@@ -30,6 +30,8 @@ class LeggedRobotCfg(BaseConfig):
         static_friction = 1.0 # coefficient of static friction of the terrain
         dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
         restitution = 0. # coefficient of restitution of the terrain
+        
+        
         # rough terrain only:
         # obtain terrain height information around feet (default: 9 points around feet), measure_
         # x  x   x
@@ -37,6 +39,7 @@ class LeggedRobotCfg(BaseConfig):
         # x  x   x (x: height point, F: foot position)
         obtain_terrain_info_around_feet = False
         measure_heights = False # obtain height measurements
+        
         # positions of the sampling height around the base (relative to the base of the robot)
         measured_points_x = [-0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] # 1mx1.6m rectangle (without center line)
         measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]

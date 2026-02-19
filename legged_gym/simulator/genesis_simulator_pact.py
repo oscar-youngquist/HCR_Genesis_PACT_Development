@@ -7,14 +7,21 @@ import numpy as np
 import os
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.math_utils import *
+
+import torch.nn.functional as F
+import pinocchio as pn
+
+
 if SIMULATOR == "genesis":
     import genesis as gs
 
 """ ********** Genesis Simulator ********** """
-class GenesisSimulator(Simulator):
+class GenesisSimulator_PACT(Simulator):
     def __init__(self, cfg, sim_params: dict, device, headless):
         self._sim_params = sim_params
         super().__init__(cfg, sim_params, device, headless)
+        self.first_loop = True
+        self.first_loop_feedback = None
         
     
     #----- Public methods -----#
@@ -24,6 +31,8 @@ class GenesisSimulator(Simulator):
         self._last_feet_vel[:] = self._feet_vel[:]
         self._last_dof_vel[:] = self._dof_vel[:]
         
+        self.first_loop = True
+
         for _ in range(self._cfg.control.decimation):
             self._torques = self._compute_torques(actions)
             
@@ -38,6 +47,8 @@ class GenesisSimulator(Simulator):
                 self._dof_indices)
 
     def post_physics_step(self):
+        self.common_step_counter += 1
+        
         # prepare quantities
         self._base_pos[:] = self._robot.get_pos()
         self._check_base_pos_out_of_bound()       # check if the pos of the robot is out of terrain bounds
@@ -55,6 +66,10 @@ class GenesisSimulator(Simulator):
         self._feet_pos[:] = self._robot.get_links_pos()[:, self._feet_indices, :]
         self._feet_vel[:] = self._robot.get_links_vel()[:, self._feet_indices, :]
         
+        # Used to train the model, so reorganize this to match the model inidices
+        #     extract the values used to calculate the dynamics consitentcy reward separately.
+        self._grfs_buf[:] = self.robot.get_links_net_contact_force()[:, self.feet_indices, :].reshape(self.base_pos.shape[0], self.grf_dim)
+
         # Link contact state
         if self._cfg.asset.obtain_link_contact_states:
             self._link_contact_states = 1. * (torch.norm(
@@ -87,6 +102,7 @@ class GenesisSimulator(Simulator):
         self._last_feet_vel[env_ids] = 0.
         self._last_base_lin_vel[env_ids] = 0.
         self._last_base_ang_vel[env_ids] = 0.
+        self._grfs_buf[env_ids] = 0.
 
     def reset_dofs(self, env_ids, dof_pos, dof_vel):
         """ Resets DOF position and velocities of selected environmments
@@ -154,14 +170,77 @@ class GenesisSimulator(Simulator):
         self._env_origins[env_ids] = self._terrain_origins[self._terrain_levels[env_ids],
             self._terrain_types[env_ids]]
 
-    def push_robots(self):
-        max_push_vel_xy = self._cfg.domain_rand.max_push_vel_xy
-        # in Genesis, base link also has DOF, it's 6DOF if not fixed.
-        dofs_vel = self._robot.get_dofs_velocity()  # (num_envs, num_dof) [0:3] ~ base_link_vel
-        push_vel = torch_rand_float(-max_push_vel_xy,
-                                     max_push_vel_xy, (self._num_envs, 2), self._device)
-        self._rand_push_vels[:, :2] = push_vel.detach().clone()
-        dofs_vel[:, :2] += push_vel
+    def push_robots(self):        
+        dofs_vel = self.robot.get_dofs_velocity()
+
+        # check which wrench values have timed out
+        push_mask = (
+            (self.common_step_counter + self.env_identities)
+            % (self.push_timeouts / self._control_dt).int()
+        ) == 0
+
+        wrench_mask = (
+            (self.common_step_counter + self.env_identities)
+            % (self.wrench_timeouts / self._control_dt).int()
+        )  == 0
+        
+        vert_mask = (
+            (self.common_step_counter + self.env_identities)
+            % (self.vert_timeouts / self._control_dt).int()
+        )  == 0
+
+        num_push_reset = push_mask.sum()
+        num_wrench_reset = wrench_mask.sum()
+        num_vert_reset = vert_mask.sum()
+        
+        if num_push_reset > 0:
+            lin_vel = torch_rand_float(-self.push_value,
+                                        self.push_value, (num_push_reset, 2), self.device)
+            
+            self._rand_push_vels[push_mask, :2] = lin_vel.detach().clone()
+            dofs_vel[push_mask, :2] += lin_vel
+        
+        if num_wrench_reset > 0:
+            ang_push = torch_rand_float(-self.wrench_value,
+                                        self.wrench_value,
+                                        (num_wrench_reset, 3),   # roll, pitch, yaw
+                                        self.device)
+            self._rand_wrench_vels[wrench_mask,:] = ang_push.detach().clone()
+            dofs_vel[wrench_mask, 3:6] += ang_push
+
+        if num_vert_reset > 0:
+            ang_push = torch_rand_float(-self.vert_value,
+                                        0.0,
+                                        (num_vert_reset,1),   # vertical forces
+                                        self.device)
+            self._rand_push_vels[vert_mask,2] = ang_push.detach().clone()
+            dofs_vel[vert_mask, 2] += ang_push
+        
+        # Calculate new interval times for the number of time-out envs
+        if num_push_reset > 0:
+            self.push_timeouts[push_mask] = torch.round(
+                                                torch_rand_float(self.push_interval_min,
+                                                    self.push_interval_max,
+                                                    (num_push_reset,),
+                                                    self._device),
+                                                decimals=self.n_digits).float()
+            
+        if num_wrench_reset > 0:
+            self.wrench_timeouts[wrench_mask] = torch.round(
+                                                torch_rand_float(self.wrench_timeout_min,
+                                                    self.wrench_timeout_max,
+                                                    (num_wrench_reset,),
+                                                    self._device),
+                                                decimals=self.n_digits).float()
+        
+        if num_vert_reset > 0:
+            self.vert_timeouts[vert_mask] = torch.round(
+                                                torch_rand_float(self.vert_interval_min,
+                                                    self.vert_interval_max,
+                                                    (num_vert_reset,),
+                                                    self._device),
+                                                decimals=self.n_digits).float()
+            
         self._robot.set_dofs_velocity(dofs_vel)
 
     def draw_debug_vis(self):
@@ -226,19 +305,82 @@ class GenesisSimulator(Simulator):
     #----- Protected methods -----#
     def _parse_cfg(self):
         self._debug = self._cfg.env.debug
-        self._control_dt = self._cfg.sim.dt * self._cfg.control.decimation
+        self._control_dt = self._cfg.control.dt
+
+        self.sim_dt = self._control_dt / self._cfg.control.decimation
+        self.sim_substeps = 1
+
         self._batch_dofs_links_info = self._cfg.domain_rand.randomize_joint_armature or \
                 self._cfg.domain_rand.randomize_joint_friction or \
                 self._cfg.domain_rand.randomize_joint_damping
+        
+        # Depth Camera
         if self._cfg.sensor.add_depth:
             self.frame_count = 0
+
+        # Domain rand curriculum stuff
+        self.n_digits = int(1.0/self._control_dt)
+
+        self.use_domainrand_curr = self._cfg.domain_rand.use_domainrand_curriculum
+        self.com_rand_z_positive = self._cfg.domain_rand.com_rand_z_positive
+        self.num_push_steps = self._cfg.domain_rand.num_push_steps
+        self.push_warmup_step = self._cfg.domain_rand.push_warmup
+        
+        self.push_bounds = [self._cfg.domain_rand.min_push_vel_xy,
+                            self._cfg.domain_rand.max_push_vel_xy]
+        self.push_diff = self.push_bounds[1] - self.push_bounds[0]
+        self.push_value = self.push_bounds[0]
+        
+        self.vert_bounds = [self._cfg.domain_rand.min_vertical_push,
+                            self._cfg.domain_rand.max_vertical_push]
+        self.vert_diff = self.vert_bounds[1] - self.vert_bounds[0]
+        self.vert_value = self.vert_bounds[0]
+        
+        self.wrench_bounds = [self._cfg.domain_rand.min_push_torque,
+                              self._cfg.domain_rand.max_push_torque]
+        self.wrench_diff = self.wrench_bounds[1] - self.wrench_bounds[0]
+        self.wrench_value = self.wrench_bounds[0]
+
+        self.max_mass_bounds = [self._cfg.domain_rand.min_added_mass_max,
+                                self._cfg.domain_rand.max_added_mass_max]
+        
+        self.mass_min = self._cfg.domain_rand.added_mass_min
+        self.mass_bounds_diff = self.max_mass_bounds[1] - self.max_mass_bounds[0]
+        self.mass_max_value = self.max_mass_bounds[0]
+
+        self.com_delta_x_bounds = [self._cfg.domain_rand.com_displacement_x_min, self._cfg.domain_rand.com_displacement_x_max]
+        self.com_delta_x_diff = self.com_delta_x_bounds[1] - self.com_delta_x_bounds[0]
+        self.com_delta_x_value = self.com_delta_x_bounds[0]
+
+        self.com_delta_y_bounds = [self._cfg.domain_rand.com_displacement_y_min, self._cfg.domain_rand.com_displacement_y_max]
+        self.com_delta_y_diff = self.com_delta_y_bounds[1] - self.com_delta_y_bounds[0]
+        self.com_delta_y_value = self.com_delta_y_bounds[0]
+
+        # When we start stepping the domain randomization values, the z-com shift will be purely positive
+        if self.com_rand_z_positive:
+            self.com_delta_z_bounds = [self._cfg.domain_rand.com_displacement_z_min_pos, self._cfg.domain_rand.com_displacement_z_max]
+        else:
+            self.com_delta_z_bounds = [self._cfg.domain_rand.com_displacement_z_min, self._cfg.domain_rand.com_displacement_z_max]
+        self.com_delta_z_diff = self.com_delta_z_bounds[1] - self.com_delta_z_bounds[0]
+        # No matter what, before we step the value will be the z-min that can be negative
+        self.com_delta_z_value = self._cfg.domain_rand.com_displacement_z_min
+
+        # This will be reset in the step_push function
+        self.com_delta_z_val_bounds = [-self.com_delta_z_value, self.com_delta_z_value]
+
+        # Tradeoff curriculum stuff
+        self.feedforward_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=gs.tc_float)
+        self.feedback_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=gs.tc_float)
+
+        self.wb_dim = self._cfg.env.whole_body_dim
+        self.grf_dim = self._cfg.env.grf_dim
     
     def _create_sim(self):
         # create scene
         self._scene = gs.Scene(
             sim_options=gs.options.SimOptions(
-                dt=self._sim_params["dt"],
-                substeps=self._sim_params["substeps"]),
+                dt=self.sim_dt,
+                substeps=self.sim_substeps),
             viewer_options=gs.options.ViewerOptions(
                 # max_FPS=int(1 / self._control_dt * self._cfg.control.decimation),
                 camera_pos=np.array(self._cfg.viewer.pos),
@@ -250,7 +392,7 @@ class GenesisSimulator(Simulator):
                 shadow=False,
                 ),
             rigid_options=gs.options.RigidOptions(
-                dt=self._sim_params["dt"],
+                dt=self.sim_dt,
                 constraint_solver=gs.constraint_solver.Newton,
                 enable_collision=True,
                 enable_joint_limit=True,
@@ -347,6 +489,58 @@ class GenesisSimulator(Simulator):
                 if flag:
                     link_indices.append(link.idx - self._robot.link_start)
             return link_indices
+        
+        ###
+        #  Load an istance of the robot model within a pinocchio rigid body dynamics library class
+        #      and create the necessary index maps.
+        ###
+        
+        # Create a pinocchio dynamics model and data container
+        self.pino_model = pn.buildModelFromUrdf(os.path.join(asset_root, asset_file), pn.JointModelFreeFlyer())
+        self.pino_data  = self.pino_model.createData()
+
+        # Create the joint mappings from model-2-pino and pino-2-model - model: [FR, FL, RR, RL], pino: [FL, FR, RL, RR]
+        pino_dof_names = [name for name in self.pino_model.names[2:]]   # skip the universe and base joints
+
+        # Maps from the [FR, FL, RR, RL] leg order used by the model to the [FL, FR, RL, RR] order used by pinocchio 
+        #       I have confirmed that this is the order the joints load in for these URDF's but this should
+        #       be safe for aribitrary orderings.
+        self.model_2_pino_joint_map = []
+        for dof_name in pino_dof_names:
+            self.model_2_pino_joint_map.append(self.dof_names.index(dof_name))
+
+        print("self.model_2_pino_joint_map")
+        print(self.model_2_pino_joint_map)
+        
+        # Maps from pinocchio's leg order to the [FR, FL, RR, RL] ordering used by the learning model and
+        #      enforced in this code. Note, pinocchio's DOF positions uses a quat for the orientation
+        #      and so has a lightly different indexing scheme from the output of the elements of the 
+        #      dynamics equations we will use, so we need both
+        self.pino_2_model_joint_pos_map = []
+        self.pino_2_model_joint_act_map = []
+        for joint_name in self.dof_names:
+            joint_id = self.pino_model.getJointId(joint_name)  # pull out the pinocchio idx for this joint
+            joint = self.pino_model.joints[joint_id]           # pull out the joint itself
+            v_idx = joint.idx_v                                # Get the start index of the joint's DoFs in the velocity vector (v)
+            q_idx = joint.idx_q                                # Get the start index of the joint's DoFs in the configuration vector (q)
+            # The joints we care about only have a single DOF...
+            self.pino_2_model_joint_act_map.append(v_idx)
+            self.pino_2_model_joint_pos_map.append(q_idx)
+
+        print("self.pino_2_model_joint_pos_map and self.pino_2_model_joint_act_map")
+        print(self.pino_2_model_joint_pos_map)
+        print(self.pino_2_model_joint_act_map)
+
+
+        # Also need a separate list of foot names and indicies... so stupid...
+        self.pino_foot_names = []
+
+        for frame in self.pino_model.frames:
+            name = frame.name
+            if name.endswith("foot"):
+                self.pino_foot_names.append(name)
+
+        self.pino_feet_indices = find_link_indices(self.pino_foot_names)
 
         self._termination_contact_indices = find_link_indices(
             self._cfg.asset.terminate_after_contacts_on)
@@ -417,18 +611,52 @@ class GenesisSimulator(Simulator):
             self._randomize_pd_gain(np.arange(self._num_envs))
             
     def _init_buffers(self):
+        self.common_step_counter = 0
+
+        # time outs for wrench components
+        self.wrench_timeouts = torch.round(
+            torch_rand_float(self.wrench_timeout_min,
+                             self.wrench_timeout_max,
+                             (self._cfg.env.num_envs,),
+                             self._device),
+            decimals=self.n_digits).float()
+
+        self.push_timeouts = torch.round(
+            torch_rand_float(self.push_interval_min,
+                             self.push_interval_max,
+                             (self._cfg.env.num_envs,),
+                             self._device),
+            decimals=self.n_digits).float()
+        
+        self.vert_timeouts = torch.round(
+            torch_rand_float(self.vert_interval_min,
+                             self.vert_interval_max,
+                             (self._cfg.env.num_envs,),
+                             self._device),
+            decimals=self.n_digits).float()
+        
+        self.env_identities = torch.arange(
+            self.num_envs,
+            device=self.device,
+            dtype=gs.tc_int,
+        )
+        
+        # Base init stuff
         self._base_init_pos = torch.tensor(
             self._cfg.init_state.pos, device=self._device
         )
         self._base_init_quat = torch.tensor(
             self._cfg.init_state.rot, device=self._device
         )
+        
+        # Base velocity
         self._base_lin_vel = torch.zeros(
             (self._num_envs, 3), device=self._device, dtype=torch.float)
         self._base_ang_vel = torch.zeros(
             (self._num_envs, 3), device=self._device, dtype=torch.float)
         self._last_base_lin_vel = torch.zeros_like(self._base_lin_vel)
         self._last_base_ang_vel = torch.zeros_like(self._base_ang_vel)
+        
         self._projected_gravity = torch.zeros(
             (self._num_envs, 3), device=self._device, dtype=torch.float)
         self._global_gravity = torch.tensor([0.0, 0.0, -1.0], device=self._device, dtype=torch.float).repeat(
@@ -437,6 +665,7 @@ class GenesisSimulator(Simulator):
         self._dof_pos = torch.zeros(self._num_envs, self._num_actions, device=self._device, dtype=torch.float)
         self._dof_vel = torch.zeros(self._num_envs, self._num_actions, device=self._device, dtype=torch.float)
         self._last_dof_vel = torch.zeros_like(self._dof_vel)
+        
         self._base_pos = torch.zeros(
             (self._num_envs, 3), device=self._device, dtype=torch.float)
         self._base_quat = torch.zeros(
@@ -445,9 +674,11 @@ class GenesisSimulator(Simulator):
             (self._num_envs, 4), device=self._device, dtype=torch.float) # quaternion in genesis definition, wxyz
         self._base_euler = torch.zeros(
             (self._num_envs, 3), device=self._device, dtype=torch.float)
+        
         self._link_contact_forces = torch.zeros(
             (self._num_envs, self._robot.n_links, 3), device=self._device, dtype=torch.float
         )
+        
         self._feet_pos = torch.zeros(
             (self._num_envs, len(self._feet_indices), 3), device=self._device, dtype=torch.float
         )
@@ -455,6 +686,10 @@ class GenesisSimulator(Simulator):
             (self._num_envs, len(self._feet_indices), 3), device=self._device, dtype=torch.float
         )
         self._last_feet_vel = torch.zeros_like(self._feet_vel)
+
+        # PINN stuff
+        self.grfs_buf = torch.zeros((self.num_envs, self.grf_dim), device=self.device, dtype=gs.tc_float)
+        
         # depth images
         if self._cfg.sensor.add_depth:
             self.depth_images = torch.zeros(
@@ -496,6 +731,7 @@ class GenesisSimulator(Simulator):
                     self._d_gains.append(damping[key])
         self._p_gains = torch.tensor(self._p_gains, device=self._device)
         self._d_gains = torch.tensor(self._d_gains, device=self._device)
+        
         if self._batch_dofs_links_info:   
             self._p_gains = self._p_gains[None, :].repeat(self._num_envs, 1)
             self._d_gains = self._d_gains[None, :].repeat(self._num_envs, 1)
@@ -503,8 +739,8 @@ class GenesisSimulator(Simulator):
         self._robot.set_dofs_kv(self._d_gains, self._dof_indices)
 
         self._init_height_points()
-        self._measured_heights = torch.zeros(self._num_envs, self._num_height_points, device=self._device, requires_grad=False)
-    
+        self._measured_heights = torch.zeros(self._num_envs, self._num_height_points, device=self._device, requires_grad=False)        
+
     def _init_height_points(self):
         y = torch.tensor(self._cfg.terrain.measured_points_y,
                          device=self._device, requires_grad=False)
@@ -646,37 +882,68 @@ class GenesisSimulator(Simulator):
                 self._base_pos[env_ids], zero_velocity=False, envs_idx=env_ids)
 
     def _compute_torques(self, actions):
-        # control_type = 'P'
-        actions_scaled = actions * self._cfg.control.action_scale
+        # Pull out the position control actions
+        pos_actions = actions[:,0:12]
+        # pull out the torque control actions
+        tau_actions = actions[:,12:24]
+        
+        # Process feedback torque first
+        pos_actions_scaled = pos_actions * self._cfg.control.action_scale
+        
         # get two dimensional gains
         if self._p_gains.ndim == 1:
             self._p_gains = self._p_gains.unsqueeze(0).repeat(self._num_envs, 1)
             self._d_gains = self._d_gains.unsqueeze(0).repeat(self._num_envs, 1)
-        torques = (
-            self._kp_scale * self._p_gains * (actions_scaled +
-                                    self._default_dof_pos - self._dof_pos)
+        
+        self.feedback_torques = (
+            self._kp_scale * self._p_gains * (pos_actions_scaled +self._default_dof_pos - self._dof_pos)
             - self._kd_scale * self._d_gains * self._dof_vel
         )
-        return torques
+
+        # now compute feedforward torques
+        if self.first_loop:
+            self.first_loop = False
+            self.first_loop_feedback = self.feedback_torques.clone()
+
+
+        # Compute tradeoff curriculum weighted coupled torque output
+        self.feedforward_torques = tau_actions * self._cfg.control.torque_scale
+
+        torques = (self.feedforward_tau_weight) * self.feedforward_torques + (self.feedback_tau_weight)*self.feedback_torques
+
+        # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
+        return torch.clip(torques, -1.1*self.torque_limits, 1.1*self.torque_limits)
+    
 
     def _init_domain_params(self):
         """ Initializes domain randomization parameters, which are used to randomize the environment."""
         self._friction_values = torch.zeros(
             self._num_envs, 1, dtype=torch.float, device=self._device, requires_grad=False)
+        
         self._added_base_mass = torch.ones(
             self._num_envs, 1, dtype=torch.float, device=self._device, requires_grad=False)
+        
         self._rand_push_vels = torch.zeros(
             self._num_envs, 3, dtype=torch.float, device=self._device, requires_grad=False)
+        
+        self._rand_wrench_vels = torch.zeros(
+            self.num_envs, 3, dtype=torch.float, device=self._device, requires_grad=False)
+
         self._base_com_bias = torch.zeros(
             self._num_envs, 3, dtype=torch.float, device=self._device, requires_grad=False)
+        
         self._joint_armature = torch.zeros(
             self._num_envs, 1, dtype=torch.float, device=self._device, requires_grad=False)
+        
         self._joint_friction = torch.zeros(
             self._num_envs, 1, dtype=torch.float, device=self._device, requires_grad=False)
+        
         self._joint_damping = torch.zeros(
             self._num_envs, 1, dtype=torch.float, device=self._device, requires_grad=False)
+        
         self._kp_scale = torch.ones(
             self._num_envs, self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
+        
         self._kd_scale = torch.ones(
             self._num_envs, self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
 
@@ -694,25 +961,28 @@ class GenesisSimulator(Simulator):
 
     def _randomize_base_mass(self, env_ids=None):
         ''' Randomize base mass'''
-        min_mass, max_mass = self._cfg.domain_rand.added_mass_range
-        added_mass = gs.rand((len(env_ids), 1), dtype=float) * \
-            (max_mass - min_mass) + min_mass
+        min_mass, max_mass = self.mass_min, self.mass_max_value
+        added_mass = gs.rand((len(env_ids), 1), dtype=float) * (max_mass - min_mass) + min_mass
         self._added_base_mass[env_ids] = added_mass[:].detach().clone()
         self._robot.set_mass_shift(added_mass, self._base_link_index, env_ids)
 
     def _randomize_com_displacement(self, env_ids):
         ''' Randomize center of mass displacement of the robot'''
-        min_displacement_x, max_displacement_x = self._cfg.domain_rand.com_pos_x_range
-        min_displacement_y, max_displacement_y = self._cfg.domain_rand.com_pos_y_range
-        min_displacement_z, max_displacement_z = self._cfg.domain_rand.com_pos_z_range
+        min_displacement_x, max_displacement_x = -self.com_delta_x_value, self.com_delta_x_value
+        min_displacement_y, max_displacement_y = -self.com_delta_y_value, self.com_delta_y_value
+        min_displacement_z, max_displacement_z = self.com_delta_z_val_bounds[0], self.com_delta_z_val_bounds[1]
+        
         com_displacement = torch.zeros((len(env_ids), 1, 3), dtype=torch.float, device=self._device)
 
         com_displacement[:, 0, 0] = gs.rand((len(env_ids), 1), dtype=float).squeeze(1) \
             * (max_displacement_x - min_displacement_x) + min_displacement_x
+        
         com_displacement[:, 0, 1] = gs.rand((len(env_ids), 1), dtype=float).squeeze(1) \
             * (max_displacement_y - min_displacement_y) + min_displacement_y
+        
         com_displacement[:, 0, 2] = gs.rand((len(env_ids), 1), dtype=float).squeeze(1) \
             * (max_displacement_z - min_displacement_z) + min_displacement_z
+        
         self._base_com_bias[env_ids] = com_displacement[:,
                                                         0, :].detach().clone()
 

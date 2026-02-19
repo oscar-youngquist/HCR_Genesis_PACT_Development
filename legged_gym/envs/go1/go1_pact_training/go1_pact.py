@@ -11,7 +11,7 @@ from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.utils.math_utils import wrap_to_pi, torch_rand_float, quat_apply
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.helpers import class_to_dict
-from .legged_robot_config import LeggedRobotCfg
+from ...base.legged_robot_config import LeggedRobotCfg
 
 class LeggedRobot(BaseTask):
     def __init__(self, cfg: LeggedRobotCfg, sim_params: dict, sim_device, headless):
@@ -41,7 +41,9 @@ class LeggedRobot(BaseTask):
             actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env)
         """
         actions = self._pre_sim_step(actions)
+        
         self.simulator.step(actions)
+        
         self.post_physics_step()
 
         # return clipped obs, clipped states (None), rewards, dones and infos
@@ -448,11 +450,14 @@ class LeggedRobot(BaseTask):
         self.max_episode_length_s = self.cfg.env.episode_length_s
         self.max_episode_length = np.ceil(self.max_episode_length_s / self.dt)
         
+        
         # determine privileged observation offset to normalize privileged observations
         self.friction_value_offset = (self.cfg.domain_rand.friction_range[0] + 
                                       self.cfg.domain_rand.friction_range[1]) / 2  # mean value
+        
         self.kp_scale_offset = (self.cfg.domain_rand.kp_range[0] +
                                 self.cfg.domain_rand.kp_range[1]) / 2  # mean value
+        
         self.kd_scale_offset = (self.cfg.domain_rand.kd_range[0] +
                                 self.cfg.domain_rand.kd_range[1]) / 2  # mean value
         

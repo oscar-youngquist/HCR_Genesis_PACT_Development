@@ -33,6 +33,7 @@ class Go2Dreamwaq(LeggedRobotDreamwaq):
             self.obs_buf,                 # num_observations
             domain_randomization_info,    # 34
         ), dim=-1)
+        
         ## add link contact states
         if self.cfg.asset.obtain_link_contact_states:
             critic_obs = torch.cat(
@@ -47,6 +48,7 @@ class Go2Dreamwaq(LeggedRobotDreamwaq):
             heights = torch.clip(self.simulator.base_pos[:, 2].unsqueeze(
                 1) - 0.5 - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements
             critic_obs = torch.cat((critic_obs, heights), dim=-1)
+        
         self.critic_obs_deque.append(critic_obs)
         self.privileged_obs_buf = torch.cat(
             [self.critic_obs_deque[i]

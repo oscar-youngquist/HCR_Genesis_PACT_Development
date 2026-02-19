@@ -1,6 +1,17 @@
 import numpy as np
 import torch
 
+
+def wrap_to_pi(angles):
+    angles %= 2 * np.pi
+    angles -= 2 * np.pi * (angles > np.pi)
+    return angles
+
+
+def gs_rand_float(lower, upper, shape, device):
+    return (upper - lower) * torch.rand(size=shape, device=device) + lower
+
+
 def gs_inv_quat(quat):
     qw, qx, qy, qz = quat.unbind(-1)
     inv_quat = torch.stack([1.0 * qw, -qx, -qy, -qz], dim=-1)
