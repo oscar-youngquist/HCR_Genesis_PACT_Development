@@ -41,7 +41,7 @@ class RolloutStoragePACT:
             self.observation_history = None
             self.dones = None
 
-            self.torso_velo_targets = None  # same timestep as observations, used by encoder output
+            self.explicit_labels = None  # same timestep as observations, used by encoder output
             self.grf_targets = None  # next time-step from observations, used by decoder output
             self.obs_targets = None  # next time-step from observations, used by decoder output
 
@@ -69,7 +69,7 @@ class RolloutStoragePACT:
             self.__init__()
 
     # We want all of the actions and associated data formatted in the Model kinematic definition - [FR, FL, RR, RL]
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, obs_hist_shape, actions_shape, torso_velo_shape, grf_shape, wb_shape, device="cpu"):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, wb_shape, device="cpu"):
 
         self.device = device
 
@@ -84,7 +84,7 @@ class RolloutStoragePACT:
         self.dones               = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
         
         # specific to DreamWaQ style history encoder...
-        self.torso_velo_targets = torch.zeros(num_transitions_per_env, num_envs, *torso_velo_shape, device=self.device)
+        self.explicit_labels = torch.zeros(num_transitions_per_env, num_envs, *explicit_shape, device=self.device)
         self.grf_targets = torch.zeros(num_transitions_per_env, num_envs, *grf_shape, device=self.device)
         self.observation_targets = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
 
@@ -132,7 +132,7 @@ class RolloutStoragePACT:
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
         
         # Specific to DreamWaQ style history encoder
-        self.torso_velo_targets[self.step].copy_(transition.torso_velo_targets)
+        self.explicit_labels[self.step].copy_(transition.explicit_labels)
         self.grf_targets[self.step].copy_(transition.grf_targets)
         self.observation_targets[self.step].copy_(transition.obs_targets)
         
@@ -212,7 +212,7 @@ class RolloutStoragePACT:
         critic_observations = self.critic_observations.flatten(0, 1)
         obs_history = self.observation_history.flatten(0,1)
 
-        torso_velo_labels = self.torso_velo_targets.flatten(0,1)
+        explicit_labels = self.explicit_labels.flatten(0,1)
         grf_labels = self.grf_targets.flatten(0,1)
         obs_targets = self.observation_targets.flatten(0,1)
 
@@ -250,7 +250,7 @@ class RolloutStoragePACT:
                 obs_hist_batch = obs_history[batch_idx]
 
                 # DreamWaQ Style History Encoder stuff
-                torso_velo_labels_batch = torso_velo_labels[batch_idx]
+                explicit_labels_batch = explicit_labels[batch_idx]
                 grf_labels_batch = grf_labels[batch_idx]
                 obs_labels_batch = obs_targets[batch_idx]
 
@@ -278,7 +278,7 @@ class RolloutStoragePACT:
                 pprev_obs_hist_batch = pprev_obs_hist[batch_idx]
 
                 
-                yield terminated_batch, obs_batch, critic_observations_batch, obs_hist_batch, torso_velo_labels_batch, \
+                yield terminated_batch, obs_batch, critic_observations_batch, obs_hist_batch, explicit_labels_batch, \
                         grf_labels_batch, obs_labels_batch, actions_batch, target_values_batch, \
                         advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
                         old_sigma_batch, prev_obs_batch, prev_obs_hist_batch, gt_forces_batch, mass_mat_batch, \

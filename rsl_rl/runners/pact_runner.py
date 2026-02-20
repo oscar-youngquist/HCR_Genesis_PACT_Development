@@ -61,6 +61,10 @@ class OnPolicyRunnerPACT:
         else:
             num_critic_obs = self.env.num_obs
         
+        # check if we are using a history of critic observations
+        if self.env.num_crit_obs_stack is not None:
+            num_critic_obs *= self.env.num_crit_obs_stack
+
         actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
         
         cenet_input_dim = self.env.num_obs * self.env.num_obs_hist
@@ -97,7 +101,7 @@ class OnPolicyRunnerPACT:
 
         # init storage and model
         self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
-                              [2*self.env.num_actions], [self.policy_cfg["cenet_velo_dim"]], [self.cfg["grf_dim"]], [self.env.wb_dim])
+                              [2*self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]], [self.env.wb_dim])
 
         if "pretrained_path" in self.policy_cfg.keys():
             self._load_pretrained_model()
@@ -167,7 +171,7 @@ class OnPolicyRunnerPACT:
                     pprev_obs, pprev_obs_hist = pprev_obs.to(self.device), pprev_obs_hist.to(self.device)
 
                     # Call the algorithms act() method to store current transition data and predict actions
-                    actions = self.alg.act(obs, critic_obs, obs_hist, torso_velo, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist) # obs_t, (obs_t-1)
+                    actions = self.alg.act(obs, critic_obs, obs_hist, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist) # obs_t, (obs_t-1)
                          
                     # Submit the predicted action and extract the resulting state... 
                     obs, privileged_obs, obs_hist, rewards, dones, infos, grfs = self.env.step(actions)  # obs_t+1  (obs_t)

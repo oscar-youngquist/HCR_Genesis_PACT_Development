@@ -129,7 +129,7 @@ class PPO_PACT:
     def train_mode(self):
         self.actor_critic.train()
 
-    def act(self, obs, critic_obs, obs_history, torso_velo, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist):
+    def act(self, obs, critic_obs, obs_history, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist):
         # if self.actor_critic.is_recurrent:
         #     self.transition.hidden_states = self.actor_critic.get_hidden_states()
         if self.use_boot:
@@ -149,9 +149,6 @@ class PPO_PACT:
         self.transition.observations = obs
         self.transition.observation_history = obs_history
         self.transition.critic_observations = critic_obs
-        
-        # The current torso velocities, used as a target for part of the encoders output
-        self.transition.torso_velo_targets = torso_velo
 
         # PINN stuff
         self.transition.prev_obs      = prev_obs
@@ -161,13 +158,15 @@ class PPO_PACT:
         
         return all_actions
     
-    def process_env_step(self, rewards, dones, infos, grf_labels, obs_labels, gt_forces, mass_mats, bias_vecs, torso_acc):
+    def process_env_step(self, rewards, dones, infos, grf_labels, obs_labels, explicit_labels, gt_forces, mass_mats, bias_vecs, torso_acc):
         self.transition.rewards = rewards.clone()
         
         self.transition.dones = dones
         # Values from the next-time step used as labels for the decoder network
         self.transition.grf_targets = grf_labels
         self.transition.obs_targets = obs_labels
+
+        self.transition.explicit_labels = explicit_labels
         
         # Bootstrapping on time outs
         if 'time_outs' in infos:
@@ -234,7 +233,7 @@ class PPO_PACT:
             print(self.pinn_weight)
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, vel_target, \
+        for terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
             grf_target, obs_target, actions_batch, target_values_batch, \
             advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
             old_sigma_batch, prev_obs_batch, prev_obs_hist_batch, gt_forces_batch, mass_mat_batch, \
@@ -291,7 +290,7 @@ class PPO_PACT:
 
                 # Calculate the DreamWaQ-style VAE update
                 vae_loss, kl_div, recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(obs_hist_batch, grf_target, 
-                                                                                                                          obs_target, vel_target, terminated_batch)
+                                                                                                                          obs_target, explicit_labels_batch, terminated_batch)
                 
                 # Update paramaters of encoder
                 self.enc_optimizer.zero_grad()
@@ -416,7 +415,7 @@ class PPO_PACT:
         return ppo_loss, surrogate_loss, value_loss, current_actions
 
     def _compute_vae_loss(self, obs_hist_batch, grf_target, 
-                          obs_target, vel_target, terminated_batch):
+                          obs_target, explicit_labels_batch, terminated_batch):
         vae_loss = None
 
         mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.context_encoder(obs_hist_batch)
@@ -429,9 +428,9 @@ class PPO_PACT:
         
         decode_target = torch.cat((obs_target, grf_target), dim=-1)
         # decode_target = obs_target
-        vel_target.requires_grad = False
+        explicit_labels_batch.requires_grad = False
 
-        vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,vel_target*terminated_batch)
+        vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
         recon_error    = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
         kl_div         = (-0.5 * torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp()))
         vae_loss = vel_pred_error + recon_error + self.vae_beta*kl_div

@@ -8,6 +8,7 @@ from torch import Tensor
 from typing import Tuple, Dict
 import multiprocessing as mp
 import random
+from collections import deque
 
 from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.utils.math_utils import wrap_to_pi, torch_rand_float, quat_apply
@@ -38,12 +39,12 @@ class LeggedRobot(BaseTask):
         self.init_done = True
 
     def get_observations(self):
-        return self.obs_buf, self.obs_history, self.privileged_obs_buf, self.explicit_labels
+        return self.obs_buf, self.obs_history, self.privileged_obs_buf, self.explicit_labels_buf
 
     def reset(self):
         """ Reset all robots"""
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
-        obs, privileged_obs, _, _, _, _, _ = self.step(torch.zeros(self.num_envs, 2*self.num_actions, device=self.device, requires_grad=False))
+        obs, privileged_obs, _, _, _, _, _, _ = self.step(torch.zeros(self.num_envs, 2*self.num_actions, device=self.device, requires_grad=False))
         return obs, privileged_obs
 
     def step(self, actions):
@@ -65,7 +66,8 @@ class LeggedRobot(BaseTask):
             self.privileged_obs_buf = torch.clip(
                 self.privileged_obs_buf, -clip_obs, clip_obs)
         
-        return self.obs_buf, self.privileged_obs_buf, self.obs_history, self.rew_buf, self.reset_buf, self.extras, (self.grfs_buf * self.obs_scales.grf)
+        return self.obs_buf, self.privileged_obs_buf, self.obs_history, self.explicit_labels_buf, \
+            self.rew_buf, self.reset_buf, self.extras, (self.grfs_buf * self.obs_scales.grf)
 
     def get_failure_idx(self):
         return self.reset_buf * ~self.time_out_buf
@@ -486,7 +488,54 @@ class LeggedRobot(BaseTask):
             (self.num_envs, len(self.simulator.feet_indices)), device=self.device, dtype=torch.float)
         self.last_contacts = torch.zeros((self.num_envs, len(self.simulator.feet_indices)), device=self.device, dtype=torch.int)
 
+        # history of single observations
+        self.last_obs_buf = torch.zeros(
+            (self.num_envs, self.cfg.env.num_observations),
+            dtype=torch.float,
+            device=self.device,
+        )
 
+        self.llast_obs_buf = torch.zeros(
+            (self.num_envs, self.cfg.env.num_observations),
+            dtype=torch.float,
+            device=self.device,
+        )
+
+        # observation history buffer
+        self.obs_history_deque = deque(maxlen=self.cfg.env.num_obs_hist)
+
+        self.obs_history = torch.zeros(
+            (self.num_envs, self.num_obs * self.num_obs_hist), device=self.device, dtype=torch.float)
+        
+        for _ in range(self.cfg.env.num_obs_hist):
+            self.obs_history_deque.append(
+                torch.zeros(
+                    self.num_envs,
+                    self.cfg.env.num_observations,
+                    dtype=torch.float,
+                    device=self.device,
+                )
+            )
+
+        # dqueue of critic observations. -> used to stablize critic predictions
+        self.critic_obs_deque = deque(maxlen=self.cfg.env.num_priv_stack)
+        for _ in range(self.cfg.env.num_priv_stack):
+            self.critic_obs_deque.append(
+                torch.zeros(
+                    self.num_envs,
+                    self.cfg.env.num_privileged_obs,
+                    dtype=torch.float,
+                    device=self.device,
+                )
+            )
+
+        # explicit recon obs buffer (torso lin.velo, feet contact state, feet height)
+        self.explicit_labels_buf = torch.zeros(
+            (self.num_envs, self.cfg.env.num_explicit_recon_obs),
+            dtype=torch.float,
+            device=self.device,
+            requires_grad=False,
+        )
 
         # randomize action delay
         if self.cfg.domain_rand.randomize_ctrl_delay:
@@ -585,6 +634,9 @@ class LeggedRobot(BaseTask):
         self.dt = self.cfg.control.dt
         self.debug = self.cfg.env.debug
         
+        self.num_exp_labels = self.cfg.env.num_explicit_recon_obs
+        self.num_crit_obs_stack = self.cfg.env.num_priv_stack
+
         # use self-implemented pd controller
         self.obs_scales = self.cfg.normalization.obs_scales
         
