@@ -741,7 +741,7 @@ class GenesisSimulator_PACT(Simulator):
         self.torque_limits_lower = self._torque_limits.clone()
         self.torque_limits_diff = self.torque_limits_override - self._torque_limits
 
-        self.dof_pos_limits_hard = self.dof_pos_limits.clone()
+        self.dof_pos_limits_hard = self._dof_pos_limits.clone()
 
         for i in range(self._dof_pos_limits.shape[0]):
             # soft limits

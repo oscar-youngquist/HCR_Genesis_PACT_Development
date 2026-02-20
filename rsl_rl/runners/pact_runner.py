@@ -140,15 +140,14 @@ class OnPolicyRunnerPACT:
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
         
-        obs,obs_hist,torso_velo = self.env.get_observations()
-        # self.env.step_tradeoff_curriculum()
+        obs,obs_hist,privileged_obs,exp_labels = self.env.get_observations()
+
         if self.env.use_reward_curriculum:
-            self.env.step_reward_curriculum()
+            self.env.step_reward_curriculum(0)
         
-        privileged_obs = self.env.get_privileged_observations()
         critic_obs = privileged_obs if privileged_obs is not None else obs
         
-        obs, critic_obs, obs_hist, torso_velo = obs.to(self.device), critic_obs.to(self.device),obs_hist.to(self.device), torso_velo.to(self.device)
+        obs, critic_obs, obs_hist, exp_labels = obs.to(self.device), critic_obs.to(self.device),obs_hist.to(self.device), exp_labels.to(self.device)
         self.alg.actor_critic.train() # switch to train mode (for dropout for example)
 
         ep_infos = []
@@ -174,7 +173,7 @@ class OnPolicyRunnerPACT:
                     actions = self.alg.act(obs, critic_obs, obs_hist, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist) # obs_t, (obs_t-1)
                          
                     # Submit the predicted action and extract the resulting state... 
-                    obs, privileged_obs, obs_hist, rewards, dones, infos, grfs = self.env.step(actions)  # obs_t+1  (obs_t)
+                    obs, privileged_obs, obs_hist, exp_labels, rewards, dones, infos, grfs = self.env.step(actions)  # obs_t+1  (obs_t)
                     
                     # Create privileged obs
                     critic_obs = privileged_obs if privileged_obs is not None else obs
@@ -184,11 +183,11 @@ class OnPolicyRunnerPACT:
                     gt_forces, mass_mats, bias_vecs, torso_acc = gt_forces.to(self.device), mass_mats.to(self.device), bias_vecs.to(self.device), torso_acc.to(self.device)
 
                     # move everything to the correct device
-                    obs, critic_obs, obs_hist, rewards, dones, grfs = obs.to(self.device), critic_obs.to(self.device), \
-                        obs_hist.to(self.device), rewards.to(self.device), dones.to(self.device), grfs.to(self.device)
+                    obs, critic_obs, obs_hist, exp_labels, rewards, dones, grfs = obs.to(self.device), critic_obs.to(self.device), \
+                        obs_hist.to(self.device), exp_labels.to(self.device), rewards.to(self.device), dones.to(self.device), grfs.to(self.device)
 
                     # Log the labels associated with the context decoder as well as the typical stuff
-                    self.alg.process_env_step(rewards, dones, infos, grfs, obs, gt_forces, mass_mats, bias_vecs, torso_acc)
+                    self.alg.process_env_step(rewards, dones, infos, grfs, obs, exp_labels, gt_forces, mass_mats, bias_vecs, torso_acc)
 
                     if self.log_dir is not None:
                         # Book keeping

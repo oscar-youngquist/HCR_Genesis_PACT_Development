@@ -317,13 +317,13 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
             termination           = 0.0
             collision             = -1.0
             dof_pos_limits        = -1.0
-            dof_close_to_default  = -0.5
+            dof_close_to_default  = 0.0
             torque_limits         = -1.0
             
             alive_bonus           = 0.1
 
             stand_still_contact = -0.01
-            stand_still         = -0.1
+            dof_pos_stand_still = -0.1
 
             # command tracking
             tracking_lin_vel  = 1.0
@@ -355,12 +355,13 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
 
             feedforward_torques   = -2.0e-4
             feedback_torques      = -2.4e-4
-            dof_act_limits          = -1.0
+            dof_act_limits        = -1.0
 
             # gait
-            feet_air_time    = 0.5            # tracking reward for long steps
-            # max_contact_time = 0.0            # penalty for feet being in contact for too long
-            foot_clearance   = 0.5            # tracking reward for feet reaching the desired clearance
+            feet_air_time    = 1.0            # tracking reward for long steps
+            foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance            
+            hip_pos = -0.05
+            
             foot_slip        = -0.1           # penalty for feet slipping
             feet_contact_forces = -2.0e-1     # penalty for high contact forces on the feet
 
