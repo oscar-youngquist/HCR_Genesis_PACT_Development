@@ -8,9 +8,13 @@ import os
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.math_utils import *
 
+import multiprocessing as mp
+import random
+
 import torch.nn.functional as F
 import pinocchio as pn
 
+from .parallel_pino_workers import PinocchioAsync
 
 if SIMULATOR == "genesis":
     import genesis as gs
@@ -22,7 +26,28 @@ class GenesisSimulator_PACT(Simulator):
         super().__init__(cfg, sim_params, device, headless)
         self.first_loop = True
         self.first_loop_feedback = None
+
+    def _create_async_pino_workers(self):
+        wb_correct_pino_2_model_ordering = [0,1,2,3,4,5]
+        wb_correct_pino_2_model_ordering.extend(self.pino_2_model_joint_act_map)
         
+        # For safeties shake, use only 90% of available CPU's
+        num_cpus = int(mp.cpu_count() * 0.98)
+
+        # Build the class that manages (1) shared input/output memeory and (2) invoking worker processes 
+        self.async_pino_manager = PinocchioAsync(
+            self.pino_model,
+            self._num_envs,
+            self.pino_foot_names,
+            wb_correct_pino_2_model_ordering,
+            self._wb_dim,
+            (12,1),
+            num_cpus
+            )
+
+    def _shutdown_asynic_pino_workers(self):
+        # clear shared memory and persistent CPU workers
+        self.async_pino_manager.shutdown()        
     
     #----- Public methods -----#
     def step(self, actions):
@@ -31,6 +56,9 @@ class GenesisSimulator_PACT(Simulator):
         self._last_feet_vel[:] = self._feet_vel[:]
         self._last_dof_vel[:] = self._dof_vel[:]
         
+        self._last_base_world_lin_vel[:] = self._base_world_lin_vel[:]
+        self._last_base_world_ang_vel[:] = self._base_world_ang_vel[:]
+
         self.first_loop = True
 
         for _ in range(self._cfg.control.decimation):
@@ -45,6 +73,16 @@ class GenesisSimulator_PACT(Simulator):
                 self._dof_indices)
             self._dof_vel[:] = self._robot.get_dofs_velocity(
                 self._dof_indices)
+
+    def _get_pinn_wb_dynamics(self):
+        #           total GT forces  ,  generalized mass mat, bias vector
+        return self._contact_forces_buff, self._wb_mass_mat_buff, self._wb_bias_vec_buff, self._torso_6dof_acceleration
+
+    def _get_pinn_feedback(self, pos_actions, dof_pos, dof_vel):
+        feedback_torques = (
+            self._cahed_pgain * (pos_actions + self._default_dof_pos - dof_pos) - self._cahed_dgain * dof_vel
+        )
+        return feedback_torques
 
     def post_physics_step(self):
         self.common_step_counter += 1
@@ -65,11 +103,58 @@ class GenesisSimulator_PACT(Simulator):
         self._link_contact_forces[:] = self._robot.get_links_net_contact_force()
         self._feet_pos[:] = self._robot.get_links_pos()[:, self._feet_indices, :]
         self._feet_vel[:] = self._robot.get_links_vel()[:, self._feet_indices, :]
+
+        # Some pinn specific stuff
+        self._base_velo_world[:] = self._robot.get_vel()
+        self._base_ang_velo_world[:] = self._robot.get_ang()
         
         # Used to train the model, so reorganize this to match the model inidices
         #     extract the values used to calculate the dynamics consitentcy reward separately.
-        self._grfs_buf[:] = self.robot.get_links_net_contact_force()[:, self.feet_indices, :].reshape(self.base_pos.shape[0], self.grf_dim)
+        self._grfs_buf[:] = self._robot.get_links_net_contact_force()[:, self._feet_indices, :].reshape(self._base_pos.shape[0], self._grf_dim)
 
+        # All the below is done in the pinocchio indexing scheme [FL, FR, RL, RR]
+        # Use the Pinocchio library to calculate the (1) contact forces and (2) whole-body dynamics of the robot for use
+        #     in the dynamic consistency reward and PINN loss. All done in WORLD FRAME!
+        
+        #     extract the contact forces in pinocchio order
+        contact_temp = self._link_contact_forces[:, self.pino_feet_indices, :]
+
+        #     push all the CUDA stuff from GPU to CPU for use by the PinocchioAsync class
+        #     The whole-body pose
+        wb_pos_np = torch.concatenate([self._base_pos, self._base_quat, self._dof_pos[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
+        
+        #     The whole-body velocity
+        wb_vel_np = torch.concatenate([self._base_velo_world, self._base_ang_velo_world, self._dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
+        
+        #     The previous whole-body velocity
+        wb_vel_prev_np = torch.concatenate([self._last_base_world_lin_vel, self._last_base_world_ang_vel, self._last_dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
+
+        #     The GRF forces
+        grf_np = contact_temp.reshape(contact_temp.shape[0], 12).unsqueeze(2).cpu().numpy()
+
+        #     Pass the numpy (cpu) data structures to shared memeory
+        self.async_pino_manager.shared.q[:]       = wb_pos_np        # num_envs x 19
+        self.async_pino_manager.shared.qd[:]      = wb_vel_np        # num_envs x 18
+        self.async_pino_manager.shared.qd_prev[:] = wb_vel_prev_np   # num_envs x 18
+        self.async_pino_manager.shared.grf[:]     = grf_np           # num_envs x 4 x 3
+        self.async_pino_manager.shared.dt[0]      = self._control_dt
+
+        self.async_pino_manager.compute_async()
+        self.async_pino_manager.wait()            # blocking, wait until all workers are done
+
+        # now stack the tensor lists to get the necessary state values
+        self._wb_dynamics_buff[:]        = torch.from_numpy(
+            self.async_pino_manager.shared.wb_dynamics).to(self.device) # num_envs x 18
+        self._contact_forces_buff[:]     = torch.from_numpy(
+            self.async_pino_manager.shared.wb_contacts).to(self.device) # num_envs x 18
+        self._wb_mass_mat_buff[:]        = torch.from_numpy(
+            self.async_pino_manager.shared.mass_mat).to(self.device)    # num_envs x 18 x 18
+        self._wb_bias_vec_buff[:]        = torch.from_numpy(
+            self.async_pino_manager.shared.bias).to(self.device)        # num_envs x 18
+        self._torso_6dof_acceleration[:] = torch.from_numpy(
+            self.async_pino_manager.shared.acc6d).to(self.device)       # num_envs x 6
+        
+        
         # Link contact state
         if self._cfg.asset.obtain_link_contact_states:
             self._link_contact_states = 1. * (torch.norm(
@@ -102,7 +187,18 @@ class GenesisSimulator_PACT(Simulator):
         self._last_feet_vel[env_ids] = 0.
         self._last_base_lin_vel[env_ids] = 0.
         self._last_base_ang_vel[env_ids] = 0.
+        
+        # PINN stuff
         self._grfs_buf[env_ids] = 0.
+        self._contact_forces_buff[env_ids] = 0.
+        self._wb_dynamics_buff[env_ids] = 0.
+        self._wb_mass_mat_buff[env_ids] = 0.
+        self._wb_bias_vec_buff[env_ids] = 0.
+        self._torso_6dof_acceleration[env_ids] = 0.
+        self._base_world_lin_vel[env_ids] = 0.
+        self._base_world_ang_vel[env_ids] = 0.
+        self._last_base_world_lin_vel[env_ids] = 0.
+        self._last_base_world_ang_vel[env_ids] = 0.
 
     def reset_dofs(self, env_ids, dof_pos, dof_vel):
         """ Resets DOF position and velocities of selected environmments
@@ -302,6 +398,60 @@ class GenesisSimulator_PACT(Simulator):
     def set_viewer_camera(self, eye: np.ndarray, target: np.ndarray):
         self._scene.viewer.set_camera_pose(pos=eye, lookat=target)
     
+    def _step_domian_rand(self, num_iters):
+        if (num_iters - self.push_warmup_step) > self.num_push_steps:
+            return
+        
+        elif num_iters <= self.push_warmup_step:
+            print("Push Value: ", self.push_value)
+            print("Wrench Value: ", self.wrench_value)
+            print("Vertical Push Value: ", self.vert_value)
+            print("Mass Max Value: ", self.mass_max_value)
+            print("COM Delta X Value: ", self.com_delta_x_value)
+            print("COM Delta Y Value: ", self.com_delta_y_value)
+            print("COM Delta Z Value: ", self.com_delta_z_value)
+            print("Torque Limits - ", self.torque_limits[0])
+            return
+
+        adjusted_step = num_iters - self.push_warmup_step
+        
+        # Safety catch, hopefully isn't needed really
+        if adjusted_step == 0:
+            print("Push Value: ", self.push_value)
+            print("Wrench Value: ", self.wrench_value)
+            print("Vertical Push Value: ", self.vert_value)
+            print("Mass Max Value: ", self.mass_max_value)
+            print("COM Delta X Value: ", self.com_delta_x_value)
+            print("COM Delta Y Value: ", self.com_delta_y_value)
+            print("COM Delta Z Value: ", self.com_delta_z_value)
+            print("Torque Limits - ", self.torque_limits[0])
+            return
+
+        self.push_value      = (adjusted_step / self.num_push_steps) * self.push_diff + self.push_bounds[0]
+        self.wrench_value    = (adjusted_step / self.num_push_steps) * self.wrench_diff + self.wrench_bounds[0]
+        self.vert_value      = (adjusted_step / self.num_push_steps) * self.vert_diff + self.vert_bounds[0]
+        self.mass_max_value  = (adjusted_step / self.num_push_steps) * self.mass_bounds_diff + self.max_mass_bounds[0]
+        self.com_delta_x_value = (adjusted_step / self.num_push_steps) * self.com_delta_x_diff + self.com_delta_x_bounds[0]
+        self.com_delta_y_value = (adjusted_step / self.num_push_steps) * self.com_delta_y_diff + self.com_delta_y_bounds[0]
+        self.com_delta_z_value = (adjusted_step / self.num_push_steps) * self.com_delta_z_diff + self.com_delta_z_bounds[0]
+       
+        # If we haven't returned already by now, then we are stepping, and so we want to reset the vertical com-shift bounds
+        #     if necessary
+        if self.com_rand_z_positive:
+            self.com_delta_z_val_bounds = [self.com_delta_z_bounds[0], self.com_delta_z_value]
+        
+        
+        self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
+
+        print("Push Value: ", self.push_value)
+        print("Wrench Value: ", self.wrench_value)
+        print("Vertical Push Value: ", self.vert_value)
+        print("Mass Max Value: ", self.mass_max_value)
+        print("COM Delta X Value: ", self.com_delta_x_value)
+        print("COM Delta Y Value: ", self.com_delta_y_value)
+        print("COM Delta Z Value: ", self.com_delta_z_value)
+        print("Torque Limits - ", self.torque_limits[0])
+
     #----- Protected methods -----#
     def _parse_cfg(self):
         self._debug = self._cfg.env.debug
@@ -321,7 +471,16 @@ class GenesisSimulator_PACT(Simulator):
         # Domain rand curriculum stuff
         self.n_digits = int(1.0/self._control_dt)
 
-        self.use_domainrand_curr = self._cfg.domain_rand.use_domainrand_curriculum
+        self.vert_interval_min = self.cfg.domain_rand.vert_interval_min
+        self.vert_interval_max = self.cfg.domain_rand.vert_interval_max
+
+        self.push_interval_min = self.cfg.domain_rand.push_interval_min
+        self.push_interval_max = self.cfg.domain_rand.push_interval_max
+
+        self.wrench_timeout_min = self.cfg.domain_rand.wrench_timeout_min
+        self.wrench_timeout_max = self.cfg.domain_rand.wrench_timeout_max
+
+        self.use_domainrand_curriculum = self._cfg.domain_rand.use_domainrand_curriculum
         self.com_rand_z_positive = self._cfg.domain_rand.com_rand_z_positive
         self.num_push_steps = self._cfg.domain_rand.num_push_steps
         self.push_warmup_step = self._cfg.domain_rand.push_warmup
@@ -365,15 +524,15 @@ class GenesisSimulator_PACT(Simulator):
         # No matter what, before we step the value will be the z-min that can be negative
         self.com_delta_z_value = self._cfg.domain_rand.com_displacement_z_min
 
-        # This will be reset in the step_push function
+        # This will be reset in the step_domian_rand function
         self.com_delta_z_val_bounds = [-self.com_delta_z_value, self.com_delta_z_value]
 
         # Tradeoff curriculum stuff
-        self.feedforward_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=gs.tc_float)
-        self.feedback_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=gs.tc_float)
+        self.feedforward_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
+        self.feedback_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
 
-        self.wb_dim = self._cfg.env.whole_body_dim
-        self.grf_dim = self._cfg.env.grf_dim
+        self._wb_dim = self._cfg.env.whole_body_dim
+        self._grf_dim = self._cfg.env.grf_dim
     
     def _create_sim(self):
         # create scene
@@ -507,7 +666,7 @@ class GenesisSimulator_PACT(Simulator):
         #       be safe for aribitrary orderings.
         self.model_2_pino_joint_map = []
         for dof_name in pino_dof_names:
-            self.model_2_pino_joint_map.append(self.dof_names.index(dof_name))
+            self.model_2_pino_joint_map.append(self._dof_names.index(dof_name))
 
         print("self.model_2_pino_joint_map")
         print(self.model_2_pino_joint_map)
@@ -518,7 +677,7 @@ class GenesisSimulator_PACT(Simulator):
         #      dynamics equations we will use, so we need both
         self.pino_2_model_joint_pos_map = []
         self.pino_2_model_joint_act_map = []
-        for joint_name in self.dof_names:
+        for joint_name in self._dof_names:
             joint_id = self.pino_model.getJointId(joint_name)  # pull out the pinocchio idx for this joint
             joint = self.pino_model.joints[joint_id]           # pull out the joint itself
             v_idx = joint.idx_v                                # Get the start index of the joint's DoFs in the velocity vector (v)
@@ -576,6 +735,14 @@ class GenesisSimulator_PACT(Simulator):
         
         self._torque_limits = self._robot.get_dofs_force_range(self._dof_indices)[
             1]
+        
+        self.torque_limits_override = torch.from_numpy(np.array([23.7, 23.7, 35.55, 23.7, 23.7, 35.55, 23.7, 23.7, 35.55, 23.7, 23.7, 35.55])).to(self.device)
+
+        self.torque_limits_lower = self._torque_limits.clone()
+        self.torque_limits_diff = self.torque_limits_override - self._torque_limits
+
+        self.dof_pos_limits_hard = self.dof_pos_limits.clone()
+
         for i in range(self._dof_pos_limits.shape[0]):
             # soft limits
             m = (self._dof_pos_limits[i, 0] + self._dof_pos_limits[i, 1]) / 2
@@ -636,7 +803,7 @@ class GenesisSimulator_PACT(Simulator):
             decimals=self.n_digits).float()
         
         self.env_identities = torch.arange(
-            self.num_envs,
+            self._num_envs,
             device=self.device,
             dtype=gs.tc_int,
         )
@@ -687,9 +854,27 @@ class GenesisSimulator_PACT(Simulator):
         )
         self._last_feet_vel = torch.zeros_like(self._feet_vel)
 
-        # PINN stuff
-        self.grfs_buf = torch.zeros((self.num_envs, self.grf_dim), device=self.device, dtype=gs.tc_float)
+        # Pinocchio PINN stuff
+        self._grfs_buf = torch.zeros((self._num_envs, self._grf_dim), device=self.device, dtype=torch.float)
         
+        self._contact_forces_buff = torch.zeros((self._num_envs, self._wb_dim), device=self.device, dtype=torch.float)
+        
+        self._wb_dynamics_buff = torch.zeros((self._num_envs, self._wb_dim), device=self.device, dtype=torch.float)
+        
+        # Holds the generalized mass matrix computed by pinocchio, reshaped to match the model order (FR, FL, RR, RL)
+        self._wb_mass_mat_buff = torch.zeros((self._num_envs, self._wb_dim, self._wb_dim), device=self.device, dtype=torch.float)
+        
+        # Hold the bias vector (gravity, corilis, centerfugal) calculated by pinocchio, reshaped to match the model order
+        self._wb_bias_vec_buff = torch.zeros((self._num_envs, self._wb_dim), device=self.device, dtype=torch.float)
+
+        self._torso_6dof_acceleration = torch.zeros(self._num_envs, 6, device=self.device, dtype=torch.float)
+
+        self._base_world_lin_vel = torch.zeros_like(self._base_lin_vel)
+        self._base_world_ang_vel = torch.zeros_like(self._base_ang_vel)
+
+        self._last_base_world_lin_vel = torch.zeros_like(self._base_lin_vel)
+        self._last_base_world_ang_vel = torch.zeros_like(self._base_ang_vel)
+
         # depth images
         if self._cfg.sensor.add_depth:
             self.depth_images = torch.zeros(
@@ -719,6 +904,7 @@ class GenesisSimulator_PACT(Simulator):
             dtype=torch.float,
         )
         self._default_dof_pos = self._default_dof_pos.unsqueeze(0)
+        
         # PD control
         stiffness = self._cfg.control.stiffness
         damping = self._cfg.control.damping
@@ -732,6 +918,9 @@ class GenesisSimulator_PACT(Simulator):
         self._p_gains = torch.tensor(self._p_gains, device=self._device)
         self._d_gains = torch.tensor(self._d_gains, device=self._device)
         
+        self._cahed_pgain = self._p_gains.clone()
+        self._cahed_dgain = self._d_gains.clone()
+
         if self._batch_dofs_links_info:   
             self._p_gains = self._p_gains[None, :].repeat(self._num_envs, 1)
             self._d_gains = self._d_gains[None, :].repeat(self._num_envs, 1)
@@ -739,7 +928,7 @@ class GenesisSimulator_PACT(Simulator):
         self._robot.set_dofs_kv(self._d_gains, self._dof_indices)
 
         self._init_height_points()
-        self._measured_heights = torch.zeros(self._num_envs, self._num_height_points, device=self._device, requires_grad=False)        
+        self._measured_heights = torch.zeros(self._num_envs, self._num_height_points, device=self._device, requires_grad=False)
 
     def _init_height_points(self):
         y = torch.tensor(self._cfg.terrain.measured_points_y,
@@ -836,6 +1025,8 @@ class GenesisSimulator_PACT(Simulator):
         px = torch.clip(px, 0, self._height_samples.shape[0]-2)
         py = torch.clip(py, 0, self._height_samples.shape[1]-2)
         # get heights around the feet, 9 points for each foot
+        
+        # points directy in front/behind/left/right of foot 
         heights1 = self._height_samples[px-1, py]  # [x-0.1, y]
         heights2 = self._height_samples[px+1, py]  # [x+0.1, y]
         heights3 = self._height_samples[px, py-1]  # [x, y-0.1]
@@ -912,7 +1103,7 @@ class GenesisSimulator_PACT(Simulator):
         torques = (self.feedforward_tau_weight) * self.feedforward_torques + (self.feedback_tau_weight)*self.feedback_torques
 
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
-        return torch.clip(torques, -1.1*self.torque_limits, 1.1*self.torque_limits)
+        return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
     
 
     def _init_domain_params(self):
@@ -927,7 +1118,7 @@ class GenesisSimulator_PACT(Simulator):
             self._num_envs, 3, dtype=torch.float, device=self._device, requires_grad=False)
         
         self._rand_wrench_vels = torch.zeros(
-            self.num_envs, 3, dtype=torch.float, device=self._device, requires_grad=False)
+            self._num_envs, 3, dtype=torch.float, device=self._device, requires_grad=False)
 
         self._base_com_bias = torch.zeros(
             self._num_envs, 3, dtype=torch.float, device=self._device, requires_grad=False)

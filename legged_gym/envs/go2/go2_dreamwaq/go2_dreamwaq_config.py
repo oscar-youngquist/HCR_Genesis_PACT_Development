@@ -7,7 +7,7 @@ class Go2DreamwaqCfg( LeggedRobotDreamwaqCfg ):
         num_envs = 3000
         num_actions = 12
         num_observations = 45  # num_obs
-        frame_stack = 20    # number of frames to stack for obs_history
+        frame_stack = 5    # number of frames to stack for obs_history
         num_history_obs = int(num_observations * frame_stack)
         num_latent_dims = 16
         num_explicit_dims = 24  # base linear velocity

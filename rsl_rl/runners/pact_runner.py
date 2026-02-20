@@ -37,7 +37,7 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import torch
 
-from rsl_rl.algorithms import PPODynamic
+from rsl_rl.algorithms import PPO_PACT
 from rsl_rl.modules import ActorCritic_PACT, ContextDecoder
 from rsl_rl.env import VecEnv
 
@@ -86,11 +86,11 @@ class OnPolicyRunnerPACT:
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         
-        self.alg: PPODynamic = alg_class(actor_critic, decoder, 
-                                         pinn_lambda=self.policy_cfg["pinn_loss_weight"], 
-                                         pinn_warmup=self.policy_cfg["pinn_warmup"], 
-                                         pinn_init_steps=self.policy_cfg["pinn_init_steps"],
-                                         device=self.device, **self.alg_cfg)
+        self.alg: PPO_PACT = alg_class(actor_critic, decoder, 
+                                       pinn_lambda=self.policy_cfg["pinn_loss_weight"], 
+                                       pinn_warmup=self.policy_cfg["pinn_warmup"], 
+                                       pinn_init_steps=self.policy_cfg["pinn_init_steps"],
+                                       device=self.device, **self.alg_cfg)
         
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
@@ -153,7 +153,6 @@ class OnPolicyRunnerPACT:
         cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
@@ -208,7 +207,7 @@ class OnPolicyRunnerPACT:
             
             mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, mean_vel_loss, \
                     mean_recon_loss, mean_kld_loss, mean_pinn_loss \
-                    = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, self.env.num_iters, self.env.default_dof_pos, beta=2.0)
+                    = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, it, self.env.default_dof_pos, beta=2.0)
 
             # self.env.step_tradeoff_curriculum()
             print("Avg - Curriculum Step: ", torch.mean(self.env.tradeoff_step_ctr).item())
@@ -221,14 +220,12 @@ class OnPolicyRunnerPACT:
             
             # Step the reward curriculum if we are doing that
             if self.env.use_reward_curriculum:
-                self.env.step_reward_curriculum()
+                self.env.step_reward_curriculum(it)
             
             # Step the domain randomization if approperiate
             if self.env.use_domainrand_curriculum:
-                self.env.step_domian_rand()
-            
-            self.env.num_iters += 1
-            
+                self.env.step_domian_rand(it)
+                        
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:

@@ -6,13 +6,16 @@ import os
 import torch
 from torch import Tensor
 from typing import Tuple, Dict
+import multiprocessing as mp
+import random
 
 from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.utils.math_utils import wrap_to_pi, torch_rand_float, quat_apply
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.helpers import class_to_dict
 from ...base.legged_robot_config import LeggedRobotCfg
-
+import torch.nn.functional as F
+import pinocchio as pn
 class LeggedRobot(BaseTask):
     def __init__(self, cfg: LeggedRobotCfg, sim_params: dict, sim_device, headless):
         """ Parses the provided config file,
@@ -27,12 +30,21 @@ class LeggedRobot(BaseTask):
         """
         self.cfg = cfg
         self.init_done = False
-        self._parse_cfg(self.cfg)
+        self._parse_cfg(self.cfg, sim_device)
         super().__init__(self.cfg, sim_params, sim_device, headless)
         
         self._init_buffers()
         self._prepare_reward_function()
         self.init_done = True
+
+    def get_observations(self):
+        return self.obs_buf, self.obs_history, self.privileged_obs_buf, self.explicit_labels
+
+    def reset(self):
+        """ Reset all robots"""
+        self.reset_idx(torch.arange(self.num_envs, device=self.device))
+        obs, privileged_obs, _, _, _, _, _ = self.step(torch.zeros(self.num_envs, 2*self.num_actions, device=self.device, requires_grad=False))
+        return obs, privileged_obs
 
     def step(self, actions):
         """ Apply actions, simulate, call self.post_physics_step()
@@ -53,7 +65,57 @@ class LeggedRobot(BaseTask):
             self.privileged_obs_buf = torch.clip(
                 self.privileged_obs_buf, -clip_obs, clip_obs)
         
-        return self.obs_buf, self.privileged_obs_buf, self.rew_buf, self.reset_buf, self.extras
+        return self.obs_buf, self.privileged_obs_buf, self.obs_history, self.rew_buf, self.reset_buf, self.extras, (self.grfs_buf * self.obs_scales.grf)
+
+    def get_failure_idx(self):
+        return self.reset_buf * ~self.time_out_buf
+    
+    def get_scaled_pos_actions(self):
+                # control_type = 'P'
+        # Pull out the position control actions
+        pos_actions = self.actions[:,0:12]
+        
+        # Scale the position actions        
+        actions_scaled = pos_actions * self.cfg.control.action_scale + self.simulator.default_dof_pos
+
+        return actions_scaled
+    
+    def create_async_pino_workers(self):
+        self.simulator._create_async_pino_workers()
+
+    def shutdown_asynic_pino_workers(self):
+        self.simulator._shutdown_asynic_pino_workers()
+
+    def get_pinn_wb_dynamics(self):
+        return self.simulator._get_pinn_wb_dynamics()
+    
+    def _get_pinn_feedback(self, pos_actions, dof_pos, dof_vel):
+        return self.simulator._get_pinn_feedback(pos_actions, dof_pos, dof_vel)
+
+    def _get_pinn_actions(self, actions):
+        # Pull out the position control actions
+        pos_actions = actions[:,0:12]
+        # pull out the torque control actions
+        tau_actions = actions[:,12:24]
+        
+        # Scale and shift the position actions
+        actions_scaled = pos_actions * self.cfg.control.action_scale
+        target_dof_pos = actions_scaled + self.default_dof_pos
+
+        # Scale and shift the torque actions
+        feedforward_torques = tau_actions * self.cfg.control.torque_scale
+
+        return target_dof_pos, feedforward_torques
+
+    # TODO add buffers
+    def get_prev_obs(self):
+        return self.last_obs_buf, self.last_obs_hist, self.llast_obs_buf, self.llast_obs_hist
+    
+    # TODO add buffers
+    def get_pinn_wb_dynamics(self):
+        #           total GT forces  ,  generalized mass mat, bias vector
+        return self.contact_forces_buff, self.wb_mass_mat_buff, self.wb_bias_vec_buff, self.torso_6dof_acceleration
+
 
     def post_physics_step(self):
         """ check terminations, compute observations and rewards
@@ -161,8 +223,10 @@ class LeggedRobot(BaseTask):
             rew = self.reward_functions[i]() * self.reward_scales[name]
             self.rew_buf += rew
             self.episode_sums[name] += rew
+        
         if self.cfg.rewards.only_positive_rewards:
             self.rew_buf[:] = torch.clip(self.rew_buf[:], min=0.)
+        
         # add termination reward after clipping
         if "termination" in self.reward_scales:
             rew = self._reward_termination(
@@ -234,18 +298,18 @@ class LeggedRobot(BaseTask):
         """ Callback called at the beginning of the step function, before stepping the simulation
         """
         clip_actions = self.cfg.normalization.clip_actions
-        actions = torch.clip(
-            actions, -clip_actions, clip_actions).to(self.device)
+        actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
+        
         # update history of actions
         self.llast_actions[:] = self.last_actions[:]
         self.last_actions[:] = self.actions[:]
         self.actions[:] = actions[:]
+        
         # apply action delay by using an action queue
         if self.cfg.domain_rand.randomize_ctrl_delay:
             self.action_queue[:, 1:] = self.action_queue[:, :-1].clone()
             self.action_queue[:, 0] = actions.clone()
-            actions = self.action_queue[torch.arange(
-                self.num_envs), self.action_delay].clone()
+            actions = self.action_queue[torch.arange(self.num_envs), self.action_delay].clone()
         
         # # during training, the camera follows the first environment
         # if not self.debug and not self.headless:
@@ -362,22 +426,35 @@ class LeggedRobot(BaseTask):
             [torch.Tensor]: Vector of scales used to multiply a uniform distribution in [-1, 1]
         """
         noise_vec = torch.zeros_like(self.obs_buf[0])
+
+        self.height_noise_vec = torch.zeros(self.simulator._num_height_points, device=self.device)
+
         self.add_noise = self.cfg.noise.add_noise
         noise_scales = self.cfg.noise.noise_scales
         noise_level = self.cfg.noise.noise_level
-        noise_vec[:3] = noise_scales.lin_vel * \
-            noise_level * self.obs_scales.lin_vel
-        noise_vec[3:6] = noise_scales.ang_vel * \
+        
+        # input commands
+        noise_vec[:3] = 0.
+        # projected gravity vector
+        noise_vec[3:6] = noise_scales.gravity * noise_level
+        # angular velocity
+        noise_vec[6:9] = noise_scales.ang_vel * \
             noise_level * self.obs_scales.ang_vel
-        noise_vec[6:9] = noise_scales.gravity * noise_level
-        noise_vec[9:12] = 0.  # commands
-        noise_vec[12:24] = noise_scales.dof_pos * \
+        # leg joint positions
+        noise_vec[9:21] = noise_scales.dof_pos * \
             noise_level * self.obs_scales.dof_pos
-        noise_vec[24:36] = noise_scales.dof_vel * \
+        # leg joint velocities
+        noise_vec[21:33] = noise_scales.dof_vel * \
             noise_level * self.obs_scales.dof_vel
-        noise_vec[36:48] = 0.  # previous actions
+        
+        # previous joint position actions
+        noise_vec[33:45] = 0.
+        # previous joint torque actions
+        noise_vec[45:57] = 0.
+
         if self.cfg.terrain.measure_heights:
-            noise_vec[48:235] = noise_scales.height_measurements * noise_level * self.obs_scales.height_measurements
+            self.height_noise_vec[:] = noise_scales.height_measurements * noise_level * self.obs_scales.height_measurements
+        
         return noise_vec
 
     # ----------------------------------------
@@ -390,10 +467,13 @@ class LeggedRobot(BaseTask):
         self.forward_vec = torch.zeros(
             (self.num_envs, 3), device=self.device, dtype=torch.float
         )
+        
         self.forward_vec[:, 0] = 1.0
         self.fail_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device, requires_grad=False)
+        
         self.commands = torch.zeros(
             (self.num_envs, self.cfg.commands.num_commands), device=self.device, dtype=torch.float)
+        
         self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel],
                                            device=self.device, dtype=torch.float,
                                            requires_grad=False)
@@ -401,9 +481,12 @@ class LeggedRobot(BaseTask):
             (self.num_envs, self.num_actions), device=self.device, dtype=torch.float)
         self.last_actions = torch.zeros_like(self.actions)
         self.llast_actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)  # last last actions
+        
         self.feet_air_time = torch.zeros(
             (self.num_envs, len(self.simulator.feet_indices)), device=self.device, dtype=torch.float)
         self.last_contacts = torch.zeros((self.num_envs, len(self.simulator.feet_indices)), device=self.device, dtype=torch.int)
+
+
 
         # randomize action delay
         if self.cfg.domain_rand.randomize_ctrl_delay:
@@ -411,6 +494,34 @@ class LeggedRobot(BaseTask):
                 self.num_envs, self.cfg.domain_rand.ctrl_delay_step_range[1]+1, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
             self.action_delay = torch.randint(self.cfg.domain_rand.ctrl_delay_step_range[0],
                                               self.cfg.domain_rand.ctrl_delay_step_range[1]+1, (self.num_envs,), device=self.device, requires_grad=False)
+            
+
+    def step_reward_curriculum(self, num_iters):
+        # Safety catch
+        if not self.use_reward_curriculum:
+            return
+        
+        # initialize the policy with fixed-lower bound
+        if num_iters < self.reward_warmup_steps:
+            for key in self.reward_curr_keys:
+                if key in self.reward_scales.keys():
+                    self.reward_scales[key] = self.reward_curr_bounds[key][0] * self.dt
+                    # print("Reward - ", key, " scale - ", self.reward_scales[key])
+        # Gradually increase the regularization strength
+        elif num_iters > self.reward_warmup_steps and (num_iters - self.reward_warmup_steps) < self.reward_curr_steps:
+            print("Stepping Reward Curriculum")
+            adjusted_iter = num_iters - self.reward_warmup_steps
+            for key in self.reward_curr_keys:
+                if key in self.reward_scales.keys():
+                    self.reward_scales[key] = ((float(adjusted_iter)/float(self.reward_curr_steps))*self.reward_bound_diffs[key] + self.reward_curr_bounds[key][0])*self.dt
+                    # print("Reward - ", key, " scale - ", self.reward_scales[key])
+        # Fix the regularization strength to the upper-bound
+        else:
+            # by default set the reward to the upper bound
+            for key in self.reward_curr_keys:
+                if key in self.reward_scales.keys():
+                    self.reward_scales[key] = self.reward_curr_bounds[key][1] * self.dt
+
 
     def _prepare_reward_function(self):
         """ Prepares a list of reward functions, whcih will be called to compute the total reward.
@@ -437,13 +548,60 @@ class LeggedRobot(BaseTask):
         self.episode_sums = {name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
                              for name in self.reward_scales.keys()}
 
-    def _parse_cfg(self, cfg):
-        self.dt = self.cfg.sim.dt * self.cfg.control.decimation
+    def step_tradeoff_curriculum(self, env_ids):
+        # # If the tracking reward is above XX% of the maximum, increase the tradeoff        
+        if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > \
+                self.cfg.control.tradeoff_threshold * self.reward_scales["tracking_lin_vel"]:
+            
+            # print("^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*^*")
+            # print(torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length)
+            # print(self.cfg.control.tradeoff_threshold * self.reward_scales["tracking_lin_vel"])
+
+            # Increment the tradeoff step-counter for these successful envs.
+            self.tradeoff_step_ctr[env_ids] += 1.0
+
+            # Check if this increased the step count of any env beyond the maximum and then reset
+            max_step_mask = self.tradeoff_step_ctr > self.tradeoff_num_steps
+            self.tradeoff_step_ctr[max_step_mask] = self.tradeoff_num_steps
+
+        # apply the curriculum scaling
+        self.simulator.feedforward_tau_weight[env_ids]  = self.tradeoff_step_ctr[env_ids] *float(1.0/self.tradeoff_num_steps)*self.bound_diff[0] + self.tradeoff_lowerbounds[0]
+        self.simulator.feedback_tau_weight[env_ids]     = self.tradeoff_step_ctr[env_ids] *float(1.0/self.tradeoff_num_steps)*self.bound_diff[1] + self.tradeoff_lowerbounds[1]
+
+        random_smaple = random.random()
+        
+        if random_smaple <= 0.25:  # 20% of the time reduce to lower bound
+            self.simulator.feedforward_tau_weight[env_ids] = self.tradeoff_lowerbounds[0]
+            self.simulator.feedback_tau_weight[env_ids]    = self.tradeoff_lowerbounds[1]
+        elif random_smaple > 0.25 and random_smaple <= 0.50: # ~25% of the time, sample a random value between the lower and current upper bound
+            # step_ctr * (1.0/num_steps) -> is the per-env upper bound. Multipled by a random float between [0,1)
+            random_step_size = self.tradeoff_step_ctr*float(1.0/self.tradeoff_num_steps) * torch.rand((self.num_envs, 1))
+
+            self.simulator.feedforward_tau_weight[env_ids] = random_step_size[env_ids]*self.bound_diff[0] + self.tradeoff_lowerbounds[0]
+            self.simulator.feedback_tau_weight[env_ids]    = random_step_size[env_ids]*self.bound_diff[1] + self.tradeoff_lowerbounds[1]
+
+
+    def _parse_cfg(self, cfg, sim_device):
+        self.dt = self.cfg.control.dt
         self.debug = self.cfg.env.debug
         
         # use self-implemented pd controller
         self.obs_scales = self.cfg.normalization.obs_scales
+        
+        # Reward stuff (scale, curriculum scales/schedule)
         self.reward_scales = class_to_dict(self.cfg.rewards.scales)
+        
+        self.use_reward_curriculum = self.cfg.rewards.use_reward_curriculum
+
+        self.reward_curr_keys = self.cfg.rewards.reward_curriculum.curr_reward_keys
+        self.reward_curr_bounds = self.cfg.rewards.reward_curriculum.curr_reward_bounds
+        self.reward_curr_steps = self.cfg.rewards.reward_curriculum.curr_steps
+        self.reward_warmup_steps = self.cfg.rewards.reward_curriculum.warmup_steps
+
+        self.reward_bound_diffs = {}
+        for key in self.reward_curr_keys:
+            self.reward_bound_diffs[key] = self.reward_curr_bounds[key][1] - self.reward_curr_bounds[key][0]        
+        
         self.command_ranges = class_to_dict(self.cfg.commands.ranges)
         if self.cfg.terrain.mesh_type not in ['heightfield', "trimesh"]:
             self.cfg.terrain.curriculum = False
@@ -462,6 +620,24 @@ class LeggedRobot(BaseTask):
                                 self.cfg.domain_rand.kd_range[1]) / 2  # mean value
         
         self.cfg.domain_rand.push_interval = np.ceil(self.cfg.domain_rand.push_interval_s / self.dt)
+
+        # load some PACT specific values
+        #     some PACT specific dimension values
+        self.wb_dim = self.cfg.env.whole_body_dim
+        self.grf_dim = self.cfg.env.grf_dim
+        self.num_obs_hist = self.cfg.env.num_obs_hist
+
+        # Tradeoff curriculum stuff...
+        self.tradeoff_lowerbounds = np.array(self.cfg.control.tradeoff_init_weights)
+        self.tradeoff_upperbounds = np.array(self.cfg.control.tradeoff_final_weights)
+        self.tradeoff_num_steps = self.cfg.control.tradeoff_steps
+        self.bound_diff = self.tradeoff_upperbounds - self.tradeoff_lowerbounds 
+        self.use_tradeoff = self.cfg.control.use_tradeoff_curriculum
+        
+        # We want to be at the full bounds right away, but we want to skip back sometimes for exploration
+        self.tradeoff_step_ctr = torch.ones((self.cfg.env.num_envs, 1), device=sim_device, dtype=gs.tc_float)
+
+
 
     # ------------ reward functions----------------
     def _reward_lin_vel_z(self):
