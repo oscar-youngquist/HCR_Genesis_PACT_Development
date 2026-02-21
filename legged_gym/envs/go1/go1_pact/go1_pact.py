@@ -152,10 +152,8 @@ class Go1PACT(BaseTask):
         if hasattr(self.cfg, "termination"):
             # more sophisticated termination conditions
             rpy = self.simulator._base_euler
-            r, p = rpy[:,0], rpy[:,1]
-            r[r > np.pi] -= np.pi * 2 # to range (-pi, pi)
-            p[p > np.pi] -= np.pi * 2 # to range (-pi, pi)
-            height = self.simulator.base_pos[:, 2] - self.simulator.env_origins[:, 2]
+            r, p = wrap_to_pi(rpy[:,0]), wrap_to_pi(rpy[:,1])
+            base_height = torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) - self.simulator.measured_heights, dim=1)
             
             if "roll" in self.cfg.termination.termination_terms:
                 r_term_buff = torch.abs(r) > self.cfg.termination.roll_threshold
@@ -164,10 +162,10 @@ class Go1PACT(BaseTask):
                 p_term_buff = torch.abs(p) > self.cfg.termination.pitch_threshold
                 self.fail_buf |= p_term_buff
             if "height_min" in self.cfg.termination.termination_terms:
-                height_term_buff = height < self.cfg.termination.height_min
+                height_term_buff = base_height < self.cfg.termination.height_min
                 self.fail_buf |= height_term_buff
             if "height_max" in self.cfg.termination.termination_terms:
-                height_term_buff = height > self.cfg.termination.height_max
+                height_term_buff = base_height > self.cfg.termination.height_max
                 self.fail_buf |= height_term_buff
         
         self.fail_buf += fail_buf
@@ -443,7 +441,7 @@ class Go1PACT(BaseTask):
                 0.5 * wrap_to_pi(self.commands[:, 3] - heading), self.cfg.commands.ranges.ang_vel_yaw[0], 
                                                                  self.cfg.commands.ranges.ang_vel_yaw[1])
 
-        if self.cfg.domain_rand.push_robots and (self.common_step_counter % self.cfg.domain_rand.push_interval == 0):
+        if self.cfg.domain_rand.push_robots:
             self.simulator.push_robots()
         
     def _resample_commands(self, env_ids):

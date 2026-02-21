@@ -5,7 +5,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        num_privileged_obs = 57 + 67 + 2  # robot_state + privilged info + tradeoff curriculum weights + terrain_heights (81)
+        num_privileged_obs = 57 + 67 + 2 # robot_state + privilged info + tradeoff curriculum weights + terrain_heights (81)
         num_priv_stack = 2
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -65,7 +65,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
 
     class sim:
         # Common
-        dt = 0.001                 # 1000 Hz
+        dt = 0.002                 # 1000 Hz
         substeps = 1
         # For Genesis
         max_collision_pairs = 100  # More collision pairs will occupy more GPU memory and slow down the simulation
@@ -139,7 +139,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         # Randomized 6DOF torso wrench
         push_robots = True
         push_interval_max = 15.0
-        push_interval_min = 1.0
+        push_interval_min = 0.1
         max_push_vel_xy = 1.00
         min_push_vel_xy = 0.5
 
@@ -151,7 +151,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         max_push_torque = 2.5
         min_push_torque = 0.75
         wrench_timeout_min = 0.01
-        wrench_timeout_max = 5.0
+        wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True

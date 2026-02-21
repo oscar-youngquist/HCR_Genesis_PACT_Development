@@ -267,33 +267,36 @@ class GenesisSimulator_PACT(Simulator):
             self._terrain_types[env_ids]]
 
     def push_robots(self):        
-        dofs_vel = self.robot.get_dofs_velocity()
+        dofs_vel = self._robot.get_dofs_velocity()
 
-        # check which wrench values have timed out
+        # check which wrench values have timed out   + self.env_identities
         push_mask = (
-            (self.common_step_counter + self.env_identities)
+            (self.common_step_counter)
             % (self.push_timeouts / self._control_dt).int()
         ) == 0
 
         wrench_mask = (
-            (self.common_step_counter + self.env_identities)
+            (self.common_step_counter)
             % (self.wrench_timeouts / self._control_dt).int()
         )  == 0
         
         vert_mask = (
-            (self.common_step_counter + self.env_identities)
+            (self.common_step_counter)
             % (self.vert_timeouts / self._control_dt).int()
         )  == 0
 
-        num_push_reset = push_mask.sum()
-        num_wrench_reset = wrench_mask.sum()
-        num_vert_reset = vert_mask.sum()
+        push_mask = push_mask.squeeze()
+        wrench_mask = wrench_mask.squeeze()
+        vert_mask = vert_mask.squeeze()
+
+        num_push_reset = push_mask.sum().item()
+        num_wrench_reset = wrench_mask.sum().item()
+        num_vert_reset = vert_mask.sum().item()
         
         if num_push_reset > 0:
             lin_vel = torch_rand_float(-self.push_value,
                                         self.push_value, (num_push_reset, 2), self._device)
-            
-            self._rand_push_vels[push_mask, :2] = lin_vel.detach().clone()
+            self._rand_push_vels[push_mask, :2] = lin_vel.detach().clone().squeeze()
             dofs_vel[push_mask, :2] += lin_vel
         
         if num_wrench_reset > 0:
@@ -301,20 +304,16 @@ class GenesisSimulator_PACT(Simulator):
                                         self.wrench_value,
                                         (num_wrench_reset, 3),   # roll, pitch, yaw
                                         self._device)
-            self._rand_wrench_vels[wrench_mask,:] = ang_push.detach().clone()
+            self._rand_wrench_vels[wrench_mask,:] = ang_push.detach().clone().squeeze()
             dofs_vel[wrench_mask, 3:6] += ang_push
 
         if num_vert_reset > 0:
-            ang_push = torch_rand_float(-self.vert_value,
+            vert_push = torch_rand_float(-self.vert_value,
                                         0.0,
                                         (num_vert_reset,1),   # vertical forces
                                         self._device)
-            self._rand_push_vels[vert_mask,2] = ang_push.detach().clone()
-            dofs_vel[vert_mask, 2] += ang_push
-
-        print(self._rand_push_vels)
-        print(self._rand_wrench_vels)
-        print("-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-")
+            self._rand_push_vels[vert_mask,2] = vert_push.detach().clone().squeeze()
+            dofs_vel[vert_mask, 2] += vert_push.squeeze()
         
         # Calculate new interval times for the number of time-out envs
         if num_push_reset > 0:
@@ -473,7 +472,9 @@ class GenesisSimulator_PACT(Simulator):
             self.frame_count = 0
 
         # Domain rand curriculum stuff
-        self.n_digits = int(1.0/self._control_dt)
+        self.n_digits = 2
+
+        print("++++++++++++++ self.n_digits -- ", self.n_digits)
 
         self.vert_interval_min = self._cfg.domain_rand.vert_interval_min
         self.vert_interval_max = self._cfg.domain_rand.vert_interval_max
@@ -801,13 +802,15 @@ class GenesisSimulator_PACT(Simulator):
                              (self._cfg.env.num_envs,1),
                              self._device),
             decimals=self.n_digits).float()
-        
+                
         self.vert_timeouts = torch.round(
             torch_rand_float(self.vert_interval_min,
                              self.vert_interval_max,
                              (self._cfg.env.num_envs,1),
                              self._device),
             decimals=self.n_digits).float()
+        
+        print(self.wrench_timeouts)
         
         self.env_identities = torch.arange(
             self._num_envs,

@@ -41,6 +41,15 @@ from rsl_rl.algorithms import PPO_PACT
 from rsl_rl.modules import ActorCritic_PACT, ContextDecoder
 from rsl_rl.env import VecEnv
 
+
+
+# ---------------- 4090 / Ada Lovelace performance knobs ----------------
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
+torch.backends.cudnn.benchmark = True
+
+
 class OnPolicyRunnerPACT:
 
     def __init__(self,
@@ -81,6 +90,9 @@ class OnPolicyRunnerPACT:
                                                                self.policy_cfg["activation"],
                                                                self.policy_cfg["init_noise_std"]).to(self.device)
         
+        
+        actor_critic = torch.compile(actor_critic)
+        
         print(actor_critic)
         
         decoder = ContextDecoder(self.policy_cfg["cenet_dec_input_dim"],
@@ -88,6 +100,8 @@ class OnPolicyRunnerPACT:
                                  self.policy_cfg["cenet_dec_out_dim"]
                                  ).to(self.device)
         
+        decoder = torch.compile(decoder)
+
         print("Created Parallel Actor-Critic Model. Parameter Count: ", np.sum(p.numel() for p in actor_critic.parameters() if p.requires_grad))
 
         print("\t Actor Trunk Parameter Count: ", np.sum(p.numel() for p in actor_critic.act_trunk.parameters() if p.requires_grad))
@@ -180,7 +194,8 @@ class OnPolicyRunnerPACT:
                     pprev_obs, pprev_obs_hist = pprev_obs.to(self.device), pprev_obs_hist.to(self.device)
 
                     # Call the algorithms act() method to store current transition data and predict actions
-                    actions = self.alg.act(obs, critic_obs, obs_hist, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist) # obs_t, (obs_t-1)
+                    with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                        actions = self.alg.act(obs, critic_obs, obs_hist, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist) # obs_t, (obs_t-1)
                          
                     # Submit the predicted action and extract the resulting state... 
                     obs, privileged_obs, obs_hist, exp_labels, rewards, dones, infos, grfs = self.env.step(actions)  # obs_t+1  (obs_t)
