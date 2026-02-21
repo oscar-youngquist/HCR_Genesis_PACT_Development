@@ -105,8 +105,8 @@ class GenesisSimulator_PACT(Simulator):
         self._feet_vel[:] = self._robot.get_links_vel()[:, self._feet_indices, :]
 
         # Some pinn specific stuff
-        self._base_velo_world[:] = self._robot.get_vel()
-        self._base_ang_velo_world[:] = self._robot.get_ang()
+        self._base_world_lin_vel[:] = self._robot.get_vel()
+        self._base_world_ang_vel[:] = self._robot.get_ang()
         
         # Used to train the model, so reorganize this to match the model inidices
         #     extract the values used to calculate the dynamics consitentcy reward separately.
@@ -124,7 +124,7 @@ class GenesisSimulator_PACT(Simulator):
         wb_pos_np = torch.concatenate([self._base_pos, self._base_quat, self._dof_pos[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
         
         #     The whole-body velocity
-        wb_vel_np = torch.concatenate([self._base_velo_world, self._base_ang_velo_world, self._dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
+        wb_vel_np = torch.concatenate([self._base_world_lin_vel, self._base_world_ang_vel, self._dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
         
         #     The previous whole-body velocity
         wb_vel_prev_np = torch.concatenate([self._last_base_world_lin_vel, self._last_base_world_ang_vel, self._last_dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
@@ -144,15 +144,15 @@ class GenesisSimulator_PACT(Simulator):
 
         # now stack the tensor lists to get the necessary state values
         self._wb_dynamics_buff[:]        = torch.from_numpy(
-            self.async_pino_manager.shared.wb_dynamics).to(self.device) # num_envs x 18
+            self.async_pino_manager.shared.wb_dynamics).to(self._device) # num_envs x 18
         self._contact_forces_buff[:]     = torch.from_numpy(
-            self.async_pino_manager.shared.wb_contacts).to(self.device) # num_envs x 18
+            self.async_pino_manager.shared.wb_contacts).to(self._device) # num_envs x 18
         self._wb_mass_mat_buff[:]        = torch.from_numpy(
-            self.async_pino_manager.shared.mass_mat).to(self.device)    # num_envs x 18 x 18
+            self.async_pino_manager.shared.mass_mat).to(self._device)    # num_envs x 18 x 18
         self._wb_bias_vec_buff[:]        = torch.from_numpy(
-            self.async_pino_manager.shared.bias).to(self.device)        # num_envs x 18
+            self.async_pino_manager.shared.bias).to(self._device)        # num_envs x 18
         self._torso_6dof_acceleration[:] = torch.from_numpy(
-            self.async_pino_manager.shared.acc6d).to(self.device)       # num_envs x 6
+            self.async_pino_manager.shared.acc6d).to(self._device)       # num_envs x 6
         
         
         # Link contact state
@@ -291,7 +291,7 @@ class GenesisSimulator_PACT(Simulator):
         
         if num_push_reset > 0:
             lin_vel = torch_rand_float(-self.push_value,
-                                        self.push_value, (num_push_reset, 2), self.device)
+                                        self.push_value, (num_push_reset, 2), self._device)
             
             self._rand_push_vels[push_mask, :2] = lin_vel.detach().clone()
             dofs_vel[push_mask, :2] += lin_vel
@@ -300,7 +300,7 @@ class GenesisSimulator_PACT(Simulator):
             ang_push = torch_rand_float(-self.wrench_value,
                                         self.wrench_value,
                                         (num_wrench_reset, 3),   # roll, pitch, yaw
-                                        self.device)
+                                        self._device)
             self._rand_wrench_vels[wrench_mask,:] = ang_push.detach().clone()
             dofs_vel[wrench_mask, 3:6] += ang_push
 
@@ -308,16 +308,20 @@ class GenesisSimulator_PACT(Simulator):
             ang_push = torch_rand_float(-self.vert_value,
                                         0.0,
                                         (num_vert_reset,1),   # vertical forces
-                                        self.device)
+                                        self._device)
             self._rand_push_vels[vert_mask,2] = ang_push.detach().clone()
             dofs_vel[vert_mask, 2] += ang_push
+
+        print(self._rand_push_vels)
+        print(self._rand_wrench_vels)
+        print("-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-")
         
         # Calculate new interval times for the number of time-out envs
         if num_push_reset > 0:
             self.push_timeouts[push_mask] = torch.round(
                                                 torch_rand_float(self.push_interval_min,
                                                     self.push_interval_max,
-                                                    (num_push_reset,),
+                                                    (num_push_reset,1),
                                                     self._device),
                                                 decimals=self.n_digits).float()
             
@@ -325,7 +329,7 @@ class GenesisSimulator_PACT(Simulator):
             self.wrench_timeouts[wrench_mask] = torch.round(
                                                 torch_rand_float(self.wrench_timeout_min,
                                                     self.wrench_timeout_max,
-                                                    (num_wrench_reset,),
+                                                    (num_wrench_reset,1),
                                                     self._device),
                                                 decimals=self.n_digits).float()
         
@@ -333,7 +337,7 @@ class GenesisSimulator_PACT(Simulator):
             self.vert_timeouts[vert_mask] = torch.round(
                                                 torch_rand_float(self.vert_interval_min,
                                                     self.vert_interval_max,
-                                                    (num_vert_reset,),
+                                                    (num_vert_reset,1),
                                                     self._device),
                                                 decimals=self.n_digits).float()
             
@@ -471,14 +475,14 @@ class GenesisSimulator_PACT(Simulator):
         # Domain rand curriculum stuff
         self.n_digits = int(1.0/self._control_dt)
 
-        self.vert_interval_min = self.cfg.domain_rand.vert_interval_min
-        self.vert_interval_max = self.cfg.domain_rand.vert_interval_max
+        self.vert_interval_min = self._cfg.domain_rand.vert_interval_min
+        self.vert_interval_max = self._cfg.domain_rand.vert_interval_max
 
-        self.push_interval_min = self.cfg.domain_rand.push_interval_min
-        self.push_interval_max = self.cfg.domain_rand.push_interval_max
+        self.push_interval_min = self._cfg.domain_rand.push_interval_min
+        self.push_interval_max = self._cfg.domain_rand.push_interval_max
 
-        self.wrench_timeout_min = self.cfg.domain_rand.wrench_timeout_min
-        self.wrench_timeout_max = self.cfg.domain_rand.wrench_timeout_max
+        self.wrench_timeout_min = self._cfg.domain_rand.wrench_timeout_min
+        self.wrench_timeout_max = self._cfg.domain_rand.wrench_timeout_max
 
         self.use_domainrand_curriculum = self._cfg.domain_rand.use_domainrand_curriculum
         self.com_rand_z_positive = self._cfg.domain_rand.com_rand_z_positive
@@ -661,6 +665,8 @@ class GenesisSimulator_PACT(Simulator):
         # Create the joint mappings from model-2-pino and pino-2-model - model: [FR, FL, RR, RL], pino: [FL, FR, RL, RR]
         pino_dof_names = [name for name in self.pino_model.names[2:]]   # skip the universe and base joints
 
+        print("pino_dof_names", pino_dof_names)
+
         # Maps from the [FR, FL, RR, RL] leg order used by the model to the [FL, FR, RL, RR] order used by pinocchio 
         #       I have confirmed that this is the order the joints load in for these URDF's but this should
         #       be safe for aribitrary orderings.
@@ -714,6 +720,7 @@ class GenesisSimulator_PACT(Simulator):
         self._feet_names = [
             link.name for link in self._robot.links if self._cfg.asset.foot_name in link.name]
         self._feet_indices = find_link_indices(self._feet_names)
+        
         print(f"feet names: {self._feet_names}, feet link indices: {self._feet_indices}")
         assert len(self._feet_indices) > 0
         
@@ -736,7 +743,7 @@ class GenesisSimulator_PACT(Simulator):
         self._torque_limits = self._robot.get_dofs_force_range(self._dof_indices)[
             1]
         
-        self.torque_limits_override = torch.from_numpy(np.array([23.7, 23.7, 35.55, 23.7, 23.7, 35.55, 23.7, 23.7, 35.55, 23.7, 23.7, 35.55])).to(self.device)
+        self.torque_limits_override = torch.from_numpy(np.array([23.7, 23.7, 35.55, 23.7, 23.7, 35.55, 23.7, 23.7, 35.55, 23.7, 23.7, 35.55])).to(self._device)
 
         self.torque_limits_lower = self._torque_limits.clone()
         self.torque_limits_diff = self.torque_limits_override - self._torque_limits
@@ -784,28 +791,28 @@ class GenesisSimulator_PACT(Simulator):
         self.wrench_timeouts = torch.round(
             torch_rand_float(self.wrench_timeout_min,
                              self.wrench_timeout_max,
-                             (self._cfg.env.num_envs,),
+                             (self._cfg.env.num_envs,1),
                              self._device),
             decimals=self.n_digits).float()
 
         self.push_timeouts = torch.round(
             torch_rand_float(self.push_interval_min,
                              self.push_interval_max,
-                             (self._cfg.env.num_envs,),
+                             (self._cfg.env.num_envs,1),
                              self._device),
             decimals=self.n_digits).float()
         
         self.vert_timeouts = torch.round(
             torch_rand_float(self.vert_interval_min,
                              self.vert_interval_max,
-                             (self._cfg.env.num_envs,),
+                             (self._cfg.env.num_envs,1),
                              self._device),
             decimals=self.n_digits).float()
         
         self.env_identities = torch.arange(
             self._num_envs,
-            device=self.device,
-            dtype=gs.tc_int,
+            device=self._device,
+            dtype=torch.float,
         )
         
         # Base init stuff
@@ -855,19 +862,19 @@ class GenesisSimulator_PACT(Simulator):
         self._last_feet_vel = torch.zeros_like(self._feet_vel)
 
         # Pinocchio PINN stuff
-        self._grfs_buf = torch.zeros((self._num_envs, self._grf_dim), device=self.device, dtype=torch.float)
+        self._grfs_buf = torch.zeros((self._num_envs, self._grf_dim), device=self._device, dtype=torch.float)
         
-        self._contact_forces_buff = torch.zeros((self._num_envs, self._wb_dim), device=self.device, dtype=torch.float)
+        self._contact_forces_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
         
-        self._wb_dynamics_buff = torch.zeros((self._num_envs, self._wb_dim), device=self.device, dtype=torch.float)
+        self._wb_dynamics_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
         
         # Holds the generalized mass matrix computed by pinocchio, reshaped to match the model order (FR, FL, RR, RL)
-        self._wb_mass_mat_buff = torch.zeros((self._num_envs, self._wb_dim, self._wb_dim), device=self.device, dtype=torch.float)
+        self._wb_mass_mat_buff = torch.zeros((self._num_envs, self._wb_dim, self._wb_dim), device=self._device, dtype=torch.float)
         
         # Hold the bias vector (gravity, corilis, centerfugal) calculated by pinocchio, reshaped to match the model order
-        self._wb_bias_vec_buff = torch.zeros((self._num_envs, self._wb_dim), device=self.device, dtype=torch.float)
+        self._wb_bias_vec_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
 
-        self._torso_6dof_acceleration = torch.zeros(self._num_envs, 6, device=self.device, dtype=torch.float)
+        self._torso_6dof_acceleration = torch.zeros(self._num_envs, 6, device=self._device, dtype=torch.float)
 
         self._base_world_lin_vel = torch.zeros_like(self._base_lin_vel)
         self._base_world_ang_vel = torch.zeros_like(self._base_ang_vel)
@@ -894,6 +901,7 @@ class GenesisSimulator_PACT(Simulator):
                 self._num_envs, len(self._feet_indices), 9, dtype=torch.float, device=self._device, requires_grad=False)
         
         if self._cfg.asset.obtain_link_contact_states:
+            print("Constructing link contact state buffer! &&&&&&&&&&&&&&&&&")
             self._link_contact_states = torch.zeros(
                 self._num_envs, len(self._contact_state_link_indices), dtype=torch.float, device=self._device, requires_grad=False)
         

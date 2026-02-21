@@ -6,7 +6,7 @@ from legged_gym.utils import get_args, task_registry
 import shutil
 
 def train(args):
-    if SIMULATOR == "genesis":
+    if "genesis" in SIMULATOR:
         gs.init(backend=gs.cpu if args.cpu else gs.gpu, logging_level='warning')
     # Make environment and algorithm runner
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
@@ -22,6 +22,7 @@ def train(args):
     else:
         robot_file_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task, args.task+".py")
         robot_config_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task, args.task+"_config.py")
+    
     shutil.copy(robot_file_path, log_dir)
     shutil.copy(robot_config_path, log_dir)
     

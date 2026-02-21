@@ -1,12 +1,12 @@
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
-class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
+class GO1PACTCfg( LeggedRobotCfg ):
     
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        num_privileged_obs = 57 + 67 + 2 + 81  # robot_state + privilged info + tradeoff curriculum weights + terrain_heights (81)
-        num_priv_stack = 3
+        num_privileged_obs = 57 + 67 + 2  # robot_state + privilged info + tradeoff curriculum weights + terrain_heights (81)
+        num_priv_stack = 2
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
@@ -28,6 +28,7 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
         static_friction = 1.0 # coefficient of static friction of the terrain
         dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
         restitution = 0. # coefficient of restitution of the terrain
+        obtain_terrain_info_around_feet = True
 
         # # rough terrain only:
         # mesh_type = "heightfield"
@@ -127,8 +128,8 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
     class domain_rand(LeggedRobotCfg.domain_rand):
         use_domainrand_curriculum = True
         com_rand_z_positive = True
-        num_push_steps = 500  # number of steps to increase the domain randomization ranges
-        push_warmup = 500     # number of steps with initial values held constant
+        num_push_steps = 1000  # number of steps to increase the domain randomization ranges
+        push_warmup = 2000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -161,10 +162,10 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.16
+        com_displacement_x_max = 0.20
         
-        com_displacement_y_min = 0.06
-        com_displacement_y_max = 0.12
+        com_displacement_y_min = 0.075
+        com_displacement_y_max = 0.15
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
@@ -209,19 +210,19 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
         lookat = [0., 0, 1.]  # [m]
         rendered_envs_idx = [i for i in range(0, 3, 1)]  # number of environments to be rendered
         # rendered_envs_idx.extend([i for i in range(200, 203, 1)])  # number of environments to be rendered
-        # # rendered_envs_idx.extend([i for i in range(500, 503, 1)])  # number of environments to be rendered
+        rendered_envs_idx.extend([i for i in range(500, 503, 1)])  # number of environments to be rendered
         # # rendered_envs_idx.extend([i for i in range(750, 753, 1)])  # number of environments to be rendered
         # rendered_envs_idx.extend([i for i in range(900, 903, 1)])  # number of environments to be rendered
 
-        # rendered_envs_idx.extend([i for i in range(1500, 1503, 1)])
+        rendered_envs_idx.extend([i for i in range(1500, 1503, 1)])
         # # rendered_envs_idx.extend([i for i in range(1900, 1903, 1)])
-        # # rendered_envs_idx.extend([i for i in range(3500, 3503, 1)])
+        # rendered_envs_idx.extend([i for i in range(3500, 3503, 1)])
         # rendered_envs_idx.extend([i for i in range(4000, 4003, 1)])
 
-        # rendered_envs_idx.extend([i for i in range(1700, 1703, 1)])
+        rendered_envs_idx.extend([i for i in range(1700, 1703, 1)])
         # # rendered_envs_idx.extend([i for i in range(2200, 2203, 1)])
         # # rendered_envs_idx.extend([i for i in range(3700, 3703, 1)])
-        # rendered_envs_idx.extend([i for i in range(3900, 3903, 1)])
+        rendered_envs_idx.extend([i for i in range(3900, 3903, 1)])
         # rendered_envs_idx = [0, 1000, 3500]
         add_camera = False
 
@@ -248,6 +249,7 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
             pointcloud_in_world_frame = False
 
     class asset( LeggedRobotCfg.asset ):
+        name = "go1"
         file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/go1_description/urdf/go1.urdf'
         dof_names = [        # specify the sequence of actions
             'FR_hip_joint',
@@ -262,18 +264,20 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
             'RL_hip_joint',
             'RL_thigh_joint',
             'RL_calf_joint',]
-        foot_name = ["foot"]
+        foot_name = "foot"
         penalize_contacts_on = ["hip", "thigh", "calf"]
-        terminate_after_contacts_on = ["base"]
+        terminate_after_contacts_on = ["base","trunk","hip"]
         links_to_keep = ['FR_foot', 'FL_foot', 'RR_foot', 'RL_foot']
         self_collisions = True
+        obtain_link_contact_states = True
+        contact_state_link_names = ["thigh", "calf", "foot", "base", "hip"]
   
     class control( LeggedRobotCfg.control ):
         # PD Drive parameters:
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
-        stiffness = {'joint': 20.0}   # [N*m/rad]
-        damping   = {'joint': 0.50}     # [N*m*s/rad]
+        stiffness = {'joint': 30.0}   # [N*m/rad]
+        damping   = {'joint': 0.75}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
@@ -284,7 +288,7 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
 
         # Assumed order - tau_ff, tau_fb
         # tradeoff_init_weights  = [0.80, 1.4]
-        tradeoff_init_weights  = [0.50, 1.25]
+        tradeoff_init_weights  = [0.20, 1.80]
         tradeoff_final_weights = [1.00, 1.00]
         tradeoff_steps = 10
         tradeoff_threshold = 0.60
@@ -292,7 +296,7 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
 
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
-        roll_threshold    = 1.00  # [rad] ~ 40 degrees
+        roll_threshold    = 0.7  # [rad] ~ 40 degrees
         pitch_threshold   = 0.7  # [rad] ~ 30 degrees
         height_min = 0.20       # [m]
         height_max = 1.50        # [m]
@@ -309,7 +313,7 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = False
 
-        use_reward_curriculum = False
+        use_reward_curriculum = True
 
         max_contact_force = 400.0
         class scales( LeggedRobotCfg.rewards.scales ):
@@ -328,7 +332,6 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
             # command tracking
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
-            feet_spread_pairwise_axes = 0.2
             dof_tracking      = 0.1
             aligned_torques   = 0.1
             sparse_contacts   = 0.01            
@@ -364,39 +367,43 @@ class GO1DynamicFinetuneCfg( LeggedRobotCfg ):
             
             foot_slip        = -0.1           # penalty for feet slipping
             feet_contact_forces = -2.0e-1     # penalty for high contact forces on the feet
+            feet_spread_pairwise_axes = -0.2
 
         class reward_curriculum():
             curr_reward_keys = ["feedback_torques", "feet_contact_forces",
                                 "ang_vel_xy", "base_height", "lin_vel_z", "orientation",
-                                "feedforward_torques", "dof_act_limits"]
+                                "feedforward_torques", "dof_act_limits",
+                                "tau_action_rate", "tau_action_smoothness"]
             
             curr_reward_bounds = {
-                                  "feedback_torques":[-2.25e-4, -2.0e-4],
+                                  "feedback_torques":[-2.20e-4, -2.0e-4],
                                   "feedforward_torques":[-2.0e-4, -2.2e-4],
-                                  "feet_contact_forces":[-1.0e-1,-5.0e-1],
+                                  "feet_contact_forces":[-1.0e-2,-1.0e-1],
                                   "ang_vel_xy":[-0.05, -0.1],
                                   "base_height":[-1.0,-2.0],
                                   "lin_vel_z":[-1.0,-2.0],
                                   "orientation":[-1.0,-2.0],
                                   "dof_act_limits":[-1.0, -2.0],
+                                  "tau_action_rate":[-0.05, -0.2],
+                                  "tau_action_smoothness":[-0.05, -0.2],
                                  }
 
-            curr_steps = 0
-            warmup_steps = 0
+            curr_steps = 1000
+            warmup_steps = 2500
 
-    class commands( LeggedRobotCfg.commands ):
+    class commands(LeggedRobotCfg.commands):
         curriculum = True
         max_curriculum = 1.
         num_commands = 3 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 10.  # time before command are changed[s]
         heading_command = False # if true: compute ang vel command from heading error
-        class ranges( LeggedRobotCfg.commands.ranges ):
+        class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
             lin_vel_y = [-1.0, 1.0]   # min max [m/s]
             ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
             heading = [-3.14, 3.14]
 
-class GO1DynmaicFinetuneCfgPPO( LeggedRobotCfgPPO ):
+class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
     seed = 1
     runner_class_name = "PACTRunner" # Teacher-Student Runner
     
@@ -410,12 +417,12 @@ class GO1DynmaicFinetuneCfgPPO( LeggedRobotCfgPPO ):
         cenet_velo_dim = 3 + 4 + 4      # torso velocity, foot-contact indicator, foot-height 
 
         # Context Decoder
-        cenet_dec_input_dim = 19
+        cenet_dec_input_dim = 27
         cenet_dec_layers = [64,128]
         cenet_dec_out_dim = 57 + 12      # next obs (57) + grf_dim (12)
 
         # Actor/critic
-        actor_branch_layers = [512,256,128]
+        actor_layers = [512,256,128]
         critic_layers = [1024,256,128,64]
         
         # Shared
@@ -446,12 +453,12 @@ class GO1DynmaicFinetuneCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'
         num_steps_per_env = 100 # per iteration
-        max_iterations = 1600 # number of policy updates
+        max_iterations = 5000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'unimodel_grf_pinn_100hz_full_posboot_01_finetune_full_05'
-        experiment_name = 'rss_go1_dynamic_unimodel_full'
+        run_name = 'pact_100hz'
+        experiment_name = 'go1_pact_rough'
         save_interval = 100
         
         

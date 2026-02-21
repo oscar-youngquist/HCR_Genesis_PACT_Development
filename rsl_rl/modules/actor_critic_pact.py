@@ -181,7 +181,7 @@ class ActorCritic_PACT(nn.Module):
                                               activation=activation)
         
         # Get the activation function used by the actor and critic networks
-        self.activation = get_activation(activation)
+        activation = get_activation(activation)
 
         self.init_noise_std = init_noise_std
 
@@ -210,16 +210,16 @@ class ActorCritic_PACT(nn.Module):
         ###
         #  Construct layers for the critic network
         ###
-        critic_layers = []
-        critic_layers.append(nn.Linear(num_critic_obs, critic_layers[0]))
-        critic_layers.append(activation)
+        _critic_layers = []
+        _critic_layers.append(nn.Linear(num_critic_obs, critic_layers[0]))
+        _critic_layers.append(activation)
         for l in range(len(critic_layers)):
             if l == len(critic_layers) - 1:
-                critic_layers.append(nn.Linear(critic_layers[l], 1))
+                _critic_layers.append(nn.Linear(critic_layers[l], 1))
             else:
-                critic_layers.append(nn.Linear(critic_layers[l], critic_layers[l + 1]))
-                critic_layers.append(activation)
-        self.critic = nn.Sequential(*critic_layers)
+                _critic_layers.append(nn.Linear(critic_layers[l], critic_layers[l + 1]))
+                _critic_layers.append(activation)
+        self.critic = nn.Sequential(*_critic_layers)
 
         # Used to track these values during training....
         #     These values will not be used during inference (sim or real)
@@ -281,23 +281,22 @@ class ActorCritic_PACT(nn.Module):
         no_decay  = set()
         encoder = set()
         whitelist = (nn.Linear, nn.MultiheadAttention)
-        blacklist = (nn.LayerNorm, nn.Embedding, nn.Sequential, nn.Parameter)
+        blacklist = (nn.LayerNorm, nn.Embedding, nn.Parameter)
 
         for mn, m in self.named_modules():
             for pn, p in m.named_parameters():
                 fpn = f"{mn}.{pn}" if mn else pn  # full param name
-                if pn.endswith("bias") or pn.startswith("bias"):
+                if isinstance(m, blacklist):
                     no_decay.add(fpn)
-                elif pn.endswith("weight"):
-                    if isinstance(m, blacklist):
-                        no_decay.add(fpn)
-                    elif isinstance(m, whitelist):
-                        if "context_encoder" in fpn:
-                            encoder.add(fpn)
-                        elif "critic" in fpn:
-                            critic_set.add(fpn)
-                        else:
-                            actor_set.add(fpn)
+                elif isinstance(m, whitelist):
+                    if "context_encoder" in fpn:
+                        encoder.add(fpn)
+                    elif "critic" in fpn:
+                        critic_set.add(fpn)
+                    elif "act" in fpn:
+                        actor_set.add(fpn)
+                    else:
+                        raise ValueError(f"Parameters not categorized: {fpn}")
 
         # for i in range(self.options["action_net"]["num_layers"]-1):
         #     no_decay.update([f"noise_decoder.cross_field_scales_pos.{i}", f"noise_decoder.cross_field_scales_tau.{i}"])
@@ -312,7 +311,6 @@ class ActorCritic_PACT(nn.Module):
         missing_params = param_dict.keys() - (actor_set | no_decay | encoder | critic_set)
         if missing_params:
             raise ValueError(f"Parameters not categorized: {missing_params}")
-        
         # print(f"Parameters with extra strong weight decay{special_decay}")
 
         params_act = [{"params": [param_dict[pn] for pn in sorted(actor_set)],  "weight_decay": 0.0, "name":"actor"},
@@ -355,6 +353,7 @@ class ActorCritic_PACT(nn.Module):
     
     def cenet_enc_inference(self, obs_history):
         mean_z, mean_v = self.context_encoder.forward_inference(obs_history)
+        return mean_z, mean_v
 
     # Method for the forward method of the actor network, used mostly as an internal method
     def actor_forward(self, current_obs):

@@ -9,6 +9,8 @@ if sys.version_info[1] >= 10: # >=3.10 for genesis and isaacsim
     simulator_type = os.getenv("SIMULATOR")
     if simulator_type == "genesis":
         SIMULATOR = "genesis"
+    if simulator_type == "genesis_pact":
+        SIMULATOR = "genesis_pact"
     elif simulator_type == "isaaclab":
         SIMULATOR = "isaaclab"
     else:
@@ -17,6 +19,12 @@ elif sys.version_info[1] <= 8 and sys.version_info[1] >= 6: # >=3.6 and <3.9 for
     SIMULATOR = "isaacgym"
 
 if SIMULATOR == "genesis":
+    try: 
+        import genesis as gs
+    except ImportError as e:
+        print("Failed to import Genesis. Please ensure that the Genesis is properly installed and configured.")
+        raise e
+if SIMULATOR == "genesis_pact":
     try: 
         import genesis as gs
     except ImportError as e:

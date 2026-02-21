@@ -74,6 +74,10 @@ from legged_gym.envs.bipedal_walker.bipedal_walker import BipedalWalker
 # from legged_gym.envs.go2.go2_sysid.go2_sysid import GO2SysID
 # from legged_gym.envs.go2.go2_sysid.go2_sysid_config import GO2SysIDCfg
 
+# Go1 PACT training
+from legged_gym.envs.go1.go1_pact.go1_pact_config import GO1PACTCfg, GO1PACTCfgPPO
+from legged_gym.envs.go1.go1_pact.go1_pact import Go1PACT
+
 
 from legged_gym.utils.task_registry import task_registry
 
@@ -91,3 +95,5 @@ task_registry.register( "tron1_pf_ee", TRON1PF_EE, TRON1PF_EECfg(), TRON1PF_EECf
 task_registry.register( "tron1_sf", TRON1SF, TRON1SFCfg(), TRON1SFCfgPPO())
 # task_registry.register( "go2_sysid", GO2SysID, GO2SysIDCfg(), GO2CfgPPO())
 # task_registry.register( "bipedal_walker", BipedalWalker, BipedalWalkerCfg(), BipedalWalkerCfgPPO())
+
+task_registry.register("go1_pact", Go1PACT, GO1PACTCfg(), GO1PACTCfgPPO())

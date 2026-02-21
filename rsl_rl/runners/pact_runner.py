@@ -81,12 +81,22 @@ class OnPolicyRunnerPACT:
                                                                self.policy_cfg["activation"],
                                                                self.policy_cfg["init_noise_std"]).to(self.device)
         
+        print(actor_critic)
+        
         decoder = ContextDecoder(self.policy_cfg["cenet_dec_input_dim"],
                                  self.policy_cfg["cenet_dec_layers"],
                                  self.policy_cfg["cenet_dec_out_dim"]
                                  ).to(self.device)
         
         print("Created Parallel Actor-Critic Model. Parameter Count: ", np.sum(p.numel() for p in actor_critic.parameters() if p.requires_grad))
+
+        print("\t Actor Trunk Parameter Count: ", np.sum(p.numel() for p in actor_critic.act_trunk.parameters() if p.requires_grad))
+
+        print("\t Encoder Parameter Count: ", np.sum(p.numel() for p in actor_critic.context_encoder.parameters() if p.requires_grad))
+
+        print("\t Critic Parameter Count: ", np.sum(p.numel() for p in actor_critic.critic.parameters() if p.requires_grad))
+
+
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         
@@ -100,7 +110,7 @@ class OnPolicyRunnerPACT:
         self.save_interval = self.cfg["save_interval"]
 
         # init storage and model
-        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
+        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
                               [2*self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]], [self.env.wb_dim])
 
         if "pretrained_path" in self.policy_cfg.keys():
@@ -210,24 +220,24 @@ class OnPolicyRunnerPACT:
             
             mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, mean_vel_loss, \
                     mean_recon_loss, mean_kld_loss, mean_pinn_loss \
-                    = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, it, self.env.default_dof_pos, beta=2.0)
+                    = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, it, self.env.simulator.default_dof_pos, self.env.obs_scales.dof_vel)
 
             # self.env.step_tradeoff_curriculum()
             print("Avg - Curriculum Step: ", torch.mean(self.env.tradeoff_step_ctr).item())
-            print("Max - self.feedforward_tau_weight: ", torch.max(self.env.feedforward_tau_weight).item())
-            print("Min - self.feedforward_tau_weight: ", torch.min(self.env.feedforward_tau_weight).item())
-            print("Avg - self.feedforward_tau_weight: ", torch.mean(self.env.feedforward_tau_weight).item())
-            print("Max - self.feedback_tau_weight: ", torch.max(self.env.feedback_tau_weight).item())
-            print("Min - self.feedback_tau_weight: ", torch.min(self.env.feedback_tau_weight).item())
-            print("Avg - self.feedback_tau_weight: ", torch.mean(self.env.feedback_tau_weight).item())
+            print("Max - self.feedforward_tau_weight: ", torch.max(self.env.simulator.feedforward_tau_weight).item())
+            print("Min - self.feedforward_tau_weight: ", torch.min(self.env.simulator.feedforward_tau_weight).item())
+            print("Avg - self.feedforward_tau_weight: ", torch.mean(self.env.simulator.feedforward_tau_weight).item())
+            print("Max - self.feedback_tau_weight: ", torch.max(self.env.simulator.feedback_tau_weight).item())
+            print("Min - self.feedback_tau_weight: ", torch.min(self.env.simulator.feedback_tau_weight).item())
+            print("Avg - self.feedback_tau_weight: ", torch.mean(self.env.simulator.feedback_tau_weight).item())
             
             # Step the reward curriculum if we are doing that
             if self.env.use_reward_curriculum:
                 self.env.step_reward_curriculum(it)
             
             # Step the domain randomization if approperiate
-            if self.env.use_domainrand_curriculum:
-                self.env.step_domian_rand(it)
+            if self.env.simulator.use_domainrand_curriculum:
+                self.env.simulator._step_domian_rand(it)
                         
             stop = time.time()
             learn_time = stop - start

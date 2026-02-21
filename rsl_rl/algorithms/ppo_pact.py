@@ -61,11 +61,12 @@ class PPO_PACT:
                  schedule="fixed",
                  desired_kl=0.01,
                  device='cpu',
+                 use_spo=False,
                  pinn_lambda=0.001,
                  pinn_warmup=1000,
                  pinn_init_steps=500,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
-                 vae_kld_weight=2.0,   # weight of KL divergence loss in VAE
+                 vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
                  ):
         
         self.device = device
@@ -331,11 +332,11 @@ class PPO_PACT:
         mean_surrogate_loss /= num_updates
         mean_pinn_loss /= num_updates
 
-        mean_autoenc_loss /= (num_updates * self.num_encoder_epochs)
-        mean_decoder_loss /= (num_updates * self.num_encoder_epochs)
-        mean_kld_loss /= (num_updates * self.num_encoder_epochs)
-        mean_vel_loss /= (num_updates * self.num_encoder_epochs)
-        mean_recon_loss /= (num_updates * self.num_encoder_epochs)
+        mean_autoenc_loss /= (num_updates * self.num_enc_epochs)
+        mean_decoder_loss /= (num_updates * self.num_enc_epochs)
+        mean_kld_loss /= (num_updates * self.num_enc_epochs)
+        mean_vel_loss /= (num_updates * self.num_enc_epochs)
+        mean_recon_loss /= (num_updates * self.num_enc_epochs)
 
         # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
         mean_pred = np.mean(all_enc_obs_targets, axis=0)

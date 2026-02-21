@@ -2,7 +2,7 @@ import sys
 import numpy as np
 import torch
 import time
-from legged_gym.simulator import GenesisSimulator, IsaacGymSimulator, IsaacLabSimulator
+from legged_gym.simulator import GenesisSimulator, IsaacGymSimulator, IsaacLabSimulator, GenesisSimulator_PACT
 from legged_gym import SIMULATOR
 
 # Base class for RL tasks
@@ -44,6 +44,8 @@ class BaseTask():
             self.simulator = IsaacGymSimulator(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "isaaclab":
             self.simulator = IsaacLabSimulator(cfg, sim_params, sim_device, self.headless)
+        elif SIMULATOR == "genesis_pact":
+            self.simulator = GenesisSimulator_PACT(cfg, sim_params, sim_device, self.headless)
         else:
             raise ValueError(f"Unknown simulator: {SIMULATOR}")
 
