@@ -116,7 +116,7 @@ class GenesisSimulator_PACT(Simulator):
         # Use the Pinocchio library to calculate the (1) contact forces and (2) whole-body dynamics of the robot for use
         #     in the dynamic consistency reward and PINN loss. All done in WORLD FRAME!
         
-        #     extract the contact forces in pinocchio order
+        #     extract the contact forces in pinocchio order GRF
         contact_temp = self._link_contact_forces[:, self.pino_feet_indices, :]
 
         #     push all the CUDA stuff from GPU to CPU for use by the PinocchioAsync class
@@ -441,7 +441,7 @@ class GenesisSimulator_PACT(Simulator):
         # If we haven't returned already by now, then we are stepping, and so we want to reset the vertical com-shift bounds
         #     if necessary
         if self.com_rand_z_positive:
-            self.com_delta_z_val_bounds = [self.com_delta_z_bounds[0], self.com_delta_z_value]
+            self.com_delta_z_val_bounds = [-self._cfg.domain_rand.com_displacement_z_min, self.com_delta_z_value]
         
         
         self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower

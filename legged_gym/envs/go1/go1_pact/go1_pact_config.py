@@ -5,7 +5,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        num_privileged_obs = 57 + 67 + 2 # robot_state + privilged info + tradeoff curriculum weights + terrain_heights (81)
+        num_privileged_obs = 57 + 67 + 2 + 81 # robot_state + privilged info + tradeoff curriculum weights + terrain_heights (81)
         num_priv_stack = 2
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -18,50 +18,50 @@ class GO1PACTCfg( LeggedRobotCfg ):
 
     
     class terrain( LeggedRobotCfg.terrain ):
-        mesh_type = 'plane' # plane, heightfield, trimesh
-        plane_length = 200.0 # [m]. plane size is 200x200x10 by default
-        horizontal_scale = 0.1 # [m] distance between height samples in x and y direction
-        vertical_scale = 0.005 # [m] distance between height samples in z direction
-        border_size = 5 # [m] length of the border surrounding the terrain
-        border_height = 1.0 # [m] height of the border surrounding the terrain
-        curriculum = False # whether to use terrain curriculum, starting from easier terrains and gradually increasing the difficulty
-        static_friction = 1.0 # coefficient of static friction of the terrain
-        dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
-        restitution = 0. # coefficient of restitution of the terrain
-        obtain_terrain_info_around_feet = True
-
-        # # rough terrain only:
-        # mesh_type = "heightfield"
+        # mesh_type = 'plane' # plane, heightfield, trimesh
+        # plane_length = 200.0 # [m]. plane size is 200x200x10 by default
+        # horizontal_scale = 0.1 # [m] distance between height samples in x and y direction
+        # vertical_scale = 0.005 # [m] distance between height samples in z direction
+        # border_size = 5 # [m] length of the border surrounding the terrain
+        # border_height = 1.0 # [m] height of the border surrounding the terrain
+        # curriculum = False # whether to use terrain curriculum, starting from easier terrains and gradually increasing the difficulty
         # static_friction = 1.0 # coefficient of static friction of the terrain
         # dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
         # restitution = 0. # coefficient of restitution of the terrain
-        # border_size = 20.0 # [m]
-        # curriculum = True
-        # # obtain terrain height information around feet (default: 9 points around feet), measure_
-        # # x  x   x
-        # # x F(x) x
-        # # x  x   x (x: height point, F: foot position)
         # obtain_terrain_info_around_feet = True
-        # measure_heights = True # obtain height measurements
+
+        # rough terrain only:
+        mesh_type = "heightfield"
+        static_friction = 1.0 # coefficient of static friction of the terrain
+        dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
+        restitution = 0. # coefficient of restitution of the terrain
+        border_size = 20.0 # [m]
+        curriculum = True
+        # obtain terrain height information around feet (default: 9 points around feet), measure_
+        # x  x   x
+        # x F(x) x
+        # x  x   x (x: height point, F: foot position)
+        obtain_terrain_info_around_feet = True
+        measure_heights = True # obtain height measurements
         
-        # # positions of the sampling height around the base (relative to the base of the robot)
-        # measured_points_x = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4] # 9x9=81
-        # measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4]
+        # positions of the sampling height around the base (relative to the base of the robot)
+        measured_points_x = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4] # 9x9=81
+        measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4]
         
-        # selected = False # select a unique terrain type and pass all arguments
-        # terrain_kwargs = None # Dict of arguments for selected terrain
-        # max_init_terrain_level = 1 # starting curriculum level
+        selected = False # select a unique terrain type and pass all arguments
+        terrain_kwargs = None # Dict of arguments for selected terrain
+        max_init_terrain_level = 1 # starting curriculum level
         
-        # terrain_length = 8.0 # [m] length of each subterrain, X direction
-        # terrain_width = 8.0 # [m] width of each subterrain, Y direction
-        # platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
-        # num_rows = 10  # number of terrain rows (levels), X direction
-        # num_cols = 10  # number of terrain cols (types), Y direction
-        # num_subterrains = num_rows * num_cols
-        # # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
-        # terrain_proportions = [0.2, 0.1, 0.25, 0.25, 0.2]
-        # # trimesh only:
-        # slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
+        terrain_length = 8.0 # [m] length of each subterrain, X direction
+        terrain_width = 8.0 # [m] width of each subterrain, Y direction
+        platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
+        num_rows = 10  # number of terrain rows (levels), X direction
+        num_cols = 10  # number of terrain cols (types), Y direction
+        num_subterrains = num_rows * num_cols
+        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
+        terrain_proportions = [0.2, 0.1, 0.25, 0.25, 0.2]
+        # trimesh only:
+        slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
     class sim:
         # Common
@@ -129,7 +129,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = True
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 2000     # number of steps with initial values held constant
+        push_warmup = 3000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -162,15 +162,15 @@ class GO1PACTCfg( LeggedRobotCfg ):
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.20
+        com_displacement_x_max = 0.16
         
         com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.15
+        com_displacement_y_max = 0.12
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
         com_displacement_z_min = 0.05
-        com_displacement_z_max = 0.3
+        com_displacement_z_max = 0.25
         
         # Control delay
         randomize_ctrl_delay = True
@@ -288,7 +288,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
 
         # Assumed order - tau_ff, tau_fb
         # tradeoff_init_weights  = [0.80, 1.4]
-        tradeoff_init_weights  = [0.20, 1.80]
+        tradeoff_init_weights  = [0.40, 1.60]
         tradeoff_final_weights = [1.00, 1.00]
         tradeoff_steps = 10
         tradeoff_threshold = 0.60
@@ -367,7 +367,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             
             foot_slip        = -0.1           # penalty for feet slipping
             feet_contact_forces = -2.0e-1     # penalty for high contact forces on the feet
-            feet_spread_pairwise_axes = -0.2
+            feet_spread_pairwise_axes = 0.0
 
         class reward_curriculum():
             curr_reward_keys = ["feedback_torques", "feet_contact_forces",
@@ -384,12 +384,12 @@ class GO1PACTCfg( LeggedRobotCfg ):
                                   "lin_vel_z":[-1.0,-2.0],
                                   "orientation":[-1.0,-2.0],
                                   "dof_act_limits":[-1.0, -2.0],
-                                  "tau_action_rate":[-0.05, -0.2],
-                                  "tau_action_smoothness":[-0.05, -0.2],
+                                  "tau_action_rate":[-0.01, -0.1],
+                                  "tau_action_smoothness":[-0.01, -0.1],
                                  }
 
-            curr_steps = 1000
-            warmup_steps = 2500
+            curr_steps = 6000
+            warmup_steps = 0
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -409,7 +409,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
     
     class policy( LeggedRobotCfgPPO.policy ):
         activation = 'tanh' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid, swish (SiLU)
-        init_noise_std = 1.00
+        init_noise_std = 0.50
         
         # Context encoder
         cenet_enc_layers=[128,64]
@@ -453,7 +453,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'
         num_steps_per_env = 100 # per iteration
-        max_iterations = 5000 # number of policy updates
+        max_iterations = 8000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb
@@ -463,6 +463,6 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         
         
         load_run = ""
-        checkpoint = 2600
+        checkpoint = 2500
         resume = False
         exp_data_path = ""

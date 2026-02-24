@@ -163,6 +163,8 @@ class OnPolicyRunnerPACT:
 
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
+            
+        # self.alg.actor_critic.std.data.fill_(self.policy_cfg["init_noise_std"]*0.45)
         
         obs,obs_hist,privileged_obs,exp_labels = self.env.get_observations()
 
@@ -378,6 +380,7 @@ class OnPolicyRunnerPACT:
         # Load the VAE decoder model...
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']
+        self.current_learning_iteration = 0
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):
