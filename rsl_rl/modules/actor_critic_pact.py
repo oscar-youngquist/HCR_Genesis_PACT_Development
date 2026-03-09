@@ -37,18 +37,27 @@ class ContextEncoder(nn.Module):
     ) -> None:
         super().__init__()
 
+        output_hdim = 2*(context_latent_size + context_torso_velo_size)
+
         # VAE-style context encoder layers
         # Input Layer
         self.ce_in = nn.Linear(context_input_dim, context_layer_sizes[0])
         # Hidden Layers
         self.ce_h1 = nn.Linear(context_layer_sizes[0], context_layer_sizes[1])
+        self.ce_h2 = nn.Linear(context_layer_sizes[1], output_hdim)
         # Output Layers
-        
-        self.ce_out_mean = nn.Linear(context_layer_sizes[1], context_latent_size)
-        self.ce_out_var = nn.Linear(context_layer_sizes[1], context_latent_size)
 
-        self.ce_velo_mean = nn.Linear(context_layer_sizes[1], context_torso_velo_size)
-        self.ce_velo_var  = nn.Linear(context_layer_sizes[1], context_torso_velo_size)
+        self.ce_latmean_h = nn.Linear(output_hdim, output_hdim)
+        self.ce_latvar_h  = nn.Linear(output_hdim, output_hdim)
+
+        self.ce_velomean_h = nn.Linear(output_hdim, output_hdim)
+        self.ce_velovar_h  = nn.Linear(output_hdim, output_hdim)
+
+        self.ce_out_mean = nn.Linear(output_hdim, context_latent_size)
+        self.ce_out_var = nn.Linear(output_hdim, context_latent_size)
+
+        self.ce_velo_mean = nn.Linear(output_hdim, context_torso_velo_size)
+        self.ce_velo_var  = nn.Linear(output_hdim, context_torso_velo_size)
 
         
         self.activation = get_activation(activation)
@@ -61,7 +70,9 @@ class ContextEncoder(nn.Module):
         """Initialize all linear layers with Xavier uniform distribution."""
         for layer in [self.ce_in, self.ce_h1,
                      self.ce_out_mean, self.ce_out_var, 
-                     self.ce_velo_mean, self.ce_velo_var]:
+                     self.ce_velo_mean, self.ce_velo_var,
+                     self.ce_h2, self.ce_velovar_h, self.ce_velovar_h,
+                     self.ce_latmean_h, self.ce_latvar_h]:
             
             nn.init.xavier_uniform_(layer.weight)
             
@@ -74,8 +85,15 @@ class ContextEncoder(nn.Module):
         # x = self.drop_1(x)
         x = self.activation(self.ce_h1(x))
         # x = self.drop_2(x)
+        x = self.activation(self.ce_h2(x))
 
-        return self.ce_out_mean(x), self.ce_out_var(x), self.ce_velo_mean(x), self.ce_velo_var(x)
+        lat_mean = self.activation(self.ce_latmean_h(x))
+        lat_var  = self.activation(self.ce_latvar_h(x))
+
+        velo_mean = self.activation(self.ce_velomean_h(x))
+        velo_var  = self.activation(self.ce_velovar_h(x))
+
+        return self.ce_out_mean(lat_mean), self.ce_out_var(lat_var), self.ce_velo_mean(velo_mean), self.ce_velo_var(velo_var)
 
     def reparameterization_trick(
         self,

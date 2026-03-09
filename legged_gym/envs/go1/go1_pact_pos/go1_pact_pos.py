@@ -44,7 +44,7 @@ class Go1PACTPos(BaseTask):
     def reset(self):
         """ Reset all robots"""
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
-        obs, privileged_obs, _, _, _, _, _, _ = self.step(torch.zeros(self.num_envs, 2*self.num_actions, device=self.device, requires_grad=False))
+        obs, privileged_obs, _, _, _, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
         return obs, privileged_obs
 
     def step(self, actions):
@@ -283,7 +283,7 @@ class Go1PACTPos(BaseTask):
                                       * self.obs_scales.dof_pos,                              # joint pose            12
                                     self.simulator.dof_vel * self.obs_scales.dof_vel,         # joint velocity        12
                                     self.actions[:,0:12],                                     # joint pose actions    12
-                                    self.actions[:,12:24],                                    # joint torque actions  12
+                                    self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)),    # joint torque actions  12
                                     ), dim=-1)                                                # 57
 
         # add noise if needed
@@ -293,10 +293,10 @@ class Go1PACTPos(BaseTask):
         # build the explicit labels buffer
         self.explicit_labels_buf = torch.cat((
             self.simulator.base_lin_vel * self.obs_scales.lin_vel,                     # torso linear velocity         3
-            self.simulator.link_contact_states[:,self.simulator.feet_indices], # contact states feet and base  4
+            self.simulator.link_contact_states[:,self.simulator.feet_indices],         # contact states of feet        4
             torch.clip(self.simulator.feet_pos[:, :, 2] -
-            torch.mean(self.simulator.height_around_feet, dim=-1) -
-            self.cfg.rewards.foot_height_offset, -1, 1.),                              # feet height                   4
+                torch.mean(self.simulator.height_around_feet, dim=-1) -
+                self.cfg.rewards.foot_height_offset, -1, 1.),                              # feet height                   4
         ), dim=-1)
 
         # track history buffer
@@ -325,7 +325,9 @@ class Go1PACTPos(BaseTask):
                 self.obs_buf,                                             # 57
                 self.simulator.base_lin_vel * self.obs_scales.lin_vel,    # 3
                 self.simulator._grfs_buf * self.obs_scales.grf,           # 12
-                self.simulator.link_contact_states,                       # 17
+                self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain info around feet
+                self.simulator.link_contact_states[:,self.simulator.feet_indices],     # 4  - contact states of feet
+                # self.simulator.link_contact_states,                       # 17
                 self.simulator.feedforward_tau_weight,                    # 1
                 self.simulator.feedback_tau_weight,                       # 1
                 domain_randomization_info                                 # 35
@@ -540,9 +542,9 @@ class Go1PACTPos(BaseTask):
                                            device=self.device, dtype=torch.float,
                                            requires_grad=False)
         self.actions = torch.zeros(
-            (self.num_envs, 2*self.num_actions), device=self.device, dtype=torch.float)
+            (self.num_envs, self.num_actions), device=self.device, dtype=torch.float)
         self.last_actions = torch.zeros_like(self.actions)
-        self.llast_actions = torch.zeros(self.num_envs, 2*self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)  # last last actions
+        self.llast_actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)  # last last actions
         
         self.feet_air_time = torch.zeros(
             (self.num_envs, len(self.simulator.feet_indices)), device=self.device, dtype=torch.float)
@@ -606,7 +608,7 @@ class Go1PACTPos(BaseTask):
         # randomize action delay
         if self.cfg.domain_rand.randomize_ctrl_delay:
             self.action_queue = torch.zeros(
-                self.num_envs, self.cfg.domain_rand.ctrl_delay_step_range[1]+1, 2*self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
+                self.num_envs, self.cfg.domain_rand.ctrl_delay_step_range[1]+1, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
             self.action_delay = torch.randint(self.cfg.domain_rand.ctrl_delay_step_range[0],
                                               self.cfg.domain_rand.ctrl_delay_step_range[1]+1, (self.num_envs,), device=self.device, requires_grad=False)
             

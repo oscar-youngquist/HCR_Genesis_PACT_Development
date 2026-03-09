@@ -5,12 +5,12 @@ class GO1PACTCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        num_privileged_obs = 57 + 67 + 2 + 81 # robot_state + privilged info + tradeoff curriculum weights + terrain_heights (81)
-        num_priv_stack = 2
+        num_privileged_obs = 57 + 66 + 2 + 81 # robot_state + privilged info + tradeoff curriculum weights + terrain_heights (81)
+        num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 5
+        num_obs_hist = 10
         grf_dim = 12
         whole_body_dim = 18
         debug = False # if debugging, visualize contacts, 
@@ -55,11 +55,11 @@ class GO1PACTCfg( LeggedRobotCfg ):
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
-        num_rows = 10  # number of terrain rows (levels), X direction
+        num_rows = 20  # number of terrain rows (levels), X direction
         num_cols = 10  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
-        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
-        terrain_proportions = [0.2, 0.1, 0.25, 0.25, 0.2]
+        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
+        terrain_proportions = [0.20, 0.10, 0.20, 0.20, 0.20, 0.1]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
@@ -128,8 +128,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
     class domain_rand(LeggedRobotCfg.domain_rand):
         use_domainrand_curriculum = True
         com_rand_z_positive = True
-        num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 3000     # number of steps with initial values held constant
+        num_push_steps = 2000  # number of steps to increase the domain randomization ranges
+        push_warmup = 2000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -143,13 +143,13 @@ class GO1PACTCfg( LeggedRobotCfg ):
         max_push_vel_xy = 1.00
         min_push_vel_xy = 0.5
 
-        max_vertical_push = -0.5
+        max_vertical_push = 0.40
         min_vertical_push = 0.00
         vert_interval_max = 10.0
         vert_interval_min = 0.1
 
-        max_push_torque = 2.5
-        min_push_torque = 0.75
+        max_push_torque = 1.5
+        min_push_torque = 0.50
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
@@ -276,8 +276,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
         # PD Drive parameters:
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
-        stiffness = {'joint': 30.0}   # [N*m/rad]
-        damping   = {'joint': 0.75}     # [N*m*s/rad]
+        stiffness = {'joint': 40.0}   # [N*m/rad]
+        damping   = {'joint': 0.80}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
@@ -287,33 +287,33 @@ class GO1PACTCfg( LeggedRobotCfg ):
         decimation = 5  # decimation: Number of control action updates @ sim DT per policy DT
 
         # Assumed order - tau_ff, tau_fb
-        # tradeoff_init_weights  = [0.80, 1.4]
-        tradeoff_init_weights  = [0.40, 1.60]
+        # tradeoff_init_weights  = [0.80, 1.05]
+        tradeoff_init_weights  = [1.00, 1.00]
         tradeoff_final_weights = [1.00, 1.00]
-        tradeoff_steps = 10
+        tradeoff_steps = 50
         tradeoff_threshold = 0.60
-        use_tradeoff_curriculum = True
+        use_tradeoff_curriculum = False
 
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
-        roll_threshold    = 0.7  # [rad] ~ 40 degrees
-        pitch_threshold   = 0.7  # [rad] ~ 30 degrees
+        roll_threshold    = 1.5  # [rad] ~ 40 degrees
+        pitch_threshold   = 1.5  # [rad] ~ 30 degrees
         height_min = 0.20       # [m]
         height_max = 1.50        # [m]
 
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
         soft_torque_limit = 0.90
-        base_height_target = 0.26
+        base_height_target = 0.30
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
-        foot_clearance_target = 0.060 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.075 # desired foot clearance above ground [m]
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = False
 
-        use_reward_curriculum = True
+        use_reward_curriculum = False
 
         max_contact_force = 400.0
         class scales( LeggedRobotCfg.rewards.scales ):
@@ -322,25 +322,30 @@ class GO1PACTCfg( LeggedRobotCfg ):
             collision             = -1.0
             dof_pos_limits        = -1.0
             dof_close_to_default  = 0.0
-            torque_limits         = -1.0
+            torque_limits         = -0.01
             
-            alive_bonus           = 0.1
+            alive_bonus           = 0.11
 
-            stand_still_contact = -0.01
+            stand_still_contact = -0.1
             dof_pos_stand_still = -0.1
 
             # command tracking
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
             dof_tracking      = 0.1
-            aligned_torques   = 0.1
-            sparse_contacts   = 0.01            
+            sparse_contacts   = 0.1
+
+            # coupled output specific rewards 
+            # aligned_torques     = -0.01
+            # antagonisitc_energy = -0.01
+            torque_conflict_symmetric = -0.1 
+            torque_alignment = 0.4
             
             # smoothness and stability
             lin_vel_z        = -2.0
-            base_height      = -2.0
-            ang_vel_xy       = -0.1
-            orientation      = -2.0
+            base_height      = -1.0
+            ang_vel_xy       = -0.05
+            orientation      = -0.2
             dof_acc          = -2.5e-7
             joint_power      = -2.e-5
             joint_power_dist = -1.e-5
@@ -353,54 +358,56 @@ class GO1PACTCfg( LeggedRobotCfg ):
             pos_action_rate       = -0.01
             pos_action_smoothness = -0.01
 
-            tau_action_rate       = -0.2
-            tau_action_smoothness = -0.2
+            tau_action_rate       = -0.02
+            tau_action_smoothness = -0.02
 
-            feedforward_torques   = -2.0e-4
-            feedback_torques      = -2.4e-4
+            feedforward_torques   = -2.5e-7
+            feedback_torques      = -2.0e-7
             dof_act_limits        = -1.0
 
             # gait
-            feet_air_time    = 1.0            # tracking reward for long steps
+            feet_air_time    = 0.75            # tracking reward for long steps
             foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance            
             hip_pos = -0.05
             
             foot_slip        = -0.1           # penalty for feet slipping
-            feet_contact_forces = -2.0e-1     # penalty for high contact forces on the feet
+            feet_contact_forces = -1.0e-3     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
 
         class reward_curriculum():
-            curr_reward_keys = ["feedback_torques", "feet_contact_forces",
-                                "ang_vel_xy", "base_height", "lin_vel_z", "orientation",
-                                "feedforward_torques", "dof_act_limits",
-                                "tau_action_rate", "tau_action_smoothness"]
+            curr_reward_keys = ["ang_vel_xy", "orientation",
+                                "dof_act_limits", "torque_limits",
+                                "tau_action_rate", "tau_action_smoothness",
+                                "feedforward_torques","feedback_torques",
+                                "feet_contact_forces",
+                                "dof_tracking"]
             
             curr_reward_bounds = {
-                                  "feedback_torques":[-2.20e-4, -2.0e-4],
-                                  "feedforward_torques":[-2.0e-4, -2.2e-4],
-                                  "feet_contact_forces":[-1.0e-2,-1.0e-1],
                                   "ang_vel_xy":[-0.05, -0.1],
-                                  "base_height":[-1.0,-2.0],
-                                  "lin_vel_z":[-1.0,-2.0],
-                                  "orientation":[-1.0,-2.0],
-                                  "dof_act_limits":[-1.0, -2.0],
-                                  "tau_action_rate":[-0.01, -0.1],
-                                  "tau_action_smoothness":[-0.01, -0.1],
+                                  "orientation":[-0.2,-0.4],
+                                  "dof_act_limits":[-0.1, -0.2],
+                                  "torque_limits":[-0.01, -0.05],
+                                  "tau_action_rate":[-0.01, -0.05],
+                                  "tau_action_smoothness":[-0.01, -0.05],
+                                  "feedback_torques":[-2.0e-7, -2.5e-6],
+                                  "feedforward_torques":[-2.0e-7, -2.0e-6],
+                                  "feet_contact_forces":[-1.0e-4, -1.0e-2],
+                                  "dof_tracking":[0.1, 0.25],
                                  }
 
-            curr_steps = 6000
-            warmup_steps = 0
+            curr_steps = 1505
+            warmup_steps = 1500
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
         max_curriculum = 1.
         num_commands = 3 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
-        resampling_time = 10.  # time before command are changed[s]
+        resampling_time = 5.  # time before command are changed[s]
         heading_command = False # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
-            lin_vel_y = [-1.0, 1.0]   # min max [m/s]
-            ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
+            lin_vel_y = [-0.5, 0.5]   # min max [m/s]
+            ang_vel_yaw = [-0.5, 0.5]    # min max [rad/s]
             heading = [-3.14, 3.14]
 
 class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
@@ -424,20 +431,17 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         # Actor/critic
         actor_layers = [512,256,128]
         critic_layers = [1024,256,128,64]
-        
-        # Shared
-        dropout = 0.1
 
         pinn_loss_weight = 0.01
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Mar05_14-19-13_pact_pos_100hz/model_3100_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
         # learning_rate = 1.0e-3 #
-        learning_rate = 1.0e-4 #
+        learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -453,16 +457,16 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'
         num_steps_per_env = 100 # per iteration
-        max_iterations = 8000 # number of policy updates
+        max_iterations = 6000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz'
+        run_name = 'pact_100hz_entropydrop'
         experiment_name = 'go1_pact_rough'
         save_interval = 100
         
         
         load_run = ""
-        checkpoint = 2500
+        checkpoint = -1
         resume = False
         exp_data_path = ""

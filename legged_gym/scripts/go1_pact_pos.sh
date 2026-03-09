@@ -4,6 +4,6 @@
 
 conda activate /home/oyoungquist/.conda/envs/genesis_lr
 
-export SIMULATOR=genesis_pact
+export SIMULATOR=genesis_pact_pos
 
-python train.py --task=go1_pact --headless
+python train.py --task=go1_pact_pos --headless

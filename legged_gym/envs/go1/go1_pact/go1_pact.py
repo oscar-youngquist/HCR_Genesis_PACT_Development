@@ -325,7 +325,9 @@ class Go1PACT(BaseTask):
                 self.obs_buf,                                             # 57
                 self.simulator.base_lin_vel * self.obs_scales.lin_vel,    # 3
                 self.simulator._grfs_buf * self.obs_scales.grf,           # 12
-                self.simulator.link_contact_states,                       # 17
+                self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain info around feet
+                self.simulator.link_contact_states[:,self.simulator.feet_indices],     # 4  - contact states of feet
+                # self.simulator.link_contact_states,                       # 17
                 self.simulator.feedforward_tau_weight,                    # 1
                 self.simulator.feedback_tau_weight,                       # 1
                 domain_randomization_info                                 # 35
@@ -472,10 +474,25 @@ class Go1PACT(BaseTask):
         # If the tracking reward is above 80% of the maximum, increase the range of commands
         if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > \
                 self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel"]:
+            
             self.command_ranges["lin_vel_x"][0] = np.clip(
                 self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
+            self.command_ranges["lin_vel_y"][0] = np.clip(
+                self.command_ranges["lin_vel_y"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
+            
+            self.command_ranges["ang_vel_yaw"][0] = np.clip(
+                self.command_ranges["ang_vel_yaw"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
+            
+            
             self.command_ranges["lin_vel_x"][1] = np.clip(
                 self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
+            self.command_ranges["lin_vel_y"][1] = np.clip(
+                self.command_ranges["lin_vel_y"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
+            
+            self.command_ranges["ang_vel_yaw"][1] = np.clip(
+                self.command_ranges["ang_vel_yaw"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
+
+
 
     def _get_noise_scale_vec(self):
         """ Sets a vector used to scale the noise added to the observations.
@@ -1025,7 +1042,7 @@ class Go1PACT(BaseTask):
     
     def _reward_dof_close_to_default(self):
         # Penalize dof position deviation from default
-        return torch.sum(torch.square(self.simulator.dof_pos - self.simulator.default_dof_pos), dim=1)
+        return torch.sum(torch.square(self.simulator.dof_pos - self.simulator.default_dof_pos), dim=1)        
 
     def _reward_alive_bonus(self):
         return ~self.reset_buf
@@ -1074,14 +1091,59 @@ class Go1PACT(BaseTask):
     
         # Curriculum, sensitive torque ratio reward and robust to several potential "failure" modes
     
+    # cos_sim = F.cosine_similarity(self.simulator.feedforward_torques, self.simulator.feedback_torques, dim=-1)
+    # aligned_torques_gate = torch.clamp(cos_sim, min=0.0)  # only reward non-conflicting torques
+    # return torch.exp(-4.0*aligned_torques_gate)
     def _reward_aligned_torques(self):
         # prevent feedforward (or possibly PD) torques from learning to simply dominate and "cancel out"
         #    the torques produced from feedback control. 
         cos_sim = F.cosine_similarity(self.simulator.feedforward_torques, self.simulator.feedback_torques, dim=-1)
-        aligned_torques_gate = torch.clamp(cos_sim, min=0.0)  # only reward non-conflicting torques
-
-        return torch.exp(-4.0*aligned_torques_gate)
+        return torch.relu(-cos_sim)
     
+    def _reward_antagonisitc_energy(self):
+        clamp_dot = torch.clamp(-(torch.sum(self.simulator.feedforward_torques*self.simulator.feedback_torques, dim=-1)), max=0.0)
+        abs_dot = torch.abs(torch.sum(self.simulator.feedforward_torques*self.simulator.feedback_torques, dim=-1))
+
+        return (clamp_dot / abs_dot)
+
+    # This rewards treats feedback torque as the primary "driver" and focuses on how much 
+    #    feedforward fights it. 
+    def _reward_torque_cancellation(self):
+        ff = self.simulator.feedforward_torques
+        fb = self.simulator.feedback_torques
+
+        fb_norm = torch.norm(fb, dim=-1, keepdim=True)
+        fb_dir = fb / (fb_norm + 1e-6)
+
+        opposing_component = torch.relu(-torch.sum(ff * fb_dir, dim=-1))
+        gate = torch.tanh(2.0 * fb_norm.squeeze(-1))
+
+        return gate * torch.tanh(opposing_component)
+
+    def _reward_torque_conflict_symmetric(self):
+        ff = self.simulator.feedforward_torques
+        fb = self.simulator.feedback_torques
+
+        dot = torch.sum(ff * fb, dim=-1)
+        ff_norm = torch.norm(ff, dim=-1)
+        fb_norm = torch.norm(fb, dim=-1)
+
+        conflict = torch.relu(-dot / (ff_norm * fb_norm + 1e-6))
+        gate = torch.tanh(ff_norm) * torch.tanh(fb_norm)
+
+        return gate * conflict
+    
+    def _reward_torque_alignment(self):
+        ff = self.simulator.feedforward_torques
+        fb = self.simulator.feedback_torques
+
+        cos_sim = F.cosine_similarity(ff, fb, dim=-1)
+        ff_norm = torch.norm(ff, dim=-1)
+        fb_norm = torch.norm(fb, dim=-1)
+        gate = torch.tanh(ff_norm) * torch.tanh(fb_norm)
+
+        return gate * torch.clamp(cos_sim, min=0.0)
+
     def _reward_dof_tracking(self):
         # control_type = 'P'
         # Pull out the position control actions

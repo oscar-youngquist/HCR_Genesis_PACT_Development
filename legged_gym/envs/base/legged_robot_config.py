@@ -10,7 +10,7 @@ class LeggedRobotCfg(BaseConfig):
         send_timeouts = True # send time out information to the algorithm
         episode_length_s = 20 # episode length in seconds
         env_spacing = 1.0 # spacing between envs in the scene, only for plane
-        fail_to_terminal_time_s = 0.1 # time before a fail state leads to environment reset, refer to https://github.com/limxdynamics/tron1-rl-isaacgym/tree/master
+        fail_to_terminal_time_s = 0.02 # time before a fail state leads to environment reset, refer to https://github.com/limxdynamics/tron1-rl-isaacgym/tree/master
         debug = False # enable debug drawings in the simulator
         debug_draw_height_points_around_base = False # obtain height measurements around the base
         debug_draw_height_points_around_feet = False # obtain height measurements around the feet (9 points around each foot, see terrain.measured_points_x/y)

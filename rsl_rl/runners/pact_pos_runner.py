@@ -91,7 +91,7 @@ class OnPolicyRunnerPACTPos:
                                                                 self.policy_cfg["init_noise_std"]).to(self.device)
         
         
-        actor_critic = torch.compile(actor_critic)
+        # actor_critic = torch.compile(actor_critic)
         
         print(actor_critic)
         
@@ -100,7 +100,7 @@ class OnPolicyRunnerPACTPos:
                                  self.policy_cfg["cenet_dec_out_dim"]
                                  ).to(self.device)
         
-        decoder = torch.compile(decoder)
+        # decoder = torch.compile(decoder)
 
         print("Created Parallel Actor-Critic Model. Parameter Count: ", np.sum(p.numel() for p in actor_critic.parameters() if p.requires_grad))
 
@@ -137,7 +137,7 @@ class OnPolicyRunnerPACTPos:
         self.tot_time = 0
         self.current_learning_iteration = 0
 
-        self.env.create_async_pino_workers()
+        # self.env.create_async_pino_workers()
 
         _, _ = self.env.reset()
 
@@ -268,7 +268,7 @@ class OnPolicyRunnerPACTPos:
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
 
         # Learning is done, shutdown the async. pinocchio workers
-        self.env.shutdown_asynic_pino_workers()
+        # self.env.shutdown_asynic_pino_workers()
 
     def log(self, locs, width=80, pad=35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs

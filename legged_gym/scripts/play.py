@@ -33,15 +33,15 @@ def override_configs(env_cfg, args):
         
         
         # random uniform terrain
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-        #                                   "min_height" : -0.05, "max_height": 0.05, 
-        #                                   "step":0.005, "downsampled_scale" : 0.2}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+                                          "min_height" : -0.05, "max_height": 0.05, 
+                                          "step":0.005, "downsampled_scale" : 0.2}
         # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
         #                                   "slope": -0.4, "platform_size": 3.0}
         # stairs
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-                                        "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
+        #                                 "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
         # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.1,
@@ -51,7 +51,7 @@ def override_configs(env_cfg, args):
         #                                   "platform_size": 3.0}
         # wave terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.wave_terrain", 
-        #                                   "amplitude": 0.1, "num_waves": 2}
+        #                                   "amplitude": 0.2, "num_waves": 2}
         # stepping stones
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.stepping_stones_terrain",
         #                                   "stone_size": 1.0, "max_height": 0.1,
@@ -69,9 +69,9 @@ def override_configs(env_cfg, args):
     if args.use_joystick:
         env_cfg.commands.heading_command = False
     
-    env_cfg.commands.ranges.lin_vel_x = [0.0, 0.0]
-    env_cfg.commands.ranges.lin_vel_y = [0.0, 0.0]
-    env_cfg.commands.ranges.ang_vel_yaw = [0.0, 0.0]
+    env_cfg.commands.ranges.lin_vel_x = [-1.0, 1.0]
+    env_cfg.commands.ranges.lin_vel_y = [-1.0, 1.0]
+    env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
     env_cfg.commands.ranges.heading = [0.0, 0.0]
 
 def print_debug_info(env, robot_index):
@@ -112,6 +112,8 @@ def interaction_loop(env, policy, args):
         estimator_features, _, _ = env.get_observations()
     elif "dreamwaq" in task_name:  # dreamwaq
         obs_buf, privileged_obs_buf, obs_history, explicit_labels, next_states = env.get_observations()
+    elif "pact" in task_name:
+        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
     else: # vanilla
         obs = env.get_observations()
     
@@ -125,7 +127,7 @@ def interaction_loop(env, policy, args):
     # env.commands[:, 3] = 0
     
     # interaction loop
-    for i in range(10*int(env.max_episode_length)):
+    for i in range(int(1.05*env.max_episode_length)):
         
         # update commands from joystick
         if args.use_joystick:
@@ -150,6 +152,9 @@ def interaction_loop(env, policy, args):
         elif "waq" in task_name:
             actions = policy(obs_buf, obs_history)
             obs_buf, privileged_obs_buf, obs_history, explicit_labels, next_states, rews, dones, infos = env.step(actions.detach())
+        elif "pact" in task_name:
+            actions = policy(obs_buf, obs_history)
+            obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach())
         else:
             actions = policy(obs.detach())
             obs, _, rews, dones, infos = env.step(actions.detach())
@@ -221,7 +226,7 @@ def play(args):
     Args:
         args (_type_): command line arguments
     """
-    if SIMULATOR == "genesis":
+    if SIMULATOR == "genesis" or SIMULATOR == "genesis_pact_pos" or SIMULATOR == "genesis_pact":
         gs.init(
             backend=gs.cpu if args.cpu else gs.gpu,
             logging_level='warning',
@@ -239,7 +244,7 @@ def play(args):
     # export policy as a jit module (used to run it from C++ or python)
     path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 
                             train_cfg.runner.load_run, 'exported')
-    export_policy(ppo_runner, path, args, env_cfg, train_cfg)
+    # export_policy(ppo_runner, path, args, env_cfg, train_cfg)
 
     interaction_loop(env, policy, args)
     

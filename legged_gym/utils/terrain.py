@@ -122,9 +122,17 @@ class Terrain:
                                 length=self.width_per_env_pixels,
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
+        # slope = difficulty * 0.4
+        # wave_amp = 0.05 + 0.15*difficulty
+        # rough_height = 0.01 + 0.04 * difficulty
+        # step_height = 0.05 + 0.15 * difficulty
+        # discrete_obstacles_height = 0.05 + difficulty * 0.15
         slope = difficulty * 0.4
-        step_height = 0.05 + 0.15 * difficulty
-        discrete_obstacles_height = 0.05 + difficulty * 0.15
+        wave_amp = 0.20*difficulty
+        rough_height = 0.05 * difficulty
+        step_height = 0.20 * difficulty
+        discrete_obstacles_height = 0.20*difficulty
+
         stepping_stones_size = 1.5 * (1.05 - difficulty)
         stone_distance = 0.05 if difficulty==0 else 0.1
         gap_size = 1. * difficulty
@@ -138,8 +146,8 @@ class Terrain:
                                                  terrain_type=self.type)
         elif choice < self.proportions[1]: # random uniform
             terrain_utils.random_uniform_terrain(terrain, 
-                                                 min_height=-0.05, 
-                                                 max_height=0.05, 
+                                                 min_height=-rough_height, 
+                                                 max_height=rough_height, 
                                                  step=0.005, 
                                                  downsampled_scale=0.2, 
                                                  terrain_type=self.type)
@@ -162,14 +170,19 @@ class Terrain:
                                                      num_rectangles, 
                                                      platform_size=self.platform_size,
                                                      terrain_type=self.type)
-        elif choice < self.proportions[5]: # stepping stones
+        elif choice < self.proportions[5]: # wave
+            terrain_utils.wave_terrain(terrain, 
+                                       amplitude=wave_amp,
+                                       num_waves=2,
+                                       terrain_type=self.type)
+        elif choice < self.proportions[6]: # stepping stones
             terrain_utils.stepping_stones_terrain(terrain, 
                                                   stone_size=stepping_stones_size, 
                                                   stone_distance=stone_distance, 
                                                   max_height=0., 
                                                   platform_size=self.platform_size,
                                                   terrain_type=self.type)
-        elif choice < self.proportions[6]: # gap
+        elif choice < self.proportions[7]: # gap
             terrain_utils.gap_terrain(terrain, 
                                       gap_size=gap_size, 
                                       platform_size=self.platform_size,

@@ -91,7 +91,7 @@ class OnPolicyRunnerPACT:
                                                                self.policy_cfg["init_noise_std"]).to(self.device)
         
         
-        actor_critic = torch.compile(actor_critic)
+        # actor_critic = torch.compile(actor_critic)
         
         print(actor_critic)
         
@@ -100,7 +100,7 @@ class OnPolicyRunnerPACT:
                                  self.policy_cfg["cenet_dec_out_dim"]
                                  ).to(self.device)
         
-        decoder = torch.compile(decoder)
+        # decoder = torch.compile(decoder)
 
         print("Created Parallel Actor-Critic Model. Parameter Count: ", np.sum(p.numel() for p in actor_critic.parameters() if p.requires_grad))
 
@@ -145,13 +145,10 @@ class OnPolicyRunnerPACT:
     # function to load a boot-strap initial model and reset the std
     def _load_pretrained_model(self):
         pretrained_path = self.policy_cfg["pretrained_path"]
-        pretrained_std = self.policy_cfg["pretrained_std"]
         print(pretrained_path)
         loaded_dict = torch.load(pretrained_path)
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
-        # Reset the 
-        self.alg.actor_critic._init_std(pretrained_std)
         # Load the pretrained decoder network
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
 
@@ -256,6 +253,9 @@ class OnPolicyRunnerPACT:
             if self.env.simulator.use_domainrand_curriculum:
                 self.env.simulator._step_domian_rand(it)
                         
+            if it > 200:
+                self.alg.set_entropy_coef(1e-3)
+            
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:

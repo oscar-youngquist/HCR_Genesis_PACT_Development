@@ -126,6 +126,9 @@ class PPO_PACT:
 
     def test_mode(self):
         self.actor_critic.test()
+
+    def set_entropy_coef(self, coef=1e-3):
+        self.entropy_coef = coef
     
     def train_mode(self):
         self.actor_critic.train()
@@ -385,7 +388,7 @@ class PPO_PACT:
                 kl_mean = torch.mean(kl)
 
                 if kl_mean > self.desired_kl * 2.0:
-                    self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                    self.learning_rate = max(1e-6, self.learning_rate / 1.5)
                 elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
                     self.learning_rate = min(1e-2, self.learning_rate * 1.5)
                 

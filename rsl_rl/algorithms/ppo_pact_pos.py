@@ -66,7 +66,7 @@ class PPO_PACT_Pos:
                  pinn_warmup=1000,
                  pinn_init_steps=500,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
-                 vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
+                 vae_kld_weight=2.0,   # weight of KL divergence loss in VAE
                  ):
         
         self.device = device
@@ -229,9 +229,9 @@ class PPO_PACT_Pos:
         all_enc_obs_targets = []
         all_enc_recons     = []
 
-        if itr > self.pinn_init and self.num_pinn_updates < (self.pinn_warmup_steps+1):
-            self.pinn_weight = (float(self.num_pinn_updates)/float(self.pinn_warmup_steps))*self.pinn_weight_final
-            print(self.pinn_weight)
+        # if itr > self.pinn_init and self.num_pinn_updates < (self.pinn_warmup_steps+1):
+        #     self.pinn_weight = (float(self.num_pinn_updates)/float(self.pinn_warmup_steps))*self.pinn_weight_final
+        #     print(self.pinn_weight)
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
@@ -245,7 +245,7 @@ class PPO_PACT_Pos:
             self.enc_optimizer.zero_grad()
 
             # Perform RL update
-            ppo_loss, surrogate_loss, value_loss, current_actions = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
+            ppo_loss, surrogate_loss, value_loss, current_actions, tau_clone_loss = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
                                                                                           advantages_batch, target_values_batch, returns_batch,
@@ -254,22 +254,26 @@ class PPO_PACT_Pos:
             
             # PINN loss calculation
             pinn_loss = None
-            if self.pinn_weight > 0.0:
-                pinn_loss = self._compute_PINN_loss(current_actions, obs_batch, prev_obs_batch, prev_obs_hist_batch,
-                                                    pprev_obs_batch, pprev_obs_hist_batch, torso_accs_batch,
-                                                    mass_mat_batch, bias_vec_batch, gt_forces_batch,
-                                                    action_func, fb_func, default_pose, dt, qvel_scale)
+            # if self.pinn_weight > 0.0:
+            #     pinn_loss = self._compute_PINN_loss(current_actions, obs_batch, prev_obs_batch, prev_obs_hist_batch,
+            #                                         pprev_obs_batch, pprev_obs_hist_batch, torso_accs_batch,
+            #                                         mass_mat_batch, bias_vec_batch, gt_forces_batch,
+            #                                         action_func, fb_func, default_pose, dt, qvel_scale)
                 
-            if self.pinn_weight > 0.0:
-                ppo_losses = [ppo_loss, self.pinn_weight * pinn_loss]
-            else:
-                ppo_losses = [ppo_loss]
+            # if self.pinn_weight > 0.0:
+            #     ppo_losses = [ppo_loss, self.pinn_weight * pinn_loss]
+            # else:
+            #     ppo_losses = [ppo_loss]
             
-            # PCGrad - back-propigate the loss
-            if self.pinn_weight > 0 and pinn_loss is not None:    # just being extra cautious
-                self.act_optimizer.pc_backward_pinn(ppo_losses)
-            else:
-                self.act_optimizer.pc_backward(ppo_losses)
+            ppo_losses = [ppo_loss, 0.01*tau_clone_loss]
+            # # PCGrad - back-propigate the loss
+            # if self.pinn_weight > 0 and pinn_loss is not None:    # just being extra cautious
+            #     self.act_optimizer.pc_backward_pinn(ppo_losses)
+            # else:
+            #     self.act_optimizer.pc_backward(ppo_losses)
+            
+            self.act_optimizer.pc_backward_pinn(ppo_losses)
+            
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.act_optimizer.step()
 
@@ -427,12 +431,10 @@ class PPO_PACT_Pos:
         # Calculate feedback torques
         pd_tau_curr  = fb_func(q_des_curr,  q_pos_curr,  q_velo_curr)
 
-        tau_clone_loss = F.mse_loss(tau_des_curr, pd_tau_curr*0.1) # scale down to a tenth in order to not 
+        tau_clone_loss = F.mse_loss(tau_des_curr, 0.1*pd_tau_curr) # scale down to a tenth in order to not 
                                                                    # have torque overpower in early stages of subsequent coupled training
 
-        ppo_loss += tau_clone_loss
-
-        return ppo_loss, surrogate_loss, value_loss, current_actions
+        return ppo_loss, surrogate_loss, value_loss, current_actions, tau_clone_loss
 
     def _compute_vae_loss(self, obs_hist_batch, grf_target, 
                           obs_target, explicit_labels_batch, terminated_batch):
@@ -452,7 +454,7 @@ class PPO_PACT_Pos:
 
         vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
         recon_error    = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
-        kl_div         = (-0.5 * torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp()))
+        kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=1)*terminated_batch)
         vae_loss = vel_pred_error + recon_error + self.vae_beta*kl_div
         
         return vae_loss, kl_div, recon_error, vel_pred_error, dec_input.clone().detach(), decode_target, enc_update_obs_decode
@@ -482,7 +484,7 @@ class PPO_PACT_Pos:
 
         # Extract joint pose and velocity data
         # Obs - cmd (3), proj_grav (3), ang_vel (3)
-        q_pos_curr,  q_velo_curr  = obs_batch[:,9:21].detach().clone(),   obs_batch[:,22:33].detach().clone()
+        q_pos_curr,  q_velo_curr  = obs_batch[:,9:21].detach().clone(),   obs_batch[:,21:33].detach().clone()
         q_pos_curr,  q_velo_curr  = (q_pos_curr + default_pose).float(),  (q_velo_curr / qvel_scale).float()
         
         # Calculate feedback torques

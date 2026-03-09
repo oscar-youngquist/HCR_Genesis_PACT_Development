@@ -86,3 +86,7 @@ class Go2DreamwaqCfgPPO( LeggedRobotDreamwaqCfgPPO ):
         experiment_name = 'go2_rough'
         save_interval = 500
         max_iterations = 3000
+
+        load_run = "Mar04_07-22-16_dreamwaq_genesis"
+        checkpoint = -1
+        resume = True
