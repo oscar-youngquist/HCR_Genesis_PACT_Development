@@ -128,8 +128,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
     class domain_rand(LeggedRobotCfg.domain_rand):
         use_domainrand_curriculum = True
         com_rand_z_positive = True
-        num_push_steps = 2000  # number of steps to increase the domain randomization ranges
-        push_warmup = 2000     # number of steps with initial values held constant
+        num_push_steps = 1000  # number of steps to increase the domain randomization ranges
+        push_warmup = 1000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -287,10 +287,10 @@ class GO1PACTCfg( LeggedRobotCfg ):
         decimation = 5  # decimation: Number of control action updates @ sim DT per policy DT
 
         # Assumed order - tau_ff, tau_fb
-        # tradeoff_init_weights  = [0.80, 1.05]
-        tradeoff_init_weights  = [1.00, 1.00]
+        tradeoff_init_weights  = [0.90, 1.025]
+        # tradeoff_init_weights  = [1.00, 1.00]
         tradeoff_final_weights = [1.00, 1.00]
-        tradeoff_steps = 50
+        tradeoff_steps = 10
         tradeoff_threshold = 0.60
         use_tradeoff_curriculum = False
 
@@ -419,13 +419,13 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         init_noise_std = 0.50
         
         # Context encoder
-        cenet_enc_layers=[128,64]
+        cenet_enc_layers=[256,128]
         cenet_enc_latent_dim = 16
         cenet_velo_dim = 3 + 4 + 4      # torso velocity, foot-contact indicator, foot-height 
 
         # Context Decoder
         cenet_dec_input_dim = 27
-        cenet_dec_layers = [64,128]
+        cenet_dec_layers = [128,256]
         cenet_dec_out_dim = 57 + 12      # next obs (57) + grf_dim (12)
 
         # Actor/critic
@@ -436,12 +436,12 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Mar05_14-19-13_pact_pos_100hz/model_3100_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Mar09_19-54-31_pact_pos_100hz_bigger/model_2000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
-        # learning_rate = 1.0e-3 #
-        learning_rate = 3.0e-4 #
+        learning_rate = 1.0e-3 #
+        # learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -456,8 +456,8 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'
-        num_steps_per_env = 100 # per iteration
-        max_iterations = 6000 # number of policy updates
+        num_steps_per_env = 48 # per iteration
+        max_iterations = 4000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb

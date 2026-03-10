@@ -454,7 +454,7 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = ""
+        load_run = "Mar09_19-54-31_pact_pos_100hz_bigger"
         checkpoint = -1
         resume = False
         exp_data_path = ""

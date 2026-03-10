@@ -8,6 +8,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        # Kaiming uniform initialization for weights
+        torch.nn.init.xavier_uniform_(m.weight)
+        # Initialize biases to zero if they exist
+        if m.bias is not None:
+            torch.nn.init.zeros_(m.bias)
+
 ###
 #
 #   Context Encoder/Decoder models used to provide conditioning input
@@ -73,8 +81,7 @@ class ContextEncoder(nn.Module):
     def _initialize_weights(self) -> None:
         """Initialize all linear layers with Xavier uniform distribution."""
         for layer in [self.ce_in, self.ce_h1,
-                     self.ce_out_mean, 
-                     self.ce_velo_mean,
+                     self.ce_out_mean, self.ce_velo_mean,
                      self.ce_h2, self.ce_velovar_h, self.ce_velovar_h,
                      self.ce_latmean_h, self.ce_latvar_h]:
             
@@ -82,6 +89,9 @@ class ContextEncoder(nn.Module):
             
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
+
+        self.ce_out_var.apply(init_weights)
+        self.ce_velo_var.apply(init_weights)
 
     def encode(self, X_C: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # Forward pass through encoder
@@ -200,7 +210,7 @@ class ActorCritic_PACT_Pos(nn.Module):
                                               context_layer_sizes=cenet_enc_layers,
                                               context_latent_size=cenet_latent_dim,
                                               context_torso_velo_size=cenet_velo_dim,
-                                              activation='elu')
+                                              activation=activation)
         
         # Get the activation function used by the actor and critic networks
         activation = get_activation(activation)

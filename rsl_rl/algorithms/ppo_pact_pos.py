@@ -36,6 +36,7 @@ from torch import linalg as LA
 
 import numpy as np
 import random
+import gc
 
 from rsl_rl.modules import ActorCritic_PACT_Pos, ContextDecoder
 from rsl_rl.storage import RolloutStoragePACT
@@ -285,6 +286,8 @@ class PPO_PACT_Pos:
             else:
                 mean_pinn_loss += 0.0
 
+            gc.collect()
+            torch.cuda.empty_cache()
 
             # Calculate the encoder update n-times
             for _ in range(self.num_enc_epochs):
@@ -439,11 +442,14 @@ class PPO_PACT_Pos:
     def _compute_vae_loss(self, obs_hist_batch, grf_target, 
                           obs_target, explicit_labels_batch, terminated_batch):
         vae_loss = None
-
+        
         mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.context_encoder(obs_hist_batch)
         
         dec_input = torch.cat((cenet_latent, cenet_torso_velo), dim=-1)
-        enc_update_obs_decode = self.decoder(dec_input)
+        enc_update_obs_decode = None
+        
+        with torch.no_grad():
+            enc_update_obs_decode = self.decoder(dec_input)
         
         grf_target.requires_grad = False
         obs_target.requires_grad = False
@@ -454,10 +460,11 @@ class PPO_PACT_Pos:
 
         vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
         recon_error    = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
-        kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=1)*terminated_batch)
+        kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
+        # kl_div         = -0.5*torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp())
         vae_loss = vel_pred_error + recon_error + self.vae_beta*kl_div
         
-        return vae_loss, kl_div, recon_error, vel_pred_error, dec_input.clone().detach(), decode_target, enc_update_obs_decode
+        return vae_loss, kl_div, recon_error, vel_pred_error, dec_input.clone().detach(), decode_target.detach(), enc_update_obs_decode.detach()
 
     def _compute_PINN_loss(self, current_actions, obs_batch,                                      # Current timestep
                            prev_obs_batch, prev_obs_hist_batch,                                   # Previous timestep
