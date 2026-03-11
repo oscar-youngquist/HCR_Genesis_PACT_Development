@@ -18,7 +18,7 @@ from legged_gym.scripts.liquid_payload_configs import *
 
 # Some values that are held constant for the water tank and liquid
 liquid_substeps      = 15
-liquid_particle_size = 0.005
+liquid_particle_size = 0.01
 
 container_outer_x = 0.20  # X dimension
 container_outer_y = 0.15  # Y dimension
@@ -34,7 +34,7 @@ if SIMULATOR == "genesis":
     import genesis as gs
 
 """ ********** Genesis Simulator ********** """
-class GenesisSimulator_PACT(Simulator):
+class GenesisSimulator_PACT_Water(Simulator):
     def __init__(self, cfg, sim_params: dict, device, headless):
         self._sim_params = sim_params
         super().__init__(cfg, sim_params, device, headless)
@@ -198,6 +198,8 @@ class GenesisSimulator_PACT(Simulator):
         self._base_quat[env_ids, :] = base_quat[:]
         self._base_quat_gs[env_ids, 0] = self._base_quat[env_ids, 3]  # xyzw to wxyz
         self._base_quat_gs[env_ids, 1:4] = self._base_quat[env_ids, 0:3] # xyzw to wxyz
+        
+        
         self._robot.set_quat(
             self._base_quat_gs[env_ids], zero_velocity=False, envs_idx=env_ids)
         self._robot.zero_all_dofs_velocity(env_ids)
@@ -212,6 +214,27 @@ class GenesisSimulator_PACT(Simulator):
             [self._base_lin_vel[env_ids], self._base_ang_vel[env_ids]], dim=1)
         self._robot.set_dofs_velocity(velocity=base_vel, dofs_idx_local=[
                                      0, 1, 2, 3, 4, 5], envs_idx=env_ids)
+        if self.use_liquid:
+            self._reset_liquid_state(env_ids)
+    
+    def _reset_liquid_state(self, envs_idx):
+        # pull out the new poses and oreintations
+        new_base_poses = self._base_pos[envs_idx].clone().cpu().numpy()
+        
+        # Calculate the liquid pose offsets
+        new_particle_pos_offset    = new_base_poses
+        new_particle_pos_offset[:, 2] = 0.0 # no need to modify the height
+                
+        # Use the new poses/orientations to reset the liquid particles
+        self._liquid.set_particles_vel(0, envs_idx=envs_idx)
+
+        # Doesn't look like the yaw angle is randomized when resetting, so no need to rotate the particle positions.
+        # new_particle_posistions = quat_rotate_inverse(self._base_quat_offsets,
+        #                                               self._liquid_init_pose[envs_idx]).cpu().numpy()
+        new_particle_posistions = self._liquid_init_pose[envs_idx].cpu().numpy()
+        new_particle_posistions += new_particle_pos_offset[:, None, :]
+        self._liquid.set_particles_pos(new_particle_posistions,
+                                      envs_idx=envs_idx)
 
     def update_sensors(self):
         # Genesis currently exposes depth update via `update_depth_images`
@@ -434,6 +457,13 @@ class GenesisSimulator_PACT(Simulator):
         if self._cfg.sensor.add_depth:
             self.frame_count = 0
 
+        self.use_liquid = False
+        # Added to support liquid payloads
+        if self.cfg.env.use_liquid:
+            self.sim_substeps = liquid_substeps
+            self.use_liquid = True
+
+
         # Domain rand curriculum stuff
         self.n_digits = 2
 
@@ -508,33 +538,72 @@ class GenesisSimulator_PACT(Simulator):
     
     def _create_sim(self):
         # create scene
-        self._scene = gs.Scene(
-            sim_options=gs.options.SimOptions(
-                dt=self.sim_dt,
-                substeps=self.sim_substeps),
-            viewer_options=gs.options.ViewerOptions(
-                # max_FPS=int(1 / self._control_dt * self._cfg.control.decimation),
-                camera_pos=np.array(self._cfg.viewer.pos),
-                camera_lookat=np.array(self._cfg.viewer.lookat),
-                camera_fov=40,
-            ),
-            vis_options=gs.options.VisOptions(
-                rendered_envs_idx=self._cfg.viewer.rendered_envs_idx,
-                shadow=False,
+        # If we are using a liquid, include SPH options
+        if self.use_liquid:
+            self.scene = gs.Scene(
+                sim_options=gs.options.SimOptions(
+                    dt=self.sim_dt,
+                    substeps=self.sim_substeps),
+                viewer_options=gs.options.ViewerOptions(
+                    # max_FPS=int(1 / self.dt * self.cfg.control.decimation),
+                    camera_pos=np.array(self.cfg.viewer.pos),
+                    camera_lookat=np.array(self.cfg.viewer.lookat),
+                    camera_fov=40,
                 ),
-            rigid_options=gs.options.RigidOptions(
-                dt=self.sim_dt,
-                constraint_solver=gs.constraint_solver.Newton,
-                enable_collision=True,
-                enable_joint_limit=True,
-                enable_self_collision=True,
-                max_collision_pairs=self._cfg.sim.max_collision_pairs,
-                IK_max_targets=self._cfg.sim.IK_max_targets,
-                batch_dofs_info=self._batch_dofs_links_info,
-                batch_links_info=self._batch_dofs_links_info,
-            ),
-            show_viewer=not self._headless,
-        )
+                vis_options=gs.options.VisOptions(
+                    rendered_envs_idx= self.cfg.viewer.rendered_envs_idx,
+                    # ambient_light=(0.2, 0.2, 0.2),
+                    # background_color=(0.93,0.92,0.87)
+                    background_color=(0.0,0.0,0.0),
+                    shadow=True,
+                    lights=[
+                        {"type": "directional", "dir": (1, 1, -1), "color": (1.0, 1.0, 1.0), "intensity": 5.0},
+                    ],
+                ),
+                rigid_options=gs.options.RigidOptions(
+                    dt=self.sim_dt,
+                    constraint_solver=gs.constraint_solver.Newton,
+                    enable_collision=True,
+                    enable_joint_limit=True,
+                    enable_self_collision=True,
+                    max_collision_pairs=self._cfg.sim.max_collision_pairs,
+                    IK_max_targets=self._cfg.sim.IK_max_targets,
+                    batch_dofs_info=self._batch_dofs_links_info,
+                    batch_links_info=self._batch_dofs_links_info,
+                ),
+                sph_options=gs.options.SPHOptions(
+                    particle_size = liquid_particle_size,
+                ),
+                show_viewer=not self.headless,
+            )
+        else:
+            self._scene = gs.Scene(
+                sim_options=gs.options.SimOptions(
+                    dt=self.sim_dt,
+                    substeps=self.sim_substeps),
+                viewer_options=gs.options.ViewerOptions(
+                    # max_FPS=int(1 / self._control_dt * self._cfg.control.decimation),
+                    camera_pos=np.array(self._cfg.viewer.pos),
+                    camera_lookat=np.array(self._cfg.viewer.lookat),
+                    camera_fov=40,
+                ),
+                vis_options=gs.options.VisOptions(
+                    rendered_envs_idx=self._cfg.viewer.rendered_envs_idx,
+                    shadow=False,
+                    ),
+                rigid_options=gs.options.RigidOptions(
+                    dt=self.sim_dt,
+                    constraint_solver=gs.constraint_solver.Newton,
+                    enable_collision=True,
+                    enable_joint_limit=True,
+                    enable_self_collision=True,
+                    max_collision_pairs=self._cfg.sim.max_collision_pairs,
+                    IK_max_targets=self._cfg.sim.IK_max_targets,
+                    batch_dofs_info=self._batch_dofs_links_info,
+                    batch_links_info=self._batch_dofs_links_info,
+                ),
+                show_viewer=not self._headless,
+            )
 
         # add terrain
         mesh_type = self._cfg.terrain.mesh_type
@@ -573,6 +642,74 @@ class GenesisSimulator_PACT(Simulator):
             self._terrain_y_range[0] = -self._cfg.terrain.plane_length/2+1
             self._terrain_y_range[1] = self._cfg.terrain.plane_length/2-1
 
+    
+    def _build_liquid_payloads(self):
+        # pull out the liquid properties we are using
+        self.liquid_properties = get_payload_config(self.cfg.liquid.liquid_type, self.cfg.liquid.liquid_volume, self.cfg.liquid.liquid_tank)
+        
+        rob_pos = np.array(self.cfg.init_state.pos)
+        rob_quat = np.array(self.cfg.init_state.rot)
+        
+        # this 0.1 is a magic value that is slightly shorter than the actual height of the stl model
+        #    effectively "welding" the top of the tank walls and the lid.
+        #    this has been found to precent particles from "spilling" out the top due to minor simulation inaccuracies
+        lid_offset = (0.1/2.0) + (self.liquid_properties["scale_z"]*container_outer_z)
+        
+        mount_xy_pos = [rob_pos[0], rob_pos[1]]
+        if "mount_offset" in self.liquid_properties.keys():
+            mount_xy_pos = [rob_pos[0] + self.liquid_properties["mount_offset"][0], rob_pos[1] + self.liquid_properties["mount_offset"][1]]
+
+        # Add the liquid container
+        self._bucket = self.scene.add_entity(
+            material=gs.materials.Rigid(gravity_compensation=0.0,),
+            morph=gs.morphs.Mesh(
+                file="water_tank_proper_units_simple.stl",
+                scale=(self.liquid_properties["scale_x"],
+                       self.liquid_properties["scale_y"],
+                       self.liquid_properties["scale_z"]),    # adjust scale
+                pos= (mount_xy_pos[0], mount_xy_pos[1], bucket_offset),      # position
+                quat=rob_quat, # no rotation; uses w, x, y, z quaternion
+            decimate=False,
+            convexify=False),
+            surface=gs.surfaces.Glass(opacity=0.6))
+        
+        # Add a lid to the liquid container
+        self._lid = self._scene.add_entity(
+            material=gs.materials.Rigid(gravity_compensation=1.0),
+            morph=gs.morphs.Mesh(
+                file="water_tank_lid.stl",
+                scale=(self.liquid_properties["scale_x"],
+                       self.liquid_properties["scale_y"],
+                       1.0),    # adjust scale if needed
+            pos= (mount_xy_pos[0], mount_xy_pos[1], lid_offset),      # position
+            quat=rob_quat, # no rotation; uses w, x, y, z quaternion
+            decimate=False,
+            convexify=False),
+            surface=gs.surfaces.Glass(opacity=0.6))
+
+        # Calculate the scaled internal dimensions of the container
+        #   this offset sets how big of a space that the particle sampler
+        #   will use to fill with particles.
+        #   This is how we determine a volume.
+        scaled_width = container_outer_x * self.liquid_properties["scale_x"] - 2.0 * (self.liquid_properties["scale_x"]*container_wall_thickness)
+        scaled_depth = container_outer_y * self.liquid_properties["scale_y"] - 2.0 * (self.liquid_properties["scale_y"]*container_wall_thickness)
+        scaled_height = container_outer_z * self.liquid_properties["scale_z"] - self.liquid_properties["scale_z"]*container_bottom_thickness
+        
+        # add the liquid itself
+        self._liquid = self._scene.add_entity(
+            material=gs.materials.SPH.Liquid(rho=self.liquid_properties["rho"],
+                                             mu=self.liquid_properties["mu"],
+                                             gamma=self.liquid_properties["gamma"]),
+            morph=gs.morphs.Box(pos=(mount_xy_pos[0],
+                                     mount_xy_pos[1],
+                                     rob_pos[2] + bucket_offset + 0.5*scaled_height + self.liquid_properties["scale_z"]*container_bottom_thickness),
+                            size=(scaled_width-self.liquid_properties["offset"],
+                                  scaled_depth-self.liquid_properties["offset"],
+                                  scaled_height-self.liquid_properties["offset"])),
+            surface=gs.surfaces.Water(),
+        )
+    
+    
     def _create_envs(self):
         # Create envs
         asset_path = self._cfg.asset.file.format(
@@ -592,6 +729,16 @@ class GenesisSimulator_PACT(Simulator):
             # visualize_contact=self._debug,
         )
         
+        # add water tanks to robots....
+        if self.use_liquid:
+            # Add the contaier, lid, and liquid
+            self._build_liquid_payloads()
+            # Rigidly attach the tank and lid to the robot base
+            if self._bucket and self._robot:
+                self._bucket.attach(self._robot, "base")
+            if self._lid and self._robot:
+                self._lid.attach(self._robot, "base")
+
         # add camera if needed
         if self._cfg.sensor.add_depth:
             self._setup_depth_camera()
@@ -600,6 +747,10 @@ class GenesisSimulator_PACT(Simulator):
         self._scene.build(n_envs=self._num_envs)
 
         self._get_env_origins()
+
+        if self.use_liquid:
+            # extract the inital pose of the liquid, to be used to reset it later
+            self._liquid_init_pose = self._liquid.get_particles_pos()
 
         self._dof_names = self._cfg.asset.dof_names
         self._num_dof = len(self._cfg.asset.dof_names)

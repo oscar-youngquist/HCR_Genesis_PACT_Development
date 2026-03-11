@@ -816,7 +816,7 @@ class Go1PACT(BaseTask):
     def _reward_feedforward_torques_scaled(self):
         ff_tau_pen = torch.sum(torch.square(self.simulator.feedforward_torques),dim=1)
         total_mass = self.simulator._robot_mass + torch.clamp(self.simulator._added_base_mass, min=0.0)
-        scales = self.simulator._robot_mass / total_mass
+        scales = (self.simulator._robot_mass / total_mass).squeeze(-1)
         return scales * ff_tau_pen
 
     def _reward_dof_vel(self):
@@ -1319,7 +1319,7 @@ class Go1PACT(BaseTask):
         gate = torch.tanh(ff_norm) * torch.tanh(fb_norm)
 
         total_mass = self.simulator._robot_mass + torch.clamp(self.simulator._added_base_mass, min=0.0)
-        scales = self.simulator._robot_mass / total_mass
+        scales = (self.simulator._robot_mass / total_mass).squeeze(-1)
 
         return scales * gate * conflict
     

@@ -4,3 +4,4 @@ from .isaacgym_simulator import IsaacGymSimulator
 from .isaaclab_simulator import IsaacLabSimulator
 from .genesis_simulator_pact import GenesisSimulator_PACT
 from .genesis_simulator_pact_pos import GenesisSimulator_PACT_Pos
+from .genesis_simulator_pact_water import GenesisSimulator_PACT_Water

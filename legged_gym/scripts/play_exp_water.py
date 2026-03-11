@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from legged_gym.scripts.joystick import Joystick
 from legged_gym.utils.exp_data_logger import ExpLogger
+import argparse
 
 def override_configs(env_cfg, args):
     """Override some environment configuration parameters for testing
@@ -19,7 +20,7 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 10)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -29,7 +30,9 @@ def override_configs(env_cfg, args):
         env_cfg.terrain.num_cols = 2
         env_cfg.terrain.border_size = 5.0
         env_cfg.terrain.curriculum = False
-        env_cfg.terrain.selected = True        
+        env_cfg.terrain.selected = True
+        env_cfg.env.debug_draw_terrain_height_points = False
+        
         
         # random uniform terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
@@ -62,7 +65,9 @@ def override_configs(env_cfg, args):
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pit_terrain", 
         #                                   "depth": 0.2, "platform_size": 3.0}
         
-            
+        
+    env_cfg.env.debug = True
+    
     if args.use_joystick:
         env_cfg.commands.heading_command = False
     
@@ -82,8 +87,6 @@ def override_configs(env_cfg, args):
     env_cfg.asset.fix_base_link = False
     env_cfg.env.debug_viz = True
     env_cfg.env.debug = True
-    env_cfg.env.debug_draw_terrain_height_points = True
-
     
 
 def print_debug_info(env, robot_index):
@@ -284,4 +287,27 @@ def play(args):
     
 if __name__ == '__main__':
     args = get_args()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--task',           type=str, default='go2')
+    parser.add_argument('--headless',       action='store_true', default=False)  # enable visualization by default
+    parser.add_argument('-c', '--cpu',      action='store_true', default=False)  # use cuda by default
+    parser.add_argument('-B', '--num_envs', type=int, default=None)
+    parser.add_argument('--max_iterations', type=int, default=None)
+    parser.add_argument('--resume',         type=str, default=None)
+    parser.add_argument('-o', '--offline',  action='store_true', default=False)
+    parser.add_argument('-d', '--device',   type=str, default='cuda')
+
+    parser.add_argument('--debug',          action='store_true', default=False)
+    parser.add_argument('--ckpt',           type=int, default=1000)
+    
+    parser.add_argument('--follow_robot',   action='store_true', default=False, help="whether the camera follows the robot during play")
+    
+    parser.add_argument('--use_liquid',    type=bool, default='True')
+    parser.add_argument('--liquid_type',   type=str, default='water', choices=['water', 'oil', 'gas'])
+    parser.add_argument('--liquid_volume', type=float, default=4.0)
+    parser.add_argument('--liquid_tank', type=str, default="default", choices=["default", "wide", "tall", "offset"])
+
+    args = parser.parse_args()
+    
     play(args)
