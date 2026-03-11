@@ -14,7 +14,21 @@ import random
 import torch.nn.functional as F
 import pinocchio as pn
 
-from .parallel_pino_workers import PinocchioAsync
+from legged_gym.scripts.liquid_payload_configs import *
+
+# Some values that are held constant for the water tank and liquid
+liquid_substeps      = 15
+liquid_particle_size = 0.005
+
+container_outer_x = 0.20  # X dimension
+container_outer_y = 0.15  # Y dimension
+container_outer_z = 0.20  # total outer height
+container_wall_thickness = .015
+container_bottom_thickness = 0.015
+
+go1_torso_height = 0.114
+bucket_offset = (go1_torso_height/2.0)
+
 
 if SIMULATOR == "genesis":
     import genesis as gs
@@ -27,27 +41,13 @@ class GenesisSimulator_PACT(Simulator):
         self.first_loop = True
         self.first_loop_feedback = None
 
+    # So we don't have to make another runner, just pass through this
     def _create_async_pino_workers(self):
-        wb_correct_pino_2_model_ordering = [0,1,2,3,4,5]
-        wb_correct_pino_2_model_ordering.extend(self.pino_2_model_joint_act_map)
-        
-        # For safeties shake, use only 90% of available CPU's
-        num_cpus = int(mp.cpu_count() * 0.98)
+        pass
 
-        # Build the class that manages (1) shared input/output memeory and (2) invoking worker processes 
-        self.async_pino_manager = PinocchioAsync(
-            self.pino_model,
-            self._num_envs,
-            self.pino_foot_names,
-            wb_correct_pino_2_model_ordering,
-            self._wb_dim,
-            (12,1),
-            num_cpus
-            )
-
+    # So we don't have to make another runner, just pass through this
     def _shutdown_asynic_pino_workers(self):
-        # clear shared memory and persistent CPU workers
-        self.async_pino_manager.shutdown()        
+        pass  
     
     #----- Public methods -----#
     def step(self, actions):
@@ -113,48 +113,6 @@ class GenesisSimulator_PACT(Simulator):
         # Used to train the model, so reorganize this to match the model inidices
         #     extract the values used to calculate the dynamics consitentcy reward separately.
         self._grfs_buf[:] = self._robot.get_links_net_contact_force()[:, self._feet_indices, :].reshape(self._base_pos.shape[0], self._grf_dim)
-
-        # All the below is done in the pinocchio indexing scheme [FL, FR, RL, RR]
-        # Use the Pinocchio library to calculate the (1) contact forces and (2) whole-body dynamics of the robot for use
-        #     in the dynamic consistency reward and PINN loss. All done in WORLD FRAME!
-        
-        #     extract the contact forces in pinocchio order GRF
-        contact_temp = self._link_contact_forces[:, self.pino_feet_indices, :]
-
-        #     push all the CUDA stuff from GPU to CPU for use by the PinocchioAsync class
-        #     The whole-body pose
-        wb_pos_np = torch.concatenate([self._base_pos, self._base_quat, self._dof_pos[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
-        
-        #     The whole-body velocity
-        wb_vel_np = torch.concatenate([self._base_world_lin_vel, self._base_world_ang_vel, self._dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
-        
-        #     The previous whole-body velocity
-        wb_vel_prev_np = torch.concatenate([self._last_base_world_lin_vel, self._last_base_world_ang_vel, self._last_dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
-
-        #     The GRF forces
-        grf_np = contact_temp.reshape(contact_temp.shape[0], 12).unsqueeze(2).cpu().numpy()
-
-        #     Pass the numpy (cpu) data structures to shared memeory
-        self.async_pino_manager.shared.q[:]       = wb_pos_np        # num_envs x 19
-        self.async_pino_manager.shared.qd[:]      = wb_vel_np        # num_envs x 18
-        self.async_pino_manager.shared.qd_prev[:] = wb_vel_prev_np   # num_envs x 18
-        self.async_pino_manager.shared.grf[:]     = grf_np           # num_envs x 4 x 3
-        self.async_pino_manager.shared.dt[0]      = self._control_dt
-
-        self.async_pino_manager.compute_async()
-        self.async_pino_manager.wait()            # blocking, wait until all workers are done
-
-        # now stack the tensor lists to get the necessary state values
-        self._wb_dynamics_buff[:]        = torch.from_numpy(
-            self.async_pino_manager.shared.wb_dynamics).to(self._device) # num_envs x 18
-        self._contact_forces_buff[:]     = torch.from_numpy(
-            self.async_pino_manager.shared.wb_contacts).to(self._device) # num_envs x 18
-        self._wb_mass_mat_buff[:]        = torch.from_numpy(
-            self.async_pino_manager.shared.mass_mat).to(self._device)    # num_envs x 18 x 18
-        self._wb_bias_vec_buff[:]        = torch.from_numpy(
-            self.async_pino_manager.shared.bias).to(self._device)        # num_envs x 18
-        self._torso_6dof_acceleration[:] = torch.from_numpy(
-            self.async_pino_manager.shared.acc6d).to(self._device)       # num_envs x 6
         
         
         # Link contact state
@@ -1332,3 +1290,4 @@ class GenesisSimulator_PACT(Simulator):
             list[int]: Indices of the feet links in the contact sensors.
         """
         return self._feet_indices
+    

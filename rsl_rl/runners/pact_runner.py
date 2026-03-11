@@ -253,8 +253,11 @@ class OnPolicyRunnerPACT:
             if self.env.simulator.use_domainrand_curriculum:
                 self.env.simulator._step_domian_rand(it)
                         
-            if it > 200:
-                self.alg.set_entropy_coef(1e-3)
+            if it > 200 and it < 2000:
+                self.alg.set_entropy_coef(5.e-3)
+            
+            if it > 2000:
+                self.alg.set_entropy_coef(1.e-3)
             
             stop = time.time()
             learn_time = stop - start

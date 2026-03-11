@@ -134,27 +134,27 @@ class GenesisSimulator_PACT(Simulator):
         #     The GRF forces
         grf_np = contact_temp.reshape(contact_temp.shape[0], 12).unsqueeze(2).cpu().numpy()
 
-        #     Pass the numpy (cpu) data structures to shared memeory
-        self.async_pino_manager.shared.q[:]       = wb_pos_np        # num_envs x 19
-        self.async_pino_manager.shared.qd[:]      = wb_vel_np        # num_envs x 18
-        self.async_pino_manager.shared.qd_prev[:] = wb_vel_prev_np   # num_envs x 18
-        self.async_pino_manager.shared.grf[:]     = grf_np           # num_envs x 4 x 3
-        self.async_pino_manager.shared.dt[0]      = self._control_dt
+        # #     Pass the numpy (cpu) data structures to shared memeory
+        # self.async_pino_manager.shared.q[:]       = wb_pos_np        # num_envs x 19
+        # self.async_pino_manager.shared.qd[:]      = wb_vel_np        # num_envs x 18
+        # self.async_pino_manager.shared.qd_prev[:] = wb_vel_prev_np   # num_envs x 18
+        # self.async_pino_manager.shared.grf[:]     = grf_np           # num_envs x 4 x 3
+        # self.async_pino_manager.shared.dt[0]      = self._control_dt
 
-        self.async_pino_manager.compute_async()
-        self.async_pino_manager.wait()            # blocking, wait until all workers are done
+        # self.async_pino_manager.compute_async()
+        # self.async_pino_manager.wait()            # blocking, wait until all workers are done
 
-        # now stack the tensor lists to get the necessary state values
-        self._wb_dynamics_buff[:]        = torch.from_numpy(
-            self.async_pino_manager.shared.wb_dynamics).to(self._device) # num_envs x 18
-        self._contact_forces_buff[:]     = torch.from_numpy(
-            self.async_pino_manager.shared.wb_contacts).to(self._device) # num_envs x 18
-        self._wb_mass_mat_buff[:]        = torch.from_numpy(
-            self.async_pino_manager.shared.mass_mat).to(self._device)    # num_envs x 18 x 18
-        self._wb_bias_vec_buff[:]        = torch.from_numpy(
-            self.async_pino_manager.shared.bias).to(self._device)        # num_envs x 18
-        self._torso_6dof_acceleration[:] = torch.from_numpy(
-            self.async_pino_manager.shared.acc6d).to(self._device)       # num_envs x 6
+        # # now stack the tensor lists to get the necessary state values
+        # self._wb_dynamics_buff[:]        = torch.from_numpy(
+        #     self.async_pino_manager.shared.wb_dynamics).to(self._device) # num_envs x 18
+        # self._contact_forces_buff[:]     = torch.from_numpy(
+        #     self.async_pino_manager.shared.wb_contacts).to(self._device) # num_envs x 18
+        # self._wb_mass_mat_buff[:]        = torch.from_numpy(
+        #     self.async_pino_manager.shared.mass_mat).to(self._device)    # num_envs x 18 x 18
+        # self._wb_bias_vec_buff[:]        = torch.from_numpy(
+        #     self.async_pino_manager.shared.bias).to(self._device)        # num_envs x 18
+        # self._torso_6dof_acceleration[:] = torch.from_numpy(
+        #     self.async_pino_manager.shared.acc6d).to(self._device)       # num_envs x 6
         
         
         # Link contact state
