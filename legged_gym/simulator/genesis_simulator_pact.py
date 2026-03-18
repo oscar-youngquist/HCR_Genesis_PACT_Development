@@ -1044,7 +1044,7 @@ class GenesisSimulator_PACT(Simulator):
         heights = torch.min(heights, heights3)
 
         self._measured_heights = heights.view(self._num_envs, -1) * self._cfg.terrain.vertical_scale
-    
+
     def _calc_terrain_info_around_feet(self):
         """ Finds neighboring points around each foot for terrain height measurement."""
         # Foot positions
@@ -1131,11 +1131,14 @@ class GenesisSimulator_PACT(Simulator):
 
         # Compute tradeoff curriculum weighted coupled torque output
         self.feedforward_torques = tau_actions * self._cfg.control.torque_scale
+        
+        self._unweighted_torques = self.feedforward_torques + self.feedback_torques
 
         torques = (self.feedforward_tau_weight) * self.feedforward_torques + (self.feedback_tau_weight)*self.feedback_torques
 
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
-        return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
+        # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
+        return torques
     
 
     def _init_domain_params(self):

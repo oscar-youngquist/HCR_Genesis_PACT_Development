@@ -10,7 +10,7 @@ from legged_gym.scripts.joystick import Joystick
 from legged_gym.utils.exp_data_logger import ExpLogger
 import argparse
 
-def override_configs(env_cfg, args):
+def override_configs(env_cfg, train_cfg, args):
     """Override some environment configuration parameters for testing
 
     Args:
@@ -24,6 +24,7 @@ def override_configs(env_cfg, args):
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
+
     # adjust parameters according to terrain type
     if env_cfg.terrain.mesh_type in ["heightfield", "trimesh"]:
         env_cfg.terrain.num_rows = 2
@@ -35,9 +36,9 @@ def override_configs(env_cfg, args):
         
         
         # random uniform terrain
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-                                        #   "min_height" : -0.05, "max_height": 0.05, 
-                                        #   "step":0.005, "downsampled_scale" : 0.2}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+                                          "min_height" : -0.05, "max_height": 0.05, 
+                                          "step":0.005, "downsampled_scale" : 0.2}
         # # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
         #                                   "slope": -0.4, "platform_size": 3.0}
@@ -45,12 +46,12 @@ def override_configs(env_cfg, args):
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
         #                                 "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
         # # discrete obstacles
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
-                                          "max_height": 0.1,
-                                          "min_size": 1.0,
-                                          "max_size": 2.0,
-                                          "num_rects": 20,
-                                          "platform_size": 3.0}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
+        #                                   "max_height": 0.1,
+        #                                   "min_size": 1.0,
+        #                                   "max_size": 2.0,
+        #                                   "num_rects": 20,
+        #                                   "platform_size": 3.0}
         # wave terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.wave_terrain", 
         #                                   "amplitude": 0.2, "num_waves": 2}
@@ -64,6 +65,10 @@ def override_configs(env_cfg, args):
         # pit terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pit_terrain", 
         #                                   "depth": 0.2, "platform_size": 3.0}
+    else:
+        for i in range(2):
+            env_cfg.viewer.pos[i] = env_cfg.viewer.pos[i] - env_cfg.terrain.plane_length / 4
+            env_cfg.viewer.lookat[i] = env_cfg.viewer.lookat[i] - env_cfg.terrain.plane_length / 4    
         
         
     env_cfg.env.debug = True
@@ -82,11 +87,23 @@ def override_configs(env_cfg, args):
     env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_base_mass = True
+    env_cfg.domain_rand.randomize_base_mass = False
 
     env_cfg.asset.fix_base_link = False
     env_cfg.env.debug_viz = True
     env_cfg.env.debug = True
+
+    # Liquid Payload override stuff
+    args.use_liquid = True
+    args.liquid_type = "water"
+    args.liquid_tank = "default"
+    args.liquid_volume = 12.0  # liters
+
+    env_cfg.liquid.liquid_type = args.liquid_type
+    env_cfg.liquid.liquid_volume = args.liquid_volume  # liters
+    env_cfg.liquid.liquid_tank = args.liquid_tank  # liters
+    train_cfg.runner.exp_data_path = f"exp_data/strict_overreach_04/plane_water_test_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}.csv"
+    env_cfg.env.use_liquid = args.use_liquid
     
 
 def print_debug_info(env, robot_index):
@@ -97,9 +114,10 @@ def print_debug_info(env, robot_index):
         robot_index (int): index of the robot to print info for
     """
     # print debug info
-    # print("base lin vel: ", env.simulator.base_lin_vel[robot_index, :].cpu().numpy())
-    # print("base yaw angle: ", env.simulator.base_euler[robot_index, 2].item())
-    # print("base height: ", env.simulator.base_pos[robot_index, 2].cpu().numpy())
+    print("base lin vel: ", env.simulator.base_lin_vel[robot_index, :].cpu().numpy())
+    print("base ang vel: ", env.simulator.base_ang_vel[robot_index, :].cpu().numpy())
+    print("base_orientation: ", env.simulator.projected_gravity[robot_index, :].cpu().numpy())
+    print("base height: ", env.simulator.base_pos[robot_index, 2].cpu().numpy())
     # print("foot_height: ", env.simulator.feet_pos[robot_index, :, 2].cpu().numpy())
     # print(f"ankle pitch: {env.simulator.dof_pos[robot_index, [3,7]].cpu().numpy()}")
     pass
@@ -113,7 +131,7 @@ def interaction_loop(train_cfg, env, policy, args):
         args: command line arguments
     """
     
-    robot_index = 1 # which robot is used for logging
+    robot_index = 0 # which robot is used for logging
     joint_index = 2 # which joint is used for logging
     stop_state_log = 300 # number of steps before plotting states
     stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards
@@ -138,13 +156,21 @@ def interaction_loop(train_cfg, env, policy, args):
     if args.use_joystick:
         joystick = Joystick(joystick_type=args.joystick_type)
     
-    # env.commands[:, 0] = 0.5
-    # env.commands[:, 1] = 0
-    # env.commands[:, 2] = 0
-    # env.commands[:, 3] = 0
+    # env.commands[:, 0] = 1.0
+    # env.commands[:, 1] = 0.0
+    # env.commands[:, 2] = 1.0
+    
+    print("Max - self.feedforward_tau_weight: ", torch.max(env.simulator.feedforward_tau_weight).item())
+    print("Min - self.feedforward_tau_weight: ", torch.min(env.simulator.feedforward_tau_weight).item())
+    print("Max - self.feedback_tau_weight: ", torch.max(env.simulator.feedback_tau_weight).item())
+    print("Min - self.feedback_tau_weight: ", torch.min(env.simulator.feedback_tau_weight).item())
     
     # interaction loop
     for i in range(int(1.05*env.max_episode_length)):
+        
+        # env.commands[:, 0] = 1.0
+        # env.commands[:, 1] = 0.0
+        # env.commands[:, 2] = 1.0
         
         # update commands from joystick
         if args.use_joystick:
@@ -177,7 +203,7 @@ def interaction_loop(train_cfg, env, policy, args):
             obs, _, rews, dones, infos = env.step(actions.detach())
         
         # print debug info
-        print_debug_info(env, robot_index)
+        # print_debug_info(env, robot_index)
         
         # # Update logger info
         # if i < stop_state_log:
@@ -207,6 +233,8 @@ def interaction_loop(train_cfg, env, policy, args):
         #             logger.log_rewards(infos["episode"], num_episodes)
         # elif i==stop_rew_log:
         #     logger.print_rewards()
+
+        # print(env.simulator.feedforward_torques.detach().cpu().numpy())
 
         logger.log_states(
             {
@@ -262,13 +290,13 @@ def play(args):
     Args:
         args (_type_): command line arguments
     """
-    if SIMULATOR == "genesis" or SIMULATOR == "genesis_pact_pos" or SIMULATOR == "genesis_pact":
+    if SIMULATOR == "genesis" or SIMULATOR == "genesis_pact_pos" or SIMULATOR == "genesis_pact" or SIMULATOR == "genesis_pact_water":
         gs.init(
             backend=gs.cpu if args.cpu else gs.gpu,
             logging_level='warning',
         )
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
-    override_configs(env_cfg, args)
+    override_configs(env_cfg, train_cfg, args)
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
@@ -301,8 +329,13 @@ if __name__ == '__main__':
     parser.add_argument('--debug',          action='store_true', default=False)
     parser.add_argument('--ckpt',           type=int, default=1000)
     
+    parser.add_argument('--sync_wandb',     action='store_true', default=False, help="synchronize training log with wandb")
+    parser.add_argument('--export_onnx',    action='store_true', default=False, help="export policy as onnx (besides jit)")
+    parser.add_argument('--load_run',       type=str, default=None, help="run to load, default: last run")
+    parser.add_argument('--use_joystick',   action='store_true', default=False, help="use joystick to provide commands")
+    parser.add_argument('--joystick_type',  type=str, default='xbox', help="type of joystick: xbox, switch")
     parser.add_argument('--follow_robot',   action='store_true', default=False, help="whether the camera follows the robot during play")
-    
+
     parser.add_argument('--use_liquid',    type=bool, default='True')
     parser.add_argument('--liquid_type',   type=str, default='water', choices=['water', 'oil', 'gas'])
     parser.add_argument('--liquid_volume', type=float, default=4.0)

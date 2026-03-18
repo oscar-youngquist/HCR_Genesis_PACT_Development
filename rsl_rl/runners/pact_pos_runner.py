@@ -28,6 +28,7 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+import math
 import time
 import os
 from collections import deque
@@ -255,7 +256,26 @@ class OnPolicyRunnerPACTPos:
             # Step the domain randomization if approperiate
             if self.env.simulator.use_domainrand_curriculum:
                 self.env.simulator._step_domian_rand(it)
-                        
+
+            # if it > 1000:
+            #     self.alg.set_entropy_coef(1.0e-3)
+            
+            if it < 1000:
+                entropy_coef = 0.01
+            elif it < 1500:
+                alpha = (it - 1000) / 1000.0
+                entropy_coef = 0.005 + 0.5 * (0.01 - 0.005) * (1 + math.cos(math.pi * alpha))
+            elif it < 2000:
+                entropy_coef = 0.005
+            elif it < 3000:
+                alpha = (it - 2000) / 1500.0
+                entropy_coef = 0.001 + 0.5 * (0.005 - 0.001) * (1 + math.cos(math.pi * alpha))
+            else:
+                entropy_coef = 0.001
+            
+            entropy_coef = max(entropy_coef, 0.001)
+            self.alg.set_entropy_coef(entropy_coef)
+            
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:

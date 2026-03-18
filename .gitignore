@@ -23,6 +23,8 @@ dist/
 target/
 dist/
 
+**/exp_data/*
+
 # JetBrains IDE
 .idea/
 

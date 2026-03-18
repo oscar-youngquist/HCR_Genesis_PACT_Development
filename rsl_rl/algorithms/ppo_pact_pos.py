@@ -185,6 +185,10 @@ class PPO_PACT_Pos:
         self.transition.clear()
         self.actor_critic.reset(dones)
 
+
+    def set_entropy_coef(self, coef=1e-3):
+        self.entropy_coef = coef
+
     def spectral_normalization(self, model):
         """Applies spectral normalization to linear and attention layers.
         
@@ -285,9 +289,6 @@ class PPO_PACT_Pos:
                 mean_pinn_loss += pinn_loss.item()
             else:
                 mean_pinn_loss += 0.0
-
-            gc.collect()
-            torch.cuda.empty_cache()
 
             # Calculate the encoder update n-times
             for _ in range(self.num_enc_epochs):

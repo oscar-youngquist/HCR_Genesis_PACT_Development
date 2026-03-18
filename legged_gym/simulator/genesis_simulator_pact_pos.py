@@ -560,7 +560,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
                 constraint_solver=gs.constraint_solver.Newton,
                 enable_collision=True,
                 enable_joint_limit=True,
-                enable_self_collision=not self._cfg.asset.self_collisions,
+                enable_self_collision=True,
                 max_collision_pairs=self._cfg.sim.max_collision_pairs,
                 IK_max_targets=self._cfg.sim.IK_max_targets,
                 batch_dofs_info=self._batch_dofs_links_info,
@@ -1109,7 +1109,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
         torques = self.feedback_torques
 
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
-        return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
+        # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
+        return torques
     
 
     def _init_domain_params(self):

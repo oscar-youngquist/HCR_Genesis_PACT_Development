@@ -127,11 +127,17 @@ class Terrain:
         # rough_height = 0.01 + 0.04 * difficulty
         # step_height = 0.05 + 0.15 * difficulty
         # discrete_obstacles_height = 0.05 + difficulty * 0.15
+        # slope = difficulty * 0.4
+        # wave_amp = 0.20*difficulty
+        # rough_height = 0.08 * difficulty
+        # step_height = 0.20 * difficulty
+        # discrete_obstacles_height = 0.20*difficulty
+
         slope = difficulty * 0.4
         wave_amp = 0.20*difficulty
-        rough_height = 0.02 + 0.08 * difficulty
-        step_height = 0.02 + 0.18 * difficulty
-        discrete_obstacles_height = 0.02 + 0.18*difficulty
+        rough_height = 0.08 * difficulty
+        step_height = 0.10 * difficulty
+        discrete_obstacles_height = 0.15*difficulty
 
         stepping_stones_size = 1.5 * (1.05 - difficulty)
         stone_distance = 0.05 if difficulty==0 else 0.1
@@ -155,7 +161,7 @@ class Terrain:
             if choice<self.proportions[2]: # stairs
                 step_height *= -1
             terrain_utils.pyramid_stairs_terrain(terrain, 
-                                                 step_width=0.4, 
+                                                 step_width=0.3,               # 0.4 
                                                  step_height=step_height, 
                                                  platform_size=self.platform_size,
                                                  terrain_type=self.type)

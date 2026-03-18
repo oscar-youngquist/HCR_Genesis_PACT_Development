@@ -156,6 +156,8 @@ def get_args():
     parser.add_argument('--use_joystick',   action='store_true', default=False, help="use joystick to provide commands")
     parser.add_argument('--joystick_type',  type=str, default='xbox', help="type of joystick: xbox, switch")
     parser.add_argument('--follow_robot',   action='store_true', default=False, help="whether the camera follows the robot during play")
+    parser.add_argument('--record_frames',   action='store_true', default=False, help="whether to record the camera")
+
 
     return parser.parse_args()
 
@@ -316,6 +318,19 @@ class PolicyExporterWaQ(torch.nn.Module):
                               input_names=input_names,
                               output_names=output_names,
                               opset_version=11)
+            
+class PolicyExporterPACT():
+    def __init__(self, actor_critic):
+        self.actor = actor_critic
+
+    def export(self, path, env_cfg, train_cfg=None):
+        os.makedirs(path, exist_ok=True)
+        filename = train_cfg.runner.load_run + "_ite" + str(train_cfg.runner.checkpoint) + ".pt"
+        path = os.path.join(path, filename)
+        self.actor.to('cpu')
+        traced_script_module = torch.jit.script(self.actor)
+        traced_script_module.save(path)
+
 
 class PolicyExporterLSTM(torch.nn.Module):
     def __init__(self, actor_critic):

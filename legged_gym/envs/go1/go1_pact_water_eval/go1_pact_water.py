@@ -17,7 +17,7 @@ from legged_gym.utils.helpers import class_to_dict
 from ...base.legged_robot_config import LeggedRobotCfg
 import torch.nn.functional as F
 
-class Go1PACT(BaseTask):
+class Go1PACTWater(BaseTask):
     def __init__(self, cfg: LeggedRobotCfg, sim_params: dict, sim_device, headless):
         """ Parses the provided config file,
             calls create_sim() (which creates, simulation, terrain and environments),
@@ -68,15 +68,6 @@ class Go1PACT(BaseTask):
         
         return self.obs_buf, self.privileged_obs_buf, self.obs_history, self.explicit_labels_buf, \
             self.rew_buf, self.reset_buf, self.extras, (self.simulator._grfs_buf * self.obs_scales.grf)
-
-
-    def set_camera(self, pos, lookat):
-        """ Set camera position and direction
-        """
-        self.simulator._floating_camera.set_pose(
-            pos=pos,
-            lookat=lookat
-        )
 
     def get_failure_idx(self):
         return self.reset_buf * ~self.time_out_buf
@@ -145,7 +136,7 @@ class Go1PACT(BaseTask):
         
         self.compute_observations()  # in some cases a simulation step might be required to refresh some obs (for example body positions)
         
-        if self.debug_viz:
+        if self.debug:
             self.simulator.draw_debug_vis()
 
     def check_termination(self):
@@ -154,6 +145,10 @@ class Go1PACT(BaseTask):
         fail_buf = torch.any(
             torch.norm(self.simulator.link_contact_forces[:, self.simulator.termination_contact_indices, :], dim=-1)
             > 10.0, dim=1)
+        
+        # if torch.any(fail_buf > 0):
+        #     print("contact termination!")
+        #     print(self.simulator.link_contact_forces[:, self.simulator.termination_contact_indices, :] > 10.0)
         # print(f"contact termination: {fail_buf}")
         # fail_buf |= self.simulator.projected_gravity[:, 2] > self.cfg.rewards.max_projected_gravity
         # print(f"gravity termination: {self.simulator.projected_gravity[:, 2] > self.cfg.rewards.max_projected_gravity}")
@@ -166,15 +161,31 @@ class Go1PACT(BaseTask):
             
             if "roll" in self.cfg.termination.termination_terms:
                 r_term_buff = torch.abs(r) > self.cfg.termination.roll_threshold
+
+                # if torch.any(r_term_buff > 0):
+                #     print("roll termination!")
+
                 self.fail_buf |= r_term_buff
             if "pitch" in self.cfg.termination.termination_terms:
                 p_term_buff = torch.abs(p) > self.cfg.termination.pitch_threshold
+
+                # if torch.any(p_term_buff > 0):
+                #     print("pitch termination!")
+
                 self.fail_buf |= p_term_buff
             if "height_min" in self.cfg.termination.termination_terms:
                 height_term_buff = base_height < self.cfg.termination.height_min
+
+                # if torch.any(height_term_buff > 0):
+                #     print("height_min termination!")
+
                 self.fail_buf |= height_term_buff
             if "height_max" in self.cfg.termination.termination_terms:
                 height_term_buff = base_height > self.cfg.termination.height_max
+
+                # if torch.any(height_term_buff > 0):
+                #     print("height_max termination!")
+
                 self.fail_buf |= height_term_buff
         
         self.fail_buf += fail_buf
@@ -386,7 +397,7 @@ class Go1PACT(BaseTask):
             actions = self.action_queue[torch.arange(self.num_envs), self.action_delay].clone()
         
         # # during training, the camera follows the first environment
-        # if not self.debug_viz and not self.simulator._debug and not self.headless:
+        # if not self.debug and not self.headless:
         #     pos = self.simulator.base_pos[0].cpu().numpy() + np.array(self.cfg.viewer.pos)
         #     lookat = self.simulator.base_pos[0].cpu().numpy() + np.array(self.cfg.viewer.lookat)
         #     self.set_viewer_camera(pos, lookat)
@@ -717,10 +728,10 @@ class Go1PACT(BaseTask):
 
         random_smaple = random.random()
         
-        if random_smaple <= 0.10:  # 20% of the time reduce to lower bound
+        if random_smaple <= 0.25:  # 20% of the time reduce to lower bound
             self.simulator.feedforward_tau_weight[env_ids] = self.tradeoff_lowerbounds[0]
             self.simulator.feedback_tau_weight[env_ids]    = self.tradeoff_lowerbounds[1]
-        elif random_smaple > 0.10 and random_smaple <= 0.35: # ~25% of the time, sample a random value between the lower and current upper bound
+        elif random_smaple > 0.25 and random_smaple <= 0.50: # ~25% of the time, sample a random value between the lower and current upper bound
             # step_ctr * (1.0/num_steps) -> is the per-env upper bound. Multipled by a random float between [0,1)
             random_step_size = self.tradeoff_step_ctr*float(1.0/self.tradeoff_num_steps) * torch.rand((self.num_envs, 1))
 
@@ -729,9 +740,7 @@ class Go1PACT(BaseTask):
 
     def _parse_cfg(self, cfg, sim_device):
         self.dt = self.cfg.control.dt
-        self.debug_viz = self.cfg.env.debug_viz
-
-        print("++ self.debug_viz - ", self.debug_viz)
+        self.debug = self.cfg.env.debug
         
         self.num_exp_labels = self.cfg.env.num_explicit_recon_obs
         self.num_crit_obs_stack = self.cfg.env.num_priv_stack
@@ -998,9 +1007,7 @@ class Go1PACT(BaseTask):
 
     def _reward_torque_limits(self):
         # penalize torques too close to the limit
-        # return torch.sum((torch.abs(self.simulator.torques) - self.simulator.torque_limits*self.cfg.rewards.soft_torque_limit).clip(min=0.), dim=1)
-        return torch.sum((torch.abs(self.simulator._unweighted_torques) - self.simulator.torque_limits*self.cfg.rewards.soft_torque_limit).clip(min=0.), dim=1)
-
+        return torch.sum((torch.abs(self.simulator.torques) - self.simulator.torque_limits*self.cfg.rewards.soft_torque_limit).clip(min=0.), dim=1)
 
     def _reward_tracking_lin_vel(self):
         # Tracking of linear velocity commands (xy axes)
@@ -1130,7 +1137,6 @@ class Go1PACT(BaseTask):
         # Margin gives some freedom to overshoot a little during learning
         excess_margin = 0.04  # [m], tune: 0.03 - 0.06
         excess = torch.relu(feet_z - (z_des + excess_margin))           # (N,4)
-        # excess = F.softplus(feet_z - (z_des + excess_margin))           # (N,4)
         excess_err = torch.square(excess)
 
         # Weight excess penalty less than main tracking term
@@ -1142,41 +1148,19 @@ class Go1PACT(BaseTask):
         )                                                               # (N,)
 
         return torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma)
-    
 
-    def _reward_front_foot_overreach(self):
-        # Assumed order is FR/L, FL/R....
-        front_1 = quat_rotate_inverse(
-            self.simulator.base_quat,
-            self.simulator.feet_pos[:, 0, :] - self.simulator.base_pos
-        )  # (N,3)
+    # def _reward_support_polygon(self):
+    #     feet_xy = self.simulator.feet_pos[:, :, :2]
 
-        front_2 = quat_rotate_inverse(
-            self.simulator.base_quat,
-            self.simulator.feet_pos[:, 1, :] - self.simulator.base_pos
-        )  # (N,3)
+    #     contact = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
 
-        front_x_1 = front_1[:, 0]   # (N,)
-        front_x_2 = front_2[:, 0]   # (N,)
+    #     stance_center = torch.sum(contact.unsqueeze(-1) * feet_xy, dim=1) / (torch.sum(contact, dim=1, keepdim=True) + 1e-6)
 
-        front_x = torch.stack([front_x_1, front_x_2], dim=1)   # (N,2)
+    #     com_xy = self.simulator.base_pos[:, :2]
 
-        
-        overreach = torch.relu(front_x - self.cfg.rewards.overreach_x_max)
-        
-        # stance/contact gating
-        contact = (
-            self.simulator.link_contact_forces[:, self.simulator.feet_indices[:2], 2] > 5.0
-        ).float()
+    #     err = torch.norm(com_xy - stance_center, dim=1)
 
-        penalty = torch.sum(contact * overreach ** 2, dim=1)
-
-        total_mass = self.simulator._robot_mass + torch.clamp(self.simulator._added_base_mass, min=0.0)
-        _scales = (self.simulator._robot_mass / total_mass).squeeze(-1)
-        
-        scales = 1.0 - 0.5 * _scales
-
-        return scales * penalty
+    #     return -err
     
 
     def _reward_support_polygon(self):
@@ -1269,36 +1253,6 @@ class Go1PACT(BaseTask):
 
         # <2 stance feet -> reward stays 0
         return rew
-
-    def _reward_pd_target_torque_limit(self):
-        """
-        Penalize joint position targets that would induce PD torques
-        exceeding tau_max.
-
-        Uses a quadratic hinge outside the admissible target range.
-        """
-
-        tau_max = torch.from_numpy(np.array([20.0, 20.0, 30.0, 20.0, 20.0, 30.0, 20.0, 20.0, 30.0, 20.0, 20.0, 30.0])).float()  # [Nm]
-        tau_max = tau_max.to(self.device)
-
-        q      = self.simulator.dof_pos        # (N, dof)
-        qdot   = self.simulator.dof_vel        # (N, dof)
-        q_des  = self.actions[:, :12] * self.cfg.control.action_scale + self.simulator.default_dof_pos  # (N, dof)
-    
-        Kp = self.simulator._kp_scale * self.simulator._p_gains  # (N, dof)
-        Kd = self.simulator._kd_scale * self.simulator._d_gains  # (N, dof)
-
-        # compute admissible bounds
-        q_lower = (Kd * qdot - tau_max) / Kp + q
-        q_upper = (Kd * qdot + tau_max) / Kp + q
-
-        # hinge penalties
-        over_upper = F.softplus(q_des - q_upper)
-        under_lower = F.softplus(q_lower - q_des)
-
-        penalty = over_upper**2 + under_lower**2
-
-        return torch.sum(penalty, dim=1)
 
     def _reward_foot_landing_vel(self):
         z_vels = self.simulator.feet_vel[:, :, 2]

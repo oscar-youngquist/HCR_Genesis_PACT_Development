@@ -7,6 +7,7 @@ import numpy as np
 import os
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.math_utils import *
+from legged_gym.utils.viz_helpers import _build_surface_frame_from_normal, _create_local_plane_mesh, _create_sample_point_mesh, _create_world_plane_patch_from_frame
 
 import multiprocessing as mp
 import random
@@ -20,7 +21,7 @@ if SIMULATOR == "genesis":
     import genesis as gs
 
 """ ********** Genesis Simulator ********** """
-class GenesisSimulator_PACT(Simulator):
+class GenesisSimulator_PACT_NoPINN(Simulator):
     def __init__(self, cfg, sim_params: dict, device, headless):
         self._sim_params = sim_params
         super().__init__(cfg, sim_params, device, headless)
@@ -28,26 +29,11 @@ class GenesisSimulator_PACT(Simulator):
         self.first_loop_feedback = None
 
     def _create_async_pino_workers(self):
-        wb_correct_pino_2_model_ordering = [0,1,2,3,4,5]
-        wb_correct_pino_2_model_ordering.extend(self.pino_2_model_joint_act_map)
-        
-        # For safeties shake, use only 90% of available CPU's
-        num_cpus = int(mp.cpu_count() * 0.98)
-
-        # Build the class that manages (1) shared input/output memeory and (2) invoking worker processes 
-        self.async_pino_manager = PinocchioAsync(
-            self.pino_model,
-            self._num_envs,
-            self.pino_foot_names,
-            wb_correct_pino_2_model_ordering,
-            self._wb_dim,
-            (12,1),
-            num_cpus
-            )
+        pass
 
     def _shutdown_asynic_pino_workers(self):
         # clear shared memory and persistent CPU workers
-        self.async_pino_manager.shutdown()        
+        pass   
     
     #----- Public methods -----#
     def step(self, actions):
@@ -117,44 +103,6 @@ class GenesisSimulator_PACT(Simulator):
         # All the below is done in the pinocchio indexing scheme [FL, FR, RL, RR]
         # Use the Pinocchio library to calculate the (1) contact forces and (2) whole-body dynamics of the robot for use
         #     in the dynamic consistency reward and PINN loss. All done in WORLD FRAME!
-        
-        #     extract the contact forces in pinocchio order GRF
-        contact_temp = self._link_contact_forces[:, self.pino_feet_indices, :]
-
-        #     push all the CUDA stuff from GPU to CPU for use by the PinocchioAsync class
-        #     The whole-body pose
-        wb_pos_np = torch.concatenate([self._base_pos, self._base_quat, self._dof_pos[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
-        
-        #     The whole-body velocity
-        wb_vel_np = torch.concatenate([self._base_world_lin_vel, self._base_world_ang_vel, self._dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
-        
-        #     The previous whole-body velocity
-        wb_vel_prev_np = torch.concatenate([self._last_base_world_lin_vel, self._last_base_world_ang_vel, self._last_dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
-
-        #     The GRF forces
-        grf_np = contact_temp.reshape(contact_temp.shape[0], 12).unsqueeze(2).cpu().numpy()
-
-        # #     Pass the numpy (cpu) data structures to shared memeory
-        # self.async_pino_manager.shared.q[:]       = wb_pos_np        # num_envs x 19
-        # self.async_pino_manager.shared.qd[:]      = wb_vel_np        # num_envs x 18
-        # self.async_pino_manager.shared.qd_prev[:] = wb_vel_prev_np   # num_envs x 18
-        # self.async_pino_manager.shared.grf[:]     = grf_np           # num_envs x 4 x 3
-        # self.async_pino_manager.shared.dt[0]      = self._control_dt
-
-        # self.async_pino_manager.compute_async()
-        # self.async_pino_manager.wait()            # blocking, wait until all workers are done
-
-        # # now stack the tensor lists to get the necessary state values
-        # self._wb_dynamics_buff[:]        = torch.from_numpy(
-        #     self.async_pino_manager.shared.wb_dynamics).to(self._device) # num_envs x 18
-        # self._contact_forces_buff[:]     = torch.from_numpy(
-        #     self.async_pino_manager.shared.wb_contacts).to(self._device) # num_envs x 18
-        # self._wb_mass_mat_buff[:]        = torch.from_numpy(
-        #     self.async_pino_manager.shared.mass_mat).to(self._device)    # num_envs x 18 x 18
-        # self._wb_bias_vec_buff[:]        = torch.from_numpy(
-        #     self.async_pino_manager.shared.bias).to(self._device)        # num_envs x 18
-        # self._torso_6dof_acceleration[:] = torch.from_numpy(
-        #     self.async_pino_manager.shared.acc6d).to(self._device)       # num_envs x 6
         
         
         # Link contact state
@@ -353,7 +301,11 @@ class GenesisSimulator_PACT(Simulator):
         # draw height points
         if not self._cfg.terrain.measure_heights:
             return
+        
         self._scene.clear_debug_objects()
+        
+        self._draw_swing_foot_surface_debug()
+
         
         # # Height points around feet
         # height_points = torch.zeros(self._num_envs, 9*len(self._feet_indices), 3, device=self._device)
@@ -374,33 +326,113 @@ class GenesisSimulator_PACT(Simulator):
         #     height_points[0, i*9+0, 0] = (px-1).view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+0, 1] = (py-1).view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+0, 2] = heights6.view(self._num_envs, -1)[0, i] * self._cfg.terrain.vertical_scale
+            
         #     height_points[0, i*9+1, 0] = (px-1).view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+1, 1] = py.view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+1, 2] = heights1.view(self._num_envs, -1)[0, i] * self._cfg.terrain.vertical_scale
+            
         #     height_points[0, i*9+2, 0] = px.view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+2, 1] = (py-1).view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+2, 2] = heights3.view(self._num_envs, -1)[0, i] * self._cfg.terrain.vertical_scale
+            
         #     height_points[0, i*9+3, 0] = px.view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+3, 1] = (py+1).view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+3, 2] = heights4.view(self._num_envs, -1)[0, i] * self._cfg.terrain.vertical_scale
+            
         #     height_points[0, i*9+4, 0] = px.view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+4, 1] = py.view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+4, 2] = heights5.view(self._num_envs, -1)[0, i] * self._cfg.terrain.vertical_scale
+            
         #     height_points[0, i*9+5, 0] = (px+1).view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+5, 1] = py.view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+5, 2] = heights2.view(self._num_envs, -1)[0, i] * self._cfg.terrain.vertical_scale
+            
         #     height_points[0, i*9+6, 0] = (px+1).view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+6, 1] = (py+1).view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+6, 2] = heights7.view(self._num_envs, -1)[0, i] * self._cfg.terrain.vertical_scale
+            
         #     height_points[0, i*9+7, 0] = (px-1).view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+7, 1] = (py+1).view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+7, 2] = heights8.view(self._num_envs, -1)[0, i] * self._cfg.terrain.vertical_scale
+            
         #     height_points[0, i*9+8, 0] = (px+1).view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+8, 1] = (py-1).view(self._num_envs, -1)[0, i] * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
         #     height_points[0, i*9+8, 2] = heights9.view(self._num_envs, -1)[0, i] * self._cfg.terrain.vertical_scale
-        
+
         # # print(f"shape of height_points: ", height_points.shape) # (num_envs, num_points, 3)
         # self._scene.draw_debug_spheres(height_points[0, :], radius=0.02, color=(1, 0, 0, 0.7))  # only draw for the first env
+
+
+    def _draw_swing_foot_surface_debug(self):
+        """
+        Draw terrain patch planes, local surface frames, and sampled terrain points
+        under swing feet only for a debug environment.
+        """
+        if not getattr(self._cfg.env, "debug_draw_swing_planes", False):
+            return
+
+        env_id              = self._cfg.env.debug_viz_env
+        plane_size_xy       = self._cfg.env.debug_viz_plane_size
+        plane_color         = self._cfg.env.debug_viz_plane_color
+        frame_axis_length   = self._cfg.env.debug_viz_frame_axis_length
+        frame_origin_size   = self._cfg.env.debug_viz_frame_origin_size
+        frame_axis_radius   = self._cfg.env.debug_viz_frame_axis_radius
+        sample_point_radius = self._cfg.env.debug_viz_sample_point_radius
+        sample_point_color  = self._cfg.env.debug_viz_sample_point_color
+        plane_normal_offset = self._cfg.env.debug_viz_plane_offset
+
+        n_feet = len(self._feet_indices)
+
+        # Replace this with your actual contact signal
+        # Expected shape: (n_feet,), True = contact/stance, False = swing
+        contact = (self._link_contact_forces[:, self._feet_indices, 2] > 5.0).float() # (N,4)
+        contact_mask = contact[env_id]
+
+        # plane_mesh = _create_local_plane_mesh(
+        #     plane_size_xy=plane_size_xy,
+        #     color=plane_color,
+        # )
+        point_mesh = _create_sample_point_mesh(
+            radius=sample_point_radius,
+            color=sample_point_color,
+        )
+
+        for i in range(n_feet):
+            in_contact = bool(contact_mask[i].item())
+            if in_contact:
+                continue
+
+            pts = self._viz_terrain_points_around_feet[env_id, i].detach().cpu().numpy()      # (9, 3)
+            normal = self._viz_feet_normal_vector[env_id, i].detach().cpu().numpy() # (3,)
+
+            # center patch/frame at center sample
+            # center = pts[4].copy()
+            center = pts.mean(axis=0) + normal * plane_normal_offset
+
+            T = _build_surface_frame_from_normal(center, normal)
+
+            plane_mesh = _create_world_plane_patch_from_frame(center, normal, plane_size_xy, plane_color)
+
+            # plane patch
+            self._scene.draw_debug_mesh(
+                mesh=plane_mesh,
+            )
+
+            # local frame: z aligned with terrain normal
+            self._scene.draw_debug_frame(
+                T=T,
+                axis_length=frame_axis_length,
+                origin_size=frame_origin_size,
+                axis_radius=frame_axis_radius,
+            )
+
+            # sampled terrain points
+            for p in pts:
+                self._scene.draw_debug_mesh(
+                    mesh=point_mesh,
+                    pos=p,
+                )
+
 
     def set_viewer_camera(self, eye: np.ndarray, target: np.ndarray):
         self._scene.viewer.set_camera_pose(pos=eye, lookat=target)
@@ -547,7 +579,20 @@ class GenesisSimulator_PACT(Simulator):
 
         self._wb_dim = self._cfg.env.whole_body_dim
         self._grf_dim = self._cfg.env.grf_dim
-    
+
+    # ------------- Callbacks --------------
+    def _setup_camera(self):
+        ''' Set camera position and direction
+        '''
+        print("Adding camera to the scene!")
+        self._floating_camera = self._scene.add_camera(
+            res= (1280, 960),
+            pos=np.array(self._cfg.viewer.pos),
+            lookat=np.array(self._cfg.viewer.lookat),
+            fov=40,
+            GUI=True,
+        )
+
     def _create_sim(self):
         # create scene
         self._scene = gs.Scene(
@@ -577,6 +622,11 @@ class GenesisSimulator_PACT(Simulator):
             ),
             show_viewer=not self._headless,
         )
+
+        # add camera if needed
+        if self._cfg.viewer.add_camera:
+            self._setup_camera()
+
 
         # add terrain
         mesh_type = self._cfg.terrain.mesh_type
@@ -631,7 +681,7 @@ class GenesisSimulator_PACT(Simulator):
                 quat=np.array([1.0, 0.0, 0.0, 0.0]),  # wxyz
                 fixed=self._cfg.asset.fix_base_link,
             ),
-            # visualize_contact=self._debug,
+            visualize_contact=self._debug,
         )
         
         # add camera if needed
@@ -916,6 +966,10 @@ class GenesisSimulator_PACT(Simulator):
                 self._num_envs, len(self._feet_indices) * 3, dtype=torch.float, device=self._device, requires_grad=False)
             self._height_around_feet = torch.zeros(
                 self._num_envs, len(self._feet_indices), 9, dtype=torch.float, device=self._device, requires_grad=False)
+
+        if self._cfg.env.debug_draw_swing_planes:
+            self._viz_feet_normal_vector = torch.zeros(self._num_envs, len(self._feet_indices), 3, device=self._device, dtype=torch.float)
+            self._viz_terrain_points_around_feet = torch.zeros(self._num_envs, len(self._feet_indices), 9, 3, device=self._device, dtype=torch.float)
         
         if self._cfg.asset.obtain_link_contact_states:
             self._link_contact_states = torch.zeros(
@@ -1041,13 +1095,13 @@ class GenesisSimulator_PACT(Simulator):
         """ Finds neighboring points around each foot for terrain height measurement."""
         # Foot positions
         foot_points = self._feet_pos + self._cfg.terrain.border_size
-        foot_points = (foot_points/self._cfg.terrain.horizontal_scale).long()
+        foot_points = torch.round((foot_points/self._cfg.terrain.horizontal_scale)).long()
         # px and py for 4 feet, num_envs*len(feet_indices)
         px = foot_points[:, :, 0].view(-1)
         py = foot_points[:, :, 1].view(-1)
         # clip to the range of height samples
-        px = torch.clip(px, 0, self._height_samples.shape[0]-2)
-        py = torch.clip(py, 0, self._height_samples.shape[1]-2)
+        px = torch.clip(px, 1, self._height_samples.shape[0]-2)
+        py = torch.clip(py, 1, self._height_samples.shape[1]-2)
         # get heights around the feet, 9 points for each foot
         
         # points directy in front/behind/left/right of foot 
@@ -1077,6 +1131,43 @@ class GenesisSimulator_PACT(Simulator):
         # Calculate height around feet
         for i in range(9):
             self._height_around_feet[:, :, i] = eval(f'heights{i+1}').view(self._num_envs, -1)[:] * self._cfg.terrain.vertical_scale
+        
+        ###
+        ##  Calculate similar values but used for normalization, not touching the above right now as current training code depends on it 03/17/2026
+        ###
+        dx = ((heights2 - heights1) * self._cfg.terrain.vertical_scale / (self._cfg.terrain.horizontal_scale * 2)).view(self._num_envs, -1)
+        dy = ((heights4 - heights3) * self._cfg.terrain.vertical_scale / (self._cfg.terrain.horizontal_scale * 2)).view(self._num_envs, -1)
+        for i in range(len(self._feet_indices)):
+            # upward-pointing normal for z = h(x,y)
+            normal_vector = torch.cat((
+                -dx[:, i].unsqueeze(1),
+                -dy[:, i].unsqueeze(1),
+                torch.ones_like(dx[:, i].unsqueeze(1)),
+                ), dim=-1).to(self._device)
+            
+            normal_vector /= torch.norm(normal_vector, dim=-1, keepdim=True).clamp_min(1e-8)
+            
+            self._viz_feet_normal_vector[:, i, :] = normal_vector
+
+        px2 = px.view(self._num_envs, len(self._feet_indices))
+        py2 = py.view(self._num_envs, len(self._feet_indices))
+
+        x_offsets = torch.tensor([-1,  1,  0,  0,  0, -1,  1, -1,  1], device=self._device)
+        y_offsets = torch.tensor([ 0,  0, -1,  1,  0, -1,  1,  1, -1], device=self._device)
+
+        for j in range(9):
+            gx = px2 + x_offsets[j]
+            gy = py2 + y_offsets[j]
+
+            self._viz_terrain_points_around_feet[:, :, j, 0] = (
+                gx * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
+            )
+            self._viz_terrain_points_around_feet[:, :, j, 1] = (
+                gy * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
+            )
+            self._viz_terrain_points_around_feet[:, :, j, 2] = self._height_around_feet[:, :, j]
+
+
 
     def _check_base_pos_out_of_bound(self):
         """ Check if the base position is out of the terrain bounds
@@ -1126,8 +1217,11 @@ class GenesisSimulator_PACT(Simulator):
 
         torques = (self.feedforward_tau_weight) * self.feedforward_torques + (self.feedback_tau_weight)*self.feedback_torques
 
+        self._unweighted_torques = self.feedforward_torques + self.feedback_torques
+
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
-        return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
+        # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
+        return torques
     
 
     def _init_domain_params(self):

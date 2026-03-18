@@ -19,7 +19,7 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 10)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -32,9 +32,9 @@ def override_configs(env_cfg, args):
         env_cfg.terrain.selected = True        
         
         # random uniform terrain
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-                                        #   "min_height" : -0.05, "max_height": 0.05, 
-                                        #   "step":0.005, "downsampled_scale" : 0.2}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+                                          "min_height" : -0.05, "max_height": 0.05, 
+                                          "step":0.005, "downsampled_scale" : 0.2}
         # # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
         #                                   "slope": -0.4, "platform_size": 3.0}
@@ -42,12 +42,12 @@ def override_configs(env_cfg, args):
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
         #                                 "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
         # # discrete obstacles
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
-                                          "max_height": 0.1,
-                                          "min_size": 1.0,
-                                          "max_size": 2.0,
-                                          "num_rects": 20,
-                                          "platform_size": 3.0}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
+        #                                   "max_height": 0.1,
+        #                                   "min_size": 1.0,
+        #                                   "max_size": 2.0,
+        #                                   "num_rects": 20,
+        #                                   "platform_size": 3.0}
         # wave terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.wave_terrain", 
         #                                   "amplitude": 0.2, "num_waves": 2}
@@ -61,14 +61,23 @@ def override_configs(env_cfg, args):
         # pit terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pit_terrain", 
         #                                   "depth": 0.2, "platform_size": 3.0}
+    else:
+        for i in range(2):
+            env_cfg.viewer.pos[i] = env_cfg.viewer.pos[i] - env_cfg.terrain.plane_length / 4
+            env_cfg.viewer.lookat[i] = env_cfg.viewer.lookat[i] - env_cfg.terrain.plane_length / 4    
         
             
     if args.use_joystick:
         env_cfg.commands.heading_command = False
     
-    env_cfg.commands.ranges.lin_vel_x = [-1.0, 1.0]
-    env_cfg.commands.ranges.lin_vel_y = [-1.0, 1.0]
+    # env_cfg.commands.ranges.lin_vel_x = [-1.0, 1.0]
+    # env_cfg.commands.ranges.lin_vel_y = [-1.0, 1.0]
+    # env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
+
+    env_cfg.commands.ranges.lin_vel_x   = [-1.0, 1.0]
+    env_cfg.commands.ranges.lin_vel_y   = [-1.0, 1.0]
     env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
+
     env_cfg.commands.ranges.heading = [0.0, 0.0]
 
     # Turn off/on domain randomization elements
@@ -80,9 +89,13 @@ def override_configs(env_cfg, args):
     env_cfg.domain_rand.randomize_base_mass = True
 
     env_cfg.asset.fix_base_link = False
-    env_cfg.env.debug_viz = True
-    env_cfg.env.debug = True
-    env_cfg.env.debug_draw_terrain_height_points = True
+    # env_cfg.env.debug_viz = False
+    # env_cfg.env.debug = False
+    # env_cfg.env.debug_draw_terrain_height_points = False
+
+    if args.record_frames:
+        print("Adding Camera!")
+        env_cfg.viewer.add_camera = True  # use a extra camera for moving
 
     
 
@@ -110,7 +123,7 @@ def interaction_loop(train_cfg, env, policy, args):
         args: command line arguments
     """
     
-    robot_index = 1 # which robot is used for logging
+    robot_index = 0 # which robot is used for logging
     joint_index = 2 # which joint is used for logging
     stop_state_log = 300 # number of steps before plotting states
     stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards
@@ -135,13 +148,24 @@ def interaction_loop(train_cfg, env, policy, args):
     if args.use_joystick:
         joystick = Joystick(joystick_type=args.joystick_type)
     
-    # env.commands[:, 0] = 0.5
-    # env.commands[:, 1] = 0
-    # env.commands[:, 2] = 0
+    env.commands[:, 0] = 0.5
+    env.commands[:, 1] = 0
+    env.commands[:, 2] = 0
     # env.commands[:, 3] = 0
+
+    print("Max - self.feedforward_tau_weight: ", torch.max(env.simulator.feedforward_tau_weight).item())
+    print("Min - self.feedforward_tau_weight: ", torch.min(env.simulator.feedforward_tau_weight).item())
+    print("Max - self.feedback_tau_weight: ", torch.max(env.simulator.feedback_tau_weight).item())
+    print("Min - self.feedback_tau_weight: ", torch.min(env.simulator.feedback_tau_weight).item())
     
+
+
     # interaction loop
     for i in range(int(1.05*env.max_episode_length)):
+
+        env.commands[:, 0] = 0.5
+        env.commands[:, 1] = 0
+        env.commands[:, 2] = 0
         
         # update commands from joystick
         if args.use_joystick:
@@ -154,7 +178,8 @@ def interaction_loop(train_cfg, env, policy, args):
         if args.follow_robot:
             pos = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.pos, dtype=np.float32)
             lookat = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.lookat, dtype=np.float32)
-            env.set_viewer_camera(pos, lookat)
+            # env.set_viewer_camera(pos, lookat)
+            env.set_camera(pos, lookat)
         
         # Step the environment according to task type
         if "ts" in task_name or "cat" in task_name:
@@ -244,6 +269,9 @@ def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     elif "dreamwaq" in task_name:
         exporter = PolicyExporterWaQ(alg_runner.alg.actor_critic)
         exporter.export(path, env_cfg, args.export_onnx, train_cfg)
+    elif "pact" in task_name:
+        exporter = PolicyExporterPACT(alg_runner.alg.actor_critic)
+        exporter.export(path, env_cfg, train_cfg)
     else:
         exporter = PolicyExporter(alg_runner.alg.actor_critic)
         exporter.export(path, env_cfg, args.export_onnx, train_cfg)
@@ -259,7 +287,7 @@ def play(args):
     Args:
         args (_type_): command line arguments
     """
-    if SIMULATOR == "genesis" or SIMULATOR == "genesis_pact_pos" or SIMULATOR == "genesis_pact":
+    if "genesis" in SIMULATOR:
         gs.init(
             backend=gs.cpu if args.cpu else gs.gpu,
             logging_level='warning',

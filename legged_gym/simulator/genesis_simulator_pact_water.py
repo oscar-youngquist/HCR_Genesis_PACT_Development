@@ -17,7 +17,7 @@ import pinocchio as pn
 from legged_gym.scripts.liquid_payload_configs import *
 
 # Some values that are held constant for the water tank and liquid
-liquid_substeps      = 15
+liquid_substeps      = 5
 liquid_particle_size = 0.01
 
 container_outer_x = 0.20  # X dimension
@@ -459,7 +459,7 @@ class GenesisSimulator_PACT_Water(Simulator):
 
         self.use_liquid = False
         # Added to support liquid payloads
-        if self.cfg.env.use_liquid:
+        if self._cfg.env.use_liquid:
             self.sim_substeps = liquid_substeps
             self.use_liquid = True
 
@@ -540,18 +540,18 @@ class GenesisSimulator_PACT_Water(Simulator):
         # create scene
         # If we are using a liquid, include SPH options
         if self.use_liquid:
-            self.scene = gs.Scene(
+            self._scene = gs.Scene(
                 sim_options=gs.options.SimOptions(
                     dt=self.sim_dt,
                     substeps=self.sim_substeps),
                 viewer_options=gs.options.ViewerOptions(
-                    # max_FPS=int(1 / self.dt * self.cfg.control.decimation),
-                    camera_pos=np.array(self.cfg.viewer.pos),
-                    camera_lookat=np.array(self.cfg.viewer.lookat),
+                    # max_FPS=int(1 / self.dt * self._cfg.control.decimation),
+                    camera_pos=np.array(self._cfg.viewer.pos),
+                    camera_lookat=np.array(self._cfg.viewer.lookat),
                     camera_fov=40,
                 ),
                 vis_options=gs.options.VisOptions(
-                    rendered_envs_idx= self.cfg.viewer.rendered_envs_idx,
+                    rendered_envs_idx= self._cfg.viewer.rendered_envs_idx,
                     # ambient_light=(0.2, 0.2, 0.2),
                     # background_color=(0.93,0.92,0.87)
                     background_color=(0.0,0.0,0.0),
@@ -574,7 +574,7 @@ class GenesisSimulator_PACT_Water(Simulator):
                 sph_options=gs.options.SPHOptions(
                     particle_size = liquid_particle_size,
                 ),
-                show_viewer=not self.headless,
+                show_viewer=not self._headless,
             )
         else:
             self._scene = gs.Scene(
@@ -645,10 +645,10 @@ class GenesisSimulator_PACT_Water(Simulator):
     
     def _build_liquid_payloads(self):
         # pull out the liquid properties we are using
-        self.liquid_properties = get_payload_config(self.cfg.liquid.liquid_type, self.cfg.liquid.liquid_volume, self.cfg.liquid.liquid_tank)
+        self.liquid_properties = get_payload_config(self._cfg.liquid.liquid_type, self._cfg.liquid.liquid_volume, self._cfg.liquid.liquid_tank)
         
-        rob_pos = np.array(self.cfg.init_state.pos)
-        rob_quat = np.array(self.cfg.init_state.rot)
+        rob_pos = np.array(self._cfg.init_state.pos)
+        rob_quat = np.array(self._cfg.init_state.rot)
         
         # this 0.1 is a magic value that is slightly shorter than the actual height of the stl model
         #    effectively "welding" the top of the tank walls and the lid.
@@ -660,7 +660,7 @@ class GenesisSimulator_PACT_Water(Simulator):
             mount_xy_pos = [rob_pos[0] + self.liquid_properties["mount_offset"][0], rob_pos[1] + self.liquid_properties["mount_offset"][1]]
 
         # Add the liquid container
-        self._bucket = self.scene.add_entity(
+        self._bucket = self._scene.add_entity(
             material=gs.materials.Rigid(gravity_compensation=0.0,),
             morph=gs.morphs.Mesh(
                 file="water_tank_proper_units_simple.stl",

@@ -28,6 +28,7 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+import math
 import time
 import os
 from collections import deque
@@ -253,11 +254,45 @@ class OnPolicyRunnerPACT:
             if self.env.simulator.use_domainrand_curriculum:
                 self.env.simulator._step_domian_rand(it)
                         
-            if it > 200 and it < 2000:
-                self.alg.set_entropy_coef(5.e-3)
+            # if it > 2000 and it < 3000:
+            #     self.alg.set_entropy_coef(2.5e-3)
             
-            if it > 2000:
-                self.alg.set_entropy_coef(1.e-3)
+            # if it > 3500:
+            #     self.alg.set_entropy_coef(1.e-3)
+                
+            # if it < 2000:
+            #     entropy_coef = 0.01
+            # elif it < 3000:
+            #     alpha = (it - 2000) / 1000.0
+            #     entropy_coef = 0.01 + alpha * (0.005 - 0.01)
+            #     self.alg.set_entropy_coef(entropy_coef)
+            # elif it < 3500:
+            #     entropy_coef = 0.005
+            #     self.alg.set_entropy_coef(entropy_coef)
+            # else:
+            #     alpha = (it -3500) / 1500.0
+            #     entropy_coef = 0.005 + alpha * (0.001 - 0.005)
+            #     self.alg.set_entropy_coef(entropy_coef)
+
+            if it < 2000:
+                entropy_coef = 0.01
+
+            elif it < 3000:
+                alpha = (it - 2000) / 1000.0
+                entropy_coef = 0.005 + 0.5 * (0.01 - 0.005) * (1 + math.cos(math.pi * alpha))
+
+            elif it < 3500:
+                entropy_coef = 0.005
+
+            elif it < 5000:
+                alpha = (it - 3500) / 1500.0
+                entropy_coef = 0.001 + 0.5 * (0.005 - 0.001) * (1 + math.cos(math.pi * alpha))
+
+            else:
+                entropy_coef = 0.001
+
+            entropy_coef = max(entropy_coef, 0.001)
+            self.alg.set_entropy_coef(entropy_coef)
             
             stop = time.time()
             learn_time = stop - start
