@@ -1,0 +1,432 @@
+from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+
+class A1PACTPosCfg( LeggedRobotCfg ):
+
+    class env( LeggedRobotCfg.env ):
+        num_envs = 4096
+        num_observations = 57
+        num_privileged_obs = 57 + 66 + 2 + 81 # robot_state + privilged info + tradeoff curriculum weights + terrain_heights (81)
+        num_priv_stack = 5
+        num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
+        num_actions = 12
+        env_spacing = 0.5
+        num_obs_hist = 10
+        grf_dim = 12
+        whole_body_dim = 18
+        debug = False # if debugging, visualize contacts,
+        debug_viz = False # draw debug visualizations
+
+
+    class terrain( LeggedRobotCfg.terrain ):
+        # rough terrain only:
+        mesh_type = "heightfield"
+        static_friction = 1.0 # coefficient of static friction of the terrain
+        dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
+        restitution = 0. # coefficient of restitution of the terrain
+        border_size = 20.0 # [m]
+        curriculum = True
+        obtain_terrain_info_around_feet = True
+        measure_heights = True # obtain height measurements
+
+        # positions of the sampling height around the base (relative to the base of the robot)
+        measured_points_x = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4] # 9x9=81
+        measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4]
+
+        selected = False # select a unique terrain type and pass all arguments
+        terrain_kwargs = None # Dict of arguments for selected terrain
+        max_init_terrain_level = 1 # starting curriculum level
+
+        terrain_length = 8.0 # [m] length of each subterrain, X direction
+        terrain_width = 8.0 # [m] width of each subterrain, Y direction
+        platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
+        num_rows = 20  # number of terrain rows (levels), X direction
+        num_cols = 10  # number of terrain cols (types), Y direction
+        num_subterrains = num_rows * num_cols
+        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
+        terrain_proportions = [0.20, 0.10, 0.20, 0.20, 0.20, 0.1]
+        # trimesh only:
+        slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
+
+    class sim:
+        # Common
+        dt = 0.002                 # 500 Hz
+        substeps = 1
+        # For Genesis
+        max_collision_pairs = 100  # More collision pairs will occupy more GPU memory and slow down the simulation
+        IK_max_targets = 2         # Fewer IK targets will lead to fewer memory usage
+
+    class init_state( LeggedRobotCfg.init_state ):
+        leg_joint_limits = [[-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721],
+                            [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721],
+                            [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721],
+                            [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721]]
+        pos = [0.0, 0.0, 0.34] # x,y,z [m]
+        default_joint_angles = { # = target angles [rad] when action = 0.0
+            'FL_hip_joint': 0.0,     # [rad]
+            'RL_hip_joint': 0.0,     # [rad]
+            'FR_hip_joint': 0.0 ,    # [rad]
+            'RR_hip_joint': 0.0,     # [rad]
+
+            'FL_thigh_joint': 0.8,   # [rad]
+            'RL_thigh_joint': 1.0,   # [rad]
+            'FR_thigh_joint': 0.8,   # [rad]
+            'RR_thigh_joint': 1.0,   # [rad]
+
+            'FL_calf_joint': -1.5,   # [rad]
+            'RL_calf_joint': -1.5,   # [rad]
+            'FR_calf_joint': -1.5,   # [rad]
+            'RR_calf_joint': -1.5,   # [rad]
+        }
+
+        default_joint_torques = { # = target joint torques [nM] when action = 0.0
+            'FR_hip_joint':  0.0,   # [nM]
+            'FL_hip_joint':  0.0,   # [nM]
+            'RR_hip_joint':  0.0,   # [nM]
+            'RL_hip_joint':  0.0,   # [nM]
+
+            'FL_thigh_joint': 0.0,  # [nM]
+            'RL_thigh_joint': 0.0,  # [nM]
+            'FR_thigh_joint': 0.0,  # [nM]
+            'RR_thigh_joint': 0.0,  # [nM]
+
+            'FL_calf_joint': 0.0,   # [nM]
+            'RL_calf_joint': 0.0,   # [nM]
+            'FR_calf_joint': 0.0,   # [nM]
+            'RR_calf_joint': 0.0,   # [nM]
+        }
+        # initial state randomization
+        yaw_angle_range = [0., 3.14] # min max [rad]
+
+    class normalization (LeggedRobotCfg.normalization):
+        class obs_scales:
+            lin_vel = 1.0
+            ang_vel = 0.25
+            dof_pos = 1.0
+            dof_vel = 0.05
+            dof_tau = 0.05               # in collected data the magnitude of the DOF's velocity and torques are roughly comparable
+            grf = 0.01
+            height_measurements = 5.0
+        clip_observations = 100.
+        clip_actions = 50.
+
+    class domain_rand(LeggedRobotCfg.domain_rand):
+        use_domainrand_curriculum = True
+        com_rand_z_positive = False
+        num_push_steps = 1000  # number of steps to increase the domain randomization ranges
+        push_warmup = 1000     # number of steps with initial values held constant
+
+        # Randomize Friction
+        randomize_friction = True
+        friction_range = [0.2, 1.8]
+
+        # What changes with finetuning round
+        # Randomized 6DOF torso wrench
+        push_robots = True
+        push_interval_max = 15.0
+        push_interval_min = 0.1
+        max_push_vel_xy = 1.00
+        min_push_vel_xy = 0.75
+
+        max_vertical_push = 0.20
+        min_vertical_push = 0.00
+        vert_interval_max = 10.0
+        vert_interval_min = 0.1
+
+        max_push_torque = 0.50
+        min_push_torque = 0.10
+        wrench_timeout_min = 0.01
+        wrench_timeout_max = 10.0
+
+        # Randomized base mass, applied at COM
+        randomize_base_mass = True
+        min_added_mass_max = 2.0
+        max_added_mass_max = 3.0
+        added_mass_min = -1.0
+
+        # COM displacement crap
+        randomize_com_displacement = True
+        com_displacement_x_min = 0.03
+        com_displacement_x_max = 0.05
+
+        com_displacement_y_min = 0.03
+        com_displacement_y_max = 0.05
+
+        com_displacement_z_positive = False
+        com_displacement_z_min_pos = 0.1
+        com_displacement_z_min = 0.03
+        com_displacement_z_max = 0.05
+
+        # Control delay
+        randomize_ctrl_delay = True
+        ctrl_delay_step_range = [0, 2]
+
+        # PD-gain randomization
+        randomize_pd_gain = True
+        kp_range = [0.8, 1.2]
+        kd_range = [0.8, 1.2]
+
+        # Motor strength randomization
+
+        # Unused more complicated dynamics randomization
+        randomize_joint_armature = False
+        joint_armature_range = [0.015, 0.025]  # [N*m*s/rad]
+        randomize_joint_stiffness = False
+        joint_stiffness_range = [0.01, 0.02]
+        randomize_joint_damping = False
+        joint_damping_range = [0.25, 0.3]
+
+    class noise (LeggedRobotCfg.noise):
+        add_noise = True
+        noise_level = 1.0 # scales other values
+        class noise_scales:
+            dof_pos = 0.0006
+            dof_vel = 0.02
+            dof_tau = 0.5
+            lin_vel = 0.1
+            ang_vel = 0.2
+            gravity = 0.06
+            height_measurements = 0.1
+
+    class viewer:
+        ref_env = 0
+        pos = [2, 2, 2]       # [m]
+        lookat = [0., 0, 1.]  # [m]
+        rendered_envs_idx = [i for i in range(0, 3, 1)]  # number of environments to be rendered
+        rendered_envs_idx.extend([i for i in range(500, 503, 1)])  # number of environments to be rendered
+        rendered_envs_idx.extend([i for i in range(900, 903, 1)])  # number of environments to be rendered
+
+        rendered_envs_idx.extend([i for i in range(1500, 1503, 1)])
+        rendered_envs_idx.extend([i for i in range(3500, 3503, 1)])
+        rendered_envs_idx.extend([i for i in range(4000, 4003, 1)])
+
+        rendered_envs_idx.extend([i for i in range(1700, 1703, 1)])
+        rendered_envs_idx.extend([i for i in range(2200, 2203, 1)])
+        rendered_envs_idx.extend([i for i in range(3900, 3903, 1)])
+        add_camera = False
+
+    class sensor:
+        add_depth = False
+        use_warp = False       # whether to use warp-based model
+        class depth_camera_config:
+            num_sensors = 1
+            num_history = 1        # history frames for depth images
+
+            near_clip = 0.1
+            far_clip = 10.0
+            near_plane = 0.1
+            far_plane = 10.0
+            resolution = (80, 60)
+            horizontal_fov_deg = 75
+            pos =   (0.3, 0.0, 0.1)
+            euler = (0.0, 0.0, 0.0)
+            decimation = 5
+            # Warp only
+            calculate_depth = True
+            segmentation_camera = False
+            return_pointcloud = False
+            pointcloud_in_world_frame = False
+
+    class asset( LeggedRobotCfg.asset ):
+        name = "a1"
+        file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/a1/urdf/a1.urdf'
+        dof_names = [        # specify the sequence of actions
+            'FR_hip_joint',
+            'FR_thigh_joint',
+            'FR_calf_joint',
+            'FL_hip_joint',
+            'FL_thigh_joint',
+            'FL_calf_joint',
+            'RR_hip_joint',
+            'RR_thigh_joint',
+            'RR_calf_joint',
+            'RL_hip_joint',
+            'RL_thigh_joint',
+            'RL_calf_joint',]
+        foot_name = "foot"
+        penalize_contacts_on = ["hip", "thigh", "calf"]
+        terminate_after_contacts_on = ["base","trunk","hip"]
+        links_to_keep = ['FR_foot', 'FL_foot', 'RR_foot', 'RL_foot']
+        self_collisions = True
+        obtain_link_contact_states = True
+        contact_state_link_names = ["thigh", "calf", "foot", "base", "hip"]
+
+    class control( LeggedRobotCfg.control ):
+        # PD Drive parameters:
+        stiffness = {'joint': 50.0}   # [N*m/rad]
+        damping   = {'joint': 1.00}     # [N*m*s/rad]
+
+        action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
+        torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
+
+
+        dt =  0.01     # control frequency 100Hz
+        decimation = 5  # decimation: Number of control action updates @ sim DT per policy DT
+
+        tradeoff_init_weights  = [1.00, 1.00]
+        tradeoff_final_weights = [1.00, 1.00]
+        tradeoff_steps = 10
+        tradeoff_threshold = 0.60
+        use_tradeoff_curriculum = False
+
+    class termination:
+        termination_terms = ["roll", "pitch", "height_min", "height_max"]
+        roll_threshold    = 1.5  # [rad] ~ 40 degrees
+        pitch_threshold   = 1.5  # [rad] ~ 40 degrees
+        height_min = 0.20       # [m]
+        height_max = 1.50       # [m]
+
+    class rewards( LeggedRobotCfg.rewards ):
+        soft_dof_pos_limit = 0.90
+        soft_torque_limit = 0.90
+        base_height_target = 0.30
+        tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
+
+        foot_clearance_target = 0.075 # desired foot clearance above ground [m]
+        foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
+
+        foot_clearance_tracking_sigma = 0.01
+        only_positive_rewards = True
+
+        use_reward_curriculum = False
+
+        max_contact_force = 200.0
+        class scales( LeggedRobotCfg.rewards.scales ):
+            # General
+            termination           = 0.0
+            collision             = -1.0
+            dof_pos_limits        = -1.0
+            dof_close_to_default  = -0.1
+            torque_limits         = -0.01
+
+            alive_bonus           = 0.10
+
+            stand_still_contact = -0.1
+            dof_pos_stand_still = -0.1
+
+            # command tracking
+            tracking_lin_vel  = 1.0
+            tracking_ang_vel  = 0.5
+
+            dof_tracking      = 0.05
+            aligned_torques   = 0.0
+
+            sparse_contacts   = 0.01
+
+            # smoothness and stability
+            lin_vel_z        = -2.0
+            base_height      = -1.0
+            ang_vel_xy       = -0.05
+            orientation      = -0.2
+            dof_acc          = -2.0e-7
+            joint_power      = -2.0e-5
+            joint_power_dist = -1.0e-5
+            torques          = 0.0
+
+            # Zero out some values that are used in the individual reward classes below
+            action_rate       = 0.0
+            action_smoothness = 0.0
+
+            pos_action_rate       = -0.01
+            pos_action_smoothness = -0.01
+
+            tau_action_rate       = 0.0
+            tau_action_smoothness = 0.0
+
+            feedforward_torques   = 0.0
+            feedback_torques      = 0.0
+            dof_act_limits        = 0.0
+
+            # gait
+            feet_air_time    = 0.75            # tracking reward for long steps
+            foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
+            hip_pos = -0.1
+
+            foot_slip        = -0.1           # penalty for feet slipping
+            feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
+            feet_spread_pairwise_axes = 0.0
+
+        class reward_curriculum():
+            curr_reward_keys = ["ang_vel_xy", "base_height",
+                                "lin_vel_z", "orientation",
+                                "feedback_torques"]
+
+            curr_reward_bounds = {"feedback_torques":[-2.0e-5, -2.0e-4],
+                                  "ang_vel_xy":[-0.05, -0.1],
+                                  "base_height":[-1.0,-1.2],
+                                  "lin_vel_z":[-2.0,-2.2],
+                                  "orientation":[-0.2,-0.4],
+                                 }
+
+            curr_steps = 1505
+            warmup_steps = 1500
+
+    class commands(LeggedRobotCfg.commands):
+        curriculum = True
+        max_curriculum = 1.
+        num_commands = 3
+        resampling_time = 5.
+        heading_command = False
+        class ranges(LeggedRobotCfg.commands.ranges):
+            lin_vel_x = [-0.5, 0.5]
+            lin_vel_y = [-1.0, 1.0]
+            ang_vel_yaw = [-1.0, 1.0]
+            heading = [-3.14, 3.14]
+
+class A1PACTPosCfgPPO( LeggedRobotCfgPPO ):
+    seed = 1
+    runner_class_name = "PACTPosRunner"
+
+    class policy( LeggedRobotCfgPPO.policy ):
+        activation = 'tanh'
+        init_noise_std = 1.00
+
+        # Context encoder
+        cenet_enc_layers=[256,128]
+        cenet_enc_latent_dim = 16
+        cenet_velo_dim = 3 + 4 + 4      # torso velocity, foot-contact indicator, foot-height
+
+        # Context Decoder
+        cenet_dec_input_dim = 27
+        cenet_dec_layers = [128,256]
+        cenet_dec_out_dim = 57 + 12      # next obs (57) + grf_dim (12)
+
+        # Actor/critic
+        actor_layers = [512,256,128]
+        critic_layers = [1024,256,128,64]
+
+        # Shared
+        dropout = 0.1
+
+        pinn_loss_weight = 0.01
+        pinn_warmup = 10000
+        pinn_init_steps = 0
+
+    class algorithm( LeggedRobotCfgPPO.algorithm ):
+        entropy_coef = 0.01
+        learning_rate = 1.0e-3
+        value_loss_coef = 1.0
+        use_clipped_value_loss = True
+        clip_param = 0.2
+        num_learning_epochs = 5
+        num_mini_batches = 4
+        schedule = 'adaptive'
+        gamma = 0.99
+        lam   = 0.95
+        desired_kl = 0.01
+        max_grad_norm = 1.0
+
+    class runner( LeggedRobotCfgPPO.runner ):
+        policy_class_name = 'ActorCritic_PACT_Pos'
+        algorithm_class_name = 'PPO_PACT_Pos'
+        num_steps_per_env = 48
+        max_iterations = 2000
+        grf_dim = 12
+
+        run_name = 'pact_pos_100hz'
+        experiment_name = 'a1_pact_pos_rough'
+        save_interval = 100
+
+        load_run = ""
+        checkpoint = -1
+        resume = False
+        exp_data_path = ""
