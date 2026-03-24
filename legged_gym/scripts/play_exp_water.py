@@ -102,7 +102,7 @@ def override_configs(env_cfg, train_cfg, args):
     env_cfg.liquid.liquid_type = args.liquid_type
     env_cfg.liquid.liquid_volume = args.liquid_volume  # liters
     env_cfg.liquid.liquid_tank = args.liquid_tank  # liters
-    train_cfg.runner.exp_data_path = f"exp_data/strict_overreach_04/plane_water_test_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}.csv"
+    train_cfg.runner.exp_data_path = f"exp_data/tradeoff_norand/plane_water_test_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}.csv"
     env_cfg.env.use_liquid = args.use_liquid
     
 
@@ -314,8 +314,6 @@ def play(args):
     
     
 if __name__ == '__main__':
-    args = get_args()
-
     parser = argparse.ArgumentParser()
     parser.add_argument('--task',           type=str, default='go2')
     parser.add_argument('--headless',       action='store_true', default=False)  # enable visualization by default
@@ -327,7 +325,7 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--device',   type=str, default='cuda')
 
     parser.add_argument('--debug',          action='store_true', default=False)
-    parser.add_argument('--ckpt',           type=int, default=1000)
+    parser.add_argument('--ckpt',           type=int, default=-1)
     
     parser.add_argument('--sync_wandb',     action='store_true', default=False, help="synchronize training log with wandb")
     parser.add_argument('--export_onnx',    action='store_true', default=False, help="export policy as onnx (besides jit)")

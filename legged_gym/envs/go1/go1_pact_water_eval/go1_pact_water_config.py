@@ -416,7 +416,18 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         whole_body_dim = 18
         debug = False # if debugging, visualize contacts, 
         debug_viz = False # draw debug visualizations
-
+        
+        # stuff for drawing the surface normal visulations
+        debug_draw_swing_planes = False
+        debug_viz_env                 = 0
+        debug_viz_plane_size          = (0.16, 0.16)
+        debug_viz_plane_color         = (0.2, 0.7, 1.0, 0.35)
+        debug_viz_frame_axis_length   = 0.05
+        debug_viz_frame_origin_size   = 0.008
+        debug_viz_frame_axis_radius   = 0.003
+        debug_viz_sample_point_radius = 0.01
+        debug_viz_sample_point_color  = (1.0, 0.0, 0.0, 1.0)
+        debug_viz_plane_offset        = 0.01
     class liquid():
         liquid_type = "water"
         liquid_volume = 12.0  # liters
@@ -479,7 +490,7 @@ class GO1PACTWaterCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Mar18_01-09-31_pact_100hz_entropydrop_stricter"
-        checkpoint = 1500
+        load_run = "Mar19_11-42-58_pact_100hz_trade_no_rand"
+        checkpoint = -1
         resume = False
         exp_data_path = "exp_data/quick_test_02/strict_overeach_model_plane_12L_water.csv"

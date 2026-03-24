@@ -14,10 +14,10 @@ class GO1PACTCfg( LeggedRobotCfg ):
         grf_dim = 12
         whole_body_dim = 18
         debug = False       # if debugging, visualize contacts, 
-        debug_viz = True    # draw debug visualizations
+        debug_viz = False    # draw debug visualizations
         
         # stuff for drawing the surface normal visulations
-        debug_draw_swing_planes = True
+        debug_draw_swing_planes = False
         debug_viz_env                 = 0
         debug_viz_plane_size          = (0.16, 0.16)
         debug_viz_plane_color         = (0.2, 0.7, 1.0, 0.35)
@@ -209,11 +209,11 @@ class GO1PACTCfg( LeggedRobotCfg ):
         add_noise = True
         noise_level = 1.0 # scales other values
         class noise_scales:
-            dof_pos = 0.0006
-            dof_vel = 0.02
+            dof_pos = 0.01
+            dof_vel = 0.5
             dof_tau = 0.5
             lin_vel = 0.1
-            ang_vel = 0.2
+            ang_vel = 0.5
             gravity = 0.06
             height_measurements = 0.1
 
@@ -278,19 +278,23 @@ class GO1PACTCfg( LeggedRobotCfg ):
             'RL_thigh_joint',
             'RL_calf_joint',]
         foot_name = "foot"
+        dof_armature = [0.01] * 12
+        
         penalize_contacts_on = ["hip", "thigh", "calf"]
         terminate_after_contacts_on = ["base","trunk","hip"]
         links_to_keep = ['FR_foot', 'FL_foot', 'RR_foot', 'RL_foot']
+        
         self_collisions = True
         obtain_link_contact_states = True
+        
         contact_state_link_names = ["thigh", "calf", "foot", "base", "hip"]
   
     class control( LeggedRobotCfg.control ):
         # PD Drive parameters:
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
-        stiffness = {'joint': 40.0}   # [N*m/rad]
-        damping   = {'joint': 0.80}     # [N*m*s/rad]
+        stiffness = {'joint': 50.0}   # [N*m/rad]
+        damping   = {'joint': 4.00}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
@@ -300,12 +304,12 @@ class GO1PACTCfg( LeggedRobotCfg ):
         decimation = 5  # decimation: Number of control action updates @ sim DT per policy DT
 
         # Assumed order - tau_ff, tau_fb
-        tradeoff_init_weights  = [0.20, 1.40]
+        tradeoff_init_weights  = [0.20, 1.16]
         # tradeoff_init_weights  = [1.00, 1.00]
         tradeoff_final_weights = [1.00, 1.00]
         tradeoff_steps = 4
         tradeoff_threshold = 0.40
-        use_tradeoff_curriculum = False
+        use_tradeoff_curriculum = True
 
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
@@ -362,7 +366,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # smoothness and stability
             lin_vel_z        = -2.0
             base_height      = -2.0
-            ang_vel_xy       = -0.2
+            ang_vel_xy       = -1.0
             orientation      = -10.0
             dof_acc          = -2.5e-7
             joint_power      = -2.e-5
@@ -376,8 +380,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
             pos_action_rate       = -0.01
             pos_action_smoothness = -0.01
 
-            tau_action_rate       = -0.02
-            tau_action_smoothness = -0.02
+            tau_action_rate       = -0.05
+            tau_action_smoothness = -0.05
 
             # feedforward_torques   = -2.5e-5
             # feedback_torques      = -2.0e-5
@@ -489,12 +493,12 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_entropydrop_stricter'
+        run_name = 'pact_100hz_large_damp'
         experiment_name = 'go1_pact_rough'
         save_interval = 100
         
         
-        load_run = "Mar16_12-13-57_pact_100hz_entropydrop_stricter"
+        load_run = "Mar23_16-02-32_pact_100hz_trade_no_rand"
         checkpoint = -1
         resume = False
-        exp_data_path = "exp_data/quick_test/surface_plane_render_test.csv"
+        exp_data_path = "exp_data/debugging_deployment/genesis_standing_log.csv"

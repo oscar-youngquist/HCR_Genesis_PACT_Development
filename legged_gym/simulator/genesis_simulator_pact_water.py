@@ -1233,10 +1233,13 @@ class GenesisSimulator_PACT_Water(Simulator):
         # Compute tradeoff curriculum weighted coupled torque output
         self.feedforward_torques = tau_actions * self._cfg.control.torque_scale
 
+        self._unweighted_torques = self.feedforward_torques + self.feedback_torques
+
         torques = (self.feedforward_tau_weight) * self.feedforward_torques + (self.feedback_tau_weight)*self.feedback_torques
 
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
-        return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
+        # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
+        return torques
     
 
     def _init_domain_params(self):

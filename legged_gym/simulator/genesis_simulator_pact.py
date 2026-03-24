@@ -658,6 +658,8 @@ class GenesisSimulator_PACT(Simulator):
         # name to indices
         self._dof_indices = [self._robot.get_joint(
             name).dof_start for name in self._cfg.asset.dof_names]
+        
+        print(f"motor dof indices: {self._cfg.asset.dof_names}")
         print(f"motor dof indices: {self._dof_indices}")
         
         # find link indices, termination links, penalized links, and feet

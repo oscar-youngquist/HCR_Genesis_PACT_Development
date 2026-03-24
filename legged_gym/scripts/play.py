@@ -127,7 +127,7 @@ def interaction_loop(env, policy, args):
     # env.commands[:, 3] = 0
     
     # interaction loop
-    for i in range(int(1.05*env.max_episode_length)):
+    for i in range(int(10.00*env.max_episode_length)):
         
         # update commands from joystick
         if args.use_joystick:

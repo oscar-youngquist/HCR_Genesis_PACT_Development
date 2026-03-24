@@ -1132,40 +1132,41 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         for i in range(9):
             self._height_around_feet[:, :, i] = eval(f'heights{i+1}').view(self._num_envs, -1)[:] * self._cfg.terrain.vertical_scale
         
-        ###
-        ##  Calculate similar values but used for normalization, not touching the above right now as current training code depends on it 03/17/2026
-        ###
-        dx = ((heights2 - heights1) * self._cfg.terrain.vertical_scale / (self._cfg.terrain.horizontal_scale * 2)).view(self._num_envs, -1)
-        dy = ((heights4 - heights3) * self._cfg.terrain.vertical_scale / (self._cfg.terrain.horizontal_scale * 2)).view(self._num_envs, -1)
-        for i in range(len(self._feet_indices)):
-            # upward-pointing normal for z = h(x,y)
-            normal_vector = torch.cat((
-                -dx[:, i].unsqueeze(1),
-                -dy[:, i].unsqueeze(1),
-                torch.ones_like(dx[:, i].unsqueeze(1)),
-                ), dim=-1).to(self._device)
-            
-            normal_vector /= torch.norm(normal_vector, dim=-1, keepdim=True).clamp_min(1e-8)
-            
-            self._viz_feet_normal_vector[:, i, :] = normal_vector
+        if self._cfg.env.debug_draw_swing_planes:
+            ###
+            ##  Calculate similar values but used for normalization, not touching the above right now as current training code depends on it 03/17/2026
+            ###
+            dx = ((heights2 - heights1) * self._cfg.terrain.vertical_scale / (self._cfg.terrain.horizontal_scale * 2)).view(self._num_envs, -1)
+            dy = ((heights4 - heights3) * self._cfg.terrain.vertical_scale / (self._cfg.terrain.horizontal_scale * 2)).view(self._num_envs, -1)
+            for i in range(len(self._feet_indices)):
+                # upward-pointing normal for z = h(x,y)
+                normal_vector = torch.cat((
+                    -dx[:, i].unsqueeze(1),
+                    -dy[:, i].unsqueeze(1),
+                    torch.ones_like(dx[:, i].unsqueeze(1)),
+                    ), dim=-1).to(self._device)
+                
+                normal_vector /= torch.norm(normal_vector, dim=-1, keepdim=True).clamp_min(1e-8)
+                
+                self._viz_feet_normal_vector[:, i, :] = normal_vector
 
-        px2 = px.view(self._num_envs, len(self._feet_indices))
-        py2 = py.view(self._num_envs, len(self._feet_indices))
+            px2 = px.view(self._num_envs, len(self._feet_indices))
+            py2 = py.view(self._num_envs, len(self._feet_indices))
 
-        x_offsets = torch.tensor([-1,  1,  0,  0,  0, -1,  1, -1,  1], device=self._device)
-        y_offsets = torch.tensor([ 0,  0, -1,  1,  0, -1,  1,  1, -1], device=self._device)
+            x_offsets = torch.tensor([-1,  1,  0,  0,  0, -1,  1, -1,  1], device=self._device)
+            y_offsets = torch.tensor([ 0,  0, -1,  1,  0, -1,  1,  1, -1], device=self._device)
 
-        for j in range(9):
-            gx = px2 + x_offsets[j]
-            gy = py2 + y_offsets[j]
+            for j in range(9):
+                gx = px2 + x_offsets[j]
+                gy = py2 + y_offsets[j]
 
-            self._viz_terrain_points_around_feet[:, :, j, 0] = (
-                gx * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
-            )
-            self._viz_terrain_points_around_feet[:, :, j, 1] = (
-                gy * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
-            )
-            self._viz_terrain_points_around_feet[:, :, j, 2] = self._height_around_feet[:, :, j]
+                self._viz_terrain_points_around_feet[:, :, j, 0] = (
+                    gx * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
+                )
+                self._viz_terrain_points_around_feet[:, :, j, 1] = (
+                    gy * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
+                )
+                self._viz_terrain_points_around_feet[:, :, j, 2] = self._height_around_feet[:, :, j]
 
 
 
@@ -1219,6 +1220,10 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
 
         self._unweighted_torques = self.feedforward_torques + self.feedback_torques
 
+        # print(self.feedforward_torques.cpu().numpy() )
+        # print(self.feedback_torques.cpu().numpy() )
+        # print("----------------------------------------\n")
+
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
         # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
         return torques
@@ -1270,8 +1275,9 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
 
     def _randomize_base_mass(self, env_ids=None):
         ''' Randomize base mass'''
-        min_mass, max_mass = self.mass_min, self.mass_max_value
-        # min_mass, max_mass = 10.0, 12.0
+        # min_mass, max_mass = self.mass_min, self.mass_max_value
+        min_mass, max_mass = 10.0, 12.0
+        # min_mass, max_mass = 0.0, 0.0
         added_mass = gs.rand((len(env_ids), 1), dtype=float) * (max_mass - min_mass) + min_mass
         self._added_base_mass[env_ids] = added_mass[:].detach().clone()
         self._robot.set_mass_shift(added_mass, self._base_link_index, env_ids)

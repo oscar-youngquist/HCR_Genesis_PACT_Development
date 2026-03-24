@@ -305,7 +305,7 @@ class Go1PACT(BaseTask):
         # build the explicit labels buffer
         self.explicit_labels_buf = torch.cat((
             self.simulator.base_lin_vel * self.obs_scales.lin_vel,                     # torso linear velocity         3
-            self.simulator.link_contact_states[:,self.simulator.feet_indices], # contact states feet and base  4
+            self.simulator.link_contact_states[:,self.simulator.feet_indices],         # contact states feet and base  4
             torch.clip(self.simulator.feet_pos[:, :, 2] -
             torch.mean(self.simulator.height_around_feet, dim=-1) -
             self.cfg.rewards.foot_height_offset, -1, 1.),                              # feet height                   4
@@ -715,17 +715,17 @@ class Go1PACT(BaseTask):
         self.simulator.feedforward_tau_weight[env_ids]  = self.tradeoff_step_ctr[env_ids] *float(1.0/self.tradeoff_num_steps)*self.bound_diff[0] + self.tradeoff_lowerbounds[0]
         self.simulator.feedback_tau_weight[env_ids]     = self.tradeoff_step_ctr[env_ids] *float(1.0/self.tradeoff_num_steps)*self.bound_diff[1] + self.tradeoff_lowerbounds[1]
 
-        random_smaple = random.random()
+        # random_smaple = random.random()
         
-        if random_smaple <= 0.10:  # 20% of the time reduce to lower bound
-            self.simulator.feedforward_tau_weight[env_ids] = self.tradeoff_lowerbounds[0]
-            self.simulator.feedback_tau_weight[env_ids]    = self.tradeoff_lowerbounds[1]
-        elif random_smaple > 0.10 and random_smaple <= 0.35: # ~25% of the time, sample a random value between the lower and current upper bound
-            # step_ctr * (1.0/num_steps) -> is the per-env upper bound. Multipled by a random float between [0,1)
-            random_step_size = self.tradeoff_step_ctr*float(1.0/self.tradeoff_num_steps) * torch.rand((self.num_envs, 1))
+        # if random_smaple <= 0.10:  # 20% of the time reduce to lower bound
+        #     self.simulator.feedforward_tau_weight[env_ids] = self.tradeoff_lowerbounds[0]
+        #     self.simulator.feedback_tau_weight[env_ids]    = self.tradeoff_lowerbounds[1]
+        # elif random_smaple > 0.10 and random_smaple <= 0.35: # ~25% of the time, sample a random value between the lower and current upper bound
+        #     # step_ctr * (1.0/num_steps) -> is the per-env upper bound. Multipled by a random float between [0,1)
+        #     random_step_size = self.tradeoff_step_ctr*float(1.0/self.tradeoff_num_steps) * torch.rand((self.num_envs, 1))
 
-            self.simulator.feedforward_tau_weight[env_ids] = random_step_size[env_ids]*self.bound_diff[0] + self.tradeoff_lowerbounds[0]
-            self.simulator.feedback_tau_weight[env_ids]    = random_step_size[env_ids]*self.bound_diff[1] + self.tradeoff_lowerbounds[1]
+        #     self.simulator.feedforward_tau_weight[env_ids] = random_step_size[env_ids]*self.bound_diff[0] + self.tradeoff_lowerbounds[0]
+        #     self.simulator.feedback_tau_weight[env_ids]    = random_step_size[env_ids]*self.bound_diff[1] + self.tradeoff_lowerbounds[1]
 
     def _parse_cfg(self, cfg, sim_device):
         self.dt = self.cfg.control.dt

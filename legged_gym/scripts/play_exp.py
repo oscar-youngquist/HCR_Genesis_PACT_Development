@@ -43,7 +43,7 @@ def override_configs(env_cfg, args):
         #                                 "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
         # # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
-        #                                   "max_height": 0.1,
+        #                                   "max_height": 0.06,
         #                                   "min_size": 1.0,
         #                                   "max_size": 2.0,
         #                                   "num_rects": 20,
@@ -81,7 +81,7 @@ def override_configs(env_cfg, args):
     env_cfg.commands.ranges.heading = [0.0, 0.0]
 
     # Turn off/on domain randomization elements
-    env_cfg.noise.add_noise = True
+    env_cfg.noise.add_noise = False
     # Disable some of the domain randomization (our payload will handle that now)
     env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
@@ -128,7 +128,8 @@ def interaction_loop(train_cfg, env, policy, args):
     stop_state_log = 300 # number of steps before plotting states
     stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards
 
-    logger = ExpLogger(train_cfg.runner.exp_data_path)
+    # logger = ExpLogger(train_cfg.runner.exp_data_path)
+    logger = ExpLogger(train_cfg.runner.exp_data_path, ref_key='q_actual', length_limit=100)
 
         
     # Get initial observations according to task type
@@ -148,9 +149,9 @@ def interaction_loop(train_cfg, env, policy, args):
     if args.use_joystick:
         joystick = Joystick(joystick_type=args.joystick_type)
     
-    env.commands[:, 0] = 0.5
-    env.commands[:, 1] = 0
-    env.commands[:, 2] = 0
+    # env.commands[:, 0] = 0.5
+    # env.commands[:, 1] = 0
+    # env.commands[:, 2] = 0
     # env.commands[:, 3] = 0
 
     print("Max - self.feedforward_tau_weight: ", torch.max(env.simulator.feedforward_tau_weight).item())
@@ -158,14 +159,15 @@ def interaction_loop(train_cfg, env, policy, args):
     print("Max - self.feedback_tau_weight: ", torch.max(env.simulator.feedback_tau_weight).item())
     print("Min - self.feedback_tau_weight: ", torch.min(env.simulator.feedback_tau_weight).item())
     
-
+    if args.record_frames:
+        env.simulator._floating_camera.start_recording()
 
     # interaction loop
-    for i in range(int(1.05*env.max_episode_length)):
+    for i in range(int(10.00*env.max_episode_length)):
 
-        env.commands[:, 0] = 0.5
-        env.commands[:, 1] = 0
-        env.commands[:, 2] = 0
+        # env.commands[:, 0] = 0.5
+        # env.commands[:, 1] = 0
+        # env.commands[:, 2] = 0
         
         # update commands from joystick
         if args.use_joystick:
@@ -175,11 +177,13 @@ def interaction_loop(train_cfg, env, policy, args):
             env.commands[:, 2] = -joystick.rx
         
         # set the viewer camera to follow the first environment by default
+        # TODO - fix recording/general camera follow conflict
         if args.follow_robot:
             pos = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.pos, dtype=np.float32)
             lookat = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.lookat, dtype=np.float32)
             # env.set_viewer_camera(pos, lookat)
             env.set_camera(pos, lookat)
+            env.simulator._floating_camera.render()
         
         # Step the environment according to task type
         if "ts" in task_name or "cat" in task_name:
@@ -192,6 +196,8 @@ def interaction_loop(train_cfg, env, policy, args):
             actions = policy(obs_buf, obs_history)
             obs_buf, privileged_obs_buf, obs_history, explicit_labels, next_states, rews, dones, infos = env.step(actions.detach())
         elif "pact" in task_name:
+            # print("obs_buf - ", obs_buf.cpu().numpy())
+            # print("obs_history - ", obs_history.cpu().numpy())
             actions = policy(obs_buf, obs_history)
             obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach())
         else:
@@ -232,21 +238,24 @@ def interaction_loop(train_cfg, env, policy, args):
 
         logger.log_states(
             {
-                'base_cmd':env.commands.detach().cpu().numpy().tolist(),
-                'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
-                'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
-                'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
-                'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
-                'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
-                'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
-                'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
-                'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
-                'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
-                'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
-                'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
-                'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
-                'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
-                'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
+                # 'base_cmd':env.commands.detach().cpu().numpy().tolist(),
+                # 'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
+                # 'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
+                'q_actual':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
+                # 'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
+                # 'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
+                # 'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
+                # 'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
+                # 'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
+                # 'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
+                # 'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
+                'q_desired':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
+                'ff_torque':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
+                'pd_torque':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
+                # 'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist())),
+                'total_torque':(env.simulator.feedforward_torques.detach().cpu().numpy() + env.simulator.first_loop_feedback.detach().cpu().numpy()).tolist(),
+                'obs':obs_buf.detach().cpu().numpy().tolist(),
+                'obs_hist':obs_history.detach().cpu().numpy().tolist(),
             })
 
 def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
@@ -308,6 +317,16 @@ def play(args):
     # export_policy(ppo_runner, path, args, env_cfg, train_cfg)
 
     interaction_loop(train_cfg, env, policy, args)
+
+    if args.record_frames:
+        try:
+            filename_mp4 = f"{train_cfg.runner.experiment_name}_discrete_normal_viz.mp4"
+        except:
+            from datetime import datetime
+            filename_mp4 = f"{datetime.now().timestamp()}"
+        
+        env.simulator._floating_camera.stop_recording(save_to_filename=filename_mp4, fps=30)
+        print("Saved recording to " + filename_mp4)
     
     
 if __name__ == '__main__':
