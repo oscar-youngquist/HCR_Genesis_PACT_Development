@@ -20,7 +20,7 @@ def override_configs(env_cfg, train_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -71,7 +71,7 @@ def override_configs(env_cfg, train_cfg, args):
             env_cfg.viewer.lookat[i] = env_cfg.viewer.lookat[i] - env_cfg.terrain.plane_length / 4    
         
         
-    env_cfg.env.debug = True
+    env_cfg.env.debug = False
     
     if args.use_joystick:
         env_cfg.commands.heading_command = False
@@ -90,8 +90,8 @@ def override_configs(env_cfg, train_cfg, args):
     env_cfg.domain_rand.randomize_base_mass = False
 
     env_cfg.asset.fix_base_link = False
-    env_cfg.env.debug_viz = True
-    env_cfg.env.debug = True
+    env_cfg.env.debug_viz = False
+    env_cfg.env.debug = False
 
     # Liquid Payload override stuff
     args.use_liquid = True
@@ -102,8 +102,12 @@ def override_configs(env_cfg, train_cfg, args):
     env_cfg.liquid.liquid_type = args.liquid_type
     env_cfg.liquid.liquid_volume = args.liquid_volume  # liters
     env_cfg.liquid.liquid_tank = args.liquid_tank  # liters
-    train_cfg.runner.exp_data_path = f"exp_data/tradeoff_norand/plane_water_test_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}.csv"
+    train_cfg.runner.exp_data_path = f"exp_data/spec_strict_model/plane_water_test_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}.csv"
     env_cfg.env.use_liquid = args.use_liquid
+
+    if args.record_frames or args.follow_robot:
+        print("Adding Camera!")
+        env_cfg.viewer.add_camera = True  # use a extra camera for moving
     
 
 def print_debug_info(env, robot_index):
@@ -183,7 +187,9 @@ def interaction_loop(train_cfg, env, policy, args):
         if args.follow_robot:
             pos = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.pos, dtype=np.float32)
             lookat = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.lookat, dtype=np.float32)
-            env.set_viewer_camera(pos, lookat)
+            # env.set_viewer_camera(pos, lookat)
+            env.set_camera(pos, lookat)
+            env.simulator._floating_camera.render()
         
         # Step the environment according to task type
         if "ts" in task_name or "cat" in task_name:
@@ -333,6 +339,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_joystick',   action='store_true', default=False, help="use joystick to provide commands")
     parser.add_argument('--joystick_type',  type=str, default='xbox', help="type of joystick: xbox, switch")
     parser.add_argument('--follow_robot',   action='store_true', default=False, help="whether the camera follows the robot during play")
+    parser.add_argument('--record_frames',   action='store_true', default=False, help="whether to record the camera")
 
     parser.add_argument('--use_liquid',    type=bool, default='True')
     parser.add_argument('--liquid_type',   type=str, default='water', choices=['water', 'oil', 'gas'])

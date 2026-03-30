@@ -81,7 +81,7 @@ def override_configs(env_cfg, args):
     env_cfg.commands.ranges.heading = [0.0, 0.0]
 
     # Turn off/on domain randomization elements
-    env_cfg.noise.add_noise = False
+    env_cfg.noise.add_noise = True
     # Disable some of the domain randomization (our payload will handle that now)
     env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
@@ -93,7 +93,7 @@ def override_configs(env_cfg, args):
     # env_cfg.env.debug = False
     # env_cfg.env.debug_draw_terrain_height_points = False
 
-    if args.record_frames:
+    if args.record_frames or args.follow_robot:
         print("Adding Camera!")
         env_cfg.viewer.add_camera = True  # use a extra camera for moving
 

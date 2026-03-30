@@ -33,6 +33,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch import linalg as LA
+import time
 
 import numpy as np
 import random
@@ -189,34 +190,70 @@ class PPO_PACT_Pos:
     def set_entropy_coef(self, coef=1e-3):
         self.entropy_coef = coef
 
-    def spectral_normalization(self, model):
-        """Applies spectral normalization to linear and attention layers.
-        
-        Normalizes weights such that their spectral norm (2-norm) doesn't exceed
-        the specified bound. Only affects Linear and MultiheadAttention layers.
+    def spectral_normalization(
+        self,
+        model: nn.Module,
+        sigma_max: float = 1.0,
+        n_power_iters: int = 1,
+    ):
+        """
+        Spectral-norm clip all Linear layers except selected output layers.
 
         Args:
-            model: The neural network model to normalize.
-
-        Note:
-            - Operates in-place on the model parameters
-            - Only processes weights (not biases)
-            - Only affects parameters with ndim > 1
+            model: network to normalize in-place
+            sigma_max: maximum allowed spectral norm
+            n_power_iters: number of power iterations for sigma estimate
         """
-        whitelist = (nn.Linear, nn.MultiheadAttention)
 
-        for module in model.modules():
-            if isinstance(module, whitelist):
-                for name, param in module.named_parameters():
-                    if name.endswith("weight") and param.ndim > 1:
-                        with torch.no_grad():
-                            weight = param.data
-                            norm = LA.matrix_norm(weight, ord=2)
-                            
-                            # Normalize if exceeds bound
-                            if norm > 2.0:
-                                param.data = (weight / norm) * 2.0
-    
+        whitelist = (nn.Linear,)
+
+        # lazily create persistent power-iteration vectors
+        if not hasattr(self, "_spec_u"):
+            self._spec_u = {}
+
+        for module_name, module in model.named_modules():
+            if not isinstance(module, whitelist):
+                continue
+
+            # skip known output layers
+            if module_name.endswith("out") or module_name.endswith("mean") or module_name.endswith("var") or "critic" in module_name:
+                continue
+
+            for param_name, param in module.named_parameters(recurse=False):
+                if param_name != "weight" or param.ndim != 2:
+                    continue
+
+                full_name = f"{module_name}.{param_name}" if module_name else param_name
+                W = param.data  # [out_dim, in_dim]
+
+                # initialize persistent u vector once per parameter
+                if full_name not in self._spec_u or self._spec_u[full_name].shape[0] != W.shape[0]:
+                    u = torch.randn(W.shape[0], device=W.device, dtype=W.dtype)
+                    u = u / (u.norm() + 1e-12)
+                    self._spec_u[full_name] = u
+
+                u = self._spec_u[full_name]
+
+                with torch.no_grad():
+                    # power iteration
+                    for _ in range(n_power_iters):
+                        v = W.t().mv(u)
+                        v = v / (v.norm() + 1e-12)
+
+                        u = W.mv(v)
+                        u = u / (u.norm() + 1e-12)
+
+                    # sigma ~= u^T W v
+                    sigma = torch.dot(u, W.mv(v))
+
+                    # save updated u for next call
+                    self._spec_u[full_name] = u
+
+                    # clip only if above threshold
+                    if sigma > sigma_max:
+                        param.data.mul_(sigma_max / (sigma + 1e-12))
+
+
     def compute_returns(self, last_critic_obs):
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)  
@@ -230,6 +267,19 @@ class PPO_PACT_Pos:
         mean_kld_loss = 0
         mean_decoder_loss = 0
         mean_pinn_loss = 0
+
+        timers = {
+            "rl_loss": 0.0,
+            "pc_backward": 0.0,
+            "act_step": 0.0,
+            "vae_loss": 0.0,
+            "enc_step": 0.0,
+            "dec_step": 0.0,
+            "boot_stats": 0.0,
+            "boot_prob": 0.0,
+            "spec_norm" : 0.0}
+
+
 
         all_enc_obs_targets = []
         all_enc_recons     = []
@@ -249,12 +299,17 @@ class PPO_PACT_Pos:
             self.act_optimizer.zero_grad()
             self.enc_optimizer.zero_grad()
 
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
             # Perform RL update
             ppo_loss, surrogate_loss, value_loss, current_actions, tau_clone_loss = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
                                                                                           advantages_batch, target_values_batch, returns_batch,
                                                                                           action_func, fb_func, default_pose, dt, qvel_scale)
+            
+            torch.cuda.synchronize()
+            timers["rl_loss"] += time.perf_counter() - t0
 
             
             # PINN loss calculation
@@ -277,11 +332,24 @@ class PPO_PACT_Pos:
             # else:
             #     self.act_optimizer.pc_backward(ppo_losses)
             
-            self.act_optimizer.pc_backward_pinn(ppo_losses)
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
             
+            self.act_optimizer.pc_backward_pinn(ppo_losses)
+
+            torch.cuda.synchronize()
+            timers["pc_backward"] += time.perf_counter() - t0
+            
+
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.act_optimizer.step()
 
+            torch.cuda.synchronize()
+            timers["act_step"] += time.perf_counter() - t0
+            
             # Perform some logging
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
@@ -298,15 +366,26 @@ class PPO_PACT_Pos:
                 self.actor_critic.train()
                 self.decoder.eval()
 
+                torch.cuda.synchronize()
+                t0 = time.perf_counter()
+
                 # Calculate the DreamWaQ-style VAE update
                 vae_loss, kl_div, recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(obs_hist_batch, grf_target, 
                                                                                                                           obs_target, explicit_labels_batch, terminated_batch)
                 
+                timers["vae_loss"] += time.perf_counter() - t0
+                
+
+                torch.cuda.synchronize()
+                t0 = time.perf_counter()
+
                 # Update paramaters of encoder
                 self.enc_optimizer.zero_grad()
                 vae_loss.backward()
                 nn.utils.clip_grad_norm_(self.actor_critic.context_encoder.parameters(), self.max_grad_norm)
                 self.enc_optimizer.step()
+                
+                timers["enc_step"] += time.perf_counter() - t0
 
                 ###
                 #  Update decoder with frozen encoder
@@ -315,16 +394,27 @@ class PPO_PACT_Pos:
                 self.decoder.train()
                 self.decoder_optimizer.zero_grad()
 
+                torch.cuda.synchronize()
+                t0 = time.perf_counter()
+
                 dec_recon = self.decoder(dec_input)
                 dec_loss = F.mse_loss(dec_recon, decode_targets)
                 dec_loss.backward()
                 nn.utils.clip_grad_norm_(self.decoder.parameters(), self.max_grad_norm)
                 self.decoder_optimizer.step()
 
+                timers["dec_step"] += time.perf_counter() - t0
+
+                torch.cuda.synchronize()
+                t0 = time.perf_counter()
+
                 # Log the decode targets and recons for computing boot-probability
                 with torch.no_grad():
                     all_enc_obs_targets.extend((decode_targets*terminated_batch).detach().cpu().numpy())
                     all_enc_recons.extend((recons*terminated_batch).clone().detach().cpu().numpy())
+
+
+                timers["boot_stats"] += time.perf_counter() - t0
 
                 # Log losses
                 mean_autoenc_loss += vae_loss.item()
@@ -332,6 +422,12 @@ class PPO_PACT_Pos:
                 mean_recon_loss += recon_error.item()
                 mean_kld_loss += kl_div.item()
                 mean_decoder_loss += dec_loss.item()
+
+            # Keeps the interaction of incoming data with layer wieghts below the threashold that 
+            #     saturates the tanh activation function.
+            self.spectral_normalization(self.actor_critic, sigma_max=6.0)
+
+            timers["spec_norm"] += time.perf_counter() - t0
 
         if itr > self.pinn_init:
             self.num_pinn_updates += 1
@@ -347,6 +443,10 @@ class PPO_PACT_Pos:
         mean_vel_loss /= (num_updates * self.num_enc_epochs)
         mean_recon_loss /= (num_updates * self.num_enc_epochs)
 
+
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+
         # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
         mean_pred = np.mean(all_enc_obs_targets, axis=0)
         mean_pred_error = np.mean(np.square(mean_pred - all_enc_obs_targets))
@@ -354,12 +454,23 @@ class PPO_PACT_Pos:
         ratio = mean_pred_error / (actual_pred_error * self.boot_mult)
         pboot = np.tanh(ratio)
 
+        timers["boot_prob"] += time.perf_counter() - t0
+
         # Use the (scaled) ratio of mean-prediction performance to actual prediction performance
         #     to determine if encoder bootstrapping is performed.
         self.use_boot = random.random() < pboot
         print("Use bootstrapped Encoder Dynamics: ", self.use_boot)
 
         self.storage.clear()
+
+
+        # Get the average time for the various tracked timers
+        for key in timers.keys():
+            if "boot_prob" not in key:
+                timers[key] /= num_updates
+
+
+        print("update timers:", {k: round(v, 4) for k, v in timers.items()})
 
         return mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, \
                mean_vel_loss, mean_recon_loss, mean_kld_loss, mean_pinn_loss
@@ -410,6 +521,9 @@ class PPO_PACT_Pos:
         surrogate = -torch.squeeze(advantages_batch) * ratio
         surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
         surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+        # SPO loss
+        # surrogate_loss = -(torch.squeeze(advantages_batch) * ratio - torch.abs(torch.squeeze(advantages_batch)) * torch.pow(ratio - 1.0, 2) / (2.0 * self.clip_param)).mean()
 
         # PPO stuff
         # Value function loss

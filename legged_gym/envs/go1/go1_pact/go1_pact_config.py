@@ -10,7 +10,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 10
+        num_obs_hist = 20
         grf_dim = 12
         whole_body_dim = 18
         debug = False       # if debugging, visualize contacts, 
@@ -193,16 +193,24 @@ class GO1PACTCfg( LeggedRobotCfg ):
         randomize_pd_gain = True
         kp_range = [0.8, 1.2]
         kd_range = [0.8, 1.2]
-
+        
         # Motor strength randomization
+        randomize_motor_strength = True
+        motor_strength_range = [0.8, 1.2]
         
         # Unused more complicated dynamics randomization
-        randomize_joint_armature = False
-        joint_armature_range = [0.015, 0.025]  # [N*m*s/rad]
-        randomize_joint_stiffness = False
-        joint_stiffness_range = [0.01, 0.02]
-        randomize_joint_damping = False
-        joint_damping_range = [0.25, 0.3]
+        randomize_joint_armature = True
+        joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
+        
+        randomize_joint_friction = True
+        joint_friction_range = [0.0, 0.03]
+        
+        randomize_joint_stiffness = True
+        joint_stiffness_range = [0.0, 1.0]
+        
+        randomize_joint_damping = True
+        joint_damping_range = [0.0, 0.5]
+
 
     # Taken from the Go1 config class in - 
     class noise (LeggedRobotCfg.noise):
@@ -294,7 +302,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
         stiffness = {'joint': 50.0}   # [N*m/rad]
-        damping   = {'joint': 4.00}     # [N*m*s/rad]
+        damping   = {'joint': 1.00}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
@@ -309,7 +317,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         tradeoff_final_weights = [1.00, 1.00]
         tradeoff_steps = 4
         tradeoff_threshold = 0.40
-        use_tradeoff_curriculum = True
+        use_tradeoff_curriculum = False
 
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
@@ -366,7 +374,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # smoothness and stability
             lin_vel_z        = -2.0
             base_height      = -2.0
-            ang_vel_xy       = -1.0
+            ang_vel_xy       = -0.2
             orientation      = -10.0
             dof_acc          = -2.5e-7
             joint_power      = -2.e-5
@@ -398,7 +406,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.5            # tracking reward for long steps
             # foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance      
-            foot_clearance_terrain_aware = 0.5  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 1.0  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.1
             
             foot_slip        = -0.1           # penalty for feet slipping
@@ -466,7 +474,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Mar17_13-37-35_pact_pos_100hz_nostairs/model_2500_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Mar26_16-34-03_pact_pos_100hz_nostairs_spec/model_3000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
@@ -493,12 +501,12 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_large_damp'
+        run_name = 'pact_100hz_spec'
         experiment_name = 'go1_pact_rough'
         save_interval = 100
         
         
-        load_run = "Mar23_16-02-32_pact_100hz_trade_no_rand"
+        load_run = "Mar27_12-06-16_pact_100hz_spec"
         checkpoint = -1
         resume = False
-        exp_data_path = "exp_data/debugging_deployment/genesis_standing_log.csv"
+        exp_data_path = "exp_data/debugging_deployment/spec_model_joystick.csv"

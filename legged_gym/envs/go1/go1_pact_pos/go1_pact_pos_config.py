@@ -10,7 +10,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 10
+        num_obs_hist = 20
         grf_dim = 12
         whole_body_dim = 18
         debug = False # if debugging, visualize contacts, 
@@ -182,25 +182,31 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         kd_range = [0.8, 1.2]
 
         # Motor strength randomization
+        randomize_motor_strength = True
+        motor_strength_range = [0.8, 1.2]
         
         # Unused more complicated dynamics randomization
-        randomize_joint_armature = False
-        joint_armature_range = [0.015, 0.025]  # [N*m*s/rad]
-        randomize_joint_stiffness = False
-        joint_stiffness_range = [0.01, 0.02]
-        randomize_joint_damping = False
-        joint_damping_range = [0.25, 0.3]
+        randomize_joint_armature = True
+        joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
+        
+        randomize_joint_friction = True
+        joint_friction_range = [0.0, 0.03]
+        
+        randomize_joint_stiffness = True
+        joint_stiffness_range = [0.0, 1.0]
+        
+        randomize_joint_damping = True
+        joint_damping_range = [0.0, 0.5]
 
-    # Taken from the Go1 config class in - 
     class noise (LeggedRobotCfg.noise):
         add_noise = True
         noise_level = 1.0 # scales other values
         class noise_scales:
-            dof_pos = 0.0006
-            dof_vel = 0.02
+            dof_pos = 0.01
+            dof_vel = 1.5
             dof_tau = 0.5
             lin_vel = 0.1
-            ang_vel = 0.2
+            ang_vel = 0.5
             gravity = 0.06
             height_measurements = 0.1
 
@@ -273,8 +279,8 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         # PD Drive parameters:
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
-        stiffness = {'joint': 60.0}   # [N*m/rad]
-        damping   = {'joint': 1.20}     # [N*m*s/rad]
+        stiffness = {'joint': 50.0}   # [N*m/rad]
+        damping   = {'joint': 1.00}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
@@ -369,7 +375,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.5  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 1.0  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.1
             
             foot_slip        = -0.1           # penalty for feet slipping
@@ -452,12 +458,12 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_pos_100hz_nostairs'
+        run_name = 'pact_pos_100hz_nostairs_spec'
         experiment_name = 'go1_pact_pos_rough'
         save_interval = 100
         
         
-        load_run = "Mar17_13-37-35_pact_pos_100hz_nostairs"
+        load_run = "Mar26_12-12-01_pact_pos_100hz_nostairs"
         checkpoint = -1
         resume = False
         exp_data_path = ""

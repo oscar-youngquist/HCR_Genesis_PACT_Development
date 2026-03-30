@@ -18,7 +18,7 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 32)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -69,6 +69,14 @@ def override_configs(env_cfg, args):
     if args.use_joystick:
         env_cfg.commands.heading_command = False
     
+    # Turn off/on domain randomization elements
+    env_cfg.noise.add_noise = True
+    # Disable some of the domain randomization (our payload will handle that now)
+    env_cfg.domain_rand.randomize_com_displacement = False
+    env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
+    env_cfg.domain_rand.push_robots = False
+    env_cfg.domain_rand.randomize_base_mass = False
+
     env_cfg.commands.ranges.lin_vel_x = [-1.0, 1.0]
     env_cfg.commands.ranges.lin_vel_y = [-1.0, 1.0]
     env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
@@ -99,7 +107,7 @@ def interaction_loop(env, policy, args):
     """
     
     logger = Logger(env.dt)
-    robot_index = 1 # which robot is used for logging
+    robot_index = 0 # which robot is used for logging
     joint_index = 2 # which joint is used for logging
     stop_state_log = 300 # number of steps before plotting states
     stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards

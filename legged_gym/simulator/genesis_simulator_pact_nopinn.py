@@ -130,8 +130,12 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
             self._randomize_joint_friction(env_ids)
         if self._cfg.domain_rand.randomize_joint_damping:
             self._randomize_joint_damping(env_ids)
+        if self._cfg.domain_rand.randomize_joint_stiffness:
+            self._randomize_joint_stiffness(env_ids)
         if self._cfg.domain_rand.randomize_pd_gain:
             self._randomize_pd_gain(env_ids)
+        if self._cfg.domain_rand.randomize_motor_strength:
+            self._randomize_motor_strength(env_ids)
         
         self._last_dof_vel[env_ids] = 0.
         self._last_feet_vel[env_ids] = 0.
@@ -844,9 +848,15 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         # randomize joint damping
         if self._cfg.domain_rand.randomize_joint_damping:
             self._randomize_joint_damping(np.arange(self._num_envs))
+        # randomize joint stiffness
+        if self._cfg.domain_rand.randomize_joint_stiffness:
+            self._randomize_joint_stiffness(np.arange(self._num_envs))
         # randomize pd gain
         if self._cfg.domain_rand.randomize_pd_gain:
             self._randomize_pd_gain(np.arange(self._num_envs))
+        # randomize motor strength factor
+        if self._cfg.domain_rand.randomize_motor_strength:
+            self._randomize_motor_strength(np.arange(self._num_envs))
             
     def _init_buffers(self):
         self.common_step_counter = 0
@@ -1255,10 +1265,16 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         self._joint_damping = torch.zeros(
             self._num_envs, 1, dtype=torch.float, device=self._device, requires_grad=False)
         
+        self._joint_stiffness = torch.zeros(
+            self._num_envs, 1, dtype=torch.float, device=self._device, requires_grad=False)
+        
         self._kp_scale = torch.ones(
             self._num_envs, self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
         
         self._kd_scale = torch.ones(
+            self._num_envs, self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
+        
+        self._motor_strength = torch.ones(
             self._num_envs, self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
 
     def _randomize_friction(self, env_ids=None):
@@ -1324,6 +1340,15 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         friction = friction.unsqueeze(1).repeat(1, self._num_actions)
         self._robot.set_dofs_frictionloss(
             friction, self._dof_indices, envs_idx=env_ids)
+        
+    def _randomize_joint_stiffness(self, env_ids):
+        min_stiffness, max_stiffness = self._cfg.domain_rand.joint_stiffness_range
+        stiffness = torch.rand((len(env_ids),), dtype=torch.float, device=self._device) \
+            * (max_stiffness - min_stiffness) + min_stiffness
+        self._joint_stiffness[env_ids, 0] = stiffness.detach().clone()
+        stiffness = stiffness.unsqueeze(1).repeat(1, self._num_actions)
+        self._robot.set_dofs_stiffness(
+            stiffness, self._dof_indices, envs_idx=env_ids)      
 
     def _randomize_joint_damping(self, env_ids):
         """ Randomize joint damping of the robot
@@ -1335,6 +1360,12 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         damping = damping.unsqueeze(1).repeat(1, self._num_actions)
         self._robot.set_dofs_damping(
             damping, self._dof_indices, envs_idx=env_ids)
+        
+    def _randomize_motor_strength(self, env_ids):
+        min_strength, max_strength = self._cfg.domain_rand.motor_strength_range
+
+        self._motor_strength[env_ids] = torch_rand_float(
+                min_strength, max_strength, (len(env_ids), self._num_actions), device=self._device)
 
     def _randomize_pd_gain(self, env_ids):
         self._kp_scale[env_ids] = torch_rand_float(

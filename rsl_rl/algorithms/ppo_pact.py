@@ -187,33 +187,98 @@ class PPO_PACT:
         self.transition.clear()
         self.actor_critic.reset(dones)
 
-    def spectral_normalization(self, model):
-        """Applies spectral normalization to linear and attention layers.
+    # def spectral_normalization(self, model):
+    #     """Applies spectral normalization to linear and attention layers.
         
-        Normalizes weights such that their spectral norm (2-norm) doesn't exceed
-        the specified bound. Only affects Linear and MultiheadAttention layers.
+    #     Normalizes weights such that their spectral norm (2-norm) doesn't exceed
+    #     the specified bound. Only affects Linear layers.
+
+    #     Args:
+    #         model: The neural network model to normalize.
+
+    #     Note:
+    #         - Operates in-place on the model parameters
+    #         - Only processes weights (not biases)
+    #         - Only affects parameters with ndim > 1
+    #     """
+    #     whitelist = (nn.Linear)
+
+    #     for module in model.modules():
+    #         if isinstance(module, whitelist):
+    #             for name, param in module.named_parameters():
+    #                 print(name)
+    #                 if name.endswith("weight") and param.ndim > 1:
+    #                     with torch.no_grad():
+    #                         weight = param.data
+    #                         norm = LA.matrix_norm(weight, ord=2)
+                            
+    #                         # Normalize if exceeds bound
+    #                         if norm > 2.0:
+    #                             param.data = (weight / norm) * 2.0
+
+
+    def spectral_normalization(
+        self,
+        model: nn.Module,
+        sigma_max: float = 1.0,
+        n_power_iters: int = 1,
+    ):
+        """
+        Spectral-norm clip all Linear layers except selected output layers.
 
         Args:
-            model: The neural network model to normalize.
-
-        Note:
-            - Operates in-place on the model parameters
-            - Only processes weights (not biases)
-            - Only affects parameters with ndim > 1
+            model: network to normalize in-place
+            sigma_max: maximum allowed spectral norm
+            n_power_iters: number of power iterations for sigma estimate
         """
-        whitelist = (nn.Linear, nn.MultiheadAttention)
 
-        for module in model.modules():
-            if isinstance(module, whitelist):
-                for name, param in module.named_parameters():
-                    if name.endswith("weight") and param.ndim > 1:
-                        with torch.no_grad():
-                            weight = param.data
-                            norm = LA.matrix_norm(weight, ord=2)
-                            
-                            # Normalize if exceeds bound
-                            if norm > 2.0:
-                                param.data = (weight / norm) * 2.0
+        whitelist = (nn.Linear,)
+
+        # lazily create persistent power-iteration vectors
+        if not hasattr(self, "_spec_u"):
+            self._spec_u = {}
+
+        for module_name, module in model.named_modules():
+            if not isinstance(module, whitelist):
+                continue
+
+            # skip known output layers
+            if module_name.endswith("out") or module_name.endswith("mean") or module_name.endswith("var") or "critic" in module_name:
+                continue
+
+            for param_name, param in module.named_parameters(recurse=False):
+                if param_name != "weight" or param.ndim != 2:
+                    continue
+
+                full_name = f"{module_name}.{param_name}" if module_name else param_name
+                W = param.data  # [out_dim, in_dim]
+
+                # initialize persistent u vector once per parameter
+                if full_name not in self._spec_u or self._spec_u[full_name].shape[0] != W.shape[0]:
+                    u = torch.randn(W.shape[0], device=W.device, dtype=W.dtype)
+                    u = u / (u.norm() + 1e-12)
+                    self._spec_u[full_name] = u
+
+                u = self._spec_u[full_name]
+
+                with torch.no_grad():
+                    # power iteration
+                    for _ in range(n_power_iters):
+                        v = W.t().mv(u)
+                        v = v / (v.norm() + 1e-12)
+
+                        u = W.mv(v)
+                        u = u / (u.norm() + 1e-12)
+
+                    # sigma ~= u^T W v
+                    sigma = torch.dot(u, W.mv(v))
+
+                    # save updated u for next call
+                    self._spec_u[full_name] = u
+
+                    # clip only if above threshold
+                    if sigma > sigma_max:
+                        param.data.mul_(sigma_max / (sigma + 1e-12))
     
     def compute_returns(self, last_critic_obs):
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
@@ -327,6 +392,10 @@ class PPO_PACT:
                 mean_kld_loss += kl_div.item()
                 mean_decoder_loss += dec_loss.item()
 
+            # Keeps the interaction of incoming data with layer wieghts below the threashold that 
+            #     saturates the tanh activation function.
+            self.spectral_normalization(self.actor_critic, sigma_max=6.0)
+
         if itr > self.pinn_init:
             self.num_pinn_updates += 1
 
@@ -403,6 +472,9 @@ class PPO_PACT:
         surrogate = -torch.squeeze(advantages_batch) * ratio
         surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
         surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+        # SPO loss
+        # surrogate_loss = -(torch.squeeze(advantages_batch) * ratio - torch.abs(torch.squeeze(advantages_batch)) * torch.pow(ratio - 1.0, 2) / (2.0 * self.clip_param)).mean()
 
         # PPO stuff
         # Value function loss

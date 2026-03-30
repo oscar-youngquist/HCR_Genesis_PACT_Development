@@ -168,14 +168,21 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         kd_range = [0.8, 1.2]
 
         # Motor strength randomization
+        randomize_motor_strength = True
+        motor_strength_range = [0.8, 1.2]
         
         # Unused more complicated dynamics randomization
-        randomize_joint_armature = False
-        joint_armature_range = [0.015, 0.025]  # [N*m*s/rad]
-        randomize_joint_stiffness = False
-        joint_stiffness_range = [0.01, 0.02]
-        randomize_joint_damping = False
-        joint_damping_range = [0.25, 0.3]
+        randomize_joint_armature = True
+        joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
+        
+        randomize_joint_friction = True
+        joint_friction_range = [0.0, 0.03]
+        
+        randomize_joint_stiffness = True
+        joint_stiffness_range = [0.0, 1.0]
+        
+        randomize_joint_damping = True
+        joint_damping_range = [0.0, 0.5]
 
     # Taken from the Go1 config class in - 
     class noise (LeggedRobotCfg.noise):
@@ -262,8 +269,8 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         # PD Drive parameters:
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
-        stiffness = {'joint': 60.0}   # [N*m/rad]
-        damping   = {'joint': 1.20}     # [N*m*s/rad]
+        stiffness = {'joint': 50.0}   # [N*m/rad]
+        damping   = {'joint': 1.00}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
@@ -411,7 +418,7 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 10
+        num_obs_hist = 20
         grf_dim = 12
         whole_body_dim = 18
         debug = False # if debugging, visualize contacts, 
@@ -460,7 +467,7 @@ class GO1PACTWaterCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Mar09_19-54-31_pact_pos_100hz_bigger/model_2000_converted.pt"
+        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Mar09_19-54-31_pact_pos_100hz_bigger/model_2000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
@@ -485,12 +492,12 @@ class GO1PACTWaterCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_entropydrop_stricter'
+        run_name = 'pact_100hz_spec'
         experiment_name = 'go1_pact_rough'
         save_interval = 100
         
         
-        load_run = "Mar19_11-42-58_pact_100hz_trade_no_rand"
+        load_run = "Mar27_12-06-16_pact_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/quick_test_02/strict_overeach_model_plane_12L_water.csv"

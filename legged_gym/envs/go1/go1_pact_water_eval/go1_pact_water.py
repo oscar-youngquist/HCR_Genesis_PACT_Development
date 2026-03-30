@@ -341,7 +341,12 @@ class Go1PACTWater(BaseTask):
             self.simulator._rand_wrench_vels,                                # 3
             (self.simulator._kp_scale - self.kp_scale_offset),               # num_actions
             (self.simulator._kd_scale - self.kd_scale_offset),               # num_actions
-            ), dim=-1)                                                       # 35
+            self.simulator._motor_strength,                                  # num_actions
+            self.simulator._joint_armature,                                  # 1
+            self.simulator._joint_friction,                                  # 1
+            self.simulator._joint_damping,                                   # 1
+            self.simulator._joint_stiffness,                                  # 1
+            ), dim=-1)  
 
         critic_obs = torch.cat(
             (
@@ -353,10 +358,10 @@ class Go1PACTWater(BaseTask):
                 # self.simulator.link_contact_states,                       # 17
                 self.simulator.feedforward_tau_weight,                    # 1
                 self.simulator.feedback_tau_weight,                       # 1
-                domain_randomization_info                                 # 35
+                domain_randomization_info                                 # 51
             ),
             dim=-1,
-        )
+        ) # 158
 
         # add hieght measurements to asymmetric critic if approperiate
         if self.cfg.terrain.measure_heights:
@@ -376,6 +381,14 @@ class Go1PACTWater(BaseTask):
         """ Set viewer camera position and direction
         """
         self.simulator.set_viewer_camera(eye=pos, target=lookat)
+
+    def set_camera(self, pos, lookat):
+        """ Set camera position and direction
+        """
+        self.simulator._floating_camera.set_pose(
+            pos=pos,
+            lookat=lookat
+        )
 
     # ------------- Callbacks (Protected Function) --------------
     
