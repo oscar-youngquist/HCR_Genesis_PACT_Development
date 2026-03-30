@@ -1201,12 +1201,17 @@ class GenesisSimulator_PACT_Water(Simulator):
         heights9 = self._height_samples[px+1, py-1]  # [x+0.1, y-0.1]
         
         # Calculate normal vectors around feet
-        dx = ((heights2 - heights1) / (self._cfg.terrain.horizontal_scale * 2)).view(self._num_envs, -1)
-        dy = ((heights4 - heights3) / (self._cfg.terrain.horizontal_scale * 2)).view(self._num_envs, -1)
+        dx = ((heights2 - heights1) * self._cfg.terrain.vertical_scale / (self._cfg.terrain.horizontal_scale * 2)).view(self._num_envs, -1)
+        dy = ((heights4 - heights3) * self._cfg.terrain.vertical_scale / (self._cfg.terrain.horizontal_scale * 2)).view(self._num_envs, -1)
         for i in range(len(self._feet_indices)):
-            normal_vector = torch.cat((dx[:, i].unsqueeze(1), dy[:, i].unsqueeze(1), 
-                -1*torch.ones_like(dx[:, i].unsqueeze(1))), dim=-1).to(self._device)
+            normal_vector = torch.cat((
+                -dx[:, i].unsqueeze(1),
+                -dy[:, i].unsqueeze(1), 
+                torch.ones_like(dx[:, i].unsqueeze(1))), 
+                dim=-1).to(self._device)
+            
             normal_vector /= torch.norm(normal_vector, dim=-1, keepdim=True)
+            
             self._normal_vector_around_feet[:, i*3:i*3+3] = normal_vector[:]
         
         # Calculate height around feet
