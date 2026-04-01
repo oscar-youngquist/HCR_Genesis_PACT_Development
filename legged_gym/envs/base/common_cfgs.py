@@ -82,8 +82,8 @@ class Go2RoughCommonCfg(Go2FlatCommonCfg):
         # rough terrain only:
         obtain_terrain_info_around_feet = True
         measure_heights = True
-        measured_points_x = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4] # 9x9=81
-        measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4]
+        measured_points_x = [-0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] # 11x17 = 187
+        measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
         terrain_length = 8.0
         terrain_width = 8.0
         platform_size = 4.0

@@ -297,10 +297,7 @@ def play(args):
         args (_type_): command line arguments
     """
     if SIMULATOR == "genesis" or SIMULATOR == "genesis_pact_pos" or SIMULATOR == "genesis_pact" or SIMULATOR == "genesis_pact_water":
-        gs.init(
-            backend=gs.cpu if args.cpu else gs.gpu,
-            logging_level='warning',
-        )
+        init_genesis(args, gs)
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     override_configs(env_cfg, train_cfg, args)
 
@@ -328,7 +325,8 @@ if __name__ == '__main__':
     parser.add_argument('--max_iterations', type=int, default=None)
     parser.add_argument('--resume',         type=str, default=None)
     parser.add_argument('-o', '--offline',  action='store_true', default=False)
-    parser.add_argument('-d', '--device',   type=str, default='cuda')
+    parser.add_argument('-d', '--device',   type=str, default='cuda:0')
+    parser.add_argument('--gpu',            type=str, default=None)
 
     parser.add_argument('--debug',          action='store_true', default=False)
     parser.add_argument('--ckpt',           type=int, default=-1)
@@ -347,5 +345,8 @@ if __name__ == '__main__':
     parser.add_argument('--liquid_tank', type=str, default="default", choices=["default", "wide", "tall", "offset"])
 
     args = parser.parse_args()
+    if args.gpu is None:
+        args.gpu = args.device
+    configure_runtime_device(args)
     
     play(args)

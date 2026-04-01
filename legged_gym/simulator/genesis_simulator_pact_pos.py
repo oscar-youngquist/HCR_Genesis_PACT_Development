@@ -417,6 +417,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
             print("COM Delta X Value: ", self.com_delta_x_value)
             print("COM Delta Y Value: ", self.com_delta_y_value)
             print("COM Delta Z Value: ", self.com_delta_z_value)
+            print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
+            print("Joint Damping Bounds: ", self.joint_damping_bound_current)
             print("Torque Limits - ", self.torque_limits[0])
             return
 
@@ -431,6 +433,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
             print("COM Delta X Value: ", self.com_delta_x_value)
             print("COM Delta Y Value: ", self.com_delta_y_value)
             print("COM Delta Z Value: ", self.com_delta_z_value)
+            print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
+            print("Joint Damping Bounds: ", self.joint_damping_bound_current)
             print("Torque Limits - ", self.torque_limits[0])
             return
 
@@ -441,6 +445,9 @@ class GenesisSimulator_PACT_Pos(Simulator):
         self.com_delta_x_value = (adjusted_step / self.num_push_steps) * self.com_delta_x_diff + self.com_delta_x_bounds[0]
         self.com_delta_y_value = (adjusted_step / self.num_push_steps) * self.com_delta_y_diff + self.com_delta_y_bounds[0]
         self.com_delta_z_value = (adjusted_step / self.num_push_steps) * self.com_delta_z_diff + self.com_delta_z_bounds[0]
+        self.joint_stiffness_bound_current = (adjusted_step / self.num_push_steps) * self.joint_stiffness_range + self.joint_stiffness_bounds_start
+        self.joint_damping_bound_current = (adjusted_step / self.num_push_steps) * self.joint_damping_range + self.joint_damping_bounds_start
+
        
         # If we haven't returned already by now, then we are stepping, and so we want to reset the vertical com-shift bounds
         #     if necessary
@@ -457,6 +464,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
         print("COM Delta X Value: ", self.com_delta_x_value)
         print("COM Delta Y Value: ", self.com_delta_y_value)
         print("COM Delta Z Value: ", self.com_delta_z_value)
+        print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
+        print("Joint Damping Bounds: ", self.joint_damping_bound_current)
         print("Torque Limits - ", self.torque_limits[0])
 
     #----- Protected methods -----#
@@ -535,6 +544,16 @@ class GenesisSimulator_PACT_Pos(Simulator):
 
         # This will be reset in the step_domian_rand function
         self.com_delta_z_val_bounds = [-self.com_delta_z_value, self.com_delta_z_value]
+
+        self.joint_stiffness_bounds_start = self._cfg.domain_rand.joint_stiffness_range_start
+        self.joint_stiffness_bounds_end   = self._cfg.domain_rand.joint_stiffness_range_end
+        self.joint_stiffness_range        = np.array(self._cfg.domain_rand.joint_stiffness_range_end) - np.array(self._cfg.domain_rand.joint_stiffness_range_start)
+        self.joint_stiffness_bound_current = self.joint_stiffness_bounds_start
+
+        self.joint_damping_bounds_start = self._cfg.domain_rand.joint_damping_range_start
+        self.joint_damping_bounds_end   = self._cfg.domain_rand.joint_damping_range_end
+        self.joint_damping_range        = np.array(self._cfg.domain_rand.joint_damping_range_end) - np.array(self._cfg.domain_rand.joint_damping_range_start)
+        self.joint_damping_bound_current = self.joint_damping_bounds_start
 
         # Tradeoff curriculum stuff
         self.feedforward_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
@@ -1229,7 +1248,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
             friction, self._dof_indices, envs_idx=env_ids)
         
     def _randomize_joint_stiffness(self, env_ids):
-        min_stiffness, max_stiffness = self._cfg.domain_rand.joint_stiffness_range
+        min_stiffness, max_stiffness = self.joint_stiffness_bound_current
         stiffness = torch.rand((len(env_ids),), dtype=torch.float, device=self._device) \
             * (max_stiffness - min_stiffness) + min_stiffness
         self._joint_stiffness[env_ids, 0] = stiffness.detach().clone()
@@ -1240,7 +1259,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
     def _randomize_joint_damping(self, env_ids):
         """ Randomize joint damping of the robot
         """
-        min_damping, max_damping = self._cfg.domain_rand.joint_damping_range
+        min_damping, max_damping = self.joint_damping_bound_current
         damping = torch.rand((len(env_ids),), dtype=torch.float, device=self._device) \
             * (max_damping - min_damping) + min_damping
         self._joint_damping[env_ids, 0] = damping.detach().clone()

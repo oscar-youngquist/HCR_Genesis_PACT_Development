@@ -338,7 +338,7 @@ class Go1PACTPos(BaseTask):
                 domain_randomization_info                                 # 51
             ),
             dim=-1,
-        ) # 158
+        ) # 141
 
         # add hieght measurements to asymmetric critic if approperiate
         if self.cfg.terrain.measure_heights:

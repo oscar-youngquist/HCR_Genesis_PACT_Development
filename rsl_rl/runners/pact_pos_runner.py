@@ -115,7 +115,7 @@ class OnPolicyRunnerPACTPos:
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         
-        self.alg: PPO_PACT_Pos = alg_class(actor_critic, decoder, 
+        self.alg: PPO_PACT_Pos = alg_class(actor_critic, decoder, self.env.num_privileged_obs,
                                            pinn_lambda=self.policy_cfg["pinn_loss_weight"], 
                                            pinn_warmup=self.policy_cfg["pinn_warmup"], 
                                            pinn_init_steps=self.policy_cfg["pinn_init_steps"],
@@ -125,7 +125,8 @@ class OnPolicyRunnerPACTPos:
         self.save_interval = self.cfg["save_interval"]
 
         # init storage and model
-        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
+        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], \
+                              [self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
                               [self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]], [self.env.wb_dim])
 
         if "pretrained_path" in self.policy_cfg.keys():
@@ -215,7 +216,8 @@ class OnPolicyRunnerPACTPos:
                         obs_hist.to(self.device), exp_labels.to(self.device), rewards.to(self.device), dones.to(self.device), grfs.to(self.device)
 
                     # Log the labels associated with the context decoder as well as the typical stuff
-                    self.alg.process_env_step(rewards, dones, infos, grfs, obs, exp_labels, gt_forces, mass_mats, bias_vecs, torso_acc)
+                    # self.alg.process_env_step(rewards, dones, infos, grfs, obs, exp_labels, gt_forces, mass_mats, bias_vecs, torso_acc)
+                    self.alg.process_env_step(rewards, dones, infos, grfs, critic_obs, exp_labels, gt_forces, mass_mats, bias_vecs, torso_acc)
 
                     if self.log_dir is not None:
                         # Book keeping
@@ -263,12 +265,12 @@ class OnPolicyRunnerPACTPos:
             if it < 1000:
                 entropy_coef = 0.01
             elif it < 1500:
-                alpha = (it - 1000) / 1000.0
+                alpha = (it - 1000) / 500.0
                 entropy_coef = 0.005 + 0.5 * (0.01 - 0.005) * (1 + math.cos(math.pi * alpha))
             elif it < 2000:
                 entropy_coef = 0.005
-            elif it < 3000:
-                alpha = (it - 2000) / 1500.0
+            elif it < 2500:
+                alpha = (it - 2500) / 1000.0
                 entropy_coef = 0.001 + 0.5 * (0.005 - 0.001) * (1 + math.cos(math.pi * alpha))
             else:
                 entropy_coef = 0.001

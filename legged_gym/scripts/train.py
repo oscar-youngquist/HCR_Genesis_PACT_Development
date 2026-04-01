@@ -2,12 +2,12 @@ import os
 
 from legged_gym import *
 from legged_gym.envs import *
-from legged_gym.utils import get_args, task_registry
+from legged_gym.utils import get_args, init_genesis, task_registry
 import shutil
 
 def train(args):
     if "genesis" in SIMULATOR:
-        gs.init(backend=gs.cpu if args.cpu else gs.gpu, logging_level='warning')
+        init_genesis(args, gs)
     # Make environment and algorithm runner
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)

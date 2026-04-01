@@ -9,7 +9,7 @@ from rsl_rl.runners import OnPolicyRunner
 from rsl_rl.utils.runner_registry import runner_registry
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
-from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, get_load_path_ee, set_seed
+from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, get_load_path_ee, set_seed, configure_runtime_device
 
 class TaskRegistry():
     def __init__(self):
@@ -50,6 +50,8 @@ class TaskRegistry():
         # if no args passed get command line arguments
         if args is None:
             args = get_args()
+        else:
+            configure_runtime_device(args)
         # check if there is a registered env with that name
         if name in self.task_classes:
             task_class = self.get_task_class(name)
@@ -62,7 +64,7 @@ class TaskRegistry():
         env_cfg, _ = update_cfg_from_args(env_cfg, None, args)
         set_seed(env_cfg.seed)
         # parse sim params (convert to dict first)
-        sim_device = "cpu" if args.cpu else "cuda:0"
+        sim_device = "cpu" if args.cpu else args.gpu
         # sim_params
         sim_params = class_to_dict(env_cfg.sim)
         env = task_class(   cfg=env_cfg,
@@ -93,6 +95,8 @@ class TaskRegistry():
         # if no args passed get command line arguments
         if args is None:
             args = get_args()
+        else:
+            configure_runtime_device(args)
         # if config files are passed use them, otherwise load from the name
         if train_cfg is None:
             if name is None:
@@ -114,7 +118,7 @@ class TaskRegistry():
             log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
         
         train_cfg_dict = class_to_dict(train_cfg)
-        sim_device = "cpu" if args.cpu else "cuda"
+        sim_device = "cpu" if args.cpu else args.gpu
         # select runner according to runner_class_name
         runner_class = runner_registry.get_runner_class(train_cfg.runner_class_name)
         runner = runner_class(env, train_cfg_dict, log_dir, device=sim_device)

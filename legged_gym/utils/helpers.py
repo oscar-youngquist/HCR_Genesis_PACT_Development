@@ -7,6 +7,79 @@ import argparse
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 
+
+def _normalize_gpu_arg(gpu):
+    gpu = str(gpu).strip().lower()
+    if gpu.isdigit():
+        return f"cuda:{gpu}"
+    if gpu == "cuda":
+        return gpu
+    if gpu.startswith("cuda:"):
+        index = gpu.split(":", 1)[1]
+        if index.isdigit():
+            return f"cuda:{index}"
+    raise ValueError(
+        f"Unsupported GPU specifier '{gpu}'. Use values like 'cuda', 'cuda:0', or '1'."
+    )
+
+
+def configure_runtime_device(args):
+    """Normalize GPU selection and, when needed, mask visibility to the requested physical GPU.
+
+    Genesis and some CUDA codepaths may still resolve work onto the process-local `cuda:0`.
+    When a specific physical GPU is requested, we remap visibility so that local `cuda:0`
+    corresponds to the requested GPU.
+    """
+    if getattr(args, "cpu", False):
+        if hasattr(args, "gpu"):
+            args.gpu = "cpu"
+        if hasattr(args, "device"):
+            args.device = "cpu"
+        if hasattr(args, "requested_gpu"):
+            args.requested_gpu = "cpu"
+        return args
+
+    requested_gpu = getattr(args, "requested_gpu", None)
+    if requested_gpu is None:
+        requested_gpu = getattr(args, "gpu", None)
+    if requested_gpu is None:
+        requested_gpu = getattr(args, "device", "cuda:0")
+
+    requested_gpu = _normalize_gpu_arg(requested_gpu)
+    runtime_gpu = requested_gpu
+
+    if requested_gpu.startswith("cuda:"):
+        physical_index = requested_gpu.split(":", 1)[1]
+        visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if visible_devices:
+            visible_gpu_ids = [gpu_id.strip() for gpu_id in visible_devices.split(",") if gpu_id.strip()]
+            if physical_index not in visible_gpu_ids:
+                raise ValueError(
+                    f"Requested GPU '{requested_gpu}' is not available under "
+                    f"CUDA_VISIBLE_DEVICES={visible_devices}."
+                )
+            runtime_gpu = f"cuda:{visible_gpu_ids.index(physical_index)}"
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = physical_index
+            runtime_gpu = "cuda:0"
+
+    elif requested_gpu == "cuda" and os.environ.get("CUDA_VISIBLE_DEVICES"):
+        runtime_gpu = "cuda:0"
+
+    args.requested_gpu = requested_gpu
+    args.gpu = runtime_gpu
+    if hasattr(args, "device"):
+        args.device = runtime_gpu
+    return args
+
+
+def init_genesis(args, gs):
+    """Initialize Genesis after device selection has been normalized."""
+    configure_runtime_device(args)
+    gs.init(backend=gs.cpu if args.cpu else gs.gpu, logging_level="warning")
+    if not args.cpu and args.gpu.startswith("cuda"):
+        torch.cuda.set_device(torch.device(args.gpu))
+
 def class_to_dict(obj) -> dict:
     if not hasattr(obj,"__dict__"):
         return obj
@@ -145,6 +218,7 @@ def get_args():
     parser.add_argument('--task',           type=str, default='go2', help="task name")
     parser.add_argument('--headless',       action='store_true', default=False, help="enable visualization by default")
     parser.add_argument('--cpu',            action='store_true', default=False, help="use CPU instead of CUDA")
+    parser.add_argument('--gpu',            type=str, default='cuda:0', help="which GPU to use (default: cuda:0)")
     parser.add_argument('--num_envs',       type=int, default=None, help="number of parallel environments")
     parser.add_argument('--max_iterations', type=int, default=None, help="max number of training iterations")
     parser.add_argument('--resume',         action='store_true', default=False, help="resume training from specified checkpoint")
@@ -159,7 +233,7 @@ def get_args():
     parser.add_argument('--record_frames',   action='store_true', default=False, help="whether to record the camera")
 
 
-    return parser.parse_args()
+    return configure_runtime_device(parser.parse_args())
 
 # def export_policy_as_jit(actor_critic, path, prefix=None):
 #     if hasattr(actor_critic, 'memory_a'):

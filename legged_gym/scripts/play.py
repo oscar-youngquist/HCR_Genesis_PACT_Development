@@ -219,6 +219,9 @@ def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     elif "dreamwaq" in task_name:
         exporter = PolicyExporterWaQ(alg_runner.alg.actor_critic)
         exporter.export(path, env_cfg, args.export_onnx, train_cfg)
+    elif "pact" in task_name:
+        exporter = PolicyExporterPACT(alg_runner.alg.actor_critic)
+        exporter.export(path, env_cfg, train_cfg)
     else:
         exporter = PolicyExporter(alg_runner.alg.actor_critic)
         exporter.export(path, env_cfg, args.export_onnx, train_cfg)
@@ -235,10 +238,7 @@ def play(args):
         args (_type_): command line arguments
     """
     if SIMULATOR == "genesis" or SIMULATOR == "genesis_pact_pos" or SIMULATOR == "genesis_pact":
-        gs.init(
-            backend=gs.cpu if args.cpu else gs.gpu,
-            logging_level='warning',
-        )
+        init_genesis(args, gs)
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     override_configs(env_cfg, args)
 
@@ -252,8 +252,8 @@ def play(args):
     # export policy as a jit module (used to run it from C++ or python)
     path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 
                             train_cfg.runner.load_run, 'exported')
-    # export_policy(ppo_runner, path, args, env_cfg, train_cfg)
-
+    export_policy(ppo_runner, path, args, env_cfg, train_cfg)
+    
     interaction_loop(env, policy, args)
     
     

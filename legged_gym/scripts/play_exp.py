@@ -29,7 +29,7 @@ def override_configs(env_cfg, args):
         env_cfg.terrain.num_cols = 2
         env_cfg.terrain.border_size = 5.0
         env_cfg.terrain.curriculum = False
-        env_cfg.terrain.selected = True        
+        env_cfg.terrain.selected   = True
         
         # random uniform terrain
         env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
@@ -238,7 +238,7 @@ def interaction_loop(train_cfg, env, policy, args):
 
         logger.log_states(
             {
-                # 'base_cmd':env.commands.detach().cpu().numpy().tolist(),
+                'base_cmd':env.commands.detach().cpu().numpy().tolist(),
                 # 'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
                 # 'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
                 'q_actual':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
@@ -297,10 +297,7 @@ def play(args):
         args (_type_): command line arguments
     """
     if "genesis" in SIMULATOR:
-        gs.init(
-            backend=gs.cpu if args.cpu else gs.gpu,
-            logging_level='warning',
-        )
+        init_genesis(args, gs)
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     override_configs(env_cfg, args)
 

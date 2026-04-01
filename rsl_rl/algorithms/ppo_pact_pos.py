@@ -50,6 +50,7 @@ class PPO_PACT_Pos:
     def __init__(self,
                  actor_critic,
                  decoder_network,
+                 num_priv_obs,
                  num_learning_epochs=1,
                  num_mini_batches=1,
                  clip_param=0.2,
@@ -72,6 +73,8 @@ class PPO_PACT_Pos:
                  ):
         
         self.device = device
+
+        self.num_priv_obs = num_priv_obs
 
         self.desired_kl = desired_kl
         self.schedule = schedule
@@ -122,8 +125,8 @@ class PPO_PACT_Pos:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
         
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
-        self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_hist_shape, \
+    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
+        self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
                                               action_shape, torso_velo_shape, grf_shape, wb_shape, self.device)
 
     def test_mode(self):
@@ -167,7 +170,9 @@ class PPO_PACT_Pos:
         self.transition.dones = dones
         # Values from the next-time step used as labels for the decoder network
         self.transition.grf_targets = grf_labels
-        self.transition.obs_targets = obs_labels
+
+        # This is now the stack of critic observations, we want to prune off the last one
+        self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
 
         self.transition.explicit_labels = explicit_labels
         
@@ -278,8 +283,6 @@ class PPO_PACT_Pos:
             "boot_stats": 0.0,
             "boot_prob": 0.0,
             "spec_norm" : 0.0}
-
-
 
         all_enc_obs_targets = []
         all_enc_recons     = []
