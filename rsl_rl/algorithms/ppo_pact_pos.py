@@ -173,6 +173,7 @@ class PPO_PACT_Pos:
 
         # This is now the stack of critic observations, we want to prune off the last one
         self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
+        # self.transition.obs_targets = obs_labels
 
         self.transition.explicit_labels = explicit_labels
         
@@ -194,6 +195,9 @@ class PPO_PACT_Pos:
 
     def set_entropy_coef(self, coef=1e-3):
         self.entropy_coef = coef
+        
+    def _set_std_clip_lwr(self, clip_val=0.1):
+        self.actor_critic._set_std_clip_lwr(clip_val)
 
     def spectral_normalization(
         self,
@@ -284,8 +288,10 @@ class PPO_PACT_Pos:
             "boot_prob": 0.0,
             "spec_norm" : 0.0}
 
-        all_enc_obs_targets = []
-        all_enc_recons     = []
+        boot_count = 0
+        boot_sum_x = None
+        boot_sum_x2 = None
+        boot_sum_recon_sqerr = 0.0
 
         # if itr > self.pinn_init and self.num_pinn_updates < (self.pinn_warmup_steps+1):
         #     self.pinn_weight = (float(self.num_pinn_updates)/float(self.pinn_warmup_steps))*self.pinn_weight_final
@@ -413,8 +419,25 @@ class PPO_PACT_Pos:
 
                 # Log the decode targets and recons for computing boot-probability
                 with torch.no_grad():
-                    all_enc_obs_targets.extend((decode_targets*terminated_batch).detach().cpu().numpy())
-                    all_enc_recons.extend((recons*terminated_batch).clone().detach().cpu().numpy())
+                    x = decode_targets * terminated_batch
+                    r = recons * terminated_batch
+
+                    # flatten batch dimension only; keep feature dim
+                    # assumes x shape [B, D]
+                    if boot_sum_x is None:
+                        boot_sum_x = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
+                        boot_sum_x2 = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
+
+                    x64 = x.to(torch.float64)
+                    r64 = r.to(torch.float64)
+
+                    boot_sum_x += x64.sum(dim=0)
+                    boot_sum_x2 += (x64 * x64).sum(dim=0)
+
+                    # scalar sum over all elements
+                    boot_sum_recon_sqerr += ((r64 - x64) ** 2).sum().item()
+
+                    boot_count += x.shape[0]
 
 
                 timers["boot_stats"] += time.perf_counter() - t0
@@ -450,11 +473,25 @@ class PPO_PACT_Pos:
         torch.cuda.synchronize()
         t0 = time.perf_counter()
 
-        # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
-        mean_pred = np.mean(all_enc_obs_targets, axis=0)
-        mean_pred_error = np.mean(np.square(mean_pred - all_enc_obs_targets))
-        actual_pred_error = np.mean(np.square(np.array(all_enc_recons) - np.array(all_enc_obs_targets)))
-        ratio = mean_pred_error / (actual_pred_error * self.boot_mult)
+        # # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
+        # mean_pred = np.mean(all_enc_obs_targets, axis=0)
+        # mean_pred_error = np.mean(np.square(mean_pred - all_enc_obs_targets))
+        # actual_pred_error = np.mean(np.square(np.array(all_enc_recons) - np.array(all_enc_obs_targets)))
+        # ratio = mean_pred_error / (actual_pred_error * self.boot_mult)
+        # pboot = np.tanh(ratio)
+
+        # total number of scalar elements per sample vector
+        feat_dim = boot_sum_x.shape[0]
+
+        mean_pred = boot_sum_x / boot_count                     # [D]
+        ex2 = boot_sum_x2 / boot_count                          # [D]
+        var = torch.clamp(ex2 - mean_pred**2, min=0.0)          # [D]
+
+        mean_pred_error = var.mean().item()
+
+        actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
+
+        ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
         pboot = np.tanh(ratio)
 
         timers["boot_prob"] += time.perf_counter() - t0
@@ -572,8 +609,8 @@ class PPO_PACT_Pos:
         grf_target.requires_grad = False
         obs_target.requires_grad = False
         
-        decode_target = torch.cat((obs_target, grf_target), dim=-1)
-        # decode_target = obs_target
+        # decode_target = torch.cat((obs_target, grf_target), dim=-1)
+        decode_target = obs_target
         explicit_labels_batch.requires_grad = False
 
         vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)

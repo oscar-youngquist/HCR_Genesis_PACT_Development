@@ -19,7 +19,7 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -153,11 +153,6 @@ def interaction_loop(train_cfg, env, policy, args):
     # env.commands[:, 1] = 0
     # env.commands[:, 2] = 0
     # env.commands[:, 3] = 0
-
-    print("Max - self.feedforward_tau_weight: ", torch.max(env.simulator.feedforward_tau_weight).item())
-    print("Min - self.feedforward_tau_weight: ", torch.min(env.simulator.feedforward_tau_weight).item())
-    print("Max - self.feedback_tau_weight: ", torch.max(env.simulator.feedback_tau_weight).item())
-    print("Min - self.feedback_tau_weight: ", torch.min(env.simulator.feedback_tau_weight).item())
     
     if args.record_frames:
         env.simulator._floating_camera.start_recording()
@@ -239,23 +234,15 @@ def interaction_loop(train_cfg, env, policy, args):
         logger.log_states(
             {
                 'base_cmd':env.commands.detach().cpu().numpy().tolist(),
-                # 'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
-                # 'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
+                'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
+                'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
                 'q_actual':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
-                # 'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
-                # 'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
-                # 'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
-                # 'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
-                # 'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
-                # 'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
-                # 'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
-                'q_desired':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
-                'ff_torque':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
-                'pd_torque':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
-                # 'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist())),
-                'total_torque':(env.simulator.feedforward_torques.detach().cpu().numpy() + env.simulator.first_loop_feedback.detach().cpu().numpy()).tolist(),
-                'obs':obs_buf.detach().cpu().numpy().tolist(),
-                'obs_hist':obs_history.detach().cpu().numpy().tolist(),
+                'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
+                'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
+                'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
+                'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
+                'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
+                'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist())),
             })
 
 def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):

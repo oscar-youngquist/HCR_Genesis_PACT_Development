@@ -49,17 +49,24 @@ def configure_runtime_device(args):
     runtime_gpu = requested_gpu
 
     if requested_gpu.startswith("cuda:"):
-        physical_index = requested_gpu.split(":", 1)[1]
         visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
         if visible_devices:
             visible_gpu_ids = [gpu_id.strip() for gpu_id in visible_devices.split(",") if gpu_id.strip()]
-            if physical_index not in visible_gpu_ids:
-                raise ValueError(
-                    f"Requested GPU '{requested_gpu}' is not available under "
-                    f"CUDA_VISIBLE_DEVICES={visible_devices}."
-                )
-            runtime_gpu = f"cuda:{visible_gpu_ids.index(physical_index)}"
+            local_index = int(requested_gpu.split(":", 1)[1])
+            # If CUDA_VISIBLE_DEVICES is already set before Python starts, treat cuda:N
+            # as a process-local device index.
+            if 0 <= local_index < len(visible_gpu_ids):
+                runtime_gpu = f"cuda:{local_index}"
+            else:
+                physical_index = str(local_index)
+                if physical_index not in visible_gpu_ids:
+                    raise ValueError(
+                        f"Requested GPU '{requested_gpu}' is not available under "
+                        f"CUDA_VISIBLE_DEVICES={visible_devices}."
+                    )
+                runtime_gpu = f"cuda:{visible_gpu_ids.index(physical_index)}"
         else:
+            physical_index = requested_gpu.split(":", 1)[1]
             os.environ["CUDA_VISIBLE_DEVICES"] = physical_index
             runtime_gpu = "cuda:0"
 

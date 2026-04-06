@@ -274,18 +274,18 @@ class OnPolicyRunnerPACT:
             #     entropy_coef = 0.005 + alpha * (0.001 - 0.005)
             #     self.alg.set_entropy_coef(entropy_coef)
 
-            if it < 2000:
+            if it < 1000:
                 entropy_coef = 0.01
 
-            elif it < 3000:
-                alpha = (it - 2000) / 1000.0
+            elif it < 1500:
+                alpha = (it - 1000) / 500.0
                 entropy_coef = 0.005 + 0.5 * (0.01 - 0.005) * (1 + math.cos(math.pi * alpha))
 
-            elif it < 3500:
+            elif it < 1800:
                 entropy_coef = 0.005
 
-            elif it < 5000:
-                alpha = (it - 3500) / 1500.0
+            elif it < 2500:
+                alpha = (it - 1800) / 700.0
                 entropy_coef = 0.001 + 0.5 * (0.005 - 0.001) * (1 + math.cos(math.pi * alpha))
 
             else:

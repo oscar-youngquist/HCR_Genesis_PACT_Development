@@ -262,21 +262,34 @@ class OnPolicyRunnerPACTPos:
             # if it > 1000:
             #     self.alg.set_entropy_coef(1.0e-3)
             
-            if it < 1000:
+            entropy_coef = 0.01
+            std_lwr = 0.40
+            
+            if it < 2500:
                 entropy_coef = 0.01
-            elif it < 1500:
-                alpha = (it - 1000) / 500.0
+                std_lwr = 0.40
+            elif it < 3000:
+                alpha = (it - 2500) / 500.0
                 entropy_coef = 0.005 + 0.5 * (0.01 - 0.005) * (1 + math.cos(math.pi * alpha))
-            elif it < 2000:
+                std_lwr = 0.20
+            elif it < 4000:
                 entropy_coef = 0.005
-            elif it < 2500:
-                alpha = (it - 2500) / 1000.0
+                std_lwr = 0.20
+            elif it < 5000:
+                alpha = (it - 4000) / 1000.0
                 entropy_coef = 0.001 + 0.5 * (0.005 - 0.001) * (1 + math.cos(math.pi * alpha))
+                std_lwr = 0.10
             else:
                 entropy_coef = 0.001
+                std_lwr = 0.10
             
             entropy_coef = max(entropy_coef, 0.001)
+
+            print("entropy_coef - ", entropy_coef)
+            # print("std_lwr - ", std_lwr)
+
             self.alg.set_entropy_coef(entropy_coef)
+            # self.alg._set_std_clip_lwr(std_lwr)
 
 
             if self.env.cfg.rewards.only_positive_rewards and it > 1000:

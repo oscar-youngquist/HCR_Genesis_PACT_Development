@@ -1118,7 +1118,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
 
     def _compute_torques(self, actions):
         # Pull out the position control actions
-        pos_actions = self._motor_strength * actions
+        pos_actions = actions
         
         # Process feedback torque first
         pos_actions_scaled = pos_actions * self._cfg.control.action_scale
@@ -1140,7 +1140,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
 
         # torques = (self.feedforward_tau_weight) * self.feedforward_torques + (self.feedback_tau_weight)*self.feedback_torques
 
-        torques = self.feedback_torques
+        torques = self._motor_strength * self.feedback_torques
 
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
         # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)

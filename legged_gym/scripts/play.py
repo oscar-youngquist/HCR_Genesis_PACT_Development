@@ -41,7 +41,7 @@ def override_configs(env_cfg, args):
         #                                   "slope": -0.4, "platform_size": 3.0}
         # stairs
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-        #                                 "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
+                                        # "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
         # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.1,
@@ -76,6 +76,11 @@ def override_configs(env_cfg, args):
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
     env_cfg.domain_rand.push_robots = False
     env_cfg.domain_rand.randomize_base_mass = False
+
+
+        # env_cfg.domain_rand.randomize_joint_damping = True
+        # joint_damping_range_end   = [0.00, 0.50]
+        # joint_damping_range_start = [0.25, 0.30]
 
     env_cfg.commands.ranges.lin_vel_x = [-1.0, 1.0]
     env_cfg.commands.ranges.lin_vel_y = [-1.0, 1.0]
