@@ -88,6 +88,9 @@ from legged_gym.envs.go1.go1_pact_water_eval.go1_pact_water import Go1PACTWater
 from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos_config import GO2PACTPosCfg, GO2PACTPosCfgPPO
 from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos import Go2PACTPos
 
+from legged_gym.envs.go2.go2_pact.go2_pact_config import GO2PACTCfg, GO2PACTCfgPPO
+from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
+
 
 from legged_gym.utils.task_registry import task_registry
 
@@ -111,3 +114,4 @@ task_registry.register("go1_pact_pos", Go1PACTPos, GO1PACTPosCfg(), GO1PACTPosCf
 task_registry.register("go1_pact_water", Go1PACTWater, GO1PACTWaterCfg(), GO1PACTWaterCfgPPO())
 
 task_registry.register("go2_pact_pos", Go2PACTPos, GO2PACTPosCfg(), GO2PACTPosCfgPPO())
+task_registry.register("go2_pact", Go2PACT, GO2PACTCfg(), GO2PACTCfgPPO())

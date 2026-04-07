@@ -164,13 +164,14 @@ class ContextDecoder(nn.Module):
         # Network architecture
         self.dec_in = nn.Linear(input_dim, layers[0])
         self.dec_h1 = nn.Linear(layers[0], layers[1])
-        self.dec_out = nn.Linear(layers[1], decode_dim)
+        self.dec_h2 = nn.Linear(layers[1], layers[2])
+        self.dec_out = nn.Linear(layers[2], decode_dim)
 
         self._initialize_weights()
 
     def _initialize_weights(self) -> None:
         """Initialize all linear layers with Xavier uniform distribution."""
-        for layer in [self.dec_in, self.dec_h1, self.dec_out]:
+        for layer in [self.dec_in, self.dec_h1, self.dec_h2, self.dec_out]:
             nn.init.xavier_uniform_(layer.weight)
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
@@ -186,6 +187,7 @@ class ContextDecoder(nn.Module):
         # Process through network with ELU activations
         x = F.elu(self.dec_in(condition))
         x = F.elu(self.dec_h1(x))
+        x = F.elu(self.dec_h2(x))
         return self.dec_out(x)
 
 class ActorCritic_PACT(nn.Module):

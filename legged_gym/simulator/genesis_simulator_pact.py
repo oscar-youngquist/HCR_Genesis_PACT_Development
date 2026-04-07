@@ -764,8 +764,10 @@ class GenesisSimulator_PACT(Simulator):
             self._cfg.asset.penalize_contacts_on)
         print(f"penalized link indices: {self._penalized_contact_indices}")
         
-        self._feet_names = [
-            link.name for link in self._robot.links if self._cfg.asset.foot_name in link.name]
+        # self._feet_names = [
+        #     link.name for link in self._robot.links if self._cfg.asset.foot_name in link.name]
+
+        self._feet_names = self._cfg.asset.foot_name
         self._feet_indices = find_link_indices(self._feet_names)
         
         print(f"feet names: {self._feet_names}, feet link indices: {self._feet_indices}")
@@ -1168,7 +1170,7 @@ class GenesisSimulator_PACT(Simulator):
         # Compute tradeoff curriculum weighted coupled torque output
         self.feedforward_torques = tau_actions * self._cfg.control.torque_scale
         
-        self._unweighted_torques = self.feedforward_torques + self.feedback_torques
+        self._unweighted_torques = self._motor_strength * (self.feedforward_torques + self.feedback_torques)
 
         torques = (self.feedforward_tau_weight) * self.feedforward_torques + (self.feedback_tau_weight)*self.feedback_torques
 

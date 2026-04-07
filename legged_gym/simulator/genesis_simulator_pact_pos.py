@@ -741,8 +741,11 @@ class GenesisSimulator_PACT_Pos(Simulator):
             self._cfg.asset.penalize_contacts_on)
         print(f"penalized link indices: {self._penalized_contact_indices}")
         
-        self._feet_names = [
-            link.name for link in self._robot.links if self._cfg.asset.foot_name in link.name]
+        # self._feet_names = [
+        #     link.name for link in self._robot.links if self._cfg.asset.foot_name in link.name]
+        # self._feet_indices = find_link_indices(self._feet_names)
+
+        self._feet_names = self._cfg.asset.foot_name
         self._feet_indices = find_link_indices(self._feet_names)
         
         print(f"feet names: {self._feet_names}, feet link indices: {self._feet_indices}")

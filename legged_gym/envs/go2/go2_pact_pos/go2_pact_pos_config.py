@@ -271,9 +271,10 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             'RL_hip_joint',
             'RL_thigh_joint',
             'RL_calf_joint',]
-        foot_name = "foot"
+        # foot_name = "foot"
+        foot_name = ['FR_foot', 'FL_foot', 'RR_foot', 'RL_foot']
         penalize_contacts_on = ["thigh", "hip", "calf", "base", "Head"]
-        terminate_after_contacts_on = ["base","hip","Head"]
+        terminate_after_contacts_on = ["base","Head"]
         links_to_keep = ['FR_foot', 'FL_foot', 'RR_foot', 'RL_foot']
         self_collisions = True
         obtain_link_contact_states = True
@@ -317,11 +318,11 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         foot_clearance_target = 0.06 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
-        overreach_x_max = 0.32
+        overreach_x_max = 0.36
         support_polygon_sigma = 0.01
 
         foot_clearance_tracking_sigma = 0.01
-        only_positive_rewards = True
+        only_positive_rewards = False
 
         use_reward_curriculum = True
 
@@ -441,8 +442,8 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
-        # learning_rate = 1.0e-3 #
-        learning_rate = 3.0e-4 #
+        learning_rate = 1.0e-3 #
+        # learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -457,7 +458,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
-        num_steps_per_env = 36 # per iteration
+        num_steps_per_env = 24 # per iteration
         max_iterations = 5000 # number of policy updates
         grf_dim = 12
         

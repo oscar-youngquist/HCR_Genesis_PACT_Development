@@ -48,6 +48,7 @@ class PPO_PACT:
     def __init__(self,
                  actor_critic,
                  decoder_network,
+                 num_priv_obs,
                  num_learning_epochs=1,
                  num_mini_batches=1,
                  clip_param=0.2,
@@ -70,6 +71,8 @@ class PPO_PACT:
                  ):
         
         self.device = device
+
+        self.num_priv_obs = num_priv_obs
 
         self.desired_kl = desired_kl
         self.schedule = schedule
@@ -120,8 +123,8 @@ class PPO_PACT:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
         
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
-        self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_hist_shape, \
+    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
+        self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
                                               action_shape, torso_velo_shape, grf_shape, wb_shape, self.device)
 
     def test_mode(self):
@@ -168,7 +171,10 @@ class PPO_PACT:
         self.transition.dones = dones
         # Values from the next-time step used as labels for the decoder network
         self.transition.grf_targets = grf_labels
-        self.transition.obs_targets = obs_labels
+
+        # This is now the stack of critic observations, we want to prune off the last one
+        self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
+        # self.transition.obs_targets = obs_labels
 
         self.transition.explicit_labels = explicit_labels
         
@@ -294,8 +300,10 @@ class PPO_PACT:
         mean_decoder_loss = 0
         mean_pinn_loss = 0
 
-        all_enc_obs_targets = []
-        all_enc_recons     = []
+        boot_count = 0
+        boot_sum_x = None
+        boot_sum_x2 = None
+        boot_sum_recon_sqerr = 0.0
 
         if itr > self.pinn_init and self.num_pinn_updates < (self.pinn_warmup_steps+1):
             self.pinn_weight = (float(self.num_pinn_updates)/float(self.pinn_warmup_steps))*self.pinn_weight_final
@@ -382,8 +390,25 @@ class PPO_PACT:
 
                 # Log the decode targets and recons for computing boot-probability
                 with torch.no_grad():
-                    all_enc_obs_targets.extend((decode_targets*terminated_batch).detach().cpu().numpy())
-                    all_enc_recons.extend((recons*terminated_batch).clone().detach().cpu().numpy())
+                    x = decode_targets * terminated_batch
+                    r = recons * terminated_batch
+
+                    # flatten batch dimension only; keep feature dim
+                    # assumes x shape [B, D]
+                    if boot_sum_x is None:
+                        boot_sum_x = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
+                        boot_sum_x2 = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
+
+                    x64 = x.to(torch.float64)
+                    r64 = r.to(torch.float64)
+
+                    boot_sum_x += x64.sum(dim=0)
+                    boot_sum_x2 += (x64 * x64).sum(dim=0)
+
+                    # scalar sum over all elements
+                    boot_sum_recon_sqerr += ((r64 - x64) ** 2).sum().item()
+
+                    boot_count += x.shape[0]
 
                 # Log losses
                 mean_autoenc_loss += vae_loss.item()
@@ -410,11 +435,25 @@ class PPO_PACT:
         mean_vel_loss /= (num_updates * self.num_enc_epochs)
         mean_recon_loss /= (num_updates * self.num_enc_epochs)
 
-        # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
-        mean_pred = np.mean(all_enc_obs_targets, axis=0)
-        mean_pred_error = np.mean(np.square(mean_pred - all_enc_obs_targets))
-        actual_pred_error = np.mean(np.square(np.array(all_enc_recons) - np.array(all_enc_obs_targets)))
-        ratio = mean_pred_error / (actual_pred_error * self.boot_mult)
+        # # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
+        # mean_pred = np.mean(all_enc_obs_targets, axis=0)
+        # mean_pred_error = np.mean(np.square(mean_pred - all_enc_obs_targets))
+        # actual_pred_error = np.mean(np.square(np.array(all_enc_recons) - np.array(all_enc_obs_targets)))
+        # ratio = mean_pred_error / (actual_pred_error * self.boot_mult)
+        # pboot = np.tanh(ratio)
+
+        # total number of scalar elements per sample vector
+        feat_dim = boot_sum_x.shape[0]
+
+        mean_pred = boot_sum_x / boot_count                     # [D]
+        ex2 = boot_sum_x2 / boot_count                          # [D]
+        var = torch.clamp(ex2 - mean_pred**2, min=0.0)          # [D]
+
+        mean_pred_error = var.mean().item()
+
+        actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
+
+        ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
         pboot = np.tanh(ratio)
 
         # Use the (scaled) ratio of mean-prediction performance to actual prediction performance
@@ -502,8 +541,8 @@ class PPO_PACT:
         grf_target.requires_grad = False
         obs_target.requires_grad = False
         
-        decode_target = torch.cat((obs_target, grf_target), dim=-1)
-        # decode_target = obs_target
+        # decode_target = torch.cat((obs_target, grf_target), dim=-1)
+        decode_target = obs_target
         explicit_labels_batch.requires_grad = False
 
         vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)

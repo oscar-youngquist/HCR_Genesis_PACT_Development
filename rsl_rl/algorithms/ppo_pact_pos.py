@@ -334,7 +334,7 @@ class PPO_PACT_Pos:
             # else:
             #     ppo_losses = [ppo_loss]
             
-            ppo_losses = [ppo_loss, 0.01*tau_clone_loss]
+            ppo_losses = [ppo_loss, tau_clone_loss]
             # # PCGrad - back-propigate the loss
             # if self.pinn_weight > 0 and pinn_loss is not None:    # just being extra cautious
             #     self.act_optimizer.pc_backward_pinn(ppo_losses)
