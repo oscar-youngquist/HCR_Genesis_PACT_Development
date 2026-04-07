@@ -288,7 +288,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         damping   = {'joint': 1.00}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
-        torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
+        torque_scale = 2.50   # action scale:  target torque = torque_scale * tau_action + defaultTorque
         
         
         dt =  0.01     # control frequency 200Hz
@@ -322,7 +322,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         support_polygon_sigma = 0.01
 
         foot_clearance_tracking_sigma = 0.01
-        only_positive_rewards = False
+        only_positive_rewards = True
 
         use_reward_curriculum = True
 
@@ -393,9 +393,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
                                   "orientation":[-1.0,-10.0],
                                   "ang_vel_xy":[-0.1, -0.2]
                                  }
-
-            curr_steps = 1
-            warmup_steps = 3000
+            curr_steps = 500
+            warmup_steps = 200
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -442,8 +441,8 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
-        learning_rate = 1.0e-3 #
-        # learning_rate = 3.0e-4 #
+        # learning_rate = 1.0e-3 #
+        learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -458,7 +457,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
-        num_steps_per_env = 24 # per iteration
+        num_steps_per_env = 32 # per iteration
         max_iterations = 5000 # number of policy updates
         grf_dim = 12
         
@@ -468,7 +467,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Apr02_23-44-41_pact_pos_100hz_spec_jointrand"
+        load_run = "Apr06_21-12-58_pact_pos_100hz_spec_jointrand"
         checkpoint = -1
         resume = False
         exp_data_path = ""

@@ -5,7 +5,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        num_privileged_obs = 57 + 66 + 2 + 81 # robot_state + privilged info + tradeoff curriculum weights + terrain_heights (81)
+        num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -57,9 +57,9 @@ class GO1PACTCfg( LeggedRobotCfg ):
         measure_heights = True # obtain height measurements
         
         # positions of the sampling height around the base (relative to the base of the robot)
-        measured_points_x = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4] # 9x9=81
-        measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4]
-        
+        measured_points_x = [-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6] # 11x13 = 143
+        measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
+
         selected = False # select a unique terrain type and pass all arguments
         terrain_kwargs = None # Dict of arguments for selected terrain
         max_init_terrain_level = 1 # starting curriculum level
@@ -71,7 +71,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         num_cols = 10  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        terrain_proportions = [0.20, 0.40, 0.00, 0.00, 0.20, 0.20]
+        terrain_proportions = [0.10, 0.10, 0.25, 0.25, 0.20, 0.10]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
@@ -90,10 +90,10 @@ class GO1PACTCfg( LeggedRobotCfg ):
                             [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721]]
         pos = [0.0, 0.0, 0.34] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
-            'FL_hip_joint': 0.0,     # [rad]
-            'RL_hip_joint': 0.0,     # [rad]
-            'FR_hip_joint': 0.0 ,    # [rad]
-            'RR_hip_joint': 0.0,     # [rad]
+            'FL_hip_joint': 0.1,     # [rad]
+            'RL_hip_joint': 0.1,     # [rad]
+            'FR_hip_joint': -0.1 ,    # [rad]
+            'RR_hip_joint': -0.1,     # [rad]
 
             'FL_thigh_joint': 0.8,   # [rad]
             'RL_thigh_joint': 1.0,   # [rad]
@@ -141,7 +141,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = True
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 1500     # number of steps with initial values held constant
+        push_warmup = 2000     # number of steps with initial values held constant
         num_jumps = 10
         
         # Randomize Friction
@@ -196,20 +196,22 @@ class GO1PACTCfg( LeggedRobotCfg ):
         
         # Motor strength randomization
         randomize_motor_strength = True
-        motor_strength_range = [0.8, 1.2]
+        motor_strength_range = [0.9, 1.1]
         
         # Unused more complicated dynamics randomization
         randomize_joint_armature = True
         joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range = [0.0, 0.03]
+        joint_friction_range = [0.00, 0.02]
         
-        randomize_joint_stiffness = True
-        joint_stiffness_range = [0.0, 1.0]
+        randomize_joint_stiffness = False
+        joint_stiffness_range_end   = [0.0, 0.0]
+        joint_stiffness_range_start = [0.0, 0.0]
         
         randomize_joint_damping = True
-        joint_damping_range = [0.0, 0.5]
+        joint_damping_range_end   = [0.00, 1.00]
+        joint_damping_range_start = [0.30, 0.50]
 
 
     # Taken from the Go1 config class in - 
@@ -218,7 +220,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         noise_level = 1.0 # scales other values
         class noise_scales:
             dof_pos = 0.01
-            dof_vel = 0.5
+            dof_vel = 1.5
             dof_tau = 0.5
             lin_vel = 0.1
             ang_vel = 0.5

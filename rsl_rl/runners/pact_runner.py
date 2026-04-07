@@ -111,6 +111,7 @@ class OnPolicyRunnerPACT:
 
         print("\t Critic Parameter Count: ", np.sum(p.numel() for p in actor_critic.critic.parameters() if p.requires_grad))
 
+        self._init_entropy_coef = self.alg_cfg["entropy_coef"]
 
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
@@ -276,18 +277,22 @@ class OnPolicyRunnerPACT:
             #     entropy_coef = 0.005 + alpha * (0.001 - 0.005)
             #     self.alg.set_entropy_coef(entropy_coef)
 
+            half_ceof = self._init_entropy_coef * 0.5
+            tenth_coef = self._init_entropy_coef * 0.1
+
             if it < 2500:
-                entropy_coef = 0.01
+                entropy_coef = self._init_entropy_coef
             elif it < 3000:
+                new_coef = self._init_entropy_coef / 2.0
                 alpha = (it - 2500) / 500.0
-                entropy_coef = 0.005 + 0.5 * (0.01 - 0.005) * (1 + math.cos(math.pi * alpha))
+                entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
             elif it < 3500:
-                entropy_coef = 0.005
+                entropy_coef = half_ceof
             elif it < 4500:
                 alpha = (it - 3500) / 1000.0
-                entropy_coef = 0.001 + 0.5 * (0.005 - 0.001) * (1 + math.cos(math.pi * alpha))
+                entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
             else:
-                entropy_coef = 0.001
+                entropy_coef = tenth_coef
 
             entropy_coef = max(entropy_coef, 0.001)
             self.alg.set_entropy_coef(entropy_coef)

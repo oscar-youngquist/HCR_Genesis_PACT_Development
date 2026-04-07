@@ -270,7 +270,8 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             'RL_hip_joint',
             'RL_thigh_joint',
             'RL_calf_joint',]
-        foot_name = "foot"
+        # foot_name = "foot"
+        foot_name = ['FR_foot', 'FL_foot', 'RR_foot', 'RL_foot']
         penalize_contacts_on = ["hip", "thigh", "calf"]
         terminate_after_contacts_on = ["base","trunk","hip"]
         links_to_keep = ['FR_foot', 'FL_foot', 'RR_foot', 'RL_foot']
@@ -422,8 +423,8 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
 
         # Context Decoder
         cenet_dec_input_dim = 27
-        cenet_dec_layers = [128, 256]
-        cenet_dec_out_dim = 57 + 12      # next obs (57) + grf_dim (12)
+        cenet_dec_layers = [128, 256, 512]
+        cenet_dec_out_dim = 57 + (51 + 33) + 143 # next obs (57) + grf_dim (12)
 
         # Actor/critic
         actor_layers = [512,256,128]
@@ -456,7 +457,7 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
-        num_steps_per_env = 48 # per iteration
+        num_steps_per_env = 32 # per iteration
         max_iterations = 3000 # number of policy updates
         grf_dim = 12
         

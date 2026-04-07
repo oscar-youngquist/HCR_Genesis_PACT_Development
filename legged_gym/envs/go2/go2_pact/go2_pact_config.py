@@ -316,7 +316,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
         tradeoff_final_weights = [1.00, 1.00]
         tradeoff_steps = 4
         tradeoff_threshold = 0.40
-        use_tradeoff_curriculum = True
+        use_tradeoff_curriculum = False
 
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
@@ -382,20 +382,20 @@ class GO2PACTCfg( LeggedRobotCfg ):
             torques          = 0.0     # don't need to use this when we already have joint power above...
 
             # Zero out some values that are used in the individual reward classes below
-            action_rate       = -0.01
-            action_smoothness = -0.01
+            action_rate       = -0.001
+            action_smoothness = -0.001
 
-            # pos_action_rate       = -0.01
-            # pos_action_smoothness = -0.01
+            pos_action_rate       = 0.0
+            pos_action_smoothness = 0.0
 
-            # tau_action_rate       = -0.01
-            # tau_action_smoothness = -0.01
+            tau_action_rate       = 0.0
+            tau_action_smoothness = 0.0
 
-            # feedforward_torques   = -2.5e-5
-            # feedback_torques      = -2.0e-5
+            # feedforward_torques   = -2.5e-6
+            # feedback_torques      = -2.0e-6
 
-            feedforward_torques_scaled = -2.0e-5
-            feedback_torques           = -2.5e-5
+            feedforward_torques_scaled = -2.0e-6
+            feedback_torques           = -2.5e-6
             
             dof_act_limits             = 0.0
 
@@ -412,23 +412,37 @@ class GO2PACTCfg( LeggedRobotCfg ):
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
         class reward_curriculum():
+            # curr_reward_keys = ["ang_vel_xy", "orientation",
+            #                     "feedforward_torques_scaled", "feedback_torques",
+            #                     "action_rate", "action_smoothness", "torque_limits"
+            #                     ]
+            
+            # curr_reward_bounds = {
+            #                       "ang_vel_xy":[-0.05, -0.2],
+            #                       "orientation":[-1.0,-10.0],
+            #                       "feedforward_torques_scaled":[-2.0e-8, -2.0e-4],
+            #                       "feedback_torques":[-2.0e-8, -2.0e-4],
+            #                       "action_rate":[-1.0e-4,-1.0e-2],
+            #                       "action_smoothness":[-1.0e-4,-1.0e-2],
+            #                       "torque_limits":[-1.0e-3, -0.1]
+            #                      }
+
             curr_reward_keys = ["ang_vel_xy", "orientation",
-                                "feedforward_torques_scaled", "feedback_torques",
-                                "action_rate", "action_smoothness", "torque_limits"
-                                ]
+                                "torque_limits",
+                                "action_rate", "action_smoothness",
+                                "dof_acc"]
             
             curr_reward_bounds = {
                                   "ang_vel_xy":[-0.05, -0.2],
                                   "orientation":[-1.0,-10.0],
-                                  "feedforward_torques_scaled":[-2.0e-8, -2.0e-4],
-                                  "feedback_torques":[-2.0e-8, -2.0e-4],
-                                  "action_rate":[-1.0e-4,-1.0e-2],
-                                  "action_smoothness":[-1.0e-4,-1.0e-2],
-                                  "torque_limits":[-1.0e-3, -0.1]
+                                  "torque_limits":[-1.0e-3, -0.1],
+                                  "action_rate":[-0.001, -0.01],
+                                  "action_smoothness":[-0.001,-0.01],
+                                  "dof_acc":[-2.5e-10, -2.5e-7],
                                  }
 
             curr_steps = 1
-            warmup_steps = 2000
+            warmup_steps = 1000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -438,8 +452,8 @@ class GO2PACTCfg( LeggedRobotCfg ):
         heading_command = False # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
-            lin_vel_y = [-1.0, 1.0]   # min max [m/s]
-            ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
+            lin_vel_y = [-0.5, 0.5]   # min max [m/s]
+            ang_vel_yaw = [-0.5, 0.5]    # min max [rad/s]
             heading = [-3.14, 3.14]
 
 class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
@@ -468,12 +482,12 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go2_pact_pos_rough/Apr02_23-44-41_pact_pos_100hz_spec_jointrand/model_5000_converted.pt"
+        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go2_pact_pos_rough/Apr06_21-12-58_pact_pos_100hz_spec_jointrand/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.01
+        entropy_coef = 0.001
         # learning_rate = 1.0e-3 #
-        learning_rate = 3.0e-4 #
+        learning_rate = 1.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -488,7 +502,7 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'
-        num_steps_per_env = 24 # per iteration
+        num_steps_per_env = 32 # per iteration
         max_iterations = 6000 # number of policy updates
 
 
