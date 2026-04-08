@@ -82,10 +82,16 @@ from legged_gym.envs.go1.go1_pact_pos.go1_pact_pos_config import GO1PACTPosCfg, 
 from legged_gym.envs.go1.go1_pact_pos.go1_pact_pos import Go1PACTPos
 
 # Go2 PACT training
+from legged_gym.envs.go2.go2_pact.go2_pact_config import GO2PACTCfg, GO2PACTCfgPPO
+from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
+
 from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos_config import GO2PACTPosCfg, GO2PACTPosCfgPPO
 from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos import Go2PACTPos
 
 # A1 PACT training
+from legged_gym.envs.a1.a1_pact.a1_pact_config import A1PACTCfg, A1PACTCfgPPO
+from legged_gym.envs.a1.a1_pact.a1_pact import A1PACT
+
 from legged_gym.envs.a1.a1_pact_pos.a1_pact_pos_config import A1PACTPosCfg, A1PACTPosCfgPPO
 from legged_gym.envs.a1.a1_pact_pos.a1_pact_pos import A1PACTPos
 
@@ -110,6 +116,8 @@ task_registry.register("go1_pact", Go1PACT, GO1PACTCfg(), GO1PACTCfgPPO())
 
 task_registry.register("go1_pact_pos", Go1PACTPos, GO1PACTPosCfg(), GO1PACTPosCfgPPO())
 
+task_registry.register("go2_pact", Go2PACT, GO2PACTCfg(), GO2PACTCfgPPO())
 task_registry.register("go2_pact_pos", Go2PACTPos, GO2PACTPosCfg(), GO2PACTPosCfgPPO())
 
+task_registry.register("a1_pact", A1PACT, A1PACTCfg(), A1PACTCfgPPO())
 task_registry.register("a1_pact_pos", A1PACTPos, A1PACTPosCfg(), A1PACTPosCfgPPO())
