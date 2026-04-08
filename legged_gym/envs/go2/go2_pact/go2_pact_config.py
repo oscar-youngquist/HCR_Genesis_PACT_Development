@@ -371,7 +371,7 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go2_pact_pos_rough/model_2000_converted.pt"
+        pretrained_path = "rsl_rl/modules/pretained_checkpoints/rl_pos/go2_pact_pos_rough/model_2000_converted.pt"
 
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
