@@ -400,5 +400,5 @@ class A1PACTCfgPPO( LeggedRobotCfgPPO ):
 
         load_run = ""
         checkpoint = -1
-        resume = False
+        resume = True
         exp_data_path = ""
