@@ -336,7 +336,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         foot_clearance_target = 0.12 # desired foot clearance above ground [m]
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
-        overreach_x_max = 0.30
+        overreach_x_max = 0.28
 
         support_polygon_sigma = 0.01
         foot_clearance_tracking_sigma = 0.01
@@ -350,13 +350,13 @@ class GO1PACTCfg( LeggedRobotCfg ):
             termination           = 0.0
             collision             = -1.0
             dof_pos_limits        = -1.0
-            dof_close_to_default  = -0.1
+            dof_close_to_default  = -0.15
             torque_limits         = -0.1
             pd_target_torque_limit = 0.0
             
             alive_bonus           = 0.01
 
-            dof_vel_stand_still = -1.0
+            dof_vel_stand_still = -0.1
             stand_still_contact = -0.5
             dof_pos_stand_still = -0.5
 
@@ -490,7 +490,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 8000 # number of policy updates
+        max_iterations = 6000 # number of policy updates
 
 
         grf_dim = 12
@@ -498,10 +498,10 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         # debug_warmpinn_wb
         run_name = 'pact_100hz_spec'
         experiment_name = 'go1_pact_rough'
-        save_interval = 500
+        save_interval = 100
         
         
-        load_run = "Apr08_00-53-18_pact_100hz_spec"
+        load_run = "Mar27_12-06-16_pact_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/debugging_deployment/spec_model_joystick.csv"
