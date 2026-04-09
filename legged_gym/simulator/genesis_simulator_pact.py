@@ -467,7 +467,7 @@ class GenesisSimulator_PACT(Simulator):
             self.com_delta_z_val_bounds = [-self._cfg.domain_rand.com_displacement_z_min, self.com_delta_z_value]
         
         
-        self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
+        # self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
 
         print("Push Value: ", self.push_value)
         print("Wrench Value: ", self.wrench_value)

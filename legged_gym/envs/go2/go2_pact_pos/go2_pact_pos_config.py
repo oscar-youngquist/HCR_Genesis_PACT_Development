@@ -10,7 +10,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 20
+        num_obs_hist = 50
         grf_dim = 12
         whole_body_dim = 18
         debug = False # if debugging, visualize contacts, 
@@ -59,7 +59,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         num_cols = 10  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        terrain_proportions = [0.10, 0.10, 0.25, 0.25, 0.20, 0.10]
+        terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
@@ -279,6 +279,12 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         self_collisions = True
         obtain_link_contact_states = True
         contact_state_link_names = ["thigh", "calf", "foot", "base", "hip"]
+        
+        abad_link_length = 0.0955
+        hip_link_length = 0.213
+        knee_link_length = 0.213
+        knee_link_y_offset = 0.0
+        side_signs = [-1.0, 1.0, -1.0, 1.0]   # FR, FL, RR, RL
   
     class control( LeggedRobotCfg.control ):
         # PD Drive parameters:
@@ -291,8 +297,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         torque_scale = 2.50   # action scale:  target torque = torque_scale * tau_action + defaultTorque
         
         
-        dt =  0.01     # control frequency 200Hz
-        decimation = 5  # decimation: Number of control action updates @ sim DT per policy DT
+        dt =  0.02     # control frequency 200Hz
+        decimation = 4  # decimation: Number of control action updates @ sim DT per policy DT
 
         # Assumed order - tau_ff, tau_fb
         # tradeoff_init_weights  = [0.80, 1.4]
@@ -315,7 +321,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         base_height_target = 0.33
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
-        foot_clearance_target = 0.06 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.12 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.36
@@ -332,14 +338,14 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             termination           = 0.0
             collision             = -10.0
             dof_pos_limits        = -10.0
-            dof_close_to_default  = -0.25
+            dof_close_to_default  = -0.10
             torque_limits         = -0.1
 
             alive_bonus           = 0.01
 
-            stand_still_contact = -0.5
+            stand_still_contact = -1.0
             dof_pos_stand_still = -0.5
-            dof_vel_stand_still = -0.1
+            dof_vel_stand_still = -0.5
 
             # command tracking
             tracking_lin_vel  = 1.0
@@ -386,6 +392,29 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
 
+            torso_force_wrench_ellipsoid = 0.3
+            swing_vel_ellipsoid_terrain  = 0.3
+
+        # KITE reward terms
+        class kite_rewards():
+            ellipsoid_main_weight = 0.6
+            ellipsoid_force_aux_weight = 0.35
+            ellipsoid_wrench_aux_weight = 0.35
+            ellipsoid_friction_weight = 0.30
+
+            ellipsoid_wrench_length_scale = 0.70
+            ellipsoid_force_size_scale = 0.50
+            ellipsoid_wrench_size_scale = 0.50
+
+            ellipsoid_force_z_ratio_min = 1.2
+            ellipsoid_force_z_ratio_max = 4.0
+            ellipsoid_force_xy_ratio_max = 2.0
+            ellipsoid_wrench_cond_max = 6.0
+
+            ellipsoid_mu_friction = 0.6
+            ellipsoid_normal_force_margin = 5.0
+            ellipsoid_tangential_force_margin = 2.0
+
         class reward_curriculum():
             curr_reward_keys = ["orientation", "ang_vel_xy"]
             
@@ -398,7 +427,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
-        max_curriculum = 1.
+        max_curriculum = 2.
         num_commands = 3 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 5.  # time before command are changed[s]
         heading_command = False # if true: compute ang vel command from heading error
@@ -417,7 +446,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         init_noise_std = 1.00
         
         # Context encoder
-        cenet_enc_layers=[256,128]
+        cenet_enc_layers=[512,128]
         cenet_enc_latent_dim = 16
         cenet_velo_dim = 3 + 4 + 4      # torso velocity, foot-contact indicator, foot-height 
 
@@ -457,13 +486,13 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
-        num_steps_per_env = 32 # per iteration
-        max_iterations = 5000 # number of policy updates
+        num_steps_per_env = 24 # per iteration
+        max_iterations = 7000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_pos_100hz_spec_jointrand'
-        experiment_name = 'go2_pact_pos_rough'
+        run_name = '50hz_spec_jointrand'
+        experiment_name = 'go2_kite_rough'
         save_interval = 100
         
         

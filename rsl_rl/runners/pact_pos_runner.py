@@ -105,7 +105,7 @@ class OnPolicyRunnerPACTPos:
 
         print("Created Parallel Actor-Critic Model. Parameter Count: ", np.sum(p.numel() for p in actor_critic.parameters() if p.requires_grad))
 
-        print("\t Actor Trunk Parameter Count: ", np.sum(p.numel() for p in actor_critic.act_trunk.parameters() if p.requires_grad))
+        print("\t Actor Trunk Parameter Count: ", np.sum(p.numel() for p in actor_critic.actor.parameters() if p.requires_grad))
 
         print("\t Encoder Parameter Count: ", np.sum(p.numel() for p in actor_critic.context_encoder.parameters() if p.requires_grad))
 
@@ -265,23 +265,25 @@ class OnPolicyRunnerPACTPos:
             entropy_coef = 0.01
             std_lwr = 0.40
             
-            if it < 2500:
-                entropy_coef = 0.01
-                std_lwr = 0.40
-            elif it < 3000:
-                alpha = (it - 2500) / 500.0
-                entropy_coef = 0.005 + 0.5 * (0.01 - 0.005) * (1 + math.cos(math.pi * alpha))
-                std_lwr = 0.20
+            half_ceof = self._init_entropy_coef * 0.5
+            tenth_coef = self._init_entropy_coef * 0.1
+
+            if it < 3000:
+                entropy_coef = self._init_entropy_coef
             elif it < 4000:
-                entropy_coef = 0.005
-                std_lwr = 0.20
+                new_coef = self._init_entropy_coef / 2.0
+                alpha = (it - 3000) / 1000.0
+                entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
             elif it < 5000:
-                alpha = (it - 4000) / 1000.0
-                entropy_coef = 0.001 + 0.5 * (0.005 - 0.001) * (1 + math.cos(math.pi * alpha))
-                std_lwr = 0.10
+                entropy_coef = half_ceof
+            elif it < 6000:
+                alpha = (it - 5000) / 1000.0
+                entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
             else:
-                entropy_coef = 0.001
-                std_lwr = 0.10
+                entropy_coef = tenth_coef
+
+            entropy_coef = max(entropy_coef, 0.001)
+            self.alg.set_entropy_coef(entropy_coef)
             
             entropy_coef = max(entropy_coef, 0.001)
 

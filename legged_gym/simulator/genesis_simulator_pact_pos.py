@@ -103,6 +103,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
         self._link_contact_forces[:] = self._robot.get_links_net_contact_force()
         self._feet_pos[:] = self._robot.get_links_pos()[:, self._feet_indices, :]
         self._feet_vel[:] = self._robot.get_links_vel()[:, self._feet_indices, :]
+        self._dof_tau[:] = self._robot.get_dofs_force(self._dof_indices)
+
 
         # Some pinn specific stuff
         self._base_world_lin_vel[:] = self._robot.get_vel()
@@ -191,6 +193,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
         self._last_feet_vel[env_ids] = 0.
         self._last_base_lin_vel[env_ids] = 0.
         self._last_base_ang_vel[env_ids] = 0.
+        
+        self._dof_tau[env_ids] = 0.
         
         # PINN stuff
         self._grfs_buf[env_ids] = 0.
@@ -419,7 +423,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
             print("COM Delta Z Value: ", self.com_delta_z_value)
             print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
             print("Joint Damping Bounds: ", self.joint_damping_bound_current)
-            print("Torque Limits - ", self.torque_limits[0])
+            # print("Torque Limits - ", self.torque_limits[0])
             return
 
         adjusted_step = num_iters - self.push_warmup_step
@@ -435,7 +439,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
             print("COM Delta Z Value: ", self.com_delta_z_value)
             print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
             print("Joint Damping Bounds: ", self.joint_damping_bound_current)
-            print("Torque Limits - ", self.torque_limits[0])
+            # print("Torque Limits - ", self.torque_limits[0])
             return
 
         self.push_value      = (adjusted_step / self.num_push_steps) * self.push_diff + self.push_bounds[0]
@@ -455,7 +459,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
             self.com_delta_z_val_bounds = [-self._cfg.domain_rand.com_displacement_z_min, self.com_delta_z_value]
         
         
-        self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
+        # self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
 
         print("Push Value: ", self.push_value)
         print("Wrench Value: ", self.wrench_value)
@@ -466,7 +470,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
         print("COM Delta Z Value: ", self.com_delta_z_value)
         print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
         print("Joint Damping Bounds: ", self.joint_damping_bound_current)
-        print("Torque Limits - ", self.torque_limits[0])
+        # print("Torque Limits - ", self.torque_limits[0])
 
     #----- Protected methods -----#
     def _parse_cfg(self):
@@ -916,6 +920,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
 
         self._last_base_world_lin_vel = torch.zeros_like(self._base_lin_vel)
         self._last_base_world_ang_vel = torch.zeros_like(self._base_ang_vel)
+
+        self._dof_tau = torch.zeros_like(self._dof_pos)
 
         # depth images
         if self._cfg.sensor.add_depth:

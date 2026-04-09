@@ -233,14 +233,10 @@ class ActorCritic_PACT_Pos(nn.Module):
             shared_trunk_layers.append(nn.Linear(actor_layers[l], actor_layers[l+1]))
             shared_trunk_layers.append(activation)
         
-        self.act_trunk = nn.Sequential(*shared_trunk_layers)
+        shared_trunk_layers.append(nn.Linear(actor_layers[-1], num_actions))
         
-        # Output head for position control
-        self.act_pos_out = nn.Linear(actor_layers[-1], num_actions)
-
-        # Output head for torque control
-        self.act_tau_out = nn.Linear(actor_layers[-1], num_actions)
-
+        self.actor = nn.Sequential(*shared_trunk_layers)
+        
         ###
         #  Construct layers for the critic network
         ###
@@ -262,8 +258,7 @@ class ActorCritic_PACT_Pos(nn.Module):
         self.cenet_z = None
         self.cenet_torso_velo = None
 
-        self.mean_pos = None
-        self.mean_tau = None
+        self.mean = None
 
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.num_actions = num_actions
@@ -288,15 +283,8 @@ class ActorCritic_PACT_Pos(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-        # # Optionally set small initial output weights (to reduce initial action magnitude)
-        nn.init.uniform_(self.act_pos_out.weight, -3e-2, 3e-2)
-        nn.init.uniform_(self.act_tau_out.weight, -3e-6, 3e-6)
-        nn.init.zeros_(self.act_pos_out.bias)
-        nn.init.zeros_(self.act_tau_out.bias)
-
     def _init_std(self, std_val=1.00):                
         self.std.data.fill_(std_val)
-        
 
     def get_optim_groups(self, weight_decay: float = 1e-4, strong_decay: float = 1e-1):
         """Separate parameters into groups:
@@ -394,21 +382,13 @@ class ActorCritic_PACT_Pos(nn.Module):
     # Method for the forward method of the actor network, used mostly as an internal method
     def actor_forward(self, current_obs):
         # We are assuming "current_obs" includes all of the components used in the dreamwaq policy input
-        latent = self.act_trunk(current_obs)
+        action = self.act_trunk(current_obs)
 
-        # Now run the final output layers to get both action modalities
-        act_pos_act = self.act_pos_out(latent)
-        act_tau_act = self.act_tau_out(latent)
-
-        if torch.isnan(act_pos_act).any():
+        if torch.isnan(action).any():
             with torch.no_grad():
-                act_pos_act = torch.nan_to_num(act_pos_act, nan=0.0, posinf=0.0, neginf=0.0)
+                action = torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
 
-        if torch.isnan(act_tau_act).any():
-            with torch.no_grad():
-                act_tau_act = torch.nan_to_num(act_tau_act, nan=0.0, posinf=0.0, neginf=0.0)
-
-        return act_pos_act, act_tau_act
+        return action
 
     # Functions that are specific to PPO training
     @property
@@ -440,13 +420,12 @@ class ActorCritic_PACT_Pos(nn.Module):
 
     @torch.jit.ignore
     def update_distribution(self, curr_obs):
-        mean_pos, mean_tau = self.actor_forward(curr_obs)
-        self.mean_pos = mean_pos
-        self.mean_tau = mean_tau
+        mean = self.actor_forward(curr_obs)
+        self.mean = mean
 
         self._clip_std()
 
-        self.distribution = Normal(mean_pos, mean_pos * 0.0 + self.std)
+        self.distribution = Normal(mean, mean * 0.0 + self.std)
 
     # method used during simulated training
     @torch.jit.ignore
@@ -508,11 +487,11 @@ class ActorCritic_PACT_Pos(nn.Module):
         current_obs = torch.cat((obs,z,torso_velo), dim=-1)   
                 
         # call the actors forward method and return it's results
-        actions_pos, actions_tau = self.actor_forward(current_obs)
+        actions = self.actor_forward(current_obs)
 
         # total_sample = torch.cat([actions_pos, actions_tau], dim=1)
 
-        return actions_pos
+        return actions
 
     # Forward method for calculating the value of the current state
     #     using the privilged critic observation

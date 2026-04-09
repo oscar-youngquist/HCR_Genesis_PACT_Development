@@ -91,7 +91,6 @@ from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos import Go2PACTPos
 from legged_gym.envs.go2.go2_pact.go2_pact_config import GO2PACTCfg, GO2PACTCfgPPO
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
 
-
 from legged_gym.utils.task_registry import task_registry
 
 task_registry.register( "go2", GO2, GO2Cfg(), GO2CfgPPO())

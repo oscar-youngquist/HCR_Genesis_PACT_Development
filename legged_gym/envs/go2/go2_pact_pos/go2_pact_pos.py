@@ -1,3 +1,4 @@
+from legged_gym.envs.go2.go2_pact_pos.kite_reward_helpers import _eig_desc, _geom_mean, _interval_reward, _safe_inv, _safe_pinv, _skew, _upper_reward
 from legged_gym import *
 from time import time
 import numpy as np
@@ -144,8 +145,87 @@ class Go2PACTPos(BaseTask):
         
         self.compute_observations()  # in some cases a simulation step might be required to refresh some obs (for example body positions)
         
+        # KITE specific update
+        self.leg_jacobians[:] = self.compute_all_leg_jacobians(self.simulator.dof_pos.view(-1, 4, 3))
+        
         if self.debug:
             self.simulator.draw_debug_vis()
+
+    def compute_all_leg_jacobians(self, q: torch.Tensor) -> torch.Tensor:
+        """
+        Compute translational Jacobians for all 4 legs.
+
+        Args:
+            q:
+                Joint angles for all legs.
+                Shape (N, 4, 3), ordered per leg as [abad, hip, knee].
+
+        Returns:
+            J:
+                Batched translational Jacobians in the base frame.
+                Shape (N, 4, 3, 3)
+
+        Required config entries
+        -----------------------
+        self.cfg.robot.abad_link_length
+        self.cfg.robot.hip_link_length
+        self.cfg.robot.knee_link_length
+        self.cfg.robot.knee_link_y_offset
+        self.cfg.robot.side_signs   # e.g. [1.0, -1.0, 1.0, -1.0]
+
+        Notes
+        -----
+        This matches the provided C++ exactly, including:
+            s2 = sin(-q1), s3 = sin(-q2)
+            c2 = cos(-q1), c3 = cos(-q2)
+        """
+        assert q.ndim == 3 and q.shape[1:] == (4, 3), f"Expected q shape (N, 4, 3), got {q.shape}"
+
+        dtype = q.dtype
+        device = q.device
+        N = q.shape[0]
+
+        l1 = torch.as_tensor(self.cfg.asset.abad_link_length, device=device, dtype=dtype)
+        l2 = torch.as_tensor(self.cfg.asset.hip_link_length, device=device, dtype=dtype)
+        l3 = torch.as_tensor(self.cfg.asset.knee_link_length, device=device, dtype=dtype)
+        l4 = torch.as_tensor(self.cfg.asset.knee_link_y_offset, device=device, dtype=dtype)
+
+        side_sign = torch.as_tensor(
+            self.cfg.asset.side_signs,
+            device=device,
+            dtype=dtype,
+        ).view(1, 4).expand(N, 4)  # (N, 4)
+
+        q0 = q[:, :, 0]  # (N, 4)
+        q1 = q[:, :, 1]
+        q2 = q[:, :, 2]
+
+        s1 = torch.sin(q0)
+        s2 = torch.sin(-q1)
+        s3 = torch.sin(-q2)
+
+        c1 = torch.cos(q0)
+        c2 = torch.cos(-q1)
+        c3 = torch.cos(-q2)
+
+        c23 = c2 * c3 - s2 * s3
+        s23 = s2 * c3 + c2 * s3
+
+        J = torch.zeros(N, 4, 3, 3, device=device, dtype=dtype)
+
+        J[:, :, 0, 0] = 0.0
+        J[:, :, 0, 1] = l3 * c23 + l2 * c2
+        J[:, :, 0, 2] = l3 * c23
+
+        J[:, :, 1, 0] = l3 * c1 * c23 + l2 * c1 * c2 - (l1 + l4) * side_sign * s1
+        J[:, :, 1, 1] = -l3 * s1 * s23 - l2 * s1 * s2
+        J[:, :, 1, 2] = -l3 * s1 * s23
+
+        J[:, :, 2, 0] = l3 * s1 * c23 + l2 * c2 * s1 + (l1 + l4) * side_sign * c1
+        J[:, :, 2, 1] = l3 * c1 * s23 + l2 * c1 * s2
+        J[:, :, 2, 2] = l3 * c1 * s23
+
+        return J
 
     def check_termination(self):
         """ Check if environments need to be reset
@@ -603,6 +683,8 @@ class Go2PACTPos(BaseTask):
         
         self.llast_obs_hist = torch.zeros(
             (self.num_envs, self.num_obs * self.num_obs_hist), device=self.device, dtype=torch.float)
+        
+        self.leg_jacobians = torch.zeros((self.num_envs, 4, 3, 3), dtype=torch.float, device=self.device)
 
         for _ in range(self.cfg.env.num_obs_hist):
             self.obs_history_deque.append(
@@ -788,6 +870,356 @@ class Go2PACTPos(BaseTask):
         self.tradeoff_step_ctr = torch.zeros((self.cfg.env.num_envs, 1), device=sim_device, dtype=torch.float)
 
     # ------------ reward functions----------------
+    
+    def _reward_swing_vel_ellipsoid_terrain(self):
+        """Reward swing-foot velocity ellipsoids that are:
+        (1) large,
+        (2) aligned so their dominant axes lie in the local terrain tangent plane,
+        (3) mildly anisotropic, favoring tangential over normal velocity authority.
+        Assumes:
+        - self._get_swing_leg_jacobians() -> (B, 4, 3, nj)
+        - self._terrain_normals_under_feet -> (B, 4, 3)
+        - self._swing_mask -> (B, 4) in {0,1}
+        """
+        eps = 1e-6
+        J = self.leg_jacobians                                # (B, 4, 3, nj)
+        n = self.simulator._normal_vector_around_feet.reshape(-1, 4, 3)   # (B, 4, 3)
+        swing = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
+                 ).float()                                                # (B, 4)
+
+        # velocity ellipsoid matrix: M = J J^T
+        M = J @ J.transpose(-1, -2)                             # (B, 4, 3, 3)
+        I3 = torch.eye(3, device=M.device, dtype=M.dtype).view(1, 1, 3, 3)
+        M = M + eps * I3
+
+        # principal axes / sizes
+        eigvals, eigvecs = torch.linalg.eigh(M)                 # ascending
+        eigvals = torch.clamp(eigvals, min=eps)
+        axes = torch.sqrt(eigvals)                              # semi-axis lengths
+
+        v_small = eigvecs[..., 0]                               # (B, 4, 3)
+        v_mid   = eigvecs[..., 1]
+        v_large = eigvecs[..., 2]
+
+        # normalize terrain normals
+        n = n / (torch.norm(n, dim=-1, keepdim=True) + eps)
+
+        # alignment: largest two axes tangent to terrain, smallest axis normal to terrain
+        align_large = 1.0 - (torch.sum(v_large * n, dim=-1) ** 2)
+        align_mid   = 1.0 - (torch.sum(v_mid   * n, dim=-1) ** 2)
+        align_small =       (torch.sum(v_small * n, dim=-1) ** 2)
+        align = 0.5 * align_large + 0.25 * align_mid + 0.25 * align_small
+
+        # size: geometric mean of ellipsoid semi-axis lengths
+        # size_raw = torch.exp(torch.mean(torch.log(axes), dim=-1))
+        size_raw = _geom_mean(axes)
+        size = 1.0 - torch.exp(-self.cfg.rewards.kite_reward.ellipsoid_force_size_scale * size_raw)
+        
+        # directional authority in normal vs tangent plane
+        normal_auth = torch.einsum('bfi,bfij,bfj->bf', n, M, n)
+
+        # plane authority = trace(M) - normal authority
+        plane_auth = torch.diagonal(M, dim1=-2, dim2=-1).sum(dim=-1) - normal_auth
+
+        # mild anisotropy: prefer tangent-plane authority slightly above normal
+        # target plane_auth / normal_auth ~= 2.2 / 1.0
+        ratio = plane_auth / (normal_auth + eps)
+        anis = torch.exp(-torch.abs(torch.log(ratio + eps) - torch.log(torch.tensor(2.2, device=M.device, dtype=M.dtype))))
+
+        # combine over swing feet only
+        per_foot = 0.6 * align + 0.25 * size + 0.15 * anis
+        reward = (per_foot * swing).sum(dim=1) / torch.clamp(swing.sum(dim=1), min=1.0)
+
+        return reward
+    
+    def _reward_torso_force_wrench_ellipsoid(self):
+        """
+        Force / wrench ellipsoid reward using:
+            J_legs: (N, 4, 3, 3)
+
+        Expected tensors on self
+        ------------------------
+        self.foot_jacobian_b        : (N, 4, 3, 3)  # from compute_all_leg_jacobians(...)
+        self.applied_leg_torques    : (N, 4, 3)
+        self.torque_limits_leg      : (N, 4, 3) or (1, 4, 3)
+        self.contact_forces         : (N, n_bodies, 3)
+        self.rigid_body_states      : (N, n_bodies, >=3)
+        self.root_states[:, 0:3]    : (N, 3)
+        self.base_quat              : (N, 4) xyzw
+        self.foot_indices           : len 4
+        self.terrain_normals_w      : (N, 4, 3)
+
+        Suggested cfg.rewards fields
+        ----------------------------
+        ellipsoid_main_weight = 1.0
+        ellipsoid_force_aux_weight = 0.25
+        ellipsoid_wrench_aux_weight = 0.10
+        ellipsoid_tau_margin_weight = 0.10
+        ellipsoid_tau_grf_consistency_weight = 0.20
+        ellipsoid_friction_weight = 0.15
+
+        ellipsoid_wrench_length_scale = 0.30
+        ellipsoid_force_size_scale = 0.75
+        ellipsoid_wrench_size_scale = 0.20
+
+        ellipsoid_force_z_ratio_min = 1.2
+        ellipsoid_force_z_ratio_max = 4.0
+        ellipsoid_force_xy_ratio_max = 2.0
+        ellipsoid_wrench_cond_max = 6.0
+
+        ellipsoid_mu_friction = 0.6
+        ellipsoid_normal_force_margin = 5.0
+        ellipsoid_tangential_force_margin = 2.0
+        """
+        device = self.simulator.base_pos.device
+        dtype = self.simulator.base_pos.dtype
+        N = self.simulator.base_pos.shape[0]
+
+        # --------------------------------------------------
+        # state
+        # --------------------------------------------------
+        J_b = self.leg_jacobians                                                # (N,4,3,3)
+        tau_leg = self.simulator._dof_tau.view(-1, 4, 3)                        # (N,4,3)
+        tau_max = self.simulator._torque_limits.view(-1, 4, 3)                  # (N,4,3) or broadcastable
+
+        foot_pos_w = self.simulator.feet_pos          # (N,4,3)
+        base_pos_w = self.simulator.base_pos          # (N,3)
+        foot_pos_rel_base_w = foot_pos_w - base_pos_w[:, None, :]               # (N,4,3)
+
+        grf_w = self.simulator._grfs_buf.view(-1, 4, 3)                         # (N,4,3)
+        normals_w = self.simulator._normal_vector_around_feet.view(-1,4,3)      # (N,4,3)
+        normals_w = normals_w / torch.clamp(torch.linalg.norm(normals_w, dim=-1, keepdim=True), min=1e-6)
+
+        # stance mask from normal contact force
+        fn_meas = torch.sum(grf_w * normals_w, dim=-1)                          # (N,4)
+        stance_mask = fn_meas > 1.0
+        stance_f = stance_mask.to(dtype)
+
+        # --------------------------------------------------
+        # rotate Jacobians from base frame -> world frame
+        # --------------------------------------------------
+        x, y, z, w = self.simulator.base_quat[:, 0], self.simulator.base_quat[:, 1], self.simulator.base_quat[:, 2], self.simulator.base_quat[:, 3]
+        xx, yy, zz = x*x, y*y, z*z
+        xy, xz, yz = x*y, x*z, y*z
+        wx, wy, wz = w*x, w*y, w*z
+        R_wb = torch.stack([
+            torch.stack([1 - 2*(yy + zz),     2*(xy - wz),     2*(xz + wy)], dim=-1),
+            torch.stack([    2*(xy + wz), 1 - 2*(xx + zz),     2*(yz - wx)], dim=-1),
+            torch.stack([    2*(xz - wy),     2*(yz + wx), 1 - 2*(xx + yy)], dim=-1),
+        ], dim=-2)                                                               # (N,3,3)
+
+        J_w = torch.matmul(R_wb[:, None, :, :], J_b)                             # (N,4,3,3)
+
+        # --------------------------------------------------
+        # primary capability matrices
+        #   M_i = J_i diag(tau_max_i^2) J_i^T
+        #   S_F = sum_i M_i^{-1}
+        #   S_W = sum_i A_i M_i^{-1} A_i^T
+        # --------------------------------------------------
+        Lw = self.cfg.rewards.ellipsoid_wrench_length_scale
+
+        S_F = torch.zeros(N, 3, 3, device=device, dtype=dtype)
+        S_W = torch.zeros(N, 6, 6, device=device, dtype=dtype)
+        I3 = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(N, 3, 3)
+
+        for i in range(4):
+            J_i = J_w[:, i]                                                      # (N,3,3)
+            tau_max_i = tau_max[:, i]                                            # (N,3)
+
+            Wtau_inv_i = torch.diag_embed(tau_max_i ** 2)                        # (N,3,3)
+            M_i = J_i @ Wtau_inv_i @ J_i.transpose(-1, -2)                       # (N,3,3)
+            M_i_inv = _safe_inv(M_i, eps=1e-5)
+
+            mask_i = stance_f[:, i].view(N, 1, 1)
+            S_F = S_F + mask_i * M_i_inv
+
+            A_i = torch.cat([
+                I3,
+                _skew(foot_pos_rel_base_w[:, i]) / Lw,
+            ], dim=-2)                                                           # (N,6,3)
+
+            S_W = S_W + mask_i * (A_i @ M_i_inv @ A_i.transpose(-1, -2))
+
+        # --------------------------------------------------
+        # force ellipsoid reward
+        #   F^T S_F^{-1} F <= 1
+        # --------------------------------------------------
+        evals_F, evecs_F = _eig_desc(S_F)
+        lam1, lam2, lam3 = evals_F[:, 0], evals_F[:, 1], evals_F[:, 2]
+
+        force_size = _geom_mean(evals_F)
+        r_force_size = 1.0 - torch.exp(-self.cfg.rewards.kite_rewards.ellipsoid_force_size_scale * force_size)
+
+        z_ratio = lam1 / torch.clamp(0.5 * (lam2 + lam3), min=1e-8)
+        xy_ratio = lam2 / torch.clamp(lam3, min=1e-8)
+
+        r_force_aniso = (
+            _interval_reward(
+                z_ratio,
+                self.cfg.rewards.kite_rewards.ellipsoid_force_z_ratio_min,
+                self.cfg.rewards.kite_rewards.ellipsoid_force_z_ratio_max,
+                sharpness=2.0,
+            )
+            *
+            _upper_reward(
+                xy_ratio,
+                self.cfg.rewards.kite_rewards.ellipsoid_force_xy_ratio_max,
+                sharpness=2.0,
+            )
+        )
+
+        ez = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype).view(1, 3)
+        u1 = evecs_F[:, :, 0]
+        u2 = evecs_F[:, :, 1]
+        u3 = evecs_F[:, :, 2]
+
+        align_z = torch.abs(torch.sum(u1 * ez, dim=-1))
+        align_xy = 1.0 - 0.5 * (u2[:, 2].abs() + u3[:, 2].abs())
+        align_xy = torch.clamp(align_xy, 0.0, 1.0)
+
+        r_force_align = align_z * align_xy
+        r_force_main = 0.6 * r_force_align + 0.25 * r_force_size + 0.15 * r_force_aniso
+
+        # --------------------------------------------------
+        # wrench ellipsoid reward
+        #   W_tilde^T S_W^{-1} W_tilde <= 1
+        # --------------------------------------------------
+        evals_W, _ = _eig_desc(S_W)
+
+        n_stance = stance_mask.sum(dim=1).clamp(min=1)                           # (N,)
+        k_active = torch.clamp(3 * n_stance, max=6)                              # (N,)
+
+        idx6 = torch.arange(6, device=device).view(1, 6)
+        active_mask = idx6 < k_active.unsqueeze(-1)
+
+        wrench_log = torch.where(
+            active_mask,
+            torch.log(torch.clamp(evals_W, min=1e-8)),
+            torch.zeros_like(evals_W),
+        ).sum(dim=1)
+
+        wrench_size = torch.exp(wrench_log / k_active.to(dtype))
+        r_wrench_size = 1.0 - torch.exp(-self.cfg.rewards.kite_rewards.ellipsoid_wrench_size_scale * wrench_size)
+
+        lam_max = evals_W[:, 0]
+        lam_min_active = torch.gather(evals_W, 1, (k_active - 1).long().unsqueeze(-1)).squeeze(-1)
+        cond_W = lam_max / torch.clamp(lam_min_active, min=1e-8)
+
+        r_wrench_cond = _upper_reward(
+            cond_W,
+            self.cfg.rewards.kite_rewards.ellipsoid_wrench_cond_max,
+            sharpness=1.0,
+        )
+
+        r_wrench_main = 0.6 * r_wrench_size + 0.4 * r_wrench_cond
+
+        # --------------------------------------------------
+        # auxiliary: realized force/wrench uses strong ellipsoid directions
+        # --------------------------------------------------
+        grf_stance = grf_w * stance_f.unsqueeze(-1)
+        F_meas = grf_stance.sum(dim=1)                                           # (N,3)
+        M_meas = torch.cross(foot_pos_rel_base_w, grf_stance, dim=-1).sum(dim=1)
+        W_meas = torch.cat([F_meas, M_meas / Lw], dim=-1)                        # (N,6)
+
+        H_F = _safe_pinv(S_F, eps=1e-5)
+        F_hat = F_meas / (torch.linalg.norm(F_meas, dim=-1, keepdim=True) + 1e-6)
+        force_dir_cost = torch.einsum("bi,bij,bj->b", F_hat, H_F, F_hat)
+        r_force_use = torch.exp(-2.0 * force_dir_cost)
+
+        r_force_principal_use = torch.abs(torch.sum(F_hat * u1, dim=-1))
+
+        H_W = _safe_pinv(S_W, eps=1e-5)
+        W_hat = W_meas / (torch.linalg.norm(W_meas, dim=-1, keepdim=True) + 1e-6)
+        wrench_dir_cost = torch.einsum("bi,bij,bj->b", W_hat, H_W, W_hat)
+        r_wrench_use = torch.exp(-2.0 * wrench_dir_cost)
+
+        # # --------------------------------------------------
+        # # auxiliary: torque limits and torque/GRF consistency
+        # # --------------------------------------------------
+        # F_tau = torch.zeros(N, 4, 3, device=device, dtype=dtype)
+        # tau_margin_terms = []
+
+        # for i in range(4):
+        #     J_i = J_w[:, i]                                                      # (N,3,3)
+        #     tau_i = tau_leg[:, i]                                                # (N,3)
+        #     tau_max_i = tau_max[:, i]                                            # (N,3)
+
+        #     F_tau_i = (_safe_pinv(J_i @ J_i.transpose(-1, -2), eps=1e-5) @ (J_i @ tau_i.unsqueeze(-1))).squeeze(-1)
+        #     F_tau_i = F_tau_i * stance_f[:, i:i+1]
+        #     F_tau[:, i] = F_tau_i
+
+        #     tau_norm_i = tau_i / torch.clamp(tau_max_i, min=1e-6)
+        #     tau_util_i = torch.linalg.norm(tau_norm_i, dim=-1) / (tau_i.shape[-1] ** 0.5)
+        #     tau_margin_i = torch.exp(-3.0 * tau_util_i**2) * stance_f[:, i]
+        #     tau_margin_terms.append(tau_margin_i)
+
+        # tau_margin_terms = torch.stack(tau_margin_terms, dim=1)                  # (N,4)
+        # r_tau_margin = tau_margin_terms.sum(dim=1) / torch.clamp(stance_f.sum(dim=1), min=1.0)
+
+        # diff_F = F_tau - grf_w
+        # err_F = torch.linalg.norm(diff_F, dim=-1) / torch.clamp(torch.linalg.norm(grf_w, dim=-1), min=1e-6)
+        # r_tau_grf_consistency = (
+        #     torch.exp(-5.0 * err_F**2) * stance_f
+        # ).sum(dim=1) / torch.clamp(stance_f.sum(dim=1), min=1.0)
+
+        # --------------------------------------------------
+        # auxiliary: terrain awareness via friction cone
+        # --------------------------------------------------
+        fn = torch.sum(grf_w * normals_w, dim=-1)                                # (N,4)
+        ft_vec = grf_w - fn.unsqueeze(-1) * normals_w
+        ft = torch.linalg.norm(ft_vec, dim=-1)
+
+        mu = self.cfg.rewards.kite_rewards.ellipsoid_mu_friction
+        fn_margin = self.cfg.rewards.kite_rewards.ellipsoid_normal_force_margin
+        ft_margin = self.cfg.rewards.kite_rewards.ellipsoid_tangential_force_margin
+
+        r_normal_support = torch.exp(-2.0 * torch.relu(fn_margin - fn)**2)
+        cone_violation = torch.relu(ft - mu * torch.relu(fn - ft_margin))
+        r_friction = torch.exp(-0.5 * cone_violation**2)
+
+        r_contact_cone = (
+            (r_normal_support * r_friction) * stance_f
+        ).sum(dim=1) / torch.clamp(stance_f.sum(dim=1), min=1.0)
+
+        # --------------------------------------------------
+        # final reward
+        # --------------------------------------------------
+        r_main = 0.5 * r_force_main + 0.5 * r_wrench_main
+        r_aux = (
+            self.cfg.rewards.kite_rewards.ellipsoid_force_aux_weight
+            * (0.5 * r_force_use + 0.5 * r_force_principal_use)
+            +
+            self.cfg.rewards.kite_rewards.ellipsoid_wrench_aux_weight
+            * r_wrench_use
+            +
+            # self.cfg.rewards.ellipsoid_tau_margin_weight
+            # * r_tau_margin
+            # +
+            # self.cfg.rewards.ellipsoid_tau_grf_consistency_weight
+            # * r_tau_grf_consistency
+            # +
+            self.cfg.rewards.kite_rewards.ellipsoid_friction_weight
+            * r_contact_cone
+        )
+
+        reward = self.cfg.rewards.kite_rewards.ellipsoid_main_weight * r_main + (1.0 - self.cfg.rewards.kite_rewards.ellipsoid_main_weight) * r_aux
+        reward = reward * (n_stance > 0).to(dtype)
+
+        # # optional logging
+        # self.extras["ellipsoid_force_size"] = force_size.mean()
+        # self.extras["ellipsoid_force_z_ratio"] = z_ratio.mean()
+        # self.extras["ellipsoid_force_xy_ratio"] = xy_ratio.mean()
+        # self.extras["ellipsoid_force_align"] = r_force_align.mean()
+        # self.extras["ellipsoid_wrench_cond"] = cond_W.mean()
+        # self.extras["ellipsoid_force_use"] = r_force_use.mean()
+        # self.extras["ellipsoid_wrench_use"] = r_wrench_use.mean()
+        # self.extras["ellipsoid_tau_margin"] = r_tau_margin.mean()
+        # self.extras["ellipsoid_tau_grf_consistency"] = r_tau_grf_consistency.mean()
+        # self.extras["ellipsoid_contact_cone"] = r_contact_cone.mean()
+
+        return reward    
+
+    
     def _reward_lin_vel_z(self):
         # Penalize z axis base linear velocity
         return torch.square(self.simulator.base_lin_vel[:, 2])

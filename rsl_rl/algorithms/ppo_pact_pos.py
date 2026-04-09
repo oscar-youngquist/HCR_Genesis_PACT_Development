@@ -311,7 +311,7 @@ class PPO_PACT_Pos:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             # Perform RL update
-            ppo_loss, surrogate_loss, value_loss, current_actions, tau_clone_loss = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
+            ppo_loss, surrogate_loss, value_loss, current_actions = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
                                                                                           advantages_batch, target_values_batch, returns_batch,
@@ -334,7 +334,7 @@ class PPO_PACT_Pos:
             # else:
             #     ppo_losses = [ppo_loss]
             
-            ppo_losses = [ppo_loss, tau_clone_loss]
+            ppo_losses = [ppo_loss]
             # # PCGrad - back-propigate the loss
             # if self.pinn_weight > 0 and pinn_loss is not None:    # just being extra cautious
             #     self.act_optimizer.pc_backward_pinn(ppo_losses)
@@ -577,22 +577,7 @@ class PPO_PACT_Pos:
 
         ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
-        # Update PPO loss with tau-branch tracking loss (scaled magnitude of *first* feedback torques)
-        #     Process current and previous actions into the action-space
-        q_des_curr, tau_des_curr = action_func(current_actions)
-
-        #     Extract joint pose and velocity data
-        #     Obs - cmd (3) [0,1,2], proj_grav (3) [3,4,5], ang_vel (3) [6,7,8], qpose (12) [9-20], qvel (12) [21-32]
-        q_pos_curr,  q_velo_curr  = obs_batch[:,9:21].detach().clone(),   obs_batch[:,21:33].detach().clone()
-        q_pos_curr,  q_velo_curr  = (q_pos_curr + default_pose).float(),  (q_velo_curr / qvel_scale).float()
-        
-        # Calculate feedback torques
-        pd_tau_curr  = fb_func(q_des_curr,  q_pos_curr,  q_velo_curr)
-
-        tau_clone_loss = F.mse_loss(tau_des_curr, 0.1*pd_tau_curr) # scale down to a tenth in order to not 
-                                                                   # have torque overpower in early stages of subsequent coupled training
-
-        return ppo_loss, surrogate_loss, value_loss, current_actions, tau_clone_loss
+        return ppo_loss, surrogate_loss, value_loss, current_actions
 
     def _compute_vae_loss(self, obs_hist_batch, grf_target, 
                           obs_target, explicit_labels_batch, terminated_batch):
