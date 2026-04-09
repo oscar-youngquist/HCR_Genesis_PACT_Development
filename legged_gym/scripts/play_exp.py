@@ -298,7 +298,7 @@ def play(args):
     # export policy as a jit module (used to run it from C++ or python)
     path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 
                             train_cfg.runner.load_run, 'exported')
-    # export_policy(ppo_runner, path, args, env_cfg, train_cfg)
+    export_policy(ppo_runner, path, args, env_cfg, train_cfg)
 
     interaction_loop(train_cfg, env, policy, args)
 

@@ -22,18 +22,18 @@ class SharedTensors:
 
         # Inputs
         #      the plus (1) accounts for the quat. representation of orientation used by pinocchio
-        self.q       = self.make("pact_q",       (num_envs, self.DOF+1))
-        self.qd      = self.make("pact_qd",      (num_envs, self.DOF))
-        self.qd_prev = self.make("pact_qd_prev", (num_envs, self.DOF))
-        self.grf     = self.make("pact_grf",     (num_envs, *self.FOOT_DIM))
-        self.dt      = self.make("pact_dt",      (1,))
+        self.q       = self.make("go1_pact_q",       (num_envs, self.DOF+1))
+        self.qd      = self.make("go1_pact_qd",      (num_envs, self.DOF))
+        self.qd_prev = self.make("go1_pact_qd_prev", (num_envs, self.DOF))
+        self.grf     = self.make("go1_pact_grf",     (num_envs, *self.FOOT_DIM))
+        self.dt      = self.make("go1_pact_dt",      (1,))
 
         # Outputs
-        self.wb_dynamics = self.make("pact_wb_dynamics", (num_envs, self.DOF))
-        self.wb_contacts = self.make("pact_wb_contacts", (num_envs, self.DOF))
-        self.mass_mat    = self.make("pact_mass_mat",    (num_envs, self.DOF, self.DOF))
-        self.bias        = self.make("pact_bias",        (num_envs, self.DOF))
-        self.acc6d       = self.make("pact_acc6d",       (num_envs, 6))
+        self.wb_dynamics = self.make("go1_pact_wb_dynamics", (num_envs, self.DOF))
+        self.wb_contacts = self.make("go1_pact_wb_contacts", (num_envs, self.DOF))
+        self.mass_mat    = self.make("go1_pact_mass_mat",    (num_envs, self.DOF, self.DOF))
+        self.bias        = self.make("go1_pact_bias",        (num_envs, self.DOF))
+        self.acc6d       = self.make("go1_pact_acc6d",       (num_envs, 6))
 
     def make(self, name, shape, dtype=np.float32):
         nbytes = np.prod(shape) * np.dtype(dtype).itemsize
@@ -56,17 +56,17 @@ def compute_single_env(i, shared, pino_model, pino_data,
     for a single environment index i.
     """
 
-    q       = shared.pact_q[i]
-    qd      = shared.pact_qd[i]
-    qdprev  = shared.pact_qd_prev[i]
-    grf     = shared.pact_grf[i]      # shaped as (12)
-    dt      = shared.pact_dt[0]
+    q       = shared.go1_pact_q[i]
+    qd      = shared.go1_pact_qd[i]
+    qdprev  = shared.go1_pact_qd_prev[i]
+    grf     = shared.go1_pact_grf[i]      # shaped as (12)
+    dt      = shared.go1_pact_dt[0]
 
     # Acceleration (backward finite difference)
     acc = (qd - qdprev) / dt
 
     # 6-DoF torso accel
-    shared.pact_acc6d[i] = acc[:6]
+    shared.go1_pact_acc6d[i] = acc[:6]
 
     # Pinocchio general coords
     aq0 = np.zeros_like(qd)
@@ -75,12 +75,12 @@ def compute_single_env(i, shared, pino_model, pino_data,
     M = pn.crba(pino_model, pino_data, q)
 
     wb_dyn = M @ acc + b
-    shared.pact_wb_dynamics[i] = wb_dyn[correct_idxs]
+    shared.go1_pact_wb_dynamics[i] = wb_dyn[correct_idxs]
 
     # Also save reduced mass matrix + bias
     M_ = M[np.ix_(correct_idxs, correct_idxs)]
-    shared.pact_mass_mat[i] = M_
-    shared.pact_bias[i] = b[correct_idxs]
+    shared.go1_pact_mass_mat[i] = M_
+    shared.go1_pact_bias[i] = b[correct_idxs]
 
     # Contact forces
     J_list = []
@@ -92,7 +92,7 @@ def compute_single_env(i, shared, pino_model, pino_data,
     J_total = np.concatenate(J_list, axis=0)
     tau = (J_total.transpose() @ grf).squeeze()
 
-    shared.pact_wb_contacts[i] = tau[correct_idxs]
+    shared.go1_pact_wb_contacts[i] = tau[correct_idxs]
 
 def worker_loop(worker_id, shared_names, shapes, dtypes,
                 pino_model, pino_foot_names, correct_idxs,

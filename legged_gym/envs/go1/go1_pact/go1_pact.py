@@ -1419,11 +1419,17 @@ class Go1PACT(BaseTask):
         """ Reward for the hip joint position close to default position
         """
         hip_joint_indices = [0, 3, 6, 9]
-        dof_pos_error = torch.sum(torch.square(
-            self.simulator.dof_pos[:, hip_joint_indices] - 
-            self.simulator.default_dof_pos[:, hip_joint_indices]), dim=-1)
-        return dof_pos_error
-    
+        front_dof_pos_error = torch.sum(torch.square(
+            self.simulator.dof_pos[:, hip_joint_indices[0:2]] - 
+            self.simulator.default_dof_pos[:, hip_joint_indices[0:2]]), dim=-1)
+        
+        # weight the rear hip joint twice as much as front. They are currently splaying out
+        rear_dof_pos_error = torch.sum(torch.square(
+            2*(self.simulator.dof_pos[:, hip_joint_indices[2:4]] - 
+            self.simulator.default_dof_pos[:, hip_joint_indices[2:4]])), dim=-1)
+        
+        return front_dof_pos_error + rear_dof_pos_error
+
     def _potential_orientation(self):
         roll_pitch = self.simulator.projected_gravity[:, :2]
         return -torch.sum(roll_pitch**2, dim=1)

@@ -141,7 +141,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = True
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 2000     # number of steps with initial values held constant
+        push_warmup = 3000     # number of steps with initial values held constant
         num_jumps = 10
         
         # Randomize Friction
@@ -331,7 +331,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
         base_height_target = 0.33
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
-        foot_clearance_target = 0.06 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.36
@@ -353,7 +353,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
             
             pd_target_torque_limit = 0.0
             
-            alive_bonus           = 0.10
+            alive_bonus           = 0.01
 
             stand_still_contact = -0.5
             dof_pos_stand_still = -0.5
@@ -438,11 +438,11 @@ class GO2PACTCfg( LeggedRobotCfg ):
                                   "torque_limits":[-1.0e-3, -0.1],
                                   "action_rate":[-0.001, -0.01],
                                   "action_smoothness":[-0.001,-0.01],
-                                  "dof_acc":[-2.5e-10, -2.5e-7],
+                                  "dof_acc":[-2.5e-9, -2.5e-7],
                                  }
 
             curr_steps = 1
-            warmup_steps = 1000
+            warmup_steps = 2000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -452,8 +452,8 @@ class GO2PACTCfg( LeggedRobotCfg ):
         heading_command = False # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
-            lin_vel_y = [-0.5, 0.5]   # min max [m/s]
-            ang_vel_yaw = [-0.5, 0.5]    # min max [rad/s]
+            lin_vel_y = [-1.0, 1.0]   # min max [m/s]
+            ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
             heading = [-3.14, 3.14]
 
 class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
@@ -485,9 +485,9 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go2_pact_pos_rough/Apr06_21-12-58_pact_pos_100hz_spec_jointrand/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.001
+        entropy_coef = 0.005
         # learning_rate = 1.0e-3 #
-        learning_rate = 1.0e-4 #
+        learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -514,7 +514,7 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Mar27_12-06-16_pact_100hz_spec"
+        load_run = "Apr07_21-24-22_pact_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/debugging_deployment/spec_model_joystick.csv"

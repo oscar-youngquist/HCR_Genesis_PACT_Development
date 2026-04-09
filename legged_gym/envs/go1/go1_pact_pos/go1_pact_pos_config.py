@@ -129,7 +129,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 500  # number of steps to increase the domain randomization ranges
-        push_warmup = 1000     # number of steps with initial values held constant
+        push_warmup = 2000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -314,7 +314,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         base_height_target = 0.30
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
-        foot_clearance_target = 0.06 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.28
@@ -329,8 +329,8 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
-            collision             = -1.0
-            dof_pos_limits        = -1.0
+            collision             = -10.0
+            dof_pos_limits        = -10.0
             dof_close_to_default  = -0.25
             torque_limits         = -0.1
 
@@ -378,7 +378,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 1.0  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.25  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.1
             
             foot_slip        = -0.1           # penalty for feet slipping
@@ -394,7 +394,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
                                  }
 
             curr_steps = 1
-            warmup_steps = 1500
+            warmup_steps = 200
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -441,8 +441,8 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
-        learning_rate = 1.0e-3 #
-        # learning_rate = 3.0e-4 #
+        # learning_rate = 1.0e-3 #
+        learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -458,7 +458,7 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 3000 # number of policy updates
+        max_iterations = 5000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb
