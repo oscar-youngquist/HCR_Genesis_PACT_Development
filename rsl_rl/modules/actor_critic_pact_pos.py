@@ -382,7 +382,7 @@ class ActorCritic_PACT_Pos(nn.Module):
     # Method for the forward method of the actor network, used mostly as an internal method
     def actor_forward(self, current_obs):
         # We are assuming "current_obs" includes all of the components used in the dreamwaq policy input
-        action = self.act_trunk(current_obs)
+        action = self.actor(current_obs)
 
         if torch.isnan(action).any():
             with torch.no_grad():

@@ -264,7 +264,7 @@ class OnPolicyRunnerPACTPos:
             
             entropy_coef = 0.01
             std_lwr = 0.40
-            
+            self._init_entropy_coef = 0.01
             half_ceof = self._init_entropy_coef * 0.5
             tenth_coef = self._init_entropy_coef * 0.1
 

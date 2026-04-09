@@ -242,24 +242,24 @@ def interaction_loop(train_cfg, env, policy, args):
 
         # print(env.simulator.feedforward_torques.detach().cpu().numpy())
 
-        logger.log_states(
-            {
-                'base_cmd':env.commands.detach().cpu().numpy().tolist(),
-                'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
-                'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
-                'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
-                'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
-                'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
-                'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
-                'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
-                'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
-                'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
-                'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
-                'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
-                'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
-                'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
-                'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
-            })
+        # logger.log_states(
+        #     {
+        #         'base_cmd':env.commands.detach().cpu().numpy().tolist(),
+        #         'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
+        #         'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
+        #         'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
+        #         'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
+        #         'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
+        #         'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
+        #         'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
+        #         'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
+        #         'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
+        #         'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
+        #         'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
+        #         'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
+        #         'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
+        #         'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
+        #     })
 
 def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     """export the policy as jit script according to different task types

@@ -527,7 +527,7 @@ class PPO_PACT_Pos:
             self.actor_critic.act_bootmask(obs_batch, obs_hist_batch)
 
         # Pull out the current actions for use later
-        current_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
+        current_actions = self.actor_critic.mean
 
         # PPO stuff
         #    - Position Control
@@ -606,63 +606,63 @@ class PPO_PACT_Pos:
         
         return vae_loss, kl_div, recon_error, vel_pred_error, dec_input.clone().detach(), decode_target.detach(), enc_update_obs_decode.detach()
 
-    def _compute_PINN_loss(self, current_actions, obs_batch,                                      # Current timestep
-                           prev_obs_batch, prev_obs_hist_batch,                                   # Previous timestep
-                           pprev_obs_batch, pprev_obs_hist_batch,                                 # previous-previous timestep
-                           torso_accs_batch, mass_mat_batch, bias_vec_batch, gt_forces_batch,     # PINN stuff
-                           action_func, fb_func, default_pose, dt, qvel_scale):                   # simulator functions/values passthrough
-        if self.use_boot:
-            self.actor_critic.act(prev_obs_batch, prev_obs_hist_batch)
-        else:
-            self.actor_critic.act_bootmask(prev_obs_batch, prev_obs_hist_batch)
-        prev_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
+    # def _compute_PINN_loss(self, current_actions, obs_batch,                                      # Current timestep
+    #                        prev_obs_batch, prev_obs_hist_batch,                                   # Previous timestep
+    #                        pprev_obs_batch, pprev_obs_hist_batch,                                 # previous-previous timestep
+    #                        torso_accs_batch, mass_mat_batch, bias_vec_batch, gt_forces_batch,     # PINN stuff
+    #                        action_func, fb_func, default_pose, dt, qvel_scale):                   # simulator functions/values passthrough
+    #     if self.use_boot:
+    #         self.actor_critic.act(prev_obs_batch, prev_obs_hist_batch)
+    #     else:
+    #         self.actor_critic.act_bootmask(prev_obs_batch, prev_obs_hist_batch)
+    #     prev_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
 
-        pprev_actions = None
-        if self.use_boot:
-            self.actor_critic.act(pprev_obs_batch, pprev_obs_hist_batch)
-        else:
-            self.actor_critic.act_bootmask(pprev_obs_batch, pprev_obs_hist_batch)
-        pprev_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
+    #     pprev_actions = None
+    #     if self.use_boot:
+    #         self.actor_critic.act(pprev_obs_batch, pprev_obs_hist_batch)
+    #     else:
+    #         self.actor_critic.act_bootmask(pprev_obs_batch, pprev_obs_hist_batch)
+    #     pprev_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
 
-        # Process current and previous actions into the action-space
-        q_des_curr, tau_des_curr = action_func(current_actions)
-        q_des_prev, _            = action_func(prev_actions)
-        q_des_pprev, _           = action_func(pprev_actions)
+    #     # Process current and previous actions into the action-space
+    #     q_des_curr, tau_des_curr = action_func(current_actions)
+    #     q_des_prev, _            = action_func(prev_actions)
+    #     q_des_pprev, _           = action_func(pprev_actions)
 
-        # Extract joint pose and velocity data
-        # Obs - cmd (3), proj_grav (3), ang_vel (3)
-        q_pos_curr,  q_velo_curr  = obs_batch[:,9:21].detach().clone(),   obs_batch[:,21:33].detach().clone()
-        q_pos_curr,  q_velo_curr  = (q_pos_curr + default_pose).float(),  (q_velo_curr / qvel_scale).float()
+    #     # Extract joint pose and velocity data
+    #     # Obs - cmd (3), proj_grav (3), ang_vel (3)
+    #     q_pos_curr,  q_velo_curr  = obs_batch[:,9:21].detach().clone(),   obs_batch[:,21:33].detach().clone()
+    #     q_pos_curr,  q_velo_curr  = (q_pos_curr + default_pose).float(),  (q_velo_curr / qvel_scale).float()
         
-        # Calculate feedback torques
-        pd_tau_curr  = fb_func(q_des_curr,  q_pos_curr,  q_velo_curr)
+    #     # Calculate feedback torques
+    #     pd_tau_curr  = fb_func(q_des_curr,  q_pos_curr,  q_velo_curr)
 
-        ###
-        #   WB-dynamics
-        ###
-        # Use 1st order backwards finite differences to approximate models command acceleration
-        dof_acc = (q_des_curr - 2.0*q_des_prev + q_des_pprev) / np.power(dt,2)
-        # Create the whole-body acceleration vector
-        wb_acc = torch.cat([torso_accs_batch, dof_acc], dim=1).float()
-        # Create the whole-boyd tau vector 
-        wb_tau = torch.cat([torch.zeros(torso_accs_batch.shape[0], 6).float().to(self.device), (tau_des_curr.float() + pd_tau_curr.float())], dim=1).float()
+    #     ###
+    #     #   WB-dynamics
+    #     ###
+    #     # Use 1st order backwards finite differences to approximate models command acceleration
+    #     dof_acc = (q_des_curr - 2.0*q_des_prev + q_des_pprev) / np.power(dt,2)
+    #     # Create the whole-body acceleration vector
+    #     wb_acc = torch.cat([torso_accs_batch, dof_acc], dim=1).float()
+    #     # Create the whole-boyd tau vector 
+    #     wb_tau = torch.cat([torch.zeros(torso_accs_batch.shape[0], 6).float().to(self.device), (tau_des_curr.float() + pd_tau_curr.float())], dim=1).float()
 
-        # Calculate the models wb-dynamics
-        model_wb_dynamics = torch.bmm(mass_mat_batch.float(), wb_acc.unsqueeze(-1)).squeeze(-1) + bias_vec_batch.float()
+    #     # Calculate the models wb-dynamics
+    #     model_wb_dynamics = torch.bmm(mass_mat_batch.float(), wb_acc.unsqueeze(-1)).squeeze(-1) + bias_vec_batch.float()
 
-        error = model_wb_dynamics[:,6:] - gt_forces_batch[:,6:] - wb_tau[:,6:]
+    #     error = model_wb_dynamics[:,6:] - gt_forces_batch[:,6:] - wb_tau[:,6:]
 
-        # softly weight by contact
-        # Apply soft (to make this a continuous reward signal) contact weighting to avoid over-penalizing for leg movement
-        contact_magnitude = torch.clamp(gt_forces_batch[:,6:], min=0.0)
-        contact_max = torch.max(contact_magnitude, dim=1, keepdim=True)[0]
-        contact_weight = contact_magnitude / (contact_max + 1e-8)
-        error *= contact_weight
+    #     # softly weight by contact
+    #     # Apply soft (to make this a continuous reward signal) contact weighting to avoid over-penalizing for leg movement
+    #     contact_magnitude = torch.clamp(gt_forces_batch[:,6:], min=0.0)
+    #     contact_max = torch.max(contact_magnitude, dim=1, keepdim=True)[0]
+    #     contact_weight = contact_magnitude / (contact_max + 1e-8)
+    #     error *= contact_weight
 
-        # Make the error relative, so that it is less senesitive to scale
-        rel_error = torch.norm(error, dim=1) / (1e-8 + torch.norm(wb_tau[:,6:].detach().clone(), dim=1) + torch.norm(gt_forces_batch[:,6:], dim=1))
+    #     # Make the error relative, so that it is less senesitive to scale
+    #     rel_error = torch.norm(error, dim=1) / (1e-8 + torch.norm(wb_tau[:,6:].detach().clone(), dim=1) + torch.norm(gt_forces_batch[:,6:], dim=1))
 
-        # Calculate the whole-body PINN loss
-        pinn_loss = torch.mean(rel_error)
+    #     # Calculate the whole-body PINN loss
+    #     pinn_loss = torch.mean(rel_error)
         
-        return pinn_loss
+    #     return pinn_loss

@@ -1,4 +1,4 @@
-from legged_gym.envs.go2.go2_pact_pos.kite_reward_helpers import _eig_desc, _geom_mean, _interval_reward, _safe_inv, _safe_pinv, _skew, _upper_reward
+from legged_gym.envs.go2.go2_pact_pos.kite_reward_helpers import _eig_desc, _geom_mean, _interval_reward, _safe_inv, _safe_normalize, _safe_pinv, _sanitize_tensor, _skew, _upper_reward
 from legged_gym import *
 from time import time
 import numpy as np
@@ -180,6 +180,7 @@ class Go2PACTPos(BaseTask):
             c2 = cos(-q1), c3 = cos(-q2)
         """
         assert q.ndim == 3 and q.shape[1:] == (4, 3), f"Expected q shape (N, 4, 3), got {q.shape}"
+        q = torch.nan_to_num(q, nan=0.0, posinf=0.0, neginf=0.0)
 
         dtype = q.dtype
         device = q.device
@@ -195,6 +196,7 @@ class Go2PACTPos(BaseTask):
             device=device,
             dtype=dtype,
         ).view(1, 4).expand(N, 4)  # (N, 4)
+        side_sign = torch.nan_to_num(side_sign, nan=1.0, posinf=1.0, neginf=-1.0)
 
         q0 = q[:, :, 0]  # (N, 4)
         q1 = q[:, :, 1]
@@ -225,7 +227,7 @@ class Go2PACTPos(BaseTask):
         J[:, :, 2, 1] = l3 * c1 * s23 + l2 * c1 * s2
         J[:, :, 2, 2] = l3 * c1 * s23
 
-        return J
+        return torch.nan_to_num(J, nan=0.0, posinf=1e6, neginf=-1e6)
 
     def check_termination(self):
         """ Check if environments need to be reset
@@ -370,8 +372,7 @@ class Go2PACTPos(BaseTask):
                                   (self.simulator.dof_pos - self.simulator.default_dof_pos)   
                                       * self.obs_scales.dof_pos,                              # joint pose            12
                                     self.simulator.dof_vel * self.obs_scales.dof_vel,         # joint velocity        12
-                                    self.actions[:,0:12],                                     # joint pose actions    12
-                                    self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)),    # joint torque actions  12
+                                    self.actions[:,0:12]                                     # joint pose actions    12)
                                     ), dim=-1)                                                # 57
 
         # add noise if needed
@@ -882,19 +883,20 @@ class Go2PACTPos(BaseTask):
         - self._swing_mask -> (B, 4) in {0,1}
         """
         eps = 1e-6
-        J = self.leg_jacobians                                # (B, 4, 3, nj)
-        n = self.simulator._normal_vector_around_feet.reshape(-1, 4, 3)   # (B, 4, 3)
+        J = _sanitize_tensor(self.leg_jacobians)                                # (B, 4, 3, nj)
+        n = _sanitize_tensor(self.simulator._normal_vector_around_feet.reshape(-1, 4, 3))   # (B, 4, 3)
         swing = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
                  ).float()                                                # (B, 4)
 
         # velocity ellipsoid matrix: M = J J^T
         M = J @ J.transpose(-1, -2)                             # (B, 4, 3, 3)
         I3 = torch.eye(3, device=M.device, dtype=M.dtype).view(1, 1, 3, 3)
-        M = M + eps * I3
+        M = _sanitize_tensor(0.5 * (M + M.transpose(-1, -2)) + eps * I3)
 
         # principal axes / sizes
         eigvals, eigvecs = torch.linalg.eigh(M)                 # ascending
-        eigvals = torch.clamp(eigvals, min=eps)
+        eigvals = torch.clamp(_sanitize_tensor(eigvals), min=eps)
+        eigvecs = _safe_normalize(eigvecs, dim=-2, eps=eps)
         axes = torch.sqrt(eigvals)                              # semi-axis lengths
 
         v_small = eigvecs[..., 0]                               # (B, 4, 3)
@@ -902,35 +904,41 @@ class Go2PACTPos(BaseTask):
         v_large = eigvecs[..., 2]
 
         # normalize terrain normals
-        n = n / (torch.norm(n, dim=-1, keepdim=True) + eps)
+        n = _safe_normalize(n, dim=-1, eps=eps)
+        default_n = torch.tensor([0.0, 0.0, 1.0], device=n.device, dtype=n.dtype).view(1, 1, 3)
+        n_norm = torch.linalg.norm(n, dim=-1, keepdim=True)
+        n = torch.where(n_norm > eps, n, default_n)
 
         # alignment: largest two axes tangent to terrain, smallest axis normal to terrain
         align_large = 1.0 - (torch.sum(v_large * n, dim=-1) ** 2)
         align_mid   = 1.0 - (torch.sum(v_mid   * n, dim=-1) ** 2)
         align_small =       (torch.sum(v_small * n, dim=-1) ** 2)
-        align = 0.5 * align_large + 0.25 * align_mid + 0.25 * align_small
+        align = torch.clamp(0.5 * align_large + 0.25 * align_mid + 0.25 * align_small, 0.0, 1.0)
 
         # size: geometric mean of ellipsoid semi-axis lengths
         # size_raw = torch.exp(torch.mean(torch.log(axes), dim=-1))
         size_raw = _geom_mean(axes)
-        size = 1.0 - torch.exp(-self.cfg.rewards.kite_reward.ellipsoid_force_size_scale * size_raw)
-        
+        size = 1.0 - torch.exp(-self.cfg.rewards.kite_rewards.ellipsoid_force_size_scale * size_raw)
+        size = torch.clamp(_sanitize_tensor(size), 0.0, 1.0)
+
         # directional authority in normal vs tangent plane
-        normal_auth = torch.einsum('bfi,bfij,bfj->bf', n, M, n)
+        normal_auth = torch.clamp(_sanitize_tensor(torch.einsum('bfi,bfij,bfj->bf', n, M, n)), min=0.0)
 
         # plane authority = trace(M) - normal authority
-        plane_auth = torch.diagonal(M, dim1=-2, dim2=-1).sum(dim=-1) - normal_auth
+        plane_auth = torch.clamp(_sanitize_tensor(torch.diagonal(M, dim1=-2, dim2=-1).sum(dim=-1) - normal_auth), min=0.0)
 
         # mild anisotropy: prefer tangent-plane authority slightly above normal
         # target plane_auth / normal_auth ~= 2.2 / 1.0
-        ratio = plane_auth / (normal_auth + eps)
-        anis = torch.exp(-torch.abs(torch.log(ratio + eps) - torch.log(torch.tensor(2.2, device=M.device, dtype=M.dtype))))
+        ratio = torch.clamp(_sanitize_tensor(plane_auth / torch.clamp(normal_auth, min=eps)), min=eps, max=1e6)
+        target_ratio = torch.tensor(2.2, device=M.device, dtype=M.dtype)
+        anis = torch.exp(-torch.abs(torch.log(ratio) - torch.log(target_ratio)))
+        anis = torch.clamp(_sanitize_tensor(anis), 0.0, 1.0)
 
         # combine over swing feet only
         per_foot = 0.6 * align + 0.25 * size + 0.15 * anis
         reward = (per_foot * swing).sum(dim=1) / torch.clamp(swing.sum(dim=1), min=1.0)
 
-        return reward
+        return torch.clamp(_sanitize_tensor(reward), 0.0, 1.0)
     
     def _reward_torso_force_wrench_ellipsoid(self):
         """
@@ -978,17 +986,19 @@ class Go2PACTPos(BaseTask):
         # --------------------------------------------------
         # state
         # --------------------------------------------------
-        J_b = self.leg_jacobians                                                # (N,4,3,3)
-        tau_leg = self.simulator._dof_tau.view(-1, 4, 3)                        # (N,4,3)
-        tau_max = self.simulator._torque_limits.view(-1, 4, 3)                  # (N,4,3) or broadcastable
+        J_b = _sanitize_tensor(self.leg_jacobians)                                                # (N,4,3,3)
+        tau_leg = _sanitize_tensor(self.simulator._dof_tau.view(-1, 4, 3))                        # (N,4,3)
+        tau_max = torch.clamp(_sanitize_tensor(self.simulator._torque_limits.view(-1, 4, 3)).abs(), min=1e-6)                  # (N,4,3) or broadcastable
 
-        foot_pos_w = self.simulator.feet_pos          # (N,4,3)
-        base_pos_w = self.simulator.base_pos          # (N,3)
+        foot_pos_w = _sanitize_tensor(self.simulator.feet_pos)          # (N,4,3)
+        base_pos_w = _sanitize_tensor(self.simulator.base_pos)          # (N,3)
         foot_pos_rel_base_w = foot_pos_w - base_pos_w[:, None, :]               # (N,4,3)
 
-        grf_w = self.simulator._grfs_buf.view(-1, 4, 3)                         # (N,4,3)
-        normals_w = self.simulator._normal_vector_around_feet.view(-1,4,3)      # (N,4,3)
-        normals_w = normals_w / torch.clamp(torch.linalg.norm(normals_w, dim=-1, keepdim=True), min=1e-6)
+        grf_w = _sanitize_tensor(self.simulator._grfs_buf.view(-1, 4, 3))                         # (N,4,3)
+        normals_w = _safe_normalize(self.simulator._normal_vector_around_feet.view(-1,4,3), dim=-1, eps=1e-6)      # (N,4,3)
+        default_n = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype).view(1, 1, 3)
+        normals_norm = torch.linalg.norm(normals_w, dim=-1, keepdim=True)
+        normals_w = torch.where(normals_norm > 1e-6, normals_w, default_n)
 
         # stance mask from normal contact force
         fn_meas = torch.sum(grf_w * normals_w, dim=-1)                          # (N,4)
@@ -998,7 +1008,8 @@ class Go2PACTPos(BaseTask):
         # --------------------------------------------------
         # rotate Jacobians from base frame -> world frame
         # --------------------------------------------------
-        x, y, z, w = self.simulator.base_quat[:, 0], self.simulator.base_quat[:, 1], self.simulator.base_quat[:, 2], self.simulator.base_quat[:, 3]
+        base_quat = _safe_normalize(self.simulator.base_quat, dim=-1, eps=1e-6)
+        x, y, z, w = base_quat[:, 0], base_quat[:, 1], base_quat[:, 2], base_quat[:, 3]
         xx, yy, zz = x*x, y*y, z*z
         xy, xz, yz = x*y, x*z, y*z
         wx, wy, wz = w*x, w*y, w*z
@@ -1008,7 +1019,7 @@ class Go2PACTPos(BaseTask):
             torch.stack([    2*(xz - wy),     2*(yz + wx), 1 - 2*(xx + yy)], dim=-1),
         ], dim=-2)                                                               # (N,3,3)
 
-        J_w = torch.matmul(R_wb[:, None, :, :], J_b)                             # (N,4,3,3)
+        J_w = _sanitize_tensor(torch.matmul(R_wb[:, None, :, :], J_b))                             # (N,4,3,3)
 
         # --------------------------------------------------
         # primary capability matrices
@@ -1016,7 +1027,7 @@ class Go2PACTPos(BaseTask):
         #   S_F = sum_i M_i^{-1}
         #   S_W = sum_i A_i M_i^{-1} A_i^T
         # --------------------------------------------------
-        Lw = self.cfg.rewards.ellipsoid_wrench_length_scale
+        Lw = max(float(self.cfg.rewards.kite_rewards.ellipsoid_wrench_length_scale), 1e-6)
 
         S_F = torch.zeros(N, 3, 3, device=device, dtype=dtype)
         S_W = torch.zeros(N, 6, 6, device=device, dtype=dtype)
@@ -1028,6 +1039,7 @@ class Go2PACTPos(BaseTask):
 
             Wtau_inv_i = torch.diag_embed(tau_max_i ** 2)                        # (N,3,3)
             M_i = J_i @ Wtau_inv_i @ J_i.transpose(-1, -2)                       # (N,3,3)
+            M_i = _sanitize_tensor(0.5 * (M_i + M_i.transpose(-1, -2)))
             M_i_inv = _safe_inv(M_i, eps=1e-5)
 
             mask_i = stance_f[:, i].view(N, 1, 1)
@@ -1040,6 +1052,9 @@ class Go2PACTPos(BaseTask):
 
             S_W = S_W + mask_i * (A_i @ M_i_inv @ A_i.transpose(-1, -2))
 
+        S_F = _sanitize_tensor(0.5 * (S_F + S_F.transpose(-1, -2)))
+        S_W = _sanitize_tensor(0.5 * (S_W + S_W.transpose(-1, -2)))
+
         # --------------------------------------------------
         # force ellipsoid reward
         #   F^T S_F^{-1} F <= 1
@@ -1049,9 +1064,10 @@ class Go2PACTPos(BaseTask):
 
         force_size = _geom_mean(evals_F)
         r_force_size = 1.0 - torch.exp(-self.cfg.rewards.kite_rewards.ellipsoid_force_size_scale * force_size)
+        r_force_size = torch.clamp(_sanitize_tensor(r_force_size), 0.0, 1.0)
 
-        z_ratio = lam1 / torch.clamp(0.5 * (lam2 + lam3), min=1e-8)
-        xy_ratio = lam2 / torch.clamp(lam3, min=1e-8)
+        z_ratio = torch.clamp(_sanitize_tensor(lam1 / torch.clamp(0.5 * (lam2 + lam3), min=1e-8)), min=0.0, max=1e6)
+        xy_ratio = torch.clamp(_sanitize_tensor(lam2 / torch.clamp(lam3, min=1e-8)), min=0.0, max=1e6)
 
         r_force_aniso = (
             _interval_reward(
@@ -1077,8 +1093,9 @@ class Go2PACTPos(BaseTask):
         align_xy = 1.0 - 0.5 * (u2[:, 2].abs() + u3[:, 2].abs())
         align_xy = torch.clamp(align_xy, 0.0, 1.0)
 
-        r_force_align = align_z * align_xy
+        r_force_align = torch.clamp(_sanitize_tensor(align_z * align_xy), 0.0, 1.0)
         r_force_main = 0.6 * r_force_align + 0.25 * r_force_size + 0.15 * r_force_aniso
+        r_force_main = torch.clamp(_sanitize_tensor(r_force_main), 0.0, 1.0)
 
         # --------------------------------------------------
         # wrench ellipsoid reward
@@ -1100,10 +1117,11 @@ class Go2PACTPos(BaseTask):
 
         wrench_size = torch.exp(wrench_log / k_active.to(dtype))
         r_wrench_size = 1.0 - torch.exp(-self.cfg.rewards.kite_rewards.ellipsoid_wrench_size_scale * wrench_size)
+        r_wrench_size = torch.clamp(_sanitize_tensor(r_wrench_size), 0.0, 1.0)
 
         lam_max = evals_W[:, 0]
         lam_min_active = torch.gather(evals_W, 1, (k_active - 1).long().unsqueeze(-1)).squeeze(-1)
-        cond_W = lam_max / torch.clamp(lam_min_active, min=1e-8)
+        cond_W = torch.clamp(_sanitize_tensor(lam_max / torch.clamp(lam_min_active, min=1e-8)), min=0.0, max=1e6)
 
         r_wrench_cond = _upper_reward(
             cond_W,
@@ -1112,6 +1130,7 @@ class Go2PACTPos(BaseTask):
         )
 
         r_wrench_main = 0.6 * r_wrench_size + 0.4 * r_wrench_cond
+        r_wrench_main = torch.clamp(_sanitize_tensor(r_wrench_main), 0.0, 1.0)
 
         # --------------------------------------------------
         # auxiliary: realized force/wrench uses strong ellipsoid directions
@@ -1122,16 +1141,16 @@ class Go2PACTPos(BaseTask):
         W_meas = torch.cat([F_meas, M_meas / Lw], dim=-1)                        # (N,6)
 
         H_F = _safe_pinv(S_F, eps=1e-5)
-        F_hat = F_meas / (torch.linalg.norm(F_meas, dim=-1, keepdim=True) + 1e-6)
-        force_dir_cost = torch.einsum("bi,bij,bj->b", F_hat, H_F, F_hat)
-        r_force_use = torch.exp(-2.0 * force_dir_cost)
+        F_hat = _safe_normalize(F_meas, dim=-1, eps=1e-6)
+        force_dir_cost = torch.clamp(_sanitize_tensor(torch.einsum("bi,bij,bj->b", F_hat, H_F, F_hat)), min=0.0, max=1e6)
+        r_force_use = torch.clamp(_sanitize_tensor(torch.exp(-2.0 * force_dir_cost)), 0.0, 1.0)
 
-        r_force_principal_use = torch.abs(torch.sum(F_hat * u1, dim=-1))
+        r_force_principal_use = torch.clamp(_sanitize_tensor(torch.abs(torch.sum(F_hat * u1, dim=-1))), 0.0, 1.0)
 
         H_W = _safe_pinv(S_W, eps=1e-5)
-        W_hat = W_meas / (torch.linalg.norm(W_meas, dim=-1, keepdim=True) + 1e-6)
-        wrench_dir_cost = torch.einsum("bi,bij,bj->b", W_hat, H_W, W_hat)
-        r_wrench_use = torch.exp(-2.0 * wrench_dir_cost)
+        W_hat = _safe_normalize(W_meas, dim=-1, eps=1e-6)
+        wrench_dir_cost = torch.clamp(_sanitize_tensor(torch.einsum("bi,bij,bj->b", W_hat, H_W, W_hat)), min=0.0, max=1e6)
+        r_wrench_use = torch.clamp(_sanitize_tensor(torch.exp(-2.0 * wrench_dir_cost)), 0.0, 1.0)
 
         # # --------------------------------------------------
         # # auxiliary: torque limits and torque/GRF consistency
@@ -1165,17 +1184,17 @@ class Go2PACTPos(BaseTask):
         # --------------------------------------------------
         # auxiliary: terrain awareness via friction cone
         # --------------------------------------------------
-        fn = torch.sum(grf_w * normals_w, dim=-1)                                # (N,4)
+        fn = _sanitize_tensor(torch.sum(grf_w * normals_w, dim=-1))                                # (N,4)
         ft_vec = grf_w - fn.unsqueeze(-1) * normals_w
-        ft = torch.linalg.norm(ft_vec, dim=-1)
+        ft = _sanitize_tensor(torch.linalg.norm(ft_vec, dim=-1))
 
         mu = self.cfg.rewards.kite_rewards.ellipsoid_mu_friction
         fn_margin = self.cfg.rewards.kite_rewards.ellipsoid_normal_force_margin
         ft_margin = self.cfg.rewards.kite_rewards.ellipsoid_tangential_force_margin
 
-        r_normal_support = torch.exp(-2.0 * torch.relu(fn_margin - fn)**2)
-        cone_violation = torch.relu(ft - mu * torch.relu(fn - ft_margin))
-        r_friction = torch.exp(-0.5 * cone_violation**2)
+        r_normal_support = torch.clamp(_sanitize_tensor(torch.exp(-2.0 * torch.relu(fn_margin - fn)**2)), 0.0, 1.0)
+        cone_violation = _sanitize_tensor(torch.relu(ft - mu * torch.relu(fn - ft_margin)))
+        r_friction = torch.clamp(_sanitize_tensor(torch.exp(-0.5 * cone_violation**2)), 0.0, 1.0)
 
         r_contact_cone = (
             (r_normal_support * r_friction) * stance_f
@@ -1204,6 +1223,7 @@ class Go2PACTPos(BaseTask):
 
         reward = self.cfg.rewards.kite_rewards.ellipsoid_main_weight * r_main + (1.0 - self.cfg.rewards.kite_rewards.ellipsoid_main_weight) * r_aux
         reward = reward * (n_stance > 0).to(dtype)
+        reward = torch.clamp(_sanitize_tensor(reward), 0.0, 1.0)
 
         # # optional logging
         # self.extras["ellipsoid_force_size"] = force_size.mean()
