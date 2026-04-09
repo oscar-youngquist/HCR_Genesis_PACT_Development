@@ -402,7 +402,7 @@ class GenesisSimulator_PACT_Water(Simulator):
             print("COM Delta X Value: ", self.com_delta_x_value)
             print("COM Delta Y Value: ", self.com_delta_y_value)
             print("COM Delta Z Value: ", self.com_delta_z_value)
-            print("Torque Limits - ", self.torque_limits[0])
+            # print("Torque Limits - ", self.torque_limits[0])
             return
 
         adjusted_step = num_iters - self.push_warmup_step
@@ -416,7 +416,7 @@ class GenesisSimulator_PACT_Water(Simulator):
             print("COM Delta X Value: ", self.com_delta_x_value)
             print("COM Delta Y Value: ", self.com_delta_y_value)
             print("COM Delta Z Value: ", self.com_delta_z_value)
-            print("Torque Limits - ", self.torque_limits[0])
+            # print("Torque Limits - ", self.torque_limits[0])
             return
         
         elif adjusted_step % self.num_steps_per_jump == 0:
@@ -434,7 +434,7 @@ class GenesisSimulator_PACT_Water(Simulator):
                 self.com_delta_z_val_bounds = [-self._cfg.domain_rand.com_displacement_z_min, self.com_delta_z_value]
             
             
-            self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
+            # self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
 
         print("Push Value: ", self.push_value)
         print("Wrench Value: ", self.wrench_value)
@@ -443,7 +443,7 @@ class GenesisSimulator_PACT_Water(Simulator):
         print("COM Delta X Value: ", self.com_delta_x_value)
         print("COM Delta Y Value: ", self.com_delta_y_value)
         print("COM Delta Z Value: ", self.com_delta_z_value)
-        print("Torque Limits - ", self.torque_limits[0])
+        # print("Torque Limits - ", self.torque_limits[0])
 
     #----- Protected methods -----#
     def _parse_cfg(self):
