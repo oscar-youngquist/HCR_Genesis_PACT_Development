@@ -270,80 +270,96 @@ class GenesisSimulator_PACT_Pos(Simulator):
         self._env_origins[env_ids] = self._terrain_origins[self._terrain_levels[env_ids],
             self._terrain_types[env_ids]]
 
-    def push_robots(self):        
+    def push_robots(self):
         dofs_vel = self._robot.get_dofs_velocity()
 
-        # check which wrench values have timed out   + self.env_identities
-        push_mask = (
-            (self.common_step_counter)
-            % (self.push_timeouts / self._control_dt).int()
-        ) == 0
+        # Convert timeout durations to integer step intervals
+        push_steps = torch.clamp(
+            (self.push_timeouts / self._control_dt).int().view(-1), min=1
+        )
+        wrench_steps = torch.clamp(
+            (self.wrench_timeouts / self._control_dt).int().view(-1), min=1
+        )
+        vert_steps = torch.clamp(
+            (self.vert_timeouts / self._control_dt).int().view(-1), min=1
+        )
 
-        wrench_mask = (
-            (self.common_step_counter)
-            % (self.wrench_timeouts / self._control_dt).int()
-        )  == 0
-        
-        vert_mask = (
-            (self.common_step_counter)
-            % (self.vert_timeouts / self._control_dt).int()
-        )  == 0
+        # Boolean masks of envs whose timeout has elapsed
+        push_mask = ((self.common_step_counter % push_steps) == 0).view(-1)
+        wrench_mask = ((self.common_step_counter % wrench_steps) == 0).view(-1)
+        vert_mask = ((self.common_step_counter % vert_steps) == 0).view(-1)
 
-        push_mask = push_mask.squeeze()
-        wrench_mask = wrench_mask.squeeze()
-        vert_mask = vert_mask.squeeze()
+        num_push_reset = int(push_mask.sum().item())
+        num_wrench_reset = int(wrench_mask.sum().item())
+        num_vert_reset = int(vert_mask.sum().item())
 
-        num_push_reset = push_mask.sum().item()
-        num_wrench_reset = wrench_mask.sum().item()
-        num_vert_reset = vert_mask.sum().item()
-        
+        # Apply planar push
         if num_push_reset > 0:
-            lin_vel = torch_rand_float(-self.push_value,
-                                        self.push_value, (num_push_reset, 2), self._device)
-            self._rand_push_vels[push_mask, :2] = lin_vel.detach().clone().squeeze()
+            lin_vel = torch_rand_float(
+                -self.push_value,
+                self.push_value,
+                (num_push_reset, 2),
+                self._device,
+            )
+            self._rand_push_vels[push_mask, :2] = lin_vel
             dofs_vel[push_mask, :2] += lin_vel
-        
+
+        # Apply angular wrench
         if num_wrench_reset > 0:
-            ang_push = torch_rand_float(-self.wrench_value,
-                                        self.wrench_value,
-                                        (num_wrench_reset, 3),   # roll, pitch, yaw
-                                        self._device)
-            self._rand_wrench_vels[wrench_mask,:] = ang_push.detach().clone().squeeze()
+            ang_push = torch_rand_float(
+                -self.wrench_value,
+                self.wrench_value,
+                (num_wrench_reset, 3),
+                self._device,
+            )
+            self._rand_wrench_vels[wrench_mask, :] = ang_push
             dofs_vel[wrench_mask, 3:6] += ang_push
 
+        # Apply downward vertical push
         if num_vert_reset > 0:
-            vert_push = torch_rand_float(-self.vert_value,
-                                        0.0,
-                                        (num_vert_reset,1),   # vertical forces
-                                        self._device)
-            self._rand_push_vels[vert_mask,2] = vert_push.detach().clone().squeeze()
-            dofs_vel[vert_mask, 2] += vert_push.squeeze()
-        
-        # Calculate new interval times for the number of time-out envs
+            vert_push = torch_rand_float(
+                -self.vert_value,
+                0.0,
+                (num_vert_reset, 1),
+                self._device,
+            )
+            self._rand_push_vels[vert_mask, 2:3] = vert_push
+            dofs_vel[vert_mask, 2:3] += vert_push
+
+        # Resample timeout intervals
         if num_push_reset > 0:
             self.push_timeouts[push_mask] = torch.round(
-                                                torch_rand_float(self.push_interval_min,
-                                                    self.push_interval_max,
-                                                    (num_push_reset,1),
-                                                    self._device),
-                                                decimals=self.n_digits).float()
-            
+                torch_rand_float(
+                    self.push_interval_min,
+                    self.push_interval_max,
+                    (num_push_reset, 1),
+                    self._device,
+                ),
+                decimals=self.n_digits,
+            ).float()
+
         if num_wrench_reset > 0:
             self.wrench_timeouts[wrench_mask] = torch.round(
-                                                torch_rand_float(self.wrench_timeout_min,
-                                                    self.wrench_timeout_max,
-                                                    (num_wrench_reset,1),
-                                                    self._device),
-                                                decimals=self.n_digits).float()
-        
+                torch_rand_float(
+                    self.wrench_timeout_min,
+                    self.wrench_timeout_max,
+                    (num_wrench_reset, 1),
+                    self._device,
+                ),
+                decimals=self.n_digits,
+            ).float()
+
         if num_vert_reset > 0:
             self.vert_timeouts[vert_mask] = torch.round(
-                                                torch_rand_float(self.vert_interval_min,
-                                                    self.vert_interval_max,
-                                                    (num_vert_reset,1),
-                                                    self._device),
-                                                decimals=self.n_digits).float()
-            
+                torch_rand_float(
+                    self.vert_interval_min,
+                    self.vert_interval_max,
+                    (num_vert_reset, 1),
+                    self._device,
+                ),
+                decimals=self.n_digits,
+            ).float()
+
         self._robot.set_dofs_velocity(dofs_vel)
 
     def draw_debug_vis(self):
@@ -561,6 +577,19 @@ class GenesisSimulator_PACT_Pos(Simulator):
 
         self._wb_dim = self._cfg.env.whole_body_dim
         self._grf_dim = self._cfg.env.grf_dim
+
+    # ------------- Callbacks --------------
+    def _setup_camera(self):
+        ''' Set camera position and direction
+        '''
+        print("Adding camera to the scene!")
+        self._floating_camera = self._scene.add_camera(
+            res= (1280, 960),
+            pos=np.array(self._cfg.viewer.pos),
+            lookat=np.array(self._cfg.viewer.lookat),
+            fov=40,
+            GUI=True,
+        )
     
     def _create_sim(self):
         # create scene
@@ -591,6 +620,10 @@ class GenesisSimulator_PACT_Pos(Simulator):
             ),
             show_viewer=not self._headless,
         )
+
+        # add camera if needed
+        if self._cfg.viewer.add_camera:
+            self._setup_camera()
 
         # add terrain
         mesh_type = self._cfg.terrain.mesh_type

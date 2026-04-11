@@ -385,6 +385,12 @@ class Go1PACTWater(BaseTask):
     def set_camera(self, pos, lookat):
         """ Set camera position and direction
         """
+
+        print("env pos - ", pos)
+        print("env lookat - ", lookat)
+
+        print("-----------------------------------------------------")
+
         self.simulator._floating_camera.set_pose(
             pos=pos,
             lookat=lookat

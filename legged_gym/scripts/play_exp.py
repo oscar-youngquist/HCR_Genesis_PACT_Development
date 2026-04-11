@@ -19,7 +19,7 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -85,7 +85,7 @@ def override_configs(env_cfg, args):
     # Disable some of the domain randomization (our payload will handle that now)
     env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
-    env_cfg.domain_rand.push_robots = False
+    env_cfg.domain_rand.push_robots = True
     env_cfg.domain_rand.randomize_base_mass = True
 
     env_cfg.asset.fix_base_link = False
@@ -231,19 +231,19 @@ def interaction_loop(train_cfg, env, policy, args):
         # elif i==stop_rew_log:
         #     logger.print_rewards()
 
-        logger.log_states(
-            {
-                'base_cmd':env.commands.detach().cpu().numpy().tolist(),
-                'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
-                'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
-                'q_actual':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
-                'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
-                'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
-                'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
-                'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
-                'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
-                'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist())),
-            })
+        # logger.log_states(
+        #     {
+        #         'base_cmd':env.commands.detach().cpu().numpy().tolist(),
+        #         'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
+        #         'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
+        #         'q_actual':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
+        #         'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
+        #         'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
+        #         'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
+        #         'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
+        #         'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
+        #         'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist())),
+        #     })
 
 def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     """export the policy as jit script according to different task types
@@ -298,7 +298,7 @@ def play(args):
     # export policy as a jit module (used to run it from C++ or python)
     path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 
                             train_cfg.runner.load_run, 'exported')
-    export_policy(ppo_runner, path, args, env_cfg, train_cfg)
+    # export_policy(ppo_runner, path, args, env_cfg, train_cfg)
 
     interaction_loop(train_cfg, env, policy, args)
 

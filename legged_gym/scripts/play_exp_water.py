@@ -36,22 +36,22 @@ def override_configs(env_cfg, train_cfg, args):
         
         
         # random uniform terrain
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-                                          "min_height" : -0.05, "max_height": 0.05, 
-                                          "step":0.005, "downsampled_scale" : 0.2}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+                                        #   "min_height" : -0.05, "max_height": 0.05, 
+                                        #   "step":0.005, "downsampled_scale" : 0.2}
         # # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
         #                                   "slope": -0.4, "platform_size": 3.0}
-        # stairs
+        # # stairs
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-        #                                 "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
-        # # discrete obstacles
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
-        #                                   "max_height": 0.1,
-        #                                   "min_size": 1.0,
-        #                                   "max_size": 2.0,
-        #                                   "num_rects": 20,
-        #                                   "platform_size": 3.0}
+        #                                 "step_width": 0.31, "step_height": -0.06, "platform_size": 3.0}
+        # discrete obstacles
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
+                                          "max_height": 0.06,
+                                          "min_size": 1.0,
+                                          "max_size": 2.0,
+                                          "num_rects": 20,
+                                          "platform_size": 3.0}
         # wave terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.wave_terrain", 
         #                                   "amplitude": 0.2, "num_waves": 2}
@@ -65,10 +65,10 @@ def override_configs(env_cfg, train_cfg, args):
         # pit terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pit_terrain", 
         #                                   "depth": 0.2, "platform_size": 3.0}
-    else:
-        for i in range(2):
-            env_cfg.viewer.pos[i] = env_cfg.viewer.pos[i] - env_cfg.terrain.plane_length / 4
-            env_cfg.viewer.lookat[i] = env_cfg.viewer.lookat[i] - env_cfg.terrain.plane_length / 4    
+    # else:
+        # for i in range(2):
+        #     env_cfg.viewer.pos[i] = env_cfg.viewer.pos[i] - env_cfg.terrain.plane_length / 4
+        #     env_cfg.viewer.lookat[i] = env_cfg.viewer.lookat[i] - env_cfg.terrain.plane_length / 4    
         
         
     env_cfg.env.debug = False
@@ -84,17 +84,17 @@ def override_configs(env_cfg, train_cfg, args):
     # Turn off/on domain randomization elements
     env_cfg.noise.add_noise = True
     # Disable some of the domain randomization (our payload will handle that now)
-    env_cfg.domain_rand.randomize_com_displacement = False
+    env_cfg.domain_rand.randomize_com_displacement = True
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_base_mass = False
+    env_cfg.domain_rand.randomize_base_mass = True
 
     env_cfg.asset.fix_base_link = False
     env_cfg.env.debug_viz = False
     env_cfg.env.debug = False
 
     # Liquid Payload override stuff
-    args.use_liquid = True
+    args.use_liquid = False
     args.liquid_type = "water"
     args.liquid_tank = "default"
     args.liquid_volume = 12.0  # liters
@@ -159,6 +159,9 @@ def interaction_loop(train_cfg, env, policy, args):
     # Setup joystick if needed
     if args.use_joystick:
         joystick = Joystick(joystick_type=args.joystick_type)
+
+    if args.record_frames:
+        env.simulator._floating_camera.start_recording()
     
     # env.commands[:, 0] = 1.0
     # env.commands[:, 1] = 0.0
@@ -170,7 +173,7 @@ def interaction_loop(train_cfg, env, policy, args):
     print("Min - self.feedback_tau_weight: ", torch.min(env.simulator.feedback_tau_weight).item())
     
     # interaction loop
-    for i in range(int(1.05*env.max_episode_length)):
+    for i in range(int(0.405*env.max_episode_length)):
         
         # env.commands[:, 0] = 1.0
         # env.commands[:, 1] = 0.0
@@ -187,6 +190,8 @@ def interaction_loop(train_cfg, env, policy, args):
         if args.follow_robot:
             pos = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.pos, dtype=np.float32)
             lookat = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.lookat, dtype=np.float32)
+            print("exp pos - ", pos)
+            print("exp lookat - ", lookat)
             # env.set_viewer_camera(pos, lookat)
             env.set_camera(pos, lookat)
             env.simulator._floating_camera.render()
@@ -242,24 +247,24 @@ def interaction_loop(train_cfg, env, policy, args):
 
         # print(env.simulator.feedforward_torques.detach().cpu().numpy())
 
-        logger.log_states(
-            {
-                'base_cmd':env.commands.detach().cpu().numpy().tolist(),
-                'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
-                'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
-                'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
-                'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
-                'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
-                'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
-                'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
-                'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
-                'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
-                'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
-                'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
-                'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
-                'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
-                'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
-            })
+        # logger.log_states(
+        #     {
+        #         'base_cmd':env.commands.detach().cpu().numpy().tolist(),
+        #         'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
+        #         'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
+        #         'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
+        #         'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
+        #         'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
+        #         'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
+        #         'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
+        #         'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
+        #         'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
+        #         'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
+        #         'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
+        #         'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
+        #         'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
+        #         'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
+        #     })
 
 def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     """export the policy as jit script according to different task types
@@ -314,6 +319,16 @@ def play(args):
     # export_policy(ppo_runner, path, args, env_cfg, train_cfg)
 
     interaction_loop(train_cfg, env, policy, args)
+
+    if args.record_frames:
+        try:
+            filename_mp4 = f"{train_cfg.runner.experiment_name}_discrete_12L.mp4"
+        except:
+            from datetime import datetime
+            filename_mp4 = f"{datetime.now().timestamp()}"
+        
+        env.simulator._floating_camera.stop_recording(save_to_filename=filename_mp4, fps=30)
+        print("Saved recording to " + filename_mp4)
     
     
 if __name__ == '__main__':

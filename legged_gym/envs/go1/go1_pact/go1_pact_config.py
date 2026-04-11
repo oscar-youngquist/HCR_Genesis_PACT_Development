@@ -336,7 +336,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         foot_clearance_target = 0.12 # desired foot clearance above ground [m]
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
-        overreach_x_max = 0.28
+        overreach_x_max = 0.30
 
         support_polygon_sigma = 0.01
         foot_clearance_tracking_sigma = 0.01
@@ -428,7 +428,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
                                   "dof_acc":[-2.5e-9, -2.5e-7],
                                  }
 
-            curr_steps = 1
+            curr_steps = 500
             warmup_steps = 2000
 
     class commands(LeggedRobotCfg.commands):
@@ -469,7 +469,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Apr07_17-42-07_pact_pos_100hz_spec_jointrand/model_5000_converted.pt"
+        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Apr07_17-42-07_pact_pos_100hz_spec_jointrand/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
@@ -490,18 +490,18 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 6000 # number of policy updates
+        max_iterations = 8000 # number of policy updates
 
 
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_spec'
+        run_name = 'pact_100hz_spec_scratch'
         experiment_name = 'go1_pact_rough'
         save_interval = 100
         
         
-        load_run = "Mar27_12-06-16_pact_100hz_spec"
+        load_run = "Apr08_00-53-18_pact_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/debugging_deployment/spec_model_joystick.csv"
