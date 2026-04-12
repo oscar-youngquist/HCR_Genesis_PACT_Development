@@ -162,22 +162,22 @@ class GO1PACTCfg( LeggedRobotCfg ):
         vert_interval_min = 0.1
 
         max_push_torque = 2.50
-        min_push_torque = 0.50
+        min_push_torque = 0.10
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 4.0
+        min_added_mass_max = 2.0
         max_added_mass_max = 8.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
-        com_displacement_x_min = 0.075
+        com_displacement_x_min = 0.05
         com_displacement_x_max = 0.25
         
-        com_displacement_y_min = 0.075
+        com_displacement_y_min = 0.05
         com_displacement_y_max = 0.22
         
         com_displacement_z_positive = False
@@ -211,7 +211,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 1.00]
-        joint_damping_range_start = [0.20, 0.30]
+        joint_damping_range_start = [0.25, 0.30]
 
 
     # Taken from the Go1 config class in - 
@@ -354,7 +354,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             torque_limits         = -0.1
             pd_target_torque_limit = 0.0
             
-            alive_bonus           = 0.01
+            alive_bonus           = 0.02
 
             dof_vel_stand_still = -0.1
             stand_still_contact = -0.5
@@ -364,7 +364,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
             dof_tracking      = 0.1
-            # sparse_contacts   = 0.1
+            sparse_contacts   = 0.01
 
             # coupled output specific rewards 
             # aligned_torques     = -0.01
@@ -374,17 +374,17 @@ class GO1PACTCfg( LeggedRobotCfg ):
             
             # smoothness and stability
             lin_vel_z        = -2.0
-            base_height      = -2.0
-            ang_vel_xy       = -0.2
-            orientation      = -10.0
+            base_height      = -1.0
+            ang_vel_xy       = -0.05
+            orientation      = -1.0
             dof_acc          = -2.5e-7
             joint_power      = -2.e-5
             joint_power_dist = -1.e-5
             torques          = 0.0     # don't need to use this when we already have joint power above...
 
             # Zero out some values that are used in the individual reward classes below
-            action_rate       = -0.01
-            action_smoothness = -0.01
+            action_rate       = -0.001
+            action_smoothness = -0.001
 
             pos_action_rate       = 0.0
             pos_action_smoothness = 0.0
@@ -407,7 +407,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.5            # tracking reward for long steps
             # foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance      
-            foot_clearance_terrain_aware = 0.5  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.75  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.1
             
             foot_slip        = -0.1           # penalty for feet slipping
@@ -423,8 +423,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
                                   "ang_vel_xy":[-0.05, -0.2],
                                   "orientation":[-1.0,-10.0],
                                   "torque_limits":[-1.0e-3, -0.1],
-                                  "action_rate":[-0.001, -0.01],
-                                  "action_smoothness":[-0.001,-0.01],
+                                  "action_rate":[-1.0e-3, -0.01],
+                                  "action_smoothness":[-1.0e-3,-0.01],
                                   "dof_acc":[-2.5e-9, -2.5e-7],
                                  }
 
@@ -472,7 +472,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Apr07_17-42-07_pact_pos_100hz_spec_jointrand/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.01
+        entropy_coef = 0.005
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0

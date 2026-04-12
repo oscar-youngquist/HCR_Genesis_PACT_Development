@@ -267,6 +267,12 @@ class Go1PACT(BaseTask):
         for i in range(len(self.reward_functions)):
             name = self.reward_names[i]
             rew = self.reward_functions[i]() * self.reward_scales[name]
+            
+            # if self.cfg.rewards.only_positive_rewards:
+            #     self.rew_buf = torch.clip(rew, min=0.)
+            # else:
+            #     self.rew_buf += rew
+            
             self.rew_buf += rew
             self.episode_sums[name] += rew
         
