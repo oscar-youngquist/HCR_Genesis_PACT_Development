@@ -386,7 +386,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.25  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.50  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.1
             
             foot_slip        = -0.1           # penalty for feet slipping
@@ -460,7 +460,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
 
         # Context Decoder
         cenet_dec_input_dim = 27
-        cenet_dec_layers = [128,256,512]
+        cenet_dec_layers = [32,128,256,512]
         cenet_dec_out_dim = 57 + (51 + 33) + 143     # next obs (57) + grf_dim (12)
 
         # Actor/critic

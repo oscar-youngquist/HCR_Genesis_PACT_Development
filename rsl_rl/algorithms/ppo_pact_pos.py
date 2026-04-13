@@ -407,7 +407,7 @@ class PPO_PACT_Pos:
                 t0 = time.perf_counter()
 
                 dec_recon = self.decoder(dec_input)
-                dec_loss = F.mse_loss(dec_recon, decode_targets)
+                dec_loss = F.mse_loss(dec_recon * terminated_batch, decode_targets * terminated_batch)
                 dec_loss.backward()
                 nn.utils.clip_grad_norm_(self.decoder.parameters(), self.max_grad_norm)
                 self.decoder_optimizer.step()
