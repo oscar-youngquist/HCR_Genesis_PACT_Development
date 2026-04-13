@@ -130,12 +130,12 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         min_push_vel_xy = 1.0
 
         max_vertical_push = 0.40
-        min_vertical_push = 0.40
+        min_vertical_push = 0.20
         vert_interval_max = 1.0
         vert_interval_min = 0.1
 
         max_push_torque = 2.5
-        min_push_torque = 1.0
+        min_push_torque = 1.50
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
@@ -147,15 +147,15 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         
         # COM displacement crap
         randomize_com_displacement = True
-        com_displacement_x_min = 0.25
+        com_displacement_x_min = 0.075
         com_displacement_x_max = 0.16
         
-        com_displacement_y_min = 0.22
+        com_displacement_y_min = 0.075
         com_displacement_y_max = 0.12
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.25
+        com_displacement_z_min = 0.05
         com_displacement_z_max = 0.25
         
         # Control delay
@@ -163,12 +163,12 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         ctrl_delay_step_range = [0, 2]
 
         # PD-gain randomization
-        randomize_pd_gain = False
+        randomize_pd_gain = True
         kp_range = [0.8, 1.2]
         kd_range = [0.8, 1.2]
 
         # Motor strength randomization
-        randomize_motor_strength = False
+        randomize_motor_strength = True
         motor_strength_range = [0.8, 1.2]
         
         # Unused more complicated dynamics randomization
@@ -498,7 +498,7 @@ class GO1PACTWaterCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Apr12_23-57-38_pact_100hz_spec_scratch"
+        load_run = "Apr08_00-53-18_pact_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/scratch_pact_exp/strict_overeach_model_plane_12L_water.csv"

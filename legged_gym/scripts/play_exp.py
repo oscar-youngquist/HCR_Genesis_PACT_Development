@@ -26,21 +26,21 @@ def override_configs(env_cfg, args):
     # adjust parameters according to terrain type
     if env_cfg.terrain.mesh_type in ["heightfield", "trimesh"]:
         env_cfg.terrain.num_rows = 2
-        env_cfg.terrain.num_cols = 2q
+        env_cfg.terrain.num_cols = 2
         env_cfg.terrain.border_size = 5.0
         env_cfg.terrain.curriculum = False
         env_cfg.terrain.selected   = True
         
         # random uniform terrain
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-                                          "min_height" : -0.05, "max_height": 0.05, 
-                                          "step":0.005, "downsampled_scale" : 0.2}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+        #                                   "min_height" : -0.05, "max_height": 0.05, 
+        #                                   "step":0.005, "downsampled_scale" : 0.2}
         # # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
         #                                   "slope": -0.4, "platform_size": 3.0}
         # stairs
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-        #                                 "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
+                                        "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
         # # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.06,

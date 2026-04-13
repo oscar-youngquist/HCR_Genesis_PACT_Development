@@ -331,7 +331,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             termination           = 0.0
             collision             = -10.0
             dof_pos_limits        = -10.0
-            dof_close_to_default  = -0.10
+            dof_close_to_default  = -0.01
             torque_limits         = -0.1
 
             alive_bonus           = 0.01
@@ -379,7 +379,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
             foot_clearance_terrain_aware = 0.25  # tracking reward for feet reaching the desired clearance responsive to terrain height    
-            hip_pos = -0.1
+            hip_pos = -0.12
             
             foot_slip        = -0.1           # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
