@@ -314,7 +314,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         base_height_target = 0.30
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
-        foot_clearance_target = 0.12 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.32
@@ -331,14 +331,14 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             termination           = 0.0
             collision             = -10.0
             dof_pos_limits        = -10.0
-            dof_close_to_default  = -0.15
+            dof_close_to_default  = -0.10
             torque_limits         = -0.1
 
             alive_bonus           = 0.01
 
-            stand_still_contact = -0.5
+            stand_still_contact = -1.0
             dof_pos_stand_still = -0.5
-            dof_vel_stand_still = -0.1
+            dof_vel_stand_still = -0.5
 
             # command tracking
             tracking_lin_vel  = 1.0
@@ -378,7 +378,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.50  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.25  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.1
             
             foot_slip        = -0.1           # penalty for feet slipping
