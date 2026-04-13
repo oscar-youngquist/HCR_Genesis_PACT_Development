@@ -268,16 +268,16 @@ class OnPolicyRunnerPACTPos:
             half_ceof = self._init_entropy_coef * 0.5
             tenth_coef = self._init_entropy_coef * 0.1
 
-            if it < 3000:
+            if it < 5000:
                 entropy_coef = self._init_entropy_coef
-            elif it < 4000:
-                new_coef = self._init_entropy_coef / 2.0
-                alpha = (it - 3000) / 1000.0
-                entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
-            elif it < 5000:
-                entropy_coef = half_ceof
+            # elif it < 4000:
+            #     new_coef = self._init_entropy_coef / 2.0
+            #     alpha = (it - 3000) / 1000.0
+            #     entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
+            # elif it < 5000:
+            #     entropy_coef = half_ceof
             elif it < 6000:
-                alpha = (it - 5000) / 1000.0
+                alpha = (it - 6000) / 1000.0
                 entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
             else:
                 entropy_coef = tenth_coef

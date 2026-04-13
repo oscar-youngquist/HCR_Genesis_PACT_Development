@@ -35,6 +35,8 @@ class Go2PACTPos(BaseTask):
         self._parse_cfg(self.cfg, sim_device)
         super().__init__(self.cfg, sim_params, sim_device, headless)
         
+        self.last_update_idx = 0
+        
         self._init_buffers()
         self._prepare_reward_function()
         self.init_done = True
@@ -325,6 +327,8 @@ class Go2PACTPos(BaseTask):
                 self.simulator.terrain_levels.float())
         if self.cfg.commands.curriculum:
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
+            self.extras["episode"]["max_command_y"] = self.command_ranges["lin_vel_y"][1]
+            self.extras["episode"]["max_command_yaw"] = self.command_ranges["ang_vel_yaw"][1]
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -372,7 +376,8 @@ class Go2PACTPos(BaseTask):
                                   (self.simulator.dof_pos - self.simulator.default_dof_pos)   
                                       * self.obs_scales.dof_pos,                              # joint pose            12
                                     self.simulator.dof_vel * self.obs_scales.dof_vel,         # joint velocity        12
-                                    self.actions[:,0:12]                                     # joint pose actions    12)
+                                    self.actions[:,0:12],                                     # joint pose actions    12
+                                    self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)),    # joint torque actions  12
                                     ), dim=-1)                                                # 57
 
         # add noise if needed
@@ -567,7 +572,11 @@ class Go2PACTPos(BaseTask):
         """
         # If the tracking reward is above 80% of the maximum, increase the range of commands
         if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > \
-                self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel"]:
+                self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel"] and \
+                    self.common_step_counter > (self.last_update_idx + 500):
+            
+            self.last_update_idx = self.common_step_counter
+            
             # self.command_ranges["lin_vel_x"][0] = np.clip(
             #     self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
             # self.command_ranges["lin_vel_x"][1] = np.clip(
@@ -575,19 +584,19 @@ class Go2PACTPos(BaseTask):
             self.command_ranges["lin_vel_x"][0] = np.clip(
                 self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
             self.command_ranges["lin_vel_y"][0] = np.clip(
-                self.command_ranges["lin_vel_y"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
+                self.command_ranges["lin_vel_y"][0] - 0.5, -1.0, 0.)
             
             self.command_ranges["ang_vel_yaw"][0] = np.clip(
-                self.command_ranges["ang_vel_yaw"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
+                self.command_ranges["ang_vel_yaw"][0] - 0.5, -3.0, 0.)
             
             
             self.command_ranges["lin_vel_x"][1] = np.clip(
                 self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
             self.command_ranges["lin_vel_y"][1] = np.clip(
-                self.command_ranges["lin_vel_y"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
+                self.command_ranges["lin_vel_y"][1] + 0.5, 0., 1.0)
             
             self.command_ranges["ang_vel_yaw"][1] = np.clip(
-                self.command_ranges["ang_vel_yaw"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
+                self.command_ranges["ang_vel_yaw"][1] + 0.5, 0., 3.0)
 
     def _get_noise_scale_vec(self):
         """ Sets a vector used to scale the noise added to the observations.

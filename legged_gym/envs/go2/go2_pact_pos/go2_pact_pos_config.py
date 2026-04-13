@@ -4,8 +4,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
     
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
-        num_observations = 45
-        num_privileged_obs = 45 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (143)
+        num_observations = 57
+        num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (143)
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -59,13 +59,14 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         num_cols = 10  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
+        # terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
+        terrain_proportions = [0.20, 0.25, 0.00, 0.00, 0.30, 0.25]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
     class sim:
         # Common
-        dt = 0.002                 # 500 Hz
+        dt = 0.02                 # 500 Hz
         substeps = 1
         # For Genesis
         max_collision_pairs = 100  # More collision pairs will occupy more GPU memory and slow down the simulation
@@ -128,8 +129,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
     class domain_rand(LeggedRobotCfg.domain_rand):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
-        num_push_steps = 500  # number of steps to increase the domain randomization ranges
-        push_warmup = 2000     # number of steps with initial values held constant
+        num_push_steps = 1000  # number of steps to increase the domain randomization ranges
+        push_warmup = 4000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -148,8 +149,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         vert_interval_max = 10.0
         vert_interval_min = 0.1
 
-        max_push_torque = 0.50
-        min_push_torque = 0.10
+        max_push_torque = 1.50
+        min_push_torque = 0.50
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
@@ -423,11 +424,11 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
                                   "ang_vel_xy":[-0.1, -0.2]
                                  }
             curr_steps = 500
-            warmup_steps = 200
+            warmup_steps = 2000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
-        max_curriculum = 2.
+        max_curriculum = 3.0
         num_commands = 3 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 5.  # time before command are changed[s]
         heading_command = False # if true: compute ang vel command from heading error
@@ -453,7 +454,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # Context Decoder
         cenet_dec_input_dim = 27
         cenet_dec_layers = [128,256,512]
-        cenet_dec_out_dim = 45 + (51 + 33) + 143     # next obs (57) + grf_dim (12)
+        cenet_dec_out_dim = 57 + (51 + 33) + 143     # next obs (57) + grf_dim (12)
 
         # Actor/critic
         actor_layers = [512,256,128]
@@ -491,7 +492,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = '50hz_spec_jointrand'
+        run_name = '50hz_spec_jointrand_nostairs'
         experiment_name = 'go2_kite_rough'
         save_interval = 100
         
