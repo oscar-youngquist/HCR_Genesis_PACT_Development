@@ -603,8 +603,8 @@ class PPO_PACT_Pos:
         dec_input = torch.cat((cenet_latent, cenet_torso_velo), dim=-1)
         enc_update_obs_decode = None
         
-        with torch.no_grad():
-            enc_update_obs_decode = self.decoder(dec_input)
+        # with torch.no_grad():
+        enc_update_obs_decode = self.decoder(dec_input)
         
         grf_target.requires_grad = False
         obs_target.requires_grad = False

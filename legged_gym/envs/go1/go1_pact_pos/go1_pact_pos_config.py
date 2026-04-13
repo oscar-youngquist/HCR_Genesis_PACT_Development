@@ -55,7 +55,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
-        num_rows = 20  # number of terrain rows (levels), X direction
+        num_rows = 10  # number of terrain rows (levels), X direction
         num_cols = 10  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
@@ -79,9 +79,9 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         pos = [0.0, 0.0, 0.34] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
             'FL_hip_joint': 0.1,     # [rad]
-            'RL_hip_joint': 0.1,     # [rad]
+            'RL_hip_joint': 0.05,     # [rad]
             'FR_hip_joint': -0.1 ,    # [rad]
-            'RR_hip_joint': -0.1,     # [rad]
+            'RR_hip_joint': -0.05,     # [rad]
 
             'FL_thigh_joint': 0.8,   # [rad]
             'RL_thigh_joint': 1.0,   # [rad]
@@ -140,16 +140,16 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 0.1
-        max_push_vel_xy = 1.00
+        max_push_vel_xy = 0.50
         min_push_vel_xy = 0.50
 
         max_vertical_push = 0.20
-        min_vertical_push = 0.00
+        min_vertical_push = 0.20
         vert_interval_max = 10.0
         vert_interval_min = 0.1
 
         max_push_torque = 0.50
-        min_push_torque = 0.10
+        min_push_torque = 0.50
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
@@ -161,15 +161,15 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         
         # COM displacement crap
         randomize_com_displacement = True
-        com_displacement_x_min = 0.03
+        com_displacement_x_min = 0.05
         com_displacement_x_max = 0.05
         
-        com_displacement_y_min = 0.03
+        com_displacement_y_min = 0.05
         com_displacement_y_max = 0.05
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.03
+        com_displacement_z_min = 0.05
         com_displacement_z_max = 0.05
         
         # Control delay
@@ -314,10 +314,10 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         base_height_target = 0.30
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
-        foot_clearance_target = 0.09 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.12 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
-        overreach_x_max = 0.28
+        overreach_x_max = 0.32
         support_polygon_sigma = 0.01
 
         foot_clearance_tracking_sigma = 0.01
@@ -331,7 +331,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             termination           = 0.0
             collision             = -10.0
             dof_pos_limits        = -10.0
-            dof_close_to_default  = -0.25
+            dof_close_to_default  = -0.15
             torque_limits         = -0.1
 
             alive_bonus           = 0.01
@@ -346,7 +346,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             
             dof_tracking      = 0.05
             aligned_torques   = 0.00
-            sparse_contacts   = 0.01     
+            sparse_contacts   = 0.01
             
             # smoothness and stability
             lin_vel_z        = -2.0
@@ -378,7 +378,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.25  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.50  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.1
             
             foot_slip        = -0.1           # penalty for feet slipping
@@ -394,7 +394,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
                                  }
 
             curr_steps = 1
-            warmup_steps = 200
+            warmup_steps = 500
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -464,7 +464,7 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # debug_warmpinn_wb
         run_name = 'pact_pos_100hz_spec_jointrand'
         experiment_name = 'go1_pact_pos_rough'
-        save_interval = 100
+        save_interval = 500
         
         
         load_run = "Apr02_13-53-12_pact_pos_100hz_spec_jointrand"

@@ -322,7 +322,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
 
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
-        roll_threshold    = 0.87  # [rad] ~ 40 degrees
+        roll_threshold    = 0.7  # [rad] ~ 40 degrees
         pitch_threshold   = 1.0  # [rad] ~ 30 degrees
         height_min = 0.20       # [m]
         height_max = 1.50        # [m]
@@ -336,7 +336,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         foot_clearance_target = 0.12 # desired foot clearance above ground [m]
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
-        overreach_x_max = 0.30
+        overreach_x_max = 0.32
 
         support_polygon_sigma = 0.01
         foot_clearance_tracking_sigma = 0.01
