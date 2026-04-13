@@ -494,7 +494,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
-        num_steps_per_env = 32 # per iteration
+        num_steps_per_env = 24 # per iteration
         max_iterations = 7000 # number of policy updates
         grf_dim = 12
         
