@@ -91,9 +91,9 @@ class GO1PACTCfg( LeggedRobotCfg ):
         pos = [0.0, 0.0, 0.34] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
             'FL_hip_joint': 0.1,     # [rad]
-            'RL_hip_joint': 0.1,     # [rad]
+            'RL_hip_joint': 0.05,     # [rad]
             'FR_hip_joint': -0.1 ,    # [rad]
-            'RR_hip_joint': -0.1,     # [rad]
+            'RR_hip_joint': -0.05,     # [rad]
 
             'FL_thigh_joint': 0.8,   # [rad]
             'RL_thigh_joint': 1.0,   # [rad]
@@ -141,7 +141,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = True
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 3000     # number of steps with initial values held constant
+        push_warmup = 4000     # number of steps with initial values held constant
         num_jumps = 10
         
         # Randomize Friction
@@ -429,7 +429,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
                                  }
 
             curr_steps = 500
-            warmup_steps = 2000
+            warmup_steps = 5500
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -490,7 +490,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 8000 # number of policy updates
+        max_iterations = 10000 # number of policy updates
 
 
         grf_dim = 12
