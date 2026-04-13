@@ -494,7 +494,7 @@ class Go2PACTPos(BaseTask):
         distance = torch.norm(
             self.simulator.base_pos[env_ids, :2] - self.simulator.env_origins[env_ids, :2], dim=1)
         # robots that walked far enough progress to harder terains
-        move_up = distance > self.simulator._terrain.env_length / 2
+        move_up = distance > (self.simulator._terrain.env_length / 3)
         # robots that walked less than half of their required distance go to simpler terrains
         move_down = (distance < torch.norm(
             self.commands[env_ids, :2], dim=1)*self.max_episode_length_s*0.5) * ~move_up
@@ -579,7 +579,7 @@ class Go2PACTPos(BaseTask):
         """
         # If the tracking reward is above 80% of the maximum, increase the range of commands
         if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > \
-                self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel"] and \
+                self.cfg.commands.curriculum_threshold_ang * self.reward_scales["tracking_lin_vel"] and \
                     self.common_step_counter > (self.last_lin_update_idx + 500):
             
             self.last_lin_update_idx = self.common_step_counter
