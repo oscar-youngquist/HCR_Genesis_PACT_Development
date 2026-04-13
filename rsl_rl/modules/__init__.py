@@ -35,4 +35,4 @@ from .actor_critic_ee import ActorCriticEE
 from .actor_critic_cts import ActorCriticCTS
 from .actor_critic_dreamwaq import ActorCriticDreamWaQ
 from .actor_critic_pact import ContextDecoder, ActorCritic_PACT
-from .actor_critic_pact_pos import ActorCritic_PACT_Pos
+from .actor_critic_pact_pos import ActorCritic_PACT_Pos, ContextDecoder

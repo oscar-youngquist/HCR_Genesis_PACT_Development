@@ -433,7 +433,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         resampling_time = 5.  # time before command are changed[s]
         
         randomize_resampling_time = False
-        resampling_time_min = 1.0
+        resampling_time_min = 0.5
         resampling_time_max = 5.0
         use_command_resampling_time_curriculum = True
         command_resampling_time_warmup_iters = 5000
@@ -454,7 +454,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         init_noise_std = 1.00
         
         # Context encoder
-        cenet_enc_layers=[512,128]
+        cenet_enc_layers=[512,256,128]
         cenet_enc_latent_dim = 16
         cenet_velo_dim = 3 + 4 + 4      # torso velocity, foot-contact indicator, foot-height 
 

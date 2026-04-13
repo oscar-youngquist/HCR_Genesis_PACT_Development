@@ -37,7 +37,7 @@ class ContextEncoder(nn.Module):
     def __init__(
         self,
         context_input_dim: int = 230,
-        context_layer_sizes: List[int] = [128, 64],
+        context_layer_sizes: List[int] = [128, 64, 32],
         context_latent_size: int = 16,
         context_torso_velo_size: int = 3,
         activation: str = 'swish',
@@ -52,7 +52,8 @@ class ContextEncoder(nn.Module):
         self.ce_in = nn.Linear(context_input_dim, context_layer_sizes[0])
         # Hidden Layers
         self.ce_h1 = nn.Linear(context_layer_sizes[0], context_layer_sizes[1])
-        self.ce_h2 = nn.Linear(context_layer_sizes[1], output_hdim)
+        self.ce_h2 = nn.Linear(context_layer_sizes[1], context_layer_sizes[2])
+        self.ce_h3 = nn.Linear(context_layer_sizes[2], output_hdim)
         # Output Layers
 
         self.ce_latmean_h = nn.Linear(output_hdim, output_hdim)
@@ -82,7 +83,7 @@ class ContextEncoder(nn.Module):
         """Initialize all linear layers with Xavier uniform distribution."""
         for layer in [self.ce_in, self.ce_h1,
                      self.ce_out_mean, self.ce_velo_mean,
-                     self.ce_h2, self.ce_velovar_h, self.ce_velovar_h,
+                     self.ce_h2, self.ce_h3, self.ce_velovar_h, self.ce_velovar_h,
                      self.ce_latmean_h, self.ce_latvar_h]:
             
             nn.init.xavier_uniform_(layer.weight)
@@ -100,6 +101,8 @@ class ContextEncoder(nn.Module):
         x = self.activation(self.ce_h1(x))
         # x = self.drop_2(x)
         x = self.activation(self.ce_h2(x))
+        
+        x = self.activation(self.ce_h3(x))
 
         lat_mean = self.activation(self.ce_latmean_h(x))
         lat_var  = self.activation(self.ce_latvar_h(x))
