@@ -532,8 +532,9 @@ class Go2PACTPos(BaseTask):
         """ Callback called before computing terminations, rewards, and observations
             Default behaviour: Compute ang vel command based on target and heading, compute measured terrain heights and randomly push robots
         """
-        #
-        env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0).nonzero(as_tuple=False).flatten()
+        env_ids = (
+            self.episode_length_buf % self.command_resample_timeouts == 0
+        ).nonzero(as_tuple=False).flatten()
         self._resample_commands(env_ids)
         if self.cfg.commands.heading_command:
             forward = quat_apply(self.simulator.base_quat, self.forward_vec)
@@ -551,6 +552,9 @@ class Go2PACTPos(BaseTask):
         Args:
             env_ids (List[int]): Environments ids for which new commands are needed
         """
+        if len(env_ids) == 0:
+            return
+
         self.commands[env_ids, 0] = torch_rand_float(
             self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1], (len(env_ids),1), self.device).squeeze(1)
         self.commands[env_ids, 1] = torch_rand_float(
@@ -563,6 +567,8 @@ class Go2PACTPos(BaseTask):
         # set small commands to zero
         self.commands[env_ids, :3] *= (torch.norm(
             self.commands[env_ids, :3], dim=1) > 0.2).unsqueeze(1)
+
+        self.command_resample_timeouts[env_ids] = self._sample_command_resample_timeouts(len(env_ids))
 
     def _update_command_curriculum(self, env_ids):
         """ Implements a curriculum of increasing commands
@@ -656,6 +662,7 @@ class Go2PACTPos(BaseTask):
         
         self.commands = torch.zeros(
             (self.num_envs, self.cfg.commands.num_commands), device=self.device, dtype=torch.float)
+        self.command_resample_timeouts = self._sample_command_resample_timeouts(self.num_envs)
         
         self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel],
                                            device=self.device, dtype=torch.float,
@@ -760,6 +767,15 @@ class Go2PACTPos(BaseTask):
                 if key in self.reward_scales.keys():
                     self.reward_scales[key] = self.reward_curr_bounds[key][1] * self.dt
 
+    def step_command_resampling_time_curriculum(self, num_iters):
+        if not self.use_command_resampling_time_curriculum:
+            self.randomize_command_resampling_time = self.enable_command_resampling_time_randomization
+            return
+
+        self.randomize_command_resampling_time = (
+            num_iters >= self.command_resampling_time_warmup_iters
+        )
+
 
     def _prepare_reward_function(self):
         """ Prepares a list of reward functions, whcih will be called to compute the total reward.
@@ -843,6 +859,22 @@ class Go2PACTPos(BaseTask):
             self.reward_bound_diffs[key] = self.reward_curr_bounds[key][1] - self.reward_curr_bounds[key][0]        
         
         self.command_ranges = class_to_dict(self.cfg.commands.ranges)
+        self.enable_command_resampling_time_randomization = getattr(
+            self.cfg.commands, "randomize_resampling_time", False
+        )
+        self.use_command_resampling_time_curriculum = getattr(
+            self.cfg.commands, "use_command_resampling_time_curriculum", False
+        )
+        self.command_resampling_time_warmup_iters = getattr(
+            self.cfg.commands, "command_resampling_time_warmup_iters", 0
+        )
+        self.randomize_command_resampling_time = self.enable_command_resampling_time_randomization
+        self.command_resampling_time_min = getattr(
+            self.cfg.commands, "resampling_time_min", self.cfg.commands.resampling_time
+        )
+        self.command_resampling_time_max = getattr(
+            self.cfg.commands, "resampling_time_max", self.cfg.commands.resampling_time
+        )
         if self.cfg.terrain.mesh_type not in ['heightfield', "trimesh"]:
             self.cfg.terrain.curriculum = False
         self.max_episode_length_s = self.cfg.env.episode_length_s
@@ -873,6 +905,27 @@ class Go2PACTPos(BaseTask):
         self.tradeoff_num_steps = self.cfg.control.tradeoff_steps
         self.bound_diff = self.tradeoff_upperbounds - self.tradeoff_lowerbounds 
         self.use_tradeoff = self.cfg.control.use_tradeoff_curriculum
+
+    def _sample_command_resample_timeouts(self, num_envs):
+        if self.randomize_command_resampling_time:
+            command_timeouts_s = torch_rand_float(
+                self.command_resampling_time_min,
+                self.command_resampling_time_max,
+                (num_envs, 1),
+                self.device,
+            ).squeeze(1)
+        else:
+            command_timeouts_s = torch.full(
+                (num_envs,),
+                self.cfg.commands.resampling_time,
+                device=self.device,
+                dtype=torch.float,
+            )
+
+        return torch.clamp(
+            torch.round(command_timeouts_s / self.dt).long(),
+            min=1,
+        )
         
         print("self.use_tradeoff - ", self.use_tradeoff)
 

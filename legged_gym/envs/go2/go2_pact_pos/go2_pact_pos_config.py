@@ -431,6 +431,13 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         max_curriculum = 3.0
         num_commands = 3 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 5.  # time before command are changed[s]
+        
+        randomize_resampling_time = False
+        resampling_time_min = 1.0
+        resampling_time_max = 5.0
+        use_command_resampling_time_curriculum = True
+        command_resampling_time_warmup_iters = 5000
+        
         heading_command = False # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
