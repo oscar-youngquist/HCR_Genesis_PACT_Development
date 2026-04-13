@@ -5,8 +5,7 @@
 conda activate /home/oyoungquist/.conda/envs/genesis_lr
 
 export SIMULATOR=genesis_pact_water
-python play_exp_water.py --task=go1_pact_water --follow_robot --use_joystick --record_frames
+python play_exp_water.py --task=go1_pact_water --headless
 
 # export SIMULATOR=genesis
 # python play.py --task=go2_dreamwaq
-

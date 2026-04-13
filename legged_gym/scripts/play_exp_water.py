@@ -20,7 +20,7 @@ def override_configs(env_cfg, train_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -84,17 +84,17 @@ def override_configs(env_cfg, train_cfg, args):
     # Turn off/on domain randomization elements
     env_cfg.noise.add_noise = True
     # Disable some of the domain randomization (our payload will handle that now)
-    env_cfg.domain_rand.randomize_com_displacement = True
+    env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_base_mass = True
+    env_cfg.domain_rand.randomize_base_mass = False
 
     env_cfg.asset.fix_base_link = False
     env_cfg.env.debug_viz = False
     env_cfg.env.debug = False
 
     # Liquid Payload override stuff
-    args.use_liquid = False
+    args.use_liquid = True
     args.liquid_type = "water"
     args.liquid_tank = "default"
     args.liquid_volume = 12.0  # liters
@@ -102,7 +102,7 @@ def override_configs(env_cfg, train_cfg, args):
     env_cfg.liquid.liquid_type = args.liquid_type
     env_cfg.liquid.liquid_volume = args.liquid_volume  # liters
     env_cfg.liquid.liquid_tank = args.liquid_tank  # liters
-    train_cfg.runner.exp_data_path = f"exp_data/spec_strict_model/plane_water_test_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}.csv"
+    train_cfg.runner.exp_data_path = f"exp_data/scratch_pact_exp/plane_water_test_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}.csv"
     env_cfg.env.use_liquid = args.use_liquid
 
     if args.record_frames or args.follow_robot:
@@ -173,7 +173,7 @@ def interaction_loop(train_cfg, env, policy, args):
     print("Min - self.feedback_tau_weight: ", torch.min(env.simulator.feedback_tau_weight).item())
     
     # interaction loop
-    for i in range(int(0.405*env.max_episode_length)):
+    for i in range(int(10.01*env.max_episode_length)):
         
         # env.commands[:, 0] = 1.0
         # env.commands[:, 1] = 0.0
@@ -247,24 +247,24 @@ def interaction_loop(train_cfg, env, policy, args):
 
         # print(env.simulator.feedforward_torques.detach().cpu().numpy())
 
-        # logger.log_states(
-        #     {
-        #         'base_cmd':env.commands.detach().cpu().numpy().tolist(),
-        #         'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
-        #         'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
-        #         'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
-        #         'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
-        #         'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
-        #         'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
-        #         'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
-        #         'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
-        #         'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
-        #         'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
-        #         'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
-        #         'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
-        #         'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
-        #         'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
-        #     })
+        logger.log_states(
+            {
+                'base_cmd':env.commands.detach().cpu().numpy().tolist(),
+                'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
+                'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
+                'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
+                'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
+                'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
+                'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
+                'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
+                'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
+                'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
+                'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
+                'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
+                'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
+                'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
+                'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
+            })
 
 def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     """export the policy as jit script according to different task types

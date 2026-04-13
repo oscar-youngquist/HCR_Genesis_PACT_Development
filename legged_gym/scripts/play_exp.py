@@ -19,7 +19,7 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -85,8 +85,8 @@ def override_configs(env_cfg, args):
     # Disable some of the domain randomization (our payload will handle that now)
     env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
-    env_cfg.domain_rand.push_robots = True
-    env_cfg.domain_rand.randomize_base_mass = True
+    env_cfg.domain_rand.push_robots = False
+    env_cfg.domain_rand.randomize_base_mass = False
 
     env_cfg.asset.fix_base_link = False
     # env_cfg.env.debug_viz = False
@@ -128,8 +128,8 @@ def interaction_loop(train_cfg, env, policy, args):
     stop_state_log = 300 # number of steps before plotting states
     stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards
 
-    # logger = ExpLogger(train_cfg.runner.exp_data_path)
-    logger = ExpLogger(train_cfg.runner.exp_data_path, ref_key='q_actual', length_limit=100)
+    logger = ExpLogger(train_cfg.runner.exp_data_path)
+    # logger = ExpLogger(train_cfg.runner.exp_data_path, ref_key='base_cmd', length_limit=100)
 
         
     # Get initial observations according to task type
@@ -231,19 +231,24 @@ def interaction_loop(train_cfg, env, policy, args):
         # elif i==stop_rew_log:
         #     logger.print_rewards()
 
-        # logger.log_states(
-        #     {
-        #         'base_cmd':env.commands.detach().cpu().numpy().tolist(),
-        #         'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
-        #         'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
-        #         'q_actual':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
-        #         'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
-        #         'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
-        #         'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
-        #         'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
-        #         'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
-        #         'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist())),
-        #     })
+        logger.log_states(
+            {
+                'base_cmd':env.commands.detach().cpu().numpy().tolist(),
+                'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
+                'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
+                'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
+                'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
+                'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
+                'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
+                'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
+                'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
+                'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
+                'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
+                'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
+                'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
+                'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
+                'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
+            })
 
 def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     """export the policy as jit script according to different task types

@@ -63,10 +63,10 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
                             [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721]]
         pos = [0.0, 0.0, 0.34] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
-            'FL_hip_joint': 0.0,     # [rad]
-            'RL_hip_joint': 0.0,     # [rad]
-            'FR_hip_joint': 0.0 ,    # [rad]
-            'RR_hip_joint': 0.0,     # [rad]
+            'FL_hip_joint': 0.1,     # [rad]
+            'RL_hip_joint': 0.1,     # [rad]
+            'FR_hip_joint': -0.1 ,    # [rad]
+            'RR_hip_joint': -0.1,     # [rad]
 
             'FL_thigh_joint': 0.8,   # [rad]
             'RL_thigh_joint': 1.0,   # [rad]
@@ -498,7 +498,7 @@ class GO1PACTWaterCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Apr08_00-53-18_pact_100hz_spec"
+        load_run = "Apr11_20-18-37_pact_100hz_spec_scratch"
         checkpoint = -1
         resume = False
-        exp_data_path = "exp_data/quick_test_02/strict_overeach_model_plane_12L_water.csv"
+        exp_data_path = "exp_data/scratch_pact_exp/strict_overeach_model_plane_12L_water.csv"
