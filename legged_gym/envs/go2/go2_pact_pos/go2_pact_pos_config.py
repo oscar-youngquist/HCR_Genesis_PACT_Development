@@ -381,7 +381,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         base_height_target = 0.33
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
-        foot_clearance_target = 0.12 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.36
