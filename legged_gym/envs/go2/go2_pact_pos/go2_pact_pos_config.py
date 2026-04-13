@@ -4,8 +4,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
     
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
-        num_observations = 57
-        num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (143)
+        num_observations = 45
+        num_privileged_obs = 45 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (143)
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -461,7 +461,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # Context Decoder
         cenet_dec_input_dim = 27
         cenet_dec_layers = [32,128,256,512]
-        cenet_dec_out_dim = 57 + (51 + 33) + 143     # next obs (57) + grf_dim (12)
+        cenet_dec_out_dim = 45 + (51 + 33) + 143     # next obs (45) + grf_dim (12)
 
         # Actor/critic
         actor_layers = [512,256,128]
@@ -494,7 +494,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
-        num_steps_per_env = 24 # per iteration
+        num_steps_per_env = 32 # per iteration
         max_iterations = 7000 # number of policy updates
         grf_dim = 12
         
