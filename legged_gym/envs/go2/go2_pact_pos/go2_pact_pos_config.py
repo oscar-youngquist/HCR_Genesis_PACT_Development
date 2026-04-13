@@ -77,7 +77,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
                             [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721],
                             [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721],
                             [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721]]
-        pos = [0.0, 0.0, 0.34] # x,y,z [m]
+        pos = [0.0, 0.0, 0.42] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
             'FL_hip_joint': 0.1,     # [rad]
             'RL_hip_joint': 0.1,     # [rad]
@@ -126,8 +126,68 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         clip_observations = 100.
         clip_actions = 50.
 
+    # class domain_rand(LeggedRobotCfg.domain_rand):
+    #     use_domainrand_curriculum = True
+    #     com_rand_z_positive = False
+    #     num_push_steps = 1000  # number of steps to increase the domain randomization ranges
+    #     push_warmup = 4000     # number of steps with initial values held constant
+    #     # Randomize Friction
+    #     randomize_friction = True
+    #     friction_range = [0.2, 1.8]
+    #     # What changes with finetuning round
+    #     # Randomized 6DOF torso wrench
+    #     push_robots = True
+    #     push_interval_max = 15.0
+    #     push_interval_min = 0.1
+    #     max_push_vel_xy = 1.00
+    #     min_push_vel_xy = 0.50
+    #     max_vertical_push = 0.20
+    #     min_vertical_push = 0.00
+    #     vert_interval_max = 10.0
+    #     vert_interval_min = 0.1
+    #     max_push_torque = 1.50
+    #     min_push_torque = 0.50
+    #     wrench_timeout_min = 0.01
+    #     wrench_timeout_max = 10.0
+    #     # Randomized base mass, applied at COM
+    #     randomize_base_mass = True
+    #     min_added_mass_max = 2.0
+    #     max_added_mass_max = 3.0
+    #     added_mass_min = -1.0
+    #     # COM displacement crap
+    #     randomize_com_displacement = True
+    #     com_displacement_x_min = 0.025
+    #     com_displacement_x_max = 0.075
+    #     com_displacement_y_min = 0.025
+    #     com_displacement_y_max = 0.075
+    #     com_displacement_z_positive = False
+    #     com_displacement_z_min_pos = 0.1
+    #     com_displacement_z_min = 0.025
+    #     com_displacement_z_max = 0.075
+    #     # Control delay
+    #     randomize_ctrl_delay = True
+    #     ctrl_delay_step_range = [0, 2]
+    #     # PD-gain randomization
+    #     randomize_pd_gain = True
+    #     kp_range = [0.8, 1.2]
+    #     kd_range = [0.8, 1.2]
+    #     # Motor strength randomization
+    #     randomize_motor_strength = True
+    #     motor_strength_range = [0.9, 1.1]
+    #     # Unused more complicated dynamics randomization
+    #     randomize_joint_armature = True
+    #     joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
+    #     randomize_joint_friction = True
+    #     joint_friction_range = [0.00, 0.02]
+    #     randomize_joint_stiffness = False
+    #     joint_stiffness_range_end   = [0.0, 0.01]
+    #     joint_stiffness_range_start = [0.0, 0.005]
+    #     randomize_joint_damping = True
+    #     joint_damping_range_end   = [0.00, 0.50]
+    #     joint_damping_range_start = [0.25, 0.30]
+
     class domain_rand(LeggedRobotCfg.domain_rand):
-        use_domainrand_curriculum = True
+        use_domainrand_curriculum = False
         com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
         push_warmup = 4000     # number of steps with initial values held constant
@@ -142,35 +202,35 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         push_interval_max = 15.0
         push_interval_min = 0.1
         max_push_vel_xy = 1.00
-        min_push_vel_xy = 0.50
+        min_push_vel_xy = 1.00
 
         max_vertical_push = 0.20
-        min_vertical_push = 0.00
+        min_vertical_push = 0.20
         vert_interval_max = 10.0
         vert_interval_min = 0.1
 
         max_push_torque = 1.50
-        min_push_torque = 0.50
+        min_push_torque = 1.00
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 2.0
+        min_added_mass_max = 4.0
         max_added_mass_max = 3.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
-        com_displacement_x_min = 0.025
+        com_displacement_x_min = 0.075
         com_displacement_x_max = 0.075
         
-        com_displacement_y_min = 0.025
+        com_displacement_y_min = 0.075
         com_displacement_y_max = 0.075
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.025
+        com_displacement_z_min = 0.075
         com_displacement_z_max = 0.075
         
         # Control delay
@@ -199,8 +259,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 0.50]
-        joint_damping_range_start = [0.25, 0.30]
-
+        joint_damping_range_start = [0.00, 0.50]
 
     class noise (LeggedRobotCfg.noise):
         add_noise = True
@@ -331,7 +390,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
 
-        use_reward_curriculum = True
+        use_reward_curriculum = False
 
         max_contact_force = 200.0
         class scales( LeggedRobotCfg.rewards.scales ):
@@ -359,7 +418,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             # smoothness and stability
             lin_vel_z        = -2.0
             base_height      = -1.0
-            ang_vel_xy       = -0.2
+            ang_vel_xy       = -0.05
             orientation      = -1.0
             dof_acc          = -2.0e-7
             joint_power      = -2.0e-5
@@ -386,7 +445,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.50  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.25  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.1
             
             foot_slip        = -0.1           # penalty for feet slipping
@@ -441,7 +500,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         heading_command = False # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
-            lin_vel_y = [-1.0, 1.0]   # min max [m/s]
+            lin_vel_y = [-0.5, 0.5]   # min max [m/s]
             ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
             heading = [-3.14, 3.14]
 
