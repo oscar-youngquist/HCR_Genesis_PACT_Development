@@ -491,8 +491,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         num_commands = 3 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 5.  # time before command are changed[s]
 
-        curriculum_threshold = 0.65
-        curriculum_threshold_ang = 0.25
+        curriculum_threshold = 0.70
+        curriculum_threshold_ang = 0.30
         
         randomize_resampling_time = False
         resampling_time_min = 0.5

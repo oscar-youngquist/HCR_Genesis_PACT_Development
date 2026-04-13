@@ -580,7 +580,7 @@ class Go2PACTPos(BaseTask):
         # If the tracking reward is above 80% of the maximum, increase the range of commands
         if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > \
                 self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel"] and \
-                    self.common_step_counter > (self.last_lin_update_idx + 750):
+                    self.common_step_counter > (self.last_lin_update_idx + 24*500):
             
             self.last_lin_update_idx = self.common_step_counter
             
@@ -599,7 +599,7 @@ class Go2PACTPos(BaseTask):
         # If the tracking reward is above 80% of the maximum, increase the range of commands
         if torch.mean(self.episode_sums["tracking_ang_vel"][env_ids]) / self.max_episode_length > \
                 self.cfg.commands.curriculum_threshold_ang * self.reward_scales["tracking_ang_vel"] and \
-                    self.common_step_counter > (self.last_ang_update_idx + 500):
+                    self.common_step_counter > (self.last_ang_update_idx + 24*500):
             
             self.last_ang_update_idx = self.common_step_counter
             

@@ -227,7 +227,7 @@ class GenesisSimulator_PACT_Water(Simulator):
         
         # Calculate the liquid pose offsets
         new_particle_pos_offset    = new_base_poses
-        new_particle_pos_offset[:, 2] = 0.0 # no need to modify the height
+        # new_particle_pos_offset[:, 2] = 0.0 # no need to modify the height
                 
         # Use the new poses/orientations to reset the liquid particles
         self._liquid.set_particles_vel(0, envs_idx=envs_idx)
