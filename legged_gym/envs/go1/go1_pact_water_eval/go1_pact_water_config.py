@@ -3,50 +3,50 @@ from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobot
 class GO1PACTWaterCfg( LeggedRobotCfg ):
         
     class terrain( LeggedRobotCfg.terrain ):
-        mesh_type = 'plane' # plane, heightfield, trimesh
-        plane_length = 200.0 # [m]. plane size is 200x200x10 by default
-        horizontal_scale = 0.1 # [m] distance between height samples in x and y direction
-        vertical_scale = 0.005 # [m] distance between height samples in z direction
-        border_size = 5 # [m] length of the border surrounding the terrain
-        border_height = 1.0 # [m] height of the border surrounding the terrain
-        curriculum = False # whether to use terrain curriculum, starting from easier terrains and gradually increasing the difficulty
-        static_friction = 1.0 # coefficient of static friction of the terrain
-        dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
-        restitution = 0. # coefficient of restitution of the terrainr
-        obtain_terrain_info_around_feet = True
-
-        # # rough terrain only:
-        # mesh_type = "heightfield"
+        # mesh_type = 'plane' # plane, heightfield, trimesh
+        # plane_length = 200.0 # [m]. plane size is 200x200x10 by default
+        # horizontal_scale = 0.1 # [m] distance between height samples in x and y direction
+        # vertical_scale = 0.005 # [m] distance between height samples in z direction
+        # border_size = 5 # [m] length of the border surrounding the terrain
+        # border_height = 1.0 # [m] height of the border surrounding the terrain
+        # curriculum = False # whether to use terrain curriculum, starting from easier terrains and gradually increasing the difficulty
         # static_friction = 1.0 # coefficient of static friction of the terrain
         # dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
-        # restitution = 0. # coefficient of restitution of the terrain
-        # border_size = 20.0 # [m]
-        # curriculum = True
-        # # obtain terrain height information around feet (default: 9 points around feet), measure_
-        # # x  x   x
-        # # x F(x) x
-        # # x  x   x (x: height point, F: foot position)
+        # restitution = 0. # coefficient of restitution of the terrainr
         # obtain_terrain_info_around_feet = True
-        # measure_heights = True # obtain height measurements
+
+        # rough terrain only:
+        mesh_type = "heightfield"
+        static_friction = 1.0 # coefficient of static friction of the terrain
+        dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
+        restitution = 0. # coefficient of restitution of the terrain
+        border_size = 20.0 # [m]
+        curriculum = True
+        # obtain terrain height information around feet (default: 9 points around feet), measure_
+        # x  x   x
+        # x F(x) x
+        # x  x   x (x: height point, F: foot position)
+        obtain_terrain_info_around_feet = True
+        measure_heights = True # obtain height measurements
         
-        # # positions of the sampling height around the base (relative to the base of the robot)
-        # measured_points_x = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4] # 9x9=81
-        # measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4]
+        # positions of the sampling height around the base (relative to the base of the robot)
+        measured_points_x = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4] # 9x9=81
+        measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4]
         
-        # selected = False # select a unique terrain type and pass all arguments
-        # terrain_kwargs = None # Dict of arguments for selected terrain
-        # max_init_terrain_level = 1 # starting curriculum level
+        selected = False # select a unique terrain type and pass all arguments
+        terrain_kwargs = None # Dict of arguments for selected terrain
+        max_init_terrain_level = 1 # starting curriculum level
         
-        # terrain_length = 8.0 # [m] length of each subterrain, X direction
-        # terrain_width = 8.0 # [m] width of each subterrain, Y direction
-        # platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
-        # num_rows = 20  # number of terrain rows (levels), X direction
-        # num_cols = 10  # number of terrain cols (types), Y direction
-        # num_subterrains = num_rows * num_cols
-        # # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        # terrain_proportions = [0.10, 0.20, 0.20, 0.20, 0.15, 0.15]
-        # # trimesh only:
-        # slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
+        terrain_length = 8.0 # [m] length of each subterrain, X direction
+        terrain_width = 8.0 # [m] width of each subterrain, Y direction
+        platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
+        num_rows = 20  # number of terrain rows (levels), X direction
+        num_cols = 10  # number of terrain cols (types), Y direction
+        num_subterrains = num_rows * num_cols
+        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
+        terrain_proportions = [0.10, 0.20, 0.20, 0.20, 0.15, 0.15]
+        # trimesh only:
+        slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
     class sim:
         # Common
@@ -130,12 +130,12 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         min_push_vel_xy = 1.0
 
         max_vertical_push = 0.40
-        min_vertical_push = 0.20
+        min_vertical_push = 0.40
         vert_interval_max = 1.0
         vert_interval_min = 0.1
 
         max_push_torque = 2.5
-        min_push_torque = 1.50
+        min_push_torque = 1.0
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
@@ -147,15 +147,15 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         
         # COM displacement crap
         randomize_com_displacement = True
-        com_displacement_x_min = 0.075
+        com_displacement_x_min = 0.25
         com_displacement_x_max = 0.16
         
-        com_displacement_y_min = 0.075
+        com_displacement_y_min = 0.22
         com_displacement_y_max = 0.12
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.05
+        com_displacement_z_min = 0.25
         com_displacement_z_max = 0.25
         
         # Control delay
@@ -163,12 +163,12 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         ctrl_delay_step_range = [0, 2]
 
         # PD-gain randomization
-        randomize_pd_gain = True
+        randomize_pd_gain = False
         kp_range = [0.8, 1.2]
         kd_range = [0.8, 1.2]
 
         # Motor strength randomization
-        randomize_motor_strength = True
+        randomize_motor_strength = False
         motor_strength_range = [0.8, 1.2]
         
         # Unused more complicated dynamics randomization
@@ -498,7 +498,7 @@ class GO1PACTWaterCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Apr11_20-18-37_pact_100hz_spec_scratch"
+        load_run = "Apr12_23-57-38_pact_100hz_spec_scratch"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/scratch_pact_exp/strict_overeach_model_plane_12L_water.csv"

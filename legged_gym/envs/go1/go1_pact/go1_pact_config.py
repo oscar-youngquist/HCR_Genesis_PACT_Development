@@ -30,50 +30,50 @@ class GO1PACTCfg( LeggedRobotCfg ):
 
     
     class terrain( LeggedRobotCfg.terrain ):
-        mesh_type = 'plane' # plane, heightfield, trimesh
-        plane_length = 200.0 # [m]. plane size is 200x200x10 by default
-        horizontal_scale = 0.1 # [m] distance between height samples in x and y direction
-        vertical_scale = 0.005 # [m] distance between height samples in z direction
-        border_size = 5 # [m] length of the border surrounding the terrain
-        border_height = 1.0 # [m] height of the border surrounding the terrain
-        curriculum = False # whether to use terrain curriculum, starting from easier terrains and gradually increasing the difficulty
-        static_friction = 1.0 # coefficient of static friction of the terrain
-        dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
-        restitution = 0. # coefficient of restitution of the terrainr
-        obtain_terrain_info_around_feet = True
-
-        # # rough terrain only:
-        # mesh_type = "heightfield"
+        # mesh_type = 'plane' # plane, heightfield, trimesh
+        # plane_length = 200.0 # [m]. plane size is 200x200x10 by default
+        # horizontal_scale = 0.1 # [m] distance between height samples in x and y direction
+        # vertical_scale = 0.005 # [m] distance between height samples in z direction
+        # border_size = 5 # [m] length of the border surrounding the terrain
+        # border_height = 1.0 # [m] height of the border surrounding the terrain
+        # curriculum = False # whether to use terrain curriculum, starting from easier terrains and gradually increasing the difficulty
         # static_friction = 1.0 # coefficient of static friction of the terrain
         # dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
-        # restitution = 0. # coefficient of restitution of the terrain
-        # border_size = 20.0 # [m]
-        # curriculum = True
-        # # obtain terrain height information around feet (default: 9 points around feet), measure_
-        # # x  x   x
-        # # x F(x) x
-        # # x  x   x (x: height point, F: foot position)
+        # restitution = 0. # coefficient of restitution of the terrainr
         # obtain_terrain_info_around_feet = True
-        # measure_heights = True # obtain height measurements
-        
-        # # positions of the sampling height around the base (relative to the base of the robot)
-        # measured_points_x = [-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6] # 11x13 = 143
-        # measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
 
-        # selected = False # select a unique terrain type and pass all arguments
-        # terrain_kwargs = None # Dict of arguments for selected terrain
-        # max_init_terrain_level = 1 # starting curriculum level
+        # rough terrain only:
+        mesh_type = "heightfield"
+        static_friction = 1.0 # coefficient of static friction of the terrain
+        dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
+        restitution = 0. # coefficient of restitution of the terrain
+        border_size = 20.0 # [m]
+        curriculum = True
+        # obtain terrain height information around feet (default: 9 points around feet), measure_
+        # x  x   x
+        # x F(x) x
+        # x  x   x (x: height point, F: foot position)
+        obtain_terrain_info_around_feet = True
+        measure_heights = True # obtain height measurements
         
-        # terrain_length = 8.0 # [m] length of each subterrain, X direction
-        # terrain_width = 8.0 # [m] width of each subterrain, Y direction
-        # platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
-        # num_rows = 20  # number of terrain rows (levels), X direction
-        # num_cols = 10  # number of terrain cols (types), Y direction
-        # num_subterrains = num_rows * num_cols
-        # # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        # terrain_proportions = [0.10, 0.10, 0.25, 0.25, 0.20, 0.10]
-        # # trimesh only:
-        # slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
+        # positions of the sampling height around the base (relative to the base of the robot)
+        measured_points_x = [-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6] # 11x13 = 143
+        measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
+
+        selected = False # select a unique terrain type and pass all arguments
+        terrain_kwargs = None # Dict of arguments for selected terrain
+        max_init_terrain_level = 1 # starting curriculum level
+        
+        terrain_length = 8.0 # [m] length of each subterrain, X direction
+        terrain_width = 8.0 # [m] width of each subterrain, Y direction
+        platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
+        num_rows = 20  # number of terrain rows (levels), X direction
+        num_cols = 10  # number of terrain cols (types), Y direction
+        num_subterrains = num_rows * num_cols
+        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
+        terrain_proportions = [0.10, 0.10, 0.25, 0.25, 0.20, 0.10]
+        # trimesh only:
+        slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
     class sim:
         # Common
@@ -91,9 +91,9 @@ class GO1PACTCfg( LeggedRobotCfg ):
         pos = [0.0, 0.0, 0.34] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
             'FL_hip_joint': 0.1,      # [rad]
-            'RL_hip_joint': 0.1,      # [rad]
+            'RL_hip_joint': 0.05,      # [rad]
             'FR_hip_joint': -0.1 ,    # [rad]
-            'RR_hip_joint': -0.1,     # [rad]
+            'RR_hip_joint': -0.05,     # [rad]
 
             'FL_thigh_joint': 0.8,   # [rad]
             'RL_thigh_joint': 1.0,   # [rad]

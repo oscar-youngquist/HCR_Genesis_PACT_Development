@@ -26,7 +26,7 @@ def override_configs(env_cfg, args):
     # adjust parameters according to terrain type
     if env_cfg.terrain.mesh_type in ["heightfield", "trimesh"]:
         env_cfg.terrain.num_rows = 2
-        env_cfg.terrain.num_cols = 2
+        env_cfg.terrain.num_cols = 2q
         env_cfg.terrain.border_size = 5.0
         env_cfg.terrain.curriculum = False
         env_cfg.terrain.selected   = True
@@ -61,10 +61,10 @@ def override_configs(env_cfg, args):
         # pit terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pit_terrain", 
         #                                   "depth": 0.2, "platform_size": 3.0}
-    else:
-        for i in range(2):
-            env_cfg.viewer.pos[i] = env_cfg.viewer.pos[i] - env_cfg.terrain.plane_length / 4
-            env_cfg.viewer.lookat[i] = env_cfg.viewer.lookat[i] - env_cfg.terrain.plane_length / 4    
+    # else:
+    #     for i in range(2):
+    #         env_cfg.viewer.pos[i] = env_cfg.viewer.pos[i] - env_cfg.terrain.plane_length / 4
+    #         env_cfg.viewer.lookat[i] = env_cfg.viewer.lookat[i] - env_cfg.terrain.plane_length / 4    
         
             
     if args.use_joystick:
