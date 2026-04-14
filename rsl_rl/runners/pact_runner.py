@@ -297,9 +297,15 @@ class OnPolicyRunnerPACT:
             
             if it < 7000:
                 entropy_coef = self._init_entropy_coef
-            elif it <8000:
-                alpha = (it - 7000) / 1000.0
-                entropy_coef = tenth_coef + 0.5 * (self._init_entropy_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            elif it < 7500:
+                new_coef = self._init_entropy_coef / 2.0
+                alpha = (it - 7000) / 500.0
+                entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
+            elif it < 8000:
+                entropy_coef = half_ceof
+            elif it <8500:
+                alpha = (it - 8000) / 500.0
+                entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
             else:
                 entropy_coef = tenth_coef
 
@@ -307,8 +313,8 @@ class OnPolicyRunnerPACT:
             self.alg.set_entropy_coef(entropy_coef)
 
 
-            if self.env.cfg.rewards.only_positive_rewards and it > 1000:
-                self.env.cfg.rewards.only_positive_rewards = False
+            # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
+            #     self.env.cfg.rewards.only_positive_rewards = False
             
             stop = time.time()
             learn_time = stop - start

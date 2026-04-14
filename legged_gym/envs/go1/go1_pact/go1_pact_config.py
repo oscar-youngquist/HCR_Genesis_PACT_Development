@@ -157,19 +157,19 @@ class GO1PACTCfg( LeggedRobotCfg ):
         min_push_vel_xy = 0.5
 
         max_vertical_push = 0.40
-        min_vertical_push = 0.00
+        min_vertical_push = 0.20
         vert_interval_max = 10.0
         vert_interval_min = 0.1
 
         max_push_torque = 2.50
-        min_push_torque = 0.10
+        min_push_torque = 0.50
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
         min_added_mass_max = 2.0
-        max_added_mass_max = 8.0
+        max_added_mass_max = 10.0
         added_mass_min = -1.0
         
         # COM displacement crap
@@ -178,7 +178,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         com_displacement_x_max = 0.25
         
         com_displacement_y_min = 0.05
-        com_displacement_y_max = 0.22
+        com_displacement_y_max = 0.25
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
@@ -211,7 +211,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 1.00]
-        joint_damping_range_start = [0.25, 0.30]
+        joint_damping_range_start = [0.25, 0.50]
 
 
     # Taken from the Go1 config class in - 
@@ -333,7 +333,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         base_height_target = 0.30
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
-        foot_clearance_target = 0.12 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.32
@@ -350,19 +350,20 @@ class GO1PACTCfg( LeggedRobotCfg ):
             termination           = 0.0
             collision             = -1.0
             dof_pos_limits        = -1.0
-            dof_close_to_default  = -0.15
+            dof_close_to_default  = -0.01
             torque_limits         = -0.1
             pd_target_torque_limit = 0.0
             
             alive_bonus           = 0.02
 
-            dof_vel_stand_still = -0.1
-            stand_still_contact = -0.5
+            stand_still_contact = -1.0
             dof_pos_stand_still = -0.5
+            dof_vel_stand_still = -0.5
 
             # command tracking
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
+            
             dof_tracking      = 0.1
             sparse_contacts   = 0.01
 
@@ -469,7 +470,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Apr07_17-42-07_pact_pos_100hz_spec_jointrand/model_5000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Apr13_22-14-32_pact_pos_100hz_spec_jointrand/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.005
@@ -498,7 +499,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         # debug_warmpinn_wb
         run_name = 'pact_100hz_spec_scratch'
         experiment_name = 'go1_pact_rough'
-        save_interval = 100
+        save_interval = 500
         
         
         load_run = "Apr11_20-18-37_pact_100hz_spec_scratch"
