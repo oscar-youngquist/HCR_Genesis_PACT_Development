@@ -487,7 +487,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
-        max_curriculum = 3.0
+        max_curriculum = 2.0
         num_commands = 3 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 5.  # time before command are changed[s]
 
