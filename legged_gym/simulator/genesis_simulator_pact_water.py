@@ -17,8 +17,8 @@ import pinocchio as pn
 from legged_gym.scripts.liquid_payload_configs import *
 
 # Some values that are held constant for the water tank and liquid
-liquid_substeps      = 1
-liquid_particle_size = 0.02
+liquid_substeps      = 5
+liquid_particle_size = 0.005
 
 container_outer_x = 0.20  # X dimension
 container_outer_y = 0.15  # Y dimension

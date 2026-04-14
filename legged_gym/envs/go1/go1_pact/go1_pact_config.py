@@ -336,7 +336,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
-        overreach_x_max = 0.32
+        overreach_x_max = 0.34
 
         support_polygon_sigma = 0.01
         foot_clearance_tracking_sigma = 0.01
@@ -354,7 +354,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             torque_limits         = -0.1
             pd_target_torque_limit = 0.0
             
-            alive_bonus           = 0.02
+            alive_bonus           = 0.01
 
             stand_still_contact = -1.0
             dof_pos_stand_still = -0.5
@@ -473,7 +473,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Apr13_22-14-32_pact_pos_100hz_spec_jointrand/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.01
+        entropy_coef = 0.003
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0

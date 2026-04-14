@@ -36,9 +36,9 @@ def override_configs(env_cfg, train_cfg, args):
         
         
         # random uniform terrain
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-                                          "min_height" : -0.05, "max_height": 0.05, 
-                                          "step":0.005, "downsampled_scale" : 0.2}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+        #                                   "min_height" : -0.05, "max_height": 0.05, 
+        #                                   "step":0.005, "downsampled_scale" : 0.2}
         # # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
         #                                   "slope": 0.4, "platform_size": 3.0}
@@ -46,12 +46,12 @@ def override_configs(env_cfg, train_cfg, args):
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
         #                                 "step_width": 0.31, "step_height": 0.06, "platform_size": 3.0}
         # discrete obstacles
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
-        #                                   "max_height": 0.06,
-        #                                   "min_size": 1.0,
-        #                                   "max_size": 2.0,
-        #                                   "num_rects": 20,
-        #                                   "platform_size": 3.0}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
+                                          "max_height": 0.06,
+                                          "min_size": 1.0,
+                                          "max_size": 2.0,
+                                          "num_rects": 20,
+                                          "platform_size": 3.0}
         # # wave terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.wave_terrain", 
         #                                   "amplitude": 0.2, "num_waves": 2}
@@ -333,7 +333,7 @@ def play(args):
 
     if args.record_frames:
         try:
-            filename_mp4 = f"{train_cfg.runner.experiment_name}_rough_12L_water.mp4"
+            filename_mp4 = f"{train_cfg.runner.experiment_name}_plane_12L_water.mp4"
         except:
             from datetime import datetime
             filename_mp4 = f"{datetime.now().timestamp()}"

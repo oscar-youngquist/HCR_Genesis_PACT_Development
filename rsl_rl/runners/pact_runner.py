@@ -309,7 +309,7 @@ class OnPolicyRunnerPACT:
             else:
                 entropy_coef = tenth_coef
 
-            entropy_coef = max(entropy_coef, 0.001)
+            entropy_coef = max(entropy_coef, 0.00001)
             self.alg.set_entropy_coef(entropy_coef)
 
 
