@@ -465,9 +465,9 @@ class Go1PACTWater(BaseTask):
         # base quat
         base_quat = self.simulator.base_init_quat.reshape(1, -1).repeat(len(env_ids), 1)
         # base lin vel
-        base_lin_vel = torch_rand_float(-0.5, 0.5, (len(env_ids), 3), self.device)
+        base_lin_vel = torch_rand_float(-0.0, 0.0, (len(env_ids), 3), self.device)
         # base ang vel
-        base_ang_vel = torch_rand_float(-0.5, 0.5, (len(env_ids), 3), self.device)
+        base_ang_vel = torch_rand_float(-0.0, 0.0, (len(env_ids), 3), self.device)
         
         self.simulator.reset_root_states(env_ids, base_pos, base_quat, base_lin_vel, base_ang_vel)
 

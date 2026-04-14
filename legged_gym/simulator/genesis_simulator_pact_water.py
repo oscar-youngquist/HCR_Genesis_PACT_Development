@@ -17,8 +17,8 @@ import pinocchio as pn
 from legged_gym.scripts.liquid_payload_configs import *
 
 # Some values that are held constant for the water tank and liquid
-liquid_substeps      = 5
-liquid_particle_size = 0.01
+liquid_substeps      = 1
+liquid_particle_size = 0.02
 
 container_outer_x = 0.20  # X dimension
 container_outer_y = 0.15  # Y dimension
@@ -224,21 +224,34 @@ class GenesisSimulator_PACT_Water(Simulator):
     def _reset_liquid_state(self, envs_idx):
         # pull out the new poses and oreintations
         new_base_poses = self._base_pos[envs_idx].clone().cpu().numpy()
-        
+
+        print(new_base_poses)
+        rob_init_pose = np.array(self._cfg.init_state.pos)
+
+        height_offsets = new_base_poses[:,2] - (rob_init_pose[2])
+        # height_offsets =  self._env_origins[envs_idx,2].cpu().numpy()
+        print(height_offsets)
+
         # Calculate the liquid pose offsets
         new_particle_pos_offset    = new_base_poses
-        new_particle_pos_offset[:, 2] = 0.0 # no need to modify the height
-                
-        # Use the new poses/orientations to reset the liquid particles
-        self._liquid.set_particles_vel(0, envs_idx=envs_idx)
+        new_particle_pos_offset[:, 2] = height_offsets
 
         # Doesn't look like the yaw angle is randomized when resetting, so no need to rotate the particle positions.
         # new_particle_posistions = quat_rotate_inverse(self._base_quat_offsets,
         #                                               self._liquid_init_pose[envs_idx]).cpu().numpy()
         new_particle_posistions = self._liquid_init_pose[envs_idx].cpu().numpy()
+        
+        print(new_particle_posistions[:,0:2])
+        
         new_particle_posistions += new_particle_pos_offset[:, None, :]
+        
+        print(new_particle_posistions[:,0:2])
+        
         self._liquid.set_particles_pos(new_particle_posistions,
                                       envs_idx=envs_idx)
+        
+        # # Use the new poses/orientations to reset the liquid particles
+        # self._liquid.set_particles_vel(0, envs_idx=envs_idx)
 
     def update_sensors(self):
         # Genesis currently exposes depth update via `update_depth_images`
@@ -1130,13 +1143,19 @@ class GenesisSimulator_PACT_Water(Simulator):
             max_init_level = self._cfg.terrain.max_init_terrain_level
             if not self._cfg.terrain.curriculum:
                 max_init_level = self._cfg.terrain.num_rows - 1
+            
             self._terrain_levels = torch.randint(
                 0, max_init_level+1, (self._num_envs,), device=self._device)
+            
             self._terrain_types = torch.div(torch.arange(self._num_envs, device=self._device), (
                 self._num_envs/self._cfg.terrain.num_cols), rounding_mode='floor').to(torch.long)
+            
             self._max_terrain_level = self._cfg.terrain.num_rows
+            
             self._terrain_origins = torch.from_numpy(
                 self._terrain.env_origins).to(self._device).to(torch.float)
+            
+            
             self._env_origins[:] = self._terrain_origins[self._terrain_levels,
                                                        self._terrain_types]
         else:

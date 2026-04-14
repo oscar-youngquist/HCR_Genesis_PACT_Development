@@ -37,14 +37,14 @@ def override_configs(env_cfg, train_cfg, args):
         
         # random uniform terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-                                        #   "min_height" : -0.05, "max_height": 0.05, 
-                                        #   "step":0.005, "downsampled_scale" : 0.2}
+        #                                   "min_height" : -0.05, "max_height": 0.05, 
+        #                                   "step":0.005, "downsampled_scale" : 0.2}
         # # slope
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
-        #                                   "slope": -0.4, "platform_size": 3.0}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
+                                          "slope": 0.4, "platform_size": 3.0}
         # # stairs
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-                                        "step_width": 0.31, "step_height": -0.06, "platform_size": 3.0}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
+        #                                 "step_width": 0.31, "step_height": 0.06, "platform_size": 3.0}
         # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.06,
@@ -87,17 +87,17 @@ def override_configs(env_cfg, train_cfg, args):
     env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_base_mass = True
+    env_cfg.domain_rand.randomize_base_mass = False
 
     env_cfg.asset.fix_base_link = False
     env_cfg.env.debug_viz = False
     env_cfg.env.debug = False
 
     # Liquid Payload override stuff
-    args.use_liquid = False
+    args.use_liquid = True
     args.liquid_type = "water"
     args.liquid_tank = "default"
-    args.liquid_volume = 12.0  # liters
+    args.liquid_volume = 10.0  # liters
 
     env_cfg.liquid.liquid_type = args.liquid_type
     env_cfg.liquid.liquid_volume = args.liquid_volume  # liters
@@ -163,6 +163,15 @@ def interaction_loop(train_cfg, env, policy, args):
     if args.record_frames:
         env.simulator._floating_camera.start_recording()
     
+    # set the viewer camera to follow the first environment by default
+    if args.follow_robot:
+        pos = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.pos, dtype=np.float32)
+        lookat = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.lookat, dtype=np.float32)
+        # print("exp pos - ", pos)
+        # print("exp lookat - ", lookat)
+        env.set_camera(pos, lookat)
+        env.simulator._floating_camera.render()
+
     # env.commands[:, 0] = 1.0
     # env.commands[:, 1] = 0.0
     # env.commands[:, 2] = 1.0
@@ -192,7 +201,6 @@ def interaction_loop(train_cfg, env, policy, args):
             lookat = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.lookat, dtype=np.float32)
             # print("exp pos - ", pos)
             # print("exp lookat - ", lookat)
-            # env.set_viewer_camera(pos, lookat)
             env.set_camera(pos, lookat)
             env.simulator._floating_camera.render()
         
