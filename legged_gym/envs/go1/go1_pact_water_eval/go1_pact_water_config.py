@@ -200,7 +200,7 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
     class viewer:
         ref_env = 0
         # pos = [0.5, 1.5, 1.25]       # [m]
-        pos = [2., 2.0, 1.0]       # [m]
+        pos = [1., 1.5, 0.5]       # [m]
         lookat = [0., 0, 0.0]  # [m]
         rendered_envs_idx = [i for i in range(0, 3, 1)]  # number of environments to be rendered
         # rendered_envs_idx.extend([i for i in range(200, 203, 1)])  # number of environments to be rendered

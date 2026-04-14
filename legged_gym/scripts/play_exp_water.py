@@ -36,12 +36,12 @@ def override_configs(env_cfg, train_cfg, args):
         
         
         # random uniform terrain
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-        #                                   "min_height" : -0.05, "max_height": 0.05, 
-        #                                   "step":0.005, "downsampled_scale" : 0.2}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+                                          "min_height" : -0.05, "max_height": 0.05, 
+                                          "step":0.005, "downsampled_scale" : 0.2}
         # # slope
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
-                                          "slope": 0.4, "platform_size": 3.0}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
+        #                                   "slope": 0.4, "platform_size": 3.0}
         # # stairs
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
         #                                 "step_width": 0.31, "step_height": 0.06, "platform_size": 3.0}
@@ -97,7 +97,7 @@ def override_configs(env_cfg, train_cfg, args):
     args.use_liquid = True
     args.liquid_type = "water"
     args.liquid_tank = "default"
-    args.liquid_volume = 10.0  # liters
+    args.liquid_volume = 12.0  # liters
 
     env_cfg.liquid.liquid_type = args.liquid_type
     env_cfg.liquid.liquid_volume = args.liquid_volume  # liters
@@ -182,7 +182,7 @@ def interaction_loop(train_cfg, env, policy, args):
     print("Min - self.feedback_tau_weight: ", torch.min(env.simulator.feedback_tau_weight).item())
     
     # interaction loop
-    for i in range(int(10.01*env.max_episode_length)):
+    for i in range(int(0.56*env.max_episode_length)):
         
         # env.commands[:, 0] = 1.0
         # env.commands[:, 1] = 0.0
@@ -195,6 +195,9 @@ def interaction_loop(train_cfg, env, policy, args):
             env.commands[:, 1] = -joystick.lx
             env.commands[:, 2] = -joystick.rx
         
+
+        print(env.commands)
+
         # set the viewer camera to follow the first environment by default
         if args.follow_robot:
             pos = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.pos, dtype=np.float32)
@@ -330,7 +333,7 @@ def play(args):
 
     if args.record_frames:
         try:
-            filename_mp4 = f"{train_cfg.runner.experiment_name}_discrete_12L.mp4"
+            filename_mp4 = f"{train_cfg.runner.experiment_name}_rough_12L_water.mp4"
         except:
             from datetime import datetime
             filename_mp4 = f"{datetime.now().timestamp()}"
