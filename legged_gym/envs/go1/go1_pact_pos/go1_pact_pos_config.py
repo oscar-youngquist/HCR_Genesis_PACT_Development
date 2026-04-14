@@ -394,7 +394,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
                                  }
 
             curr_steps = 1
-            warmup_steps = 500
+            warmup_steps = 4000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
