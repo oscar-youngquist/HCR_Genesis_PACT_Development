@@ -68,7 +68,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
         num_rows = 20  # number of terrain rows (levels), X direction
-        num_cols = 10  # number of terrain cols (types), Y direction
+        num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
         terrain_proportions = [0.10, 0.10, 0.25, 0.25, 0.20, 0.10]
