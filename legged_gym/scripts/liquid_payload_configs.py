@@ -281,3 +281,46 @@ def get_payload_config(payload_type: str, volume: int, container_shape: str = "d
 
     else:
         raise ValueError(f"Unsupported payload type: {payload_type}")
+
+
+# Registry of all available (type, volume, tank) combinations
+ALL_LIQUID_CONFIGS = [
+    ("water", 2,  "default"),
+    ("water", 4,  "default"),
+    ("water", 6,  "default"),
+    ("water", 8,  "default"),
+    ("water", 10, "default"),
+    ("water", 10, "tall"),
+    ("water", 10, "wide"),
+    ("water", 10, "offset"),
+    ("water", 12, "default"),
+    ("oil",   2,  "default"),
+    ("oil",   4,  "default"),
+    ("oil",   6,  "default"),
+    ("oil",   8,  "default"),
+    ("oil",   10, "default"),
+    ("oil",   12, "default"),
+    ("gas",   2,  "default"),
+    ("gas",   4,  "default"),
+    ("gas",   6,  "default"),
+    ("gas",   8,  "default"),
+    ("gas",   10, "default"),
+    ("gas",   12, "default"),
+]
+
+
+def sample_liquid_configs(n=20, seed=None):
+    """Randomly sample n liquid configs from all available ones.
+
+    Args:
+        n: number of configs to sample (clamped to total available)
+        seed: optional random seed for reproducibility
+
+    Returns:
+        list of (liquid_type, volume, tank) tuples
+    """
+    import random as _rng
+    if seed is not None:
+        _rng.seed(seed)
+    n = min(n, len(ALL_LIQUID_CONFIGS))
+    return _rng.sample(ALL_LIQUID_CONFIGS, n)

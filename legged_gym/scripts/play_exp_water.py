@@ -95,13 +95,9 @@ def override_configs(env_cfg, train_cfg, args):
 
     # Liquid Payload override stuff
     args.use_liquid = True
-    args.liquid_type = "water"
-    args.liquid_tank = "default"
-    args.liquid_volume = 12.0  # liters
-
     env_cfg.liquid.liquid_type = args.liquid_type
-    env_cfg.liquid.liquid_volume = args.liquid_volume  # liters
-    env_cfg.liquid.liquid_tank = args.liquid_tank  # liters
+    env_cfg.liquid.liquid_volume = args.liquid_volume
+    env_cfg.liquid.liquid_tank = args.liquid_tank
     train_cfg.runner.exp_data_path = f"exp_data/scratch_pact_exp/plane_water_test_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}.csv"
     env_cfg.env.use_liquid = args.use_liquid
 

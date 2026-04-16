@@ -84,6 +84,10 @@ from legged_gym.envs.go1.go1_pact_pos.go1_pact_pos import Go1PACTPos
 from legged_gym.envs.go1.go1_pact_water_eval.go1_pact_water_config import GO1PACTWaterCfg, GO1PACTWaterCfgPPO
 from legged_gym.envs.go1.go1_pact_water_eval.go1_pact_water import Go1PACTWater
 
+# Go2 PACT water eval
+from legged_gym.envs.go2.go2_pact_water_eval.go2_pact_water_config import GO2PACTWaterCfg, GO2PACTWaterCfgPPO
+from legged_gym.envs.go2.go2_pact_water_eval.go2_pact_water import Go2PACTWater
+
 # Go2 PACT training
 from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos_config import GO2PACTPosCfg, GO2PACTPosCfgPPO
 from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos import Go2PACTPos
@@ -97,6 +101,10 @@ from legged_gym.envs.a1.a1_pact.a1_pact import A1PACT
 
 from legged_gym.envs.a1.a1_pact_pos.a1_pact_pos_config import A1PACTPosCfg, A1PACTPosCfgPPO
 from legged_gym.envs.a1.a1_pact_pos.a1_pact_pos import A1PACTPos
+
+# A1 PACT water eval
+from legged_gym.envs.a1.a1_pact_water_eval.a1_pact_water_config import A1PACTWaterCfg, A1PACTWaterCfgPPO
+from legged_gym.envs.a1.a1_pact_water_eval.a1_pact_water import A1PACTWater
 
 from legged_gym.utils.task_registry import task_registry
 
@@ -121,6 +129,8 @@ task_registry.register("go1_pact_water", Go1PACTWater, GO1PACTWaterCfg(), GO1PAC
 
 task_registry.register("go2_pact_pos", Go2PACTPos, GO2PACTPosCfg(), GO2PACTPosCfgPPO())
 task_registry.register("go2_pact", Go2PACT, GO2PACTCfg(), GO2PACTCfgPPO())
+task_registry.register("go2_pact_water", Go2PACTWater, GO2PACTWaterCfg(), GO2PACTWaterCfgPPO())
 
 task_registry.register("a1_pact", A1PACT, A1PACTCfg(), A1PACTCfgPPO())
 task_registry.register("a1_pact_pos", A1PACTPos, A1PACTPosCfg(), A1PACTPosCfgPPO())
+task_registry.register("a1_pact_water", A1PACTWater, A1PACTWaterCfg(), A1PACTWaterCfgPPO())
