@@ -18,7 +18,7 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 32)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -41,7 +41,7 @@ def override_configs(env_cfg, args):
         #                                   "slope": -0.4, "platform_size": 3.0}
         # stairs
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-        #                                 "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
+                                        # "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
         # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.1,
@@ -69,6 +69,19 @@ def override_configs(env_cfg, args):
     if args.use_joystick:
         env_cfg.commands.heading_command = False
     
+    # Turn off/on domain randomization elements
+    env_cfg.noise.add_noise = True
+    # Disable some of the domain randomization (our payload will handle that now)
+    env_cfg.domain_rand.randomize_com_displacement = False
+    env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
+    env_cfg.domain_rand.push_robots = False
+    env_cfg.domain_rand.randomize_base_mass = False
+
+
+        # env_cfg.domain_rand.randomize_joint_damping = True
+        # joint_damping_range_end   = [0.00, 0.50]
+        # joint_damping_range_start = [0.25, 0.30]
+
     env_cfg.commands.ranges.lin_vel_x = [-1.0, 1.0]
     env_cfg.commands.ranges.lin_vel_y = [-1.0, 1.0]
     env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
@@ -99,7 +112,7 @@ def interaction_loop(env, policy, args):
     """
     
     logger = Logger(env.dt)
-    robot_index = 1 # which robot is used for logging
+    robot_index = 0 # which robot is used for logging
     joint_index = 2 # which joint is used for logging
     stop_state_log = 300 # number of steps before plotting states
     stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards
@@ -127,7 +140,7 @@ def interaction_loop(env, policy, args):
     # env.commands[:, 3] = 0
     
     # interaction loop
-    for i in range(int(1.05*env.max_episode_length)):
+    for i in range(int(10.00*env.max_episode_length)):
         
         # update commands from joystick
         if args.use_joystick:
@@ -211,6 +224,9 @@ def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     elif "dreamwaq" in task_name:
         exporter = PolicyExporterWaQ(alg_runner.alg.actor_critic)
         exporter.export(path, env_cfg, args.export_onnx, train_cfg)
+    elif "pact" in task_name:
+        exporter = PolicyExporterPACT(alg_runner.alg.actor_critic)
+        exporter.export(path, env_cfg, train_cfg)
     else:
         exporter = PolicyExporter(alg_runner.alg.actor_critic)
         exporter.export(path, env_cfg, args.export_onnx, train_cfg)
@@ -227,10 +243,7 @@ def play(args):
         args (_type_): command line arguments
     """
     if SIMULATOR == "genesis" or SIMULATOR == "genesis_pact_pos" or SIMULATOR == "genesis_pact":
-        gs.init(
-            backend=gs.cpu if args.cpu else gs.gpu,
-            logging_level='warning',
-        )
+        init_genesis(args, gs)
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     override_configs(env_cfg, args)
 
@@ -244,8 +257,8 @@ def play(args):
     # export policy as a jit module (used to run it from C++ or python)
     path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 
                             train_cfg.runner.load_run, 'exported')
-    # export_policy(ppo_runner, path, args, env_cfg, train_cfg)
-
+    export_policy(ppo_runner, path, args, env_cfg, train_cfg)
+    
     interaction_loop(env, policy, args)
     
     

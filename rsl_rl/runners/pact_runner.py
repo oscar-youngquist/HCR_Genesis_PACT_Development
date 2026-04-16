@@ -28,6 +28,7 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+import math
 import time
 import os
 from collections import deque
@@ -110,11 +111,12 @@ class OnPolicyRunnerPACT:
 
         print("\t Critic Parameter Count: ", np.sum(p.numel() for p in actor_critic.critic.parameters() if p.requires_grad))
 
+        self._init_entropy_coef = self.alg_cfg["entropy_coef"]
 
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         
-        self.alg: PPO_PACT = alg_class(actor_critic, decoder, 
+        self.alg: PPO_PACT = alg_class(actor_critic, decoder, self.env.num_privileged_obs,
                                        pinn_lambda=self.policy_cfg["pinn_loss_weight"], 
                                        pinn_warmup=self.policy_cfg["pinn_warmup"], 
                                        pinn_init_steps=self.policy_cfg["pinn_init_steps"],
@@ -124,7 +126,8 @@ class OnPolicyRunnerPACT:
         self.save_interval = self.cfg["save_interval"]
 
         # init storage and model
-        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
+        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], \
+                              [self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
                               [2*self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]], [self.env.wb_dim])
 
         if "pretrained_path" in self.policy_cfg.keys():
@@ -211,7 +214,8 @@ class OnPolicyRunnerPACT:
                         obs_hist.to(self.device), exp_labels.to(self.device), rewards.to(self.device), dones.to(self.device), grfs.to(self.device)
 
                     # Log the labels associated with the context decoder as well as the typical stuff
-                    self.alg.process_env_step(rewards, dones, infos, grfs, obs, exp_labels, gt_forces, mass_mats, bias_vecs, torso_acc)
+                    # self.alg.process_env_step(rewards, dones, infos, grfs, obs, exp_labels, gt_forces, mass_mats, bias_vecs, torso_acc)
+                    self.alg.process_env_step(rewards, dones, infos, grfs, critic_obs, exp_labels, gt_forces, mass_mats, bias_vecs, torso_acc)
 
                     if self.log_dir is not None:
                         # Book keeping
@@ -253,8 +257,64 @@ class OnPolicyRunnerPACT:
             if self.env.simulator.use_domainrand_curriculum:
                 self.env.simulator._step_domian_rand(it)
                         
-            if it > 200:
-                self.alg.set_entropy_coef(1e-3)
+            # if it > 2000 and it < 3000:
+            #     self.alg.set_entropy_coef(2.5e-3)
+            
+            # if it > 3500:
+            #     self.alg.set_entropy_coef(1.e-3)
+                
+            # if it < 2000:
+            #     entropy_coef = 0.01
+            # elif it < 3000:
+            #     alpha = (it - 2000) / 1000.0
+            #     entropy_coef = 0.01 + alpha * (0.005 - 0.01)
+            #     self.alg.set_entropy_coef(entropy_coef)
+            # elif it < 3500:
+            #     entropy_coef = 0.005
+            #     self.alg.set_entropy_coef(entropy_coef)
+            # else:
+            #     alpha = (it -3500) / 1500.0
+            #     entropy_coef = 0.005 + alpha * (0.001 - 0.005)
+            #     self.alg.set_entropy_coef(entropy_coef)
+
+            half_ceof = self._init_entropy_coef * 0.5
+            tenth_coef = self._init_entropy_coef * 0.1
+
+            # if it < 5000:
+            #     entropy_coef = self._init_entropy_coef
+            # elif it < 5500:
+            #     new_coef = self._init_entropy_coef / 2.0
+            #     alpha = (it - 5000) / 500.0
+            #     entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
+            # elif it < 6000:
+            #     entropy_coef = half_ceof
+            # elif it <6500:
+            #     alpha = (it - 6000) / 500.0
+            #     entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            # else:
+            #     entropy_coef = tenth_coef
+            
+            
+            if it < 7000:
+                entropy_coef = self._init_entropy_coef
+            elif it < 7500:
+                new_coef = self._init_entropy_coef / 2.0
+                alpha = (it - 7000) / 500.0
+                entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
+            elif it < 8000:
+                entropy_coef = half_ceof
+            elif it <8500:
+                alpha = (it - 8000) / 500.0
+                entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            else:
+                entropy_coef = tenth_coef
+
+            entropy_coef = max(entropy_coef, 0.00001)
+            self.alg.set_entropy_coef(entropy_coef)
+
+
+            # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
+            #     self.env.cfg.rewards.only_positive_rewards = False
             
             stop = time.time()
             learn_time = stop - start

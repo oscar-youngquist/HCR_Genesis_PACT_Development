@@ -13,10 +13,7 @@ from tqdm import trange, tqdm
 
 def evaluate(args):
     if SIMULATOR == "genesis":
-        gs.init(
-            backend=gs.cpu if args.cpu else gs.gpu,
-            logging_level='warning',
-        )
+        init_genesis(args, gs)
     # ---------- Constrained Teacher-Student ----------
     cat_task = "go2_cat" # constrained teacher-student
     env_cfg, train_cfg = task_registry.get_cfgs(name=cat_task)

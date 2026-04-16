@@ -7,6 +7,8 @@
 node_modules/
 dist/
 
+*.mp4
+
 # Compiled Java class files
 *.class
 
@@ -22,6 +24,8 @@ dist/
 # Maven
 target/
 dist/
+
+**/exp_data/*
 
 # JetBrains IDE
 .idea/

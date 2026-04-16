@@ -8,6 +8,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        # Kaiming uniform initialization for weights
+        torch.nn.init.xavier_uniform_(m.weight)
+        # Initialize biases to zero if they exist
+        if m.bias is not None:
+            torch.nn.init.zeros_(m.bias)
+
 ###
 #
 #   Context Encoder/Decoder models used to provide conditioning input
@@ -73,8 +81,7 @@ class ContextEncoder(nn.Module):
     def _initialize_weights(self) -> None:
         """Initialize all linear layers with Xavier uniform distribution."""
         for layer in [self.ce_in, self.ce_h1,
-                     self.ce_out_mean, 
-                     self.ce_velo_mean,
+                     self.ce_out_mean, self.ce_velo_mean,
                      self.ce_h2, self.ce_velovar_h, self.ce_velovar_h,
                      self.ce_latmean_h, self.ce_latvar_h]:
             
@@ -82,6 +89,9 @@ class ContextEncoder(nn.Module):
             
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
+
+        self.ce_out_var.apply(init_weights)
+        self.ce_velo_var.apply(init_weights)
 
     def encode(self, X_C: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # Forward pass through encoder
@@ -156,13 +166,14 @@ class ContextDecoder(nn.Module):
         # Network architecture
         self.dec_in = nn.Linear(input_dim, layers[0])
         self.dec_h1 = nn.Linear(layers[0], layers[1])
-        self.dec_out = nn.Linear(layers[1], decode_dim)
+        self.dec_h2 = nn.Linear(layers[1], layers[2])
+        self.dec_out = nn.Linear(layers[2], decode_dim)
 
         self._initialize_weights()
 
     def _initialize_weights(self) -> None:
         """Initialize all linear layers with Xavier uniform distribution."""
-        for layer in [self.dec_in, self.dec_h1, self.dec_out]:
+        for layer in [self.dec_in, self.dec_h1, self.dec_out, self.dec_h2]:
             nn.init.xavier_uniform_(layer.weight)
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
@@ -178,6 +189,7 @@ class ContextDecoder(nn.Module):
         # Process through network with ELU activations
         x = F.elu(self.dec_in(condition))
         x = F.elu(self.dec_h1(x))
+        x = F.elu(self.dec_h2(x))
         return self.dec_out(x)
 
 class ActorCritic_PACT_Pos(nn.Module):
@@ -200,7 +212,7 @@ class ActorCritic_PACT_Pos(nn.Module):
                                               context_layer_sizes=cenet_enc_layers,
                                               context_latent_size=cenet_latent_dim,
                                               context_torso_velo_size=cenet_velo_dim,
-                                              activation='elu')
+                                              activation=activation)
         
         # Get the activation function used by the actor and critic networks
         activation = get_activation(activation)
@@ -259,6 +271,8 @@ class ActorCritic_PACT_Pos(nn.Module):
         self.distribution = None
         
         self.current_obs = None
+        
+        self._std_clip_lwr = 0.1
         
         # disable args validation for speedup
         Normal.set_default_validate_args = False
@@ -419,7 +433,10 @@ class ActorCritic_PACT_Pos(nn.Module):
     @torch.no_grad
     @torch.jit.ignore
     def _clip_std(self,):
-        self.std.data.clamp_(0.1, 5.0)
+        self.std.data.clamp_(self._std_clip_lwr, 5.0)
+        
+    def _set_std_clip_lwr(self, clip_val=0.1):
+        self._std_clip_lwr = clip_val
 
     @torch.jit.ignore
     def update_distribution(self, curr_obs):

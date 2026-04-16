@@ -7,6 +7,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        # Kaiming uniform initialization for weights
+        torch.nn.init.xavier_uniform_(m.weight)
+        # Initialize biases to zero if they exist
+        if m.bias is not None:
+            torch.nn.init.zeros_(m.bias)
 
 ###
 #
@@ -54,11 +61,14 @@ class ContextEncoder(nn.Module):
         self.ce_velovar_h  = nn.Linear(output_hdim, output_hdim)
 
         self.ce_out_mean = nn.Linear(output_hdim, context_latent_size)
-        self.ce_out_var = nn.Linear(output_hdim, context_latent_size)
+        self.ce_out_var = nn.Sequential(
+            nn.Linear(output_hdim, context_latent_size),
+            nn.Hardtanh(min_val=-5., max_val=5.))
 
         self.ce_velo_mean = nn.Linear(output_hdim, context_torso_velo_size)
-        self.ce_velo_var  = nn.Linear(output_hdim, context_torso_velo_size)
-
+        self.ce_velo_var  = nn.Sequential(
+            nn.Linear(output_hdim, context_torso_velo_size), 
+            nn.Hardtanh(min_val=-5., max_val=5.))
         
         self.activation = get_activation(activation)
 
@@ -69,8 +79,7 @@ class ContextEncoder(nn.Module):
     def _initialize_weights(self) -> None:
         """Initialize all linear layers with Xavier uniform distribution."""
         for layer in [self.ce_in, self.ce_h1,
-                     self.ce_out_mean, self.ce_out_var, 
-                     self.ce_velo_mean, self.ce_velo_var,
+                     self.ce_out_mean, self.ce_velo_mean,
                      self.ce_h2, self.ce_velovar_h, self.ce_velovar_h,
                      self.ce_latmean_h, self.ce_latvar_h]:
             
@@ -78,6 +87,9 @@ class ContextEncoder(nn.Module):
             
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
+
+        self.ce_out_var.apply(init_weights)
+        self.ce_velo_var.apply(init_weights)
 
     def encode(self, X_C: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # Forward pass through encoder
@@ -152,13 +164,14 @@ class ContextDecoder(nn.Module):
         # Network architecture
         self.dec_in = nn.Linear(input_dim, layers[0])
         self.dec_h1 = nn.Linear(layers[0], layers[1])
-        self.dec_out = nn.Linear(layers[1], decode_dim)
+        self.dec_h2 = nn.Linear(layers[1], layers[2])
+        self.dec_out = nn.Linear(layers[2], decode_dim)
 
         self._initialize_weights()
 
     def _initialize_weights(self) -> None:
         """Initialize all linear layers with Xavier uniform distribution."""
-        for layer in [self.dec_in, self.dec_h1, self.dec_out]:
+        for layer in [self.dec_in, self.dec_h1, self.dec_h2, self.dec_out]:
             nn.init.xavier_uniform_(layer.weight)
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
@@ -174,6 +187,7 @@ class ContextDecoder(nn.Module):
         # Process through network with ELU activations
         x = F.elu(self.dec_in(condition))
         x = F.elu(self.dec_h1(x))
+        x = F.elu(self.dec_h2(x))
         return self.dec_out(x)
 
 class ActorCritic_PACT(nn.Module):

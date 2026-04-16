@@ -48,6 +48,7 @@ class PPO_PACT:
     def __init__(self,
                  actor_critic,
                  decoder_network,
+                 num_priv_obs,
                  num_learning_epochs=1,
                  num_mini_batches=1,
                  clip_param=0.2,
@@ -70,6 +71,8 @@ class PPO_PACT:
                  ):
         
         self.device = device
+
+        self.num_priv_obs = num_priv_obs
 
         self.desired_kl = desired_kl
         self.schedule = schedule
@@ -120,8 +123,8 @@ class PPO_PACT:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
         
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
-        self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_hist_shape, \
+    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
+        self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
                                               action_shape, torso_velo_shape, grf_shape, wb_shape, self.device)
 
     def test_mode(self):
@@ -168,7 +171,10 @@ class PPO_PACT:
         self.transition.dones = dones
         # Values from the next-time step used as labels for the decoder network
         self.transition.grf_targets = grf_labels
-        self.transition.obs_targets = obs_labels
+
+        # This is now the stack of critic observations, we want to prune off the last one
+        self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
+        # self.transition.obs_targets = obs_labels
 
         self.transition.explicit_labels = explicit_labels
         
@@ -187,33 +193,98 @@ class PPO_PACT:
         self.transition.clear()
         self.actor_critic.reset(dones)
 
-    def spectral_normalization(self, model):
-        """Applies spectral normalization to linear and attention layers.
+    # def spectral_normalization(self, model):
+    #     """Applies spectral normalization to linear and attention layers.
         
-        Normalizes weights such that their spectral norm (2-norm) doesn't exceed
-        the specified bound. Only affects Linear and MultiheadAttention layers.
+    #     Normalizes weights such that their spectral norm (2-norm) doesn't exceed
+    #     the specified bound. Only affects Linear layers.
+
+    #     Args:
+    #         model: The neural network model to normalize.
+
+    #     Note:
+    #         - Operates in-place on the model parameters
+    #         - Only processes weights (not biases)
+    #         - Only affects parameters with ndim > 1
+    #     """
+    #     whitelist = (nn.Linear)
+
+    #     for module in model.modules():
+    #         if isinstance(module, whitelist):
+    #             for name, param in module.named_parameters():
+    #                 print(name)
+    #                 if name.endswith("weight") and param.ndim > 1:
+    #                     with torch.no_grad():
+    #                         weight = param.data
+    #                         norm = LA.matrix_norm(weight, ord=2)
+                            
+    #                         # Normalize if exceeds bound
+    #                         if norm > 2.0:
+    #                             param.data = (weight / norm) * 2.0
+
+
+    def spectral_normalization(
+        self,
+        model: nn.Module,
+        sigma_max: float = 1.0,
+        n_power_iters: int = 1,
+    ):
+        """
+        Spectral-norm clip all Linear layers except selected output layers.
 
         Args:
-            model: The neural network model to normalize.
-
-        Note:
-            - Operates in-place on the model parameters
-            - Only processes weights (not biases)
-            - Only affects parameters with ndim > 1
+            model: network to normalize in-place
+            sigma_max: maximum allowed spectral norm
+            n_power_iters: number of power iterations for sigma estimate
         """
-        whitelist = (nn.Linear, nn.MultiheadAttention)
 
-        for module in model.modules():
-            if isinstance(module, whitelist):
-                for name, param in module.named_parameters():
-                    if name.endswith("weight") and param.ndim > 1:
-                        with torch.no_grad():
-                            weight = param.data
-                            norm = LA.matrix_norm(weight, ord=2)
-                            
-                            # Normalize if exceeds bound
-                            if norm > 2.0:
-                                param.data = (weight / norm) * 2.0
+        whitelist = (nn.Linear,)
+
+        # lazily create persistent power-iteration vectors
+        if not hasattr(self, "_spec_u"):
+            self._spec_u = {}
+
+        for module_name, module in model.named_modules():
+            if not isinstance(module, whitelist):
+                continue
+
+            # skip known output layers
+            if module_name.endswith("out") or module_name.endswith("mean") or module_name.endswith("var") or "critic" in module_name:
+                continue
+
+            for param_name, param in module.named_parameters(recurse=False):
+                if param_name != "weight" or param.ndim != 2:
+                    continue
+
+                full_name = f"{module_name}.{param_name}" if module_name else param_name
+                W = param.data  # [out_dim, in_dim]
+
+                # initialize persistent u vector once per parameter
+                if full_name not in self._spec_u or self._spec_u[full_name].shape[0] != W.shape[0]:
+                    u = torch.randn(W.shape[0], device=W.device, dtype=W.dtype)
+                    u = u / (u.norm() + 1e-12)
+                    self._spec_u[full_name] = u
+
+                u = self._spec_u[full_name]
+
+                with torch.no_grad():
+                    # power iteration
+                    for _ in range(n_power_iters):
+                        v = W.t().mv(u)
+                        v = v / (v.norm() + 1e-12)
+
+                        u = W.mv(v)
+                        u = u / (u.norm() + 1e-12)
+
+                    # sigma ~= u^T W v
+                    sigma = torch.dot(u, W.mv(v))
+
+                    # save updated u for next call
+                    self._spec_u[full_name] = u
+
+                    # clip only if above threshold
+                    if sigma > sigma_max:
+                        param.data.mul_(sigma_max / (sigma + 1e-12))
     
     def compute_returns(self, last_critic_obs):
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
@@ -229,8 +300,10 @@ class PPO_PACT:
         mean_decoder_loss = 0
         mean_pinn_loss = 0
 
-        all_enc_obs_targets = []
-        all_enc_recons     = []
+        boot_count = 0
+        boot_sum_x = None
+        boot_sum_x2 = None
+        boot_sum_recon_sqerr = 0.0
 
         if itr > self.pinn_init and self.num_pinn_updates < (self.pinn_warmup_steps+1):
             self.pinn_weight = (float(self.num_pinn_updates)/float(self.pinn_warmup_steps))*self.pinn_weight_final
@@ -317,8 +390,25 @@ class PPO_PACT:
 
                 # Log the decode targets and recons for computing boot-probability
                 with torch.no_grad():
-                    all_enc_obs_targets.extend((decode_targets*terminated_batch).detach().cpu().numpy())
-                    all_enc_recons.extend((recons*terminated_batch).clone().detach().cpu().numpy())
+                    x = decode_targets * terminated_batch
+                    r = recons * terminated_batch
+
+                    # flatten batch dimension only; keep feature dim
+                    # assumes x shape [B, D]
+                    if boot_sum_x is None:
+                        boot_sum_x = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
+                        boot_sum_x2 = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
+
+                    x64 = x.to(torch.float64)
+                    r64 = r.to(torch.float64)
+
+                    boot_sum_x += x64.sum(dim=0)
+                    boot_sum_x2 += (x64 * x64).sum(dim=0)
+
+                    # scalar sum over all elements
+                    boot_sum_recon_sqerr += ((r64 - x64) ** 2).sum().item()
+
+                    boot_count += x.shape[0]
 
                 # Log losses
                 mean_autoenc_loss += vae_loss.item()
@@ -326,6 +416,10 @@ class PPO_PACT:
                 mean_recon_loss += recon_error.item()
                 mean_kld_loss += kl_div.item()
                 mean_decoder_loss += dec_loss.item()
+
+            # Keeps the interaction of incoming data with layer wieghts below the threashold that 
+            #     saturates the tanh activation function.
+            self.spectral_normalization(self.actor_critic, sigma_max=6.0)
 
         if itr > self.pinn_init:
             self.num_pinn_updates += 1
@@ -341,11 +435,25 @@ class PPO_PACT:
         mean_vel_loss /= (num_updates * self.num_enc_epochs)
         mean_recon_loss /= (num_updates * self.num_enc_epochs)
 
-        # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
-        mean_pred = np.mean(all_enc_obs_targets, axis=0)
-        mean_pred_error = np.mean(np.square(mean_pred - all_enc_obs_targets))
-        actual_pred_error = np.mean(np.square(np.array(all_enc_recons) - np.array(all_enc_obs_targets)))
-        ratio = mean_pred_error / (actual_pred_error * self.boot_mult)
+        # # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
+        # mean_pred = np.mean(all_enc_obs_targets, axis=0)
+        # mean_pred_error = np.mean(np.square(mean_pred - all_enc_obs_targets))
+        # actual_pred_error = np.mean(np.square(np.array(all_enc_recons) - np.array(all_enc_obs_targets)))
+        # ratio = mean_pred_error / (actual_pred_error * self.boot_mult)
+        # pboot = np.tanh(ratio)
+
+        # total number of scalar elements per sample vector
+        feat_dim = boot_sum_x.shape[0]
+
+        mean_pred = boot_sum_x / boot_count                     # [D]
+        ex2 = boot_sum_x2 / boot_count                          # [D]
+        var = torch.clamp(ex2 - mean_pred**2, min=0.0)          # [D]
+
+        mean_pred_error = var.mean().item()
+
+        actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
+
+        ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
         pboot = np.tanh(ratio)
 
         # Use the (scaled) ratio of mean-prediction performance to actual prediction performance
@@ -404,6 +512,9 @@ class PPO_PACT:
         surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
         surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
+        # SPO loss
+        # surrogate_loss = -(torch.squeeze(advantages_batch) * ratio - torch.abs(torch.squeeze(advantages_batch)) * torch.pow(ratio - 1.0, 2) / (2.0 * self.clip_param)).mean()
+
         # PPO stuff
         # Value function loss
         if self.use_clipped_value_loss:
@@ -430,13 +541,14 @@ class PPO_PACT:
         grf_target.requires_grad = False
         obs_target.requires_grad = False
         
-        decode_target = torch.cat((obs_target, grf_target), dim=-1)
-        # decode_target = obs_target
+        # decode_target = torch.cat((obs_target, grf_target), dim=-1)
+        decode_target = obs_target
         explicit_labels_batch.requires_grad = False
 
         vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
         recon_error    = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
-        kl_div         = (-0.5 * torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp()))
+        # kl_div         = (-0.5 * torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp()))
+        kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
         vae_loss = vel_pred_error + recon_error + self.vae_beta*kl_div
         
         return vae_loss, kl_div, recon_error, vel_pred_error, dec_input.clone().detach(), decode_target, enc_update_obs_decode

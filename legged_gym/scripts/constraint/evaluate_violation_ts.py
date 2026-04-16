@@ -13,10 +13,7 @@ from tqdm import trange, tqdm
 
 def evaluate(args):
     if SIMULATOR == "genesis":
-        gs.init(
-            backend=gs.cpu if args.cpu else gs.gpu,
-            logging_level='warning',
-        )
+        init_genesis(args, gs)
     # ---------- Vanilla Teacher-Student -----------
     ts_task = "go2_ts" # vanilla teacher-student
     env_cfg, train_cfg = task_registry.get_cfgs(name=ts_task)

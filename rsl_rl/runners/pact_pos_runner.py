@@ -28,6 +28,7 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+import math
 import time
 import os
 from collections import deque
@@ -111,10 +112,11 @@ class OnPolicyRunnerPACTPos:
         print("\t Critic Parameter Count: ", np.sum(p.numel() for p in actor_critic.critic.parameters() if p.requires_grad))
 
 
+        self._init_entropy_coef = self.alg_cfg["entropy_coef"]
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         
-        self.alg: PPO_PACT_Pos = alg_class(actor_critic, decoder, 
+        self.alg: PPO_PACT_Pos = alg_class(actor_critic, decoder, self.env.num_privileged_obs,
                                            pinn_lambda=self.policy_cfg["pinn_loss_weight"], 
                                            pinn_warmup=self.policy_cfg["pinn_warmup"], 
                                            pinn_init_steps=self.policy_cfg["pinn_init_steps"],
@@ -124,7 +126,8 @@ class OnPolicyRunnerPACTPos:
         self.save_interval = self.cfg["save_interval"]
 
         # init storage and model
-        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
+        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], \
+                              [self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
                               [self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]], [self.env.wb_dim])
 
         if "pretrained_path" in self.policy_cfg.keys():
@@ -214,7 +217,8 @@ class OnPolicyRunnerPACTPos:
                         obs_hist.to(self.device), exp_labels.to(self.device), rewards.to(self.device), dones.to(self.device), grfs.to(self.device)
 
                     # Log the labels associated with the context decoder as well as the typical stuff
-                    self.alg.process_env_step(rewards, dones, infos, grfs, obs, exp_labels, gt_forces, mass_mats, bias_vecs, torso_acc)
+                    # self.alg.process_env_step(rewards, dones, infos, grfs, obs, exp_labels, gt_forces, mass_mats, bias_vecs, torso_acc)
+                    self.alg.process_env_step(rewards, dones, infos, grfs, critic_obs, exp_labels, gt_forces, mass_mats, bias_vecs, torso_acc)
 
                     if self.log_dir is not None:
                         # Book keeping
@@ -240,13 +244,13 @@ class OnPolicyRunnerPACTPos:
                     = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, it, self.env.simulator.default_dof_pos, self.env.obs_scales.dof_vel)
 
             # self.env.step_tradeoff_curriculum()
-            print("Avg - Curriculum Step: ", torch.mean(self.env.tradeoff_step_ctr).item())
-            print("Max - self.feedforward_tau_weight: ", torch.max(self.env.simulator.feedforward_tau_weight).item())
-            print("Min - self.feedforward_tau_weight: ", torch.min(self.env.simulator.feedforward_tau_weight).item())
-            print("Avg - self.feedforward_tau_weight: ", torch.mean(self.env.simulator.feedforward_tau_weight).item())
-            print("Max - self.feedback_tau_weight: ", torch.max(self.env.simulator.feedback_tau_weight).item())
-            print("Min - self.feedback_tau_weight: ", torch.min(self.env.simulator.feedback_tau_weight).item())
-            print("Avg - self.feedback_tau_weight: ", torch.mean(self.env.simulator.feedback_tau_weight).item())
+            # print("Avg - Curriculum Step: ", torch.mean(self.env.tradeoff_step_ctr).item())
+            # print("Max - self.feedforward_tau_weight: ", torch.max(self.env.simulator.feedforward_tau_weight).item())
+            # print("Min - self.feedforward_tau_weight: ", torch.min(self.env.simulator.feedforward_tau_weight).item())
+            # print("Avg - self.feedforward_tau_weight: ", torch.mean(self.env.simulator.feedforward_tau_weight).item())
+            # print("Max - self.feedback_tau_weight: ", torch.max(self.env.simulator.feedback_tau_weight).item())
+            # print("Min - self.feedback_tau_weight: ", torch.min(self.env.simulator.feedback_tau_weight).item())
+            # print("Avg - self.feedback_tau_weight: ", torch.mean(self.env.simulator.feedback_tau_weight).item())
             
             # Step the reward curriculum if we are doing that
             if self.env.use_reward_curriculum:
@@ -255,7 +259,41 @@ class OnPolicyRunnerPACTPos:
             # Step the domain randomization if approperiate
             if self.env.simulator.use_domainrand_curriculum:
                 self.env.simulator._step_domian_rand(it)
-                        
+
+            # if it > 1000:
+            #     self.alg.set_entropy_coef(1.0e-3)
+            
+            entropy_coef = 0.01
+            std_lwr = 0.40
+
+            half_coef = self._init_entropy_coef * 0.5
+            tenth_coef = self._init_entropy_coef * 0.1
+            
+            if it < 2500:
+                entropy_coef = self._init_entropy_coef
+            elif it < 3000:
+                alpha = (it - 2500) / 500.0
+                entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
+            elif it < 3500:
+                entropy_coef = half_coef
+            elif it < 4000:
+                alpha = (it - 4000) / 500.0
+                entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            else:
+                entropy_coef = tenth_coef
+            
+            entropy_coef = max(entropy_coef, 0.001)
+
+            print("entropy_coef - ", entropy_coef)
+            # print("std_lwr - ", std_lwr)
+
+            self.alg.set_entropy_coef(entropy_coef)
+            # self.alg._set_std_clip_lwr(std_lwr)
+
+
+            # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
+            #     self.env.cfg.rewards.only_positive_rewards = False
+            
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:

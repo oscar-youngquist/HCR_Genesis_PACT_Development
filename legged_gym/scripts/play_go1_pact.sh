@@ -4,8 +4,8 @@
 
 conda activate /home/oyoungquist/.conda/envs/genesis_lr
 
-export SIMULATOR=genesis_pact
-python play.py --task=go1_pact
+export SIMULATOR=genesis_pact_nopinn
+python play_exp.py --task=go1_pact --headless
 
 # export SIMULATOR=genesis
 # python play.py --task=go2_dreamwaq

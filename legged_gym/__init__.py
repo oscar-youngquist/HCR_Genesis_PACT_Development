@@ -13,6 +13,10 @@ if sys.version_info[1] >= 10: # >=3.10 for genesis and isaacsim
         SIMULATOR = "genesis_pact"
     elif simulator_type == "genesis_pact_pos":
         SIMULATOR = "genesis_pact_pos"
+    elif simulator_type == "genesis_pact_water":
+        SIMULATOR = "genesis_pact_water"
+    elif simulator_type == "genesis_pact_nopinn":
+        SIMULATOR = "genesis_pact_nopinn"
     elif simulator_type == "isaaclab":
         SIMULATOR = "isaaclab"
     else:
@@ -20,24 +24,30 @@ if sys.version_info[1] >= 10: # >=3.10 for genesis and isaacsim
 elif sys.version_info[1] <= 8 and sys.version_info[1] >= 6: # >=3.6 and <3.9 for isaacgym
     SIMULATOR = "isaacgym"
 
-if SIMULATOR == "genesis":
+if "genesis" in SIMULATOR:
     try: 
         import genesis as gs
     except ImportError as e:
         print("Failed to import Genesis. Please ensure that the Genesis is properly installed and configured.")
         raise e
-if SIMULATOR == "genesis_pact":
-    try: 
-        import genesis as gs
-    except ImportError as e:
-        print("Failed to import Genesis. Please ensure that the Genesis is properly installed and configured.")
-        raise e
-if SIMULATOR == "genesis_pact_pos":
-    try: 
-        import genesis as gs
-    except ImportError as e:
-        print("Failed to import Genesis. Please ensure that the Genesis is properly installed and configured.")
-        raise e
+# if SIMULATOR == "genesis_pact":
+#     try: 
+#         import genesis as gs
+#     except ImportError as e:
+#         print("Failed to import Genesis. Please ensure that the Genesis is properly installed and configured.")
+#         raise e
+# if SIMULATOR == "genesis_pact_pos":
+#     try: 
+#         import genesis as gs
+#     except ImportError as e:
+#         print("Failed to import Genesis. Please ensure that the Genesis is properly installed and configured.")
+#         raise e
+# if SIMULATOR == "genesis_pact_pos":
+#     try: 
+#         import genesis as gs
+#     except ImportError as e:
+#         print("Failed to import Genesis. Please ensure that the Genesis is properly installed and configured.")
+#         raise e
 elif SIMULATOR == "isaacgym":
     try:
         import isaacgym
