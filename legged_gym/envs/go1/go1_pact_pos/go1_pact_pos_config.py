@@ -5,7 +5,8 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
+        # num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
+        num_privileged_obs = 57 + (39 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -424,7 +425,9 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # Context Decoder
         cenet_dec_input_dim = 27
         cenet_dec_layers = [128, 256, 512]
-        cenet_dec_out_dim = 57 + (51 + 33) + 143 # next obs (57) + grf_dim (12)
+        # cenet_dec_out_dim = 57 + (51 + 33) + 143 # next obs (57) + grf_dim (12)
+        cenet_dec_out_dim = 57 + (39 + 33) + 143 # next obs (57) + grf_dim (12)
+
 
         # Actor/critic
         actor_layers = [512,256,128]
@@ -462,7 +465,7 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_posboot_100hz_spec_grf'
+        run_name = 'pact_posboot_100hz_spec_nogrf'
         experiment_name = 'go1_pact_pos_rough'
         save_interval = 500
         
