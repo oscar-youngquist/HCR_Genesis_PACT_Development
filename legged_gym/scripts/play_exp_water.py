@@ -43,15 +43,16 @@ def override_configs(env_cfg, train_cfg, args):
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
         #                                   "slope": 0.4, "platform_size": 3.0}
         # # stairs
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-        #                                 "step_width": 0.31, "step_height": 0.06, "platform_size": 3.0}
-        # discrete obstacles
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
-                                          "max_height": 0.06,
-                                          "min_size": 1.0,
-                                          "max_size": 2.0,
-                                          "num_rects": 20,
-                                          "platform_size": 3.0}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
+                                        "step_width": 0.25, "step_height": -0.10, "platform_size": 3.0}
+
+        # # discrete obstacles
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
+        #                                   "max_height": 0.06,
+        #                                   "min_size": 1.0,
+        #                                   "max_size": 2.0,
+        #                                   "num_rects": 20,
+        #                                   "platform_size": 3.0}
         # # wave terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.wave_terrain", 
         #                                   "amplitude": 0.2, "num_waves": 2}
@@ -94,7 +95,7 @@ def override_configs(env_cfg, train_cfg, args):
     env_cfg.env.debug = False
 
     # Liquid Payload override stuff
-    args.use_liquid = True
+    args.use_liquid = False
     args.liquid_type = "water"
     args.liquid_tank = "default"
     args.liquid_volume = 12.0  # liters
