@@ -391,7 +391,7 @@ class Go2PACTPos(BaseTask):
             self.simulator.link_contact_states[:,self.simulator.feet_indices],         # contact states of feet        4
             torch.clip(self.simulator.feet_pos[:, :, 2] -
                 torch.mean(self.simulator.height_around_feet, dim=-1) -
-                self.cfg.rewards.foot_height_offset, -1, 1.),                              # feet height                   4
+                self.cfg.rewards.foot_height_offset, -1, 1.),                              # feet height               4
         ), dim=-1)
 
         # track history buffer

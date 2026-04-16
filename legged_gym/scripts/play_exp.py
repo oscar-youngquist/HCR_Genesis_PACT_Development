@@ -25,25 +25,25 @@ def override_configs(env_cfg, args):
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
     # adjust parameters according to terrain type
     if env_cfg.terrain.mesh_type in ["heightfield", "trimesh"]:
-        env_cfg.terrain.num_rows = 2
+        env_cfg.terrain.num_rows = 4
         env_cfg.terrain.num_cols = 2
         env_cfg.terrain.border_size = 5.0
         env_cfg.terrain.curriculum = False
         env_cfg.terrain.selected   = True
         
         # random uniform terrain
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-                                          "min_height" : -0.05, "max_height": 0.05, 
-                                          "step":0.005, "downsampled_scale" : 0.2}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+        #                                   "min_height" : -0.10, "max_height": 0.10, 
+        #                                   "step":0.005, "downsampled_scale" : 0.2}
         # # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
-        #                                   "slope": -0.4, "platform_size": 3.0}
+        #                                   "slope": 0.4, "platform_size": 2.0}
         # stairs
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-        #                                 "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
+                                        "step_width": 0.31, "step_height": 0.1, "platform_size": 3.0}
         # # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
-        #                                   "max_height": 0.06,
+        #                                   "max_height": 0.1,
         #                                   "min_size": 1.0,
         #                                   "max_size": 2.0,
         #                                   "num_rects": 20,
@@ -74,9 +74,9 @@ def override_configs(env_cfg, args):
     # env_cfg.commands.ranges.lin_vel_y = [-1.0, 1.0]
     # env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
 
-    env_cfg.commands.ranges.lin_vel_x   = [-1.0, 1.0]
-    env_cfg.commands.ranges.lin_vel_y   = [-1.0, 1.0]
-    env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
+    env_cfg.commands.ranges.lin_vel_x   = [-2.0, 2.0]
+    env_cfg.commands.ranges.lin_vel_y   = [0.5, 0.5]
+    env_cfg.commands.ranges.ang_vel_yaw = [-3.0, 3.0]
 
     env_cfg.commands.ranges.heading = [0.0, 0.0]
 
@@ -86,7 +86,7 @@ def override_configs(env_cfg, args):
     env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_base_mass = True
+    env_cfg.domain_rand.randomize_base_mass = False
 
     env_cfg.asset.fix_base_link = False
     # env_cfg.env.debug_viz = False
@@ -128,8 +128,8 @@ def interaction_loop(train_cfg, env, policy, args):
     stop_state_log = 300 # number of steps before plotting states
     stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards
 
-    # logger = ExpLogger(train_cfg.runner.exp_data_path)
-    logger = ExpLogger(train_cfg.runner.exp_data_path, ref_key='q_actual', length_limit=100)
+    logger = ExpLogger(train_cfg.runner.exp_data_path)
+    # logger = ExpLogger(train_cfg.runner.exp_data_path, ref_key='q_actual', length_limit=100)
 
         
     # Get initial observations according to task type
@@ -167,9 +167,11 @@ def interaction_loop(train_cfg, env, policy, args):
         # update commands from joystick
         if args.use_joystick:
             joystick.update()
-            env.commands[:, 0] = -joystick.ly
-            env.commands[:, 1] = -joystick.lx
-            env.commands[:, 2] = -joystick.rx
+            env.commands[:, 0] = (-joystick.ly * 2.0)
+            env.commands[:, 1] = (-joystick.lx * 0.5)
+            env.commands[:, 2] = (-joystick.rx * 3.0)
+
+        # print(env.commands)
         
         # set the viewer camera to follow the first environment by default
         # TODO - fix recording/general camera follow conflict
@@ -298,7 +300,7 @@ def play(args):
     # export policy as a jit module (used to run it from C++ or python)
     path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 
                             train_cfg.runner.load_run, 'exported')
-    export_policy(ppo_runner, path, args, env_cfg, train_cfg)
+    # export_policy(ppo_runner, path, args, env_cfg, train_cfg)
 
     interaction_loop(train_cfg, env, policy, args)
 

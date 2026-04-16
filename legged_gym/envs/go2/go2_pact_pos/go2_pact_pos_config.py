@@ -439,8 +439,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             feedback_torques      = 0.0
             dof_act_limits        = 0.0
 
-            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
-            front_foot_overreach = -10000.0
+            # support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
+            # front_foot_overreach = -10000.0
 
             # gait
             feet_air_time    = 0.50            # tracking reward for long steps
@@ -452,8 +452,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
 
-            torso_force_wrench_ellipsoid = 0.3
-            swing_vel_ellipsoid_terrain  = 0.3
+            # torso_force_wrench_ellipsoid = 0.3
+            # swing_vel_ellipsoid_terrain  = 0.3
 
         # KITE reward terms
         class kite_rewards():
@@ -518,7 +518,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # Context encoder
         cenet_enc_layers=[512,256,128]
         cenet_enc_latent_dim = 16
-        cenet_velo_dim = 3 + 4 + 4      # torso velocity, foot-contact indicator, foot-height 
+        cenet_velo_dim = 3 + 4 + 4    # torso velocity, foot-contact indicator, foot-height 
 
         # Context Decoder
         cenet_dec_input_dim = 27
@@ -561,12 +561,13 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = '50hz_spec_jointrand_stairs'
+        run_name = '50hz_spec_jointrand_stairs_baseline'
         experiment_name = 'go2_kite_rough'
-        save_interval = 100
+        save_interval = 500
         
         
-        load_run = "Apr06_21-12-58_pact_pos_100hz_spec_jointrand"
+        # load_run = "Apr15_11-53-35_50hz_spec_jointrand_stairs"
+        load_run = "Apr15_21-58-54_50hz_spec_jointrand_stairs_baseline"
         checkpoint = -1
         resume = False
-        exp_data_path = ""
+        exp_data_path = "exp_data/kite_feasibility/baseline_model_stairs.csv"
