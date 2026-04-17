@@ -241,7 +241,7 @@ class PPO_PosTau:
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)  
 
-    def update(self, action_func, fb_func, dt, itr, default_pose, qvel_scale):
+    def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_autoenc_loss = 0
@@ -280,11 +280,10 @@ class PPO_PosTau:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             # Perform RL update
-            ppo_loss, surrogate_loss, value_loss, current_actions = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
-                                                                                          critic_obs_batch, old_sigma_batch, old_mu_batch,
-                                                                                          old_actions_log_prob_batch,
-                                                                                          advantages_batch, target_values_batch, returns_batch,
-                                                                                          action_func, fb_func, default_pose, dt, qvel_scale)
+            ppo_loss, surrogate_loss, value_loss = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
+                                                                         critic_obs_batch, old_sigma_batch, old_mu_batch,
+                                                                         old_actions_log_prob_batch,
+                                                                         advantages_batch, target_values_batch, returns_batch)
             
             torch.cuda.synchronize()
             timers["rl_loss"] += time.perf_counter() - t0
@@ -453,15 +452,11 @@ class PPO_PosTau:
                          actions_batch, critic_obs_batch,
                          old_sigma_batch, old_mu_batch,
                          old_actions_log_prob_batch,
-                         advantages_batch, target_values_batch, returns_batch,
-                         action_func, fb_func, default_pose, dt, qvel_scale):
+                         advantages_batch, target_values_batch, returns_batch):
         if self.use_boot:
             self.actor_critic.act(obs_batch, obs_hist_batch)
         else:
             self.actor_critic.act_bootmask(obs_batch, obs_hist_batch)
-
-        # Pull out the current actions for use later
-        current_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
 
         # PPO stuff
         #    - Position Control
@@ -511,10 +506,9 @@ class PPO_PosTau:
 
         ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
-        return ppo_loss, surrogate_loss, value_loss, current_actions
+        return ppo_loss, surrogate_loss, value_loss
 
-    def _compute_vae_loss(self, obs_hist_batch, grf_target, 
-                          obs_target, explicit_labels_batch, terminated_batch):
+    def _compute_vae_loss(self, obs_hist_batch, obs_target, explicit_labels_batch, terminated_batch):
         vae_loss = None
         
         mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.context_encoder(obs_hist_batch)
@@ -524,11 +518,8 @@ class PPO_PosTau:
         
         # with torch.no_grad():
         enc_update_obs_decode = self.decoder(dec_input)
-        
-        grf_target.requires_grad = False
         obs_target.requires_grad = False
         
-        # decode_target = torch.cat((obs_target, grf_target), dim=-1)
         decode_target = obs_target
         explicit_labels_batch.requires_grad = False
 

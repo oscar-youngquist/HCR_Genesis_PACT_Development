@@ -227,7 +227,7 @@ class OnPolicyRunnerPosTau:
             
             mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, mean_vel_loss, \
                     mean_recon_loss, mean_kld_loss \
-                    = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, it, self.env.simulator.default_dof_pos, self.env.obs_scales.dof_vel)
+                    = self.alg.update()
 
             # self.env.step_tradeoff_curriculum()
             # print("Avg - Curriculum Step: ", torch.mean(self.env.tradeoff_step_ctr).item())
