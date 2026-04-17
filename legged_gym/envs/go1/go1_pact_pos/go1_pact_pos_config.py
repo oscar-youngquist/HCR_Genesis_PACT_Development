@@ -141,8 +141,8 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 0.1
-        max_push_vel_xy = 1.00
-        min_push_vel_xy = 1.00
+        max_push_vel_xy = 0.50
+        min_push_vel_xy = 0.50
 
         max_vertical_push = 0.20
         min_vertical_push = 0.20
@@ -150,14 +150,14 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         vert_interval_min = 0.1
 
         max_push_torque = 0.50
-        min_push_torque = 1.00
+        min_push_torque = 0.50
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 4.0
-        max_added_mass_max = 3.0
+        min_added_mass_max = 2.0
+        max_added_mass_max = 2.0
         added_mass_min = -1.0
         
         # COM displacement crap
@@ -198,8 +198,8 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         joint_stiffness_range_start = [0.0, 0.0]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 0.50]
-        joint_damping_range_start = [0.00, 0.50]
+        joint_damping_range_end   = [0.25, 0.50]
+        joint_damping_range_start = [0.25, 0.50]
 
     class noise (LeggedRobotCfg.noise):
         add_noise = True
@@ -405,7 +405,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         heading_command = False # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
-            lin_vel_y = [-1.0, 1.0]   # min max [m/s]
+            lin_vel_y = [-0.5, 0.5]   # min max [m/s]
             ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
             heading = [-3.14, 3.14]
 
