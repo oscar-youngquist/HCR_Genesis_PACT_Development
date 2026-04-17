@@ -17,7 +17,7 @@ from legged_gym.utils.helpers import class_to_dict
 from ...base.legged_robot_config import LeggedRobotCfg
 import torch.nn.functional as F
 
-class Go1PACTPos(BaseTask):
+class Go1Pos(BaseTask):
     def __init__(self, cfg: LeggedRobotCfg, sim_params: dict, sim_device, headless):
         """ Parses the provided config file,
             calls create_sim() (which creates, simulation, terrain and environments),
@@ -44,7 +44,7 @@ class Go1PACTPos(BaseTask):
     def reset(self):
         """ Reset all robots"""
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
-        obs, privileged_obs, _, _, _, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
+        obs, privileged_obs, _, _, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
         return obs, privileged_obs
 
     def step(self, actions):
@@ -67,7 +67,7 @@ class Go1PACTPos(BaseTask):
                 self.privileged_obs_buf, -clip_obs, clip_obs)
         
         return self.obs_buf, self.privileged_obs_buf, self.obs_history, self.explicit_labels_buf, \
-            self.rew_buf, self.reset_buf, self.extras, (self.simulator._grfs_buf * self.obs_scales.grf)
+            self.rew_buf, self.reset_buf, self.extras
 
     def get_failure_idx(self):
         return self.reset_buf * ~self.time_out_buf
@@ -283,7 +283,7 @@ class Go1PACTPos(BaseTask):
                                       * self.obs_scales.dof_pos,                              # joint pose            12
                                     self.simulator.dof_vel * self.obs_scales.dof_vel,         # joint velocity        12
                                     self.actions[:,0:12],                                     # joint pose actions    12
-                                    self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)),    # joint torque actions  12
+                                    # self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)),    # joint torque actions  12
                                     ), dim=-1)                                                # 57
 
         # add noise if needed
@@ -329,7 +329,7 @@ class Go1PACTPos(BaseTask):
             (
                 self.obs_buf,                                             # 57
                 self.simulator.base_lin_vel * self.obs_scales.lin_vel,    # 3
-                self.simulator._grfs_buf * self.obs_scales.grf,           # 12
+                # self.simulator._grfs_buf * self.obs_scales.grf,           # 12
                 self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain info around feet
                 self.simulator.link_contact_states[:,self.simulator.feet_indices],     # 4  - contact states of feet
                 # self.simulator.link_contact_states,                       # 17

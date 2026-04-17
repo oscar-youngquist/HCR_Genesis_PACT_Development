@@ -1,12 +1,11 @@
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
-class GO1PACTPosCfg( LeggedRobotCfg ):
+class GO1PosCfg( LeggedRobotCfg ):
     
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
-        num_observations = 57
-        num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
-        # num_privileged_obs = 57 + (39 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
+        num_observations = 45
+        num_privileged_obs = 45 + (39 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -129,8 +128,8 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
     class domain_rand(LeggedRobotCfg.domain_rand):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
-        num_push_steps = 500  # number of steps to increase the domain randomization ranges
-        push_warmup = 2000     # number of steps with initial values held constant
+        num_push_steps = 1000  # number of steps to increase the domain randomization ranges
+        push_warmup = 3000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -144,12 +143,12 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         max_push_vel_xy = 1.00
         min_push_vel_xy = 0.50
 
-        max_vertical_push = 0.20
+        max_vertical_push = 0.50
         min_vertical_push = 0.00
         vert_interval_max = 10.0
         vert_interval_min = 0.1
 
-        max_push_torque = 0.50
+        max_push_torque = 2.50
         min_push_torque = 0.10
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
@@ -157,21 +156,21 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         # Randomized base mass, applied at COM
         randomize_base_mass = True
         min_added_mass_max = 2.0
-        max_added_mass_max = 3.0
+        max_added_mass_max = 10.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
-        com_displacement_x_min = 0.03
-        com_displacement_x_max = 0.05
+        com_displacement_x_min = 0.05
+        com_displacement_x_max = 0.25
         
-        com_displacement_y_min = 0.03
-        com_displacement_y_max = 0.05
+        com_displacement_y_min = 0.05
+        com_displacement_y_max = 0.22
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.03
-        com_displacement_z_max = 0.05
+        com_displacement_z_min = 0.05
+        com_displacement_z_max = 0.25
         
         # Control delay
         randomize_ctrl_delay = True
@@ -198,7 +197,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         joint_stiffness_range_start = [0.0, 0.0]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 0.50]
+        joint_damping_range_end   = [0.00, 0.80]
         joint_damping_range_start = [0.25, 0.30]
 
     class noise (LeggedRobotCfg.noise):
@@ -290,6 +289,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
         
+        type = "PD"
         
         dt =  0.01     # control frequency 200Hz
         decimation = 5  # decimation: Number of control action updates @ sim DT per policy DT
@@ -360,11 +360,11 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             torques          = 0.0     # don't need to use this when we already have joint power above...
 
             # Zero out some values that are used in the individual reward classes below
-            action_rate       = 0.0
-            action_smoothness = 0.0
+            action_rate       = -0.01
+            action_smoothness = -0.01
 
-            pos_action_rate       = -0.01
-            pos_action_smoothness = -0.01
+            pos_action_rate       = 0.00
+            pos_action_smoothness = 0.00
 
             tau_action_rate       = 0.0
             tau_action_smoothness = 0.0
@@ -373,13 +373,13 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             feedback_torques      = 0.0
             dof_act_limits        = 0.0
 
-            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
+            support_polygon = 0.0             # encourages well condition foot-placement realtive to the base CoM
             front_foot_overreach = -10000.0
 
             # gait
             feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.50  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.25  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.10
             
             foot_slip        = -0.1           # penalty for feet slipping
@@ -395,7 +395,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
                                  }
 
             curr_steps = 1
-            warmup_steps = 3000
+            warmup_steps = 200
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -405,13 +405,13 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         heading_command = False # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
-            lin_vel_y = [-1.0, 1.0]   # min max [m/s]
-            ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
+            lin_vel_y = [-0.5, 0.5]   # min max [m/s]
+            ang_vel_yaw = [-0.5, 0.5]    # min max [rad/s]
             heading = [-3.14, 3.14]
 
-class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
+class GO1PosCfgPPO( LeggedRobotCfgPPO ):
     seed = 1
-    runner_class_name = "PACTPosRunner" # Teacher-Student Runner
+    runner_class_name = "PosTauRunner" # Teacher-Student Runner
     
     class policy( LeggedRobotCfgPPO.policy ):
         activation = 'tanh' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid, swish (SiLU)
@@ -425,21 +425,13 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # Context Decoder
         cenet_dec_input_dim = 27
         cenet_dec_layers = [128, 256, 512]
-        cenet_dec_out_dim = 57 + (51 + 33) + 143 # next obs (57) + grf_dim (12)
-        # cenet_dec_out_dim = 57 + (39 + 33) + 143 # next obs (57) + grf_dim (12)
+        cenet_dec_out_dim = 45 + (39 + 33) + 143 # next obs (45) + grf_dim (12)
 
 
         # Actor/critic
         actor_layers = [512,256,128]
         critic_layers = [1024,256,128,64]
         
-        # Shared
-        dropout = 0.1
-
-        pinn_loss_weight = 0.01
-        pinn_warmup = 10000
-        pinn_init_steps = 0
-
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
@@ -458,19 +450,19 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         max_grad_norm = 1.0
 
     class runner( LeggedRobotCfgPPO.runner ):
-        policy_class_name = 'ActorCritic_PACT_Pos'
-        algorithm_class_name = 'PPO_PACT_Pos'
+        policy_class_name = 'ActorCritic_PosTau'
+        algorithm_class_name = 'PPO_PosTau'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 5000 # number of policy updates
+        max_iterations = 6000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_posboot_100hz_spec_grf'
-        experiment_name = 'go1_pact_pos_rough'
+        run_name = 'pos_100hz_spec'
+        experiment_name = 'go1_pos_rough'
         save_interval = 500
         
         
-        load_run = "Apr16_15-59-26_pact_posboot_100hz_spec_grf"
+        load_run = "Apr02_13-53-12_pact_pos_100hz_spec_jointrand"
         checkpoint = -1
         resume = False
         exp_data_path = ""
