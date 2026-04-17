@@ -116,6 +116,8 @@ class OnPolicyRunnerPACT:
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         
+        print("&&&&&&&&&&&&&&&&&&&& PINN weight - ", self.policy_cfg["pinn_loss_weight"])
+        
         self.alg: PPO_PACT = alg_class(actor_critic, decoder, self.env.num_privileged_obs,
                                        pinn_lambda=self.policy_cfg["pinn_loss_weight"], 
                                        pinn_warmup=self.policy_cfg["pinn_warmup"], 

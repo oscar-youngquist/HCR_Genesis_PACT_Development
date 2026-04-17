@@ -305,7 +305,7 @@ class PPO_PACT:
         boot_sum_x2 = None
         boot_sum_recon_sqerr = 0.0
 
-        if itr > self.pinn_init and self.num_pinn_updates < (self.pinn_warmup_steps+1):
+        if itr > self.pinn_init and self.num_pinn_updates < (self.pinn_warmup_steps+1) and self.pinn_weight_final > 0:
             self.pinn_weight = (float(self.num_pinn_updates)/float(self.pinn_warmup_steps))*self.pinn_weight_final
             print(self.pinn_weight)
 
@@ -335,14 +335,18 @@ class PPO_PACT:
                                                     mass_mat_batch, bias_vec_batch, gt_forces_batch,
                                                     action_func, fb_func, default_pose, dt, qvel_scale)
                 
-            if self.pinn_weight > 0.0:
+            if self.pinn_weight > 0.0 and self.pinn_weight_final > 0:
                 ppo_losses = [ppo_loss, self.pinn_weight * pinn_loss]
+            elif self.pinn_weight_final < 0:
+                ppo_losses = [ppo_loss, pinn_loss]
             else:
                 ppo_losses = [ppo_loss]
             
             # PCGrad - back-propigate the loss
             if self.pinn_weight > 0 and pinn_loss is not None:    # just being extra cautious
                 self.act_optimizer.pc_backward_pinn(ppo_losses)
+            elif self.pinn_weight_final < 0:
+                self.act_optimizer.pc_backward_ppgrad(ppo_losses)
             else:
                 self.act_optimizer.pc_backward(ppo_losses)
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)

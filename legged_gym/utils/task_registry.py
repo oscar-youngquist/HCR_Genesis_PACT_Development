@@ -25,11 +25,14 @@ class TaskRegistry():
     def get_task_class(self, name: str) -> VecEnv:
         return self.task_classes[name]
     
-    def get_cfgs(self, name):
+    def get_cfgs(self, name, args):
         train_cfg = self.train_cfgs[name]
         env_cfg = self.env_cfgs[name]
-        # copy seed
-        env_cfg.seed = train_cfg.seed
+        
+        # copy seed from args
+        train_cfg.seed = args.seed
+        env_cfg.seed = args.seed
+
         return env_cfg, train_cfg
     
     def make_env(self, name, args=None, env_cfg=None):
@@ -59,7 +62,7 @@ class TaskRegistry():
             raise ValueError(f"Task with name: {name} was not registered")
         if env_cfg is None:
             # load config files
-            env_cfg, _ = self.get_cfgs(name)
+            env_cfg, _ = self.get_cfgs(name, args)
         # override cfg from args (if specified)
         env_cfg, _ = update_cfg_from_args(env_cfg, None, args)
         set_seed(env_cfg.seed)
@@ -102,7 +105,7 @@ class TaskRegistry():
             if name is None:
                 raise ValueError("Either 'name' or 'train_cfg' must be not None")
             # load config files
-            _, train_cfg = self.get_cfgs(name)
+            _, train_cfg = self.get_cfgs(name, args)
         else:
             if name is not None:
                 print(f"'train_cfg' provided -> Ignoring 'name={name}'")
@@ -119,6 +122,11 @@ class TaskRegistry():
         
         train_cfg_dict = class_to_dict(train_cfg)
         sim_device = "cpu" if args.cpu else args.gpu
+
+        # Don't do this for pact-pos settings
+        if "pact" in name and "pos" not in name:
+            train_cfg_dict["policy"]["pinn_loss_weight"] = args.pinn_loss_weight
+
         # select runner according to runner_class_name
         runner_class = runner_registry.get_runner_class(train_cfg.runner_class_name)
         runner = runner_class(env, train_cfg_dict, log_dir, device=sim_device)

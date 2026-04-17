@@ -239,6 +239,10 @@ def get_args():
     parser.add_argument('--follow_robot',   action='store_true', default=False, help="whether the camera follows the robot during play")
     parser.add_argument('--record_frames',   action='store_true', default=False, help="whether to record the camera")
 
+    parser.add_argument('--seed',       type=int, default=1, help="int seed for random sampling (default 1)")
+
+    # PACT PINN specific thing.
+    parser.add_argument('--pinn_loss_weight',       type=float, default=0.01, help="float for weight of PINN loss (default 0.01)")
 
     return configure_runtime_device(parser.parse_args())
 
