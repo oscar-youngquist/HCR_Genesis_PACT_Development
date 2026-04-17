@@ -92,6 +92,9 @@ from legged_gym.envs.go1.go1_pos.go1_pos import Go1Pos
 from legged_gym.envs.go1.go1_tau.go1_tau_config import GO1TauCfg, GO1TauCfgPPO
 from legged_gym.envs.go1.go1_tau.go1_tau import Go1Tau
 
+from legged_gym.envs.go1.go1_rl2ac.go1_rl2ac_config import GO1RL2ACCfg, GO1RL2ACCfgPPO
+from legged_gym.envs.go1.go1_rl2ac.go1_rl2ac import Go1RL2AC
+
 
 # Go2 PACT training
 from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos_config import GO2PACTPosCfg, GO2PACTPosCfgPPO
@@ -125,6 +128,7 @@ task_registry.register("go1_pact_water", Go1PACTWater, GO1PACTWaterCfg(), GO1PAC
 # PACT CoRL Comparison Methods
 task_registry.register("go1_pos", Go1Pos, GO1PosCfg(), GO1PosCfgPPO())
 task_registry.register("go1_tau", Go1Tau, GO1TauCfg(), GO1TauCfgPPO())
+task_registry.register("go1_rl2ac", Go1RL2AC, GO1RL2ACCfg(), GO1RL2ACCfgPPO())
 
 
 

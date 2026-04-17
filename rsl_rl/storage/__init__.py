@@ -8,3 +8,4 @@ from .rollout_storage_cts import RolloutStorageCTS
 from .rollout_storage_dreamwaq import RolloutStorageDreamWaQ
 from .rollout_storage_pact import RolloutStoragePACT
 from .rollout_storage_postau import RolloutStoragePosTau
+from .rollout_storage_rl2ac import RolloutStorageRL2AC
