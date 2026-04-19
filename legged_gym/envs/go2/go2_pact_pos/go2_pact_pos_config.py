@@ -7,7 +7,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         num_observations = 57
         num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (143)
         num_priv_stack = 5
-        num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
+        num_explicit_recon_obs = 3 + 4 + 4 + 12 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
         num_obs_hist = 50
@@ -439,8 +439,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             feedback_torques      = 0.0
             dof_act_limits        = 0.0
 
-            # support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
-            # front_foot_overreach = -10000.0
+            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
+            front_foot_overreach = -10000.0
 
             # gait
             feet_air_time    = 0.50            # tracking reward for long steps
@@ -452,8 +452,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
 
-            # torso_force_wrench_ellipsoid = 0.3
-            # swing_vel_ellipsoid_terrain  = 0.3
+            torso_force_wrench_ellipsoid = 0.6
+            swing_vel_ellipsoid_terrain  = 0.4
 
         # KITE reward terms
         class kite_rewards():
@@ -518,10 +518,10 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # Context encoder
         cenet_enc_layers=[512,256,128]
         cenet_enc_latent_dim = 16
-        cenet_velo_dim = 3 + 4 + 4    # torso velocity, foot-contact indicator, foot-height 
+        cenet_velo_dim = 3 + 4 + 4 + 12   # torso velocity, foot-contact indicator, foot-height 
 
         # Context Decoder
-        cenet_dec_input_dim = 27
+        cenet_dec_input_dim = 27 + 12
         cenet_dec_layers = [32,128,256,512]
         cenet_dec_out_dim = 57 + (51 + 33) + 143     # next obs (57) + grf_dim (12)
 

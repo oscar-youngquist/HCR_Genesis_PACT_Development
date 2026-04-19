@@ -392,6 +392,7 @@ class Go2PACTPos(BaseTask):
             torch.clip(self.simulator.feet_pos[:, :, 2] -
                 torch.mean(self.simulator.height_around_feet, dim=-1) -
                 self.cfg.rewards.foot_height_offset, -1, 1.),                              # feet height               4
+            self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1)        # 12 - terrain info around feet
         ), dim=-1)
 
         # track history buffer
