@@ -167,7 +167,7 @@ class PCGrad():
 
     def _project_conflicting_pinn(self, grads, has_grads, shapes=None):
         assert len(grads) == 2
-        shared = (has_grads[0] & has_grads[1]).bool()
+        shared = torch.stack(has_grads).prod(0).bool()
         grads_ = copy.deepcopy(grads)
 
         g_R = grads_[0]   # task gradient
@@ -194,7 +194,8 @@ class PCGrad():
 
     def _project_conflicting_pinn_balanced(self, grads, has_grads, shapes=None):
         assert len(grads) == 2
-        shared = (has_grads[0] & has_grads[1]).bool()
+        # print("PCGrad with balanced scaling of PINN gradient")
+        shared = torch.stack(has_grads).prod(0).bool()
         grads_ = copy.deepcopy(grads)
 
         g_R = grads_[0]   # task gradient

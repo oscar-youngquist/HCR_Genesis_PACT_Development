@@ -127,9 +127,9 @@ class GO1PosCfg( LeggedRobotCfg ):
 
     class domain_rand(LeggedRobotCfg.domain_rand):
         use_domainrand_curriculum = True
-        com_rand_z_positive = False
+        com_rand_z_positive = True
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 3000     # number of steps with initial values held constant
+        push_warmup = 4000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -143,19 +143,19 @@ class GO1PosCfg( LeggedRobotCfg ):
         max_push_vel_xy = 1.00
         min_push_vel_xy = 0.50
 
-        max_vertical_push = 0.50
-        min_vertical_push = 0.00
+        max_vertical_push = 0.40
+        min_vertical_push = 0.20
         vert_interval_max = 10.0
         vert_interval_min = 0.1
 
         max_push_torque = 2.50
-        min_push_torque = 0.10
+        min_push_torque = 0.50
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 2.0
+        min_added_mass_max = 5.0
         max_added_mass_max = 10.0
         added_mass_min = -1.0
         
@@ -197,8 +197,8 @@ class GO1PosCfg( LeggedRobotCfg ):
         joint_stiffness_range_start = [0.0, 0.0]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 0.80]
-        joint_damping_range_start = [0.25, 0.30]
+        joint_damping_range_end   = [0.00, 1.00]
+        joint_damping_range_start = [0.25, 0.60]
 
     class noise (LeggedRobotCfg.noise):
         add_noise = True
@@ -318,7 +318,7 @@ class GO1PosCfg( LeggedRobotCfg ):
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
-        overreach_x_max = 0.28
+        overreach_x_max = 0.30
         support_polygon_sigma = 0.01
 
         foot_clearance_tracking_sigma = 0.01
@@ -373,7 +373,7 @@ class GO1PosCfg( LeggedRobotCfg ):
             feedback_torques      = 0.0
             dof_act_limits        = 0.0
 
-            support_polygon = 0.0             # encourages well condition foot-placement realtive to the base CoM
+            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
             front_foot_overreach = -10000.0
 
             # gait
@@ -394,8 +394,8 @@ class GO1PosCfg( LeggedRobotCfg ):
                                   "ang_vel_xy":[-0.1, -0.2]
                                  }
 
-            curr_steps = 1
-            warmup_steps = 200
+            curr_steps = 10
+            warmup_steps = 7000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -453,7 +453,7 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PosTau'
         algorithm_class_name = 'PPO_PosTau'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 6000 # number of policy updates
+        max_iterations = 9000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb

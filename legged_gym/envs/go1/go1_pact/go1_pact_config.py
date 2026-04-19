@@ -91,9 +91,9 @@ class GO1PACTCfg( LeggedRobotCfg ):
         pos = [0.0, 0.0, 0.34] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
             'FL_hip_joint': 0.1,      # [rad]
-            'RL_hip_joint': 0.05,      # [rad]
+            'RL_hip_joint': 0.1,      # [rad]
             'FR_hip_joint': -0.1 ,    # [rad]
-            'RR_hip_joint': -0.05,     # [rad]
+            'RR_hip_joint': -0.1,     # [rad]
 
             'FL_thigh_joint': 0.8,   # [rad]
             'RL_thigh_joint': 1.0,   # [rad]
@@ -141,7 +141,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = True
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 4000     # number of steps with initial values held constant
+        push_warmup = 3000     # number of steps with initial values held constant
         num_jumps = 10
         
         # Randomize Friction
@@ -168,7 +168,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 2.0
+        min_added_mass_max = 5.0
         max_added_mass_max = 10.0
         added_mass_min = -1.0
         
@@ -178,7 +178,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         com_displacement_x_max = 0.25
         
         com_displacement_y_min = 0.05
-        com_displacement_y_max = 0.25
+        com_displacement_y_max = 0.22
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
@@ -336,7 +336,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
-        overreach_x_max = 0.34
+        overreach_x_max = 0.28
 
         support_polygon_sigma = 0.01
         foot_clearance_tracking_sigma = 0.01
@@ -350,22 +350,22 @@ class GO1PACTCfg( LeggedRobotCfg ):
             termination           = 0.0
             collision             = -1.0
             dof_pos_limits        = -1.0
-            dof_close_to_default  = -0.01
+            dof_close_to_default  = -0.20
             torque_limits         = -0.1
             pd_target_torque_limit = 0.0
             
             alive_bonus           = 0.01
 
-            stand_still_contact = -1.0
+            stand_still_contact = -0.5
             dof_pos_stand_still = -0.5
-            dof_vel_stand_still = -0.5
+            dof_vel_stand_still = -0.1
 
             # command tracking
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
             
             dof_tracking      = 0.1
-            sparse_contacts   = 0.01
+            # sparse_contacts   = 0.0
 
             # coupled output specific rewards 
             # aligned_torques     = -0.01
@@ -375,8 +375,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
             
             # smoothness and stability
             lin_vel_z        = -2.0
-            base_height      = -1.0
-            ang_vel_xy       = -0.05
+            base_height      = -2.0
+            ang_vel_xy       = -0.1
             orientation      = -1.0
             dof_acc          = -2.5e-7
             joint_power      = -2.e-5
@@ -408,7 +408,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.5            # tracking reward for long steps
             # foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance      
-            foot_clearance_terrain_aware = 0.75  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.5  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.1
             
             foot_slip        = -0.1           # penalty for feet slipping
@@ -429,8 +429,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
                                   "dof_acc":[-2.5e-9, -2.5e-7],
                                  }
 
-            curr_steps = 500
-            warmup_steps = 5500
+            curr_steps = 10
+            warmup_steps = 6000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -470,10 +470,10 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Apr13_22-14-32_pact_pos_100hz_spec_jointrand/model_5000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Apr17_15-22-31_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.003
+        entropy_coef = 0.005
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
@@ -491,13 +491,13 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 10000 # number of policy updates
+        max_iterations = 8000 # number of policy updates
 
 
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_spec_scratch'
+        run_name = 'pact_100hz_spec'
         experiment_name = 'go1_pact_rough'
         save_interval = 500
         

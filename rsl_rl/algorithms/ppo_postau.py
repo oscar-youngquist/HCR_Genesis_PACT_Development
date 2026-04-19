@@ -66,7 +66,7 @@ class PPO_PosTau:
                  device='cpu',
                  use_spo=False,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
-                 vae_kld_weight=2.0,   # weight of KL divergence loss in VAE
+                 vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
                  ):
         
         self.device = device
