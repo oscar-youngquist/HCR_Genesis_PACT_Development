@@ -37,3 +37,4 @@ from .ppo_pact import PPO_PACT
 from .ppo_pact_pos import PPO_PACT_Pos
 from .ppo_postau import PPO_PosTau
 from .ppo_rl2ac import PPO_RL2AC
+from .ppo_abl1 import PPO_ABL1

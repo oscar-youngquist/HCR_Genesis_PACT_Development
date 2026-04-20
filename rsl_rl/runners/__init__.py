@@ -37,6 +37,7 @@ from .pact_runner import OnPolicyRunnerPACT
 from .pact_pos_runner import OnPolicyRunnerPACTPos
 from .postau_runner import OnPolicyRunnerPosTau
 from .rl2ac_runner import OnPolicyRunnerRL2AC
+from .abl1_runner import OnPolicyRunnerABL1
 
 from rsl_rl.utils.runner_registry import runner_registry
 runner_registry.register("OnPolicyRunner", OnPolicyRunner)
@@ -48,3 +49,4 @@ runner_registry.register("PACTRunner", OnPolicyRunnerPACT)
 runner_registry.register("PACTPosRunner", OnPolicyRunnerPACTPos)
 runner_registry.register("PosTauRunner", OnPolicyRunnerPosTau)
 runner_registry.register("RL2ACRunner", OnPolicyRunnerRL2AC)
+runner_registry.register("ABL1Runner", OnPolicyRunnerABL1)

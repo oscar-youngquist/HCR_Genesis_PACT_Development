@@ -27,6 +27,8 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         super().__init__(cfg, sim_params, device, headless)
         self.first_loop = True
         self.first_loop_feedback = None
+        
+        print("********** Genesis Simulator ********** NO PINN VERSION **********")
 
     def _create_async_pino_workers(self):
         pass

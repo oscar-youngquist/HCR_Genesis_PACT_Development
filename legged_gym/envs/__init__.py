@@ -95,6 +95,9 @@ from legged_gym.envs.go1.go1_tau.go1_tau import Go1Tau
 from legged_gym.envs.go1.go1_rl2ac.go1_rl2ac_config import GO1RL2ACCfg, GO1RL2ACCfgPPO
 from legged_gym.envs.go1.go1_rl2ac.go1_rl2ac import Go1RL2AC
 
+from legged_gym.envs.go1.go1_abl1.go1_abl1_config import GO1ABL1Cfg, GO1ABL1CfgPPO
+from legged_gym.envs.go1.go1_abl1.go1_abl1 import Go1ABL1
+
 
 # Go2 PACT training
 from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos_config import GO2PACTPosCfg, GO2PACTPosCfgPPO
@@ -129,7 +132,7 @@ task_registry.register("go1_pact_water", Go1PACTWater, GO1PACTWaterCfg(), GO1PAC
 task_registry.register("go1_pos", Go1Pos, GO1PosCfg(), GO1PosCfgPPO())
 task_registry.register("go1_tau", Go1Tau, GO1TauCfg(), GO1TauCfgPPO())
 task_registry.register("go1_rl2ac", Go1RL2AC, GO1RL2ACCfg(), GO1RL2ACCfgPPO())
-
+task_registry.register("go1_abl1", Go1ABL1, GO1ABL1Cfg(), GO1ABL1CfgPPO())
 
 
 task_registry.register("go2_pact_pos", Go2PACTPos, GO2PACTPosCfg(), GO2PACTPosCfgPPO())
