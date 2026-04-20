@@ -245,6 +245,8 @@ class Go1PACT(BaseTask):
         if self.cfg.terrain.curriculum:
             self.extras["episode"]["terrain_level"] = torch.mean(
                 self.simulator.terrain_levels.float())
+            self.extras["episode"]["max_terrain_level"] = torch.max(
+                self.simulator.terrain_levels.float())
         if self.cfg.commands.curriculum:
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
         # send timeout info to the algorithm
@@ -419,9 +421,17 @@ class Go1PACT(BaseTask):
         # robots that walked far enough progress to harder terains
         move_up = distance > self.simulator._terrain.env_length / 2
         # robots that walked less than half of their required distance go to simpler terrains
-        move_down = (distance < torch.norm(
+        added_mass = self.simulator._added_base_mass[env_ids].view(-1)
+        total_mass = self.simulator._robot_mass + torch.clamp(added_mass, min=0.0)
+        scales = self.simulator._robot_mass / total_mass
+
+        # Masses below the DreamWaQ threshold are not scaled.
+        dream_idx = added_mass <= 2.0
+        scales = torch.where(dream_idx, torch.ones_like(scales), scales)
+
+        move_down = (distance < scales * torch.norm(
             self.commands[env_ids, :2], dim=1)*self.max_episode_length_s*0.5) * ~move_up
-        
+
         self.simulator.update_terrain_curriculum(env_ids, move_up, move_down)
     
     def _reset_dofs(self, env_ids):

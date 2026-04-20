@@ -257,20 +257,20 @@ class OnPolicyRunnerRL2AC:
             half_coef = self._init_entropy_coef * 0.5
             tenth_coef = self._init_entropy_coef * 0.1
             
-            if it < 2500:
+            if it < 4000:
                 entropy_coef = self._init_entropy_coef
-            elif it < 3000:
-                alpha = (it - 2500) / 500.0
-                entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
-            elif it < 3500:
-                entropy_coef = half_coef
-            elif it < 4000:
+            elif it < 4500:
                 alpha = (it - 4000) / 500.0
+                entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
+            elif it < 5000:
+                entropy_coef = half_coef
+            elif it < 5500:
+                alpha = (it - 5000) / 500.0
                 entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
             else:
                 entropy_coef = tenth_coef
             
-            entropy_coef = max(entropy_coef, 0.001)
+            entropy_coef = max(entropy_coef, 0.0001)
 
             print("entropy_coef - ", entropy_coef)
             # print("std_lwr - ", std_lwr)

@@ -129,7 +129,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 2000     # number of steps with initial values held constant
+        push_warmup = 4000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -143,20 +143,20 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         max_push_vel_xy = 1.00
         min_push_vel_xy = 1.00
 
-        max_vertical_push = 0.00
-        min_vertical_push = 0.00
+        max_vertical_push = 0.20
+        min_vertical_push = 0.20
         vert_interval_max = 10.0
         vert_interval_min = 0.1
 
-        max_push_torque = 2.50
-        min_push_torque = 0.10
+        max_push_torque = 0.50
+        min_push_torque = 0.50
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 2.0
-        max_added_mass_max = 2.0
+        min_added_mass_max = 5.0
+        max_added_mass_max = 5.0
         added_mass_min = -1.0
         
         # COM displacement crap
@@ -197,8 +197,8 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         joint_stiffness_range_start = [0.0, 0.0]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 0.80]
-        joint_damping_range_start = [0.25, 0.30]
+        joint_damping_range_end   = [0.00, 1.00]
+        joint_damping_range_start = [0.25, 0.50]
 
     class noise (LeggedRobotCfg.noise):
         add_noise = True
@@ -324,7 +324,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
 
-        use_reward_curriculum = True
+        use_reward_curriculum = False
 
         max_contact_force = 200.0
         class scales( LeggedRobotCfg.rewards.scales ):
@@ -395,7 +395,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
                                  }
 
             curr_steps = 1
-            warmup_steps = 200
+            warmup_steps = 4000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -453,7 +453,7 @@ class GO1RL2ACCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_RL2AC'
         algorithm_class_name = 'PPO_RL2AC'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 6000 # number of policy updates
+        max_iterations = 7000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb

@@ -157,7 +157,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         min_push_vel_xy = 0.5
 
         max_vertical_push = 0.40
-        min_vertical_push = 0.20
+        min_vertical_push = 0.05
         vert_interval_max = 10.0
         vert_interval_min = 0.1
 
@@ -168,7 +168,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 5.0
+        min_added_mass_max = 6.0
         max_added_mass_max = 10.0
         added_mass_min = -1.0
         
@@ -354,7 +354,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             torque_limits         = -0.1
             pd_target_torque_limit = 0.0
             
-            alive_bonus           = 0.01
+            alive_bonus           = 0.02
 
             stand_still_contact = -0.5
             dof_pos_stand_still = -0.5
@@ -416,20 +416,20 @@ class GO1PACTCfg( LeggedRobotCfg ):
             feet_spread_pairwise_axes = 0.0
         class reward_curriculum():
             curr_reward_keys = ["ang_vel_xy", "orientation",
-                                "torque_limits",
-                                "action_rate", "action_smoothness",
-                                "dof_acc"]
+                                "torque_limits", "dof_acc"]
+                                # "action_rate", "action_smoothness",
+                                # "dof_acc"]
             
             curr_reward_bounds = {
-                                  "ang_vel_xy":[-0.05, -0.2],
+                                  "ang_vel_xy":[-0.1, -0.2],
                                   "orientation":[-1.0,-10.0],
-                                  "torque_limits":[-1.0e-3, -0.1],
-                                  "action_rate":[-1.0e-3, -0.01],
-                                  "action_smoothness":[-1.0e-3,-0.01],
-                                  "dof_acc":[-2.5e-9, -2.5e-7],
+                                  "torque_limits":[-1.0e-2, -0.1],
+                                #   "action_rate":[-1.0e-3, -0.01],
+                                #   "action_smoothness":[-1.0e-3,-0.01],
+                                  "dof_acc":[-2.5e-8, -2.5e-7],
                                  }
 
-            curr_steps = 10
+            curr_steps = 1
             warmup_steps = 6000
 
     class commands(LeggedRobotCfg.commands):
@@ -497,7 +497,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_spec'
+        run_name = 'pact_100hz_spec_materr'
         experiment_name = 'go1_pact_rough'
         save_interval = 500
         
