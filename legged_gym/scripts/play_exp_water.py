@@ -20,7 +20,7 @@ def override_configs(env_cfg, train_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -43,16 +43,16 @@ def override_configs(env_cfg, train_cfg, args):
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
         #                                   "slope": 0.4, "platform_size": 3.0}
         # # stairs
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-                                        "step_width": 0.25, "step_height": -0.10, "platform_size": 3.0}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
+                                        # "step_width": 0.25, "step_height": -0.06, "platform_size": 3.0}
 
         # # discrete obstacles
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
-        #                                   "max_height": 0.06,
-        #                                   "min_size": 1.0,
-        #                                   "max_size": 2.0,
-        #                                   "num_rects": 20,
-        #                                   "platform_size": 3.0}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
+                                          "max_height": 0.1,
+                                          "min_size": 1.0,
+                                          "max_size": 2.0,
+                                          "num_rects": 20,
+                                          "platform_size": 3.0}
         # # wave terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.wave_terrain", 
         #                                   "amplitude": 0.2, "num_waves": 2}
@@ -88,7 +88,7 @@ def override_configs(env_cfg, train_cfg, args):
     env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_base_mass = True
+    env_cfg.domain_rand.randomize_base_mass = False
 
     env_cfg.asset.fix_base_link = False
     env_cfg.env.debug_viz = False
@@ -260,24 +260,24 @@ def interaction_loop(train_cfg, env, policy, args):
 
         # print(env.simulator.feedforward_torques.detach().cpu().numpy())
 
-        logger.log_states(
-            {
-                'base_cmd':env.commands.detach().cpu().numpy().tolist(),
-                'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
-                'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
-                'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
-                'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
-                'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
-                'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
-                'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
-                'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
-                'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
-                'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
-                'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
-                'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
-                'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
-                'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
-            })
+        # logger.log_states(
+        #     {
+        #         'base_cmd':env.commands.detach().cpu().numpy().tolist(),
+        #         'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
+        #         'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
+        #         'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
+        #         'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
+        #         'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
+        #         'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
+        #         'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
+        #         'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
+        #         'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
+        #         'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
+        #         'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
+        #         'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
+        #         'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
+        #         'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
+        #     })
 
 def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     """export the policy as jit script according to different task types
@@ -316,7 +316,7 @@ def play(args):
     """
     if SIMULATOR == "genesis" or SIMULATOR == "genesis_pact_pos" or SIMULATOR == "genesis_pact" or SIMULATOR == "genesis_pact_water":
         init_genesis(args, gs)
-    env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    env_cfg, train_cfg = task_registry.get_cfgs(name=args.task, args=args)
     override_configs(env_cfg, train_cfg, args)
 
     # prepare environment
@@ -366,6 +366,9 @@ if __name__ == '__main__':
     parser.add_argument('--joystick_type',  type=str, default='xbox', help="type of joystick: xbox, switch")
     parser.add_argument('--follow_robot',   action='store_true', default=False, help="whether the camera follows the robot during play")
     parser.add_argument('--record_frames',   action='store_true', default=False, help="whether to record the camera")
+    parser.add_argument('--seed',       type=int, default=1, help="int seed for random sampling (default 1)")
+
+    parser.add_argument('--pinn_loss_weight',       type=float, default=0.01, help="float for weight of PINN loss (default 0.01)")
 
     parser.add_argument('--use_liquid',    type=bool, default='True')
     parser.add_argument('--liquid_type',   type=str, default='water', choices=['water', 'oil', 'gas'])

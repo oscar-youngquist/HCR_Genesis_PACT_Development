@@ -40,7 +40,7 @@ def override_configs(env_cfg, args):
         #                                   "slope": -0.4, "platform_size": 3.0}
         # stairs
         env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-                                        "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
+                                        "step_width": 0.31, "step_height": -0.06, "platform_size": 3.0}
         # # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.06,
@@ -290,7 +290,7 @@ def play(args):
     """
     if "genesis" in SIMULATOR:
         init_genesis(args, gs)
-    env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    env_cfg, train_cfg = task_registry.get_cfgs(name=args.task, args=args)
     override_configs(env_cfg, args)
 
     # prepare environment
