@@ -344,7 +344,8 @@ class PPO_PACT_Pos:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             
-            self.act_optimizer.pc_backward_pinn(ppo_losses)
+            # self.act_optimizer.pc_backward_pinn(ppo_losses)
+            self.act_optimizer.pc_backward_ppgrad(ppo_losses)
 
             torch.cuda.synchronize()
             timers["pc_backward"] += time.perf_counter() - t0

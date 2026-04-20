@@ -269,30 +269,30 @@ class OnPolicyRunnerPACTPos:
             half_coef = self._init_entropy_coef * 0.5
             tenth_coef = self._init_entropy_coef * 0.1
             
-            if it < 2500:
-                entropy_coef = self._init_entropy_coef
-            elif it < 3000:
-                alpha = (it - 2500) / 500.0
-                entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
-            elif it < 3500:
-                entropy_coef = half_coef
-            elif it < 4000:
-                alpha = (it - 4000) / 500.0
-                entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
-            else:
-                entropy_coef = tenth_coef
+            # if it < 2500:
+            #     entropy_coef = self._init_entropy_coef
+            # elif it < 3000:
+            #     alpha = (it - 2500) / 500.0
+            #     entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
+            # elif it < 3500:
+            #     entropy_coef = half_coef
+            # elif it < 4000:
+            #     alpha = (it - 4000) / 500.0
+            #     entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            # else:
+            #     entropy_coef = tenth_coef
             
-            entropy_coef = max(entropy_coef, 0.001)
+            # entropy_coef = max(entropy_coef, 0.001)
 
             print("entropy_coef - ", entropy_coef)
             # print("std_lwr - ", std_lwr)
 
-            self.alg.set_entropy_coef(entropy_coef)
+            # self.alg.set_entropy_coef(entropy_coef)
             # self.alg._set_std_clip_lwr(std_lwr)
 
 
-            if self.env.cfg.rewards.only_positive_rewards and it > 1000:
-                self.env.cfg.rewards.only_positive_rewards = False
+            # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
+            #     self.env.cfg.rewards.only_positive_rewards = False
             
             stop = time.time()
             learn_time = stop - start

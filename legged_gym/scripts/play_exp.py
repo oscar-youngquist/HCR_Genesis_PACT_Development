@@ -32,15 +32,15 @@ def override_configs(env_cfg, args):
         env_cfg.terrain.selected   = True
         
         # random uniform terrain
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-        #                                   "min_height" : -0.05, "max_height": 0.05, 
-        #                                   "step":0.005, "downsampled_scale" : 0.2}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+                                          "min_height" : -0.05, "max_height": 0.05, 
+                                          "step":0.005, "downsampled_scale" : 0.2}
         # # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
         #                                   "slope": -0.4, "platform_size": 3.0}
-        # stairs
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-                                        "step_width": 0.31, "step_height": -0.06, "platform_size": 3.0}
+        # # stairs
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
+        #                                 "step_width": 0.31, "step_height": -0.06, "platform_size": 3.0}
         # # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.06,
@@ -142,6 +142,8 @@ def interaction_loop(train_cfg, env, policy, args):
         obs_buf, privileged_obs_buf, obs_history, explicit_labels, next_states = env.get_observations()
     elif "pact" in task_name:
         obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
+    elif "rl2ac" in task_name:
+        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
     else: # vanilla
         obs = env.get_observations()
     
@@ -195,6 +197,9 @@ def interaction_loop(train_cfg, env, policy, args):
             # print("obs_history - ", obs_history.cpu().numpy())
             actions = policy(obs_buf, obs_history)
             obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach())
+        elif "rl2ac" in task_name:
+            actions, qref = policy(obs_buf, obs_history)
+            obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach(), qref)
         else:
             actions = policy(obs.detach())
             obs, _, rews, dones, infos = env.step(actions.detach())

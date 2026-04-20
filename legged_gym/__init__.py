@@ -19,6 +19,8 @@ if sys.version_info[1] >= 10: # >=3.10 for genesis and isaacsim
         SIMULATOR = "genesis_pact_nopinn"
     elif simulator_type == "genesis_pact_postau":
         SIMULATOR = "genesis_pact_postau"
+    elif simulator_type == "genesis_pact_rl2ac":
+        SIMULATOR = "genesis_pact_rl2ac"
     elif simulator_type == "isaaclab":
         SIMULATOR = "isaaclab"
     else:

@@ -44,10 +44,11 @@ class Go1RL2AC(BaseTask):
     def reset(self):
         """ Reset all robots"""
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
-        obs, privileged_obs, _, _, _, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
+        obs, privileged_obs, _, _, _, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False),
+                                                          torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
         return obs, privileged_obs
 
-    def step(self, actions):
+    def step(self, actions, qref):
         """ Apply actions, simulate, call self.post_physics_step()
 
         Args:
@@ -55,7 +56,7 @@ class Go1RL2AC(BaseTask):
         """
         actions = self._pre_sim_step(actions)
         
-        self.simulator.step(actions)
+        self.simulator.step(actions, qref)
         
         self.post_physics_step()
 

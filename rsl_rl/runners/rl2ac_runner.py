@@ -195,7 +195,8 @@ class OnPolicyRunnerRL2AC:
                         actions = self.alg.act(obs, critic_obs, obs_hist) # obs_t, (obs_t-1)
                          
                     # Submit the predicted action and extract the resulting state... 
-                    obs, privileged_obs, obs_hist, exp_labels, rewards, dones, infos, dof_labels = self.env.step(actions)  # obs_t+1  (obs_t)
+                    #     passing through actions twice, second one is unused. Just saving a place for pasing through actual RL2AC q-ref targets during eval
+                    obs, privileged_obs, obs_hist, exp_labels, rewards, dones, infos, dof_labels = self.env.step(actions, actions)  # obs_t+1  (obs_t)
                     
                     # Create privileged obs
                     critic_obs = privileged_obs if privileged_obs is not None else obs
