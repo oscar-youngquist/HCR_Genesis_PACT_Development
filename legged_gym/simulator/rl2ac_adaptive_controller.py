@@ -10,8 +10,8 @@ class RL2ACAdaptiveCtrl:
         self.J = 12
 
         # Scalars (broadcasted)
-        self.alpha = 40.0
-        self.kappa = 1.2
+        self.alpha = 50.0
+        self.kappa = 2.2
         self.eta = 0.1
         self.lambda_0 = 3.0
         self.k_0 = 20.0
@@ -38,7 +38,7 @@ class RL2ACAdaptiveCtrl:
         self.comp = torch.zeros_like(self.phi)
 
         # Adaptive matrices: [B, J, J]
-        self.Gamma = torch.eye(self.J, device=device, dtype=dtype).repeat(self.B, 1, 1) * 0.01
+        self.Gamma = torch.eye(self.J, device=device, dtype=dtype).repeat(self.B, 1, 1)
         self.K = torch.zeros(self.B, self.J, self.J, device=device, dtype=dtype)
 
         # Numerical stability constants
@@ -105,7 +105,8 @@ class RL2ACAdaptiveCtrl:
         self.comp = torch.einsum("bij,bj->bi", self.K, self.phi)
 
         print(torch.norm(self.K))
-        print(torch.norm(self.phi))
+        print(self.phi[0])
+        print(self.comp[0])
         print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
 
 

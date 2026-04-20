@@ -1199,7 +1199,7 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
             else:
                 self.rl2ac_adaptive_ctrl.update_state(self._dof_pos, self._dof_vel, self._dof_tau)
                 self.adaptive_torques = self.rl2ac_adaptive_ctrl.update_compensation(self.sim_dt)
-                torques = self.feedback_torques + self.adaptive_torques
+                torques = self.feedback_torques - self.adaptive_torques
         
         elif self._cfg.control.type == "Tau":
             tau_actions = pos_actions * self._cfg.control.torque_scale
@@ -1271,6 +1271,7 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
     def _randomize_base_mass(self, env_ids=None):
         ''' Randomize base mass'''
         min_mass, max_mass = self.mass_min, self.mass_max_value
+        min_mass, max_mass = 17.0, 18.0
         added_mass = gs.rand((len(env_ids), 1), dtype=float) * (max_mass - min_mass) + min_mass
         self._added_base_mass[env_ids] = added_mass[:].detach().clone()
         self._robot.set_mass_shift(added_mass, self._base_link_index, env_ids)
