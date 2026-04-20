@@ -497,8 +497,8 @@ class GO1ABL1CfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_spec_materr'
-        experiment_name = 'go1_pact_rough'
+        run_name = 'abl1_100hz_spec_materr'
+        experiment_name = 'go1_abl1_rough'
         save_interval = 500
         
         
