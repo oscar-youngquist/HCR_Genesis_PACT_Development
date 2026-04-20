@@ -81,12 +81,28 @@ def override_configs(env_cfg, args):
     env_cfg.commands.ranges.heading = [0.0, 0.0]
 
     # Turn off/on domain randomization elements
-    env_cfg.noise.add_noise = False
+    env_cfg.noise.add_noise = True
     # Disable some of the domain randomization (our payload will handle that now)
     env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_base_mass = True
+    env_cfg.domain_rand.randomize_base_mass = False
+
+    # env_cfg.domain_rand.push_interval_max = 1.0
+    # env_cfg.domain_rand.push_interval_min = 0.1
+    # env_cfg.domain_rand.max_push_vel_xy = 1.20
+    # env_cfg.domain_rand.min_push_vel_xy = 1.20
+
+    # env_cfg.domain_rand.max_vertical_push = 0.30
+    # env_cfg.domain_rand.min_vertical_push = 0.30
+    # env_cfg.domain_rand.vert_interval_max = 1.0
+    # env_cfg.domain_rand.vert_interval_min = 0.1
+
+    # env_cfg.domain_rand.max_push_torque = 0.75
+    # env_cfg.domain_rand.min_push_torque = 0.75
+    # env_cfg.domain_rand.wrench_timeout_min = 0.1
+    # env_cfg.domain_rand.wrench_timeout_max = 1.0
+
 
     env_cfg.asset.fix_base_link = False
     # env_cfg.env.debug_viz = False

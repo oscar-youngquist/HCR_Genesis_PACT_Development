@@ -47,6 +47,13 @@ class RL2ACAdaptiveCtrl:
         self.min_lambda = 0.0
         self.dt_min = 1e-5
 
+    def reset_adaptive_controller(self):
+        self.Gamma = torch.eye(self.J, device=self.device, dtype=self.dtype).repeat(self.B, 1, 1)
+        self.K = torch.zeros(self.B, self.J, self.J, device=self.device, dtype=self.dtype) 
+        self.comp_old = torch.zeros_like(self.phi)
+        self.comp = torch.zeros_like(self.phi)   
+   
+   
     # ------------------------------------------------------------------
     # State update (called every sim step)
     # ------------------------------------------------------------------

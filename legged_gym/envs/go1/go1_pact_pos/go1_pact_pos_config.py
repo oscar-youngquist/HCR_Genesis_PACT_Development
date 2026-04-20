@@ -141,8 +141,8 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 0.1
-        max_push_vel_xy = 0.50
-        min_push_vel_xy = 0.50
+        max_push_vel_xy = 1.00
+        min_push_vel_xy = 1.00
 
         max_vertical_push = 0.20
         min_vertical_push = 0.20
@@ -333,7 +333,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             collision             = -1.0
             dof_pos_limits        = -1.0
             dof_close_to_default  = 0.0
-            torque_limits         = -0.01
+            torque_limits         = -0.0001
 
             alive_bonus           = 0.00
 
@@ -443,7 +443,7 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.012
+        entropy_coef = 0.015
         learning_rate = 1.0e-3 #
         # learning_rate = 3.0e-4 #
         value_loss_coef = 1.0

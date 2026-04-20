@@ -201,6 +201,8 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
         self._last_base_ang_vel[env_ids] = 0.
 
         self._dof_tau[env_ids] = 0.
+
+        self.rl2ac_adaptive_ctrl.reset_adaptive_controller()
         
         # PINN stuff
         self._grfs_buf[env_ids] = 0.
@@ -1271,7 +1273,7 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
     def _randomize_base_mass(self, env_ids=None):
         ''' Randomize base mass'''
         min_mass, max_mass = self.mass_min, self.mass_max_value
-        min_mass, max_mass = 17.0, 18.0
+        min_mass, max_mass = 14.0, 16.0
         added_mass = gs.rand((len(env_ids), 1), dtype=float) * (max_mass - min_mass) + min_mass
         self._added_base_mass[env_ids] = added_mass[:].detach().clone()
         self._robot.set_mass_shift(added_mass, self._base_link_index, env_ids)
