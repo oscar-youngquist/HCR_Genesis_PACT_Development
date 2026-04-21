@@ -32,18 +32,18 @@ def override_configs(env_cfg, args):
         env_cfg.terrain.selected   = True
         
         # random uniform terrain
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-        #                                   "min_height" : -0.05, "max_height": 0.05, 
-        #                                   "step":0.005, "downsampled_scale" : 0.2}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+                                          "min_height" : -0.1, "max_height": 0.1, 
+                                          "step":0.005, "downsampled_scale" : 0.2}
         # # slope
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
-                                          "slope": -0.4, "platform_size": 3.0}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
+        #                                   "slope": -0.4, "platform_size": 3.0}
         # # stairs
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-        #                                 "step_width": 0.31, "step_height": -0.06, "platform_size": 3.0}
+        #                                 "step_width": 0.31, "step_height": -0.10, "platform_size": 3.0}
         # # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
-        #                                   "max_height": 0.06,
+        #                                   "max_height": 0.1,
         #                                   "min_size": 1.0,
         #                                   "max_size": 2.0,
         #                                   "num_rects": 20,
@@ -178,9 +178,9 @@ def interaction_loop(train_cfg, env, policy, args):
     # interaction loop
     for i in range(int(10.00*env.max_episode_length)):
 
-        # env.commands[:, 0] = 0.5
-        # env.commands[:, 1] = 0
-        # env.commands[:, 2] = 0
+        env.commands[:, 0] = 1.0
+        env.commands[:, 1] = 0
+        env.commands[:, 2] = 0.0
         
         # update commands from joystick
         if args.use_joystick:

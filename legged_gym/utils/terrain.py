@@ -134,10 +134,10 @@ class Terrain:
         # discrete_obstacles_height = 0.20*difficulty
 
         slope = difficulty * 0.4
-        wave_amp = 0.20*difficulty
-        rough_height = 0.12 * difficulty
-        step_height = 0.22 * difficulty
-        discrete_obstacles_height = 0.20*difficulty
+        wave_amp = 0.04 + 0.16*difficulty
+        rough_height = 0.02 + 0.10 * difficulty
+        step_height = 0.05 + 0.15 * difficulty
+        discrete_obstacles_height = 0.05 + 0.15 * difficulty
 
         stepping_stones_size = 1.5 * (1.05 - difficulty)
         stone_distance = 0.05 if difficulty==0 else 0.1

@@ -55,7 +55,7 @@ class GO1PosCfg( LeggedRobotCfg ):
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
-        num_rows = 20  # number of terrain rows (levels), X direction
+        num_rows = 10  # number of terrain rows (levels), X direction
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
@@ -141,7 +141,7 @@ class GO1PosCfg( LeggedRobotCfg ):
         push_interval_max = 15.0
         push_interval_min = 0.1
         max_push_vel_xy = 1.00
-        min_push_vel_xy = 0.50
+        min_push_vel_xy = 1.00
 
         max_vertical_push = 0.40
         min_vertical_push = 0.20
@@ -198,7 +198,7 @@ class GO1PosCfg( LeggedRobotCfg ):
         
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 1.00]
-        joint_damping_range_start = [0.25, 0.60]
+        joint_damping_range_start = [0.25, 0.50]
 
     class noise (LeggedRobotCfg.noise):
         add_noise = True
