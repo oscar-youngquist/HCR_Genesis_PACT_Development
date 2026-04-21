@@ -351,8 +351,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         # PD Drive parameters:
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
-        stiffness = {'joint': 50.0}   # [N*m/rad]
-        damping   = {'joint': 1.00}     # [N*m*s/rad]
+        stiffness = {'joint': 30.0}   # [N*m/rad]
+        damping   = {'joint': 0.60}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.00   # action scale:  target torque = torque_scale * tau_action + defaultTorque
