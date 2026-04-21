@@ -7,7 +7,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         num_observations = 57
         num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (143)
         num_priv_stack = 5
-        num_explicit_recon_obs = 3 + 4 + 4 + 12 # torso lin-velo, feet contact states, feet height
+        # num_explicit_recon_obs = 3 + 4 + 4 + 12 # torso lin-velo, feet contact states, feet height
+        num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
         num_obs_hist = 50
@@ -418,7 +419,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             # smoothness and stability
             lin_vel_z        = -2.0
             base_height      = -1.0
-            ang_vel_xy       = -0.05
+            ang_vel_xy       = -0.1
             orientation      = -1.0
             dof_acc          = -2.0e-7
             joint_power      = -2.0e-5
@@ -443,10 +444,10 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             front_foot_overreach = -10000.0
 
             # gait
-            feet_air_time    = 0.50            # tracking reward for long steps
+            feet_air_time    = 1.00            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.25  # tracking reward for feet reaching the desired clearance responsive to terrain height    
-            hip_pos = -0.1
+            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            hip_pos = -0.05
             
             foot_slip        = -0.1           # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
@@ -488,19 +489,19 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
     class commands(LeggedRobotCfg.commands):
         curriculum = True
         max_curriculum = 2.0
-        num_commands = 3 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
-        resampling_time = 5.  # time before command are changed[s]
+        num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
+        resampling_time = 10.  # time before command are changed[s]
 
         curriculum_threshold = 0.70
         curriculum_threshold_ang = 0.30
         
         randomize_resampling_time = False
-        resampling_time_min = 0.5
-        resampling_time_max = 5.0
+        resampling_time_min = 1.0
+        resampling_time_max = 10.0
         use_command_resampling_time_curriculum = True
         command_resampling_time_warmup_iters = 5000
         
-        heading_command = False # if true: compute ang vel command from heading error
+        heading_command = True # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
             lin_vel_y = [-0.5, 0.5]   # min max [m/s]
@@ -518,10 +519,12 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # Context encoder
         cenet_enc_layers=[512,256,128]
         cenet_enc_latent_dim = 16
-        cenet_velo_dim = 3 + 4 + 4 + 12   # torso velocity, foot-contact indicator, foot-height 
+        # cenet_velo_dim = 3 + 4 + 4 + 12   # torso velocity, foot-contact indicator, foot-height 
+        cenet_velo_dim = 3 + 4 + 4   # torso velocity, foot-contact indicator, foot-height 
 
         # Context Decoder
-        cenet_dec_input_dim = 27 + 12
+        # cenet_dec_input_dim = 27 + 12
+        cenet_dec_input_dim = 27
         cenet_dec_layers = [32,128,256,512]
         cenet_dec_out_dim = 57 + (51 + 33) + 143     # next obs (57) + grf_dim (12)
 
