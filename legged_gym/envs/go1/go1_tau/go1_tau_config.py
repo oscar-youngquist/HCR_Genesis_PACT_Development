@@ -55,11 +55,11 @@ class GO1TauCfg( LeggedRobotCfg ):
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
-        num_rows = 20  # number of terrain rows (levels), X direction
+        num_rows = 10  # number of terrain rows (levels), X direction
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        terrain_proportions = [0.10, 0.10, 0.25, 0.25, 0.20, 0.10]
+        terrain_proportions = [0.10, 0.15, 0.25, 0.25, 0.20, 0.05]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
@@ -155,8 +155,8 @@ class GO1TauCfg( LeggedRobotCfg ):
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 2.0
-        max_added_mass_max = 10.0
+        min_added_mass_max = 3.0
+        max_added_mass_max = 8.0
         added_mass_min = -1.0
         
         # COM displacement crap
@@ -197,8 +197,8 @@ class GO1TauCfg( LeggedRobotCfg ):
         joint_stiffness_range_start = [0.0, 0.0]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 0.80]
-        joint_damping_range_start = [0.25, 0.30]
+        joint_damping_range_end   = [0.00, 1.00]
+        joint_damping_range_start = [0.25, 0.50]
 
     class noise (LeggedRobotCfg.noise):
         add_noise = True
@@ -332,7 +332,7 @@ class GO1TauCfg( LeggedRobotCfg ):
             termination           = 0.0
             collision             = -10.0
             dof_pos_limits        = -10.0
-            dof_close_to_default  = -0.20
+            dof_close_to_default  = -0.10
             torque_limits         = -0.1
 
             alive_bonus           = 0.01
@@ -377,10 +377,10 @@ class GO1TauCfg( LeggedRobotCfg ):
             front_foot_overreach = -10000.0
 
             # gait
-            feet_air_time    = 0.50            # tracking reward for long steps
+            feet_air_time    = 1.00            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.25  # tracking reward for feet reaching the desired clearance responsive to terrain height    
-            hip_pos = -0.10
+            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            hip_pos = -0.05
             
             foot_slip        = -0.1           # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
@@ -394,19 +394,19 @@ class GO1TauCfg( LeggedRobotCfg ):
                                   "ang_vel_xy":[-0.1, -0.2]
                                  }
 
-            curr_steps = 1
-            warmup_steps = 200
+            curr_steps = 10
+            warmup_steps = 7000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
         max_curriculum = 1.
-        num_commands = 3 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
-        resampling_time = 5.  # time before command are changed[s]
-        heading_command = False # if true: compute ang vel command from heading error
+        num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
+        resampling_time = 10.  # time before command are changed[s]
+        heading_command = True # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
             lin_vel_y = [-0.5, 0.5]   # min max [m/s]
-            ang_vel_yaw = [-0.5, 0.5]    # min max [rad/s]
+            ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
             heading = [-3.14, 3.14]
 
 class GO1TauCfgPPO( LeggedRobotCfgPPO ):
@@ -452,8 +452,8 @@ class GO1TauCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PosTau'
         algorithm_class_name = 'PPO_PosTau'
-        num_steps_per_env = 32 # per iteration
-        max_iterations = 6000 # number of policy updates
+        num_steps_per_env = 24 # per iteration
+        max_iterations = 9000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb
