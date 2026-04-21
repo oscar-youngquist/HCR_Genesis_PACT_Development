@@ -205,9 +205,8 @@ class PCGrad():
 
         g_P_orth = (g_P - proj_coeff * g_R)   # orthogonal component of the PINN loss gradient
 
-
         # Adaptive \beta scaling to ensure the norm of projected PINN gradient
-        # is not greater than the norm of the task reward gradient
+        #     is not greater than the norm of the task reward gradient
         beta = g_R.norm() / g_P_orth.norm() if g_P_orth.norm() > g_R.norm() else 1.0
         g_P_scaled = beta * g_P_orth
 
@@ -224,8 +223,6 @@ class PCGrad():
 
         merged_grad[~shared] = torch.stack([g[~shared] for g in pp_grad]).sum(dim=0)
         return merged_grad
-
-
 
     def _set_grad(self, grads):
         '''

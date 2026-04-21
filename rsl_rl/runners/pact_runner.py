@@ -258,60 +258,34 @@ class OnPolicyRunnerPACT:
             # Step the domain randomization if approperiate
             if self.env.simulator.use_domainrand_curriculum:
                 self.env.simulator._step_domian_rand(it)
-                        
-            # if it > 2000 and it < 3000:
-            #     self.alg.set_entropy_coef(2.5e-3)
+
+            entropy_coef = self._init_entropy_coef
             
-            # if it > 3500:
-            #     self.alg.set_entropy_coef(1.e-3)
-                
-            # if it < 2000:
-            #     entropy_coef = 0.01
-            # elif it < 3000:
-            #     alpha = (it - 2000) / 1000.0
-            #     entropy_coef = 0.01 + alpha * (0.005 - 0.01)
-            #     self.alg.set_entropy_coef(entropy_coef)
-            # elif it < 3500:
-            #     entropy_coef = 0.005
-            #     self.alg.set_entropy_coef(entropy_coef)
-            # else:
-            #     alpha = (it -3500) / 1500.0
-            #     entropy_coef = 0.005 + alpha * (0.001 - 0.005)
-            #     self.alg.set_entropy_coef(entropy_coef)
-
             half_ceof = self._init_entropy_coef * 0.5
-            tenth_coef = self._init_entropy_coef * 0.1
-
-            # if it < 5000:
+            tenth_coef = self._init_entropy_coef * 0.1       
+            
+            # if it < 6000:
             #     entropy_coef = self._init_entropy_coef
-            # elif it < 5500:
+            # elif it < 6500:
             #     new_coef = self._init_entropy_coef / 2.0
-            #     alpha = (it - 5000) / 500.0
-            #     entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
-            # elif it < 6000:
-            #     entropy_coef = half_ceof
-            # elif it <6500:
             #     alpha = (it - 6000) / 500.0
+            #     entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
+            # elif it < 7000:
+            #     entropy_coef = half_ceof
+            # elif it <7500:
+            #     alpha = (it - 7000) / 500.0
             #     entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
             # else:
             #     entropy_coef = tenth_coef
-            
-            
-            if it < 6000:
-                entropy_coef = self._init_entropy_coef
-            elif it < 6500:
-                new_coef = self._init_entropy_coef / 2.0
-                alpha = (it - 6000) / 500.0
-                entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
-            elif it < 7000:
-                entropy_coef = half_ceof
-            elif it <7500:
-                alpha = (it - 7000) / 500.0
-                entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
-            else:
-                entropy_coef = tenth_coef
+
+            if it < 8000 and it >= 7000:
+                alpha = (it - 7000) / 1000.0
+                entropy_coef = tenth_coef + 0.5 * (self._init_entropy_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+
+            print(entropy_coef)
 
             entropy_coef = max(entropy_coef, 0.00001)
+            
             self.alg.set_entropy_coef(entropy_coef)
 
 
