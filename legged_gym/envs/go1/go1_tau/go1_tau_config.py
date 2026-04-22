@@ -55,7 +55,7 @@ class GO1TauCfg( LeggedRobotCfg ):
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
-        num_rows = 10  # number of terrain rows (levels), X direction
+        num_rows = 20  # number of terrain rows (levels), X direction
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
@@ -143,13 +143,13 @@ class GO1TauCfg( LeggedRobotCfg ):
         max_push_vel_xy = 1.00
         min_push_vel_xy = 0.50
 
-        max_vertical_push = 0.50
-        min_vertical_push = 0.00
+        max_vertical_push = 0.40
+        min_vertical_push = 0.20
         vert_interval_max = 10.0
         vert_interval_min = 0.1
 
         max_push_torque = 2.50
-        min_push_torque = 0.10
+        min_push_torque = 0.50
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
@@ -311,7 +311,7 @@ class GO1TauCfg( LeggedRobotCfg ):
 
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
-        soft_torque_limit = 0.85
+        soft_torque_limit = 0.90
         base_height_target = 0.30
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
@@ -377,21 +377,24 @@ class GO1TauCfg( LeggedRobotCfg ):
             front_foot_overreach = -10000.0
 
             # gait
-            feet_air_time    = 1.00            # tracking reward for long steps
+            feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
             foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
-            hip_pos = -0.05
+            hip_pos = -0.10
             
             foot_slip        = -0.1           # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
 
         class reward_curriculum():
-            curr_reward_keys = ["orientation", "ang_vel_xy"]
+            curr_reward_keys = ["orientation", 
+                                "ang_vel_xy",
+                                "base_height"]
             
             curr_reward_bounds = {
                                   "orientation":[-1.0,-10.0],
-                                  "ang_vel_xy":[-0.1, -0.2]
+                                  "ang_vel_xy":[-0.1, -0.2],
+                                  "base_height":[-1.0, -2.0]
                                  }
 
             curr_steps = 10

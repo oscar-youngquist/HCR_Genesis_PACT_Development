@@ -55,7 +55,7 @@ class GO1PosCfg( LeggedRobotCfg ):
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
-        num_rows = 10  # number of terrain rows (levels), X direction
+        num_rows = 20  # number of terrain rows (levels), X direction
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
@@ -141,7 +141,7 @@ class GO1PosCfg( LeggedRobotCfg ):
         push_interval_max = 15.0
         push_interval_min = 0.1
         max_push_vel_xy = 1.00
-        min_push_vel_xy = 1.00
+        min_push_vel_xy = 0.50
 
         max_vertical_push = 0.40
         min_vertical_push = 0.20
@@ -283,8 +283,8 @@ class GO1PosCfg( LeggedRobotCfg ):
         # PD Drive parameters:
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
-        stiffness = {'joint': 30.0}   # [N*m/rad]
-        damping   = {'joint': 0.60}     # [N*m*s/rad]
+        stiffness = {'joint': 50.0}   # [N*m/rad]
+        damping   = {'joint': 1.00}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
@@ -311,14 +311,14 @@ class GO1PosCfg( LeggedRobotCfg ):
 
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
-        soft_torque_limit = 0.85
+        soft_torque_limit = 0.90
         base_height_target = 0.30
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
-        overreach_x_max = 0.30
+        overreach_x_max = 0.32
         support_polygon_sigma = 0.01
 
         foot_clearance_tracking_sigma = 0.01
@@ -377,21 +377,24 @@ class GO1PosCfg( LeggedRobotCfg ):
             front_foot_overreach = -10000.0
 
             # gait
-            feet_air_time    = 1.00            # tracking reward for long steps
+            feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.25  # tracking reward for feet reaching the desired clearance responsive to terrain height    
-            hip_pos = -0.05
+            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            hip_pos = -0.10
             
             foot_slip        = -0.1           # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
 
         class reward_curriculum():
-            curr_reward_keys = ["orientation", "ang_vel_xy"]
+            curr_reward_keys = ["orientation", 
+                                "ang_vel_xy", 
+                                "base_height"]
             
             curr_reward_bounds = {
                                   "orientation":[-1.0,-10.0],
-                                  "ang_vel_xy":[-0.1, -0.2]
+                                  "ang_vel_xy":[-0.1, -0.2],
+                                  "base_height":[-1., -2.]
                                  }
 
             curr_steps = 10

@@ -56,7 +56,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
-        num_rows = 10  # number of terrain rows (levels), X direction
+        num_rows = 20  # number of terrain rows (levels), X direction
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
@@ -127,7 +127,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         clip_actions = 50.
 
     class domain_rand(LeggedRobotCfg.domain_rand):
-        use_domainrand_curriculum = False
+        use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 500  # number of steps to increase the domain randomization ranges
         push_warmup = 2000     # number of steps with initial values held constant
@@ -198,7 +198,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         joint_stiffness_range_start = [0.0, 0.0]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.25, 0.50]
+        joint_damping_range_end   = [0.00, 0.50]
         joint_damping_range_start = [0.25, 0.50]
 
     class noise (LeggedRobotCfg.noise):
@@ -284,8 +284,8 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         # PD Drive parameters:
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
-        stiffness = {'joint': 30.0}   # [N*m/rad]
-        damping   = {'joint': 0.60}     # [N*m*s/rad]
+        stiffness = {'joint': 50.0}   # [N*m/rad]
+        damping   = {'joint': 1.00}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
@@ -377,7 +377,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             front_foot_overreach = -10000.0
 
             # gait
-            feet_air_time    = 1.00            # tracking reward for long steps
+            feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
             foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.10
@@ -406,7 +406,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
             lin_vel_y = [-0.5, 0.5]   # min max [m/s]
-            ang_vel_yaw = [-0.5, 0.5]    # min max [rad/s]
+            ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
             heading = [-3.14, 3.14]
 
 class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
