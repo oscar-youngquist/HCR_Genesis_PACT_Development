@@ -141,7 +141,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         push_interval_max = 15.0
         push_interval_min = 0.1
         max_push_vel_xy = 1.00
-        min_push_vel_xy = 1.00
+        min_push_vel_xy = 0.50
 
         max_vertical_push = 0.20
         min_vertical_push = 0.20
@@ -320,7 +320,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
-        overreach_x_max = 0.28
+        overreach_x_max = 0.30
         support_polygon_sigma = 0.01
 
         foot_clearance_tracking_sigma = 0.01
@@ -375,13 +375,13 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
             feedback_torques      = 0.0
             dof_act_limits        = 0.0
 
-            support_polygon = 0.0             # encourages well condition foot-placement realtive to the base CoM
+            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
             front_foot_overreach = -10000.0
 
             # gait
             feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.25  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.10
             
             foot_slip        = -0.1           # penalty for feet slipping
@@ -394,7 +394,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
                                 "base_height"]
             
             curr_reward_bounds = {
-                                  "orientation":[-1.0,-10.0],
+                                  "orientation":[-1.0, -2.0],
                                   "ang_vel_xy":[-0.1, -0.2],
                                   "base_height":[-1., -2.]
                                  }

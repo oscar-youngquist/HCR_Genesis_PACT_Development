@@ -19,7 +19,7 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -40,7 +40,7 @@ def override_configs(env_cfg, args):
         #                                   "slope": -0.4, "platform_size": 3.0}
         # # stairs
         env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-                                        "step_width": 0.31, "step_height": -0.10, "platform_size": 3.0}
+                                        "step_width": 0.31, "step_height": -0.15, "platform_size": 3.0}
         # # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.1,
@@ -73,12 +73,13 @@ def override_configs(env_cfg, args):
     # env_cfg.commands.ranges.lin_vel_x = [-1.0, 1.0]
     # env_cfg.commands.ranges.lin_vel_y = [-1.0, 1.0]
     # env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
+    env_cfg.commands.resampling_time = 5.0
 
     env_cfg.commands.ranges.lin_vel_x   = [-1.0, 1.0]
     env_cfg.commands.ranges.lin_vel_y   = [-1.0, 1.0]
     env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
 
-    env_cfg.commands.ranges.heading = [0.0, 0.0]
+    env_cfg.commands.ranges.heading = [-3.14, 3.14]
 
     # Turn off/on domain randomization elements
     env_cfg.noise.add_noise = True
@@ -144,7 +145,7 @@ def interaction_loop(train_cfg, env, policy, args):
     stop_state_log = 300 # number of steps before plotting states
     stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards
 
-    # logger = ExpLogger(train_cfg.runner.exp_data_path)
+    logger = ExpLogger(train_cfg.runner.exp_data_path)
     # logger = ExpLogger(train_cfg.runner.exp_data_path, ref_key='base_cmd', length_limit=100)
 
         
@@ -176,12 +177,8 @@ def interaction_loop(train_cfg, env, policy, args):
         env.simulator._floating_camera.start_recording()
 
     # interaction loop
-    for i in range(int(10.00*env.max_episode_length)):
+    for i in range(int(5.05*env.max_episode_length)):
 
-        env.commands[:, 0] = 1.0
-        env.commands[:, 1] = 0
-        env.commands[:, 2] = 0.0
-        
         # update commands from joystick
         if args.use_joystick:
             joystick.update()
@@ -252,24 +249,24 @@ def interaction_loop(train_cfg, env, policy, args):
         # elif i==stop_rew_log:
         #     logger.print_rewards()
 
-        # logger.log_states(
-        #     {
-        #         'base_cmd':env.commands.detach().cpu().numpy().tolist(),
-        #         'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
-        #         'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
-        #         'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
-        #         'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
-        #         'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
-        #         'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
-        #         'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
-        #         'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
-        #         'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
-        #         'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
-        #         'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
-        #         'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
-        #         'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
-        #         'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
-        #     })
+        logger.log_states(
+            {
+                'base_cmd':env.commands.detach().cpu().numpy().tolist(),
+                'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
+                'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
+                'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
+                'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
+                'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
+                'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
+                'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
+                'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
+                # 'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
+                'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
+                'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
+                # 'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
+                'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
+                'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
+            })
 
 def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     """export the policy as jit script according to different task types

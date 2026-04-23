@@ -284,8 +284,8 @@ class OnPolicyRunnerRL2AC:
             # self.alg._set_std_clip_lwr(std_lwr)
 
 
-            if self.env.cfg.rewards.only_positive_rewards and it > 1000:
-                self.env.cfg.rewards.only_positive_rewards = False
+            # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
+            #     self.env.cfg.rewards.only_positive_rewards = False
             
             stop = time.time()
             learn_time = stop - start

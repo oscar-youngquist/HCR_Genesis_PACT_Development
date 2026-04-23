@@ -1235,7 +1235,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
 
     def _randomize_base_mass(self, env_ids=None):
         ''' Randomize base mass'''
-        min_mass, max_mass = self.mass_min, self.mass_max_value
+        # min_mass, max_mass = self.mass_min, self.mass_max_value
+        min_mass, max_mass = 4.0, 6.0
         added_mass = gs.rand((len(env_ids), 1), dtype=float) * (max_mass - min_mass) + min_mass
         self._added_base_mass[env_ids] = added_mass[:].detach().clone()
         self._robot.set_mass_shift(added_mass, self._base_link_index, env_ids)

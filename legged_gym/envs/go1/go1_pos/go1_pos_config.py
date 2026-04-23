@@ -127,7 +127,7 @@ class GO1PosCfg( LeggedRobotCfg ):
 
     class domain_rand(LeggedRobotCfg.domain_rand):
         use_domainrand_curriculum = True
-        com_rand_z_positive = True
+        com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
         push_warmup = 4000     # number of steps with initial values held constant
         
@@ -318,7 +318,7 @@ class GO1PosCfg( LeggedRobotCfg ):
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
-        overreach_x_max = 0.32
+        overreach_x_max = 0.30
         support_polygon_sigma = 0.01
 
         foot_clearance_tracking_sigma = 0.01
@@ -379,7 +379,7 @@ class GO1PosCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.50            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.25  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.10
             
             foot_slip        = -0.1           # penalty for feet slipping
@@ -392,7 +392,7 @@ class GO1PosCfg( LeggedRobotCfg ):
                                 "base_height"]
             
             curr_reward_bounds = {
-                                  "orientation":[-1.0,-10.0],
+                                  "orientation":[-1.0,-2.0],
                                   "ang_vel_xy":[-0.1, -0.2],
                                   "base_height":[-1., -2.]
                                  }
@@ -455,7 +455,7 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PosTau'
         algorithm_class_name = 'PPO_PosTau'
-        num_steps_per_env = 24 # per iteration
+        num_steps_per_env = 32 # per iteration
         max_iterations = 9000 # number of policy updates
         grf_dim = 12
         

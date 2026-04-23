@@ -427,7 +427,8 @@ class Go1PACT(BaseTask):
 
         # Masses below the DreamWaQ threshold are not scaled.
         dream_idx = added_mass <= 2.0
-        scales = torch.where(dream_idx, torch.ones_like(scales), scales)
+        scales = torch.where(dream_idx, torch.ones_like(scales), scales) * 2.0
+        scales = torch.clamp(scales, max=1.0)
 
         move_down = (distance < scales * torch.norm(
             self.commands[env_ids, :2], dim=1)*self.max_episode_length_s*0.5) * ~move_up

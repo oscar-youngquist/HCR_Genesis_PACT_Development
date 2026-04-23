@@ -67,7 +67,7 @@ class PPO_RL2AC:
                  use_spo=False,
                  pos_action_scale=0.25,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
-                 vae_kld_weight=2.0,   # weight of KL divergence loss in VAE
+                 vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
                  ):
         
         self.device = device

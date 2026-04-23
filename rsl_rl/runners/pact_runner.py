@@ -278,9 +278,13 @@ class OnPolicyRunnerPACT:
             # else:
             #     entropy_coef = tenth_coef
 
-            if it < 8000 and it >= 7000:
-                alpha = (it - 7000) / 1000.0
+            if it < 6500:
+                entropy_coef = self._init_entropy_coef
+            elif it < 7500:
+                alpha = (it - 6500) / 1000.0
                 entropy_coef = tenth_coef + 0.5 * (self._init_entropy_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            else:
+                entropy_coef = tenth_coef
 
             print(entropy_coef)
 
