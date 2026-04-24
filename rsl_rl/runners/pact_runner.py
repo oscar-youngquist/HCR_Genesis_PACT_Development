@@ -264,27 +264,27 @@ class OnPolicyRunnerPACT:
             half_ceof = self._init_entropy_coef * 0.5
             tenth_coef = self._init_entropy_coef * 0.1       
             
-            # if it < 6000:
-            #     entropy_coef = self._init_entropy_coef
-            # elif it < 6500:
-            #     new_coef = self._init_entropy_coef / 2.0
-            #     alpha = (it - 6000) / 500.0
-            #     entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
-            # elif it < 7000:
-            #     entropy_coef = half_ceof
-            # elif it <7500:
-            #     alpha = (it - 7000) / 500.0
-            #     entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
-            # else:
-            #     entropy_coef = tenth_coef
-
-            if it < 6500:
+            if it < 6000:
                 entropy_coef = self._init_entropy_coef
-            elif it < 7500:
-                alpha = (it - 6500) / 1000.0
-                entropy_coef = tenth_coef + 0.5 * (self._init_entropy_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            elif it < 6500:
+                new_coef = self._init_entropy_coef / 2.0
+                alpha = (it - 6000) / 500.0
+                entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
+            elif it < 7000:
+                entropy_coef = half_ceof
+            elif it <7500:
+                alpha = (it - 7000) / 500.0
+                entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
             else:
                 entropy_coef = tenth_coef
+
+            # if it < 6500:
+            #     entropy_coef = self._init_entropy_coef
+            # elif it < 7500:
+            #     alpha = (it - 6500) / 1000.0
+            #     entropy_coef = tenth_coef + 0.5 * (self._init_entropy_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            # else:
+            #     entropy_coef = tenth_coef
 
             print(entropy_coef)
 

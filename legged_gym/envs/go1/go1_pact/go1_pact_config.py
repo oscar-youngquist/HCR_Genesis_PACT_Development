@@ -67,11 +67,11 @@ class GO1PACTCfg( LeggedRobotCfg ):
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
-        num_rows = 20  # number of terrain rows (levels), X direction
-        num_cols = 10  # number of terrain cols (types), Y direction
+        num_rows = 10  # number of terrain rows (levels), X direction
+        num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        terrain_proportions = [0.10, 0.10, 0.25, 0.25, 0.20, 0.10]
+        terrain_proportions = [0.10, 0.15, 0.25, 0.25, 0.20, 0.05]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
@@ -96,9 +96,9 @@ class GO1PACTCfg( LeggedRobotCfg ):
             'RR_hip_joint': -0.1,     # [rad]
 
             'FL_thigh_joint': 0.8,   # [rad]
-            'RL_thigh_joint': 1.0,   # [rad]
+            'RL_thigh_joint': 0.8,   # [rad]
             'FR_thigh_joint': 0.8,   # [rad]
-            'RR_thigh_joint': 1.0,   # [rad]
+            'RR_thigh_joint': 0.8,   # [rad]
 
             'FL_calf_joint': -1.5,   # [rad]
             'RL_calf_joint': -1.5,   # [rad]
@@ -157,12 +157,12 @@ class GO1PACTCfg( LeggedRobotCfg ):
         min_push_vel_xy = 0.5
 
         max_vertical_push = 0.40
-        min_vertical_push = 0.00
+        min_vertical_push = 0.20
         vert_interval_max = 10.0
         vert_interval_min = 0.1
 
         max_push_torque = 2.50
-        min_push_torque = 0.00
+        min_push_torque = 0.50
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
@@ -302,8 +302,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
         # PD Drive parameters:
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
-        stiffness = {'joint': 50.0}   # [N*m/rad]
-        damping   = {'joint': 1.00}     # [N*m*s/rad]
+        stiffness = {'joint': 30.0}   # [N*m/rad]
+        damping   = {'joint': 0.60}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
@@ -329,18 +329,18 @@ class GO1PACTCfg( LeggedRobotCfg ):
 
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
-        soft_torque_limit = 0.80
+        soft_torque_limit = 0.90
         base_height_target = 0.30
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
-        overreach_x_max = 0.30
+        overreach_x_max = 0.28
 
         support_polygon_sigma = 0.01
         foot_clearance_tracking_sigma = 0.01
-        only_positive_rewards = False
+        only_positive_rewards = True
 
         use_reward_curriculum = True
 
@@ -349,16 +349,16 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # General
             termination           = 0.0
             collision             = -1.0
-            dof_pos_limits        = -1.0
+            dof_pos_limits        = -2.0
             dof_close_to_default  = -0.01
-            torque_limits         = -0.1
+            torque_limits         = -0.01
             pd_target_torque_limit = 0.0
             
-            alive_bonus           = 0.01
+            alive_bonus           = 0.001
 
-            dof_vel_stand_still = -0.1
+            dof_vel_stand_still = 0.0
             stand_still_contact = -0.5
-            dof_pos_stand_still = -0.5
+            dof_pos_stand_still = -0.1
 
             # command tracking
             tracking_lin_vel  = 1.0
@@ -374,9 +374,9 @@ class GO1PACTCfg( LeggedRobotCfg ):
             
             # smoothness and stability
             lin_vel_z        = -2.0
-            base_height      = -2.0
-            ang_vel_xy       = -0.2
-            orientation      = -10.0
+            base_height      = -1.0
+            ang_vel_xy       = -0.05
+            orientation      = -0.2
             dof_acc          = -2.5e-7
             joint_power      = -2.e-5
             joint_power_dist = -1.e-5
@@ -407,18 +407,21 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 1.0            # tracking reward for long steps
             # foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance      
-            foot_clearance_terrain_aware = 0.5  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.05
             
             foot_slip        = -0.01           # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
         class reward_curriculum():
-            curr_reward_keys = ["ang_vel_xy", "orientation",
+            curr_reward_keys = ["ang_vel_xy", 
+                                "orientation",
                                 "torque_limits",
                                 # "action_rate", "action_smoothness",
-                                "dof_acc",
-                                "base_height"]
+                                # "dof_acc",
+                                "base_height",
+                                "dof_close_to_default",
+                                ]
             
             curr_reward_bounds = {
                                   "ang_vel_xy":[-0.05, -0.2],
@@ -426,8 +429,9 @@ class GO1PACTCfg( LeggedRobotCfg ):
                                   "torque_limits":[-1.0e-4, -1.0e-2],
                                 #   "action_rate":[-0.001, -0.01],
                                 #   "action_smoothness":[-0.001,-0.01],
-                                  "dof_acc":[-2.5e-9, -2.5e-7],
-                                  "base_height":[-1.0, -2.0]
+                                #   "dof_acc":[-2.5e-9, -2.5e-7],
+                                  "base_height":[-1.0, -2.0],
+                                  "dof_close_to_default":[-0.01, -0.10]
                                  }
 
             curr_steps = 1
@@ -450,7 +454,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
     runner_class_name = "PACTRunner" # Teacher-Student Runner
     
     class policy( LeggedRobotCfgPPO.policy ):
-        activation = 'tanh' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid, swish (SiLU)
+        activation = 'elu' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid, swish (SiLU)
         init_noise_std = 1.00
         
         # Context encoder
@@ -471,12 +475,12 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Apr07_17-42-07_pact_pos_100hz_spec_jointrand/model_5000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
-        # learning_rate = 1.0e-3 #
-        learning_rate = 3.0e-4 #
+        learning_rate = 1.0e-3 #
+        # learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2

@@ -40,7 +40,7 @@ def override_configs(env_cfg, args):
         #                                   "slope": -0.4, "platform_size": 3.0}
         # # stairs
         env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-                                        "step_width": 0.31, "step_height": -0.15, "platform_size": 3.0}
+                                        "step_width": 0.31, "step_height": -0.10, "platform_size": 3.0}
         # # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.1,
@@ -84,10 +84,10 @@ def override_configs(env_cfg, args):
     # Turn off/on domain randomization elements
     env_cfg.noise.add_noise = True
     # Disable some of the domain randomization (our payload will handle that now)
-    env_cfg.domain_rand.randomize_com_displacement = False
+    env_cfg.domain_rand.randomize_com_displacement = True
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_base_mass = False
+    env_cfg.domain_rand.randomize_base_mass = True
 
     # env_cfg.domain_rand.push_interval_max = 1.0
     # env_cfg.domain_rand.push_interval_min = 0.1

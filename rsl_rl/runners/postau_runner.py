@@ -255,23 +255,23 @@ class OnPolicyRunnerPosTau:
             half_coef = self._init_entropy_coef * 0.5
             tenth_coef = self._init_entropy_coef * 0.1
             
-            # if it < 7000:
-            #     entropy_coef = self._init_entropy_coef
-            # elif it < 7500:
-            #     alpha = (it - 7000) / 500.0
-            #     entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
-            # elif it < 8000:
-            #     entropy_coef = half_coef
-            # elif it < 8500:
-            #     alpha = (it - 8000) / 500.0
-            #     entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
-            # else:
-            #     entropy_coef = tenth_coef
+            if it < 8000:
+                entropy_coef = self._init_entropy_coef
+            elif it < 8500:
+                alpha = (it - 8000) / 500.0
+                entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
+            elif it < 9000:
+                entropy_coef = half_coef
+            elif it < 9500:
+                alpha = (it - 9000) / 500.0
+                entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            else:
+                entropy_coef = tenth_coef
 
 
-            if it < 9000 and it >= 8000:
-                alpha = (it - 8000) / 1000.0
-                entropy_coef = tenth_coef + 0.5 * (self._init_entropy_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            # if it < 9000 and it >= 8000:
+            #     alpha = (it - 8000) / 1000.0
+            #     entropy_coef = tenth_coef + 0.5 * (self._init_entropy_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
             
             entropy_coef = max(entropy_coef, 0.0001)
 

@@ -480,11 +480,11 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 500
         
         
-        # load_run = "Apr23_00-28-47_pact_posboot_100hz_spec_grf"   # spec, 0.01
-        load_run = "Apr23_00-50-42_pact_posboot_100hz_spec_grf"    # spec, 0.02
+        load_run = "Apr23_00-28-47_pact_posboot_100hz_spec_grf"   # spec, 0.01
+        # load_run = "Apr23_00-50-42_pact_posboot_100hz_spec_grf"    # spec, 0.02
 
         # load_run = "Apr23_01-02-35_pact_posboot_100hz_grf"   # no-spec, 0.02
 
         checkpoint = -1
         resume = False
-        exp_data_path = "exp_data/pact_pos_tests/spec_0_02_0kg_stairs_2.csv"
+        exp_data_path = "exp_data/pact_pos_tests/spec_0_01_4-6kg_stairs.csv"

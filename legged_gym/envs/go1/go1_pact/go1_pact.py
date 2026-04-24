@@ -33,6 +33,7 @@ class Go1PACT(BaseTask):
         self.init_done = False
         self._parse_cfg(self.cfg, sim_device)
         super().__init__(self.cfg, sim_params, sim_device, headless)
+        self.cmd_update_steps = 0
         
         self._init_buffers()
         self._prepare_reward_function()
@@ -507,7 +508,8 @@ class Go1PACT(BaseTask):
         """
         # If the tracking reward is above 80% of the maximum, increase the range of commands
         if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > \
-                self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel"]:
+                self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel"] \
+                    and self.common_step_counter >= 50*500:
             
             self.command_ranges["lin_vel_x"][0] = np.clip(
                 self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
