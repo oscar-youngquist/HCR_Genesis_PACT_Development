@@ -147,7 +147,9 @@ class OnPolicyRunnerPACT:
 
     # function to load a boot-strap initial model and reset the std
     def _load_pretrained_model(self):
-        pretrained_path = self.policy_cfg["pretrained_path"]
+        import os
+        from legged_gym import LEGGED_GYM_ROOT_DIR
+        pretrained_path = os.path.join(LEGGED_GYM_ROOT_DIR, self.policy_cfg["pretrained_path"])
         print(pretrained_path)
         loaded_dict = torch.load(pretrained_path)
         # Load the pretrained action-network and encoder
@@ -430,15 +432,29 @@ class OnPolicyRunnerPACT:
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
+        # Backward compat: older checkpoints stored ce_out_var/ce_velo_var as bare Linear;
+        # current code wraps them in Sequential(Linear, Hardtanh). Remap keys.
+        model_sd = loaded_dict['model_state_dict']
+        for old_key in list(model_sd.keys()):
+            if ('ce_out_var.' in old_key or 'ce_velo_var.' in old_key) and '.0.' not in old_key:
+                new_key = old_key.replace('ce_out_var.', 'ce_out_var.0.').replace('ce_velo_var.', 'ce_velo_var.0.')
+                model_sd[new_key] = model_sd.pop(old_key)
         # Load actor/critic model(s)
-        self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
-        # Load optimizer(s)
+        self.alg.actor_critic.load_state_dict(model_sd)
+        # Load optimizer(s) — tolerate mismatch (e.g. decoder-shape drift at eval)
         if load_optimizer:
-            self.alg.act_optimizer.optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
-            self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
-            self.alg.decoder_optimizer.load_state_dict(loaded_dict['decoder_opt_state_dict'])
-        # Load the VAE decoder model...
-        self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
+            for name, opt, key in [
+                ("act",     self.alg.act_optimizer.optimizer, 'act_optimizer_state_dict'),
+                ("enc",     self.alg.enc_optimizer,           'enc_optimizer_state_dict'),
+                ("decoder", self.alg.decoder_optimizer,       'decoder_opt_state_dict'),
+            ]:
+                try:
+                    opt.load_state_dict(loaded_dict[key])
+                except (ValueError, KeyError) as e:
+                    print(f"[warning] skipped {name} optimizer state load: {e}")
+        # Load the VAE decoder model (strict=False: tolerate decoder shape mismatch,
+        # decoder is unused at eval)
+        self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'], strict=False)
         self.current_learning_iteration = loaded_dict['iter']
         self.current_learning_iteration = 0
         return loaded_dict['infos']

@@ -246,7 +246,7 @@ class GenesisSimulator(Simulator):
                 camera_fov=40,
             ),
             vis_options=gs.options.VisOptions(
-                rendered_envs_idx=self._cfg.viewer.rendered_envs_idx,
+                rendered_envs_idx=[i for i in self._cfg.viewer.rendered_envs_idx if i < self._num_envs],
                 shadow=False,
                 ),
             rigid_options=gs.options.RigidOptions(

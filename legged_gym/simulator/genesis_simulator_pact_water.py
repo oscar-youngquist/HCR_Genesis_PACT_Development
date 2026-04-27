@@ -712,7 +712,7 @@ class GenesisSimulator_PACT_Water(Simulator):
         self._bucket = self._scene.add_entity(
             material=gs.materials.Rigid(gravity_compensation=0.0,),
             morph=gs.morphs.Mesh(
-                file="water_tank_proper_units_simple.stl",
+                file=os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "scripts", "water_tank_proper_units_simple.stl"),
                 scale=(self.liquid_properties["scale_x"],
                        self.liquid_properties["scale_y"],
                        self.liquid_properties["scale_z"]),    # adjust scale
@@ -726,7 +726,7 @@ class GenesisSimulator_PACT_Water(Simulator):
         self._lid = self._scene.add_entity(
             material=gs.materials.Rigid(gravity_compensation=1.0),
             morph=gs.morphs.Mesh(
-                file="water_tank_lid.stl",
+                file=os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "scripts", "water_tank_lid.stl"),
                 scale=(self.liquid_properties["scale_x"],
                        self.liquid_properties["scale_y"],
                        1.0),    # adjust scale if needed

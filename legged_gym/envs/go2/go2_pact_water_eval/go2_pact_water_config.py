@@ -133,7 +133,7 @@ class GO2PACTWaterCfg( LeggedRobotCfg ):
         kp_range = [0.8, 1.2]
         kd_range = [0.8, 1.2]
 
-        # Joint dynamics randomization (off for this checkpoint)
+
         randomize_joint_armature = False
         joint_armature_range = [0.015, 0.025]
 
@@ -145,6 +145,9 @@ class GO2PACTWaterCfg( LeggedRobotCfg ):
 
         randomize_joint_damping = False
         joint_damping_range = [0.25, 0.3]
+
+        randomize_motor_strength = False
+        motor_strength_range = [0.8, 1.2]
 
     class noise (LeggedRobotCfg.noise):
         add_noise = True
@@ -189,7 +192,7 @@ class GO2PACTWaterCfg( LeggedRobotCfg ):
             return_pointcloud = False
             pointcloud_in_world_frame = False
 
-    # Changed from Go1: name, URDF path, foot_name, terminate_after_contacts_on
+
     class asset( LeggedRobotCfg.asset ):
         name = "go2"
         file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/go2/urdf/go2.urdf'
@@ -214,7 +217,7 @@ class GO2PACTWaterCfg( LeggedRobotCfg ):
         obtain_link_contact_states = True
         contact_state_link_names = ["thigh", "calf", "foot", "base", "hip"]
 
-    # Changed from Go1: stiffness 40, damping 0.8, tradeoff weights [1.0, 1.0], steps 50
+    # go2-specific: stiffness 40, damping 0.8, tradeoff weights [1.0, 1.0], steps 50
     class control( LeggedRobotCfg.control ):
         stiffness = {'joint': 40.0}   # [N*m/rad]
         damping   = {'joint': 0.80}   # [N*m*s/rad]
@@ -238,7 +241,7 @@ class GO2PACTWaterCfg( LeggedRobotCfg ):
         height_min = 0.20
         height_max = 1.50
 
-    # Changed from Go1: soft_torque_limit 0.90, dof_close_to_default 0.0, torque_limits -0.01,
+    # go2-specific: soft_torque_limit 0.90, dof_close_to_default 0.0, torque_limits -0.01,
     #   alive_bonus 0.11, feedforward_torques (not scaled), foot_clearance (not terrain_aware)
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
@@ -344,11 +347,11 @@ class GO2PACTWaterCfg( LeggedRobotCfg ):
             ang_vel_yaw = [-0.5, 0.5]
             heading = [-3.14, 3.14]
 
-    # Changed from Go1: num_privileged_obs, num_obs_hist = 10
+   
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        num_privileged_obs = 57 + 66 + 2 + 81 # match Go2 training checkpoint
+        num_privileged_obs = 57 + 66 + 2 + 81 # match go2_pact_rough training checkpoint
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4
         num_actions = 12
@@ -375,8 +378,7 @@ class GO2PACTWaterCfg( LeggedRobotCfg ):
         liquid_tank = "default"
 
 
-# Changed from Go1: init_noise_std 0.50, dec_layers [128,256], dec_out_dim 57+12,
-#   pretrained_path, learning_rate 3e-4, experiment_name, load_run, num_steps_per_env 48
+
 class GO2PACTWaterCfgPPO( LeggedRobotCfgPPO ):
     seed = 1
     runner_class_name = "PACTRunner"
@@ -390,7 +392,7 @@ class GO2PACTWaterCfgPPO( LeggedRobotCfgPPO ):
         cenet_velo_dim = 3 + 4 + 4
 
         cenet_dec_input_dim = 27
-        cenet_dec_layers = [128,256]
+        cenet_dec_layers = [128,256,256]  # 3rd layer is dummy (dim=256 keeps dec_out matching checkpoint); decoder unused at eval
         cenet_dec_out_dim = 57 + 12
 
         actor_layers = [512,256,128]
@@ -400,7 +402,6 @@ class GO2PACTWaterCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = "rsl_rl/modules/pretained_checkpoints/rl_pos/go2_pact_pos_rough/model_2000_converted.pt"
 
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
