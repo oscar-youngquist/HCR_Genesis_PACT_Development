@@ -1,5 +1,6 @@
 from legged_gym import *
 import os
+from datetime import datetime
 
 from legged_gym.envs import *
 from legged_gym.utils import *
@@ -131,9 +132,11 @@ def interaction_loop(train_cfg, env, policy, args):
     
     robot_index = 0  # index used by camera-follow / debug prints
 
+    robot_id = args.task.split("_")[0]
+    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     water_out_dir = os.path.join(
-        "exp_data", "water_collect",
-        f"{args.task}_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}")
+        "exp_data", "water_collect", robot_id,
+        f"{run_stamp}_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}")
     water_logger = WaterDataLogger(env, args, water_out_dir)
 
     # Get initial observations according to task type
