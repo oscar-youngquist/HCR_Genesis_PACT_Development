@@ -18,7 +18,7 @@ from legged_gym.utils.helpers import class_to_dict
 from ...base.legged_robot_config import LeggedRobotCfg
 import torch.nn.functional as F
 
-class Go2PACTPos(BaseTask):
+class Go2KITE(BaseTask):
     def __init__(self, cfg: LeggedRobotCfg, sim_params: dict, sim_device, headless):
         """ Parses the provided config file,
             calls create_sim() (which creates, simulation, terrain and environments),

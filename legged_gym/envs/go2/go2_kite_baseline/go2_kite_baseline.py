@@ -18,7 +18,7 @@ from legged_gym.utils.helpers import class_to_dict
 from ...base.legged_robot_config import LeggedRobotCfg
 import torch.nn.functional as F
 
-class Go2PACTPos(BaseTask):
+class Go2KITEBaseline(BaseTask):
     def __init__(self, cfg: LeggedRobotCfg, sim_params: dict, sim_device, headless):
         """ Parses the provided config file,
             calls create_sim() (which creates, simulation, terrain and environments),
@@ -392,7 +392,7 @@ class Go2PACTPos(BaseTask):
             torch.clip(self.simulator.feet_pos[:, :, 2] -
                 torch.mean(self.simulator.height_around_feet, dim=-1) -
                 self.cfg.rewards.foot_height_offset, -1, 1.),                              # feet height               4
-            self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1)        # 12 - terrain info around feet
+            # self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1)        # 12 - terrain info around feet
         ), dim=-1)
 
         # track history buffer

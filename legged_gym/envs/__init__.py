@@ -91,6 +91,12 @@ from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos import Go2PACTPos
 from legged_gym.envs.go2.go2_pact.go2_pact_config import GO2PACTCfg, GO2PACTCfgPPO
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
 
+from legged_gym.envs.go2.go2_kite.go2_kite_config import GO2KITECfg, GO2KITECfgPPO
+from legged_gym.envs.go2.go2_kite.go2_kite import Go2KITE
+
+from legged_gym.envs.go2.go2_kite_baseline.go2_kite_baseline_config import GO2KITEBaselineCfg, GO2KITEBaselineCfgPPO
+from legged_gym.envs.go2.go2_kite_baseline.go2_kite_baseline import Go2KITEBaseline
+
 from legged_gym.utils.task_registry import task_registry
 
 task_registry.register( "go2", GO2, GO2Cfg(), GO2CfgPPO())
@@ -114,3 +120,6 @@ task_registry.register("go1_pact_water", Go1PACTWater, GO1PACTWaterCfg(), GO1PAC
 
 task_registry.register("go2_pact_pos", Go2PACTPos, GO2PACTPosCfg(), GO2PACTPosCfgPPO())
 task_registry.register("go2_pact", Go2PACT, GO2PACTCfg(), GO2PACTCfgPPO())
+
+task_registry.register("go2_kite", Go2KITE, GO2KITECfg(), GO2KITECfgPPO())
+task_registry.register("go2_kite_baseline", Go2KITEBaseline, GO2KITEBaselineCfg(), GO2KITEBaselineCfgPPO())
