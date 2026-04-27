@@ -266,6 +266,8 @@ class ActorCritic_PACT(nn.Module):
         self.std = nn.Parameter(init_noise_std * torch.ones(2*num_actions))
         self.num_actions = num_actions
         
+        self._std_clip_lwr = 0.1
+
         self.distribution = None
         
         self.current_obs = None
@@ -429,7 +431,10 @@ class ActorCritic_PACT(nn.Module):
     @torch.no_grad
     @torch.jit.ignore
     def _clip_std(self,):
-        self.std.data.clamp_(0.1, 5.0)
+        self.std.data.clamp_(self._std_clip_lwr, 5.0)
+
+    def _set_std_clip_lwr(self, clip_val=0.1):
+        self._std_clip_lwr = clip_val
 
     @torch.jit.ignore
     def update_distribution(self, curr_obs):

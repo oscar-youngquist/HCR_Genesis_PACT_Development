@@ -1191,17 +1191,19 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
                 self.first_loop = False
                 self.first_loop_feedback = self.feedback_torques.clone()
 
-                if not self._cfg.control.training:
-                    qref_target = qref * self._cfg.control.action_scale
-                    self.rl2ac_adaptive_ctrl.update_cmd(qref_target, pos_actions_scaled, self.feedback_torques.clone())
+            torques = self.feedback_torques
+
+            #     if not self._cfg.control.training:
+            #         qref_target = qref * self._cfg.control.action_scale
+            #         self.rl2ac_adaptive_ctrl.update_cmd(qref_target, pos_actions_scaled, self.feedback_torques.clone())
 
             
-            if self._cfg.control.training:
-                torques = self.feedback_torques
-            else:
-                self.rl2ac_adaptive_ctrl.update_state(self._dof_pos, self._dof_vel, self._dof_tau)
-                self.adaptive_torques = self.rl2ac_adaptive_ctrl.update_compensation(self.sim_dt)
-                torques = self.feedback_torques - self.adaptive_torques
+            # if self._cfg.control.training:
+            #     torques = self.feedback_torques
+            # else:
+            #     self.rl2ac_adaptive_ctrl.update_state(self._dof_pos, self._dof_vel, self._dof_tau)
+            #     self.adaptive_torques = self.rl2ac_adaptive_ctrl.update_compensation(self.sim_dt)
+            #     torques = self.feedback_torques - self.adaptive_torques
         
         elif self._cfg.control.type == "Tau":
             tau_actions = pos_actions * self._cfg.control.torque_scale
@@ -1273,7 +1275,7 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
     def _randomize_base_mass(self, env_ids=None):
         ''' Randomize base mass'''
         min_mass, max_mass = self.mass_min, self.mass_max_value
-        min_mass, max_mass = 14.0, 16.0
+        # min_mass, max_mass = 14.0, 16.0
         added_mass = gs.rand((len(env_ids), 1), dtype=float) * (max_mass - min_mass) + min_mass
         self._added_base_mass[env_ids] = added_mass[:].detach().clone()
         self._robot.set_mass_shift(added_mass, self._base_link_index, env_ids)

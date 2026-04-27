@@ -329,7 +329,7 @@ class Go1PACTPos(BaseTask):
             (
                 self.obs_buf,                                             # 57
                 self.simulator.base_lin_vel * self.obs_scales.lin_vel,    # 3
-                self.simulator._grfs_buf * self.obs_scales.grf,           # 12
+                # self.simulator._grfs_buf * self.obs_scales.grf,           # 12
                 self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain info around feet
                 self.simulator.link_contact_states[:,self.simulator.feet_indices],     # 4  - contact states of feet
                 # self.simulator.link_contact_states,                       # 17

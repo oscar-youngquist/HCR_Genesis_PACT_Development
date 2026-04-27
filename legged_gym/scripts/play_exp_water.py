@@ -184,7 +184,7 @@ def interaction_loop(train_cfg, env, policy, args):
     print("Min - self.feedback_tau_weight: ", torch.min(env.simulator.feedback_tau_weight).item())
     
     # interaction loop
-    for i in range(int(0.56*env.max_episode_length)):
+    for i in range(int(5.56*env.max_episode_length)):
         
         # env.commands[:, 0] = 1.0
         # env.commands[:, 1] = 0.0

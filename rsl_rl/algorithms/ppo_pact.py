@@ -130,6 +130,9 @@ class PPO_PACT:
     def test_mode(self):
         self.actor_critic.test()
 
+    def _set_std_clip_lwr(self, clip_val=0.1):
+        self.actor_critic._set_std_clip_lwr(clip_val)
+
     def set_entropy_coef(self, coef=1e-3):
         self.entropy_coef = coef
     
@@ -342,7 +345,7 @@ class PPO_PACT:
             if self.pinn_weight > 0.0 and self.pinn_weight_final > 0:
                 ppo_losses = [ppo_loss, self.pinn_weight * pinn_loss]
             elif self.pinn_weight > 0.0 and self.pinn_weight_final < 0:
-                ppo_losses = [ppo_loss, pinn_loss]
+                ppo_losses = [ppo_loss, 0.01*pinn_loss]
             else:
                 ppo_losses = [ppo_loss]
             

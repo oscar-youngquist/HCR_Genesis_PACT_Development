@@ -260,23 +260,42 @@ class OnPolicyRunnerPACT:
                 self.env.simulator._step_domian_rand(it)
 
             entropy_coef = self._init_entropy_coef
-            
-            half_ceof = self._init_entropy_coef * 0.5
+            std_lwr = 0.40
+
+            half_coef = self._init_entropy_coef * 0.5
             tenth_coef = self._init_entropy_coef * 0.1       
             
-            if it < 6000:
+            # if it < 6000:
+            #     entropy_coef = self._init_entropy_coef
+            # elif it < 6500:
+            #     new_coef = self._init_entropy_coef / 2.0
+            #     alpha = (it - 6000) / 500.0
+            #     entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
+            # elif it < 7000:
+            #     entropy_coef = half_coef
+            # elif it <7500:
+            #     alpha = (it - 7000) / 500.0
+            #     entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            # else:
+            #     entropy_coef = tenth_coef
+            
+            if it < 8000:
                 entropy_coef = self._init_entropy_coef
-            elif it < 6500:
-                new_coef = self._init_entropy_coef / 2.0
-                alpha = (it - 6000) / 500.0
-                entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
-            elif it < 7000:
-                entropy_coef = half_ceof
-            elif it <7500:
-                alpha = (it - 7000) / 500.0
-                entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
+                std_lwr = 0.10
+            elif it < 8500:
+                alpha = (it - 8000) / 500.0
+                entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
+                std_lwr = 0.10
+            elif it < 9000:
+                entropy_coef = half_coef
+                std_lwr = 0.10
+            elif it < 9500:
+                alpha = (it - 9000) / 500.0
+                entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+                std_lwr = 0.10
             else:
                 entropy_coef = tenth_coef
+                std_lwr = 0.10
 
             # if it < 6500:
             #     entropy_coef = self._init_entropy_coef
@@ -287,10 +306,12 @@ class OnPolicyRunnerPACT:
             #     entropy_coef = tenth_coef
 
             print(entropy_coef)
+            print("std_lwr - ", std_lwr)
 
             entropy_coef = max(entropy_coef, 0.00001)
             
             self.alg.set_entropy_coef(entropy_coef)
+            self.alg._set_std_clip_lwr(std_lwr)
 
 
             # if self.env.cfg.rewards.only_positive_rewards and it > 1000:

@@ -452,7 +452,7 @@ class PPO_PACT_Pos:
 
             # Keeps the interaction of incoming data with layer wieghts below the threashold that 
             #     saturates the tanh activation function.
-            # self.spectral_normalization(self.actor_critic, sigma_max=6.0)
+            self.spectral_normalization(self.actor_critic, sigma_max=6.0)
 
             timers["spec_norm"] += time.perf_counter() - t0
 

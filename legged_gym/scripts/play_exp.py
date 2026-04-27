@@ -19,7 +19,7 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -84,10 +84,14 @@ def override_configs(env_cfg, args):
     # Turn off/on domain randomization elements
     env_cfg.noise.add_noise = True
     # Disable some of the domain randomization (our payload will handle that now)
-    env_cfg.domain_rand.randomize_com_displacement = True
+    env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_base_mass = True
+    env_cfg.domain_rand.randomize_base_mass = False
+    
+    env_cfg.domain_rand.min_added_mass_max = 12.0
+    env_cfg.domain_rand.max_added_mass_max = 12.0
+    env_cfg.domain_rand.added_mass_min = 6.0
 
     # env_cfg.domain_rand.push_interval_max = 1.0
     # env_cfg.domain_rand.push_interval_min = 0.1
@@ -159,6 +163,8 @@ def interaction_loop(train_cfg, env, policy, args):
         obs_buf, privileged_obs_buf, obs_history, explicit_labels, next_states = env.get_observations()
     elif "pact" in task_name:
         obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
+    elif "pos" in task_name and "pact" not in task_name:
+        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
     elif "rl2ac" in task_name:
         obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
     else: # vanilla
@@ -210,6 +216,9 @@ def interaction_loop(train_cfg, env, policy, args):
             # print("obs_history - ", obs_history.cpu().numpy())
             actions = policy(obs_buf, obs_history)
             obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach())
+        elif "pos" in task_name and "pact" not in task_name:
+            actions = policy(obs_buf, obs_history)
+            obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos = env.step(actions.detach())
         elif "rl2ac" in task_name:
             actions, qref = policy(obs_buf, obs_history)
             obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach(), qref)
