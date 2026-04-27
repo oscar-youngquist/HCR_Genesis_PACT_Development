@@ -190,8 +190,6 @@ def interaction_loop(train_cfg, env, policy, args):
             env.commands[:, 2] = -joystick.rx
         
 
-        print(env.commands)
-
         # set the viewer camera to follow the first environment by default
         if args.follow_robot:
             pos = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.pos, dtype=np.float32)

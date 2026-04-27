@@ -133,7 +133,7 @@ class WaterDataLogger:
         if not buf["step"]:
             return
         fname = (f"{self._meta['robot_id']}_{self._meta['liquid_tank']}_"
-                 f"{self._meta['liquid_type']}_{int(self._meta['liquid_volume'])}L_"
+                 f"{self._meta['liquid_type']}_{int(self._meta['liquid_volume_L'])}L_"
                  f"env{env_id:02d}_ep{self._ep_idx[env_id]:04d}.h5")
         path = os.path.join(self._output_dir, fname)
         with h5py.File(path, "w") as f:
@@ -143,6 +143,7 @@ class WaterDataLogger:
             f.attrs["episode_idx"] = self._ep_idx[env_id]
             for k, lst in buf.items():
                 f.create_dataset(k, data=np.asarray(lst))
+        print(f"[water_logger] flushed env{env_id:02d} ep{self._ep_idx[env_id]:04d} ({len(buf['step'])} steps) -> {fname}", flush=True)
 
     def close(self):
         for e in range(self._num_envs):

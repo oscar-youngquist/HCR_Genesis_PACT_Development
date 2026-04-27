@@ -225,12 +225,10 @@ class GenesisSimulator_PACT_Water(Simulator):
         # pull out the new poses and oreintations
         new_base_poses = self._base_pos[envs_idx].clone().cpu().numpy()
 
-        print(new_base_poses)
         rob_init_pose = np.array(self._cfg.init_state.pos)
 
         height_offsets = new_base_poses[:,2] - (rob_init_pose[2])
         # height_offsets =  self._env_origins[envs_idx,2].cpu().numpy()
-        print(height_offsets)
 
         # Calculate the liquid pose offsets
         new_particle_pos_offset    = new_base_poses
@@ -240,12 +238,8 @@ class GenesisSimulator_PACT_Water(Simulator):
         # new_particle_posistions = quat_rotate_inverse(self._base_quat_offsets,
         #                                               self._liquid_init_pose[envs_idx]).cpu().numpy()
         new_particle_posistions = self._liquid_init_pose[envs_idx].cpu().numpy()
-        
-        print(new_particle_posistions[:,0:2])
-        
+
         new_particle_posistions += new_particle_pos_offset[:, None, :]
-        
-        print(new_particle_posistions[:,0:2])
         
         self._liquid.set_particles_pos(new_particle_posistions,
                                       envs_idx=envs_idx)
@@ -424,28 +418,12 @@ class GenesisSimulator_PACT_Water(Simulator):
             return
         
         elif num_iters <= self.push_warmup_step:
-            print("Push Value: ", self.push_value)
-            print("Wrench Value: ", self.wrench_value)
-            print("Vertical Push Value: ", self.vert_value)
-            print("Mass Max Value: ", self.mass_max_value)
-            print("COM Delta X Value: ", self.com_delta_x_value)
-            print("COM Delta Y Value: ", self.com_delta_y_value)
-            print("COM Delta Z Value: ", self.com_delta_z_value)
-            # print("Torque Limits - ", self.torque_limits[0])
             return
 
         adjusted_step = num_iters - self.push_warmup_step
-        
+
         # Safety catch, hopefully isn't needed really
         if adjusted_step == 0:
-            print("Push Value: ", self.push_value)
-            print("Wrench Value: ", self.wrench_value)
-            print("Vertical Push Value: ", self.vert_value)
-            print("Mass Max Value: ", self.mass_max_value)
-            print("COM Delta X Value: ", self.com_delta_x_value)
-            print("COM Delta Y Value: ", self.com_delta_y_value)
-            print("COM Delta Z Value: ", self.com_delta_z_value)
-            # print("Torque Limits - ", self.torque_limits[0])
             return
         
         elif adjusted_step % self.num_steps_per_jump == 0:
@@ -464,15 +442,6 @@ class GenesisSimulator_PACT_Water(Simulator):
             
             
             # self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
-
-        print("Push Value: ", self.push_value)
-        print("Wrench Value: ", self.wrench_value)
-        print("Vertical Push Value: ", self.vert_value)
-        print("Mass Max Value: ", self.mass_max_value)
-        print("COM Delta X Value: ", self.com_delta_x_value)
-        print("COM Delta Y Value: ", self.com_delta_y_value)
-        print("COM Delta Z Value: ", self.com_delta_z_value)
-        # print("Torque Limits - ", self.torque_limits[0])
 
     #----- Protected methods -----#
     def _parse_cfg(self):
