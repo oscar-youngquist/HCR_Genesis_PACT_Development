@@ -139,8 +139,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
 
     class domain_rand(LeggedRobotCfg.domain_rand):
         use_domainrand_curriculum = True
-        com_rand_z_positive = True
-        num_push_steps = 2000  # number of steps to increase the domain randomization ranges
+        com_rand_z_positive = False
+        num_push_steps = 1000  # number of steps to increase the domain randomization ranges
         push_warmup = 2000     # number of steps with initial values held constant
         num_jumps = 10
         
@@ -152,37 +152,37 @@ class GO1PACTCfg( LeggedRobotCfg ):
         # Randomized 6DOF torso wrench
         push_robots = True
         push_interval_max = 15.0
-        push_interval_min = 0.1
+        push_interval_min = 2.50
         max_push_vel_xy = 1.00
-        min_push_vel_xy = 1.00
+        min_push_vel_xy = 0.50
 
         max_vertical_push = 0.40
-        min_vertical_push = 0.20
+        min_vertical_push = 0.10
         vert_interval_max = 10.0
-        vert_interval_min = 0.1
+        vert_interval_min = 2.50
 
         max_push_torque = 2.50
-        min_push_torque = 1.00
-        wrench_timeout_min = 0.01
+        min_push_torque = 0.50
+        wrench_timeout_min = 1.00
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 6.0
+        min_added_mass_max = 3.0
         max_added_mass_max = 8.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
-        com_displacement_x_min = 0.15
+        com_displacement_x_min = 0.075
         com_displacement_x_max = 0.25
         
-        com_displacement_y_min = 0.12
+        com_displacement_y_min = 0.075
         com_displacement_y_max = 0.22
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.15
+        com_displacement_z_min = 0.075
         com_displacement_z_max = 0.25
         
         # Control delay
@@ -212,7 +212,17 @@ class GO1PACTCfg( LeggedRobotCfg ):
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 0.80]
         joint_damping_range_start = [0.30, 0.40]
+        
+        
+        # new domain randomization curriculum parameters
+        recovery_ratio = 0.70
+        min_reward_to_step = 10.0
+        step_interval = 10
+        reward_ema_alpha = 0.05
+        max_required_reward = 20.0
 
+        mass_com_progress_delta = 0.02
+        disturbance_progress_delta = 0.01
 
     # Taken from the Go1 config class in - 
     class noise (LeggedRobotCfg.noise):
@@ -436,7 +446,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
                                  }
 
             curr_steps = 1000
-            warmup_steps = 2000
+            warmup_steps = 8000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -479,7 +489,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.005
+        entropy_coef = 0.001
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
@@ -497,13 +507,13 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 7000 # number of policy updates
+        max_iterations = 10000 # number of policy updates
 
 
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_spec'
+        run_name = 'pact_100hz_spec_smartcurr'
         experiment_name = 'go1_pact_rough'
         save_interval = 100
         

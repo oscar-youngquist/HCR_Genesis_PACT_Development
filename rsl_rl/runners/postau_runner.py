@@ -244,41 +244,43 @@ class OnPolicyRunnerPosTau:
             
             # Step the domain randomization if approperiate
             if self.env.simulator.use_domainrand_curriculum:
-                self.env.simulator._step_domian_rand(it)
+                # self.env.simulator._step_domian_rand(it)
+                mean_reward = statistics.mean(rewbuffer) if len(rewbuffer) > 0 else None
+                self.env.simulator._step_domian_rand(it, mean_reward)
 
             # if it > 1000:
             #     self.alg.set_entropy_coef(1.0e-3)
             
-            entropy_coef = self._init_entropy_coef
-            std_lwr = 0.40
+            # entropy_coef = self._init_entropy_coef
+            # std_lwr = 0.40
 
-            half_coef = self._init_entropy_coef * 0.5
-            tenth_coef = self._init_entropy_coef * 0.1
+            # half_coef = self._init_entropy_coef * 0.5
+            # tenth_coef = self._init_entropy_coef * 0.1
             
-            if it < 8000:
-                entropy_coef = self._init_entropy_coef
-            elif it < 8500:
-                alpha = (it - 8000) / 500.0
-                entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
-            elif it < 9000:
-                entropy_coef = half_coef
-            elif it < 9500:
-                alpha = (it - 9000) / 500.0
-                entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
-            else:
-                entropy_coef = tenth_coef
+            # if it < 8000:
+            #     entropy_coef = self._init_entropy_coef
+            # elif it < 8500:
+            #     alpha = (it - 8000) / 500.0
+            #     entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
+            # elif it < 9000:
+            #     entropy_coef = half_coef
+            # elif it < 9500:
+            #     alpha = (it - 9000) / 500.0
+            #     entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            # else:
+            #     entropy_coef = tenth_coef
 
 
             # if it < 9000 and it >= 8000:
             #     alpha = (it - 8000) / 1000.0
             #     entropy_coef = tenth_coef + 0.5 * (self._init_entropy_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
             
-            entropy_coef = max(entropy_coef, 0.0001)
+            # entropy_coef = max(entropy_coef, 0.0001)
 
-            print("entropy_coef - ", entropy_coef)
+            # print("entropy_coef - ", entropy_coef)
             # print("std_lwr - ", std_lwr)
 
-            self.alg.set_entropy_coef(entropy_coef)
+            # self.alg.set_entropy_coef(entropy_coef)
             # self.alg._set_std_clip_lwr(std_lwr)
 
 

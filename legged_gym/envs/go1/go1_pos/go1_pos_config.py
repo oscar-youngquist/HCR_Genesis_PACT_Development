@@ -129,7 +129,7 @@ class GO1PosCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 4000     # number of steps with initial values held constant
+        push_warmup = 3000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -139,18 +139,18 @@ class GO1PosCfg( LeggedRobotCfg ):
         # Randomized 6DOF torso wrench
         push_robots = True
         push_interval_max = 15.0
-        push_interval_min = 0.1
+        push_interval_min = 2.50
         max_push_vel_xy = 1.00
         min_push_vel_xy = 0.50
 
         max_vertical_push = 0.40
-        min_vertical_push = 0.20
+        min_vertical_push = 0.10
         vert_interval_max = 10.0
-        vert_interval_min = 0.1
+        vert_interval_min = 2.50
 
         max_push_torque = 2.50
         min_push_torque = 0.50
-        wrench_timeout_min = 0.01
+        wrench_timeout_min = 1.00
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
@@ -161,15 +161,15 @@ class GO1PosCfg( LeggedRobotCfg ):
         
         # COM displacement crap
         randomize_com_displacement = True
-        com_displacement_x_min = 0.05
+        com_displacement_x_min = 0.075
         com_displacement_x_max = 0.25
         
-        com_displacement_y_min = 0.05
+        com_displacement_y_min = 0.075
         com_displacement_y_max = 0.22
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.05
+        com_displacement_z_min = 0.075
         com_displacement_z_max = 0.25
         
         # Control delay
@@ -200,6 +200,15 @@ class GO1PosCfg( LeggedRobotCfg ):
         joint_damping_range_end   = [0.00, 0.80]
         joint_damping_range_start = [0.30, 0.40]
 
+        # new domain randomization curriculum parameters
+        recovery_ratio = 0.70
+        min_reward_to_step = 10.0
+        step_interval = 10
+        reward_ema_alpha = 0.05
+        max_required_reward = 20.0
+
+        mass_com_progress_delta = 0.02
+        disturbance_progress_delta = 0.01
     class noise (LeggedRobotCfg.noise):
         add_noise = True
         noise_level = 1.0 # scales other values
@@ -304,7 +313,7 @@ class GO1PosCfg( LeggedRobotCfg ):
 
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
-        roll_threshold    = 0.7  # [rad] ~ 40 degrees
+        roll_threshold    = 0.87  # [rad] ~ 40 degrees
         pitch_threshold   = 1.0  # [rad] ~ 40 degrees
         height_min = 0.20       # [m]
         height_max = 1.50       # [m]
@@ -345,7 +354,7 @@ class GO1PosCfg( LeggedRobotCfg ):
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
             
-            dof_tracking      = 0.02
+            dof_tracking      = 0.00
             aligned_torques   = 0.00
             sparse_contacts   = 0.01
             
@@ -377,7 +386,7 @@ class GO1PosCfg( LeggedRobotCfg ):
             front_foot_overreach = -10000.0
 
             # gait
-            feet_air_time    = 1.00            # tracking reward for long steps
+            feet_air_time    = 0.70            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
             foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.05
@@ -404,8 +413,8 @@ class GO1PosCfg( LeggedRobotCfg ):
                                 #   "action_smoothness":[-0.0001,-0.01],
                                  }
 
-            curr_steps = 10
-            warmup_steps = 5000
+            curr_steps = 1000
+            warmup_steps = 8000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -446,8 +455,8 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
-        learning_rate = 1.0e-3 #
-        # learning_rate = 3.0e-4 #
+        # learning_rate = 1.0e-3 #
+        learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -469,7 +478,7 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         # debug_warmpinn_wb
         run_name = 'pos_100hz_spec'
         experiment_name = 'go1_pos_rough'
-        save_interval = 500
+        save_interval = 100
         
         
         load_run = "Apr24_21-53-16_pos_100hz_spec"
