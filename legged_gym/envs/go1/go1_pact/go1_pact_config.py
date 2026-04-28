@@ -140,8 +140,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
     class domain_rand(LeggedRobotCfg.domain_rand):
         use_domainrand_curriculum = True
         com_rand_z_positive = True
-        num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 4000     # number of steps with initial values held constant
+        num_push_steps = 2000  # number of steps to increase the domain randomization ranges
+        push_warmup = 2000     # number of steps with initial values held constant
         num_jumps = 10
         
         # Randomize Friction
@@ -154,7 +154,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         push_interval_max = 15.0
         push_interval_min = 0.1
         max_push_vel_xy = 1.00
-        min_push_vel_xy = 0.5
+        min_push_vel_xy = 1.00
 
         max_vertical_push = 0.40
         min_vertical_push = 0.20
@@ -162,27 +162,27 @@ class GO1PACTCfg( LeggedRobotCfg ):
         vert_interval_min = 0.1
 
         max_push_torque = 2.50
-        min_push_torque = 0.50
+        min_push_torque = 1.00
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 4.0
+        min_added_mass_max = 6.0
         max_added_mass_max = 8.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
-        com_displacement_x_min = 0.075
+        com_displacement_x_min = 0.15
         com_displacement_x_max = 0.25
         
-        com_displacement_y_min = 0.075
+        com_displacement_y_min = 0.12
         com_displacement_y_max = 0.22
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.05
+        com_displacement_z_min = 0.15
         com_displacement_z_max = 0.25
         
         # Control delay
@@ -229,7 +229,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
 
     class viewer:
         ref_env = 0
-        pos = [0.5, 1.5, 1.25]       # [m]
+        pos = [0.5, 1.5, 0.5]       # [m]
         lookat = [0., 0, 0.0]  # [m]
         rendered_envs_idx = [i for i in range(0, 3, 1)]  # number of environments to be rendered
         # rendered_envs_idx.extend([i for i in range(200, 203, 1)])  # number of environments to be rendered
@@ -363,7 +363,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # command tracking
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
-            dof_tracking      = 0.1
+            dof_tracking      = 0.05
             # sparse_contacts   = 0.1
 
             # coupled output specific rewards 
@@ -410,7 +410,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.05
             
-            foot_slip        = -0.01           # penalty for feet slipping
+            foot_slip        = -0.01          # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
         class reward_curriculum():
@@ -435,8 +435,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
                                   "dof_close_to_default":[-0.01, -0.10]
                                  }
 
-            curr_steps = 10
-            warmup_steps = 8000
+            curr_steps = 1000
+            warmup_steps = 2000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -479,7 +479,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.006
+        entropy_coef = 0.005
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
@@ -497,7 +497,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 10000 # number of policy updates
+        max_iterations = 7000 # number of policy updates
 
 
         grf_dim = 12
@@ -508,7 +508,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Apr24_13-14-33_pact_100hz_spec"
+        load_run = "Apr25_23-27-27_pact_100hz_spec"
         checkpoint = -1
         resume = False
-        exp_data_path = "exp_data/initial_corl_test/pact_plane_6-12kg.csv"
+        exp_data_path = "exp_data/initial_corl_test/pact_02_stairs_12-16kg.csv"

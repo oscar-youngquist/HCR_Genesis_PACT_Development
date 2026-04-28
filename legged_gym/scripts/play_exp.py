@@ -19,7 +19,7 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -87,11 +87,23 @@ def override_configs(env_cfg, args):
     env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_base_mass = False
+    env_cfg.domain_rand.randomize_base_mass = True
     
-    env_cfg.domain_rand.min_added_mass_max = 12.0
+    env_cfg.domain_rand.min_added_mass_max = 16.0
     env_cfg.domain_rand.max_added_mass_max = 12.0
-    env_cfg.domain_rand.added_mass_min = 6.0
+    env_cfg.domain_rand.added_mass_min = 12.0
+
+    # COM displacement crap
+    env_cfg.domain_rand.com_displacement_x_min = 0.15
+    env_cfg.domain_rand.com_displacement_x_max = 0.25
+    
+    env_cfg.domain_rand.com_displacement_y_min = 0.15
+    env_cfg.domain_rand.com_displacement_y_max = 0.22
+    
+    env_cfg.domain_rand.com_displacement_z_positive = False
+    env_cfg.domain_rand.com_displacement_z_min_pos = 0.1
+    env_cfg.domain_rand.com_displacement_z_min = 0.15
+    env_cfg.domain_rand.com_displacement_z_max = 0.25
 
     # env_cfg.domain_rand.push_interval_max = 1.0
     # env_cfg.domain_rand.push_interval_min = 0.1

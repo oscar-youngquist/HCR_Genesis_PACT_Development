@@ -595,6 +595,14 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         # This will be reset in the step_domian_rand function
         self.com_delta_z_val_bounds = [-self.com_delta_z_value, self.com_delta_z_value]
 
+        print("Push Value: ", self.push_value)
+        print("Wrench Value: ", self.wrench_value)
+        print("Vertical Push Value: ", self.vert_value)
+        print("Mass Max Value: ", self.mass_max_value)
+        print("COM Delta X Value: ", self.com_delta_x_value)
+        print("COM Delta Y Value: ", self.com_delta_y_value)
+        print("COM Delta Z Value: ", self.com_delta_z_value)
+
         # Tradeoff curriculum stuff
         self.feedforward_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
         self.feedback_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
@@ -1317,9 +1325,7 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
 
     def _randomize_base_mass(self, env_ids=None):
         ''' Randomize base mass'''
-        # min_mass, max_mass = self.mass_min, self.mass_max_value
-        min_mass, max_mass = 10.0, 12.0
-        # min_mass, max_mass = 0.0, 0.0
+        min_mass, max_mass = self.mass_min, self.mass_max_value
         added_mass = gs.rand((len(env_ids), 1), dtype=float) * (max_mass - min_mass) + min_mass
         self._added_base_mass[env_ids] = added_mass[:].detach().clone()
         self._robot.set_mass_shift(added_mass, self._base_link_index, env_ids)
