@@ -1,14 +1,17 @@
 """
 Loop over ALL_LIQUID_CONFIGS, run play_test_water.py for each.
-go2, 100 envs, headless. Skips configs that already have HDF5 files in any
-prior timestamped run dir under exp_data/water_collect/go2/*_<vol>L<liq>_<tank>/.
+go2, 100 envs, headless. One timestamped sweep dir; one sub-dir per config.
 
     SIMULATOR=genesis_pact_water python legged_gym/scripts/collect_all_water.py
+
+Output layout:
+    exp_data/water_collect/go2/<sweep_stamp>/<vol>L<liq>_<tank>/*.h5
 """
 import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from legged_gym.scripts.liquid_payload_configs import ALL_LIQUID_CONFIGS
@@ -19,10 +22,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 OUT_ROOT = REPO_ROOT / "exp_data" / "water_collect"
 ROBOT_DIR = OUT_ROOT / "go2"
 
-
-def _config_existing_files(liquid_type, volume, tank):
-    pattern = f"*_{int(volume)}L{liquid_type}_{tank}"
-    return [p for d in ROBOT_DIR.glob(pattern) if d.is_dir() for p in d.glob("*.h5")]
+SWEEP_STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+SWEEP_DIR = ROBOT_DIR / SWEEP_STAMP
 
 
 def _fmt_hms(seconds):
@@ -56,6 +57,7 @@ def _slurm_wall_remaining_s():
 configs = list(ALL_LIQUID_CONFIGS)
 total_volume = sum(v for _, v, _ in configs)
 print(f"=== SWEEP START: {len(configs)} configs, total volume sum = {total_volume:g}L ===", flush=True)
+print(f"=== SWEEP DIR: {SWEEP_DIR} ===", flush=True)
 for i, (lt, v, tk) in enumerate(configs, start=1):
     print(f"  [{i:2d}] {lt:5s} {v:g}L {tk}", flush=True)
 wall_init = _slurm_wall_remaining_s()
@@ -68,12 +70,7 @@ done_volume = 0.0
 done_elapsed = 0.0
 for i, (liquid_type, volume, tank) in enumerate(configs, start=1):
     tag = f"[{i}/{len(configs)}] {liquid_type}-{volume}L-{tank}"
-
-    pre_existing = _config_existing_files(liquid_type, volume, tank)
-    if pre_existing:
-        print(f"{tag} skip ({len(pre_existing)} existing files)", flush=True)
-        results.append((tag, "skip", 0, len(pre_existing)))
-        continue
+    config_dir = SWEEP_DIR / f"{int(volume)}L{liquid_type}_{tank}"
 
     print(f"{tag} START  cumulative_sweep_elapsed={_fmt_hms(time.time()-sweep_t0)}", flush=True)
     cfg_t0 = time.time()
@@ -84,10 +81,11 @@ for i, (liquid_type, volume, tank) in enumerate(configs, start=1):
         "--liquid_type", liquid_type,
         "--liquid_volume", str(volume),
         "--liquid_tank", tank,
+        "--output_dir", str(config_dir),
         "--headless",
     ], cwd=REPO_ROOT)
     cfg_elapsed = time.time() - cfg_t0
-    n_files = len(_config_existing_files(liquid_type, volume, tank))
+    n_files = len(list(config_dir.glob("*.h5"))) if config_dir.exists() else 0
     status = "OK" if result.returncode == 0 else f"FAIL(rc={result.returncode})"
     print(f"{tag} END {status}  config_elapsed={_fmt_hms(cfg_elapsed)} ({cfg_elapsed:.0f}s)  files_written={n_files}", flush=True)
     results.append((tag, status, cfg_elapsed, n_files))

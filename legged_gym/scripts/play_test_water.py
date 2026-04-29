@@ -136,10 +136,13 @@ def interaction_loop(train_cfg, env, policy, args):
     robot_index = 0  # index used by camera-follow / debug prints
 
     robot_id = args.task.split("_")[0]
-    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    water_out_dir = os.path.join(
-        "exp_data", "water_collect", robot_id,
-        f"{run_stamp}_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}")
+    if args.output_dir:
+        water_out_dir = args.output_dir
+    else:
+        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        water_out_dir = os.path.join(
+            "exp_data", "water_collect", robot_id, run_stamp,
+            f"{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}")
     water_logger = WaterDataLogger(env, args, water_out_dir)
 
     def _on_term(signum, frame):
@@ -343,6 +346,7 @@ if __name__ == '__main__':
     parser.add_argument('--liquid_type',   type=str, default='water', choices=['water', 'oil', 'gas'])
     parser.add_argument('--liquid_volume', type=float, default=4.0)
     parser.add_argument('--liquid_tank', type=str, default="default", choices=["default", "wide", "tall", "offset"])
+    parser.add_argument('--output_dir',  type=str, default=None, help="if set, write HDF5s here directly; else build a default path")
 
     args = parser.parse_args()
     if args.gpu is None:
