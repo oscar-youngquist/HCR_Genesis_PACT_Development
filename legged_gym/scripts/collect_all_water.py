@@ -18,6 +18,7 @@ from legged_gym.scripts.liquid_payload_configs import ALL_LIQUID_CONFIGS
 
 TASK = "go2_pact_water"
 NUM_ENVS = 100
+MAX_CONFIGS = 3   # only run the first N configs from ALL_LIQUID_CONFIGS; set to None for full sweep
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUT_ROOT = REPO_ROOT / "exp_data" / "water_collect"
 ROBOT_DIR = OUT_ROOT / "go2"
@@ -55,8 +56,10 @@ def _slurm_wall_remaining_s():
 
 
 configs = list(ALL_LIQUID_CONFIGS)
+if MAX_CONFIGS is not None:
+    configs = configs[:MAX_CONFIGS]
 total_volume = sum(v for _, v, _ in configs)
-print(f"=== SWEEP START: {len(configs)} configs, total volume sum = {total_volume:g}L ===", flush=True)
+print(f"=== SWEEP START: {len(configs)} configs (of {len(ALL_LIQUID_CONFIGS)} total), volume sum = {total_volume:g}L ===", flush=True)
 print(f"=== SWEEP DIR: {SWEEP_DIR} ===", flush=True)
 for i, (lt, v, tk) in enumerate(configs, start=1):
     print(f"  [{i:2d}] {lt:5s} {v:g}L {tk}", flush=True)
