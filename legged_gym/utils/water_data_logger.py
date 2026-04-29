@@ -15,6 +15,8 @@ def _np(x):
 
 
 class WaterDataLogger:
+    FLUSH_INTERVAL_STEPS = 200
+
     def __init__(self, env, args, output_dir):
         self._env = env
         self._sim = env.simulator
@@ -68,6 +70,13 @@ class WaterDataLogger:
 
         self._buf = [self._new_buf() for _ in range(self._num_envs)]
         self._ep_idx = [0] * self._num_envs
+        self._files = [None] * self._num_envs
+        self._n_flushed = 0
+        print(f"[water_logger] init: num_envs={self._num_envs} out={self._output_dir} "
+              f"flush_every={self.FLUSH_INTERVAL_STEPS} steps", flush=True)
+        print(f"[water_logger]   liquid={self._meta['liquid_type']} {self._meta['liquid_volume_L']:g}L "
+              f"tank={self._meta['liquid_tank']} mass={self._meta['liquid_mass_kg_effective']:.3f}kg "
+              f"control_dt={self._meta['control_dt']:.4f}s", flush=True)
 
     def _new_buf(self):
         return {k: [] for k in (
@@ -83,6 +92,9 @@ class WaterDataLogger:
         )}
 
     def log_step(self, step_idx, actions, dones):
+        if step_idx > 0 and step_idx % 200 == 0:
+            print(f"[water_logger] step={step_idx} flushed_so_far={self._n_flushed} "
+                  f"buffered_envs={sum(1 for b in self._buf if b['step'])}", flush=True)
         sim, env = self._sim, self._env
         N = self._num_envs
 
@@ -124,29 +136,74 @@ class WaterDataLogger:
             b["tau_motor"].append(tau_motor[e])
 
             if dones_np[e]:
-                self._flush(e)
-                self._buf[e] = self._new_buf()
-                self._ep_idx[e] += 1
+                self._finalize_episode(e)
 
-    def _flush(self, env_id):
+        if step_idx > 0 and step_idx % self.FLUSH_INTERVAL_STEPS == 0:
+            for e in range(N):
+                if self._buf[e]["step"]:
+                    self._flush_chunk(e)
+
+    def _ensure_open(self, env_id):
+        if self._files[env_id] is not None:
+            return self._files[env_id]
+        try:
+            fname = (f"{self._meta['robot_id']}_{self._meta['liquid_tank']}_"
+                     f"{self._meta['liquid_type']}_{int(self._meta['liquid_volume_L'])}L_"
+                     f"env{env_id:02d}_ep{self._ep_idx[env_id]:04d}.h5")
+        except KeyError as ke:
+            print(f"[water_logger] OPEN FAILED env{env_id}: missing meta key {ke!r}; "
+                  f"available = {sorted(self._meta.keys())}", flush=True)
+            raise
+        path = os.path.join(self._output_dir, fname)
+        f = h5py.File(path, "w")
+        for k, v in self._meta.items():
+            f.attrs[k] = v
+        f.attrs["env_id"] = env_id
+        f.attrs["episode_idx"] = self._ep_idx[env_id]
+        self._files[env_id] = f
+        return f
+
+    def _flush_chunk(self, env_id):
         buf = self._buf[env_id]
         if not buf["step"]:
             return
-        fname = (f"{self._meta['robot_id']}_{self._meta['liquid_tank']}_"
-                 f"{self._meta['liquid_type']}_{int(self._meta['liquid_volume_L'])}L_"
-                 f"env{env_id:02d}_ep{self._ep_idx[env_id]:04d}.h5")
-        path = os.path.join(self._output_dir, fname)
-        with h5py.File(path, "w") as f:
-            for k, v in self._meta.items():
-                f.attrs[k] = v
-            f.attrs["env_id"] = env_id
-            f.attrs["episode_idx"] = self._ep_idx[env_id]
-            for k, lst in buf.items():
-                f.create_dataset(k, data=np.asarray(lst))
-        print(f"[water_logger] flushed env{env_id:02d} ep{self._ep_idx[env_id]:04d} ({len(buf['step'])} steps) -> {fname}", flush=True)
+        f = self._ensure_open(env_id)
+        n_new = len(buf["step"])
+        for k, lst in buf.items():
+            arr = np.asarray(lst)
+            if k in f:
+                ds = f[k]
+                old_n = ds.shape[0]
+                ds.resize((old_n + n_new,) + ds.shape[1:])
+                ds[old_n:] = arr
+            else:
+                maxshape = (None,) + arr.shape[1:]
+                f.create_dataset(k, data=arr, maxshape=maxshape, chunks=True)
+        f.flush()
+        self._buf[env_id] = self._new_buf()
+
+    def _finalize_episode(self, env_id):
+        if self._buf[env_id]["step"]:
+            self._flush_chunk(env_id)
+        f = self._files[env_id]
+        if f is None:
+            return
+        path = f.filename
+        n_steps = f["step"].shape[0]
+        f.close()
+        self._files[env_id] = None
+        self._n_flushed += 1
+        sz_kb = os.path.getsize(path) // 1024
+        print(f"[water_logger] finalized env{env_id:02d} ep{self._ep_idx[env_id]:04d} "
+              f"({n_steps} steps, {sz_kb} KB) -> {os.path.basename(path)}  [total={self._n_flushed}]", flush=True)
+        self._ep_idx[env_id] += 1
 
     def close(self):
+        n_pending = sum(1 for b in self._buf if b["step"])
+        n_open = sum(1 for f in self._files if f is not None)
+        print(f"[water_logger] close: {n_pending} buffered envs, {n_open} open files "
+              f"(already finalized {self._n_flushed})", flush=True)
         for e in range(self._num_envs):
-            if self._buf[e]["step"]:
-                self._flush(e)
-                self._buf[e] = self._new_buf()
+            if self._buf[e]["step"] or self._files[e] is not None:
+                self._finalize_episode(e)
+        print(f"[water_logger] close: done. final flushed total = {self._n_flushed}", flush=True)

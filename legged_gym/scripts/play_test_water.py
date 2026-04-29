@@ -1,5 +1,6 @@
 from legged_gym import *
 import os
+import time
 from datetime import datetime
 
 from legged_gym.envs import *
@@ -20,7 +21,7 @@ def override_configs(env_cfg, train_cfg, args):
     """
     task_name = args.task
     # number of environments
-    env_cfg.env.num_envs = 100
+    env_cfg.env.num_envs = args.num_envs if args.num_envs is not None else 100
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -179,7 +180,25 @@ def interaction_loop(train_cfg, env, policy, args):
     
     # N episodes per env: loop past N timeouts, + margin for the last episode to terminate cleanly
     num_episodes_per_env = 1
-    for i in range(num_episodes_per_env * int(env.max_episode_length) + 100):
+    n_iters = num_episodes_per_env * int(env.max_episode_length) + 100
+    loop_t0 = time.time()
+    print(f"[play_test_water] interaction loop start: {n_iters} iters, num_envs={env.cfg.env.num_envs}, "
+          f"max_episode_length={int(env.max_episode_length)}", flush=True)
+    projected_printed = False
+    for i in range(n_iters):
+        if i > 0 and i % 100 == 0:
+            elapsed = time.time() - loop_t0
+            rate = i / elapsed if elapsed > 0 else 0
+            eta_s = (n_iters - i) / rate if rate > 0 else 0
+            eta_h, eta_m = int(eta_s // 3600), int((eta_s % 3600) // 60)
+            print(f"[play_test_water] step {i}/{n_iters}  elapsed={elapsed:.1f}s  "
+                  f"rate={rate:.2f} step/s  eta={eta_h}h{eta_m:02d}m ({eta_s:.0f}s)", flush=True)
+            if not projected_printed:
+                total_s = n_iters / rate if rate > 0 else 0
+                th, tm = int(total_s // 3600), int((total_s % 3600) // 60)
+                print(f"[play_test_water] *** PROJECTED CONFIG WALL TIME: {th}h{tm:02d}m "
+                      f"({total_s:.0f}s) at {rate:.2f} step/s ***", flush=True)
+                projected_printed = True
         
         # env.commands[:, 0] = 1.0
         # env.commands[:, 1] = 0.0
