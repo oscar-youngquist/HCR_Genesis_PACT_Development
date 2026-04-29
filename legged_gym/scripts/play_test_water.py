@@ -178,9 +178,10 @@ def interaction_loop(train_cfg, env, policy, args):
     print("Max - self.feedback_tau_weight: ", torch.max(env.simulator.feedback_tau_weight).item())
     print("Min - self.feedback_tau_weight: ", torch.min(env.simulator.feedback_tau_weight).item())
     
-    # N episodes per env: loop past N timeouts, + margin for the last episode to terminate cleanly
+    # N episodes per env: loop exactly N × max_episode_length so the final timeout becomes a clean done.
+    # close() flushes any open buffers afterwards, so no margin is needed.
     num_episodes_per_env = 1
-    n_iters = num_episodes_per_env * int(env.max_episode_length) + 100
+    n_iters = num_episodes_per_env * int(env.max_episode_length)
     loop_t0 = time.time()
     print(f"[play_test_water] interaction loop start: {n_iters} iters, num_envs={env.cfg.env.num_envs}, "
           f"max_episode_length={int(env.max_episode_length)}", flush=True)
