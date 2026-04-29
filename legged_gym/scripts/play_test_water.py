@@ -1,5 +1,7 @@
 from legged_gym import *
 import os
+import signal
+import sys
 import time
 from datetime import datetime
 
@@ -139,6 +141,13 @@ def interaction_loop(train_cfg, env, policy, args):
         "exp_data", "water_collect", robot_id,
         f"{run_stamp}_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}")
     water_logger = WaterDataLogger(env, args, water_out_dir)
+
+    def _on_term(signum, frame):
+        print(f"[play_test_water] caught signal {signum}; flushing logger before exit", flush=True)
+        water_logger.close()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _on_term)
+    signal.signal(signal.SIGINT, _on_term)
 
     # Get initial observations according to task type
     task_name = args.task
