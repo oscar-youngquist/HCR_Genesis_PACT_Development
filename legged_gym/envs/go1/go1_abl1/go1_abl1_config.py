@@ -152,23 +152,23 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
         # Randomized 6DOF torso wrench
         push_robots = True
         push_interval_max = 15.0
-        push_interval_min = 0.1
+        push_interval_min = 2.50
         max_push_vel_xy = 1.00
-        min_push_vel_xy = 0.5
+        min_push_vel_xy = 0.50
 
         max_vertical_push = 0.40
-        min_vertical_push = 0.20
+        min_vertical_push = 0.10
         vert_interval_max = 10.0
-        vert_interval_min = 0.1
+        vert_interval_min = 2.50
 
         max_push_torque = 2.50
         min_push_torque = 0.50
-        wrench_timeout_min = 0.01
+        wrench_timeout_min = 1.00
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 4.0
+        min_added_mass_max = 3.0
         max_added_mass_max = 8.0
         added_mass_min = -1.0
         
@@ -182,7 +182,7 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.05
+        com_displacement_z_min = 0.075
         com_displacement_z_max = 0.25
         
         # Control delay
@@ -212,6 +212,16 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 0.80]
         joint_damping_range_start = [0.30, 0.40]
+        
+        # new domain randomization curriculum parameters
+        recovery_ratio = 0.70
+        min_reward_to_step = 10.0
+        step_interval = 10
+        reward_ema_alpha = 0.05
+        max_required_reward = 20.0
+
+        mass_com_progress_delta = 0.02
+        disturbance_progress_delta = 0.01
 
 
     # Taken from the Go1 config class in - 
@@ -364,7 +374,7 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
             
-            dof_tracking      = 0.1
+            dof_tracking      = 0.05
             # sparse_contacts   = 0.0
 
             # coupled output specific rewards 
@@ -406,7 +416,7 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
             front_foot_overreach = -10000.0
 
             # gait
-            feet_air_time    = 1.00            # tracking reward for long steps
+            feet_air_time    = 0.70            # tracking reward for long steps
             # foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance      
             foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.05
@@ -426,7 +436,7 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
             
             curr_reward_bounds = {
                                   "ang_vel_xy":[-0.05, -0.2],
-                                  "orientation":[-0.2,-2.0],
+                                  "orientation":[-0.2,-1.0],
                                   "torque_limits":[-1.0e-4, -0.01],
                                 #   "action_rate":[-1.0e-3, -0.01],
                                 #   "action_smoothness":[-1.0e-3,-0.01],
@@ -434,8 +444,8 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
                                   "dof_close_to_default":[-0.01, -0.10],
                                  }
 
-            curr_steps = 10
-            warmup_steps = 5000
+            curr_steps = 1000
+            warmup_steps = 6000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -478,9 +488,9 @@ class GO1ABL1CfgPPO( LeggedRobotCfgPPO ):
         pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr25_19-03-47_pact_posboot_100hz_nogrf/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.005
-        learning_rate = 1.0e-3 #
-        # learning_rate = 3.0e-4 #
+        entropy_coef = 0.001
+        # learning_rate = 1.0e-3 #
+        learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -496,15 +506,15 @@ class GO1ABL1CfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_ABL1'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 10000 # number of policy updates
+        max_iterations = 8000 # number of policy updates
 
 
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'abl1_100hz_spec_materr'
+        run_name = 'abl1_100hz_spec_smartcurr'
         experiment_name = 'go1_abl1_rough'
-        save_interval = 500
+        save_interval = 100
         
         
         load_run = "Apr11_20-18-37_pact_100hz_spec_scratch"

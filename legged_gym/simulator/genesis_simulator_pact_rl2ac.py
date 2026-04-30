@@ -67,9 +67,11 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
         self._last_base_world_ang_vel[:] = self._base_world_ang_vel[:]
 
         self.first_loop = True
+        self.ctrl_loop_counter = 0
 
         for _ in range(self._cfg.control.decimation):
             self._torques = self._compute_torques(actions, qref)
+            self.ctrl_loop_counter += 1
             
             self._robot.control_dofs_force(
                 self._torques, self._dof_indices)
@@ -1173,37 +1175,54 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
         torques = None
         
         if self._cfg.control.type == "PD":
+        #    If we are training, run this every step
             # Process feedback torque first
             pos_actions_scaled = pos_actions * self._cfg.control.action_scale + self._default_dof_pos
+            if self._cfg.control.training:                
+                # get two dimensional gains
+                if self._p_gains.ndim == 1:
+                    self._p_gains = self._p_gains.unsqueeze(0).repeat(self._num_envs, 1)
+                    self._d_gains = self._d_gains.unsqueeze(0).repeat(self._num_envs, 1)
+                
+                self.feedback_torques = (
+                    self._kp_scale * self._p_gains * (pos_actions_scaled - self._dof_pos)
+                    - self._kd_scale * self._d_gains * self._dof_vel
+                )
+                # now compute feedforward torques
+                if self.first_loop:
+                    self.first_loop = False
+                    self.first_loop_feedback = self.feedback_torques.clone()
             
-            # get two dimensional gains
-            if self._p_gains.ndim == 1:
-                self._p_gains = self._p_gains.unsqueeze(0).repeat(self._num_envs, 1)
-                self._d_gains = self._d_gains.unsqueeze(0).repeat(self._num_envs, 1)
+            # if w ARENT training, run this every other loop
+            elif self.ctrl_loop_counter % 2 == 0:
+                # get two dimensional gains
+                if self._p_gains.ndim == 1:
+                    self._p_gains = self._p_gains.unsqueeze(0).repeat(self._num_envs, 1)
+                    self._d_gains = self._d_gains.unsqueeze(0).repeat(self._num_envs, 1)
+                
+                self.feedback_torques = (
+                    self._kp_scale * self._p_gains * (pos_actions_scaled - self._dof_pos)
+                    - self._kd_scale * self._d_gains * self._dof_vel
+                )
+
+                # now compute feedforward torques
+                if self.first_loop:
+                    self.first_loop = False
+                    self.first_loop_feedback = self.feedback_torques.clone()
             
-            self.feedback_torques = (
-                self._kp_scale * self._p_gains * (pos_actions_scaled - self._dof_pos)
-                - self._kd_scale * self._d_gains * self._dof_vel
-            )
-
-            # now compute feedforward torques
-            if self.first_loop:
-                self.first_loop = False
-                self.first_loop_feedback = self.feedback_torques.clone()
-
             torques = self.feedback_torques
 
-            #     if not self._cfg.control.training:
-            #         qref_target = qref * self._cfg.control.action_scale
-            #         self.rl2ac_adaptive_ctrl.update_cmd(qref_target, pos_actions_scaled, self.feedback_torques.clone())
+            if not self._cfg.control.training:
+                qref_target = qref * self._cfg.control.action_scale
+                self.rl2ac_adaptive_ctrl.update_cmd(qref_target, pos_actions_scaled, self.feedback_torques.clone())
 
             
-            # if self._cfg.control.training:
-            #     torques = self.feedback_torques
-            # else:
-            #     self.rl2ac_adaptive_ctrl.update_state(self._dof_pos, self._dof_vel, self._dof_tau)
-            #     self.adaptive_torques = self.rl2ac_adaptive_ctrl.update_compensation(self.sim_dt)
-            #     torques = self.feedback_torques - self.adaptive_torques
+            if self._cfg.control.training:
+                torques = self.feedback_torques
+            else:
+                self.rl2ac_adaptive_ctrl.update_state(self._dof_pos, self._dof_vel, self._dof_tau)
+                self.adaptive_torques = self.rl2ac_adaptive_ctrl.update_compensation(self.sim_dt)
+                torques = self.feedback_torques - self.adaptive_torques
         
         elif self._cfg.control.type == "Tau":
             tau_actions = pos_actions * self._cfg.control.torque_scale
@@ -1213,6 +1232,8 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
         # torques = (self.feedforward_tau_weight) * self.feedforward_torques + (self.feedback_tau_weight)*self.feedback_torques
 
         torques = self._motor_strength * torques
+        
+        self.feedforward_torques = torch.zeros_like(torques)
 
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
         # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)

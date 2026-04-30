@@ -90,19 +90,19 @@ def override_configs(env_cfg, args):
     env_cfg.domain_rand.randomize_base_mass = True
     
     env_cfg.domain_rand.min_added_mass_max = 16.0
-    env_cfg.domain_rand.max_added_mass_max = 12.0
+    env_cfg.domain_rand.max_added_mass_max = 16.0
     env_cfg.domain_rand.added_mass_min = 12.0
 
     # COM displacement crap
-    env_cfg.domain_rand.com_displacement_x_min = 0.15
+    env_cfg.domain_rand.com_displacement_x_min = 0.12
     env_cfg.domain_rand.com_displacement_x_max = 0.25
     
-    env_cfg.domain_rand.com_displacement_y_min = 0.15
+    env_cfg.domain_rand.com_displacement_y_min = 0.12
     env_cfg.domain_rand.com_displacement_y_max = 0.22
     
     env_cfg.domain_rand.com_displacement_z_positive = False
     env_cfg.domain_rand.com_displacement_z_min_pos = 0.1
-    env_cfg.domain_rand.com_displacement_z_min = 0.15
+    env_cfg.domain_rand.com_displacement_z_min = 0.12
     env_cfg.domain_rand.com_displacement_z_max = 0.25
 
     # env_cfg.domain_rand.push_interval_max = 1.0
@@ -195,7 +195,7 @@ def interaction_loop(train_cfg, env, policy, args):
         env.simulator._floating_camera.start_recording()
 
     # interaction loop
-    for i in range(int(5.05*env.max_episode_length)):
+    for i in range(int(2.01*env.max_episode_length)):
 
         # update commands from joystick
         if args.use_joystick:
@@ -281,10 +281,10 @@ def interaction_loop(train_cfg, env, policy, args):
                 'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
                 'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
                 'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
-                # 'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
+                'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
                 'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
                 'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
-                # 'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
+                'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
                 'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
                 'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist()))
             })

@@ -208,8 +208,8 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
             cfg_train.runner.resume = args.resume
         if args.sync_wandb:
             cfg_train.runner.sync_wandb = args.sync_wandb
-        if args.ckpt is not None:
-            cfg_train.runner.checkpoint = args.ckpt
+        # if args.ckpt is not None:
+        #     cfg_train.runner.checkpoint = args.ckpt
         if args.load_run is not None:
             cfg_train.runner.load_run = args.load_run
 

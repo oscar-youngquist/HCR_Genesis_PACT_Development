@@ -148,29 +148,29 @@ class GO1PosCfg( LeggedRobotCfg ):
         vert_interval_max = 10.0
         vert_interval_min = 2.50
 
-        max_push_torque = 2.50
+        max_push_torque = 1.00
         min_push_torque = 0.50
         wrench_timeout_min = 1.00
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 3.0
+        min_added_mass_max = 4.0
         max_added_mass_max = 8.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.25
+        com_displacement_x_max = 0.15
         
         com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.22
+        com_displacement_y_max = 0.15
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
         com_displacement_z_min = 0.075
-        com_displacement_z_max = 0.25
+        com_displacement_z_max = 0.15
         
         # Control delay
         randomize_ctrl_delay = True
@@ -201,14 +201,18 @@ class GO1PosCfg( LeggedRobotCfg ):
         joint_damping_range_start = [0.30, 0.40]
 
         # new domain randomization curriculum parameters
-        recovery_ratio = 0.70
-        min_reward_to_step = 10.0
-        step_interval = 10
-        reward_ema_alpha = 0.05
-        max_required_reward = 20.0
+        best_reward_window = 200        # amount of history used to capture recent performance.
+        best_reward_quantile = 0.90     # quantile for determining "max" performance over history window.
 
-        mass_com_progress_delta = 0.02
-        disturbance_progress_delta = 0.01
+        recovery_ratio = 0.90           # allowable deivation from quantile of history window
+        step_interval = 10              # minimum number of iterations before taking next domain rand step
+        
+        
+        reward_ema_alpha = 0.05         # ema value for tracking 
+        min_reward_to_step = 0.60       # minimum reward threashold for stepping (i.e. the performance must always be above this for a step to occur, regardless of the historical performance.) 
+
+        mass_com_progress_delta = 0.01      # domain rand step delta for stepping payload parameters
+        disturbance_progress_delta = 0.01   # domain rand step delta for external disturbance parameters
     class noise (LeggedRobotCfg.noise):
         add_noise = True
         noise_level = 1.0 # scales other values
@@ -414,7 +418,7 @@ class GO1PosCfg( LeggedRobotCfg ):
                                  }
 
             curr_steps = 1000
-            warmup_steps = 8000
+            warmup_steps = 7000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -454,7 +458,7 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.01
+        entropy_coef = 0.02
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
@@ -472,7 +476,7 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PosTau'
         algorithm_class_name = 'PPO_PosTau'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 10000 # number of policy updates
+        max_iterations = 8000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb
@@ -481,7 +485,7 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Apr24_21-53-16_pos_100hz_spec"
-        checkpoint = -1
+        load_run = "Apr28_21-07-48_pos_100hz_spec"
+        checkpoint = 3000
         resume = False
-        exp_data_path = "exp_data/initial_corl_test/pos_stairs_12-16kg.csv"
+        exp_data_path = "exp_data/corl_intermediate_test/pos_plane_12-16kg.csv"

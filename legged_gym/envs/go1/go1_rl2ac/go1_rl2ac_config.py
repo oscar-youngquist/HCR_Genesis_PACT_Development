@@ -93,6 +93,23 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
             'FR_calf_joint': -1.5,   # [rad]
             'RR_calf_joint': -1.5,   # [rad]
         }
+        
+        # default_joint_angles = { # = target angles [rad] when action = 0.0
+        #     'FL_hip_joint': 0.1,     # [rad]
+        #     'RL_hip_joint': 0.1,     # [rad]
+        #     'FR_hip_joint': -0.1 ,    # [rad]
+        #     'RR_hip_joint': -0.1,     # [rad]
+
+        #     'FL_thigh_joint': 0.8,   # [rad]
+        #     'RL_thigh_joint': 1.0,   # [rad]
+        #     'FR_thigh_joint': 0.8,   # [rad]
+        #     'RR_thigh_joint': 1.0,   # [rad]
+
+        #     'FL_calf_joint': -1.5,   # [rad]
+        #     'RL_calf_joint': -1.5,   # [rad]
+        #     'FR_calf_joint': -1.5,   # [rad]
+        #     'RR_calf_joint': -1.5,   # [rad]
+        # }
 
         default_joint_torques = { # = target joint torques [nM] when action = 0.0
             'FR_hip_joint':  0.0,   # [nM]
@@ -139,38 +156,38 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         # Randomized 6DOF torso wrench
         push_robots = True
         push_interval_max = 15.0
-        push_interval_min = 0.1
+        push_interval_min = 2.50
         max_push_vel_xy = 1.00
         min_push_vel_xy = 0.50
 
-        max_vertical_push = 0.20
-        min_vertical_push = 0.20
+        max_vertical_push = 0.10
+        min_vertical_push = 0.10
         vert_interval_max = 10.0
-        vert_interval_min = 0.1
+        vert_interval_min = 2.50
 
         max_push_torque = 0.50
         min_push_torque = 0.50
-        wrench_timeout_min = 0.01
+        wrench_timeout_min = 1.00
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 3.0
-        max_added_mass_max = 3.0
+        min_added_mass_max = 4.0
+        max_added_mass_max = 4.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
-        com_displacement_x_min = 0.05
-        com_displacement_x_max = 0.05
+        com_displacement_x_min = 0.075
+        com_displacement_x_max = 0.075
         
-        com_displacement_y_min = 0.05
-        com_displacement_y_max = 0.05
+        com_displacement_y_min = 0.075
+        com_displacement_y_max = 0.075
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.05
-        com_displacement_z_max = 0.05
+        com_displacement_z_min = 0.075
+        com_displacement_z_max = 0.075
         
         # Control delay
         randomize_ctrl_delay = True
@@ -286,6 +303,9 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         stiffness = {'joint': 30.0}   # [N*m/rad]
         damping   = {'joint': 0.60}     # [N*m*s/rad]
         
+        # stiffness = {'joint': 50.0}   # [N*m/rad]
+        # damping   = {'joint': 1.00}     # [N*m*s/rad]
+        
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
         
@@ -326,7 +346,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
 
-        use_reward_curriculum = False
+        use_reward_curriculum = True
 
         max_contact_force = 200.0
         class scales( LeggedRobotCfg.rewards.scales ):
@@ -347,7 +367,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
             
-            dof_tracking      = 0.02
+            dof_tracking      = 0.00
             aligned_torques   = 0.00
             sparse_contacts   = 0.01
             
@@ -379,7 +399,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
             front_foot_overreach = -10000.0
 
             # gait
-            feet_air_time    = 1.00            # tracking reward for long steps
+            feet_air_time    = 0.70            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
             foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.05
@@ -390,13 +410,20 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
 
         class reward_curriculum():
             curr_reward_keys = ["orientation", 
-                                "ang_vel_xy", 
-                                "base_height"]
+                                "ang_vel_xy",
+                                "dof_close_to_default",
+                                "torque_limits",
+                                # "action_rate",
+                                # "action_smoothness"
+                                ]
             
             curr_reward_bounds = {
-                                  "orientation":[-1.0, -2.0],
-                                  "ang_vel_xy":[-0.1, -0.2],
-                                  "base_height":[-1., -2.]
+                                  "orientation":[-0.2,-1.0],
+                                  "ang_vel_xy":[-0.05, -0.1],
+                                  "dof_close_to_default":[-0.01, -0.10],
+                                  "torque_limits":[-0.0001, -1.0e-2],
+                                #   "action_rate":[-0.0001, -0.01],
+                                #   "action_smoothness":[-0.0001,-0.01],
                                  }
 
             curr_steps = 1
@@ -440,9 +467,9 @@ class GO1RL2ACCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.01
-        learning_rate = 1.0e-3 #
-        # learning_rate = 3.0e-4 #
+        entropy_coef = 0.02
+        # learning_rate = 1.0e-3 #
+        learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -458,7 +485,7 @@ class GO1RL2ACCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_RL2AC'
         algorithm_class_name = 'PPO_RL2AC'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 6000 # number of policy updates
+        max_iterations = 5000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb
@@ -468,6 +495,6 @@ class GO1RL2ACCfgPPO( LeggedRobotCfgPPO ):
         
         
         load_run = "Apr19_17-37-22_rl2ac_100hz_spec"
-        checkpoint = -1
+        checkpoint = 4000
         resume = False
-        exp_data_path = ""
+        exp_data_path = "exp_data/corl_intermediate_test/rl2ac_plane_12-16kg.csv"

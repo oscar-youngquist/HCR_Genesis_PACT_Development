@@ -11,7 +11,7 @@ class RL2ACAdaptiveCtrl:
 
         # Scalars (broadcasted)
         self.alpha = 50.0
-        self.kappa = 2.2
+        self.kappa = 1.2
         self.eta = 0.1
         self.lambda_0 = 3.0
         self.k_0 = 20.0
@@ -111,10 +111,10 @@ class RL2ACAdaptiveCtrl:
         self.comp_old.copy_(self.comp)
         self.comp = torch.einsum("bij,bj->bi", self.K, self.phi)
 
-        print(torch.norm(self.K))
-        print(self.phi[0])
-        print(self.comp[0])
-        print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
+        # print(torch.norm(self.K))
+        # print(self.phi[0])
+        # print(self.comp[0])
+        # print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
 
 
         return self.comp

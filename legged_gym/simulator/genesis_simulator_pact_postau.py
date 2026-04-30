@@ -1,3 +1,5 @@
+from collections import deque
+
 from legged_gym import *
 from legged_gym.simulator.simulator import Simulator
 from PIL import Image as im
@@ -103,6 +105,7 @@ class GenesisSimulator_PACT_PosTau(Simulator):
         self._link_contact_forces[:] = self._robot.get_links_net_contact_force()
         self._feet_pos[:] = self._robot.get_links_pos()[:, self._feet_indices, :]
         self._feet_vel[:] = self._robot.get_links_vel()[:, self._feet_indices, :]
+        self._dof_tau[:] = self._robot.get_dofs_force(self._dof_indices)
 
         # Some pinn specific stuff
         self._base_world_lin_vel[:] = self._robot.get_vel()
@@ -191,6 +194,7 @@ class GenesisSimulator_PACT_PosTau(Simulator):
         self._last_feet_vel[env_ids] = 0.
         self._last_base_lin_vel[env_ids] = 0.
         self._last_base_ang_vel[env_ids] = 0.
+        self._dof_tau[env_ids] = 0.
         
         # PINN stuff
         self._grfs_buf[env_ids] = 0.
@@ -448,16 +452,13 @@ class GenesisSimulator_PACT_PosTau(Simulator):
         def _interp(p, low, diff):
             return p * diff + low
 
-        if num_iters <= self.push_warmup_step:
-            self._print_domain_rand_values("[DomainRand] Warmup: holding initial values.")
-            return
-
         # -----------------------------
         # Reward EMA / recovery gating
         # -----------------------------
         if mean_reward is not None:
             mean_reward = float(mean_reward)
 
+            # calculate the EMA of the tracked reward signal
             if self.domain_rand_reward_ema is None:
                 self.domain_rand_reward_ema = mean_reward
             else:
@@ -466,36 +467,53 @@ class GenesisSimulator_PACT_PosTau(Simulator):
                     (1.0 - a) * self.domain_rand_reward_ema + a * mean_reward
                 )
 
-            self.domain_rand_best_reward_ema = max(
-                self.domain_rand_best_reward_ema,
-                self.domain_rand_reward_ema,
-            )
+            # Store recent EMA history
+            self.domain_rand_reward_ema_hist.append(self.domain_rand_reward_ema)
 
-            required_reward = (
+            # Recent-window reference performance
+            hist = np.asarray(self.domain_rand_reward_ema_hist, dtype=np.float32)
+
+            if len(hist) < 10:
+                self.domain_rand_best_reward_ema = float(hist.max())
+            else:
+                self.domain_rand_best_reward_ema = float(
+                    np.quantile(hist, self.domain_rand_best_quantile)
+                )
+
+            self.required_reward = (
                 self.domain_rand_recovery_ratio * self.domain_rand_best_reward_ema
             )
 
-            if self.domain_rand_max_required_reward is not None:
-                required_reward = min(required_reward, self.domain_rand_max_required_reward)
+            # if self.domain_rand_max_required_reward is not None:
+            #     self.required_reward = min(self.required_reward, self.domain_rand_max_required_reward)
 
             can_step = (
-                self.domain_rand_reward_ema >= required_reward
+                self.domain_rand_reward_ema >= self.required_reward
                 and self.domain_rand_reward_ema >= self.domain_rand_min_reward
             )
         else:
-            required_reward = None
+            self.required_reward = None
             can_step = True
 
         enough_time_since_step = (
             num_iters - self.domain_rand_last_step_iter
         ) >= self.domain_rand_step_interval
 
+
+        # Skip all the below if we are still in the warm-up stage
+        #    butI want to log the ema stuff for debugging, so still calculate all of that
+        if num_iters <= self.push_warmup_step:
+            self._print_domain_rand_values("[DomainRand] Warmup: holding initial values.")
+            return
+
+
         if not can_step or not enough_time_since_step:
             self.domain_rand_frozen = True
             self._print_domain_rand_values(
                 "[DomainRand] Frozen | "
                 f"reward_ema={self.domain_rand_reward_ema}, "
-                f"required={required_reward}"
+                f"required={self.required_reward}, "
+                f"min={self.domain_rand_min_reward}, "
             )
             return
 
@@ -578,8 +596,7 @@ class GenesisSimulator_PACT_PosTau(Simulator):
                 self.com_delta_z_value,
             ]
 
-        self._print_domain_rand_values("[DomainRand] Advanced.")    
-
+        self._print_domain_rand_values("[DomainRand] Stepped --")
 
     # def _step_domian_rand(self, num_iters):
     #     if (num_iters - self.push_warmup_step) > self.num_push_steps:
@@ -773,7 +790,17 @@ class GenesisSimulator_PACT_PosTau(Simulator):
         self.domain_rand_max_required_reward = getattr(
             self._cfg.domain_rand, "max_required_reward", 22.0
         )
-
+    
+        self.domain_rand_reward_ema_hist = deque(
+            maxlen=getattr(self._cfg.domain_rand, "best_reward_window", 500)
+        )
+        
+        self.domain_rand_best_quantile = getattr(
+            self._cfg.domain_rand, "best_reward_quantile", 0.90
+            )
+        
+        self.required_reward = 0.0
+    
     # ------------- Callbacks --------------
     def _setup_camera(self):
         ''' Set camera position and direction
@@ -1103,6 +1130,7 @@ class GenesisSimulator_PACT_PosTau(Simulator):
         self._dof_pos = torch.zeros(self._num_envs, self._num_actions, device=self._device, dtype=torch.float)
         self._dof_vel = torch.zeros(self._num_envs, self._num_actions, device=self._device, dtype=torch.float)
         self._last_dof_vel = torch.zeros_like(self._dof_vel)
+        self._dof_tau = torch.zeros_like(self._dof_pos)
         
         self._base_pos = torch.zeros(
             (self._num_envs, 3), device=self._device, dtype=torch.float)
@@ -1145,7 +1173,7 @@ class GenesisSimulator_PACT_PosTau(Simulator):
 
         self._last_base_world_lin_vel = torch.zeros_like(self._base_lin_vel)
         self._last_base_world_ang_vel = torch.zeros_like(self._base_ang_vel)
-
+        
         # depth images
         if self._cfg.sensor.add_depth:
             self.depth_images = torch.zeros(
@@ -1374,6 +1402,8 @@ class GenesisSimulator_PACT_PosTau(Simulator):
                 self.first_loop_feedback = self.feedback_torques.clone()
 
             torques = self.feedback_torques
+            
+            self.feedforward_torques = torch.zeros_like(torques)
         
         elif self._cfg.control.type == "Tau":
             tau_actions = pos_actions * self._cfg.control.torque_scale

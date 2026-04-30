@@ -116,6 +116,8 @@ class PPO_RL2AC:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
         
+        self.current_entropy_coef = entropy_coef
+        
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape):
         self.storage = RolloutStorageRL2AC(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
                                               action_shape, torso_velo_shape, self.device)
@@ -174,6 +176,29 @@ class PPO_RL2AC:
         
     def _set_std_clip_lwr(self, clip_val=0.1):
         self.actor_critic._set_std_clip_lwr(clip_val)
+
+    def update_adaptive_entropy_coef(self, performance_metrics):
+        lin_vel_tracking = performance_metrics.get('lin_vel_tracking', 0.0)
+        ang_vel_tracking = performance_metrics.get('ang_vel_tracking', 0.0)
+        terrain_level = performance_metrics.get('terrain_level', 0)
+        
+        lin_vel_gap = max(0, 0.70 - lin_vel_tracking)
+        ang_vel_gap = max(0, 0.30 - ang_vel_tracking)
+        terrain_gap = max(0, 5.0 - terrain_level)
+        
+        norm_lin_gap = lin_vel_gap /  0.70 if  0.70 > 0 else 0
+        norm_ang_gap = ang_vel_gap / 0.30 if 0.30 > 0 else 0
+        norm_terrain_gap = terrain_gap / 5.0 if 5.0 > 0 else 0
+        
+        gaps = torch.tensor([norm_lin_gap, norm_ang_gap, norm_terrain_gap], dtype=torch.float32)
+        
+        weights = F.softmax(gaps / 2.0, dim=0)
+        
+        weighted_gap = torch.sum(weights * gaps).item()
+        
+        self.current_entropy_coef = 0.002 + weighted_gap * (0.02 - 0.002)
+        
+        return self.current_entropy_coef
 
     def spectral_normalization(
         self,
@@ -510,7 +535,8 @@ class PPO_RL2AC:
         else:
             value_loss = (returns_batch - value_batch).pow(2).mean()
 
-        ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+        # ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+        ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.current_entropy_coef * entropy_batch.mean()
 
         return ppo_loss, surrogate_loss, value_loss
 

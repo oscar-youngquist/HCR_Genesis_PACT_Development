@@ -249,39 +249,66 @@ class OnPolicyRunnerRL2AC:
             if self.env.simulator.use_domainrand_curriculum:
                 self.env.simulator._step_domian_rand(it)
 
-            # if it > 1000:
-            #     self.alg.set_entropy_coef(1.0e-3)
+            performance_metrics = {}
+            if ep_infos:
+                # 提取线速度和角速度跟踪性能
+                lin_vel_tracking = 0.0
+                ang_vel_tracking = 0.0
+                terrain_level = 0
+                
+                for ep_info in ep_infos:
+                    if 'rew_tracking_lin_vel' in ep_info:
+                        lin_vel_tracking = max(lin_vel_tracking, ep_info['rew_tracking_lin_vel'])
+                    if 'rew_tracking_ang_vel' in ep_info:
+                        ang_vel_tracking = max(ang_vel_tracking, ep_info['rew_tracking_ang_vel'])
+                    if 'terrain_level' in ep_info:
+                        terrain_level = max(terrain_level, ep_info['terrain_level'])
+                
+                performance_metrics = {
+                    'lin_vel_tracking': lin_vel_tracking,
+                    'ang_vel_tracking': ang_vel_tracking,
+                    'terrain_level': terrain_level
+                }
             
-            entropy_coef = self._init_entropy_coef
-            std_lwr = 0.40
-
-            half_coef = self._init_entropy_coef * 0.5
-            tenth_coef = self._init_entropy_coef * 0.1
             
-            if it < 4000:
-                entropy_coef = self._init_entropy_coef
-            elif it < 4500:
-                alpha = (it - 4000) / 500.0
-                entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
-            elif it < 5000:
-                entropy_coef = half_coef
-            elif it < 5500:
-                alpha = (it - 5000) / 500.0
-                entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
-            else:
-                entropy_coef = tenth_coef
+            entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
+            print(entropy)
 
-            # if it < 6000 and it >= 5000:
-            #     alpha = (it - 5000) / 1000.0
-            #     entropy_coef = tenth_coef + 0.5 * (self._init_entropy_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            self.writer.add_scalar('Values/entropy',entropy,it)
+
+            # # if it > 1000:
+            # #     self.alg.set_entropy_coef(1.0e-3)
             
-            entropy_coef = max(entropy_coef, 0.0001)
+            # entropy_coef = self._init_entropy_coef
+            # std_lwr = 0.40
 
-            print("entropy_coef - ", entropy_coef)
-            # print("std_lwr - ", std_lwr)
+            # half_coef = self._init_entropy_coef * 0.5
+            # tenth_coef = self._init_entropy_coef * 0.1
+            
+            # if it < 4000:
+            #     entropy_coef = self._init_entropy_coef
+            # elif it < 4500:
+            #     alpha = (it - 4000) / 500.0
+            #     entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
+            # elif it < 5000:
+            #     entropy_coef = half_coef
+            # elif it < 5500:
+            #     alpha = (it - 5000) / 500.0
+            #     entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            # else:
+            #     entropy_coef = tenth_coef
 
-            self.alg.set_entropy_coef(entropy_coef)
-            # self.alg._set_std_clip_lwr(std_lwr)
+            # # if it < 6000 and it >= 5000:
+            # #     alpha = (it - 5000) / 1000.0
+            # #     entropy_coef = tenth_coef + 0.5 * (self._init_entropy_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            
+            # entropy_coef = max(entropy_coef, 0.0001)
+
+            # print("entropy_coef - ", entropy_coef)
+            # # print("std_lwr - ", std_lwr)
+
+            # self.alg.set_entropy_coef(entropy_coef)
+            # # self.alg._set_std_clip_lwr(std_lwr)
 
 
             # if self.env.cfg.rewards.only_positive_rewards and it > 1000:

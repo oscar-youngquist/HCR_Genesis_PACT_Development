@@ -7,6 +7,7 @@ import numpy as np
 import os
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.math_utils import *
+from collections import deque
 
 import multiprocessing as mp
 import random
@@ -42,7 +43,8 @@ class GenesisSimulator_PACT(Simulator):
             wb_correct_pino_2_model_ordering,
             self._wb_dim,
             (12,1),
-            num_cpus
+            num_cpus,
+            self.pino_base_idx
             )
 
     def _shutdown_asynic_pino_workers(self):
@@ -140,6 +142,10 @@ class GenesisSimulator_PACT(Simulator):
         self.async_pino_manager.shared.qd_prev[:] = wb_vel_prev_np   # num_envs x 18
         self.async_pino_manager.shared.grf[:]     = grf_np           # num_envs x 4 x 3
         self.async_pino_manager.shared.dt[0]      = self._control_dt
+        
+        #     Pass the numpy (cpu) domain randomization parameters to shared memory
+        self.async_pino_manager.shared.base_added_mass[:] = self._added_base_mass.cpu().numpy()  # num_envs x 1
+        self.async_pino_manager.shared.base_com_shift[:] = self._base_com_bias.cpu().numpy()    # num_envs x 3
 
         self.async_pino_manager.compute_async()
         self.async_pino_manager.wait()            # blocking, wait until all workers are done
@@ -523,16 +529,13 @@ class GenesisSimulator_PACT(Simulator):
         def _interp(p, low, diff):
             return p * diff + low
 
-        if num_iters <= self.push_warmup_step:
-            self._print_domain_rand_values("[DomainRand] Warmup: holding initial values.")
-            return
-
         # -----------------------------
         # Reward EMA / recovery gating
         # -----------------------------
         if mean_reward is not None:
             mean_reward = float(mean_reward)
 
+            # calculate the EMA of the tracked reward signal
             if self.domain_rand_reward_ema is None:
                 self.domain_rand_reward_ema = mean_reward
             else:
@@ -541,36 +544,53 @@ class GenesisSimulator_PACT(Simulator):
                     (1.0 - a) * self.domain_rand_reward_ema + a * mean_reward
                 )
 
-            self.domain_rand_best_reward_ema = max(
-                self.domain_rand_best_reward_ema,
-                self.domain_rand_reward_ema,
-            )
+            # Store recent EMA history
+            self.domain_rand_reward_ema_hist.append(self.domain_rand_reward_ema)
 
-            required_reward = (
+            # Recent-window reference performance
+            hist = np.asarray(self.domain_rand_reward_ema_hist, dtype=np.float32)
+
+            if len(hist) < 10:
+                self.domain_rand_best_reward_ema = float(hist.max())
+            else:
+                self.domain_rand_best_reward_ema = float(
+                    np.quantile(hist, self.domain_rand_best_quantile)
+                )
+
+            self.required_reward = (
                 self.domain_rand_recovery_ratio * self.domain_rand_best_reward_ema
             )
 
-            if self.domain_rand_max_required_reward is not None:
-                required_reward = min(required_reward, self.domain_rand_max_required_reward)
+            # if self.domain_rand_max_required_reward is not None:
+            #     self.required_reward = min(self.required_reward, self.domain_rand_max_required_reward)
 
             can_step = (
-                self.domain_rand_reward_ema >= required_reward
+                self.domain_rand_reward_ema >= self.required_reward
                 and self.domain_rand_reward_ema >= self.domain_rand_min_reward
             )
         else:
-            required_reward = None
+            self.required_reward = None
             can_step = True
 
         enough_time_since_step = (
             num_iters - self.domain_rand_last_step_iter
         ) >= self.domain_rand_step_interval
 
+
+        # Skip all the below if we are still in the warm-up stage
+        #    butI want to log the ema stuff for debugging, so still calculate all of that
+        if num_iters <= self.push_warmup_step:
+            self._print_domain_rand_values("[DomainRand] Warmup: holding initial values.")
+            return
+
+
         if not can_step or not enough_time_since_step:
             self.domain_rand_frozen = True
             self._print_domain_rand_values(
                 "[DomainRand] Frozen | "
                 f"reward_ema={self.domain_rand_reward_ema}, "
-                f"required={required_reward}"
+                f"required={self.required_reward}, "
+                f"min={self.domain_rand_min_reward}, "
             )
             return
 
@@ -653,7 +673,7 @@ class GenesisSimulator_PACT(Simulator):
                 self.com_delta_z_value,
             ]
 
-        self._print_domain_rand_values("[DomainRand] Advanced.")
+        self._print_domain_rand_values("[DomainRand] Stepped --")
 
 
     #----- Protected methods -----#
@@ -778,19 +798,35 @@ class GenesisSimulator_PACT(Simulator):
         self.domain_rand_recovery_ratio = getattr(
             self._cfg.domain_rand, "recovery_ratio", 0.70
         )
+        
         self.domain_rand_min_reward = getattr(
+        
             self._cfg.domain_rand, "min_reward_to_step", 12.0
         )
+        
         self.domain_rand_step_interval = getattr(
             self._cfg.domain_rand, "step_interval", 100
         )
+        
         self.domain_rand_last_step_iter = -10**9
+        
         self.domain_rand_ema_alpha = getattr(
             self._cfg.domain_rand, "reward_ema_alpha", 0.05
         )
+        
         self.domain_rand_max_required_reward = getattr(
             self._cfg.domain_rand, "max_required_reward", 22.0
         )
+        
+        self.domain_rand_reward_ema_hist = deque(
+            maxlen=getattr(self._cfg.domain_rand, "best_reward_window", 500)
+        )
+        
+        self.domain_rand_best_quantile = getattr(
+            self._cfg.domain_rand, "best_reward_quantile", 0.90
+            )
+        
+        self.required_reward = 0.0
     
     # ------------- Callbacks --------------
     def _setup_camera(self):
@@ -940,7 +976,10 @@ class GenesisSimulator_PACT(Simulator):
         # Create the joint mappings from model-2-pino and pino-2-model - model: [FR, FL, RR, RL], pino: [FL, FR, RL, RR]
         pino_dof_names = [name for name in self.pino_model.names[2:]]   # skip the universe and base joints
 
-        print("pino_dof_names", pino_dof_names)
+        print("pino_dof_names", self.pino_model.names)
+                
+        # TODO - confirm loaded pino model has the base-joint idx as the SECOND joint after the universe joint.
+        self.pino_base_idx = 1 
 
         self._robot_mass = pn.computeTotalMass(self.pino_model)
         print("self._robot_mass: ", self._robot_mass)

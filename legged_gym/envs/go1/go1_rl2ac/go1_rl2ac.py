@@ -73,6 +73,14 @@ class Go1RL2AC(BaseTask):
     def get_failure_idx(self):
         return self.reset_buf * ~self.time_out_buf
     
+    def set_camera(self, pos, lookat):
+        """ Set camera position and direction
+        """
+        self.simulator._floating_camera.set_pose(
+            pos=pos,
+            lookat=lookat
+        )
+    
     def get_scaled_pos_actions(self):
                 # control_type = 'P'
         # Pull out the position control actions

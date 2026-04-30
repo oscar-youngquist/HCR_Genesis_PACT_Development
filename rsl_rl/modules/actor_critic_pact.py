@@ -266,7 +266,7 @@ class ActorCritic_PACT(nn.Module):
         self.std = nn.Parameter(init_noise_std * torch.ones(2*num_actions))
         self.num_actions = num_actions
         
-        self._std_clip_lwr = 0.1
+        self._std_clip_lwr = 0.20
 
         self.distribution = None
         

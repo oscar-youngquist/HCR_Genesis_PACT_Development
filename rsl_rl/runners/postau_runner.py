@@ -245,8 +245,54 @@ class OnPolicyRunnerPosTau:
             # Step the domain randomization if approperiate
             if self.env.simulator.use_domainrand_curriculum:
                 # self.env.simulator._step_domian_rand(it)
-                mean_reward = statistics.mean(rewbuffer) if len(rewbuffer) > 0 else None
-                self.env.simulator._step_domian_rand(it, mean_reward)
+                mean_tracking_lin_vel = None
+
+                if len(ep_infos) > 0 and "rew_tracking_lin_vel" in ep_infos[0]:
+                    vals = []
+                    for ep_info in ep_infos:
+                        v = ep_info["rew_tracking_lin_vel"]
+                        if not isinstance(v, torch.Tensor):
+                            v = torch.tensor([v], device=self.device)
+                        vals.append(v.float().mean().to(self.device))
+
+                # mean_reward = statistics.mean(rewbuffer) if len(rewbuffer) > 0 else None
+                mean_tracking_lin_vel = torch.stack(vals).mean().item()
+                self.env.simulator._step_domian_rand(it, mean_tracking_lin_vel)
+
+            performance_metrics = {}
+            if ep_infos:
+                # 提取线速度和角速度跟踪性能
+                lin_vel_tracking = 0.0
+                ang_vel_tracking = 0.0
+                terrain_level = 0
+                
+                for ep_info in ep_infos:
+                    if 'rew_tracking_lin_vel' in ep_info:
+                        lin_vel_tracking = max(lin_vel_tracking, ep_info['rew_tracking_lin_vel'])
+                    if 'rew_tracking_ang_vel' in ep_info:
+                        ang_vel_tracking = max(ang_vel_tracking, ep_info['rew_tracking_ang_vel'])
+                    if 'terrain_level' in ep_info:
+                        terrain_level = max(terrain_level, ep_info['terrain_level'])
+                
+                performance_metrics = {
+                    'lin_vel_tracking': lin_vel_tracking,
+                    'ang_vel_tracking': ang_vel_tracking,
+                    'terrain_level': terrain_level
+                }
+            
+            
+            entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
+            print(entropy)
+
+            self.writer.add_scalar('Values/entropy',entropy,it)
+            
+            if self.env.simulator.domain_rand_reward_ema is not None:
+                self.writer.add_scalar('Values/domain_rand_reward_ema',self.env.simulator.domain_rand_reward_ema,it) 
+            else:
+                self.writer.add_scalar('Values/domain_rand_reward_ema',0.0,it) 
+            self.writer.add_scalar('Values/required_reward',self.env.simulator.required_reward,it) 
+            self.writer.add_scalar('Values/domain_rand_mass_com_progress',self.env.simulator.domain_rand_mass_com_progress,it) 
+            self.writer.add_scalar('Values/domain_rand_disturbance_progress',self.env.simulator.domain_rand_disturbance_progress,it) 
 
             # if it > 1000:
             #     self.alg.set_entropy_coef(1.0e-3)

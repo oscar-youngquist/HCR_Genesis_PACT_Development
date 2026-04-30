@@ -279,7 +279,7 @@ class ActorCritic_RL2AC(nn.Module):
         
         self.current_obs = None
         
-        self._std_clip_lwr = 0.1
+        self._std_clip_lwr = 0.20
         
         # disable args validation for speedup
         Normal.set_default_validate_args = False
