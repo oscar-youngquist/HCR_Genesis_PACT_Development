@@ -37,6 +37,8 @@ from torch import linalg as LA
 import numpy as np
 import random
 
+from rsl_rl.utils import print_class_attributes
+
 from rsl_rl.modules import ActorCritic_PACT, ContextDecoder
 from rsl_rl.storage import RolloutStoragePACT
 
@@ -68,6 +70,12 @@ class PPO_PACT:
                  pinn_init_steps=500,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
                  vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
+                 use_adaptive_entropy=True,
+                 adaptive_ent_bounds=[0.01, 0.001],
+                 adaptive_ent_lin_threshold=0.75,
+                 adaptive_ent_ang_threshold=0.35,
+                 adaptive_ent_ter_threshold=5.0,
+                 adaptive_ent_softmax_temp=2.0,
                  ):
         
         self.device = device
@@ -81,6 +89,17 @@ class PPO_PACT:
         self.num_enc_epochs = num_encoder_epochs
         self.vae_beta = vae_kld_weight
 
+        # Adaptive entropy coefficent algorithm values
+        self.use_adaptive_entropy = use_adaptive_entropy
+        self.entropy_coef_bounds = adaptive_ent_bounds
+        self.ent_linvelo_threshold = adaptive_ent_lin_threshold
+        self.ent_angvelo_threshold = adaptive_ent_ang_threshold
+        self.ent_terrain_threshold = adaptive_ent_ter_threshold
+        self.ent_softmax_temperature = adaptive_ent_softmax_temp
+        
+        self.current_entropy_coef = entropy_coef
+        self.entropy_coef = entropy_coef
+
         # PPO components
         self.actor_critic = actor_critic
         self.actor_critic.to(self.device)
@@ -93,8 +112,7 @@ class PPO_PACT:
 
         # # We want to reduce the LR of the critic
         for param_group in self.act_optimizer.optimizer.param_groups:
-        # for param_group in self.act_optimizer.param_groups:
-            # specifically modifies the learning rate of the position-control specific parameters
+            # specifically modifies the learning rate of the crtic specific parameters
             if "name" in param_group.keys():
                 if "critic" in param_group["name"]:
                     param_group['lr'] = (learning_rate / 3.0)
@@ -117,13 +135,13 @@ class PPO_PACT:
         self.num_learning_epochs = num_learning_epochs
         self.num_mini_batches = num_mini_batches
         self.value_loss_coef = value_loss_coef
-        self.entropy_coef = entropy_coef
         self.gamma = gamma
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+
+        print_class_attributes(self)
         
-        self.current_entropy_coef = entropy_coef
         
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
         self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
@@ -136,29 +154,31 @@ class PPO_PACT:
         self.actor_critic._set_std_clip_lwr(clip_val)
 
     def set_entropy_coef(self, coef=1e-3):
-        self.entropy_coef = coef
-        
+        if self.use_adaptive_entropy: 
+            self.current_entropy_coef = coef
+        else:
+            self.entropy_coef = coef        
         
     def update_adaptive_entropy_coef(self, performance_metrics):
         lin_vel_tracking = performance_metrics.get('lin_vel_tracking', 0.0)
         ang_vel_tracking = performance_metrics.get('ang_vel_tracking', 0.0)
         terrain_level = performance_metrics.get('terrain_level', 0)
         
-        lin_vel_gap = max(0, 0.75 - lin_vel_tracking)
-        ang_vel_gap = max(0, 0.35 - ang_vel_tracking)
-        terrain_gap = max(0, 6.0 - terrain_level)
+        lin_vel_gap = max(0, self.ent_linvelo_threshold - lin_vel_tracking)
+        ang_vel_gap = max(0, self.ent_angvelo_threshold - ang_vel_tracking)
+        terrain_gap = max(0, self.ent_terrain_threshold - terrain_level)
         
-        norm_lin_gap = lin_vel_gap /  0.75 if  0.75 > 0 else 0
-        norm_ang_gap = ang_vel_gap / 0.35 if 0.35 > 0 else 0
-        norm_terrain_gap = terrain_gap / 6.0 if 6.0 > 0 else 0
+        norm_lin_gap = lin_vel_gap /  self.ent_linvelo_threshold if self.ent_linvelo_threshold > 0 else 0
+        norm_ang_gap = ang_vel_gap / self.ent_angvelo_threshold if self.ent_angvelo_threshold > 0 else 0
+        norm_terrain_gap = terrain_gap / self.ent_terrain_threshold if self.ent_terrain_threshold > 0 else 0
         
         gaps = torch.tensor([norm_lin_gap, norm_ang_gap, norm_terrain_gap], dtype=torch.float32)
         
-        weights = F.softmax(gaps / 2.0, dim=0)
+        weights = F.softmax(gaps / self.ent_softmax_temperature, dim=0)
         
         weighted_gap = torch.sum(weights * gaps).item()
         
-        self.current_entropy_coef = 0.001 + weighted_gap * (0.01 - 0.001)
+        self.current_entropy_coef = self.entropy_coef_bounds[0] + weighted_gap * (self.entropy_coef_bounds[1] - self.entropy_coef_bounds[0])
         
         return self.current_entropy_coef
     
@@ -221,35 +241,6 @@ class PPO_PACT:
         self.storage.add_transitions(self.transition)
         self.transition.clear()
         self.actor_critic.reset(dones)
-
-    # def spectral_normalization(self, model):
-    #     """Applies spectral normalization to linear and attention layers.
-        
-    #     Normalizes weights such that their spectral norm (2-norm) doesn't exceed
-    #     the specified bound. Only affects Linear layers.
-
-    #     Args:
-    #         model: The neural network model to normalize.
-
-    #     Note:
-    #         - Operates in-place on the model parameters
-    #         - Only processes weights (not biases)
-    #         - Only affects parameters with ndim > 1
-    #     """
-    #     whitelist = (nn.Linear)
-
-    #     for module in model.modules():
-    #         if isinstance(module, whitelist):
-    #             for name, param in module.named_parameters():
-    #                 print(name)
-    #                 if name.endswith("weight") and param.ndim > 1:
-    #                     with torch.no_grad():
-    #                         weight = param.data
-    #                         norm = LA.matrix_norm(weight, ord=2)
-                            
-    #                         # Normalize if exceeds bound
-    #                         if norm > 2.0:
-    #                             param.data = (weight / norm) * 2.0
 
 
     def spectral_normalization(
@@ -472,24 +463,15 @@ class PPO_PACT:
         mean_vel_loss /= (num_updates * self.num_enc_epochs)
         mean_recon_loss /= (num_updates * self.num_enc_epochs)
 
-        # # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
-        # mean_pred = np.mean(all_enc_obs_targets, axis=0)
-        # mean_pred_error = np.mean(np.square(mean_pred - all_enc_obs_targets))
-        # actual_pred_error = np.mean(np.square(np.array(all_enc_recons) - np.array(all_enc_obs_targets)))
-        # ratio = mean_pred_error / (actual_pred_error * self.boot_mult)
-        # pboot = np.tanh(ratio)
-
-        # total number of scalar elements per sample vector
+        # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
+        #      total number of scalar elements per sample vector
         feat_dim = boot_sum_x.shape[0]
 
         mean_pred = boot_sum_x / boot_count                     # [D]
         ex2 = boot_sum_x2 / boot_count                          # [D]
         var = torch.clamp(ex2 - mean_pred**2, min=0.0)          # [D]
-
         mean_pred_error = var.mean().item()
-
         actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
-
         ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
         pboot = np.tanh(ratio)
 
@@ -562,8 +544,10 @@ class PPO_PACT:
         else:
             value_loss = (returns_batch - value_batch).pow(2).mean()
 
-        # ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
-        ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.current_entropy_coef * entropy_batch.mean()        
+        if self.use_adaptive_entropy: 
+            ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.current_entropy_coef * entropy_batch.mean()
+        else:
+            ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()        
 
         return ppo_loss, surrogate_loss, value_loss, current_actions
 

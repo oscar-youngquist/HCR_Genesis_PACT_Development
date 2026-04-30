@@ -69,3 +69,33 @@ def unpad_trajectories(trajectories, masks):
     """
     # Need to transpose before and after the masking to have proper reshaping
     return trajectories.transpose(1, 0)[masks.transpose(1, 0)].view(-1, trajectories.shape[0], trajectories.shape[-1]).transpose(1, 0)
+
+
+def print_class_attributes(obj, max_width=80):
+    """
+    Pretty-print all non-callable attributes of a class instance.
+
+    Args:
+        obj: class instance (e.g., self)
+        max_width: formatting width
+    """
+    print("\n" + "=" * max_width)
+    print(f"{obj.__class__.__name__} Attributes".center(max_width))
+    print("=" * max_width)
+
+    for key, value in sorted(vars(obj).items()):
+        # Skip callables (methods, functions)
+        if callable(value):
+            continue
+
+        # Shorten large tensors / modules
+        if hasattr(value, "shape"):
+            val_str = f"{type(value).__name__}(shape={tuple(value.shape)})"
+        elif hasattr(value, "__class__") and "torch.nn" in str(type(value)):
+            val_str = f"{value.__class__.__name__}(...)"
+        else:
+            val_str = str(value)
+
+        print(f"{key:>35} : {val_str}")
+
+    print("=" * max_width + "\n")

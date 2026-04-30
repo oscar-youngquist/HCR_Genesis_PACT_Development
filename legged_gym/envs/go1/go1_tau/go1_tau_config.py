@@ -54,14 +54,14 @@ class GO1TauCfg( LeggedRobotCfg ):
         
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
-        platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
-        num_rows = 10  # number of terrain rows (levels), X direction
-        num_cols = 20  # number of terrain cols (types), Y direction
-        num_subterrains = num_rows * num_cols
-        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        terrain_proportions = [0.10, 0.15, 0.25, 0.25, 0.20, 0.05]
-        # trimesh only:
-        slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
+        # platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
+        # num_rows = 10  # number of terrain rows (levels), X direction
+        # num_cols = 20  # number of terrain cols (types), Y direction
+        # num_subterrains = num_rows * num_cols
+        # # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
+        # terrain_proportions = [0.10, 0.15, 0.25, 0.25, 0.20, 0.05]
+        # # trimesh only:
+        # slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
     class sim:
         # Common
@@ -486,7 +486,7 @@ class GO1TauCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Apr02_13-53-12_pact_pos_100hz_spec_jointrand"
-        checkpoint = -1
+        load_run = "Apr29_21-29-54_tau_100hz_spec_smartcurr"
+        checkpoint = 8000
         resume = False
-        exp_data_path = ""
+        exp_data_path = "exp_data/corl_tests_01/tau_stairs_12-16kg.csv"

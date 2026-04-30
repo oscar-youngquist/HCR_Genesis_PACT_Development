@@ -1409,6 +1409,10 @@ class GenesisSimulator_PACT_PosTau(Simulator):
             tau_actions = pos_actions * self._cfg.control.torque_scale
 
             torques = tau_actions
+            
+            self.feedforward_torques = torques.clone()
+            self.feedback_torques = torch.zeros_like(torques)
+            self.first_loop_feedback = torch.zeros_like(torques)
 
         # torques = (self.feedforward_tau_weight) * self.feedforward_torques + (self.feedback_tau_weight)*self.feedback_torques
 

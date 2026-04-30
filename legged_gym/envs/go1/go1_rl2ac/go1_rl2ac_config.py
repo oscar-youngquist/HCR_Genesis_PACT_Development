@@ -231,8 +231,8 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
 
     class viewer:
         ref_env = 0
-        pos = [2, 2, 2]       # [m]
-        lookat = [0., 0, 1.]  # [m]
+        pos = [0.5, 1.5, 0.5]       # [m]
+        lookat = [0., 0, 0.0]  # [m]
         # rendered_envs_idx = [1500]
         rendered_envs_idx = [i for i in range(0, 3, 1)]  # number of environments to be rendered
         rendered_envs_idx.extend([i for i in range(500, 503, 1)])  # number of environments to be rendered
@@ -312,9 +312,9 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         type = "PD"
         
         dt =  0.01     # control frequency 200Hz
-        decimation = 5  # decimation: Number of control action updates @ sim DT per policy DT
+        decimation = 10  # decimation: Number of control action updates @ sim DT per policy DT
 
-        training = True
+        training = False
 
         # Assumed order - tau_ff, tau_fb
         # tradeoff_init_weights  = [0.80, 1.4]
@@ -494,7 +494,7 @@ class GO1RL2ACCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 500
         
         
-        load_run = "Apr19_17-37-22_rl2ac_100hz_spec"
-        checkpoint = 4000
+        load_run = "Apr29_21-45-53_rl2ac_100hz_spec"
+        checkpoint = -1
         resume = False
-        exp_data_path = "exp_data/corl_intermediate_test/rl2ac_plane_12-16kg.csv"
+        exp_data_path = "exp_data/corl_tests_01/rl2ac_stairs_12-16kg.csv"

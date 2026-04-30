@@ -84,9 +84,11 @@ def override_configs(env_cfg, args):
     # Turn off/on domain randomization elements
     env_cfg.noise.add_noise = True
     # Disable some of the domain randomization (our payload will handle that now)
-    env_cfg.domain_rand.randomize_com_displacement = False
-    env_cfg.domain_rand.randomize_pd_gain = False           # Maybe keep this on?
+    env_cfg.domain_rand.randomize_pd_gain = False
+    env_cfg.domain_rand.randomize_motor_strength = False
+    
     env_cfg.domain_rand.push_robots = False
+    env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_base_mass = True
     
     env_cfg.domain_rand.min_added_mass_max = 16.0
@@ -177,6 +179,8 @@ def interaction_loop(train_cfg, env, policy, args):
         obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
     elif "pos" in task_name and "pact" not in task_name:
         obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
+    elif "tau" in task_name:
+        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
     elif "rl2ac" in task_name:
         obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
     else: # vanilla
@@ -229,6 +233,9 @@ def interaction_loop(train_cfg, env, policy, args):
             actions = policy(obs_buf, obs_history)
             obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach())
         elif "pos" in task_name and "pact" not in task_name:
+            actions = policy(obs_buf, obs_history)
+            obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos = env.step(actions.detach())
+        elif "tau" in task_name:
             actions = policy(obs_buf, obs_history)
             obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos = env.step(actions.detach())
         elif "rl2ac" in task_name:

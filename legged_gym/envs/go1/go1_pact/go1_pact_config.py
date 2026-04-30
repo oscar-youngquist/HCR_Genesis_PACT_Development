@@ -153,15 +153,15 @@ class GO1PACTCfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 2.50
-        max_push_vel_xy = 1.00
+        max_push_vel_xy = 1.50
         min_push_vel_xy = 0.50
 
-        max_vertical_push = 0.40
+        max_vertical_push = 0.50
         min_vertical_push = 0.10
         vert_interval_max = 10.0
         vert_interval_min = 2.50
 
-        max_push_torque = 1.00
+        max_push_torque = 1.50
         min_push_torque = 0.50
         wrench_timeout_min = 1.00
         wrench_timeout_max = 10.0
@@ -175,7 +175,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.15
+        com_displacement_x_max = 0.20
         
         com_displacement_y_min = 0.075
         com_displacement_y_max = 0.15
@@ -220,7 +220,6 @@ class GO1PACTCfg( LeggedRobotCfg ):
 
         recovery_ratio = 0.90           # allowable deivation from quantile of history window
         step_interval = 10              # minimum number of iterations before taking next domain rand step
-        
         
         reward_ema_alpha = 0.05         # ema value for tracking 
         min_reward_to_step = 0.60       # minimum reward threashold for stepping (i.e. the performance must always be above this for a step to occur, regardless of the historical performance.) 
@@ -329,11 +328,11 @@ class GO1PACTCfg( LeggedRobotCfg ):
 
         # Assumed order - tau_ff, tau_fb
         # tradeoff_init_weights  = [0.20, 1.16]
-        tradeoff_init_weights  = [0.40, 1.60]
+        tradeoff_init_weights  = [0.20, 1.80]
         tradeoff_final_weights = [1.00, 1.00]
-        tradeoff_steps = 4
+        tradeoff_steps = 10
         tradeoff_threshold = 0.60
-        use_tradeoff_curriculum = False
+        use_tradeoff_curriculum = True
 
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
@@ -432,10 +431,6 @@ class GO1PACTCfg( LeggedRobotCfg ):
             curr_reward_keys = ["ang_vel_xy", 
                                 "orientation",
                                 "torque_limits",
-                                # "action_rate", 
-                                # "action_smoothness",
-                                # "dof_acc",
-                                # "base_height",
                                 "dof_close_to_default",
                                 ]
             
@@ -443,14 +438,10 @@ class GO1PACTCfg( LeggedRobotCfg ):
                                   "ang_vel_xy":[-0.05, -0.2],
                                   "orientation":[-0.2,-2.0],
                                   "torque_limits":[-1.0e-4, -1.0e-2],
-                                #   "action_rate":[-0.001, -0.01],
-                                #   "action_smoothness":[-0.001,-0.01],
-                                #   "dof_acc":[-2.5e-9, -2.5e-7],
-                                #   "base_height":[-1.0, -2.0],
                                   "dof_close_to_default":[-0.01, -0.10]
                                  }
 
-            curr_steps = 1000
+            curr_steps = 500
             warmup_steps = 5000
 
     class commands(LeggedRobotCfg.commands):
@@ -494,7 +485,6 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.01
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
@@ -508,22 +498,28 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         desired_kl = 0.01
         max_grad_norm = 1.0
 
+        # adaptive entropy coefficent algorithm parameters
+        entropy_coef = 0.01                      # initial entropy value
+        use_adaptive_entropy = True              # weather or not to use the adaptive entropy coef alg.
+        adaptive_ent_bounds = [0.001, 0.01]      # entropy coefficent bands
+        adaptive_ent_lin_threshold = 0.75        # minimum linear velocity tracking target
+        adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target
+        adaptive_ent_ter_threshold = 6.0         # minimum avg. terrain curriculum progress target
+        adaptive_ent_softmax_temp = 2.0          # temperature (sharpness) of the softmax operation used in the alg. 
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'
         num_steps_per_env = 32 # per iteration
         max_iterations = 6000 # number of policy updates
-
-
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_spec_smartcurr'
+        run_name = 'pact_100hz_spec_smartcurr_e2e'
         experiment_name = 'go1_pact_rough'
         save_interval = 100
         
         
-        load_run = "Apr28_20-13-36_pact_100hz_spec_smartcurr"
-        checkpoint = 2000
+        load_run = "Apr29_20-06-15_pact_100hz_spec_smartcurr"
+        checkpoint = -1
         resume = False
-        exp_data_path = "exp_data/corl_intermediate_test/pact_plane_12-16kg.csv"
+        exp_data_path = "exp_data/corl_tests_01/pact_stairs_12-16kg.csv"

@@ -50,7 +50,6 @@ torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 torch.backends.cudnn.benchmark = True
 
-
 class OnPolicyRunnerPACT:
 
     def __init__(self,
@@ -90,12 +89,7 @@ class OnPolicyRunnerPACT:
                                                                self.policy_cfg["cenet_enc_layers"],
                                                                self.policy_cfg["activation"],
                                                                self.policy_cfg["init_noise_std"]).to(self.device)
-        
-        
-        # actor_critic = torch.compile(actor_critic)
-        
-        print(actor_critic)
-        
+                
         decoder = ContextDecoder(self.policy_cfg["cenet_dec_input_dim"],
                                  self.policy_cfg["cenet_dec_layers"],
                                  self.policy_cfg["cenet_dec_out_dim"]
@@ -104,20 +98,19 @@ class OnPolicyRunnerPACT:
         # decoder = torch.compile(decoder)
 
         print("Created Parallel Actor-Critic Model. Parameter Count: ", np.sum(p.numel() for p in actor_critic.parameters() if p.requires_grad))
-
         print("\t Actor Trunk Parameter Count: ", np.sum(p.numel() for p in actor_critic.act_trunk.parameters() if p.requires_grad))
-
         print("\t Encoder Parameter Count: ", np.sum(p.numel() for p in actor_critic.context_encoder.parameters() if p.requires_grad))
-
         print("\t Critic Parameter Count: ", np.sum(p.numel() for p in actor_critic.critic.parameters() if p.requires_grad))
+        print("\t Decoder Parameter Count: ", np.sum(p.numel() for p in decoder.parameters() if p.requires_grad))
+        print(actor_critic)
+        print(decoder)
 
         self._init_entropy_coef = self.alg_cfg["entropy_coef"]
+        self.use_adaptive_entropy = self.alg_cfg["use_adaptive_entropy"]
 
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
-        
-        print("&&&&&&&&&&&&&&&&&&&& PINN weight - ", self.policy_cfg["pinn_loss_weight"])
-        
+                
         self.alg: PPO_PACT = alg_class(actor_critic, decoder, self.env.num_privileged_obs,
                                        pinn_lambda=self.policy_cfg["pinn_loss_weight"], 
                                        pinn_warmup=self.policy_cfg["pinn_warmup"], 
@@ -146,11 +139,10 @@ class OnPolicyRunnerPACT:
 
         _, _ = self.env.reset()
 
-
     # function to load a boot-strap initial model and reset the std
     def _load_pretrained_model(self):
         pretrained_path = self.policy_cfg["pretrained_path"]
-        print(pretrained_path)
+        print("Loading boot-strapping model from - ", pretrained_path)
         loaded_dict = torch.load(pretrained_path)
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
@@ -271,10 +263,18 @@ class OnPolicyRunnerPACT:
                 # mean_reward = statistics.mean(rewbuffer) if len(rewbuffer) > 0 else None
                 mean_tracking_lin_vel = torch.stack(vals).mean().item()
                 self.env.simulator._step_domian_rand(it, mean_tracking_lin_vel)
-                
+
+                if self.env.simulator.domain_rand_reward_ema is not None:
+                    self.writer.add_scalar('Values/domain_rand_reward_ema',self.env.simulator.domain_rand_reward_ema,it) 
+                else:
+                    self.writer.add_scalar('Values/domain_rand_reward_ema',0.0,it) 
+                self.writer.add_scalar('Values/required_reward',self.env.simulator.required_reward,it) 
+                self.writer.add_scalar('Values/domain_rand_mass_com_progress',self.env.simulator.domain_rand_mass_com_progress,it) 
+                self.writer.add_scalar('Values/domain_rand_disturbance_progress',self.env.simulator.domain_rand_disturbance_progress,it) 
+                    
                 
             performance_metrics = {}
-            if ep_infos:
+            if ep_infos and self.use_adaptive_entropy:
                 # 提取线速度和角速度跟踪性能
                 lin_vel_tracking = 0.0
                 ang_vel_tracking = 0.0
@@ -294,62 +294,13 @@ class OnPolicyRunnerPACT:
                     'terrain_level': terrain_level
                 }
             
-            
-            entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
-            print(entropy)
+                entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
+                print(entropy)
+                self.writer.add_scalar('Values/entropy',entropy,it)
 
-            self.writer.add_scalar('Values/entropy',entropy,it)
-            
-            if self.env.simulator.domain_rand_reward_ema is not None:
-                self.writer.add_scalar('Values/domain_rand_reward_ema',self.env.simulator.domain_rand_reward_ema,it) 
-            else:
-                self.writer.add_scalar('Values/domain_rand_reward_ema',0.0,it) 
-            self.writer.add_scalar('Values/required_reward',self.env.simulator.required_reward,it) 
-            self.writer.add_scalar('Values/domain_rand_mass_com_progress',self.env.simulator.domain_rand_mass_com_progress,it) 
-            self.writer.add_scalar('Values/domain_rand_disturbance_progress',self.env.simulator.domain_rand_disturbance_progress,it) 
-
-
-
-
-
-            entropy_coef = self._init_entropy_coef
-            std_lwr = 0.40
-
-            half_coef = self._init_entropy_coef * 0.5
-            tenth_coef = self._init_entropy_coef * 0.1       
-            
-            # if it < 6000:
-            #     entropy_coef = self._init_entropy_coef
-            # elif it < 6500:
-            #     new_coef = self._init_entropy_coef / 2.0
-            #     alpha = (it - 6000) / 500.0
-            #     entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
-            # elif it < 7000:
-            #     entropy_coef = half_coef
-            # elif it <7500:
-            #     alpha = (it - 7000) / 500.0
-            #     entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
-            # else:
-            #     entropy_coef = tenth_coef
-            
-            # if it < 3000:
-            #     entropy_coef = self._init_entropy_coef
-            #     std_lwr = 0.40
-            # elif it < 4000:
-            #     alpha = (it - 3000) / 1000.0
-            #     entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
-            #     std_lwr = 0.10
-            # elif it < 5000:
-            #     entropy_coef = half_coef
-            #     std_lwr = 0.10
-            # elif it < 6000:
-            #     alpha = (it - 6000) / 1000.0
-            #     entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
-            #     std_lwr = 0.10
-            # else:
-            #     entropy_coef = tenth_coef
-            #     std_lwr = 0.10
-
+            # entropy_coef = self._init_entropy_coef
+            # half_coef = self._init_entropy_coef * 0.5
+            # tenth_coef = self._init_entropy_coef * 0.1
             # if it < 6500:
             #     entropy_coef = self._init_entropy_coef
             # elif it < 7500:
@@ -357,14 +308,9 @@ class OnPolicyRunnerPACT:
             #     entropy_coef = tenth_coef + 0.5 * (self._init_entropy_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
             # else:
             #     entropy_coef = tenth_coef
-
             # print("entropy_coef - ", entropy_coef)
-            # print("std_lwr - ", std_lwr)
-
-            # entropy_coef = max(entropy_coef, 0.00001)
-            
+            # entropy_coef = max(entropy_coef, 0.00001)            
             # self.alg.set_entropy_coef(entropy_coef)
-            # self.alg._set_std_clip_lwr(std_lwr)
 
 
             # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
