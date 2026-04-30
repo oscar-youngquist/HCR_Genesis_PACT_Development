@@ -40,7 +40,7 @@ import random
 import gc
 
 from rsl_rl.modules import ActorCritic_PACT_Pos, ContextDecoder
-from rsl_rl.storage import RolloutStoragePACT
+from rsl_rl.storage import RolloutStoragePACTPos
 
 from .pc_grad import PCGrad
 
@@ -65,11 +65,14 @@ class PPO_PACT_Pos:
                  desired_kl=0.01,
                  device='cpu',
                  use_spo=False,
-                 pinn_lambda=0.001,
-                 pinn_warmup=1000,
-                 pinn_init_steps=500,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
-                 vae_kld_weight=2.0,   # weight of KL divergence loss in VAE
+                 vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
+                 use_adaptive_entropy=True,
+                 adaptive_ent_bounds=[0.01, 0.001],
+                 adaptive_ent_lin_threshold=0.75,
+                 adaptive_ent_ang_threshold=0.35,
+                 adaptive_ent_ter_threshold=5.0,
+                 adaptive_ent_softmax_temp=2.0,
                  ):
         
         self.device = device
@@ -83,13 +86,24 @@ class PPO_PACT_Pos:
         self.num_enc_epochs = num_encoder_epochs
         self.vae_beta = vae_kld_weight
 
+        # Adaptive entropy coefficent algorithm values
+        self.use_adaptive_entropy = use_adaptive_entropy
+        self.entropy_coef_bounds = adaptive_ent_bounds
+        self.ent_linvelo_threshold = adaptive_ent_lin_threshold
+        self.ent_angvelo_threshold = adaptive_ent_ang_threshold
+        self.ent_terrain_threshold = adaptive_ent_ter_threshold
+        self.ent_softmax_temperature = adaptive_ent_softmax_temp
+        
+        self.current_entropy_coef = entropy_coef
+        self.entropy_coef = entropy_coef
+
         # PPO components
         self.actor_critic = actor_critic
         self.actor_critic.to(self.device)
         self.storage = None # initialized later
 
         self.act_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(learning_rate)
-        self.transition = RolloutStoragePACT.Transition()
+        self.transition = RolloutStoragePACTPos.Transition()
 
         self.act_optimizer = PCGrad(self.act_optimizer, reduction='sum')
 
@@ -107,27 +121,19 @@ class PPO_PACT_Pos:
         self.boot_mult = 1.0
         self.use_boot = False
 
-        self.pinn_weight_final = pinn_lambda
-        self.pinn_weight = 0.0
-        self.pinn_warmup_steps = pinn_warmup
-        self.pinn_init = pinn_init_steps
-
-        self.num_pinn_updates = 0
-
         # PPO parameters
         self.clip_param = clip_param
         self.num_learning_epochs = num_learning_epochs
         self.num_mini_batches = num_mini_batches
         self.value_loss_coef = value_loss_coef
-        self.entropy_coef = entropy_coef
         self.gamma = gamma
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
         
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
-        self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
-                                              action_shape, torso_velo_shape, grf_shape, wb_shape, self.device)
+    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape):
+        self.storage = RolloutStoragePACTPos(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
+                                                               action_shape, torso_velo_shape, grf_shape, self.device)
 
     def test_mode(self):
         self.actor_critic.test()
@@ -135,7 +141,7 @@ class PPO_PACT_Pos:
     def train_mode(self):
         self.actor_critic.train()
 
-    def act(self, obs, critic_obs, obs_history, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist):
+    def act(self, obs, critic_obs, obs_history):
         # if self.actor_critic.is_recurrent:
         #     self.transition.hidden_states = self.actor_critic.get_hidden_states()
         if self.use_boot:
@@ -155,16 +161,10 @@ class PPO_PACT_Pos:
         self.transition.observations = obs
         self.transition.observation_history = obs_history
         self.transition.critic_observations = critic_obs
-
-        # PINN stuff
-        self.transition.prev_obs      = prev_obs
-        self.transition.prev_obs_hist = prev_obs_hist
-        self.transition.pprev_obs      = pprev_obs
-        self.transition.pprev_obs_hist = pprev_obs_hist
         
         return all_actions
     
-    def process_env_step(self, rewards, dones, infos, grf_labels, obs_labels, explicit_labels, gt_forces, mass_mats, bias_vecs, torso_acc):
+    def process_env_step(self, rewards, dones, infos, grf_labels, obs_labels, explicit_labels):
         self.transition.rewards = rewards.clone()
         
         self.transition.dones = dones
@@ -181,20 +181,39 @@ class PPO_PACT_Pos:
         if 'time_outs' in infos:
             self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
 
-        # PINN stuff
-        self.transition.wb_contact_forces = gt_forces
-        self.transition.wb_mass_mat = mass_mats
-        self.transition.wb_bias_vec = bias_vecs
-        self.transition.torso_acc = torso_acc
-        
         # Record the transition
         self.storage.add_transitions(self.transition)
         self.transition.clear()
         self.actor_critic.reset(dones)
 
-
     def set_entropy_coef(self, coef=1e-3):
-        self.entropy_coef = coef
+        if self.use_adaptive_entropy: 
+            self.current_entropy_coef = coef
+        else:
+            self.entropy_coef = coef        
+        
+    def update_adaptive_entropy_coef(self, performance_metrics):
+        lin_vel_tracking = performance_metrics.get('lin_vel_tracking', 0.0)
+        ang_vel_tracking = performance_metrics.get('ang_vel_tracking', 0.0)
+        terrain_level = performance_metrics.get('terrain_level', 0)
+        
+        lin_vel_gap = max(0, self.ent_linvelo_threshold - lin_vel_tracking)
+        ang_vel_gap = max(0, self.ent_angvelo_threshold - ang_vel_tracking)
+        terrain_gap = max(0, self.ent_terrain_threshold - terrain_level)
+        
+        norm_lin_gap = lin_vel_gap /  self.ent_linvelo_threshold if self.ent_linvelo_threshold > 0 else 0
+        norm_ang_gap = ang_vel_gap / self.ent_angvelo_threshold if self.ent_angvelo_threshold > 0 else 0
+        norm_terrain_gap = terrain_gap / self.ent_terrain_threshold if self.ent_terrain_threshold > 0 else 0
+        
+        gaps = torch.tensor([norm_lin_gap, norm_ang_gap, norm_terrain_gap], dtype=torch.float32)
+        
+        weights = F.softmax(gaps / self.ent_softmax_temperature, dim=0)
+        
+        weighted_gap = torch.sum(weights * gaps).item()
+        
+        self.current_entropy_coef = self.entropy_coef_bounds[0] + weighted_gap * (self.entropy_coef_bounds[1] - self.entropy_coef_bounds[0])
+        
+        return self.current_entropy_coef
         
     def _set_std_clip_lwr(self, clip_val=0.1):
         self.actor_critic._set_std_clip_lwr(clip_val)
@@ -275,7 +294,7 @@ class PPO_PACT_Pos:
         mean_recon_loss = 0
         mean_kld_loss = 0
         mean_decoder_loss = 0
-        mean_pinn_loss = 0
+        mean_tau_loss = 0
 
         timers = {
             "rl_loss": 0.0,
@@ -293,16 +312,11 @@ class PPO_PACT_Pos:
         boot_sum_x2 = None
         boot_sum_recon_sqerr = 0.0
 
-        # if itr > self.pinn_init and self.num_pinn_updates < (self.pinn_warmup_steps+1):
-        #     self.pinn_weight = (float(self.num_pinn_updates)/float(self.pinn_warmup_steps))*self.pinn_weight_final
-        #     print(self.pinn_weight)
-
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
             grf_target, obs_target, actions_batch, target_values_batch, \
             advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
-            old_sigma_batch, prev_obs_batch, prev_obs_hist_batch, gt_forces_batch, mass_mat_batch, \
-            bias_vec_batch, torso_accs_batch,  pprev_obs_batch, pprev_obs_hist_batch  in generator:
+            old_sigma_batch in generator:
             
             self.actor_critic.train()
             self.act_optimizer.zero_grad()
@@ -311,7 +325,7 @@ class PPO_PACT_Pos:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             # Perform RL update
-            ppo_loss, surrogate_loss, value_loss, current_actions, tau_clone_loss = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
+            ppo_loss, surrogate_loss, value_loss, _, tau_clone_loss = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
                                                                                           advantages_batch, target_values_batch, returns_batch,
@@ -319,32 +333,13 @@ class PPO_PACT_Pos:
             
             torch.cuda.synchronize()
             timers["rl_loss"] += time.perf_counter() - t0
-
-            
-            # PINN loss calculation
-            pinn_loss = None
-            # if self.pinn_weight > 0.0:
-            #     pinn_loss = self._compute_PINN_loss(current_actions, obs_batch, prev_obs_batch, prev_obs_hist_batch,
-            #                                         pprev_obs_batch, pprev_obs_hist_batch, torso_accs_batch,
-            #                                         mass_mat_batch, bias_vec_batch, gt_forces_batch,
-            #                                         action_func, fb_func, default_pose, dt, qvel_scale)
-                
-            # if self.pinn_weight > 0.0:
-            #     ppo_losses = [ppo_loss, self.pinn_weight * pinn_loss]
-            # else:
-            #     ppo_losses = [ppo_loss]
             
             ppo_losses = [ppo_loss, tau_clone_loss]
-            # # PCGrad - back-propigate the loss
-            # if self.pinn_weight > 0 and pinn_loss is not None:    # just being extra cautious
-            #     self.act_optimizer.pc_backward_pinn(ppo_losses)
-            # else:
-            #     self.act_optimizer.pc_backward(ppo_losses)
             
+
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             
-            # self.act_optimizer.pc_backward_pinn(ppo_losses)
             self.act_optimizer.pc_backward_ppgrad(ppo_losses)
 
             torch.cuda.synchronize()
@@ -363,10 +358,7 @@ class PPO_PACT_Pos:
             # Perform some logging
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
-            if self.pinn_weight > 0.0:
-                mean_pinn_loss += pinn_loss.item()
-            else:
-                mean_pinn_loss += 0.0
+            mean_tau_loss += tau_clone_loss.item()
 
             # Calculate the encoder update n-times
             for _ in range(self.num_enc_epochs):
@@ -456,13 +448,10 @@ class PPO_PACT_Pos:
 
             timers["spec_norm"] += time.perf_counter() - t0
 
-        if itr > self.pinn_init:
-            self.num_pinn_updates += 1
-
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
-        mean_pinn_loss /= num_updates
+        mean_tau_loss /= num_updates
 
         mean_autoenc_loss /= (num_updates * self.num_enc_epochs)
         mean_decoder_loss /= (num_updates * self.num_enc_epochs)
@@ -514,7 +503,7 @@ class PPO_PACT_Pos:
         print("update timers:", {k: round(v, 4) for k, v in timers.items()})
 
         return mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, \
-               mean_vel_loss, mean_recon_loss, mean_kld_loss, mean_pinn_loss
+               mean_vel_loss, mean_recon_loss, mean_kld_loss, mean_tau_loss
 
     def _compute_rl_loss(self, obs_batch, obs_hist_batch,
                          actions_batch, critic_obs_batch,
@@ -576,8 +565,10 @@ class PPO_PACT_Pos:
         else:
             value_loss = (returns_batch - value_batch).pow(2).mean()
 
-        ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
-
+        if self.use_adaptive_entropy: 
+            ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.current_entropy_coef * entropy_batch.mean()
+        else:
+            ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()        
         # Update PPO loss with tau-branch tracking loss (scaled magnitude of *first* feedback torques)
         #     Process current and previous actions into the action-space
         q_des_curr, tau_des_curr = action_func(current_actions)
@@ -621,64 +612,3 @@ class PPO_PACT_Pos:
         vae_loss = vel_pred_error + recon_error + self.vae_beta*kl_div
         
         return vae_loss, kl_div, recon_error, vel_pred_error, dec_input.clone().detach(), decode_target.detach(), enc_update_obs_decode.detach()
-
-    def _compute_PINN_loss(self, current_actions, obs_batch,                                      # Current timestep
-                           prev_obs_batch, prev_obs_hist_batch,                                   # Previous timestep
-                           pprev_obs_batch, pprev_obs_hist_batch,                                 # previous-previous timestep
-                           torso_accs_batch, mass_mat_batch, bias_vec_batch, gt_forces_batch,     # PINN stuff
-                           action_func, fb_func, default_pose, dt, qvel_scale):                   # simulator functions/values passthrough
-        if self.use_boot:
-            self.actor_critic.act(prev_obs_batch, prev_obs_hist_batch)
-        else:
-            self.actor_critic.act_bootmask(prev_obs_batch, prev_obs_hist_batch)
-        prev_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
-
-        pprev_actions = None
-        if self.use_boot:
-            self.actor_critic.act(pprev_obs_batch, pprev_obs_hist_batch)
-        else:
-            self.actor_critic.act_bootmask(pprev_obs_batch, pprev_obs_hist_batch)
-        pprev_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
-
-        # Process current and previous actions into the action-space
-        q_des_curr, tau_des_curr = action_func(current_actions)
-        q_des_prev, _            = action_func(prev_actions)
-        q_des_pprev, _           = action_func(pprev_actions)
-
-        # Extract joint pose and velocity data
-        # Obs - cmd (3), proj_grav (3), ang_vel (3)
-        q_pos_curr,  q_velo_curr  = obs_batch[:,9:21].detach().clone(),   obs_batch[:,21:33].detach().clone()
-        q_pos_curr,  q_velo_curr  = (q_pos_curr + default_pose).float(),  (q_velo_curr / qvel_scale).float()
-        
-        # Calculate feedback torques
-        pd_tau_curr  = fb_func(q_des_curr,  q_pos_curr,  q_velo_curr)
-
-        ###
-        #   WB-dynamics
-        ###
-        # Use 1st order backwards finite differences to approximate models command acceleration
-        dof_acc = (q_des_curr - 2.0*q_des_prev + q_des_pprev) / np.power(dt,2)
-        # Create the whole-body acceleration vector
-        wb_acc = torch.cat([torso_accs_batch, dof_acc], dim=1).float()
-        # Create the whole-boyd tau vector 
-        wb_tau = torch.cat([torch.zeros(torso_accs_batch.shape[0], 6).float().to(self.device), (tau_des_curr.float() + pd_tau_curr.float())], dim=1).float()
-
-        # Calculate the models wb-dynamics
-        model_wb_dynamics = torch.bmm(mass_mat_batch.float(), wb_acc.unsqueeze(-1)).squeeze(-1) + bias_vec_batch.float()
-
-        error = model_wb_dynamics[:,6:] - gt_forces_batch[:,6:] - wb_tau[:,6:]
-
-        # softly weight by contact
-        # Apply soft (to make this a continuous reward signal) contact weighting to avoid over-penalizing for leg movement
-        contact_magnitude = torch.clamp(gt_forces_batch[:,6:], min=0.0)
-        contact_max = torch.max(contact_magnitude, dim=1, keepdim=True)[0]
-        contact_weight = contact_magnitude / (contact_max + 1e-8)
-        error *= contact_weight
-
-        # Make the error relative, so that it is less senesitive to scale
-        rel_error = torch.norm(error, dim=1) / (1e-8 + torch.norm(wb_tau[:,6:].detach().clone(), dim=1) + torch.norm(gt_forces_batch[:,6:], dim=1))
-
-        # Calculate the whole-body PINN loss
-        pinn_loss = torch.mean(rel_error)
-        
-        return pinn_loss

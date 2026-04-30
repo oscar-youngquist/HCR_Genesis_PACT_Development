@@ -280,7 +280,6 @@ class OnPolicyRunnerPACT:
                 
             performance_metrics = {}
             if ep_infos and self.use_adaptive_entropy:
-                # 提取线速度和角速度跟踪性能
                 lin_vel_tracking = 0.0
                 ang_vel_tracking = 0.0
                 terrain_level = 0

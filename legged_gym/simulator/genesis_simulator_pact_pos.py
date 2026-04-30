@@ -13,6 +13,7 @@ import random
 
 import torch.nn.functional as F
 import pinocchio as pn
+from collections import deque
 
 from .parallel_pino_workers import PinocchioAsync
 
@@ -421,58 +422,74 @@ class GenesisSimulator_PACT_Pos(Simulator):
     def set_viewer_camera(self, eye: np.ndarray, target: np.ndarray):
         self._scene.viewer.set_camera_pose(pos=eye, lookat=target)
     
-    def _step_domian_rand(self, num_iters):
-        if (num_iters - self.push_warmup_step) > self.num_push_steps:
-            return
+    # def _step_domian_rand(self, num_iters):
+    #     if (num_iters - self.push_warmup_step) > self.num_push_steps:
+    #         return
         
-        elif num_iters <= self.push_warmup_step:
-            print("Push Value: ", self.push_value)
-            print("Wrench Value: ", self.wrench_value)
-            print("Vertical Push Value: ", self.vert_value)
-            print("Mass Max Value: ", self.mass_max_value)
-            print("COM Delta X Value: ", self.com_delta_x_value)
-            print("COM Delta Y Value: ", self.com_delta_y_value)
-            print("COM Delta Z Value: ", self.com_delta_z_value)
-            print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
-            print("Joint Damping Bounds: ", self.joint_damping_bound_current)
-            # print("Torque Limits - ", self.torque_limits[0])
-            return
+    #     elif num_iters <= self.push_warmup_step:
+    #         print("Push Value: ", self.push_value)
+    #         print("Wrench Value: ", self.wrench_value)
+    #         print("Vertical Push Value: ", self.vert_value)
+    #         print("Mass Max Value: ", self.mass_max_value)
+    #         print("COM Delta X Value: ", self.com_delta_x_value)
+    #         print("COM Delta Y Value: ", self.com_delta_y_value)
+    #         print("COM Delta Z Value: ", self.com_delta_z_value)
+    #         print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
+    #         print("Joint Damping Bounds: ", self.joint_damping_bound_current)
+    #         # print("Torque Limits - ", self.torque_limits[0])
+    #         return
 
-        adjusted_step = num_iters - self.push_warmup_step
+    #     adjusted_step = num_iters - self.push_warmup_step
         
-        # Safety catch, hopefully isn't needed really
-        if adjusted_step == 0:
-            print("Push Value: ", self.push_value)
-            print("Wrench Value: ", self.wrench_value)
-            print("Vertical Push Value: ", self.vert_value)
-            print("Mass Max Value: ", self.mass_max_value)
-            print("COM Delta X Value: ", self.com_delta_x_value)
-            print("COM Delta Y Value: ", self.com_delta_y_value)
-            print("COM Delta Z Value: ", self.com_delta_z_value)
-            print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
-            print("Joint Damping Bounds: ", self.joint_damping_bound_current)
-            # print("Torque Limits - ", self.torque_limits[0])
-            return
+    #     # Safety catch, hopefully isn't needed really
+    #     if adjusted_step == 0:
+    #         print("Push Value: ", self.push_value)
+    #         print("Wrench Value: ", self.wrench_value)
+    #         print("Vertical Push Value: ", self.vert_value)
+    #         print("Mass Max Value: ", self.mass_max_value)
+    #         print("COM Delta X Value: ", self.com_delta_x_value)
+    #         print("COM Delta Y Value: ", self.com_delta_y_value)
+    #         print("COM Delta Z Value: ", self.com_delta_z_value)
+    #         print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
+    #         print("Joint Damping Bounds: ", self.joint_damping_bound_current)
+    #         # print("Torque Limits - ", self.torque_limits[0])
+    #         return
 
-        self.push_value      = (adjusted_step / self.num_push_steps) * self.push_diff + self.push_bounds[0]
-        self.wrench_value    = (adjusted_step / self.num_push_steps) * self.wrench_diff + self.wrench_bounds[0]
-        self.vert_value      = (adjusted_step / self.num_push_steps) * self.vert_diff + self.vert_bounds[0]
-        self.mass_max_value  = (adjusted_step / self.num_push_steps) * self.mass_bounds_diff + self.max_mass_bounds[0]
-        self.com_delta_x_value = (adjusted_step / self.num_push_steps) * self.com_delta_x_diff + self.com_delta_x_bounds[0]
-        self.com_delta_y_value = (adjusted_step / self.num_push_steps) * self.com_delta_y_diff + self.com_delta_y_bounds[0]
-        self.com_delta_z_value = (adjusted_step / self.num_push_steps) * self.com_delta_z_diff + self.com_delta_z_bounds[0]
-        self.joint_stiffness_bound_current = (adjusted_step / self.num_push_steps) * self.joint_stiffness_range + self.joint_stiffness_bounds_start
-        self.joint_damping_bound_current = (adjusted_step / self.num_push_steps) * self.joint_damping_range + self.joint_damping_bounds_start
+    #     self.push_value      = (adjusted_step / self.num_push_steps) * self.push_diff + self.push_bounds[0]
+    #     self.wrench_value    = (adjusted_step / self.num_push_steps) * self.wrench_diff + self.wrench_bounds[0]
+    #     self.vert_value      = (adjusted_step / self.num_push_steps) * self.vert_diff + self.vert_bounds[0]
+    #     self.mass_max_value  = (adjusted_step / self.num_push_steps) * self.mass_bounds_diff + self.max_mass_bounds[0]
+    #     self.com_delta_x_value = (adjusted_step / self.num_push_steps) * self.com_delta_x_diff + self.com_delta_x_bounds[0]
+    #     self.com_delta_y_value = (adjusted_step / self.num_push_steps) * self.com_delta_y_diff + self.com_delta_y_bounds[0]
+    #     self.com_delta_z_value = (adjusted_step / self.num_push_steps) * self.com_delta_z_diff + self.com_delta_z_bounds[0]
+    #     self.joint_stiffness_bound_current = (adjusted_step / self.num_push_steps) * self.joint_stiffness_range + self.joint_stiffness_bounds_start
+    #     self.joint_damping_bound_current = (adjusted_step / self.num_push_steps) * self.joint_damping_range + self.joint_damping_bounds_start
 
        
-        # If we haven't returned already by now, then we are stepping, and so we want to reset the vertical com-shift bounds
-        #     if necessary
-        if self.com_rand_z_positive:
-            self.com_delta_z_val_bounds = [-self._cfg.domain_rand.com_displacement_z_min, self.com_delta_z_value]
+    #     # If we haven't returned already by now, then we are stepping, and so we want to reset the vertical com-shift bounds
+    #     #     if necessary
+    #     if self.com_rand_z_positive:
+    #         self.com_delta_z_val_bounds = [-self._cfg.domain_rand.com_displacement_z_min, self.com_delta_z_value]
         
         
-        # self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
+    #     # self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
 
+    #     print("Push Value: ", self.push_value)
+    #     print("Wrench Value: ", self.wrench_value)
+    #     print("Vertical Push Value: ", self.vert_value)
+    #     print("Mass Max Value: ", self.mass_max_value)
+    #     print("COM Delta X Value: ", self.com_delta_x_value)
+    #     print("COM Delta Y Value: ", self.com_delta_y_value)
+    #     print("COM Delta Z Value: ", self.com_delta_z_value)
+    #     print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
+    #     print("Joint Damping Bounds: ", self.joint_damping_bound_current)
+    #     # print("Torque Limits - ", self.torque_limits[0])
+
+    def _print_domain_rand_values(self, prefix=""):
+        print(prefix)
+        print("Phase: ", self.domain_rand_phase)
+        print("Mass/COM Progress: ", self.domain_rand_mass_com_progress)
+        print("Disturbance Progress: ", self.domain_rand_disturbance_progress)
         print("Push Value: ", self.push_value)
         print("Wrench Value: ", self.wrench_value)
         print("Vertical Push Value: ", self.vert_value)
@@ -482,7 +499,163 @@ class GenesisSimulator_PACT_Pos(Simulator):
         print("COM Delta Z Value: ", self.com_delta_z_value)
         print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
         print("Joint Damping Bounds: ", self.joint_damping_bound_current)
-        # print("Torque Limits - ", self.torque_limits[0])
+
+    def _step_domian_rand(self, num_iters, mean_reward=None):
+        """
+        Two-phase performance-gated domain-rand curriculum.
+
+        Phase 1: increase mass + COM randomization.
+        Phase 2: increase external disturbance randomization.
+        """
+
+        def _interp(p, low, diff):
+            return p * diff + low
+
+        # -----------------------------
+        # Reward EMA / recovery gating
+        # -----------------------------
+        if mean_reward is not None:
+            mean_reward = float(mean_reward)
+
+            # calculate the EMA of the tracked reward signal
+            if self.domain_rand_reward_ema is None:
+                self.domain_rand_reward_ema = mean_reward
+            else:
+                a = self.domain_rand_ema_alpha
+                self.domain_rand_reward_ema = (
+                    (1.0 - a) * self.domain_rand_reward_ema + a * mean_reward
+                )
+
+            # Store recent EMA history
+            self.domain_rand_reward_ema_hist.append(self.domain_rand_reward_ema)
+
+            # Recent-window reference performance
+            hist = np.asarray(self.domain_rand_reward_ema_hist, dtype=np.float32)
+
+            if len(hist) < 10:
+                self.domain_rand_best_reward_ema = float(hist.max())
+            else:
+                self.domain_rand_best_reward_ema = float(
+                    np.quantile(hist, self.domain_rand_best_quantile)
+                )
+
+            self.required_reward = (
+                self.domain_rand_recovery_ratio * self.domain_rand_best_reward_ema
+            )
+
+            # if self.domain_rand_max_required_reward is not None:
+            #     self.required_reward = min(self.required_reward, self.domain_rand_max_required_reward)
+
+            can_step = (
+                self.domain_rand_reward_ema >= self.required_reward
+                and self.domain_rand_reward_ema >= self.domain_rand_min_reward
+            )
+        else:
+            self.required_reward = None
+            can_step = True
+
+        enough_time_since_step = (
+            num_iters - self.domain_rand_last_step_iter
+        ) >= self.domain_rand_step_interval
+
+
+        # Skip all the below if we are still in the warm-up stage
+        #    butI want to log the ema stuff for debugging, so still calculate all of that
+        if num_iters <= self.push_warmup_step:
+            self._print_domain_rand_values("[DomainRand] Warmup: holding initial values.")
+            return
+
+
+        if not can_step or not enough_time_since_step:
+            self.domain_rand_frozen = True
+            self._print_domain_rand_values(
+                "[DomainRand] Frozen | "
+                f"reward_ema={self.domain_rand_reward_ema}, "
+                f"required={self.required_reward}, "
+                f"min={self.domain_rand_min_reward}, "
+            )
+            return
+
+        self.domain_rand_frozen = False
+        self.domain_rand_last_step_iter = num_iters
+
+        # -----------------------------
+        # Phase selection
+        # -----------------------------
+        if self.domain_rand_phase == "mass_com":
+            self.domain_rand_mass_com_progress = min(
+                1.0,
+                self.domain_rand_mass_com_progress + self.domain_rand_mass_com_delta,
+            )
+
+            if self.domain_rand_mass_com_progress >= 1.0:
+                self.domain_rand_phase = "disturbance"
+
+                # Reset recovery baseline when entering the harder phase.
+                self.domain_rand_best_reward_ema = self.domain_rand_reward_ema
+
+        elif self.domain_rand_phase == "disturbance":
+            self.domain_rand_disturbance_progress = min(
+                1.0,
+                self.domain_rand_disturbance_progress + self.domain_rand_disturbance_delta,
+            )
+
+        # -----------------------------
+        # Apply mass + COM progress
+        # -----------------------------
+        p_mc = self.domain_rand_mass_com_progress
+
+        self.mass_max_value = _interp(
+            p_mc, self.max_mass_bounds[0], self.mass_bounds_diff
+        )
+
+        self.com_delta_x_value = _interp(
+            p_mc, self.com_delta_x_bounds[0], self.com_delta_x_diff
+        )
+        self.com_delta_y_value = _interp(
+            p_mc, self.com_delta_y_bounds[0], self.com_delta_y_diff
+        )
+        self.com_delta_z_value = _interp(
+            p_mc, self.com_delta_z_bounds[0], self.com_delta_z_diff
+        )
+
+        # -----------------------------
+        # Apply disturbance progress
+        # -----------------------------
+        p_dist = self.domain_rand_disturbance_progress
+
+        self.push_value = _interp(
+            p_dist, self.push_bounds[0], self.push_diff
+        )
+        self.wrench_value = _interp(
+            p_dist, self.wrench_bounds[0], self.wrench_diff
+        )
+        self.vert_value = _interp(
+            p_dist, self.vert_bounds[0], self.vert_diff
+        )
+
+        # -----------------------------
+        # Apply joint dynamics progress
+        # -----------------------------
+        self.joint_stiffness_bound_current = (
+            p_mc * self.joint_stiffness_range + self.joint_stiffness_bounds_start
+        )
+        self.joint_damping_bound_current = (
+            p_mc * self.joint_damping_range + self.joint_damping_bounds_start
+        )
+
+        if self.com_rand_z_positive:
+            self.com_delta_z_val_bounds = [
+                -self._cfg.domain_rand.com_displacement_z_min,
+                self.com_delta_z_value,
+            ]
+        else:
+            self.com_delta_z_val_bounds = [
+                -self.com_delta_z_value,
+                self.com_delta_z_value,
+            ]
+
+        self._print_domain_rand_values("[DomainRand] Stepped --")
 
     #----- Protected methods -----#
     def _parse_cfg(self):
@@ -577,6 +750,59 @@ class GenesisSimulator_PACT_Pos(Simulator):
 
         self._wb_dim = self._cfg.env.whole_body_dim
         self._grf_dim = self._cfg.env.grf_dim
+
+        self._init_domain_rand_curriculum_state()
+        
+        
+    def _init_domain_rand_curriculum_state(self):
+        self.domain_rand_phase = "mass_com"
+
+        self.domain_rand_mass_com_progress = 0.0
+        self.domain_rand_disturbance_progress = 0.0
+
+        self.domain_rand_mass_com_delta = getattr(
+            self._cfg.domain_rand, "mass_com_progress_delta", 0.002
+        )
+        self.domain_rand_disturbance_delta = getattr(
+            self._cfg.domain_rand, "disturbance_progress_delta", 0.001
+        )
+
+        self.domain_rand_frozen = False
+        self.domain_rand_reward_ema = None
+        self.domain_rand_best_reward_ema = -float("inf")
+
+        self.domain_rand_recovery_ratio = getattr(
+            self._cfg.domain_rand, "recovery_ratio", 0.70
+        )
+        
+        self.domain_rand_min_reward = getattr(
+        
+            self._cfg.domain_rand, "min_reward_to_step", 12.0
+        )
+        
+        self.domain_rand_step_interval = getattr(
+            self._cfg.domain_rand, "step_interval", 100
+        )
+        
+        self.domain_rand_last_step_iter = -10**9
+        
+        self.domain_rand_ema_alpha = getattr(
+            self._cfg.domain_rand, "reward_ema_alpha", 0.05
+        )
+        
+        self.domain_rand_max_required_reward = getattr(
+            self._cfg.domain_rand, "max_required_reward", 22.0
+        )
+        
+        self.domain_rand_reward_ema_hist = deque(
+            maxlen=getattr(self._cfg.domain_rand, "best_reward_window", 500)
+        )
+        
+        self.domain_rand_best_quantile = getattr(
+            self._cfg.domain_rand, "best_reward_quantile", 0.90
+            )
+        
+        self.required_reward = 0.0
 
     # ------------- Callbacks --------------
     def _setup_camera(self):
