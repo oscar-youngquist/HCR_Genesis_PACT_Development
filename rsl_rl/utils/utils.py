@@ -70,32 +70,123 @@ def unpad_trajectories(trajectories, masks):
     # Need to transpose before and after the masking to have proper reshaping
     return trajectories.transpose(1, 0)[masks.transpose(1, 0)].view(-1, trajectories.shape[0], trajectories.shape[-1]).transpose(1, 0)
 
+def pretty_print_module(module, indent_size=4):
+    """
+    Pretty-print a PyTorch module with:
+      - 4-space aligned indentation
+      - parameter count next to each layer/module
+      - total parameter count after each closing parenthesis
+    """
+    import torch.nn as nn
+
+    def count_params(m):
+        return sum(p.numel() for p in m.parameters())
+
+    def layer_repr(m):
+        # PyTorch's one-line repr for leaf modules
+        return m.extra_repr() if hasattr(m, "extra_repr") else ""
+
+    def format_module(m, name=None, level=0):
+        indent = " " * (indent_size * level)
+        child_indent = " " * (indent_size * (level + 1))
+
+        total_params = count_params(m)
+        children = list(m.named_children())
+
+        # Header
+        if name is None:
+            lines = [f"{indent}{m.__class__.__name__}("]
+        else:
+            lines = [f"{indent}({name}): {m.__class__.__name__}("]
+
+        # Leaf module
+        if len(children) == 0:
+            extra = layer_repr(m)
+            if name is None:
+                return [f"{indent}{m.__class__.__name__}({extra})  # params={total_params:,}"]
+            return [
+                f"{indent}({name}): {m.__class__.__name__}({extra})  # params={total_params:,}"
+            ]
+
+        # Recursive children
+        for child_name, child in children:
+            child_children = list(child.named_children())
+
+            if len(child_children) == 0:
+                extra = layer_repr(child)
+                child_params = count_params(child)
+                lines.append(
+                    f"{child_indent}({child_name}): "
+                    f"{child.__class__.__name__}({extra})  # params={child_params:,}"
+                )
+            else:
+                lines.extend(format_module(child, child_name, level + 1))
+
+        # Closing line with total params
+        lines.append(f"{indent})  # total_params={total_params:,}")
+        return lines
+
+    print("\n".join(format_module(module)))
 
 def print_class_attributes(obj, max_width=80):
     """
     Pretty-print all non-callable attributes of a class instance.
 
-    Args:
-        obj: class instance (e.g., self)
-        max_width: formatting width
+    Special handling:
+      - torch.optim.Optimizer → print class name + (lr, weight_decay)
+        with aligned indentation
     """
+    import torch
+
+    indent = " " * 4  # one "tab" (4 spaces)
+
     print("\n" + "=" * max_width)
     print(f"{obj.__class__.__name__} Attributes".center(max_width))
     print("=" * max_width)
 
     for key, value in sorted(vars(obj).items()):
-        # Skip callables (methods, functions)
         if callable(value):
             continue
 
-        # Shorten large tensors / modules
-        if hasattr(value, "shape"):
-            val_str = f"{type(value).__name__}(shape={tuple(value.shape)})"
-        elif hasattr(value, "__class__") and "torch.nn" in str(type(value)):
-            val_str = f"{value.__class__.__name__}(...)"
-        else:
-            val_str = str(value)
+        key_str = f"{key:>35} : "
 
-        print(f"{key:>35} : {val_str}")
+        # -------------------------
+        # Optimizer special case
+        # -------------------------
+        if isinstance(value, torch.optim.Optimizer):
+            opt_name = value.__class__.__name__
+
+            pg = value.param_groups[0]
+            lr = pg.get("lr", None)
+            wd = pg.get("weight_decay", None)
+
+            # First line
+            print(f"{key_str}{opt_name} (")
+
+            # Indented fields
+            print(f"{indent}{indent}{'lr':<15}: {lr}")
+            print(f"{indent}{indent}{'weight_decay':<15}: {wd}")
+
+            # Closing aligned under key
+            print(f"{' ' * len(key_str)})")
+
+        # -------------------------
+        # Tensor handling
+        # -------------------------
+        elif hasattr(value, "shape"):
+            val_str = f"{type(value).__name__}(shape={tuple(value.shape)})"
+            print(f"{key_str}{val_str}")
+
+        # -------------------------
+        # NN modules
+        # -------------------------
+        elif isinstance(value, torch.nn.Module):
+            print(f"{key_str}{value.__class__.__name__}(...)")
+
+        # -------------------------
+        # Default
+        # -------------------------
+        else:
+            print(f"{key_str}{value}")
 
     print("=" * max_width + "\n")

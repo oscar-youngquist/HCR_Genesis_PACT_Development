@@ -41,6 +41,7 @@ import torch
 from rsl_rl.algorithms import PPO_PACT
 from rsl_rl.modules import ActorCritic_PACT, ContextDecoder
 from rsl_rl.env import VecEnv
+from rsl_rl.utils import pretty_print_module
 
 
 
@@ -97,13 +98,17 @@ class OnPolicyRunnerPACT:
         
         # decoder = torch.compile(decoder)
 
-        print("Created Parallel Actor-Critic Model. Parameter Count: ", np.sum(p.numel() for p in actor_critic.parameters() if p.requires_grad))
-        print("\t Actor Trunk Parameter Count: ", np.sum(p.numel() for p in actor_critic.act_trunk.parameters() if p.requires_grad))
-        print("\t Encoder Parameter Count: ", np.sum(p.numel() for p in actor_critic.context_encoder.parameters() if p.requires_grad))
-        print("\t Critic Parameter Count: ", np.sum(p.numel() for p in actor_critic.critic.parameters() if p.requires_grad))
-        print("\t Decoder Parameter Count: ", np.sum(p.numel() for p in decoder.parameters() if p.requires_grad))
-        print(actor_critic)
-        print(decoder)
+        # print("Created Parallel Actor-Critic Model. Parameter Count: ", np.sum(p.numel() for p in actor_critic.parameters() if p.requires_grad))
+        # print("\t Actor Trunk Parameter Count: ", np.sum(p.numel() for p in actor_critic.act_trunk.parameters() if p.requires_grad))
+        # print("\t Encoder Parameter Count: ", np.sum(p.numel() for p in actor_critic.context_encoder.parameters() if p.requires_grad))
+        # print("\t Critic Parameter Count: ", np.sum(p.numel() for p in actor_critic.critic.parameters() if p.requires_grad))
+        # print("\t Decoder Parameter Count: ", np.sum(p.numel() for p in decoder.parameters() if p.requires_grad))
+        # print(actor_critic)
+        # print(decoder)
+
+        print("Created Parallel Actor-Critic Model")
+        pretty_print_module(actor_critic)
+        pretty_print_module(decoder)
 
         self._init_entropy_coef = self.alg_cfg["entropy_coef"]
         self.use_adaptive_entropy = self.alg_cfg["use_adaptive_entropy"]
