@@ -676,7 +676,7 @@ class Go1ABL3(BaseTask):
                     self.reward_scales[key] = self.reward_curr_bounds[key][0] * self.dt
                     # print("Reward - ", key, " scale - ", self.reward_scales[key])
         # Gradually increase the regularization strength
-        elif num_iters > self.reward_warmup_steps and (num_iters - self.reward_warmup_steps) < self.reward_curr_steps:
+        elif num_iters >= self.reward_warmup_steps and (num_iters - self.reward_warmup_steps) < self.reward_curr_steps:
             print("Stepping Reward Curriculum")
             adjusted_iter = num_iters - self.reward_warmup_steps
             for key in self.reward_curr_keys:
@@ -1463,3 +1463,14 @@ class Go1ABL3(BaseTask):
 
         self.phi_prev_orientation = phi_next
         return shaping
+
+    def _reward_ff_ratio(self):
+        ff_norm = torch.norm(self.simulator.feedforward_torques, dim=1)
+        fb_norm = torch.norm(self.simulator.feedback_torques)
+        r_ff_ratio = ff_norm / (ff_norm + fb_norm + 1e-6)
+        
+        error = torch.abs(r_ff_ratio - self.cfg.rewards.ff_ratio_target)
+
+        reward = torch.exp(-error / self.cfg.rewards.ff_ratio_width)
+
+        return reward

@@ -449,11 +449,11 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
                                   "torque_limits":[-1.0e-4, -0.01],
                                   "action_rate":[-1.0e-3, -0.01],
                                   "action_smoothness":[-1.0e-3,-0.01],
-                                  "dof_close_to_default":[-0.01, -0.10],
+                                  "dof_close_to_default":[-0.05, -0.20],
                                  }
 
-            curr_steps = 1000
-            warmup_steps = 5000
+            curr_steps = 500
+            warmup_steps = 4500
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
