@@ -129,7 +129,7 @@ class GO1PosCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 3000     # number of steps with initial values held constant
+        push_warmup = 5000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -156,21 +156,21 @@ class GO1PosCfg( LeggedRobotCfg ):
         # Randomized base mass, applied at COM
         randomize_base_mass = True
         min_added_mass_max = 4.0
-        max_added_mass_max = 6.5
+        max_added_mass_max = 6.8
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.12
+        com_displacement_x_max = 0.16
         
         com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.10
+        com_displacement_y_max = 0.12
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
         com_displacement_z_min = 0.075
-        com_displacement_z_max = 0.10
+        com_displacement_z_max = 0.12
         
         # Control delay
         randomize_ctrl_delay = True

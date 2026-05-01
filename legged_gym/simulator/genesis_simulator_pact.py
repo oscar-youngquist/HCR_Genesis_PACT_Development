@@ -1623,7 +1623,7 @@ class GenesisSimulator_PACT(Simulator):
         balanced_mask = torch.rand(n, device=device) < balanced_prob
 
         # Randomly choose which source gets biased upward
-        bias_ff_mask = torch.rand(n, device=device) < 0.5
+        bias_ff_mask = torch.rand(n, device=device) <= 0.5
 
         # Random bias amount
         bias = torch.empty(n, device=device).uniform_(weight_bias_min, weight_bias_max)

@@ -526,9 +526,9 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_spec_smartcurr_e2e'
+        run_name = 'pact_100hz_spec_smartcurr'
         experiment_name = 'go1_pact_rough'
-        save_interval = 100
+        save_interval = 500
         
         
         load_run = "Apr29_20-06-15_pact_100hz_spec_smartcurr"

@@ -1460,8 +1460,8 @@ class Go1PACT(BaseTask):
         return shaping
 
     def _reward_ff_ratio(self):
-        r_ff_ratio = torch.norm(self.simulator.feedforward_torques, dim=1) / (
-            torch.norm(self.simulator.torques, dim=1) + 1e-6
-            )
+        ff_norm = torch.norm(self.simulator.feedforward_torques, dim=1)
+        fb_norm = torch.norm(self.simulator.feedback_torques)
+        r_ff_ratio = ff_norm / (ff_norm + fb_norm + 1e-6)
         
         return r_ff_ratio
