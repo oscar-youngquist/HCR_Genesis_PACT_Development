@@ -467,7 +467,6 @@ class GO1RL2ACCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.02
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
@@ -480,6 +479,15 @@ class GO1RL2ACCfgPPO( LeggedRobotCfgPPO ):
         lam   = 0.95
         desired_kl = 0.01
         max_grad_norm = 1.0
+
+        # adaptive entropy coefficent algorithm parameters
+        entropy_coef = 0.02                      # initial entropy value
+        use_adaptive_entropy = True              # weather or not to use the adaptive entropy coef alg.
+        adaptive_ent_bounds = [0.001, 0.02]      # entropy coefficent bands
+        adaptive_ent_lin_threshold = 0.75        # minimum linear velocity tracking target
+        adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target
+        adaptive_ent_ter_threshold = 6.0         # minimum avg. terrain curriculum progress target
+        adaptive_ent_softmax_temp = 2.0          # temperature (sharpness) of the softmax operation used in the alg. 
 
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_RL2AC'

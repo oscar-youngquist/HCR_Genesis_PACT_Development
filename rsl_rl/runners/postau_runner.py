@@ -41,7 +41,7 @@ import torch
 from rsl_rl.algorithms import PPO_PosTau
 from rsl_rl.modules import ActorCritic_PosTau, ContextDecoder
 from rsl_rl.env import VecEnv
-
+from rsl_rl.utils import pretty_print_module
 
 
 # ---------------- 4090 / Ada Lovelace performance knobs ----------------
@@ -91,28 +91,18 @@ class OnPolicyRunnerPosTau:
                                                                 self.policy_cfg["activation"],
                                                                 self.policy_cfg["init_noise_std"]).to(self.device)
         
-        
-        # actor_critic = torch.compile(actor_critic)
-        
-        print(actor_critic)
-        
+                        
         decoder = ContextDecoder(self.policy_cfg["cenet_dec_input_dim"],
                                  self.policy_cfg["cenet_dec_layers"],
                                  self.policy_cfg["cenet_dec_out_dim"]
                                  ).to(self.device)
         
-        # decoder = torch.compile(decoder)
-
-        print("Created Parallel Actor-Critic Model. Parameter Count: ", np.sum(p.numel() for p in actor_critic.parameters() if p.requires_grad))
-
-        print("\t Actor Trunk Parameter Count: ", np.sum(p.numel() for p in actor_critic.act_trunk.parameters() if p.requires_grad))
-
-        print("\t Encoder Parameter Count: ", np.sum(p.numel() for p in actor_critic.context_encoder.parameters() if p.requires_grad))
-
-        print("\t Critic Parameter Count: ", np.sum(p.numel() for p in actor_critic.critic.parameters() if p.requires_grad))
-
+        print("Created Parallel Actor-Critic Model")
+        pretty_print_module(actor_critic)
+        pretty_print_module(decoder)
 
         self._init_entropy_coef = self.alg_cfg["entropy_coef"]
+        self.use_adaptive_entropy = self.alg_cfg["use_adaptive_entropy"]
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         
@@ -259,9 +249,17 @@ class OnPolicyRunnerPosTau:
                 mean_tracking_lin_vel = torch.stack(vals).mean().item()
                 self.env.simulator._step_domian_rand(it, mean_tracking_lin_vel)
 
+                if self.env.simulator.domain_rand_reward_ema is not None:
+                    self.writer.add_scalar('Values/domain_rand_reward_ema',self.env.simulator.domain_rand_reward_ema,it) 
+                else:
+                    self.writer.add_scalar('Values/domain_rand_reward_ema',0.0,it) 
+                self.writer.add_scalar('Values/required_reward',self.env.simulator.required_reward,it) 
+                self.writer.add_scalar('Values/domain_rand_mass_com_progress',self.env.simulator.domain_rand_mass_com_progress,it) 
+                self.writer.add_scalar('Values/domain_rand_disturbance_progress',self.env.simulator.domain_rand_disturbance_progress,it) 
+                    
+                
             performance_metrics = {}
-            if ep_infos:
-                # 提取线速度和角速度跟踪性能
+            if ep_infos and self.use_adaptive_entropy:
                 lin_vel_tracking = 0.0
                 ang_vel_tracking = 0.0
                 terrain_level = 0
@@ -280,29 +278,13 @@ class OnPolicyRunnerPosTau:
                     'terrain_level': terrain_level
                 }
             
-            
-            entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
-            print(entropy)
+                entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
+                print(entropy)
+                self.writer.add_scalar('Values/entropy',entropy,it)
 
-            self.writer.add_scalar('Values/entropy',entropy,it)
-            
-            if self.env.simulator.domain_rand_reward_ema is not None:
-                self.writer.add_scalar('Values/domain_rand_reward_ema',self.env.simulator.domain_rand_reward_ema,it) 
-            else:
-                self.writer.add_scalar('Values/domain_rand_reward_ema',0.0,it) 
-            self.writer.add_scalar('Values/required_reward',self.env.simulator.required_reward,it) 
-            self.writer.add_scalar('Values/domain_rand_mass_com_progress',self.env.simulator.domain_rand_mass_com_progress,it) 
-            self.writer.add_scalar('Values/domain_rand_disturbance_progress',self.env.simulator.domain_rand_disturbance_progress,it) 
-
-            # if it > 1000:
-            #     self.alg.set_entropy_coef(1.0e-3)
-            
             # entropy_coef = self._init_entropy_coef
-            # std_lwr = 0.40
-
             # half_coef = self._init_entropy_coef * 0.5
             # tenth_coef = self._init_entropy_coef * 0.1
-            
             # if it < 8000:
             #     entropy_coef = self._init_entropy_coef
             # elif it < 8500:
@@ -315,20 +297,9 @@ class OnPolicyRunnerPosTau:
             #     entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
             # else:
             #     entropy_coef = tenth_coef
-
-
-            # if it < 9000 and it >= 8000:
-            #     alpha = (it - 8000) / 1000.0
-            #     entropy_coef = tenth_coef + 0.5 * (self._init_entropy_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
-            
             # entropy_coef = max(entropy_coef, 0.0001)
-
             # print("entropy_coef - ", entropy_coef)
-            # print("std_lwr - ", std_lwr)
-
             # self.alg.set_entropy_coef(entropy_coef)
-            # self.alg._set_std_clip_lwr(std_lwr)
-
 
             # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
             #     self.env.cfg.rewards.only_positive_rewards = False

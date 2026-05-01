@@ -41,6 +41,7 @@ import torch
 from rsl_rl.algorithms import PPO_RL2AC
 from rsl_rl.modules import ActorCritic_RL2AC, ContextDecoder
 from rsl_rl.env import VecEnv
+from rsl_rl.utils import pretty_print_module
 
 
 
@@ -91,32 +92,20 @@ class OnPolicyRunnerRL2AC:
                                                                 self.policy_cfg["activation"],
                                                                 self.policy_cfg["init_noise_std"]).to(self.device)
         
-        
-        # actor_critic = torch.compile(actor_critic)
-        
-        print(actor_critic)
-        
         decoder = ContextDecoder(self.policy_cfg["cenet_dec_input_dim"],
                                  self.policy_cfg["cenet_dec_layers"],
                                  self.policy_cfg["cenet_dec_out_dim"]
-                                 ).to(self.device)
-        
-        # decoder = torch.compile(decoder)
+                                 ).to(self.device)        
 
-        print("Created Parallel Actor-Critic Model. Parameter Count: ", np.sum(p.numel() for p in actor_critic.parameters() if p.requires_grad))
-
-        print("\t Actor Trunk Parameter Count: ", np.sum(p.numel() for p in actor_critic.act_trunk.parameters() if p.requires_grad))
-
-        print("\t Encoder Parameter Count: ", np.sum(p.numel() for p in actor_critic.context_encoder.parameters() if p.requires_grad))
-
-        print("\t Critic Parameter Count: ", np.sum(p.numel() for p in actor_critic.critic.parameters() if p.requires_grad))
-
+        print("Created Parallel Actor-Critic Model")
+        pretty_print_module(actor_critic)
+        pretty_print_module(decoder)
 
         self._init_entropy_coef = self.alg_cfg["entropy_coef"]
+        self.use_adaptive_entropy = self.alg_cfg["use_adaptive_entropy"]
+
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
-
-
         
         self.alg: PPO_RL2AC = alg_class(actor_critic, decoder, self.env.num_privileged_obs,
                                            device=self.device, **self.alg_cfg)
@@ -250,8 +239,7 @@ class OnPolicyRunnerRL2AC:
                 self.env.simulator._step_domian_rand(it)
 
             performance_metrics = {}
-            if ep_infos:
-                # 提取线速度和角速度跟踪性能
+            if ep_infos and self.use_adaptive_entropy:
                 lin_vel_tracking = 0.0
                 ang_vel_tracking = 0.0
                 terrain_level = 0
@@ -270,11 +258,9 @@ class OnPolicyRunnerRL2AC:
                     'terrain_level': terrain_level
                 }
             
-            
-            entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
-            print(entropy)
-
-            self.writer.add_scalar('Values/entropy',entropy,it)
+                entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
+                print(entropy)
+                self.writer.add_scalar('Values/entropy',entropy,it)
 
             # # if it > 1000:
             # #     self.alg.set_entropy_coef(1.0e-3)

@@ -346,7 +346,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             collision             = -1.0
             dof_pos_limits        = -2.0
             dof_close_to_default  = -0.01
-            torque_limits         = -0.01
+            torque_limits         = -0.0001
 
             alive_bonus           = 0.001
 

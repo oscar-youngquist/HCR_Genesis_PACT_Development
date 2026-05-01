@@ -133,14 +133,14 @@ class GO1TauCfg( LeggedRobotCfg ):
         
         # Randomize Friction
         randomize_friction = True
-        friction_range = [0.2, 1.8]
+        friction_range = [0.2, 1.25]
 
         # What changes with finetuning round
         # Randomized 6DOF torso wrench
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 2.50
-        max_push_vel_xy = 1.00
+        max_push_vel_xy = 1.35
         min_push_vel_xy = 0.50
 
         max_vertical_push = 0.40
@@ -148,7 +148,7 @@ class GO1TauCfg( LeggedRobotCfg ):
         vert_interval_max = 10.0
         vert_interval_min = 2.50
 
-        max_push_torque = 1.00
+        max_push_torque = 1.35
         min_push_torque = 0.50
         wrench_timeout_min = 1.00
         wrench_timeout_max = 10.0
@@ -156,21 +156,21 @@ class GO1TauCfg( LeggedRobotCfg ):
         # Randomized base mass, applied at COM
         randomize_base_mass = True
         min_added_mass_max = 4.0
-        max_added_mass_max = 8.0
+        max_added_mass_max = 6.5
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.15
+        com_displacement_x_max = 0.12
         
         com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.15
+        com_displacement_y_max = 0.10
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
         com_displacement_z_min = 0.075
-        com_displacement_z_max = 0.15
+        com_displacement_z_max = 0.10
         
         # Control delay
         randomize_ctrl_delay = True
@@ -459,7 +459,6 @@ class GO1TauCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.01
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
@@ -473,11 +472,19 @@ class GO1TauCfgPPO( LeggedRobotCfgPPO ):
         desired_kl = 0.01
         max_grad_norm = 1.0
 
+        # adaptive entropy coefficent algorithm parameters
+        entropy_coef = 0.01                      # initial entropy value
+        use_adaptive_entropy = True              # weather or not to use the adaptive entropy coef alg.
+        adaptive_ent_bounds = [0.001, 0.01]      # entropy coefficent bands
+        adaptive_ent_lin_threshold = 0.75        # minimum linear velocity tracking target
+        adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target
+        adaptive_ent_ter_threshold = 6.0         # minimum avg. terrain curriculum progress target
+        adaptive_ent_softmax_temp = 2.0          # temperature (sharpness) of the softmax operation used in the alg. 
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PosTau'
         algorithm_class_name = 'PPO_PosTau'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 10000 # number of policy updates
+        max_iterations = 8000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb

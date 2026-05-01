@@ -41,8 +41,7 @@ import gc
 
 from rsl_rl.modules import ActorCritic_RL2AC, ContextDecoder
 from rsl_rl.storage import RolloutStorageRL2AC
-
-from .pc_grad import PCGrad
+from rsl_rl.utils import print_class_attributes
 
 class PPO_RL2AC:
     actor_critic: ActorCritic_RL2AC
@@ -68,6 +67,12 @@ class PPO_RL2AC:
                  pos_action_scale=0.25,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
                  vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
+                 use_adaptive_entropy=True,
+                 adaptive_ent_bounds=[0.01, 0.001],
+                 adaptive_ent_lin_threshold=0.75,
+                 adaptive_ent_ang_threshold=0.35,
+                 adaptive_ent_ter_threshold=5.0,
+                 adaptive_ent_softmax_temp=2.0,
                  ):
         
         self.device = device
@@ -82,6 +87,18 @@ class PPO_RL2AC:
 
         self.num_enc_epochs = num_encoder_epochs
         self.vae_beta = vae_kld_weight
+
+        # Adaptive entropy coefficent algorithm values
+        self.use_adaptive_entropy = use_adaptive_entropy
+        self.entropy_coef_bounds = adaptive_ent_bounds
+        self.ent_linvelo_threshold = adaptive_ent_lin_threshold
+        self.ent_angvelo_threshold = adaptive_ent_ang_threshold
+        self.ent_terrain_threshold = adaptive_ent_ter_threshold
+        self.ent_softmax_temperature = adaptive_ent_softmax_temp
+        
+        self.current_entropy_coef = entropy_coef
+        self.entropy_coef = entropy_coef
+
 
         # PPO components
         self.actor_critic = actor_critic
@@ -110,14 +127,11 @@ class PPO_RL2AC:
         self.num_learning_epochs = num_learning_epochs
         self.num_mini_batches = num_mini_batches
         self.value_loss_coef = value_loss_coef
-        self.entropy_coef = entropy_coef
         self.gamma = gamma
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
-        
-        self.current_entropy_coef = entropy_coef
-        
+                
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape):
         self.storage = RolloutStorageRL2AC(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
                                               action_shape, torso_velo_shape, self.device)
@@ -182,21 +196,21 @@ class PPO_RL2AC:
         ang_vel_tracking = performance_metrics.get('ang_vel_tracking', 0.0)
         terrain_level = performance_metrics.get('terrain_level', 0)
         
-        lin_vel_gap = max(0, 0.70 - lin_vel_tracking)
-        ang_vel_gap = max(0, 0.30 - ang_vel_tracking)
-        terrain_gap = max(0, 5.0 - terrain_level)
+        lin_vel_gap = max(0, self.ent_linvelo_threshold - lin_vel_tracking)
+        ang_vel_gap = max(0, self.ent_angvelo_threshold - ang_vel_tracking)
+        terrain_gap = max(0, self.ent_terrain_threshold - terrain_level)
         
-        norm_lin_gap = lin_vel_gap /  0.70 if  0.70 > 0 else 0
-        norm_ang_gap = ang_vel_gap / 0.30 if 0.30 > 0 else 0
-        norm_terrain_gap = terrain_gap / 5.0 if 5.0 > 0 else 0
+        norm_lin_gap = lin_vel_gap /  self.ent_linvelo_threshold if self.ent_linvelo_threshold > 0 else 0
+        norm_ang_gap = ang_vel_gap / self.ent_angvelo_threshold if self.ent_angvelo_threshold > 0 else 0
+        norm_terrain_gap = terrain_gap / self.ent_terrain_threshold if self.ent_terrain_threshold > 0 else 0
         
         gaps = torch.tensor([norm_lin_gap, norm_ang_gap, norm_terrain_gap], dtype=torch.float32)
         
-        weights = F.softmax(gaps / 2.0, dim=0)
+        weights = F.softmax(gaps / self.ent_softmax_temperature, dim=0)
         
         weighted_gap = torch.sum(weights * gaps).item()
         
-        self.current_entropy_coef = 0.002 + weighted_gap * (0.02 - 0.002)
+        self.current_entropy_coef = self.entropy_coef_bounds[0] + weighted_gap * (self.entropy_coef_bounds[1] - self.entropy_coef_bounds[0])
         
         return self.current_entropy_coef
 
@@ -535,8 +549,10 @@ class PPO_RL2AC:
         else:
             value_loss = (returns_batch - value_batch).pow(2).mean()
 
-        # ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
-        ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.current_entropy_coef * entropy_batch.mean()
+        if self.use_adaptive_entropy: 
+            ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.current_entropy_coef * entropy_batch.mean()
+        else:
+            ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()        
 
         return ppo_loss, surrogate_loss, value_loss
 
