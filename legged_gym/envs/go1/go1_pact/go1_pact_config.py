@@ -334,6 +334,13 @@ class GO1PACTCfg( LeggedRobotCfg ):
         tradeoff_threshold = 0.60
         use_tradeoff_curriculum = False
 
+        # not a tradeoff curriculum, but just slightly randomizing how much each branch contributes
+        randomize_pact_weights = True
+        pact_weight_bias_min = 0.0       # minimum output bias
+        pact_weight_bias_max = 0.20      # maximum output bias
+        pact_balanced_prob = 0.25        # % of envs that are guaranteed to have a 1-1 "balanced" output contribution
+
+
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
         roll_threshold    = 0.70  # [rad] ~ 40 degrees
@@ -377,18 +384,17 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # command tracking
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
-            dof_tracking      = 0.05
+            dof_tracking      = 0.1
             # sparse_contacts   = 0.1
 
             # coupled output specific rewards 
-            # aligned_torques     = -0.01
-            # antagonisitc_energy = -0.01
-            torque_conflict_symmetric = -0.1
-            torque_alignment = 0.4
+            torque_conflict_symmetric = -0.1     # discourages a negative cosine similarity between ff and fb torques
+            torque_alignment = 0.4               # encourage a positive cosine-similarity between the ff and fb torques
+            ff_ratio = 0.1                       # encourage the feeforward torques explaining more of the final torque
             
             # smoothness and stability
             lin_vel_z        = -2.0
-            base_height      = -1.0
+            base_height      = -2.0
             ang_vel_xy       = -0.05
             orientation      = -0.2
             dof_acc          = -2.5e-7
@@ -409,8 +415,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # feedforward_torques   = -2.5e-5
             # feedback_torques      = -2.0e-5
 
-            feedforward_torques_scaled = -1.0e-5
-            feedback_torques           = -1.5e-5
+            feedforward_torques_scaled = -1.0e-5       # penalize magnitude of ff torques, scales down with added payload mass (ff assumes MORE responsibility when transporting)
+            feedback_torques           = -2.0e-5       # make using large PD torques 2x as expensive as ff torques.
             dof_act_limits             = 0.0
 
             support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
@@ -432,16 +438,20 @@ class GO1PACTCfg( LeggedRobotCfg ):
                                 "orientation",
                                 "torque_limits",
                                 "dof_close_to_default",
+                                "action_rate", 
+                                "action_smoothness",
                                 ]
             
             curr_reward_bounds = {
                                   "ang_vel_xy":[-0.05, -0.2],
                                   "orientation":[-0.2,-2.0],
                                   "torque_limits":[-1.0e-4, -1.0e-2],
-                                  "dof_close_to_default":[-0.01, -0.10]
+                                  "dof_close_to_default":[-0.01, -0.10],
+                                  "action_rate":[-0.001, -0.01],
+                                  "action_smoothness":[-0.001,-0.01],
                                  }
 
-            curr_steps = 500
+            curr_steps = 250
             warmup_steps = 5000
 
     class commands(LeggedRobotCfg.commands):
@@ -482,7 +492,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/Apr30_20-18-21_pact_posboot_100hz_grf/model_2000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #

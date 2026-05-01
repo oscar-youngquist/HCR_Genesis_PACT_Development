@@ -194,6 +194,9 @@ class GenesisSimulator_PACT(Simulator):
             self._randomize_pd_gain(env_ids)        
         if self._cfg.domain_rand.randomize_motor_strength:
             self._randomize_motor_strength(env_ids)
+
+        if self._cfg.control.randomize_pact_weights:
+            self._randomize_pact_torque_weights(env_ids)
         
         self._last_dof_vel[env_ids] = 0.
         self._last_feet_vel[env_ids] = 0.
@@ -1108,6 +1111,10 @@ class GenesisSimulator_PACT(Simulator):
         # randomize motor strength factor
         if self._cfg.domain_rand.randomize_motor_strength:
             self._randomize_motor_strength(np.arange(self._num_envs))
+
+        # Randomize weighted contribution from each PACT output
+        if self._cfg.control.randomize_pact_weights:
+            self._randomize_pact_torque_weights(env_ids)
             
     def _init_buffers(self):
         self.common_step_counter = 0
@@ -1583,6 +1590,61 @@ class GenesisSimulator_PACT(Simulator):
                 self._cfg.domain_rand.kp_range[0], self._cfg.domain_rand.kp_range[1], (len(env_ids), self._num_actions), device=self._device)
         self._kd_scale[env_ids] = torch_rand_float(
                 self._cfg.domain_rand.kd_range[0], self._cfg.domain_rand.kd_range[1], (len(env_ids), self._num_actions), device=self._device)
+        
+    def _randomize_pact_torque_weights(self, env_ids):
+        """
+        Randomize feedforward / feedback torque weights for PACT torque outputs.
+
+        Goal:
+            tau_nominal = tau_ff + tau_fb
+
+            tau_mixed_raw = w_ff * tau_ff + w_fb * tau_fb
+            tau_mixed     = scale * tau_mixed_raw
+
+        where scale preserves ||tau_mixed|| ~= ||tau_nominal||.
+
+        A subset of envs are sampled as "balanced":
+            w_ff = 1.0
+            w_fb = 1.0
+        """
+
+        if len(env_ids) == 0:
+            return
+
+        device = self.device
+        n = len(env_ids)
+
+        # User-defined config values
+        weight_bias_min = self._cfg.control.pact_weight_bias_min  # e.g. 0.15
+        weight_bias_max = self._cfg.control.pact_weight_bias_max  # e.g. 0.35
+        balanced_prob = self._cfg.control.pact_balanced_prob      # e.g. 0.25
+
+        # Decide which envs use the balanced/full-strength case
+        balanced_mask = torch.rand(n, device=device) < balanced_prob
+
+        # Randomly choose which source gets biased upward
+        bias_ff_mask = torch.rand(n, device=device) < 0.5
+
+        # Random bias amount
+        bias = torch.empty(n, device=device).uniform_(weight_bias_min, weight_bias_max)
+
+        # Start balanced
+        w_ff = torch.ones(n, device=device)
+        w_fb = torch.ones(n, device=device)
+
+        # Bias toward feedforward:
+        #   ff gets stronger, fb gets weaker
+        w_ff = torch.where(~balanced_mask & bias_ff_mask, 1.0 + bias, w_ff)
+        w_fb = torch.where(~balanced_mask & bias_ff_mask, 1.0 - bias, w_fb)
+
+        # Bias toward feedback:
+        #   fb gets stronger, ff gets weaker
+        w_ff = torch.where(~balanced_mask & ~bias_ff_mask, 1.0 - bias, w_ff)
+        w_fb = torch.where(~balanced_mask & ~bias_ff_mask, 1.0 + bias, w_fb)
+
+        # Store as [num_envs, 1] so they broadcast over joints/actions
+        self.feedforward_tau_weight[env_ids] = w_ff.unsqueeze(-1)
+        self.feedback_tau_weight[env_ids] = w_fb.unsqueeze(-1)
     
     def _update_depth_images(self):
         """ Renders the depth camera and retrieves the depth images

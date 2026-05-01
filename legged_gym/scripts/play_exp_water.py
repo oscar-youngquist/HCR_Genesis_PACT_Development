@@ -95,7 +95,7 @@ def override_configs(env_cfg, train_cfg, args):
     env_cfg.env.debug = False
 
     # Liquid Payload override stuff
-    args.use_liquid = False
+    args.use_liquid = True
     args.liquid_type = "water"
     args.liquid_tank = "default"
     args.liquid_volume = 12.0  # liters
@@ -299,6 +299,9 @@ def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     elif "dreamwaq" in task_name:
         exporter = PolicyExporterWaQ(alg_runner.alg.actor_critic)
         exporter.export(path, env_cfg, args.export_onnx, train_cfg)
+    elif "pact" in task_name:
+        exporter = PolicyExporterPACT(alg_runner.alg.actor_critic)
+        exporter.export(path, env_cfg, train_cfg)
     else:
         exporter = PolicyExporter(alg_runner.alg.actor_critic)
         exporter.export(path, env_cfg, args.export_onnx, train_cfg)
@@ -327,9 +330,9 @@ def play(args):
     policy = ppo_runner.get_inference_policy(device=env.device)
     
     # export policy as a jit module (used to run it from C++ or python)
-    path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 
+    path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', 'pact_coral', train_cfg.runner.experiment_name, 
                             train_cfg.runner.load_run, 'exported')
-    # export_policy(ppo_runner, path, args, env_cfg, train_cfg)
+    export_policy(ppo_runner, path, args, env_cfg, train_cfg)
 
     interaction_loop(train_cfg, env, policy, args)
 

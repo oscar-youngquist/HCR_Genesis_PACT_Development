@@ -1458,3 +1458,10 @@ class Go1PACT(BaseTask):
 
         self.phi_prev_orientation = phi_next
         return shaping
+
+    def _reward_ff_ratio(self):
+        r_ff_ratio = torch.norm(self.simulator.feedforward_torques, dim=1) / (
+            torch.norm(self.simulator.torques, dim=1) + 1e-6
+            )
+        
+        return r_ff_ratio
