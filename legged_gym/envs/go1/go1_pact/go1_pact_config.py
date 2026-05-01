@@ -384,7 +384,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # command tracking
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
-            dof_tracking      = 0.1
+            dof_tracking      = 0.05
             # sparse_contacts   = 0.1
 
             # coupled output specific rewards 
@@ -416,7 +416,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # feedback_torques      = -2.0e-5
 
             feedforward_torques_scaled = -1.0e-5       # penalize magnitude of ff torques, scales down with added payload mass (ff assumes MORE responsibility when transporting)
-            feedback_torques           = -2.0e-5       # make using large PD torques 2x as expensive as ff torques.
+            feedback_torques           = -2.0e-5       # make using large PD torques 1.5x as expensive as ff torques.
             dof_act_limits             = 0.0
 
             support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
@@ -492,7 +492,8 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/Apr30_20-18-21_pact_posboot_100hz_grf/model_2000_converted.pt"
+        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/Apr30_20-18-21_pact_posboot_100hz_grf/model_2000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
@@ -516,6 +517,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target
         adaptive_ent_ter_threshold = 6.0         # minimum avg. terrain curriculum progress target
         adaptive_ent_softmax_temp = 2.0          # temperature (sharpness) of the softmax operation used in the alg. 
+
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_PACT'

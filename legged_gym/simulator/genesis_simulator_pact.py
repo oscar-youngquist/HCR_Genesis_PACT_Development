@@ -1114,7 +1114,7 @@ class GenesisSimulator_PACT(Simulator):
 
         # Randomize weighted contribution from each PACT output
         if self._cfg.control.randomize_pact_weights:
-            self._randomize_pact_torque_weights(env_ids)
+            self._randomize_pact_torque_weights(np.arange(self._num_envs))
             
     def _init_buffers(self):
         self.common_step_counter = 0
@@ -1611,7 +1611,7 @@ class GenesisSimulator_PACT(Simulator):
         if len(env_ids) == 0:
             return
 
-        device = self.device
+        device = self._device
         n = len(env_ids)
 
         # User-defined config values
