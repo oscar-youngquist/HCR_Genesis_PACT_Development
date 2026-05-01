@@ -651,7 +651,15 @@ class Go1Pos(BaseTask):
             adjusted_iter = num_iters - self.reward_warmup_steps
             for key in self.reward_curr_keys:
                 if key in self.reward_scales.keys():
-                    self.reward_scales[key] = ((float(adjusted_iter)/float(self.reward_curr_steps))*self.reward_bound_diffs[key] + self.reward_curr_bounds[key][0])*self.dt
+                    low, high = self.reward_curr_bounds[key]
+
+                    alpha = adjusted_iter / self.reward_curr_steps
+                    alpha = np.clip(alpha, 0.0, 1.0)
+                    print(alpha)
+                    ramp = 0.5 * (1.0 - np.cos(np.pi * alpha))
+
+                    self.reward_scales[key] = (low + (high - low) * ramp) * self.dt
+                    # self.reward_scales[key] = ((float(adjusted_iter)/float(self.reward_curr_steps))*self.reward_bound_diffs[key] + self.reward_curr_bounds[key][0])*self.dt
                     # print("Reward - ", key, " scale - ", self.reward_scales[key])
         # Fix the regularization strength to the upper-bound
         else:

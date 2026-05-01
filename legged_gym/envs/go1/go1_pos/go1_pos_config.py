@@ -409,12 +409,12 @@ class GO1PosCfg( LeggedRobotCfg ):
             curr_reward_bounds = {
                                   "orientation":[-0.2,-1.0],
                                   "ang_vel_xy":[-0.05, -0.1],
-                                  "dof_close_to_default":[-0.01, -0.10],
+                                  "dof_close_to_default":[-0.05, -0.20],
                                   "torque_limits":[-0.0001, -1.0e-2],
                                  }
 
-            curr_steps = 1000
-            warmup_steps = 7000
+            curr_steps = 500
+            warmup_steps = 6500
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True

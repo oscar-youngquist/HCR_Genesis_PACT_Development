@@ -2,6 +2,7 @@ from legged_gym import *
 from time import time
 import numpy as np
 import os
+import math
 from legged_gym.utils.math_utils import *
 
 import torch
@@ -677,15 +678,23 @@ class Go1PACT(BaseTask):
             for key in self.reward_curr_keys:
                 if key in self.reward_scales.keys():
                     self.reward_scales[key] = self.reward_curr_bounds[key][0] * self.dt
-                    # print("Reward - ", key, " scale - ", self.reward_scales[key])
-        # Gradually increase the regularization strength
-        elif num_iters > self.reward_warmup_steps and (num_iters - self.reward_warmup_steps) < self.reward_curr_steps:
+                    # print("Before stepping - Reward - ", key, " scale - ", self.reward_scales[key]/self.dt)
+        # Gradually increase the regularization strength via cosine annealing schedule
+        elif num_iters >= self.reward_warmup_steps and (num_iters - self.reward_warmup_steps) < self.reward_curr_steps:
             print("Stepping Reward Curriculum")
             adjusted_iter = num_iters - self.reward_warmup_steps
             for key in self.reward_curr_keys:
                 if key in self.reward_scales.keys():
-                    self.reward_scales[key] = ((float(adjusted_iter)/float(self.reward_curr_steps))*self.reward_bound_diffs[key] + self.reward_curr_bounds[key][0])*self.dt
-                    # print("Reward - ", key, " scale - ", self.reward_scales[key])
+                    low, high = self.reward_curr_bounds[key]
+
+                    alpha = adjusted_iter / self.reward_curr_steps
+                    alpha = np.clip(alpha, 0.0, 1.0)
+                    print(alpha)
+                    ramp = 0.5 * (1.0 - np.cos(np.pi * alpha))
+
+                    self.reward_scales[key] = (low + (high - low) * ramp) * self.dt
+                    # self.reward_scales[key] = ((float(adjusted_iter)/float(self.reward_curr_steps))*self.reward_bound_diffs[key] + self.reward_curr_bounds[key][0])*self.dt
+                    # print("Reward - ", key, " scale - ", self.reward_scales[key]/self.dt)
         # Fix the regularization strength to the upper-bound
         else:
             # by default set the reward to the upper bound
@@ -1464,4 +1473,8 @@ class Go1PACT(BaseTask):
         fb_norm = torch.norm(self.simulator.feedback_torques)
         r_ff_ratio = ff_norm / (ff_norm + fb_norm + 1e-6)
         
-        return r_ff_ratio
+        error = torch.abs(r_ff_ratio - self.cfg.rewards.ff_ratio_target)
+
+        reward = torch.exp(-error / self.cfg.rewards.ff_ratio_width)
+
+        return reward

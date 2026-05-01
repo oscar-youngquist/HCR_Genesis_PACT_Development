@@ -38,9 +38,8 @@ import numpy as np
 import random
 
 from rsl_rl.modules import ActorCritic_PACT, ContextDecoder
-from rsl_rl.storage import RolloutStoragePACT
-
-from .pc_grad import PCGrad
+from rsl_rl.storage import RolloutStoragePACTAblation
+from rsl_rl.utils import print_class_attributes
 
 class PPO_ABL1:
     actor_critic: ActorCritic_PACT
@@ -63,11 +62,14 @@ class PPO_ABL1:
                  desired_kl=0.01,
                  device='cpu',
                  use_spo=False,
-                 pinn_lambda=0.001,
-                 pinn_warmup=1000,
-                 pinn_init_steps=500,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
                  vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
+                 use_adaptive_entropy=True,
+                 adaptive_ent_bounds=[0.01, 0.001],
+                 adaptive_ent_lin_threshold=0.75,
+                 adaptive_ent_ang_threshold=0.35,
+                 adaptive_ent_ter_threshold=5.0,
+                 adaptive_ent_softmax_temp=2.0,
                  ):
         
         self.device = device
@@ -81,15 +83,25 @@ class PPO_ABL1:
         self.num_enc_epochs = num_encoder_epochs
         self.vae_beta = vae_kld_weight
 
+        # Adaptive entropy coefficent algorithm values
+        self.use_adaptive_entropy = use_adaptive_entropy
+        self.entropy_coef_bounds = adaptive_ent_bounds
+        self.ent_linvelo_threshold = adaptive_ent_lin_threshold
+        self.ent_angvelo_threshold = adaptive_ent_ang_threshold
+        self.ent_terrain_threshold = adaptive_ent_ter_threshold
+        self.ent_softmax_temperature = adaptive_ent_softmax_temp
+        
+        self.current_entropy_coef = entropy_coef
+        self.entropy_coef = entropy_coef
+
         # PPO components
         self.actor_critic = actor_critic
         self.actor_critic.to(self.device)
         self.storage = None # initialized later
 
         self.act_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(learning_rate)
-        self.transition = RolloutStoragePACT.Transition()
+        self.transition = RolloutStoragePACTAblation.Transition()
 
-        # self.act_optimizer = PCGrad(self.act_optimizer, reduction='sum')
 
         # # We want to reduce the LR of the critic
         for param_group in self.act_optimizer.param_groups:
@@ -105,38 +117,58 @@ class PPO_ABL1:
         self.boot_mult = 1.0
         self.use_boot = False
 
-        self.pinn_weight_final = pinn_lambda
-        self.pinn_weight = 0.0
-        self.pinn_warmup_steps = pinn_warmup
-        self.pinn_init = pinn_init_steps
-
-        self.num_pinn_updates = 0
-
         # PPO parameters
         self.clip_param = clip_param
         self.num_learning_epochs = num_learning_epochs
         self.num_mini_batches = num_mini_batches
         self.value_loss_coef = value_loss_coef
-        self.entropy_coef = entropy_coef
         self.gamma = gamma
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+
+        print_class_attributes(self)
         
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
-        self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
-                                              action_shape, torso_velo_shape, grf_shape, wb_shape, self.device)
+    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape):
+        self.storage = RolloutStoragePACTAblation(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
+                                              action_shape, torso_velo_shape, grf_shape, self.device)
 
     def test_mode(self):
         self.actor_critic.test()
 
     def set_entropy_coef(self, coef=1e-3):
-        self.entropy_coef = coef
+        if self.use_adaptive_entropy: 
+            self.current_entropy_coef = coef
+        else:
+            self.entropy_coef = coef        
+        
+    def update_adaptive_entropy_coef(self, performance_metrics):
+        lin_vel_tracking = performance_metrics.get('lin_vel_tracking', 0.0)
+        ang_vel_tracking = performance_metrics.get('ang_vel_tracking', 0.0)
+        terrain_level = performance_metrics.get('terrain_level', 0)
+        
+        lin_vel_gap = max(0, self.ent_linvelo_threshold - lin_vel_tracking)
+        ang_vel_gap = max(0, self.ent_angvelo_threshold - ang_vel_tracking)
+        terrain_gap = max(0, self.ent_terrain_threshold - terrain_level)
+        
+        norm_lin_gap = lin_vel_gap /  self.ent_linvelo_threshold if self.ent_linvelo_threshold > 0 else 0
+        norm_ang_gap = ang_vel_gap / self.ent_angvelo_threshold if self.ent_angvelo_threshold > 0 else 0
+        norm_terrain_gap = terrain_gap / self.ent_terrain_threshold if self.ent_terrain_threshold > 0 else 0
+        
+        gaps = torch.tensor([norm_lin_gap, norm_ang_gap, norm_terrain_gap], dtype=torch.float32)
+        
+        weights = F.softmax(gaps / self.ent_softmax_temperature, dim=0)
+        
+        weighted_gap = torch.sum(weights * gaps).item()
+        
+        self.current_entropy_coef = self.entropy_coef_bounds[0] + weighted_gap * (self.entropy_coef_bounds[1] - self.entropy_coef_bounds[0])
+        
+        return self.current_entropy_coef
     
     def train_mode(self):
         self.actor_critic.train()
 
-    def act(self, obs, critic_obs, obs_history, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist):
+    def act(self, obs, critic_obs, obs_history):
         # if self.actor_critic.is_recurrent:
         #     self.transition.hidden_states = self.actor_critic.get_hidden_states()
         if self.use_boot:
@@ -156,16 +188,10 @@ class PPO_ABL1:
         self.transition.observations = obs
         self.transition.observation_history = obs_history
         self.transition.critic_observations = critic_obs
-
-        # PINN stuff
-        self.transition.prev_obs      = prev_obs
-        self.transition.prev_obs_hist = prev_obs_hist
-        self.transition.pprev_obs      = pprev_obs
-        self.transition.pprev_obs_hist = pprev_obs_hist
         
         return all_actions
     
-    def process_env_step(self, rewards, dones, infos, grf_labels, obs_labels, explicit_labels, gt_forces, mass_mats, bias_vecs, torso_acc):
+    def process_env_step(self, rewards, dones, infos, grf_labels, obs_labels, explicit_labels):
         self.transition.rewards = rewards.clone()
         
         self.transition.dones = dones
@@ -181,47 +207,11 @@ class PPO_ABL1:
         # Bootstrapping on time outs
         if 'time_outs' in infos:
             self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
-
-        # PINN stuff
-        self.transition.wb_contact_forces = gt_forces
-        self.transition.wb_mass_mat = mass_mats
-        self.transition.wb_bias_vec = bias_vecs
-        self.transition.torso_acc = torso_acc
         
         # Record the transition
         self.storage.add_transitions(self.transition)
         self.transition.clear()
         self.actor_critic.reset(dones)
-
-    # def spectral_normalization(self, model):
-    #     """Applies spectral normalization to linear and attention layers.
-        
-    #     Normalizes weights such that their spectral norm (2-norm) doesn't exceed
-    #     the specified bound. Only affects Linear layers.
-
-    #     Args:
-    #         model: The neural network model to normalize.
-
-    #     Note:
-    #         - Operates in-place on the model parameters
-    #         - Only processes weights (not biases)
-    #         - Only affects parameters with ndim > 1
-    #     """
-    #     whitelist = (nn.Linear)
-
-    #     for module in model.modules():
-    #         if isinstance(module, whitelist):
-    #             for name, param in module.named_parameters():
-    #                 print(name)
-    #                 if name.endswith("weight") and param.ndim > 1:
-    #                     with torch.no_grad():
-    #                         weight = param.data
-    #                         norm = LA.matrix_norm(weight, ord=2)
-                            
-    #                         # Normalize if exceeds bound
-    #                         if norm > 2.0:
-    #                             param.data = (weight / norm) * 2.0
-
 
     def spectral_normalization(
         self,
@@ -290,7 +280,7 @@ class PPO_ABL1:
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)  
 
-    def update(self, action_func, fb_func, dt, itr, default_pose, qvel_scale):
+    def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_autoenc_loss = 0
@@ -298,27 +288,17 @@ class PPO_ABL1:
         mean_recon_loss = 0
         mean_kld_loss = 0
         mean_decoder_loss = 0
-        mean_pinn_loss = 0
 
         boot_count = 0
         boot_sum_x = None
         boot_sum_x2 = None
         boot_sum_recon_sqerr = 0.0
 
-        if itr > self.pinn_init and self.num_pinn_updates < (self.pinn_warmup_steps+1):
-            if self.pinn_weight_final < 0:
-                self.pinn_weight = 1.0
-            else:
-                self.pinn_weight = (float(self.num_pinn_updates)/float(self.pinn_warmup_steps))*self.pinn_weight_final
-
-            print(self.pinn_weight)
-
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
             grf_target, obs_target, actions_batch, target_values_batch, \
             advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
-            old_sigma_batch, prev_obs_batch, prev_obs_hist_batch, gt_forces_batch, mass_mat_batch, \
-            bias_vec_batch, torso_accs_batch,  pprev_obs_batch, pprev_obs_hist_batch  in generator:
+            old_sigma_batch  in generator:
             
             self.actor_critic.train()
             self.act_optimizer.zero_grad()
@@ -338,7 +318,6 @@ class PPO_ABL1:
             # Perform some logging
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
-
 
             # Calculate the encoder update n-times
             for _ in range(self.num_enc_epochs):
@@ -443,7 +422,7 @@ class PPO_ABL1:
         self.storage.clear()
 
         return mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, \
-               mean_vel_loss, mean_recon_loss, mean_kld_loss, mean_pinn_loss
+               mean_vel_loss, mean_recon_loss, mean_kld_loss
 
     def _compute_rl_loss(self, obs_batch, obs_hist_batch,
                          actions_batch, critic_obs_batch,
@@ -504,7 +483,10 @@ class PPO_ABL1:
         else:
             value_loss = (returns_batch - value_batch).pow(2).mean()
 
-        ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+        if self.use_adaptive_entropy: 
+            ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.current_entropy_coef * entropy_batch.mean()
+        else:
+            ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()      
         
         return ppo_loss, surrogate_loss, value_loss
 

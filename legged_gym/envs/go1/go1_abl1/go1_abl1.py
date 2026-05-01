@@ -681,7 +681,15 @@ class Go1ABL1(BaseTask):
             adjusted_iter = num_iters - self.reward_warmup_steps
             for key in self.reward_curr_keys:
                 if key in self.reward_scales.keys():
-                    self.reward_scales[key] = ((float(adjusted_iter)/float(self.reward_curr_steps))*self.reward_bound_diffs[key] + self.reward_curr_bounds[key][0])*self.dt
+                    low, high = self.reward_curr_bounds[key]
+
+                    alpha = adjusted_iter / self.reward_curr_steps
+                    alpha = np.clip(alpha, 0.0, 1.0)
+                    print(alpha)
+                    ramp = 0.5 * (1.0 - np.cos(np.pi * alpha))
+
+                    self.reward_scales[key] = (low + (high - low) * ramp) * self.dt
+                    # self.reward_scales[key] = ((float(adjusted_iter)/float(self.reward_curr_steps))*self.reward_bound_diffs[key] + self.reward_curr_bounds[key][0])*self.dt
                     # print("Reward - ", key, " scale - ", self.reward_scales[key])
         # Fix the regularization strength to the upper-bound
         else:
@@ -1455,3 +1463,14 @@ class Go1ABL1(BaseTask):
 
         self.phi_prev_orientation = phi_next
         return shaping
+
+    def _reward_ff_ratio(self):
+        ff_norm = torch.norm(self.simulator.feedforward_torques, dim=1)
+        fb_norm = torch.norm(self.simulator.feedback_torques)
+        r_ff_ratio = ff_norm / (ff_norm + fb_norm + 1e-6)
+        
+        error = torch.abs(r_ff_ratio - self.cfg.rewards.ff_ratio_target)
+
+        reward = torch.exp(-error / self.cfg.rewards.ff_ratio_width)
+
+        return reward

@@ -366,6 +366,9 @@ class GO1PACTCfg( LeggedRobotCfg ):
         use_reward_curriculum = True
 
         max_contact_force = 200.0
+
+        ff_ratio_target = 0.50
+        ff_ratio_width  = 0.20
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
@@ -384,7 +387,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # command tracking
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
-            dof_tracking      = 0.05
+            dof_tracking      = 0.1
             # sparse_contacts   = 0.1
 
             # coupled output specific rewards 
@@ -446,13 +449,13 @@ class GO1PACTCfg( LeggedRobotCfg ):
                                   "ang_vel_xy":[-0.05, -0.2],
                                   "orientation":[-0.2,-2.0],
                                   "torque_limits":[-1.0e-4, -1.0e-2],
-                                  "dof_close_to_default":[-0.01, -0.10],
+                                  "dof_close_to_default":[-0.05, -0.20],
                                   "action_rate":[-0.001, -0.01],
                                   "action_smoothness":[-0.001,-0.01],
                                  }
 
-            curr_steps = 250
-            warmup_steps = 5000
+            curr_steps = 500
+            warmup_steps = 4500
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True

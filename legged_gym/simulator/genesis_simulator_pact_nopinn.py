@@ -11,6 +11,7 @@ from legged_gym.utils.viz_helpers import _build_surface_frame_from_normal, _crea
 
 import multiprocessing as mp
 import random
+from collections import deque
 
 import torch.nn.functional as F
 import pinocchio as pn
@@ -138,6 +139,9 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
             self._randomize_pd_gain(env_ids)
         if self._cfg.domain_rand.randomize_motor_strength:
             self._randomize_motor_strength(env_ids)
+
+        if self._cfg.control.randomize_pact_weights:
+            self._randomize_pact_torque_weights(env_ids)
         
         self._last_dof_vel[env_ids] = 0.
         self._last_feet_vel[env_ids] = 0.
@@ -541,16 +545,13 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         def _interp(p, low, diff):
             return p * diff + low
 
-        if num_iters <= self.push_warmup_step:
-            self._print_domain_rand_values("[DomainRand] Warmup: holding initial values.")
-            return
-
         # -----------------------------
         # Reward EMA / recovery gating
         # -----------------------------
         if mean_reward is not None:
             mean_reward = float(mean_reward)
 
+            # calculate the EMA of the tracked reward signal
             if self.domain_rand_reward_ema is None:
                 self.domain_rand_reward_ema = mean_reward
             else:
@@ -559,36 +560,53 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
                     (1.0 - a) * self.domain_rand_reward_ema + a * mean_reward
                 )
 
-            self.domain_rand_best_reward_ema = max(
-                self.domain_rand_best_reward_ema,
-                self.domain_rand_reward_ema,
-            )
+            # Store recent EMA history
+            self.domain_rand_reward_ema_hist.append(self.domain_rand_reward_ema)
 
-            required_reward = (
+            # Recent-window reference performance
+            hist = np.asarray(self.domain_rand_reward_ema_hist, dtype=np.float32)
+
+            if len(hist) < 10:
+                self.domain_rand_best_reward_ema = float(hist.max())
+            else:
+                self.domain_rand_best_reward_ema = float(
+                    np.quantile(hist, self.domain_rand_best_quantile)
+                )
+
+            self.required_reward = (
                 self.domain_rand_recovery_ratio * self.domain_rand_best_reward_ema
             )
 
-            if self.domain_rand_max_required_reward is not None:
-                required_reward = min(required_reward, self.domain_rand_max_required_reward)
+            # if self.domain_rand_max_required_reward is not None:
+            #     self.required_reward = min(self.required_reward, self.domain_rand_max_required_reward)
 
             can_step = (
-                self.domain_rand_reward_ema >= required_reward
+                self.domain_rand_reward_ema >= self.required_reward
                 and self.domain_rand_reward_ema >= self.domain_rand_min_reward
             )
         else:
-            required_reward = None
+            self.required_reward = None
             can_step = True
 
         enough_time_since_step = (
             num_iters - self.domain_rand_last_step_iter
         ) >= self.domain_rand_step_interval
 
+
+        # Skip all the below if we are still in the warm-up stage
+        #    butI want to log the ema stuff for debugging, so still calculate all of that
+        if num_iters <= self.push_warmup_step:
+            self._print_domain_rand_values("[DomainRand] Warmup: holding initial values.")
+            return
+
+
         if not can_step or not enough_time_since_step:
             self.domain_rand_frozen = True
             self._print_domain_rand_values(
                 "[DomainRand] Frozen | "
                 f"reward_ema={self.domain_rand_reward_ema}, "
-                f"required={required_reward}"
+                f"required={self.required_reward}, "
+                f"min={self.domain_rand_min_reward}, "
             )
             return
 
@@ -671,7 +689,8 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
                 self.com_delta_z_value,
             ]
 
-        self._print_domain_rand_values("[DomainRand] Advanced.")
+        self._print_domain_rand_values("[DomainRand] Stepped --")
+
 
     #----- Protected methods -----#
     def _parse_cfg(self):
@@ -794,19 +813,35 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         self.domain_rand_recovery_ratio = getattr(
             self._cfg.domain_rand, "recovery_ratio", 0.70
         )
+        
         self.domain_rand_min_reward = getattr(
+        
             self._cfg.domain_rand, "min_reward_to_step", 12.0
         )
+        
         self.domain_rand_step_interval = getattr(
             self._cfg.domain_rand, "step_interval", 100
         )
+        
         self.domain_rand_last_step_iter = -10**9
+        
         self.domain_rand_ema_alpha = getattr(
             self._cfg.domain_rand, "reward_ema_alpha", 0.05
         )
+        
         self.domain_rand_max_required_reward = getattr(
             self._cfg.domain_rand, "max_required_reward", 22.0
         )
+        
+        self.domain_rand_reward_ema_hist = deque(
+            maxlen=getattr(self._cfg.domain_rand, "best_reward_window", 500)
+        )
+        
+        self.domain_rand_best_quantile = getattr(
+            self._cfg.domain_rand, "best_reward_quantile", 0.90
+            )
+        
+        self.required_reward = 0.0
 
     # ------------- Callbacks --------------
     def _setup_camera(self):
@@ -1084,6 +1119,10 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         # randomize motor strength factor
         if self._cfg.domain_rand.randomize_motor_strength:
             self._randomize_motor_strength(np.arange(self._num_envs))
+
+        # Randomize weighted contribution from each PACT output
+        if self._cfg.control.randomize_pact_weights:
+            self._randomize_pact_torque_weights(np.arange(self._num_envs))
             
     def _init_buffers(self):
         self.common_step_counter = 0
@@ -1603,6 +1642,61 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         self._kd_scale[env_ids] = torch_rand_float(
                 self._cfg.domain_rand.kd_range[0], self._cfg.domain_rand.kd_range[1], (len(env_ids), self._num_actions), device=self._device)
     
+    def _randomize_pact_torque_weights(self, env_ids):
+        """
+        Randomize feedforward / feedback torque weights for PACT torque outputs.
+
+        Goal:
+            tau_nominal = tau_ff + tau_fb
+
+            tau_mixed_raw = w_ff * tau_ff + w_fb * tau_fb
+            tau_mixed     = scale * tau_mixed_raw
+
+        where scale preserves ||tau_mixed|| ~= ||tau_nominal||.
+
+        A subset of envs are sampled as "balanced":
+            w_ff = 1.0
+            w_fb = 1.0
+        """
+
+        if len(env_ids) == 0:
+            return
+
+        device = self._device
+        n = len(env_ids)
+
+        # User-defined config values
+        weight_bias_min = self._cfg.control.pact_weight_bias_min  # e.g. 0.15
+        weight_bias_max = self._cfg.control.pact_weight_bias_max  # e.g. 0.35
+        balanced_prob = self._cfg.control.pact_balanced_prob      # e.g. 0.25
+
+        # Decide which envs use the balanced/full-strength case
+        balanced_mask = torch.rand(n, device=device) < balanced_prob
+
+        # Randomly choose which source gets biased upward
+        bias_ff_mask = torch.rand(n, device=device) <= 0.5
+
+        # Random bias amount
+        bias = torch.empty(n, device=device).uniform_(weight_bias_min, weight_bias_max)
+
+        # Start balanced
+        w_ff = torch.ones(n, device=device)
+        w_fb = torch.ones(n, device=device)
+
+        # Bias toward feedforward:
+        #   ff gets stronger, fb gets weaker
+        w_ff = torch.where(~balanced_mask & bias_ff_mask, 1.0 + bias, w_ff)
+        w_fb = torch.where(~balanced_mask & bias_ff_mask, 1.0 - bias, w_fb)
+
+        # Bias toward feedback:
+        #   fb gets stronger, ff gets weaker
+        w_ff = torch.where(~balanced_mask & ~bias_ff_mask, 1.0 - bias, w_ff)
+        w_fb = torch.where(~balanced_mask & ~bias_ff_mask, 1.0 + bias, w_fb)
+
+        # Store as [num_envs, 1] so they broadcast over joints/actions
+        self.feedforward_tau_weight[env_ids] = w_ff.unsqueeze(-1)
+        self.feedback_tau_weight[env_ids] = w_fb.unsqueeze(-1)
+
     def _update_depth_images(self):
         """ Renders the depth camera and retrieves the depth images
         """
