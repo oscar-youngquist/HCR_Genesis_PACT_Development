@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from legged_gym.scripts.joystick import Joystick
 from legged_gym.utils.exp_data_logger import ExpLogger
+import argparse
 
 def override_configs(env_cfg, args):
     """Override some environment configuration parameters for testing
@@ -19,14 +20,14 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
     # adjust parameters according to terrain type
     if env_cfg.terrain.mesh_type in ["heightfield", "trimesh"]:
-        env_cfg.terrain.num_rows = 4
-        env_cfg.terrain.num_cols = 4
+        env_cfg.terrain.num_rows = 1
+        env_cfg.terrain.num_cols = 1
         env_cfg.terrain.border_size = 1.0
         env_cfg.terrain.curriculum = False
         env_cfg.terrain.selected   = True
@@ -185,6 +186,8 @@ def interaction_loop(train_cfg, env, policy, args):
         obs_buf, privileged_obs_buf, obs_history, explicit_labels, next_states = env.get_observations()
     elif "pact" in task_name:
         obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
+    elif "abl" in task_name:
+        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
     elif "pos" in task_name and "pact" not in task_name:
         obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
     elif "tau" in task_name:
@@ -241,8 +244,9 @@ def interaction_loop(train_cfg, env, policy, args):
             actions = policy(obs_buf, obs_history)
             obs_buf, privileged_obs_buf, obs_history, explicit_labels, next_states, rews, dones, infos = env.step(actions.detach())
         elif "pact" in task_name:
-            # print("obs_buf - ", obs_buf.cpu().numpy())
-            # print("obs_history - ", obs_history.cpu().numpy())
+            actions = policy(obs_buf, obs_history)
+            obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach())
+        elif "abl" in task_name:
             actions = policy(obs_buf, obs_history)
             obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach())
         elif "pos" in task_name and "pact" not in task_name:
@@ -260,35 +264,6 @@ def interaction_loop(train_cfg, env, policy, args):
         
         # # print debug info
         # print_debug_info(env, robot_index)
-        
-        # # Update logger info
-        # if i < stop_state_log:
-        #     logger.log_states(
-        #         {
-        #             'dof_pos_target': actions[robot_index, joint_index].item() * env.cfg.control.action_scale,
-        #             'dof_pos': env.simulator.dof_pos[robot_index, joint_index].item(),
-        #             'dof_vel': env.simulator.dof_vel[robot_index, joint_index].item(),
-        #             'dof_torque': env.simulator.torques[robot_index, joint_index].item(),
-        #             'command_x': env.commands[robot_index, 0].item(),
-        #             'command_y': env.commands[robot_index, 1].item(),
-        #             'command_yaw': env.commands[robot_index, 2].item(),
-        #             'base_vel_x': env.simulator.base_lin_vel[robot_index, 0].item(),
-        #             'base_vel_y': env.simulator.base_lin_vel[robot_index, 1].item(),
-        #             'base_vel_z': env.simulator.base_lin_vel[robot_index, 2].item(),
-        #             'base_vel_yaw': env.simulator.base_ang_vel[robot_index, 2].item(),
-        #             'contact_forces_z': env.simulator.link_contact_forces[robot_index, 
-        #                                                                   env.simulator.feet_indices, 2].cpu().numpy()
-        #         }
-        #     )
-        # elif i==stop_state_log:
-        #     logger.plot_states()
-        # if  0 < i < stop_rew_log:
-        #     if infos["episode"]:
-        #         num_episodes = torch.sum(env.reset_buf).item()
-        #         if num_episodes>0:
-        #             logger.log_rewards(infos["episode"], num_episodes)
-        # elif i==stop_rew_log:
-        #     logger.print_rewards()
 
         # logger.log_states(
         #     {
@@ -378,5 +353,30 @@ def play(args):
     
     
 if __name__ == '__main__':
-    args = get_args()
-    play(args)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--task',           type=str, default='go2', help="task name")
+    parser.add_argument('--headless',       action='store_true', default=False, help="enable visualization by default")
+    parser.add_argument('--cpu',            action='store_true', default=False, help="use CPU instead of CUDA")
+    parser.add_argument('--gpu',            type=str, default='cuda:0', help="which GPU to use (default: cuda:0)")
+    parser.add_argument('--num_envs',       type=int, default=None, help="number of parallel environments")
+    parser.add_argument('--max_iterations', type=int, default=None, help="max number of training iterations")
+    parser.add_argument('--resume',         action='store_true', default=False, help="resume training from specified checkpoint")
+    parser.add_argument('--sync_wandb',     action='store_true', default=False, help="synchronize training log with wandb")
+    parser.add_argument('--export_onnx',    action='store_true', default=False, help="export policy as onnx (besides jit)")
+    parser.add_argument('--debug',          action='store_true', default=False, help="enable debug mode")
+    parser.add_argument('--load_run',       type=str, default=None, help="run to load, default: last run")
+    parser.add_argument('--ckpt',           type=int, default=-1, help="checkpoint to load, -1 means latest")
+    parser.add_argument('--use_joystick',   action='store_true', default=False, help="use joystick to provide commands")
+    parser.add_argument('--joystick_type',  type=str, default='xbox', help="type of joystick: xbox, switch")
+    parser.add_argument('--follow_robot',   action='store_true', default=False, help="whether the camera follows the robot during play")
+    parser.add_argument('--record_frames',   action='store_true', default=False, help="whether to record the camera")
+
+    parser.add_argument('--seed',       type=int, default=1, help="int seed for random sampling (default 1)")
+
+    # PACT PINN specific thing.
+    parser.add_argument('--pinn_loss_weight',       type=float, default=0.01, help="float for weight of PINN loss (default 0.01)")
+
+    # large scale experiment specific arguments
+    parser.add_argument('--terrain_type',  type=str, default='plane', )
+
+    return configure_runtime_device(parser.parse_args())

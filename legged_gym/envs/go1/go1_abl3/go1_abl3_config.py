@@ -138,7 +138,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         clip_actions = 50.
 
     class domain_rand(LeggedRobotCfg.domain_rand):
-        use_domainrand_curriculum = True
+        use_domainrand_curriculum = False
         com_rand_z_positive = True
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
         push_warmup = 4000     # number of steps with initial values held constant
@@ -455,7 +455,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
                                  }
 
             curr_steps = 500
-            warmup_steps = 4500
+            warmup_steps = 1500
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -524,14 +524,14 @@ class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_ABL1'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 8000 # number of policy updates
+        max_iterations = 3000 # number of policy updates
 
 
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'abl3_100hz_spec_materr'
-        experiment_name = 'go1_abl3_rough'
+        run_name = 'hybrid_100hz_spec_materr'
+        experiment_name = 'go1_hybrid_rough'
         save_interval = 500
         
         

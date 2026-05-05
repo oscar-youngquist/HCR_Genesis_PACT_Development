@@ -111,10 +111,10 @@ class RL2ACAdaptiveCtrl:
         self.comp_old.copy_(self.comp)
         self.comp = torch.einsum("bij,bj->bi", self.K, self.phi)
 
-        # print(torch.norm(self.K))
-        # print(self.phi[0])
-        # print(self.comp[0])
-        # print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
+        print(torch.norm(self.K))
+        print(torch.norm(self.phi[0]))
+        print(torch.norm(self.comp[0]))
+        print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
 
 
         return self.comp

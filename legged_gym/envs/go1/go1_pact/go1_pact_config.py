@@ -534,7 +534,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 500
         
         
-        load_run = "Apr29_20-06-15_pact_100hz_spec_smartcurr"
+        load_run = "May01_16-41-42_pact_100hz_spec_smartcurr"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pact_stairs_12-16kg.csv"

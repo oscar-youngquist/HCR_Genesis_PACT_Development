@@ -401,7 +401,7 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
             dof_acc          = -2.5e-7
             joint_power      = -2.e-5
             joint_power_dist = -1.e-5
-            torques          = 0.0     # don't need to use this when we already have joint power above...
+            torques          = -1.0e-5     # don't need to use this when we already have joint power above...
 
             # Zero out some values that are used in the individual reward classes below
             action_rate       = -0.001
@@ -416,8 +416,8 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
             # feedforward_torques   = -2.5e-5
             # feedback_torques      = -2.0e-5
 
-            feedforward_torques_scaled = -1.0e-5
-            feedback_torques           = -1.5e-5
+            feedforward_torques_scaled = 0.0
+            feedback_torques           = 0.0
             dof_act_limits             = 0.0
 
             support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM

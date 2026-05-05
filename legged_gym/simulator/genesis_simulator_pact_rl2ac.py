@@ -1193,7 +1193,7 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
                     self.first_loop = False
                     self.first_loop_feedback = self.feedback_torques.clone()
             
-            # if w ARENT training, run this every other loop
+            # if we ARENT training, run this every other loop
             elif self.ctrl_loop_counter % 2 == 0:
                 # get two dimensional gains
                 if self._p_gains.ndim == 1:
@@ -1222,7 +1222,7 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
             else:
                 self.rl2ac_adaptive_ctrl.update_state(self._dof_pos, self._dof_vel, self._dof_tau)
                 self.adaptive_torques = self.rl2ac_adaptive_ctrl.update_compensation(self.sim_dt)
-                torques = self.feedback_torques - self.adaptive_torques
+                torques = self.feedback_torques + self.adaptive_torques
         
         elif self._cfg.control.type == "Tau":
             tau_actions = pos_actions * self._cfg.control.torque_scale
