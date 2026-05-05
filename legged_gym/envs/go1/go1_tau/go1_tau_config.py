@@ -493,7 +493,7 @@ class GO1TauCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Apr29_21-29-54_tau_100hz_spec_smartcurr"
-        checkpoint = 8000
+        load_run = "May04_12-14-01_tau_100hz_spec_smartcurr"
+        checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/tau_stairs_12-16kg.csv"

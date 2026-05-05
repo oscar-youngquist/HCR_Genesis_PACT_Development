@@ -26,6 +26,7 @@ target/
 dist/
 
 **/exp_data/*
+**/exp_data_corl/*
 
 # JetBrains IDE
 .idea/

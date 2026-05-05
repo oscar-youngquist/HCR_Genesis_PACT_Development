@@ -533,7 +533,7 @@ class GO1ABL1CfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Apr11_20-18-37_pact_100hz_spec_scratch"
+        load_run = "May01_17-40-18_abl1_100hz_spec_smartcurr"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/scratch_pact_exp/plane_tracking_test.csv"

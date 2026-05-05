@@ -531,11 +531,11 @@ class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
         
         # debug_warmpinn_wb
         run_name = 'hybrid_100hz_spec_materr'
-        experiment_name = 'go1_hybrid_rough'
+        experiment_name = 'go1_abl3_rough'
         save_interval = 500
         
         
-        load_run = "Apr11_20-18-37_pact_100hz_spec_scratch"
+        load_run = "May01_17-29-12_abl3_100hz_spec_materr"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/scratch_pact_exp/plane_tracking_test.csv"
