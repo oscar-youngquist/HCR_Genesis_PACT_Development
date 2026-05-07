@@ -141,7 +141,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 1000     # number of steps with initial values held constant
+        push_warmup = 1500     # number of steps with initial values held constant
         num_jumps = 10
         
         # Randomize Friction
@@ -215,14 +215,14 @@ class GO1PACTCfg( LeggedRobotCfg ):
         
         
         # new domain randomization curriculum parameters
-        best_reward_window = 200        # amount of history used to capture recent performance.
+        best_reward_window = 400        # amount of history used to capture recent performance.
         best_reward_quantile = 0.90     # quantile for determining "max" performance over history window.
 
         recovery_ratio = 0.90           # allowable deivation from quantile of history window
         step_interval = 10              # minimum number of iterations before taking next domain rand step
         
         reward_ema_alpha = 0.05         # ema value for tracking 
-        min_reward_to_step = 0.60       # minimum reward threashold for stepping (i.e. the performance must always be above this for a step to occur, regardless of the historical performance.) 
+        min_reward_to_step = 0.65       # minimum reward threashold for stepping (i.e. the performance must always be above this for a step to occur, regardless of the historical performance.) 
 
         mass_com_progress_delta = 0.01      # domain rand step delta for stepping payload parameters
         disturbance_progress_delta = 0.01   # domain rand step delta for external disturbance parameters
