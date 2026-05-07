@@ -128,16 +128,16 @@ def override_configs(env_cfg, args):
             print("Adding CoM Randomization!")
             env_cfg.domain_rand.randomize_com_displacement = True
             # COM displacement crap
-            env_cfg.domain_rand.com_displacement_x_min = args.com_bounds[0]
-            env_cfg.domain_rand.com_displacement_x_max = args.com_bounds[0]
+            env_cfg.domain_rand.com_displacement_x_min = 0.25
+            env_cfg.domain_rand.com_displacement_x_max = 0.25
             
-            env_cfg.domain_rand.com_displacement_y_min = args.com_bounds[1]
-            env_cfg.domain_rand.com_displacement_y_max = args.com_bounds[1]
+            env_cfg.domain_rand.com_displacement_y_min = 0.20
+            env_cfg.domain_rand.com_displacement_y_max = 0.15
             
             env_cfg.domain_rand.com_displacement_z_positive = False
             env_cfg.domain_rand.com_displacement_z_min_pos = 0.1
-            env_cfg.domain_rand.com_displacement_z_min = args.com_bounds[2]
-            env_cfg.domain_rand.com_displacement_z_max = args.com_bounds[2]
+            env_cfg.domain_rand.com_displacement_z_min = 0.20
+            env_cfg.domain_rand.com_displacement_z_max = 0.25
         else:
             env_cfg.domain_rand.randomize_com_displacement = False
 
@@ -177,7 +177,7 @@ def override_configs(env_cfg, args):
         env_cfg.viewer.add_camera = True  # use a extra camera for moving
 
     # Construct the log-file output path
-    args.output_path = os.path.join(args.log_path, f"{args.task}_{args.terrain_type}_{args.disturbance_type}.csv")
+    args.output_path = os.path.join(args.log_path, f"{args.task}_{args.terrain_type}_{args.disturbance_type}_episodes.csv")
     
 
 def print_debug_info(env, robot_index):
@@ -195,132 +195,316 @@ def print_debug_info(env, robot_index):
     # print(f"ankle pitch: {env.simulator.dof_pos[robot_index, [3,7]].cpu().numpy()}")
     pass
 
-def interaction_loop(train_cfg, env, policy, args):
-    """Run interaction loop between environment and policy
 
-    Args:
-        env: environment object
-        policy : a policy that takes observations and outputs actions
-        args: command line arguments
+def _to_bool_tensor(value, device, num_envs=None):
+    """Convert a scalar/list/np array/torch tensor into a bool tensor on device."""
+    if value is None:
+        if num_envs is None:
+            raise ValueError("num_envs must be provided when value is None")
+        return torch.zeros(num_envs, dtype=torch.bool, device=device)
+    if torch.is_tensor(value):
+        return value.detach().to(device=device).bool().view(-1)
+    return torch.as_tensor(value, device=device).bool().view(-1)
+
+
+def _get_timeout_mask(env, infos, dones, pre_step_episode_lengths=None):
     """
-    
-    robot_index = 0 # which robot is used for logging
-    joint_index = 2 # which joint is used for logging
-    stop_state_log = 300 # number of steps before plotting states
-    stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards
+    Robustly infer which reset events were caused by episode timeouts.
+
+    RSL-RL/legged_gym variants commonly expose timeout information in one of:
+        - infos["time_outs"]
+        - infos["timeouts"]
+        - env.time_out_buf
+
+    If none are available, fall back to comparing the pre-step episode length
+    against env.max_episode_length. This fallback should work when the env uses
+    episode_length_buf to trigger time-limit resets.
+    """
+    device = dones.device
+    num_envs = dones.numel()
+
+    timeout_value = None
+    if isinstance(infos, dict):
+        for key in ("time_outs", "timeouts", "time_out", "timeout"):
+            if key in infos:
+                timeout_value = infos[key]
+                break
+
+    if timeout_value is None and hasattr(env, "time_out_buf"):
+        timeout_value = getattr(env, "time_out_buf")
+
+    if timeout_value is not None:
+        timeout_mask = _to_bool_tensor(timeout_value, device, num_envs=num_envs)
+        if timeout_mask.numel() == 1:
+            timeout_mask = timeout_mask.repeat(num_envs)
+        return timeout_mask[:num_envs] & dones
+
+    if pre_step_episode_lengths is not None and hasattr(env, "max_episode_length"):
+        # Most legged_gym envs increment episode_length_buf during step and then
+        # reset environments whose length reaches max_episode_length.
+        return ((pre_step_episode_lengths.to(device).view(-1) + 1) >= env.max_episode_length) & dones
+
+    return torch.zeros_like(dones, dtype=torch.bool)
+
+
+def _get_failure_reset_mask(env, dones, timeout_mask):
+    """
+    Robustly infer which reset events were caused by failure instead of timeout.
+
+    Prefer env.get_failure_idx() when available. If it is unavailable or has an
+    unexpected shape, use the conservative definition: done and not timeout.
+    """
+    try:
+        failure_mask = _to_bool_tensor(env.get_failure_idx(), dones.device, num_envs=dones.numel())
+        if failure_mask.numel() == dones.numel():
+            return failure_mask & dones & (~timeout_mask)
+    except Exception:
+        pass
+    return dones & (~timeout_mask)
+
+
+def _get_observations_for_task(env, task_name):
+    """Fetch initial observations using the same task-specific conventions as the original play script."""
+    if "ts" in task_name or "cat" in task_name:
+        obs_buf, privileged_obs_buf, obs_history, critic_obs = env.get_observations()
+        return {"obs_buf": obs_buf, "privileged_obs_buf": privileged_obs_buf,
+                "obs_history": obs_history, "critic_obs": critic_obs}
+    elif "ee" in task_name:
+        estimator_features, _, _ = env.get_observations()
+        return {"estimator_features": estimator_features}
+    elif "dreamwaq" in task_name:
+        obs_buf, privileged_obs_buf, obs_history, explicit_labels, next_states = env.get_observations()
+        return {"obs_buf": obs_buf, "privileged_obs_buf": privileged_obs_buf,
+                "obs_history": obs_history, "explicit_labels": explicit_labels,
+                "next_states": next_states}
+    elif "pact" in task_name:
+        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
+        return {"obs_buf": obs_buf, "obs_history": obs_history,
+                "privileged_obs_buf": privileged_obs_buf, "explicit_labels": explicit_labels}
+    elif "abl" in task_name:
+        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
+        return {"obs_buf": obs_buf, "obs_history": obs_history,
+                "privileged_obs_buf": privileged_obs_buf, "explicit_labels": explicit_labels}
+    elif "pos" in task_name and "pact" not in task_name:
+        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
+        return {"obs_buf": obs_buf, "obs_history": obs_history,
+                "privileged_obs_buf": privileged_obs_buf, "explicit_labels": explicit_labels}
+    elif "tau" in task_name:
+        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
+        return {"obs_buf": obs_buf, "obs_history": obs_history,
+                "privileged_obs_buf": privileged_obs_buf, "explicit_labels": explicit_labels}
+    elif "rl2ac" in task_name:
+        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
+        return {"obs_buf": obs_buf, "obs_history": obs_history,
+                "privileged_obs_buf": privileged_obs_buf, "explicit_labels": explicit_labels}
+    else:
+        obs = env.get_observations()
+        return {"obs": obs}
+
+
+def _policy_step_for_task(env, policy, task_name, state):
+    """Run one policy/env step and update the task-specific observation state dict."""
+    if "ts" in task_name or "cat" in task_name:
+        actions = policy(state["obs_buf"], state["obs_history"])
+        obs_buf, privileged_obs_buf, obs_history, critic_obs, rews, dones, infos = env.step(actions.detach())
+        state.update(obs_buf=obs_buf, privileged_obs_buf=privileged_obs_buf,
+                     obs_history=obs_history, critic_obs=critic_obs)
+    elif "ee" in task_name:
+        actions = policy(state["estimator_features"].detach())
+        estimator_features, estimator_labels, _, rews, dones, infos = env.step(actions.detach())
+        state.update(estimator_features=estimator_features, estimator_labels=estimator_labels)
+    elif "waq" in task_name:
+        actions = policy(state["obs_buf"], state["obs_history"])
+        obs_buf, privileged_obs_buf, obs_history, explicit_labels, next_states, rews, dones, infos = env.step(actions.detach())
+        state.update(obs_buf=obs_buf, privileged_obs_buf=privileged_obs_buf,
+                     obs_history=obs_history, explicit_labels=explicit_labels,
+                     next_states=next_states)
+    elif "pact" in task_name:
+        actions = policy(state["obs_buf"], state["obs_history"])
+        obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach())
+        state.update(obs_buf=obs_buf, privileged_obs_buf=privileged_obs_buf,
+                     obs_history=obs_history, explicit_labels=explicit_labels, grfs=grfs)
+    elif "abl" in task_name:
+        actions = policy(state["obs_buf"], state["obs_history"])
+        obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach())
+        state.update(obs_buf=obs_buf, privileged_obs_buf=privileged_obs_buf,
+                     obs_history=obs_history, explicit_labels=explicit_labels, grfs=grfs)
+    elif "pos" in task_name and "pact" not in task_name:
+        actions = policy(state["obs_buf"], state["obs_history"])
+        obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos = env.step(actions.detach())
+        state.update(obs_buf=obs_buf, privileged_obs_buf=privileged_obs_buf,
+                     obs_history=obs_history, explicit_labels=explicit_labels)
+    elif "tau" in task_name:
+        actions = policy(state["obs_buf"], state["obs_history"])
+        obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos = env.step(actions.detach())
+        state.update(obs_buf=obs_buf, privileged_obs_buf=privileged_obs_buf,
+                     obs_history=obs_history, explicit_labels=explicit_labels)
+    elif "rl2ac" in task_name:
+        actions, qref = policy(state["obs_buf"], state["obs_history"])
+        obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach(), qref)
+        state.update(obs_buf=obs_buf, privileged_obs_buf=privileged_obs_buf,
+                     obs_history=obs_history, explicit_labels=explicit_labels, grfs=grfs,
+                     qref=qref)
+    else:
+        actions = policy(state["obs"].detach())
+        obs, _, rews, dones, infos = env.step(actions.detach())
+        state.update(obs=obs)
+
+    return state, rews, dones, infos
+
+
+def interaction_loop(train_cfg, env, policy, args):
+    """Run evaluation for a fixed number of completed episodes, not fixed timesteps.
+
+    Episode accounting is global across vectorized environments. For example,
+    with --num_envs 16 and --num_eps 100, the script exits once 100 total
+    env-episodes have completed. Each row is tagged with:
+        - episode: global episode id assigned to that env rollout
+        - episode_step: 1-indexed transition index within that episode
+        - done: whether this transition ended the episode
+        - time_out: whether the reset was induced by episode time limit
+        - failure_reset: whether the reset was induced by failure
+        - valid_episode: whether the row belongs to one of the requested episodes
+
+    Because vectorized envs can finish multiple episodes on the same step, the
+    final logged step may include rows with valid_episode=0 or episode ids beyond
+    the requested count. Filter valid_episode==1 in downstream analysis.
+    """
+
+    robot_index = 0  # which robot is used for camera following
+    task_name = args.task
+    target_episodes = int(args.num_eps)
+    if target_episodes <= 0:
+        raise ValueError(f"--num_eps must be positive, got {args.num_eps}")
 
     logger = None
     if args.log:
+        os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
         logger = ExpLogger(args.output_path)
-        
-    # Get initial observations according to task type
-    task_name = args.task
-    if "ts" in task_name or "cat" in task_name:  # teacher-student
-        obs_buf, privileged_obs_buf, obs_history, critic_obs = env.get_observations()
-    elif "ee" in task_name:  # explicit estimator
-        estimator_features, _, _ = env.get_observations()
-    elif "dreamwaq" in task_name:  # dreamwaq
-        obs_buf, privileged_obs_buf, obs_history, explicit_labels, next_states = env.get_observations()
-    elif "pact" in task_name:
-        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
-    elif "abl" in task_name:
-        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
-    elif "pos" in task_name and "pact" not in task_name:
-        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
-    elif "tau" in task_name:
-        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
-    elif "rl2ac" in task_name:
-        obs_buf, obs_history, privileged_obs_buf, explicit_labels = env.get_observations()
-    else: # vanilla
-        obs = env.get_observations()
-    
-    # Setup joystick if needed
+
+    state = _get_observations_for_task(env, task_name)
+
     if args.use_joystick:
         joystick = Joystick(joystick_type=args.joystick_type)
-    
+
     if args.record_frames:
         env.simulator._floating_camera.start_recording()
 
-    # interaction loop
-    for i in range(int(args.num_eps*env.max_episode_length)):
+    num_envs = env.num_envs if hasattr(env, "num_envs") else args.num_envs
+    device = env.device
 
-        # update commands from joystick
+    # Assign global episode ids to the first wave of vectorized env rollouts.
+    episode_id = torch.arange(num_envs, dtype=torch.long, device=device)
+    episode_active = episode_id < target_episodes
+    next_episode_id = int(min(num_envs, target_episodes))
+    completed_episodes = 0
+    episode_step = torch.zeros(num_envs, dtype=torch.long, device=device)
+    global_step = 0
+
+    print(f"Collecting {target_episodes} completed episodes across {num_envs} envs.")
+
+    while completed_episodes < target_episodes:
+        global_step += 1
+
+        if hasattr(env, "episode_length_buf"):
+            pre_step_episode_lengths = env.episode_length_buf.detach().clone()
+        else:
+            pre_step_episode_lengths = None
+
+        # Update commands from joystick.
         if args.use_joystick:
             joystick.update()
             env.commands[:, 0] = -joystick.ly
             env.commands[:, 1] = -joystick.lx
             env.commands[:, 2] = -joystick.rx
 
+        # Override with fixed command, if requested.
         if args.fixed_cmd is not None:
             env.commands[:, 0] = args.fixed_cmd[0]
             env.commands[:, 1] = args.fixed_cmd[1]
             env.commands[:, 2] = args.fixed_cmd[2]
             env.commands[:, 3] = args.fixed_cmd[3]
-        
+
         if args.follow_robot:
             pos = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.pos, dtype=np.float32)
             lookat = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.lookat, dtype=np.float32)
-            # env.set_viewer_camera(pos, lookat)
             env.set_camera(pos, lookat)
             env.simulator._floating_camera.render()
-        
-        # Step the environment according to task type
-        if "ts" in task_name or "cat" in task_name:
-            actions = policy(obs_buf, obs_history)
-            obs_buf, privileged_obs_buf, obs_history, critic_obs, rews, dones, infos = env.step(actions.detach())
-        elif "ee" in task_name:
-            actions = policy(estimator_features.detach())
-            estimator_features, estimator_labels, _, rews, dones, infos = env.step(actions.detach())
-        elif "waq" in task_name:
-            actions = policy(obs_buf, obs_history)
-            obs_buf, privileged_obs_buf, obs_history, explicit_labels, next_states, rews, dones, infos = env.step(actions.detach())
-        elif "pact" in task_name:
-            actions = policy(obs_buf, obs_history)
-            obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach())
-        elif "abl" in task_name:
-            actions = policy(obs_buf, obs_history)
-            obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach())
-        elif "pos" in task_name and "pact" not in task_name:
-            actions = policy(obs_buf, obs_history)
-            obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos = env.step(actions.detach())
-        elif "tau" in task_name:
-            actions = policy(obs_buf, obs_history)
-            obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos = env.step(actions.detach())
-        elif "rl2ac" in task_name:
-            actions, qref = policy(obs_buf, obs_history)
-            obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach(), qref)
-        else:
-            actions = policy(obs.detach())
-            obs, _, rews, dones, infos = env.step(actions.detach())
-        
-        # # print debug info
-        # print_debug_info(env, robot_index)
+
+        # Step policy and environment.
+        state, rews, dones, infos = _policy_step_for_task(env, policy, task_name, state)
+        dones = _to_bool_tensor(dones, device, num_envs=num_envs)
+
+        # These labels refer to the transition that was just executed.
+        log_episode_id = episode_id.detach().clone()
+        log_episode_step = episode_step.detach().clone() + 1
+        log_valid_episode = episode_active.detach().clone()
+
+        timeout_mask = _get_timeout_mask(env, infos, dones, pre_step_episode_lengths)
+        failure_reset_mask = _get_failure_reset_mask(env, dones, timeout_mask)
+        completed_mask = dones & episode_active
 
         if args.log:
             logger.log_states(
                 {
-                    'base_cmd':env.commands.detach().cpu().numpy().tolist(),
-                    'base_pose':env.simulator.base_pos.detach().cpu().numpy().tolist(),
-                    'base_rpy':env.simulator.base_euler.detach().cpu().numpy().tolist(),
-                    'dof_pose':env.simulator.dof_pos.detach().cpu().numpy().tolist(),
-                    'base_lin_vel':env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
-                    'base_ang_vel':env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
-                    'dof_vel':env.simulator.dof_vel.detach().cpu().numpy().tolist(),
-                    'proj_grav':env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
-                    'feet_pos':env.simulator.feet_pos.detach().cpu().numpy().tolist(),
-                    'tau_act':env.simulator._dof_tau.detach().cpu().numpy().tolist(),
-                    'grf':env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
-                    'q_des':env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
-                    'tau_ff':env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
-                    'tau_pd':env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
-                    'failure':list(map(int, env.get_failure_idx().detach().cpu().numpy().tolist())),
-                    'payload':env.simulator._added_base_mass.detach().cpu().numpy().tolist(),
-                    'com_shift':env.simulator._base_com_bias.detach().cpu().numpy().tolist(),
-                    'rand_push':env.simulator._rand_push_vels.detach().cpu().numpy().tolist(),
-                    'rand_wrench':env.simulator._rand_wrench_vels.detach().cpu().numpy().tolist()
-                })
-            
-    logger.save_log()
+                    'episode': log_episode_id.detach().cpu().numpy().tolist(),
+                    'episode_step': log_episode_step.detach().cpu().numpy().tolist(),
+                    'global_step': [global_step] * num_envs,
+                    'valid_episode': list(map(int, log_valid_episode.detach().cpu().numpy().tolist())),
+                    'done': list(map(int, dones.detach().cpu().numpy().tolist())),
+                    'time_out': list(map(int, timeout_mask.detach().cpu().numpy().tolist())),
+                    'failure_reset': list(map(int, failure_reset_mask.detach().cpu().numpy().tolist())),
+                    
+                    'base_cmd': env.commands.detach().cpu().numpy().tolist(),
+                    'base_pose': env.simulator.base_pos.detach().cpu().numpy().tolist(),
+                    'base_rpy': env.simulator.base_euler.detach().cpu().numpy().tolist(),
+                    'dof_pose': env.simulator.dof_pos.detach().cpu().numpy().tolist(),
+                    'base_lin_vel': env.simulator.base_lin_vel.detach().cpu().numpy().tolist(),
+                    'base_ang_vel': env.simulator.base_ang_vel.detach().cpu().numpy().tolist(),
+                    'dof_vel': env.simulator.dof_vel.detach().cpu().numpy().tolist(),
+                    'proj_grav': env.simulator.projected_gravity.detach().cpu().numpy().tolist(),
+                    'feet_pos': env.simulator.feet_pos.detach().cpu().numpy().tolist(),
+                    'tau_act': env.simulator._dof_tau.detach().cpu().numpy().tolist(),
+                    'grf': env.simulator._grfs_buf.detach().cpu().numpy().tolist(),
+                    'q_des': env.get_scaled_pos_actions().detach().cpu().numpy().tolist(),
+                    'tau_ff': env.simulator.feedforward_torques.detach().cpu().numpy().tolist(),
+                    'tau_pd': env.simulator.first_loop_feedback.detach().cpu().numpy().tolist(),
+                    
+                    # Kept for backward compatibility with your previous CSV format.
+                    'failure': list(map(int, failure_reset_mask.detach().cpu().numpy().tolist())),
+                    'payload': env.simulator._added_base_mass.detach().cpu().numpy().tolist(),
+                    'com_shift': env.simulator._base_com_bias.detach().cpu().numpy().tolist(),
+                    'rand_push': env.simulator._rand_push_vels.detach().cpu().numpy().tolist(),
+                    'rand_wrench': env.simulator._rand_wrench_vels.detach().cpu().numpy().tolist()
+                }
+            )
+
+        # Advance per-env episode step counters for active rollouts.
+        episode_step[episode_active] += 1
+
+        # Retire completed episodes and assign fresh global episode ids to envs
+        # that reset while more requested episodes remain.
+        done_env_ids = torch.nonzero(dones, as_tuple=False).flatten().detach().cpu().tolist()
+        for env_id in done_env_ids:
+            if bool(episode_active[env_id].item()):
+                completed_episodes += 1
+
+            episode_step[env_id] = 0
+
+            if next_episode_id < target_episodes:
+                episode_id[env_id] = next_episode_id
+                episode_active[env_id] = True
+                next_episode_id += 1
+            else:
+                episode_id[env_id] = -1
+                episode_active[env_id] = False
+
+        if args.progress_interval > 0 and (global_step % args.progress_interval == 0 or completed_mask.any()):
+            print(f"Completed {completed_episodes}/{target_episodes} episodes after {global_step} vectorized steps.")
+
+    if logger is not None:
+        logger.save_log()
+        print(f"Saved episode-based evaluation log to: {args.output_path}")
 
 def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     """export the policy as jit script according to different task types
@@ -442,6 +626,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--log_path',         type=str, default="exp_data/output", help="path to experiment output folder (default - 'exp_data/output')")
 
-    parser.add_argument('--num_eps',          type=float, default=5.0, help="Number of data collection epsiode to run (default - 5.0)")
+    parser.add_argument('--num_eps',          type=int, default=5, help="Number of completed evaluation episodes to collect globally across all envs (default - 5)")
+    parser.add_argument('--progress_interval', type=int, default=100, help="Print episode collection progress every N vectorized steps. Use 0 to disable.")
 
     play(configure_runtime_device(parser.parse_args()))

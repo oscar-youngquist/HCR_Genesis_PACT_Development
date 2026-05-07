@@ -5,7 +5,7 @@
 conda activate /home/oyoungquist/.conda/envs/genesis_lr
 
 export SIMULATOR=genesis_pact_rl2ac
-python play_exp.py --task=go1_rl2ac --gpu=cuda:0 --use_joystick --follow_robot
+python play_exp.py --task=go1_rl2ac --gpu=cuda:0 --follow_robot --use_joystick
 
 # export SIMULATOR=genesis
 # python play.py --task=go2_dreamwaq

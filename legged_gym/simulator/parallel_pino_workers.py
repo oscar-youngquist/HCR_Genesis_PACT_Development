@@ -22,18 +22,22 @@ class SharedTensors:
 
         # Inputs
         #      the plus (1) accounts for the quat. representation of orientation used by pinocchio
-        self.q       = self.make("go1_2_pact_q",       (num_envs, self.DOF+1))
-        self.qd      = self.make("go1_2_pact_qd",      (num_envs, self.DOF))
-        self.qd_prev = self.make("go1_2_pact_qd_prev", (num_envs, self.DOF))
-        self.grf     = self.make("go1_2_pact_grf",     (num_envs, *self.FOOT_DIM))
-        self.dt      = self.make("go1_2_pact_dt",      (1,))
+        self.q       = self.make("go1_pact_q",       (num_envs, self.DOF+1))
+        self.qd      = self.make("go1_pact_qd",      (num_envs, self.DOF))
+        self.qd_prev = self.make("go1_pact_qd_prev", (num_envs, self.DOF))
+        self.grf     = self.make("go1_pact_grf",     (num_envs, *self.FOOT_DIM))
+        self.dt      = self.make("go1_pact_dt",      (1,))
 
         # Outputs
-        self.wb_dynamics = self.make("go1_2_pact_wb_dynamics", (num_envs, self.DOF))
-        self.wb_contacts = self.make("go1_2_pact_wb_contacts", (num_envs, self.DOF))
-        self.mass_mat    = self.make("go1_2_pact_mass_mat",    (num_envs, self.DOF, self.DOF))
-        self.bias        = self.make("go1_2_pact_bias",        (num_envs, self.DOF))
-        self.acc6d       = self.make("go1_2_pact_acc6d",       (num_envs, 6))
+        self.wb_dynamics = self.make("go1_pact_wb_dynamics", (num_envs, self.DOF))
+        self.wb_contacts = self.make("go1_pact_wb_contacts", (num_envs, self.DOF))
+        self.mass_mat    = self.make("go1_pact_mass_mat",    (num_envs, self.DOF, self.DOF))
+        self.bias        = self.make("go1_pact_bias",        (num_envs, self.DOF))
+        self.acc6d       = self.make("go1_pact_acc6d",       (num_envs, 6))
+        
+        # Domain-randomized inertial parameters
+        self.base_added_mass = self.make("go1_pact_base_added_mass", (num_envs, 1))
+        self.base_com_shift = self.make("go1_pact_base_com_shift", (num_envs, 3))
 
     def make(self, name, shape, dtype=np.float32):
         nbytes = np.prod(shape) * np.dtype(dtype).itemsize
@@ -47,26 +51,89 @@ class SharedTensors:
             shm.close()
             shm.unlink()
 
+# Clone the inertial values from the original Pinocchio model to avoid any issues with shared memory and mutability.
+def clone_inertia(I):
+    return pn.Inertia(
+        float(I.mass),
+        np.array(I.lever, dtype=np.float64).copy(),
+        np.array(I.inertia, dtype=np.float64).copy()
+    )
+    
+def apply_base_inertia_randomization(
+    pino_model,
+    nominal_base_inertia,
+    base_joint_id,
+    added_mass,
+    com_shift,
+    scale_rotational_inertia=True,
+):
+    """
+    Apply randomized torso mass/COM to Pinocchio model.
+
+    IMPORTANT:
+    This is computed relative to nominal_base_inertia, not the currently
+    mutated model inertia, to avoid accumulating changes over calls.
+    """
+
+    m0 = float(nominal_base_inertia.mass)
+    lever0 = np.array(nominal_base_inertia.lever, dtype=np.float64)
+    inertia0 = np.array(nominal_base_inertia.inertia, dtype=np.float64)
+
+    dm = float(added_mass)
+    dc = np.asarray(com_shift, dtype=np.float64)
+
+    new_mass = max(m0 + dm, 1e-6)
+    new_lever = lever0 + dc
+
+    if scale_rotational_inertia:
+        # Simple approximation: preserve rotational inertia / mass ratio.
+        new_inertia = inertia0 * (new_mass / m0)
+    else:
+        # Leaves rotational inertia unchanged.
+        new_inertia = inertia0.copy()
+
+    pino_model.inertias[base_joint_id] = pn.Inertia(
+        new_mass,
+        new_lever,
+        new_inertia
+    )
 
 def compute_single_env(i, shared, pino_model, pino_data, 
                        pino_foot_names,
-                       correct_idxs):
+                       correct_idxs,
+                       base_joint_id,
+                       nominal_base_inertia):
     """
     Compute WB dynamics, mass matrix, bias forces, and contact forces
     for a single environment index i.
     """
 
-    q       = shared.go1_2_pact_q[i]
-    qd      = shared.go1_2_pact_qd[i]
-    qdprev  = shared.go1_2_pact_qd_prev[i]
-    grf     = shared.go1_2_pact_grf[i]      # shaped as (12)
-    dt      = shared.go1_2_pact_dt[0]
+    q       = shared.go1_pact_q[i]
+    qd      = shared.go1_pact_qd[i]
+    qdprev  = shared.go1_pact_qd_prev[i]
+    grf     = shared.go1_pact_grf[i]      # shaped as (12)
+    dt      = shared.go1_pact_dt[0]
+    
+    # ------------------------------------------------------------
+    # Apply per-env randomized torso mass / COM to Pinocchio model
+    # ------------------------------------------------------------
+    added_mass = shared.go1_pact_base_added_mass[i, 0]
+    com_shift  = shared.go1_pact_base_com_shift[i]
+
+    apply_base_inertia_randomization(
+        pino_model=pino_model,
+        nominal_base_inertia=nominal_base_inertia,
+        base_joint_id=base_joint_id,
+        added_mass=added_mass,
+        com_shift=com_shift,
+        scale_rotational_inertia=True,
+    )
 
     # Acceleration (backward finite difference)
     acc = (qd - qdprev) / dt
 
     # 6-DoF torso accel
-    shared.go1_2_pact_acc6d[i] = acc[:6]
+    shared.go1_pact_acc6d[i] = acc[:6]
 
     # Pinocchio general coords
     aq0 = np.zeros_like(qd)
@@ -75,12 +142,12 @@ def compute_single_env(i, shared, pino_model, pino_data,
     M = pn.crba(pino_model, pino_data, q)
 
     wb_dyn = M @ acc + b
-    shared.go1_2_pact_wb_dynamics[i] = wb_dyn[correct_idxs]
+    shared.go1_pact_wb_dynamics[i] = wb_dyn[correct_idxs]
 
     # Also save reduced mass matrix + bias
     M_ = M[np.ix_(correct_idxs, correct_idxs)]
-    shared.go1_2_pact_mass_mat[i] = M_
-    shared.go1_2_pact_bias[i] = b[correct_idxs]
+    shared.go1_pact_mass_mat[i] = M_
+    shared.go1_pact_bias[i] = b[correct_idxs]
 
     # Contact forces
     J_list = []
@@ -92,11 +159,12 @@ def compute_single_env(i, shared, pino_model, pino_data,
     J_total = np.concatenate(J_list, axis=0)
     tau = (J_total.transpose() @ grf).squeeze()
 
-    shared.go1_2_pact_wb_contacts[i] = tau[correct_idxs]
+    shared.go1_pact_wb_contacts[i] = tau[correct_idxs]
 
 def worker_loop(worker_id, shared_names, shapes, dtypes,
                 pino_model, pino_foot_names, correct_idxs,
                 task_queue, done_queue,
+                base_joint_id=1,
                 idle_sleep=0.01):
     """
     Long-running asynchronous worker.
@@ -139,6 +207,12 @@ def worker_loop(worker_id, shared_names, shapes, dtypes,
 
     pino_data = pino_model.createData()
 
+    # Store nominal inertia once per worker.
+    # All env-specific randomization is applied relative to this.
+    nominal_base_inertia = clone_inertia(
+        pino_model.inertias[base_joint_id]
+    )
+
     while True:
         try:
             # Try to get a task, but timeout if none available
@@ -151,9 +225,16 @@ def worker_loop(worker_id, shared_names, shapes, dtypes,
         if env_id == "STOP":
             break
 
-        compute_single_env(env_id, shared, pino_model, pino_data,
-                           pino_foot_names,
-                           correct_idxs)
+        compute_single_env(
+            env_id,
+            shared,
+            pino_model,
+            pino_data,
+            pino_foot_names,
+            correct_idxs,
+            base_joint_id,
+            nominal_base_inertia,
+        )
 
         done_queue.put(env_id)
 
@@ -168,12 +249,14 @@ class PinocchioAsync:
                  correct_idxs,
                  wb_dim,
                  foot_dim,
-                 num_cpu):
+                 num_cpu,
+                 base_joint_id=1):
 
         self.pino_model = pino_model
         self.num_envs = num_envs
         self.pino_foot_names = pino_foot_names
         self.correct_idxs = correct_idxs
+        self.base_joint_id = base_joint_id
 
         # Shared memory
         self.shared = SharedTensors(num_envs, num_dof=wb_dim, foot_dim=foot_dim)
@@ -198,7 +281,9 @@ class PinocchioAsync:
                       pino_model,
                       pino_foot_names,
                       correct_idxs,
-                      self.task_q, self.done_q)
+                      self.task_q, 
+                      self.done_q,
+                      base_joint_id)
             )
             p.daemon = True
             p.start()

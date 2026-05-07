@@ -784,7 +784,7 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         self.joint_damping_bound_current = self.joint_damping_bounds_start
 
         # Tradeoff curriculum stuff
-        self.feedforward_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
+        self.feedforward_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float) * 1.0
         self.feedback_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
 
         self._wb_dim = self._cfg.env.whole_body_dim

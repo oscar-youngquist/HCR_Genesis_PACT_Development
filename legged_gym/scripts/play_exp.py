@@ -19,7 +19,7 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 10)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -96,12 +96,12 @@ def override_configs(env_cfg, args):
     env_cfg.domain_rand.randomize_motor_strength = False
     
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_com_displacement = True
-    env_cfg.domain_rand.randomize_base_mass = True
+    env_cfg.domain_rand.randomize_com_displacement = False
+    env_cfg.domain_rand.randomize_base_mass = False
     
-    env_cfg.domain_rand.min_added_mass_max = 12.0
-    env_cfg.domain_rand.max_added_mass_max = 12.0
-    env_cfg.domain_rand.added_mass_min = 12.0
+    env_cfg.domain_rand.min_added_mass_max = 10.0
+    env_cfg.domain_rand.max_added_mass_max = 10.0
+    env_cfg.domain_rand.added_mass_min = 10.0
 
     # COM displacement crap
     env_cfg.domain_rand.com_displacement_x_min = 0.25
@@ -216,7 +216,7 @@ def interaction_loop(train_cfg, env, policy, args):
             env.commands[:, 1] = -joystick.lx
             env.commands[:, 2] = -joystick.rx
 
-        # env.commands[:, 0] = 0.65
+        # env.commands[:, 0] = 0.50
         # env.commands[:, 1] = 0.0
         # env.commands[:, 2] = 0.0
         # env.commands[:, 3] = 0
@@ -289,6 +289,8 @@ def interaction_loop(train_cfg, env, policy, args):
         #             logger.log_rewards(infos["episode"], num_episodes)
         # elif i==stop_rew_log:
         #     logger.print_rewards()
+
+        print(env.simulator.base_lin_vel.detach().cpu().numpy().tolist())
 
         # logger.log_states(
         #     {
