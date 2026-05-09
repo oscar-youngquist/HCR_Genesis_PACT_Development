@@ -759,6 +759,9 @@ class Go1PACT(BaseTask):
         self.simulator.feedforward_tau_weight[env_ids]  = self.tradeoff_step_ctr[env_ids] *float(1.0/self.tradeoff_num_steps)*self.bound_diff[0] + self.tradeoff_lowerbounds[0]
         self.simulator.feedback_tau_weight[env_ids]     = self.tradeoff_step_ctr[env_ids] *float(1.0/self.tradeoff_num_steps)*self.bound_diff[1] + self.tradeoff_lowerbounds[1]
 
+        self.simulator.feedforward_tau_weight_clean[env_ids] = self.tradeoff_step_ctr[env_ids] *float(1.0/self.tradeoff_num_steps)*self.bound_diff[0] + self.tradeoff_lowerbounds[0]
+        self.simulator.feedback_tau_weight_clean[env_ids]    = self.tradeoff_step_ctr[env_ids] *float(1.0/self.tradeoff_num_steps)*self.bound_diff[1] + self.tradeoff_lowerbounds[1]
+
         # random_smaple = random.random()
         
         # if random_smaple <= 0.10:  # 20% of the time reduce to lower bound

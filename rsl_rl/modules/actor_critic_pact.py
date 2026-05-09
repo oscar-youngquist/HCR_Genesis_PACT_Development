@@ -275,6 +275,8 @@ class ActorCritic_PACT(nn.Module):
         # disable args validation for speedup
         Normal.set_default_validate_args = False
 
+        nn.init.uniform_(self.act_tau_out.weight, -1.0e-6, 1.0e-6)
+        nn.init.zeros_(self.act_tau_out.bias)
 
     # Currently unused...
     def _init_weights(self):

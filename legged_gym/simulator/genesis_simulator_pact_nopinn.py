@@ -787,6 +787,9 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         self.feedforward_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
         self.feedback_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
 
+        self.feedforward_tau_weight_clean = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
+        self.feedback_tau_weight_clean = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
+
         self._wb_dim = self._cfg.env.whole_body_dim
         self._grf_dim = self._cfg.env.grf_dim
         
@@ -1647,12 +1650,7 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         Randomize feedforward / feedback torque weights for PACT torque outputs.
 
         Goal:
-            tau_nominal = tau_ff + tau_fb
-
-            tau_mixed_raw = w_ff * tau_ff + w_fb * tau_fb
-            tau_mixed     = scale * tau_mixed_raw
-
-        where scale preserves ||tau_mixed|| ~= ||tau_nominal||.
+            tau_mixed = w_ff * tau_ff + w_fb * tau_fb
 
         A subset of envs are sampled as "balanced":
             w_ff = 1.0
@@ -1680,18 +1678,21 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         bias = torch.empty(n, device=device).uniform_(weight_bias_min, weight_bias_max)
 
         # Start balanced
-        w_ff = torch.ones(n, device=device)
-        w_fb = torch.ones(n, device=device)
+        # w_ff = torch.ones(n, device=device)
+        # w_fb = torch.ones(n, device=device)
+
+        w_ff = self.feedforward_tau_weight_clean
+        w_fb = self.feedback_tau_weight_clean
 
         # Bias toward feedforward:
         #   ff gets stronger, fb gets weaker
-        w_ff = torch.where(~balanced_mask & bias_ff_mask, 1.0 + bias, w_ff)
-        w_fb = torch.where(~balanced_mask & bias_ff_mask, 1.0 - bias, w_fb)
+        w_ff = torch.where(~balanced_mask & bias_ff_mask, self.feedforward_tau_weight_clean + bias, w_ff)
+        w_fb = torch.where(~balanced_mask & bias_ff_mask, self.feedback_tau_weight_clean - bias, w_fb)
 
         # Bias toward feedback:
         #   fb gets stronger, ff gets weaker
-        w_ff = torch.where(~balanced_mask & ~bias_ff_mask, 1.0 - bias, w_ff)
-        w_fb = torch.where(~balanced_mask & ~bias_ff_mask, 1.0 + bias, w_fb)
+        w_ff = torch.where(~balanced_mask & ~bias_ff_mask, self.feedforward_tau_weight_clean - bias, w_ff)
+        w_fb = torch.where(~balanced_mask & ~bias_ff_mask, self.feedback_tau_weight_clean + bias, w_fb)
 
         # Store as [num_envs, 1] so they broadcast over joints/actions
         self.feedforward_tau_weight[env_ids] = w_ff.unsqueeze(-1)
