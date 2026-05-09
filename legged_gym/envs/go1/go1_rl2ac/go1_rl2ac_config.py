@@ -502,7 +502,7 @@ class GO1RL2ACCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 500
         
         
-        load_run = "Apr29_21-45-53_rl2ac_100hz_spec"
+        load_run = "May04_15-07-09_rl2ac_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/rl2ac_stairs_12-16kg.csv"

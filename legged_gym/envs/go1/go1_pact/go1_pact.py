@@ -169,18 +169,25 @@ class Go1PACT(BaseTask):
             if "roll" in self.cfg.termination.termination_terms:
                 r_term_buff = torch.abs(r) > self.cfg.termination.roll_threshold
                 self.fail_buf |= r_term_buff
+                # print(f"roll termination: {r}")
             if "pitch" in self.cfg.termination.termination_terms:
                 p_term_buff = torch.abs(p) > self.cfg.termination.pitch_threshold
                 self.fail_buf |= p_term_buff
+                # print(f"pitch termination: {p}")
             if "height_min" in self.cfg.termination.termination_terms:
                 height_term_buff = base_height < self.cfg.termination.height_min
                 self.fail_buf |= height_term_buff
+                # print(f"height termination: {base_height}")
             if "height_max" in self.cfg.termination.termination_terms:
                 height_term_buff = base_height > self.cfg.termination.height_max
                 self.fail_buf |= height_term_buff
         
         self.fail_buf += fail_buf
         self.time_out_buf = self.episode_length_buf > self.max_episode_length  # no terminal reward for time-outs
+        
+        # print(f"timeout termination: {self.time_out_buf}")
+        # print("======================================================")
+
         self.reset_buf = (
             (self.fail_buf > self.cfg.env.fail_to_terminal_time_s / self.dt)
             | self.time_out_buf

@@ -138,7 +138,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         clip_actions = 50.
 
     class domain_rand(LeggedRobotCfg.domain_rand):
-        use_domainrand_curriculum = True
+        use_domainrand_curriculum = False
         com_rand_z_positive = True
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
         push_warmup = 4000     # number of steps with initial values held constant
@@ -152,38 +152,38 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         # Randomized 6DOF torso wrench
         push_robots = True
         push_interval_max = 15.0
-        push_interval_min = 0.1
-        max_push_vel_xy = 1.00
-        min_push_vel_xy = 0.5
+        push_interval_min = 2.50
+        max_push_vel_xy = 1.40
+        min_push_vel_xy = 0.50
 
         max_vertical_push = 0.40
-        min_vertical_push = 0.20
+        min_vertical_push = 0.10
         vert_interval_max = 10.0
-        vert_interval_min = 0.1
+        vert_interval_min = 2.50
 
-        max_push_torque = 2.50
+        max_push_torque = 1.40
         min_push_torque = 0.50
-        wrench_timeout_min = 0.01
+        wrench_timeout_min = 1.00
         wrench_timeout_max = 10.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
         min_added_mass_max = 4.0
-        max_added_mass_max = 8.0
+        max_added_mass_max = 7.50
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.25
+        com_displacement_x_max = 0.18
         
         com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.22
+        com_displacement_y_max = 0.14
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
         com_displacement_z_min = 0.05
-        com_displacement_z_max = 0.25
+        com_displacement_z_max = 0.14
         
         # Control delay
         randomize_ctrl_delay = True
@@ -213,6 +213,18 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         joint_damping_range_end   = [0.00, 0.80]
         joint_damping_range_start = [0.30, 0.40]
 
+        # new domain randomization curriculum parameters
+        best_reward_window = 200        # amount of history used to capture recent performance.
+        best_reward_quantile = 0.90     # quantile for determining "max" performance over history window.
+
+        recovery_ratio = 0.90           # allowable deivation from quantile of history window
+        step_interval = 10              # minimum number of iterations before taking next domain rand step
+        
+        reward_ema_alpha = 0.05         # ema value for tracking 
+        min_reward_to_step = 0.60       # minimum reward threashold for stepping (i.e. the performance must always be above this for a step to occur, regardless of the historical performance.) 
+
+        mass_com_progress_delta = 0.01      # domain rand step delta for stepping payload parameters
+        disturbance_progress_delta = 0.01   # domain rand step delta for external disturbance parameters
 
     # Taken from the Go1 config class in - 
     class noise (LeggedRobotCfg.noise):
@@ -320,6 +332,12 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         tradeoff_threshold = 0.40
         use_tradeoff_curriculum = False
 
+        # not a tradeoff curriculum, but just slightly randomizing how much each branch contributes
+        randomize_pact_weights = True
+        pact_weight_bias_min = 0.0       # minimum output bias
+        pact_weight_bias_max = 0.20      # maximum output bias
+        pact_balanced_prob = 0.25        # % of envs that are guaranteed to have a 1-1 "balanced" output contribution
+
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
         roll_threshold    = 0.7  # [rad] ~ 40 degrees
@@ -345,6 +363,9 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         use_reward_curriculum = True
 
         max_contact_force = 200.0
+
+        ff_ratio_target = 0.50
+        ff_ratio_width  = 0.20
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
@@ -372,10 +393,11 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             # antagonisitc_energy = -0.01
             torque_conflict_symmetric = -0.1
             torque_alignment = 0.4
+            ff_ratio = 0.1
             
             # smoothness and stability
             lin_vel_z        = -2.0
-            base_height      = -1.0
+            base_height      = -1.5
             ang_vel_xy       = -0.05
             orientation      = -0.2
             dof_acc          = -2.5e-7
@@ -397,7 +419,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             # feedback_torques      = -2.0e-5
 
             feedforward_torques_scaled = -1.0e-5
-            feedback_torques           = -1.5e-5
+            feedback_torques           = -2.0e-5
             dof_act_limits             = 0.0
 
             support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
@@ -406,7 +428,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             front_foot_overreach = -10000.0
 
             # gait
-            feet_air_time    = 1.00            # tracking reward for long steps
+            feet_air_time    = 0.70            # tracking reward for long steps
             # foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance      
             foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.05
@@ -418,24 +440,22 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             curr_reward_keys = ["ang_vel_xy", 
                                 "orientation",
                                 "torque_limits",
-                                # "action_rate", 
-                                # "action_smoothness",
-                                # "dof_acc"
+                                "action_rate", 
+                                "action_smoothness",
                                 "dof_close_to_default",
                                 ]
             
             curr_reward_bounds = {
                                   "ang_vel_xy":[-0.05, -0.2],
-                                  "orientation":[-0.2,-2.0],
+                                  "orientation":[-0.2,-1.5],
                                   "torque_limits":[-1.0e-4, -0.01],
-                                #   "action_rate":[-1.0e-3, -0.01],
-                                #   "action_smoothness":[-1.0e-3,-0.01],
-                                #   "dof_acc":[-2.5e-8, -2.5e-7],
-                                  "dof_close_to_default":[-0.01, -0.10],
+                                  "action_rate":[-1.0e-3, -0.01],
+                                  "action_smoothness":[-1.0e-3,-0.01],
+                                  "dof_close_to_default":[-0.05, -0.20],
                                  }
 
-            curr_steps = 10
-            warmup_steps = 5000
+            curr_steps = 500
+            warmup_steps = 1500
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -478,9 +498,8 @@ class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
         pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.005
-        learning_rate = 1.0e-3 #
-        # learning_rate = 3.0e-4 #
+        # learning_rate = 1.0e-3 #
+        learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -492,22 +511,31 @@ class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
         desired_kl = 0.01
         max_grad_norm = 1.0
 
+        # adaptive entropy coefficent algorithm parameters
+        entropy_coef = 0.01                      # initial entropy value
+        use_adaptive_entropy = True              # weather or not to use the adaptive entropy coef alg.
+        adaptive_ent_bounds = [0.001, 0.01]      # entropy coefficent bands
+        adaptive_ent_lin_threshold = 0.75        # minimum linear velocity tracking target
+        adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target
+        adaptive_ent_ter_threshold = 6.0         # minimum avg. terrain curriculum progress target
+        adaptive_ent_softmax_temp = 2.0          # temperature (sharpness) of the softmax operation used in the alg. 
+
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_ABL1'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 10000 # number of policy updates
+        max_iterations = 3000 # number of policy updates
 
 
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'abl3_100hz_spec_materr'
+        run_name = 'hybrid_100hz_spec_materr'
         experiment_name = 'go1_abl3_rough'
         save_interval = 500
         
         
-        load_run = "Apr11_20-18-37_pact_100hz_spec_scratch"
+        load_run = "May01_17-29-12_abl3_100hz_spec_materr"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/scratch_pact_exp/plane_tracking_test.csv"

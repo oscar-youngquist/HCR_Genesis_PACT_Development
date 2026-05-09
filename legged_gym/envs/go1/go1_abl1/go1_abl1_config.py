@@ -401,7 +401,7 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
             dof_acc          = -2.5e-7
             joint_power      = -2.e-5
             joint_power_dist = -1.e-5
-            torques          = 0.0     # don't need to use this when we already have joint power above...
+            torques          = -1.0e-5     # don't need to use this when we already have joint power above...
 
             # Zero out some values that are used in the individual reward classes below
             action_rate       = -0.001
@@ -416,8 +416,8 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
             # feedforward_torques   = -2.5e-5
             # feedback_torques      = -2.0e-5
 
-            feedforward_torques_scaled = -1.0e-5
-            feedback_torques           = -1.5e-5
+            feedforward_torques_scaled = 0.0
+            feedback_torques           = 0.0
             dof_act_limits             = 0.0
 
             support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
@@ -449,11 +449,11 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
                                   "torque_limits":[-1.0e-4, -0.01],
                                   "action_rate":[-1.0e-3, -0.01],
                                   "action_smoothness":[-1.0e-3,-0.01],
-                                  "dof_close_to_default":[-0.01, -0.10],
+                                  "dof_close_to_default":[-0.05, -0.20],
                                  }
 
-            curr_steps = 1000
-            warmup_steps = 5000
+            curr_steps = 500
+            warmup_steps = 4500
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -533,7 +533,7 @@ class GO1ABL1CfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Apr11_20-18-37_pact_100hz_spec_scratch"
+        load_run = "May01_17-40-18_abl1_100hz_spec_smartcurr"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/scratch_pact_exp/plane_tracking_test.csv"

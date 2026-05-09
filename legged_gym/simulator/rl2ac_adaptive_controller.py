@@ -12,7 +12,7 @@ class RL2ACAdaptiveCtrl:
         # Scalars (broadcasted)
         self.alpha = 50.0
         self.kappa = 1.2
-        self.eta = 0.1
+        self.eta = 0.01
         self.lambda_0 = 3.0
         self.k_0 = 20.0
 
@@ -24,6 +24,11 @@ class RL2ACAdaptiveCtrl:
         self.s = torch.zeros_like(self.phi)
         self.tau = torch.zeros_like(self.phi)
         self.epsilon = torch.zeros_like(self.phi)
+
+
+        self.phi_diag = torch.zeros(self.B, self.J, self.J, device=device, dtype=dtype)
+        self.s_diag = torch.zeros(self.B, self.J, self.J, device=device, dtype=dtype)
+        self.epsilon_diag = torch.zeros(self.B, self.J, self.J, device=device, dtype=dtype)
 
         self.q = torch.zeros_like(self.phi)
         self.qdot = torch.zeros_like(self.phi)
@@ -38,7 +43,7 @@ class RL2ACAdaptiveCtrl:
         self.comp = torch.zeros_like(self.phi)
 
         # Adaptive matrices: [B, J, J]
-        self.Gamma = torch.eye(self.J, device=device, dtype=dtype).repeat(self.B, 1, 1)
+        self.Gamma = torch.eye(self.J, device=device, dtype=dtype).repeat(self.B, 1, 1) / 100.0
         self.K = torch.zeros(self.B, self.J, self.J, device=device, dtype=dtype)
 
         # Numerical stability constants
@@ -48,7 +53,7 @@ class RL2ACAdaptiveCtrl:
         self.dt_min = 1e-5
 
     def reset_adaptive_controller(self):
-        self.Gamma = torch.eye(self.J, device=self.device, dtype=self.dtype).repeat(self.B, 1, 1)
+        self.Gamma = torch.eye(self.J, device=self.device, dtype=self.dtype).repeat(self.B, 1, 1) / 100.0
         self.K = torch.zeros(self.B, self.J, self.J, device=self.device, dtype=self.dtype) 
         self.comp_old = torch.zeros_like(self.phi)
         self.comp = torch.zeros_like(self.phi)   
@@ -83,6 +88,12 @@ class RL2ACAdaptiveCtrl:
         self.q.copy_(qj)
         self.qdot.copy_(qdj)
 
+        # copy over to the diagonal matricies
+        for i in range (0, self.J):
+            self.phi_diag[:,i,i] = self.phi[:,i]
+            self.s_diag[:,i,i] = self.s[:,i]
+            self.epsilon_diag[:,i,i] = self.epsilon[:,i]
+
         # ---- Stability: clamp ||phi||
         # phi_norm = torch.norm(self.phi, dim=1, keepdim=True).clamp(min=1e-6)
         # scale = torch.clamp(self.phi_norm_max / phi_norm, max=1.0)
@@ -109,13 +120,13 @@ class RL2ACAdaptiveCtrl:
         self._update_K(dt)
 
         self.comp_old.copy_(self.comp)
-        self.comp = torch.einsum("bij,bj->bi", self.K, self.phi)
+        # self.comp = torch.einsum("bij,bj->bi", self.K, self.phi)
+        self.comp = torch.bmm(self.K, self.phi.unsqueeze(-1)).squeeze(-1)
 
-        # print(torch.norm(self.K))
-        # print(self.phi[0])
-        # print(self.comp[0])
-        # print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
-
+        print(torch.norm(self.K[0]))
+        print(torch.norm(self.phi[0]))
+        print(torch.norm(self.comp[0]))
+        print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
 
         return self.comp
 
@@ -125,31 +136,42 @@ class RL2ACAdaptiveCtrl:
 
     def _update_forgetting_factor(self):
         gamma_norm = torch.norm(self.Gamma, dim=(1, 2))
-        lambda_val = self.lambda_0 * (1.0 - gamma_norm / self.k_0)
-        self.lambda_val = torch.clamp(lambda_val, min=self.min_lambda)
+        print(gamma_norm.shape)
+        lambda_val = self.lambda_0 * (1.0 - (gamma_norm / self.k_0))
+        self.lambda_val = lambda_val
 
     def _update_gamma(self, dt):
         # Elementwise equivalent of: Γ φ φᵀ Γ
-        phi_outer = self.phi.unsqueeze(2) * self.phi.unsqueeze(1)  # [B,J,J]
+        # phi_outer = self.phi.unsqueeze(2) * self.phi.unsqueeze(1)  # [B,J,J]
 
-        dGamma = (
-            self.lambda_val[:, None, None] * self.Gamma
-            - torch.bmm(self.Gamma, torch.bmm(phi_outer, self.Gamma))
-        )
+        print(self.Gamma.shape)
+
+        dGamma = self.lambda_val[:, None, None] * self.Gamma
+
+        print(dGamma.shape)
+
+        dGamma -= ((self.Gamma @ self.phi_diag) @ self.phi_diag) @ self.Gamma
+        
+        # dGamma = (
+        #     self.lambda_val[:, None, None] * self.Gamma
+        #     - torch.bmm(self.Gamma, torch.bmm(phi_outer, self.Gamma))
+        # )
 
         self.Gamma += dt * dGamma
 
         # ---- Stability: norm clamp + symmetrize
-        gamma_norm = torch.norm(self.Gamma, dim=(1, 2), keepdim=True).clamp(min=1e-6)
-        scale = torch.clamp(self.gamma_max_norm / gamma_norm, max=1.0)
-        self.Gamma.mul_(scale)
+        # gamma_norm = torch.norm(self.Gamma, dim=(1, 2), keepdim=True).clamp(min=1e-6)
+        # scale = torch.clamp(self.gamma_max_norm / gamma_norm, max=1.0)
+        # self.Gamma.mul_(scale)
 
-        self.Gamma = 0.5 * (self.Gamma + self.Gamma.transpose(1, 2))
+        # self.Gamma = 0.5 * (self.Gamma + self.Gamma.transpose(1, 2))
 
     def _update_K(self, dt):
         # Equivalent to: -Γ φ (s + κ ε)ᵀ
-        rhs = self.s + self.kappa * self.epsilon
-        dK = -torch.einsum("bij,bj,bk->bik", self.Gamma, self.phi, rhs)
-        dK -= self.eta * self.K
+        # rhs = self.s + self.kappa * self.epsilon
+        # dK = -torch.einsum("bij,bj,bk->bik", self.Gamma, self.phi, rhs)
+        # dK -= self.eta * self.K
+        dK_dt = -self.Gamma @ self.phi_diag @ (self.s_diag + self.kappa * self.epsilon_diag)
+        dK_dt -= self.eta * self.K
 
-        self.K += dt * dK
+        self.K += dt * dK_dt

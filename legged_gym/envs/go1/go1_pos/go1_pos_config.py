@@ -489,7 +489,7 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Apr29_21-22-27_pos_100hz_spec"
+        load_run = "May01_17-08-23_pos_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pos_stairs_12-16kg.csv"
