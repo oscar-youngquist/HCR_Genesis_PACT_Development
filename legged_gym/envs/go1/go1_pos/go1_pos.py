@@ -654,7 +654,7 @@ class Go1Pos(BaseTask):
                     self.reward_scales[key] = self.reward_curr_bounds[key][0] * self.dt
                     # print("Reward - ", key, " scale - ", self.reward_scales[key])
         # Gradually increase the regularization strength
-        elif num_iters > self.reward_warmup_steps and (num_iters - self.reward_warmup_steps) < self.reward_curr_steps:
+        elif num_iters >= self.reward_warmup_steps and (num_iters - self.reward_warmup_steps) < self.reward_curr_steps:
             print("Stepping Reward Curriculum")
             adjusted_iter = num_iters - self.reward_warmup_steps
             for key in self.reward_curr_keys:
