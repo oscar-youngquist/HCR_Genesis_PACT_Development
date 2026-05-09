@@ -5,8 +5,8 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        # num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
-        num_privileged_obs = 57 + (39 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
+        num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
+        # num_privileged_obs = 57 + (39 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -334,10 +334,13 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         overreach_x_max = 0.28
         support_polygon_sigma = 0.01
 
+        rear_foot_x_nominal = -0.20
+        rear_foot_x_margin = 0.08
+
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
 
-        use_reward_curriculum = False
+        use_reward_curriculum = True
 
         max_contact_force = 200.0
         class scales( LeggedRobotCfg.rewards.scales ):
@@ -351,7 +354,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             alive_bonus           = 0.001
 
             stand_still_contact = -0.5
-            dof_pos_stand_still = -0.0
+            dof_pos_stand_still = -0.1
             dof_vel_stand_still = -0.0
 
             # command tracking
@@ -364,7 +367,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             
             # smoothness and stability
             lin_vel_z        = -2.0
-            base_height      = -1.0
+            base_height      = -2.0
             ang_vel_xy       = -0.05
             orientation      = -0.2
             dof_acc          = -2.0e-7
@@ -386,11 +389,21 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             feedback_torques      = 0.0
             dof_act_limits        = 0.0
 
-            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
+            # Taken from MIT benchmarking PBRS for humanoid locomotion paper
+            pbrs_orientation = 10.0           # potiential reward for encouraging orientation recovery
+            pbrs_height = 10.0                # potiential reward for encouraging height change recovery
+
+            # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
+            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM (and vice-versa)
+            vhip_angle = -0.1                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
+            vhip_angular_acc = -0.001         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
+            
+            # I developed these
             front_foot_overreach = -10000.0
+            rear_foot_overreach = -10.0
 
             # gait
-            feet_air_time    = 1.00            # tracking reward for long steps
+            feet_air_time    = 0.70            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
             foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.05
@@ -411,14 +424,14 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             curr_reward_bounds = {
                                   "orientation":[-0.2,-1.0],
                                   "ang_vel_xy":[-0.05, -0.1],
-                                  "dof_close_to_default":[-0.01, -0.10],
+                                  "dof_close_to_default":[-0.05, -0.20],
                                   "torque_limits":[-0.0001, -1.0e-2],
                                 #   "action_rate":[-0.0001, -0.01],
                                 #   "action_smoothness":[-0.0001,-0.01],
                                  }
 
             curr_steps = 1
-            warmup_steps = 4000
+            warmup_steps = 2000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -448,8 +461,8 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # Context Decoder
         cenet_dec_input_dim = 27
         cenet_dec_layers = [128, 256, 512]
-        # cenet_dec_out_dim = 57 + (51 + 33) + 143 # next obs (57) + grf_dim (12)
-        cenet_dec_out_dim = 57 + (39 + 33) + 143 # next obs (57) + grf_dim (12)
+        cenet_dec_out_dim = 57 + (51 + 33) + 143 # next obs (57) + grf_dim (12)
+        # cenet_dec_out_dim = 57 + (39 + 33) + 143 # next obs (57) + grf_dim (12)
 
 
         # Actor/critic
@@ -492,7 +505,7 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 2500 # number of policy updates
+        max_iterations = 3000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb
@@ -501,7 +514,7 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 500
         
         
-        load_run = "Apr23_00-28-47_pact_posboot_100hz_spec_grf"   # spec, 0.01
+        load_run = "May08_17-10-01_pact_posboot_100hz_nogrf"   # spec, 0.01
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/pact_pos_tests/spec_0_01_4-6kg_stairs.csv"

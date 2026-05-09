@@ -184,8 +184,24 @@ def override_configs(env_cfg, args):
         env_cfg.viewer.add_camera = True  # use a extra camera for moving
 
     # Construct the log-file output path
-    args.output_path = os.path.join(args.log_path, f"{args.task}_{args.terrain_type}_{args.disturbance_type}.csv")
+    # args.output_path = os.path.join(args.log_path, f"{args.task}_{args.terrain_type}_{args.disturbance_type}.csv")
+
+    env_cfg.rl2ac.alpha = args.alpha
+    env_cfg.rl2ac.kappa = args.kappa
+    env_cfg.rl2ac.lambda_0 = args.lambda_0
+    env_cfg.rl2ac.k_0 = args.k_0
     
+    args.output_path = os.path.join(
+        args.log_path,
+        (
+            f"{args.task}_{args.terrain_type}_{args.disturbance_type}"
+            f"_alpha_{args.alpha:g}"
+            f"_kappa_{args.kappa:g}"
+            f"_lambda0_{args.lambda_0:g}"
+            f"_k0_{args.k_0:g}.csv"
+        )
+    )
+
 
 def print_debug_info(env, robot_index):
     """Print debug information while interacting
@@ -453,5 +469,10 @@ if __name__ == '__main__':
 
     parser.add_argument('--rand_pact',        action='store_true', default=False)
     parser.add_argument('--more_rand',        action='store_true', default=False)
+
+    parser.add_argument('--alpha',          type=float, default=50.0)
+    parser.add_argument('--kappa',          type=float, default=1.2)
+    parser.add_argument('--lambda_0',       type=float, default=3.0)
+    parser.add_argument('--k_0',            type=float, default=20.0)
 
     play(configure_runtime_device(parser.parse_args()))

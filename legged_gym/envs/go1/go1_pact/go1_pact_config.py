@@ -141,7 +141,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 1500     # number of steps with initial values held constant
+        push_warmup = 1200     # number of steps with initial values held constant
         num_jumps = 10
         
         # Randomize Friction
@@ -222,7 +222,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         step_interval = 10              # minimum number of iterations before taking next domain rand step
         
         reward_ema_alpha = 0.05         # ema value for tracking 
-        min_reward_to_step = 0.65       # minimum reward threashold for stepping (i.e. the performance must always be above this for a step to occur, regardless of the historical performance.) 
+        min_reward_to_step = 0.60       # minimum reward threashold for stepping (i.e. the performance must always be above this for a step to occur, regardless of the historical performance.) 
 
         mass_com_progress_delta = 0.01      # domain rand step delta for stepping payload parameters
         disturbance_progress_delta = 0.01   # domain rand step delta for external disturbance parameters
@@ -358,8 +358,10 @@ class GO1PACTCfg( LeggedRobotCfg ):
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.28
-
+        rear_foot_x_nominal = -0.20
+        rear_foot_x_margin = 0.08
         support_polygon_sigma = 0.01
+        
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
 
@@ -422,10 +424,19 @@ class GO1PACTCfg( LeggedRobotCfg ):
             feedback_torques           = -2.0e-5       # make using large PD torques 1.5x as expensive as ff torques.
             dof_act_limits             = 0.0
 
-            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
-            pbrs_orientation = 100.0          # potiential reward for encourgaing orientation recovery
+            
+            # Taken from MIT benchmarking PBRS for humanoid locomotion paper
+            pbrs_orientation = 10.0         # potiential reward for encouraging orientation recovery
+            pbrs_height = 10.0              # potiential reward for encouraging height change recovery
 
+            # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
+            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
+            vhip_angle = -0.1                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
+            vhip_angular_acc = -0.001         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
+
+            # I developed these
             front_foot_overreach = -10000.0
+            rear_foot_overreach = -10.0
 
             # gait
             feet_air_time    = 0.70            # tracking reward for long steps
@@ -435,7 +446,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             
             foot_slip        = -0.01          # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
-            feet_spread_pairwise_axes = 0.0
+
         class reward_curriculum():
             curr_reward_keys = ["ang_vel_xy", 
                                 "orientation",
@@ -495,7 +506,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/Apr30_20-18-21_pact_posboot_100hz_grf/model_2000_converted.pt"
+        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May08_17-10-01_pact_posboot_100hz_grf/model_3000_converted.pt"
         pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
@@ -535,7 +546,9 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         
         
         # load_run = "May01_16-41-42_pact_100hz_spec_smartcurr"
-        load_run = "May06_20-34-35_pact_100hz_spec_smartcurr"
+        # load_run = "May06_20-34-35_pact_100hz_spec_smartcurr"
+        load_run = "May07_18-30-49_pact_100hz_spec_smartcurr"
+        # load_run = "May07_18-49-22_pact_100hz_spec_smartcurr_e2e"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pact_stairs_12-16kg.csv"

@@ -29,7 +29,7 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
         self.first_loop = True
         self.first_loop_feedback = None
 
-        self.rl2ac_adaptive_ctrl = RL2ACAdaptiveCtrl(self._num_envs)
+        self.rl2ac_adaptive_ctrl = RL2ACAdaptiveCtrl(self._num_envs, cfg)
         self.adaptive_torques = torch.zeros((self._num_envs, 12), device=device, dtype=torch.float)
 
 

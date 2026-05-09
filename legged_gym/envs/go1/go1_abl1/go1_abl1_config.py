@@ -90,10 +90,10 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
                             [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721]]
         pos = [0.0, 0.0, 0.34] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
-            'FL_hip_joint': 0.1,      # [rad]
+            'FL_hip_joint': 0.095,      # [rad]
             'RL_hip_joint': 0.1,      # [rad]
             'FR_hip_joint': -0.1 ,    # [rad]
-            'RR_hip_joint': -0.1,     # [rad]
+            'RR_hip_joint': -0.105,     # [rad]
 
             'FL_thigh_joint': 0.8,   # [rad]
             'RL_thigh_joint': 0.8,   # [rad]
@@ -196,7 +196,7 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
         
         # Motor strength randomization
         randomize_motor_strength = True
-        motor_strength_range = [0.9, 1.1]
+        motor_strength_range = [0.88, 1.12]
         
         # Unused more complicated dynamics randomization
         randomize_joint_armature = True

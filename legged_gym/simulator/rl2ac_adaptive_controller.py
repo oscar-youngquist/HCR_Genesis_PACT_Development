@@ -2,7 +2,7 @@ import torch
 
 
 class RL2ACAdaptiveCtrl:
-    def __init__(self, num_envs, device="cuda", dtype=torch.float32):
+    def __init__(self, num_envs, config, device="cuda", dtype=torch.float32):
         self.device = device
         self.dtype = dtype
 
@@ -10,11 +10,18 @@ class RL2ACAdaptiveCtrl:
         self.J = 12
 
         # Scalars (broadcasted)
-        self.alpha = 50.0
-        self.kappa = 1.2
+        # self.alpha = 50.0
+        # self.kappa = 1.2
         self.eta = 0.01
-        self.lambda_0 = 3.0
-        self.k_0 = 20.0
+        # self.lambda_0 = 3.0
+        # self.k_0 = 20.0
+
+        self.alpha = config.rl2ac.alpha
+        self.kappa = config.rl2ac.kappa
+        self.lambda_0 = config.rl2ac.lambda_0
+        self.k_0 = config.rl2ac.k_0
+
+        print(f"RL2AC params: alpha={self.alpha}, kappa={self.kappa}, lambda_0={self.lambda_0}, k_0={self.k_0}")
 
         # State flags
         self.use_proactive_ctrl = True
@@ -43,7 +50,7 @@ class RL2ACAdaptiveCtrl:
         self.comp = torch.zeros_like(self.phi)
 
         # Adaptive matrices: [B, J, J]
-        self.Gamma = torch.eye(self.J, device=device, dtype=dtype).repeat(self.B, 1, 1) / 100.0
+        self.Gamma = torch.eye(self.J, device=device, dtype=dtype).repeat(self.B, 1, 1)
         self.K = torch.zeros(self.B, self.J, self.J, device=device, dtype=dtype)
 
         # Numerical stability constants
@@ -53,7 +60,7 @@ class RL2ACAdaptiveCtrl:
         self.dt_min = 1e-5
 
     def reset_adaptive_controller(self):
-        self.Gamma = torch.eye(self.J, device=self.device, dtype=self.dtype).repeat(self.B, 1, 1) / 100.0
+        self.Gamma = torch.eye(self.J, device=self.device, dtype=self.dtype).repeat(self.B, 1, 1)
         self.K = torch.zeros(self.B, self.J, self.J, device=self.device, dtype=self.dtype) 
         self.comp_old = torch.zeros_like(self.phi)
         self.comp = torch.zeros_like(self.phi)   
@@ -123,10 +130,10 @@ class RL2ACAdaptiveCtrl:
         # self.comp = torch.einsum("bij,bj->bi", self.K, self.phi)
         self.comp = torch.bmm(self.K, self.phi.unsqueeze(-1)).squeeze(-1)
 
-        print(torch.norm(self.K[0]))
-        print(torch.norm(self.phi[0]))
-        print(torch.norm(self.comp[0]))
-        print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
+        # print(torch.norm(self.K[0]))
+        # print(torch.norm(self.phi[0]))
+        # print(torch.norm(self.comp[0]))
+        # print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
 
         return self.comp
 
@@ -136,7 +143,7 @@ class RL2ACAdaptiveCtrl:
 
     def _update_forgetting_factor(self):
         gamma_norm = torch.norm(self.Gamma, dim=(1, 2))
-        print(gamma_norm.shape)
+        # print(gamma_norm.shape)
         lambda_val = self.lambda_0 * (1.0 - (gamma_norm / self.k_0))
         self.lambda_val = lambda_val
 
@@ -144,11 +151,11 @@ class RL2ACAdaptiveCtrl:
         # Elementwise equivalent of: Γ φ φᵀ Γ
         # phi_outer = self.phi.unsqueeze(2) * self.phi.unsqueeze(1)  # [B,J,J]
 
-        print(self.Gamma.shape)
+        # print(self.Gamma.shape)
 
         dGamma = self.lambda_val[:, None, None] * self.Gamma
 
-        print(dGamma.shape)
+        # print(dGamma.shape)
 
         dGamma -= ((self.Gamma @ self.phi_diag) @ self.phi_diag) @ self.Gamma
         

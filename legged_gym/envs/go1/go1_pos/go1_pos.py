@@ -632,7 +632,15 @@ class Go1Pos(BaseTask):
                 self.num_envs, self.cfg.domain_rand.ctrl_delay_step_range[1]+1, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
             self.action_delay = torch.randint(self.cfg.domain_rand.ctrl_delay_step_range[0],
                                               self.cfg.domain_rand.ctrl_delay_step_range[1]+1, (self.num_envs,), device=self.device, requires_grad=False)
-            
+
+    def set_camera(self, pos, lookat):
+        """ Set camera position and direction
+        """
+        self.simulator._floating_camera.set_pose(
+            pos=pos,
+            lookat=lookat
+        )
+
 
     def step_reward_curriculum(self, num_iters):
         # Safety catch

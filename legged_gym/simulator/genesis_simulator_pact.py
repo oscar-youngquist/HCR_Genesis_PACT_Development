@@ -1596,12 +1596,7 @@ class GenesisSimulator_PACT(Simulator):
         Randomize feedforward / feedback torque weights for PACT torque outputs.
 
         Goal:
-            tau_nominal = tau_ff + tau_fb
-
-            tau_mixed_raw = w_ff * tau_ff + w_fb * tau_fb
-            tau_mixed     = scale * tau_mixed_raw
-
-        where scale preserves ||tau_mixed|| ~= ||tau_nominal||.
+            tau_mixed = w_ff * tau_ff + w_fb * tau_fb
 
         A subset of envs are sampled as "balanced":
             w_ff = 1.0
