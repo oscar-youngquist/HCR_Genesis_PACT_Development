@@ -509,7 +509,7 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_posboot_100hz_nogrf'
+        run_name = 'pact_posboot_100hz_grf'
         experiment_name = 'go1_pact_pos_rough'
         save_interval = 500
         
