@@ -333,6 +333,8 @@ class GO1TauCfg( LeggedRobotCfg ):
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.28
+        rear_foot_x_nominal = -0.20
+        rear_foot_x_margin = 0.08
         support_polygon_sigma = 0.01
 
         foot_clearance_tracking_sigma = 0.01
