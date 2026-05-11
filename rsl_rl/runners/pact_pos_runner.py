@@ -197,7 +197,7 @@ class OnPolicyRunnerPACTPos:
                         obs_hist.to(self.device), exp_labels.to(self.device), rewards.to(self.device), dones.to(self.device), grfs.to(self.device)
 
                     # Log the labels associated with the context decoder as well as the typical stuff
-                    self.alg.process_env_step(rewards, dones, infos, grfs, obs, exp_labels)
+                    self.alg.process_env_step(rewards, dones, infos, grfs, critic_obs, exp_labels)
 
                     if self.log_dir is not None:
                         # Book keeping

@@ -5,10 +5,10 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        # num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
-        num_privileged_obs = 57 + 12 + 143 # robot_state + privilged info + terrain_heights (187)
+        num_privileged_obs = 57 + (50 + 38) + 143 # robot_state + privilged info + terrain_heights (187)
+        # num_privileged_obs = 57 + (50 + 26) + 143 # robot_state + privilged info + terrain_heights (187)
         num_priv_stack = 5
-        num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
+        num_explicit_recon_obs = 3 + 4 + 4 + 1 + 1 + 3 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
         num_obs_hist = 20
@@ -127,7 +127,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         clip_actions = 50.
 
     class domain_rand(LeggedRobotCfg.domain_rand):
-        use_domainrand_curriculum = False
+        use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 500  # number of steps to increase the domain randomization ranges
         push_warmup = 3000     # number of steps with initial values held constant
@@ -197,7 +197,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         joint_stiffness_range_start = [0.0, 0.0]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.30, 0.40]
+        joint_damping_range_end   = [0.00, 0.50]
         joint_damping_range_start = [0.30, 0.40]
 
         # new domain randomization curriculum parameters
@@ -431,7 +431,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
                                  }
 
             curr_steps = 1
-            warmup_steps = 2000
+            warmup_steps = 4000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -456,14 +456,17 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # Context encoder
         cenet_enc_layers=[256,128]
         cenet_enc_latent_dim = 16
-        cenet_velo_dim = 3 + 4 + 4      # torso velocity, foot-contact indicator, foot-height 
-
+        cenet_velo_dim = 3 + 4 + 4 + 1 + 1 + 3      # torso velocity, foot-contact indicator, foot-height 
+        # cenet_velo_dim = 3 + 4 + 4      # torso velocity, foot-contact indicator, foot-height 
+        
         # Context Decoder
-        cenet_dec_input_dim = 27
-        cenet_dec_layers = [64, 128, 64]
-        # cenet_dec_out_dim = 57 + (51 + 33) + 143 # next obs (57) + grf_dim (12)
-        cenet_dec_out_dim = 57
+        cenet_dec_input_dim = 16 + 3 + 4 + 4 + 1 + 1 + 3
+        cenet_dec_layers = [128, 256, 512]
+        cenet_dec_out_dim = 57 + (50 + 38) + 143 # robot_state + privilged info + terrain_heights (187)
 
+        # cenet_dec_input_dim = 16 +  3 + 4 + 4
+        # cenet_dec_layers = [64, 128, 64]
+        # cenet_dec_out_dim = 57
 
         # Actor/critic
         actor_layers = [512,256,128]
@@ -495,7 +498,7 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # adaptive entropy coefficent algorithm parameters
         entropy_coef = 0.02                      # initial entropy value
         use_adaptive_entropy = True              # weather or not to use the adaptive entropy coef alg.
-        adaptive_ent_bounds = [0.001, 0.02]      # entropy coefficent bands
+        adaptive_ent_bounds = [0.01, 0.02]      # entropy coefficent bands
         adaptive_ent_lin_threshold = 0.75        # minimum linear velocity tracking target
         adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target
         adaptive_ent_ter_threshold = 6.0         # minimum avg. terrain curriculum progress target
@@ -505,11 +508,11 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 3000 # number of policy updates
+        max_iterations = 5000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_posboot_100hz_nogrf'
+        run_name = 'pact_posboot_100hz_grf'
         experiment_name = 'go1_pact_pos_rough'
         save_interval = 500
         

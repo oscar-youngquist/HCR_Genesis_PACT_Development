@@ -75,7 +75,7 @@ class RolloutStoragePACTPos:
         # specific to DreamWaQ style history encoder...
         self.explicit_labels = torch.zeros(num_transitions_per_env, num_envs, *explicit_shape, device=self.device)
         self.grf_targets = torch.zeros(num_transitions_per_env, num_envs, *grf_shape, device=self.device)
-        self.observation_targets = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
+        self.observation_targets = torch.zeros(num_transitions_per_env, num_envs, *sinle_critc_obs_shape, device=self.device)
 
         
         # For PPO

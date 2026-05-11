@@ -288,7 +288,6 @@ class Go1Tau(BaseTask):
                                       * self.obs_scales.dof_pos,                              # joint pose            12
                                     self.simulator.dof_vel * self.obs_scales.dof_vel,         # joint velocity        12
                                     self.actions[:,0:12],                                     # joint pose actions    12
-                                    # self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)),    # joint torque actions  12
                                     ), dim=-1)                                                # 57
 
         # add noise if needed
@@ -317,33 +316,33 @@ class Go1Tau(BaseTask):
         # build up privlieged domain randomization buffer
         domain_randomization_info = torch.cat((
             (self.simulator._friction_values - self.friction_value_offset),  # 1
-            # self.simulator._added_base_mass,                                 # 1
-            # self.simulator._base_com_bias,                                   # 3
-            self.simulator._rand_push_vels[:,:2],                                  # 3
-            # self.simulator._rand_wrench_vels,                                # 3
-            # (self.simulator._kp_scale - self.kp_scale_offset),               # num_actions
-            # (self.simulator._kd_scale - self.kd_scale_offset),               # num_actions
-            # self.simulator._motor_strength,                                  # num_actions
-            # self.simulator._joint_armature,                                  # 1
-            # self.simulator._joint_friction,                                  # 1
-            # self.simulator._joint_damping,                                   # 1
-            # self.simulator._joint_stiffness,                                 # 1
-            ), dim=-1)                                                       # 51
+            self.simulator._added_base_mass,                                 # 1
+            self.simulator._base_com_bias,                                   # 3
+            self.simulator._rand_push_vels,                                  # 3
+            self.simulator._rand_wrench_vels,                                # 3
+            (self.simulator._kp_scale - self.kp_scale_offset),               # num_actions
+            (self.simulator._kd_scale - self.kd_scale_offset),               # num_actions
+            self.simulator._motor_strength,                                  # num_actions
+            self.simulator._joint_armature,                                  # 1
+            self.simulator._joint_friction,                                  # 1
+            self.simulator._joint_damping,                                   # 1
+            ), dim=-1)                                                       # 50
 
         critic_obs = torch.cat(
             (
-                self.obs_buf,                                             # 57
-                self.simulator.base_lin_vel * self.obs_scales.lin_vel,    # 3
-                # self.simulator._grfs_buf * self.obs_scales.grf,           # 12
-                # self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain info around feet
+                self.obs_buf,                                             # 45
+                self.simulator.base_lin_vel * self.obs_scales.lin_vel,                 # 3  - base linear velocity
+                torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) - 
+                           self.simulator.measured_heights, dim=1, keepdim=True),      # 1  - base height
+                self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain info around feet
                 self.simulator.link_contact_states[:,self.simulator.feet_indices],     # 4  - contact states of feet
-                # self.simulator.link_contact_states,                       # 17
-                # self.simulator.feedforward_tau_weight,                    # 1
-                # self.simulator.feedback_tau_weight,                       # 1
-                domain_randomization_info                                 # 51
+                torch.clip(self.simulator.feet_pos[:, :, 2] -
+                    torch.mean(self.simulator.height_around_feet, dim=-1) -
+                    self.cfg.rewards.foot_height_offset, -1, 1.),                      # 4 - feet height
+                domain_randomization_info                                 # 50
             ),
             dim=-1,
-        ) # 141
+        ) # 119
 
         # add hieght measurements to asymmetric critic if approperiate
         if self.cfg.terrain.measure_heights:
