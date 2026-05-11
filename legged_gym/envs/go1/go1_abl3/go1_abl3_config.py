@@ -138,30 +138,30 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         clip_actions = 50.
 
     class domain_rand(LeggedRobotCfg.domain_rand):
-        use_domainrand_curriculum = False
-        com_rand_z_positive = True
+        use_domainrand_curriculum = True
+        com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 4000     # number of steps with initial values held constant
+        push_warmup = 1200     # number of steps with initial values held constant
         num_jumps = 10
         
         # Randomize Friction
         randomize_friction = True
-        friction_range = [0.2, 1.8]
+        friction_range = [0.2, 1.25]
 
         # What changes with finetuning round
         # Randomized 6DOF torso wrench
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 2.50
-        max_push_vel_xy = 1.40
+        max_push_vel_xy = 1.50
         min_push_vel_xy = 0.50
 
-        max_vertical_push = 0.40
+        max_vertical_push = 0.50
         min_vertical_push = 0.10
         vert_interval_max = 10.0
         vert_interval_min = 2.50
 
-        max_push_torque = 1.40
+        max_push_torque = 1.50
         min_push_torque = 0.50
         wrench_timeout_min = 1.00
         wrench_timeout_max = 10.0
@@ -169,21 +169,21 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         # Randomized base mass, applied at COM
         randomize_base_mass = True
         min_added_mass_max = 4.0
-        max_added_mass_max = 7.50
+        max_added_mass_max = 8.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.18
+        com_displacement_x_max = 0.20
         
         com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.14
+        com_displacement_y_max = 0.15
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.05
-        com_displacement_z_max = 0.14
+        com_displacement_z_min = 0.075
+        com_displacement_z_max = 0.15
         
         # Control delay
         randomize_ctrl_delay = True
@@ -212,9 +212,10 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 0.80]
         joint_damping_range_start = [0.30, 0.40]
-
+        
+        
         # new domain randomization curriculum parameters
-        best_reward_window = 200        # amount of history used to capture recent performance.
+        best_reward_window = 400        # amount of history used to capture recent performance.
         best_reward_quantile = 0.90     # quantile for determining "max" performance over history window.
 
         recovery_ratio = 0.90           # allowable deivation from quantile of history window
@@ -355,6 +356,10 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.28
+        rear_foot_x_nominal = -0.20
+        rear_foot_x_margin = 0.08
+        support_polygon_sigma = 0.01
+        
 
         support_polygon_sigma = 0.01
         foot_clearance_tracking_sigma = 0.01
@@ -422,10 +427,18 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             feedback_torques           = -2.0e-5
             dof_act_limits             = 0.0
 
-            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
-            pbrs_orientation = 100.0          # potiential reward for encourgaing orientation recovery
+            # Taken from MIT benchmarking PBRS for humanoid locomotion paper
+            pbrs_orientation = 10.0         # potiential reward for encouraging orientation recovery
+            pbrs_height = 10.0              # potiential reward for encouraging height change recovery
 
+            # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
+            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
+            vhip_angle = -0.1                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
+            vhip_angular_acc = -0.001         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
+
+            # I developed these
             front_foot_overreach = -10000.0
+            rear_foot_overreach = -10.0
 
             # gait
             feet_air_time    = 0.70            # tracking reward for long steps
@@ -447,7 +460,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             
             curr_reward_bounds = {
                                   "ang_vel_xy":[-0.05, -0.2],
-                                  "orientation":[-0.2,-1.5],
+                                  "orientation":[-0.2,-2.0],
                                   "torque_limits":[-1.0e-4, -0.01],
                                   "action_rate":[-1.0e-3, -0.01],
                                   "action_smoothness":[-1.0e-3,-0.01],
@@ -455,7 +468,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
                                  }
 
             curr_steps = 500
-            warmup_steps = 1500
+            warmup_steps = 4500
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -495,8 +508,9 @@ class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
-        
+        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May10_16-17-52_pact_posboot_100hz_grf/model_3000_converted.pt"
+
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
@@ -524,7 +538,7 @@ class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_ABL1'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 3000 # number of policy updates
+        max_iterations = 8000 # number of policy updates
 
 
         grf_dim = 12
