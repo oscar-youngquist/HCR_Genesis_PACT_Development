@@ -456,7 +456,7 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
 
         # Context Decoder
         cenet_dec_input_dim = 27
-        cenet_dec_layers = [128, 256, 512]
+        cenet_dec_layers = [64, 128, 64]
         cenet_dec_out_dim = 45
 
 

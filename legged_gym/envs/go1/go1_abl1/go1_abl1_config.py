@@ -169,13 +169,13 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
         # Randomized base mass, applied at COM
         randomize_base_mass = True
         min_added_mass_max = 4.0
-        max_added_mass_max = 7.0
+        max_added_mass_max = 8.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.17
+        com_displacement_x_max = 0.20
         
         com_displacement_y_min = 0.075
         com_displacement_y_max = 0.15
@@ -482,8 +482,8 @@ class GO1ABL1CfgPPO( LeggedRobotCfgPPO ):
 
         # Context Decoder
         cenet_dec_input_dim = 27
-        cenet_dec_layers = [128,256,512]
-        cenet_dec_out_dim =  57 + (39 + 33) + 143
+        cenet_dec_layers = [64, 128, 64]
+        cenet_dec_out_dim =  57
 
         # Actor/critic
         actor_layers = [512,256,128]

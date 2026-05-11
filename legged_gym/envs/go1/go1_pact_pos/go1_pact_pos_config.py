@@ -460,9 +460,9 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
 
         # Context Decoder
         cenet_dec_input_dim = 27
-        cenet_dec_layers = [128, 256, 512]
+        cenet_dec_layers = [64, 128, 64]
         # cenet_dec_out_dim = 57 + (51 + 33) + 143 # next obs (57) + grf_dim (12)
-        cenet_dec_out_dim = 57 + (39 + 33) + 143 # next obs (57) + grf_dim (12)
+        cenet_dec_out_dim = 57
 
 
         # Actor/critic

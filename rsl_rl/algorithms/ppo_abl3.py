@@ -38,10 +38,10 @@ import numpy as np
 import random
 
 from rsl_rl.modules import ActorCritic_PACT, ContextDecoder
-from rsl_rl.storage import RolloutStoragePACTAblation
+from rsl_rl.storage import RolloutStoragePACTAblation3
 from rsl_rl.utils import print_class_attributes
 
-class PPO_ABL1:
+class PPO_ABL3:
     actor_critic: ActorCritic_PACT
     decoder_network: ContextDecoder
     def __init__(self,
@@ -100,7 +100,7 @@ class PPO_ABL1:
         self.storage = None # initialized later
 
         self.act_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(learning_rate)
-        self.transition = RolloutStoragePACTAblation.Transition()
+        self.transition = RolloutStoragePACTAblation3.Transition()
 
 
         # # We want to reduce the LR of the critic
@@ -130,7 +130,7 @@ class PPO_ABL1:
         print_class_attributes(self)
         
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape):
-        self.storage = RolloutStoragePACTAblation(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
+        self.storage = RolloutStoragePACTAblation3(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
                                               action_shape, torso_velo_shape, grf_shape, self.device)
 
     def test_mode(self):
@@ -199,8 +199,8 @@ class PPO_ABL1:
         self.transition.grf_targets = grf_labels
 
         # This is now the stack of critic observations, we want to prune off the last one
-        # self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
-        self.transition.obs_targets = obs_labels
+        self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
+        # self.transition.obs_targets = obs_labels
 
         self.transition.explicit_labels = explicit_labels
         

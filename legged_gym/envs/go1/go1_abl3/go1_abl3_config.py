@@ -484,7 +484,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
 
 class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
     seed = 1
-    runner_class_name = "ABL1Runner" # Teacher-Student Runner
+    runner_class_name = "ABL3Runner" # Teacher-Student Runner
     
     class policy( LeggedRobotCfgPPO.policy ):
         activation = 'elu' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid, swish (SiLU)
@@ -509,7 +509,7 @@ class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
         pinn_init_steps = 0
 
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May10_16-17-52_pact_posboot_100hz_grf/model_3000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May09_19-14-36_pact_posboot_100hz_grf/model_3000_converted.pt"
 
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
@@ -536,7 +536,7 @@ class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
 
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT'
-        algorithm_class_name = 'PPO_ABL1'
+        algorithm_class_name = 'PPO_ABL3'
         num_steps_per_env = 32 # per iteration
         max_iterations = 8000 # number of policy updates
 

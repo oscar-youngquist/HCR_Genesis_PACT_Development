@@ -38,8 +38,8 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import torch
 
-from rsl_rl.algorithms import PPO_PACT_Pos
-from rsl_rl.modules import ActorCritic_PACT_Pos, ContextDecoder
+from rsl_rl.algorithms import PPO_ABL3
+from rsl_rl.modules import ActorCritic_PACT, ContextDecoder
 from rsl_rl.env import VecEnv
 from rsl_rl.utils import pretty_print_module
 
@@ -50,7 +50,8 @@ torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 torch.backends.cudnn.benchmark = True
 
-class OnPolicyRunnerPACTPos:
+
+class OnPolicyRunnerABL3:
 
     def __init__(self,
                  env: VecEnv,
@@ -78,24 +79,23 @@ class OnPolicyRunnerPACTPos:
         
         cenet_input_dim = self.env.num_obs * self.env.num_obs_hist
 
-        actor_critic: ActorCritic_PACT_Pos = actor_critic_class(self.env.num_obs,
-                                                                num_critic_obs,
-                                                                self.env.num_actions,
-                                                                self.policy_cfg["actor_layers"],
-                                                                self.policy_cfg["critic_layers"],
-                                                                cenet_input_dim,
-                                                                self.policy_cfg["cenet_enc_latent_dim"],
-                                                                self.policy_cfg["cenet_velo_dim"],
-                                                                self.policy_cfg["cenet_enc_layers"],
-                                                                self.policy_cfg["activation"],
-                                                                self.policy_cfg["init_noise_std"]).to(self.device)
-                        
+        actor_critic: ActorCritic_PACT = actor_critic_class(self.env.num_obs,
+                                                               num_critic_obs,
+                                                               self.env.num_actions,
+                                                               self.policy_cfg["actor_layers"],
+                                                               self.policy_cfg["critic_layers"],
+                                                               cenet_input_dim,
+                                                               self.policy_cfg["cenet_enc_latent_dim"],
+                                                               self.policy_cfg["cenet_velo_dim"],
+                                                               self.policy_cfg["cenet_enc_layers"],
+                                                               self.policy_cfg["activation"],
+                                                               self.policy_cfg["init_noise_std"]).to(self.device)
+        
         decoder = ContextDecoder(self.policy_cfg["cenet_dec_input_dim"],
                                  self.policy_cfg["cenet_dec_layers"],
                                  self.policy_cfg["cenet_dec_out_dim"]
                                  ).to(self.device)
         
-
         print("Created Parallel Actor-Critic Model")
         pretty_print_module(actor_critic)
         pretty_print_module(decoder)
@@ -103,15 +103,13 @@ class OnPolicyRunnerPACTPos:
         self._init_entropy_coef = self.alg_cfg["entropy_coef"]
         self.use_adaptive_entropy = self.alg_cfg["use_adaptive_entropy"]
 
-
-
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
-        
-        self.alg: PPO_PACT_Pos = alg_class(actor_critic, 
-                                           decoder, 
-                                           self.env.num_privileged_obs,
-                                           device=self.device, 
-                                           **self.alg_cfg)
+                
+        self.alg: PPO_ABL3 = alg_class(actor_critic, 
+                                       decoder, 
+                                       self.env.num_privileged_obs,
+                                       device=self.device,
+                                       **self.alg_cfg)
         
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
@@ -119,7 +117,7 @@ class OnPolicyRunnerPACTPos:
         # init storage and model
         self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], \
                               [self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
-                              [self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]])
+                              [2*self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]])
 
         if "pretrained_path" in self.policy_cfg.keys():
             self._load_pretrained_model()
@@ -131,7 +129,7 @@ class OnPolicyRunnerPACTPos:
         self.tot_time = 0
         self.current_learning_iteration = 0
 
-        # self.env.create_async_pino_workers()
+        self.env.create_async_pino_workers()
 
         _, _ = self.env.reset()
 
@@ -139,13 +137,10 @@ class OnPolicyRunnerPACTPos:
     # function to load a boot-strap initial model and reset the std
     def _load_pretrained_model(self):
         pretrained_path = self.policy_cfg["pretrained_path"]
-        pretrained_std = self.policy_cfg["pretrained_std"]
-        print(pretrained_path)
+        print("Loading boot-strapping model from - ", pretrained_path)
         loaded_dict = torch.load(pretrained_path)
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
-        # Reset the 
-        self.alg.actor_critic._init_std(pretrained_std)
         # Load the pretrained decoder network
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
 
@@ -197,7 +192,8 @@ class OnPolicyRunnerPACTPos:
                         obs_hist.to(self.device), exp_labels.to(self.device), rewards.to(self.device), dones.to(self.device), grfs.to(self.device)
 
                     # Log the labels associated with the context decoder as well as the typical stuff
-                    self.alg.process_env_step(rewards, dones, infos, grfs, obs, exp_labels)
+                    # self.alg.process_env_step(rewards, dones, infos, grfs, obs, exp_labels, gt_forces, mass_mats, bias_vecs, torso_acc)
+                    self.alg.process_env_step(rewards, dones, infos, grfs, critic_obs, exp_labels)
 
                     if self.log_dir is not None:
                         # Book keeping
@@ -219,8 +215,17 @@ class OnPolicyRunnerPACTPos:
                 self.alg.compute_returns(critic_obs)
             
             mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, mean_vel_loss, \
-                    mean_recon_loss, mean_kld_loss, mean_tau_loss \
-                    = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, it, self.env.simulator.default_dof_pos, self.env.obs_scales.dof_vel)
+                    mean_recon_loss, mean_kld_loss \
+                    = self.alg.update()
+
+            # self.env.step_tradeoff_curriculum()
+            print("Avg - Curriculum Step: ", torch.mean(self.env.tradeoff_step_ctr).item())
+            print("Max - self.feedforward_tau_weight: ", torch.max(self.env.simulator.feedforward_tau_weight).item())
+            print("Min - self.feedforward_tau_weight: ", torch.min(self.env.simulator.feedforward_tau_weight).item())
+            print("Avg - self.feedforward_tau_weight: ", torch.mean(self.env.simulator.feedforward_tau_weight).item())
+            print("Max - self.feedback_tau_weight: ", torch.max(self.env.simulator.feedback_tau_weight).item())
+            print("Min - self.feedback_tau_weight: ", torch.min(self.env.simulator.feedback_tau_weight).item())
+            print("Avg - self.feedback_tau_weight: ", torch.mean(self.env.simulator.feedback_tau_weight).item())
             
             # Step the reward curriculum if we are doing that
             if self.env.use_reward_curriculum:
@@ -250,7 +255,8 @@ class OnPolicyRunnerPACTPos:
                 self.writer.add_scalar('Values/required_reward',self.env.simulator.required_reward,it) 
                 self.writer.add_scalar('Values/domain_rand_mass_com_progress',self.env.simulator.domain_rand_mass_com_progress,it) 
                 self.writer.add_scalar('Values/domain_rand_disturbance_progress',self.env.simulator.domain_rand_disturbance_progress,it) 
-
+                    
+                
             performance_metrics = {}
             if ep_infos and self.use_adaptive_entropy:
                 lin_vel_tracking = 0.0
@@ -274,28 +280,27 @@ class OnPolicyRunnerPACTPos:
                 entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
                 print(entropy)
                 self.writer.add_scalar('Values/entropy',entropy,it)
-            
-            # entropy_coef = 0.01
-            # half_coef = self._init_entropy_coef * 0.5
+
+                        
+
+            # entropy_coef = self._init_entropy_coef
+            # half_ceof = self._init_entropy_coef * 0.5
             # tenth_coef = self._init_entropy_coef * 0.1
-            # if it < 2500:
+            # if it < 6000:
             #     entropy_coef = self._init_entropy_coef
-            # elif it < 3000:
-            #     alpha = (it - 2500) / 500.0
-            #     entropy_coef = half_coef + 0.5 * (self._init_entropy_coef - half_coef) * (1 + math.cos(math.pi * alpha))
-            # elif it < 3500:
-            #     entropy_coef = half_coef
-            # elif it < 4000:
-            #     alpha = (it - 4000) / 500.0
-            #     entropy_coef = tenth_coef + 0.5 * (half_coef - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            # elif it < 6500:
+            #     new_coef = self._init_entropy_coef / 2.0
+            #     alpha = (it - 6000) / 500.0
+            #     entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
+            # elif it < 7000:
+            #     entropy_coef = half_ceof
+            # elif it <7500:
+            #     alpha = (it - 7000) / 500.0
+            #     entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
             # else:
             #     entropy_coef = tenth_coef
-            # entropy_coef = max(entropy_coef, 0.001)
-            # print("entropy_coef - ", entropy_coef)
+            # entropy_coef = max(entropy_coef, 0.00001)
             # self.alg.set_entropy_coef(entropy_coef)
-
-            # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
-            #     self.env.cfg.rewards.only_positive_rewards = False
             
             stop = time.time()
             learn_time = stop - start
@@ -309,7 +314,7 @@ class OnPolicyRunnerPACTPos:
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
 
         # Learning is done, shutdown the async. pinocchio workers
-        # self.env.shutdown_asynic_pino_workers()
+        self.env.shutdown_asynic_pino_workers()
 
     def log(self, locs, width=80, pad=35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
@@ -342,7 +347,6 @@ class OnPolicyRunnerPACTPos:
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
-        self.writer.add_scalar('Loss/tau_loss', locs['mean_tau_loss'], locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
@@ -361,7 +365,6 @@ class OnPolicyRunnerPACTPos:
                           f"""{str.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Tau loss:':>{pad}} {locs['mean_tau_loss']:.4f}\n"""
                           f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
                           f"""{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"""
                           f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
@@ -379,7 +382,6 @@ class OnPolicyRunnerPACTPos:
                           f"""{str.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Tau loss:':>{pad}} {locs['mean_tau_loss']:.4f}\n"""
                           f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
                           f"""{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"""
                           f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
@@ -401,7 +403,7 @@ class OnPolicyRunnerPACTPos:
     def save(self, path, infos=None):
         torch.save({
             'model_state_dict': self.alg.actor_critic.state_dict(),
-            'act_optimizer_state_dict': self.alg.act_optimizer.optimizer.state_dict(),
+            'act_optimizer_state_dict': self.alg.act_optimizer.state_dict(),
             'enc_optimizer_state_dict': self.alg.enc_optimizer.state_dict(),
             'decoder_state_dict': self.alg.decoder.state_dict(),
             'decoder_opt_state_dict': self.alg.decoder_optimizer.state_dict(),
@@ -415,7 +417,7 @@ class OnPolicyRunnerPACTPos:
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Load optimizer(s)
         if load_optimizer:
-            self.alg.act_optimizer.optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
+            self.alg.act_optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
             self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
             self.alg.decoder_optimizer.load_state_dict(loaded_dict['decoder_opt_state_dict'])
         # Load the VAE decoder model...

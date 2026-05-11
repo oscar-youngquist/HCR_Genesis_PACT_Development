@@ -33,7 +33,7 @@ import numpy as np
 
 from rsl_rl.utils import split_and_pad_trajectories
 
-class RolloutStoragePACTPos:
+class RolloutStoragePACTAblation3:
     class Transition:
         def __init__(self):
             self.observations = None
@@ -75,7 +75,7 @@ class RolloutStoragePACTPos:
         # specific to DreamWaQ style history encoder...
         self.explicit_labels = torch.zeros(num_transitions_per_env, num_envs, *explicit_shape, device=self.device)
         self.grf_targets = torch.zeros(num_transitions_per_env, num_envs, *grf_shape, device=self.device)
-        self.observation_targets = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
+        self.observation_targets = torch.zeros(num_transitions_per_env, num_envs, *sinle_critc_obs_shape, device=self.device)
 
         
         # For PPO
@@ -122,7 +122,7 @@ class RolloutStoragePACTPos:
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
         self.mu[self.step].copy_(transition.action_mean)
         self.sigma[self.step].copy_(transition.action_sigma)
-
+        
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
 
@@ -219,6 +219,7 @@ class RolloutStoragePACTPos:
                 old_sigma_batch = old_sigma[batch_idx]
 
                 terminated_batch = 1.0 - dones[batch_idx]
+
                 
                 yield terminated_batch, obs_batch, critic_observations_batch, obs_hist_batch, explicit_labels_batch, \
                         grf_labels_batch, obs_labels_batch, actions_batch, target_values_batch, \
