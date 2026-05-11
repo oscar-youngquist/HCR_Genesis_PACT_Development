@@ -588,13 +588,13 @@ class Go2KITEBaseline(BaseTask):
             self.command_ranges["lin_vel_x"][0] = np.clip(
                 self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
             self.command_ranges["lin_vel_y"][0] = np.clip(
-                self.command_ranges["lin_vel_y"][0] - 0.5, -0.5, 0.)
+                self.command_ranges["lin_vel_y"][0] - 0.5, -0.3, 0.)
             
             
             self.command_ranges["lin_vel_x"][1] = np.clip(
                 self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
             self.command_ranges["lin_vel_y"][1] = np.clip(
-                self.command_ranges["lin_vel_y"][1] + 0.5, 0., 0.5)
+                self.command_ranges["lin_vel_y"][1] + 0.5, 0., 0.3)
             
 
         # If the tracking reward is above 80% of the maximum, increase the range of commands

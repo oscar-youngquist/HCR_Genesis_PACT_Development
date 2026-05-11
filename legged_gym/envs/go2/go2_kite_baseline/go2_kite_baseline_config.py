@@ -217,8 +217,8 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 4.0
-        max_added_mass_max = 3.0
+        min_added_mass_max = 3.0
+        max_added_mass_max = 4.0
         added_mass_min = -1.0
         
         # COM displacement crap
@@ -399,7 +399,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
             termination           = 0.0
             collision             = -1.0
             dof_pos_limits        = -2.0
-            dof_close_to_default  = -0.01
+            dof_close_to_default  = 0.00
             torque_limits         = -0.0001
 
             alive_bonus           = 0.001
@@ -412,7 +412,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
             
-            dof_tracking      = 0.05
+            dof_tracking      = 0.00
             aligned_torques   = 0.00
             sparse_contacts   = 0.01         
             
@@ -440,7 +440,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
             feedback_torques      = 0.0
             dof_act_limits        = 0.0
 
-            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
+            support_polygon = 0.1             # encourages well condition foot-placement realtive to the base CoM
             front_foot_overreach = 0.0
 
             # gait
@@ -453,8 +453,8 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
 
-            torso_force_wrench_ellipsoid = 0.6
-            swing_vel_ellipsoid_terrain  = 0.4
+            torso_force_wrench_ellipsoid = 0.0
+            swing_vel_ellipsoid_terrain  = 0.0
 
         # KITE reward terms
         class kite_rewards():
@@ -463,7 +463,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
             ellipsoid_wrench_aux_weight = 0.35
             ellipsoid_friction_weight = 0.30
 
-            ellipsoid_wrench_length_scale = 0.70
+            ellipsoid_wrench_length_scale = 0.40
             ellipsoid_force_size_scale = 0.50
             ellipsoid_wrench_size_scale = 0.50
 

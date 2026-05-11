@@ -60,8 +60,8 @@ class GO2KITECfg( LeggedRobotCfg ):
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
-        # terrain_proportions = [0.20, 0.25, 0.00, 0.00, 0.30, 0.25]
+        # terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
+        terrain_proportions = [0.20, 0.25, 0.10, 0.10, 0.25, 0.10]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
@@ -217,8 +217,8 @@ class GO2KITECfg( LeggedRobotCfg ):
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 4.0
-        max_added_mass_max = 3.0
+        min_added_mass_max = 3.0
+        max_added_mass_max = 4.0
         added_mass_min = -1.0
         
         # COM displacement crap
@@ -259,7 +259,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         joint_stiffness_range_start = [0.0, 0.005]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 0.70]
+        joint_damping_range_end   = [0.00, 0.80]
         joint_damping_range_start = [0.30, 0.40]
 
     class noise (LeggedRobotCfg.noise):
@@ -412,7 +412,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             tracking_lin_vel  = 1.0
             tracking_ang_vel  = 0.5
             
-            dof_tracking      = 0.05
+            dof_tracking      = 0.00
             aligned_torques   = 0.00
             sparse_contacts   = 0.01         
             
@@ -440,7 +440,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             feedback_torques      = 0.0
             dof_act_limits        = 0.0
 
-            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
+            support_polygon = 0.1             # encourages well condition foot-placement realtive to the base CoM
             front_foot_overreach = 0.0
 
             # gait
@@ -453,8 +453,8 @@ class GO2KITECfg( LeggedRobotCfg ):
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
 
-            torso_force_wrench_ellipsoid = 0.6
-            swing_vel_ellipsoid_terrain  = 0.4
+            torso_force_wrench_ellipsoid = 0.2
+            swing_vel_ellipsoid_terrain  = 0.1
 
         # KITE reward terms
         class kite_rewards():
@@ -463,7 +463,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             ellipsoid_wrench_aux_weight = 0.35
             ellipsoid_friction_weight = 0.30
 
-            ellipsoid_wrench_length_scale = 0.70
+            ellipsoid_wrench_length_scale = 0.40
             ellipsoid_force_size_scale = 0.50
             ellipsoid_wrench_size_scale = 0.50
 
@@ -477,14 +477,25 @@ class GO2KITECfg( LeggedRobotCfg ):
             ellipsoid_tangential_force_margin = 2.0
 
         class reward_curriculum():
-            curr_reward_keys = ["orientation", "ang_vel_xy"]
+            # curr_reward_keys = ["orientation", "ang_vel_xy"]
+            
+            # curr_reward_bounds = {
+            #                       "orientation":[-0.2,-1.0],
+            #                       "ang_vel_xy":[-0.05, -0.2]
+            #                      }
+
+            curr_reward_keys = [
+                                "torso_force_wrench_ellipsoid", 
+                                "swing_vel_ellipsoid_terrain"
+                                ]
             
             curr_reward_bounds = {
-                                  "orientation":[-0.2,-1.0],
-                                  "ang_vel_xy":[-0.05, -0.2]
+                                  "torso_force_wrench_ellipsoid":[0.2, 0.6],
+                                  "swing_vel_ellipsoid_terrain":[0.1, 0.4]
                                  }
-            curr_steps = 500
-            warmup_steps = 2000
+
+            curr_steps = 1000
+            warmup_steps = 3000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -492,13 +503,13 @@ class GO2KITECfg( LeggedRobotCfg ):
         num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 10.  # time before command are changed[s]
 
-        curriculum_threshold = 0.70
+        curriculum_threshold = 0.80
         curriculum_threshold_ang = 0.30
         
         randomize_resampling_time = False
         resampling_time_min = 1.0
         resampling_time_max = 10.0
-        use_command_resampling_time_curriculum = True
+        use_command_resampling_time_curriculum = False
         command_resampling_time_warmup_iters = 5000
         
         heading_command = True # if true: compute ang vel command from heading error

@@ -156,6 +156,11 @@ class OnPolicyRunnerKITE:
 
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
+        lin_tracking_ema = None
+        lin_tracking_alpha = 0.05
+        lin_tracking_threshold = 0.40
+        entropy_reduced = False
+        
         # initialize writer
         if self.log_dir is not None and self.writer is None:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
@@ -240,34 +245,64 @@ class OnPolicyRunnerKITE:
             # if it > 1000:
             #     self.alg.set_entropy_coef(1.0e-3)
             
-            entropy_coef = 0.01
-            # std_lwr = 0.40
-            # self._init_entropy_coef = 0.01
-            half_ceof = self._init_entropy_coef * 0.5
-            tenth_coef = self._init_entropy_coef * 0.1
+            # entropy_coef = 0.01
+            # # std_lwr = 0.40
+            # # self._init_entropy_coef = 0.01
+            # half_ceof = self._init_entropy_coef * 0.5
+            # tenth_coef = self._init_entropy_coef * 0.1
 
-            if it < 5000:
-                entropy_coef = self._init_entropy_coef
-            elif it < 5500:
-                new_coef = self._init_entropy_coef / 2.0
-                alpha = (it - 5000) / 500.0
-                entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
-            elif it < 6000:
-                entropy_coef = half_ceof
-            elif it < 6500:
-                alpha = (it - 6000) / 500.0
-                entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            # if it < 5000:
+            #     entropy_coef = self._init_entropy_coef
+            # elif it < 5500:
+            #     new_coef = self._init_entropy_coef / 2.0
+            #     alpha = (it - 5000) / 500.0
+            #     entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
+            # elif it < 6000:
+            #     entropy_coef = half_ceof
+            # elif it < 6500:
+            #     alpha = (it - 6000) / 500.0
+            #     entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
+            # else:
+            #     entropy_coef = tenth_coef
+            
+            # entropy_coef = max(entropy_coef, 0.001)
+            # self.alg.set_entropy_coef(entropy_coef)
+            
+            # print("entropy_coef - ", entropy_coef)
+            # # print("std_lwr - ", std_lwr)
+
+            # self.alg.set_entropy_coef(entropy_coef)
+            # # self.alg._set_std_clip_lwr(std_lwr)
+
+            # Track EMA of episode linear velocity tracking reward
+            mean_tracking_lin_vel = None
+
+            if len(ep_infos) > 0 and "rew_tracking_lin_vel" in ep_infos[0]:
+                vals = []
+                for ep_info in ep_infos:
+                    v = ep_info["rew_tracking_lin_vel"]
+                    if not isinstance(v, torch.Tensor):
+                        v = torch.tensor([v], device=self.device)
+                    vals.append(v.float().mean().to(self.device))
+
+                mean_tracking_lin_vel = torch.stack(vals).mean().item()
+
+                if lin_tracking_ema is None:
+                    lin_tracking_ema = mean_tracking_lin_vel
+                else:
+                    lin_tracking_ema = (
+                        (1.0 - lin_tracking_alpha) * lin_tracking_ema
+                        + lin_tracking_alpha * mean_tracking_lin_vel
+                    )
+
+            # Entropy schedule gated by tracking performance
+            if lin_tracking_ema is not None and lin_tracking_ema > lin_tracking_threshold:
+                entropy_coef = 1.0e-3
+                entropy_reduced = True
             else:
-                entropy_coef = tenth_coef
-            
-            entropy_coef = max(entropy_coef, 0.001)
-            self.alg.set_entropy_coef(entropy_coef)
-            
-            print("entropy_coef - ", entropy_coef)
-            # print("std_lwr - ", std_lwr)
+                entropy_coef = self._init_entropy_coef
 
             self.alg.set_entropy_coef(entropy_coef)
-            # self.alg._set_std_clip_lwr(std_lwr)
 
 
             # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
@@ -277,6 +312,9 @@ class OnPolicyRunnerKITE:
             learn_time = stop - start
             if self.log_dir is not None:
                 self.log(locals())
+                self.writer.add_scalar("Curriculum/lin_tracking_ema", lin_tracking_ema, it)
+                self.writer.add_scalar("Policy/entropy_coef", entropy_coef, it)
+
             if it % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             ep_infos.clear()
@@ -322,7 +360,7 @@ class OnPolicyRunnerKITE:
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
         self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
-        
+
         if len(locs['rewbuffer']) > 0:
             self.writer.add_scalar('Train/mean_reward', statistics.mean(locs['rewbuffer']), locs['it'])
             self.writer.add_scalar('Train/mean_episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
