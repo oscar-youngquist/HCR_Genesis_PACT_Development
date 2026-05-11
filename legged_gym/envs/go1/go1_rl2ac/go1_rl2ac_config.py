@@ -5,7 +5,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 45
-        num_privileged_obs = 45 + (39 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
+        num_privileged_obs = 45 + 10 + 143 # robot_state + privilged info + terrain_heights (187)
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -312,7 +312,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         type = "PD"
         
         dt =  0.01     # control frequency 200Hz
-        decimation = 10  # decimation: Number of control action updates @ sim DT per policy DT
+        decimation = 5  # decimation: Number of control action updates @ sim DT per policy DT
 
         training = True
 

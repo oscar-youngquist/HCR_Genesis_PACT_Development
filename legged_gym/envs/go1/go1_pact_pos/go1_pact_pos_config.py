@@ -6,7 +6,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         num_envs = 4096
         num_observations = 57
         # num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
-        num_privileged_obs = 57 + (39 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
+        num_privileged_obs = 57 + 12 + 143 # robot_state + privilged info + terrain_heights (187)
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
