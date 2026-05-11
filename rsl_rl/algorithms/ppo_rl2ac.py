@@ -170,8 +170,8 @@ class PPO_RL2AC:
         self.transition.dones = dones
 
         # This is now the stack of critic observations, we want to prune off the last one
-        self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
-        # self.transition.obs_targets = obs_labels
+        # self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
+        self.transition.obs_targets = obs_labels
         self.transition.explicit_labels = explicit_labels
         self.transition.dof_pos_labels = dof_pos_labels.clone()
 

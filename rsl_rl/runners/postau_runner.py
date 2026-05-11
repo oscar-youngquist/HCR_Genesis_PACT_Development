@@ -194,7 +194,7 @@ class OnPolicyRunnerPosTau:
 
                     # Log the labels associated with the context decoder as well as the typical stuff
                     # self.alg.process_env_step(rewards, dones, infos, grfs, obs, exp_labels, gt_forces, mass_mats, bias_vecs, torso_acc)
-                    self.alg.process_env_step(rewards, dones, infos, critic_obs, exp_labels)
+                    self.alg.process_env_step(rewards, dones, infos, obs, exp_labels)
 
                     if self.log_dir is not None:
                         # Book keeping

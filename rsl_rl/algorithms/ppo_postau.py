@@ -171,8 +171,8 @@ class PPO_PosTau:
 
 
         # This is now the stack of critic observations, we want to prune off the last one
-        self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
-        # self.transition.obs_targets = obs_labels
+        # self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
+        self.transition.obs_targets = obs_labels
 
         self.transition.explicit_labels = explicit_labels
         
