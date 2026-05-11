@@ -335,8 +335,8 @@ class GO1ABL2Cfg( LeggedRobotCfg ):
         # not a tradeoff curriculum, but just slightly randomizing how much each branch contributes
         randomize_pact_weights = True
         pact_weight_bias_min = 0.0       # minimum output bias
-        pact_weight_bias_max = 0.20      # maximum output bias
-        pact_balanced_prob = 0.25        # % of envs that are guaranteed to have a 1-1 "balanced" output contribution
+        pact_weight_bias_max = 0.10      # maximum output bias
+        pact_balanced_prob = 0.50        # % of envs that are guaranteed to have a 1-1 "balanced" output contribution
 
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]

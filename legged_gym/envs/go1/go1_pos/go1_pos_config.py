@@ -82,6 +82,11 @@ class GO1PosCfg( LeggedRobotCfg ):
             'RL_hip_joint': 0.1,     # [rad]
             'FR_hip_joint': -0.105 ,    # [rad]
             'RR_hip_joint': -0.11,     # [rad]
+            
+            # 'FL_hip_joint': 0.1,     # [rad]
+            # 'RL_hip_joint': 0.1,     # [rad]
+            # 'FR_hip_joint': -0.1,    # [rad]
+            # 'RR_hip_joint': -0.1,     # [rad]
 
             'FL_thigh_joint': 0.8,   # [rad]
             'RL_thigh_joint': 0.8,   # [rad]
@@ -503,6 +508,7 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         
         
         load_run = "May01_17-08-23_pos_100hz_spec"
+        # load_run = "May09_20-36-36_pos_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pos_stairs_12-16kg.csv"

@@ -1681,22 +1681,23 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         # w_ff = torch.ones(n, device=device)
         # w_fb = torch.ones(n, device=device)
 
-        w_ff = self.feedforward_tau_weight_clean
-        w_fb = self.feedback_tau_weight_clean
+        w_ff = self.feedforward_tau_weight_clean[env_ids].squeeze(-1)
+        w_fb = self.feedback_tau_weight_clean[env_ids].squeeze(-1)
 
         # Bias toward feedforward:
         #   ff gets stronger, fb gets weaker
-        w_ff = torch.where(~balanced_mask & bias_ff_mask, self.feedforward_tau_weight_clean + bias, w_ff)
-        w_fb = torch.where(~balanced_mask & bias_ff_mask, self.feedback_tau_weight_clean - bias, w_fb)
+        w_ff = torch.where(~balanced_mask & bias_ff_mask, w_ff + bias, w_ff)
+        w_fb = torch.where(~balanced_mask & bias_ff_mask, w_fb - bias, w_fb)
 
         # Bias toward feedback:
         #   fb gets stronger, ff gets weaker
-        w_ff = torch.where(~balanced_mask & ~bias_ff_mask, self.feedforward_tau_weight_clean - bias, w_ff)
-        w_fb = torch.where(~balanced_mask & ~bias_ff_mask, self.feedback_tau_weight_clean + bias, w_fb)
+        w_ff = torch.where(~balanced_mask & ~bias_ff_mask, w_ff - bias, w_ff)
+        w_fb = torch.where(~balanced_mask & ~bias_ff_mask, w_fb + bias, w_fb)
 
         # Store as [num_envs, 1] so they broadcast over joints/actions
         self.feedforward_tau_weight[env_ids] = w_ff.unsqueeze(-1)
         self.feedback_tau_weight[env_ids] = w_fb.unsqueeze(-1)
+    
 
     def _update_depth_images(self):
         """ Renders the depth camera and retrieves the depth images
