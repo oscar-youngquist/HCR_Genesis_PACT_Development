@@ -129,7 +129,7 @@ class GO1TauCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 3000     # number of steps with initial values held constant
+        push_warmup = 4000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -140,15 +140,15 @@ class GO1TauCfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 2.50
-        max_push_vel_xy = 1.35
+        max_push_vel_xy = 1.50
         min_push_vel_xy = 0.50
 
-        max_vertical_push = 0.40
+        max_vertical_push = 0.50
         min_vertical_push = 0.10
         vert_interval_max = 10.0
         vert_interval_min = 2.50
 
-        max_push_torque = 1.35
+        max_push_torque = 1.50
         min_push_torque = 0.50
         wrench_timeout_min = 1.00
         wrench_timeout_max = 10.0
@@ -156,21 +156,21 @@ class GO1TauCfg( LeggedRobotCfg ):
         # Randomized base mass, applied at COM
         randomize_base_mass = True
         min_added_mass_max = 4.0
-        max_added_mass_max = 6.8
+        max_added_mass_max = 8.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.16
+        com_displacement_x_max = 0.20
         
         com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.12
+        com_displacement_y_max = 0.15
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
         com_displacement_z_min = 0.075
-        com_displacement_z_max = 0.12
+        com_displacement_z_max = 0.15
         
         # Control delay
         randomize_ctrl_delay = True
@@ -183,7 +183,7 @@ class GO1TauCfg( LeggedRobotCfg ):
 
         # Motor strength randomization
         randomize_motor_strength = True
-        motor_strength_range = [0.85, 1.15]
+        motor_strength_range = [0.80, 1.10]
         
         # Unused more complicated dynamics randomization
         randomize_joint_armature = True
@@ -199,7 +199,7 @@ class GO1TauCfg( LeggedRobotCfg ):
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 0.80]
         joint_damping_range_start = [0.30, 0.40]
-        
+
         # new domain randomization curriculum parameters
         best_reward_window = 200        # amount of history used to capture recent performance.
         best_reward_quantile = 0.90     # quantile for determining "max" performance over history window.
@@ -387,8 +387,18 @@ class GO1TauCfg( LeggedRobotCfg ):
             feedback_torques      = 0.0
             dof_act_limits        = 0.0
 
+            # Taken from MIT benchmarking PBRS for humanoid locomotion paper
+            pbrs_orientation = 10.0         # potiential reward for encouraging orientation recovery
+            pbrs_height = 10.0              # potiential reward for encouraging height change recovery
+
+            # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
             support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
+            vhip_angle = -0.1                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
+            vhip_angular_acc = -0.001         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
+
+            # I developed these
             front_foot_overreach = -10000.0
+            rear_foot_overreach = -10.0
 
             # gait
             feet_air_time    = 0.70            # tracking reward for long steps

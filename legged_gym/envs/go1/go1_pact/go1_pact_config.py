@@ -328,10 +328,10 @@ class GO1PACTCfg( LeggedRobotCfg ):
 
         # Assumed order - tau_ff, tau_fb
         # tradeoff_init_weights  = [0.20, 1.16]
-        tradeoff_init_weights  = [0.20, 1.80]
+        tradeoff_init_weights  = [0.40, 1.60]
         tradeoff_final_weights = [1.00, 1.00]
         tradeoff_steps = 10
-        tradeoff_threshold = 0.60
+        tradeoff_threshold = 0.70
         use_tradeoff_curriculum = False
 
         # not a tradeoff curriculum, but just slightly randomizing how much each branch contributes
@@ -506,9 +506,9 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May08_17-10-01_pact_posboot_100hz_grf/model_3000_converted.pt"
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
-        
+        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May09_19-14-36_pact_posboot_100hz_grf/model_3000_converted.pt"
+        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May10_16-17-52_pact_posboot_100hz_grf/model_3000_converted.pt"
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
@@ -526,7 +526,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         # adaptive entropy coefficent algorithm parameters
         entropy_coef = 0.01                      # initial entropy value
         use_adaptive_entropy = True              # weather or not to use the adaptive entropy coef alg.
-        adaptive_ent_bounds = [0.001, 0.01]      # entropy coefficent bands
+        adaptive_ent_bounds = [0.005, 0.01]      # entropy coefficent bands
         adaptive_ent_lin_threshold = 0.75        # minimum linear velocity tracking target
         adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target
         adaptive_ent_ter_threshold = 6.0         # minimum avg. terrain curriculum progress target
@@ -547,8 +547,10 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         
         # load_run = "May01_16-41-42_pact_100hz_spec_smartcurr"
         # load_run = "May06_20-34-35_pact_100hz_spec_smartcurr"
-        load_run = "May07_18-30-49_pact_100hz_spec_smartcurr"
-        # load_run = "May07_18-49-22_pact_100hz_spec_smartcurr_e2e"
+        # load_run = "May07_18-30-49_pact_100hz_spec_smartcurr"   # this is the most promising model/one with collected data
+        # load_run = "May07_18-49-22_pact_100hz_spec_smartcurr_e2e" 
+        # load_run = "May09_01-26-21_pact_100hz_spec_smartcurr"    # weaker pos-boot, rear-overreach
+        load_run = "May10_02-07-54_pact_100hz_spec_smartcurr"    # most recent model with strong boot and rear-overreah
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pact_stairs_12-16kg.csv"

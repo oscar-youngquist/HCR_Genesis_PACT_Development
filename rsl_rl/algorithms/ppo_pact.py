@@ -608,6 +608,8 @@ class PPO_PACT:
         
         # Calculate feedback torques
         pd_tau_curr  = fb_func(q_des_curr,  q_pos_curr,  q_velo_curr)
+        
+        # dof_acc_target = (q_velo_curr - q_velo_prev) / dt
 
         ###
         #   WB-dynamics
@@ -646,8 +648,12 @@ class PPO_PACT:
 
         # Make the error relative, so that it is less senesitive to scale
         rel_error = torch.norm(error, dim=1) / (1e-8 + torch.norm(wb_tau.detach().clone(), dim=1) + torch.norm(gt_forces_batch, dim=1))
+        
+        # rel_acc_error = torch.norm(dof_acc - dof_acc_target, dim=1) / (1e-8 + torch.norm(dof_acc_target, dim=1) +  torch.norm(dof_acc, dim=1))
 
         # Calculate the whole-body PINN loss
         pinn_loss = torch.mean(rel_error)
+        
+        # acc_loss = torch.mean(rel_acc_error)
         
         return pinn_loss

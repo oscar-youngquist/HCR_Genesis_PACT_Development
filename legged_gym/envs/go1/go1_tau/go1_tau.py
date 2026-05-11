@@ -203,6 +203,11 @@ class Go1Tau(BaseTask):
         self._reset_root_states(env_ids)
         self.simulator.reset_idx(env_ids)
 
+        # after base pose/orientation has been reset:
+        self.phi_prev_orientation[env_ids] = self._potential_orientation()[env_ids]
+
+        self.phi_prev_height[env_ids] = self._potential_height()[env_ids]
+
         # reset buffers
         self.llast_actions[env_ids] = 0.
         self.last_actions[env_ids] = 0.
@@ -553,6 +558,11 @@ class Go1Tau(BaseTask):
             (self.num_envs, 3), device=self.device, dtype=torch.float
         )
         
+        # PBRS orientation reward
+        self.phi_prev_orientation = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+
+        self.phi_prev_height = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+
         self.forward_vec[:, 0] = 1.0
         self.fail_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device, requires_grad=False)
         
@@ -1340,3 +1350,140 @@ class Go1Tau(BaseTask):
             self.simulator.dof_pos[:, hip_joint_indices] - 
             self.simulator.default_dof_pos[:, hip_joint_indices]), dim=-1)
         return dof_pos_error
+    
+    def _potential_orientation(self):
+        roll_pitch = self.simulator.projected_gravity[:, :2]
+        return torch.exp(-torch.sum(roll_pitch**2, dim=1) / 0.5)
+    
+    def _potential_height(self):
+        base_height = torch.mean(self.simulator.base_pos[:, 2].unsqueeze(
+            1) - self.simulator.measured_heights, dim=1)
+        h_po = torch.square(base_height - self.cfg.rewards.base_height_target)
+        return torch.exp(-h_po / 0.5)
+
+    def _reward_pbrs_orientation(self):
+        phi_next = self._potential_orientation()
+        shaping = phi_next - self.phi_prev_orientation
+
+        # If env will reset after this step, terminate the telescoping sum cleanly.
+        # Use zero potential for the absorbing terminal state.
+        terminal_mask = self.reset_buf & (~self.time_out_buf)
+        shaping[terminal_mask] = -self.phi_prev_orientation[terminal_mask]
+
+        self.phi_prev_orientation = phi_next
+        return shaping
+
+    def _reward_pbrs_height(self):
+        phi_next = self._potential_height()
+        shaping = phi_next - self.phi_prev_height
+
+        terminal_mask = self.reset_buf & (~self.time_out_buf)
+        shaping[terminal_mask] = -self.phi_prev_height[terminal_mask]
+
+        self.phi_prev_height = phi_next
+        return shaping
+    
+    def _compute_vhip_angle(self):
+        com_pos = self.simulator.base_pos[:,0:3]  # B x 3
+
+        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]    # B, num_feet, 3
+        foot_positions = self.simulator.feet_pos
+
+        normal_forces = foot_contact_forces[:,:,2:3]  # B. num_feet, 1
+
+        total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)  # B x 1  
+
+        cop_pos =  torch.sum(foot_positions * normal_forces, dim=1) / total_force  # B x 3
+        pendulum_length = torch.norm(com_pos - cop_pos, dim=1).clamp(min=1e-6)  # B x 1
+
+        com_z = com_pos[:,2]   # B x 1
+        cos_theta = torch.clamp(com_z / pendulum_length, -1.0, 1.0)
+        theta = torch.acos(cos_theta)
+
+        return theta
+    
+    def _compute_vhip_acceleration(self):
+        theta = self._compute_vhip_angle()
+        
+        com_pos = self.simulator.base_pos[:,0:3]  # B x 3
+
+        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]    # B, num_feet, 3
+        foot_positions = self.simulator.feet_pos
+
+        normal_forces = foot_contact_forces[:,:,2:3]  # B. num_feet, 1
+
+        total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)  # B x 1  
+
+        cop_pos =  torch.sum(foot_positions * normal_forces, dim=1) / total_force  # B x 3
+
+        pendulum_length = torch.norm(com_pos - cop_pos, dim=1).clamp(min=1e-6)  # B x 1
+
+        g = 9.81
+
+        theta_ddot = -(g / pendulum_length) * torch.sin(theta)
+
+        return theta_ddot
+
+    def _reward_vhip_angle(self):
+        theta = self._compute_vhip_angle()
+
+        angle_error = torch.abs(theta) - 0.1
+
+        angle_rew = torch.clamp(angle_error, min=0)
+
+        return angle_rew
+    
+    def _reward_vhip_angular_acc(self):
+        theta_ddot = self._compute_vhip_acceleration()
+
+        acc_error = torch.abs(theta_ddot) - 0.001
+
+        acc_rew = torch.clamp(acc_error, min=0.0)
+
+        return acc_rew
+    
+    def _reward_rear_foot_overreach(self):
+        """
+        Penalize rear feet for being too far from their nominal rear-foot x location
+        in the base frame, in either direction.
+
+        Penalizes:
+        - rear foot too far forward
+        - rear foot too far backward
+
+        Assumed foot order: FR, FL, RR, RL
+        """
+
+        # Rear feet in base frame
+        rear_1 = quat_rotate_inverse(
+            self.simulator.base_quat,
+            self.simulator.feet_pos[:, 2, :] - self.simulator.base_pos
+        )  # RR, (N,3)
+
+        rear_2 = quat_rotate_inverse(
+            self.simulator.base_quat,
+            self.simulator.feet_pos[:, 3, :] - self.simulator.base_pos
+        )  # RL, (N,3)
+
+        rear_x = torch.stack([rear_1[:, 0], rear_2[:, 0]], dim=1)  # (N,2)
+
+        # Nominal rear-foot x location in base frame.
+        # This should usually be negative, e.g. -0.20 to -0.25 m.
+        rear_x_nominal = self.cfg.rewards.rear_foot_x_nominal
+
+        # Allowed deviation around nominal rear-foot x location.
+        # Example: 0.08 m allows rear_x in [nominal - 0.08, nominal + 0.08].
+        rear_x_margin = self.cfg.rewards.rear_foot_x_margin
+
+        # Penalize both too far forward and too far backward relative to nominal.
+        x_error = torch.abs(rear_x - rear_x_nominal)
+        overreach = torch.relu(x_error - rear_x_margin)
+
+        # Contact gate rear feet only: feet_indices[2:4], not [:2]
+        contact = (
+            self.simulator.link_contact_forces[:, self.simulator.feet_indices[2:4], 2] > 5.0
+        ).float()  # (N,2)
+
+        penalty = torch.sum(contact * overreach ** 2, dim=1)
+
+        return penalty

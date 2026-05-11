@@ -503,6 +503,7 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         
         
         load_run = "May01_17-08-23_pos_100hz_spec"
+        # load_run = "May09_20-36-36_pos_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pos_stairs_12-16kg.csv"
