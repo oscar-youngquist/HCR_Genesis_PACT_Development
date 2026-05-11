@@ -85,7 +85,8 @@ class RL2ACAdaptiveCtrl:
             self.phi = self.q_des - qj
 
         # Sliding variable
-        self.s = qdj - self.alpha * (self.q_des - qj)
+        # self.s = qdj - self.alpha * (self.q_des - qj)
+        self.s = qdj - self.alpha * (self.q_ref - qj)
 
         # Torque tracking error
         self.tau = qfrc_actuator

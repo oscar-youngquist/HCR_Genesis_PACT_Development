@@ -317,17 +317,17 @@ class Go1Pos(BaseTask):
         # build up privlieged domain randomization buffer
         domain_randomization_info = torch.cat((
             (self.simulator._friction_values - self.friction_value_offset),  # 1
-            self.simulator._added_base_mass,                                 # 1
-            self.simulator._base_com_bias,                                   # 3
-            self.simulator._rand_push_vels,                                  # 3
-            self.simulator._rand_wrench_vels,                                # 3
-            (self.simulator._kp_scale - self.kp_scale_offset),               # num_actions
-            (self.simulator._kd_scale - self.kd_scale_offset),               # num_actions
-            self.simulator._motor_strength,                                  # num_actions
-            self.simulator._joint_armature,                                  # 1
-            self.simulator._joint_friction,                                  # 1
-            self.simulator._joint_damping,                                   # 1
-            self.simulator._joint_stiffness,                                 # 1
+            # self.simulator._added_base_mass,                                 # 1
+            # self.simulator._base_com_bias,                                   # 3
+            self.simulator._rand_push_vels[:,:2],                              # 2
+            # self.simulator._rand_wrench_vels,                                # 3
+            # (self.simulator._kp_scale - self.kp_scale_offset),               # num_actions
+            # (self.simulator._kd_scale - self.kd_scale_offset),               # num_actions
+            # self.simulator._motor_strength,                                  # num_actions
+            # self.simulator._joint_armature,                                  # 1
+            # self.simulator._joint_friction,                                  # 1
+            # self.simulator._joint_damping,                                   # 1
+            # self.simulator._joint_stiffness,                                 # 1
             ), dim=-1)                                                       # 51
 
         critic_obs = torch.cat(
@@ -335,11 +335,11 @@ class Go1Pos(BaseTask):
                 self.obs_buf,                                             # 57
                 self.simulator.base_lin_vel * self.obs_scales.lin_vel,    # 3
                 # self.simulator._grfs_buf * self.obs_scales.grf,           # 12
-                self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain info around feet
+                # self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain info around feet
                 self.simulator.link_contact_states[:,self.simulator.feet_indices],     # 4  - contact states of feet
                 # self.simulator.link_contact_states,                       # 17
-                self.simulator.feedforward_tau_weight,                    # 1
-                self.simulator.feedback_tau_weight,                       # 1
+                # self.simulator.feedforward_tau_weight,                    # 1
+                # self.simulator.feedback_tau_weight,                       # 1
                 domain_randomization_info                                 # 51
             ),
             dim=-1,

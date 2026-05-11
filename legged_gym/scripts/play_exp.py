@@ -19,7 +19,7 @@ def override_configs(env_cfg, args):
     task_name = args.task
     # override some parameters for testing
     # number of environments
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 10)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     if "cts" in task_name:  # cts specific
         env_cfg.env.num_teacher = 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))
@@ -85,8 +85,8 @@ def override_configs(env_cfg, args):
     env_cfg.termination.pitch_threshold = 1.57
     env_cfg.termination.height_min = 0.0
 
-    # env_cfg.asset.terminate_after_contacts_on = ["base","trunk","thigh","hip"]
-    env_cfg.asset.terminate_after_contacts_on = ["base","trunk"]
+    env_cfg.asset.terminate_after_contacts_on = ["base","trunk","thigh","hip"]
+    # env_cfg.asset.terminate_after_contacts_on = ["base","trunk"]
 
     env_cfg.control.randomize_pact_weights = False
 
@@ -98,7 +98,7 @@ def override_configs(env_cfg, args):
     
     env_cfg.domain_rand.push_robots = False
     env_cfg.domain_rand.randomize_com_displacement = False
-    env_cfg.domain_rand.randomize_base_mass = False
+    env_cfg.domain_rand.randomize_base_mass = True
     
     env_cfg.domain_rand.min_added_mass_max = 18.0
     env_cfg.domain_rand.max_added_mass_max = 18.0

@@ -312,7 +312,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         type = "PD"
         
         dt =  0.01     # control frequency 200Hz
-        decimation = 5  # decimation: Number of control action updates @ sim DT per policy DT
+        decimation = 10  # decimation: Number of control action updates @ sim DT per policy DT
 
         training = True
 

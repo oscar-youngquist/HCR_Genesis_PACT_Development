@@ -5,7 +5,7 @@ class GO1PosCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 45
-        num_privileged_obs = 45 + (39 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
+        num_privileged_obs = 45 + 10 + 143 # robot_state + privilged info + terrain_heights (187)
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -502,8 +502,9 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "May01_17-08-23_pos_100hz_spec"
+        # load_run = "May01_17-08-23_pos_100hz_spec"
         # load_run = "May09_20-36-36_pos_100hz_spec"
+        load_run = "May10_23-53-49_pos_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pos_stairs_12-16kg.csv"

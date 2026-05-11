@@ -547,10 +547,11 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         
         # load_run = "May01_16-41-42_pact_100hz_spec_smartcurr"
         # load_run = "May06_20-34-35_pact_100hz_spec_smartcurr"
-        # load_run = "May07_18-30-49_pact_100hz_spec_smartcurr"   # this is the most promising model/one with collected data
+        # load_run = "May07_18-30-49_pact_100hz_spec_smartcurr"   # this is the most promising model/one with collected data, vhip but no rear-overreach
         # load_run = "May07_18-49-22_pact_100hz_spec_smartcurr_e2e" 
         # load_run = "May09_01-26-21_pact_100hz_spec_smartcurr"    # weaker pos-boot, rear-overreach
-        load_run = "May10_02-07-54_pact_100hz_spec_smartcurr"    # most recent model with strong boot and rear-overreah
+        # load_run = "May10_02-07-54_pact_100hz_spec_smartcurr"    # most recent model with strong boot and rear-overreah
+        load_run = "May10_20-41-46_pact_100hz_spec_smartcurr"    # most recent model with strong boot and rear-overreah, 3000 pos-boot start
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pact_stairs_12-16kg.csv"

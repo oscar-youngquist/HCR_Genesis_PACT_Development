@@ -493,8 +493,8 @@ class GO1ABL2CfgPPO( LeggedRobotCfgPPO ):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr25_19-03-47_pact_posboot_100hz_nogrf/model_5000_converted.pt"
-        
+        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr25_19-03-47_pact_posboot_100hz_nogrf/model_5000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May10_23-53-05_pact_posboot_100hz_nogrf/model_3000_converted.pt"
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
@@ -510,9 +510,9 @@ class GO1ABL2CfgPPO( LeggedRobotCfgPPO ):
         max_grad_norm = 1.0
 
         # adaptive entropy coefficent algorithm parameters
-        entropy_coef = 0.01                      # initial entropy value
+        entropy_coef = 0.002                      # initial entropy value
         use_adaptive_entropy = True              # weather or not to use the adaptive entropy coef alg.
-        adaptive_ent_bounds = [0.001, 0.01]      # entropy coefficent bands
+        adaptive_ent_bounds = [0.001, 0.002]      # entropy coefficent bands
         adaptive_ent_lin_threshold = 0.75        # minimum linear velocity tracking target
         adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target
         adaptive_ent_ter_threshold = 6.0         # minimum avg. terrain curriculum progress target
