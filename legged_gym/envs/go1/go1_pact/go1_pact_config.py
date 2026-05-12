@@ -5,9 +5,9 @@ class GO1PACTCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
+        num_privileged_obs = 57 + (50 + 38) + 143 # robot_state + privilged info + terrain_heights (187)
         num_priv_stack = 5
-        num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
+        num_explicit_recon_obs = 3 + 4 + 4 + 1 + 1 + 3 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
         num_obs_hist = 20
@@ -491,12 +491,12 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         # Context encoder
         cenet_enc_layers=[256,128]
         cenet_enc_latent_dim = 16
-        cenet_velo_dim = 3 + 4 + 4      # torso velocity, foot-contact indicator, foot-height 
+        cenet_velo_dim = 3 + 4 + 4 + 1 + 1 + 3      # torso velocity, foot-contact indicator, foot-height 
 
         # Context Decoder
-        cenet_dec_input_dim = 27
+        cenet_dec_input_dim = 16 + 3 + 4 + 4 + 1 + 1 + 3
         cenet_dec_layers = [128,256,512]
-        cenet_dec_out_dim = 57 + (51 + 33) + 143     # next obs (57) + grf_dim (12)
+        cenet_dec_out_dim = 57 + (50 + 38) + 143    # next obs (57) + grf_dim (12)
 
         # Actor/critic
         actor_layers = [512,256,128]
@@ -508,7 +508,9 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
 
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May09_19-14-36_pact_posboot_100hz_grf/model_3000_converted.pt"
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May10_16-17-52_pact_posboot_100hz_grf/model_3000_converted.pt"
+        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May10_16-17-52_pact_posboot_100hz_grf/model_3000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May11_16-36-57_pact_posboot_100hz_grf/model_3000_converted.pt"
+
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
