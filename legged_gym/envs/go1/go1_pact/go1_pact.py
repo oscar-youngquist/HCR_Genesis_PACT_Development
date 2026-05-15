@@ -81,7 +81,7 @@ class Go1PACT(BaseTask):
         )
 
     def get_failure_idx(self):
-        return self.reset_buf * ~self.time_out_buf
+        return self.reset_buf * ~self.time_out_buf * ~self.non_failure_reset_buf
     
     def get_scaled_pos_actions(self):
                 # control_type = 'P'
@@ -185,12 +185,18 @@ class Go1PACT(BaseTask):
         self.fail_buf += fail_buf
         self.time_out_buf = self.episode_length_buf > self.max_episode_length  # no terminal reward for time-outs
         
+        if getattr(self.cfg.terrain, "reset_out_of_bounds", False):
+            self.non_failure_reset_buf[:] = self.simulator._base_pos_out_of_bounds_buf
+        else:
+            self.non_failure_reset_buf[:] = False
+        
         # print(f"timeout termination: {self.time_out_buf}")
         # print("======================================================")
 
         self.reset_buf = (
             (self.fail_buf > self.cfg.env.fail_to_terminal_time_s / self.dt)
             | self.time_out_buf
+            | self.non_failure_reset_buf
         )
 
     def reset_idx(self, env_ids):
@@ -263,6 +269,10 @@ class Go1PACT(BaseTask):
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
+        
+
+        if getattr(self.cfg.terrain, "reset_out_of_bounds", False):
+            self.extras["reset_outs"] = self.non_failure_reset_buf
 
         # reset action queue and delay
         if self.cfg.domain_rand.randomize_ctrl_delay:
@@ -608,6 +618,7 @@ class Go1PACT(BaseTask):
 
         self.forward_vec[:, 0] = 1.0
         self.fail_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device, requires_grad=False)
+        self.non_failure_reset_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
         
         self.commands = torch.zeros(
             (self.num_envs, self.cfg.commands.num_commands), device=self.device, dtype=torch.float)
@@ -939,7 +950,7 @@ class Go1PACT(BaseTask):
 
     def _reward_termination(self):
         # Terminal reward / penalty
-        return self.reset_buf * ~self.time_out_buf
+        return self.reset_buf * ~self.time_out_buf * ~self.non_failure_reset_buf
 
     def _reward_dof_pos_limits(self):
         # Penalize dof positions too close to the limit
@@ -1399,7 +1410,7 @@ class Go1PACT(BaseTask):
 
         # If env will reset after this step, terminate the telescoping sum cleanly.
         # Use zero potential for the absorbing terminal state.
-        terminal_mask = self.reset_buf & (~self.time_out_buf)
+        terminal_mask = self.reset_buf & (~self.time_out_buf) & (~self.non_failure_reset_buf)
         shaping[terminal_mask] = -self.phi_prev_orientation[terminal_mask]
 
         self.phi_prev_orientation = phi_next
@@ -1409,7 +1420,7 @@ class Go1PACT(BaseTask):
         phi_next = self._potential_height()
         shaping = phi_next - self.phi_prev_height
 
-        terminal_mask = self.reset_buf & (~self.time_out_buf)
+        terminal_mask = self.reset_buf & (~self.time_out_buf) & (~self.non_failure_reset_buf)
         shaping[terminal_mask] = -self.phi_prev_height[terminal_mask]
 
         self.phi_prev_height = phi_next
@@ -1621,3 +1632,21 @@ class Go1PACT(BaseTask):
         penalty = torch.sum(contact * overreach ** 2, dim=1)
 
         return penalty
+    
+
+    def _reward_stumble(self):
+        """
+        Penalize feet colliding with vertical surfaces / obstacles during swing.
+        """
+
+        contact_forces = self.simulator.link_contact_forces[:, self.simulator.feet_indices, :]  # (N,4,3)
+
+        horizontal_force = torch.norm(contact_forces[:, :, :2], dim=2)
+        vertical_force = torch.abs(contact_forces[:, :, 2])
+
+        contact = vertical_force > 1.0
+        swing = (~contact).float()
+
+        stumble = (horizontal_force > 4.0 * vertical_force) & (horizontal_force > 5.0)
+
+        return torch.sum(swing * stumble.float(), dim=1)

@@ -54,11 +54,11 @@ def make_rl2ac_command(
     task="go1_rl2ac",
     gpu="cuda:0",
     seed=1,
-    num_eps=2.00,
-    num_envs=50,
+    num_eps=1.00,
+    num_envs=100,
     terrain_type="rough",
     disturbance_type="payload",
-    log_path="exp_data_corl_rl2ac/sample_param_search",
+    log_path="exp_data_corl_rl2ac/sample_param_search_02",
     script_name="play_exp_rl2ac_tune.py",
 ):
     """
@@ -74,6 +74,7 @@ def make_rl2ac_command(
         f"--num_envs={num_envs} "
         f"--terrain_type={terrain_type} "
         f"--disturbance_type={disturbance_type} "
+        f"--shift_com "
         f"--log "
         f"--log_path={log_path} "
         f"--alpha={format_float(cfg['alpha'])} "
@@ -93,10 +94,10 @@ def write_lhs_sweep_script(
     """
 
     param_ranges = {
-        "alpha": (20.0, 55.0),
-        "kappa": (0.02, 0.25),
-        "lambda_0": (0.1, 1.5),
-        "k_0": (2.0, 20.0),
+        "alpha": (10.0, 50.0),
+        "kappa": (1.0, 20.0),
+        "lambda_0": (0.2, 5.0),
+        "k_0": (5, 20.0),
     }
 
     samples = latin_hypercube_sample(
@@ -137,24 +138,44 @@ def write_lhs_sweep_script(
     lines.append(make_rl2ac_command(conservative_cfg))
     lines.append("")
 
-    lines.append("# Best zero-failure result from initial coarse grid sweep")
-    best_zero_failure_cfg = {
-        "alpha": 35.0,
-        "kappa": 0.1,
-        "lambda_0": 0.3,
-        "k_0": 5.0,
-    }
-    lines.append(make_rl2ac_command(best_zero_failure_cfg))
-    lines.append("")
-
-    lines.append("# Best low-kappa linear tracking result from initial coarse grid sweep")
-    best_low_kappa_tracking_cfg = {
+    lines.append("# Best current tradeoff")
+    best_current_tradeoff_cfg = {
         "alpha": 50.0,
         "kappa": 0.1,
         "lambda_0": 0.3,
         "k_0": 5.0,
     }
-    lines.append(make_rl2ac_command(best_low_kappa_tracking_cfg))
+    lines.append(make_rl2ac_command(best_current_tradeoff_cfg))
+    lines.append("")
+
+    lines.append("# Best tracking, less stable")
+    best_tracking_less_stable_cfg = {
+        "alpha": 10.0,
+        "kappa": 0.1,
+        "lambda_0": 0.3,
+        "k_0": 1.0,
+    }
+    lines.append(make_rl2ac_command(best_tracking_less_stable_cfg))
+    lines.append("")
+
+    lines.append("# Strong tracking with moderate failures")
+    strong_tracking_moderate_failures_cfg = {
+        "alpha": 10.0,
+        "kappa": 0.1,
+        "lambda_0": 0.1,
+        "k_0": 5.0,
+    }
+    lines.append(make_rl2ac_command(strong_tracking_moderate_failures_cfg))
+    lines.append("")
+
+    lines.append("# Stable moderate-alpha result")
+    stable_moderate_alpha_cfg = {
+        "alpha": 20.0,
+        "kappa": 0.1,
+        "lambda_0": 0.3,
+        "k_0": 5.0,
+    }
+    lines.append(make_rl2ac_command(stable_moderate_alpha_cfg))
     lines.append("")
 
     lines.append(f"# Latin-hypercube sweep: n_samples={n_samples}, seed={seed}")

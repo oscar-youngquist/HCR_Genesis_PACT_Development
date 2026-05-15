@@ -5,7 +5,7 @@ class GO1ABL2Cfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        num_privileged_obs = 57 + (39 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
+        num_privileged_obs = 57 + (50 + 26) + 143 # robot_state + privilged info + terrain_heights (187)
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -15,7 +15,10 @@ class GO1ABL2Cfg( LeggedRobotCfg ):
         whole_body_dim = 18
         debug = False       # if debugging, visualize contacts, 
         debug_viz = False    # draw debug visualizations
-        
+
+        # Added for PACT experiment collection
+        lateral_push_only = False
+
         # stuff for drawing the surface normal visulations
         debug_draw_swing_planes = False
         debug_viz_env                 = 0
@@ -75,6 +78,8 @@ class GO1ABL2Cfg( LeggedRobotCfg ):
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
+        # Added for PACT experiment collection
+        reset_out_of_bounds = False
     class sim:
         # Common
         dt = 0.002                 # 1000 Hz
@@ -153,15 +158,15 @@ class GO1ABL2Cfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 2.50
-        max_push_vel_xy = 1.35
+        max_push_vel_xy = 1.50
         min_push_vel_xy = 0.50
 
-        max_vertical_push = 0.40
+        max_vertical_push = 0.50
         min_vertical_push = 0.10
         vert_interval_max = 10.0
         vert_interval_min = 2.50
 
-        max_push_torque = 1.35
+        max_push_torque = 1.50
         min_push_torque = 0.50
         wrench_timeout_min = 1.00
         wrench_timeout_max = 10.0
@@ -395,7 +400,7 @@ class GO1ABL2Cfg( LeggedRobotCfg ):
 
             # smoothness and stability
             lin_vel_z        = -2.0
-            base_height      = -1.5
+            base_height      = -2.0
             ang_vel_xy       = -0.05
             orientation      = -0.2
             dof_acc          = -2.5e-7
@@ -445,7 +450,7 @@ class GO1ABL2Cfg( LeggedRobotCfg ):
             
             curr_reward_bounds = {
                                   "ang_vel_xy":[-0.05, -0.2],
-                                  "orientation":[-0.2,-1.5],
+                                  "orientation":[-0.2,-2.0],
                                   "torque_limits":[-1.0e-4, -0.01],
                                   "action_rate":[-1.0e-3, -0.01],
                                   "action_smoothness":[-1.0e-3,-0.01],
@@ -494,7 +499,9 @@ class GO1ABL2CfgPPO( LeggedRobotCfgPPO ):
         pinn_init_steps = 0
 
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr25_19-03-47_pact_posboot_100hz_nogrf/model_5000_converted.pt"
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May10_23-53-05_pact_posboot_100hz_nogrf/model_3000_converted.pt"
+        # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May10_23-53-05_pact_posboot_100hz_nogrf/model_3000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May11_16-12-25_pact_posboot_100hz_nogrf/model_3000_converted.pt"
+
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
@@ -533,7 +540,7 @@ class GO1ABL2CfgPPO( LeggedRobotCfgPPO ):
         save_interval = 500
         
         
-        load_run = "May01_17-28-57_abl2_100hz_spec_materr"
+        load_run = "May11_22-47-52_abl2_100hz_spec_materr"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/scratch_pact_exp/plane_tracking_test.csv"

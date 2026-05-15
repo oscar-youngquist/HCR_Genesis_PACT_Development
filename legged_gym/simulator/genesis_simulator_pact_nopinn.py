@@ -259,6 +259,10 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
                 (num_push_reset, 2),
                 self._device,
             )
+            
+            if self._cfg.env.lateral_push_only:
+                lin_vel[:,0] = 0.0
+            
             self._rand_push_vels[push_mask, :2] = lin_vel
             dofs_vel[push_mask, :2] += lin_vel
 
@@ -1179,6 +1183,10 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         self._global_gravity = torch.tensor([0.0, 0.0, -1.0], device=self._device, dtype=torch.float).repeat(
             self._num_envs, 1
         )
+
+        self._base_pos_out_of_bounds_buf = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.bool)
+
         self._dof_pos = torch.zeros(self._num_envs, self._num_actions, device=self._device, dtype=torch.float)
         self._dof_vel = torch.zeros(self._num_envs, self._num_actions, device=self._device, dtype=torch.float)
         self._last_dof_vel = torch.zeros_like(self._dof_vel)
@@ -1461,9 +1469,11 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
             self._base_pos[:, 0] <= self._terrain_x_range[0])
         y_out_of_bound = (self._base_pos[:, 1] >= self._terrain_y_range[1]) | (
             self._base_pos[:, 1] <= self._terrain_y_range[0])
-        out_of_bound_buf = x_out_of_bound | y_out_of_bound
-        env_ids = out_of_bound_buf.nonzero(as_tuple=False).flatten()
+        self._base_pos_out_of_bounds_buf[:] = x_out_of_bound | y_out_of_bound
+        env_ids = self._base_pos_out_of_bounds_buf.nonzero(as_tuple=False).flatten()
         if len(env_ids) == 0:
+            return
+        elif getattr(self._cfg.terrain, "reset_out_of_bounds", False):
             return
         else:
             # reset base position to initial position

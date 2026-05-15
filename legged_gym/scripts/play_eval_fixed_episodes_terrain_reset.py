@@ -10,6 +10,15 @@ from legged_gym.scripts.joystick import Joystick
 from legged_gym.utils.exp_data_logger import ExpLogger
 import argparse
 
+def _fmt_bound_value(x):
+    """Format numeric bounds so they are filename-friendly."""
+    return f"{float(x):g}".replace("-", "neg").replace(".", "p")
+
+
+def _fmt_bounds(prefix, bounds):
+    """Create filename-safe bound string like payload_neg3_12 or push_2_1_2."""
+    return prefix + "_" + "_".join(_fmt_bound_value(v) for v in bounds)
+
 def override_configs(env_cfg, args):
     """Override some environment configuration parameters for testing
 
@@ -33,6 +42,9 @@ def override_configs(env_cfg, args):
     env_cfg.terrain.restitution = 0.                          # coefficient of restitution of the terrain
     env_cfg.terrain.curriculum = False                        # whether to generate terrain curriculum (no)
     
+    env_cfg.terrain.reset_out_of_bounds = True
+    env_cfg.env.lateral_push_only = True
+
     # Terrain construction logic
     if args.terrain_type == "plane":
         env_cfg.terrain.mesh_type = 'plane'                     # plane, heightfield, trimesh
@@ -60,21 +72,29 @@ def override_configs(env_cfg, args):
                                               "min_height" : -0.08, "max_height": 0.08, 
                                               "step":0.005, "downsampled_scale" : 0.2}
             print("Adding Rough Terrain")
-        elif args.terrain_type =="slope":                                                            # slope terrain
+        elif args.terrain_type =="slope_up":                                                            # slope terrain
             env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
-                                              "slope": -0.4, "platform_size": 3.0}
-            print("Adding Slope Terrain")
-        elif args.terrain_type == "stairs":                                                           # stairs terrain
+                                              "slope": -0.4, "platform_size": 2.0}
+            print("Adding Slope Up Terrain")
+        elif args.terrain_type =="slope_down":                                                            # slope terrain
+            env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
+                                              "slope": 0.4, "platform_size": 2.0}
+            print("Adding Slope Down Terrain")
+        elif args.terrain_type == "stairs_up":                                                           # stairs terrain
             env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-                                            "step_width": 0.40, "step_height": -0.10, "platform_size": 3.0}
-            print("Adding Stairs Terrain")
+                                            "step_width": 0.40, "step_height": -0.10, "platform_size": 2.0}
+            print("Adding Stairs Up Terrain")
+        elif args.terrain_type == "stairs_down":                                                           # stairs terrain
+            env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
+                                            "step_width": 0.40, "step_height": 0.10, "platform_size": 2.0}
+            print("Adding Stairs Down Terrain")
         elif args.terrain_type == "discrete":                                                         # discrete obstacles terrain
             env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
                                             "max_height": 0.1,
                                             "min_size": 1.0,
                                             "max_size": 2.0,
                                             "num_rects": 20,
-                                            "platform_size": 3.0}
+                                            "platform_size": 2.0}
             print("Adding Discrete Terrain")
         elif args.terrain_type == "wave":
             env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.wave_terrain", 
@@ -101,23 +121,35 @@ def override_configs(env_cfg, args):
     env_cfg.termination.roll_threshold = 1.57
     env_cfg.termination.pitch_threshold = 1.57
     env_cfg.termination.height_min = 0.0
-    env_cfg.asset.terminate_after_contacts_on = ["base","trunk"]
+    # env_cfg.asset.terminate_after_contacts_on = ["base","trunk"]
+    env_cfg.asset.terminate_after_contacts_on = ["base","trunk","hip"]
 
     # Turn off/on domain randomization elements
     env_cfg.noise.add_noise = True
     # Disable some of the domain randomization (our payload will handle that now)
-    env_cfg.domain_rand.randomize_pd_gain = False
-    env_cfg.domain_rand.randomize_motor_strength = False
+    if args.more_rand:
+        env_cfg.domain_rand.randomize_pd_gain = True
+        env_cfg.domain_rand.randomize_motor_strength = True
+    else:
+        env_cfg.domain_rand.randomize_pd_gain = False
+        env_cfg.domain_rand.randomize_motor_strength = False
+    
+
+    # In this script, the disturbance behavior is a bit different. 
+    #     So, turn everything off by default
+    env_cfg.domain_rand.push_robots = False
+    env_cfg.domain_rand.randomize_com_displacement = False
+    env_cfg.domain_rand.randomize_base_mass = False
     
     # Enable/disable disturbances as requested
-    if args.disturbance_type == "none":
+    if "none" in args.disturbance_type:
         print("Adding No Disturbances")
         env_cfg.domain_rand.push_robots = False
         env_cfg.domain_rand.randomize_com_displacement = False
-        env_cfg.domain_rand.randomize_base_mass = True
-    elif args.disturbance_type == "payload":
+        env_cfg.domain_rand.randomize_base_mass = False
+    
+    if "payload" in args.disturbance_type:
         print("Adding Randomized Payloads!")
-        env_cfg.domain_rand.push_robots = False
         env_cfg.domain_rand.randomize_base_mass = True
 
         env_cfg.domain_rand.min_added_mass_max = args.payload_bounds[1]
@@ -128,31 +160,29 @@ def override_configs(env_cfg, args):
             print("Adding CoM Randomization!")
             env_cfg.domain_rand.randomize_com_displacement = True
             # COM displacement crap
-            env_cfg.domain_rand.com_displacement_x_min = 0.25
-            env_cfg.domain_rand.com_displacement_x_max = 0.25
+            env_cfg.domain_rand.com_displacement_x_min = args.com_bounds[0]
+            env_cfg.domain_rand.com_displacement_x_max = args.com_bounds[0]
             
-            env_cfg.domain_rand.com_displacement_y_min = 0.20
-            env_cfg.domain_rand.com_displacement_y_max = 0.15
+            env_cfg.domain_rand.com_displacement_y_min = args.com_bounds[1]
+            env_cfg.domain_rand.com_displacement_y_max = args.com_bounds[1]
             
             env_cfg.domain_rand.com_displacement_z_positive = False
             env_cfg.domain_rand.com_displacement_z_min_pos = 0.1
-            env_cfg.domain_rand.com_displacement_z_min = 0.20
-            env_cfg.domain_rand.com_displacement_z_max = 0.25
+            env_cfg.domain_rand.com_displacement_z_min = args.com_bounds[2]
+            env_cfg.domain_rand.com_displacement_z_max = args.com_bounds[2]
         else:
             env_cfg.domain_rand.randomize_com_displacement = False
 
-    elif args.disturbance_type == "push":
+    if "push" in args.disturbance_type:
         print("Adding external pushes!")
         env_cfg.domain_rand.push_robots = True
-        env_cfg.domain_rand.randomize_base_mass = False
-        env_cfg.domain_rand.randomize_com_displacement = False
 
         # Random impulse time ranges
-        env_cfg.domain_rand.push_interval_max = 5.0
+        env_cfg.domain_rand.push_interval_max = 2.0
         env_cfg.domain_rand.push_interval_min = 1.0
-        env_cfg.domain_rand.vert_interval_max = 5.0
+        env_cfg.domain_rand.vert_interval_max = 2.0
         env_cfg.domain_rand.vert_interval_min = 1.0
-        env_cfg.domain_rand.wrench_timeout_min = 5.0
+        env_cfg.domain_rand.wrench_timeout_min = 2.0
         env_cfg.domain_rand.wrench_timeout_max = 1.0
         
         # Random impulse magnitudes
@@ -164,7 +194,10 @@ def override_configs(env_cfg, args):
         env_cfg.domain_rand.min_push_torque = args.push_bounds[2]
 
     # Training artifact unique to PACT that needs to be disabled.
-    env_cfg.control.randomize_pact_weights = False
+    if args.rand_pact:
+        env_cfg.control.randomize_pact_weights = True
+    else:
+        env_cfg.control.randomize_pact_weights = False
 
     # Ensure debugging visulization stuff is disabled.
     env_cfg.asset.fix_base_link = False
@@ -177,7 +210,20 @@ def override_configs(env_cfg, args):
         env_cfg.viewer.add_camera = True  # use a extra camera for moving
 
     # Construct the log-file output path
-    args.output_path = os.path.join(args.log_path, f"{args.task}_{args.terrain_type}_{args.disturbance_type}_episodes.csv")
+    # args.output_path = os.path.join(args.log_path, f"{args.task}_{args.terrain_type}_{args.disturbance_type}_episodes.csv")
+    if "payload" in args.disturbance_type:
+        disturbance_tag = _fmt_bounds("payload", args.payload_bounds)
+
+        if args.shift_com:
+            disturbance_tag += "_" + _fmt_bounds("com", args.com_bounds)
+
+    if "push" in args.disturbance_type :
+        disturbance_tag += "_" + _fmt_bounds("push", args.push_bounds)
+
+    args.output_path = os.path.join(
+        args.log_path,
+        f"{args.task}_{args.terrain_type}_{disturbance_tag}_episodes.csv"
+    )
     
 
 def print_debug_info(env, robot_index):
@@ -247,20 +293,57 @@ def _get_timeout_mask(env, infos, dones, pre_step_episode_lengths=None):
     return torch.zeros_like(dones, dtype=torch.bool)
 
 
-def _get_failure_reset_mask(env, dones, timeout_mask):
+def _get_non_failure_reset_mask(env, infos, dones):
+    """
+    Robustly infer which reset events were intentionally non-failure resets.
+
+    PACT terrain-bound resets expose this through env.non_failure_reset_buf and,
+    when available in infos, infos["reset_outs"].
+    """
+    device = dones.device
+    num_envs = dones.numel()
+
+    reset_value = None
+    if isinstance(infos, dict):
+        for key in ("non_failure_reset", "non_failure_resets", "reset_outs", "reset_out"):
+            if key in infos:
+                reset_value = infos[key]
+                break
+
+    if reset_value is None and hasattr(env, "non_failure_reset_buf"):
+        reset_value = getattr(env, "non_failure_reset_buf")
+
+    if reset_value is None and hasattr(env, "simulator"):
+        simulator = getattr(env, "simulator")
+        if hasattr(simulator, "non_failure_reset_buf"):
+            reset_value = getattr(simulator, "non_failure_reset_buf")
+        elif hasattr(simulator, "_base_pos_out_of_bounds_buf"):
+            reset_value = getattr(simulator, "_base_pos_out_of_bounds_buf")
+
+    if reset_value is not None:
+        reset_mask = _to_bool_tensor(reset_value, device, num_envs=num_envs)
+        if reset_mask.numel() == 1:
+            reset_mask = reset_mask.repeat(num_envs)
+        return reset_mask[:num_envs] & dones
+
+    return torch.zeros_like(dones, dtype=torch.bool)
+
+
+def _get_failure_reset_mask(env, dones, timeout_mask, non_failure_reset_mask):
     """
     Robustly infer which reset events were caused by failure instead of timeout.
 
     Prefer env.get_failure_idx() when available. If it is unavailable or has an
-    unexpected shape, use the conservative definition: done and not timeout.
+    unexpected shape, use the conservative definition: done and not timeout and
+    not a known non-failure reset.
     """
     try:
         failure_mask = _to_bool_tensor(env.get_failure_idx(), dones.device, num_envs=dones.numel())
         if failure_mask.numel() == dones.numel():
-            return failure_mask & dones & (~timeout_mask)
+            return failure_mask & dones & (~timeout_mask) & (~non_failure_reset_mask)
     except Exception:
         pass
-    return dones & (~timeout_mask)
+    return dones & (~timeout_mask) & (~non_failure_reset_mask)
 
 
 def _get_observations_for_task(env, task_name):
@@ -363,6 +446,7 @@ def interaction_loop(train_cfg, env, policy, args):
         - episode_step: 1-indexed transition index within that episode
         - done: whether this transition ended the episode
         - time_out: whether the reset was induced by episode time limit
+        - non_failure_reset: whether the reset was induced by a non-failure condition
         - failure_reset: whether the reset was induced by failure
         - valid_episode: whether the row belongs to one of the requested episodes
 
@@ -422,7 +506,7 @@ def interaction_loop(train_cfg, env, policy, args):
         if args.fixed_cmd is not None:
             env.commands[:, 0] = args.fixed_cmd[0]
             env.commands[:, 1] = args.fixed_cmd[1]
-            env.commands[:, 2] = args.fixed_cmd[2]
+            # env.commands[:, 2] = args.fixed_cmd[2]
             env.commands[:, 3] = args.fixed_cmd[3]
 
         if args.follow_robot:
@@ -441,7 +525,8 @@ def interaction_loop(train_cfg, env, policy, args):
         log_valid_episode = episode_active.detach().clone()
 
         timeout_mask = _get_timeout_mask(env, infos, dones, pre_step_episode_lengths)
-        failure_reset_mask = _get_failure_reset_mask(env, dones, timeout_mask)
+        non_failure_reset_mask = _get_non_failure_reset_mask(env, infos, dones)
+        failure_reset_mask = _get_failure_reset_mask(env, dones, timeout_mask, non_failure_reset_mask)
         completed_mask = dones & episode_active
 
         if args.log:
@@ -453,6 +538,7 @@ def interaction_loop(train_cfg, env, policy, args):
                     'valid_episode': list(map(int, log_valid_episode.detach().cpu().numpy().tolist())),
                     'done': list(map(int, dones.detach().cpu().numpy().tolist())),
                     'time_out': list(map(int, timeout_mask.detach().cpu().numpy().tolist())),
+                    'non_failure_reset': list(map(int, non_failure_reset_mask.detach().cpu().numpy().tolist())),
                     'failure_reset': list(map(int, failure_reset_mask.detach().cpu().numpy().tolist())),
                     
                     'base_cmd': env.commands.detach().cpu().numpy().tolist(),
@@ -611,14 +697,14 @@ if __name__ == '__main__':
     
     # Terrain selection parameters
     parser.add_argument('--terrain_type',     type=str, default='plane', help="Terrain type to be evaluted (options - plane, rough, slope, stairs, discrete, waves. Default - plane)")
-    parser.add_argument('--terrain_rows',     type=int, default=4, help="Number of rows of rough terrains to generate (default - 2)")
-    parser.add_argument('--terrain_cols',     type=int, default=4, help="Number of cols of rough terrains to generate (default - 2)")
+    parser.add_argument('--terrain_rows',     type=int, default=1, help="Number of rows of rough terrains to generate (default - 2)")
+    parser.add_argument('--terrain_cols',     type=int, default=1, help="Number of cols of rough terrains to generate (default - 2)")
 
     # Disturbance parameters
-    parser.add_argument('--disturbance_type', type=str, default='none', help="Type of disturbance applied to robot (options - none, payload, push. Default - none)")
+    parser.add_argument('--disturbance_type', type=str, nargs='+', default='none', help="Type of disturbance applied to robot (options - none, payload, push. Default - none)")
     parser.add_argument('--payload_bounds',   type=float, nargs='+', default=[-3.0, 12.0], help="min and max payload sample range (default - [-3.0, 12.0])")
     parser.add_argument('--shift_com',        action='store_true', default=False, help="whether or not to randomize the CoM when transporting payloads. (default - False)")
-    parser.add_argument('--com_bounds',       type=float, nargs='+', default=[0.25, 0.20, 0.20], help="combined min/max COM-shift values [x, y, z] (default - [0.25, 0.20, 0.20])")
+    parser.add_argument('--com_bounds',       type=float, nargs='+', default=[0.20, 0.15, 0.15], help="combined min/max COM-shift values [x, y, z] (default - [0.25, 0.20, 0.20])")
     parser.add_argument('--push_bounds',      type=float, nargs='+', default=[2.0, 1.0, 2.0], help="combined min/max external push velo. values [planer, vertical, wrench] (default - [1.0, 0.5, 1.0])")
 
     # Fixed command execution
@@ -627,6 +713,9 @@ if __name__ == '__main__':
     parser.add_argument('--log_path',         type=str, default="exp_data/output", help="path to experiment output folder (default - 'exp_data/output')")
 
     parser.add_argument('--num_eps',          type=int, default=5, help="Number of completed evaluation episodes to collect globally across all envs (default - 5)")
-    parser.add_argument('--progress_interval', type=int, default=100, help="Print episode collection progress every N vectorized steps. Use 0 to disable.")
+    parser.add_argument('--progress_interval', type=int, default=10000, help="Print episode collection progress every N vectorized steps. Use 0 to disable.")
+
+    parser.add_argument('--rand_pact',        action='store_true', default=False)
+    parser.add_argument('--more_rand',        action='store_true', default=False)
 
     play(configure_runtime_device(parser.parse_args()))

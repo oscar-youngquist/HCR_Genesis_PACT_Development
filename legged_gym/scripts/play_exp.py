@@ -33,14 +33,14 @@ def override_configs(env_cfg, args):
         
         # random uniform terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-        #                                   "min_height" : -0.08, "max_height": 0.08, 
-        #                                   "step":0.005, "downsampled_scale" : 0.2}
+                                        #   "min_height" : -0.08, "max_height": 0.08, 
+                                        #   "step":0.005, "downsampled_scale" : 0.2}
         # # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
-        #                                   "slope": -0.4, "platform_size": 3.0}
+                                        #   "slope": -0.4, "platform_size": 3.0}
         # # stairs
         env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-                                        "step_width": 0.40, "step_height": -0.10, "platform_size": 3.0}
+                                        "step_width": 0.40, "step_height": -0.10, "platform_size": 2.0}
         # # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.1,
@@ -65,7 +65,9 @@ def override_configs(env_cfg, args):
     #     for i in range(2):
     #         env_cfg.viewer.pos[i] = env_cfg.viewer.pos[i] - env_cfg.terrain.plane_length / 4
     #         env_cfg.viewer.lookat[i] = env_cfg.viewer.lookat[i] - env_cfg.terrain.plane_length / 4    
-        
+    
+    env_cfg.terrain.reset_out_of_bounds = True
+    env_cfg.env.lateral_push_only = True
             
     if args.use_joystick:
         env_cfg.commands.heading_command = False
@@ -85,7 +87,7 @@ def override_configs(env_cfg, args):
     env_cfg.termination.pitch_threshold = 1.57
     env_cfg.termination.height_min = 0.0
 
-    env_cfg.asset.terminate_after_contacts_on = ["base","trunk","thigh","hip"]
+    env_cfg.asset.terminate_after_contacts_on = ["base","trunk","hip"]
     # env_cfg.asset.terminate_after_contacts_on = ["base","trunk"]
 
     env_cfg.control.randomize_pact_weights = False
@@ -97,38 +99,38 @@ def override_configs(env_cfg, args):
     env_cfg.domain_rand.randomize_motor_strength = False
     
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_com_displacement = False
+    env_cfg.domain_rand.randomize_com_displacement = True
     env_cfg.domain_rand.randomize_base_mass = True
     
-    env_cfg.domain_rand.min_added_mass_max = 18.0
-    env_cfg.domain_rand.max_added_mass_max = 18.0
-    env_cfg.domain_rand.added_mass_min = 18.0
+    env_cfg.domain_rand.min_added_mass_max = 10.0
+    env_cfg.domain_rand.max_added_mass_max = 10.0
+    env_cfg.domain_rand.added_mass_min = 10.0
 
     # COM displacement crap
-    env_cfg.domain_rand.com_displacement_x_min = 0.25
-    env_cfg.domain_rand.com_displacement_x_max = 0.25
+    env_cfg.domain_rand.com_displacement_x_min = 0.16
+    env_cfg.domain_rand.com_displacement_x_max = 0.16
     
-    env_cfg.domain_rand.com_displacement_y_min = 0.20
-    env_cfg.domain_rand.com_displacement_y_max = 0.15
+    env_cfg.domain_rand.com_displacement_y_min = 0.12
+    env_cfg.domain_rand.com_displacement_y_max = 0.12
     
     env_cfg.domain_rand.com_displacement_z_positive = False
     env_cfg.domain_rand.com_displacement_z_min_pos = 0.1
-    env_cfg.domain_rand.com_displacement_z_min = 0.20
-    env_cfg.domain_rand.com_displacement_z_max = 0.25
+    env_cfg.domain_rand.com_displacement_z_min = 0.12
+    env_cfg.domain_rand.com_displacement_z_max = 0.12
 
-    env_cfg.domain_rand.push_interval_max = 5.0
+    env_cfg.domain_rand.push_interval_max = 2.0
     env_cfg.domain_rand.push_interval_min = 1.0
-    env_cfg.domain_rand.max_push_vel_xy = 2.00
-    env_cfg.domain_rand.min_push_vel_xy = 2.00
+    env_cfg.domain_rand.max_push_vel_xy = 1.0
+    env_cfg.domain_rand.min_push_vel_xy = 1.0
 
-    env_cfg.domain_rand.max_vertical_push = 1.00
-    env_cfg.domain_rand.min_vertical_push = 1.00
-    env_cfg.domain_rand.vert_interval_max = 5.0
+    env_cfg.domain_rand.max_vertical_push = 0.0
+    env_cfg.domain_rand.min_vertical_push = 0.0
+    env_cfg.domain_rand.vert_interval_max = 2.0
     env_cfg.domain_rand.vert_interval_min = 1.0
 
-    env_cfg.domain_rand.max_push_torque = 2.00
-    env_cfg.domain_rand.min_push_torque = 2.00
-    env_cfg.domain_rand.wrench_timeout_min = 5.0
+    env_cfg.domain_rand.max_push_torque = 1.50
+    env_cfg.domain_rand.min_push_torque = 1.50
+    env_cfg.domain_rand.wrench_timeout_min = 2.0
     env_cfg.domain_rand.wrench_timeout_max = 1.0
 
 
@@ -217,10 +219,10 @@ def interaction_loop(train_cfg, env, policy, args):
             env.commands[:, 1] = -joystick.lx
             env.commands[:, 2] = -joystick.rx
 
-        # env.commands[:, 0] = 0.65
-        # env.commands[:, 1] = 0.0
+        env.commands[:, 0] = 0.65
+        env.commands[:, 1] = 0.0
         # env.commands[:, 2] = 0.0
-        # env.commands[:, 3] = 0
+        env.commands[:, 3] = 0
         
         # set the viewer camera to follow the first environment by default
         # TODO - fix recording/general camera follow conflict

@@ -24,7 +24,7 @@ class RL2ACAdaptiveCtrl:
         print(f"RL2AC params: alpha={self.alpha}, kappa={self.kappa}, lambda_0={self.lambda_0}, k_0={self.k_0}")
 
         # State flags
-        self.use_proactive_ctrl = True
+        self.use_proactive_ctrl = False
 
         # Joint-space vectors: [B, J]
         self.phi = torch.zeros(self.B, self.J, device=device, dtype=dtype)
@@ -59,13 +59,16 @@ class RL2ACAdaptiveCtrl:
         self.min_lambda = 0.0
         self.dt_min = 1e-5
 
-    def reset_adaptive_controller(self):
-        self.Gamma = torch.eye(self.J, device=self.device, dtype=self.dtype).repeat(self.B, 1, 1)
-        self.K = torch.zeros(self.B, self.J, self.J, device=self.device, dtype=self.dtype) 
-        self.comp_old = torch.zeros_like(self.phi)
-        self.comp = torch.zeros_like(self.phi)   
+    def reset_adaptive_controller(self, env_ids):
+        self.Gamma[env_ids] = torch.eye(self.J, device=self.device, dtype=self.dtype).unsqueeze(0)
+        self.K[env_ids] = 0.0
+        self.comp_old[env_ids] = 0.0
+        self.comp[env_ids] = 0.0   
    
-   
+        self.phi[env_ids] = 0.0
+        self.s[env_ids] = 0.0
+        self.epsilon[env_ids] = 0.0
+    
     # ------------------------------------------------------------------
     # State update (called every sim step)
     # ------------------------------------------------------------------
@@ -81,16 +84,18 @@ class RL2ACAdaptiveCtrl:
 
         if self.use_proactive_ctrl:
             self.phi = self.q_des - self.q_ref
+            self.s = qdj - self.alpha * (self.q_ref - qj)
         else:
             self.phi = self.q_des - qj
+            self.s = qdj - self.alpha * (self.q_des - qj)
 
         # Sliding variable
         # self.s = qdj - self.alpha * (self.q_des - qj)
-        self.s = qdj - self.alpha * (self.q_ref - qj)
+
 
         # Torque tracking error
         self.tau = qfrc_actuator
-        self.epsilon = (self.tauDes_old + self.comp) - self.tau
+        self.epsilon = self.tau - (self.tau_des + self.comp)
 
         # Log states
         self.q.copy_(qj)
@@ -128,8 +133,8 @@ class RL2ACAdaptiveCtrl:
         self._update_K(dt)
 
         self.comp_old.copy_(self.comp)
-        # self.comp = torch.einsum("bij,bj->bi", self.K, self.phi)
-        self.comp = torch.bmm(self.K, self.phi.unsqueeze(-1)).squeeze(-1)
+        self.comp = torch.einsum("bij,bj->bi", self.K, self.phi)
+        # self.comp = torch.bmm(self.K, self.phi.unsqueeze(-1)).squeeze(-1)
 
         # print(torch.norm(self.K[0]))
         # print(torch.norm(self.phi[0]))
@@ -150,22 +155,28 @@ class RL2ACAdaptiveCtrl:
 
     def _update_gamma(self, dt):
         # Elementwise equivalent of: Γ φ φᵀ Γ
-        # phi_outer = self.phi.unsqueeze(2) * self.phi.unsqueeze(1)  # [B,J,J]
+        phi_outer = self.phi.unsqueeze(2) * self.phi.unsqueeze(1)  # [B,J,J]
 
         # print(self.Gamma.shape)
 
-        dGamma = self.lambda_val[:, None, None] * self.Gamma
+        # dGamma = self.lambda_val[:, None, None] * self.Gamma
 
         # print(dGamma.shape)
 
-        dGamma -= ((self.Gamma @ self.phi_diag) @ self.phi_diag) @ self.Gamma
+        # dGamma -= ((self.Gamma @ self.phi_diag) @ self.phi_diag) @ self.Gamma
         
-        # dGamma = (
-        #     self.lambda_val[:, None, None] * self.Gamma
-        #     - torch.bmm(self.Gamma, torch.bmm(phi_outer, self.Gamma))
-        # )
+        dGamma = (
+            self.lambda_val[:, None, None] * self.Gamma
+            - torch.bmm(self.Gamma, torch.bmm(phi_outer, self.Gamma))
+        )
 
         self.Gamma += dt * dGamma
+        
+        self.Gamma = 0.5 * (self.Gamma + self.Gamma.transpose(-1, -2))
+        self.Gamma = self.Gamma + 1e-6 * torch.eye(self.Gamma.shape[-1],
+                                                   device=self.Gamma.device,
+                                                   dtype=self.Gamma.dtype,
+                                                   ).unsqueeze(0)
 
         # ---- Stability: norm clamp + symmetrize
         # gamma_norm = torch.norm(self.Gamma, dim=(1, 2), keepdim=True).clamp(min=1e-6)
@@ -176,10 +187,10 @@ class RL2ACAdaptiveCtrl:
 
     def _update_K(self, dt):
         # Equivalent to: -Γ φ (s + κ ε)ᵀ
-        # rhs = self.s + self.kappa * self.epsilon
-        # dK = -torch.einsum("bij,bj,bk->bik", self.Gamma, self.phi, rhs)
-        # dK -= self.eta * self.K
-        dK_dt = -self.Gamma @ self.phi_diag @ (self.s_diag + self.kappa * self.epsilon_diag)
-        dK_dt -= self.eta * self.K
+        rhs = self.s + self.kappa * self.epsilon
+        dK = -torch.einsum("bij,bj,bk->bik", self.Gamma, self.phi, rhs)
+        dK -= self.eta * self.K
+        # dK_dt = -self.Gamma @ self.phi_diag @ (self.s_diag + self.kappa * self.epsilon_diag)
+        # dK_dt -= self.eta * self.K
 
-        self.K += dt * dK_dt
+        self.K += dt * dK

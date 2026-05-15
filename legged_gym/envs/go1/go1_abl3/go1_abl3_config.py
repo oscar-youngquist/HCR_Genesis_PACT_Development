@@ -402,7 +402,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             
             # smoothness and stability
             lin_vel_z        = -2.0
-            base_height      = -1.5
+            base_height      = -2.0
             ang_vel_xy       = -0.05
             orientation      = -0.2
             dof_acc          = -2.5e-7
@@ -550,7 +550,7 @@ class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
         save_interval = 500
         
         
-        load_run = "May01_17-29-12_abl3_100hz_spec_materr"
+        load_run = "May11_22-26-21_hybrid_100hz_spec_materr"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/scratch_pact_exp/plane_tracking_test.csv"

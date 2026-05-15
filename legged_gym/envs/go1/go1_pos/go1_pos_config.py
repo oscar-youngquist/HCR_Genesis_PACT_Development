@@ -16,6 +16,10 @@ class GO1PosCfg( LeggedRobotCfg ):
         debug = False # if debugging, visualize contacts, 
         debug_viz = False # draw debug visualizations
 
+        # Added for PACT experiment collection
+        lateral_push_only = False
+
+
     
     class terrain( LeggedRobotCfg.terrain ):
         # mesh_type = 'plane' # plane, heightfield, trimesh
@@ -62,6 +66,9 @@ class GO1PosCfg( LeggedRobotCfg ):
         terrain_proportions = [0.10, 0.15, 0.25, 0.25, 0.20, 0.05]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
+
+        # Added for PACT experiment collection
+        reset_out_of_bounds = False
 
     class sim:
         # Common
@@ -504,7 +511,7 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         
         # load_run = "May01_17-08-23_pos_100hz_spec"
         # load_run = "May09_20-36-36_pos_100hz_spec"
-        load_run = "May10_23-53-49_pos_100hz_spec"
+        load_run = "May11_16-55-20_pos_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pos_stairs_12-16kg.csv"

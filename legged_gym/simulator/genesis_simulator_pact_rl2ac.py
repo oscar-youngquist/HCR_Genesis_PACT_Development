@@ -204,7 +204,7 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
 
         self._dof_tau[env_ids] = 0.
 
-        self.rl2ac_adaptive_ctrl.reset_adaptive_controller()
+        self.rl2ac_adaptive_ctrl.reset_adaptive_controller(env_ids)
         
         # PINN stuff
         self._grfs_buf[env_ids] = 0.
