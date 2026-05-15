@@ -206,17 +206,17 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
 
         self.rl2ac_adaptive_ctrl.reset_adaptive_controller(env_ids)
         
-        # PINN stuff
-        self._grfs_buf[env_ids] = 0.
-        self._contact_forces_buff[env_ids] = 0.
-        self._wb_dynamics_buff[env_ids] = 0.
-        self._wb_mass_mat_buff[env_ids] = 0.
-        self._wb_bias_vec_buff[env_ids] = 0.
-        self._torso_6dof_acceleration[env_ids] = 0.
-        self._base_world_lin_vel[env_ids] = 0.
-        self._base_world_ang_vel[env_ids] = 0.
-        self._last_base_world_lin_vel[env_ids] = 0.
-        self._last_base_world_ang_vel[env_ids] = 0.
+        # # PINN stuff
+        # self._grfs_buf[env_ids] = 0.
+        # self._contact_forces_buff[env_ids] = 0.
+        # self._wb_dynamics_buff[env_ids] = 0.
+        # self._wb_mass_mat_buff[env_ids] = 0.
+        # self._wb_bias_vec_buff[env_ids] = 0.
+        # self._torso_6dof_acceleration[env_ids] = 0.
+        # self._base_world_lin_vel[env_ids] = 0.
+        # self._base_world_ang_vel[env_ids] = 0.
+        # self._last_base_world_lin_vel[env_ids] = 0.
+        # self._last_base_world_ang_vel[env_ids] = 0.
 
     def reset_dofs(self, env_ids, dof_pos, dof_vel):
         """ Resets DOF position and velocities of selected environmments
@@ -948,15 +948,18 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
         
         self._contact_forces_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
         
-        self._wb_dynamics_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
-        
-        # Holds the generalized mass matrix computed by pinocchio, reshaped to match the model order (FR, FL, RR, RL)
-        self._wb_mass_mat_buff = torch.zeros((self._num_envs, self._wb_dim, self._wb_dim), device=self._device, dtype=torch.float)
-        
-        # Hold the bias vector (gravity, corilis, centerfugal) calculated by pinocchio, reshaped to match the model order
-        self._wb_bias_vec_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
+        self._base_pos_out_of_bounds_buf = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.bool)
 
-        self._torso_6dof_acceleration = torch.zeros(self._num_envs, 6, device=self._device, dtype=torch.float)
+        # self._wb_dynamics_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
+        
+        # # Holds the generalized mass matrix computed by pinocchio, reshaped to match the model order (FR, FL, RR, RL)
+        # self._wb_mass_mat_buff = torch.zeros((self._num_envs, self._wb_dim, self._wb_dim), device=self._device, dtype=torch.float)
+        
+        # # Hold the bias vector (gravity, corilis, centerfugal) calculated by pinocchio, reshaped to match the model order
+        # self._wb_bias_vec_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
+
+        # self._torso_6dof_acceleration = torch.zeros(self._num_envs, 6, device=self._device, dtype=torch.float)
 
         self._base_world_lin_vel = torch.zeros_like(self._base_lin_vel)
         self._base_world_ang_vel = torch.zeros_like(self._base_ang_vel)
@@ -1157,9 +1160,11 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
             self._base_pos[:, 0] <= self._terrain_x_range[0])
         y_out_of_bound = (self._base_pos[:, 1] >= self._terrain_y_range[1]) | (
             self._base_pos[:, 1] <= self._terrain_y_range[0])
-        out_of_bound_buf = x_out_of_bound | y_out_of_bound
-        env_ids = out_of_bound_buf.nonzero(as_tuple=False).flatten()
+        self._base_pos_out_of_bounds_buf[:] = x_out_of_bound | y_out_of_bound
+        env_ids = self._base_pos_out_of_bounds_buf.nonzero(as_tuple=False).flatten()
         if len(env_ids) == 0:
+            return
+        elif getattr(self._cfg.terrain, "reset_out_of_bounds", False):
             return
         else:
             # reset base position to initial position
