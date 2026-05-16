@@ -16,6 +16,9 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         debug = False       # if debugging, visualize contacts, 
         debug_viz = False    # draw debug visualizations
         
+        # Added for PACT experiment collection
+        lateral_push_only = False
+        
         # stuff for drawing the surface normal visulations
         debug_draw_swing_planes = False
         debug_viz_env                 = 0
@@ -74,6 +77,9 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         terrain_proportions = [0.10, 0.15, 0.25, 0.25, 0.20, 0.05]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
+
+        # Added for PACT experiment collection
+        reset_out_of_bounds = False
 
     class sim:
         # Common
