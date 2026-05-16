@@ -135,7 +135,7 @@ class GO1TauCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 4000     # number of steps with initial values held constant
+        push_warmup = 2000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -199,13 +199,13 @@ class GO1TauCfg( LeggedRobotCfg ):
         joint_friction_range_end   = [0.00, 2.00]
         joint_friction_range_start = [0.00, 1.00]
         
-        randomize_joint_stiffness = False
-        joint_stiffness_range_end   = [0.0, 0.0]
-        joint_stiffness_range_start = [0.0, 0.0]
+        randomize_joint_stiffness = True
+        joint_stiffness_range_end   = [0.0, 0.04]
+        joint_stiffness_range_start = [0.0, 0.02]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 0.80]
-        joint_damping_range_start = [0.30, 0.40]
+        joint_damping_range_end   = [0.00, 2.00]
+        joint_damping_range_start = [0.50, 1.50]
 
         # new domain randomization curriculum parameters
         best_reward_window = 200        # amount of history used to capture recent performance.
@@ -428,21 +428,17 @@ class GO1TauCfg( LeggedRobotCfg ):
                                 "ang_vel_xy",
                                 "dof_close_to_default",
                                 "torque_limits",
-                                # "action_rate",
-                                # "action_smoothness"
                                 ]
             
             curr_reward_bounds = {
                                   "orientation":[-0.2,-1.0],
                                   "ang_vel_xy":[-0.05, -0.1],
                                   "dof_close_to_default":[-0.05, -0.20],
-                                  "torque_limits":[-0.0001, -1.0e-2],
-                                #   "action_rate":[-0.0001, -0.01],
-                                #   "action_smoothness":[-0.0001,-0.01],
+                                  "torque_limits":[-0.001, -1.0e-1],
                                  }
 
             curr_steps = 500
-            warmup_steps = 6500
+            warmup_steps = 6000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -480,6 +476,8 @@ class GO1TauCfgPPO( LeggedRobotCfgPPO ):
         critic_layers = [1024,256,128]
         
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_tau_rough/May13_23-22-14_tau_100hz_spec_smartcurr/model_4000.pt"
+
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
@@ -503,6 +501,7 @@ class GO1TauCfgPPO( LeggedRobotCfgPPO ):
         adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target
         adaptive_ent_ter_threshold = 6.0         # minimum avg. terrain curriculum progress target
         adaptive_ent_softmax_temp = 2.0          # temperature (sharpness) of the softmax operation used in the alg. 
+        
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PosTau'
         algorithm_class_name = 'PPO_PosTau'

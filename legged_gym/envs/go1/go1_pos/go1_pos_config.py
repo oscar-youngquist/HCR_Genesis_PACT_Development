@@ -136,7 +136,7 @@ class GO1PosCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 4000     # number of steps with initial values held constant
+        push_warmup = 2000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -435,11 +435,11 @@ class GO1PosCfg( LeggedRobotCfg ):
                                   "orientation":[-0.2,-2.0],
                                   "ang_vel_xy":[-0.05, -0.2],
                                   "dof_close_to_default":[-0.05, -0.20],
-                                  "torque_limits":[-0.0001, -1.0e-2],
+                                  "torque_limits":[-0.001, -1.0e-1],
                                  }
 
             curr_steps = 500
-            warmup_steps = 6500
+            warmup_steps = 6000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -477,7 +477,8 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         critic_layers = [1024,256,128]
         
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
-        
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pos_rough/May11_16-55-20_pos_100hz_spec/model_4000.pt"
+
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
