@@ -237,6 +237,9 @@ class OnPolicyRunnerRL2AC:
             # Step the domain randomization if approperiate
             if self.env.simulator.use_domainrand_curriculum:
                 self.env.simulator._step_domian_rand(it)
+                self.writer.add_scalar('Values/domain_rand_joint_dynamics_progress',self.env.simulator.domain_rand_joint_dynamics_progress,it)
+                self.writer.add_scalar('Values/domain_rand_mass_com_progress',self.env.simulator.domain_rand_mass_com_progress,it)
+                self.writer.add_scalar('Values/domain_rand_disturbance_progress',self.env.simulator.domain_rand_disturbance_progress,it)
 
             performance_metrics = {}
             if ep_infos and self.use_adaptive_entropy:

@@ -256,6 +256,12 @@ class Go1ABL1(BaseTask):
                 self.simulator.terrain_levels.float())
         if self.cfg.commands.curriculum:
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
+        if self.cfg.domain_rand.use_domainrand_curriculum:
+            phase_to_idx = {"joint_dynamics": 0.0, "mass_com": 1.0, "disturbance": 2.0}
+            self.extras["episode"]["domain_rand_phase"] = phase_to_idx.get(self.simulator.domain_rand_phase, -1.0)
+            self.extras["episode"]["domain_rand_joint_dynamics_progress"] = self.simulator.domain_rand_joint_dynamics_progress
+            self.extras["episode"]["domain_rand_mass_com_progress"] = self.simulator.domain_rand_mass_com_progress
+            self.extras["episode"]["domain_rand_disturbance_progress"] = self.simulator.domain_rand_disturbance_progress
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf

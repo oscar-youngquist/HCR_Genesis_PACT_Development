@@ -97,6 +97,14 @@ def override_configs(env_cfg, args):
         env_cfg.commands.ranges.heading     = [-3.14, 3.14]
     env_cfg.commands.resampling_time = 5.0
 
+    # Just sample a value right in the middle of the training ranges
+    env_cfg.domain_rand.joint_friction_range        = [0.1, 0.1]
+    env_cfg.domain_rand.joint_armature_range        = [0.02, 0.02]
+    env_cfg.domain_rand.joint_stiffness_range_start = [0.02, 0.02]
+    env_cfg.domain_rand.joint_stiffness_range_end   = [0.02, 0.02]
+    env_cfg.domain_rand.joint_damping_range_start   = [0.50, 0.50]
+    env_cfg.domain_rand.joint_damping_range_end     = [0.50, 0.50]
+
     # Slightly relaxed from training termination conditions
     env_cfg.termination.roll_threshold = 1.57
     env_cfg.termination.pitch_threshold = 1.57

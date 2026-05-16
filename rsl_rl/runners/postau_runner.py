@@ -254,6 +254,7 @@ class OnPolicyRunnerPosTau:
                 else:
                     self.writer.add_scalar('Values/domain_rand_reward_ema',0.0,it) 
                 self.writer.add_scalar('Values/required_reward',self.env.simulator.required_reward,it) 
+                self.writer.add_scalar('Values/domain_rand_joint_dynamics_progress',self.env.simulator.domain_rand_joint_dynamics_progress,it)
                 self.writer.add_scalar('Values/domain_rand_mass_com_progress',self.env.simulator.domain_rand_mass_com_progress,it) 
                 self.writer.add_scalar('Values/domain_rand_disturbance_progress',self.env.simulator.domain_rand_disturbance_progress,it) 
                     

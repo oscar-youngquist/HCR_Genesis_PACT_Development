@@ -436,57 +436,63 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
         self._scene.viewer.set_camera_pose(pos=eye, lookat=target)
     
     def _step_domian_rand(self, num_iters):
-        if (num_iters - self.push_warmup_step) > self.num_push_steps:
-            return
-        
-        elif num_iters <= self.push_warmup_step:
-            print("Push Value: ", self.push_value)
-            print("Wrench Value: ", self.wrench_value)
-            print("Vertical Push Value: ", self.vert_value)
-            print("Mass Max Value: ", self.mass_max_value)
-            print("COM Delta X Value: ", self.com_delta_x_value)
-            print("COM Delta Y Value: ", self.com_delta_y_value)
-            print("COM Delta Z Value: ", self.com_delta_z_value)
-            print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
-            print("Joint Damping Bounds: ", self.joint_damping_bound_current)
-            # print("Torque Limits - ", self.torque_limits[0])
+        if num_iters <= self.push_warmup_step:
+            self._print_domain_rand_values()
             return
 
-        adjusted_step = num_iters - self.push_warmup_step
-        
-        # Safety catch, hopefully isn't needed really
-        if adjusted_step == 0:
-            print("Push Value: ", self.push_value)
-            print("Wrench Value: ", self.wrench_value)
-            print("Vertical Push Value: ", self.vert_value)
-            print("Mass Max Value: ", self.mass_max_value)
-            print("COM Delta X Value: ", self.com_delta_x_value)
-            print("COM Delta Y Value: ", self.com_delta_y_value)
-            print("COM Delta Z Value: ", self.com_delta_z_value)
-            print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
-            print("Joint Damping Bounds: ", self.joint_damping_bound_current)
-            # print("Torque Limits - ", self.torque_limits[0])
-            return
+        if self.domain_rand_phase == "joint_dynamics":
+            self.domain_rand_joint_dynamics_progress = min(
+                1.0,
+                self.domain_rand_joint_dynamics_progress + self.domain_rand_joint_dynamics_delta,
+            )
+            if self.domain_rand_joint_dynamics_progress >= 1.0:
+                self.domain_rand_phase = "mass_com"
 
-        self.push_value      = (adjusted_step / self.num_push_steps) * self.push_diff + self.push_bounds[0]
-        self.wrench_value    = (adjusted_step / self.num_push_steps) * self.wrench_diff + self.wrench_bounds[0]
-        self.vert_value      = (adjusted_step / self.num_push_steps) * self.vert_diff + self.vert_bounds[0]
-        self.mass_max_value  = (adjusted_step / self.num_push_steps) * self.mass_bounds_diff + self.max_mass_bounds[0]
-        self.com_delta_x_value = (adjusted_step / self.num_push_steps) * self.com_delta_x_diff + self.com_delta_x_bounds[0]
-        self.com_delta_y_value = (adjusted_step / self.num_push_steps) * self.com_delta_y_diff + self.com_delta_y_bounds[0]
-        self.com_delta_z_value = (adjusted_step / self.num_push_steps) * self.com_delta_z_diff + self.com_delta_z_bounds[0]
-        self.joint_stiffness_bound_current = (adjusted_step / self.num_push_steps) * self.joint_stiffness_range + self.joint_stiffness_bounds_start
-        self.joint_damping_bound_current = (adjusted_step / self.num_push_steps) * self.joint_damping_range + self.joint_damping_bounds_start
+        elif self.domain_rand_phase == "mass_com":
+            self.domain_rand_mass_com_progress = min(
+                1.0,
+                self.domain_rand_mass_com_progress + self.domain_rand_mass_com_delta,
+            )
+            if self.domain_rand_mass_com_progress >= 1.0:
+                self.domain_rand_phase = "disturbance"
 
-       
-        # If we haven't returned already by now, then we are stepping, and so we want to reset the vertical com-shift bounds
-        #     if necessary
+        elif self.domain_rand_phase == "disturbance":
+            self.domain_rand_disturbance_progress = min(
+                1.0,
+                self.domain_rand_disturbance_progress + self.domain_rand_disturbance_delta,
+            )
+
+        p_joint = self.domain_rand_joint_dynamics_progress
+        p_mc = self.domain_rand_mass_com_progress
+        p_dist = self.domain_rand_disturbance_progress
+
+        self.push_value = p_dist * self.push_diff + self.push_bounds[0]
+        self.wrench_value = p_dist * self.wrench_diff + self.wrench_bounds[0]
+        self.vert_value = p_dist * self.vert_diff + self.vert_bounds[0]
+        self.mass_max_value = p_mc * self.mass_bounds_diff + self.max_mass_bounds[0]
+        self.com_delta_x_value = p_mc * self.com_delta_x_diff + self.com_delta_x_bounds[0]
+        self.com_delta_y_value = p_mc * self.com_delta_y_diff + self.com_delta_y_bounds[0]
+        self.com_delta_z_value = p_mc * self.com_delta_z_diff + self.com_delta_z_bounds[0]
+        self.joint_stiffness_bound_current = (
+            p_joint * self.joint_stiffness_range + self.joint_stiffness_bounds_start
+        )
+        self.joint_damping_bound_current = (
+            p_joint * self.joint_damping_range + self.joint_damping_bounds_start
+        )
+        self.joint_friction_bound_current = (
+            p_joint * self.joint_friction_range + self.joint_friction_bounds_start
+        )
+
         if self.com_rand_z_positive:
             self.com_delta_z_val_bounds = [-self._cfg.domain_rand.com_displacement_z_min, self.com_delta_z_value]
-        
-        
-        # self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
 
+        self._print_domain_rand_values()
+
+    def _print_domain_rand_values(self):
+        print("Phase: ", self.domain_rand_phase)
+        print("Joint Dynamics Progress: ", self.domain_rand_joint_dynamics_progress)
+        print("Mass/COM Progress: ", self.domain_rand_mass_com_progress)
+        print("Disturbance Progress: ", self.domain_rand_disturbance_progress)
         print("Push Value: ", self.push_value)
         print("Wrench Value: ", self.wrench_value)
         print("Vertical Push Value: ", self.vert_value)
@@ -496,7 +502,7 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
         print("COM Delta Z Value: ", self.com_delta_z_value)
         print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
         print("Joint Damping Bounds: ", self.joint_damping_bound_current)
-        # print("Torque Limits - ", self.torque_limits[0])
+        print("Joint Friction Bounds: ", self.joint_friction_bound_current)
 
     #----- Protected methods -----#
     def _parse_cfg(self):
@@ -585,12 +591,36 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
         self.joint_damping_range        = np.array(self._cfg.domain_rand.joint_damping_range_end) - np.array(self._cfg.domain_rand.joint_damping_range_start)
         self.joint_damping_bound_current = self.joint_damping_bounds_start
 
+        self.joint_friction_bounds_start = self._cfg.domain_rand.joint_friction_range_start
+        self.joint_friction_bounds_end   = self._cfg.domain_rand.joint_friction_range_end
+        self.joint_friction_range        = np.array(self.joint_friction_bounds_end) - np.array(self.joint_friction_bounds_start)
+        self.joint_friction_bound_current = self.joint_friction_bounds_start
+
         # Tradeoff curriculum stuff
         self.feedforward_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
         self.feedback_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
 
         self._wb_dim = self._cfg.env.whole_body_dim
         self._grf_dim = self._cfg.env.grf_dim
+
+        self._init_domain_rand_curriculum_state()
+
+    def _init_domain_rand_curriculum_state(self):
+        self.domain_rand_phase = "joint_dynamics"
+
+        self.domain_rand_joint_dynamics_progress = 0.0
+        self.domain_rand_mass_com_progress = 0.0
+        self.domain_rand_disturbance_progress = 0.0
+
+        self.domain_rand_joint_dynamics_delta = getattr(
+            self._cfg.domain_rand, "joint_dynamics_progress_delta", 0.002
+        )
+        self.domain_rand_mass_com_delta = getattr(
+            self._cfg.domain_rand, "mass_com_progress_delta", 0.002
+        )
+        self.domain_rand_disturbance_delta = getattr(
+            self._cfg.domain_rand, "disturbance_progress_delta", 0.001
+        )
 
     # ------------- Callbacks --------------
     def _setup_camera(self):
@@ -1341,7 +1371,7 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
         # This armature will be Refreshed when envs are reset
 
     def _randomize_joint_friction(self, env_ids):
-        min_friction, max_friction = self._cfg.domain_rand.joint_friction_range
+        min_friction, max_friction = self.joint_friction_bound_current
         friction = torch.rand((len(env_ids),), dtype=torch.float, device=self._device) \
             * (max_friction - min_friction) + min_friction
         self._joint_friction[env_ids, 0] = friction.detach().clone()
