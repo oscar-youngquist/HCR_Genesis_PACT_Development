@@ -221,6 +221,7 @@ class Go1ABL2(BaseTask):
 
         # after base pose/orientation has been reset:
         self.phi_prev_orientation[env_ids] = self._potential_orientation()[env_ids]
+        self.phi_prev_height[env_ids] = self._potential_height()[env_ids]
 
         # reset buffers
         self.llast_actions[env_ids] = 0.
@@ -600,6 +601,7 @@ class Go1ABL2(BaseTask):
         
         # PBRS orientation reward
         self.phi_prev_orientation = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        self.phi_prev_height = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
 
         self.forward_vec[:, 0] = 1.0
         self.fail_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device, requires_grad=False)
@@ -1330,6 +1332,56 @@ class Go1ABL2(BaseTask):
         # <2 stance feet -> reward stays 0
         return rew
 
+    def _compute_vhip_angle(self):
+        com_pos = self.simulator.base_pos[:, 0:3]
+        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]
+        foot_positions = self.simulator.feet_pos
+        normal_forces = foot_contact_forces[:, :, 2:3]
+        total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)
+        cop_pos = torch.sum(foot_positions * normal_forces, dim=1) / total_force
+        pendulum_length = torch.norm(com_pos - cop_pos, dim=1).clamp(min=1e-6)
+        com_z = com_pos[:, 2]
+        cos_theta = torch.clamp(com_z / pendulum_length, -1.0, 1.0)
+        return torch.acos(cos_theta)
+
+    def _compute_vhip_acceleration(self):
+        theta = self._compute_vhip_angle()
+        com_pos = self.simulator.base_pos[:, 0:3]
+        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]
+        foot_positions = self.simulator.feet_pos
+        normal_forces = foot_contact_forces[:, :, 2:3]
+        total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)
+        cop_pos = torch.sum(foot_positions * normal_forces, dim=1) / total_force
+        pendulum_length = torch.norm(com_pos - cop_pos, dim=1).clamp(min=1e-6)
+        return -(9.81 / pendulum_length) * torch.sin(theta)
+
+    def _reward_vhip_angle(self):
+        theta = self._compute_vhip_angle()
+        angle_error = torch.abs(theta) - 0.1
+        return torch.clamp(angle_error, min=0)
+
+    def _reward_vhip_angular_acc(self):
+        theta_ddot = self._compute_vhip_acceleration()
+        acc_error = torch.abs(theta_ddot) - 0.001
+        return torch.clamp(acc_error, min=0.0)
+
+    def _reward_rear_foot_overreach(self):
+        rear_1 = quat_rotate_inverse(
+            self.simulator.base_quat,
+            self.simulator.feet_pos[:, 2, :] - self.simulator.base_pos
+        )
+        rear_2 = quat_rotate_inverse(
+            self.simulator.base_quat,
+            self.simulator.feet_pos[:, 3, :] - self.simulator.base_pos
+        )
+        rear_x = torch.stack([rear_1[:, 0], rear_2[:, 0]], dim=1)
+        x_error = torch.abs(rear_x - self.cfg.rewards.rear_foot_x_nominal)
+        overreach = torch.relu(x_error - self.cfg.rewards.rear_foot_x_margin)
+        contact = (
+            self.simulator.link_contact_forces[:, self.simulator.feet_indices[2:4], 2] > 5.0
+        ).float()
+        return torch.sum(contact * overreach ** 2, dim=1)
+
     def _reward_pd_target_torque_limit(self):
         """
         Penalize joint position targets that would induce PD torques
@@ -1483,6 +1535,12 @@ class Go1ABL2(BaseTask):
         roll_pitch = self.simulator.projected_gravity[:, :2]
         return -torch.sum(roll_pitch**2, dim=1)
 
+    def _potential_height(self):
+        base_height = torch.mean(self.simulator.base_pos[:, 2].unsqueeze(
+            1) - self.simulator.measured_heights, dim=1)
+        h_po = torch.square(base_height - self.cfg.rewards.base_height_target)
+        return torch.exp(-h_po / 0.5)
+
     def _reward_pbrs_orientation(self):
         phi_next = self._potential_orientation()
         shaping = phi_next - self.phi_prev_orientation
@@ -1493,6 +1551,16 @@ class Go1ABL2(BaseTask):
         shaping[terminal_mask] = -self.phi_prev_orientation[terminal_mask]
 
         self.phi_prev_orientation = phi_next
+        return shaping
+
+    def _reward_pbrs_height(self):
+        phi_next = self._potential_height()
+        shaping = phi_next - self.phi_prev_height
+
+        terminal_mask = self.reset_buf & (~self.time_out_buf) & (~self.non_failure_reset_buf)
+        shaping[terminal_mask] = -self.phi_prev_height[terminal_mask]
+
+        self.phi_prev_height = phi_next
         return shaping
 
     def _reward_ff_ratio(self):

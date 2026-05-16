@@ -365,7 +365,8 @@ class GO1ABL2Cfg( LeggedRobotCfg ):
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.28
-
+        rear_foot_x_nominal = -0.20
+        rear_foot_x_margin = 0.08
         support_polygon_sigma = 0.01
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
@@ -430,10 +431,18 @@ class GO1ABL2Cfg( LeggedRobotCfg ):
             feedback_torques           = -2.0e-5
             dof_act_limits             = 0.0
 
-            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
-            pbrs_orientation = 100.0          # potiential reward for encourgaing orientation recovery
+            # Taken from MIT benchmarking PBRS for humanoid locomotion paper
+            pbrs_orientation = 10.0         # potiential reward for encouraging orientation recovery
+            pbrs_height = 10.0              # potiential reward for encouraging height change recovery
 
+            # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
+            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
+            vhip_angle = -0.1                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact
+            vhip_angular_acc = -0.001         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
+
+            # I developed these
             front_foot_overreach = -10000.0
+            rear_foot_overreach = -10.0
 
             # gait
             feet_air_time    = 0.70            # tracking reward for long steps
