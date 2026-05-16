@@ -452,6 +452,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             hip_pos = -0.05
             
             foot_slip        = -0.01           # penalty for feet slipping
+            stumble          = -0.2
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
         class reward_curriculum():

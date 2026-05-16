@@ -1048,6 +1048,18 @@ class Go1PACTPos(BaseTask):
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.
         return  torch.sum(torch.square(contact * torch.sum(self.simulator.feet_vel[:,:,:2], dim=-1)), dim=-1)
 
+    def _reward_stumble(self):
+        """
+        Penalize feet colliding with vertical surfaces / obstacles during swing.
+        """
+        contact_forces = self.simulator.link_contact_forces[:, self.simulator.feet_indices, :]
+        horizontal_force = torch.norm(contact_forces[:, :, :2], dim=2)
+        vertical_force = torch.abs(contact_forces[:, :, 2])
+        contact = vertical_force > 1.0
+        swing = (~contact).float()
+        stumble = (horizontal_force > 4.0 * vertical_force) & (horizontal_force > 5.0)
+        return torch.sum(swing * stumble.float(), dim=1)
+
     def _reward_feet_contact_forces(self):
         # penalize high contact forces
         return torch.sum((torch.norm(self.simulator.link_contact_forces[:, self.simulator.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
