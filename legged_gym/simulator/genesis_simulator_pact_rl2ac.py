@@ -446,7 +446,7 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
                 self.domain_rand_joint_dynamics_progress + self.domain_rand_joint_dynamics_delta,
             )
             if self.domain_rand_joint_dynamics_progress >= 1.0:
-                self.domain_rand_phase = "mass_com"
+                self._advance_domain_rand_phase()
 
         elif self.domain_rand_phase == "mass_com":
             self.domain_rand_mass_com_progress = min(
@@ -454,13 +454,15 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
                 self.domain_rand_mass_com_progress + self.domain_rand_mass_com_delta,
             )
             if self.domain_rand_mass_com_progress >= 1.0:
-                self.domain_rand_phase = "disturbance"
+                self._advance_domain_rand_phase()
 
         elif self.domain_rand_phase == "disturbance":
             self.domain_rand_disturbance_progress = min(
                 1.0,
                 self.domain_rand_disturbance_progress + self.domain_rand_disturbance_delta,
             )
+            if self.domain_rand_disturbance_progress >= 1.0:
+                self._advance_domain_rand_phase()
 
         p_joint = self.domain_rand_joint_dynamics_progress
         p_mc = self.domain_rand_mass_com_progress
@@ -606,11 +608,22 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
         self._init_domain_rand_curriculum_state()
 
     def _init_domain_rand_curriculum_state(self):
-        self.domain_rand_phase = "joint_dynamics"
-
         self.domain_rand_joint_dynamics_progress = 0.0
         self.domain_rand_mass_com_progress = 0.0
         self.domain_rand_disturbance_progress = 0.0
+
+        self.domain_rand_curriculum_phases = []
+        if getattr(self._cfg.domain_rand, "use_joint_dynamics_curriculum", True):
+            self.domain_rand_curriculum_phases.append("joint_dynamics")
+        if getattr(self._cfg.domain_rand, "use_mass_com_curriculum", True):
+            self.domain_rand_curriculum_phases.append("mass_com")
+        if getattr(self._cfg.domain_rand, "use_disturbance_curriculum", True):
+            self.domain_rand_curriculum_phases.append("disturbance")
+        self.domain_rand_phase = (
+            self.domain_rand_curriculum_phases[0]
+            if self.domain_rand_curriculum_phases
+            else "complete"
+        )
 
         self.domain_rand_joint_dynamics_delta = getattr(
             self._cfg.domain_rand, "joint_dynamics_progress_delta", 0.002
@@ -620,6 +633,19 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
         )
         self.domain_rand_disturbance_delta = getattr(
             self._cfg.domain_rand, "disturbance_progress_delta", 0.001
+        )
+
+    def _advance_domain_rand_phase(self):
+        if self.domain_rand_phase not in self.domain_rand_curriculum_phases:
+            self.domain_rand_phase = "complete"
+            return
+
+        phase_idx = self.domain_rand_curriculum_phases.index(self.domain_rand_phase)
+        next_idx = phase_idx + 1
+        self.domain_rand_phase = (
+            self.domain_rand_curriculum_phases[next_idx]
+            if next_idx < len(self.domain_rand_curriculum_phases)
+            else "complete"
         )
 
     # ------------- Callbacks --------------

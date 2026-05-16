@@ -222,6 +222,9 @@ class GO1PosCfg( LeggedRobotCfg ):
         joint_dynamics_progress_delta = 0.02 # domain rand step delta for stepping joint-level dynamics parameters
         mass_com_progress_delta = 0.01       # domain rand step delta for stepping payload parameters
         disturbance_progress_delta = 0.01    # domain rand step delta for external disturbance parameters
+        use_joint_dynamics_curriculum = True # set False to skip joint stiffness/damping/friction curriculum updates
+        use_mass_com_curriculum = True       # set False to skip payload and CoM curriculum updates
+        use_disturbance_curriculum = True    # set False to skip push/wrench curriculum updates
     class noise (LeggedRobotCfg.noise):
         add_noise = True
         noise_level = 1.0 # scales other values
