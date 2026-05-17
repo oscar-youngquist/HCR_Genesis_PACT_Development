@@ -8,14 +8,11 @@ import os
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.math_utils import *
 
-import multiprocessing as mp
 import random
 
 import torch.nn.functional as F
 import pinocchio as pn
 from collections import deque
-
-from .parallel_pino_workers import PinocchioAsync
 
 if SIMULATOR == "genesis":
     import genesis as gs
@@ -29,26 +26,14 @@ class GenesisSimulator_PACT_Pos(Simulator):
         self.first_loop_feedback = None
 
     def _create_async_pino_workers(self):
-        wb_correct_pino_2_model_ordering = [0,1,2,3,4,5]
-        wb_correct_pino_2_model_ordering.extend(self.pino_2_model_joint_act_map)
-        
-        # For safeties shake, use only 90% of available CPU's
-        num_cpus = int(mp.cpu_count() * 0.98)
-
-        # Build the class that manages (1) shared input/output memeory and (2) invoking worker processes 
-        self.async_pino_manager = PinocchioAsync(
-            self.pino_model,
-            self._num_envs,
-            self.pino_foot_names,
-            wb_correct_pino_2_model_ordering,
-            self._wb_dim,
-            (12,1),
-            num_cpus
-            )
+        # PACT_POS currently does not run the async Pinocchio dynamics path in
+        # post_physics_step, so avoid starting unused worker processes.
+        self.async_pino_manager = None
 
     def _shutdown_asynic_pino_workers(self):
-        # clear shared memory and persistent CPU workers
-        self.async_pino_manager.shutdown()        
+        if self.async_pino_manager is not None:
+            self.async_pino_manager.shutdown()
+            self.async_pino_manager = None
     
     #----- Public methods -----#
     def step(self, actions):

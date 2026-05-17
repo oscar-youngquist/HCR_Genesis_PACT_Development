@@ -7,6 +7,7 @@ import pinocchio as pn
 import time
 import os
 import queue
+import math
 
 
 def shared_memory_exists(name):
@@ -163,10 +164,12 @@ def apply_base_inertia_randomization(
     )
 
 def compute_single_env(i, shared, pino_model, pino_data, 
-                       pino_foot_names,
+                       pino_foot_frame_ids,
                        correct_idxs,
                        base_joint_id,
-                       nominal_base_inertia):
+                       nominal_base_inertia,
+                       aq0,
+                       contact_tau):
     """
     Compute WB dynamics, mass matrix, bias forces, and contact forces
     for a single environment index i.
@@ -200,7 +203,7 @@ def compute_single_env(i, shared, pino_model, pino_data,
     shared.acc6d[i] = acc[:6]
 
     # Pinocchio general coords
-    aq0 = np.zeros_like(qd)
+    aq0.fill(0.0)
 
     b = pn.rnea(pino_model, pino_data, q, qd, aq0)
     M = pn.crba(pino_model, pino_data, q)
@@ -214,16 +217,20 @@ def compute_single_env(i, shared, pino_model, pino_data,
     shared.bias[i] = b[correct_idxs]
 
     # Contact forces
-    J_list = []
-    for foot_name in pino_foot_names:
-        fid = pino_model.getFrameId(foot_name)
-        J = pn.computeFrameJacobian(pino_model, pino_data, q, fid, pn.ReferenceFrame.LOCAL_WORLD_ALIGNED)[0:3, :]
-        J_list.append(J)
+    contact_tau.fill(0.0)
+    grf_flat = grf.reshape(-1)
+    for foot_idx, fid in enumerate(pino_foot_frame_ids):
+        J = pn.computeFrameJacobian(
+            pino_model,
+            pino_data,
+            q,
+            fid,
+            pn.ReferenceFrame.LOCAL_WORLD_ALIGNED,
+        )[0:3, :]
+        start = 3 * foot_idx
+        contact_tau += J.T @ grf_flat[start:start + 3]
 
-    J_total = np.concatenate(J_list, axis=0)
-    tau = (J_total.transpose() @ grf).squeeze()
-
-    shared.wb_contacts[i] = tau[correct_idxs]
+    shared.wb_contacts[i] = contact_tau[correct_idxs]
 
 def worker_loop(worker_id, shared_names, shapes, dtypes,
                 pino_model, pino_foot_names, correct_idxs,
@@ -276,31 +283,40 @@ def worker_loop(worker_id, shared_names, shapes, dtypes,
     nominal_base_inertia = clone_inertia(
         pino_model.inertias[base_joint_id]
     )
+    pino_foot_frame_ids = [
+        pino_model.getFrameId(foot_name) for foot_name in pino_foot_names
+    ]
+    aq0 = np.zeros(shapes["qd"][1], dtype=dtypes["qd"])
+    contact_tau = np.zeros(shapes["qd"][1], dtype=dtypes["qd"])
 
     while True:
         try:
             # Try to get a task, but timeout if none available
-            env_id = task_queue.get(timeout=idle_sleep)
+            task = task_queue.get(timeout=idle_sleep)
         except queue.Empty:
             # No task, yield CPU
             time.sleep(idle_sleep)  # optional extra sleep
             continue
 
-        if env_id == "STOP":
+        if task == "STOP":
             break
 
-        compute_single_env(
-            env_id,
-            shared,
-            pino_model,
-            pino_data,
-            pino_foot_names,
-            correct_idxs,
-            base_joint_id,
-            nominal_base_inertia,
-        )
+        start_env, end_env = task
+        for env_id in range(start_env, end_env):
+            compute_single_env(
+                env_id,
+                shared,
+                pino_model,
+                pino_data,
+                pino_foot_frame_ids,
+                correct_idxs,
+                base_joint_id,
+                nominal_base_inertia,
+                aq0,
+                contact_tau,
+            )
 
-        done_queue.put(env_id)
+        done_queue.put(task)
 
     # Close handles (don't unlink, main process owns them)
     for shm in shared_shms.values():
@@ -322,6 +338,7 @@ class PinocchioAsync:
         self.pino_foot_names = pino_foot_names
         self.correct_idxs = correct_idxs
         self.base_joint_id = base_joint_id
+        self.pending_chunks = 0
 
         # Shared memory
         self.shared = SharedTensors(
@@ -360,14 +377,22 @@ class PinocchioAsync:
             self.workers.append(p)
 
     def compute_async(self):
-        for env_id in range(self.num_envs):
-            self.task_q.put(env_id)
+        self.pending_chunks = 0
+        if not self.workers or self.num_envs == 0:
+            return
+
+        chunk_size = math.ceil(self.num_envs / len(self.workers))
+        for start_env in range(0, self.num_envs, chunk_size):
+            end_env = min(start_env + chunk_size, self.num_envs)
+            self.task_q.put((start_env, end_env))
+            self.pending_chunks += 1
 
     def wait(self):
         completed = 0
-        while completed < self.num_envs:
+        while completed < self.pending_chunks:
             _ = self.done_q.get()
             completed += 1
+        self.pending_chunks = 0
 
     def shutdown(self):
         for _ in self.workers:
