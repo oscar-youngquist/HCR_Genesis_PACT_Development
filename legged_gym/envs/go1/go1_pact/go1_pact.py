@@ -190,7 +190,7 @@ class Go1PACT(BaseTask):
         else:
             self.non_failure_reset_buf[:] = False
         
-        # print(f"timeout termination: {self.time_out_buf}")
+        # print(f"terrain termination: {self.non_failure_reset_buf}")
         # print("======================================================")
 
         self.reset_buf = (

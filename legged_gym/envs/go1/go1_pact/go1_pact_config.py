@@ -209,15 +209,15 @@ class GO1PACTCfg( LeggedRobotCfg ):
         joint_armature_range = [0.00, 0.04]         # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range_end   = [0.00, 2.00]
-        joint_friction_range_start = [0.00, 1.00]
+        joint_friction_range_end   = [0.00, 5.00]
+        joint_friction_range_start = [0.00, 2.50]
         
         randomize_joint_stiffness = True
         joint_stiffness_range_end   = [0.0, 0.04]
         joint_stiffness_range_start = [0.0, 0.02]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 2.20]
+        joint_damping_range_end   = [1.00, 3.00]
         joint_damping_range_start = [0.50, 1.50]
         
         
@@ -385,9 +385,9 @@ class GO1PACTCfg( LeggedRobotCfg ):
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
-            collision             = -1.0
+            collision             = -10.0
             dof_pos_limits        = -2.0
-            dof_close_to_default  = -0.01
+            dof_close_to_default  = -0.05
             torque_limits         = -0.01
             pd_target_torque_limit = 0.0
             
@@ -452,18 +452,18 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.70            # tracking reward for long steps
             # foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance      
-            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
-            hip_pos = -0.05
+            foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            hip_pos = -0.2
             
             foot_slip        = -0.01          # penalty for feet slipping
-            stumble          = -0.2
+            stumble          = -1.0
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
 
         class reward_curriculum():
             curr_reward_keys = ["ang_vel_xy", 
                                 "orientation",
                                 "torque_limits",
-                                "dof_close_to_default",
+                                "hip_pos",
                                 "pos_action_rate", 
                                 "pos_action_smoothness",
                                 "tau_action_rate", 
@@ -473,8 +473,8 @@ class GO1PACTCfg( LeggedRobotCfg ):
             curr_reward_bounds = {
                                   "ang_vel_xy":[-0.05, -0.2],
                                   "orientation":[-0.2,-2.0],
-                                  "torque_limits":[-1.0e-3, -1.0e-1],
-                                  "dof_close_to_default":[-0.05, -0.25],
+                                  "torque_limits":[-1.0e-2, -1.0],
+                                  "hip_pos":[-0.2, -0.4],
                                   "pos_action_rate":[-0.001, -0.01],
                                   "pos_action_smoothness":[-0.001,-0.01],
                                   "tau_action_rate":[-0.002, -0.02],

@@ -33,14 +33,14 @@ def override_configs(env_cfg, args):
         
         # random uniform terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-                                        #   "min_height" : -0.08, "max_height": 0.08, 
-                                        #   "step":0.005, "downsampled_scale" : 0.2}
+        #                                   "min_height" : -0.08, "max_height": 0.08, 
+        #                                   "step":0.005, "downsampled_scale" : 0.2}
         # # slope
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
-                                        #   "slope": -0.4, "platform_size": 3.0}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
+                                          "slope": -0.4, "platform_size": 3.0}
         # # stairs
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-                                        "step_width": 0.40, "step_height": -0.10, "platform_size": 3.0}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
+        #                                 "step_width": 0.40, "step_height": -0.10, "platform_size": 3.0}
         # # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.1,
@@ -93,7 +93,8 @@ def override_configs(env_cfg, args):
     env_cfg.env.lateral_push_only = True
 
     # Just sample a value right in the middle of the training ranges
-    env_cfg.domain_rand.joint_friction_range        = [0.50, 0.50]
+    env_cfg.domain_rand.joint_friction_range_end    = [1.00, 1.00]
+    env_cfg.domain_rand.joint_friction_range_start  = [1.00, 1.00]
     env_cfg.domain_rand.joint_armature_range        = [0.02, 0.02]
     env_cfg.domain_rand.joint_stiffness_range_start = [0.02, 0.02]
     env_cfg.domain_rand.joint_stiffness_range_end   = [0.02, 0.02]
@@ -107,29 +108,29 @@ def override_configs(env_cfg, args):
     env_cfg.domain_rand.randomize_motor_strength = False
     
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_com_displacement = False
-    env_cfg.domain_rand.randomize_base_mass = False
+    env_cfg.domain_rand.randomize_com_displacement = True
+    env_cfg.domain_rand.randomize_base_mass = True
     
     env_cfg.domain_rand.min_added_mass_max = 10.0
     env_cfg.domain_rand.max_added_mass_max = 10.0
     env_cfg.domain_rand.added_mass_min = 10.0
 
     # COM displacement crap
-    env_cfg.domain_rand.com_displacement_x_min = 0.16
-    env_cfg.domain_rand.com_displacement_x_max = 0.16
+    env_cfg.domain_rand.com_displacement_x_min = 0.20
+    env_cfg.domain_rand.com_displacement_x_max = 0.20
     
-    env_cfg.domain_rand.com_displacement_y_min = 0.12
-    env_cfg.domain_rand.com_displacement_y_max = 0.12
+    env_cfg.domain_rand.com_displacement_y_min = 0.15
+    env_cfg.domain_rand.com_displacement_y_max = 0.15
     
     env_cfg.domain_rand.com_displacement_z_positive = False
     env_cfg.domain_rand.com_displacement_z_min_pos = 0.1
-    env_cfg.domain_rand.com_displacement_z_min = 0.12
-    env_cfg.domain_rand.com_displacement_z_max = 0.12
+    env_cfg.domain_rand.com_displacement_z_min = 0.15
+    env_cfg.domain_rand.com_displacement_z_max = 0.15
 
     env_cfg.domain_rand.push_interval_max = 2.0
     env_cfg.domain_rand.push_interval_min = 1.0
-    env_cfg.domain_rand.max_push_vel_xy = 1.5
-    env_cfg.domain_rand.min_push_vel_xy = 1.5
+    env_cfg.domain_rand.max_push_vel_xy = 1.0
+    env_cfg.domain_rand.min_push_vel_xy = 1.0
 
     env_cfg.domain_rand.max_vertical_push = 0.0
     env_cfg.domain_rand.min_vertical_push = 0.0
