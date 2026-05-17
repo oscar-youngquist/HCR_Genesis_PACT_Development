@@ -6,50 +6,114 @@ from multiprocessing.shared_memory import SharedMemory
 import pinocchio as pn
 import time
 import os
-import queue 
+import queue
+
+
+def shared_memory_exists(name):
+    try:
+        shm = SharedMemory(name=name)
+    except FileNotFoundError:
+        return False
+    else:
+        shm.close()
+        return True
 
 class SharedTensors:
     """
     Allocates shared memory buffers used by both the main process and worker processes.
     """
 
-    def __init__(self, num_envs, num_dof, foot_dim=(4,3)):
+    def __init__(
+        self,
+        num_envs,
+        num_dof,
+        foot_dim=(4,3),
+        shared_name_prefix="go1_pact_02",
+        max_name_attempts=1000,
+    ):
         self.num_envs = num_envs
         self.DOF = num_dof
         self.FOOT_DIM = foot_dim
+        self.shared_name_prefix = shared_name_prefix
 
         self.shm = {}
 
+        for prefix in self.available_prefixes(shared_name_prefix, max_name_attempts):
+            self.shared_name_prefix = prefix
+            try:
+                self._create_all()
+                break
+            except FileExistsError:
+                self.close()
+        else:
+            raise RuntimeError(
+                f"Could not allocate shared memory names for prefix {shared_name_prefix}"
+            )
+
+    def _create_all(self):
         # Inputs
         #      the plus (1) accounts for the quat. representation of orientation used by pinocchio
-        self.q       = self.make("go1_pact_02_q",       (num_envs, self.DOF+1))
-        self.qd      = self.make("go1_pact_02_qd",      (num_envs, self.DOF))
-        self.qd_prev = self.make("go1_pact_02_qd_prev", (num_envs, self.DOF))
-        self.grf     = self.make("go1_pact_02_grf",     (num_envs, *self.FOOT_DIM))
-        self.dt      = self.make("go1_pact_02_dt",      (1,))
+        self.q       = self.make("q",       (self.num_envs, self.DOF+1))
+        self.qd      = self.make("qd",      (self.num_envs, self.DOF))
+        self.qd_prev = self.make("qd_prev", (self.num_envs, self.DOF))
+        self.grf     = self.make("grf",     (self.num_envs, *self.FOOT_DIM))
+        self.dt      = self.make("dt",      (1,))
 
         # Outputs
-        self.wb_dynamics = self.make("go1_pact_02_wb_dynamics", (num_envs, self.DOF))
-        self.wb_contacts = self.make("go1_pact_02_wb_contacts", (num_envs, self.DOF))
-        self.mass_mat    = self.make("go1_pact_02_mass_mat",    (num_envs, self.DOF, self.DOF))
-        self.bias        = self.make("go1_pact_02_bias",        (num_envs, self.DOF))
-        self.acc6d       = self.make("go1_pact_02_acc6d",       (num_envs, 6))
-        
-        # Domain-randomized inertial parameters
-        self.base_added_mass = self.make("go1_pact_02_base_added_mass", (num_envs, 1))
-        self.base_com_shift = self.make("go1_pact_02_base_com_shift", (num_envs, 3))
+        self.wb_dynamics = self.make("wb_dynamics", (self.num_envs, self.DOF))
+        self.wb_contacts = self.make("wb_contacts", (self.num_envs, self.DOF))
+        self.mass_mat    = self.make("mass_mat",    (self.num_envs, self.DOF, self.DOF))
+        self.bias        = self.make("bias",        (self.num_envs, self.DOF))
+        self.acc6d       = self.make("acc6d",       (self.num_envs, 6))
 
-    def make(self, name, shape, dtype=np.float32):
+        # Domain-randomized inertial parameters
+        self.base_added_mass = self.make("base_added_mass", (self.num_envs, 1))
+        self.base_com_shift = self.make("base_com_shift", (self.num_envs, 3))
+
+    def available_prefixes(self, base_prefix, max_attempts):
+        for counter in range(max_attempts):
+            prefix = base_prefix if counter == 0 else f"{base_prefix}_{counter}"
+            if self.prefix_available(prefix):
+                yield prefix
+
+    def prefix_available(self, prefix):
+        return not any(shared_memory_exists(self.name_for(prefix, key)) for key in self.keys())
+
+    def keys(self):
+        return (
+            "q",
+            "qd",
+            "qd_prev",
+            "grf",
+            "dt",
+            "wb_dynamics",
+            "wb_contacts",
+            "mass_mat",
+            "bias",
+            "acc6d",
+            "base_added_mass",
+            "base_com_shift",
+        )
+
+    def name_for(self, prefix, key):
+        return f"{prefix}_{key}"
+
+    def make(self, key, shape, dtype=np.float32):
         nbytes = np.prod(shape) * np.dtype(dtype).itemsize
+        name = self.name_for(self.shared_name_prefix, key)
         shm = SharedMemory(create=True, size=nbytes, name=name)
         arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
-        self.shm[name] = (shm, arr)
+        self.shm[key] = (shm, arr)
         return arr
 
     def close(self):
         for shm, _ in self.shm.values():
             shm.close()
-            shm.unlink()
+            try:
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+        self.shm.clear()
 
 # Clone the inertial values from the original Pinocchio model to avoid any issues with shared memory and mutability.
 def clone_inertia(I):
@@ -108,17 +172,17 @@ def compute_single_env(i, shared, pino_model, pino_data,
     for a single environment index i.
     """
 
-    q       = shared.go1_pact_02_q[i]
-    qd      = shared.go1_pact_02_qd[i]
-    qdprev  = shared.go1_pact_02_qd_prev[i]
-    grf     = shared.go1_pact_02_grf[i]      # shaped as (12)
-    dt      = shared.go1_pact_02_dt[0]
+    q       = shared.q[i]
+    qd      = shared.qd[i]
+    qdprev  = shared.qd_prev[i]
+    grf     = shared.grf[i]      # shaped as (12)
+    dt      = shared.dt[0]
     
     # ------------------------------------------------------------
     # Apply per-env randomized torso mass / COM to Pinocchio model
     # ------------------------------------------------------------
-    added_mass = shared.go1_pact_02_base_added_mass[i, 0]
-    com_shift  = shared.go1_pact_02_base_com_shift[i]
+    added_mass = shared.base_added_mass[i, 0]
+    com_shift  = shared.base_com_shift[i]
 
     apply_base_inertia_randomization(
         pino_model=pino_model,
@@ -133,7 +197,7 @@ def compute_single_env(i, shared, pino_model, pino_data,
     acc = (qd - qdprev) / dt
 
     # 6-DoF torso accel
-    shared.go1_pact_02_acc6d[i] = acc[:6]
+    shared.acc6d[i] = acc[:6]
 
     # Pinocchio general coords
     aq0 = np.zeros_like(qd)
@@ -142,12 +206,12 @@ def compute_single_env(i, shared, pino_model, pino_data,
     M = pn.crba(pino_model, pino_data, q)
 
     wb_dyn = M @ acc + b
-    shared.go1_pact_02_wb_dynamics[i] = wb_dyn[correct_idxs]
+    shared.wb_dynamics[i] = wb_dyn[correct_idxs]
 
     # Also save reduced mass matrix + bias
     M_ = M[np.ix_(correct_idxs, correct_idxs)]
-    shared.go1_pact_02_mass_mat[i] = M_
-    shared.go1_pact_02_bias[i] = b[correct_idxs]
+    shared.mass_mat[i] = M_
+    shared.bias[i] = b[correct_idxs]
 
     # Contact forces
     J_list = []
@@ -159,7 +223,7 @@ def compute_single_env(i, shared, pino_model, pino_data,
     J_total = np.concatenate(J_list, axis=0)
     tau = (J_total.transpose() @ grf).squeeze()
 
-    shared.go1_pact_02_wb_contacts[i] = tau[correct_idxs]
+    shared.wb_contacts[i] = tau[correct_idxs]
 
 def worker_loop(worker_id, shared_names, shapes, dtypes,
                 pino_model, pino_foot_names, correct_idxs,
@@ -250,7 +314,8 @@ class PinocchioAsync:
                  wb_dim,
                  foot_dim,
                  num_cpu,
-                 base_joint_id=1):
+                 base_joint_id=1,
+                 shared_name_prefix="pact"):
 
         self.pino_model = pino_model
         self.num_envs = num_envs
@@ -259,7 +324,12 @@ class PinocchioAsync:
         self.base_joint_id = base_joint_id
 
         # Shared memory
-        self.shared = SharedTensors(num_envs, num_dof=wb_dim, foot_dim=foot_dim)
+        self.shared = SharedTensors(
+            num_envs,
+            num_dof=wb_dim,
+            foot_dim=foot_dim,
+            shared_name_prefix=shared_name_prefix,
+        )
 
         # Spawn workers
         self.task_q = mp.Queue()

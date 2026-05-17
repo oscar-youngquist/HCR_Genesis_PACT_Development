@@ -209,15 +209,15 @@ class GO1PACTCfg( LeggedRobotCfg ):
         joint_armature_range = [0.00, 0.04]         # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range_end   = [0.00, 5.00]
-        joint_friction_range_start = [0.00, 2.50]
+        joint_friction_range_end   = [0.00, 2.00]
+        joint_friction_range_start = [0.00, 1.00]
         
         randomize_joint_stiffness = True
         joint_stiffness_range_end   = [0.0, 0.04]
         joint_stiffness_range_start = [0.0, 0.02]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [1.00, 3.00]
+        joint_damping_range_end   = [0.00, 2.20]
         joint_damping_range_start = [0.50, 1.50]
         
         
@@ -387,7 +387,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             termination           = 0.0
             collision             = -10.0
             dof_pos_limits        = -2.0
-            dof_close_to_default  = -0.05
+            dof_close_to_default  = -0.01
             torque_limits         = -0.01
             pd_target_torque_limit = 0.0
             
