@@ -98,12 +98,16 @@ def override_configs(env_cfg, args):
     env_cfg.commands.resampling_time = 5.0
 
     # Just sample a value right in the middle of the training ranges
-    env_cfg.domain_rand.joint_friction_range        = [0.1, 0.1]
-    env_cfg.domain_rand.joint_armature_range        = [0.02, 0.02]
-    env_cfg.domain_rand.joint_stiffness_range_start = [0.02, 0.02]
-    env_cfg.domain_rand.joint_stiffness_range_end   = [0.02, 0.02]
-    env_cfg.domain_rand.joint_damping_range_start   = [0.50, 0.50]
-    env_cfg.domain_rand.joint_damping_range_end     = [0.50, 0.50]
+    env_cfg.domain_rand.joint_friction_range_end    = [0.35, 0.35]
+    env_cfg.domain_rand.joint_friction_range_start  = [0.35, 0.35]
+    
+    env_cfg.domain_rand.joint_armature_range        = [0.0075, 0.0075]
+    
+    env_cfg.domain_rand.joint_stiffness_range_start = [0.01, 0.01]
+    env_cfg.domain_rand.joint_stiffness_range_end   = [0.01, 0.01]
+    
+    env_cfg.domain_rand.joint_damping_range_start   = [0.60, 0.60]
+    env_cfg.domain_rand.joint_damping_range_end     = [0.60, 0.60]
 
     # Slightly relaxed from training termination conditions
     env_cfg.termination.roll_threshold = 1.57
@@ -450,7 +454,7 @@ if __name__ == '__main__':
     parser.add_argument('--payload_bounds',   type=float, nargs='+', default=[-3.0, 12.0], help="min and max payload sample range (default - [-3.0, 12.0])")
     parser.add_argument('--shift_com',        action='store_true', default=False, help="whether or not to randomize the CoM when transporting payloads. (default - False)")
     parser.add_argument('--com_bounds',       type=float, nargs='+', default=[0.30, 0.225, 0.225], help="combined min/max COM-shift values [x, y, z] (default - [0.25, 0.20, 0.20])")
-    parser.add_argument('--push_bounds',      type=float, nargs='+', default=[2.00, 1.00, 2.00], help="combined min/max external push velo. values [planer, vertical, wrench] (default - [1.0, 0.5, 1.0])")
+    parser.add_argument('--push_bounds',      type=float, nargs='+', default=[2.25, 0.75, 2.25], help="combined min/max external push velo. values [planer, vertical, wrench] (default - [1.0, 0.5, 1.0])")
 
     # Fixed command execution
     parser.add_argument('--fixed_cmd',        type=float, nargs='+', default=None, help="A fixed command to be executed throughout the experiment [x, y, ang, heading] (default: None)")

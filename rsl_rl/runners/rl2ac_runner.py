@@ -80,7 +80,7 @@ class OnPolicyRunnerRL2AC:
         
         cenet_input_dim = self.env.num_obs * self.env.num_obs_hist
 
-        actor_critic: ActorCritic_PosTau = actor_critic_class(self.env.num_obs,
+        actor_critic: ActorCritic_RL2AC = actor_critic_class(self.env.num_obs,
                                                                 num_critic_obs,
                                                                 self.env.num_actions,
                                                                 self.policy_cfg["actor_layers"],

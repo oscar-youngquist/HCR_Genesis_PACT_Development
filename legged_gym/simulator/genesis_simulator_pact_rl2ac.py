@@ -82,6 +82,9 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
                 self._dof_indices)
             self._dof_vel[:] = self._robot.get_dofs_velocity(
                 self._dof_indices)
+            
+            # Added for RL2AC
+            self._dof_tau[:] = self._robot.get_dofs_force(self._dof_indices)
 
     def _get_pinn_wb_dynamics(self):
         #           total GT forces  ,  generalized mass mat, bias vector

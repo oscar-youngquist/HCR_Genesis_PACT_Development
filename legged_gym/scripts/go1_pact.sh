@@ -6,4 +6,4 @@ conda activate /home/oyoungquist/.conda/envs/genesis_lr
 
 export SIMULATOR=genesis_pact
 
-python train.py --task=go1_pact --headless --seed=1 --pinn_loss_weight=-1.0 --gpu=cuda:1
+python train.py --task=go1_pact --headless --seed=1 --pinn_loss_weight=-1.0 --gpu=cuda:0
