@@ -159,7 +159,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 5.00
-        max_push_vel_xy = 1.50
+        max_push_vel_xy = 1.20
         min_push_vel_xy = 0.50
 
         max_vertical_push = 0.50
@@ -525,7 +525,7 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/May09_19-14-36_pact_posboot_100hz_grf/model_3000_converted.pt"
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go2_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/May10_16-17-52_pact_posboot_100hz_grf/model_3000_converted.pt"
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/May11_16-36-57_pact_posboot_100hz_grf/model_3000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/May16_22-25-01_pact_posboot_100hz_grf/model_3000_converted.pt"
 
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #

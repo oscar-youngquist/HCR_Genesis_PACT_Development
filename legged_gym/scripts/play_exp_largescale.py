@@ -450,7 +450,7 @@ if __name__ == '__main__':
     parser.add_argument('--payload_bounds',   type=float, nargs='+', default=[-3.0, 12.0], help="min and max payload sample range (default - [-3.0, 12.0])")
     parser.add_argument('--shift_com',        action='store_true', default=False, help="whether or not to randomize the CoM when transporting payloads. (default - False)")
     parser.add_argument('--com_bounds',       type=float, nargs='+', default=[0.30, 0.225, 0.225], help="combined min/max COM-shift values [x, y, z] (default - [0.25, 0.20, 0.20])")
-    parser.add_argument('--push_bounds',      type=float, nargs='+', default=[2.25, 0.75, 2.25], help="combined min/max external push velo. values [planer, vertical, wrench] (default - [1.0, 0.5, 1.0])")
+    parser.add_argument('--push_bounds',      type=float, nargs='+', default=[2.00, 1.00, 2.00], help="combined min/max external push velo. values [planer, vertical, wrench] (default - [1.0, 0.5, 1.0])")
 
     # Fixed command execution
     parser.add_argument('--fixed_cmd',        type=float, nargs='+', default=None, help="A fixed command to be executed throughout the experiment [x, y, ang, heading] (default: None)")

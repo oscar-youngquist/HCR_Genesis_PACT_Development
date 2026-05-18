@@ -68,6 +68,10 @@ class RL2ACAdaptiveCtrl:
         self.phi[env_ids] = 0.0
         self.s[env_ids] = 0.0
         self.epsilon[env_ids] = 0.0
+        
+        self.phi_diag[env_ids] = 0.0
+        self.s_diag[env_ids] = 0.0
+        self.epsilon_diag[env_ids] = 0.0
     
     # ------------------------------------------------------------------
     # State update (called every sim step)
@@ -133,8 +137,8 @@ class RL2ACAdaptiveCtrl:
         self._update_K(dt)
 
         self.comp_old.copy_(self.comp)
-        self.comp = torch.einsum("bij,bj->bi", self.K, self.phi)
-        # self.comp = torch.bmm(self.K, self.phi.unsqueeze(-1)).squeeze(-1)
+        # self.comp = torch.einsum("bij,bj->bi", self.K, self.phi)
+        self.comp = torch.bmm(self.K, self.phi.unsqueeze(-1)).squeeze(-1)
 
         # print(torch.norm(self.K[0]))
         # print(torch.norm(self.phi[0]))
@@ -155,20 +159,20 @@ class RL2ACAdaptiveCtrl:
 
     def _update_gamma(self, dt):
         # Elementwise equivalent of: Γ φ φᵀ Γ
-        phi_outer = self.phi.unsqueeze(2) * self.phi.unsqueeze(1)  # [B,J,J]
+        # phi_outer = self.phi.unsqueeze(2) * self.phi.unsqueeze(1)  # [B,J,J]
 
         # print(self.Gamma.shape)
 
-        # dGamma = self.lambda_val[:, None, None] * self.Gamma
+        dGamma = self.lambda_val[:, None, None] * self.Gamma
 
         # print(dGamma.shape)
 
-        # dGamma -= ((self.Gamma @ self.phi_diag) @ self.phi_diag) @ self.Gamma
+        dGamma -= ((self.Gamma @ self.phi_diag) @ self.phi_diag) @ self.Gamma
         
-        dGamma = (
-            self.lambda_val[:, None, None] * self.Gamma
-            - torch.bmm(self.Gamma, torch.bmm(phi_outer, self.Gamma))
-        )
+        # dGamma = (
+        #     self.lambda_val[:, None, None] * self.Gamma
+        #     - torch.bmm(self.Gamma, torch.bmm(phi_outer, self.Gamma))
+        # )
 
         self.Gamma += dt * dGamma
         
@@ -187,10 +191,10 @@ class RL2ACAdaptiveCtrl:
 
     def _update_K(self, dt):
         # Equivalent to: -Γ φ (s + κ ε)ᵀ
-        rhs = self.s + self.kappa * self.epsilon
-        dK = -torch.einsum("bij,bj,bk->bik", self.Gamma, self.phi, rhs)
+        # rhs = self.s + self.kappa * self.epsilon
+        # dK = -torch.einsum("bij,bj,bk->bik", self.Gamma, self.phi, rhs)
+        # dK -= self.eta * self.K
+        dK = -self.Gamma @ self.phi_diag @ (self.s_diag + self.kappa * self.epsilon_diag)
         dK -= self.eta * self.K
-        # dK_dt = -self.Gamma @ self.phi_diag @ (self.s_diag + self.kappa * self.epsilon_diag)
-        # dK_dt -= self.eta * self.K
 
         self.K += dt * dK

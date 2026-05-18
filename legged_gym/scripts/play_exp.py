@@ -36,11 +36,11 @@ def override_configs(env_cfg, args):
         #                                   "min_height" : -0.08, "max_height": 0.08, 
         #                                   "step":0.005, "downsampled_scale" : 0.2}
         # # slope
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
-                                          "slope": -0.4, "platform_size": 3.0}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
+        #                                   "slope": -0.4, "platform_size": 3.0}
         # # stairs
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-        #                                 "step_width": 0.40, "step_height": -0.10, "platform_size": 3.0}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
+                                        "step_width": 0.40, "step_height": -0.10, "platform_size": 3.0}
         # # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.1,
@@ -108,8 +108,8 @@ def override_configs(env_cfg, args):
     env_cfg.domain_rand.randomize_motor_strength = False
     
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_com_displacement = True
-    env_cfg.domain_rand.randomize_base_mass = True
+    env_cfg.domain_rand.randomize_com_displacement = False
+    env_cfg.domain_rand.randomize_base_mass = False
     
     env_cfg.domain_rand.min_added_mass_max = 10.0
     env_cfg.domain_rand.max_added_mass_max = 10.0
@@ -228,10 +228,10 @@ def interaction_loop(train_cfg, env, policy, args):
             env.commands[:, 1] = -joystick.lx
             env.commands[:, 2] = -joystick.rx
 
-        env.commands[:, 0] = 0.65
-        env.commands[:, 1] = 0.0
-        # env.commands[:, 2] = 0.0
-        env.commands[:, 3] = 0
+        # env.commands[:, 0] = 0.65
+        # env.commands[:, 1] = 0.0
+        # # env.commands[:, 2] = 0.0
+        # env.commands[:, 3] = 0
         
         # set the viewer camera to follow the first environment by default
         # TODO - fix recording/general camera follow conflict

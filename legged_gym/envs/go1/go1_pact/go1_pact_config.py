@@ -204,21 +204,20 @@ class GO1PACTCfg( LeggedRobotCfg ):
         randomize_motor_strength = True
         motor_strength_range = [0.9, 1.1]
         
-        # Unused more complicated dynamics randomization
         randomize_joint_armature = True
-        joint_armature_range = [0.00, 0.04]         # [N*m*s/rad]
+        joint_armature_range = [0.00, 0.03]         # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range_end   = [0.00, 2.00]
-        joint_friction_range_start = [0.00, 1.00]
+        joint_friction_range_end   = [0.00, 0.03]
+        joint_friction_range_start = [0.00, 0.005]
         
         randomize_joint_stiffness = True
-        joint_stiffness_range_end   = [0.0, 0.04]
-        joint_stiffness_range_start = [0.0, 0.02]
+        joint_stiffness_range_end   = [0.0, 0.02]
+        joint_stiffness_range_start = [0.0, 0.005]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 2.20]
-        joint_damping_range_start = [0.50, 1.50]
+        joint_damping_range_end   = [0.00, 0.50]
+        joint_damping_range_start = [0.25, 0.30]
         
         
         # new domain randomization curriculum parameters
@@ -406,7 +405,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # coupled output specific rewards 
             torque_conflict_symmetric = -0.1     # discourages a negative cosine similarity between ff and fb torques
             torque_alignment = 0.4               # encourage a positive cosine-similarity between the ff and fb torques
-            ff_ratio = 0.1                       # encourage the feeforward torques explaining more of the final torque
+            ff_ratio = 0.0                       # encourage the feeforward torques explaining more of the final torque
             
             # smoothness and stability
             lin_vel_z        = -2.0
@@ -452,7 +451,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.70            # tracking reward for long steps
             # foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance      
-            foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.2
             
             foot_slip        = -0.01          # penalty for feet slipping
@@ -473,7 +472,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
             curr_reward_bounds = {
                                   "ang_vel_xy":[-0.05, -0.2],
                                   "orientation":[-0.2,-2.0],
-                                  "torque_limits":[-1.0e-2, -1.0],
+                                  "torque_limits":[-0.01, -1.0],
                                   "hip_pos":[-0.2, -0.4],
                                   "pos_action_rate":[-0.001, -0.01],
                                   "pos_action_smoothness":[-0.001,-0.01],
@@ -558,7 +557,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_spec_smartcurr_stricterer'
+        run_name = 'pact_100hz_spec_smartcurr_weakest_jointrand_hightau'
         experiment_name = 'go1_pact_rough'
         save_interval = 500
         
@@ -572,7 +571,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         # load_run = "May10_20-41-46_pact_100hz_spec_smartcurr"    # most recent model with strong boot and rear-overreah, 3000 pos-boot start
         # load_run = "May11_21-55-58_pact_100hz_spec_smartcurr"    # best performing aligned model
         # load_run = "May14_18-35-56_pact_100hz_spec_smartcurr_stricterer"
-        load_run = "May15_18-41-46_pact_100hz_spec_smartcurr_stricterer"
+        load_run = "May16_22-25-02_pact_100hz_spec_smartcurr_stricterer"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pact_stairs_12-16kg.csv"
