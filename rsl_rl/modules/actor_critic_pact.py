@@ -410,95 +410,95 @@ class ActorCritic_PACT(nn.Module):
 
         return act_pos_act, act_tau_act
 
-    # Functions that are specific to PPO training
-    @property
-    @torch.jit.ignore
-    def action_mean(self):
-        return self.distribution.mean
+    # # Functions that are specific to PPO training
+    # @property
+    # @torch.jit.ignore
+    # def action_mean(self):
+    #     return self.distribution.mean
 
-    @property
-    @torch.jit.ignore
-    def action_std(self):
-        return self.distribution.stddev
+    # @property
+    # @torch.jit.ignore
+    # def action_std(self):
+    #     return self.distribution.stddev
 
-    @property
-    @torch.jit.ignore
-    def entropy(self):
-        return self.distribution.entropy().sum(dim=-1)
+    # @property
+    # @torch.jit.ignore
+    # def entropy(self):
+    #     return self.distribution.entropy().sum(dim=-1)
 
-    @torch.jit.ignore
-    def get_actions_log_prob(self, actions):
-        return self.distribution.log_prob(actions).sum(dim=-1)
+    # @torch.jit.ignore
+    # def get_actions_log_prob(self, actions):
+    #     return self.distribution.log_prob(actions).sum(dim=-1)
 
-    @torch.no_grad
-    @torch.jit.ignore
-    def _clip_std(self,):
-        self.std.data.clamp_(self._std_clip_lwr, 5.0)
+    # @torch.no_grad
+    # @torch.jit.ignore
+    # def _clip_std(self,):
+    #     self.std.data.clamp_(self._std_clip_lwr, 5.0)
 
-    def _set_std_clip_lwr(self, clip_val=0.1):
-        self._std_clip_lwr = clip_val
+    # def _set_std_clip_lwr(self, clip_val=0.1):
+    #     self._std_clip_lwr = clip_val
 
-    @torch.jit.ignore
-    def update_distribution(self, curr_obs):
-        mean_pos, mean_tau = self.actor_forward(curr_obs)
-        self.mean_pos = mean_pos
-        self.mean_tau = mean_tau
+    # @torch.jit.ignore
+    # def update_distribution(self, curr_obs):
+    #     mean_pos, mean_tau = self.actor_forward(curr_obs)
+    #     self.mean_pos = mean_pos
+    #     self.mean_tau = mean_tau
 
-        self._clip_std()
+    #     self._clip_std()
 
-        mean = torch.cat([mean_pos, mean_tau], dim=-1)
+    #     mean = torch.cat([mean_pos, mean_tau], dim=-1)
 
-        self.distribution = Normal(mean, mean * 0.0 + self.std)
+    #     self.distribution = Normal(mean, mean * 0.0 + self.std)
 
-    # method used during simulated training
-    @torch.jit.ignore
-    def act(self, obs, obs_history, **kwargs):
-        # Call the forward method of the context encoder
-        mean, logvar, z, torso_velo = self.cenet_enc_forward(obs_history)
+    # # method used during simulated training
+    # @torch.jit.ignore
+    # def act(self, obs, obs_history, **kwargs):
+    #     # Call the forward method of the context encoder
+    #     mean, logvar, z, torso_velo = self.cenet_enc_forward(obs_history)
         
-        # create the actors observation
-        current_obs = torch.cat((obs,z,torso_velo), dim=-1)   
+    #     # create the actors observation
+    #     current_obs = torch.cat((obs,z,torso_velo), dim=-1)   
         
-        # Upated the PPO training distribution
-        self.update_distribution(current_obs)
+    #     # Upated the PPO training distribution
+    #     self.update_distribution(current_obs)
         
-        # log context-encoder values to be used in PPO class for calculating context encoder network
-        self.cenet_mean = mean
-        self.cenet_logvar = logvar
-        self.cenet_z = z
-        self.cenet_torso_velo = torso_velo
+    #     # log context-encoder values to be used in PPO class for calculating context encoder network
+    #     self.cenet_mean = mean
+    #     self.cenet_logvar = logvar
+    #     self.cenet_z = z
+    #     self.cenet_torso_velo = torso_velo
 
-        sample = self.distribution.sample()
+    #     sample = self.distribution.sample()
         
-        # return a sample from the distribution to be executed in simulation
-        return sample
+    #     # return a sample from the distribution to be executed in simulation
+    #     return sample
     
 
-    # method used during simulated training
-    @torch.jit.ignore
-    def act_bootmask(self, obs, obs_history, **kwargs):
-        # Call the forward method of the context encoder
-        mean, logvar, z, torso_velo = self.cenet_enc_forward(obs_history)
+    # # method used during simulated training
+    # @torch.jit.ignore
+    # def act_bootmask(self, obs, obs_history, **kwargs):
+    #     # Call the forward method of the context encoder
+    #     mean, logvar, z, torso_velo = self.cenet_enc_forward(obs_history)
         
-        # Mask the latent/velo from the encoder with zeros
-        boot_mask = torch.zeros((z.shape[0], (z.shape[1] + torso_velo.shape[1])), device=obs.device)
+    #     # Mask the latent/velo from the encoder with zeros
+    #     boot_mask = torch.zeros((z.shape[0], (z.shape[1] + torso_velo.shape[1])), device=obs.device)
 
-        # create the actors observation
-        current_obs = torch.cat((obs,boot_mask), dim=-1)   
+    #     # create the actors observation
+    #     current_obs = torch.cat((obs,boot_mask), dim=-1)   
         
-        # Upated the PPO training distribution
-        self.update_distribution(current_obs)
+    #     # Upated the PPO training distribution
+    #     self.update_distribution(current_obs)
         
-        # log context-encoder values to be used in PPO class for calculating context encoder network
-        self.cenet_mean = mean
-        self.cenet_logvar = logvar
-        self.cenet_z = z
-        self.cenet_torso_velo = torso_velo
+    #     # log context-encoder values to be used in PPO class for calculating context encoder network
+    #     self.cenet_mean = mean
+    #     self.cenet_logvar = logvar
+    #     self.cenet_z = z
+    #     self.cenet_torso_velo = torso_velo
 
-        sample = self.distribution.sample()
+    #     sample = self.distribution.sample()
         
-        # return a sample from the distribution to be executed in simulation
-        return sample
+    #     # return a sample from the distribution to be executed in simulation
+    #     return sample
     
     # Method using during simulated inference
     @torch.jit.export
@@ -515,6 +515,21 @@ class ActorCritic_PACT(nn.Module):
         total_sample = torch.cat([actions_pos, actions_tau], dim=1)
 
         return total_sample
+    
+
+    def act_inference_recon(self,obs,obs_history):
+        # Call the forward method of the context encoder
+        z, torso_velo = self.cenet_enc_inference(obs_history)
+        
+        # create the actors observation
+        current_obs = torch.cat((obs,z,torso_velo), dim=-1)   
+                
+        # call the actors forward method and return it's results
+        actions_pos, actions_tau = self.actor_forward(current_obs)
+
+        total_sample = torch.cat([actions_pos, actions_tau], dim=1)
+
+        return total_sample, z, torso_velo
 
     # Forward method for calculating the value of the current state
     #     using the privilged critic observation

@@ -93,13 +93,16 @@ def override_configs(env_cfg, args):
     env_cfg.env.lateral_push_only = True
 
     # Just sample a value right in the middle of the training ranges
-    env_cfg.domain_rand.joint_friction_range_end    = [1.00, 1.00]
-    env_cfg.domain_rand.joint_friction_range_start  = [1.00, 1.00]
-    env_cfg.domain_rand.joint_armature_range        = [0.02, 0.02]
-    env_cfg.domain_rand.joint_stiffness_range_start = [0.02, 0.02]
-    env_cfg.domain_rand.joint_stiffness_range_end   = [0.02, 0.02]
-    env_cfg.domain_rand.joint_damping_range_start   = [1.00, 1.00]
-    env_cfg.domain_rand.joint_damping_range_end     = [1.00, 1.00]
+    env_cfg.domain_rand.joint_friction_range_end    = [0.35, 0.35]
+    env_cfg.domain_rand.joint_friction_range_start  = [0.35, 0.35]
+
+    env_cfg.domain_rand.joint_armature_range        = [0.0075, 0.0075]
+    
+    env_cfg.domain_rand.joint_stiffness_range_start = [0.0075, 0.0075]
+    env_cfg.domain_rand.joint_stiffness_range_end   = [0.0075, 0.0075]
+    
+    env_cfg.domain_rand.joint_damping_range_start   = [0.60, 0.60]
+    env_cfg.domain_rand.joint_damping_range_end     = [0.60, 0.60]
 
     # Turn off/on domain randomization elements
     env_cfg.noise.add_noise = True
