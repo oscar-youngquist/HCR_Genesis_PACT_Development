@@ -145,19 +145,19 @@ class GO1TauCfg( LeggedRobotCfg ):
         # Randomized 6DOF torso wrench
         push_robots = True
         push_interval_max = 15.0
-        push_interval_min = 2.50
+        push_interval_min = 5.00
         max_push_vel_xy = 1.50
         min_push_vel_xy = 0.50
 
         max_vertical_push = 0.50
         min_vertical_push = 0.10
-        vert_interval_max = 10.0
-        vert_interval_min = 2.50
+        vert_interval_max = 15.0
+        vert_interval_min = 5.0
 
         max_push_torque = 1.50
         min_push_torque = 0.50
-        wrench_timeout_min = 1.00
-        wrench_timeout_max = 10.0
+        wrench_timeout_min = 5.00
+        wrench_timeout_max = 15.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
@@ -196,16 +196,16 @@ class GO1TauCfg( LeggedRobotCfg ):
         joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range_end   = [0.00, 2.00]
-        joint_friction_range_start = [0.00, 1.00]
+        joint_friction_range_end   = [0.00, 0.30]
+        joint_friction_range_start = [0.00, 0.005]
         
         randomize_joint_stiffness = True
-        joint_stiffness_range_end   = [0.0, 0.04]
-        joint_stiffness_range_start = [0.0, 0.02]
+        joint_stiffness_range_end   = [0.0, 0.02]
+        joint_stiffness_range_start = [0.0, 0.005]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 2.00]
-        joint_damping_range_start = [0.50, 1.50]
+        joint_damping_range_end   = [0.00, 0.80]
+        joint_damping_range_start = [0.20, 0.60]
 
         # new domain randomization curriculum parameters
         best_reward_window = 200        # amount of history used to capture recent performance.
@@ -378,7 +378,7 @@ class GO1TauCfg( LeggedRobotCfg ):
             
             # smoothness and stability
             lin_vel_z        = -2.0
-            base_height      = -1.0
+            base_height      = -2.0
             ang_vel_xy       = -0.05
             orientation      = -0.2
             dof_acc          = -2.0e-7
@@ -432,8 +432,8 @@ class GO1TauCfg( LeggedRobotCfg ):
                                 ]
             
             curr_reward_bounds = {
-                                  "orientation":[-0.2,-1.0],
-                                  "ang_vel_xy":[-0.05, -0.1],
+                                  "orientation":[-0.2,-2.0],
+                                  "ang_vel_xy":[-0.05, -0.2],
                                   "dof_close_to_default":[-0.05, -0.20],
                                   "torque_limits":[-0.001, -1.0e-1],
                                  }
@@ -477,7 +477,7 @@ class GO1TauCfgPPO( LeggedRobotCfgPPO ):
         critic_layers = [1024,256,128]
         
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_tau_rough/May13_23-22-14_tau_100hz_spec_smartcurr/model_4000.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_tau_rough/May13_23-22-14_tau_100hz_spec_smartcurr/model_3000_converted.pt"
 
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
@@ -516,7 +516,7 @@ class GO1TauCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "May13_23-22-14_tau_100hz_spec_smartcurr"
+        load_run = "May18_21-20-27_tau_100hz_spec_smartcurr"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/tau_stairs_12-16kg.csv"

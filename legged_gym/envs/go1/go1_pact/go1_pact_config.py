@@ -205,19 +205,19 @@ class GO1PACTCfg( LeggedRobotCfg ):
         motor_strength_range = [0.9, 1.1]
         
         randomize_joint_armature = True
-        joint_armature_range = [0.00, 0.03]         # [N*m*s/rad]
+        joint_armature_range = [0.00, 0.015]         # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range_end   = [0.00, 0.03]
-        joint_friction_range_start = [0.00, 0.005]
+        joint_friction_range_end   = [0.00, 0.2]
+        joint_friction_range_start = [0.00, 0.05]
         
         randomize_joint_stiffness = True
         joint_stiffness_range_end   = [0.0, 0.02]
         joint_stiffness_range_start = [0.0, 0.005]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 0.50]
-        joint_damping_range_start = [0.25, 0.30]
+        joint_damping_range_end   = [0.00, 0.80]
+        joint_damping_range_start = [0.25, 0.60]
         
         
         # new domain randomization curriculum parameters
@@ -573,8 +573,8 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         # load_run = "May14_18-35-56_pact_100hz_spec_smartcurr_stricterer"
         
         # load_run = "May17_20-51-29_pact_100hz_spec_smartcurr_higher_jointrand_hightau"
-        # load_run = "May17_21-01-03_pact_100hz_spec_smartcurr_lower_jointrand_hightau"
-        load_run = "May17_21-20-40_pact_100hz_spec_smartcurr_original_jointrand_hightau"
+        load_run = "May17_21-01-03_pact_100hz_spec_smartcurr_lower_jointrand_hightau"
+        # load_run = "May17_21-20-40_pact_100hz_spec_smartcurr_original_jointrand_hightau"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pact_stairs_12-16kg.csv"

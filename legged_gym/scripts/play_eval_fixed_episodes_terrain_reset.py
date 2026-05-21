@@ -45,6 +45,22 @@ def override_configs(env_cfg, args):
     env_cfg.terrain.reset_out_of_bounds = True
     env_cfg.env.lateral_push_only = True
 
+    # Just sample a value right in the middle of the training ranges
+    env_cfg.domain_rand.joint_friction_range_end    = [0.1, 0.1]
+    env_cfg.domain_rand.joint_friction_range_start  = [0.1, 0.1]
+    
+    env_cfg.domain_rand.joint_armature_range        = [0.0075, 0.0075]
+    
+    env_cfg.domain_rand.randomize_joint_stiffness = False
+    env_cfg.domain_rand.joint_stiffness_range_start = [0.01, 0.01]
+    env_cfg.domain_rand.joint_stiffness_range_end   = [0.01, 0.01]
+    
+    env_cfg.domain_rand.joint_damping_range_start   = [0.40, 0.40]
+    env_cfg.domain_rand.joint_damping_range_end     = [0.40, 0.40]
+
+    # env_cfg.domain_rand.kp_range = [0.75, 0.125]
+    # env_cfg.domain_rand.motor_strength_range = [0.85, 0.115]
+
     # Terrain construction logic
     if args.terrain_type == "plane":
         env_cfg.terrain.mesh_type = 'plane'                     # plane, heightfield, trimesh

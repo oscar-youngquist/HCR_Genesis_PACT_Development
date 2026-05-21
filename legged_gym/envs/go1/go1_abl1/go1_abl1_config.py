@@ -159,15 +159,15 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 5.00
-        max_push_vel_xy = 1.2
+        max_push_vel_xy = 1.5
         min_push_vel_xy = 0.50
 
-        max_vertical_push = 0.35
+        max_vertical_push = 0.50
         min_vertical_push = 0.10
         vert_interval_max = 15.0
         vert_interval_min = 5.00
 
-        max_push_torque = 1.20
+        max_push_torque = 1.50
         min_push_torque = 0.50
         wrench_timeout_min = 5.00
         wrench_timeout_max = 15.0
@@ -175,21 +175,21 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
         # Randomized base mass, applied at COM
         randomize_base_mass = True
         min_added_mass_max = 4.0
-        max_added_mass_max = 6.5
+        max_added_mass_max = 8.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.1625
+        com_displacement_x_max = 0.20
         
         com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.115
+        com_displacement_y_max = 0.15
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
         com_displacement_z_min = 0.075
-        com_displacement_z_max = 0.114
+        com_displacement_z_max = 0.15
         
         # Control delay
         randomize_ctrl_delay = True
@@ -209,16 +209,16 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
         joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range_end   = [0.00, 2.00]
-        joint_friction_range_start = [0.00, 1.00]
+        joint_friction_range_end   = [0.00, 0.20]
+        joint_friction_range_start = [0.00, 0.05]
         
         randomize_joint_stiffness = False
-        joint_stiffness_range_end   = [0.0, 0.04]
-        joint_stiffness_range_start = [0.0, 0.02]
+        joint_stiffness_range_end   = [0.0, 0.02]
+        joint_stiffness_range_start = [0.0, 0.005]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 2.00]
-        joint_damping_range_start = [0.50, 1.50]
+        joint_damping_range_end   = [0.00, 0.80]
+        joint_damping_range_start = [0.20, 0.60]
         
         # new domain randomization curriculum parameters
         best_reward_window = 200        # amount of history used to capture recent performance.
@@ -379,7 +379,7 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
-            collision             = -1.0
+            collision             = -10.0
             dof_pos_limits        = -2.0
             dof_close_to_default  = -0.01
             torque_limits         = -0.01
@@ -407,7 +407,7 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
 
             # smoothness and stability
             lin_vel_z        = -2.0
-            base_height      = -1.0
+            base_height      = -2.0
             ang_vel_xy       = -0.05
             orientation      = -0.2
             dof_acc          = -2.5e-7
@@ -448,11 +448,11 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.70            # tracking reward for long steps
             # foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance      
-            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
-            hip_pos = -0.05
+            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            hip_pos = -0.2
             
             foot_slip        = -0.01           # penalty for feet slipping
-            stumble          = -0.2
+            stumble          = -1.0
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
         class reward_curriculum():
@@ -463,18 +463,18 @@ class GO1ABL1Cfg( LeggedRobotCfg ):
                                 "pos_action_smoothness",
                                 "tau_action_rate", 
                                 "tau_action_smoothness",
-                                "dof_close_to_default",
+                                "hip_pos",
                                 ]
             
             curr_reward_bounds = {
-                                  "ang_vel_xy":[-0.05, -0.1],
-                                  "orientation":[-0.2,-1.0],
-                                  "torque_limits":[-1.0e-3, -0.1],
+                                  "ang_vel_xy":[-0.05, -0.2],
+                                  "orientation":[-0.2,-2.0],
+                                  "torque_limits":[-1.0e-2, -1.0],
                                   "pos_action_rate":[-0.001, -0.01],
                                   "pos_action_smoothness":[-0.001,-0.01],
                                   "tau_action_rate":[-0.002, -0.02],
                                   "tau_action_smoothness":[-0.002,-0.02],
-                                  "dof_close_to_default":[-0.05, -0.20],
+                                  "hip_pos":[-0.2, -0.5],
                                  }
 
             curr_steps = 500
@@ -560,7 +560,7 @@ class GO1ABL1CfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "May11_22-42-37_abl1_100hz_spec_smartcurr"
+        load_run = "May18_21-14-14_abl1_100hz_spec_smartcurr"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/scratch_pact_exp/plane_tracking_test.csv"

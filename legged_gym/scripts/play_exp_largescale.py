@@ -103,6 +103,7 @@ def override_configs(env_cfg, args):
     
     env_cfg.domain_rand.joint_armature_range        = [0.0075, 0.0075]
     
+    env_cfg.domain_rand.randomize_joint_stiffness = False
     env_cfg.domain_rand.joint_stiffness_range_start = [0.01, 0.01]
     env_cfg.domain_rand.joint_stiffness_range_end   = [0.01, 0.01]
     
