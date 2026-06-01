@@ -399,7 +399,10 @@ class Go1PACT(BaseTask):
         if self.cfg.terrain.measure_heights:
             heights = torch.clip(self.simulator.base_pos[:, 2].unsqueeze(1) - 0.5 \
                                  - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements # 81
-            heights *= self.height_noise_vec
+            
+            if self.add_noise:
+                heights *= self.height_noise_vec
+            
             critic_obs = torch.cat((critic_obs, heights), dim=-1) # 207
 
         self.critic_obs_deque.append(critic_obs)

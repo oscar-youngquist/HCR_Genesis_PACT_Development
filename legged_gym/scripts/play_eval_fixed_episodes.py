@@ -111,7 +111,7 @@ def override_configs(env_cfg, args):
     env_cfg.termination.pitch_threshold = 1.57
     env_cfg.termination.height_min = 0.0
     # env_cfg.asset.terminate_after_contacts_on = ["base","trunk"]
-    env_cfg.asset.terminate_after_contacts_on = ["base","trunk","thigh","hip"]
+    env_cfg.asset.terminate_after_contacts_on = ["base","trunk","hip"]
 
     # Turn off/on domain randomization elements
     env_cfg.noise.add_noise = True

@@ -24,7 +24,7 @@ class RL2ACAdaptiveCtrl:
         print(f"RL2AC params: alpha={self.alpha}, kappa={self.kappa}, lambda_0={self.lambda_0}, k_0={self.k_0}")
 
         # State flags
-        self.use_proactive_ctrl = False
+        self.use_proactive_ctrl = True
 
         # Joint-space vectors: [B, J]
         self.phi = torch.zeros(self.B, self.J, device=device, dtype=dtype)

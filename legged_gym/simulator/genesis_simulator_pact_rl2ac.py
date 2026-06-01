@@ -1297,7 +1297,7 @@ class GenesisSimulator_PACT_RL2AC(Simulator):
 
         torques = self._motor_strength * torques
         
-        self.feedforward_torques = torch.zeros_like(torques)
+        self.feedforward_torques = self.adaptive_torques.clone()
 
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
         # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)

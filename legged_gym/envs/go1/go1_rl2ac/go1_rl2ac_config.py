@@ -470,10 +470,10 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
     
     class rl2ac():
         # Evaluate for CoRL with 10.0, 0.02, 0.54, 2.85
-        alpha = 50.0
-        kappa = 2.2
-        lambda_0 = 3.00
-        k_0 = 20.00
+        alpha = 40.0
+        kappa = 0.500
+        lambda_0 = 0.80
+        k_0 = 4.60
 
 class GO1RL2ACCfgPPO( LeggedRobotCfgPPO ):
     seed = 1
@@ -536,7 +536,7 @@ class GO1RL2ACCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 500
         
         
-        load_run = "May11_22-27-30_rl2ac_100hz_spec"
+        load_run = "May18_21-30-56_rl2ac_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/rl2ac_stairs_12-16kg.csv"
