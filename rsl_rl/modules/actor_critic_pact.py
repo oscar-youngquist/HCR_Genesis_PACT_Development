@@ -266,6 +266,8 @@ class ActorCritic_PACT(nn.Module):
         self.std = nn.Parameter(init_noise_std * torch.ones(2*num_actions))
         self.num_actions = num_actions
         
+        self._std_clip_lwr = 0.20
+
         self.distribution = None
         
         self.current_obs = None
@@ -273,6 +275,8 @@ class ActorCritic_PACT(nn.Module):
         # disable args validation for speedup
         Normal.set_default_validate_args = False
 
+        nn.init.uniform_(self.act_tau_out.weight, -1.0e-6, 1.0e-6)
+        nn.init.zeros_(self.act_tau_out.bias)
 
     # Currently unused...
     def _init_weights(self):
@@ -429,7 +433,10 @@ class ActorCritic_PACT(nn.Module):
     @torch.no_grad
     @torch.jit.ignore
     def _clip_std(self,):
-        self.std.data.clamp_(0.1, 5.0)
+        self.std.data.clamp_(self._std_clip_lwr, 5.0)
+
+    def _set_std_clip_lwr(self, clip_val=0.1):
+        self._std_clip_lwr = clip_val
 
     @torch.jit.ignore
     def update_distribution(self, curr_obs):
@@ -508,6 +515,21 @@ class ActorCritic_PACT(nn.Module):
         total_sample = torch.cat([actions_pos, actions_tau], dim=1)
 
         return total_sample
+    
+
+    def act_inference_recon(self,obs,obs_history):
+        # Call the forward method of the context encoder
+        z, torso_velo = self.cenet_enc_inference(obs_history)
+        
+        # create the actors observation
+        current_obs = torch.cat((obs,z,torso_velo), dim=-1)   
+                
+        # call the actors forward method and return it's results
+        actions_pos, actions_tau = self.actor_forward(current_obs)
+
+        total_sample = torch.cat([actions_pos, actions_tau], dim=1)
+
+        return total_sample, z, torso_velo
 
     # Forward method for calculating the value of the current state
     #     using the privilged critic observation

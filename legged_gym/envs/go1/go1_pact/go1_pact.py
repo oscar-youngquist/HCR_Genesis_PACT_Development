@@ -2,6 +2,7 @@ from legged_gym import *
 from time import time
 import numpy as np
 import os
+import math
 from legged_gym.utils.math_utils import *
 
 import torch
@@ -33,6 +34,7 @@ class Go1PACT(BaseTask):
         self.init_done = False
         self._parse_cfg(self.cfg, sim_device)
         super().__init__(self.cfg, sim_params, sim_device, headless)
+        self.cmd_update_steps = 0
         
         self._init_buffers()
         self._prepare_reward_function()
@@ -79,7 +81,7 @@ class Go1PACT(BaseTask):
         )
 
     def get_failure_idx(self):
-        return self.reset_buf * ~self.time_out_buf
+        return self.reset_buf * ~self.time_out_buf * ~self.non_failure_reset_buf
     
     def get_scaled_pos_actions(self):
                 # control_type = 'P'
@@ -167,21 +169,34 @@ class Go1PACT(BaseTask):
             if "roll" in self.cfg.termination.termination_terms:
                 r_term_buff = torch.abs(r) > self.cfg.termination.roll_threshold
                 self.fail_buf |= r_term_buff
+                # print(f"roll termination: {r}")
             if "pitch" in self.cfg.termination.termination_terms:
                 p_term_buff = torch.abs(p) > self.cfg.termination.pitch_threshold
                 self.fail_buf |= p_term_buff
+                # print(f"pitch termination: {p}")
             if "height_min" in self.cfg.termination.termination_terms:
                 height_term_buff = base_height < self.cfg.termination.height_min
                 self.fail_buf |= height_term_buff
+                # print(f"height termination: {base_height}")
             if "height_max" in self.cfg.termination.termination_terms:
                 height_term_buff = base_height > self.cfg.termination.height_max
                 self.fail_buf |= height_term_buff
         
         self.fail_buf += fail_buf
         self.time_out_buf = self.episode_length_buf > self.max_episode_length  # no terminal reward for time-outs
+        
+        if getattr(self.cfg.terrain, "reset_out_of_bounds", False):
+            self.non_failure_reset_buf[:] = self.simulator._base_pos_out_of_bounds_buf
+        else:
+            self.non_failure_reset_buf[:] = False
+        
+        # print(f"terrain termination: {self.non_failure_reset_buf}")
+        # print("======================================================")
+
         self.reset_buf = (
             (self.fail_buf > self.cfg.env.fail_to_terminal_time_s / self.dt)
             | self.time_out_buf
+            | self.non_failure_reset_buf
         )
 
     def reset_idx(self, env_ids):
@@ -215,6 +230,8 @@ class Go1PACT(BaseTask):
         # after base pose/orientation has been reset:
         self.phi_prev_orientation[env_ids] = self._potential_orientation()[env_ids]
 
+        self.phi_prev_height[env_ids] = self._potential_height()[env_ids]
+
         # reset buffers
         self.llast_actions[env_ids] = 0.
         self.last_actions[env_ids] = 0.
@@ -245,11 +262,23 @@ class Go1PACT(BaseTask):
         if self.cfg.terrain.curriculum:
             self.extras["episode"]["terrain_level"] = torch.mean(
                 self.simulator.terrain_levels.float())
+            self.extras["episode"]["max_terrain_level"] = torch.max(
+                self.simulator.terrain_levels.float())
         if self.cfg.commands.curriculum:
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
+        if self.cfg.domain_rand.use_domainrand_curriculum:
+            phase_to_idx = {"joint_dynamics": 0.0, "mass_com": 1.0, "disturbance": 2.0, "complete": 3.0}
+            self.extras["episode"]["domain_rand_phase"] = phase_to_idx.get(self.simulator.domain_rand_phase, -1.0)
+            self.extras["episode"]["domain_rand_joint_dynamics_progress"] = self.simulator.domain_rand_joint_dynamics_progress
+            self.extras["episode"]["domain_rand_mass_com_progress"] = self.simulator.domain_rand_mass_com_progress
+            self.extras["episode"]["domain_rand_disturbance_progress"] = self.simulator.domain_rand_disturbance_progress
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
+        
+
+        if getattr(self.cfg.terrain, "reset_out_of_bounds", False):
+            self.extras["reset_outs"] = self.non_failure_reset_buf
 
         # reset action queue and delay
         if self.cfg.domain_rand.randomize_ctrl_delay:
@@ -267,6 +296,12 @@ class Go1PACT(BaseTask):
         for i in range(len(self.reward_functions)):
             name = self.reward_names[i]
             rew = self.reward_functions[i]() * self.reward_scales[name]
+            
+            # if self.cfg.rewards.only_positive_rewards:
+            #     self.rew_buf = torch.clip(rew, min=0.)
+            # else:
+            #     self.rew_buf += rew
+            
             self.rew_buf += rew
             self.episode_sums[name] += rew
         
@@ -309,6 +344,11 @@ class Go1PACT(BaseTask):
             torch.clip(self.simulator.feet_pos[:, :, 2] -
             torch.mean(self.simulator.height_around_feet, dim=-1) -
             self.cfg.rewards.foot_height_offset, -1, 1.),                              # feet height                   4
+            torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) - 
+                       self.simulator.measured_heights, dim=1, keepdim=True) - 
+                       self.cfg.rewards.base_height_target,                            # 1  - base height error
+            self.simulator._added_base_mass,                                           # 1  - payload mass
+            self.simulator._base_com_bias,                                             # 3  - CoM shift
         ), dim=-1)
 
         # track history buffer
@@ -334,29 +374,35 @@ class Go1PACT(BaseTask):
             self.simulator._joint_armature,                                  # 1
             self.simulator._joint_friction,                                  # 1
             self.simulator._joint_damping,                                   # 1
-            self.simulator._joint_stiffness,                                  # 1
-            ), dim=-1)                                                       # 51
+            ), dim=-1)                                                       # 50
 
         critic_obs = torch.cat(
             (
                 self.obs_buf,                                             # 57
-                self.simulator.base_lin_vel * self.obs_scales.lin_vel,    # 3
-                self.simulator._grfs_buf * self.obs_scales.grf,           # 12
+                self.simulator.base_lin_vel * self.obs_scales.lin_vel,                 # 3  - base linear velocity
+                torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) - 
+                           self.simulator.measured_heights, dim=1, keepdim=True),      # 1  - base height
+                self.simulator._grfs_buf * self.obs_scales.grf,                        # 12 - measured ground reaction forces (GRFs)
                 self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain info around feet
                 self.simulator.link_contact_states[:,self.simulator.feet_indices],     # 4  - contact states of feet
-                # self.simulator.link_contact_states,                       # 17
+                torch.clip(self.simulator.feet_pos[:, :, 2] -
+                    torch.mean(self.simulator.height_around_feet, dim=-1) -
+                    self.cfg.rewards.foot_height_offset, -1, 1.),                      # 4 - feet height
                 self.simulator.feedforward_tau_weight,                    # 1
                 self.simulator.feedback_tau_weight,                       # 1
-                domain_randomization_info                                 # 51
+                domain_randomization_info                                 # 50
             ),
             dim=-1,
-        )   # 158
+        )   # 145
 
         # add hieght measurements to asymmetric critic if approperiate
         if self.cfg.terrain.measure_heights:
             heights = torch.clip(self.simulator.base_pos[:, 2].unsqueeze(1) - 0.5 \
                                  - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements # 81
-            heights *= self.height_noise_vec
+            
+            if self.add_noise:
+                heights *= self.height_noise_vec
+            
             critic_obs = torch.cat((critic_obs, heights), dim=-1) # 207
 
         self.critic_obs_deque.append(critic_obs)
@@ -413,9 +459,18 @@ class Go1PACT(BaseTask):
         # robots that walked far enough progress to harder terains
         move_up = distance > self.simulator._terrain.env_length / 2
         # robots that walked less than half of their required distance go to simpler terrains
-        move_down = (distance < torch.norm(
+        added_mass = self.simulator._added_base_mass[env_ids].view(-1)
+        total_mass = self.simulator._robot_mass + torch.clamp(added_mass, min=0.0)
+        scales = self.simulator._robot_mass / total_mass
+
+        # Masses below the DreamWaQ threshold are not scaled.
+        dream_idx = added_mass <= 2.0
+        scales = torch.where(dream_idx, torch.ones_like(scales), scales) * 2.0
+        scales = torch.clamp(scales, max=1.0)
+
+        move_down = (distance < scales * torch.norm(
             self.commands[env_ids, :2], dim=1)*self.max_episode_length_s*0.5) * ~move_up
-        
+
         self.simulator.update_terrain_curriculum(env_ids, move_up, move_down)
     
     def _reset_dofs(self, env_ids):
@@ -491,6 +546,7 @@ class Go1PACT(BaseTask):
         # If the tracking reward is above 80% of the maximum, increase the range of commands
         if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > \
                 self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel"]:
+                    # and self.common_step_counter >= 30*300:
             
             self.command_ranges["lin_vel_x"][0] = np.clip(
                 self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
@@ -567,8 +623,11 @@ class Go1PACT(BaseTask):
         # PBRS orientation reward
         self.phi_prev_orientation = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
 
+        self.phi_prev_height = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+
         self.forward_vec[:, 0] = 1.0
         self.fail_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device, requires_grad=False)
+        self.non_failure_reset_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
         
         self.commands = torch.zeros(
             (self.num_envs, self.cfg.commands.num_commands), device=self.device, dtype=torch.float)
@@ -658,15 +717,23 @@ class Go1PACT(BaseTask):
             for key in self.reward_curr_keys:
                 if key in self.reward_scales.keys():
                     self.reward_scales[key] = self.reward_curr_bounds[key][0] * self.dt
-                    # print("Reward - ", key, " scale - ", self.reward_scales[key])
-        # Gradually increase the regularization strength
-        elif num_iters > self.reward_warmup_steps and (num_iters - self.reward_warmup_steps) < self.reward_curr_steps:
+                    # print("Before stepping - Reward - ", key, " scale - ", self.reward_scales[key]/self.dt)
+        # Gradually increase the regularization strength via cosine annealing schedule
+        elif num_iters >= self.reward_warmup_steps and (num_iters - self.reward_warmup_steps) < self.reward_curr_steps:
             print("Stepping Reward Curriculum")
             adjusted_iter = num_iters - self.reward_warmup_steps
             for key in self.reward_curr_keys:
                 if key in self.reward_scales.keys():
-                    self.reward_scales[key] = ((float(adjusted_iter)/float(self.reward_curr_steps))*self.reward_bound_diffs[key] + self.reward_curr_bounds[key][0])*self.dt
-                    # print("Reward - ", key, " scale - ", self.reward_scales[key])
+                    low, high = self.reward_curr_bounds[key]
+
+                    alpha = adjusted_iter / self.reward_curr_steps
+                    alpha = np.clip(alpha, 0.0, 1.0)
+                    print(alpha)
+                    ramp = 0.5 * (1.0 - np.cos(np.pi * alpha))
+
+                    self.reward_scales[key] = (low + (high - low) * ramp) * self.dt
+                    # self.reward_scales[key] = ((float(adjusted_iter)/float(self.reward_curr_steps))*self.reward_bound_diffs[key] + self.reward_curr_bounds[key][0])*self.dt
+                    # print("Reward - ", key, " scale - ", self.reward_scales[key]/self.dt)
         # Fix the regularization strength to the upper-bound
         else:
             # by default set the reward to the upper bound
@@ -719,6 +786,9 @@ class Go1PACT(BaseTask):
         # apply the curriculum scaling
         self.simulator.feedforward_tau_weight[env_ids]  = self.tradeoff_step_ctr[env_ids] *float(1.0/self.tradeoff_num_steps)*self.bound_diff[0] + self.tradeoff_lowerbounds[0]
         self.simulator.feedback_tau_weight[env_ids]     = self.tradeoff_step_ctr[env_ids] *float(1.0/self.tradeoff_num_steps)*self.bound_diff[1] + self.tradeoff_lowerbounds[1]
+
+        self.simulator.feedforward_tau_weight_clean[env_ids] = self.tradeoff_step_ctr[env_ids] *float(1.0/self.tradeoff_num_steps)*self.bound_diff[0] + self.tradeoff_lowerbounds[0]
+        self.simulator.feedback_tau_weight_clean[env_ids]    = self.tradeoff_step_ctr[env_ids] *float(1.0/self.tradeoff_num_steps)*self.bound_diff[1] + self.tradeoff_lowerbounds[1]
 
         # random_smaple = random.random()
         
@@ -889,7 +959,7 @@ class Go1PACT(BaseTask):
 
     def _reward_termination(self):
         # Terminal reward / penalty
-        return self.reset_buf * ~self.time_out_buf
+        return self.reset_buf * ~self.time_out_buf * ~self.non_failure_reset_buf
 
     def _reward_dof_pos_limits(self):
         # Penalize dof positions too close to the limit
@@ -1184,97 +1254,6 @@ class Go1PACT(BaseTask):
         return scales * penalty
     
 
-    def _reward_support_polygon(self):
-        """
-        Positive support-region stability reward that supports:
-        - 4/3 stance feet: polygon-like support using stance-center distance
-        - 2 stance feet: line-segment support using distance to support line
-        - <2 stance feet: reward = 0
-
-        Assumptions:
-            self.simulator.base_pos:            (N, 3)
-            self.simulator.feet_pos:            (N, 4, 3)
-            self.simulator.link_contact_forces: (N, n_links, 3)
-            self.simulator.feet_indices:        4 foot link ids
-            self.cfg.rewards.support_polygon_sigma: float
-        """
-        fz_thr = 5.0
-        sigma = self.cfg.rewards.support_polygon_sigma
-
-        base_xy = self.simulator.base_pos[:, :2]                      # (N,2)
-        feet_xy = self.simulator.feet_pos[:, :, :2]                  # (N,4,2)
-
-        contact = (
-            self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > fz_thr
-        ).float()                                                    # (N,4)
-
-        n_stance = torch.sum(contact, dim=1)                         # (N,)
-
-        rew = torch.zeros(base_xy.shape[0], device=base_xy.device)
-
-        # ------------------------------------------------------------------
-        # Case 1: 3 or more stance feet -> center/radius approximation
-        # ------------------------------------------------------------------
-        mask_poly = n_stance >= 3
-        if torch.any(mask_poly):
-            contact_poly = contact[mask_poly]
-            feet_poly = feet_xy[mask_poly]
-            base_poly = base_xy[mask_poly]
-
-            stance_center = torch.sum(contact_poly.unsqueeze(-1) * feet_poly, dim=1) / (
-                n_stance[mask_poly].unsqueeze(-1) + 1e-6
-            )                                                        # (M,2)
-
-            center_dist = torch.norm(base_poly - stance_center, dim=1)  # (M,)
-
-            support_radius = torch.sum(
-                contact_poly * torch.norm(feet_poly - stance_center.unsqueeze(1), dim=-1),
-                dim=1
-            ) / (n_stance[mask_poly] + 1e-6)                        # (M,)
-
-            margin_frac = 0.60
-            desired_dist = margin_frac * support_radius
-            excess = torch.relu(center_dist - desired_dist)
-
-            rew[mask_poly] = torch.exp(-(excess ** 2) / (sigma + 1e-6))
-
-        # ------------------------------------------------------------------
-        # Case 2: exactly 2 stance feet -> distance to support line segment
-        # ------------------------------------------------------------------
-        mask_line = n_stance == 2
-        if torch.any(mask_line):
-            contact_line = contact[mask_line]                       # (K,4)
-            feet_line = feet_xy[mask_line]                         # (K,4,2)
-            base_line = base_xy[mask_line]                         # (K,2)
-
-            # indices of the two stance feet for each env
-            idx = torch.nonzero(contact_line, as_tuple=False)      # (2K,2): [env_idx, foot_idx]
-            foot_ids = idx[:, 1].view(-1, 2)                       # (K,2)
-
-            batch_ids = torch.arange(feet_line.shape[0], device=feet_line.device)
-            p1 = feet_line[batch_ids, foot_ids[:, 0]]              # (K,2)
-            p2 = feet_line[batch_ids, foot_ids[:, 1]]              # (K,2)
-
-            seg = p2 - p1                                          # (K,2)
-            seg_len_sq = torch.sum(seg ** 2, dim=1, keepdim=True)  # (K,1)
-
-            # projection of base onto line segment
-            t = torch.sum((base_line - p1) * seg, dim=1, keepdim=True) / (seg_len_sq + 1e-6)
-            t = torch.clamp(t, 0.0, 1.0)
-
-            proj = p1 + t * seg                                    # (K,2)
-            line_dist = torch.norm(base_line - proj, dim=1)        # (K,)
-
-            # allow some lateral deviation relative to segment length
-            seg_len = torch.sqrt(seg_len_sq.squeeze(-1) + 1e-6)    # (K,)
-            desired_dist = 0.30 * seg_len
-            excess = torch.relu(line_dist - desired_dist)
-
-            rew[mask_line] = torch.exp(-(excess ** 2) / (sigma + 1e-6))
-
-        # <2 stance feet -> reward stays 0
-        return rew
-
     def _reward_pd_target_torque_limit(self):
         """
         Penalize joint position targets that would induce PD torques
@@ -1426,7 +1405,13 @@ class Go1PACT(BaseTask):
     
     def _potential_orientation(self):
         roll_pitch = self.simulator.projected_gravity[:, :2]
-        return -torch.sum(roll_pitch**2, dim=1)
+        return torch.exp(-torch.sum(roll_pitch**2, dim=1) / 0.5)
+    
+    def _potential_height(self):
+        base_height = torch.mean(self.simulator.base_pos[:, 2].unsqueeze(
+            1) - self.simulator.measured_heights, dim=1)
+        h_po = torch.square(base_height - self.cfg.rewards.base_height_target)
+        return torch.exp(-h_po / 0.5)
 
     def _reward_pbrs_orientation(self):
         phi_next = self._potential_orientation()
@@ -1434,8 +1419,243 @@ class Go1PACT(BaseTask):
 
         # If env will reset after this step, terminate the telescoping sum cleanly.
         # Use zero potential for the absorbing terminal state.
-        terminal_mask = self.reset_buf & (~self.time_out_buf)
+        terminal_mask = self.reset_buf & (~self.time_out_buf) & (~self.non_failure_reset_buf)
         shaping[terminal_mask] = -self.phi_prev_orientation[terminal_mask]
 
         self.phi_prev_orientation = phi_next
         return shaping
+
+    def _reward_pbrs_height(self):
+        phi_next = self._potential_height()
+        shaping = phi_next - self.phi_prev_height
+
+        terminal_mask = self.reset_buf & (~self.time_out_buf) & (~self.non_failure_reset_buf)
+        shaping[terminal_mask] = -self.phi_prev_height[terminal_mask]
+
+        self.phi_prev_height = phi_next
+        return shaping
+
+    def _reward_ff_ratio(self):
+        ff_norm = torch.norm(self.simulator.feedforward_torques, dim=1)
+        fb_norm = torch.norm(self.simulator.feedback_torques)
+        r_ff_ratio = ff_norm / (ff_norm + fb_norm + 1e-6)
+        
+        error = torch.abs(r_ff_ratio - self.cfg.rewards.ff_ratio_target)
+
+        reward = torch.exp(-error / self.cfg.rewards.ff_ratio_width)
+
+        return reward
+
+    def _reward_support_polygon(self):
+        """
+        Positive support-region stability reward that supports:
+        - 4/3 stance feet: polygon-like support using stance-center distance
+        - 2 stance feet: line-segment support using distance to support line
+        - <2 stance feet: reward = 0
+
+        Assumptions:
+            self.simulator.base_pos:            (N, 3)
+            self.simulator.feet_pos:            (N, 4, 3)
+            self.simulator.link_contact_forces: (N, n_links, 3)
+            self.simulator.feet_indices:        4 foot link ids
+            self.cfg.rewards.support_polygon_sigma: float
+        """
+        fz_thr = 5.0
+        sigma = self.cfg.rewards.support_polygon_sigma
+
+        base_xy = self.simulator.base_pos[:, :2]                      # (N,2)
+        feet_xy = self.simulator.feet_pos[:, :, :2]                  # (N,4,2)
+
+        contact = (
+            self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > fz_thr
+        ).float()                                                    # (N,4)
+
+        n_stance = torch.sum(contact, dim=1)                         # (N,)
+
+        rew = torch.zeros(base_xy.shape[0], device=base_xy.device)
+
+        # ------------------------------------------------------------------
+        # Case 1: 3 or more stance feet -> center/radius approximation
+        # ------------------------------------------------------------------
+        mask_poly = n_stance >= 3
+        if torch.any(mask_poly):
+            contact_poly = contact[mask_poly]
+            feet_poly = feet_xy[mask_poly]
+            base_poly = base_xy[mask_poly]
+
+            stance_center = torch.sum(contact_poly.unsqueeze(-1) * feet_poly, dim=1) / (
+                n_stance[mask_poly].unsqueeze(-1) + 1e-6
+            )                                                        # (M,2)
+
+            center_dist = torch.norm(base_poly - stance_center, dim=1)  # (M,)
+
+            support_radius = torch.sum(
+                contact_poly * torch.norm(feet_poly - stance_center.unsqueeze(1), dim=-1),
+                dim=1
+            ) / (n_stance[mask_poly] + 1e-6)                        # (M,)
+
+            margin_frac = 0.60
+            desired_dist = margin_frac * support_radius
+            excess = torch.relu(center_dist - desired_dist)
+
+            rew[mask_poly] = torch.exp(-(excess ** 2) / (sigma + 1e-6))
+
+        # ------------------------------------------------------------------
+        # Case 2: exactly 2 stance feet -> distance to support line segment
+        # ------------------------------------------------------------------
+        mask_line = n_stance == 2
+        if torch.any(mask_line):
+            contact_line = contact[mask_line]                       # (K,4)
+            feet_line = feet_xy[mask_line]                         # (K,4,2)
+            base_line = base_xy[mask_line]                         # (K,2)
+
+            # indices of the two stance feet for each env
+            idx = torch.nonzero(contact_line, as_tuple=False)      # (2K,2): [env_idx, foot_idx]
+            foot_ids = idx[:, 1].view(-1, 2)                       # (K,2)
+
+            batch_ids = torch.arange(feet_line.shape[0], device=feet_line.device)
+            p1 = feet_line[batch_ids, foot_ids[:, 0]]              # (K,2)
+            p2 = feet_line[batch_ids, foot_ids[:, 1]]              # (K,2)
+
+            seg = p2 - p1                                          # (K,2)
+            seg_len_sq = torch.sum(seg ** 2, dim=1, keepdim=True)  # (K,1)
+
+            # projection of base onto line segment
+            t = torch.sum((base_line - p1) * seg, dim=1, keepdim=True) / (seg_len_sq + 1e-6)
+            t = torch.clamp(t, 0.0, 1.0)
+
+            proj = p1 + t * seg                                    # (K,2)
+            line_dist = torch.norm(base_line - proj, dim=1)        # (K,)
+
+            # allow some lateral deviation relative to segment length
+            seg_len = torch.sqrt(seg_len_sq.squeeze(-1) + 1e-6)    # (K,)
+            desired_dist = 0.30 * seg_len
+            excess = torch.relu(line_dist - desired_dist)
+
+            rew[mask_line] = torch.exp(-(excess ** 2) / (sigma + 1e-6))
+
+        # <2 stance feet -> reward stays 0
+        return rew
+    
+    def _compute_vhip_angle(self):
+        com_pos = self.simulator.base_pos[:,0:3]  # B x 3
+
+        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]    # B, num_feet, 3
+        foot_positions = self.simulator.feet_pos
+
+        normal_forces = foot_contact_forces[:,:,2:3]  # B. num_feet, 1
+
+        total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)  # B x 1  
+
+        cop_pos =  torch.sum(foot_positions * normal_forces, dim=1) / total_force  # B x 3
+        pendulum_length = torch.norm(com_pos - cop_pos, dim=1).clamp(min=1e-6)  # B x 1
+
+        com_z = com_pos[:,2]   # B x 1
+        cos_theta = torch.clamp(com_z / pendulum_length, -1.0, 1.0)
+        theta = torch.acos(cos_theta)
+
+        return theta
+    
+    def _compute_vhip_acceleration(self):
+        theta = self._compute_vhip_angle()
+        
+        com_pos = self.simulator.base_pos[:,0:3]  # B x 3
+
+        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]    # B, num_feet, 3
+        foot_positions = self.simulator.feet_pos
+
+        normal_forces = foot_contact_forces[:,:,2:3]  # B. num_feet, 1
+
+        total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)  # B x 1  
+
+        cop_pos =  torch.sum(foot_positions * normal_forces, dim=1) / total_force  # B x 3
+
+        pendulum_length = torch.norm(com_pos - cop_pos, dim=1).clamp(min=1e-6)  # B x 1
+
+        g = 9.81
+
+        theta_ddot = -(g / pendulum_length) * torch.sin(theta)
+
+        return theta_ddot
+
+    def _reward_vhip_angle(self):
+        theta = self._compute_vhip_angle()
+
+        angle_error = torch.abs(theta) - 0.1
+
+        angle_rew = torch.clamp(angle_error, min=0)
+
+        return angle_rew
+    
+    def _reward_vhip_angular_acc(self):
+        theta_ddot = self._compute_vhip_acceleration()
+
+        acc_error = torch.abs(theta_ddot) - 0.001
+
+        acc_rew = torch.clamp(acc_error, min=0.0)
+
+        return acc_rew
+    
+    def _reward_rear_foot_overreach(self):
+        """
+        Penalize rear feet for being too far from their nominal rear-foot x location
+        in the base frame, in either direction.
+
+        Penalizes:
+        - rear foot too far forward
+        - rear foot too far backward
+
+        Assumed foot order: FR, FL, RR, RL
+        """
+
+        # Rear feet in base frame
+        rear_1 = quat_rotate_inverse(
+            self.simulator.base_quat,
+            self.simulator.feet_pos[:, 2, :] - self.simulator.base_pos
+        )  # RR, (N,3)
+
+        rear_2 = quat_rotate_inverse(
+            self.simulator.base_quat,
+            self.simulator.feet_pos[:, 3, :] - self.simulator.base_pos
+        )  # RL, (N,3)
+
+        rear_x = torch.stack([rear_1[:, 0], rear_2[:, 0]], dim=1)  # (N,2)
+
+        # Nominal rear-foot x location in base frame.
+        # This should usually be negative, e.g. -0.20 to -0.25 m.
+        rear_x_nominal = self.cfg.rewards.rear_foot_x_nominal
+
+        # Allowed deviation around nominal rear-foot x location.
+        # Example: 0.08 m allows rear_x in [nominal - 0.08, nominal + 0.08].
+        rear_x_margin = self.cfg.rewards.rear_foot_x_margin
+
+        # Penalize both too far forward and too far backward relative to nominal.
+        x_error = torch.abs(rear_x - rear_x_nominal)
+        overreach = torch.relu(x_error - rear_x_margin)
+
+        # Contact gate rear feet only: feet_indices[2:4], not [:2]
+        contact = (
+            self.simulator.link_contact_forces[:, self.simulator.feet_indices[2:4], 2] > 5.0
+        ).float()  # (N,2)
+
+        penalty = torch.sum(contact * overreach ** 2, dim=1)
+
+        return penalty
+    
+
+    def _reward_stumble(self):
+        """
+        Penalize feet colliding with vertical surfaces / obstacles during swing.
+        """
+
+        contact_forces = self.simulator.link_contact_forces[:, self.simulator.feet_indices, :]  # (N,4,3)
+
+        horizontal_force = torch.norm(contact_forces[:, :, :2], dim=2)
+        vertical_force = torch.abs(contact_forces[:, :, 2])
+
+        contact = vertical_force > 1.0
+        swing = (~contact).float()
+
+        stumble = (horizontal_force > 4.0 * vertical_force) & (horizontal_force > 5.0)
+
+        return torch.sum(swing * stumble.float(), dim=1)

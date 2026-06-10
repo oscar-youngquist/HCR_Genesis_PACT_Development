@@ -73,14 +73,6 @@ class Go2PACTPos(BaseTask):
         return self.obs_buf, self.privileged_obs_buf, self.obs_history, self.explicit_labels_buf, \
             self.rew_buf, self.reset_buf, self.extras, (self.simulator._grfs_buf * self.obs_scales.grf)
 
-    def set_camera(self, pos, lookat):
-        """ Set camera position and direction
-        """
-        self.simulator._floating_camera.set_pose(
-            pos=pos,
-            lookat=lookat
-        )
-
     def get_failure_idx(self):
         return self.reset_buf * ~self.time_out_buf
     
@@ -296,6 +288,11 @@ class Go2PACTPos(BaseTask):
         self._reset_root_states(env_ids)
         self.simulator.reset_idx(env_ids)
 
+        # after base pose/orientation has been reset:
+        self.phi_prev_orientation[env_ids] = self._potential_orientation()[env_ids]
+
+        self.phi_prev_height[env_ids] = self._potential_height()[env_ids]
+
         # reset buffers
         self.llast_actions[env_ids] = 0.
         self.last_actions[env_ids] = 0.
@@ -328,8 +325,12 @@ class Go2PACTPos(BaseTask):
                 self.simulator.terrain_levels.float())
         if self.cfg.commands.curriculum:
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
-            self.extras["episode"]["max_command_y"] = self.command_ranges["lin_vel_y"][1]
-            self.extras["episode"]["max_command_yaw"] = self.command_ranges["ang_vel_yaw"][1]
+        if self.cfg.domain_rand.use_domainrand_curriculum:
+            phase_to_idx = {"joint_dynamics": 0.0, "mass_com": 1.0, "disturbance": 2.0, "complete": 3.0}
+            self.extras["episode"]["domain_rand_phase"] = phase_to_idx.get(self.simulator.domain_rand_phase, -1.0)
+            self.extras["episode"]["domain_rand_joint_dynamics_progress"] = self.simulator.domain_rand_joint_dynamics_progress
+            self.extras["episode"]["domain_rand_mass_com_progress"] = self.simulator.domain_rand_mass_com_progress
+            self.extras["episode"]["domain_rand_disturbance_progress"] = self.simulator.domain_rand_disturbance_progress
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -387,12 +388,16 @@ class Go2PACTPos(BaseTask):
 
         # build the explicit labels buffer
         self.explicit_labels_buf = torch.cat((
-            self.simulator.base_lin_vel * self.obs_scales.lin_vel,                     # torso linear velocity         3
-            self.simulator.link_contact_states[:,self.simulator.feet_indices],         # contact states of feet        4
+            self.simulator.base_lin_vel * self.obs_scales.lin_vel,                     # 3  - torso linear velocity
+            self.simulator.link_contact_states[:,self.simulator.feet_indices],         # 4  - contact states of feet
             torch.clip(self.simulator.feet_pos[:, :, 2] -
                 torch.mean(self.simulator.height_around_feet, dim=-1) -
-                self.cfg.rewards.foot_height_offset, -1, 1.),                              # feet height               4
-            self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1)        # 12 - terrain info around feet
+                self.cfg.rewards.foot_height_offset, -1, 1.),                          # 4  - feet height
+            torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) - 
+                       self.simulator.measured_heights, dim=1, keepdim=True) - 
+                       self.cfg.rewards.base_height_target,                            # 1  - base height error
+            self.simulator._added_base_mass,                                           # 1  - payload mass
+            self.simulator._base_com_bias,                                             # 3  - CoM shift
         ), dim=-1)
 
         # track history buffer
@@ -418,23 +423,26 @@ class Go2PACTPos(BaseTask):
             self.simulator._joint_armature,                                  # 1
             self.simulator._joint_friction,                                  # 1
             self.simulator._joint_damping,                                   # 1
-            self.simulator._joint_stiffness,                                 # 1
-            ), dim=-1)                                                       # 51
+            ), dim=-1)                                                       # 50
 
         critic_obs = torch.cat(
             (
-                self.obs_buf,                                             # 57
-                self.simulator.base_lin_vel * self.obs_scales.lin_vel,    # 3
-                self.simulator._grfs_buf * self.obs_scales.grf,           # 12
+                self.obs_buf,                                                          # 57
+                self.simulator.base_lin_vel * self.obs_scales.lin_vel,                 # 3  - base linear velocity
+                torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) - 
+                           self.simulator.measured_heights, dim=1, keepdim=True),      # 1  - base height
+                self.simulator._grfs_buf * self.obs_scales.grf,                        # 12 - measured ground reaction forces (GRFs)
                 self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain info around feet
                 self.simulator.link_contact_states[:,self.simulator.feet_indices],     # 4  - contact states of feet
-                # self.simulator.link_contact_states,                       # 17
+                torch.clip(self.simulator.feet_pos[:, :, 2] -
+                    torch.mean(self.simulator.height_around_feet, dim=-1) -
+                    self.cfg.rewards.foot_height_offset, -1, 1.),                      # 4 - feet height
                 self.simulator.feedforward_tau_weight,                    # 1
                 self.simulator.feedback_tau_weight,                       # 1
-                domain_randomization_info                                 # 51
+                domain_randomization_info                                 # 50
             ),
             dim=-1,
-        ) # 141
+        ) # 145 (grf) / 133 (no-grf)
 
         # add hieght measurements to asymmetric critic if approperiate
         if self.cfg.terrain.measure_heights:
@@ -664,6 +672,11 @@ class Go2PACTPos(BaseTask):
             (self.num_envs, 3), device=self.device, dtype=torch.float
         )
         
+        # PBRS orientation reward
+        self.phi_prev_orientation = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+
+        self.phi_prev_height = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+
         self.forward_vec[:, 0] = 1.0
         self.fail_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device, requires_grad=False)
         
@@ -765,7 +778,15 @@ class Go2PACTPos(BaseTask):
             adjusted_iter = num_iters - self.reward_warmup_steps
             for key in self.reward_curr_keys:
                 if key in self.reward_scales.keys():
-                    self.reward_scales[key] = ((float(adjusted_iter)/float(self.reward_curr_steps))*self.reward_bound_diffs[key] + self.reward_curr_bounds[key][0])*self.dt
+                    low, high = self.reward_curr_bounds[key]
+
+                    alpha = adjusted_iter / self.reward_curr_steps
+                    alpha = np.clip(alpha, 0.0, 1.0)
+                    print(alpha)
+                    ramp = 0.5 * (1.0 - np.cos(np.pi * alpha))
+
+                    self.reward_scales[key] = (low + (high - low) * ramp) * self.dt
+                    # self.reward_scales[key] = ((float(adjusted_iter)/float(self.reward_curr_steps))*self.reward_bound_diffs[key] + self.reward_curr_bounds[key][0])*self.dt
                     # print("Reward - ", key, " scale - ", self.reward_scales[key])
         # Fix the regularization strength to the upper-bound
         else:
@@ -1545,6 +1566,18 @@ class Go2PACTPos(BaseTask):
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.
         return  torch.sum(torch.square(contact * torch.sum(self.simulator.feet_vel[:,:,:2], dim=-1)), dim=-1)
 
+    def _reward_stumble(self):
+        """
+        Penalize feet colliding with vertical surfaces / obstacles during swing.
+        """
+        contact_forces = self.simulator.link_contact_forces[:, self.simulator.feet_indices, :]
+        horizontal_force = torch.norm(contact_forces[:, :, :2], dim=2)
+        vertical_force = torch.abs(contact_forces[:, :, 2])
+        contact = vertical_force > 1.0
+        swing = (~contact).float()
+        stumble = (horizontal_force > 4.0 * vertical_force) & (horizontal_force > 5.0)
+        return torch.sum(swing * stumble.float(), dim=1)
+
     def _reward_feet_contact_forces(self):
         # penalize high contact forces
         return torch.sum((torch.norm(self.simulator.link_contact_forces[:, self.simulator.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
@@ -1861,3 +1894,140 @@ class Go2PACTPos(BaseTask):
             self.simulator.dof_pos[:, hip_joint_indices] - 
             self.simulator.default_dof_pos[:, hip_joint_indices]), dim=-1)
         return dof_pos_error
+    
+    def _potential_orientation(self):
+        roll_pitch = self.simulator.projected_gravity[:, :2]
+        return torch.exp(-torch.sum(roll_pitch**2, dim=1) / 0.5)
+    
+    def _potential_height(self):
+        base_height = torch.mean(self.simulator.base_pos[:, 2].unsqueeze(
+            1) - self.simulator.measured_heights, dim=1)
+        h_po = torch.square(base_height - self.cfg.rewards.base_height_target)
+        return torch.exp(-h_po / 0.5)
+
+    def _reward_pbrs_orientation(self):
+        phi_next = self._potential_orientation()
+        shaping = phi_next - self.phi_prev_orientation
+
+        # If env will reset after this step, terminate the telescoping sum cleanly.
+        # Use zero potential for the absorbing terminal state.
+        terminal_mask = self.reset_buf & (~self.time_out_buf)
+        shaping[terminal_mask] = -self.phi_prev_orientation[terminal_mask]
+
+        self.phi_prev_orientation = phi_next
+        return shaping
+
+    def _reward_pbrs_height(self):
+        phi_next = self._potential_height()
+        shaping = phi_next - self.phi_prev_height
+
+        terminal_mask = self.reset_buf & (~self.time_out_buf)
+        shaping[terminal_mask] = -self.phi_prev_height[terminal_mask]
+
+        self.phi_prev_height = phi_next
+        return shaping
+    
+    def _compute_vhip_angle(self):
+        com_pos = self.simulator.base_pos[:,0:3]  # B x 3
+
+        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]    # B, num_feet, 3
+        foot_positions = self.simulator.feet_pos
+
+        normal_forces = foot_contact_forces[:,:,2:3]  # B. num_feet, 1
+
+        total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)  # B x 1  
+
+        cop_pos =  torch.sum(foot_positions * normal_forces, dim=1) / total_force  # B x 3
+        pendulum_length = torch.norm(com_pos - cop_pos, dim=1).clamp(min=1e-6)  # B x 1
+
+        com_z = com_pos[:,2]   # B x 1
+        cos_theta = torch.clamp(com_z / pendulum_length, -1.0, 1.0)
+        theta = torch.acos(cos_theta)
+
+        return theta
+    
+    def _compute_vhip_acceleration(self):
+        theta = self._compute_vhip_angle()
+        
+        com_pos = self.simulator.base_pos[:,0:3]  # B x 3
+
+        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]    # B, num_feet, 3
+        foot_positions = self.simulator.feet_pos
+
+        normal_forces = foot_contact_forces[:,:,2:3]  # B. num_feet, 1
+
+        total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)  # B x 1  
+
+        cop_pos =  torch.sum(foot_positions * normal_forces, dim=1) / total_force  # B x 3
+
+        pendulum_length = torch.norm(com_pos - cop_pos, dim=1).clamp(min=1e-6)  # B x 1
+
+        g = 9.81
+
+        theta_ddot = -(g / pendulum_length) * torch.sin(theta)
+
+        return theta_ddot
+
+    def _reward_vhip_angle(self):
+        theta = self._compute_vhip_angle()
+
+        angle_error = torch.abs(theta) - 0.1
+
+        angle_rew = torch.clamp(angle_error, min=0)
+
+        return angle_rew
+    
+    def _reward_vhip_angular_acc(self):
+        theta_ddot = self._compute_vhip_acceleration()
+
+        acc_error = torch.abs(theta_ddot) - 0.001
+
+        acc_rew = torch.clamp(acc_error, min=0.0)
+
+        return acc_rew
+    
+    def _reward_rear_foot_overreach(self):
+        """
+        Penalize rear feet for being too far from their nominal rear-foot x location
+        in the base frame, in either direction.
+
+        Penalizes:
+        - rear foot too far forward
+        - rear foot too far backward
+
+        Assumed foot order: FR, FL, RR, RL
+        """
+
+        # Rear feet in base frame
+        rear_1 = quat_rotate_inverse(
+            self.simulator.base_quat,
+            self.simulator.feet_pos[:, 2, :] - self.simulator.base_pos
+        )  # RR, (N,3)
+
+        rear_2 = quat_rotate_inverse(
+            self.simulator.base_quat,
+            self.simulator.feet_pos[:, 3, :] - self.simulator.base_pos
+        )  # RL, (N,3)
+
+        rear_x = torch.stack([rear_1[:, 0], rear_2[:, 0]], dim=1)  # (N,2)
+
+        # Nominal rear-foot x location in base frame.
+        # This should usually be negative, e.g. -0.20 to -0.25 m.
+        rear_x_nominal = self.cfg.rewards.rear_foot_x_nominal
+
+        # Allowed deviation around nominal rear-foot x location.
+        # Example: 0.08 m allows rear_x in [nominal - 0.08, nominal + 0.08].
+        rear_x_margin = self.cfg.rewards.rear_foot_x_margin
+
+        # Penalize both too far forward and too far backward relative to nominal.
+        x_error = torch.abs(rear_x - rear_x_nominal)
+        overreach = torch.relu(x_error - rear_x_margin)
+
+        # Contact gate rear feet only: feet_indices[2:4], not [:2]
+        contact = (
+            self.simulator.link_contact_forces[:, self.simulator.feet_indices[2:4], 2] > 5.0
+        ).float()  # (N,2)
+
+        penalty = torch.sum(contact * overreach ** 2, dim=1)
+
+        return penalty

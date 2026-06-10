@@ -36,3 +36,8 @@ from .ppo_dreamwaq import PPO_DreamWaQ
 from .ppo_pact import PPO_PACT
 from .ppo_pact_pos import PPO_PACT_Pos
 from .ppo_kite import PPO_KITE
+
+from .ppo_postau import PPO_PosTau
+from .ppo_rl2ac import PPO_RL2AC
+from .ppo_abl1 import PPO_ABL1
+from .ppo_abl3 import PPO_ABL3 

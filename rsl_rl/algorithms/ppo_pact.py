@@ -37,6 +37,8 @@ from torch import linalg as LA
 import numpy as np
 import random
 
+from rsl_rl.utils import print_class_attributes
+
 from rsl_rl.modules import ActorCritic_PACT, ContextDecoder
 from rsl_rl.storage import RolloutStoragePACT
 
@@ -68,6 +70,12 @@ class PPO_PACT:
                  pinn_init_steps=500,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
                  vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
+                 use_adaptive_entropy=True,
+                 adaptive_ent_bounds=[0.01, 0.001],
+                 adaptive_ent_lin_threshold=0.75,
+                 adaptive_ent_ang_threshold=0.35,
+                 adaptive_ent_ter_threshold=5.0,
+                 adaptive_ent_softmax_temp=2.0,
                  ):
         
         self.device = device
@@ -81,6 +89,17 @@ class PPO_PACT:
         self.num_enc_epochs = num_encoder_epochs
         self.vae_beta = vae_kld_weight
 
+        # Adaptive entropy coefficent algorithm values
+        self.use_adaptive_entropy = use_adaptive_entropy
+        self.entropy_coef_bounds = adaptive_ent_bounds
+        self.ent_linvelo_threshold = adaptive_ent_lin_threshold
+        self.ent_angvelo_threshold = adaptive_ent_ang_threshold
+        self.ent_terrain_threshold = adaptive_ent_ter_threshold
+        self.ent_softmax_temperature = adaptive_ent_softmax_temp
+        
+        self.current_entropy_coef = entropy_coef
+        self.entropy_coef = entropy_coef
+
         # PPO components
         self.actor_critic = actor_critic
         self.actor_critic.to(self.device)
@@ -93,8 +112,7 @@ class PPO_PACT:
 
         # # We want to reduce the LR of the critic
         for param_group in self.act_optimizer.optimizer.param_groups:
-        # for param_group in self.act_optimizer.param_groups:
-            # specifically modifies the learning rate of the position-control specific parameters
+            # specifically modifies the learning rate of the crtic specific parameters
             if "name" in param_group.keys():
                 if "critic" in param_group["name"]:
                     param_group['lr'] = (learning_rate / 3.0)
@@ -117,11 +135,13 @@ class PPO_PACT:
         self.num_learning_epochs = num_learning_epochs
         self.num_mini_batches = num_mini_batches
         self.value_loss_coef = value_loss_coef
-        self.entropy_coef = entropy_coef
         self.gamma = gamma
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+
+        print_class_attributes(self)
+        
         
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
         self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
@@ -130,8 +150,37 @@ class PPO_PACT:
     def test_mode(self):
         self.actor_critic.test()
 
+    def _set_std_clip_lwr(self, clip_val=0.1):
+        self.actor_critic._set_std_clip_lwr(clip_val)
+
     def set_entropy_coef(self, coef=1e-3):
-        self.entropy_coef = coef
+        if self.use_adaptive_entropy: 
+            self.current_entropy_coef = coef
+        else:
+            self.entropy_coef = coef        
+        
+    def update_adaptive_entropy_coef(self, performance_metrics):
+        lin_vel_tracking = performance_metrics.get('lin_vel_tracking', 0.0)
+        ang_vel_tracking = performance_metrics.get('ang_vel_tracking', 0.0)
+        terrain_level = performance_metrics.get('terrain_level', 0)
+        
+        lin_vel_gap = max(0, self.ent_linvelo_threshold - lin_vel_tracking)
+        ang_vel_gap = max(0, self.ent_angvelo_threshold - ang_vel_tracking)
+        terrain_gap = max(0, self.ent_terrain_threshold - terrain_level)
+        
+        norm_lin_gap = lin_vel_gap /  self.ent_linvelo_threshold if self.ent_linvelo_threshold > 0 else 0
+        norm_ang_gap = ang_vel_gap / self.ent_angvelo_threshold if self.ent_angvelo_threshold > 0 else 0
+        norm_terrain_gap = terrain_gap / self.ent_terrain_threshold if self.ent_terrain_threshold > 0 else 0
+        
+        gaps = torch.tensor([norm_lin_gap, norm_ang_gap, norm_terrain_gap], dtype=torch.float32)
+        
+        weights = F.softmax(gaps / self.ent_softmax_temperature, dim=0)
+        
+        weighted_gap = torch.sum(weights * gaps).item()
+        
+        self.current_entropy_coef = self.entropy_coef_bounds[0] + weighted_gap * (self.entropy_coef_bounds[1] - self.entropy_coef_bounds[0])
+        
+        return self.current_entropy_coef
     
     def train_mode(self):
         self.actor_critic.train()
@@ -192,35 +241,6 @@ class PPO_PACT:
         self.storage.add_transitions(self.transition)
         self.transition.clear()
         self.actor_critic.reset(dones)
-
-    # def spectral_normalization(self, model):
-    #     """Applies spectral normalization to linear and attention layers.
-        
-    #     Normalizes weights such that their spectral norm (2-norm) doesn't exceed
-    #     the specified bound. Only affects Linear layers.
-
-    #     Args:
-    #         model: The neural network model to normalize.
-
-    #     Note:
-    #         - Operates in-place on the model parameters
-    #         - Only processes weights (not biases)
-    #         - Only affects parameters with ndim > 1
-    #     """
-    #     whitelist = (nn.Linear)
-
-    #     for module in model.modules():
-    #         if isinstance(module, whitelist):
-    #             for name, param in module.named_parameters():
-    #                 print(name)
-    #                 if name.endswith("weight") and param.ndim > 1:
-    #                     with torch.no_grad():
-    #                         weight = param.data
-    #                         norm = LA.matrix_norm(weight, ord=2)
-                            
-    #                         # Normalize if exceeds bound
-    #                         if norm > 2.0:
-    #                             param.data = (weight / norm) * 2.0
 
 
     def spectral_normalization(
@@ -306,7 +326,11 @@ class PPO_PACT:
         boot_sum_recon_sqerr = 0.0
 
         if itr > self.pinn_init and self.num_pinn_updates < (self.pinn_warmup_steps+1):
-            self.pinn_weight = (float(self.num_pinn_updates)/float(self.pinn_warmup_steps))*self.pinn_weight_final
+            if self.pinn_weight_final < 0:
+                self.pinn_weight = 1.0
+            else:
+                self.pinn_weight = (float(self.num_pinn_updates)/float(self.pinn_warmup_steps))*self.pinn_weight_final
+
             print(self.pinn_weight)
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
@@ -335,14 +359,18 @@ class PPO_PACT:
                                                     mass_mat_batch, bias_vec_batch, gt_forces_batch,
                                                     action_func, fb_func, default_pose, dt, qvel_scale)
                 
-            if self.pinn_weight > 0.0:
+            if self.pinn_weight > 0.0 and self.pinn_weight_final > 0:
                 ppo_losses = [ppo_loss, self.pinn_weight * pinn_loss]
+            elif self.pinn_weight > 0.0 and self.pinn_weight_final < 0:
+                ppo_losses = [ppo_loss, pinn_loss]
             else:
                 ppo_losses = [ppo_loss]
             
             # PCGrad - back-propigate the loss
-            if self.pinn_weight > 0 and pinn_loss is not None:    # just being extra cautious
+            if self.pinn_weight > 0 and self.pinn_weight_final > 0 and pinn_loss is not None:    # just being extra cautious
                 self.act_optimizer.pc_backward_pinn(ppo_losses)
+            elif self.pinn_weight_final < 0 and pinn_loss is not None:
+                self.act_optimizer.pc_backward_ppgrad(ppo_losses)
             else:
                 self.act_optimizer.pc_backward(ppo_losses)
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
@@ -435,24 +463,15 @@ class PPO_PACT:
         mean_vel_loss /= (num_updates * self.num_enc_epochs)
         mean_recon_loss /= (num_updates * self.num_enc_epochs)
 
-        # # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
-        # mean_pred = np.mean(all_enc_obs_targets, axis=0)
-        # mean_pred_error = np.mean(np.square(mean_pred - all_enc_obs_targets))
-        # actual_pred_error = np.mean(np.square(np.array(all_enc_recons) - np.array(all_enc_obs_targets)))
-        # ratio = mean_pred_error / (actual_pred_error * self.boot_mult)
-        # pboot = np.tanh(ratio)
-
-        # total number of scalar elements per sample vector
+        # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
+        #      total number of scalar elements per sample vector
         feat_dim = boot_sum_x.shape[0]
 
         mean_pred = boot_sum_x / boot_count                     # [D]
         ex2 = boot_sum_x2 / boot_count                          # [D]
         var = torch.clamp(ex2 - mean_pred**2, min=0.0)          # [D]
-
         mean_pred_error = var.mean().item()
-
         actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
-
         ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
         pboot = np.tanh(ratio)
 
@@ -525,8 +544,11 @@ class PPO_PACT:
         else:
             value_loss = (returns_batch - value_batch).pow(2).mean()
 
-        ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
-        
+        if self.use_adaptive_entropy: 
+            ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.current_entropy_coef * entropy_batch.mean()
+        else:
+            ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()        
+
         return ppo_loss, surrogate_loss, value_loss, current_actions
 
     def _compute_vae_loss(self, obs_hist_batch, grf_target, 
@@ -558,37 +580,43 @@ class PPO_PACT:
                            pprev_obs_batch, pprev_obs_hist_batch,                                 # previous-previous timestep
                            torso_accs_batch, mass_mat_batch, bias_vec_batch, gt_forces_batch,     # PINN stuff
                            action_func, fb_func, default_pose, dt, qvel_scale):                   # simulator functions/values passthrough
-        if self.use_boot:
-            self.actor_critic.act(prev_obs_batch, prev_obs_hist_batch)
-        else:
-            self.actor_critic.act_bootmask(prev_obs_batch, prev_obs_hist_batch)
-        prev_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
+        # if self.use_boot:
+        #     self.actor_critic.act(prev_obs_batch, prev_obs_hist_batch)
+        # else:
+        #     self.actor_critic.act_bootmask(prev_obs_batch, prev_obs_hist_batch)
+        # prev_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
 
-        pprev_actions = None
-        if self.use_boot:
-            self.actor_critic.act(pprev_obs_batch, pprev_obs_hist_batch)
-        else:
-            self.actor_critic.act_bootmask(pprev_obs_batch, pprev_obs_hist_batch)
-        pprev_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
+        # pprev_actions = None
+        # if self.use_boot:
+        #     self.actor_critic.act(pprev_obs_batch, pprev_obs_hist_batch)
+        # else:
+        #     self.actor_critic.act_bootmask(pprev_obs_batch, pprev_obs_hist_batch)
+        # pprev_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
 
         # Process current and previous actions into the action-space
         q_des_curr, tau_des_curr = action_func(current_actions)
-        q_des_prev, _            = action_func(prev_actions)
-        q_des_pprev, _           = action_func(pprev_actions)
+        # q_des_prev, _            = action_func(prev_actions)
+        # q_des_pprev, _           = action_func(pprev_actions)
 
         # Extract joint pose and velocity data
         # Obs - cmd (3), proj_grav (3), ang_vel (3)
         q_pos_curr,  q_velo_curr  = obs_batch[:,9:21].detach().clone(),   obs_batch[:,21:33].detach().clone()
         q_pos_curr,  q_velo_curr  = (q_pos_curr + default_pose).float(),  (q_velo_curr / qvel_scale).float()
+
+        q_velo_prev = prev_obs_batch[:,21:33].detach().clone()
+        q_velo_prev = (q_velo_prev / qvel_scale).float()
         
         # Calculate feedback torques
         pd_tau_curr  = fb_func(q_des_curr,  q_pos_curr,  q_velo_curr)
+        
+        # dof_acc_target = (q_velo_curr - q_velo_prev) / dt
 
         ###
         #   WB-dynamics
         ###
         # Use 1st order backwards finite differences to approximate models command acceleration
-        dof_acc = (q_des_curr - 2.0*q_des_prev + q_des_pprev) / np.power(dt,2)
+        # dof_acc = (q_des_curr - 2.0*q_des_prev + q_des_pprev) / np.power(dt,2)
+        dof_acc = (q_velo_curr - q_velo_prev) / dt
         # Create the whole-body acceleration vector
         wb_acc = torch.cat([torso_accs_batch, dof_acc], dim=1).float()
         # Create the whole-boyd tau vector 
@@ -597,19 +625,35 @@ class PPO_PACT:
         # Calculate the models wb-dynamics
         model_wb_dynamics = torch.bmm(mass_mat_batch.float(), wb_acc.unsqueeze(-1)).squeeze(-1) + bias_vec_batch.float()
 
-        error = model_wb_dynamics[:,6:] - gt_forces_batch[:,6:] - wb_tau[:,6:]
+        # error = model_wb_dynamics[:,6:] - gt_forces_batch[:,6:] - wb_tau[:,6:]
+
+        # # softly weight by contact
+        # # Apply soft (to make this a continuous reward signal) contact weighting to avoid over-penalizing for leg movement
+        # contact_magnitude = torch.clamp(gt_forces_batch[:,6:], min=0.0)
+        # contact_max = torch.max(contact_magnitude, dim=1, keepdim=True)[0]
+        # contact_weight = contact_magnitude / (contact_max + 1e-8)
+        # error *= contact_weight
+
+        # # Make the error relative, so that it is less senesitive to scale
+        # rel_error = torch.norm(error, dim=1) / (1e-8 + torch.norm(wb_tau[:,6:].detach().clone(), dim=1) + torch.norm(gt_forces_batch[:,6:], dim=1))
+        
+        error = model_wb_dynamics - gt_forces_batch - wb_tau
 
         # softly weight by contact
         # Apply soft (to make this a continuous reward signal) contact weighting to avoid over-penalizing for leg movement
-        contact_magnitude = torch.clamp(gt_forces_batch[:,6:], min=0.0)
+        contact_magnitude = torch.clamp(gt_forces_batch, min=0.0)
         contact_max = torch.max(contact_magnitude, dim=1, keepdim=True)[0]
         contact_weight = contact_magnitude / (contact_max + 1e-8)
         error *= contact_weight
 
         # Make the error relative, so that it is less senesitive to scale
-        rel_error = torch.norm(error, dim=1) / (1e-8 + torch.norm(wb_tau[:,6:].detach().clone(), dim=1) + torch.norm(gt_forces_batch[:,6:], dim=1))
+        rel_error = torch.norm(error, dim=1) / (1e-8 + torch.norm(wb_tau.detach().clone(), dim=1) + torch.norm(gt_forces_batch, dim=1))
+        
+        # rel_acc_error = torch.norm(dof_acc - dof_acc_target, dim=1) / (1e-8 + torch.norm(dof_acc_target, dim=1) +  torch.norm(dof_acc, dim=1))
 
         # Calculate the whole-body PINN loss
         pinn_loss = torch.mean(rel_error)
+        
+        # acc_loss = torch.mean(rel_acc_error)
         
         return pinn_loss

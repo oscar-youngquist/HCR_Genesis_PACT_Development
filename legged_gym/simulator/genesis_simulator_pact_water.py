@@ -17,8 +17,8 @@ import pinocchio as pn
 from legged_gym.scripts.liquid_payload_configs import *
 
 # Some values that are held constant for the water tank and liquid
-liquid_substeps      = 5
-liquid_particle_size = 0.01
+liquid_substeps      = 2
+liquid_particle_size = 0.02
 
 container_outer_x = 0.20  # X dimension
 container_outer_y = 0.15  # Y dimension
@@ -224,21 +224,34 @@ class GenesisSimulator_PACT_Water(Simulator):
     def _reset_liquid_state(self, envs_idx):
         # pull out the new poses and oreintations
         new_base_poses = self._base_pos[envs_idx].clone().cpu().numpy()
-        
+
+        print(new_base_poses)
+        rob_init_pose = np.array(self._cfg.init_state.pos)
+
+        height_offsets = new_base_poses[:,2] - (rob_init_pose[2])
+        # height_offsets =  self._env_origins[envs_idx,2].cpu().numpy()
+        print(height_offsets)
+
         # Calculate the liquid pose offsets
         new_particle_pos_offset    = new_base_poses
-        # new_particle_pos_offset[:, 2] = 0.0 # no need to modify the height
-                
-        # Use the new poses/orientations to reset the liquid particles
-        self._liquid.set_particles_vel(0, envs_idx=envs_idx)
+        new_particle_pos_offset[:, 2] = height_offsets
 
         # Doesn't look like the yaw angle is randomized when resetting, so no need to rotate the particle positions.
         # new_particle_posistions = quat_rotate_inverse(self._base_quat_offsets,
         #                                               self._liquid_init_pose[envs_idx]).cpu().numpy()
         new_particle_posistions = self._liquid_init_pose[envs_idx].cpu().numpy()
+        
+        print(new_particle_posistions[:,0:2])
+        
         new_particle_posistions += new_particle_pos_offset[:, None, :]
+        
+        print(new_particle_posistions[:,0:2])
+        
         self._liquid.set_particles_pos(new_particle_posistions,
                                       envs_idx=envs_idx)
+        
+        # # Use the new poses/orientations to reset the liquid particles
+        # self._liquid.set_particles_vel(0, envs_idx=envs_idx)
 
     def update_sensors(self):
         # Genesis currently exposes depth update via `update_depth_images`
@@ -254,81 +267,97 @@ class GenesisSimulator_PACT_Water(Simulator):
                                                    torch.clip(self._terrain_levels[env_ids], 0))  # (the minumum level is zero)
         self._env_origins[env_ids] = self._terrain_origins[self._terrain_levels[env_ids],
             self._terrain_types[env_ids]]
-
-    def push_robots(self):        
+    
+    def push_robots(self):
         dofs_vel = self._robot.get_dofs_velocity()
 
-        # check which wrench values have timed out   + self.env_identities
-        push_mask = (
-            (self.common_step_counter)
-            % (self.push_timeouts / self._control_dt).int()
-        ) == 0
+        # Convert timeout durations to integer step intervals
+        push_steps = torch.clamp(
+            (self.push_timeouts / self._control_dt).int().view(-1), min=1
+        )
+        wrench_steps = torch.clamp(
+            (self.wrench_timeouts / self._control_dt).int().view(-1), min=1
+        )
+        vert_steps = torch.clamp(
+            (self.vert_timeouts / self._control_dt).int().view(-1), min=1
+        )
 
-        wrench_mask = (
-            (self.common_step_counter)
-            % (self.wrench_timeouts / self._control_dt).int()
-        )  == 0
-        
-        vert_mask = (
-            (self.common_step_counter)
-            % (self.vert_timeouts / self._control_dt).int()
-        )  == 0
+        # Boolean masks of envs whose timeout has elapsed
+        push_mask = ((self.common_step_counter % push_steps) == 0).view(-1)
+        wrench_mask = ((self.common_step_counter % wrench_steps) == 0).view(-1)
+        vert_mask = ((self.common_step_counter % vert_steps) == 0).view(-1)
 
-        push_mask = push_mask.squeeze()
-        wrench_mask = wrench_mask.squeeze()
-        vert_mask = vert_mask.squeeze()
+        num_push_reset = int(push_mask.sum().item())
+        num_wrench_reset = int(wrench_mask.sum().item())
+        num_vert_reset = int(vert_mask.sum().item())
 
-        num_push_reset = push_mask.sum().item()
-        num_wrench_reset = wrench_mask.sum().item()
-        num_vert_reset = vert_mask.sum().item()
-        
+        # Apply planar push
         if num_push_reset > 0:
-            lin_vel = torch_rand_float(-self.push_value,
-                                        self.push_value, (num_push_reset, 2), self._device)
-            self._rand_push_vels[push_mask, :2] = lin_vel.detach().clone().squeeze()
+            lin_vel = torch_rand_float(
+                -self.push_value,
+                self.push_value,
+                (num_push_reset, 2),
+                self._device,
+            )
+            self._rand_push_vels[push_mask, :2] = lin_vel
             dofs_vel[push_mask, :2] += lin_vel
-        
+
+        # Apply angular wrench
         if num_wrench_reset > 0:
-            ang_push = torch_rand_float(-self.wrench_value,
-                                        self.wrench_value,
-                                        (num_wrench_reset, 3),   # roll, pitch, yaw
-                                        self._device)
-            self._rand_wrench_vels[wrench_mask,:] = ang_push.detach().clone().squeeze()
+            ang_push = torch_rand_float(
+                -self.wrench_value,
+                self.wrench_value,
+                (num_wrench_reset, 3),
+                self._device,
+            )
+            self._rand_wrench_vels[wrench_mask, :] = ang_push
             dofs_vel[wrench_mask, 3:6] += ang_push
 
+        # Apply downward vertical push
         if num_vert_reset > 0:
-            vert_push = torch_rand_float(-self.vert_value,
-                                        0.0,
-                                        (num_vert_reset,1),   # vertical forces
-                                        self._device)
-            self._rand_push_vels[vert_mask,2] = vert_push.detach().clone().squeeze()
-            dofs_vel[vert_mask, 2] += vert_push.squeeze()
-        
-        # Calculate new interval times for the number of time-out envs
+            vert_push = torch_rand_float(
+                -self.vert_value,
+                0.0,
+                (num_vert_reset, 1),
+                self._device,
+            )
+            self._rand_push_vels[vert_mask, 2:3] = vert_push
+            dofs_vel[vert_mask, 2:3] += vert_push
+
+        # Resample timeout intervals
         if num_push_reset > 0:
             self.push_timeouts[push_mask] = torch.round(
-                                                torch_rand_float(self.push_interval_min,
-                                                    self.push_interval_max,
-                                                    (num_push_reset,1),
-                                                    self._device),
-                                                decimals=self.n_digits).float()
-            
+                torch_rand_float(
+                    self.push_interval_min,
+                    self.push_interval_max,
+                    (num_push_reset, 1),
+                    self._device,
+                ),
+                decimals=self.n_digits,
+            ).float()
+
         if num_wrench_reset > 0:
             self.wrench_timeouts[wrench_mask] = torch.round(
-                                                torch_rand_float(self.wrench_timeout_min,
-                                                    self.wrench_timeout_max,
-                                                    (num_wrench_reset,1),
-                                                    self._device),
-                                                decimals=self.n_digits).float()
-        
+                torch_rand_float(
+                    self.wrench_timeout_min,
+                    self.wrench_timeout_max,
+                    (num_wrench_reset, 1),
+                    self._device,
+                ),
+                decimals=self.n_digits,
+            ).float()
+
         if num_vert_reset > 0:
             self.vert_timeouts[vert_mask] = torch.round(
-                                                torch_rand_float(self.vert_interval_min,
-                                                    self.vert_interval_max,
-                                                    (num_vert_reset,1),
-                                                    self._device),
-                                                decimals=self.n_digits).float()
-            
+                torch_rand_float(
+                    self.vert_interval_min,
+                    self.vert_interval_max,
+                    (num_vert_reset, 1),
+                    self._device,
+                ),
+                decimals=self.n_digits,
+            ).float()
+
         self._robot.set_dofs_velocity(dofs_vel)
 
     def draw_debug_vis(self):
@@ -402,7 +431,7 @@ class GenesisSimulator_PACT_Water(Simulator):
             print("COM Delta X Value: ", self.com_delta_x_value)
             print("COM Delta Y Value: ", self.com_delta_y_value)
             print("COM Delta Z Value: ", self.com_delta_z_value)
-            print("Torque Limits - ", self.torque_limits[0])
+            # print("Torque Limits - ", self.torque_limits[0])
             return
 
         adjusted_step = num_iters - self.push_warmup_step
@@ -416,7 +445,7 @@ class GenesisSimulator_PACT_Water(Simulator):
             print("COM Delta X Value: ", self.com_delta_x_value)
             print("COM Delta Y Value: ", self.com_delta_y_value)
             print("COM Delta Z Value: ", self.com_delta_z_value)
-            print("Torque Limits - ", self.torque_limits[0])
+            # print("Torque Limits - ", self.torque_limits[0])
             return
         
         elif adjusted_step % self.num_steps_per_jump == 0:
@@ -434,7 +463,7 @@ class GenesisSimulator_PACT_Water(Simulator):
                 self.com_delta_z_val_bounds = [-self._cfg.domain_rand.com_displacement_z_min, self.com_delta_z_value]
             
             
-            self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
+            # self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
 
         print("Push Value: ", self.push_value)
         print("Wrench Value: ", self.wrench_value)
@@ -443,7 +472,7 @@ class GenesisSimulator_PACT_Water(Simulator):
         print("COM Delta X Value: ", self.com_delta_x_value)
         print("COM Delta Y Value: ", self.com_delta_y_value)
         print("COM Delta Z Value: ", self.com_delta_z_value)
-        print("Torque Limits - ", self.torque_limits[0])
+        # print("Torque Limits - ", self.torque_limits[0])
 
     #----- Protected methods -----#
     def _parse_cfg(self):
@@ -1114,13 +1143,19 @@ class GenesisSimulator_PACT_Water(Simulator):
             max_init_level = self._cfg.terrain.max_init_terrain_level
             if not self._cfg.terrain.curriculum:
                 max_init_level = self._cfg.terrain.num_rows - 1
+            
             self._terrain_levels = torch.randint(
                 0, max_init_level+1, (self._num_envs,), device=self._device)
+            
             self._terrain_types = torch.div(torch.arange(self._num_envs, device=self._device), (
                 self._num_envs/self._cfg.terrain.num_cols), rounding_mode='floor').to(torch.long)
+            
             self._max_terrain_level = self._cfg.terrain.num_rows
+            
             self._terrain_origins = torch.from_numpy(
                 self._terrain.env_origins).to(self._device).to(torch.float)
+            
+            
             self._env_origins[:] = self._terrain_origins[self._terrain_levels,
                                                        self._terrain_types]
         else:
@@ -1326,7 +1361,7 @@ class GenesisSimulator_PACT_Water(Simulator):
     def _randomize_base_mass(self, env_ids=None):
         ''' Randomize base mass'''
         min_mass, max_mass = self.mass_min, self.mass_max_value
-        # min_mass, max_mass = 10.0, 12.0
+        # min_mass, max_mass = 12.0, 16.0
         added_mass = gs.rand((len(env_ids), 1), dtype=float) * (max_mass - min_mass) + min_mass
         self._added_base_mass[env_ids] = added_mass[:].detach().clone()
         self._robot.set_mass_shift(added_mass, self._base_link_index, env_ids)

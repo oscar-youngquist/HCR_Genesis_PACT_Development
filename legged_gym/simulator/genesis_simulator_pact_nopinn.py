@@ -11,6 +11,7 @@ from legged_gym.utils.viz_helpers import _build_surface_frame_from_normal, _crea
 
 import multiprocessing as mp
 import random
+from collections import deque
 
 import torch.nn.functional as F
 import pinocchio as pn
@@ -27,6 +28,8 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         super().__init__(cfg, sim_params, device, headless)
         self.first_loop = True
         self.first_loop_feedback = None
+        
+        print("********** Genesis Simulator ********** NO PINN VERSION **********")
 
     def _create_async_pino_workers(self):
         pass
@@ -136,6 +139,9 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
             self._randomize_pd_gain(env_ids)
         if self._cfg.domain_rand.randomize_motor_strength:
             self._randomize_motor_strength(env_ids)
+
+        if self._cfg.control.randomize_pact_weights:
+            self._randomize_pact_torque_weights(env_ids)
         
         self._last_dof_vel[env_ids] = 0.
         self._last_feet_vel[env_ids] = 0.
@@ -221,81 +227,101 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
                                                    torch.clip(self._terrain_levels[env_ids], 0))  # (the minumum level is zero)
         self._env_origins[env_ids] = self._terrain_origins[self._terrain_levels[env_ids],
             self._terrain_types[env_ids]]
-
-    def push_robots(self):        
+        
+    def push_robots(self):
         dofs_vel = self._robot.get_dofs_velocity()
 
-        # check which wrench values have timed out   + self.env_identities
-        push_mask = (
-            (self.common_step_counter)
-            % (self.push_timeouts / self._control_dt).int()
-        ) == 0
+        # Convert timeout durations to integer step intervals
+        push_steps = torch.clamp(
+            (self.push_timeouts / self._control_dt).int().view(-1), min=1
+        )
+        wrench_steps = torch.clamp(
+            (self.wrench_timeouts / self._control_dt).int().view(-1), min=1
+        )
+        vert_steps = torch.clamp(
+            (self.vert_timeouts / self._control_dt).int().view(-1), min=1
+        )
 
-        wrench_mask = (
-            (self.common_step_counter)
-            % (self.wrench_timeouts / self._control_dt).int()
-        )  == 0
-        
-        vert_mask = (
-            (self.common_step_counter)
-            % (self.vert_timeouts / self._control_dt).int()
-        )  == 0
+        # Boolean masks of envs whose timeout has elapsed
+        push_mask = ((self.common_step_counter % push_steps) == 0).view(-1)
+        wrench_mask = ((self.common_step_counter % wrench_steps) == 0).view(-1)
+        vert_mask = ((self.common_step_counter % vert_steps) == 0).view(-1)
 
-        push_mask = push_mask.squeeze()
-        wrench_mask = wrench_mask.squeeze()
-        vert_mask = vert_mask.squeeze()
+        num_push_reset = int(push_mask.sum().item())
+        num_wrench_reset = int(wrench_mask.sum().item())
+        num_vert_reset = int(vert_mask.sum().item())
 
-        num_push_reset = push_mask.sum().item()
-        num_wrench_reset = wrench_mask.sum().item()
-        num_vert_reset = vert_mask.sum().item()
-        
+        # Apply planar push
         if num_push_reset > 0:
-            lin_vel = torch_rand_float(-self.push_value,
-                                        self.push_value, (num_push_reset, 2), self._device)
-            self._rand_push_vels[push_mask, :2] = lin_vel.detach().clone().squeeze()
+            lin_vel = torch_rand_float(
+                -self.push_value,
+                self.push_value,
+                (num_push_reset, 2),
+                self._device,
+            )
+            
+            if self._cfg.env.lateral_push_only:
+                lin_vel[:,0] = 0.0
+            
+            self._rand_push_vels[push_mask, :2] = lin_vel
             dofs_vel[push_mask, :2] += lin_vel
-        
+
+        # Apply angular wrench
         if num_wrench_reset > 0:
-            ang_push = torch_rand_float(-self.wrench_value,
-                                        self.wrench_value,
-                                        (num_wrench_reset, 3),   # roll, pitch, yaw
-                                        self._device)
-            self._rand_wrench_vels[wrench_mask,:] = ang_push.detach().clone().squeeze()
+            ang_push = torch_rand_float(
+                -self.wrench_value,
+                self.wrench_value,
+                (num_wrench_reset, 3),
+                self._device,
+            )
+            self._rand_wrench_vels[wrench_mask, :] = ang_push
             dofs_vel[wrench_mask, 3:6] += ang_push
 
+        # Apply downward vertical push
         if num_vert_reset > 0:
-            vert_push = torch_rand_float(-self.vert_value,
-                                        0.0,
-                                        (num_vert_reset,1),   # vertical forces
-                                        self._device)
-            self._rand_push_vels[vert_mask,2] = vert_push.detach().clone().squeeze()
-            dofs_vel[vert_mask, 2] += vert_push.squeeze()
-        
-        # Calculate new interval times for the number of time-out envs
+            vert_push = torch_rand_float(
+                -self.vert_value,
+                0.0,
+                (num_vert_reset, 1),
+                self._device,
+            )
+            self._rand_push_vels[vert_mask, 2:3] = vert_push
+            dofs_vel[vert_mask, 2:3] += vert_push
+
+        # Resample timeout intervals
         if num_push_reset > 0:
             self.push_timeouts[push_mask] = torch.round(
-                                                torch_rand_float(self.push_interval_min,
-                                                    self.push_interval_max,
-                                                    (num_push_reset,1),
-                                                    self._device),
-                                                decimals=self.n_digits).float()
-            
+                torch_rand_float(
+                    self.push_interval_min,
+                    self.push_interval_max,
+                    (num_push_reset, 1),
+                    self._device,
+                ),
+                decimals=self.n_digits,
+            ).float()
+
         if num_wrench_reset > 0:
             self.wrench_timeouts[wrench_mask] = torch.round(
-                                                torch_rand_float(self.wrench_timeout_min,
-                                                    self.wrench_timeout_max,
-                                                    (num_wrench_reset,1),
-                                                    self._device),
-                                                decimals=self.n_digits).float()
-        
+                torch_rand_float(
+                    self.wrench_timeout_min,
+                    self.wrench_timeout_max,
+                    (num_wrench_reset, 1),
+                    self._device,
+                ),
+                decimals=self.n_digits,
+            ).float()
+
         if num_vert_reset > 0:
             self.vert_timeouts[vert_mask] = torch.round(
-                                                torch_rand_float(self.vert_interval_min,
-                                                    self.vert_interval_max,
-                                                    (num_vert_reset,1),
-                                                    self._device),
-                                                decimals=self.n_digits).float()
-            
+                torch_rand_float(
+                    self.vert_interval_min,
+                    self.vert_interval_max,
+                    (num_vert_reset, 1),
+                    self._device,
+                ),
+                decimals=self.n_digits,
+            ).float()
+
         self._robot.set_dofs_velocity(dofs_vel)
 
     def draw_debug_vis(self):
@@ -441,52 +467,67 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
     def set_viewer_camera(self, eye: np.ndarray, target: np.ndarray):
         self._scene.viewer.set_camera_pose(pos=eye, lookat=target)
     
-    def _step_domian_rand(self, num_iters):
-        if (num_iters - self.push_warmup_step) > self.num_push_steps:
-            return
+    # def _step_domian_rand(self, num_iters):
+    #     if (num_iters - self.push_warmup_step) > self.num_push_steps:
+    #         return
         
-        elif num_iters <= self.push_warmup_step:
-            print("Push Value: ", self.push_value)
-            print("Wrench Value: ", self.wrench_value)
-            print("Vertical Push Value: ", self.vert_value)
-            print("Mass Max Value: ", self.mass_max_value)
-            print("COM Delta X Value: ", self.com_delta_x_value)
-            print("COM Delta Y Value: ", self.com_delta_y_value)
-            print("COM Delta Z Value: ", self.com_delta_z_value)
-            print("Torque Limits - ", self.torque_limits[0])
-            return
+    #     elif num_iters <= self.push_warmup_step:
+    #         print("Push Value: ", self.push_value)
+    #         print("Wrench Value: ", self.wrench_value)
+    #         print("Vertical Push Value: ", self.vert_value)
+    #         print("Mass Max Value: ", self.mass_max_value)
+    #         print("COM Delta X Value: ", self.com_delta_x_value)
+    #         print("COM Delta Y Value: ", self.com_delta_y_value)
+    #         print("COM Delta Z Value: ", self.com_delta_z_value)
+    #         # print("Torque Limits - ", self.torque_limits[0])
+    #         return
 
-        adjusted_step = num_iters - self.push_warmup_step
+    #     adjusted_step = num_iters - self.push_warmup_step
         
-        # Safety catch, hopefully isn't needed really
-        if adjusted_step == 0:
-            print("Push Value: ", self.push_value)
-            print("Wrench Value: ", self.wrench_value)
-            print("Vertical Push Value: ", self.vert_value)
-            print("Mass Max Value: ", self.mass_max_value)
-            print("COM Delta X Value: ", self.com_delta_x_value)
-            print("COM Delta Y Value: ", self.com_delta_y_value)
-            print("COM Delta Z Value: ", self.com_delta_z_value)
-            print("Torque Limits - ", self.torque_limits[0])
-            return
+    #     # Safety catch, hopefully isn't needed really
+    #     if adjusted_step == 0:
+    #         print("Push Value: ", self.push_value)
+    #         print("Wrench Value: ", self.wrench_value)
+    #         print("Vertical Push Value: ", self.vert_value)
+    #         print("Mass Max Value: ", self.mass_max_value)
+    #         print("COM Delta X Value: ", self.com_delta_x_value)
+    #         print("COM Delta Y Value: ", self.com_delta_y_value)
+    #         print("COM Delta Z Value: ", self.com_delta_z_value)
+    #         # print("Torque Limits - ", self.torque_limits[0])
+    #         return
         
-        elif adjusted_step % self.num_steps_per_jump == 0:
-            self.push_value      = (adjusted_step / self.num_push_steps) * self.push_diff + self.push_bounds[0]
-            self.wrench_value    = (adjusted_step / self.num_push_steps) * self.wrench_diff + self.wrench_bounds[0]
-            self.vert_value      = (adjusted_step / self.num_push_steps) * self.vert_diff + self.vert_bounds[0]
-            self.mass_max_value  = (adjusted_step / self.num_push_steps) * self.mass_bounds_diff + self.max_mass_bounds[0]
-            self.com_delta_x_value = (adjusted_step / self.num_push_steps) * self.com_delta_x_diff + self.com_delta_x_bounds[0]
-            self.com_delta_y_value = (adjusted_step / self.num_push_steps) * self.com_delta_y_diff + self.com_delta_y_bounds[0]
-            self.com_delta_z_value = (adjusted_step / self.num_push_steps) * self.com_delta_z_diff + self.com_delta_z_bounds[0]
+    #     elif adjusted_step % self.num_steps_per_jump == 0:
+    #         self.push_value      = (adjusted_step / self.num_push_steps) * self.push_diff + self.push_bounds[0]
+    #         self.wrench_value    = (adjusted_step / self.num_push_steps) * self.wrench_diff + self.wrench_bounds[0]
+    #         self.vert_value      = (adjusted_step / self.num_push_steps) * self.vert_diff + self.vert_bounds[0]
+    #         self.mass_max_value  = (adjusted_step / self.num_push_steps) * self.mass_bounds_diff + self.max_mass_bounds[0]
+    #         self.com_delta_x_value = (adjusted_step / self.num_push_steps) * self.com_delta_x_diff + self.com_delta_x_bounds[0]
+    #         self.com_delta_y_value = (adjusted_step / self.num_push_steps) * self.com_delta_y_diff + self.com_delta_y_bounds[0]
+    #         self.com_delta_z_value = (adjusted_step / self.num_push_steps) * self.com_delta_z_diff + self.com_delta_z_bounds[0]
         
-            # If we haven't returned already by now, then we are stepping, and so we want to reset the vertical com-shift bounds
-            #     if necessary
-            if self.com_rand_z_positive:
-                self.com_delta_z_val_bounds = [-self._cfg.domain_rand.com_displacement_z_min, self.com_delta_z_value]
+    #         # If we haven't returned already by now, then we are stepping, and so we want to reset the vertical com-shift bounds
+    #         #     if necessary
+    #         if self.com_rand_z_positive:
+    #             self.com_delta_z_val_bounds = [-self._cfg.domain_rand.com_displacement_z_min, self.com_delta_z_value]
             
             
-            self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
+    #         # self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
 
+    #     print("Push Value: ", self.push_value)
+    #     print("Wrench Value: ", self.wrench_value)
+    #     print("Vertical Push Value: ", self.vert_value)
+    #     print("Mass Max Value: ", self.mass_max_value)
+    #     print("COM Delta X Value: ", self.com_delta_x_value)
+    #     print("COM Delta Y Value: ", self.com_delta_y_value)
+    #     print("COM Delta Z Value: ", self.com_delta_z_value)
+    #     # print("Torque Limits - ", self.torque_limits[0])
+
+    def _print_domain_rand_values(self, prefix=""):
+        print(prefix)
+        print("Phase: ", self.domain_rand_phase)
+        print("Joint Dynamics Progress: ", self.domain_rand_joint_dynamics_progress)
+        print("Mass/COM Progress: ", self.domain_rand_mass_com_progress)
+        print("Disturbance Progress: ", self.domain_rand_disturbance_progress)
         print("Push Value: ", self.push_value)
         print("Wrench Value: ", self.wrench_value)
         print("Vertical Push Value: ", self.vert_value)
@@ -494,7 +535,183 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         print("COM Delta X Value: ", self.com_delta_x_value)
         print("COM Delta Y Value: ", self.com_delta_y_value)
         print("COM Delta Z Value: ", self.com_delta_z_value)
-        print("Torque Limits - ", self.torque_limits[0])
+        print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
+        print("Joint Damping Bounds: ", self.joint_damping_bound_current)
+        print("Joint Friction Bounds: ", self.joint_friction_bound_current)
+
+
+    def _step_domian_rand(self, num_iters, mean_reward=None):
+        """
+        Three-phase performance-gated domain-rand curriculum.
+
+        Phase 1: increase joint-level dynamics randomization.
+        Phase 2: increase mass + COM randomization.
+        Phase 3: increase external disturbance randomization.
+        """
+
+        def _interp(p, low, diff):
+            return p * diff + low
+
+        # -----------------------------
+        # Reward EMA / recovery gating
+        # -----------------------------
+        if mean_reward is not None:
+            mean_reward = float(mean_reward)
+
+            # calculate the EMA of the tracked reward signal
+            if self.domain_rand_reward_ema is None:
+                self.domain_rand_reward_ema = mean_reward
+            else:
+                a = self.domain_rand_ema_alpha
+                self.domain_rand_reward_ema = (
+                    (1.0 - a) * self.domain_rand_reward_ema + a * mean_reward
+                )
+
+            # Store recent EMA history
+            self.domain_rand_reward_ema_hist.append(self.domain_rand_reward_ema)
+
+            # Recent-window reference performance
+            hist = np.asarray(self.domain_rand_reward_ema_hist, dtype=np.float32)
+
+            if len(hist) < 10:
+                self.domain_rand_best_reward_ema = float(hist.max())
+            else:
+                self.domain_rand_best_reward_ema = float(
+                    np.quantile(hist, self.domain_rand_best_quantile)
+                )
+
+            self.required_reward = (
+                self.domain_rand_recovery_ratio * self.domain_rand_best_reward_ema
+            )
+
+            # if self.domain_rand_max_required_reward is not None:
+            #     self.required_reward = min(self.required_reward, self.domain_rand_max_required_reward)
+
+            can_step = (
+                self.domain_rand_reward_ema >= self.required_reward
+                and self.domain_rand_reward_ema >= self.domain_rand_min_reward
+            )
+        else:
+            self.required_reward = None
+            can_step = True
+
+        enough_time_since_step = (
+            num_iters - self.domain_rand_last_step_iter
+        ) >= self.domain_rand_step_interval
+
+
+        # Skip all the below if we are still in the warm-up stage
+        #    butI want to log the ema stuff for debugging, so still calculate all of that
+        if num_iters <= self.push_warmup_step:
+            self._print_domain_rand_values("[DomainRand] Warmup: holding initial values.")
+            return
+
+
+        if not can_step or not enough_time_since_step:
+            self.domain_rand_frozen = True
+            self._print_domain_rand_values(
+                "[DomainRand] Frozen | "
+                f"reward_ema={self.domain_rand_reward_ema}, "
+                f"required={self.required_reward}, "
+                f"min={self.domain_rand_min_reward}, "
+            )
+            return
+
+        self.domain_rand_frozen = False
+        self.domain_rand_last_step_iter = num_iters
+
+        # -----------------------------
+        # Phase selection
+        # -----------------------------
+        if self.domain_rand_phase == "joint_dynamics":
+            self.domain_rand_joint_dynamics_progress = min(
+                1.0,
+                self.domain_rand_joint_dynamics_progress + self.domain_rand_joint_dynamics_delta,
+            )
+
+            if self.domain_rand_joint_dynamics_progress >= 1.0:
+                self._advance_domain_rand_phase()
+
+        elif self.domain_rand_phase == "mass_com":
+            self.domain_rand_mass_com_progress = min(
+                1.0,
+                self.domain_rand_mass_com_progress + self.domain_rand_mass_com_delta,
+            )
+
+            if self.domain_rand_mass_com_progress >= 1.0:
+                self._advance_domain_rand_phase()
+
+        elif self.domain_rand_phase == "disturbance":
+            self.domain_rand_disturbance_progress = min(
+                1.0,
+                self.domain_rand_disturbance_progress + self.domain_rand_disturbance_delta,
+            )
+
+            if self.domain_rand_disturbance_progress >= 1.0:
+                self._advance_domain_rand_phase()
+
+        # -----------------------------
+        # Apply mass + COM progress
+        # -----------------------------
+        p_mc = self.domain_rand_mass_com_progress
+
+        self.mass_max_value = _interp(
+            p_mc, self.max_mass_bounds[0], self.mass_bounds_diff
+        )
+
+        self.com_delta_x_value = _interp(
+            p_mc, self.com_delta_x_bounds[0], self.com_delta_x_diff
+        )
+        self.com_delta_y_value = _interp(
+            p_mc, self.com_delta_y_bounds[0], self.com_delta_y_diff
+        )
+        self.com_delta_z_value = _interp(
+            p_mc, self.com_delta_z_bounds[0], self.com_delta_z_diff
+        )
+
+        # -----------------------------
+        # Apply disturbance progress
+        # -----------------------------
+        p_dist = self.domain_rand_disturbance_progress
+
+        self.push_value = _interp(
+            p_dist, self.push_bounds[0], self.push_diff
+        )
+        self.wrench_value = _interp(
+            p_dist, self.wrench_bounds[0], self.wrench_diff
+        )
+        self.vert_value = _interp(
+            p_dist, self.vert_bounds[0], self.vert_diff
+        )
+
+        # -----------------------------
+        # Apply joint dynamics progress
+        # -----------------------------
+        p_joint = self.domain_rand_joint_dynamics_progress
+
+        self.joint_stiffness_bound_current = (
+            p_joint * self.joint_stiffness_range + self.joint_stiffness_bounds_start
+        )
+        self.joint_damping_bound_current = (
+            p_joint * self.joint_damping_range + self.joint_damping_bounds_start
+        )
+        self.joint_friction_bound_current = (
+            p_joint * self.joint_friction_range + self.joint_friction_bounds_start
+        )
+
+        if self.com_rand_z_positive:
+            self.com_delta_z_val_bounds = [
+                -self._cfg.domain_rand.com_displacement_z_min,
+                self.com_delta_z_value,
+            ]
+        else:
+            self.com_delta_z_val_bounds = [
+                -self.com_delta_z_value,
+                self.com_delta_z_value,
+            ]
+
+        self._print_domain_rand_values("[DomainRand] Stepped --")
+
 
     #----- Protected methods -----#
     def _parse_cfg(self):
@@ -576,13 +793,113 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
 
         # This will be reset in the step_domian_rand function
         self.com_delta_z_val_bounds = [-self.com_delta_z_value, self.com_delta_z_value]
+        
+        self.joint_stiffness_bounds_start = self._cfg.domain_rand.joint_stiffness_range_start
+        self.joint_stiffness_bounds_end   = self._cfg.domain_rand.joint_stiffness_range_end
+        self.joint_stiffness_range        = np.array(self._cfg.domain_rand.joint_stiffness_range_end) - np.array(self._cfg.domain_rand.joint_stiffness_range_start)
+        self.joint_stiffness_bound_current = self.joint_stiffness_bounds_start
+
+        self.joint_damping_bounds_start = self._cfg.domain_rand.joint_damping_range_start
+        self.joint_damping_bounds_end   = self._cfg.domain_rand.joint_damping_range_end
+        self.joint_damping_range        = np.array(self._cfg.domain_rand.joint_damping_range_end) - np.array(self._cfg.domain_rand.joint_damping_range_start)
+        self.joint_damping_bound_current = self.joint_damping_bounds_start
+
+        self.joint_friction_bounds_start = self._cfg.domain_rand.joint_friction_range_start
+        self.joint_friction_bounds_end   = self._cfg.domain_rand.joint_friction_range_end
+        self.joint_friction_range        = np.array(self.joint_friction_bounds_end) - np.array(self.joint_friction_bounds_start)
+        self.joint_friction_bound_current = self.joint_friction_bounds_start
 
         # Tradeoff curriculum stuff
         self.feedforward_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
         self.feedback_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
 
+        self.feedforward_tau_weight_clean = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
+        self.feedback_tau_weight_clean = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
+
         self._wb_dim = self._cfg.env.whole_body_dim
         self._grf_dim = self._cfg.env.grf_dim
+        
+        self._init_domain_rand_curriculum_state()
+        
+        
+    def _init_domain_rand_curriculum_state(self):
+        self.domain_rand_joint_dynamics_progress = 0.0
+        self.domain_rand_mass_com_progress = 0.0
+        self.domain_rand_disturbance_progress = 0.0
+
+        self.domain_rand_curriculum_phases = []
+        if getattr(self._cfg.domain_rand, "use_joint_dynamics_curriculum", True):
+            self.domain_rand_curriculum_phases.append("joint_dynamics")
+        if getattr(self._cfg.domain_rand, "use_mass_com_curriculum", True):
+            self.domain_rand_curriculum_phases.append("mass_com")
+        if getattr(self._cfg.domain_rand, "use_disturbance_curriculum", True):
+            self.domain_rand_curriculum_phases.append("disturbance")
+        self.domain_rand_phase = (
+            self.domain_rand_curriculum_phases[0]
+            if self.domain_rand_curriculum_phases
+            else "complete"
+        )
+
+        self.domain_rand_joint_dynamics_delta = getattr(
+            self._cfg.domain_rand, "joint_dynamics_progress_delta", 0.002
+        )
+        self.domain_rand_mass_com_delta = getattr(
+            self._cfg.domain_rand, "mass_com_progress_delta", 0.002
+        )
+        self.domain_rand_disturbance_delta = getattr(
+            self._cfg.domain_rand, "disturbance_progress_delta", 0.001
+        )
+
+        self.domain_rand_frozen = False
+        self.domain_rand_reward_ema = None
+        self.domain_rand_best_reward_ema = -float("inf")
+
+        self.domain_rand_recovery_ratio = getattr(
+            self._cfg.domain_rand, "recovery_ratio", 0.70
+        )
+        
+        self.domain_rand_min_reward = getattr(
+        
+            self._cfg.domain_rand, "min_reward_to_step", 12.0
+        )
+        
+        self.domain_rand_step_interval = getattr(
+            self._cfg.domain_rand, "step_interval", 100
+        )
+        
+        self.domain_rand_last_step_iter = -10**9
+        
+        self.domain_rand_ema_alpha = getattr(
+            self._cfg.domain_rand, "reward_ema_alpha", 0.05
+        )
+        
+        self.domain_rand_max_required_reward = getattr(
+            self._cfg.domain_rand, "max_required_reward", 22.0
+        )
+        
+        self.domain_rand_reward_ema_hist = deque(
+            maxlen=getattr(self._cfg.domain_rand, "best_reward_window", 500)
+        )
+        
+        self.domain_rand_best_quantile = getattr(
+            self._cfg.domain_rand, "best_reward_quantile", 0.90
+            )
+        
+        self.required_reward = 0.0
+
+    def _advance_domain_rand_phase(self):
+        if self.domain_rand_phase not in self.domain_rand_curriculum_phases:
+            self.domain_rand_phase = "complete"
+            return
+
+        phase_idx = self.domain_rand_curriculum_phases.index(self.domain_rand_phase)
+        next_idx = phase_idx + 1
+        self.domain_rand_phase = (
+            self.domain_rand_curriculum_phases[next_idx]
+            if next_idx < len(self.domain_rand_curriculum_phases)
+            else "complete"
+        )
+        self.domain_rand_best_reward_ema = self.domain_rand_reward_ema
 
     # ------------- Callbacks --------------
     def _setup_camera(self):
@@ -860,6 +1177,10 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         # randomize motor strength factor
         if self._cfg.domain_rand.randomize_motor_strength:
             self._randomize_motor_strength(np.arange(self._num_envs))
+
+        # Randomize weighted contribution from each PACT output
+        if self._cfg.control.randomize_pact_weights:
+            self._randomize_pact_torque_weights(np.arange(self._num_envs))
             
     def _init_buffers(self):
         self.common_step_counter = 0
@@ -913,6 +1234,10 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         self._global_gravity = torch.tensor([0.0, 0.0, -1.0], device=self._device, dtype=torch.float).repeat(
             self._num_envs, 1
         )
+
+        self._base_pos_out_of_bounds_buf = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.bool)
+
         self._dof_pos = torch.zeros(self._num_envs, self._num_actions, device=self._device, dtype=torch.float)
         self._dof_vel = torch.zeros(self._num_envs, self._num_actions, device=self._device, dtype=torch.float)
         self._last_dof_vel = torch.zeros_like(self._dof_vel)
@@ -1195,9 +1520,11 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
             self._base_pos[:, 0] <= self._terrain_x_range[0])
         y_out_of_bound = (self._base_pos[:, 1] >= self._terrain_y_range[1]) | (
             self._base_pos[:, 1] <= self._terrain_y_range[0])
-        out_of_bound_buf = x_out_of_bound | y_out_of_bound
-        env_ids = out_of_bound_buf.nonzero(as_tuple=False).flatten()
+        self._base_pos_out_of_bounds_buf[:] = x_out_of_bound | y_out_of_bound
+        env_ids = self._base_pos_out_of_bounds_buf.nonzero(as_tuple=False).flatten()
         if len(env_ids) == 0:
+            return
+        elif getattr(self._cfg.terrain, "reset_out_of_bounds", False):
             return
         else:
             # reset base position to initial position
@@ -1299,9 +1626,7 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
 
     def _randomize_base_mass(self, env_ids=None):
         ''' Randomize base mass'''
-        # min_mass, max_mass = self.mass_min, self.mass_max_value
-        min_mass, max_mass = 10.0, 12.0
-        # min_mass, max_mass = 0.0, 0.0
+        min_mass, max_mass = self.mass_min, self.mass_max_value
         added_mass = gs.rand((len(env_ids), 1), dtype=float) * (max_mass - min_mass) + min_mass
         self._added_base_mass[env_ids] = added_mass[:].detach().clone()
         self._robot.set_mass_shift(added_mass, self._base_link_index, env_ids)
@@ -1341,7 +1666,7 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         # This armature will be Refreshed when envs are reset
 
     def _randomize_joint_friction(self, env_ids):
-        min_friction, max_friction = self._cfg.domain_rand.joint_friction_range
+        min_friction, max_friction = self.joint_friction_bound_current
         friction = torch.rand((len(env_ids),), dtype=torch.float, device=self._device) \
             * (max_friction - min_friction) + min_friction
         self._joint_friction[env_ids, 0] = friction.detach().clone()
@@ -1350,7 +1675,7 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
             friction, self._dof_indices, envs_idx=env_ids)
         
     def _randomize_joint_stiffness(self, env_ids):
-        min_stiffness, max_stiffness = self._cfg.domain_rand.joint_stiffness_range
+        min_stiffness, max_stiffness = self.joint_stiffness_bound_current
         stiffness = torch.rand((len(env_ids),), dtype=torch.float, device=self._device) \
             * (max_stiffness - min_stiffness) + min_stiffness
         self._joint_stiffness[env_ids, 0] = stiffness.detach().clone()
@@ -1361,7 +1686,7 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
     def _randomize_joint_damping(self, env_ids):
         """ Randomize joint damping of the robot
         """
-        min_damping, max_damping = self._cfg.domain_rand.joint_damping_range
+        min_damping, max_damping = self.joint_damping_bound_current
         damping = torch.rand((len(env_ids),), dtype=torch.float, device=self._device) \
             * (max_damping - min_damping) + min_damping
         self._joint_damping[env_ids, 0] = damping.detach().clone()
@@ -1381,6 +1706,60 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         self._kd_scale[env_ids] = torch_rand_float(
                 self._cfg.domain_rand.kd_range[0], self._cfg.domain_rand.kd_range[1], (len(env_ids), self._num_actions), device=self._device)
     
+    def _randomize_pact_torque_weights(self, env_ids):
+        """
+        Randomize feedforward / feedback torque weights for PACT torque outputs.
+
+        Goal:
+            tau_mixed = w_ff * tau_ff + w_fb * tau_fb
+
+        A subset of envs are sampled as "balanced":
+            w_ff = 1.0
+            w_fb = 1.0
+        """
+
+        if len(env_ids) == 0:
+            return
+
+        device = self._device
+        n = len(env_ids)
+
+        # User-defined config values
+        weight_bias_min = self._cfg.control.pact_weight_bias_min  # e.g. 0.15
+        weight_bias_max = self._cfg.control.pact_weight_bias_max  # e.g. 0.35
+        balanced_prob = self._cfg.control.pact_balanced_prob      # e.g. 0.25
+
+        # Decide which envs use the balanced/full-strength case
+        balanced_mask = torch.rand(n, device=device) < balanced_prob
+
+        # Randomly choose which source gets biased upward
+        bias_ff_mask = torch.rand(n, device=device) <= 0.5
+
+        # Random bias amount
+        bias = torch.empty(n, device=device).uniform_(weight_bias_min, weight_bias_max)
+
+        # Start balanced
+        # w_ff = torch.ones(n, device=device)
+        # w_fb = torch.ones(n, device=device)
+
+        w_ff = self.feedforward_tau_weight_clean[env_ids].squeeze(-1)
+        w_fb = self.feedback_tau_weight_clean[env_ids].squeeze(-1)
+
+        # Bias toward feedforward:
+        #   ff gets stronger, fb gets weaker
+        w_ff = torch.where(~balanced_mask & bias_ff_mask, w_ff + bias, w_ff)
+        w_fb = torch.where(~balanced_mask & bias_ff_mask, w_fb - bias, w_fb)
+
+        # Bias toward feedback:
+        #   fb gets stronger, ff gets weaker
+        w_ff = torch.where(~balanced_mask & ~bias_ff_mask, w_ff - bias, w_ff)
+        w_fb = torch.where(~balanced_mask & ~bias_ff_mask, w_fb + bias, w_fb)
+
+        # Store as [num_envs, 1] so they broadcast over joints/actions
+        self.feedforward_tau_weight[env_ids] = w_ff.unsqueeze(-1)
+        self.feedback_tau_weight[env_ids] = w_fb.unsqueeze(-1)
+    
+
     def _update_depth_images(self):
         """ Renders the depth camera and retrieves the depth images
         """

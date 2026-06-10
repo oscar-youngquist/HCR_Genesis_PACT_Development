@@ -36,23 +36,24 @@ def override_configs(env_cfg, train_cfg, args):
         
         
         # random uniform terrain
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-                                          "min_height" : -0.05, "max_height": 0.05, 
-                                          "step":0.005, "downsampled_scale" : 0.2}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+        #                                   "min_height" : -0.05, "max_height": 0.05, 
+        #                                   "step":0.005, "downsampled_scale" : 0.2}
         # # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
-        #                                   "slope": -0.4, "platform_size": 3.0}
-        # stairs
+        #                                   "slope": 0.4, "platform_size": 3.0}
+        # # stairs
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-        #                                 "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
+                                        # "step_width": 0.25, "step_height": -0.06, "platform_size": 3.0}
+
         # # discrete obstacles
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
-        #                                   "max_height": 0.1,
-        #                                   "min_size": 1.0,
-        #                                   "max_size": 2.0,
-        #                                   "num_rects": 20,
-        #                                   "platform_size": 3.0}
-        # wave terrain
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
+                                          "max_height": 0.1,
+                                          "min_size": 1.0,
+                                          "max_size": 2.0,
+                                          "num_rects": 20,
+                                          "platform_size": 3.0}
+        # # wave terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.wave_terrain", 
         #                                   "amplitude": 0.2, "num_waves": 2}
         # stepping stones
@@ -65,10 +66,10 @@ def override_configs(env_cfg, train_cfg, args):
         # pit terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pit_terrain", 
         #                                   "depth": 0.2, "platform_size": 3.0}
-    else:
-        for i in range(2):
-            env_cfg.viewer.pos[i] = env_cfg.viewer.pos[i] - env_cfg.terrain.plane_length / 4
-            env_cfg.viewer.lookat[i] = env_cfg.viewer.lookat[i] - env_cfg.terrain.plane_length / 4    
+    # else:
+        # for i in range(2):
+        #     env_cfg.viewer.pos[i] = env_cfg.viewer.pos[i] - env_cfg.terrain.plane_length / 4
+        #     env_cfg.viewer.lookat[i] = env_cfg.viewer.lookat[i] - env_cfg.terrain.plane_length / 4    
         
         
     env_cfg.env.debug = False
@@ -102,7 +103,8 @@ def override_configs(env_cfg, train_cfg, args):
     env_cfg.liquid.liquid_type = args.liquid_type
     env_cfg.liquid.liquid_volume = args.liquid_volume  # liters
     env_cfg.liquid.liquid_tank = args.liquid_tank  # liters
-    train_cfg.runner.exp_data_path = f"exp_data/spec_strict_model/plane_water_test_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}.csv"
+    # train_cfg.runner.exp_data_path = f"exp_data/scratch_pact_exp/plane_water_test_{int(args.liquid_volume)}L{args.liquid_type}_{args.liquid_tank}.csv"
+    train_cfg.runner.exp_data_path = f"exp_data/corl_pact_tau_eval/added_mass_plane.csv"
     env_cfg.env.use_liquid = args.use_liquid
 
     if args.record_frames or args.follow_robot:
@@ -159,7 +161,19 @@ def interaction_loop(train_cfg, env, policy, args):
     # Setup joystick if needed
     if args.use_joystick:
         joystick = Joystick(joystick_type=args.joystick_type)
+
+    if args.record_frames:
+        env.simulator._floating_camera.start_recording()
     
+    # set the viewer camera to follow the first environment by default
+    if args.follow_robot:
+        pos = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.pos, dtype=np.float32)
+        lookat = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.lookat, dtype=np.float32)
+        # print("exp pos - ", pos)
+        # print("exp lookat - ", lookat)
+        env.set_camera(pos, lookat)
+        env.simulator._floating_camera.render()
+
     # env.commands[:, 0] = 1.0
     # env.commands[:, 1] = 0.0
     # env.commands[:, 2] = 1.0
@@ -170,7 +184,7 @@ def interaction_loop(train_cfg, env, policy, args):
     print("Min - self.feedback_tau_weight: ", torch.min(env.simulator.feedback_tau_weight).item())
     
     # interaction loop
-    for i in range(int(1.05*env.max_episode_length)):
+    for i in range(int(5.56*env.max_episode_length)):
         
         # env.commands[:, 0] = 1.0
         # env.commands[:, 1] = 0.0
@@ -183,11 +197,15 @@ def interaction_loop(train_cfg, env, policy, args):
             env.commands[:, 1] = -joystick.lx
             env.commands[:, 2] = -joystick.rx
         
+
+        # print(env.commands)
+
         # set the viewer camera to follow the first environment by default
         if args.follow_robot:
             pos = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.pos, dtype=np.float32)
             lookat = env.simulator.base_pos[robot_index].cpu().numpy() + np.array(env.cfg.viewer.lookat, dtype=np.float32)
-            # env.set_viewer_camera(pos, lookat)
+            # print("exp pos - ", pos)
+            # print("exp lookat - ", lookat)
             env.set_camera(pos, lookat)
             env.simulator._floating_camera.render()
         
@@ -281,6 +299,9 @@ def export_policy(alg_runner, path: str, args, env_cfg, train_cfg):
     elif "dreamwaq" in task_name:
         exporter = PolicyExporterWaQ(alg_runner.alg.actor_critic)
         exporter.export(path, env_cfg, args.export_onnx, train_cfg)
+    elif "pact" in task_name:
+        exporter = PolicyExporterPACT(alg_runner.alg.actor_critic)
+        exporter.export(path, env_cfg, train_cfg)
     else:
         exporter = PolicyExporter(alg_runner.alg.actor_critic)
         exporter.export(path, env_cfg, args.export_onnx, train_cfg)
@@ -298,7 +319,7 @@ def play(args):
     """
     if SIMULATOR == "genesis" or SIMULATOR == "genesis_pact_pos" or SIMULATOR == "genesis_pact" or SIMULATOR == "genesis_pact_water":
         init_genesis(args, gs)
-    env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    env_cfg, train_cfg = task_registry.get_cfgs(name=args.task, args=args)
     override_configs(env_cfg, train_cfg, args)
 
     # prepare environment
@@ -309,11 +330,21 @@ def play(args):
     policy = ppo_runner.get_inference_policy(device=env.device)
     
     # export policy as a jit module (used to run it from C++ or python)
-    path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 
+    path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', 'pact_coral', train_cfg.runner.experiment_name, 
                             train_cfg.runner.load_run, 'exported')
-    # export_policy(ppo_runner, path, args, env_cfg, train_cfg)
+    export_policy(ppo_runner, path, args, env_cfg, train_cfg)
 
     interaction_loop(train_cfg, env, policy, args)
+
+    if args.record_frames:
+        try:
+            filename_mp4 = f"{train_cfg.runner.experiment_name}_plane_12L_water.mp4"
+        except:
+            from datetime import datetime
+            filename_mp4 = f"{datetime.now().timestamp()}"
+        
+        env.simulator._floating_camera.stop_recording(save_to_filename=filename_mp4, fps=30)
+        print("Saved recording to " + filename_mp4)
     
     
 if __name__ == '__main__':
@@ -338,6 +369,9 @@ if __name__ == '__main__':
     parser.add_argument('--joystick_type',  type=str, default='xbox', help="type of joystick: xbox, switch")
     parser.add_argument('--follow_robot',   action='store_true', default=False, help="whether the camera follows the robot during play")
     parser.add_argument('--record_frames',   action='store_true', default=False, help="whether to record the camera")
+    parser.add_argument('--seed',       type=int, default=1, help="int seed for random sampling (default 1)")
+
+    parser.add_argument('--pinn_loss_weight',       type=float, default=0.01, help="float for weight of PINN loss (default 0.01)")
 
     parser.add_argument('--use_liquid',    type=bool, default='True')
     parser.add_argument('--liquid_type',   type=str, default='water', choices=['water', 'oil', 'gas'])

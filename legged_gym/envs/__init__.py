@@ -84,6 +84,27 @@ from legged_gym.envs.go1.go1_pact_pos.go1_pact_pos import Go1PACTPos
 from legged_gym.envs.go1.go1_pact_water_eval.go1_pact_water_config import GO1PACTWaterCfg, GO1PACTWaterCfgPPO
 from legged_gym.envs.go1.go1_pact_water_eval.go1_pact_water import Go1PACTWater
 
+
+# CoRL PACT comparsions
+from legged_gym.envs.go1.go1_pos.go1_pos_config import GO1PosCfg, GO1PosCfgPPO
+from legged_gym.envs.go1.go1_pos.go1_pos import Go1Pos
+
+from legged_gym.envs.go1.go1_tau.go1_tau_config import GO1TauCfg, GO1TauCfgPPO
+from legged_gym.envs.go1.go1_tau.go1_tau import Go1Tau
+
+from legged_gym.envs.go1.go1_rl2ac.go1_rl2ac_config import GO1RL2ACCfg, GO1RL2ACCfgPPO
+from legged_gym.envs.go1.go1_rl2ac.go1_rl2ac import Go1RL2AC
+
+from legged_gym.envs.go1.go1_abl1.go1_abl1_config import GO1ABL1Cfg, GO1ABL1CfgPPO
+from legged_gym.envs.go1.go1_abl1.go1_abl1 import Go1ABL1
+
+from legged_gym.envs.go1.go1_abl2.go1_abl2_config import GO1ABL2Cfg, GO1ABL2CfgPPO
+from legged_gym.envs.go1.go1_abl2.go1_abl2 import Go1ABL2
+
+from legged_gym.envs.go1.go1_abl3.go1_abl3_config import GO1ABL3Cfg, GO1ABL3CfgPPO
+from legged_gym.envs.go1.go1_abl3.go1_abl3 import Go1ABL3
+
+
 # Go2 PACT training
 from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos_config import GO2PACTPosCfg, GO2PACTPosCfgPPO
 from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos import Go2PACTPos
@@ -117,6 +138,14 @@ task_registry.register( "tron1_sf", TRON1SF, TRON1SFCfg(), TRON1SFCfgPPO())
 task_registry.register("go1_pact", Go1PACT, GO1PACTCfg(), GO1PACTCfgPPO())
 task_registry.register("go1_pact_pos", Go1PACTPos, GO1PACTPosCfg(), GO1PACTPosCfgPPO())
 task_registry.register("go1_pact_water", Go1PACTWater, GO1PACTWaterCfg(), GO1PACTWaterCfgPPO())
+
+# PACT CoRL Comparison Methods
+task_registry.register("go1_pos", Go1Pos, GO1PosCfg(), GO1PosCfgPPO())
+task_registry.register("go1_tau", Go1Tau, GO1TauCfg(), GO1TauCfgPPO())
+task_registry.register("go1_rl2ac", Go1RL2AC, GO1RL2ACCfg(), GO1RL2ACCfgPPO())
+task_registry.register("go1_abl1", Go1ABL1, GO1ABL1Cfg(), GO1ABL1CfgPPO())
+task_registry.register("go1_abl2", Go1ABL2, GO1ABL2Cfg(), GO1ABL2CfgPPO())
+task_registry.register("go1_abl3", Go1ABL3, GO1ABL3Cfg(), GO1ABL3CfgPPO())
 
 task_registry.register("go2_pact_pos", Go2PACTPos, GO2PACTPosCfg(), GO2PACTPosCfgPPO())
 task_registry.register("go2_pact", Go2PACT, GO2PACTCfg(), GO2PACTCfgPPO())

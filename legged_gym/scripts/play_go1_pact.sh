@@ -5,8 +5,8 @@
 conda activate /home/oyoungquist/.conda/envs/genesis_lr
 
 export SIMULATOR=genesis_pact_nopinn
-python play_exp.py --task=go1_pact --use_joystick --follow_robot
+python play_exp.py --task=go1_pact --follow_robot --use_joystick
 
 # export SIMULATOR=genesis
-# python play.py --task=go2_dreamwaq
+# python play.py --task=go2_dreamwaq --use_joystick
 

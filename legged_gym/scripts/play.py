@@ -33,15 +33,15 @@ def override_configs(env_cfg, args):
         
         
         # random uniform terrain
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-                                          "min_height" : -0.05, "max_height": 0.05, 
-                                          "step":0.005, "downsampled_scale" : 0.2}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+                                        #   "min_height" : -0.05, "max_height": 0.05, 
+                                        #   "step":0.005, "downsampled_scale" : 0.2}
         # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
         #                                   "slope": -0.4, "platform_size": 3.0}
         # stairs
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-                                        # "step_width": 0.31, "step_height": -0.1, "platform_size": 3.0}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
+                                        "step_width": 0.31, "step_height": -0.10, "platform_size": 3.0}
         # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
         #                                   "max_height": 0.1,
@@ -244,7 +244,7 @@ def play(args):
     """
     if SIMULATOR == "genesis" or SIMULATOR == "genesis_pact_pos" or SIMULATOR == "genesis_pact":
         init_genesis(args, gs)
-    env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    env_cfg, train_cfg = task_registry.get_cfgs(name=args.task, args=args)
     override_configs(env_cfg, args)
 
     # prepare environment

@@ -63,15 +63,15 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
                             [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721]]
         pos = [0.0, 0.0, 0.34] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
-            'FL_hip_joint': 0.0,     # [rad]
-            'RL_hip_joint': 0.0,     # [rad]
-            'FR_hip_joint': 0.0 ,    # [rad]
-            'RR_hip_joint': 0.0,     # [rad]
+            'FL_hip_joint': 0.1,     # [rad]
+            'RL_hip_joint': 0.1,     # [rad]
+            'FR_hip_joint': -0.1 ,    # [rad]
+            'RR_hip_joint': -0.1,     # [rad]
 
             'FL_thigh_joint': 0.8,   # [rad]
-            'RL_thigh_joint': 1.0,   # [rad]
+            'RL_thigh_joint': 0.8,   # [rad]
             'FR_thigh_joint': 0.8,   # [rad]
-            'RR_thigh_joint': 1.0,   # [rad]
+            'RR_thigh_joint': 0.8,   # [rad]
 
             'FL_calf_joint': -1.5,   # [rad]
             'RL_calf_joint': -1.5,   # [rad]
@@ -124,18 +124,18 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         # What changes with finetuning round
         # Randomized 6DOF torso wrench
         push_robots = True
-        push_interval_max = 15.0
+        push_interval_max = 1.0
         push_interval_min = 0.1
         max_push_vel_xy = 1.00
-        min_push_vel_xy = 0.5
+        min_push_vel_xy = 1.0
 
         max_vertical_push = 0.40
-        min_vertical_push = 0.00
-        vert_interval_max = 10.0
+        min_vertical_push = 0.20
+        vert_interval_max = 1.0
         vert_interval_min = 0.1
 
-        max_push_torque = 1.5
-        min_push_torque = 0.50
+        max_push_torque = 2.5
+        min_push_torque = 1.50
         wrench_timeout_min = 0.01
         wrench_timeout_max = 10.0
         
@@ -178,7 +178,7 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         randomize_joint_friction = True
         joint_friction_range = [0.0, 0.03]
         
-        randomize_joint_stiffness = True
+        randomize_joint_stiffness = False
         joint_stiffness_range = [0.0, 1.0]
         
         randomize_joint_damping = True
@@ -189,18 +189,19 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         add_noise = True
         noise_level = 1.0 # scales other values
         class noise_scales:
-            dof_pos = 0.0006
-            dof_vel = 0.02
+            dof_pos = 0.01
+            dof_vel = 1.5
             dof_tau = 0.5
             lin_vel = 0.1
-            ang_vel = 0.2
+            ang_vel = 0.5
             gravity = 0.06
             height_measurements = 0.1
 
     class viewer:
         ref_env = 0
-        pos = [2, 2, 2]       # [m]
-        lookat = [0., 0, 1.]  # [m]
+        # pos = [0.5, 1.5, 1.25]       # [m]
+        pos = [-1., 1.5, 0.5]       # [m]
+        lookat = [0., 0, 0.0]  # [m]
         rendered_envs_idx = [i for i in range(0, 3, 1)]  # number of environments to be rendered
         # rendered_envs_idx.extend([i for i in range(200, 203, 1)])  # number of environments to be rendered
         rendered_envs_idx.extend([i for i in range(500, 503, 1)])  # number of environments to be rendered
@@ -269,8 +270,8 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
         # PD Drive parameters:
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
-        stiffness = {'joint': 50.0}   # [N*m/rad]
-        damping   = {'joint': 1.00}     # [N*m*s/rad]
+        stiffness = {'joint': 30.0}   # [N*m/rad]
+        damping   = {'joint': 0.60}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
@@ -401,9 +402,9 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
     class commands(LeggedRobotCfg.commands):
         curriculum = True
         max_curriculum = 1.
-        num_commands = 3 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
+        num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 5.  # time before command are changed[s]
-        heading_command = False # if true: compute ang vel command from heading error
+        heading_command = True # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
             lin_vel_y = [-0.5, 0.5]   # min max [m/s]
@@ -413,7 +414,7 @@ class GO1PACTWaterCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        num_privileged_obs = 57 + 66 + 2 + 81 # robot_state + privilged info + tradeoff curriculum weights + terrain_heights (81)
+        num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (187)
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -446,7 +447,7 @@ class GO1PACTWaterCfgPPO( LeggedRobotCfgPPO ):
     runner_class_name = "PACTRunner" # Teacher-Student Runner
     
     class policy( LeggedRobotCfgPPO.policy ):
-        activation = 'tanh' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid, swish (SiLU)
+        activation = 'elu' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid, swish (SiLU)
         init_noise_std = 1.00
         
         # Context encoder
@@ -456,12 +457,12 @@ class GO1PACTWaterCfgPPO( LeggedRobotCfgPPO ):
 
         # Context Decoder
         cenet_dec_input_dim = 27
-        cenet_dec_layers = [128,256]
-        cenet_dec_out_dim = 57 + 12      # next obs (57) + grf_dim (12)
+        cenet_dec_layers = [128,256,512]
+        cenet_dec_out_dim = 57 + (51 + 33) + 143     # next obs (57) + grf_dim (12)
 
         # Actor/critic
         actor_layers = [512,256,128]
-        critic_layers = [1024,256,128,64]
+        critic_layers = [1024,256,128]
 
         pinn_loss_weight = 0.01
         pinn_warmup = 10
@@ -470,9 +471,8 @@ class GO1PACTWaterCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/go1_pact_pos_rough/Mar09_19-54-31_pact_pos_100hz_bigger/model_2000_converted.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.01
-        learning_rate = 1.0e-3 #
-        # learning_rate = 3.0e-4 #
+        # learning_rate = 1.0e-3 #
+        learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -483,6 +483,15 @@ class GO1PACTWaterCfgPPO( LeggedRobotCfgPPO ):
         lam   = 0.95
         desired_kl = 0.01
         max_grad_norm = 1.0
+
+        # adaptive entropy coefficent algorithm parameters
+        entropy_coef = 0.01                      # initial entropy value
+        use_adaptive_entropy = True              # weather or not to use the adaptive entropy coef alg.
+        adaptive_ent_bounds = [0.001, 0.01]      # entropy coefficent bands
+        adaptive_ent_lin_threshold = 0.75        # minimum linear velocity tracking target
+        adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target
+        adaptive_ent_ter_threshold = 6.0         # minimum avg. terrain curriculum progress target
+        adaptive_ent_softmax_temp = 2.0          # temperature (sharpness) of the softmax operation used in the alg. 
 
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT'
@@ -497,7 +506,8 @@ class GO1PACTWaterCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 100
         
         
-        load_run = "Mar27_12-06-16_pact_100hz_spec"
+        load_run = "Apr29_20-06-15_pact_100hz_spec_smartcurr"
+        # load_run = "Apr08_00-53-18_pact_100hz_spec"
         checkpoint = -1
         resume = False
-        exp_data_path = "exp_data/quick_test_02/strict_overeach_model_plane_12L_water.csv"
+        exp_data_path = "exp_data/scratch_pact_exp/strict_overeach_model_plane_12L_water.csv"
