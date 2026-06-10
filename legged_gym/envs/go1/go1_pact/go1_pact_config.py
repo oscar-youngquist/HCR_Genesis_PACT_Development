@@ -217,7 +217,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 0.80]
-        joint_damping_range_start = [0.25, 0.60]
+        joint_damping_range_start = [0.20, 0.60]
         
         
         # new domain randomization curriculum parameters
@@ -236,6 +236,7 @@ class GO1PACTCfg( LeggedRobotCfg ):
         use_joint_dynamics_curriculum = True # set False to skip joint stiffness/damping/friction curriculum updates
         use_mass_com_curriculum = True       # set False to skip payload and CoM curriculum updates
         use_disturbance_curriculum = True    # set False to skip push/wrench curriculum updates
+
 
 
     # Taken from the Go1 config class in - 
@@ -557,7 +558,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_spec_smartcurr_weakest_jointrand_hightau'
+        run_name = 'pact_100hz_spec_smartcurr_lower_jointrand_hightau_03'
         experiment_name = 'go1_pact_rough'
         save_interval = 500
         
