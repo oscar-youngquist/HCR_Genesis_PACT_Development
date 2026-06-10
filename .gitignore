@@ -25,8 +25,8 @@ dist/
 target/
 dist/
 
-**/exp_data/*
-
+**/exp_data*/*
+**.csv
 # JetBrains IDE
 .idea/
 
