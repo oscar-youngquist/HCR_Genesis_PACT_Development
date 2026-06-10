@@ -11,7 +11,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         num_explicit_recon_obs = 3 + 4 + 4 + 1 + 1 + 3 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 50
+        num_obs_hist = 20
         grf_dim = 12
         whole_body_dim = 18
         debug = False # if debugging, visualize contacts, 
@@ -66,7 +66,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
 
     class sim:
         # Common
-        dt = 0.02                 # 500 Hz
+        dt = 0.002                 # 500 Hz
         substeps = 1
         # For Genesis
         max_collision_pairs = 100  # More collision pairs will occupy more GPU memory and slow down the simulation
@@ -126,68 +126,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         clip_observations = 100.
         clip_actions = 50.
 
-    # class domain_rand(LeggedRobotCfg.domain_rand):
-    #     use_domainrand_curriculum = True
-    #     com_rand_z_positive = False
-    #     num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-    #     push_warmup = 4000     # number of steps with initial values held constant
-    #     # Randomize Friction
-    #     randomize_friction = True
-    #     friction_range = [0.2, 1.8]
-    #     # What changes with finetuning round
-    #     # Randomized 6DOF torso wrench
-    #     push_robots = True
-    #     push_interval_max = 15.0
-    #     push_interval_min = 0.1
-    #     max_push_vel_xy = 1.00
-    #     min_push_vel_xy = 0.50
-    #     max_vertical_push = 0.20
-    #     min_vertical_push = 0.00
-    #     vert_interval_max = 10.0
-    #     vert_interval_min = 0.1
-    #     max_push_torque = 1.50
-    #     min_push_torque = 0.50
-    #     wrench_timeout_min = 0.01
-    #     wrench_timeout_max = 10.0
-    #     # Randomized base mass, applied at COM
-    #     randomize_base_mass = True
-    #     min_added_mass_max = 2.0
-    #     max_added_mass_max = 3.0
-    #     added_mass_min = -1.0
-    #     # COM displacement crap
-    #     randomize_com_displacement = True
-    #     com_displacement_x_min = 0.025
-    #     com_displacement_x_max = 0.075
-    #     com_displacement_y_min = 0.025
-    #     com_displacement_y_max = 0.075
-    #     com_displacement_z_positive = False
-    #     com_displacement_z_min_pos = 0.1
-    #     com_displacement_z_min = 0.025
-    #     com_displacement_z_max = 0.075
-    #     # Control delay
-    #     randomize_ctrl_delay = True
-    #     ctrl_delay_step_range = [0, 2]
-    #     # PD-gain randomization
-    #     randomize_pd_gain = True
-    #     kp_range = [0.8, 1.2]
-    #     kd_range = [0.8, 1.2]
-    #     # Motor strength randomization
-    #     randomize_motor_strength = True
-    #     motor_strength_range = [0.9, 1.1]
-    #     # Unused more complicated dynamics randomization
-    #     randomize_joint_armature = True
-    #     joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
-    #     randomize_joint_friction = True
-    #     joint_friction_range = [0.00, 0.02]
-    #     randomize_joint_stiffness = False
-    #     joint_stiffness_range_end   = [0.0, 0.01]
-    #     joint_stiffness_range_start = [0.0, 0.005]
-    #     randomize_joint_damping = True
-    #     joint_damping_range_end   = [0.00, 0.50]
-    #     joint_damping_range_start = [0.25, 0.30]
-
     class domain_rand(LeggedRobotCfg.domain_rand):
-        use_domainrand_curriculum = False
+        use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 500  # number of steps to increase the domain randomization ranges
         push_warmup = 3000     # number of steps with initial values held constant
@@ -357,12 +297,6 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         self_collisions = True
         obtain_link_contact_states = True
         contact_state_link_names = ["thigh", "calf", "foot", "base", "hip"]
-        
-        abad_link_length = 0.0955
-        hip_link_length = 0.213
-        knee_link_length = 0.213
-        knee_link_y_offset = 0.0
-        side_signs = [-1.0, 1.0, -1.0, 1.0]   # FR, FL, RR, RL
   
     class control( LeggedRobotCfg.control ):
         # PD Drive parameters:
@@ -375,8 +309,8 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
         
         
-        dt =  0.02     # control frequency 200Hz
-        decimation = 4  # decimation: Number of control action updates @ sim DT per policy DT
+        dt =  0.01     # control frequency 200Hz
+        decimation = 5  # decimation: Number of control action updates @ sim DT per policy DT
 
         # Assumed order - tau_ff, tau_fb
         # tradeoff_init_weights  = [0.80, 1.4]
@@ -411,7 +345,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
 
-        use_reward_curriculum = False
+        use_reward_curriculum = True
 
         max_contact_force = 200.0
         class scales( LeggedRobotCfg.rewards.scales ):
@@ -484,29 +418,6 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
 
-            torso_force_wrench_ellipsoid = 0.6
-            swing_vel_ellipsoid_terrain  = 0.4
-
-        # KITE reward terms
-        class kite_rewards():
-            ellipsoid_main_weight = 0.6
-            ellipsoid_force_aux_weight = 0.35
-            ellipsoid_wrench_aux_weight = 0.35
-            ellipsoid_friction_weight = 0.30
-
-            ellipsoid_wrench_length_scale = 0.70
-            ellipsoid_force_size_scale = 0.50
-            ellipsoid_wrench_size_scale = 0.50
-
-            ellipsoid_force_z_ratio_min = 1.2
-            ellipsoid_force_z_ratio_max = 4.0
-            ellipsoid_force_xy_ratio_max = 2.0
-            ellipsoid_wrench_cond_max = 6.0
-
-            ellipsoid_mu_friction = 0.6
-            ellipsoid_normal_force_margin = 5.0
-            ellipsoid_tangential_force_margin = 2.0
-
         class reward_curriculum():
             curr_reward_keys = ["orientation", 
                                 "ang_vel_xy",
@@ -519,7 +430,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             curr_reward_bounds = {
                                   "orientation":[-0.2,-1.0],
                                   "ang_vel_xy":[-0.05, -0.1],
-                                  "dof_close_to_default":[-0.05, -0.20],
+                                  "dof_close_to_default":[-0.05, -0.10],
                                   "torque_limits":[-0.0001, -1.0e-2],
                                 #   "action_rate":[-0.0001, -0.01],
                                 #   "action_smoothness":[-0.0001,-0.01],
@@ -536,7 +447,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         heading_command = True # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.5, 0.5] # min max [m/s]
-            lin_vel_y = [-0.5, 0.5]   # min max [m/s]
+            lin_vel_y = [-1.0, 1.0]   # min max [m/s]
             ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
             heading = [-3.14, 3.14]
 
@@ -549,7 +460,7 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
         init_noise_std = 1.00
         
         # Context encoder
-        cenet_enc_layers=[512,256,128]
+        cenet_enc_layers=[256,128]
         cenet_enc_latent_dim = 16
         cenet_velo_dim = 3 + 4 + 4 + 1 + 1 + 3      # torso velocity, foot-contact indicator, foot-height 
         # cenet_velo_dim = 3 + 4 + 4      # torso velocity, foot-contact indicator, foot-height 
@@ -602,8 +513,8 @@ class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_PACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
-        num_steps_per_env = 24 # per iteration
-        max_iterations = 7000 # number of policy updates
+        num_steps_per_env = 32 # per iteration
+        max_iterations = 5000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb

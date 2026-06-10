@@ -1,4 +1,4 @@
-from legged_gym.envs.go2.go2_pact_pos.kite_reward_helpers import _eig_desc, _geom_mean, _interval_reward, _safe_inv, _safe_normalize, _safe_pinv, _sanitize_tensor, _skew, _upper_reward
+from legged_gym.envs.go2.go2_kite.kite_reward_helpers import _eig_desc, _geom_mean, _interval_reward, _safe_inv, _safe_normalize, _safe_pinv, _sanitize_tensor, _skew, _upper_reward
 from legged_gym import *
 from time import time
 import numpy as np

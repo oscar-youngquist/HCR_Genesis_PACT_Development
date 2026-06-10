@@ -103,7 +103,7 @@ class OnPolicyRunnerPACTPos:
         self._init_entropy_coef = self.alg_cfg["entropy_coef"]
         self.use_adaptive_entropy = self.alg_cfg["use_adaptive_entropy"]
 
-        self._init_entropy_coef = self.alg_cfg["entropy_coef"]
+
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         
@@ -164,7 +164,6 @@ class OnPolicyRunnerPACTPos:
 
         if self.env.use_reward_curriculum:
             self.env.step_reward_curriculum(0)
-        self.env.step_command_resampling_time_curriculum(0)
         
         critic_obs = privileged_obs if privileged_obs is not None else obs
         
@@ -226,7 +225,6 @@ class OnPolicyRunnerPACTPos:
             # Step the reward curriculum if we are doing that
             if self.env.use_reward_curriculum:
                 self.env.step_reward_curriculum(it)
-            self.env.step_command_resampling_time_curriculum(it)
             
             # Step the domain randomization if approperiate
             if self.env.simulator.use_domainrand_curriculum:

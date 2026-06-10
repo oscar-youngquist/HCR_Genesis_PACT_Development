@@ -37,7 +37,7 @@ class ContextEncoder(nn.Module):
     def __init__(
         self,
         context_input_dim: int = 230,
-        context_layer_sizes: List[int] = [128, 64, 32],
+        context_layer_sizes: List[int] = [128, 64],
         context_latent_size: int = 16,
         context_torso_velo_size: int = 3,
         activation: str = 'swish',
@@ -52,8 +52,7 @@ class ContextEncoder(nn.Module):
         self.ce_in = nn.Linear(context_input_dim, context_layer_sizes[0])
         # Hidden Layers
         self.ce_h1 = nn.Linear(context_layer_sizes[0], context_layer_sizes[1])
-        self.ce_h2 = nn.Linear(context_layer_sizes[1], context_layer_sizes[2])
-        self.ce_h3 = nn.Linear(context_layer_sizes[2], output_hdim)
+        self.ce_h2 = nn.Linear(context_layer_sizes[1], output_hdim)
         # Output Layers
 
         self.ce_latmean_h = nn.Linear(output_hdim, output_hdim)
@@ -83,7 +82,7 @@ class ContextEncoder(nn.Module):
         """Initialize all linear layers with Xavier uniform distribution."""
         for layer in [self.ce_in, self.ce_h1,
                      self.ce_out_mean, self.ce_velo_mean,
-                     self.ce_h2, self.ce_h3, self.ce_velovar_h, self.ce_velovar_h,
+                     self.ce_h2, self.ce_velovar_h, self.ce_velovar_h,
                      self.ce_latmean_h, self.ce_latvar_h]:
             
             nn.init.xavier_uniform_(layer.weight)
@@ -101,8 +100,6 @@ class ContextEncoder(nn.Module):
         x = self.activation(self.ce_h1(x))
         # x = self.drop_2(x)
         x = self.activation(self.ce_h2(x))
-        
-        x = self.activation(self.ce_h3(x))
 
         lat_mean = self.activation(self.ce_latmean_h(x))
         lat_var  = self.activation(self.ce_latvar_h(x))
@@ -170,14 +167,13 @@ class ContextDecoder(nn.Module):
         self.dec_in = nn.Linear(input_dim, layers[0])
         self.dec_h1 = nn.Linear(layers[0], layers[1])
         self.dec_h2 = nn.Linear(layers[1], layers[2])
-        self.dec_h3 = nn.Linear(layers[2], layers[3])
-        self.dec_out = nn.Linear(layers[3], decode_dim)
+        self.dec_out = nn.Linear(layers[2], decode_dim)
 
         self._initialize_weights()
 
     def _initialize_weights(self) -> None:
         """Initialize all linear layers with Xavier uniform distribution."""
-        for layer in [self.dec_in, self.dec_h1, self.dec_out, self.dec_h2, self.dec_h3]:
+        for layer in [self.dec_in, self.dec_h1, self.dec_out, self.dec_h2]:
             nn.init.xavier_uniform_(layer.weight)
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
@@ -194,7 +190,6 @@ class ContextDecoder(nn.Module):
         x = F.elu(self.dec_in(condition))
         x = F.elu(self.dec_h1(x))
         x = F.elu(self.dec_h2(x))
-        x = F.elu(self.dec_h3(x))
         return self.dec_out(x)
 
 class ActorCritic_PACT_Pos(nn.Module):
@@ -238,10 +233,14 @@ class ActorCritic_PACT_Pos(nn.Module):
             shared_trunk_layers.append(nn.Linear(actor_layers[l], actor_layers[l+1]))
             shared_trunk_layers.append(activation)
         
-        shared_trunk_layers.append(nn.Linear(actor_layers[-1], num_actions))
+        self.act_trunk = nn.Sequential(*shared_trunk_layers)
         
-        self.actor = nn.Sequential(*shared_trunk_layers)
-        
+        # Output head for position control
+        self.act_pos_out = nn.Linear(actor_layers[-1], num_actions)
+
+        # Output head for torque control
+        self.act_tau_out = nn.Linear(actor_layers[-1], num_actions)
+
         ###
         #  Construct layers for the critic network
         ###
@@ -263,7 +262,8 @@ class ActorCritic_PACT_Pos(nn.Module):
         self.cenet_z = None
         self.cenet_torso_velo = None
 
-        self.mean = None
+        self.mean_pos = None
+        self.mean_tau = None
 
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.num_actions = num_actions
@@ -288,8 +288,15 @@ class ActorCritic_PACT_Pos(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
+        # # Optionally set small initial output weights (to reduce initial action magnitude)
+        nn.init.uniform_(self.act_pos_out.weight, -3e-2, 3e-2)
+        nn.init.uniform_(self.act_tau_out.weight, -3e-6, 3e-6)
+        nn.init.zeros_(self.act_pos_out.bias)
+        nn.init.zeros_(self.act_tau_out.bias)
+
     def _init_std(self, std_val=1.00):                
         self.std.data.fill_(std_val)
+        
 
     def get_optim_groups(self, weight_decay: float = 1e-4, strong_decay: float = 1e-1):
         """Separate parameters into groups:
@@ -387,13 +394,21 @@ class ActorCritic_PACT_Pos(nn.Module):
     # Method for the forward method of the actor network, used mostly as an internal method
     def actor_forward(self, current_obs):
         # We are assuming "current_obs" includes all of the components used in the dreamwaq policy input
-        action = self.actor(current_obs)
+        latent = self.act_trunk(current_obs)
 
-        if torch.isnan(action).any():
+        # Now run the final output layers to get both action modalities
+        act_pos_act = self.act_pos_out(latent)
+        act_tau_act = self.act_tau_out(latent)
+
+        if torch.isnan(act_pos_act).any():
             with torch.no_grad():
-                action = torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
+                act_pos_act = torch.nan_to_num(act_pos_act, nan=0.0, posinf=0.0, neginf=0.0)
 
-        return action
+        if torch.isnan(act_tau_act).any():
+            with torch.no_grad():
+                act_tau_act = torch.nan_to_num(act_tau_act, nan=0.0, posinf=0.0, neginf=0.0)
+
+        return act_pos_act, act_tau_act
 
     # Functions that are specific to PPO training
     @property
@@ -425,12 +440,13 @@ class ActorCritic_PACT_Pos(nn.Module):
 
     @torch.jit.ignore
     def update_distribution(self, curr_obs):
-        mean = self.actor_forward(curr_obs)
-        self.mean = mean
+        mean_pos, mean_tau = self.actor_forward(curr_obs)
+        self.mean_pos = mean_pos
+        self.mean_tau = mean_tau
 
         self._clip_std()
 
-        self.distribution = Normal(mean, mean * 0.0 + self.std)
+        self.distribution = Normal(mean_pos, mean_pos * 0.0 + self.std)
 
     # method used during simulated training
     @torch.jit.ignore
@@ -492,11 +508,11 @@ class ActorCritic_PACT_Pos(nn.Module):
         current_obs = torch.cat((obs,z,torso_velo), dim=-1)   
                 
         # call the actors forward method and return it's results
-        actions = self.actor_forward(current_obs)
+        actions_pos, actions_tau = self.actor_forward(current_obs)
 
         # total_sample = torch.cat([actions_pos, actions_tau], dim=1)
 
-        return actions
+        return actions_pos
 
     # Forward method for calculating the value of the current state
     #     using the privilged critic observation

@@ -400,7 +400,7 @@ class PPO_PACT_Pos:
                 t0 = time.perf_counter()
 
                 dec_recon = self.decoder(dec_input)
-                dec_loss = F.mse_loss(dec_recon * terminated_batch, decode_targets * terminated_batch)
+                dec_loss = F.mse_loss(dec_recon, decode_targets)
                 dec_loss.backward()
                 nn.utils.clip_grad_norm_(self.decoder.parameters(), self.max_grad_norm)
                 self.decoder_optimizer.step()
@@ -517,7 +517,7 @@ class PPO_PACT_Pos:
             self.actor_critic.act_bootmask(obs_batch, obs_hist_batch)
 
         # Pull out the current actions for use later
-        current_actions = self.actor_critic.mean
+        current_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
 
         # PPO stuff
         #    - Position Control
@@ -589,7 +589,7 @@ class PPO_PACT_Pos:
     def _compute_vae_loss(self, obs_hist_batch, grf_target, 
                           obs_target, explicit_labels_batch, terminated_batch):
         vae_loss = None
-
+        
         mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.context_encoder(obs_hist_batch)
         
         dec_input = torch.cat((cenet_latent, cenet_torso_velo), dim=-1)
@@ -607,8 +607,8 @@ class PPO_PACT_Pos:
 
         vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
         recon_error    = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
-        # kl_div         = (-0.5 * torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp()))
         kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
+        # kl_div         = -0.5*torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp())
         vae_loss = vel_pred_error + recon_error + self.vae_beta*kl_div
         
         return vae_loss, kl_div, recon_error, vel_pred_error, dec_input.clone().detach(), decode_target.detach(), enc_update_obs_decode.detach()
