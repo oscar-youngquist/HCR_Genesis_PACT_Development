@@ -190,7 +190,7 @@ class Go1PACT(BaseTask):
         else:
             self.non_failure_reset_buf[:] = False
         
-        # print(f"timeout termination: {self.time_out_buf}")
+        # print(f"terrain termination: {self.non_failure_reset_buf}")
         # print("======================================================")
 
         self.reset_buf = (
@@ -266,6 +266,12 @@ class Go1PACT(BaseTask):
                 self.simulator.terrain_levels.float())
         if self.cfg.commands.curriculum:
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
+        if self.cfg.domain_rand.use_domainrand_curriculum:
+            phase_to_idx = {"joint_dynamics": 0.0, "mass_com": 1.0, "disturbance": 2.0, "complete": 3.0}
+            self.extras["episode"]["domain_rand_phase"] = phase_to_idx.get(self.simulator.domain_rand_phase, -1.0)
+            self.extras["episode"]["domain_rand_joint_dynamics_progress"] = self.simulator.domain_rand_joint_dynamics_progress
+            self.extras["episode"]["domain_rand_mass_com_progress"] = self.simulator.domain_rand_mass_com_progress
+            self.extras["episode"]["domain_rand_disturbance_progress"] = self.simulator.domain_rand_disturbance_progress
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -393,7 +399,10 @@ class Go1PACT(BaseTask):
         if self.cfg.terrain.measure_heights:
             heights = torch.clip(self.simulator.base_pos[:, 2].unsqueeze(1) - 0.5 \
                                  - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements # 81
-            heights *= self.height_noise_vec
+            
+            if self.add_noise:
+                heights *= self.height_noise_vec
+            
             critic_obs = torch.cat((critic_obs, heights), dim=-1) # 207
 
         self.critic_obs_deque.append(critic_obs)

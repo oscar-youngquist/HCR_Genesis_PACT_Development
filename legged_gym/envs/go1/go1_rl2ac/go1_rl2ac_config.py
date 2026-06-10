@@ -213,7 +213,8 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range = [0.00, 0.02]
+        joint_friction_range_end   = [0.00, 2.00]
+        joint_friction_range_start = [0.00, 1.00]
         
         randomize_joint_stiffness = False
         joint_stiffness_range_end   = [0.0, 0.0]
@@ -222,6 +223,13 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 0.80]
         joint_damping_range_start = [0.30, 0.40]
+
+        joint_dynamics_progress_delta = 0.02 # domain rand step delta for stepping joint-level dynamics parameters
+        mass_com_progress_delta = 0.01       # domain rand step delta for stepping payload parameters
+        disturbance_progress_delta = 0.01    # domain rand step delta for external disturbance parameters
+        use_joint_dynamics_curriculum = True # set False to skip joint stiffness/damping/friction curriculum updates
+        use_mass_com_curriculum = True       # set False to skip payload and CoM curriculum updates
+        use_disturbance_curriculum = True    # set False to skip push/wrench curriculum updates
 
     class noise (LeggedRobotCfg.noise):
         add_noise = True
@@ -423,6 +431,7 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
             hip_pos = -0.05
             
             foot_slip        = -0.01           # penalty for feet slipping
+            stumble          = -0.2
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
 
@@ -461,10 +470,10 @@ class GO1RL2ACCfg( LeggedRobotCfg ):
     
     class rl2ac():
         # Evaluate for CoRL with 10.0, 0.02, 0.54, 2.85
-        alpha = 50.0
-        kappa = 2.2
-        lambda_0 = 3.00
-        k_0 = 20.00
+        alpha = 40.0
+        kappa = 0.500
+        lambda_0 = 0.80
+        k_0 = 4.60
 
 class GO1RL2ACCfgPPO( LeggedRobotCfgPPO ):
     seed = 1
@@ -527,7 +536,7 @@ class GO1RL2ACCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 500
         
         
-        load_run = "May11_22-27-30_rl2ac_100hz_spec"
+        load_run = "May18_21-30-56_rl2ac_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/rl2ac_stairs_12-16kg.csv"

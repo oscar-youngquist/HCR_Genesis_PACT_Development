@@ -512,6 +512,7 @@ class GenesisSimulator_PACT(Simulator):
     def _print_domain_rand_values(self, prefix=""):
         print(prefix)
         print("Phase: ", self.domain_rand_phase)
+        print("Joint Dynamics Progress: ", self.domain_rand_joint_dynamics_progress)
         print("Mass/COM Progress: ", self.domain_rand_mass_com_progress)
         print("Disturbance Progress: ", self.domain_rand_disturbance_progress)
         print("Push Value: ", self.push_value)
@@ -523,14 +524,16 @@ class GenesisSimulator_PACT(Simulator):
         print("COM Delta Z Value: ", self.com_delta_z_value)
         print("Joint Stiffness Bounds: ", self.joint_stiffness_bound_current)
         print("Joint Damping Bounds: ", self.joint_damping_bound_current)
+        print("Joint Friction Bounds: ", self.joint_friction_bound_current)
 
 
     def _step_domian_rand(self, num_iters, mean_reward=None):
         """
-        Two-phase performance-gated domain-rand curriculum.
+        Three-phase performance-gated domain-rand curriculum.
 
-        Phase 1: increase mass + COM randomization.
-        Phase 2: increase external disturbance randomization.
+        Phase 1: increase joint-level dynamics randomization.
+        Phase 2: increase mass + COM randomization.
+        Phase 3: increase external disturbance randomization.
         """
 
         def _interp(p, low, diff):
@@ -607,23 +610,32 @@ class GenesisSimulator_PACT(Simulator):
         # -----------------------------
         # Phase selection
         # -----------------------------
-        if self.domain_rand_phase == "mass_com":
+        if self.domain_rand_phase == "joint_dynamics":
+            self.domain_rand_joint_dynamics_progress = min(
+                1.0,
+                self.domain_rand_joint_dynamics_progress + self.domain_rand_joint_dynamics_delta,
+            )
+
+            if self.domain_rand_joint_dynamics_progress >= 1.0:
+                self._advance_domain_rand_phase()
+
+        elif self.domain_rand_phase == "mass_com":
             self.domain_rand_mass_com_progress = min(
                 1.0,
                 self.domain_rand_mass_com_progress + self.domain_rand_mass_com_delta,
             )
 
             if self.domain_rand_mass_com_progress >= 1.0:
-                self.domain_rand_phase = "disturbance"
-
-                # Reset recovery baseline when entering the harder phase.
-                self.domain_rand_best_reward_ema = self.domain_rand_reward_ema
+                self._advance_domain_rand_phase()
 
         elif self.domain_rand_phase == "disturbance":
             self.domain_rand_disturbance_progress = min(
                 1.0,
                 self.domain_rand_disturbance_progress + self.domain_rand_disturbance_delta,
             )
+
+            if self.domain_rand_disturbance_progress >= 1.0:
+                self._advance_domain_rand_phase()
 
         # -----------------------------
         # Apply mass + COM progress
@@ -662,11 +674,16 @@ class GenesisSimulator_PACT(Simulator):
         # -----------------------------
         # Apply joint dynamics progress
         # -----------------------------
+        p_joint = self.domain_rand_joint_dynamics_progress
+
         self.joint_stiffness_bound_current = (
-            p_mc * self.joint_stiffness_range + self.joint_stiffness_bounds_start
+            p_joint * self.joint_stiffness_range + self.joint_stiffness_bounds_start
         )
         self.joint_damping_bound_current = (
-            p_mc * self.joint_damping_range + self.joint_damping_bounds_start
+            p_joint * self.joint_damping_range + self.joint_damping_bounds_start
+        )
+        self.joint_friction_bound_current = (
+            p_joint * self.joint_friction_range + self.joint_friction_bounds_start
         )
 
         if self.com_rand_z_positive:
@@ -774,6 +791,11 @@ class GenesisSimulator_PACT(Simulator):
         self.joint_damping_range        = np.array(self._cfg.domain_rand.joint_damping_range_end) - np.array(self._cfg.domain_rand.joint_damping_range_start)
         self.joint_damping_bound_current = self.joint_damping_bounds_start
 
+        self.joint_friction_bounds_start = self._cfg.domain_rand.joint_friction_range_start
+        self.joint_friction_bounds_end   = self._cfg.domain_rand.joint_friction_range_end
+        self.joint_friction_range        = np.array(self.joint_friction_bounds_end) - np.array(self.joint_friction_bounds_start)
+        self.joint_friction_bound_current = self.joint_friction_bounds_start
+
 
         # Tradeoff curriculum stuff
         self.feedforward_tau_weight = torch.ones((self._cfg.env.num_envs, 1), device=self._device, dtype=torch.float)
@@ -789,11 +811,26 @@ class GenesisSimulator_PACT(Simulator):
         
         
     def _init_domain_rand_curriculum_state(self):
-        self.domain_rand_phase = "mass_com"
-
+        self.domain_rand_joint_dynamics_progress = 0.0
         self.domain_rand_mass_com_progress = 0.0
         self.domain_rand_disturbance_progress = 0.0
 
+        self.domain_rand_curriculum_phases = []
+        if getattr(self._cfg.domain_rand, "use_joint_dynamics_curriculum", True):
+            self.domain_rand_curriculum_phases.append("joint_dynamics")
+        if getattr(self._cfg.domain_rand, "use_mass_com_curriculum", True):
+            self.domain_rand_curriculum_phases.append("mass_com")
+        if getattr(self._cfg.domain_rand, "use_disturbance_curriculum", True):
+            self.domain_rand_curriculum_phases.append("disturbance")
+        self.domain_rand_phase = (
+            self.domain_rand_curriculum_phases[0]
+            if self.domain_rand_curriculum_phases
+            else "complete"
+        )
+
+        self.domain_rand_joint_dynamics_delta = getattr(
+            self._cfg.domain_rand, "joint_dynamics_progress_delta", 0.002
+        )
         self.domain_rand_mass_com_delta = getattr(
             self._cfg.domain_rand, "mass_com_progress_delta", 0.002
         )
@@ -837,6 +874,20 @@ class GenesisSimulator_PACT(Simulator):
             )
         
         self.required_reward = 0.0
+
+    def _advance_domain_rand_phase(self):
+        if self.domain_rand_phase not in self.domain_rand_curriculum_phases:
+            self.domain_rand_phase = "complete"
+            return
+
+        phase_idx = self.domain_rand_curriculum_phases.index(self.domain_rand_phase)
+        next_idx = phase_idx + 1
+        self.domain_rand_phase = (
+            self.domain_rand_curriculum_phases[next_idx]
+            if next_idx < len(self.domain_rand_curriculum_phases)
+            else "complete"
+        )
+        self.domain_rand_best_reward_ema = self.domain_rand_reward_ema
     
     # ------------- Callbacks --------------
     def _setup_camera(self):
@@ -1562,7 +1613,7 @@ class GenesisSimulator_PACT(Simulator):
         # This armature will be Refreshed when envs are reset
 
     def _randomize_joint_friction(self, env_ids):
-        min_friction, max_friction = self._cfg.domain_rand.joint_friction_range
+        min_friction, max_friction = self.joint_friction_bound_current
         friction = torch.rand((len(env_ids),), dtype=torch.float, device=self._device) \
             * (max_friction - min_friction) + min_friction
         self._joint_friction[env_ids, 0] = friction.detach().clone()

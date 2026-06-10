@@ -135,13 +135,10 @@ class OnPolicyRunnerPosTau:
     # function to load a boot-strap initial model and reset the std
     def _load_pretrained_model(self):
         pretrained_path = self.policy_cfg["pretrained_path"]
-        pretrained_std = self.policy_cfg["pretrained_std"]
-        print(pretrained_path)
+        print("Loading boot-strapping model from - ", pretrained_path)
         loaded_dict = torch.load(pretrained_path)
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
-        # Reset the 
-        self.alg.actor_critic._init_std(pretrained_std)
         # Load the pretrained decoder network
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
 
@@ -254,6 +251,7 @@ class OnPolicyRunnerPosTau:
                 else:
                     self.writer.add_scalar('Values/domain_rand_reward_ema',0.0,it) 
                 self.writer.add_scalar('Values/required_reward',self.env.simulator.required_reward,it) 
+                self.writer.add_scalar('Values/domain_rand_joint_dynamics_progress',self.env.simulator.domain_rand_joint_dynamics_progress,it)
                 self.writer.add_scalar('Values/domain_rand_mass_com_progress',self.env.simulator.domain_rand_mass_com_progress,it) 
                 self.writer.add_scalar('Values/domain_rand_disturbance_progress',self.env.simulator.domain_rand_disturbance_progress,it) 
                     

@@ -256,6 +256,12 @@ class Go1RL2AC(BaseTask):
                 self.simulator.terrain_levels.float())
         if self.cfg.commands.curriculum:
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
+        if self.cfg.domain_rand.use_domainrand_curriculum:
+            phase_to_idx = {"joint_dynamics": 0.0, "mass_com": 1.0, "disturbance": 2.0, "complete": 3.0}
+            self.extras["episode"]["domain_rand_phase"] = phase_to_idx.get(self.simulator.domain_rand_phase, -1.0)
+            self.extras["episode"]["domain_rand_joint_dynamics_progress"] = self.simulator.domain_rand_joint_dynamics_progress
+            self.extras["episode"]["domain_rand_mass_com_progress"] = self.simulator.domain_rand_mass_com_progress
+            self.extras["episode"]["domain_rand_disturbance_progress"] = self.simulator.domain_rand_disturbance_progress
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -1053,6 +1059,18 @@ class Go1RL2AC(BaseTask):
         # penalize feet that are in-contact for any movement in the x/y direction
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.
         return  torch.sum(torch.square(contact * torch.sum(self.simulator.feet_vel[:,:,:2], dim=-1)), dim=-1)
+
+    def _reward_stumble(self):
+        """
+        Penalize feet colliding with vertical surfaces / obstacles during swing.
+        """
+        contact_forces = self.simulator.link_contact_forces[:, self.simulator.feet_indices, :]
+        horizontal_force = torch.norm(contact_forces[:, :, :2], dim=2)
+        vertical_force = torch.abs(contact_forces[:, :, 2])
+        contact = vertical_force > 1.0
+        swing = (~contact).float()
+        stumble = (horizontal_force > 4.0 * vertical_force) & (horizontal_force > 5.0)
+        return torch.sum(swing * stumble.float(), dim=1)
 
     def _reward_feet_contact_forces(self):
         # penalize high contact forces

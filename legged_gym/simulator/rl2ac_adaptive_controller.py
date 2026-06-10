@@ -24,7 +24,7 @@ class RL2ACAdaptiveCtrl:
         print(f"RL2AC params: alpha={self.alpha}, kappa={self.kappa}, lambda_0={self.lambda_0}, k_0={self.k_0}")
 
         # State flags
-        self.use_proactive_ctrl = False
+        self.use_proactive_ctrl = True
 
         # Joint-space vectors: [B, J]
         self.phi = torch.zeros(self.B, self.J, device=device, dtype=dtype)
@@ -68,6 +68,10 @@ class RL2ACAdaptiveCtrl:
         self.phi[env_ids] = 0.0
         self.s[env_ids] = 0.0
         self.epsilon[env_ids] = 0.0
+        
+        self.phi_diag[env_ids] = 0.0
+        self.s_diag[env_ids] = 0.0
+        self.epsilon_diag[env_ids] = 0.0
     
     # ------------------------------------------------------------------
     # State update (called every sim step)
@@ -157,12 +161,7 @@ class RL2ACAdaptiveCtrl:
         # Elementwise equivalent of: Γ φ φᵀ Γ
         phi_outer = self.phi.unsqueeze(2) * self.phi.unsqueeze(1)  # [B,J,J]
 
-        # print(self.Gamma.shape)
-
         # dGamma = self.lambda_val[:, None, None] * self.Gamma
-
-        # print(dGamma.shape)
-
         # dGamma -= ((self.Gamma @ self.phi_diag) @ self.phi_diag) @ self.Gamma
         
         dGamma = (
@@ -190,7 +189,7 @@ class RL2ACAdaptiveCtrl:
         rhs = self.s + self.kappa * self.epsilon
         dK = -torch.einsum("bij,bj,bk->bik", self.Gamma, self.phi, rhs)
         dK -= self.eta * self.K
-        # dK_dt = -self.Gamma @ self.phi_diag @ (self.s_diag + self.kappa * self.epsilon_diag)
-        # dK_dt -= self.eta * self.K
+        # dK = -self.Gamma @ self.phi_diag @ (self.s_diag + self.kappa * self.epsilon_diag)
+        # dK -= self.eta * self.K
 
         self.K += dt * dK

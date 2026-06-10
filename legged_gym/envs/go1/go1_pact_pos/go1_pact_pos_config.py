@@ -190,7 +190,8 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range = [0.00, 0.02]
+        joint_friction_range_end   = [0.00, 2.00]
+        joint_friction_range_start = [0.00, 1.00]
         
         randomize_joint_stiffness = False
         joint_stiffness_range_end   = [0.0, 0.0]
@@ -211,8 +212,12 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         reward_ema_alpha = 0.05         # ema value for tracking 
         min_reward_to_step = 0.60       # minimum reward threashold for stepping (i.e. the performance must always be above this for a step to occur, regardless of the historical performance.) 
 
-        mass_com_progress_delta = 0.01      # domain rand step delta for stepping payload parameters
-        disturbance_progress_delta = 0.01   # domain rand step delta for external disturbance parameters
+        joint_dynamics_progress_delta = 0.02 # domain rand step delta for stepping joint-level dynamics parameters
+        mass_com_progress_delta = 0.01       # domain rand step delta for stepping payload parameters
+        disturbance_progress_delta = 0.01    # domain rand step delta for external disturbance parameters
+        use_joint_dynamics_curriculum = True # set False to skip joint stiffness/damping/friction curriculum updates
+        use_mass_com_curriculum = True       # set False to skip payload and CoM curriculum updates
+        use_disturbance_curriculum = True    # set False to skip push/wrench curriculum updates
 
     class noise (LeggedRobotCfg.noise):
         add_noise = True
@@ -409,6 +414,7 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
             hip_pos = -0.05
             
             foot_slip        = -0.01           # penalty for feet slipping
+            stumble          = -0.2
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
 

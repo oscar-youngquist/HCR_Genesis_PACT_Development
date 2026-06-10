@@ -16,6 +16,9 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         debug = False       # if debugging, visualize contacts, 
         debug_viz = False    # draw debug visualizations
         
+        # Added for PACT experiment collection
+        lateral_push_only = False
+        
         # stuff for drawing the surface normal visulations
         debug_draw_swing_planes = False
         debug_viz_env                 = 0
@@ -74,6 +77,9 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         terrain_proportions = [0.10, 0.15, 0.25, 0.25, 0.20, 0.05]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
+
+        # Added for PACT experiment collection
+        reset_out_of_bounds = False
 
     class sim:
         # Common
@@ -152,19 +158,19 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         # Randomized 6DOF torso wrench
         push_robots = True
         push_interval_max = 15.0
-        push_interval_min = 2.50
+        push_interval_min = 5.00
         max_push_vel_xy = 1.50
         min_push_vel_xy = 0.50
 
         max_vertical_push = 0.50
         min_vertical_push = 0.10
-        vert_interval_max = 10.0
-        vert_interval_min = 2.50
+        vert_interval_max = 15.0
+        vert_interval_min = 5.00
 
         max_push_torque = 1.50
         min_push_torque = 0.50
-        wrench_timeout_min = 1.00
-        wrench_timeout_max = 10.0
+        wrench_timeout_min = 5.00
+        wrench_timeout_max = 15.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
@@ -200,18 +206,19 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         
         # Unused more complicated dynamics randomization
         randomize_joint_armature = True
-        joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
+        joint_armature_range = [0.00, 0.015]  # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range = [0.00, 0.02]
+        joint_friction_range_end   = [0.00, 0.20]
+        joint_friction_range_start = [0.00, 0.05]
         
-        randomize_joint_stiffness = False
-        joint_stiffness_range_end   = [0.0, 0.0]
-        joint_stiffness_range_start = [0.0, 0.0]
+        randomize_joint_stiffness = True
+        joint_stiffness_range_end   = [0.0, 0.02]
+        joint_stiffness_range_start = [0.0, 0.005]
         
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 0.80]
-        joint_damping_range_start = [0.30, 0.40]
+        joint_damping_range_start = [0.20, 0.60]
         
         
         # new domain randomization curriculum parameters
@@ -224,8 +231,12 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         reward_ema_alpha = 0.05         # ema value for tracking 
         min_reward_to_step = 0.60       # minimum reward threashold for stepping (i.e. the performance must always be above this for a step to occur, regardless of the historical performance.) 
 
-        mass_com_progress_delta = 0.01      # domain rand step delta for stepping payload parameters
-        disturbance_progress_delta = 0.01   # domain rand step delta for external disturbance parameters
+        joint_dynamics_progress_delta = 0.02 # domain rand step delta for stepping joint-level dynamics parameters
+        mass_com_progress_delta = 0.01       # domain rand step delta for stepping payload parameters
+        disturbance_progress_delta = 0.01    # domain rand step delta for external disturbance parameters
+        use_joint_dynamics_curriculum = True # set False to skip joint stiffness/damping/friction curriculum updates
+        use_mass_com_curriculum = True       # set False to skip payload and CoM curriculum updates
+        use_disturbance_curriculum = True    # set False to skip push/wrench curriculum updates
 
     # Taken from the Go1 config class in - 
     class noise (LeggedRobotCfg.noise):
@@ -447,6 +458,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             hip_pos = -0.05
             
             foot_slip        = -0.01           # penalty for feet slipping
+            stumble          = -0.2
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
         class reward_curriculum():
@@ -461,7 +473,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             curr_reward_bounds = {
                                   "ang_vel_xy":[-0.05, -0.2],
                                   "orientation":[-0.2,-2.0],
-                                  "torque_limits":[-1.0e-4, -0.01],
+                                  "torque_limits":[-1.0e-2, -1.0],
                                   "action_rate":[-1.0e-3, -0.01],
                                   "action_smoothness":[-1.0e-3,-0.01],
                                   "dof_close_to_default":[-0.05, -0.20],
@@ -550,7 +562,7 @@ class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
         save_interval = 500
         
         
-        load_run = "May11_22-26-21_hybrid_100hz_spec_materr"
+        load_run = "May18_21-24-47_hybrid_100hz_spec_materr"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/scratch_pact_exp/plane_tracking_test.csv"

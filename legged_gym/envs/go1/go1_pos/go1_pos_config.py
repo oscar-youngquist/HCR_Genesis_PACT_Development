@@ -136,7 +136,7 @@ class GO1PosCfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 4000     # number of steps with initial values held constant
+        push_warmup = 2000     # number of steps with initial values held constant
         
         # Randomize Friction
         randomize_friction = True
@@ -146,19 +146,19 @@ class GO1PosCfg( LeggedRobotCfg ):
         # Randomized 6DOF torso wrench
         push_robots = True
         push_interval_max = 15.0
-        push_interval_min = 2.50
+        push_interval_min = 5.00
         max_push_vel_xy = 1.50
         min_push_vel_xy = 0.50
 
         max_vertical_push = 0.50
         min_vertical_push = 0.10
-        vert_interval_max = 10.0
-        vert_interval_min = 2.50
+        vert_interval_max = 15.0
+        vert_interval_min = 5.00
 
         max_push_torque = 1.50
         min_push_torque = 0.50
-        wrench_timeout_min = 1.00
-        wrench_timeout_max = 10.0
+        wrench_timeout_min = 5.00
+        wrench_timeout_max = 15.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
@@ -194,18 +194,19 @@ class GO1PosCfg( LeggedRobotCfg ):
         
         # Unused more complicated dynamics randomization
         randomize_joint_armature = True
-        joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
+        joint_armature_range = [0.00, 0.015]  # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range = [0.00, 0.02]
+        joint_friction_range_end   = [0.00, 0.20]
+        joint_friction_range_start = [0.00, 0.05]
         
-        randomize_joint_stiffness = False
-        joint_stiffness_range_end   = [0.0, 0.0]
-        joint_stiffness_range_start = [0.0, 0.0]
+        randomize_joint_stiffness = True
+        joint_stiffness_range_end   = [0.0, 0.02]
+        joint_stiffness_range_start = [0.0, 0.005]
         
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 0.80]
-        joint_damping_range_start = [0.30, 0.40]
+        joint_damping_range_start = [0.20, 0.60]
 
         # new domain randomization curriculum parameters
         best_reward_window = 200        # amount of history used to capture recent performance.
@@ -218,8 +219,12 @@ class GO1PosCfg( LeggedRobotCfg ):
         reward_ema_alpha = 0.05         # ema value for tracking 
         min_reward_to_step = 0.60       # minimum reward threashold for stepping (i.e. the performance must always be above this for a step to occur, regardless of the historical performance.) 
 
-        mass_com_progress_delta = 0.01      # domain rand step delta for stepping payload parameters
-        disturbance_progress_delta = 0.01   # domain rand step delta for external disturbance parameters
+        joint_dynamics_progress_delta = 0.02 # domain rand step delta for stepping joint-level dynamics parameters
+        mass_com_progress_delta = 0.01       # domain rand step delta for stepping payload parameters
+        disturbance_progress_delta = 0.01    # domain rand step delta for external disturbance parameters
+        use_joint_dynamics_curriculum = True # set False to skip joint stiffness/damping/friction curriculum updates
+        use_mass_com_curriculum = True       # set False to skip payload and CoM curriculum updates
+        use_disturbance_curriculum = True    # set False to skip push/wrench curriculum updates
     class noise (LeggedRobotCfg.noise):
         add_noise = True
         noise_level = 1.0 # scales other values
@@ -352,7 +357,7 @@ class GO1PosCfg( LeggedRobotCfg ):
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
-            collision             = -1.0
+            collision             = -10.0
             dof_pos_limits        = -2.0
             dof_close_to_default  = -0.01
             torque_limits         = -0.01
@@ -412,29 +417,30 @@ class GO1PosCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.70            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
-            hip_pos = -0.05
+            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            hip_pos = -0.2
             
             foot_slip        = -0.01           # penalty for feet slipping
+            stumble          = -1.0
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
 
         class reward_curriculum():
             curr_reward_keys = ["orientation", 
                                 "ang_vel_xy",
-                                "dof_close_to_default",
+                                "hip_pos",
                                 "torque_limits",
                                 ]
             
             curr_reward_bounds = {
                                   "orientation":[-0.2,-2.0],
                                   "ang_vel_xy":[-0.05, -0.2],
-                                  "dof_close_to_default":[-0.05, -0.20],
-                                  "torque_limits":[-0.0001, -1.0e-2],
+                                  "hip_pos":[-0.2, -0.5],
+                                  "torque_limits":[-0.01, -1.0],
                                  }
 
             curr_steps = 500
-            warmup_steps = 6500
+            warmup_steps = 6000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -472,7 +478,8 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         critic_layers = [1024,256,128]
         
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
-        
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pos_rough/May11_16-55-20_pos_100hz_spec/model_4000.pt"
+
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
@@ -511,7 +518,7 @@ class GO1PosCfgPPO( LeggedRobotCfgPPO ):
         
         # load_run = "May01_17-08-23_pos_100hz_spec"
         # load_run = "May09_20-36-36_pos_100hz_spec"
-        load_run = "May11_16-55-20_pos_100hz_spec"
+        load_run = "May18_21-30-18_pos_100hz_spec"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pos_stairs_12-16kg.csv"

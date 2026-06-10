@@ -515,6 +515,21 @@ class ActorCritic_PACT(nn.Module):
         total_sample = torch.cat([actions_pos, actions_tau], dim=1)
 
         return total_sample
+    
+
+    def act_inference_recon(self,obs,obs_history):
+        # Call the forward method of the context encoder
+        z, torso_velo = self.cenet_enc_inference(obs_history)
+        
+        # create the actors observation
+        current_obs = torch.cat((obs,z,torso_velo), dim=-1)   
+                
+        # call the actors forward method and return it's results
+        actions_pos, actions_tau = self.actor_forward(current_obs)
+
+        total_sample = torch.cat([actions_pos, actions_tau], dim=1)
+
+        return total_sample, z, torso_velo
 
     # Forward method for calculating the value of the current state
     #     using the privilged critic observation
