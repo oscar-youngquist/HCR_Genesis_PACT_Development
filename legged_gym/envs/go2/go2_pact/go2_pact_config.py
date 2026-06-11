@@ -206,19 +206,19 @@ class GO2PACTCfg( LeggedRobotCfg ):
         
         # Unused more complicated dynamics randomization
         randomize_joint_armature = True
-        joint_armature_range = [0.00, 0.04]         # [N*m*s/rad]
+        joint_armature_range = [0.00, 0.015]         # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range_end   = [0.00, 2.00]
-        joint_friction_range_start = [0.00, 1.00]
+        joint_friction_range_end   = [0.00, 0.20]
+        joint_friction_range_start = [0.00, 0.05]
         
         randomize_joint_stiffness = True
-        joint_stiffness_range_end   = [0.0, 0.04]
-        joint_stiffness_range_start = [0.0, 0.02]
+        joint_stiffness_range_end   = [0.0, 0.02]
+        joint_stiffness_range_start = [0.0, 0.005]
         
         randomize_joint_damping = True
-        joint_damping_range_end   = [0.00, 2.20]
-        joint_damping_range_start = [0.50, 1.50]
+        joint_damping_range_end   = [0.00, 0.80]
+        joint_damping_range_start = [0.20, 0.60]
         
         
         # new domain randomization curriculum parameters
@@ -406,7 +406,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
             # coupled output specific rewards 
             torque_conflict_symmetric = -0.1     # discourages a negative cosine similarity between ff and fb torques
             torque_alignment = 0.4               # encourage a positive cosine-similarity between the ff and fb torques
-            ff_ratio = 0.1                       # encourage the feeforward torques explaining more of the final torque
+            ff_ratio = 0.0                       # encourage the feeforward torques explaining more of the final torque
             
             # smoothness and stability
             lin_vel_z        = -2.0
@@ -452,7 +452,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.70            # tracking reward for long steps
             # foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance      
-            foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.2
             
             foot_slip        = -0.01          # penalty for feet slipping
@@ -525,7 +525,7 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/May09_19-14-36_pact_posboot_100hz_grf/model_3000_converted.pt"
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go2_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/May10_16-17-52_pact_posboot_100hz_grf/model_3000_converted.pt"
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/May16_22-25-01_pact_posboot_100hz_grf/model_3000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/Jun10_18-16-06_pact_posboot_100hz_grf/model_3000_converted.pt"
 
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
