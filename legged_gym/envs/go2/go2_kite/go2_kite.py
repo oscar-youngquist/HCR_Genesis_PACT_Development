@@ -36,6 +36,18 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         self._parse_cfg(self.cfg, sim_device)
         super().__init__(self.cfg, sim_params, sim_device, headless)
         
+        self.command_lin_tracking_ema = None
+        self.command_ang_tracking_ema = None
+        self.command_lin_best_tracking = 0.0
+        self.command_ang_best_tracking = 0.0
+        self.command_lin_required_tracking = self.cfg.commands.curriculum_min_lin_tracking
+        self.command_ang_required_tracking = self.cfg.commands.curriculum_min_ang_tracking
+        self.command_lin_tracking_history = deque(
+            maxlen=self.cfg.commands.curriculum_best_window
+        )
+        self.command_ang_tracking_history = deque(
+            maxlen=self.cfg.commands.curriculum_best_window
+        )
         self.last_lin_update_idx = 0
         self.last_ang_update_idx = 0
         
@@ -337,8 +349,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         # update curriculum
         if self.cfg.terrain.curriculum:
             self._update_terrain_curriculum(env_ids)
-        # avoid updating command curriculum at each step since the maximum command is common to all envs
-        if self.cfg.commands.curriculum and (self.common_step_counter % self.max_episode_length ==0):
+        if self.cfg.commands.curriculum:
             self._update_command_curriculum(env_ids)
 
         # Update the position/torque control tradeoff curriculum 
@@ -389,6 +400,24 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
             self.extras["episode"]["max_command_y"] = self.command_ranges["lin_vel_y"][1]
             self.extras["episode"]["max_command_yaw"] = self.command_ranges["ang_vel_yaw"][1]
+            self.extras["episode"]["command_lin_tracking_ema"] = (
+                self.command_lin_tracking_ema or 0.0
+            )
+            self.extras["episode"]["command_ang_tracking_ema"] = (
+                self.command_ang_tracking_ema or 0.0
+            )
+            self.extras["episode"]["command_lin_best_tracking"] = (
+                self.command_lin_best_tracking
+            )
+            self.extras["episode"]["command_ang_best_tracking"] = (
+                self.command_ang_best_tracking
+            )
+            self.extras["episode"]["command_lin_required_tracking"] = (
+                self.command_lin_required_tracking
+            )
+            self.extras["episode"]["command_ang_required_tracking"] = (
+                self.command_ang_required_tracking
+            )
         self.extras["episode"]["gap_reset"] = self.gap_reset_buf[env_ids].float().mean()
         if self.cfg.domain_rand.use_domainrand_curriculum:
             phase_to_idx = {
@@ -672,42 +701,141 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         self.command_resample_timeouts[env_ids] = self._sample_command_resample_timeouts(len(env_ids))
 
     def _update_command_curriculum(self, env_ids):
-        """ Implements a curriculum of increasing commands
+        """Update linear and angular command ranges using independent EMA gates."""
+        if not self.init_done:
+            return
 
-        Args:
-            env_ids (List[int]): ids of environments being reset
-        """
-        # If the tracking reward is above 80% of the maximum, increase the range of commands
-        if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > \
-                self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel"] and \
-                    self.common_step_counter > (self.last_lin_update_idx + 24*500):
-            
+        # Ignore very short episodes: their partial reward sums are too noisy to
+        # represent sustained command-tracking performance.
+        min_episode_steps = (
+            self.cfg.commands.curriculum_min_episode_fraction
+            * self.max_episode_length
+        )
+        valid_ids = env_ids[self.episode_length_buf[env_ids] >= min_episode_steps]
+        if len(valid_ids) == 0:
+            return
+
+        def update_tracking_state(reward_name, ema, history, minimum):
+            scale = self.reward_scales.get(reward_name, 0.0)
+            if scale <= 0.0:
+                return ema, 0.0, minimum
+
+            # Remove episode length and the active reward scale. Since each raw
+            # tracking reward is bounded by 1, this is the attained fraction of
+            # the maximum possible tracking reward for each episode.
+            episode_steps = self.episode_length_buf[valid_ids].float().clamp(min=1.0)
+            normalized = (
+                self.episode_sums[reward_name][valid_ids]
+                / (episode_steps * scale)
+            ).clamp(0.0, 1.0)
+            sample = normalized.mean().item()
+
+            # Smooth reset-batch performance so a single unusually good or bad
+            # batch cannot immediately advance or stall the curriculum.
+            alpha = self.cfg.commands.curriculum_ema_alpha
+            ema = sample if ema is None else (1.0 - alpha) * ema + alpha * sample
+            history.append(ema)
+
+            # Estimate demonstrated best performance robustly. Use the maximum
+            # during startup, then a high quantile to reject isolated spikes.
+            values = np.asarray(history, dtype=np.float32)
+            if len(values) < 10:
+                best = float(values.max())
+            else:
+                best = float(
+                    np.quantile(
+                        values, self.cfg.commands.curriculum_best_quantile
+                    )
+                )
+
+            # Require both an absolute level of competence and recovery toward
+            # the best EMA retained from the current/recent command ranges.
+            required = max(
+                minimum,
+                self.cfg.commands.curriculum_recovery_ratio * best,
+            )
+            return ema, best, required
+
+        # Linear and angular tracking have separate EMAs and recovery targets,
+        # allowing one command family to progress without waiting for the other.
+        (
+            self.command_lin_tracking_ema,
+            self.command_lin_best_tracking,
+            self.command_lin_required_tracking,
+        ) = update_tracking_state(
+            "tracking_lin_vel",
+            self.command_lin_tracking_ema,
+            self.command_lin_tracking_history,
+            self.cfg.commands.curriculum_min_lin_tracking,
+        )
+        (
+            self.command_ang_tracking_ema,
+            self.command_ang_best_tracking,
+            self.command_ang_required_tracking,
+        ) = update_tracking_state(
+            "tracking_ang_vel",
+            self.command_ang_tracking_ema,
+            self.command_ang_tracking_history,
+            self.cfg.commands.curriculum_min_ang_tracking,
+        )
+
+        # Expand linear ranges only after performance has recovered and the
+        # control-timestep cooldown since the previous linear update has elapsed.
+        update_interval = self.cfg.commands.curriculum_update_interval_steps
+        if (
+            self.command_lin_tracking_ema is not None
+            and self.command_lin_tracking_ema
+            >= self.command_lin_required_tracking
+            and self.common_step_counter - self.last_lin_update_idx
+            >= update_interval
+        ):
             self.last_lin_update_idx = self.common_step_counter
-            
             self.command_ranges["lin_vel_x"][0] = np.clip(
-                self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
-            self.command_ranges["lin_vel_y"][0] = np.clip(
-                self.command_ranges["lin_vel_y"][0] - 0.5, -0.3, 0.)
-            
-            
+                self.command_ranges["lin_vel_x"][0]
+                - self.cfg.commands.lin_vel_x_step,
+                -self.cfg.commands.max_curriculum,
+                0.0,
+            )
             self.command_ranges["lin_vel_x"][1] = np.clip(
-                self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
+                self.command_ranges["lin_vel_x"][1]
+                + self.cfg.commands.lin_vel_x_step,
+                0.0,
+                self.cfg.commands.max_curriculum,
+            )
+            self.command_ranges["lin_vel_y"][0] = np.clip(
+                self.command_ranges["lin_vel_y"][0]
+                - self.cfg.commands.lin_vel_y_step,
+                -self.cfg.commands.max_lin_vel_y,
+                0.0,
+            )
             self.command_ranges["lin_vel_y"][1] = np.clip(
-                self.command_ranges["lin_vel_y"][1] + 0.5, 0., 0.3)
-            
+                self.command_ranges["lin_vel_y"][1]
+                + self.cfg.commands.lin_vel_y_step,
+                0.0,
+                self.cfg.commands.max_lin_vel_y,
+            )
 
-        # If the tracking reward is above 80% of the maximum, increase the range of commands
-        if torch.mean(self.episode_sums["tracking_ang_vel"][env_ids]) / self.max_episode_length > \
-                self.cfg.commands.curriculum_threshold_ang * self.reward_scales["tracking_ang_vel"] and \
-                    self.common_step_counter > (self.last_ang_update_idx + 24*500):
-            
+        # Apply the same two-part gate independently to the yaw-rate range.
+        if (
+            self.command_ang_tracking_ema is not None
+            and self.command_ang_tracking_ema
+            >= self.command_ang_required_tracking
+            and self.common_step_counter - self.last_ang_update_idx
+            >= update_interval
+        ):
             self.last_ang_update_idx = self.common_step_counter
-            
             self.command_ranges["ang_vel_yaw"][0] = np.clip(
-                self.command_ranges["ang_vel_yaw"][0] - 0.5, -3.0, 0.)
-
+                self.command_ranges["ang_vel_yaw"][0]
+                - self.cfg.commands.ang_vel_yaw_step,
+                -self.cfg.commands.max_ang_vel_yaw,
+                0.0,
+            )
             self.command_ranges["ang_vel_yaw"][1] = np.clip(
-                self.command_ranges["ang_vel_yaw"][1] + 0.5, 0., 3.0)
+                self.command_ranges["ang_vel_yaw"][1]
+                + self.cfg.commands.ang_vel_yaw_step,
+                0.0,
+                self.cfg.commands.max_ang_vel_yaw,
+            )
 
 
     def _get_noise_scale_vec(self):

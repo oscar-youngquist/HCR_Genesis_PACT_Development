@@ -588,8 +588,20 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 10.  # time before command are changed[s]
 
-        curriculum_threshold = 0.70
-        curriculum_threshold_ang = 0.30
+        curriculum_ema_alpha = 0.05
+        curriculum_best_window = 400
+        curriculum_best_quantile = 0.90
+        curriculum_recovery_ratio = 0.90
+        curriculum_min_lin_tracking = 0.70
+        curriculum_min_ang_tracking = 0.70
+        curriculum_min_episode_fraction = 0.25
+        curriculum_update_interval_steps = 12000
+
+        lin_vel_x_step = 0.10
+        lin_vel_y_step = 0.05
+        ang_vel_yaw_step = 0.10
+        max_lin_vel_y = 0.30
+        max_ang_vel_yaw = 3.0
         
         randomize_resampling_time = False
         resampling_time_min = 1.0
