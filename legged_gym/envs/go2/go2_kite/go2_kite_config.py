@@ -62,19 +62,20 @@ class GO2KITECfg( LeggedRobotCfg ):
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
         # terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
-        terrain_proportions = [0.10, 0.05, 0.10, 0.10, 0.15,
-                               0.10, 0.15, 0.05, 0.10, 0.10]
+        
+        # slope, random-rough, stairs-down, stairs-up, discrete, stepping-stone, gap (jump), pit (climb-up), high-platform (climb), platform+gap (climb and jump) 
+        terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.15, 0.05, 0.10, 0.10]
         simplify_mesh = True
         terrain_curriculum_difficulty = {
-            "slope": "difficulty * 0.4",
+            "slope": "difficulty * 0.6",
             "step_height": "0.05 + 0.2 * difficulty",
             "discrete_height": "0.05 + 0.2 * difficulty",
             "stepping_stones_params": {
-                "stone_length": "np.random.uniform(1.6, 2.0)",
-                "stone_width": "np.random.uniform(1.0, 2.0)",
+                "stone_length": "np.random.uniform(0.2, 1.0)",
+                "stone_width": "np.random.uniform(0.2, 1.0)",
                 "stone_distance_x": "0.1 + 0.8 * difficulty",
-                "stone_distance_y": "np.random.uniform(0.3, 0.5)",
-                "max_height": "0",
+                "stone_distance_y": "np.random.uniform(0.2, 0.8)",
+                "max_height": "0.20",
             },
             "gap_size": "0.1 + difficulty * 0.8",
             "pit_depth": "0.1 + 0.5 * difficulty",
@@ -219,24 +220,39 @@ class GO2KITECfg( LeggedRobotCfg ):
         randomize_motor_strength = True
         motor_strength_range = [0.9, 1.1]
         
-        # Unused more complicated dynamics randomization
         randomize_joint_armature = True
-        joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
+        joint_armature_range = [0.00, 0.015]         # [N*m*s/rad]
         
         randomize_joint_friction = True
-        joint_friction_range = [0.00, 0.02]
-        joint_friction_range_start = joint_friction_range
-        joint_friction_range_end = joint_friction_range
+        joint_friction_range_end   = [0.00, 0.2]
+        joint_friction_range_start = [0.00, 0.05]
         
-        randomize_joint_stiffness = False
-        joint_stiffness_range_end   = [0.0, 0.01]
+        randomize_joint_stiffness = True
+        joint_stiffness_range_end   = [0.0, 0.02]
         joint_stiffness_range_start = [0.0, 0.005]
         
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 0.80]
-        joint_damping_range_start = [0.30, 0.40]
+        joint_damping_range_start = [0.20, 0.60]
         
         
+        # new domain randomization curriculum parameters
+        best_reward_window = 400        # amount of history used to capture recent performance.
+        best_reward_quantile = 0.90     # quantile for determining "max" performance over history window.
+
+        recovery_ratio = 0.90           # allowable deviation from quantile of history window
+        step_interval = 10              # minimum number of iterations before taking next domain rand step
+
+        reward_ema_alpha = 0.05         # EMA value for tracking
+        min_reward_to_step = 0.60       # absolute performance floor for curriculum steps
+
+        joint_dynamics_progress_delta = 0.02 # domain rand step delta for stepping joint-level dynamics parameters
+        mass_com_progress_delta = 0.01       # domain rand step delta for stepping payload parameters
+        disturbance_progress_delta = 0.01    # domain rand step delta for external disturbance parameters
+        use_joint_dynamics_curriculum = True # set False to skip joint stiffness/damping/friction curriculum updates
+        use_mass_com_curriculum = True       # set False to skip payload and CoM curriculum updates
+        use_disturbance_curriculum = True    # set False to skip push/wrench curriculum updates
+
         randomize_camera_pos = True
         camera_com_displacement_range = [0.01, 0.0025, 0.03]
         randomize_camera_euler = True
@@ -275,6 +291,7 @@ class GO2KITECfg( LeggedRobotCfg ):
 
     class sensor:
         add_depth = SIMULATOR == "genesis_kite_depth"
+        # add_depth = False
         use_warp = add_depth
         class depth_camera_config:
             num_sensors = 1
@@ -391,7 +408,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
 
-        use_reward_curriculum = False
+        use_reward_curriculum = True
 
         max_contact_force = 200.0
         feet_edge_threshold = 0.05
@@ -555,7 +572,6 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.01
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
@@ -568,6 +584,15 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         lam   = 0.95
         desired_kl = 0.01
         max_grad_norm = 1.0
+
+        # Adaptive entropy coefficient curriculum
+        entropy_coef = 0.01
+        use_adaptive_entropy = True
+        adaptive_ent_bounds = [0.005, 0.01]
+        adaptive_ent_lin_threshold = 0.75
+        adaptive_ent_ang_threshold = 0.35
+        adaptive_ent_ter_threshold = 6.0
+        adaptive_ent_softmax_temp = 2.0
 
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_KITE'

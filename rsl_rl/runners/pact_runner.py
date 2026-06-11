@@ -106,7 +106,7 @@ class OnPolicyRunnerPACT:
         # print(actor_critic)
         # print(decoder)
 
-        print("Created Parallel Actor-Critic Model")
+        print("Created Actor-Critic Model")
         pretty_print_module(actor_critic)
         pretty_print_module(decoder)
 

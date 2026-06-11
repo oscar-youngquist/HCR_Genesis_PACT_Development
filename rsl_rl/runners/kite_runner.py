@@ -28,7 +28,6 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-import math
 import time
 import os
 from collections import deque
@@ -41,7 +40,7 @@ import torch
 from rsl_rl.algorithms import PPO_KITE
 from rsl_rl.modules import ActorCritic_KITE, ContextDecoderKITE
 from rsl_rl.env import VecEnv
-
+from rsl_rl.utils import pretty_print_module
 
 
 # ---------------- 4090 / Ada Lovelace performance knobs ----------------
@@ -103,15 +102,11 @@ class OnPolicyRunnerKITE:
         
         # decoder = torch.compile(decoder)
 
-        print("Created Parallel Actor-Critic Model. Parameter Count: ", np.sum(p.numel() for p in actor_critic.parameters() if p.requires_grad))
+        print("Created Actor-Critic Model")
+        pretty_print_module(actor_critic)
+        pretty_print_module(decoder)
 
-        print("\t Actor Trunk Parameter Count: ", np.sum(p.numel() for p in actor_critic.actor.parameters() if p.requires_grad))
-
-        print("\t Encoder Parameter Count: ", np.sum(p.numel() for p in actor_critic.context_encoder.parameters() if p.requires_grad))
-
-        print("\t Critic Parameter Count: ", np.sum(p.numel() for p in actor_critic.critic.parameters() if p.requires_grad))
-
-        self._init_entropy_coef = self.alg_cfg["entropy_coef"]
+        self.use_adaptive_entropy = self.alg_cfg.get("use_adaptive_entropy", False)
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         
@@ -140,27 +135,17 @@ class OnPolicyRunnerKITE:
 
         _, _ = self.env.reset()
 
-
     # function to load a boot-strap initial model and reset the std
     def _load_pretrained_model(self):
         pretrained_path = self.policy_cfg["pretrained_path"]
-        pretrained_std = self.policy_cfg["pretrained_std"]
-        print(pretrained_path)
+        print("Loading boot-strapping model from - ", pretrained_path)
         loaded_dict = torch.load(pretrained_path)
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
-        # Reset the 
-        self.alg.actor_critic._init_std(pretrained_std)
         # Load the pretrained decoder network
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
 
-
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
-        lin_tracking_ema = None
-        lin_tracking_alpha = 0.05
-        lin_tracking_threshold = 0.40
-        entropy_reduced = False
-        
         # initialize writer
         if self.log_dir is not None and self.writer is None:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
@@ -238,71 +223,75 @@ class OnPolicyRunnerKITE:
                 self.env.step_reward_curriculum(it)
             self.env.step_command_resampling_time_curriculum(it)
             
-            # Step the domain randomization if approperiate
+            # Step domain randomization when tracking performance is available.
             if self.env.simulator.use_domainrand_curriculum:
-                self.env.simulator._step_domian_rand(it)
-
-            # if it > 1000:
-            #     self.alg.set_entropy_coef(1.0e-3)
-            
-            # entropy_coef = 0.01
-            # # std_lwr = 0.40
-            # # self._init_entropy_coef = 0.01
-            # half_ceof = self._init_entropy_coef * 0.5
-            # tenth_coef = self._init_entropy_coef * 0.1
-
-            # if it < 5000:
-            #     entropy_coef = self._init_entropy_coef
-            # elif it < 5500:
-            #     new_coef = self._init_entropy_coef / 2.0
-            #     alpha = (it - 5000) / 500.0
-            #     entropy_coef = half_ceof + 0.5 * (self._init_entropy_coef - half_ceof) * (1 + math.cos(math.pi * alpha))
-            # elif it < 6000:
-            #     entropy_coef = half_ceof
-            # elif it < 6500:
-            #     alpha = (it - 6000) / 500.0
-            #     entropy_coef = tenth_coef + 0.5 * (half_ceof - tenth_coef) * (1 + math.cos(math.pi * alpha))
-            # else:
-            #     entropy_coef = tenth_coef
-            
-            # entropy_coef = max(entropy_coef, 0.001)
-            # self.alg.set_entropy_coef(entropy_coef)
-            
-            # print("entropy_coef - ", entropy_coef)
-            # # print("std_lwr - ", std_lwr)
-
-            # self.alg.set_entropy_coef(entropy_coef)
-            # # self.alg._set_std_clip_lwr(std_lwr)
-
-            # Track EMA of episode linear velocity tracking reward
-            mean_tracking_lin_vel = None
-
-            if len(ep_infos) > 0 and "rew_tracking_lin_vel" in ep_infos[0]:
-                vals = []
+                tracking_values = []
                 for ep_info in ep_infos:
-                    v = ep_info["rew_tracking_lin_vel"]
-                    if not isinstance(v, torch.Tensor):
-                        v = torch.tensor([v], device=self.device)
-                    vals.append(v.float().mean().to(self.device))
+                    if "rew_tracking_lin_vel" not in ep_info:
+                        continue
+                    value = ep_info["rew_tracking_lin_vel"]
+                    if isinstance(value, torch.Tensor):
+                        value = value.float().mean().item()
+                    tracking_values.append(float(value))
 
-                mean_tracking_lin_vel = torch.stack(vals).mean().item()
-
-                if lin_tracking_ema is None:
-                    lin_tracking_ema = mean_tracking_lin_vel
-                else:
-                    lin_tracking_ema = (
-                        (1.0 - lin_tracking_alpha) * lin_tracking_ema
-                        + lin_tracking_alpha * mean_tracking_lin_vel
+                if tracking_values:
+                    mean_tracking_lin_vel = statistics.mean(tracking_values)
+                    self.env.simulator._step_domian_rand(
+                        it, mean_tracking_lin_vel
                     )
 
-            # Entropy schedule gated by tracking performance
-            if lin_tracking_ema is not None and lin_tracking_ema > lin_tracking_threshold:
-                entropy_coef = 1.0e-3
-                entropy_reduced = True
-            else:
-                entropy_coef = self._init_entropy_coef
+                if self.writer is not None:
+                    reward_ema = self.env.simulator.domain_rand_reward_ema
+                    required_reward = self.env.simulator.required_reward
+                    self.writer.add_scalar(
+                        "Values/domain_rand_reward_ema",
+                        reward_ema if reward_ema is not None else 0.0,
+                        it,
+                    )
+                    self.writer.add_scalar(
+                        "Values/required_reward",
+                        required_reward if required_reward is not None else 0.0,
+                        it,
+                    )
+                    self.writer.add_scalar(
+                        "Values/domain_rand_joint_dynamics_progress",
+                        self.env.simulator.domain_rand_joint_dynamics_progress,
+                        it,
+                    )
+                    self.writer.add_scalar(
+                        "Values/domain_rand_mass_com_progress",
+                        self.env.simulator.domain_rand_mass_com_progress,
+                        it,
+                    )
+                    self.writer.add_scalar(
+                        "Values/domain_rand_disturbance_progress",
+                        self.env.simulator.domain_rand_disturbance_progress,
+                        it,
+                    )
 
-            self.alg.set_entropy_coef(entropy_coef)
+            entropy_coef = self.alg.current_entropy_coef
+            if ep_infos and self.use_adaptive_entropy:
+                performance_metrics = {}
+                metric_names = (
+                    ("rew_tracking_lin_vel", "lin_vel_tracking"),
+                    ("rew_tracking_ang_vel", "ang_vel_tracking"),
+                    ("terrain_level", "terrain_level"),
+                )
+                for episode_key, metric_key in metric_names:
+                    values = []
+                    for ep_info in ep_infos:
+                        if episode_key not in ep_info:
+                            continue
+                        value = ep_info[episode_key]
+                        if isinstance(value, torch.Tensor):
+                            value = value.float().max().item()
+                        values.append(float(value))
+                    if values:
+                        performance_metrics[metric_key] = max(values)
+
+                entropy_coef = self.alg.update_adaptive_entropy_coef(
+                    performance_metrics
+                )
 
 
             # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
@@ -312,7 +301,6 @@ class OnPolicyRunnerKITE:
             learn_time = stop - start
             if self.log_dir is not None:
                 self.log(locals())
-                self.writer.add_scalar("Curriculum/lin_tracking_ema", lin_tracking_ema, it)
                 self.writer.add_scalar("Policy/entropy_coef", entropy_coef, it)
 
             if it % self.save_interval == 0:

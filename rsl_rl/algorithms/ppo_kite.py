@@ -65,6 +65,12 @@ class PPO_KITE:
                  use_spo=False,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
                  vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
+                 use_adaptive_entropy=True,
+                 adaptive_ent_bounds=[0.01, 0.001],
+                 adaptive_ent_lin_threshold=0.75,
+                 adaptive_ent_ang_threshold=0.35,
+                 adaptive_ent_ter_threshold=5.0,
+                 adaptive_ent_softmax_temp=2.0,
                  ):
         
         self.device = device
@@ -77,6 +83,14 @@ class PPO_KITE:
 
         self.num_enc_epochs = num_encoder_epochs
         self.vae_beta = vae_kld_weight
+
+        self.use_adaptive_entropy = use_adaptive_entropy
+        self.entropy_coef_bounds = adaptive_ent_bounds
+        self.ent_linvelo_threshold = adaptive_ent_lin_threshold
+        self.ent_angvelo_threshold = adaptive_ent_ang_threshold
+        self.ent_terrain_threshold = adaptive_ent_ter_threshold
+        self.ent_softmax_temperature = adaptive_ent_softmax_temp
+        self.current_entropy_coef = entropy_coef
 
         # PPO components
         self.actor_critic = actor_critic
@@ -166,7 +180,38 @@ class PPO_KITE:
 
 
     def set_entropy_coef(self, coef=1e-3):
-        self.entropy_coef = coef
+        if self.use_adaptive_entropy:
+            self.current_entropy_coef = coef
+        else:
+            self.entropy_coef = coef
+
+    def update_adaptive_entropy_coef(self, performance_metrics):
+        lin_vel_tracking = performance_metrics.get("lin_vel_tracking", 0.0)
+        ang_vel_tracking = performance_metrics.get("ang_vel_tracking", 0.0)
+        terrain_level = performance_metrics.get("terrain_level", 0.0)
+
+        gaps = torch.tensor(
+            [
+                max(0.0, self.ent_linvelo_threshold - lin_vel_tracking)
+                / self.ent_linvelo_threshold
+                if self.ent_linvelo_threshold > 0
+                else 0.0,
+                max(0.0, self.ent_angvelo_threshold - ang_vel_tracking)
+                / self.ent_angvelo_threshold
+                if self.ent_angvelo_threshold > 0
+                else 0.0,
+                max(0.0, self.ent_terrain_threshold - terrain_level)
+                / self.ent_terrain_threshold
+                if self.ent_terrain_threshold > 0
+                else 0.0,
+            ],
+            dtype=torch.float32,
+        )
+        weights = F.softmax(gaps / self.ent_softmax_temperature, dim=0)
+        weighted_gap = torch.sum(weights * gaps).item()
+        low, high = self.entropy_coef_bounds
+        self.current_entropy_coef = low + weighted_gap * (high - low)
+        return self.current_entropy_coef
         
     def _set_std_clip_lwr(self, clip_val=0.1):
         self.actor_critic._set_std_clip_lwr(clip_val)
@@ -499,7 +544,16 @@ class PPO_KITE:
         else:
             value_loss = (returns_batch - value_batch).pow(2).mean()
 
-        ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+        entropy_coef = (
+            self.current_entropy_coef
+            if self.use_adaptive_entropy
+            else self.entropy_coef
+        )
+        ppo_loss = (
+            surrogate_loss
+            + self.value_loss_coef * value_loss
+            - entropy_coef * entropy_batch.mean()
+        )
 
         return ppo_loss, surrogate_loss, value_loss
 

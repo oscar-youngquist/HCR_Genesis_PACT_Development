@@ -340,6 +340,25 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
             self.extras["episode"]["max_command_y"] = self.command_ranges["lin_vel_y"][1]
             self.extras["episode"]["max_command_yaw"] = self.command_ranges["ang_vel_yaw"][1]
+        if self.cfg.domain_rand.use_domainrand_curriculum:
+            phase_to_idx = {
+                "joint_dynamics": 0.0,
+                "mass_com": 1.0,
+                "disturbance": 2.0,
+                "complete": 3.0,
+            }
+            self.extras["episode"]["domain_rand_phase"] = phase_to_idx.get(
+                self.simulator.domain_rand_phase, -1.0
+            )
+            self.extras["episode"]["domain_rand_joint_dynamics_progress"] = (
+                self.simulator.domain_rand_joint_dynamics_progress
+            )
+            self.extras["episode"]["domain_rand_mass_com_progress"] = (
+                self.simulator.domain_rand_mass_com_progress
+            )
+            self.extras["episode"]["domain_rand_disturbance_progress"] = (
+                self.simulator.domain_rand_disturbance_progress
+            )
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -790,14 +809,16 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
                 if key in self.reward_scales.keys():
                     self.reward_scales[key] = self.reward_curr_bounds[key][0] * self.dt
                     # print("Reward - ", key, " scale - ", self.reward_scales[key])
-        # Gradually increase the regularization strength
-        elif num_iters > self.reward_warmup_steps and (num_iters - self.reward_warmup_steps) < self.reward_curr_steps:
+        # Gradually increase the regularization strength via cosine annealing.
+        elif num_iters >= self.reward_warmup_steps and (num_iters - self.reward_warmup_steps) < self.reward_curr_steps:
             print("Stepping Reward Curriculum")
             adjusted_iter = num_iters - self.reward_warmup_steps
             for key in self.reward_curr_keys:
                 if key in self.reward_scales.keys():
-                    self.reward_scales[key] = ((float(adjusted_iter)/float(self.reward_curr_steps))*self.reward_bound_diffs[key] + self.reward_curr_bounds[key][0])*self.dt
-                    # print("Reward - ", key, " scale - ", self.reward_scales[key])
+                    low, high = self.reward_curr_bounds[key]
+                    alpha = np.clip(adjusted_iter / self.reward_curr_steps, 0.0, 1.0)
+                    ramp = 0.5 * (1.0 - np.cos(np.pi * alpha))
+                    self.reward_scales[key] = (low + (high - low) * ramp) * self.dt
         # Fix the regularization strength to the upper-bound
         else:
             # by default set the reward to the upper bound

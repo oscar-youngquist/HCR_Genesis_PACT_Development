@@ -129,9 +129,11 @@ class Terrain:
         slope = eval(self.terrain_curriculum_difficulty["slope"])
         step_height = eval(self.terrain_curriculum_difficulty["step_height"])
         discrete_obstacles_height = eval(self.terrain_curriculum_difficulty["discrete_height"])
+        rough_height = 0.02 + 0.08*difficulty
         stepping_stones_params = self.terrain_curriculum_difficulty["stepping_stones_params"]
         gap_size = eval(self.terrain_curriculum_difficulty["gap_size"])
         pit_depth = eval(self.terrain_curriculum_difficulty["pit_depth"])
+        
         # get params if exist
         high_platform_params = self.terrain_curriculum_difficulty.get("high_platform_params", None)
         high_platform_gaps_params = self.terrain_curriculum_difficulty.get("high_platform_gaps_params", None)
@@ -144,8 +146,8 @@ class Terrain:
                                                  terrain_type=self.type)
         elif choice < self.proportions[1]: # random uniform
             terrain_utils.random_uniform_terrain(terrain,
-                                                 min_height=-0.05,
-                                                 max_height=0.05,
+                                                 min_height=-rough_height,
+                                                 max_height=rough_height,
                                                  step=0.005,
                                                  downsampled_scale=0.2,
                                                  terrain_type=self.type)

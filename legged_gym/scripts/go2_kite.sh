@@ -4,6 +4,6 @@
 
 conda activate /home/oyoungquist/.conda/envs/genesis_lr
 
-export SIMULATOR=genesis_pact_pos
+export SIMULATOR=genesis_kite_depth
 
-python train.py --task=go2_kite --headless --seed=1
+python train.py --task=go2_kite --seed=1 --gpu=cuda:0

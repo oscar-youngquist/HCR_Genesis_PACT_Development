@@ -295,6 +295,22 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 0.70]
         joint_damping_range_start = [0.30, 0.40]
+
+        # Performance-gated domain randomization curriculum
+        best_reward_window = 400
+        best_reward_quantile = 0.90
+        recovery_ratio = 0.90
+        step_interval = 10
+        reward_ema_alpha = 0.05
+        min_reward_to_step = 0.60
+
+        joint_dynamics_progress_delta = 0.02
+        mass_com_progress_delta = 0.01
+        disturbance_progress_delta = 0.01
+        use_joint_dynamics_curriculum = True
+        use_mass_com_curriculum = True
+        use_disturbance_curriculum = True
+
         randomize_camera_pos = True
         camera_com_displacement_range = [0.01, 0.0025, 0.03]
         randomize_camera_euler = True
@@ -449,7 +465,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
 
-        use_reward_curriculum = False
+        use_reward_curriculum = True
 
         max_contact_force = 200.0
         feet_edge_threshold = 0.05
@@ -602,7 +618,6 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.01
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
@@ -615,6 +630,15 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         lam   = 0.95
         desired_kl = 0.01
         max_grad_norm = 1.0
+
+        # Adaptive entropy coefficient curriculum
+        entropy_coef = 0.01
+        use_adaptive_entropy = True
+        adaptive_ent_bounds = [0.005, 0.01]
+        adaptive_ent_lin_threshold = 0.75
+        adaptive_ent_ang_threshold = 0.35
+        adaptive_ent_ter_threshold = 6.0
+        adaptive_ent_softmax_temp = 2.0
 
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_KITE'
