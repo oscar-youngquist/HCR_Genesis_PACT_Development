@@ -12,13 +12,14 @@ import random
 from collections import deque
 
 from legged_gym.envs.base.base_task import BaseTask
+from legged_gym.envs.go2.kite_depth_mixin import KITEDepthMixin
 from legged_gym.utils.math_utils import wrap_to_pi, torch_rand_float, quat_apply
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.helpers import class_to_dict
 from ...base.legged_robot_config import LeggedRobotCfg
 import torch.nn.functional as F
 
-class Go2KITEBaseline(BaseTask):
+class Go2KITEBaseline(KITEDepthMixin, BaseTask):
     def __init__(self, cfg: LeggedRobotCfg, sim_params: dict, sim_device, headless):
         """ Parses the provided config file,
             calls create_sim() (which creates, simulation, terrain and environments),
@@ -57,6 +58,7 @@ class Go2KITEBaseline(BaseTask):
         Args:
             actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env)
         """
+        self._pre_depth_step()
         actions = self._pre_sim_step(actions)
         
         self.simulator.step(actions)
@@ -145,13 +147,20 @@ class Go2KITEBaseline(BaseTask):
         
         if self.cfg.sensor.add_depth:
             self.simulator.update_depth_images()
+            self._update_depth_observations()
         
         self.compute_observations()  # in some cases a simulation step might be required to refresh some obs (for example body positions)
         
         # KITE specific update
         self.leg_jacobians[:] = self.compute_all_leg_jacobians(self.simulator.dof_pos.view(-1, 4, 3))
         
-        if self.debug:
+        if (
+            self.debug
+            or (
+                not self.headless
+                and self.cfg.sensor.depth_camera_config.debug_draw_camera_position
+            )
+        ):
             self.simulator.draw_debug_vis()
 
     def compute_all_leg_jacobians(self, q: torch.Tensor) -> torch.Tensor:
@@ -295,6 +304,7 @@ class Go2KITEBaseline(BaseTask):
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
         self.simulator.reset_idx(env_ids)
+        self._reset_depth_buffers(env_ids)
 
         # reset buffers
         self.llast_actions[env_ids] = 0.
@@ -522,7 +532,26 @@ class Go2KITEBaseline(BaseTask):
             base_pos = self.simulator.base_init_pos.reshape(1, -1).repeat(len(env_ids), 1)
             base_pos += self.simulator.env_origins[env_ids]
         # base quat
-        base_quat = self.simulator.base_init_quat.reshape(1, -1).repeat(len(env_ids), 1)
+        base_quat = quat_from_euler_xyz(
+            torch_rand_float(
+                -self.cfg.init_state.roll_random_scale,
+                self.cfg.init_state.roll_random_scale,
+                (len(env_ids), 1),
+                self.device,
+            ).squeeze(1),
+            torch_rand_float(
+                -self.cfg.init_state.pitch_random_scale,
+                self.cfg.init_state.pitch_random_scale,
+                (len(env_ids), 1),
+                self.device,
+            ).squeeze(1),
+            torch_rand_float(
+                -self.cfg.init_state.yaw_random_scale,
+                self.cfg.init_state.yaw_random_scale,
+                (len(env_ids), 1),
+                self.device,
+            ).squeeze(1),
+        )
         # base lin vel
         base_lin_vel = torch_rand_float(-0.5, 0.5, (len(env_ids), 3), self.device)
         # base ang vel
@@ -547,6 +576,7 @@ class Go2KITEBaseline(BaseTask):
 
         if self.cfg.domain_rand.push_robots:
             self.simulator.push_robots()
+        self._resample_depth_latency()
         
     def _resample_commands(self, env_ids):
         """ Randommly select commands of some environments
@@ -746,6 +776,7 @@ class Go2KITEBaseline(BaseTask):
                 self.num_envs, self.cfg.domain_rand.ctrl_delay_step_range[1]+1, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
             self.action_delay = torch.randint(self.cfg.domain_rand.ctrl_delay_step_range[0],
                                               self.cfg.domain_rand.ctrl_delay_step_range[1]+1, (self.num_envs,), device=self.device, requires_grad=False)
+        self._init_depth_processing()
             
 
     def step_reward_curriculum(self, num_iters):
@@ -1548,6 +1579,16 @@ class Go2KITEBaseline(BaseTask):
     def _reward_feet_contact_forces(self):
         # penalize high contact forces
         return torch.sum((torch.norm(self.simulator.link_contact_forces[:, self.simulator.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
+
+    def _reward_feet_near_edge(self):
+        feet_near_edge = self.simulator.calc_feet_near_edge()
+        feet_contact = (
+            self.simulator.link_contact_forces[
+                :, self.simulator.feet_indices, 2
+            ]
+            > 10.0
+        )
+        return torch.sum(feet_near_edge & feet_contact, dim=-1).float()
 
     def _reward_feet_air_time(self):
         # Reward long steps

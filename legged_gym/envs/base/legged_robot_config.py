@@ -21,6 +21,7 @@ class LeggedRobotCfg(BaseConfig):
         # heightfield uses a grid of height samples to represent the terrain, creating enormous points
         # trimesh creates terrain mesh directly, reducing the number of triangles compared with heightfield
         mesh_type = 'plane' # plane, heightfield, trimesh
+        simplify_mesh = True
         plane_length = 200.0 # [m]. plane size is 200x200x10 by default
         horizontal_scale = 0.1 # [m] distance between height samples in x and y direction
         vertical_scale = 0.005 # [m] distance between height samples in z direction
@@ -54,6 +55,20 @@ class LeggedRobotCfg(BaseConfig):
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
         terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
+        terrain_curriculum_difficulty = {
+            "slope": "difficulty * 0.4",
+            "step_height": "0.04 + 0.16 * difficulty",
+            "discrete_height": "0.04 + 0.16 * difficulty",
+            "stepping_stones_params": {
+                "stone_length": "1.5 * (1.05 - difficulty)",
+                "stone_width": "1.5 * (1.05 - difficulty)",
+                "stone_distance_x": "0.05 if difficulty == 0 else 0.1",
+                "stone_distance_y": "0.05 if difficulty == 0 else 0.1",
+                "max_height": "0.0",
+            },
+            "gap_size": "difficulty",
+            "pit_depth": "0.3 * difficulty",
+        }
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 

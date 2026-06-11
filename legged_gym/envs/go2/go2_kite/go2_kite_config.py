@@ -1,4 +1,5 @@
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+from legged_gym import SIMULATOR
 
 class GO2KITECfg( LeggedRobotCfg ):
     
@@ -61,7 +62,36 @@ class GO2KITECfg( LeggedRobotCfg ):
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
         # terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
-        terrain_proportions = [0.20, 0.25, 0.10, 0.10, 0.25, 0.10]
+        terrain_proportions = [0.10, 0.05, 0.10, 0.10, 0.15,
+                               0.10, 0.15, 0.05, 0.10, 0.10]
+        simplify_mesh = True
+        terrain_curriculum_difficulty = {
+            "slope": "difficulty * 0.4",
+            "step_height": "0.05 + 0.2 * difficulty",
+            "discrete_height": "0.05 + 0.2 * difficulty",
+            "stepping_stones_params": {
+                "stone_length": "np.random.uniform(1.6, 2.0)",
+                "stone_width": "np.random.uniform(1.0, 2.0)",
+                "stone_distance_x": "0.1 + 0.8 * difficulty",
+                "stone_distance_y": "np.random.uniform(0.3, 0.5)",
+                "max_height": "0",
+            },
+            "gap_size": "0.1 + difficulty * 0.8",
+            "pit_depth": "0.1 + 0.5 * difficulty",
+            "high_platform_params": {
+                "high_platform_height": "0.1 + 0.5 * difficulty",
+                "high_platform_length": "np.random.uniform(0.6, 1.6)",
+                "high_platform_width": "np.random.uniform(1.0, 2.0)",
+                "high_platform_interval": "np.random.uniform(1.0, 2.0)",
+            },
+            "high_platform_gaps_params": {
+                "high_platform_height": "0.1 + 0.5 * difficulty",
+                "high_platform_length": "np.random.uniform(1.6, 2.0)",
+                "high_platform_width": "np.random.uniform(1.0, 2.0)",
+                "high_platform_distance_y": "np.random.uniform(0.2, 2.0)",
+                "gap_size": "0.1 + difficulty * 0.8",
+            },
+        }
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
@@ -113,7 +143,9 @@ class GO2KITECfg( LeggedRobotCfg ):
             'RR_calf_joint': 0.0,   # [nM]
         }
         # initial state randomization
-        yaw_angle_range = [0., 3.14] # min max [rad]
+        roll_random_scale = 0.1
+        pitch_random_scale = 0.1
+        yaw_random_scale = 3.14
 
     class normalization (LeggedRobotCfg.normalization):
         class obs_scales:
@@ -126,66 +158,6 @@ class GO2KITECfg( LeggedRobotCfg ):
             height_measurements = 5.0
         clip_observations = 100.
         clip_actions = 50.
-
-    # class domain_rand(LeggedRobotCfg.domain_rand):
-    #     use_domainrand_curriculum = True
-    #     com_rand_z_positive = False
-    #     num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-    #     push_warmup = 4000     # number of steps with initial values held constant
-    #     # Randomize Friction
-    #     randomize_friction = True
-    #     friction_range = [0.2, 1.8]
-    #     # What changes with finetuning round
-    #     # Randomized 6DOF torso wrench
-    #     push_robots = True
-    #     push_interval_max = 15.0
-    #     push_interval_min = 0.1
-    #     max_push_vel_xy = 1.00
-    #     min_push_vel_xy = 0.50
-    #     max_vertical_push = 0.20
-    #     min_vertical_push = 0.00
-    #     vert_interval_max = 10.0
-    #     vert_interval_min = 0.1
-    #     max_push_torque = 1.50
-    #     min_push_torque = 0.50
-    #     wrench_timeout_min = 0.01
-    #     wrench_timeout_max = 10.0
-    #     # Randomized base mass, applied at COM
-    #     randomize_base_mass = True
-    #     min_added_mass_max = 2.0
-    #     max_added_mass_max = 3.0
-    #     added_mass_min = -1.0
-    #     # COM displacement crap
-    #     randomize_com_displacement = True
-    #     com_displacement_x_min = 0.025
-    #     com_displacement_x_max = 0.075
-    #     com_displacement_y_min = 0.025
-    #     com_displacement_y_max = 0.075
-    #     com_displacement_z_positive = False
-    #     com_displacement_z_min_pos = 0.1
-    #     com_displacement_z_min = 0.025
-    #     com_displacement_z_max = 0.075
-    #     # Control delay
-    #     randomize_ctrl_delay = True
-    #     ctrl_delay_step_range = [0, 2]
-    #     # PD-gain randomization
-    #     randomize_pd_gain = True
-    #     kp_range = [0.8, 1.2]
-    #     kd_range = [0.8, 1.2]
-    #     # Motor strength randomization
-    #     randomize_motor_strength = True
-    #     motor_strength_range = [0.9, 1.1]
-    #     # Unused more complicated dynamics randomization
-    #     randomize_joint_armature = True
-    #     joint_armature_range = [0.00, 0.03]  # [N*m*s/rad]
-    #     randomize_joint_friction = True
-    #     joint_friction_range = [0.00, 0.02]
-    #     randomize_joint_stiffness = False
-    #     joint_stiffness_range_end   = [0.0, 0.01]
-    #     joint_stiffness_range_start = [0.0, 0.005]
-    #     randomize_joint_damping = True
-    #     joint_damping_range_end   = [0.00, 0.50]
-    #     joint_damping_range_start = [0.25, 0.30]
 
     class domain_rand(LeggedRobotCfg.domain_rand):
         use_domainrand_curriculum = True
@@ -253,6 +225,8 @@ class GO2KITECfg( LeggedRobotCfg ):
         
         randomize_joint_friction = True
         joint_friction_range = [0.00, 0.02]
+        joint_friction_range_start = joint_friction_range
+        joint_friction_range_end = joint_friction_range
         
         randomize_joint_stiffness = False
         joint_stiffness_range_end   = [0.0, 0.01]
@@ -261,6 +235,12 @@ class GO2KITECfg( LeggedRobotCfg ):
         randomize_joint_damping = True
         joint_damping_range_end   = [0.00, 0.80]
         joint_damping_range_start = [0.30, 0.40]
+        
+        
+        randomize_camera_pos = True
+        camera_com_displacement_range = [0.01, 0.0025, 0.03]
+        randomize_camera_euler = True
+        camera_euler_offset_range = [0.0577, 0.0173, 0.0577]
 
     class noise (LeggedRobotCfg.noise):
         add_noise = True
@@ -294,27 +274,47 @@ class GO2KITECfg( LeggedRobotCfg ):
         add_camera = False
 
     class sensor:
-        add_depth = False
-        use_warp = False       # whether to use warp-based model
+        add_depth = SIMULATOR == "genesis_kite_depth"
+        use_warp = add_depth
         class depth_camera_config:
             num_sensors = 1
             num_history = 1        # history frames for depth images
-            
-            near_clip = 0.1
-            far_clip = 10.0
-            near_plane = 0.1
-            far_plane = 10.0
-            resolution = (80, 60)
-            horizontal_fov_deg = 75
-            pos =   (0.3, 0.0, 0.1)
+
+            near_clip = 0.0
+            far_clip = 3.0
+            near_plane = 0.05
+            far_plane = 4.0
+            resolution = (120, 160)
+            resized_resolution = (48, 64)
+            crop_top_bottom = (12, 0)
+            crop_left_right = (7, 9)
+            horizontal_fov_deg = 88
+            pos = (0.32, 0.0, 0.07)
             euler = (0.0, 0.0, 0.0)
             decimation = 5
-            
-            # Warp only
+            latency_range = (0.08, 0.142)
+            latency_resampling_time = 5.0
+            refresh_duration = 0.1
+
             calculate_depth = True
             segmentation_camera = False
             return_pointcloud = False
             pointcloud_in_world_frame = False
+            stereo_min_distance = 0.175
+            stereo_far_distance = 1.2
+            stereo_far_noise_std = 0.08
+            stereo_near_noise_std = 0.02
+            stereo_half_block_spark_prob = 0.02
+            sky_artifacts_prob = 0.001
+            sky_artifacts_far_distance = 2.0
+            sky_artifacts_values = (0.6, 1.0, 1.2, 1.5, 1.8)
+
+            # Debug rendering controls.
+            debug_render_depth_image = False
+            debug_camera_env_id = 0
+            debug_draw_camera_position = False
+            debug_camera_marker_radius = 0.03
+            debug_camera_marker_color = (1.0, 0.0, 0.0, 1.0)
 
     class asset( LeggedRobotCfg.asset ):
         name = "go2"
@@ -394,6 +394,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         use_reward_curriculum = False
 
         max_contact_force = 200.0
+        feet_edge_threshold = 0.05
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
@@ -451,6 +452,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             
             foot_slip        = -0.01           # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
+            feet_near_edge = -1.0
             feet_spread_pairwise_axes = 0.0
 
             torso_force_wrench_ellipsoid = 0.2

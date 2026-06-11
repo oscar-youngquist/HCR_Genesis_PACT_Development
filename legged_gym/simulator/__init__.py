@@ -8,3 +8,4 @@ from .genesis_simulator_pact_water import GenesisSimulator_PACT_Water
 from .genesis_simulator_pact_nopinn import GenesisSimulator_PACT_NoPINN
 from .genesis_simulator_pact_postau import GenesisSimulator_PACT_PosTau
 from .genesis_simulator_pact_rl2ac import GenesisSimulator_PACT_RL2AC
+from .genesis_simulator_kite_depth import GenesisSimulator_KITE_Depth

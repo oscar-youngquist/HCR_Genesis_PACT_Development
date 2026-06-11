@@ -13,11 +13,11 @@ class WarpCam:
         self.cfg = config
         self.tensor_dict = tensor_dict
         self.num_envs = num_envs
-        self.num_sensors = self.cfg.num_sensors
+        self.num_sensors = self.cfg.depth_camera_config.num_sensors
         self.mesh_ids_array = mesh_ids_array
 
-        self.width = self.cfg.depth_camera_config.resolution[0]
-        self.height = self.cfg.depth_camera_config.resolution[1]
+        self.height = self.cfg.depth_camera_config.resolution[0]
+        self.width = self.cfg.depth_camera_config.resolution[1]
 
         self.horizontal_fov = math.radians(self.cfg.depth_camera_config.horizontal_fov_deg)
         self.far_plane = self.cfg.depth_camera_config.far_plane
@@ -174,6 +174,7 @@ class WarpCam:
         self.camera_orientation_array = wp.from_torch(
             self.camera_orientation_tensor.view(self.num_envs, 1, 4), dtype=wp.quat)
     
+    @staticmethod
     def tensor_indices_to_slice(idx: torch.Tensor):
         # expects 1-D int tensor
         idx = idx.to(dtype=torch.long)

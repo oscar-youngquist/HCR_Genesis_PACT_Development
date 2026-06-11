@@ -21,10 +21,14 @@ if sys.version_info[1] >= 10: # >=3.10 for genesis and isaacsim
         SIMULATOR = "genesis_pact_postau"
     elif simulator_type == "genesis_pact_rl2ac":
         SIMULATOR = "genesis_pact_rl2ac"
+    elif simulator_type == "genesis_kite_depth":
+        SIMULATOR = "genesis_kite_depth"
     elif simulator_type == "isaaclab":
         SIMULATOR = "isaaclab"
     else:
-        raise ValueError("Unsupported SIMULATOR type. Please set the SIMULATOR environment variable to 'genesis' or 'isaaclab'.")
+        raise ValueError(
+            "Unsupported SIMULATOR type. Expected a configured Genesis or IsaacLab simulator."
+        )
 elif sys.version_info[1] <= 8 and sys.version_info[1] >= 6: # >=3.6 and <3.9 for isaacgym
     SIMULATOR = "isaacgym"
 
