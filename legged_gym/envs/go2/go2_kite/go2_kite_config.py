@@ -67,6 +67,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         # terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.15, 0.05, 0.10, 0.10]
         terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 1.00, 0.00, 0.00, 0.00, 0.00]
         simplify_mesh = True
+        
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.6",
             "step_height": "0.05 + 0.2 * difficulty",
@@ -79,15 +80,15 @@ class GO2KITECfg( LeggedRobotCfg ):
                 "max_height": "0.20",
             },
             "gap_size": "0.1 + difficulty * 0.8",
-            "pit_depth": "0.1 + 0.5 * difficulty",
+            "pit_depth": "0.1 + 0.3 * difficulty",
             "high_platform_params": {
-                "high_platform_height": "0.1 + 0.5 * difficulty",
+                "high_platform_height": "0.1 + 0.3 * difficulty",
                 "high_platform_length": "np.random.uniform(0.6, 1.6)",
                 "high_platform_width": "np.random.uniform(1.0, 2.0)",
                 "high_platform_interval": "np.random.uniform(1.0, 2.0)",
             },
             "high_platform_gaps_params": {
-                "high_platform_height": "0.1 + 0.5 * difficulty",
+                "high_platform_height": "0.1 + 0.3 * difficulty",
                 "high_platform_length": "np.random.uniform(1.6, 2.0)",
                 "high_platform_width": "np.random.uniform(1.0, 2.0)",
                 "high_platform_distance_y": "np.random.uniform(0.2, 2.0)",

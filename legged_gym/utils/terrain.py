@@ -129,7 +129,7 @@ class Terrain:
         slope = eval(self.terrain_curriculum_difficulty["slope"])
         step_height = eval(self.terrain_curriculum_difficulty["step_height"])
         discrete_obstacles_height = eval(self.terrain_curriculum_difficulty["discrete_height"])
-        rough_height = 0.02 + 0.08*difficulty
+        rough_height = 0.02 + 0.10*difficulty
         stepping_stones_params = self.terrain_curriculum_difficulty["stepping_stones_params"]
         gap_size = eval(self.terrain_curriculum_difficulty["gap_size"])
         pit_depth = eval(self.terrain_curriculum_difficulty["pit_depth"])
@@ -180,7 +180,7 @@ class Terrain:
                                                   stone_distance_x=eval(stepping_stones_params["stone_distance_x"]),
                                                   stone_distance_y=eval(stepping_stones_params["stone_distance_y"]),
                                                   max_height=eval(stepping_stones_params["max_height"]),
-                                                  platform_size=0.0,
+                                                  platform_size=self.platform_size,
                                                   terrain_type=self.type,
                                                   simplify_mesh=self.simplify_mesh)
         elif choice < self.proportions[6]: # gap
