@@ -37,7 +37,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         static_friction = 1.0 # coefficient of static friction of the terrain
         dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
         restitution = 0. # coefficient of restitution of the terrain
-        border_size = 20.0 # [m]
+        border_size = 5.0 # [m]
         curriculum = True
         # obtain terrain height information around feet (default: 9 points around feet), measure_
         # x  x   x
@@ -56,23 +56,24 @@ class GO2KITECfg( LeggedRobotCfg ):
         
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
-        platform_size = 2.0 # [m] size of the flat platform at the center of each subterrain
+        platform_size = 3.0 # [m] size of the flat platform at the center of each subterrain
         num_rows = 10  # number of terrain rows (levels), X direction
-        num_cols = 20  # number of terrain cols (types), Y direction
+        num_cols = 5  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
         # terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
         
         # slope, random-rough, stairs-down, stairs-up, discrete, stepping-stone, gap (jump), pit (climb-up), high-platform (climb), platform+gap (climb and jump) 
-        terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.15, 0.05, 0.10, 0.10]
+        # terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.15, 0.05, 0.10, 0.10]
+        terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 1.00, 0.00, 0.00, 0.00, 0.00]
         simplify_mesh = True
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.6",
             "step_height": "0.05 + 0.2 * difficulty",
             "discrete_height": "0.05 + 0.2 * difficulty",
             "stepping_stones_params": {
-                "stone_length": "np.random.uniform(0.3, 0.6)",
-                "stone_width": "np.random.uniform(0.3, 0.6)",
+                "stone_length": "np.random.uniform(0.4, 1.2)",
+                "stone_width": "np.random.uniform(0.4, 1.2)",
                 "stone_distance_x": "0.1 + 0.7 * difficulty",
                 "stone_distance_y": "np.random.uniform(0.2, 0.8)",
                 "max_height": "0.20",
@@ -392,6 +393,14 @@ class GO2KITECfg( LeggedRobotCfg ):
         pitch_threshold   = 1.0  # [rad] ~ 40 degrees
         height_min = 0.20       # [m]
         height_max = 1.50       # [m]
+
+        # Reset after a foot or the base falls into terrain marked as a deep void.
+        reset_unrecoverable_gaps = True
+        gap_terrain_depth_threshold = 1.0  # void height below the environment origin [m]
+        gap_foot_drop_threshold = 0.25     # foot height below the environment origin [m]
+        gap_base_drop_threshold = 0.30     # base height below the environment origin [m]
+        gap_min_fallen_feet = 1
+        gap_reset_steps = 4
 
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90

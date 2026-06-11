@@ -269,12 +269,57 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             if "height_max" in self.cfg.termination.termination_terms:
                 height_term_buff = base_height > self.cfg.termination.height_max
                 self.fail_buf |= height_term_buff
+
+        self.gap_reset_buf = self._check_unrecoverable_gap()
         
         self.fail_buf += fail_buf
         self.time_out_buf = self.episode_length_buf > self.max_episode_length  # no terminal reward for time-outs
         self.reset_buf = (
             (self.fail_buf > self.cfg.env.fail_to_terminal_time_s / self.dt)
             | self.time_out_buf
+            | self.gap_reset_buf
+        )
+
+    def _check_unrecoverable_gap(self):
+        if (
+            not getattr(self.cfg.termination, "reset_unrecoverable_gaps", False)
+            or self.cfg.terrain.mesh_type not in ("heightfield", "trimesh")
+            or not self.cfg.terrain.obtain_terrain_info_around_feet
+        ):
+            self.gap_fall_counter.zero_()
+            return torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device
+            )
+
+        support_height = self.simulator.env_origins[:, 2].unsqueeze(1)
+        terrain_under_feet = self.simulator.height_around_feet[:, :, 4]
+        deep_void = terrain_under_feet < (
+            support_height
+            - self.cfg.termination.gap_terrain_depth_threshold
+        )
+        fallen_feet = deep_void & (
+            self.simulator.feet_pos[:, :, 2]
+            < support_height - self.cfg.termination.gap_foot_drop_threshold
+        )
+        enough_fallen_feet = (
+            fallen_feet.sum(dim=1)
+            >= self.cfg.termination.gap_min_fallen_feet
+        )
+        base_fallen = deep_void.any(dim=1) & (
+            self.simulator.base_pos[:, 2]
+            < self.simulator.env_origins[:, 2]
+            - self.cfg.termination.gap_base_drop_threshold
+        )
+        falling_into_gap = enough_fallen_feet | base_fallen
+
+        self.gap_fall_counter = torch.where(
+            falling_into_gap,
+            self.gap_fall_counter + 1,
+            torch.zeros_like(self.gap_fall_counter),
+        )
+        return (
+            self.gap_fall_counter
+            >= self.cfg.termination.gap_reset_steps
         )
 
     def reset_idx(self, env_ids):
@@ -317,6 +362,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
         self.fail_buf[env_ids] = 0
+        self.gap_fall_counter[env_ids] = 0
 
         # clear obs history for the envs that are reset
         self.last_obs_buf[env_ids] = 0.
@@ -343,6 +389,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
             self.extras["episode"]["max_command_y"] = self.command_ranges["lin_vel_y"][1]
             self.extras["episode"]["max_command_yaw"] = self.command_ranges["ang_vel_yaw"][1]
+        self.extras["episode"]["gap_reset"] = self.gap_reset_buf[env_ids].float().mean()
         if self.cfg.domain_rand.use_domainrand_curriculum:
             phase_to_idx = {
                 "joint_dynamics": 0.0,
@@ -724,6 +771,12 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         
         self.forward_vec[:, 0] = 1.0
         self.fail_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device, requires_grad=False)
+        self.gap_fall_counter = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.gap_reset_buf = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
         
         self.commands = torch.zeros(
             (self.num_envs, self.cfg.commands.num_commands), device=self.device, dtype=torch.float)

@@ -180,7 +180,7 @@ class Terrain:
                                                   stone_distance_x=eval(stepping_stones_params["stone_distance_x"]),
                                                   stone_distance_y=eval(stepping_stones_params["stone_distance_y"]),
                                                   max_height=eval(stepping_stones_params["max_height"]),
-                                                  platform_size=self.platform_size,
+                                                  platform_size=0.0,
                                                   terrain_type=self.type,
                                                   simplify_mesh=self.simplify_mesh)
         elif choice < self.proportions[6]: # gap

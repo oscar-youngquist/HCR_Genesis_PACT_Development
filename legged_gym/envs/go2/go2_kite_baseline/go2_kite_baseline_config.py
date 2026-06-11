@@ -450,6 +450,14 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         height_min = 0.20       # [m]
         height_max = 1.50       # [m]
 
+        # Reset after a foot or the base falls into terrain marked as a deep void.
+        reset_unrecoverable_gaps = True
+        gap_terrain_depth_threshold = 1.0  # void height below the environment origin [m]
+        gap_foot_drop_threshold = 0.18     # foot height below the environment origin [m]
+        gap_base_drop_threshold = 0.25     # base height below the environment origin [m]
+        gap_min_fallen_feet = 1
+        gap_reset_steps = 2
+
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
         soft_torque_limit = 0.90
