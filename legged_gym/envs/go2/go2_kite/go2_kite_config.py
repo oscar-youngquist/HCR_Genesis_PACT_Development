@@ -56,7 +56,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
-        platform_size = 4.0 # [m] size of the flat platform at the center of each subterrain
+        platform_size = 2.0 # [m] size of the flat platform at the center of each subterrain
         num_rows = 10  # number of terrain rows (levels), X direction
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
@@ -71,9 +71,9 @@ class GO2KITECfg( LeggedRobotCfg ):
             "step_height": "0.05 + 0.2 * difficulty",
             "discrete_height": "0.05 + 0.2 * difficulty",
             "stepping_stones_params": {
-                "stone_length": "np.random.uniform(0.2, 1.0)",
-                "stone_width": "np.random.uniform(0.2, 1.0)",
-                "stone_distance_x": "0.1 + 0.8 * difficulty",
+                "stone_length": "np.random.uniform(0.3, 0.6)",
+                "stone_width": "np.random.uniform(0.3, 0.6)",
+                "stone_distance_x": "0.1 + 0.7 * difficulty",
                 "stone_distance_y": "np.random.uniform(0.2, 0.8)",
                 "max_height": "0.20",
             },
@@ -403,6 +403,8 @@ class GO2KITECfg( LeggedRobotCfg ):
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.36
+        rear_foot_x_nominal = -0.20
+        rear_foot_x_margin = 0.16
         support_polygon_sigma = 0.01
 
         foot_clearance_tracking_sigma = 0.01
@@ -415,7 +417,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
-            collision             = -1.0
+            collision             = -10.0
             dof_pos_limits        = -2.0
             dof_close_to_default  = -0.01
             torque_limits         = -0.0001
@@ -458,14 +460,24 @@ class GO2KITECfg( LeggedRobotCfg ):
             feedback_torques      = 0.0
             dof_act_limits        = 0.0
 
-            support_polygon = 0.1             # encourages well condition foot-placement realtive to the base CoM
-            front_foot_overreach = 0.0
+            # Potential-based recovery rewards
+            pbrs_orientation = 10.0
+            pbrs_height = 10.0
+
+            # Stability rewards
+            support_polygon = 0.2
+            vhip_angle = -0.1
+            vhip_angular_acc = -0.001
+
+            # Foot-placement limits
+            front_foot_overreach = -10000.0
+            rear_foot_overreach = -10.0
 
             # gait
-            feet_air_time    = 1.00            # tracking reward for long steps
+            feet_air_time    = 0.70            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
-            hip_pos = -0.05
+            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height
+            hip_pos = -0.20
             
             foot_slip        = -0.01           # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet

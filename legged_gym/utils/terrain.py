@@ -175,6 +175,7 @@ class Terrain:
         elif choice < self.proportions[5]: # stepping stones
             terrain_utils.stepping_stones_terrain(terrain,
                                                   stone_length=eval(stepping_stones_params["stone_length"]),
+                                                #   stone_length=eval(stepping_stones_params["stone_width"]),
                                                   stone_width=eval(stepping_stones_params["stone_width"]),
                                                   stone_distance_x=eval(stepping_stones_params["stone_distance_x"]),
                                                   stone_distance_y=eval(stepping_stones_params["stone_distance_y"]),

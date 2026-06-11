@@ -460,6 +460,8 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.36
+        rear_foot_x_nominal = -0.20
+        rear_foot_x_margin = 0.08
         support_polygon_sigma = 0.01
 
         foot_clearance_tracking_sigma = 0.01
@@ -515,8 +517,18 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
             feedback_torques      = 0.0
             dof_act_limits        = 0.0
 
-            support_polygon = 0.1             # encourages well condition foot-placement realtive to the base CoM
-            front_foot_overreach = 0.0
+            # Potential-based recovery rewards
+            pbrs_orientation = 10.0
+            pbrs_height = 10.0
+
+            # Stability rewards
+            support_polygon = 0.2
+            vhip_angle = -0.1
+            vhip_angular_acc = -0.001
+
+            # Foot-placement limits
+            front_foot_overreach = -10000.0
+            rear_foot_overreach = -10.0
 
             # gait
             feet_air_time    = 1.00            # tracking reward for long steps
