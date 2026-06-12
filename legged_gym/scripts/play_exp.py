@@ -32,18 +32,18 @@ def override_configs(env_cfg, args):
         env_cfg.terrain.selected   = True
         
         # random uniform terrain
-        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-                                          "min_height" : -0.10, "max_height": 0.10, 
-                                          "step":0.005, "downsampled_scale" : 0.2}
+        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
+                                        #   "min_height" : -0.10, "max_height": 0.10, 
+                                        #   "step":0.005, "downsampled_scale" : 0.2}
         # # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
         #                                   "slope": -0.4, "platform_size": 3.0}
         # # stairs
-        # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
-        #                                 "step_width": 0.40, "step_height": -0.10, "platform_size": 3.0}
+        env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_stairs_terrain",
+                                        "step_width": 0.40, "step_height": -0.15, "platform_size": 1.0}
         # # discrete obstacles
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.discrete_obstacles_terrain",
-        #                                   "max_height": 0.1,
+        #                                   "max_height": 0.2,
         #                                   "min_size": 1.0,
         #                                   "max_size": 2.0,
         #                                   "num_rects": 20,
@@ -69,14 +69,14 @@ def override_configs(env_cfg, args):
     if args.use_joystick:
         env_cfg.commands.heading_command = False
     
-    # env_cfg.commands.ranges.lin_vel_x = [-1.0, 1.0]
-    # env_cfg.commands.ranges.lin_vel_y = [-1.0, 1.0]
-    # env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
+    env_cfg.commands.ranges.lin_vel_x = [-1.0, 1.0]
+    env_cfg.commands.ranges.lin_vel_y = [-1.0, 1.0]
+    env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
     env_cfg.commands.resampling_time = 5.0
 
-    env_cfg.commands.ranges.lin_vel_x   = [-2.0, 2.0]
-    env_cfg.commands.ranges.lin_vel_y   = [0.5, 0.5]
-    env_cfg.commands.ranges.ang_vel_yaw = [-3.0, 3.0]
+    # env_cfg.commands.ranges.lin_vel_x   = [-2.0, 2.0]
+    # env_cfg.commands.ranges.lin_vel_y   = [0.5, 0.5]
+    # env_cfg.commands.ranges.ang_vel_yaw = [-3.0, 3.0]
 
     env_cfg.commands.ranges.heading = [-3.14, 3.14]
 
@@ -93,16 +93,16 @@ def override_configs(env_cfg, args):
     env_cfg.env.lateral_push_only = True
 
     # Just sample a value right in the middle of the training ranges
-    env_cfg.domain_rand.joint_friction_range_end    = [0.35, 0.35]
-    env_cfg.domain_rand.joint_friction_range_start  = [0.35, 0.35]
+    env_cfg.domain_rand.joint_friction_range_end    = [0.1, 0.1]
+    env_cfg.domain_rand.joint_friction_range_start  = [0.1, 0.1]
 
     env_cfg.domain_rand.joint_armature_range        = [0.0075, 0.0075]
     
-    env_cfg.domain_rand.joint_stiffness_range_start = [0.0075, 0.0075]
-    env_cfg.domain_rand.joint_stiffness_range_end   = [0.0075, 0.0075]
+    env_cfg.domain_rand.joint_stiffness_range_start = [0.01, 0.01]
+    env_cfg.domain_rand.joint_stiffness_range_end   = [0.01, 0.01]
     
-    env_cfg.domain_rand.joint_damping_range_start   = [0.60, 0.60]
-    env_cfg.domain_rand.joint_damping_range_end     = [0.60, 0.60]
+    env_cfg.domain_rand.joint_damping_range_start   = [0.40, 0.40]
+    env_cfg.domain_rand.joint_damping_range_end     = [0.40, 0.40]
 
     # Turn off/on domain randomization elements
     env_cfg.noise.add_noise = True
@@ -231,10 +231,10 @@ def interaction_loop(train_cfg, env, policy, args):
             env.commands[:, 1] = -joystick.lx
             env.commands[:, 2] = -joystick.rx
 
-        env.commands[:, 0] = 1.00
-        env.commands[:, 1] = 0.0
-        # env.commands[:, 2] = 0.0
-        env.commands[:, 3] = 0
+        # env.commands[:, 0] = 1.00
+        # env.commands[:, 1] = 0.0
+        # # env.commands[:, 2] = 0.0
+        # env.commands[:, 3] = 0
         
         # set the viewer camera to follow the first environment by default
         # TODO - fix recording/general camera follow conflict
