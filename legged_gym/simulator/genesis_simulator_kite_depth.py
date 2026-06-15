@@ -96,7 +96,46 @@ class GenesisSimulator_KITE_Depth(GenesisSimulator_KITE):
         if self.depth_images.shape[1] > 1:
             self.depth_images[:, 1:] = self.depth_images[:, :-1].clone()
         self.depth_images[:, 0] = pixels[:, 0]
+        self._print_selected_depth_stats()
         self._show_selected_depth_image()
+
+    def _print_selected_depth_stats(self):
+        cfg = self._cfg.sensor.depth_camera_config
+        if not getattr(cfg, "debug_print_depth_stats", False):
+            return
+
+        interval = max(
+            1, int(getattr(cfg, "debug_depth_stats_interval", 25))
+        )
+        update_count = getattr(self, "_depth_debug_update_count", 0)
+        self._depth_debug_update_count = update_count + 1
+        if update_count % interval != 0:
+            return
+
+        env_id = int(cfg.debug_camera_env_id)
+        if not 0 <= env_id < self._num_envs:
+            return
+
+        depth = self.depth_images[env_id, 0]
+        valid = torch.isfinite(depth) & (depth <= cfg.far_plane)
+        valid_count = int(valid.sum().item())
+        total_count = depth.numel()
+        if valid_count:
+            valid_depth = depth[valid]
+            minimum = valid_depth.min().item()
+            median = valid_depth.median().item()
+            maximum = valid_depth.max().item()
+            depth_range = (
+                f"min/median/max={minimum:.3f}/{median:.3f}/{maximum:.3f} m"
+            )
+        else:
+            depth_range = "min/median/max=no valid hits"
+
+        print(
+            f"KITE depth env {env_id}: {depth_range}, "
+            f"valid_hits={100.0 * valid_count / total_count:.1f}%",
+            flush=True,
+        )
 
     def draw_debug_vis(self, ref_key_body_pos=None):
         super().draw_debug_vis()

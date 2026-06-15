@@ -15,7 +15,7 @@ The settings documented here are shared by:
 | `resolution` | Raw render resolution as `(height, width)`, currently `120 x 160`. | Allocates raw tensors and determines the number of Warp rays. |
 | `horizontal_fov_deg` | Horizontal camera field of view in degrees. | Used to construct the `K` and `K_inv` camera matrices in `WarpCam.initialize_camera_matrices()`. |
 | `pos` | Camera XYZ offset in the robot base frame. | Transformed into world coordinates by `GenesisSimulator_KITE_Depth._refresh_camera_pose()`. |
-| `euler` | Camera roll, pitch, and yaw offset relative to the robot base. | Converted into a quaternion in `_create_warp_tensors()`. |
+| `euler` | Camera roll, pitch, and yaw offset relative to the robot base. KITe uses a nominal pitch of `+pi/2` because Warp rays point along camera-local `+Z`, while robot-forward is base-frame `+X`. | Converted into a quaternion in `_create_warp_tensors()`. |
 | `far_plane` | Maximum Warp ray-casting distance. | Passed to `wp.mesh_query_ray()` in `warp_camera_kernels.py`. |
 | `near_plane` | Intended physical minimum camera range. | Not currently used by the KITE Warp renderer. |
 | `calculate_depth` | Selects axial camera depth instead of raw distance along each pixel ray. | Controls distance projection inside the Warp depth kernel. |
@@ -157,6 +157,8 @@ considered unsupported.
 | `debug_draw_camera_position` | Enables the camera-position sphere. | Checked by the environment and `draw_debug_vis()`. |
 | `debug_camera_marker_radius` | Marker sphere radius in meters. | Passed to Genesis `draw_debug_spheres()`. |
 | `debug_camera_marker_color` | Marker RGBA color. | Passed to Genesis `draw_debug_spheres()`. |
+| `debug_print_depth_stats` | Periodically prints raw valid-hit depth statistics for the selected environment. | Used by `_print_selected_depth_stats()`. |
+| `debug_depth_stats_interval` | Number of rendered depth updates between diagnostic prints. | Controls `_print_selected_depth_stats()` frequency. |
 
 ## Main Downstream Files
 

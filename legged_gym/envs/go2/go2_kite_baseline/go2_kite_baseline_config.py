@@ -374,7 +374,9 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
             crop_left_right = (7, 9)
             horizontal_fov_deg = 88
             pos = (0.32, 0.0, 0.07)
-            euler = (0.0, 0.0, 0.0)
+            # Warp camera rays point along local +Z; pitch +pi/2 maps +Z to
+            # the robot's forward +X axis.
+            euler = (0.0, 1.5707963267948966, 0.0)
             decimation = 5
             latency_range = (0.08, 0.142)
             latency_resampling_time = 5.0
@@ -399,6 +401,8 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
             debug_draw_camera_position = False
             debug_camera_marker_radius = 0.03
             debug_camera_marker_color = (1.0, 0.0, 0.0, 1.0)
+            debug_print_depth_stats = False
+            debug_depth_stats_interval = 25
 
     class asset( LeggedRobotCfg.asset ):
         name = "go2"

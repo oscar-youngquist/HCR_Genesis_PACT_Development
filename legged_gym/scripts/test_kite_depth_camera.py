@@ -93,6 +93,8 @@ def configure_test_environment(env_cfg, visual_args):
     camera_cfg.debug_camera_env_id = DEBUG_ROBOT_ID
     camera_cfg.debug_render_depth_image = True
     camera_cfg.debug_draw_camera_position = True
+    camera_cfg.debug_print_depth_stats = True
+    camera_cfg.debug_depth_stats_interval = 5
 
     # Keep the base orientation fixed so mounting variation is easy to inspect.
     env_cfg.init_state.roll_random_scale = 0.0
