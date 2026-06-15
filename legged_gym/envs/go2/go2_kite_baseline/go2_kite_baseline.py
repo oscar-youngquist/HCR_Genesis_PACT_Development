@@ -170,7 +170,10 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             self.debug
             or (
                 not self.headless
-                and self.cfg.sensor.depth_camera_config.debug_draw_camera_position
+                and (
+                    self.cfg.sensor.depth_camera_config.debug_draw_camera_position
+                    or self.cfg.terrain.debug_draw_measured_surface_normals
+                )
             )
         ):
             self.simulator.draw_debug_vis()

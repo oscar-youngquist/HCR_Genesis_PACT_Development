@@ -170,7 +170,10 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             self.debug
             or (
                 not self.headless
-                and self.cfg.sensor.depth_camera_config.debug_draw_camera_position
+                and (
+                    self.cfg.sensor.depth_camera_config.debug_draw_camera_position
+                    or self.cfg.terrain.debug_draw_measured_surface_normals
+                )
             )
         ):
             self.simulator.draw_debug_vis()
@@ -486,7 +489,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
                                       * self.obs_scales.dof_pos,                              # joint pose            12
                                     self.simulator.dof_vel * self.obs_scales.dof_vel,         # joint velocity        12
                                     self.actions[:,0:12],                                     # joint pose actions    12
-                                    self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)),    # joint torque actions  12
+                                    # self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)),    # joint torque actions  12
                                     ), dim=-1)                                                # 57
 
         # add noise if needed
@@ -872,8 +875,8 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         
         # previous joint position actions
         noise_vec[33:45] = 0.
-        # previous joint torque actions
-        noise_vec[45:57] = 0.
+        # # previous joint torque actions
+        # noise_vec[45:57] = 0.
 
         if self.cfg.terrain.measure_heights:
             self.height_noise_vec[:] = noise_scales.height_measurements * noise_level * self.obs_scales.height_measurements

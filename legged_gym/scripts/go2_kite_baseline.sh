@@ -4,6 +4,6 @@
 
 conda activate /home/oyoungquist/.conda/envs/genesis_lr
 
-export SIMULATOR=genesis_pact_pos
+export SIMULATOR=genesis_kite
 
 python train.py --task=go2_kite_baseline --headless --seed=1

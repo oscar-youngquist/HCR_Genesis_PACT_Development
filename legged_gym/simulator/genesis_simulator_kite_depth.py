@@ -4,7 +4,7 @@ import torch
 import trimesh
 import warp as wp
 
-from legged_gym.simulator.genesis_simulator_pact_pos import GenesisSimulator_PACT_Pos
+from legged_gym.simulator.genesis_simulator_kite import GenesisSimulator_KITE
 from legged_gym.utils.math_utils import (
     quat_apply,
     quat_from_euler_xyz,
@@ -13,8 +13,8 @@ from legged_gym.utils.math_utils import (
 from legged_gym.warp.warp_cam import WarpCam
 
 
-class GenesisSimulator_KITE_Depth(GenesisSimulator_PACT_Pos):
-    """PACT position-control simulator with Warp-based terrain depth cameras."""
+class GenesisSimulator_KITE_Depth(GenesisSimulator_KITE):
+    """KITE position-control simulator with Warp-based terrain depth cameras."""
 
     def __init__(self, cfg, sim_params: dict, device, headless):
         super().__init__(cfg, sim_params, device, headless)
@@ -103,11 +103,17 @@ class GenesisSimulator_KITE_Depth(GenesisSimulator_PACT_Pos):
         cfg = self._cfg.sensor.depth_camera_config
         env_id = int(cfg.debug_camera_env_id)
         if cfg.debug_draw_camera_position and 0 <= env_id < self._num_envs:
-            self._scene.draw_debug_spheres(
+            new_marker = self._scene.draw_debug_spheres(
                 self._sensor_pos_tensor[env_id : env_id + 1],
                 radius=cfg.debug_camera_marker_radius,
                 color=tuple(cfg.debug_camera_marker_color),
             )
+            previous_marker = getattr(
+                self, "_camera_position_debug_object", None
+            )
+            if previous_marker is not None:
+                self._scene.clear_debug_object(previous_marker)
+            self._camera_position_debug_object = new_marker
 
     def calc_feet_near_edge(self):
         if self._cfg.terrain.mesh_type == "plane":
