@@ -36,7 +36,7 @@ from .actor_critic_cts import ActorCriticCTS
 from .actor_critic_dreamwaq import ActorCriticDreamWaQ
 from .actor_critic_pact import ContextDecoder, ActorCritic_PACT
 from .actor_critic_pact_pos import ActorCritic_PACT_Pos
-from .actor_critic_kite import ActorCritic_KITE, ContextDecoderKITE
+from .actor_critic_kite_old import ActorCritic_KITE, ContextDecoderKITE
 from .actor_critic_pact_pos import ActorCritic_PACT_Pos
 from .actor_critic_postau import ActorCritic_PosTau
 from .actor_critic_rl2ac import ActorCritic_RL2AC

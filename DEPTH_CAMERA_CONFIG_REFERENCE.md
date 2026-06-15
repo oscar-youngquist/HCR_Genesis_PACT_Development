@@ -63,6 +63,77 @@ The settings documented here are shared by:
 These mounting randomizations are sampled once during simulator construction,
 not on every episode reset.
 
+## Training Pipeline Flow
+
+```mermaid
+flowchart TD
+    A[Load KITe environment config] --> B{sensor.add_depth enabled?}
+    B -- No --> Z[Run training without depth allocation or updates]
+    B -- Yes --> C[Create Genesis simulator and Warp terrain mesh]
+    C --> D[Allocate camera tensors using sensor count, raw resolution, and output mode]
+    D --> E[Build camera intrinsics from resolution and horizontal FOV]
+    E --> F[Apply nominal camera pose and one-time mounting randomization]
+    F --> G[Create WarpCam and render an initial frame]
+
+    G --> H[Begin environment control step]
+    H --> I[Advance physics and refresh camera world pose from robot base pose]
+    I --> J[Handle termination and reset depth buffers for reset environments]
+    J --> K[Call simulator.update_depth_images]
+    K --> L{Render decimation reached?}
+    L -- Yes --> M[Warp ray-cast terrain using camera geometry and far plane]
+    M --> N[Store raw frame in simulator depth-image history]
+    L -- No --> O[Retain most recent raw frame]
+    N --> P[Process newest raw frame]
+    O --> P
+
+    P --> Q[Add stereo noise and sky artifacts]
+    Q --> R[Clip to near and far processing limits]
+    R --> S[Normalize depth to 0..1]
+    S --> T[Crop and resize to processed resolution]
+    T --> U[Append frame to latency buffer]
+    U --> V{Delivered-frame refresh due?}
+    V -- Yes --> W[Convert sampled latency to delayed-frame index]
+    V -- No --> X[Advance existing delayed-frame index]
+    W --> Y[Select delayed processed frame]
+    X --> Y
+    Y --> AA[Shift depth history and write newest delivered frame]
+    AA --> AB[Expose depth_sensor_output through get_depth_observations]
+    AB --> AC[Current boundary: depth is not passed to KITERunner actor or critic]
+    AC --> H
+```
+
+The timing controls operate at different points:
+
+- `decimation` controls how often Warp produces a new raw image.
+- `refresh_duration` controls how often a new delayed frame is selected for
+  delivery.
+- `latency_range` controls how old that selected frame is.
+- `num_history` controls how many delivered frames are retained in
+  `depth_sensor_output`.
+- `latency_resampling_time` controls how often each environment receives a new
+  latency value.
+
+During an environment reset, the raw simulator depth history, processed latency
+buffer, delivered depth history, and delayed-frame counter are cleared for the
+reset environments. A new latency is also sampled from `latency_range`.
+
+### Current Policy-Input Boundary
+
+`KITEDepthMixin.get_depth_observations()` exposes the processed tensor with
+shape:
+
+```text
+[num_envs, num_history, resized_height, resized_width]
+```
+
+However, the current `Go2KITE.get_observations()` and
+`Go2KITEBaseline.get_observations()` methods return proprioceptive,
+privileged, history, and explicit-label tensors only. `KITERunner` therefore
+does not currently pass `depth_sensor_output` to the actor, critic, rollout
+storage, or PPO update. The depth configuration controls rendering and sensor
+simulation during training, but an additional runner and policy integration is
+required for depth to affect learned actions.
+
 ## Output Modes
 
 | Config item | Purpose | Downstream use |
