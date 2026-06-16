@@ -165,7 +165,7 @@ class ActorCritic_KITE(nn.Module):
                  num_critic_obs=131,
                  num_actions=12,
                  actor_layers=[512,256,128],
-                 critic_layers=[1024,256,128,64],
+                 critic_layers=[128,256,128,64],
                  cenet_in_dim=450,
                  cenet_latent_dim=29,
                  cenet_velo_dim=3, 
