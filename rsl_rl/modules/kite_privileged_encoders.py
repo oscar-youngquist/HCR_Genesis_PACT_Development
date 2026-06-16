@@ -648,7 +648,7 @@ class PrivDynamicsDecoder(nn.Module):
     def __init__(
             self,
             input_dim: int = 16,
-            layers: List[int] = [64,128],
+            layers: List[int] = [32,128,256,512],
             decode_dim: int = 57) -> None:
         super().__init__()
 
