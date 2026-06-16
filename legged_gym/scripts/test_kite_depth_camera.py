@@ -42,6 +42,12 @@ def parse_visualization_args():
         default=5,
         help="control steps between normal-overlay refreshes",
     )
+    parser.add_argument(
+        "--viz-height-offset",
+        type=float,
+        default=0.02,
+        help="vertical offset for height markers and surface frames in meters",
+    )
     visual_args, remaining = parser.parse_known_args()
     sys.argv = [sys.argv[0], *remaining]
     return visual_args
@@ -54,6 +60,8 @@ def configure_test_environment(env_cfg, visual_args):
         raise ValueError("--normal-length must be positive.")
     if visual_args.normal_refresh_steps <= 0:
         raise ValueError("--normal-refresh-steps must be positive.")
+    if visual_args.viz_height_offset < 0.0:
+        raise ValueError("--viz-height-offset must be non-negative.")
 
     env_cfg.env.num_envs = NUM_ROBOTS
     env_cfg.viewer.rendered_envs_idx = [DEBUG_ROBOT_ID]
@@ -88,11 +96,15 @@ def configure_test_environment(env_cfg, visual_args):
     env_cfg.terrain.debug_surface_normal_refresh_steps = (
         visual_args.normal_refresh_steps
     )
+    env_cfg.terrain.debug_height_visualization_offset = (
+        visual_args.viz_height_offset
+    )
 
     camera_cfg = env_cfg.sensor.depth_camera_config
     camera_cfg.debug_camera_env_id = DEBUG_ROBOT_ID
     camera_cfg.debug_render_depth_image = True
     camera_cfg.debug_draw_camera_position = True
+    camera_cfg.debug_draw_camera_direction = True
     camera_cfg.debug_print_depth_stats = True
     camera_cfg.debug_depth_stats_interval = 5
 
@@ -152,9 +164,9 @@ def main():
     )
     print(
         "Running the one-robot KITE depth-camera test until Ctrl+C. "
-        "The viewer shows the camera-position marker and the OpenCV window "
-        "shows the live depth image. Green dots mark measured terrain heights "
-        "and yellow arrows show their world-frame surface normals. "
+        "The viewer shows the camera-position marker and its red view arrow; "
+        "the OpenCV window shows the live depth image. Green dots mark measured "
+        "terrain heights and yellow arrows show their world-frame surface normals. "
         f"Terrain mode: {visual_args.terrain}. The robot and camera mount are "
         f"resampled every {RESPAWN_INTERVAL_SECONDS:.1f} seconds. "
         "Press Ctrl+C to exit."

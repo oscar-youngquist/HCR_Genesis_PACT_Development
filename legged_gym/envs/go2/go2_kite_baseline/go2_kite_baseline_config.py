@@ -51,6 +51,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         debug_height_map_env_id = 0
         debug_height_point_radius = 0.015
         debug_height_point_color = (0.0, 1.0, 0.0, 1.0)
+        debug_height_visualization_offset = 0.02
         debug_surface_normal_length = 0.12
         debug_surface_normal_radius = 0.003
         debug_surface_normal_color = (1.0, 0.8, 0.0, 1.0)
@@ -324,7 +325,9 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         randomize_camera_pos = True
         camera_com_displacement_range = [0.01, 0.0025, 0.03]
         randomize_camera_euler = True
-        camera_euler_offset_range = [0.0577, 0.0173, 0.0577]
+        # Roll/yaw vary by about 3.3 degrees; pitch varies the nominal
+        # 15-degree downward view angle by +/-5 degrees.
+        camera_euler_offset_range = [0.0577, 0.08726646259971647, 0.0577]
 
     class noise (LeggedRobotCfg.noise):
         add_noise = True
@@ -374,9 +377,9 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
             crop_left_right = (7, 9)
             horizontal_fov_deg = 88
             pos = (0.32, 0.0, 0.07)
-            # Warp camera rays point along local +Z; pitch +pi/2 maps +Z to
-            # the robot's forward +X axis.
-            euler = (0.0, 1.5707963267948966, 0.0)
+            # Warp camera rays point along local +Z. A +105 degree pitch maps
+            # that axis 15 degrees downward from the robot's forward +X axis.
+            euler = (0.0, 1.8325957145940461, 0.0)
             decimation = 5
             latency_range = (0.08, 0.142)
             latency_resampling_time = 5.0
@@ -401,6 +404,10 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
             debug_draw_camera_position = False
             debug_camera_marker_radius = 0.03
             debug_camera_marker_color = (1.0, 0.0, 0.0, 1.0)
+            debug_draw_camera_direction = False
+            debug_camera_direction_length = 0.15
+            debug_camera_direction_radius = 0.002
+            debug_camera_direction_color = (1.0, 0.0, 0.0, 1.0)
             debug_print_depth_stats = False
             debug_depth_stats_interval = 25
 

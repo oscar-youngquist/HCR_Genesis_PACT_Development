@@ -448,6 +448,13 @@ class GenesisSimulator_KITE(Simulator):
         )[0]
         sample_points += self._base_pos[env_id]
         sample_points[:, 2] = self._measured_heights[env_id]
+        sample_points[:, 2] += float(
+            getattr(
+                self._cfg.terrain,
+                "debug_height_visualization_offset",
+                0.02,
+            )
+        )
 
         point_radius = float(
             getattr(self._cfg.terrain, "debug_height_point_radius", 0.015)
@@ -479,6 +486,7 @@ class GenesisSimulator_KITE(Simulator):
                 (1.0, 0.8, 0.0, 1.0),
             )
         )
+
         arrow_origins = sample_points.clone()
         arrow_origins[:, 2] += point_radius
         arrow_vectors = (

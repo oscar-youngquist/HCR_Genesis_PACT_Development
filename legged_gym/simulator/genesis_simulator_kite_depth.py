@@ -47,7 +47,10 @@ class GenesisSimulator_KITE_Depth(GenesisSimulator_KITE):
         cfg = self._cfg.sensor.depth_camera_config
         env_id = int(cfg.debug_camera_env_id)
         if (
-            cfg.debug_draw_camera_position
+            (
+                cfg.debug_draw_camera_position
+                or getattr(cfg, "debug_draw_camera_direction", False)
+            )
             and env_id not in self._cfg.viewer.rendered_envs_idx
         ):
             self._cfg.viewer.rendered_envs_idx.append(env_id)
@@ -153,6 +156,39 @@ class GenesisSimulator_KITE_Depth(GenesisSimulator_KITE):
             if previous_marker is not None:
                 self._scene.clear_debug_object(previous_marker)
             self._camera_position_debug_object = new_marker
+
+        if (
+            getattr(cfg, "debug_draw_camera_direction", False)
+            and 0 <= env_id < self._num_envs
+        ):
+            optical_axis = torch.tensor(
+                [[0.0, 0.0, 1.0]],
+                device=self._device,
+                dtype=self._sensor_pos_tensor.dtype,
+            )
+            view_direction = quat_apply(
+                self._sensor_quat_tensor[env_id : env_id + 1],
+                optical_axis,
+            )[0]
+            arrow_origin = (
+                self._sensor_pos_tensor[env_id]
+                + view_direction * cfg.debug_camera_marker_radius
+            )
+            arrow_vector = (
+                view_direction * cfg.debug_camera_direction_length
+            )
+            new_arrow = self._scene.draw_debug_arrow(
+                arrow_origin.detach().cpu().numpy(),
+                vec=arrow_vector.detach().cpu().numpy(),
+                radius=cfg.debug_camera_direction_radius,
+                color=tuple(cfg.debug_camera_direction_color),
+            )
+            previous_arrow = getattr(
+                self, "_camera_direction_debug_object", None
+            )
+            if previous_arrow is not None:
+                self._scene.clear_debug_object(previous_arrow)
+            self._camera_direction_debug_object = new_arrow
 
     def calc_feet_near_edge(self):
         if self._cfg.terrain.mesh_type == "plane":
