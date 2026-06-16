@@ -111,6 +111,9 @@ interval only gates command-range expansion.
 | `commands.max_curriculum` | `2.0` m/s | Maximum absolute linear X command. |
 | `commands.max_lin_vel_y` | `0.30` m/s | Maximum absolute linear Y command. |
 | `commands.max_ang_vel_yaw` | `3.0` rad/s | Maximum absolute yaw-rate command. |
+| `commands.bias_lin_vel_x_with_curriculum` | `True` | Enables curriculum-progress-dependent biasing of sampled `v_x` commands toward fast forward motion. |
+| `commands.lin_vel_x_forward_bias_final` | `0.85` | Final probability of replacing a uniform `v_x` sample with a positive biased sample once the linear X range reaches `max_curriculum`. |
+| `commands.lin_vel_x_high_speed_bias_power_final` | `0.50` | Final power-law exponent for positive biased samples. Values below `1.0` make samples concentrate nearer the current positive `v_x` limit. |
 
 The linear gate updates both `lin_vel_x` and `lin_vel_y`. Each lower bound is
 decreased and each upper bound is increased, then clipped to its configured
@@ -120,6 +123,42 @@ linear X unless `max_lin_vel_y` is increased or the initial Y range is reduced.
 
 The angular gate independently expands `ang_vel_yaw`. Once a range reaches its
 configured maximum, clipping prevents further growth.
+
+## Forward-Speed Sampling Bias
+
+The `v_x` command sampler uses the same curriculum progress as the linear X
+range:
+
+```text
+bias_progress =
+    (current_max_vx - initial_max_vx)
+    / (max_curriculum - initial_max_vx)
+```
+
+The value is clipped to `[0, 1]`. At `0`, the sampler is unchanged and draws
+uniformly from the full current `lin_vel_x` range. As `bias_progress`
+increases, each `v_x` sample has probability:
+
+```text
+forward_bias = bias_progress * lin_vel_x_forward_bias_final
+```
+
+of being replaced by a positive sample from `[max(0, min_vx), max_vx]`. The
+positive sample is generated as:
+
+```text
+biased_vx = positive_min + (max_vx - positive_min) * u ** high_speed_power
+```
+
+where `u` is uniform in `[0, 1]` and `high_speed_power` interpolates from `1.0`
+to `lin_vel_x_high_speed_bias_power_final`. Because the default final exponent
+is `0.50`, late-curriculum biased samples are more likely to lie near the
+current positive command limit than near zero.
+
+The remaining samples still come from the original full-range uniform
+distribution. This preserves some backward and low-speed command coverage even
+late in training while specializing most command exposure toward fast forward
+locomotion.
 
 ## Training Flow
 
@@ -165,6 +204,9 @@ training runner:
 | `command_ang_best_tracking` | Rolling estimate of best angular tracking EMA. |
 | `command_lin_required_tracking` | Current linear recovery threshold. |
 | `command_ang_required_tracking` | Current angular recovery threshold. |
+| `command_lin_vel_x_bias_progress` | Current `v_x` specialization progress in `[0, 1]`. |
+| `command_lin_vel_x_forward_bias` | Current probability of using the positive biased `v_x` sampler. |
+| `command_lin_vel_x_high_speed_power` | Current positive-sample power-law exponent; smaller values bias more strongly toward the current positive limit. |
 
 Plotting each EMA against its required threshold shows when the performance
 gate is satisfied. Plotting the command limits alongside them shows when the

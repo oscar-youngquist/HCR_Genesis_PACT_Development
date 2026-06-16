@@ -421,6 +421,15 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             self.extras["episode"]["command_ang_required_tracking"] = (
                 self.command_ang_required_tracking
             )
+            self.extras["episode"]["command_lin_vel_x_bias_progress"] = (
+                self._get_lin_vel_x_bias_progress()
+            )
+            self.extras["episode"]["command_lin_vel_x_forward_bias"] = (
+                self._get_lin_vel_x_forward_bias()
+            )
+            self.extras["episode"]["command_lin_vel_x_high_speed_power"] = (
+                self._get_lin_vel_x_high_speed_power()
+            )
         self.extras["episode"]["gap_reset"] = self.gap_reset_buf[env_ids].float().mean()
         if self.cfg.domain_rand.use_domainrand_curriculum:
             phase_to_idx = {
@@ -688,8 +697,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         if len(env_ids) == 0:
             return
 
-        self.commands[env_ids, 0] = torch_rand_float(
-            self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1], (len(env_ids),1), self.device).squeeze(1)
+        self.commands[env_ids, 0] = self._sample_lin_vel_x_commands(env_ids)
         self.commands[env_ids, 1] = torch_rand_float(
             self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1], (len(env_ids),1), self.device).squeeze(1)
         if self.cfg.commands.heading_command:
@@ -702,6 +710,57 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             self.commands[env_ids, :3], dim=1) > 0.2).unsqueeze(1)
 
         self.command_resample_timeouts[env_ids] = self._sample_command_resample_timeouts(len(env_ids))
+
+    def _get_lin_vel_x_bias_progress(self):
+        initial_max = self.initial_command_ranges["lin_vel_x"][1]
+        final_max = self.cfg.commands.max_curriculum
+        span = max(final_max - initial_max, 1e-6)
+        progress = (self.command_ranges["lin_vel_x"][1] - initial_max) / span
+        return float(np.clip(progress, 0.0, 1.0))
+
+    def _get_lin_vel_x_forward_bias(self):
+        if not getattr(self.cfg.commands, "bias_lin_vel_x_with_curriculum", False):
+            return 0.0
+        progress = self._get_lin_vel_x_bias_progress()
+        final_bias = getattr(
+            self.cfg.commands, "lin_vel_x_forward_bias_final", 0.0
+        )
+        return float(np.clip(progress * final_bias, 0.0, 1.0))
+
+    def _get_lin_vel_x_high_speed_power(self):
+        progress = self._get_lin_vel_x_bias_progress()
+        final_power = getattr(
+            self.cfg.commands,
+            "lin_vel_x_high_speed_bias_power_final",
+            1.0,
+        )
+        return float((1.0 - progress) + progress * final_power)
+
+    def _sample_lin_vel_x_commands(self, env_ids):
+        num_envs = len(env_ids)
+        lin_vel_x_min = self.command_ranges["lin_vel_x"][0]
+        lin_vel_x_max = self.command_ranges["lin_vel_x"][1]
+        samples = torch_rand_float(
+            lin_vel_x_min,
+            lin_vel_x_max,
+            (num_envs, 1),
+            self.device,
+        ).squeeze(1)
+
+        forward_bias = self._get_lin_vel_x_forward_bias()
+        if forward_bias <= 0.0 or lin_vel_x_max <= 0.0:
+            return samples
+
+        positive_min = max(0.0, lin_vel_x_min)
+        high_speed_power = self._get_lin_vel_x_high_speed_power()
+        biased_unit = torch.rand(num_envs, device=self.device).pow(
+            high_speed_power
+        )
+        biased_samples = positive_min + (
+            lin_vel_x_max - positive_min
+        ) * biased_unit
+        use_biased_sample = torch.rand(num_envs, device=self.device) < forward_bias
+        return torch.where(use_biased_sample, biased_samples, samples)
 
     def _update_command_curriculum(self, env_ids):
         """Update linear and angular command ranges using independent EMA gates."""
@@ -1111,6 +1170,10 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             self.reward_bound_diffs[key] = self.reward_curr_bounds[key][1] - self.reward_curr_bounds[key][0]        
         
         self.command_ranges = class_to_dict(self.cfg.commands.ranges)
+        self.initial_command_ranges = {
+            key: value.copy() if isinstance(value, list) else value
+            for key, value in self.command_ranges.items()
+        }
         self.enable_command_resampling_time_randomization = getattr(
             self.cfg.commands, "randomize_resampling_time", False
         )

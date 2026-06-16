@@ -581,6 +581,9 @@ class GO2KITECfg( LeggedRobotCfg ):
         ang_vel_yaw_step = 0.10
         max_lin_vel_y = 0.30
         max_ang_vel_yaw = 3.0
+        bias_lin_vel_x_with_curriculum = True
+        lin_vel_x_forward_bias_final = 0.85
+        lin_vel_x_high_speed_bias_power_final = 0.50
         
         randomize_resampling_time = False
         resampling_time_min = 1.0
