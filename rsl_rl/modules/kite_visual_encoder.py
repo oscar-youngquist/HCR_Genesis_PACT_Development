@@ -4,7 +4,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from module_utils import get_activation, EfficientMultiHeadAttention, make_1d_norm, make_2d_norm, ConvNormAct
+from .module_utils import (
+    ConvNormAct,
+    EfficientMultiHeadAttention,
+    get_activation,
+    make_1d_norm,
+    make_2d_norm,
+)
 
 
 # --------------------------------------------------------------------------

@@ -39,7 +39,8 @@ import numpy as np
 import random
 import gc
 
-from rsl_rl.modules import ActorCritic_KITE, ContextDecoderKITE
+from rsl_rl.modules import ActorCritic_KITE
+from rsl_rl.modules.actor_critic_kite_old import ContextDecoderKITE
 from rsl_rl.storage import RolloutStorageKITE
 
 class PPO_KITE:

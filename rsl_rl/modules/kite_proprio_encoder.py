@@ -7,7 +7,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from module_utils import init_weights, get_activation, MLPMixerBlock
+from .module_utils import (
+    MLPMixerBlock,
+    get_activation,
+    init_weights,
+)
 
 class ProprioContextMLPMixerKITE(nn.Module):
     """

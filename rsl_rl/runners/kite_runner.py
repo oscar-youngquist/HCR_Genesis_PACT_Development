@@ -38,7 +38,8 @@ from torch.utils.tensorboard import SummaryWriter
 import torch
 
 from rsl_rl.algorithms import PPO_KITE
-from rsl_rl.modules import ActorCritic_KITE, ContextDecoderKITE
+from rsl_rl.modules import ActorCritic_KITE, export_kite_async_deployment_pipelines
+from rsl_rl.modules.actor_critic_kite_old import ContextDecoderKITE
 from rsl_rl.env import VecEnv
 from rsl_rl.utils import pretty_print_module
 
@@ -397,30 +398,68 @@ class OnPolicyRunnerKITE:
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
         print(log_string)
 
+    def _enc_optimizer_uses_bundle(self):
+        return hasattr(self.alg.enc_optimizer, "optimizers")
+
+    def _load_enc_optimizer_state(self, enc_optimizer_state):
+        if enc_optimizer_state is None:
+            print("No encoder optimizer state found in checkpoint.")
+            return
+
+        if not self._enc_optimizer_uses_bundle():
+            self.alg.enc_optimizer.load_state_dict(enc_optimizer_state)
+            return
+
+        expected_names = set(self.alg.enc_optimizer.optimizers.keys())
+        if isinstance(enc_optimizer_state, dict) and expected_names.issubset(enc_optimizer_state.keys()):
+            self.alg.enc_optimizer.load_state_dict(enc_optimizer_state)
+            return
+
+        is_legacy_single_optimizer = (
+            isinstance(enc_optimizer_state, dict)
+            and "state" in enc_optimizer_state
+            and "param_groups" in enc_optimizer_state
+        )
+        if is_legacy_single_optimizer:
+            print(
+                "Skipping legacy single encoder optimizer state because the "
+                "current KITE policy uses an OptimizerBundle with separate "
+                "sub-optimizers. Model weights were loaded; encoder optimizer "
+                "states will be reinitialized."
+            )
+            return
+
+        raise KeyError(
+            "Encoder optimizer state does not match the current OptimizerBundle. "
+            f"Expected keys: {sorted(expected_names)}; got keys: "
+            f"{sorted(enc_optimizer_state.keys()) if isinstance(enc_optimizer_state, dict) else type(enc_optimizer_state)}"
+        )
+
     def save(self, path, infos=None):
-        torch.save({
+        checkpoint = {
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'act_optimizer_state_dict': self.alg.act_optimizer.state_dict(),
             'enc_optimizer_state_dict': self.alg.enc_optimizer.state_dict(),
+            'enc_optimizer_format': 'bundle' if self._enc_optimizer_uses_bundle() else 'single',
             'decoder_state_dict': self.alg.decoder.state_dict(),
             'decoder_opt_state_dict': self.alg.decoder_optimizer.state_dict(),
             'iter': self.current_learning_iteration,
             'infos': infos,
-            }, path)
+        }
+        torch.save(checkpoint, path)
 
     def load(self, path, load_optimizer=True):
-        loaded_dict = torch.load(path)
+        loaded_dict = torch.load(path, map_location=self.device)
         # Load actor/critic model(s)
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Load optimizer(s)
         if load_optimizer:
             self.alg.act_optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
-            self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
+            self._load_enc_optimizer_state(loaded_dict.get('enc_optimizer_state_dict'))
             self.alg.decoder_optimizer.load_state_dict(loaded_dict['decoder_opt_state_dict'])
         # Load the VAE decoder model...
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']
-        self.current_learning_iteration = 0
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):
@@ -428,3 +467,22 @@ class OnPolicyRunnerKITE:
         if device is not None:
             self.alg.actor_critic.to(device)
         return self.alg.actor_critic.act_inference
+
+    def get_async_inference_pipelines(self, device=None):
+        self.alg.actor_critic.eval() # switch to evaluation mode (dropout for example)
+        if device is not None:
+            self.alg.actor_critic.to(device)
+        depth_pipeline = self.alg.actor_critic.build_depth_async_pipeline().eval()
+        actor_pipeline = self.alg.actor_critic.build_actor_async_pipeline().eval()
+        if device is not None:
+            depth_pipeline.to(device)
+            actor_pipeline.to(device)
+        return depth_pipeline, actor_pipeline
+
+    def export_async_inference_pipelines(self, path, device="cpu"):
+        self.alg.actor_critic.eval()
+        return export_kite_async_deployment_pipelines(
+            self.alg.actor_critic,
+            path,
+            device=device,
+        )
