@@ -58,7 +58,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         debug_surface_normal_refresh_steps = 5
         
         # positions of the sampling height around the base (relative to the base of the robot) 11x18 = 198
-        measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2] #  rows
+        measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1] #  rows
         measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]                          #  cols
         
         selected = False # select a unique terrain type and pass all arguments

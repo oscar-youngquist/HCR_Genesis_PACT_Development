@@ -4,104 +4,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from module_utils import get_activation, EfficientMultiHeadAttention
+from module_utils import get_activation, EfficientMultiHeadAttention, make_1d_norm, make_2d_norm, ConvNormAct
 
 
 # --------------------------------------------------------------------------
 # Helper blocks
 # --------------------------------------------------------------------------
-
-def make_2d_norm(norm_type: str, num_channels: int) -> nn.Module:
-    """
-    Returns a normalization layer for 2D conv features.
-
-    norm_type:
-        "none"  -> Identity
-        "batch" -> BatchNorm2d
-        "group" -> GroupNorm
-    """
-    norm_type = norm_type.lower()
-
-    if norm_type == "none":
-        return nn.Identity()
-
-    if norm_type == "batch":
-        return nn.BatchNorm2d(num_channels)
-
-    if norm_type == "group":
-        num_groups = min(8, num_channels)
-        while num_channels % num_groups != 0:
-            num_groups -= 1
-        return nn.GroupNorm(num_groups, num_channels)
-
-    raise ValueError(
-        f"Unknown norm_type={norm_type}. Expected one of: 'none', 'batch', 'group'."
-    )
-
-
-def make_1d_norm(norm_type: str, num_channels: int) -> nn.Module:
-    """
-    Returns a normalization layer for 1D conv features.
-
-    norm_type:
-        "none"  -> Identity
-        "batch" -> BatchNorm1d
-        "group" -> GroupNorm
-    """
-    norm_type = norm_type.lower()
-
-    if norm_type == "none":
-        return nn.Identity()
-
-    if norm_type == "batch":
-        return nn.BatchNorm1d(num_channels)
-
-    if norm_type == "group":
-        num_groups = min(8, num_channels)
-        while num_channels % num_groups != 0:
-            num_groups -= 1
-        return nn.GroupNorm(num_groups, num_channels)
-
-    raise ValueError(
-        f"Unknown norm_type={norm_type}. Expected one of: 'none', 'batch', 'group'."
-    )
-
-
-class ConvNormAct(nn.Module):
-    """
-    2D convolution block with configurable normalization.
-
-    Default:
-        Conv2d -> Identity -> activation
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        activation: nn.Module,
-        norm_type: str = "none",
-        kernel_size: int = 3,
-        stride: int = 1,
-        padding: int = 1,
-    ):
-        super().__init__()
-
-        self.block = nn.Sequential(
-            nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-            ),
-            make_2d_norm(norm_type, out_channels),
-            activation,
-        )
-
-    def forward(self, x):
-        return self.block(x)
-
 
 class Conv1dNormAct(nn.Module):
     """
@@ -349,6 +257,40 @@ class MotionRobustDepthEncoder(nn.Module):
         }
 
         return mean, logvar, aux
+    
+
+    def encode_inf(self, depth_image: torch.Tensor, torso_state: torch.Tensor):
+        batch_size = depth_image.size(0)
+
+        stabilized_coords, _ = self.compute_motion_conditioned_coords(
+            depth_image,
+            torso_state,
+        )
+
+        x = torch.cat([depth_image, stabilized_coords], dim=1)
+
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+
+        b, c, h, w = x.shape
+        spatial_sequence = x.view(b, c, h * w).transpose(1, 2)
+
+        q = self.global_query.expand(batch_size, -1, -1)
+
+        attn_out, _ = self.spatial_attention(
+            query=q,
+            key=spatial_sequence,
+            value=spatial_sequence,
+        )
+
+        attn_out = attn_out.squeeze(1)
+        latent = self.fc(attn_out)
+
+        mean = self.mean_out(latent)
+        logvar = self.logvar_out(latent)
+
+        return mean, logvar
 
     def forward(self, depth_image: torch.Tensor, torso_state: torch.Tensor):
         mean, logvar, aux = self.encode(depth_image, torso_state)
@@ -362,7 +304,7 @@ class MotionRobustDepthEncoder(nn.Module):
 
     @torch.no_grad()
     def forward_inference(self, depth_image: torch.Tensor, torso_state: torch.Tensor):
-        mean, _, _ = self.encode(depth_image, torso_state)
+        mean, _ = self.encode_inf(depth_image, torso_state)
         return mean
 
 
@@ -546,20 +488,30 @@ class MotionRobustDepthDecoder(nn.Module):
 # --------------------------------------------------------------------------
 # Depth sequence encoder
 # --------------------------------------------------------------------------
-
-class DepthSequenceEncoder(nn.Module):
+class ConvDepthSequenceEncoder(nn.Module):
     """
     Encodes a short sequence of per-frame depth latents.
 
     Input:
         x: B x T x feature_dim
 
+    The temporal Conv1D branch compresses the full latent history into a sequence-level
+    representation. Optionally, a weighted residual skip connection projects the most
+    recent depth latent x[:, -1, :] directly into the output latent space and adds it
+    to the temporal representation:
+
+        latent = temporal_latent + latest_skip_scale * latest_skip(x[:, -1, :])
+
+    This skip connection helps preserve the most recent perception information while
+    allowing the Conv1D branch to learn temporal smoothing, motion trends, and history-
+    based corrections. The learnable scalar latest_skip_scale controls how strongly the
+    current-frame latent contributes to the final sequence representation.
+
     Output:
         mean:   B x output_dim
         logvar: B x output_dim
         z:      B x output_dim
     """
-
     def __init__(
         self,
         feature_dim: int = 16,
@@ -568,6 +520,7 @@ class DepthSequenceEncoder(nn.Module):
         activation: str = "elu",
         norm_type: str = "none",
         use_vae: bool = True,
+        use_latest_skip: bool = True,
     ):
         super().__init__()
 
@@ -576,6 +529,7 @@ class DepthSequenceEncoder(nn.Module):
         self.output_dim = output_dim
         self.norm_type = norm_type
         self.use_vae = use_vae
+        self.use_latest_skip = use_latest_skip
 
         self.activation = get_activation(activation)
 
@@ -611,6 +565,12 @@ class DepthSequenceEncoder(nn.Module):
             self.activation,
         )
 
+        if self.use_latest_skip:
+            self.latest_skip = nn.Linear(feature_dim, output_dim)
+            self.latest_skip_scale = nn.Parameter(torch.tensor(0.1))
+        else:
+            self.latest_skip = None
+
         self.mean_out = nn.Linear(output_dim, output_dim)
 
         self.logvar_out = nn.Sequential(
@@ -632,18 +592,34 @@ class DepthSequenceEncoder(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
+        # Optional: initialize the skip more conservatively so it does not
+        # dominate the temporal branch at the start of training.
+        if self.latest_skip is not None:
+            nn.init.xavier_uniform_(self.latest_skip.weight, gain=0.5)
+            if self.latest_skip.bias is not None:
+                nn.init.zeros_(self.latest_skip.bias)
+
     def encode(self, x: torch.Tensor):
         """
         x: B x T x feature_dim
         """
-        x = x.permute(0, 2, 1)
+        latest_depth_latent = x[:, -1, :]  # B x feature_dim
+
+        h = x.permute(0, 2, 1)  # B x feature_dim x T
 
         for conv in self.convs:
-            x = conv(x)
+            h = conv(h)
 
-        x = x.flatten(start_dim=1)
+        h = h.flatten(start_dim=1)
 
-        latent = self.fc(x)
+        temporal_latent = self.fc(h)
+
+        if self.latest_skip is not None:
+            latest_latent = self.latest_skip(latest_depth_latent)
+            latent = temporal_latent + self.latest_skip_scale * latest_latent
+            latent = self.activation(latent)
+        else:
+            latent = temporal_latent
 
         mean = self.mean_out(latent)
         logvar = self.logvar_out(latent)

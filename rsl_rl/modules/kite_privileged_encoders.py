@@ -3,69 +3,9 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Tuple, List, Dict, Any
 
-from module_utils import get_activation, EfficientMultiHeadAttention
-
-
-# --------------------------------------------------------------------------
-# Helper blocks
-# --------------------------------------------------------------------------
-
-def make_2d_norm(norm_type: str, num_channels: int) -> nn.Module:
-    """
-    Returns normalization layer for 2D conv features.
-
-    norm_type:
-        "none"  -> Identity
-        "batch" -> BatchNorm2d
-        "group" -> GroupNorm
-    """
-    norm_type = norm_type.lower()
-
-    if norm_type == "none":
-        return nn.Identity()
-
-    if norm_type == "batch":
-        return nn.BatchNorm2d(num_channels)
-
-    if norm_type == "group":
-        num_groups = min(8, num_channels)
-        while num_channels % num_groups != 0:
-            num_groups -= 1
-        return nn.GroupNorm(num_groups, num_channels)
-
-    raise ValueError(
-        f"Unknown norm_type={norm_type}. Expected one of: 'none', 'batch', 'group'."
-    )
-
-
-class ConvNormAct(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        activation: nn.Module,
-        norm_type: str = "none",
-        kernel_size: int = 3,
-        stride: int = 1,
-        padding: int = 1,
-    ):
-        super().__init__()
-
-        self.block = nn.Sequential(
-            nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-            ),
-            make_2d_norm(norm_type, out_channels),
-            activation,
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.block(x)
+from module_utils import get_activation, EfficientMultiHeadAttention, MLPMixerBlock, make_2d_norm, make_1d_norm, ConvNormAct
 
 
 class TerrainAttentionEncoder(nn.Module):
@@ -203,10 +143,6 @@ class TerrainAttentionEncoder(nn.Module):
         z = self.fc(pooled)
 
         return z
-
-    @torch.no_grad()
-    def forward_inference(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward(x)
     
 class TerrainTwoHeadDecoder(nn.Module):
     """
@@ -397,3 +333,353 @@ class TerrainTwoHeadDecoder(nn.Module):
 
         return recon
 
+
+class PrviDynamicsMLPMixerKITE(nn.Module):
+    """
+    Deterministic privileged-dynamics context encoder using an MLP-Mixer architecture.
+
+    This encoder compresses a history of privileged observation features into a
+    compact latent state for critic conditioning during asymmetric actor-critic
+    training.
+
+    Intended default input:
+        X_C: B x 393
+
+    Interpreted as:
+        X_C reshaped to B x 131 x 3
+
+    where:
+        131 = privileged observation feature tokens
+        3   = short history / per-token feature channel dimension
+
+    The architecture is:
+        B x 131 x 3
+            -> per-token history embedding
+        B x 131 x hidden_dim
+            -> MLP-Mixer blocks
+        B x 131 x hidden_dim
+            -> token pooling
+        B x hidden_dim
+            -> deterministic latent projection
+        B x context_latent_size
+
+    The mixer separates:
+        token mixing:
+            mixes information across privileged observation feature tokens
+
+        channel mixing:
+            mixes information within each token's learned hidden embedding
+
+    Args:
+        context_input_dim:
+            Flattened privileged context dimension.
+            Default: 393 = 131 tokens x 3 values per token.
+
+        num_tokens:
+            Number of privileged observation feature tokens.
+            Default: 131.
+
+        input_dim_per_token:
+            Number of values associated with each privileged feature token.
+            For the default setting, this is a short 3-step/history channel.
+            Default: 3.
+
+        hidden_dim:
+            Per-token embedding dimension after the initial projection from
+            input_dim_per_token to hidden_dim.
+
+        num_mixer_blocks:
+            Number of MLP-Mixer blocks.
+
+        token_mlp_dim:
+            Hidden dimension inside the token-mixing MLP, which mixes across
+            the num_tokens privileged feature tokens.
+
+        channel_mlp_dim:
+            Hidden dimension inside the channel-mixing MLP, which mixes within
+            each token's hidden_dim-dimensional representation.
+
+        context_latent_size:
+            Final deterministic latent size returned to the critic.
+
+        activation:
+            Activation passed through module_utils.get_activation(...).
+
+        use_layer_norm:
+            Whether to use LayerNorm inside the mixer blocks and after the
+            mixer trunk.
+
+        device:
+            Kept for compatibility with the existing encoder API.
+    """
+
+    def __init__(
+        self,
+        context_input_dim: int = 393,
+        num_tokens: int = 131,
+        input_dim_per_token: int = 3,
+        hidden_dim: int = 128,
+        num_mixer_blocks: int = 2,
+        token_mlp_dim: int = 128,
+        channel_mlp_dim: int = 256,
+        context_latent_size: int = 16,
+        activation: str = "elu",
+        use_layer_norm: bool = True,
+        device: str = "cpu",
+    ) -> None:
+        super().__init__()
+
+        expected_input_dim = num_tokens * input_dim_per_token
+        if context_input_dim != expected_input_dim:
+            raise ValueError(
+                f"context_input_dim must equal num_tokens * input_dim_per_token. "
+                f"Got context_input_dim={context_input_dim}, "
+                f"but num_tokens * input_dim_per_token = {expected_input_dim}."
+            )
+
+        self.context_input_dim = context_input_dim
+        self.num_tokens = num_tokens
+        self.input_dim_per_token = input_dim_per_token
+        self.hidden_dim = hidden_dim
+        self.num_mixer_blocks = num_mixer_blocks
+        self.token_mlp_dim = token_mlp_dim
+        self.channel_mlp_dim = channel_mlp_dim
+        self.context_latent_size = context_latent_size
+        self.activation_name = activation
+        self.use_layer_norm = use_layer_norm
+        self.device = device
+
+        self.activation = get_activation(activation)
+
+        # ------------------------------------------------------------------
+        # Per-token privileged-history embedding:
+        #     B x 131 x 3 -> B x 131 x hidden_dim
+        #
+        # Each privileged observation feature token has a small associated
+        # history/channel vector of length input_dim_per_token.
+        # ------------------------------------------------------------------
+        self.token_embedding = nn.Linear(input_dim_per_token, hidden_dim)
+
+        # ------------------------------------------------------------------
+        # MLP-Mixer trunk:
+        #
+        # Each block alternates between:
+        #   1. token mixing across privileged observation features
+        #   2. channel mixing inside each token embedding
+        # ------------------------------------------------------------------
+        self.mixer_blocks = nn.ModuleList(
+            [
+                MLPMixerBlock(
+                    num_tokens=num_tokens,
+                    hidden_dim=hidden_dim,
+                    token_mlp_dim=token_mlp_dim,
+                    channel_mlp_dim=channel_mlp_dim,
+                    activation=activation,
+                    use_layer_norm=use_layer_norm,
+                )
+                for _ in range(num_mixer_blocks)
+            ]
+        )
+
+        self.final_norm = nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity()
+
+        # ------------------------------------------------------------------
+        # Deterministic latent projection for critic conditioning.
+        # ------------------------------------------------------------------
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_dim, 2 * context_latent_size),
+            self.activation,
+            nn.Linear(2 * context_latent_size, context_latent_size),
+        )
+
+        self._initialize_weights()
+
+    def _initialize_weights(self) -> None:
+        """
+        Initialization routine following the style used in the other KITE
+        context encoders.
+
+        Feature embedding and hidden latent layers:
+            Kaiming uniform with leaky_relu gain approximation.
+
+        Final latent projection:
+            Kaiming uniform; final layer uses linear nonlinearity scaling.
+
+        LayerNorm:
+            weight = 1, bias = 0.
+        """
+
+        # Feature embedding.
+        nn.init.kaiming_uniform_(
+            self.token_embedding.weight,
+            a=1.0,
+            mode="fan_in",
+            nonlinearity="leaky_relu",
+        )
+        if self.token_embedding.bias is not None:
+            nn.init.zeros_(self.token_embedding.bias)
+
+        # Latent projection MLP.
+        for i, module in enumerate(self.fc):
+            if isinstance(module, nn.Linear):
+                is_final_layer = i == len(self.fc) - 1
+
+                nn.init.kaiming_uniform_(
+                    module.weight,
+                    a=1.0,
+                    mode="fan_in",
+                    nonlinearity="linear" if is_final_layer else "leaky_relu",
+                )
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+        # LayerNorm layers.
+        for module in self.modules():
+            if isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+    def _format_input(self, X_C: torch.Tensor) -> torch.Tensor:
+        """
+        Supports:
+            X_C: B x 393
+        or:
+            X_C: B x 131 x 3
+
+        Returns:
+            X_C: B x 131 x 3
+        """
+
+        if X_C.dim() == 3:
+            batch_size, num_tokens, input_dim_per_token = X_C.shape
+
+            if num_tokens != self.num_tokens:
+                raise ValueError(
+                    f"Expected num_tokens={self.num_tokens}, but got {num_tokens}."
+                )
+
+            if input_dim_per_token != self.input_dim_per_token:
+                raise ValueError(
+                    f"Expected input_dim_per_token={self.input_dim_per_token}, "
+                    f"but got {input_dim_per_token}."
+                )
+
+            return X_C
+
+        if X_C.dim() == 2:
+            batch_size, flat_dim = X_C.shape
+
+            if flat_dim != self.context_input_dim:
+                raise ValueError(
+                    f"Expected flattened context_input_dim={self.context_input_dim}, "
+                    f"but got {flat_dim}."
+                )
+
+            return X_C.view(
+                batch_size,
+                self.num_tokens,
+                self.input_dim_per_token,
+            )
+
+        raise ValueError(
+            f"Expected X_C shape Bx{self.context_input_dim} "
+            f"or Bx{self.num_tokens}x{self.input_dim_per_token}, "
+            f"but got {tuple(X_C.shape)}."
+        )
+
+    def encode(self, X_C: torch.Tensor) -> torch.Tensor:
+        """
+        Encodes privileged observation history into a deterministic latent.
+
+        Args:
+            X_C:
+                B x 393 flattened privileged context
+            or:
+                B x 131 x 3 structured privileged context
+
+        Returns:
+            z:
+                B x context_latent_size
+        """
+
+        x = self._format_input(X_C)
+
+        # B x 131 x 3 -> B x 131 x hidden_dim
+        x = self.activation(self.token_embedding(x))
+
+        # Mixer trunk.
+        for block in self.mixer_blocks:
+            x = block(x)
+
+        x = self.final_norm(x)
+
+        # Global pooling over privileged feature tokens.
+        # B x 131 x hidden_dim -> B x hidden_dim
+        x = x.mean(dim=1)
+
+        # Deterministic latent projection.
+        z = self.fc(x)
+
+        return z
+
+    def forward(self, X_C: torch.Tensor) -> torch.Tensor:
+        """
+        Complete deterministic forward pass.
+
+        Args:
+            X_C:
+                B x 393 flattened privileged context
+            or:
+                B x 131 x 3 structured privileged context
+
+        Returns:
+            z:
+                B x context_latent_size
+        """
+        return self.encode(X_C)
+
+class PrivDynamicsDecoder(nn.Module):
+    """Decoder network for reconstructing next state from latent representation and velocity.
+    
+    Takes a latent vector and torso velocity as input, processes through two ELU-activated
+    hidden layers, and outputs a predicted next state. Uses Xavier uniform initialization.
+    """
+
+    def __init__(
+            self,
+            input_dim: int = 16,
+            layers: List[int] = [64,128],
+            decode_dim: int = 57) -> None:
+        super().__init__()
+
+
+        # Network architecture
+        self.dec_in = nn.Linear(input_dim, layers[0])
+        self.dec_h1 = nn.Linear(layers[0], layers[1])
+        self.dec_h2 = nn.Linear(layers[1], layers[2])
+        self.dec_h3 = nn.Linear(layers[2], layers[3])
+        self.dec_out = nn.Linear(layers[3], decode_dim)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self) -> None:
+        """Initialize all linear layers with Xavier uniform distribution."""
+        for layer in [self.dec_in, self.dec_h1, self.dec_out, self.dec_h2, self.dec_h3]:
+            nn.init.xavier_uniform_(layer.weight)
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
+
+    def forward(self, condition: torch.Tensor) -> torch.Tensor:
+        """Forward pass through decoder network.
+
+        Args:
+            condition: Latent vector of shape (batch_size, latent_dim+velo_dim)
+        Returns:
+            Reconstructed next state of shape (batch_size, decode_dim)
+        """
+        # Process through network with ELU activations
+        x = F.elu(self.dec_in(condition))
+        x = F.elu(self.dec_h1(x))
+        x = F.elu(self.dec_h2(x))
+        x = F.elu(self.dec_h3(x))
+        return self.dec_out(x)

@@ -94,6 +94,224 @@ class EfficientMultiHeadAttention(nn.Module):
         return output, attn_weights.mean(dim=1)
 
 
+class MixerMLP(nn.Module):
+    """
+    Basic MLP used inside MLP-Mixer blocks.
+
+    Used for both:
+        - token mixing:   mixes across sampled points / tokens
+        - channel mixing: mixes across feature channels
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        activation: str = "elu",
+    ):
+        super().__init__()
+
+        self.activation = get_activation(activation)
+
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self) -> None:
+        for layer in [self.fc1, self.fc2]:
+            nn.init.kaiming_uniform_(
+                layer.weight,
+                a=1.0,
+                mode="fan_in",
+                nonlinearity="leaky_relu",
+            )
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.activation(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+
+class MLPMixerBlock(nn.Module):
+    """
+    One MLP-Mixer block.
+
+    Input:
+        x: B x num_tokens x hidden_dim
+
+    Token mixing:
+        mixes information across tokens
+
+    Channel mixing:
+        mixes information across latent channels at each token.
+    """
+
+    def __init__(
+        self,
+        num_tokens: int,
+        hidden_dim: int,
+        token_mlp_dim: int,
+        channel_mlp_dim: int,
+        activation: str = "elu",
+        use_layer_norm: bool = True,
+    ):
+        super().__init__()
+
+        self.num_tokens = num_tokens
+        self.hidden_dim = hidden_dim
+        self.use_layer_norm = use_layer_norm
+
+        self.norm1 = nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity()
+        self.norm2 = nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity()
+
+        self.token_mixer = MixerMLP(
+            input_dim=num_tokens,
+            hidden_dim=token_mlp_dim,
+            output_dim=num_tokens,
+            activation=activation,
+        )
+
+        self.channel_mixer = MixerMLP(
+            input_dim=hidden_dim,
+            hidden_dim=channel_mlp_dim,
+            output_dim=hidden_dim,
+            activation=activation,
+        )
+
+        self._initialize_norms()
+
+    def _initialize_norms(self) -> None:
+        for m in [self.norm1, self.norm2]:
+            if isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: B x num_tokens x hidden_dim
+        """
+
+        # Token mixing.
+        y = self.norm1(x)
+
+        # B x num_tokens x hidden_dim
+        # -> B x hidden_dim x num_tokens
+        y = y.transpose(1, 2)
+
+        # Apply MLP across token dimension.
+        y = self.token_mixer(y)
+
+        # B x hidden_dim x num_tokens
+        # -> B x num_tokens x hidden_dim
+        y = y.transpose(1, 2)
+
+        x = x + y
+
+        # Channel mixing.
+        y = self.norm2(x)
+        y = self.channel_mixer(y)
+
+        x = x + y
+
+        return x
+
+
+def make_2d_norm(norm_type: str, num_channels: int) -> nn.Module:
+    """
+    Returns a normalization layer for 2D conv features.
+
+    norm_type:
+        "none"  -> Identity
+        "batch" -> BatchNorm2d
+        "group" -> GroupNorm
+    """
+    norm_type = norm_type.lower()
+
+    if norm_type == "none":
+        return nn.Identity()
+
+    if norm_type == "batch":
+        return nn.BatchNorm2d(num_channels)
+
+    if norm_type == "group":
+        num_groups = min(8, num_channels)
+        while num_channels % num_groups != 0:
+            num_groups -= 1
+        return nn.GroupNorm(num_groups, num_channels)
+
+    raise ValueError(
+        f"Unknown norm_type={norm_type}. Expected one of: 'none', 'batch', 'group'."
+    )
+
+
+def make_1d_norm(norm_type: str, num_channels: int) -> nn.Module:
+    """
+    Returns a normalization layer for 1D conv features.
+
+    norm_type:
+        "none"  -> Identity
+        "batch" -> BatchNorm1d
+        "group" -> GroupNorm
+    """
+    norm_type = norm_type.lower()
+
+    if norm_type == "none":
+        return nn.Identity()
+
+    if norm_type == "batch":
+        return nn.BatchNorm1d(num_channels)
+
+    if norm_type == "group":
+        num_groups = min(8, num_channels)
+        while num_channels % num_groups != 0:
+            num_groups -= 1
+        return nn.GroupNorm(num_groups, num_channels)
+
+    raise ValueError(
+        f"Unknown norm_type={norm_type}. Expected one of: 'none', 'batch', 'group'."
+    )
+
+
+class ConvNormAct(nn.Module):
+    """
+    2D convolution block with configurable normalization.
+
+    Default:
+        Conv2d -> Identity -> activation
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        activation: nn.Module,
+        norm_type: str = "none",
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+    ):
+        super().__init__()
+
+        self.block = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+            ),
+            make_2d_norm(norm_type, out_channels),
+            activation,
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
 def get_activation(act_name):
     if act_name == "elu":
         return nn.ELU(inplace=True)
