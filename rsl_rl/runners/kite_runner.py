@@ -32,14 +32,12 @@ import time
 import os
 from collections import deque
 import statistics
-import numpy as np
 
 from torch.utils.tensorboard import SummaryWriter
 import torch
 
 from rsl_rl.algorithms import PPO_KITE
 from rsl_rl.modules import ActorCritic_KITE, export_kite_async_deployment_pipelines
-from rsl_rl.modules.actor_critic_kite_old import ContextDecoderKITE
 from rsl_rl.env import VecEnv
 from rsl_rl.utils import pretty_print_module
 
@@ -66,14 +64,18 @@ class OnPolicyRunnerKITE:
         self.device = device
         self.env = env
         
-        if self.env.num_privileged_obs is not None:
-            num_critic_obs = self.env.num_privileged_obs 
-        else:
-            num_critic_obs = self.env.num_obs
-        
-        # check if we are using a history of critic observations
-        if self.env.num_crit_obs_stack is not None:
-            num_critic_obs *= self.env.num_crit_obs_stack
+        # The critic sees raw privileged dynamics plus compact privileged
+        # terrain/dynamics latents. Raw terrain maps stay outside critic_obs.
+        latest_privileged_obs_dim = (
+            self.env.num_privileged_obs
+            if self.env.num_privileged_obs is not None
+            else self.env.num_obs
+        )
+        num_critic_obs = (
+            latest_privileged_obs_dim
+            + self.policy_cfg.get("privileged_terrain_latent_dim", 16)
+            + self.policy_cfg.get("privileged_dynamics_latent_dim", 16)
+        )
 
         actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
         
@@ -89,38 +91,62 @@ class OnPolicyRunnerKITE:
                                                                 self.policy_cfg["cenet_velo_dim"],
                                                                 self.policy_cfg["cenet_enc_layers"],
                                                                 self.policy_cfg["activation"],
-                                                                self.policy_cfg["init_noise_std"]).to(self.device)
-        
-        
-        # actor_critic = torch.compile(actor_critic)
-        
-        print(actor_critic)
-        
-        decoder = ContextDecoderKITE(self.policy_cfg["cenet_dec_input_dim"],
-                                 self.policy_cfg["cenet_dec_layers"],
-                                 self.policy_cfg["cenet_dec_out_dim"]
-                                 ).to(self.device)
-        
-        # decoder = torch.compile(decoder)
-
+                                                                self.policy_cfg["init_noise_std"],
+                                                                self.policy_cfg.get("depth_sequence_length", 5)).to(self.device)        
         print("Created Actor-Critic Model")
         pretty_print_module(actor_critic)
-        pretty_print_module(decoder)
 
         self.use_adaptive_entropy = self.alg_cfg.get("use_adaptive_entropy", False)
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         
-        self.alg: PPO_KITE = alg_class(actor_critic, decoder, self.env.num_privileged_obs,
-                                           device=self.device, **self.alg_cfg)
+        # Terrain maps are stored as height + XYZ normal channels and used by
+        # PPO-owned privileged encoders/decoders.
+        terrain_map_shape = (
+            len(self.env.cfg.terrain.measured_points_x),
+            len(self.env.cfg.terrain.measured_points_y),
+            4,
+        )
+        self.alg: PPO_KITE = alg_class(
+            actor_critic,
+            self.env.num_privileged_obs,
+            terrain_map_shape=terrain_map_shape,
+            priv_obs_history_dim=self.env.num_crit_obs_stack * self.env.num_privileged_obs,
+            latest_privileged_obs_dim=latest_privileged_obs_dim,
+            privileged_terrain_latent_dim=self.policy_cfg.get("privileged_terrain_latent_dim", 16),
+            privileged_dynamics_latent_dim=self.policy_cfg.get("privileged_dynamics_latent_dim", 16),
+            device=self.device,
+            **self.alg_cfg,
+        )
         
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
 
         # init storage and model
-        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], \
-                              [self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
-                              [self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]])
+        depth_h, depth_w = getattr(self.env, "depth_output_resolution", (48, 64))
+        depth_sequence_length = self.policy_cfg.get("depth_sequence_length", 5)
+        depth_latent_dim = self.policy_cfg["cenet_enc_latent_dim"]
+        
+        # Rollout-time visual memory: only the newest depth image is stored
+        #     raw; previous frames are kept as compact depth-frame latents.
+        self.depth_latent_history = torch.zeros(
+            self.env.num_envs,
+            depth_sequence_length - 1,
+            depth_latent_dim,
+            device=self.device,
+        )
+
+        # Latest modality-mixer torso linear velocity estimate. The runner
+        # only injects this into depth_torso_state when the velocity-specific
+        # boot gate trusts the estimate; otherwise env ground truth remains.
+        self.depth_torso_lin_vel_est = torch.zeros(
+            self.env.num_envs,
+            3,
+            device=self.device,
+        )
+        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_obs_hist * self.env.num_obs],
+                              [self.env.num_actions], [self.env.num_exp_labels], [1, depth_h, depth_w], [depth_sequence_length - 1, depth_latent_dim], [8], list(terrain_map_shape),
+                                [self.env.num_crit_obs_stack * self.env.num_privileged_obs], [depth_latent_dim],)
 
         if "pretrained_path" in self.policy_cfg.keys():
             self._load_pretrained_model()
@@ -136,6 +162,18 @@ class OnPolicyRunnerKITE:
 
         _, _ = self.env.reset()
 
+    # Construct the torso-state (roll, pitch, v_x, v_y, v_z, w_roll, w_pitch, w_yaw) used by the 
+    #     learned coordconv coordinate transform
+    def _build_depth_torso_state(self, imu_depth_torso_state):
+        """Gate predicted velocity versus simulator velocity for depth input."""
+        depth_torso_state = imu_depth_torso_state.clone()
+        if self.alg.use_depth_vel_boot:
+            depth_torso_state[:, 2:5] = self.depth_torso_lin_vel_est.to(
+                device=depth_torso_state.device,
+                dtype=depth_torso_state.dtype,
+            )
+        return depth_torso_state
+
     # function to load a boot-strap initial model and reset the std
     def _load_pretrained_model(self):
         pretrained_path = self.policy_cfg["pretrained_path"]
@@ -143,8 +181,6 @@ class OnPolicyRunnerKITE:
         loaded_dict = torch.load(pretrained_path)
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
-        # Load the pretrained decoder network
-        self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
@@ -153,18 +189,23 @@ class OnPolicyRunnerKITE:
 
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
-            
-        # self.alg.actor_critic.std.data.fill_(self.policy_cfg["init_noise_std"]*0.45)
-        
-        obs,obs_hist,privileged_obs,exp_labels = self.env.get_observations()
+                    
+        obs, obs_hist, privileged_obs, exp_labels, depth_obs, depth_torso_state, terrain_map = self.env.get_observations()
 
         if self.env.use_reward_curriculum:
             self.env.step_reward_curriculum(0)
         self.env.step_command_resampling_time_curriculum(0)
         
-        critic_obs = privileged_obs if privileged_obs is not None else obs
-        
-        obs, critic_obs, obs_hist, exp_labels = obs.to(self.device), critic_obs.to(self.device),obs_hist.to(self.device), exp_labels.to(self.device)
+        obs = obs.to(self.device)
+        obs_hist = obs_hist.to(self.device)
+        privileged_obs = privileged_obs.to(self.device) if privileged_obs is not None else obs
+        exp_labels = exp_labels.to(self.device)
+        depth_image = depth_obs[:, 0:1].to(self.device)
+        depth_torso_state = self._build_depth_torso_state(depth_torso_state.to(self.device))
+        terrain_map = terrain_map.to(self.device)
+        # Critic observations are rebuilt through the current privileged
+        # encoders so value targets match the latest auxiliary representation.
+        critic_obs = self.alg.build_critic_obs(privileged_obs, terrain_map)
         self.alg.actor_critic.train() # switch to train mode (for dropout for example)
 
         ep_infos = []
@@ -181,20 +222,46 @@ class OnPolicyRunnerKITE:
                 for i in range(self.num_steps_per_env):
                     # Call the algorithms act() method to store current transition data and predict actions
                     with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                        actions = self.alg.act(obs, critic_obs, obs_hist) # obs_t, (obs_t-1)
+                        # alg.act stores the pre-step transition and returns
+                        # the newest frame latent used to advance visual memory.
+                        actions, latest_depth_latent, latest_torso_lin_vel_est = self.alg.act(obs, critic_obs, obs_hist, privileged_obs, depth_image, self.depth_latent_history, depth_torso_state, terrain_map) # obs_t, (obs_t-1)
                          
                     # Submit the predicted action and extract the resulting state... 
-                    obs, privileged_obs, obs_hist, exp_labels, rewards, dones, infos, grfs = self.env.step(actions)  # obs_t+1  (obs_t)
+                    obs, privileged_obs, obs_hist, exp_labels, depth_obs, depth_torso_state, terrain_map, rewards, dones, infos = self.env.step(actions)  # obs_t+1  (obs_t)
                     
-                    # Create privileged obs
-                    critic_obs = privileged_obs if privileged_obs is not None else obs
-
                     # move everything to the correct device
-                    obs, critic_obs, obs_hist, exp_labels, rewards, dones, grfs = obs.to(self.device), critic_obs.to(self.device), \
-                        obs_hist.to(self.device), exp_labels.to(self.device), rewards.to(self.device), dones.to(self.device), grfs.to(self.device)
+                    obs = obs.to(self.device)
+                    obs_hist = obs_hist.to(self.device)
+                    privileged_obs = privileged_obs.to(self.device) if privileged_obs is not None else obs
+                    exp_labels = exp_labels.to(self.device)
+                    depth_image = depth_obs[:, 0:1].to(self.device)
+                    self.depth_torso_lin_vel_est = latest_torso_lin_vel_est     # copy this for use in the _build_depth_torso_state function
+                    if dones.any():
+                        self.depth_torso_lin_vel_est[dones.bool()] = 0.0
+                    depth_torso_state = self._build_depth_torso_state(
+                        depth_torso_state.to(self.device)
+                    )
+                    terrain_map = terrain_map.to(self.device)
+                    rewards = rewards.to(self.device)
+                    dones = dones.to(self.device)
+                    critic_obs = self.alg.build_critic_obs(privileged_obs, terrain_map)
+                    
+                    # Advance depth latent history after the action generated
+                    #     from the previous history has been stored.
+                    self.depth_latent_history = torch.cat(
+                        [
+                            self.depth_latent_history[:, 1:],
+                            latest_depth_latent.detach().unsqueeze(1),
+                        ],
+                        dim=1,
+                    )
+                    if dones.any():
+                        self.depth_latent_history[dones.bool()] = 0.0
 
                     # Log the labels associated with the context decoder as well as the typical stuff
-                    self.alg.process_env_step(rewards, dones, infos, grfs, critic_obs, exp_labels)
+                    # Pass next privileged obs as the dynamics reconstruction
+                    # target; critic_obs itself contains learned latents.
+                    self.alg.process_env_step(rewards, dones, infos, privileged_obs, exp_labels)
 
                     if self.log_dir is not None:
                         # Book keeping
@@ -215,9 +282,7 @@ class OnPolicyRunnerKITE:
                 start = stop
                 self.alg.compute_returns(critic_obs)
             
-            mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, mean_vel_loss, \
-                    mean_recon_loss, mean_kld_loss \
-                    = self.alg.update()
+            mean_value_loss, mean_surrogate_loss, mean_aux_loss, mean_aux_decoder_loss, mean_explicit_loss, mean_reconstruction_loss, mean_kl_loss, mean_aux_loss_details = self.alg.update()
             
             # Step the reward curriculum if we are doing that
             if self.env.use_reward_curriculum:
@@ -274,8 +339,8 @@ class OnPolicyRunnerKITE:
             if ep_infos and self.use_adaptive_entropy:
                 performance_metrics = {}
                 metric_names = (
-                    ("rew_tracking_lin_vel", "lin_vel_tracking"),
-                    ("rew_tracking_ang_vel", "ang_vel_tracking"),
+                    ("command_lin_tracking_ema", "lin_vel_tracking_pct"),
+                    ("command_ang_tracking_ema", "ang_vel_tracking_pct"),
                     ("terrain_level", "terrain_level"),
                 )
                 for episode_key, metric_key in metric_names:
@@ -293,10 +358,6 @@ class OnPolicyRunnerKITE:
                 entropy_coef = self.alg.update_adaptive_entropy_coef(
                     performance_metrics
                 )
-
-
-            # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
-            #     self.env.cfg.rewards.only_positive_rewards = False
             
             stop = time.time()
             learn_time = stop - start
@@ -337,11 +398,17 @@ class OnPolicyRunnerKITE:
         mean_std = self.alg.actor_critic.std.mean()
         
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
-        self.writer.add_scalar('Loss/autoenc_function', locs['mean_autoenc_loss'], locs['it'])
-        self.writer.add_scalar('Loss/velo_pred', locs['mean_vel_loss'], locs['it'])
-        self.writer.add_scalar('Loss/recon', locs['mean_recon_loss'], locs['it'])
-        self.writer.add_scalar('Loss/kl_div', locs['mean_kld_loss'], locs['it'])
-        self.writer.add_scalar('Loss/decoder_function', locs['mean_decoder_loss'], locs['it'])
+        
+        # Reconstruction stuff
+        self.writer.add_scalar('Loss/aux_total', locs['mean_aux_loss'], locs['it'])
+        self.writer.add_scalar('Loss/aux_explicit_state', locs['mean_explicit_loss'], locs['it'])
+        self.writer.add_scalar('Loss/aux_reconstruction', locs['mean_reconstruction_loss'], locs['it'])
+        self.writer.add_scalar('Loss/aux_kl', locs['mean_kl_loss'], locs['it'])
+        self.writer.add_scalar('Loss/aux_decoder', locs['mean_aux_decoder_loss'], locs['it'])
+        for name, value in locs['mean_aux_loss_details'].items():
+            self.writer.add_scalar(f'Loss/aux_detail/{name}', value, locs['it'])
+
+        # RL stuff
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
@@ -363,11 +430,11 @@ class OnPolicyRunnerKITE:
                           f"""{str.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
-                          f"""{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"""
-                          f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
-                          f"""{'KL Divergence    loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"""
-                          f"""{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"""
+                          f"""{'Auxiliary total loss:':>{pad}} {locs['mean_aux_loss']:.4f}\n"""
+                          f"""{'Explicit-state loss:':>{pad}} {locs['mean_explicit_loss']:.4f}\n"""
+                          f"""{'Reconstruction loss:':>{pad}} {locs['mean_reconstruction_loss']:.4f}\n"""
+                          f"""{'Auxiliary KL loss:':>{pad}} {locs['mean_kl_loss']:.4f}\n"""
+                          f"""{'Auxiliary decoder loss:':>{pad}} {locs['mean_aux_decoder_loss']:.4f}\n"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
@@ -380,11 +447,11 @@ class OnPolicyRunnerKITE:
                           f"""{str.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
-                          f"""{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"""
-                          f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
-                          f"""{'KL Divergence    loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"""
-                          f"""{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"""
+                          f"""{'Auxiliary total loss:':>{pad}} {locs['mean_aux_loss']:.4f}\n"""
+                          f"""{'Explicit-state loss:':>{pad}} {locs['mean_explicit_loss']:.4f}\n"""
+                          f"""{'Reconstruction loss:':>{pad}} {locs['mean_reconstruction_loss']:.4f}\n"""
+                          f"""{'Auxiliary KL loss:':>{pad}} {locs['mean_kl_loss']:.4f}\n"""
+                          f"""{'Auxiliary decoder loss:':>{pad}} {locs['mean_aux_decoder_loss']:.4f}\n"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean pos action noise std:':>{pad}} {mean_std.item():.2f}\n""")
@@ -441,8 +508,20 @@ class OnPolicyRunnerKITE:
             'act_optimizer_state_dict': self.alg.act_optimizer.state_dict(),
             'enc_optimizer_state_dict': self.alg.enc_optimizer.state_dict(),
             'enc_optimizer_format': 'bundle' if self._enc_optimizer_uses_bundle() else 'single',
-            'decoder_state_dict': self.alg.decoder.state_dict(),
-            'decoder_opt_state_dict': self.alg.decoder_optimizer.state_dict(),
+            'depth_decoder_state_dict': self.alg.depth_decoder.state_dict(),
+            'depth_decoder_opt_state_dict': self.alg.depth_decoder_optimizer.state_dict(),
+            'priv_terrain_encoder_state_dict': self.alg.priv_terrain_encoder.state_dict(),
+            'priv_terrain_decoder_state_dict': self.alg.priv_terrain_decoder.state_dict(),
+            'priv_dynamics_encoder_state_dict': self.alg.priv_dynamics_encoder.state_dict(),
+            'priv_dynamics_decoder_state_dict': self.alg.priv_dynamics_decoder.state_dict(),
+            'privileged_optimizer_state_dict': self.alg.privileged_optimizer.state_dict(),
+            'depth_to_terrain_latent_state_dict': self.alg.depth_to_terrain_latent.state_dict(),
+            'proprio_to_dynamics_latent_state_dict': self.alg.proprio_to_dynamics_latent.state_dict(),
+            'mixer_to_terrain_latent_state_dict': self.alg.mixer_to_terrain_latent.state_dict(),
+            'mixer_to_dynamics_latent_state_dict': self.alg.mixer_to_dynamics_latent.state_dict(),
+            'terrain_contrastive_head_state_dict': self.alg.terrain_contrastive_head.state_dict(),
+            'dynamics_contrastive_head_state_dict': self.alg.dynamics_contrastive_head.state_dict(),
+            'aux_projection_optimizer_state_dict': self.alg.aux_projection_optimizer.state_dict(),
             'iter': self.current_learning_iteration,
             'infos': infos,
         }
@@ -456,9 +535,42 @@ class OnPolicyRunnerKITE:
         if load_optimizer:
             self.alg.act_optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
             self._load_enc_optimizer_state(loaded_dict.get('enc_optimizer_state_dict'))
-            self.alg.decoder_optimizer.load_state_dict(loaded_dict['decoder_opt_state_dict'])
-        # Load the VAE decoder model...
-        self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
+            if 'depth_decoder_opt_state_dict' in loaded_dict:
+                self.alg.depth_decoder_optimizer.load_state_dict(loaded_dict['depth_decoder_opt_state_dict'])
+            if 'privileged_optimizer_state_dict' in loaded_dict:
+                self.alg.privileged_optimizer.load_state_dict(loaded_dict['privileged_optimizer_state_dict'])
+            if 'aux_projection_optimizer_state_dict' in loaded_dict:
+                try:
+                    self.alg.aux_projection_optimizer.load_state_dict(loaded_dict['aux_projection_optimizer_state_dict'])
+                except ValueError:
+                    print(
+                        "Skipping auxiliary projection optimizer state because "
+                        "its parameter groups do not match the current KITE "
+                        "auxiliary projection modules. Model weights were "
+                        "loaded; this optimizer will be reinitialized."
+                    )
+        if 'depth_decoder_state_dict' in loaded_dict:
+            self.alg.depth_decoder.load_state_dict(loaded_dict['depth_decoder_state_dict'])
+        if 'priv_terrain_encoder_state_dict' in loaded_dict:
+            self.alg.priv_terrain_encoder.load_state_dict(loaded_dict['priv_terrain_encoder_state_dict'])
+        if 'priv_terrain_decoder_state_dict' in loaded_dict:
+            self.alg.priv_terrain_decoder.load_state_dict(loaded_dict['priv_terrain_decoder_state_dict'])
+        if 'priv_dynamics_encoder_state_dict' in loaded_dict:
+            self.alg.priv_dynamics_encoder.load_state_dict(loaded_dict['priv_dynamics_encoder_state_dict'])
+        if 'priv_dynamics_decoder_state_dict' in loaded_dict:
+            self.alg.priv_dynamics_decoder.load_state_dict(loaded_dict['priv_dynamics_decoder_state_dict'])
+        if 'depth_to_terrain_latent_state_dict' in loaded_dict:
+            self.alg.depth_to_terrain_latent.load_state_dict(loaded_dict['depth_to_terrain_latent_state_dict'])
+        if 'proprio_to_dynamics_latent_state_dict' in loaded_dict:
+            self.alg.proprio_to_dynamics_latent.load_state_dict(loaded_dict['proprio_to_dynamics_latent_state_dict'])
+        if 'mixer_to_terrain_latent_state_dict' in loaded_dict:
+            self.alg.mixer_to_terrain_latent.load_state_dict(loaded_dict['mixer_to_terrain_latent_state_dict'])
+        if 'mixer_to_dynamics_latent_state_dict' in loaded_dict:
+            self.alg.mixer_to_dynamics_latent.load_state_dict(loaded_dict['mixer_to_dynamics_latent_state_dict'])
+        if 'terrain_contrastive_head_state_dict' in loaded_dict:
+            self.alg.terrain_contrastive_head.load_state_dict(loaded_dict['terrain_contrastive_head_state_dict'])
+        if 'dynamics_contrastive_head_state_dict' in loaded_dict:
+            self.alg.dynamics_contrastive_head.load_state_dict(loaded_dict['dynamics_contrastive_head_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']
         return loaded_dict['infos']
 

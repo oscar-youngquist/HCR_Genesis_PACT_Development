@@ -312,6 +312,96 @@ class ConvNormAct(nn.Module):
         return self.block(x)
 
 
+# --------------------------------------------------------------------------
+# Optional contrastive projection head
+# --------------------------------------------------------------------------
+class ContrastiveProjectionHead(nn.Module):
+    """
+    Projection head for contrastive alignment.
+
+    Use this for InfoNCE/cosine contrastive losses instead of applying the
+    contrastive loss directly to the policy latent.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        projection_dim: int = 32,
+        hidden_dim: int = 64,
+        activation: str = "elu",
+    ):
+        super().__init__()
+
+        act = get_activation(activation)
+
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            act,
+            nn.Linear(hidden_dim, projection_dim),
+        )
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(
+                    m.weight,
+                    a=1.0,
+                    mode="fan_in",
+                    nonlinearity="leaky_relu",
+                )
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor):
+        z = self.net(x)
+        z = F.normalize(z, p=2, dim=-1, eps=1e-6)
+        return z
+
+
+
+class ReconDimensionProjectionHead(nn.Module):
+    """
+    Dimension-matching head for aligning history encoders with privileged decoders.
+
+    Use this for InfoNCE/cosine contrastive losses instead of applying the
+    contrastive loss directly to the policy latent.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        recon_dim: int = 32,
+        activation: str = "elu",
+    ):
+        super().__init__()
+
+        act = get_activation(activation)
+
+        self.net = nn.Sequential(
+            act,
+            nn.Linear(input_dim, recon_dim),
+        )
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(
+                    m.weight,
+                    a=1.0,
+                    mode="fan_in",
+                    nonlinearity="leaky_relu",
+                )
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor):
+        z = self.net(x)
+        return z
+
 def get_activation(act_name):
     if act_name == "elu":
         return nn.ELU(inplace=True)

@@ -5,7 +5,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, List, Dict, Any
 
-from module_utils import get_activation, EfficientMultiHeadAttention, MLPMixerBlock, make_2d_norm, make_1d_norm, ConvNormAct
+from .module_utils import (
+    ConvNormAct,
+    EfficientMultiHeadAttention,
+    MLPMixerBlock,
+    get_activation,
+)
 
 
 class TerrainAttentionEncoder(nn.Module):

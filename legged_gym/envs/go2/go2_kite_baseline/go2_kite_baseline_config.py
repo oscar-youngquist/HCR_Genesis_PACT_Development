@@ -6,7 +6,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 57
-        num_privileged_obs = 57 + (51 + 33) + 143 # robot_state + privilged info + terrain_heights (143)
+        num_privileged_obs = 57 + (51 + 33) # robot_state + privileged info
         num_priv_stack = 5
         # num_explicit_recon_obs = 3 + 4 + 4 + 12 # torso lin-velo, feet contact states, feet height
         num_explicit_recon_obs = 3 + 4 + 4 # torso lin-velo, feet contact states, feet height
@@ -56,11 +56,11 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         debug_surface_normal_radius = 0.003
         debug_surface_normal_color = (1.0, 0.8, 0.0, 1.0)
         debug_surface_normal_refresh_steps = 5
-        
+
         # positions of the sampling height around the base (relative to the base of the robot)
         measured_points_x = [-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6] # 11x13 = 143
         measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
-        
+
         selected = False # select a unique terrain type and pass all arguments
         terrain_kwargs = None # Dict of arguments for selected terrain
         max_init_terrain_level = 0 # starting curriculum level
@@ -653,6 +653,9 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         cenet_enc_latent_dim = 16
         # cenet_velo_dim = 3 + 4 + 4 + 12   # torso velocity, foot-contact indicator, foot-height 
         cenet_velo_dim = 3 + 4 + 4   # torso velocity, foot-contact indicator, foot-height 
+        depth_sequence_length = 5
+        privileged_terrain_latent_dim = 16
+        privileged_dynamics_latent_dim = 16
 
         # Context Decoder
         # cenet_dec_input_dim = 27 + 12
@@ -695,6 +698,21 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         adaptive_ent_ang_threshold = 0.35
         adaptive_ent_ter_threshold = 6.0
         adaptive_ent_softmax_temp = 2.0
+        depth_frame_recon_weight = 1.0
+        depth_frame_kl_weight = 1.0e-3
+        depth_sequence_terrain_weight = 1.0
+        depth_sequence_kl_weight = 1.0e-3
+        proprio_dynamics_weight = 1.0
+        proprio_kl_weight = 1.0e-3
+        modality_terrain_weight = 1.0
+        modality_dynamics_weight = 1.0
+        modality_explicit_weight = 1.0
+        modality_kl_weight = 1.0e-3
+        contrastive_weight = 0.1
+        contrastive_lambda = 0.5
+        contrastive_margin = 1.0
+        versatility_weight = 0.01
+        versatility_lambda_e = 0.1
 
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_KITE'

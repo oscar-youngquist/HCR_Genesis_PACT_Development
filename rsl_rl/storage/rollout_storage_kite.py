@@ -29,20 +29,21 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 import torch
-import numpy as np
-
-from rsl_rl.utils import split_and_pad_trajectories
 
 class RolloutStorageKITE:
     class Transition:
         def __init__(self):
             self.observations = None
-            self.critic_observations = None
             self.observation_history = None
+            self.privileged_observation_history = None
+            self.depth_images = None
+            self.depth_latent_history = None
+            self.depth_torso_state = None
+            self.terrain_map = None
+            self.contrastive_negative_anchor = None
             self.dones = None
 
             self.explicit_labels = None  # same timestep as observations, used by encoder output
-            self.grf_targets = None  # next time-step from observations, used by decoder output
             self.obs_targets = None  # next time-step from observations, used by decoder output
 
             self.actions = None
@@ -58,28 +59,83 @@ class RolloutStorageKITE:
             self.__init__()
 
     # We want all of the actions and associated data formatted in the Model kinematic definition - [FR, FL, RR, RL]
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, device="cpu"):
+    def __init__(
+        self,
+        num_envs,
+        num_transitions_per_env,
+        obs_shape,
+        single_critic_obs_shape,
+        obs_hist_shape,
+        actions_shape,
+        explicit_shape,
+        depth_image_shape,
+        depth_latent_history_shape,
+        depth_torso_state_shape,
+        terrain_map_shape,
+        priv_obs_history_shape,
+        contrastive_anchor_shape,
+        device="cpu",
+    ):
 
         self.device = device
 
         self.obs_shape        = obs_shape
-        self.critic_obs_shape = critic_obs_shape
         self.actions_shape    = actions_shape
 
-        # Core
+        # Core PPO tensors.
         self.observations        = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
-        self.critic_observations = torch.zeros(num_transitions_per_env, num_envs, *critic_obs_shape, device=self.device)
         self.observation_history = torch.zeros(num_transitions_per_env, num_envs, *obs_hist_shape, device=self.device)    
+        # Raw privileged history is kept so PPO can rebuild critic inputs from
+        # current privileged encoders during the update step.
+        self.privileged_observation_history = torch.zeros(
+            num_transitions_per_env,
+            num_envs,
+            *priv_obs_history_shape,
+            device=self.device,
+        )
+        # Store only the newest processed depth image. Previous visual context
+        # is stored as depth-frame latents to reduce rollout VRAM.
+        self.depth_images = torch.zeros(
+            num_transitions_per_env,
+            num_envs,
+            *depth_image_shape,
+            device=self.device,
+        )
+        self.depth_latent_history = torch.zeros(
+            num_transitions_per_env,
+            num_envs,
+            *depth_latent_history_shape,
+            device=self.device,
+        )
+        # 8D body-motion conditioning vector for the depth-frame encoder.
+        self.depth_torso_state = torch.zeros(
+            num_transitions_per_env,
+            num_envs,
+            *depth_torso_state_shape,
+            device=self.device,
+        )
+        # Privileged terrain supervision map: height plus surface normal field.
+        self.terrain_maps = torch.zeros(
+            num_transitions_per_env,
+            num_envs,
+            *terrain_map_shape,
+            device=self.device,
+        )
+        # One random negative anchor is shared by the staged contrastive losses.
+        self.contrastive_negative_anchors = torch.zeros(
+            num_transitions_per_env,
+            num_envs,
+            *contrastive_anchor_shape,
+            device=self.device,
+        )
         self.dones               = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
         
-        # specific to DreamWaQ style history encoder...
+        # Auxiliary supervision targets used by the KITE encoder losses.
         self.explicit_labels = torch.zeros(num_transitions_per_env, num_envs, *explicit_shape, device=self.device)
-        self.grf_targets = torch.zeros(num_transitions_per_env, num_envs, *grf_shape, device=self.device)
-        self.observation_targets = torch.zeros(num_transitions_per_env, num_envs, *sinle_critc_obs_shape, device=self.device)
+        self.observation_targets = torch.zeros(num_transitions_per_env, num_envs, *single_critic_obs_shape, device=self.device)
 
         
-        # For PPO
-        # Need a set of these for each "task" (position control and torque control)
+        # PPO rollout tensors.
         self.rewards          = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.actions          = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
@@ -105,17 +161,22 @@ class RolloutStorageKITE:
             raise AssertionError("Rollout buffer overflow")
         
         self.observations[self.step].copy_(transition.observations)
-        self.critic_observations[self.step].copy_(transition.critic_observations)
         self.observation_history[self.step].copy_(transition.observation_history)
+        # These tensors are captured before stepping the environment, so they
+        # line up with the action/log-prob/value stored for the same timestep.
+        self.privileged_observation_history[self.step].copy_(transition.privileged_observation_history)
+        self.depth_images[self.step].copy_(transition.depth_images)
+        self.depth_latent_history[self.step].copy_(transition.depth_latent_history)
+        self.depth_torso_state[self.step].copy_(transition.depth_torso_state)
+        self.terrain_maps[self.step].copy_(transition.terrain_map)
+        self.contrastive_negative_anchors[self.step].copy_(transition.contrastive_negative_anchor)
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
         
-        # Specific to DreamWaQ style history encoder
+        # Auxiliary labels for explicit-state and dynamics reconstruction heads.
         self.explicit_labels[self.step].copy_(transition.explicit_labels)
-        self.grf_targets[self.step].copy_(transition.grf_targets)
         self.observation_targets[self.step].copy_(transition.obs_targets)
         
-        # Need a set for each "task"
-        #  - Position Control
+        # Action distribution tensors saved from the policy that generated the rollout.
         self.actions[self.step].copy_(transition.actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.values[self.step].copy_(transition.values)
@@ -175,11 +236,16 @@ class RolloutStorageKITE:
         indices = torch.randperm(num_mini_batches*mini_batch_size, requires_grad=False, device=self.device)
 
         observations = self.observations.flatten(0, 1)
-        critic_observations = self.critic_observations.flatten(0, 1)
         obs_history = self.observation_history.flatten(0,1)
+        # Flatten time and environment dimensions for random mini-batches.
+        privileged_obs_history = self.privileged_observation_history.flatten(0, 1)
+        depth_images = self.depth_images.flatten(0, 1)
+        depth_latent_history = self.depth_latent_history.flatten(0, 1)
+        depth_torso_state = self.depth_torso_state.flatten(0, 1)
+        terrain_maps = self.terrain_maps.flatten(0, 1)
+        contrastive_negative_anchors = self.contrastive_negative_anchors.flatten(0, 1)
 
         explicit_labels = self.explicit_labels.flatten(0,1)
-        grf_labels = self.grf_targets.flatten(0,1)
         obs_targets = self.observation_targets.flatten(0,1)
 
         actions = self.actions.flatten(0, 1)
@@ -201,15 +267,19 @@ class RolloutStorageKITE:
 
                 # Baseline PPO stuff
                 obs_batch = observations[batch_idx]
-                critic_observations_batch = critic_observations[batch_idx]
                 obs_hist_batch = obs_history[batch_idx]
+                privileged_obs_history_batch = privileged_obs_history[batch_idx]
+                depth_images_batch = depth_images[batch_idx]
+                depth_latent_history_batch = depth_latent_history[batch_idx]
+                depth_torso_state_batch = depth_torso_state[batch_idx]
+                terrain_maps_batch = terrain_maps[batch_idx]
+                contrastive_negative_anchor_batch = contrastive_negative_anchors[batch_idx]
 
-                # DreamWaQ Style History Encoder stuff
+                # Auxiliary KITE encoder targets.
                 explicit_labels_batch = explicit_labels[batch_idx]
-                grf_labels_batch = grf_labels[batch_idx]
                 obs_labels_batch = obs_targets[batch_idx]
 
-                # Position Control RL Task
+                # PPO action/value tensors.
                 actions_batch = actions[batch_idx]
                 target_values_batch = values[batch_idx]
                 returns_batch = returns[batch_idx]
@@ -220,7 +290,23 @@ class RolloutStorageKITE:
 
                 terminated_batch = 1.0 - dones[batch_idx]
   
-                yield terminated_batch, obs_batch, critic_observations_batch, obs_hist_batch, explicit_labels_batch, \
-                        grf_labels_batch, obs_labels_batch, actions_batch, target_values_batch, \
-                        advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
-                        old_sigma_batch
+                yield (
+                    terminated_batch,
+                    obs_batch,
+                    obs_hist_batch,
+                    privileged_obs_history_batch,
+                    depth_images_batch,
+                    depth_latent_history_batch,
+                    depth_torso_state_batch,
+                    terrain_maps_batch,
+                    contrastive_negative_anchor_batch,
+                    explicit_labels_batch,
+                    obs_labels_batch,
+                    actions_batch,
+                    target_values_batch,
+                    advantages_batch,
+                    returns_batch,
+                    old_actions_log_prob_batch,
+                    old_mu_batch,
+                    old_sigma_batch,
+                )

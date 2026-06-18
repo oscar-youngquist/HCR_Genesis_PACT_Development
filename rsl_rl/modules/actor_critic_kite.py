@@ -171,20 +171,26 @@ class ActorCritic_KITE(nn.Module):
                  cenet_velo_dim=3, 
                  cenet_enc_layers=[256,128,64],
                  activation="tanh", 
-                 init_noise_std=1.0,):
+                 init_noise_std=1.0,
+                 depth_sequence_length=5,):
         super().__init__()
 
         self.num_actor_obs = num_actor_obs
         self.cenet_latent_dim = cenet_latent_dim
         self.cenet_velo_dim = cenet_velo_dim
         self.depth_latent_dim = cenet_latent_dim
-        self.depth_sequence_length = 5
+        
+        # Number of depth-frame latents consumed by the sequence encoder. The
+        #      runner stores depth_sequence_length - 1 previous latents plus the
+        #      current image encoded on demand.
+        self.depth_sequence_length = depth_sequence_length
         self.depth_image_resolution = (48, 64)
         self.body_velo_dim = min(3, cenet_velo_dim)
         self.feet_state_dim = max(cenet_velo_dim - self.body_velo_dim, 0)
 
         num_proprio_tokens = num_actor_obs
         input_dim_per_token = cenet_in_dim // max(num_proprio_tokens, 1)
+        
         if num_proprio_tokens * input_dim_per_token != cenet_in_dim:
             raise ValueError(
                 "KITE proprio mixer expects cenet_in_dim to be an integer "
@@ -393,9 +399,11 @@ class ActorCritic_KITE(nn.Module):
         raise NotImplementedError
 
     def build_depth_async_pipeline(self) -> KITEDepthAsyncPipeline:
+        # Export/deployment helper for the 10 Hz visual pipeline.
         return KITEDepthAsyncPipeline(self)
 
     def build_actor_async_pipeline(self) -> KITEActorAsyncPipeline:
+        # Export/deployment helper for the 50 Hz policy pipeline.
         return KITEActorAsyncPipeline(self)
 
     def _make_default_depth_image(self, obs):
@@ -568,7 +576,7 @@ class ActorCritic_KITE(nn.Module):
 
     # method used during simulated training
     @torch.jit.ignore
-    def act(
+    def act_with_estimates(
         self,
         obs,
         obs_history,
@@ -577,7 +585,6 @@ class ActorCritic_KITE(nn.Module):
         depth_torso_state=None,
         **kwargs,
     ):
-        # Call the forward method of the context encoder
         _, _, z, body_velo_est, feet_state_est = self.cenet_enc_forward(
             obs_history,
             obs=obs,
@@ -595,14 +602,11 @@ class ActorCritic_KITE(nn.Module):
         self.update_distribution(current_obs)
 
         sample = self.distribution.sample()
-        
-        # return a sample from the distribution to be executed in simulation
-        return sample
-    
 
-    # method used during simulated training
+        return sample, body_velo_est, feet_state_est
+
     @torch.jit.ignore
-    def act_bootmask(
+    def act(
         self,
         obs,
         obs_history,
@@ -611,7 +615,29 @@ class ActorCritic_KITE(nn.Module):
         depth_torso_state=None,
         **kwargs,
     ):
-        # Call the forward method of the context encoder
+        sample, _, _ = self.act_with_estimates(
+            obs,
+            obs_history,
+            depth_image=depth_image,
+            depth_latent_history=depth_latent_history,
+            depth_torso_state=depth_torso_state,
+            **kwargs,
+        )
+        # return a sample from the distribution to be executed in simulation
+        return sample
+
+
+    # method used during simulated training
+    @torch.jit.ignore
+    def act_bootmask_with_estimates(
+        self,
+        obs,
+        obs_history,
+        depth_image=None,
+        depth_latent_history=None,
+        depth_torso_state=None,
+        **kwargs,
+    ):
         _, _, z, body_velo_est, feet_state_est = self.cenet_enc_forward(
             obs_history,
             obs=obs,
@@ -635,10 +661,30 @@ class ActorCritic_KITE(nn.Module):
         self.update_distribution(current_obs)
 
         sample = self.distribution.sample()
-        
+
+        return sample, body_velo_est, feet_state_est
+
+    @torch.jit.ignore
+    def act_bootmask(
+        self,
+        obs,
+        obs_history,
+        depth_image=None,
+        depth_latent_history=None,
+        depth_torso_state=None,
+        **kwargs,
+    ):
+        sample, _, _ = self.act_bootmask_with_estimates(
+            obs,
+            obs_history,
+            depth_image=depth_image,
+            depth_latent_history=depth_latent_history,
+            depth_torso_state=depth_torso_state,
+            **kwargs,
+        )
         # return a sample from the distribution to be executed in simulation
         return sample
-    
+
     # Method using during simulated inference
     @torch.jit.export
     def act_inference(

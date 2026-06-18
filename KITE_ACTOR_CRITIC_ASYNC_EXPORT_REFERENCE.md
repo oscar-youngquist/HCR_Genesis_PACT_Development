@@ -43,7 +43,7 @@ flowchart TD
     A[Environment step produces observations] --> B[obs: current proprioceptive observation]
     A --> C[obs_history: proprioceptive history window]
     A --> D[depth_image: newest processed depth frame]
-    A --> E[depth_torso_state: camera/body motion state]
+    A --> E[depth_torso_state: roll/pitch, boot-gated body velocity, IMU gyro]
     A --> F[depth_latent_history: previous depth-frame latents]
 
     C --> G[ProprioContextMLPMixerKITE]
@@ -117,7 +117,7 @@ flowchart TD
     C[Load kite_actor_50hz_pipeline.pt] --> D[Control loop at 50 Hz]
 
     B --> E[Read latest processed depth image]
-    B --> F[Read depth_torso_state]
+    B --> F[Read depth_torso_state: roll/pitch, predicted or fallback body velocity, IMU gyro]
     B --> G[Read stored depth_latent_history]
     E --> H[Depth TorchScript model]
     F --> H

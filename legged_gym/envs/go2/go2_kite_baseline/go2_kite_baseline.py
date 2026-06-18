@@ -56,12 +56,23 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         self.init_done = True
 
     def get_observations(self):
-        return self.obs_buf, self.obs_history, self.privileged_obs_buf, self.explicit_labels_buf
+        # KITE training consumes proprioception plus separate visual/terrain
+        # tensors. Keeping terrain maps separate prevents raw terrain from
+        # being appended to the privileged critic observation.
+        return (
+            self.obs_buf,
+            self.obs_history,
+            self.privileged_obs_buf,
+            self.explicit_labels_buf,
+            self.get_depth_observations(),
+            self.depth_torso_state_buf,
+            self.terrain_map_buf,
+        )
 
     def reset(self):
         """ Reset all robots"""
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
-        obs, privileged_obs, _, _, _, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
+        obs, privileged_obs, *_ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
         return obs, privileged_obs
 
     def step(self, actions):
@@ -84,8 +95,21 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             self.privileged_obs_buf = torch.clip(
                 self.privileged_obs_buf, -clip_obs, clip_obs)
         
-        return self.obs_buf, self.privileged_obs_buf, self.obs_history, self.explicit_labels_buf, \
-            self.rew_buf, self.reset_buf, self.extras, (self.simulator._grfs_buf * self.obs_scales.grf)
+        # Return the next-step tensors used both for PPO rollout storage and
+        # auxiliary encoder targets.
+        return (
+            self.obs_buf,
+            self.privileged_obs_buf,
+            self.obs_history,
+            self.explicit_labels_buf,
+            self.get_depth_observations(),
+            self.depth_torso_state_buf,
+            self.terrain_map_buf,
+            self.rew_buf,
+            self.reset_buf,
+            self.extras,
+            (self.simulator._grfs_buf * self.obs_scales.grf),
+        )
 
     def set_camera(self, pos, lookat):
         """ Set camera position and direction
@@ -557,16 +581,62 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         ) # 141
 
         # add hieght measurements to asymmetric critic if approperiate
-        if self.cfg.terrain.measure_heights:
-            heights = torch.clip(self.simulator.base_pos[:, 2].unsqueeze(1) - 0.5 \
-                                 - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements # 81
-            heights *= self.height_noise_vec
-            critic_obs = torch.cat((critic_obs, heights), dim=-1) # 207
+        self._update_privileged_terrain_map()
+        self._update_depth_torso_state()
 
         self.critic_obs_deque.append(critic_obs)
         self.privileged_obs_buf = torch.cat(
             [self.critic_obs_deque[i]
                 for i in range(self.critic_obs_deque.maxlen)],
+            dim=-1,
+        )
+
+    def _update_privileged_terrain_map(self):
+        """Build the privileged terrain target map for encoder supervision.
+
+        The map is B x H x W x 4 with channels:
+            [height, normal_x, normal_y, normal_z].
+        """
+        if not self.cfg.terrain.measure_heights:
+            self.terrain_map_buf.zero_()
+            self.terrain_map_buf[..., 3] = 1.0
+            return
+
+        num_x = len(self.cfg.terrain.measured_points_x)
+        num_y = len(self.cfg.terrain.measured_points_y)
+        heights = torch.clip(
+            self.simulator.base_pos[:, 2].unsqueeze(1)
+            - 0.5
+            - self.simulator.measured_heights,
+            -1,
+            1,
+        ) * self.obs_scales.height_measurements
+        heights *= self.height_noise_vec
+        height_map = heights.view(self.num_envs, num_x, num_y, 1)
+        normal_map = self.simulator.measured_surface_normals.view(
+            self.num_envs,
+            num_x,
+            num_y,
+            3,
+        )
+        self.terrain_map_buf = torch.cat((height_map, normal_map), dim=-1)
+
+    def _update_depth_torso_state(self):
+        """Collect IMU fields for the depth encoder's 8D torso state.
+
+        Columns 2:5 start as simulator ground-truth linear velocity. The
+        runner overwrites them with the latest modality-mixer estimate only
+        when the reconstruction boot gate says the learned state is reliable.
+        Final order is:
+            [roll, pitch, v_x, v_y, v_z, gyro_x, gyro_y, gyro_z].
+        """
+        roll_pitch = get_euler_xyz(self.simulator.base_quat)[:, :2]
+        self.depth_torso_state_buf = torch.cat(
+            (
+                roll_pitch,
+                self.simulator.base_lin_vel,
+                self.simulator.base_ang_vel,
+            ),
             dim=-1,
         )
 
@@ -1010,6 +1080,27 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             (self.num_envs, self.num_obs * self.num_obs_hist), device=self.device, dtype=torch.float)
         
         self.leg_jacobians = torch.zeros((self.num_envs, 4, 3, 3), dtype=torch.float, device=self.device)
+        # IMU/depth-conditioning state for MotionRobustDepthEncoder. Columns
+        # 2:5 are simulator linear velocity unless the runner's boot gate
+        # replaces them with the latest modality-mixer velocity estimate.
+        self.depth_torso_state_buf = torch.zeros(
+            (self.num_envs, 8),
+            dtype=torch.float,
+            device=self.device,
+        )
+        # Privileged terrain target used by TerrainAttentionEncoder and
+        # TerrainTwoHeadDecoder. Channel order is height + XYZ normal.
+        self.terrain_map_buf = torch.zeros(
+            (
+                self.num_envs,
+                len(self.cfg.terrain.measured_points_x),
+                len(self.cfg.terrain.measured_points_y),
+                4,
+            ),
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.terrain_map_buf[..., 3] = 1.0
 
         for _ in range(self.cfg.env.num_obs_hist):
             self.obs_history_deque.append(
