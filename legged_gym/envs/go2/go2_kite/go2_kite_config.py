@@ -547,12 +547,18 @@ class GO2KITECfg( LeggedRobotCfg ):
             #                       "ang_vel_xy":[-0.05, -0.2]
             #                      }
 
-            curr_reward_keys = [
+            curr_reward_keys = ["torque_limits",
+                                "action_rate",
+                                "action_smoothness",
+                                "dof_acc",
                                 "torso_force_wrench_ellipsoid", 
                                 "swing_vel_ellipsoid_terrain"
                                 ]
             
-            curr_reward_bounds = {
+            curr_reward_bounds = {"torque_limits":[-1.0e-5,-1.0e-3],
+                                  "action_rate":[-0.01, -0.001],
+                                  "action_smoothness":[-0.01, -0.001],
+                                  "dof_acc":[-2.0e-7, -2.0e-8],
                                   "torso_force_wrench_ellipsoid":[0.2, 0.6],
                                   "swing_vel_ellipsoid_terrain":[0.1, 0.4]
                                  }

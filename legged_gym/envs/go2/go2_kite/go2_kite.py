@@ -1139,10 +1139,10 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             adjusted_iter = num_iters - self.reward_warmup_steps
             for key in self.reward_curr_keys:
                 if key in self.reward_scales.keys():
-                    low, high = self.reward_curr_bounds[key]
+                    start, end = self.reward_curr_bounds[key]
                     alpha = np.clip(adjusted_iter / self.reward_curr_steps, 0.0, 1.0)
                     ramp = 0.5 * (1.0 - np.cos(np.pi * alpha))
-                    self.reward_scales[key] = (low + (high - low) * ramp) * self.dt
+                    self.reward_scales[key] = (start + (end - start) * ramp) * self.dt
         # Fix the regularization strength to the upper-bound
         else:
             # by default set the reward to the upper bound
@@ -1332,10 +1332,10 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         - self._swing_mask -> (B, 4) in {0,1}
         """
         eps = 1e-6
-        J = _sanitize_tensor(self.leg_jacobians)                                # (B, 4, 3, nj)
+        J = _sanitize_tensor(self.leg_jacobians)                                            # (B, 4, 3, nj)
         n = _sanitize_tensor(self.simulator._normal_vector_around_feet.reshape(-1, 4, 3))   # (B, 4, 3)
         swing = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
-                 ).float()                                                # (B, 4)
+                 ).float()                                                                  # (B, 4)
 
         # velocity ellipsoid matrix: M = J J^T
         M = J @ J.transpose(-1, -2)                             # (B, 4, 3, 3)
