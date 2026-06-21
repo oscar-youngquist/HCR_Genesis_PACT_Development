@@ -558,7 +558,7 @@ class GO2KITECfg( LeggedRobotCfg ):
                                  }
 
             curr_steps = 1000
-            warmup_steps = 3000
+            warmup_steps = 5000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -604,33 +604,55 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
     class policy( LeggedRobotCfgPPO.policy ):
         activation = 'elu' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid, swish (SiLU)
         init_noise_std = 1.00
-        
-        # Context encoder
-        cenet_enc_layers=[512,256,128]
-        cenet_enc_latent_dim = 16
-        cenet_velo_dim = 3 + 4 + 4 + 12   # torso velocity, foot-contact indicator, foot-height 
-        # cenet_velo_dim = 3 + 4 + 4   # torso velocity, foot-contact indicator, foot-height 
-        depth_sequence_length = 5
-        
-        privileged_terrain_latent_dim = 32
-        privileged_dynamics_latent_dim = 16
 
-        # Context Decoder
-        cenet_dec_input_dim = 27 + 12
-        # cenet_dec_input_dim = 27
-        cenet_dec_layers = [32,128,256,512]
-        cenet_dec_out_dim = 45 + (51 + 33) + 143     # next obs (45) + grf_dim (12)
+        # Privileged Encoder/Decoder
+        priv_activation = 'elu'
+
+        privileged_terrain_latent_dim = 32
+        cnn_norm_type = "layer"
+        terrain_encoder_attention_dim = 128
+        terrain_encoder_n_heads = 4
+        terrain_decoder_hidden_dim = 128
+        terrain_decoder_encoded_spatial_dim = (3,4)
+        terrain_decoder_channels = 64
+
+        privileged_dynamics_latent_dim = 16
+        priv_mixer_num_blocks = 2
+        priv_mixer_hidden_dim = 128
+        priv_mixer_token_dim = 128
+        priv_mixer_channel_dim = 256
+        priv_mixer_use_layer_norm = True
+        privileged_dynamics_decoder_layers = [32,64,128,256]
+
+        # Depth Image/Sequence Models
+        depth_image_latent_dim = 32
+        depth_image_norm = "layer"
+        depth_sequence_length = 5
+        depth_sequence_norm = "layer"
+        cnn_activation = 'elu'
+        
+        # Proprioceptive Context encoder
+        proprio_in_dim = 450
+        proprio_latent_dim = 16
+        proprio_use_norm = True
+        proprio_num_blocks = 2
+        proprio_hidden_dim = 128
+        proprio_token_dim = 128
+        proprio_channel_dim = 256
+
+        # Modality Mixer Network
+        mixer_velo_dim = 3                   # torso velocity state [v_x, v_y, v_z]
+        mixer_feet_state_dim = 20            # [feet-contact-state (4), feet-height (4), surface-normal under feet (12)]
+        mixer_latent_dim = 32
+        mixer_use_norm = True
+        mixer_num_blocks = 2
+        mixer_hidden_dim = 128
+        mixer_token_dim = 128
+        mixer_channel_dim = 256
 
         # Actor/critic
         actor_layers = [512,256,128]
-        critic_layers = [1024,256,128]
-        
-        # Shared
-        dropout = 0.1
-
-        pinn_loss_weight = 0.01
-        pinn_warmup = 10000
-        pinn_init_steps = 0
+        critic_layers = [512,256,128]
 
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
         
@@ -687,7 +709,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_KITE'
         algorithm_class_name = 'PPO_KITE'
         num_steps_per_env = 24 # per iteration
-        max_iterations = 7000 # number of policy updates
+        max_iterations = 8000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb

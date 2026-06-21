@@ -73,26 +73,44 @@ class OnPolicyRunnerKITE:
         )
         num_critic_obs = (
             latest_privileged_obs_dim
-            + self.policy_cfg.get("privileged_terrain_latent_dim", 16)
+            + self.policy_cfg.get("privileged_terrain_latent_dim", 32)
             + self.policy_cfg.get("privileged_dynamics_latent_dim", 16)
         )
 
         actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
         
-        cenet_input_dim = self.env.num_obs * self.env.num_obs_hist
 
         actor_critic: ActorCritic_KITE = actor_critic_class(self.env.num_obs,
-                                                                num_critic_obs,
-                                                                self.env.num_actions,
-                                                                self.policy_cfg["actor_layers"],
-                                                                self.policy_cfg["critic_layers"],
-                                                                cenet_input_dim,
-                                                                self.policy_cfg["cenet_enc_latent_dim"],
-                                                                self.policy_cfg["cenet_velo_dim"],
-                                                                self.policy_cfg["cenet_enc_layers"],
-                                                                self.policy_cfg["activation"],
-                                                                self.policy_cfg["init_noise_std"],
-                                                                self.policy_cfg.get("depth_sequence_length", 5)).to(self.device)        
+                                                            self.env.num_obs_hist,
+                                                            num_critic_obs,
+                                                            self.env.depth_output_resolution,
+                                                            self.policy_cfg["depth_image_latent_dim"],
+                                                            self.policy_cfg["depth_image_norm"],
+                                                            self.policy_cfg.get("depth_sequence_length", 5),
+                                                            self.policy_cfg["depth_sequence_norm"],
+                                                            
+                                                            self.policy_cfg["proprio_in_dim"],
+                                                            self.policy_cfg["proprio_latent_dim"],
+                                                            self.policy_cfg["proprio_use_norm"],
+                                                            self.policy_cfg["proprio_num_blocks"],
+                                                            self.policy_cfg["proprio_hidden_dim"],
+                                                            self.policy_cfg["proprio_token_dim"],
+                                                            self.policy_cfg["proprio_channel_dim"],
+                                                            
+                                                            self.policy_cfg["mixer_velo_dim"],
+                                                            self.policy_cfg["mixer_feet_state_dim"],
+                                                            self.policy_cfg["mixer_latent_dim"],
+                                                            self.policy_cfg["mixer_use_norm"],
+                                                            self.policy_cfg["mixer_blocks"],
+                                                            self.policy_cfg["mixer_hidden_dim"],
+                                                            self.policy_cfg["mixer_token_dim"],
+                                                            self.policy_cfg["mixer_channel_dim"],
+                                                            self.env.num_actions,
+                                                            self.policy_cfg["actor_layers"],
+                                                            self.policy_cfg["critic_layers"],
+                                                            self.policy_cfg["activation"],
+                                                            self.policy_cfg["init_noise_std"],
+                                                            ).to(self.device)        
         print("Created Actor-Critic Model")
         pretty_print_module(actor_critic)
 
@@ -109,12 +127,24 @@ class OnPolicyRunnerKITE:
         )
         self.alg: PPO_KITE = alg_class(
             actor_critic,
-            self.env.num_privileged_obs,
+            latest_privileged_obs_dim,
             terrain_map_shape=terrain_map_shape,
-            priv_obs_history_dim=self.env.num_crit_obs_stack * self.env.num_privileged_obs,
-            latest_privileged_obs_dim=latest_privileged_obs_dim,
-            privileged_terrain_latent_dim=self.policy_cfg.get("privileged_terrain_latent_dim", 16),
+            num_priv_obs_history=self.env.num_crit_obs_stack,
+            privileged_terrain_latent_dim=self.policy_cfg.get("privileged_terrain_latent_dim", 32),
             privileged_dynamics_latent_dim=self.policy_cfg.get("privileged_dynamics_latent_dim", 16),
+            priv_activation_func=self.policy_cfg.get("priv_activation", "elu"),
+            cnn_norm_type=self.policy_cfg.get("cnn_norm_type", "layer"),
+            terrain_encoder_attention_dim=self.policy_cfg.get("terrain_encoder_attention_dim", 128),
+            terrain_encoder_n_heads=self.policy_cfg.get("terrain_encoder_n_heads", 4),
+            terrain_decoder_hidden_dim=self.policy_cfg.get("terrain_decoder_hidden_dim", 128),
+            terrain_decoder_encoded_spatial_dim=self.policy_cfg.get("terrain_decoder_encoded_spatial_dim", (3,4)),
+            terrain_decoder_channels=self.policy_cfg.get("terrain_decoder_channels", 64),
+            privileged_dynamics_decoder_layers=self.policy_cfg.get("privileged_dynamics_decoder_layers", [32,64,128,256]),
+            priv_mixer_num_blocks=self.policy_cfg.get("priv_mixer_num_blocks", 2),
+            priv_mixer_hidden_dim=self.policy_cfg.get("priv_mixer_hidden_dim", 128),
+            priv_mixer_token_dim=self.policy_cfg.get("priv_mixer_token_dim", 128),
+            priv_mixer_channel_dim=self.policy_cfg.get("priv_mixer_channel_dim", 256),
+            priv_mixer_use_layer_norm=self.policy_cfg.get("priv_mixer_use_layer_norm", True),
             device=self.device,
             **self.alg_cfg,
         )
@@ -125,7 +155,7 @@ class OnPolicyRunnerKITE:
         # init storage and model
         depth_h, depth_w = getattr(self.env, "depth_output_resolution", (48, 64))
         depth_sequence_length = self.policy_cfg.get("depth_sequence_length", 5)
-        depth_latent_dim = self.policy_cfg["cenet_enc_latent_dim"]
+        depth_latent_dim = self.policy_cfg["depth_image_latent_dim"]
         
         # Rollout-time visual memory: only the newest depth image is stored
         #     raw; previous frames are kept as compact depth-frame latents.

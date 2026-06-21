@@ -162,83 +162,117 @@ def export_kite_async_deployment_pipelines(
 class ActorCritic_KITE(nn.Module):
     def __init__(self,
                  num_actor_obs=45,
-                 num_critic_obs=131,
+                 num_act_hist=10,
+                 num_critic_obs=132,
+                 
+                 depth_image_resolution=(48, 64),
+                 depth_image_latent_dim=32,
+                 depth_image_norm="layer",
+                 
+                 depth_sequence_length=5,
+                 depth_sequence_norm="layer",
+                 
+                 proprio_in_dim=450,
+                 proprio_latent_dim=16,
+                 proprio_use_norm=True,
+                 proprio_mixer_blocks=2,
+                 proprio_hidden_dim=128,
+                 proprio_token_dim=128,
+                 proprio_channel_dim=256,
+                 
+                 mixer_velo_dim=3,                   # torso velocity state [v_x, v_y, v_z]
+                 mixer_feet_state_dim=20,            # [feet-contact-state (4), feet-height (4), surface-normal under feet (12)]
+                 mixer_latent_dim=32,
+                 mixer_use_norm=True,
+                 mixer_mixer_blocks=2,
+                 mixer_hidden_dim=128,
+                 mixer_token_dim=128,
+                 mixer_channel_dim=256,
+                 
                  num_actions=12,
                  actor_layers=[512,256,128],
                  critic_layers=[128,256,128,64],
-                 cenet_in_dim=450,
-                 cenet_latent_dim=29,
-                 cenet_velo_dim=3, 
-                 cenet_enc_layers=[256,128,64],
-                 activation="tanh", 
+                 activation="elu", 
                  init_noise_std=1.0,
-                 depth_sequence_length=5,):
+                 ):
         super().__init__()
 
+        
+        # some generic paramaters
         self.num_actor_obs = num_actor_obs
-        self.cenet_latent_dim = cenet_latent_dim
-        self.cenet_velo_dim = cenet_velo_dim
-        self.depth_latent_dim = cenet_latent_dim
+        self.num_actions = num_actions
+        self.init_noise_std = init_noise_std
+        
+        
+        # Depth-image encoder paramaters
+        self.depth_image_resolution = depth_image_resolution
+        self.depth_latent_dim = depth_image_latent_dim
         
         # Number of depth-frame latents consumed by the sequence encoder. The
         #      runner stores depth_sequence_length - 1 previous latents plus the
         #      current image encoded on demand.
         self.depth_sequence_length = depth_sequence_length
-        self.depth_image_resolution = (48, 64)
-        self.body_velo_dim = min(3, cenet_velo_dim)
-        self.feet_state_dim = max(cenet_velo_dim - self.body_velo_dim, 0)
 
-        num_proprio_tokens = num_actor_obs
-        input_dim_per_token = cenet_in_dim // max(num_proprio_tokens, 1)
+        # Proprioceptive Encoder paramaters
+        self.proprio_latent_dim = proprio_latent_dim
         
-        if num_proprio_tokens * input_dim_per_token != cenet_in_dim:
-            raise ValueError(
-                "KITE proprio mixer expects cenet_in_dim to be an integer "
-                f"multiple of num_actor_obs. Got cenet_in_dim={cenet_in_dim}, "
-                f"num_actor_obs={num_actor_obs}."
-            )
-
+        
+        self.mixer_latent_dim = mixer_latent_dim
+        
+        # Create proprioceptive context encoder
         self.proprio_context_encoder = ProprioContextMLPMixerKITE(
-            context_input_dim=cenet_in_dim,
-            num_tokens=num_proprio_tokens,
-            input_dim_per_token=input_dim_per_token,
-            hidden_dim=cenet_enc_layers[0],
-            num_mixer_blocks=2,
-            token_mlp_dim=cenet_enc_layers[1],
-            channel_mlp_dim=cenet_enc_layers[0],
-            context_latent_size=cenet_latent_dim,
+            context_input_dim=proprio_in_dim,
+            num_tokens=num_actor_obs,
+            input_dim_per_token=num_act_hist,
+            hidden_dim=proprio_hidden_dim,
+            num_mixer_blocks=proprio_mixer_blocks,
+            token_mlp_dim=proprio_token_dim,
+            channel_mlp_dim=proprio_channel_dim,
+            context_latent_size=proprio_latent_dim,
             activation=activation,
+            use_layer_norm=proprio_use_norm,
         )
+
+        # Single-depth image encoder
         self.depth_frame_encoder = MotionRobustDepthEncoder(
             depth_image_resolution=self.depth_image_resolution,
             target_latent_dim=self.depth_latent_dim,
             cnn_activation=activation,
+            norm_type=depth_image_norm
         )
+        
+        # Depth-image latent sequence encoder
         self.depth_sequence_encoder = ConvDepthSequenceEncoder(
             feature_dim=self.depth_latent_dim,
             sequence_length=self.depth_sequence_length,
             output_dim=self.depth_latent_dim,
             activation=activation,
+            norm_type=depth_sequence_norm
         )
+        
+        # Modality mixer encoder
         self.context_encoder = MultimodalMixerVAE(
             depth_latent_dim=self.depth_latent_dim,
-            proprio_latent_dim=cenet_latent_dim,
-            output_dim=cenet_latent_dim,
-            velo_dim=self.body_velo_dim,
-            feet_state_dim=self.feet_state_dim,
+            proprio_latent_dim=proprio_latent_dim,
+            output_dim=mixer_latent_dim,
+            velo_dim=mixer_velo_dim,
+            feet_state_dim=mixer_feet_state_dim,
             activation=activation,
+            hidden_dim=mixer_hidden_dim,
+            token_mlp_dim=mixer_token_dim,
+            channel_mlp_dim=mixer_channel_dim,
+            num_mixer_blocks=mixer_mixer_blocks,
+            use_layer_norm=mixer_use_norm,
         )
         
         # Get the activation function used by the actor and critic networks
         activation = get_activation(activation)
 
-        self.init_noise_std = init_noise_std
-
         ###
         #  Construct the layers for the actor network
         ###
         # Shared layer between output branches
-        actor_input_dim = num_actor_obs + cenet_latent_dim + cenet_velo_dim  # current obs o_t, force-aware latent dynamics z_t, explicit esitmation v_t 
+        actor_input_dim = num_actor_obs + mixer_latent_dim + mixer_velo_dim +  mixer_feet_state_dim # current obs o_t, force-aware latent dynamics z_t, explicit esitmation v_t 
 
         shared_trunk_layers = []
         shared_trunk_layers.append(nn.Linear(actor_input_dim, actor_layers[0]))
@@ -267,7 +301,6 @@ class ActorCritic_KITE(nn.Module):
         self.critic = nn.Sequential(*_critic_layers)
 
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-        self.num_actions = num_actions
         
         self.distribution = None
         
@@ -445,10 +478,12 @@ class ActorCritic_KITE(nn.Module):
             [depth_latent_history, latest_depth_z.unsqueeze(1)],
             dim=1,
         )
+        
         if sequence.shape[1] < self.depth_sequence_length:
             pad_count = self.depth_sequence_length - sequence.shape[1]
             padding = latest_depth_z.unsqueeze(1).repeat(1, pad_count, 1)
             sequence = torch.cat([padding, sequence], dim=1)
+        
         return sequence[:, -self.depth_sequence_length:, :]
     
     # forward methods for the histroical context VAE

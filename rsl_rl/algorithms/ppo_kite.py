@@ -74,24 +74,40 @@ class PPO_KITE:
                  adaptive_ent_ter_threshold=5.0,
                  adaptive_ent_softmax_temp=2.0,
                  terrain_map_shape=None,
-                 priv_obs_history_dim=None,
-                 latest_privileged_obs_dim=None,
-                 privileged_terrain_latent_dim=16,
+                 num_priv_obs_history=3,
+                 privileged_terrain_latent_dim=32,
                  privileged_dynamics_latent_dim=16,
-                 cnn_activation_func='elu',
+                 priv_activation_func='elu',
+                 cnn_norm_type="layer",
+                 terrain_encoder_attention_dim=128,
+                 terrain_encoder_n_heads=4,
+                 terrain_decoder_hidden_dim=128,
+                 terrain_decoder_encoded_spatial_dim=(3,4),
+                 terrain_decoder_channels=64,
+                 privileged_dynamics_decoder_layers=[32,64,128,256],
+                 priv_mixer_num_blocks=2,
+                 priv_mixer_hidden_dim=128,
+                 priv_mixer_token_dim=32,
+                 priv_mixer_channel_dim=64,
+                 priv_mixer_use_layer_norm=True,
+
                  depth_frame_recon_weight=1.0,
                  depth_frame_kl_weight=1.0e-3,
+
                  depth_sequence_terrain_weight=1.0,
-                 depth_sequence_kl_weight=1.0e-3,
+                 depth_sequence_kl_weight=1.0,
+
                  proprio_dynamics_weight=1.0,
-                 proprio_kl_weight=1.0e-3,
+                 proprio_kl_weight=1.0,
+                 
                  modality_terrain_weight=1.0,
                  modality_dynamics_weight=1.0,
                  modality_explicit_weight=1.0,
-                 modality_kl_weight=1.0e-3,
+                 
                  contrastive_weight=0.1,
                  contrastive_lambda=0.5,
                  contrastive_margin=1.0,
+                 
                  versatility_weight=0.01,
                  versatility_lambda_e=0.1,
                  ):
@@ -117,8 +133,7 @@ class PPO_KITE:
        
         # Data shapes
         self.terrain_map_shape = terrain_map_shape
-        self.priv_obs_history_dim = priv_obs_history_dim
-        self.latest_privileged_obs_dim = latest_privileged_obs_dim or num_priv_obs
+        self.num_priv_obs_history = num_priv_obs_history
         self.privileged_terrain_latent_dim = privileged_terrain_latent_dim
         self.privileged_dynamics_latent_dim = privileged_dynamics_latent_dim
 
@@ -136,7 +151,6 @@ class PPO_KITE:
         self.modality_terrain_weight = modality_terrain_weight
         self.modality_dynamics_weight = modality_dynamics_weight
         self.modality_explicit_weight = modality_explicit_weight
-        self.modality_kl_weight = modality_kl_weight
         self.versatility_weight = versatility_weight
         self.versatility_lambda_e = versatility_lambda_e
         
@@ -178,7 +192,10 @@ class PPO_KITE:
             height=terrain_h,
             width=terrain_w,
             latent_dim=privileged_terrain_latent_dim,
-            cnn_activation=cnn_activation_func,
+            cnn_activation=priv_activation_func,
+            norm_type=cnn_norm_type,
+            attention_dim=terrain_encoder_attention_dim,
+            n_heads=terrain_encoder_n_heads,
         ).to(self.device)
 
         # Two-headed (height, surface normals) privileged terrain decoder network
@@ -186,26 +203,34 @@ class PPO_KITE:
             height=terrain_h,
             width=terrain_w,
             latent_dim=privileged_terrain_latent_dim,
-            cnn_activation=cnn_activation_func,
+            cnn_activation=priv_activation_func,
+            decoder_hidden_dim=terrain_decoder_hidden_dim,
+            encoded_spatial_dim=terrain_decoder_encoded_spatial_dim,
+            decoder_channels=terrain_decoder_channels,
+            norm_type=cnn_norm_type,
         ).to(self.device)
         
         
-        # Privileged dynamics MLP-Mixer encoder (treats time-step obs features as tokens, time-steps as channels)
-        dyn_tokens = self.latest_privileged_obs_dim
-        dyn_input_per_token = max(1, (priv_obs_history_dim or dyn_tokens) // max(dyn_tokens, 1))
+        # Privileged dynamics MLP-Mixer encoder (treats time-step obs features as tokens, time-steps as channels)        
         self.priv_dynamics_encoder = PrviDynamicsMLPMixerKITE(
-            context_input_dim=priv_obs_history_dim or dyn_tokens,
-            num_tokens=dyn_tokens,
-            input_dim_per_token=dyn_input_per_token,
+            context_input_dim=self.num_priv_obs_history * self.num_priv_obs,
+            num_tokens=self.num_priv_obs,
+            input_dim_per_token=self.num_priv_obs_history,
             context_latent_size=privileged_dynamics_latent_dim,
-            activation="elu",
+            activation=priv_activation_func,
+            num_mixer_blocks=priv_mixer_num_blocks,
+            hidden_dim=priv_mixer_hidden_dim,
+            token_dim=priv_mixer_token_dim,
+            channel_dim=priv_mixer_channel_dim,
+            use_layer_norm=priv_mixer_use_layer_norm,
             device=device,
         ).to(self.device)
 
         # Privileged dynamics decoder network
         self.priv_dynamics_decoder = PrivDynamicsDecoder(
             input_dim=privileged_dynamics_latent_dim,
-            decode_dim=self.latest_privileged_obs_dim,
+            decode_dim=self.num_priv_obs,
+            layers=privileged_dynamics_decoder_layers,
         ).to(self.device)
 
         ## Layers used to match history encoder latent dimension to corrispodning privileged latent dimensions:
@@ -219,19 +244,19 @@ class PPO_KITE:
 
         #     proprioceptive latent -> privileged dynamics decoder input 
         self.proprio_to_dynamics_latent = ReconDimensionProjectionHead(
-            input_dim=actor_critic.cenet_latent_dim,
+            input_dim=actor_critic.proprio_latent_dim,
             recon_dim=privileged_dynamics_latent_dim,
         ).to(self.device)
 
         #     modality mixer latent -> privileged terrain decoder input 
         self.mixer_to_terrain_latent = ReconDimensionProjectionHead(
-            input_dim=actor_critic.cenet_latent_dim,
+            input_dim=actor_critic.mixer_latent_dim,
             recon_dim=privileged_terrain_latent_dim,
         ).to(self.device)
 
         #     modality mixer latent -> privileged dynamics decoder input
         self.mixer_to_dynamics_latent = ReconDimensionProjectionHead(
-            input_dim=actor_critic.cenet_latent_dim,
+            input_dim=actor_critic.mixer_latent_dim,
             recon_dim=privileged_dynamics_latent_dim,
         ).to(self.device)
 
@@ -239,28 +264,28 @@ class PPO_KITE:
         # the policy/reconstruction latents one step removed from the direct
         # contrastive loss while still allowing useful alignment gradients.
         self.terrain_contrastive_head_depth = ContrastiveProjectionHead(
-            input_dim=privileged_terrain_latent_dim,
+            input_dim=actor_critic.depth_latent_dim,
             projection_dim=privileged_terrain_latent_dim,
             hidden_dim=max(64, privileged_terrain_latent_dim),
             activation="elu",
         ).to(self.device)
 
         self.dynamics_contrastive_head_proprio = ContrastiveProjectionHead(
-            input_dim=privileged_dynamics_latent_dim,
+            input_dim=actor_critic.proprio_latent_dim,
             projection_dim=privileged_dynamics_latent_dim,
             hidden_dim=max(64, privileged_dynamics_latent_dim),
             activation="elu",
         ).to(self.device)
 
         self.terrain_contrastive_head_mixer = ContrastiveProjectionHead(
-            input_dim=privileged_terrain_latent_dim,
+            input_dim=actor_critic.mixer_latent_dim,
             projection_dim=privileged_terrain_latent_dim,
             hidden_dim=max(64, privileged_terrain_latent_dim),
             activation="elu",
         ).to(self.device)
 
         self.dynamics_contrastive_head_mixer = ContrastiveProjectionHead(
-            input_dim=privileged_dynamics_latent_dim,
+            input_dim=actor_critic.mixer_latent_dim,
             projection_dim=privileged_dynamics_latent_dim,
             hidden_dim=max(64, privileged_dynamics_latent_dim),
             activation="elu",
@@ -324,7 +349,7 @@ class PPO_KITE:
         self.actor_critic.train()
 
     def _latest_privileged_obs(self, privileged_obs_history):
-        return privileged_obs_history[:, -self.latest_privileged_obs_dim:]
+        return privileged_obs_history[:, -self.num_priv_obs:]
 
     def build_critic_obs(self, privileged_obs_history, terrain_map, detach_latents=True):
         """Build critic input from privileged dynamics and learned terrain latents."""
@@ -443,14 +468,13 @@ class PPO_KITE:
             (mean - mean_pred_mean).pow(2) * _mask_col,
             dim=0) / _denom                                        # (latent_dim, )
 
-        ##
-        #  Technically, the below is a more accurate calculation of the marginal variance
-        #       but it runs the risk of not as strictly enforcing diversity in the mean samples
-        #       which is what we use during deployment, so ignoring this for now
-        ##
-
+        # # #
+        # #  Technically, the below is a more accurate calculation of the marginal variance
+        # #       but it runs the risk of not as strictly enforcing diversity in the mean samples
+        # #       which is what we use during deployment, so ignoring this for now
+        # # #
         # # E[sigma_i^2]
-        # mean_conditional_var = torch.sum(var * _mask,dim=0,) / _denom  # (latent_dim,)
+        # mean_conditional_var = torch.sum(torch.exp(logvar) * _mask,dim=0,) / _denom  # (latent_dim,)
 
         # # Law of total variance:
         # # Var(z) = Var(E[z|o]) + E[Var(z|o)]
@@ -462,11 +486,11 @@ class PPO_KITE:
         # H(z), approximating the marginal q(z) as diagonal Gaussian
         #     H(z) is large when the means are spread out over the batch.
         #     Maximizing this keeps the latent space diverse across different observations.
-        #         torch.log is natural log ln
+        #         torch.log is natural log (ln)
         marginal_entropy = 0.5 * torch.sum(torch.log(2.0 * np.pi * np.e * marginal_var))   # (1, )
 
         # H(z|o), exact entropy of diagonal Gaussian q(z|o_i),
-        #         denoising/clustering effect: conditional entropy encourages intrinsically
+        #         Induces a denoising/clustering effect - conditional entropy encourages intrinsically
         #         similar observations to map to similar latent representations.
         sample_conditional_entropy = 0.5 * torch.sum(np.log(2.0 * np.pi * np.e) + logvar, dim=-1)  # (B, 1)
 
@@ -1016,7 +1040,7 @@ class PPO_KITE:
         depth_decoder_loss, latest_depth_z_detached = self._depth_frame_decoder_update(depth_images_batch, depth_torso_state_batch, mask)
 
         # Shared privileged anchors for contrastive alignment. These are
-        # detached because the student-side encoders are updated in steps 3-5.
+        #     detached because the student-side encoders are updated in steps 3-5.
         terrain_positive = dynamics_positive = None
         with torch.no_grad():
             terrain_positive = self.priv_terrain_encoder(terrain_maps_batch)

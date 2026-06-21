@@ -546,18 +546,20 @@ class Go2KITE(KITEDepthMixin, BaseTask):
 
         critic_obs = torch.cat(
             (
-                self.obs_buf,                                             # 57
-                self.simulator.base_lin_vel * self.obs_scales.lin_vel,    # 3
-                self.simulator._grfs_buf * self.obs_scales.grf,           # 12
-                self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain info around feet
+                self.obs_buf,                                                          # 45 - standard policy observation
+                torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) - 
+                           self.simulator.measured_heights, dim=1, keepdim=True),      # 1  - base height
+                self.simulator.base_lin_vel * self.obs_scales.lin_vel,                 # 3  - base linear velocity 
+                self.simulator._grfs_buf * self.obs_scales.grf,                        # 12 - ground reaction forces experienced by feet
+                self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain (surface normals) around feet
                 self.simulator.link_contact_states[:,self.simulator.feet_indices],     # 4  - contact states of feet
-                # self.simulator.link_contact_states,                       # 17
-                self.simulator.feedforward_tau_weight,                    # 1
-                self.simulator.feedback_tau_weight,                       # 1
-                domain_randomization_info                                 # 51
+                torch.clip(self.simulator.feet_pos[:, :, 2] -
+                    torch.mean(self.simulator.height_around_feet, dim=-1) -
+                    self.cfg.rewards.foot_height_offset, -1, 1.),                      # 4  - feet height
+                domain_randomization_info                                              # 51 - privileged domain randomization values
             ),
             dim=-1,
-        ) # 141
+        ) # 132
 
         # add hieght measurements to asymmetric critic if approperiate
         self._update_privileged_terrain_map()

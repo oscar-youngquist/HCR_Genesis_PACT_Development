@@ -220,6 +220,32 @@ class MLPMixerBlock(nn.Module):
         return x
 
 
+class ChannelFirstLayerNorm1d(nn.Module):
+    """LayerNorm over channels for Conv1d outputs shaped B x C x L."""
+
+    def __init__(self, num_channels: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(num_channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.transpose(1, 2)
+        x = self.norm(x)
+        return x.transpose(1, 2).contiguous()
+
+
+class ChannelFirstLayerNorm2d(nn.Module):
+    """LayerNorm over channels for Conv2d outputs shaped B x C x H x W."""
+
+    def __init__(self, num_channels: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(num_channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.permute(0, 2, 3, 1)
+        x = self.norm(x)
+        return x.permute(0, 3, 1, 2).contiguous()
+
+
 def make_2d_norm(norm_type: str, num_channels: int) -> nn.Module:
     """
     Returns a normalization layer for 2D conv features.
@@ -227,6 +253,7 @@ def make_2d_norm(norm_type: str, num_channels: int) -> nn.Module:
     norm_type:
         "none"  -> Identity
         "batch" -> BatchNorm2d
+        "layer" -> LayerNorm over channels
         "group" -> GroupNorm
     """
     norm_type = norm_type.lower()
@@ -237,6 +264,9 @@ def make_2d_norm(norm_type: str, num_channels: int) -> nn.Module:
     if norm_type == "batch":
         return nn.BatchNorm2d(num_channels)
 
+    if norm_type == "layer":
+        return ChannelFirstLayerNorm2d(num_channels)
+
     if norm_type == "group":
         num_groups = min(8, num_channels)
         while num_channels % num_groups != 0:
@@ -244,7 +274,7 @@ def make_2d_norm(norm_type: str, num_channels: int) -> nn.Module:
         return nn.GroupNorm(num_groups, num_channels)
 
     raise ValueError(
-        f"Unknown norm_type={norm_type}. Expected one of: 'none', 'batch', 'group'."
+        f"Unknown norm_type={norm_type}. Expected one of: 'none', 'batch', 'layer', 'group'."
     )
 
 
@@ -255,6 +285,7 @@ def make_1d_norm(norm_type: str, num_channels: int) -> nn.Module:
     norm_type:
         "none"  -> Identity
         "batch" -> BatchNorm1d
+        "layer" -> LayerNorm
         "group" -> GroupNorm
     """
     norm_type = norm_type.lower()
@@ -265,6 +296,9 @@ def make_1d_norm(norm_type: str, num_channels: int) -> nn.Module:
     if norm_type == "batch":
         return nn.BatchNorm1d(num_channels)
 
+    if norm_type == "layer":
+        return ChannelFirstLayerNorm1d(num_channels)
+
     if norm_type == "group":
         num_groups = min(8, num_channels)
         while num_channels % num_groups != 0:
@@ -272,7 +306,7 @@ def make_1d_norm(norm_type: str, num_channels: int) -> nn.Module:
         return nn.GroupNorm(num_groups, num_channels)
 
     raise ValueError(
-        f"Unknown norm_type={norm_type}. Expected one of: 'none', 'batch', 'group'."
+        f"Unknown norm_type={norm_type}. Expected one of: 'none', 'batch', 'layer', 'group'."
     )
 
 
