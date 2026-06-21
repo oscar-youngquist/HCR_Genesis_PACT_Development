@@ -683,6 +683,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         #    Loss weights for single-depth-image encoder
         depth_frame_recon_weight = 1.0
         depth_frame_kl_weight = 1.0e-3
+        depth_transform_identity_weight = 1.0e-3
        
         #     loss weights for sequence of latent-depth-images encoder
         depth_sequence_terrain_weight = 1.0

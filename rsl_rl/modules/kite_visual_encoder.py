@@ -352,12 +352,6 @@ class MotionRobustDepthDecoder(nn.Module):
             torch.cat([x_grid, y_grid], dim=1),
         )
 
-        self.imu_projector = nn.Sequential(
-            nn.Linear(8, 16),
-            self.activation,
-            nn.Linear(16, 4),
-        )
-
         self.fc = nn.Sequential(
             nn.Linear(target_latent_dim, 32 * 6 * 8),
             self.activation,
@@ -407,32 +401,24 @@ class MotionRobustDepthDecoder(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-        final_imu_layer = self.imu_projector[-1]
-        nn.init.zeros_(final_imu_layer.weight)
-
-        with torch.no_grad():
-            final_imu_layer.bias.copy_(
-                torch.tensor(
-                    [1.0, 0.0, 0.0, 1.0],
-                    dtype=final_imu_layer.bias.dtype,
-                    device=final_imu_layer.bias.device,
-                )
-            )
-
     def compute_motion_conditioned_coords(
         self,
         batch_size: int,
-        torso_state: torch.Tensor,
+        transform_matrices: torch.Tensor,
     ):
         height, width = self.depth_image_resolution
 
-        transform_matrices = self.imu_projector(torso_state).view(batch_size, 2, 2)
+        if transform_matrices.shape != (batch_size, 2, 2):
+            transform_matrices = transform_matrices.view(batch_size, 2, 2)
 
         flat_grid = self.base_coord_grid.expand(batch_size, -1, -1, -1)
         flat_grid = flat_grid.view(batch_size, 2, -1)
 
-        stabilized_flat_grid = torch.bmm(transform_matrices, flat_grid)
-        coords_full = stabilized_flat_grid.view(batch_size, 2, height, width)
+        # The encoder writes coords in the stabilized frame; the decoder uses
+        # the reciprocal map to condition reconstruction back in image space.
+        decode_transform_matrices = torch.linalg.pinv(transform_matrices)
+        decoded_flat_grid = torch.bmm(decode_transform_matrices, flat_grid)
+        coords_full = decoded_flat_grid.view(batch_size, 2, height, width)
 
         coords_6_8 = F.interpolate(
             coords_full,
@@ -458,13 +444,13 @@ class MotionRobustDepthDecoder(nn.Module):
             "coords_12_16": coords_12_16,
             "coords_24_32": coords_24_32,
             "coords_full": coords_full,
-            "transform_matrices": transform_matrices,
+            "transform_matrices": decode_transform_matrices,
         }
 
-    def forward(self, z: torch.Tensor, torso_state: torch.Tensor):
+    def forward(self, z: torch.Tensor, transform_matrices: torch.Tensor):
         batch_size = z.size(0)
 
-        coord_dict = self.compute_motion_conditioned_coords(batch_size, torso_state)
+        coord_dict = self.compute_motion_conditioned_coords(batch_size, transform_matrices)
 
         x = self.fc(z)
         x = x.view(batch_size, 32, 6, 8)

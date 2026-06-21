@@ -93,6 +93,7 @@ class PPO_KITE:
 
                  depth_frame_recon_weight=1.0,
                  depth_frame_kl_weight=1.0e-3,
+                 depth_transform_identity_weight=1.0e-3,
 
                  depth_sequence_terrain_weight=1.0,
                  depth_sequence_kl_weight=1.0,
@@ -140,6 +141,7 @@ class PPO_KITE:
         # loss weights for depth-image processing
         self.depth_frame_recon_weight = depth_frame_recon_weight              
         self.depth_frame_kl_weight = depth_frame_kl_weight
+        self.depth_transform_identity_weight = depth_transform_identity_weight
         self.depth_sequence_terrain_weight = depth_sequence_terrain_weight
         self.depth_sequence_kl_weight = depth_sequence_kl_weight
         
@@ -442,6 +444,14 @@ class PPO_KITE:
 
         return kl_loss
 
+    def _transform_identity_loss(self, transform_matrices, mask):
+        identity = torch.eye(
+            2,
+            device=transform_matrices.device,
+            dtype=transform_matrices.dtype,
+        ).view(1, 2, 2)
+        return self._masked_sample_mean((transform_matrices - identity).pow(2), mask)
+
     # "We incorporate an unsupervised RL objective through mu-
     #    tual information (MI) maximization for promoting skill dis-
     #    covery. This objective allows the emergence of novel behaviors
@@ -718,68 +728,52 @@ class PPO_KITE:
         else:
             self.enc_optimizer.step()
 
-    def _depth_frame_encoder_update(self, depth_images_batch, depth_torso_state_batch, mask):
-        # Set the require-grad flag for the approperiate weights in the OptimizerBundle
-        self._set_requires_grad(self.depth_decoder, False)
-        self.actor_critic.depth_frame_encoder.train()        # update weights of encoder
-        self.depth_decoder.eval()                            # freeze decoder weights
-        self._zero_encoder_optimizer("visual_frame")         # zero gradients of approperiate optimizer weights
+    def _depth_frame_autoencoder_update(self, depth_images_batch, depth_torso_state_batch, mask):
+        self._set_requires_grad(self.depth_decoder, True)
+        self.actor_critic.depth_frame_encoder.train()
+        self.depth_decoder.train()
+        self._zero_encoder_optimizer("visual_frame")
+        self.depth_decoder_optimizer.zero_grad()
         
         # Encode the current depth image
-        depth_mean, depth_logvar, latest_depth_z, _ = self.actor_critic.depth_frame_encoder(
+        depth_mean, depth_logvar, latest_depth_z, depth_aux = self.actor_critic.depth_frame_encoder(
             depth_images_batch,
             depth_torso_state_batch,
         )
 
-        # Reconstruction with a frozen decoder
-        with torch.no_grad():
-            depth_recon, _ = self.depth_decoder(latest_depth_z, depth_torso_state_batch)
+        transform_matrices = depth_aux["transform_matrices"]
+        depth_recon, _ = self.depth_decoder(latest_depth_z, transform_matrices)
         
         # Calculate the depth-image reconstruction loss
         depth_recon_loss = self._masked_mse_loss(depth_recon, depth_images_batch, mask)
         
         # Calculate the depth-encoder KL-divergency loss
         depth_kl = self._kl_loss(depth_mean, depth_logvar, mask)
+
+        # Regularize the shared encoder/decoder transform toward the identity.
+        transform_identity_loss = self._transform_identity_loss(transform_matrices, mask)
         
         # Calculate the total depth-frame reconstruction loss
         depth_frame_loss = (
             self.depth_frame_recon_weight * depth_recon_loss
             + self.depth_frame_kl_weight * depth_kl
+            + self.depth_transform_identity_weight * transform_identity_loss
         )
 
-        # Step, norm-clip, and step optimizer for encoder
+        # Step, norm-clip, and step optimizers for the joint autoencoder.
         depth_frame_loss.backward()
         nn.utils.clip_grad_norm_(self.actor_critic.depth_frame_encoder.parameters(), self.max_grad_norm)
-        self._step_encoder_optimizer("visual_frame")
-
-        return depth_frame_loss, depth_recon_loss, depth_kl
-    
-    def _depth_frame_decoder_update(self, depth_images_batch, depth_torso_state_batch, mask):
-        # Set the require-grad flag for the approperiate weights in the OptimizerBundle
-        self._set_requires_grad(self.depth_decoder, True)
-        self.actor_critic.depth_frame_encoder.eval()        # freeze depth frame encoder wieghts
-        self.depth_decoder.train()                          # unfreeze depth-frame decoder weights
-        self.depth_decoder_optimizer.zero_grad()            # zero out the gradients of the depth-frame decoder
-       
-        # Encode the current depth_image
-        with torch.no_grad():
-            latest_depth_z_detached = self.actor_critic.depth_frame_encoder.forward_inference(
-                depth_images_batch,
-                depth_torso_state_batch,
-            )
-        
-        # Reconstruct the depth image from the latent
-        depth_dec_recon, _ = self.depth_decoder(latest_depth_z_detached, depth_torso_state_batch)
-        
-        # Calculate the masked reconstruction loss
-        depth_decoder_loss = self._masked_mse_loss(depth_dec_recon, depth_images_batch, mask)
-        
-        # backwards step, norm-clip, and optimizer step
-        depth_decoder_loss.backward()
         nn.utils.clip_grad_norm_(self.depth_decoder.parameters(), self.max_grad_norm)
+        self._step_encoder_optimizer("visual_frame")
         self.depth_decoder_optimizer.step()
 
-        return depth_decoder_loss, latest_depth_z_detached
+        return (
+            depth_frame_loss,
+            depth_recon_loss,
+            depth_kl,
+            transform_identity_loss,
+            latest_depth_z.detach(),
+        )
 
     def _depth_sequence_encoder_update(self, depth_latent_history_batch, latest_depth_z_for_seq, 
                                        terrain_maps_batch, terrain_positive, contrastive_negative_anchor_batch, 
@@ -1029,15 +1023,16 @@ class PPO_KITE:
         mask = terminated_batch.float()
         losses = {}
 
-        # 1. Depth-frame encoder update:
-        #    optimize the visual frame latent against a frozen depth decoder
-        #    with VAE KL regularization.
-        depth_frame_loss, depth_recon_loss, depth_kl = self._depth_frame_encoder_update(depth_images_batch, depth_torso_state_batch, mask)
-
-        # 2. Depth decoder update:
-        #    freeze the frame encoder and train the decoder to reconstruct the
-        #    current processed depth image.
-        depth_decoder_loss, latest_depth_z_detached = self._depth_frame_decoder_update(depth_images_batch, depth_torso_state_batch, mask)
+        # 1. Depth-image autoencoder update:
+        #    optimize the visual frame encoder and decoder together so the
+        #    encoder's IMU transform conditions both halves of reconstruction.
+        depth_frame_loss, depth_recon_loss, depth_kl, transform_identity_loss, latest_depth_z_detached = (
+            self._depth_frame_autoencoder_update(
+                depth_images_batch,
+                depth_torso_state_batch,
+                mask,
+            )
+        )
 
         # Shared privileged anchors for contrastive alignment. These are
         #     detached because the student-side encoders are updated in steps 3-5.
@@ -1046,20 +1041,20 @@ class PPO_KITE:
             terrain_positive = self.priv_terrain_encoder(terrain_maps_batch)
             dynamics_positive = self.priv_dynamics_encoder(privileged_obs_history_batch)
 
-        # 3. Depth-sequence encoder update:
+        # 2. Depth-sequence encoder update:
         #    reconstruct privileged terrain and align the visual sequence latent
         #    to the privileged terrain encoder while pushing from a random anchor.
         depth_sequence_loss, terrain_recon_loss, seq_contrastive, seq_kl, depth_z_detach = self._depth_sequence_encoder_update(depth_latent_history_batch, latest_depth_z_detached, 
                                                                                                                                terrain_maps_batch, terrain_positive, 
                                                                                                                                contrastive_negative_anchor_batch, mask)
 
-        # 4. Proprioceptive encoder update:
+        # 3. Proprioceptive encoder update:
         #    reconstruct next privileged dynamics and align proprio latent to
         #    the privileged dynamics encoder using the same negative anchor.
         proprio_loss, dynamics_recon_loss, prop_contrastive, prop_kl, obs_z_detach = self._proprioceptive_encoder_update(obs_hist_batch, obs_target, dynamics_positive,
                                                                                                                          contrastive_negative_anchor_batch, mask)
 
-        # 5. Modality mixer update:
+        # 4. Modality mixer update:
         #    fuse frozen depth/proprio latents, then supervise the fused latent
         #    with terrain, dynamics, explicit-state, contrastive, and
         #    versatility/KL losses.
@@ -1071,7 +1066,7 @@ class PPO_KITE:
                                                                                                            terrain_positive, dynamics_positive, 
                                                                                                            contrastive_negative_anchor_batch, mask)
         
-        # 6. Privileged terrain/dynamics encoder-decoder update:
+        # 5. Privileged terrain/dynamics encoder-decoder update:
         #    refresh the teacher-side representations used as positive anchors.
         privileged_loss, privileged_dynamics_loss, privileged_terrain_loss = self._privileged_encoder_decoder_updates(terrain_maps_batch, privileged_obs_history_batch, 
                                                                                                                       obs_target, mask)
@@ -1087,7 +1082,8 @@ class PPO_KITE:
 
         # Total KL loss across all encoders
         losses["total_kl"] = (depth_kl.detach() + seq_kl.detach() + prop_kl.detach() + versatility_log["kl"])
-        losses["decoder"] = depth_decoder_loss.detach() + privileged_loss.detach()
+        losses["decoder"] = depth_recon_loss.detach() + privileged_loss.detach()
+        losses["depth_transform_identity"] = transform_identity_loss.detach()
         
         # Reconstructed items, used by boot-strapping prob logic
         losses["priv_dynamics_recon"] = dyn_recon_from_mix.detach()
@@ -1099,8 +1095,8 @@ class PPO_KITE:
             "depth_frame_total": depth_frame_loss.detach(),
             "depth_frame_recon": depth_recon_loss.detach(),
             "depth_frame_kl": depth_kl.detach(),
-
-            "depth_decoder_total": depth_decoder_loss.detach(),
+            "depth_frame_transform_identity": transform_identity_loss.detach(),
+            "depth_autoencoder_recon": depth_recon_loss.detach(),
             
             "depth_sequence_total": depth_sequence_loss.detach(),
             "depth_sequence_terrain_recon": terrain_recon_loss.detach(),
@@ -1273,7 +1269,7 @@ class PPO_KITE:
                 mean_aux_loss += aux_losses["total"].item()
                 mean_explicit_loss += aux_losses["explicit"].item()
                 mean_reconstruction_loss += aux_losses["recon"].item()
-                mean_kl_loss += aux_losses["kl"].item()
+                mean_kl_loss += aux_losses["total_kl"].item()
                 mean_aux_decoder_loss += aux_losses["decoder"].item()
                 
                 for name, value in aux_losses["detail"].items():

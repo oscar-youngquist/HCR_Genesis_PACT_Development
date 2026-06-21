@@ -700,6 +700,7 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         adaptive_ent_softmax_temp = 2.0
         depth_frame_recon_weight = 1.0
         depth_frame_kl_weight = 1.0e-3
+        depth_transform_identity_weight = 1.0e-3
         depth_sequence_terrain_weight = 1.0
         depth_sequence_kl_weight = 1.0e-3
         proprio_dynamics_weight = 1.0
