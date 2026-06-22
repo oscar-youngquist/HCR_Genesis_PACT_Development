@@ -331,11 +331,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             )
 
         support_height = self.simulator.env_origins[:, 2].unsqueeze(1)
-        terrain_under_feet = self.simulator.height_around_feet[:, :, 4]
-        deep_void = terrain_under_feet < (
-            support_height
-            - self.cfg.termination.gap_terrain_depth_threshold
-        )
+        deep_void = self.simulator.gap_void_under_feet
         fallen_feet = deep_void & (
             self.simulator.feet_pos[:, :, 2]
             < support_height - self.cfg.termination.gap_foot_drop_threshold

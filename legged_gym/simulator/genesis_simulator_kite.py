@@ -1343,6 +1343,8 @@ class GenesisSimulator_KITE(Simulator):
                 self._num_envs, len(self._feet_indices) * 3, dtype=torch.float, device=self._device, requires_grad=False)
             self._height_around_feet = torch.zeros(
                 self._num_envs, len(self._feet_indices), 9, dtype=torch.float, device=self._device, requires_grad=False)
+            self._gap_void_under_feet = torch.zeros(
+                self._num_envs, len(self._feet_indices), dtype=torch.bool, device=self._device, requires_grad=False)
         
         if self._cfg.asset.obtain_link_contact_states:
             self._link_contact_states = torch.zeros(
@@ -1520,49 +1522,166 @@ class GenesisSimulator_KITE(Simulator):
     
     def _calc_terrain_info_around_feet(self):
         """ Finds neighboring points around each foot for terrain height measurement."""
-        # Foot positions
+        def sample_height_patch(px, py):
+            px = px.clamp(1, self._height_samples.shape[0] - 2)
+            py = py.clamp(1, self._height_samples.shape[1] - 2)
+            offsets = (
+                (-1, 0),   # [x-0.1, y]
+                (1, 0),    # [x+0.1, y]
+                (0, -1),   # [x, y-0.1]
+                (0, 1),    # [x, y+0.1]
+                (0, 0),    # [x, y]
+                (-1, -1),  # [x-0.1, y-0.1]
+                (1, 1),    # [x+0.1, y+0.1]
+                (-1, 1),   # [x-0.1, y+0.1]
+                (1, -1),   # [x+0.1, y-0.1]
+            )
+            return torch.stack(
+                [self._height_samples[px + dx, py + dy] for dx, dy in offsets],
+                dim=-1,
+            )
+
+        num_feet = len(self._feet_indices)
+
         foot_points = self._feet_pos + self._cfg.terrain.border_size
         foot_points = (foot_points/self._cfg.terrain.horizontal_scale).long()
-        # px and py for 4 feet, num_envs*len(feet_indices)
         px = foot_points[:, :, 0].view(-1)
         py = foot_points[:, :, 1].view(-1)
-        # clip to the range of height samples
-        px = torch.clip(px, 0, self._height_samples.shape[0]-2)
-        py = torch.clip(py, 0, self._height_samples.shape[1]-2)
-        # get heights around the feet, 9 points for each foot
-        
-        # points directy in front/behind/left/right of foot 
-        heights1 = self._height_samples[px-1, py]  # [x-0.1, y]
-        heights2 = self._height_samples[px+1, py]  # [x+0.1, y]
-        heights3 = self._height_samples[px, py-1]  # [x, y-0.1]
-        heights4 = self._height_samples[px, py+1]  # [x, y+0.1]
-        
-        # Under foot
-        heights5 = self._height_samples[px, py]    # [x, y]
-        
-        # diagonal offsets
-        heights6 = self._height_samples[px-1, py-1]  # [x-0.1, y-0.1]
-        heights7 = self._height_samples[px+1, py+1]  # [x+0.1, y+0.1]
-        heights8 = self._height_samples[px-1, py+1]  # [x-0.1, y+0.1]
-        heights9 = self._height_samples[px+1, py-1]  # [x+0.1, y-0.1]
-        
+        px = px.clamp(1, self._height_samples.shape[0] - 2)
+        py = py.clamp(1, self._height_samples.shape[1] - 2)
+
+        patch_heights = sample_height_patch(px, py)
+
+        gap_depth_threshold = getattr(
+            self._cfg.termination,
+            "gap_terrain_depth_threshold",
+            1.0,
+        )
+        support_height = self._env_origins[:, 2].unsqueeze(1)
+        void_threshold = support_height - gap_depth_threshold
+        patch_heights_m = (
+            patch_heights.view(self._num_envs, num_feet, 9)
+            * self._cfg.terrain.vertical_scale
+        )
+        foot_over_gap = patch_heights_m[:, :, 4] < void_threshold
+        self._gap_void_under_feet[:] = foot_over_gap
+
+        if foot_over_gap.any():
+            direction_base = torch.cat(
+                (
+                    self._base_lin_vel[:, :2],
+                    torch.zeros(self._num_envs, 1, device=self._device),
+                ),
+                dim=-1,
+            )
+            direction_world = quat_apply_yaw(self._base_quat, direction_base)[:, :2]
+            direction_norm = torch.linalg.norm(direction_world, dim=-1, keepdim=True)
+            direction_valid = direction_norm.squeeze(-1) > 1e-4
+            direction_world = direction_world / direction_norm.clamp_min(1e-6)
+
+            replace_mask = (
+                foot_over_gap
+                & direction_valid.unsqueeze(1)
+            ).view(-1)
+
+            if replace_mask.any():
+                final_patch_heights = patch_heights
+                found_replacement = torch.zeros_like(replace_mask)
+                flat_direction = direction_world.repeat_interleave(
+                    num_feet,
+                    dim=0,
+                )
+                flat_void_threshold = void_threshold.repeat_interleave(
+                    num_feet,
+                    dim=0,
+                )
+
+                max_projection_distance = getattr(
+                    self._cfg.termination,
+                    "gap_terrain_projection_max_distance",
+                    1.5,
+                )
+                stride_cells = max(
+                    1,
+                    int(
+                        getattr(
+                            self._cfg.termination,
+                            "gap_terrain_projection_stride_cells",
+                            3,
+                        )
+                    ),
+                )
+                max_cells = max(
+                    stride_cells,
+                    int(
+                        np.ceil(
+                            max_projection_distance
+                            / self._cfg.terrain.horizontal_scale
+                        )
+                    ),
+                )
+
+                for projection_cells in range(
+                    stride_cells,
+                    max_cells + 1,
+                    stride_cells,
+                ):
+                    offset = torch.round(
+                        flat_direction * projection_cells
+                    ).long()
+                    candidate_patch = sample_height_patch(
+                        px + offset[:, 0],
+                        py + offset[:, 1],
+                    )
+                    candidate_valid = torch.all(
+                        candidate_patch * self._cfg.terrain.vertical_scale
+                        >= flat_void_threshold,
+                        dim=-1,
+                    )
+                    use_candidate = (
+                        replace_mask
+                        & ~found_replacement
+                        & candidate_valid
+                    )
+                    final_patch_heights = torch.where(
+                        use_candidate.unsqueeze(-1),
+                        candidate_patch,
+                        final_patch_heights,
+                    )
+                    found_replacement |= use_candidate
+
+                patch_heights = final_patch_heights
+
         # Calculate normal vectors around feet
-        dx = ((heights2 - heights1) * self._cfg.terrain.vertical_scale / (self._cfg.terrain.horizontal_scale * 2)).view(self._num_envs, -1)
-        dy = ((heights4 - heights3) * self._cfg.terrain.vertical_scale / (self._cfg.terrain.horizontal_scale * 2)).view(self._num_envs, -1)
-        for i in range(len(self._feet_indices)):
-            normal_vector = torch.cat((
-                -dx[:, i].unsqueeze(1),
-                -dy[:, i].unsqueeze(1), 
-                torch.ones_like(dx[:, i].unsqueeze(1))), 
-                dim=-1).to(self._device)
-            
-            normal_vector /= torch.norm(normal_vector, dim=-1, keepdim=True)
-            
-            self._normal_vector_around_feet[:, i*3:i*3+3] = normal_vector[:]
-        
+        dx = (
+            (patch_heights[:, 1] - patch_heights[:, 0])
+            * self._cfg.terrain.vertical_scale
+            / (self._cfg.terrain.horizontal_scale * 2)
+        ).view(self._num_envs, -1)
+        dy = (
+            (patch_heights[:, 3] - patch_heights[:, 2])
+            * self._cfg.terrain.vertical_scale
+            / (self._cfg.terrain.horizontal_scale * 2)
+        ).view(self._num_envs, -1)
+        normal_vector = torch.stack(
+            (
+                -dx,
+                -dy,
+                torch.ones_like(dx),
+            ),
+            dim=-1,
+        )
+        normal_vector = F.normalize(normal_vector, p=2, dim=-1)
+        self._normal_vector_around_feet[:] = normal_vector.view(
+            self._num_envs,
+            -1,
+        )
+
         # Calculate height around feet
-        for i in range(9):
-            self._height_around_feet[:, :, i] = eval(f'heights{i+1}').view(self._num_envs, -1)[:] * self._cfg.terrain.vertical_scale
+        self._height_around_feet[:] = (
+            patch_heights.view(self._num_envs, num_feet, 9)
+            * self._cfg.terrain.vertical_scale
+        )
 
     def _check_base_pos_out_of_bound(self):
         """ Check if the base position is out of the terrain bounds

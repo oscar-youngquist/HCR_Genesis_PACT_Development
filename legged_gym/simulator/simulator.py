@@ -503,6 +503,16 @@ class Simulator(ABC):
             Tensor((num_envs, num_feet, 9)): Terrain heights around feet.
         """
         return self._height_around_feet
+
+    @property
+    def gap_void_under_feet(self):
+        """Returns raw deep-void flags under each foot before terrain projection.
+
+        Returns:
+            Tensor((num_envs, num_feet)): True where the unprojected center
+            terrain sample under each foot is classified as a gap void.
+        """
+        return self._gap_void_under_feet
     
     @property
     def default_dof_pos(self):

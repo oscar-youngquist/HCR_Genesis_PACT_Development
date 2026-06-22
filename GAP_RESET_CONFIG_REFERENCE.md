@@ -26,16 +26,22 @@ passing a foot over a gap does not terminate an episode.
 If any requirement is not satisfied, `_check_unrecoverable_gap()` clears the
 per-environment fall counters and returns no gap resets.
 
-The Genesis simulator measures nine terrain heights around every foot. The gap
-logic uses sample index `4`, which is the height-field sample directly under
-the foot:
+The Genesis simulator measures nine terrain heights around every foot and also
+stores a raw deep-void mask before any gap-aware projection is applied to the
+height and normal buffers. The gap-reset logic uses that raw mask:
 
 ```text
-terrain_under_feet = height_around_feet[:, :, 4]
+deep_void = simulator.gap_void_under_feet
 ```
 
-All height comparisons use `simulator.env_origins[:, 2]` as the local support
-height for each environment.
+This separation matters because `_height_around_feet` may contain projected
+next-edge terrain values when a swing foot passes over a gap. Reset detection
+must still see the unprojected void under the foot. The raw mask is computed
+from the original center sample, equivalent to sample index `4` of the
+unprojected 3 x 3 patch.
+
+All raw height comparisons use `simulator.env_origins[:, 2]` as the local
+support height for each environment.
 
 ## Detection Parameters
 
@@ -58,7 +64,7 @@ For each foot, terrain is classified as a deep void when:
 
 ```text
 deep_void =
-    terrain_under_foot
+    raw_terrain_under_foot
     < environment_origin_z - gap_terrain_depth_threshold
 ```
 
@@ -175,9 +181,8 @@ flowchart TD
     B --> C[Run check_termination]
     C --> D{Gap reset enabled and terrain data supported?}
     D -- No --> E[Clear gap fall counters]
-    D -- Yes --> F[Read terrain sample directly under each foot]
-    F --> G[Compare terrain height with environment origin minus void threshold]
-    G --> H[Build deep-void mask for all feet]
+    D -- Yes --> F[Read raw gap_void_under_feet mask]
+    F --> H[Use unprojected deep-void mask for all feet]
     H --> I[Check foot height and count fallen feet]
     H --> J[Check base height with any deep void present]
     I --> K{Enough fallen feet OR base fallen?}

@@ -424,6 +424,8 @@ class GO2KITECfg( LeggedRobotCfg ):
         gap_base_drop_threshold = 0.30     # base height below the environment origin [m]
         gap_min_fallen_feet = 1
         gap_reset_steps = 4
+        gap_terrain_projection_max_distance = 1.5
+        gap_terrain_projection_stride_cells = 3
 
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
