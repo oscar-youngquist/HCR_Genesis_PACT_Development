@@ -637,6 +637,7 @@ class PPO_KITE:
         weighted_gap = torch.sum(weights * gaps).item()
         low, high = self.entropy_coef_bounds
         self.current_entropy_coef = low + weighted_gap * (high - low)
+        
         return self.current_entropy_coef
         
     def _set_std_clip_lwr(self, clip_val=0.1):
@@ -934,14 +935,14 @@ class PPO_KITE:
             feet_state_explicit_loss = explicit_loss.new_zeros(())
 
         # Calculate the terrain contrastive loss
-        mix_terrain_contrast_loss = self._projected_contrastive_loss(self.terrain_contrastive_head,
+        mix_terrain_contrast_loss = self._projected_contrastive_loss(self.terrain_contrastive_head_mixer,
                                                                      mix_terrain_z,
                                                                      terrain_positive,
                                                                      contrastive_negative_anchor_batch,
                                                                      mask)
 
         # Calculate the next time-step privlieged obs contrastive loss
-        mix_dyn_contrast_loss = self.self._projected_contrastive_loss(self.dynamics_contrastive_head,
+        mix_dyn_contrast_loss = self._projected_contrastive_loss(self.dynamics_contrastive_head_mixer,
                                                                       mix_dynamics_z,
                                                                       dynamics_positive,
                                                                       contrastive_negative_anchor_batch,

@@ -678,6 +678,8 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         desired_kl = 0.01
         max_grad_norm = 1.0
 
+        debug_autograd_anomaly = True
+
         # Adaptive entropy coefficient curriculum
         entropy_coef = 0.01
         use_adaptive_entropy = True
