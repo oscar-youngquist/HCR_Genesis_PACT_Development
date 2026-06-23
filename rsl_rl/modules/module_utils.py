@@ -412,6 +412,8 @@ class ReconDimensionProjectionHead(nn.Module):
         super().__init__()
 
         act = get_activation(activation)
+        if hasattr(act, "inplace"):
+            act.inplace = False
 
         self.net = nn.Sequential(
             act,

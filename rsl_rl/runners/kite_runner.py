@@ -562,8 +562,10 @@ class OnPolicyRunnerKITE:
             'proprio_to_dynamics_latent_state_dict': self.alg.proprio_to_dynamics_latent.state_dict(),
             'mixer_to_terrain_latent_state_dict': self.alg.mixer_to_terrain_latent.state_dict(),
             'mixer_to_dynamics_latent_state_dict': self.alg.mixer_to_dynamics_latent.state_dict(),
-            'terrain_contrastive_head_state_dict': self.alg.terrain_contrastive_head.state_dict(),
-            'dynamics_contrastive_head_state_dict': self.alg.dynamics_contrastive_head.state_dict(),
+            'terrain_contrastive_head_depth_state_dict': self.alg.terrain_contrastive_head_depth.state_dict(),
+            'dynamics_contrastive_head_proprio_state_dict': self.alg.dynamics_contrastive_head_proprio.state_dict(),
+            'terrain_contrastive_head_mixer_state_dict': self.alg.terrain_contrastive_head_mixer.state_dict(),
+            'dynamics_contrastive_head_mixer_state_dict': self.alg.dynamics_contrastive_head_mixer.state_dict(),
             'aux_projection_optimizer_state_dict': self.alg.aux_projection_optimizer.state_dict(),
             'iter': self.current_learning_iteration,
             'infos': infos,
@@ -610,10 +612,14 @@ class OnPolicyRunnerKITE:
             self.alg.mixer_to_terrain_latent.load_state_dict(loaded_dict['mixer_to_terrain_latent_state_dict'])
         if 'mixer_to_dynamics_latent_state_dict' in loaded_dict:
             self.alg.mixer_to_dynamics_latent.load_state_dict(loaded_dict['mixer_to_dynamics_latent_state_dict'])
-        if 'terrain_contrastive_head_state_dict' in loaded_dict:
-            self.alg.terrain_contrastive_head.load_state_dict(loaded_dict['terrain_contrastive_head_state_dict'])
-        if 'dynamics_contrastive_head_state_dict' in loaded_dict:
-            self.alg.dynamics_contrastive_head.load_state_dict(loaded_dict['dynamics_contrastive_head_state_dict'])
+        if 'terrain_contrastive_head_depth_state_dict' in loaded_dict:
+            self.alg.terrain_contrastive_head_depth.load_state_dict(loaded_dict['terrain_contrastive_head_depth_state_dict'])
+        if 'dynamics_contrastive_head_proprio_state_dict' in loaded_dict:
+            self.alg.dynamics_contrastive_head_proprio.load_state_dict(loaded_dict['dynamics_contrastive_head_proprio_state_dict'])
+        if 'terrain_contrastive_head_mixer_state_dict' in loaded_dict:
+            self.alg.terrain_contrastive_head_mixer.load_state_dict(loaded_dict['terrain_contrastive_head_mixer_state_dict'])
+        if 'dynamics_contrastive_head_mixer_state_dict' in loaded_dict:
+            self.alg.dynamics_contrastive_head_mixer.load_state_dict(loaded_dict['dynamics_contrastive_head_mixer_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']
         return loaded_dict['infos']
 

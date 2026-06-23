@@ -427,7 +427,7 @@ class PPO_KITE:
         normal_loss = self._masked_sample_mean(1.0 - normal_cos, mask)
 
         terrain_recon_log = {"height_loss":height_loss.detach(),
-                             "normal_cos":normal_cos.detach()}
+                             "normal_cos":normal_loss.detach()}
         
         total_loss = height_loss + normal_loss
 
