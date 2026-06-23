@@ -694,6 +694,9 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         # Enables expensive CUDA synchronizations/cache clears for profiling
         # and OOM debugging. Keep False for normal training speed.
         gpu_debugging = False
+        # When False, log only compact per-model auxiliary loss totals.
+        # Enable for the full detailed encoder-loss breakdown.
+        log_detailed_encoder_losses = False
 
         # Adaptive entropy coefficient curriculum
         entropy_coef = 0.01

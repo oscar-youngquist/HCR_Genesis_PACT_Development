@@ -89,7 +89,7 @@ class GO2KITECfg( LeggedRobotCfg ):
                 "stone_distance_y": "np.random.uniform(0.2, 0.8)",
                 "max_height": "0.20",
             },
-            "gap_size": "0.1 + difficulty * 0.8",
+            "gap_size": "0.1 + difficulty * 0.3",
             "pit_depth": "0.1 + 0.3 * difficulty",
             "high_platform_params": {
                 "high_platform_height": "0.1 + 0.3 * difficulty",
@@ -102,7 +102,7 @@ class GO2KITECfg( LeggedRobotCfg ):
                 "high_platform_length": "np.random.uniform(1.6, 2.0)",
                 "high_platform_width": "np.random.uniform(6.0, 8.0)",
                 "high_platform_distance_y": "np.random.uniform(0.2, 2.0)",
-                "gap_size": "0.1 + difficulty * 0.8",
+                "gap_size": "0.1 + difficulty * 0.3",
             },
         }
         # trimesh only:
@@ -680,10 +680,16 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         desired_kl = 0.01
         max_grad_norm = 1.0
 
+        # Enables pytorch anomaly detecting in the runner-class
         debug_autograd_anomaly = False
+        
         # Enables expensive CUDA synchronizations/cache clears for profiling
         # and OOM debugging. Keep False for normal training speed.
         gpu_debugging = False
+        
+        # When False, log only compact per-model auxiliary loss totals.
+        # Enable for the full detailed encoder-loss breakdown.
+        log_detailed_encoder_losses = False
 
         # Adaptive entropy coefficient curriculum
         entropy_coef = 0.01
@@ -702,18 +708,18 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
        
         #     loss weights for sequence of latent-depth-images encoder
         depth_sequence_terrain_weight = 1.0
-        depth_sequence_kl_weight = 1.0
+        depth_sequence_kl_weight = 0.1
         
         #     loss weights for proprioceptive history context encoder
         proprio_dynamics_weight = 1.0
-        proprio_kl_weight = 1.0
+        proprio_kl_weight = 0.1
         
         #     loss weights for depth+proprio modality mixing encoder
-        modality_terrain_weight = 1.0    # terrain reconstruction loss
-        modality_dynamics_weight = 1.0   # privliged obs reconstruction loss
-        modality_explicit_weight = 1.0   # torso-velo + feet-state estimation reconstruction loss
-        versatility_weight = 0.1        # latent versatility loss
-        versatility_lambda_e = 0.1       # weight of KL-regularization on the versility loss
+        modality_terrain_weight  = 1.0    # terrain reconstruction loss
+        modality_dynamics_weight = 1.0    # privliged obs reconstruction loss
+        modality_explicit_weight = 1.0    # torso-velo + feet-state estimation reconstruction loss
+        versatility_weight = 0.2          # latent versatility loss
+        versatility_lambda_e = 0.2        # weight of KL-regularization on the versility loss
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.
         contrastive_weight = 0.1

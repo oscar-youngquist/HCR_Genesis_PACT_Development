@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Tuple, List, Dict, Any
+from typing import Tuple
 from torch.distributions import Normal
 import numpy as np
 import torch
@@ -13,37 +13,9 @@ from .kite_proprio_encoder import ProprioContextMLPMixerKITE
 from .kite_visual_encoder import (
     ConvDepthSequenceEncoder,
     MotionRobustDepthEncoder,
+    MotionRobustDepthDecoder,
 )
-from .module_utils import get_activation
-
-
-class OptimizerBundle:
-    """Small adapter so multiple optimizers behave like one optimizer handle."""
-
-    def __init__(self, optimizers: Dict[str, torch.optim.Optimizer]):
-        self.optimizers = optimizers
-
-    def zero_grad(self, *args, **kwargs):
-        for optimizer in self.optimizers.values():
-            optimizer.zero_grad(*args, **kwargs)
-
-    def step(self, *args, **kwargs):
-        for optimizer in self.optimizers.values():
-            optimizer.step(*args, **kwargs)
-
-    def state_dict(self):
-        return {
-            name: optimizer.state_dict()
-            for name, optimizer in self.optimizers.items()
-        }
-
-    def load_state_dict(self, state_dict):
-        for name, optimizer in self.optimizers.items():
-            if name not in state_dict:
-                raise KeyError(
-                    f"Missing optimizer state for encoder sub-optimizer {name!r}."
-                )
-            optimizer.load_state_dict(state_dict[name])
+from .module_utils import get_activation, ReconDimensionProjectionHead
 
 
 class KITEDepthAsyncPipeline(nn.Module):
@@ -168,6 +140,7 @@ class ActorCritic_KITE(nn.Module):
                  depth_image_resolution=(48, 64),
                  depth_image_latent_dim=32,
                  depth_image_norm="layer",
+                 depth_decoder_norm="none",
                  
                  depth_sequence_length=5,
                  depth_sequence_norm="layer",
@@ -188,6 +161,8 @@ class ActorCritic_KITE(nn.Module):
                  mixer_hidden_dim=128,
                  mixer_token_dim=128,
                  mixer_channel_dim=256,
+                 privileged_terrain_latent_dim=32,
+                 privileged_dynamics_latent_dim=16,
                  
                  num_actions=12,
                  actor_layers=[512,256,128],
@@ -242,6 +217,15 @@ class ActorCritic_KITE(nn.Module):
             cnn_activation=activation,
             norm_type=depth_image_norm
         )
+
+        # Single-depth image decoder. The frame encoder and decoder are trained
+        # together as a standalone depth autoencoder update in PPO.
+        self.depth_frame_decoder = MotionRobustDepthDecoder(
+            depth_image_resolution=self.depth_image_resolution,
+            target_latent_dim=self.depth_latent_dim,
+            cnn_activation=activation,
+            norm_type=depth_decoder_norm,
+        )
         
         # Depth-image latent sequence encoder
         self.depth_sequence_encoder = ConvDepthSequenceEncoder(
@@ -265,6 +249,17 @@ class ActorCritic_KITE(nn.Module):
             channel_mlp_dim=mixer_channel_dim,
             num_mixer_blocks=mixer_mixer_blocks,
             use_layer_norm=mixer_use_norm,
+        )
+
+        # Projection heads used only by the merged auxiliary update to map the
+        # mixer latent into the privileged decoder latent spaces.
+        self.mixer_to_terrain_latent = ReconDimensionProjectionHead(
+            input_dim=mixer_latent_dim,
+            recon_dim=privileged_terrain_latent_dim,
+        )
+        self.mixer_to_dynamics_latent = ReconDimensionProjectionHead(
+            input_dim=mixer_latent_dim,
+            recon_dim=privileged_dynamics_latent_dim,
         )
         
         # Get the activation function used by the actor and critic networks
@@ -317,20 +312,21 @@ class ActorCritic_KITE(nn.Module):
         self.std.data.fill_(std_val)
 
     def get_optim_groups(self, weight_decay: float = 1e-4, strong_decay: float = 1e-1):
-        """Separate actor/critic params and each KITE encoder submodule.
+        """Separate actor/critic, depth-frame, and merged encoder params.
         
         Args:
             weight_decay (float): Weight decay value for regularization. Default: 1e-4.
             
         Returns:
-            Actor/critic parameter groups and a dict of encoder parameter groups.
+            Actor/critic parameter groups, depth-frame autoencoder groups, and
+            merged sequence/proprio/mixer encoder groups.
         """
         critic_set = set()
         actor_set = set()
         no_decay  = set()
+        depth_frame_set = set()
         encoder_sets = {
             "proprioceptive": set(),
-            "visual_frame": set(),
             "visual_sequence": set(),
             "modality_mixer": set(),
         }
@@ -338,14 +334,23 @@ class ActorCritic_KITE(nn.Module):
         blacklist = (nn.LayerNorm, nn.Embedding, nn.Parameter)
         encoder_prefix_to_group = {
             "proprio_context_encoder.": "proprioceptive",
-            "depth_frame_encoder.": "visual_frame",
             "depth_sequence_encoder.": "visual_sequence",
             "context_encoder.": "modality_mixer",
+            "mixer_to_terrain_latent.": "modality_mixer",
+            "mixer_to_dynamics_latent.": "modality_mixer",
         }
+        depth_frame_prefixes = (
+            "depth_frame_encoder.",
+            "depth_frame_decoder.",
+        )
 
         for mn, m in self.named_modules():
             for pn, p in m.named_parameters():
                 fpn = f"{mn}.{pn}" if mn else pn  # full param name
+                if fpn.startswith(depth_frame_prefixes):
+                    depth_frame_set.add(fpn)
+                    continue
+
                 encoder_group = None
                 for prefix, group_name in encoder_prefix_to_group.items():
                     if fpn.startswith(prefix):
@@ -372,11 +377,11 @@ class ActorCritic_KITE(nn.Module):
         # Validate parameter separation
         param_dict   = {pn: p for pn, p in self.named_parameters()}
         encoder_set = set().union(*encoder_sets.values())
-        inter_params = actor_set & no_decay & encoder_set & critic_set
+        inter_params = actor_set & no_decay & encoder_set & critic_set & depth_frame_set
         if inter_params:
             raise ValueError(f"Parameters in all sets: {inter_params}")
         missing_params = param_dict.keys() - (
-            actor_set | no_decay | encoder_set | critic_set
+            actor_set | no_decay | encoder_set | critic_set | depth_frame_set
         )
         if missing_params:
             raise ValueError(f"Parameters not categorized: {missing_params}")
@@ -385,6 +390,13 @@ class ActorCritic_KITE(nn.Module):
         params_act = [{"params": [param_dict[pn] for pn in sorted(actor_set)],  "weight_decay": 0.0, "name":"actor"},
                       {"params": [param_dict[pn] for pn in sorted(critic_set)], "weight_decay": 0.0, "name":"critic"},
                       {"params": [param_dict[pn] for pn in sorted(no_decay)],   "weight_decay": 0.0}]
+        params_depth_frame = [
+            {
+                "params": [param_dict[pn] for pn in sorted(depth_frame_set)],
+                "weight_decay": weight_decay,
+                "name": "depth_frame_autoencoder",
+            }
+        ]
         
         params_enc = {
             name: [
@@ -397,7 +409,7 @@ class ActorCritic_KITE(nn.Module):
             for name, param_names in encoder_sets.items()
         }
 
-        return params_act, params_enc
+        return params_act, params_depth_frame, params_enc
 
     def configure_optimizers(self,
                              learning_rate: float = 1e-4,
@@ -406,26 +418,27 @@ class ActorCritic_KITE(nn.Module):
                              betas: Tuple[float, float] = (0.9, 0.999)) -> torch.optim.Optimizer:
         """Configure the AdamW optimizer with parameter groups.
 
-        Actor and critic share one AdamW optimizer. The KITE encoder stack uses
-        one Adam optimizer per sub-encoder:
-            proprioceptive, visual_frame, visual_sequence, modality_mixer.
+        Actor and critic share one AdamW optimizer. The merged KITE auxiliary
+        update uses one Adam optimizer over all non-privileged encoder groups.
             
         Returns:
             Configured AdamW optimizer.
         """
-        opt_groups_act, opt_groups_enc = self.get_optim_groups(weight_decay=weight_decay, strong_decay=strong_decay)
+        opt_groups_act, opt_groups_depth_frame, opt_groups_enc = self.get_optim_groups(weight_decay=weight_decay, strong_decay=strong_decay)
         act_opt = torch.optim.AdamW(opt_groups_act, lr=learning_rate)
-        enc_opt = OptimizerBundle(
-            {
-                name: torch.optim.Adam(
-                    groups,
-                    lr=2.0e-4,
-                    betas=betas,
-                )
-                for name, groups in opt_groups_enc.items()
-            }
+        depth_frame_opt = torch.optim.Adam(
+            opt_groups_depth_frame,
+            lr=2.0e-4,
+            betas=betas,
         )
-        return act_opt, enc_opt
+        enc_groups = [
+            group
+            for groups in opt_groups_enc.values()
+            for group in groups
+        ]
+        enc_opt = torch.optim.Adam(enc_groups, lr=2.0e-4, betas=betas)
+        
+        return act_opt, depth_frame_opt, enc_opt
 
     def reset(self, dones=None):
         pass

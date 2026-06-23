@@ -39,14 +39,12 @@ import numpy as np
 import random
 
 from rsl_rl.modules import ActorCritic_KITE
-from rsl_rl.modules.module_utils import ContrastiveProjectionHead, ReconDimensionProjectionHead
 from rsl_rl.modules.kite_privileged_encoders import (
     PrivDynamicsDecoder,
     PrviDynamicsMLPMixerKITE,
     TerrainAttentionEncoder,
     TerrainTwoHeadDecoder,
 )
-from rsl_rl.modules.kite_visual_encoder import MotionRobustDepthDecoder
 from rsl_rl.storage import RolloutStorageKITE
 
 class PPO_KITE:
@@ -113,6 +111,7 @@ class PPO_KITE:
                  versatility_weight=0.01,
                  versatility_lambda_e=0.1,
                  gpu_debugging=False,
+                 log_detailed_encoder_losses=False,
                  ):
         
         self.device = device
@@ -158,6 +157,7 @@ class PPO_KITE:
         self.versatility_weight = versatility_weight
         self.versatility_lambda_e = versatility_lambda_e
         self.gpu_debugging = gpu_debugging
+        self.log_detailed_encoder_losses = log_detailed_encoder_losses
         
         # Contrastive loss weights/margin shared across all contrastive updates
         self.contrastive_weight = contrastive_weight
@@ -169,8 +169,10 @@ class PPO_KITE:
         self.actor_critic.to(self.device)
         self.storage = None # initialized later
 
-        # Optimizer for actor network and all non-privileged encoders. Currently, no parameter overlap between encoder and actor
-        self.act_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(learning_rate)
+        # Actor-critic owns the non-privileged trainable modules and returns
+        # three optimizers: RL actor/critic, depth-frame autoencoder, and the
+        # merged sequence/proprio/mixer auxiliary path.
+        self.act_optimizer, self.depth_frame_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(learning_rate)
         
         # Transition data structure from storage class
         self.transition = RolloutStorageKITE.Transition()
@@ -183,14 +185,8 @@ class PPO_KITE:
 
 
         ##
-        ##  Construct depth-image decoder and privileged encoder-decoder pairs
+        ##  Construct privileged encoder-decoder pairs
         terrain_h, terrain_w, _ = terrain_map_shape or (1, 1, 4)
-
-        # Single-depth image decoder network
-        self.depth_decoder = MotionRobustDepthDecoder(
-            depth_image_resolution=actor_critic.depth_image_resolution,
-            target_latent_dim=actor_critic.depth_latent_dim,
-        ).to(self.device)
 
         # Privileged Terrain encoder network
         self.priv_terrain_encoder = TerrainAttentionEncoder(
@@ -238,90 +234,12 @@ class PPO_KITE:
             layers=privileged_dynamics_decoder_layers,
         ).to(self.device)
 
-        ## Layers used to match history encoder latent dimension to corrispodning privileged latent dimensions:
-        ##     concretely -> reparamaterized encoder VAE-sample (mu + logvar*eps) -> matching layer -> input to privileged decoders
-
-        #     depth-image sequence latent -> privileged terrain decoder input
-        self.depth_to_terrain_latent = ReconDimensionProjectionHead(
-            input_dim=actor_critic.depth_latent_dim,
-            recon_dim=privileged_terrain_latent_dim,
-        ).to(self.device)
-
-        #     proprioceptive latent -> privileged dynamics decoder input 
-        self.proprio_to_dynamics_latent = ReconDimensionProjectionHead(
-            input_dim=actor_critic.proprio_latent_dim,
-            recon_dim=privileged_dynamics_latent_dim,
-        ).to(self.device)
-
-        #     modality mixer latent -> privileged terrain decoder input 
-        self.mixer_to_terrain_latent = ReconDimensionProjectionHead(
-            input_dim=actor_critic.mixer_latent_dim,
-            recon_dim=privileged_terrain_latent_dim,
-        ).to(self.device)
-
-        #     modality mixer latent -> privileged dynamics decoder input
-        self.mixer_to_dynamics_latent = ReconDimensionProjectionHead(
-            input_dim=actor_critic.mixer_latent_dim,
-            recon_dim=privileged_dynamics_latent_dim,
-        ).to(self.device)
-
-        # Sacrificial projection heads for contrastive alignment. These keep
-        # the policy/reconstruction latents one step removed from the direct
-        # contrastive loss while still allowing useful alignment gradients.
-        self.terrain_contrastive_head_depth = ContrastiveProjectionHead(
-            input_dim=actor_critic.depth_latent_dim,
-            projection_dim=privileged_terrain_latent_dim,
-            hidden_dim=max(64, privileged_terrain_latent_dim),
-            activation="elu",
-        ).to(self.device)
-
-        self.dynamics_contrastive_head_proprio = ContrastiveProjectionHead(
-            input_dim=actor_critic.proprio_latent_dim,
-            projection_dim=privileged_dynamics_latent_dim,
-            hidden_dim=max(64, privileged_dynamics_latent_dim),
-            activation="elu",
-        ).to(self.device)
-
-        # Mixer contrastive losses are applied after the mixer latent has
-        # already been projected into the corresponding privileged latent
-        # spaces, so these heads consume privileged latent dimensions.
-        self.terrain_contrastive_head_mixer = ContrastiveProjectionHead(
-            input_dim=privileged_terrain_latent_dim,
-            projection_dim=privileged_terrain_latent_dim,
-            hidden_dim=max(64, privileged_terrain_latent_dim),
-            activation="elu",
-        ).to(self.device)
-
-        self.dynamics_contrastive_head_mixer = ContrastiveProjectionHead(
-            input_dim=privileged_dynamics_latent_dim,
-            projection_dim=privileged_dynamics_latent_dim,
-            hidden_dim=max(64, privileged_dynamics_latent_dim),
-            activation="elu",
-        ).to(self.device)
-
-
-        # Optimizer for the depth-image decoder
-        self.depth_decoder_optimizer = optim.Adam(self.depth_decoder.parameters(), lr=learning_rate)
-
         # Optimizer for the privileged encoder-decoder pairs
         self.privileged_optimizer = optim.Adam(
             list(self.priv_terrain_encoder.parameters())
             + list(self.priv_terrain_decoder.parameters())
             + list(self.priv_dynamics_encoder.parameters())
             + list(self.priv_dynamics_decoder.parameters()),
-            lr=learning_rate,
-        )
-
-        # Optimizer for the stand-alone reconstruction projection layers / the contrastive loss layers
-        self.aux_projection_optimizer = optim.Adam(
-            list(self.depth_to_terrain_latent.parameters())
-            + list(self.proprio_to_dynamics_latent.parameters())
-            + list(self.mixer_to_terrain_latent.parameters())
-            + list(self.mixer_to_dynamics_latent.parameters())
-            + list(self.terrain_contrastive_head_depth.parameters())
-            + list(self.dynamics_contrastive_head_proprio.parameters())
-            + list(self.terrain_contrastive_head_mixer.parameters())
-            + list(self.dynamics_contrastive_head_mixer.parameters()),
             lr=learning_rate,
         )
 
@@ -559,9 +477,9 @@ class PPO_KITE:
             + (1.0 - self.contrastive_lambda) * negative_loss
         )
 
-    def _projected_contrastive_loss(self, projection_head, z, positive, negative, mask):
-        """Apply contrastive loss through a sacrificial projection head."""
-        projected_z = projection_head(z)
+    def _normalized_contrastive_loss(self, z, positive, negative, mask):
+        """Apply contrastive loss after normalizing student and anchor latents."""
+        projected_z = F.normalize(z, p=2, dim=-1, eps=1e-6)
         positive = F.normalize(positive.detach(), p=2, dim=-1, eps=1e-6)
         negative = F.normalize(negative.detach(), p=2, dim=-1, eps=1e-6)
         return self._contrastive_loss(projected_z, positive, negative, mask)
@@ -865,28 +783,18 @@ class PPO_KITE:
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)  
 
-    def _set_requires_grad(self, module, requires_grad):
-        for param in module.parameters():
-            param.requires_grad_(requires_grad)
+    def _zero_all_encoder_optimizers(self):
+        """Zero every non-privileged encoder optimizer for merged aux updates."""
+        self.enc_optimizer.zero_grad(set_to_none=True)
 
-    def _zero_encoder_optimizer(self, name):
-        if hasattr(self.enc_optimizer, "optimizers"):
-            self.enc_optimizer.optimizers[name].zero_grad(set_to_none=True)
-        else:
-            self.enc_optimizer.zero_grad(set_to_none=True)
-
-    def _step_encoder_optimizer(self, name):
-        if hasattr(self.enc_optimizer, "optimizers"):
-            self.enc_optimizer.optimizers[name].step()
-        else:
-            self.enc_optimizer.step()
+    def _step_all_encoder_optimizers(self):
+        """Step every non-privileged encoder optimizer after one merged backward."""
+        self.enc_optimizer.step()
 
     def _depth_frame_autoencoder_update(self, depth_images_batch, depth_torso_state_batch, mask):
-        self._set_requires_grad(self.depth_decoder, True)
         self.actor_critic.depth_frame_encoder.train()
-        self.depth_decoder.train()
-        self._zero_encoder_optimizer("visual_frame")
-        self.depth_decoder_optimizer.zero_grad(set_to_none=True)
+        self.actor_critic.depth_frame_decoder.train()
+        self.depth_frame_optimizer.zero_grad(set_to_none=True)
         
         # Keep the depth-frame autoencoder in fp32. Its decoder computes a
         # pseudo-inverse transform, and mixing bf16 activations with fp32 pinv
@@ -897,7 +805,7 @@ class PPO_KITE:
         )
 
         transform_matrices = depth_aux["transform_matrices"].float()
-        depth_recon, _ = self.depth_decoder(latest_depth_z, transform_matrices)
+        depth_recon, _ = self.actor_critic.depth_frame_decoder(latest_depth_z, transform_matrices)
         
         # Calculate the depth-image reconstruction loss
         depth_recon_loss = self._masked_mse_loss(depth_recon, depth_images_batch, mask)
@@ -914,13 +822,15 @@ class PPO_KITE:
             + self.depth_frame_kl_weight * depth_kl
             + self.depth_transform_identity_weight * transform_identity_loss
         )
+        # The reconstruction loss keeps the needed graph references; drop the
+        # large image tensor before building the other auxiliary branches.
+        del depth_recon
 
         # Step, norm-clip, and step optimizers for the joint autoencoder.
         depth_frame_loss.backward()
         nn.utils.clip_grad_norm_(self.actor_critic.depth_frame_encoder.parameters(), self.max_grad_norm)
-        nn.utils.clip_grad_norm_(self.depth_decoder.parameters(), self.max_grad_norm)
-        self._step_encoder_optimizer("visual_frame")
-        self.depth_decoder_optimizer.step()
+        nn.utils.clip_grad_norm_(self.actor_critic.depth_frame_decoder.parameters(), self.max_grad_norm)
+        self.depth_frame_optimizer.step()
 
         return (
             depth_frame_loss,
@@ -929,223 +839,6 @@ class PPO_KITE:
             transform_identity_loss,
             latest_depth_z.detach(),
         )
-
-    def _depth_sequence_encoder_update(self, depth_latent_history_batch, latest_depth_z_for_seq, 
-                                       terrain_maps_batch, terrain_positive, contrastive_negative_anchor_batch, 
-                                       mask):
-        self.actor_critic.depth_sequence_encoder.train()
-        self.priv_terrain_decoder.eval()
-        self._zero_encoder_optimizer("visual_sequence")
-        self.aux_projection_optimizer.zero_grad(set_to_none=True)
-
-        with self._aux_autocast():
-            # history-batch from storage, latest_depth_z from depth-decoder update step
-            depth_sequence = torch.cat(
-                [depth_latent_history_batch, latest_depth_z_for_seq.unsqueeze(1)],
-                dim=1,
-            )
-            
-            # encode the depth-latent sequence
-            seq_mean, seq_logvar, depth_seq_z = self.actor_critic.depth_sequence_encoder(depth_sequence)
-            
-            # use the reconstruction projection head
-            depth_terrain_z = self.depth_to_terrain_latent(depth_seq_z)
-            
-            # Reconstruct through the privileged terrain decoder as a frozen
-            # teacher: gradients should flow to the student latent/projection, not
-            # into the teacher decoder or its gradient buffers.
-            with self._frozen_module_params(self.priv_terrain_decoder):
-                terrain_recon_from_depth = self.priv_terrain_decoder(depth_terrain_z)
-                
-                # Calculate the terrain reconstruction loss
-                terrain_recon_loss, _ = self._terrain_recon_loss(
-                    terrain_recon_from_depth,
-                    terrain_maps_batch,
-                    mask,
-                )
-
-            # Calculate the contrastive loss through the contrastive loss projection head
-            seq_contrastive = self._projected_contrastive_loss(
-                self.terrain_contrastive_head_depth,
-                depth_terrain_z,
-                terrain_positive,
-                contrastive_negative_anchor_batch,
-                mask,
-            )
-
-            # Calculate the kl-loss of the depth-sequence encoder
-            seq_kl = self._kl_loss(seq_mean, seq_logvar, mask)
-            
-            # Calculate the total depth-sequence loss
-            depth_sequence_loss = (
-                self.depth_sequence_terrain_weight * terrain_recon_loss
-                + self.contrastive_weight * seq_contrastive
-                + self.depth_sequence_kl_weight * seq_kl
-            )
-
-        # backwards, norm-clip, step-sequence encoder optimizer, step projection-head optimizer
-        depth_sequence_loss.backward()
-        nn.utils.clip_grad_norm_(self.actor_critic.depth_sequence_encoder.parameters(), self.max_grad_norm)
-        self._step_encoder_optimizer("visual_sequence")
-        self.aux_projection_optimizer.step()
-
-        return depth_sequence_loss, terrain_recon_loss, seq_contrastive, seq_kl, depth_seq_z.detach()
-
-    def _proprioceptive_encoder_update(self, obs_hist_batch, obs_target, dynamics_positive, 
-                                       contrastive_negative_anchor_batch, mask):
-        self.actor_critic.proprio_context_encoder.train()
-        self.priv_dynamics_decoder.eval()
-        self._zero_encoder_optimizer("proprioceptive")
-        self.aux_projection_optimizer.zero_grad(set_to_none=True)
-        
-        with self._aux_autocast():
-            # Encode the current properioceptive observation history
-            prop_mean, prop_logvar, proprio_z = self.actor_critic.proprio_context_encoder(obs_hist_batch)
-            
-            # Use the proprioceptive latent -> privileged dynamics latent projection head
-            proprio_dyn_z = self.proprio_to_dynamics_latent(proprio_z)
-            
-            # Reconstruct through the privileged dynamics decoder as a frozen
-            # teacher so this update only trains the proprio student path.
-            with self._frozen_module_params(self.priv_dynamics_decoder):
-                priv_dyn_recon = self.priv_dynamics_decoder(proprio_dyn_z)
-                
-                # Calculate the privileged reconstruction loss
-                dynamics_recon_loss = self._masked_mse_loss(priv_dyn_recon, obs_target, mask)
-            
-            # Calculate the contrastive loss w.r.t. the privileged dynamics encoder
-            #     using the contrastive projection head
-            prop_contrastive = self._projected_contrastive_loss(
-                self.dynamics_contrastive_head_proprio,
-                proprio_dyn_z,
-                dynamics_positive,
-                contrastive_negative_anchor_batch,
-                mask,
-            )
-            
-            # Calculate the kl-loss of the proprioceptive encoder
-            prop_kl = self._kl_loss(prop_mean, prop_logvar, mask)
-            
-            # Calculate the total proprioceptive encoder loss
-            proprio_loss = (
-                self.proprio_dynamics_weight * dynamics_recon_loss
-                + self.contrastive_weight * prop_contrastive
-                + self.proprio_kl_weight * prop_kl
-            )
-        
-        # Backwards, norm-clip, step proprioceptive encoder optimizer, step projection heads optimizer
-        proprio_loss.backward()
-        nn.utils.clip_grad_norm_(self.actor_critic.proprio_context_encoder.parameters(), self.max_grad_norm)
-        self._step_encoder_optimizer("proprioceptive")
-        self.aux_projection_optimizer.step()
-
-        return proprio_loss, dynamics_recon_loss, prop_contrastive, prop_kl, proprio_z.detach()
-
-    def _mixer_encoder_update(self, depth_seq_z_detached, proprio_z_detached, obs_target, 
-                              explicit_labels_batch, terrain_maps_batch, 
-                              terrain_positive, dynamics_positive, contrastive_negative_anchor_batch, 
-                              mask
-    ):    
-        self.actor_critic.context_encoder.train()
-        self._zero_encoder_optimizer("modality_mixer")
-        self.aux_projection_optimizer.zero_grad(set_to_none=True)
-        
-        with self._aux_autocast():
-            # Use previously computed (now detached) depth sequence latent and obs-history latent
-            #     to produce mizer latent and explicit estimation values
-            mix_mean, mix_logvar, mix_z, body_velo_est, feet_state_est = self.actor_critic.context_encoder(
-                depth_seq_z_detached,
-                proprio_z_detached,
-            )
-
-            # Use the reconstruction projection heads
-            mix_terrain_z = self.mixer_to_terrain_latent(mix_z)
-            mix_dynamics_z = self.mixer_to_dynamics_latent(mix_z)
-
-            # Decode with frozen privileged teachers; the mixer/projection heads
-            # receive the reconstruction gradients, while teacher decoder params
-            # avoid large, unnecessary grad buffers.
-            with self._frozen_module_params(
-                self.priv_terrain_decoder,
-                self.priv_dynamics_decoder,
-            ):
-                # Reconstruct the terrain
-                terrain_recon_from_mix = self.priv_terrain_decoder(mix_terrain_z)
-                
-                # Reconstruct the next time-steps privileged observation 
-                dyn_recon_from_mix = self.priv_dynamics_decoder(mix_dynamics_z)
-            
-            # Create the full explicit estimation vector
-            explicit_est = torch.cat([body_velo_est, feet_state_est], dim=-1)
-
-            # Calculate recon losses
-            mix_terrain_loss, mix_terrain_recon_log = self._terrain_recon_loss(terrain_recon_from_mix, terrain_maps_batch, mask)  # Calculate terrain reconstruction loss (with log returned)
-            mix_dyn_loss = self._masked_mse_loss(dyn_recon_from_mix, obs_target, mask)                                            # Calculate the next time-step privileged observation reconstruction loss
-            explicit_loss = self._masked_mse_loss(explicit_est, explicit_labels_batch, mask)                                      # Calculate the explicit estimation (torso velocity, feet-state) reconstruction loss
-
-            # Pull out the dimensions of the body velocity prediction and feet-state prediction
-            body_velo_dim = self.actor_critic.body_velo_dim
-            feet_state_dim = self.actor_critic.feet_state_dim
-
-            # Calculate the torso velocity estimation loss specifically for logging
-            torso_velo_explicit_loss = self._masked_mse_loss(
-                body_velo_est,
-                explicit_labels_batch[:, :body_velo_dim],
-                mask,
-            )
-
-            # Calculate the feet-state estimation loss specifically for logging
-            if feet_state_dim > 0:
-                feet_state_explicit_loss = self._masked_mse_loss(
-                    feet_state_est,
-                    explicit_labels_batch[
-                        :, body_velo_dim:body_velo_dim + feet_state_dim
-                    ],
-                    mask,
-                )
-            else:
-                feet_state_explicit_loss = explicit_loss.new_zeros(())
-
-            # Calculate the terrain contrastive loss
-            mix_terrain_contrast_loss = self._projected_contrastive_loss(self.terrain_contrastive_head_mixer,
-                                                                         mix_terrain_z,
-                                                                         terrain_positive,
-                                                                         contrastive_negative_anchor_batch,
-                                                                         mask)
-
-            # Calculate the next time-step privlieged obs contrastive loss
-            mix_dyn_contrast_loss = self._projected_contrastive_loss(self.dynamics_contrastive_head_mixer,
-                                                                          mix_dynamics_z,
-                                                                          dynamics_positive,
-                                                                          contrastive_negative_anchor_batch,
-                                                                          mask)
-            
-            # Calculate the total contrastive loss
-            mix_contrastive = mix_terrain_contrast_loss + mix_dyn_contrast_loss 
-
-            # No standalone KL-loss for the modality mixer, it is included in the versatility metric
-            versatility_loss, versatility_log = self._versatility_kl_metric(mix_mean,
-                                                                            mix_logvar,
-                                                                            mask)
-            
-            # Calculate total loss
-            modality_loss = (
-                self.modality_terrain_weight * mix_terrain_loss
-                + self.modality_dynamics_weight * mix_dyn_loss
-                + self.modality_explicit_weight * explicit_loss
-                + self.contrastive_weight * mix_contrastive
-                + self.versatility_weight * versatility_loss)
-        
-        # Backwards, norm-clip, modality-mixer encoder optimizer step, projection/contrative head optimizer step
-        modality_loss.backward()
-        nn.utils.clip_grad_norm_(self.actor_critic.context_encoder.parameters(), self.max_grad_norm)
-        self._step_encoder_optimizer("modality_mixer")
-        self.aux_projection_optimizer.step()
-        
-
-        return modality_loss, mix_terrain_loss, mix_terrain_recon_log, mix_dyn_loss, explicit_loss, torso_velo_explicit_loss, \
-                feet_state_explicit_loss, mix_terrain_contrast_loss, mix_dyn_contrast_loss, mix_contrastive, versatility_loss, versatility_log, \
-                dyn_recon_from_mix, terrain_recon_from_mix, body_velo_est
 
     def _privileged_encoder_decoder_updates(self, terrain_maps_batch, privileged_obs_history_batch, obs_target, mask):
         # Terrain and dynamics teacher updates are intentionally separated.
@@ -1198,6 +891,193 @@ class PPO_KITE:
         privileged_loss = privileged_terrain_log + privileged_dynamics_log
         return privileged_loss, privileged_dynamics_log, privileged_terrain_log
 
+    def _non_privileged_auxiliary_update(
+        self,
+        obs_hist_batch,
+        depth_latent_history_batch,
+        latest_depth_z,
+        terrain_maps_batch,
+        contrastive_negative_anchor_batch,
+        explicit_labels_batch,
+        obs_target,
+        terrain_positive,
+        dynamics_positive,
+        mask,
+        depth_frame_loss,
+        depth_recon_loss,
+        depth_kl,
+        transform_identity_loss,
+    ):
+        """Merge sequence, proprioceptive, and mixer auxiliary updates into one step."""
+        self.actor_critic.depth_sequence_encoder.train()
+        self.actor_critic.proprio_context_encoder.train()
+        self.actor_critic.context_encoder.train()
+        self.priv_terrain_decoder.eval()
+        self.priv_dynamics_decoder.eval()
+
+        # The depth-frame autoencoder is updated immediately before this
+        # function. Zero the shared encoder optimizer again so this backward
+        # only contributes sequence/proprio/mixer gradients.
+        self._zero_all_encoder_optimizers()
+
+        with self._aux_autocast():
+            # 1. Depth-sequence student path. The latest frame latent comes
+            # from the standalone frame update as a detached tensor, so this
+            # graph starts at the sequence encoder.
+            depth_sequence = torch.cat(
+                [depth_latent_history_batch, latest_depth_z.unsqueeze(1)],
+                dim=1,
+            )
+            seq_mean, seq_logvar, depth_seq_z = (
+                self.actor_critic.depth_sequence_encoder(depth_sequence)
+            )
+
+            # The sequence encoder no longer has its own terrain decoder or
+            # terrain contrastive objective. It is supervised through the
+            # modality-mixer terrain losses below, while still retaining its
+            # own KL regularization.
+            seq_kl = self._kl_loss(seq_mean, seq_logvar, mask)
+            depth_sequence_loss = self.depth_sequence_kl_weight * seq_kl
+
+            # 2. Proprioceptive student path.
+            prop_mean, prop_logvar, proprio_z = (
+                self.actor_critic.proprio_context_encoder(obs_hist_batch)
+            )
+
+            # The proprioceptive encoder no longer has a standalone dynamics
+            # reconstruction or contrastive objective. It is supervised through
+            # the modality mixer dynamics losses below, while retaining its KL.
+            prop_kl = self._kl_loss(prop_mean, prop_logvar, mask)
+            proprio_loss = self.proprio_kl_weight * prop_kl
+
+            # 3. Modality mixer path. Terrain/dynamics reconstruction losses
+            # backpropagate into the sequence and proprio encoders. The
+            # depth-frame encoder remains stop-grad because latest_depth_z was
+            # detached by the standalone frame autoencoder update.
+            mix_mean, mix_logvar, mix_z, body_velo_est, feet_state_est = (
+                self.actor_critic.context_encoder(
+                    # Allow modality terrain/dynamics/contrastive losses to
+                    # train the sequence encoder, while the sequence input
+                    # itself is still stop-grad from the frame encoder above.
+                    depth_seq_z,
+                    proprio_z,
+                )
+            )
+            mix_terrain_z = self.actor_critic.mixer_to_terrain_latent(mix_z)
+            mix_dynamics_z = self.actor_critic.mixer_to_dynamics_latent(mix_z)
+            with self._frozen_module_params(
+                self.priv_terrain_decoder,
+                self.priv_dynamics_decoder,
+            ):
+                terrain_recon_from_mix = self.priv_terrain_decoder(mix_terrain_z)
+                dyn_recon_from_mix = self.priv_dynamics_decoder(mix_dynamics_z)
+
+            explicit_est = torch.cat([body_velo_est, feet_state_est], dim=-1)
+            mix_terrain_loss, mix_terrain_recon_log = self._terrain_recon_loss(
+                terrain_recon_from_mix,
+                terrain_maps_batch,
+                mask,
+            )
+            mix_dyn_loss = self._masked_mse_loss(dyn_recon_from_mix, obs_target, mask)
+            explicit_loss = self._masked_mse_loss(
+                explicit_est,
+                explicit_labels_batch,
+                mask,
+            )
+            del explicit_est
+
+            body_velo_dim = self.actor_critic.body_velo_dim
+            feet_state_dim = self.actor_critic.feet_state_dim
+            torso_velo_explicit_loss = self._masked_mse_loss(
+                body_velo_est,
+                explicit_labels_batch[:, :body_velo_dim],
+                mask,
+            )
+            if feet_state_dim > 0:
+                feet_state_explicit_loss = self._masked_mse_loss(
+                    feet_state_est,
+                    explicit_labels_batch[
+                        :, body_velo_dim:body_velo_dim + feet_state_dim
+                    ],
+                    mask,
+                )
+            else:
+                feet_state_explicit_loss = explicit_loss.new_zeros(())
+
+            mix_terrain_contrast_loss = self._normalized_contrastive_loss(
+                mix_terrain_z,
+                terrain_positive,
+                contrastive_negative_anchor_batch,
+                mask,
+            )
+            mix_dyn_contrast_loss = self._normalized_contrastive_loss(
+                mix_dynamics_z,
+                dynamics_positive,
+                contrastive_negative_anchor_batch,
+                mask,
+            )
+
+            mix_contrastive = mix_terrain_contrast_loss + mix_dyn_contrast_loss
+            versatility_loss, versatility_log = self._versatility_kl_metric(
+                mix_mean,
+                mix_logvar,
+                mask,
+            )
+            modality_loss = (
+                self.modality_terrain_weight * mix_terrain_loss
+                + self.modality_dynamics_weight * mix_dyn_loss
+                + self.modality_explicit_weight * explicit_loss
+                + self.contrastive_weight * mix_contrastive
+                + self.versatility_weight * versatility_loss
+            )
+
+        non_privileged_loss = (
+            depth_sequence_loss
+            + proprio_loss
+            + modality_loss
+        )
+        non_privileged_loss.backward()
+        nn.utils.clip_grad_norm_(
+            self.actor_critic.depth_sequence_encoder.parameters(),
+            self.max_grad_norm,
+        )
+        nn.utils.clip_grad_norm_(
+            self.actor_critic.proprio_context_encoder.parameters(),
+            self.max_grad_norm,
+        )
+        nn.utils.clip_grad_norm_(
+            self.actor_critic.context_encoder.parameters(),
+            self.max_grad_norm,
+        )
+        self._step_all_encoder_optimizers()
+
+        return {
+            "non_privileged_loss": depth_frame_loss + non_privileged_loss,
+            "depth_frame_loss": depth_frame_loss,
+            "depth_recon_loss": depth_recon_loss,
+            "depth_kl": depth_kl,
+            "transform_identity_loss": transform_identity_loss,
+            "depth_sequence_loss": depth_sequence_loss,
+            "seq_kl": seq_kl,
+            "proprio_loss": proprio_loss,
+            "prop_kl": prop_kl,
+            "modality_loss": modality_loss,
+            "mix_terrain_loss": mix_terrain_loss,
+            "mix_terrain_recon_log": mix_terrain_recon_log,
+            "mix_dyn_loss": mix_dyn_loss,
+            "explicit_loss": explicit_loss,
+            "torso_velo_explicit_loss": torso_velo_explicit_loss,
+            "feet_state_explicit_loss": feet_state_explicit_loss,
+            "mix_terrain_contrast_loss": mix_terrain_contrast_loss,
+            "mix_dyn_contrast_loss": mix_dyn_contrast_loss,
+            "mix_contrastive": mix_contrastive,
+            "versatility_loss": versatility_loss,
+            "versatility_log": versatility_log,
+            "dyn_recon_from_mix": dyn_recon_from_mix,
+            "terrain_recon_from_mix": terrain_recon_from_mix,
+            "body_velo_est": body_velo_est,
+        }
+
     def _update_auxiliary_encoders(self, obs_hist_batch, privileged_obs_history_batch, depth_images_batch, 
                                    depth_latent_history_batch, depth_torso_state_batch, terrain_maps_batch, 
                                    contrastive_negative_anchor_batch, explicit_labels_batch, obs_target, 
@@ -1206,62 +1086,65 @@ class PPO_KITE:
         mask = terminated_batch.float()
         losses = {}
 
-        # 1. Depth-image autoencoder update:
-        #    optimize the visual frame encoder and decoder together so the
-        #    encoder's IMU transform conditions both halves of reconstruction.
-        depth_frame_loss, depth_recon_loss, depth_kl, transform_identity_loss, latest_depth_z_detached = (
-            self._depth_frame_autoencoder_update(
-                depth_images_batch,
-                depth_torso_state_batch,
-                mask,
-            )
-        )
-
         # Shared privileged anchors for contrastive alignment. These are
-        #     detached because the student-side encoders are updated in steps 3-5.
+        # detached because the student-side encoders are updated by the merged
+        # non-privileged auxiliary step below.
         terrain_positive = dynamics_positive = None
         with torch.no_grad():
             terrain_positive = self.priv_terrain_encoder(terrain_maps_batch)
             dynamics_positive = self.priv_dynamics_encoder(privileged_obs_history_batch)
 
-        # 2. Depth-sequence encoder update:
-        #    reconstruct privileged terrain and align the visual sequence latent
-        #    to the privileged terrain encoder while pushing from a random anchor.
-        depth_sequence_loss, terrain_recon_loss, seq_contrastive, seq_kl, depth_z_detach = self._depth_sequence_encoder_update(depth_latent_history_batch, latest_depth_z_detached, 
-                                                                                                                               terrain_maps_batch, terrain_positive, 
-                                                                                                                               contrastive_negative_anchor_batch, mask)
+        # 1. Update the single-frame depth autoencoder in its own graph. This
+        # releases depth-image decoder activations before building the larger
+        # sequence/proprio/mixer graph.
+        (
+            depth_frame_loss,
+            depth_recon_loss,
+            depth_kl,
+            transform_identity_loss,
+            latest_depth_z,
+        ) = self._depth_frame_autoencoder_update(
+            depth_images_batch,
+            depth_torso_state_batch,
+            mask,
+        )
+        self._empty_cache_if_debugging()
 
-        # 3. Proprioceptive encoder update:
-        #    reconstruct next privileged dynamics and align proprio latent to
-        #    the privileged dynamics encoder using the same negative anchor.
-        proprio_loss, dynamics_recon_loss, prop_contrastive, prop_kl, obs_z_detach = self._proprioceptive_encoder_update(obs_hist_batch, obs_target, dynamics_positive,
-                                                                                                                         contrastive_negative_anchor_batch, mask)
-
-        # 4. Modality mixer update:
-        #    fuse frozen depth/proprio latents, then supervise the fused latent
-        #    with terrain, dynamics, explicit-state, contrastive, and
-        #    versatility/KL losses.
-        modality_loss, mix_terrain_loss, mix_terrain_recon_log, mix_dyn_loss, explicit_loss, \
-            torso_velo_explicit_loss, feet_state_explicit_loss, mix_terrain_contrast_loss, \
-                mix_dyn_contrast_loss, mix_contrastive, versatility_loss, versatility_log, \
-                    dyn_recon_from_mix, terrain_recon_from_mix, body_velo_est = self._mixer_encoder_update(depth_z_detach, obs_z_detach, obs_target, 
-                                                                                                           explicit_labels_batch, terrain_maps_batch, 
-                                                                                                           terrain_positive, dynamics_positive, 
-                                                                                                           contrastive_negative_anchor_batch, mask)
+        # 2-4. Merge the depth-sequence, proprioceptive, and modality-mixer
+        # student updates into one forward/backward/step.
+        aux = self._non_privileged_auxiliary_update(
+            obs_hist_batch,
+            depth_latent_history_batch,
+            latest_depth_z,
+            terrain_maps_batch,
+            contrastive_negative_anchor_batch,
+            explicit_labels_batch,
+            obs_target,
+            terrain_positive,
+            dynamics_positive,
+            mask,
+            depth_frame_loss.detach(),
+            depth_recon_loss.detach(),
+            depth_kl.detach(),
+            transform_identity_loss.detach(),
+        )
+        del latest_depth_z
 
         # Boot probability only needs compact aggregate statistics. Compute
         # them immediately after the mixer update, move them to CPU, and drop
         # the large CUDA reconstructions before the privileged teacher update.
         boot_summary = self._make_boot_summary(
             obs_target,
-            dyn_recon_from_mix.detach(),
+            aux["dyn_recon_from_mix"].detach(),
             terrain_maps_batch,
-            terrain_recon_from_mix.detach(),
+            aux["terrain_recon_from_mix"].detach(),
             explicit_labels_batch,
-            body_velo_est.detach(),
+            aux["body_velo_est"].detach(),
             mask,
         )
-        del dyn_recon_from_mix, terrain_recon_from_mix, body_velo_est
+        del aux["dyn_recon_from_mix"]
+        del aux["terrain_recon_from_mix"]
+        del aux["body_velo_est"]
         self._empty_cache_if_debugging()
         
         # 5. Privileged terrain/dynamics encoder-decoder update:
@@ -1270,66 +1153,95 @@ class PPO_KITE:
                                                                                                                       obs_target, mask)
 
         # Total Encoder(s) update loss
-        losses["total"] = self._detach_scalar(depth_frame_loss + depth_sequence_loss + proprio_loss + modality_loss + privileged_loss)
+        losses["total"] = self._detach_scalar(aux["non_privileged_loss"] + privileged_loss)
 
         # Explicity Estimation Loss
-        losses["explicit"] = self._detach_scalar(explicit_loss)
+        losses["explicit"] = self._detach_scalar(aux["explicit_loss"])
         
         # Total reconstructed loss
-        losses["recon"] = self._detach_scalar(depth_recon_loss + terrain_recon_loss + dynamics_recon_loss + mix_terrain_loss + mix_dyn_loss)
+        losses["recon"] = self._detach_scalar(
+            aux["depth_recon_loss"]
+            + aux["mix_terrain_loss"]
+            + aux["mix_dyn_loss"]
+        )
 
         # Total KL loss across all encoders
-        losses["total_kl"] = self._detach_scalar(depth_kl + seq_kl + prop_kl + versatility_log["kl"])
-        losses["decoder"] = self._detach_scalar(depth_recon_loss + privileged_loss)
-        losses["depth_transform_identity"] = self._detach_scalar(transform_identity_loss)
+        losses["total_kl"] = self._detach_scalar(
+            aux["depth_kl"]
+            + aux["seq_kl"]
+            + aux["prop_kl"]
+            + aux["versatility_log"]["kl"]
+        )
+        losses["decoder"] = self._detach_scalar(aux["depth_recon_loss"] + privileged_loss)
+        losses["depth_transform_identity"] = self._detach_scalar(aux["transform_identity_loss"])
         
         losses["boot_summary"] = boot_summary
         # The positive anchors and detached student latents are no longer
         # needed after the auxiliary losses and CPU boot summaries are built.
         del terrain_positive, dynamics_positive
-        del latest_depth_z_detached, depth_z_detach, obs_z_detach
         del contrastive_negative_anchor_batch
         self._empty_cache_if_debugging()
 
-        # Loss details for logging
+        # Loss details for logging. The compact path logs per-model totals and
+        # a small number of aggregate losses; detailed mode restores all leaves.
         losses["detail"] = {
-            "depth_frame_total": self._detach_scalar(depth_frame_loss),
-            "depth_frame_recon": self._detach_scalar(depth_recon_loss),
-            "depth_frame_kl": self._detach_scalar(depth_kl),
-            "depth_frame_transform_identity": self._detach_scalar(transform_identity_loss),
-            "depth_autoencoder_recon": self._detach_scalar(depth_recon_loss),
-            
-            "depth_sequence_total": self._detach_scalar(depth_sequence_loss),
-            "depth_sequence_terrain_recon": self._detach_scalar(terrain_recon_loss),
-            "depth_sequence_contrastive": self._detach_scalar(seq_contrastive),
-            "depth_sequence_kl": self._detach_scalar(seq_kl),
-            
-            "proprio_total": self._detach_scalar(proprio_loss),
-            "proprio_dynamics_recon": self._detach_scalar(dynamics_recon_loss),
-            "proprio_contrastive": self._detach_scalar(prop_contrastive),
-            "proprio_kl": self._detach_scalar(prop_kl),
-            
-            "modality_total": self._detach_scalar(modality_loss),
-            "modality_terrain_recon": self._detach_scalar(mix_terrain_loss),
-            "modality_terrain_height": self._detach_scalar(mix_terrain_recon_log["height_loss"]),
-            "modality_terrain_normals": self._detach_scalar(mix_terrain_recon_log["normal_cos"]),
-            "modality_dynamics_recon": self._detach_scalar(mix_dyn_loss),
-            "modality_versatility": self._detach_scalar(versatility_loss),
-            "modality_kl": self._detach_scalar(versatility_log["kl"]),
-            "modality_marginal_entropy": self._detach_scalar(versatility_log["marginal_entropy"]),
-            "modality_conditional_entropy": self._detach_scalar(versatility_log["conditional_entropy"]),
-            "modality_mutual_info": self._detach_scalar(versatility_log["mutual_info"]),
-            "modality_explicit": self._detach_scalar(explicit_loss),
-            "modality_explicit_torso_velo": self._detach_scalar(torso_velo_explicit_loss),
-            "modality_explicit_feet_state": self._detach_scalar(feet_state_explicit_loss),
-            "modality_contrastive": self._detach_scalar(mix_contrastive),
-            "modality_terrain_contrastive": self._detach_scalar(mix_terrain_contrast_loss),
-            "modality_dynamics_contrastive": self._detach_scalar(mix_dyn_contrast_loss),
-            
+            "depth_frame_total": self._detach_scalar(aux["depth_frame_loss"]),
+            "depth_sequence_total": self._detach_scalar(aux["depth_sequence_loss"]),
+            "proprio_total": self._detach_scalar(aux["proprio_loss"]),
+            "modality_total": self._detach_scalar(aux["modality_loss"]),
+            "modality_recon": self._detach_scalar(
+                aux["mix_terrain_loss"] + aux["mix_dyn_loss"]
+            ),
             "privileged_total": self._detach_scalar(privileged_loss),
-            "privileged_terrain_recon": self._detach_scalar(privileged_terrain_loss),
-            "privileged_dynamics_recon": self._detach_scalar(privileged_dynamics_loss),
         }
+        if self.log_detailed_encoder_losses:
+            losses["detail"].update({
+                "depth_frame_recon": self._detach_scalar(aux["depth_recon_loss"]),
+                "depth_frame_kl": self._detach_scalar(aux["depth_kl"]),
+                "depth_frame_transform_identity": self._detach_scalar(aux["transform_identity_loss"]),
+                "depth_autoencoder_recon": self._detach_scalar(aux["depth_recon_loss"]),
+                
+                "depth_sequence_kl": self._detach_scalar(aux["seq_kl"]),
+                
+                "proprio_kl": self._detach_scalar(aux["prop_kl"]),
+                
+                "modality_terrain_recon": self._detach_scalar(aux["mix_terrain_loss"]),
+                "modality_terrain_height": self._detach_scalar(
+                    aux["mix_terrain_recon_log"]["height_loss"]
+                ),
+                "modality_terrain_normals": self._detach_scalar(
+                    aux["mix_terrain_recon_log"]["normal_cos"]
+                ),
+                "modality_dynamics_recon": self._detach_scalar(aux["mix_dyn_loss"]),
+                "modality_versatility": self._detach_scalar(aux["versatility_loss"]),
+                "modality_kl": self._detach_scalar(aux["versatility_log"]["kl"]),
+                "modality_marginal_entropy": self._detach_scalar(
+                    aux["versatility_log"]["marginal_entropy"]
+                ),
+                "modality_conditional_entropy": self._detach_scalar(
+                    aux["versatility_log"]["conditional_entropy"]
+                ),
+                "modality_mutual_info": self._detach_scalar(
+                    aux["versatility_log"]["mutual_info"]
+                ),
+                "modality_explicit": self._detach_scalar(aux["explicit_loss"]),
+                "modality_explicit_torso_velo": self._detach_scalar(
+                    aux["torso_velo_explicit_loss"]
+                ),
+                "modality_explicit_feet_state": self._detach_scalar(
+                    aux["feet_state_explicit_loss"]
+                ),
+                "modality_contrastive": self._detach_scalar(aux["mix_contrastive"]),
+                "modality_terrain_contrastive": self._detach_scalar(
+                    aux["mix_terrain_contrast_loss"]
+                ),
+                "modality_dynamics_contrastive": self._detach_scalar(
+                    aux["mix_dyn_contrast_loss"]
+                ),
+                "privileged_terrain_recon": self._detach_scalar(privileged_terrain_loss),
+                "privileged_dynamics_recon": self._detach_scalar(privileged_dynamics_loss),
+            })
+        del aux
 
         return losses
 

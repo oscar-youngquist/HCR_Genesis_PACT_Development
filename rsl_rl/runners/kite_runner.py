@@ -90,6 +90,7 @@ class OnPolicyRunnerKITE:
                                                             self.env.depth_output_resolution,
                                                             self.policy_cfg["depth_image_latent_dim"],
                                                             self.policy_cfg["depth_image_norm"],
+                                                            self.policy_cfg.get("depth_decoder_norm", "none"),
                                                             self.policy_cfg.get("depth_sequence_length", 5),
                                                             self.policy_cfg["depth_sequence_norm"],
                                                             
@@ -109,6 +110,8 @@ class OnPolicyRunnerKITE:
                                                             self.policy_cfg["mixer_hidden_dim"],
                                                             self.policy_cfg["mixer_token_dim"],
                                                             self.policy_cfg["mixer_channel_dim"],
+                                                            self.policy_cfg.get("privileged_terrain_latent_dim", 32),
+                                                            self.policy_cfg.get("privileged_dynamics_latent_dim", 16),
                                                             self.env.num_actions,
                                                             self.policy_cfg["actor_layers"],
                                                             self.policy_cfg["critic_layers"],
@@ -508,65 +511,17 @@ class OnPolicyRunnerKITE:
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
         print(log_string)
 
-    def _enc_optimizer_uses_bundle(self):
-        return hasattr(self.alg.enc_optimizer, "optimizers")
-
-    def _load_enc_optimizer_state(self, enc_optimizer_state):
-        if enc_optimizer_state is None:
-            print("No encoder optimizer state found in checkpoint.")
-            return
-
-        if not self._enc_optimizer_uses_bundle():
-            self.alg.enc_optimizer.load_state_dict(enc_optimizer_state)
-            return
-
-        expected_names = set(self.alg.enc_optimizer.optimizers.keys())
-        if isinstance(enc_optimizer_state, dict) and expected_names.issubset(enc_optimizer_state.keys()):
-            self.alg.enc_optimizer.load_state_dict(enc_optimizer_state)
-            return
-
-        is_legacy_single_optimizer = (
-            isinstance(enc_optimizer_state, dict)
-            and "state" in enc_optimizer_state
-            and "param_groups" in enc_optimizer_state
-        )
-        if is_legacy_single_optimizer:
-            print(
-                "Skipping legacy single encoder optimizer state because the "
-                "current KITE policy uses an OptimizerBundle with separate "
-                "sub-optimizers. Model weights were loaded; encoder optimizer "
-                "states will be reinitialized."
-            )
-            return
-
-        raise KeyError(
-            "Encoder optimizer state does not match the current OptimizerBundle. "
-            f"Expected keys: {sorted(expected_names)}; got keys: "
-            f"{sorted(enc_optimizer_state.keys()) if isinstance(enc_optimizer_state, dict) else type(enc_optimizer_state)}"
-        )
-
     def save(self, path, infos=None):
         checkpoint = {
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'act_optimizer_state_dict': self.alg.act_optimizer.state_dict(),
+            'depth_frame_optimizer_state_dict': self.alg.depth_frame_optimizer.state_dict(),
             'enc_optimizer_state_dict': self.alg.enc_optimizer.state_dict(),
-            'enc_optimizer_format': 'bundle' if self._enc_optimizer_uses_bundle() else 'single',
-            'depth_decoder_state_dict': self.alg.depth_decoder.state_dict(),
-            'depth_decoder_opt_state_dict': self.alg.depth_decoder_optimizer.state_dict(),
             'priv_terrain_encoder_state_dict': self.alg.priv_terrain_encoder.state_dict(),
             'priv_terrain_decoder_state_dict': self.alg.priv_terrain_decoder.state_dict(),
             'priv_dynamics_encoder_state_dict': self.alg.priv_dynamics_encoder.state_dict(),
             'priv_dynamics_decoder_state_dict': self.alg.priv_dynamics_decoder.state_dict(),
             'privileged_optimizer_state_dict': self.alg.privileged_optimizer.state_dict(),
-            'depth_to_terrain_latent_state_dict': self.alg.depth_to_terrain_latent.state_dict(),
-            'proprio_to_dynamics_latent_state_dict': self.alg.proprio_to_dynamics_latent.state_dict(),
-            'mixer_to_terrain_latent_state_dict': self.alg.mixer_to_terrain_latent.state_dict(),
-            'mixer_to_dynamics_latent_state_dict': self.alg.mixer_to_dynamics_latent.state_dict(),
-            'terrain_contrastive_head_depth_state_dict': self.alg.terrain_contrastive_head_depth.state_dict(),
-            'dynamics_contrastive_head_proprio_state_dict': self.alg.dynamics_contrastive_head_proprio.state_dict(),
-            'terrain_contrastive_head_mixer_state_dict': self.alg.terrain_contrastive_head_mixer.state_dict(),
-            'dynamics_contrastive_head_mixer_state_dict': self.alg.dynamics_contrastive_head_mixer.state_dict(),
-            'aux_projection_optimizer_state_dict': self.alg.aux_projection_optimizer.state_dict(),
             'iter': self.current_learning_iteration,
             'infos': infos,
         }
@@ -579,23 +534,9 @@ class OnPolicyRunnerKITE:
         # Load optimizer(s)
         if load_optimizer:
             self.alg.act_optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
-            self._load_enc_optimizer_state(loaded_dict.get('enc_optimizer_state_dict'))
-            if 'depth_decoder_opt_state_dict' in loaded_dict:
-                self.alg.depth_decoder_optimizer.load_state_dict(loaded_dict['depth_decoder_opt_state_dict'])
-            if 'privileged_optimizer_state_dict' in loaded_dict:
-                self.alg.privileged_optimizer.load_state_dict(loaded_dict['privileged_optimizer_state_dict'])
-            if 'aux_projection_optimizer_state_dict' in loaded_dict:
-                try:
-                    self.alg.aux_projection_optimizer.load_state_dict(loaded_dict['aux_projection_optimizer_state_dict'])
-                except ValueError:
-                    print(
-                        "Skipping auxiliary projection optimizer state because "
-                        "its parameter groups do not match the current KITE "
-                        "auxiliary projection modules. Model weights were "
-                        "loaded; this optimizer will be reinitialized."
-                    )
-        if 'depth_decoder_state_dict' in loaded_dict:
-            self.alg.depth_decoder.load_state_dict(loaded_dict['depth_decoder_state_dict'])
+            self.alg.depth_frame_optimizer.load_state_dict(loaded_dict['depth_frame_optimizer_state_dict'])
+            self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
+            self.alg.privileged_optimizer.load_state_dict(loaded_dict['privileged_optimizer_state_dict'])
         if 'priv_terrain_encoder_state_dict' in loaded_dict:
             self.alg.priv_terrain_encoder.load_state_dict(loaded_dict['priv_terrain_encoder_state_dict'])
         if 'priv_terrain_decoder_state_dict' in loaded_dict:
@@ -604,22 +545,6 @@ class OnPolicyRunnerKITE:
             self.alg.priv_dynamics_encoder.load_state_dict(loaded_dict['priv_dynamics_encoder_state_dict'])
         if 'priv_dynamics_decoder_state_dict' in loaded_dict:
             self.alg.priv_dynamics_decoder.load_state_dict(loaded_dict['priv_dynamics_decoder_state_dict'])
-        if 'depth_to_terrain_latent_state_dict' in loaded_dict:
-            self.alg.depth_to_terrain_latent.load_state_dict(loaded_dict['depth_to_terrain_latent_state_dict'])
-        if 'proprio_to_dynamics_latent_state_dict' in loaded_dict:
-            self.alg.proprio_to_dynamics_latent.load_state_dict(loaded_dict['proprio_to_dynamics_latent_state_dict'])
-        if 'mixer_to_terrain_latent_state_dict' in loaded_dict:
-            self.alg.mixer_to_terrain_latent.load_state_dict(loaded_dict['mixer_to_terrain_latent_state_dict'])
-        if 'mixer_to_dynamics_latent_state_dict' in loaded_dict:
-            self.alg.mixer_to_dynamics_latent.load_state_dict(loaded_dict['mixer_to_dynamics_latent_state_dict'])
-        if 'terrain_contrastive_head_depth_state_dict' in loaded_dict:
-            self.alg.terrain_contrastive_head_depth.load_state_dict(loaded_dict['terrain_contrastive_head_depth_state_dict'])
-        if 'dynamics_contrastive_head_proprio_state_dict' in loaded_dict:
-            self.alg.dynamics_contrastive_head_proprio.load_state_dict(loaded_dict['dynamics_contrastive_head_proprio_state_dict'])
-        if 'terrain_contrastive_head_mixer_state_dict' in loaded_dict:
-            self.alg.terrain_contrastive_head_mixer.load_state_dict(loaded_dict['terrain_contrastive_head_mixer_state_dict'])
-        if 'dynamics_contrastive_head_mixer_state_dict' in loaded_dict:
-            self.alg.dynamics_contrastive_head_mixer.load_state_dict(loaded_dict['dynamics_contrastive_head_mixer_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']
         return loaded_dict['infos']
 
