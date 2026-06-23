@@ -751,12 +751,108 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             self.commands[env_ids, 3] = torch_rand_float(self.command_ranges["heading"][0], self.command_ranges["heading"][1], (len(env_ids), 1), device=self.device).squeeze(1)
         else:
             self.commands[env_ids, 2] = torch_rand_float(self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1], (len(env_ids), 1), device=self.device).squeeze(1)
-        
+
+        forward_only_mask = self._get_forward_only_command_mask(env_ids)
+        if forward_only_mask.any():
+            forward_only_env_ids = env_ids[forward_only_mask]
+            self.commands[forward_only_env_ids, 0] = self._sample_forward_only_lin_vel_x_commands(
+                len(forward_only_env_ids)
+            )
+            self.commands[forward_only_env_ids, 1] = 0.0
+            if self.cfg.commands.heading_command:
+                self.commands[forward_only_env_ids, 3] = 0.0
+            else:
+                self.commands[forward_only_env_ids, 2] = 0.0
+
         # set small commands to zero
-        self.commands[env_ids, :3] *= (torch.norm(
-            self.commands[env_ids, :3], dim=1) > 0.2).unsqueeze(1)
+        command_is_active = torch.norm(self.commands[env_ids, :3], dim=1) > 0.2
+        command_is_active = command_is_active | forward_only_mask
+        self.commands[env_ids, :3] *= command_is_active.unsqueeze(1)
 
         self.command_resample_timeouts[env_ids] = self._sample_command_resample_timeouts(len(env_ids))
+
+    def _get_forward_only_command_mask(self, env_ids):
+        """Return envs on obstacle terrain columns that should only receive forward commands."""
+        if (
+            len(env_ids) == 0
+            or self.forward_only_command_terrain_kind_ids.numel() == 0
+        ):
+            return torch.zeros(len(env_ids), dtype=torch.bool, device=self.device)
+
+        terrain_kind_ids = getattr(self.simulator, "terrain_kind_ids", None)
+        if terrain_kind_ids is not None:
+            env_terrain_kind_ids = terrain_kind_ids[env_ids]
+            return (
+                env_terrain_kind_ids.unsqueeze(1)
+                == self.forward_only_command_terrain_kind_ids.unsqueeze(0)
+            ).any(dim=1)
+
+        if (
+            self.forward_only_command_terrain_types.numel() == 0
+            or not hasattr(self.simulator, "terrain_types")
+        ):
+            return torch.zeros(len(env_ids), dtype=torch.bool, device=self.device)
+
+        terrain_types = self.simulator.terrain_types[env_ids]
+        return (
+            terrain_types.unsqueeze(1)
+            == self.forward_only_command_terrain_types.unsqueeze(0)
+        ).any(dim=1)
+
+    def _sample_forward_only_lin_vel_x_commands(self, num_envs):
+        """Sample strictly positive forward speed commands for obstacle-focused terrains."""
+        lin_vel_x_max = max(
+            float(self.command_ranges["lin_vel_x"][1]),
+            self.forward_only_min_lin_vel_x,
+        )
+        return torch_rand_float(
+            self.forward_only_min_lin_vel_x,
+            lin_vel_x_max,
+            (num_envs, 1),
+            self.device,
+        ).squeeze(1)
+
+    def _build_forward_only_command_terrain_kind_ids(self, sim_device):
+        """Return terrain generator branch ids that use obstacle-focused commands."""
+        return torch.tensor(
+            Terrain.FORWARD_ONLY_COMMAND_KIND_IDS,
+            device=sim_device,
+            dtype=torch.long,
+        )
+
+    def _build_forward_only_command_terrain_types(self, sim_device):
+        """Map terrain curriculum columns to obstacle terrain branches."""
+        terrain_names = (
+            "gap_terrain",
+            "pit_terrain",
+            "multiple_high_platforms_terrain",
+            "high_platform_gaps_terrain",
+        )
+        if getattr(self.cfg.terrain, "selected", False):
+            terrain_type = getattr(self.cfg.terrain, "terrain_kwargs", {}).get(
+                "type", ""
+            )
+            if any(name in terrain_type for name in terrain_names):
+                return torch.arange(
+                    self.cfg.terrain.num_cols, device=sim_device, dtype=torch.long
+                )
+            return torch.empty(0, device=sim_device, dtype=torch.long)
+
+        obstacle_terrain_indices = set(Terrain.FORWARD_ONLY_COMMAND_KIND_IDS)
+        proportions = np.cumsum(self.cfg.terrain.terrain_proportions)
+        terrain_type_ids = []
+        lower_bound = 0.0
+        for terrain_idx, upper_bound in enumerate(proportions):
+            if terrain_idx in obstacle_terrain_indices:
+                for terrain_col in range(self.cfg.terrain.num_cols):
+                    choice = terrain_col / self.cfg.terrain.num_cols + 0.001
+                    if lower_bound <= choice < upper_bound:
+                        terrain_type_ids.append(terrain_col)
+            lower_bound = upper_bound
+
+        return torch.tensor(
+            sorted(set(terrain_type_ids)), device=sim_device, dtype=torch.long
+        )
 
     def _get_lin_vel_x_bias_progress(self):
         initial_max = self.initial_command_ranges["lin_vel_x"][1]
@@ -1257,6 +1353,15 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         )
         self.command_resampling_time_max = getattr(
             self.cfg.commands, "resampling_time_max", self.cfg.commands.resampling_time
+        )
+        self.forward_only_min_lin_vel_x = getattr(
+            self.cfg.commands, "forward_only_min_lin_vel_x", 0.05
+        )
+        self.forward_only_command_terrain_kind_ids = self._build_forward_only_command_terrain_kind_ids(
+            sim_device
+        )
+        self.forward_only_command_terrain_types = self._build_forward_only_command_terrain_types(
+            sim_device
         )
         if self.cfg.terrain.mesh_type not in ['heightfield', "trimesh"]:
             self.cfg.terrain.curriculum = False

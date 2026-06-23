@@ -287,6 +287,15 @@ class Simulator(ABC):
             Tensor((num_envs,)): Terrain types of all environments.
         """
         return self._terrain_types
+
+    @property
+    def terrain_kind_ids(self):
+        """Returns the generated terrain branch id for each environment, if available.
+
+        Returns:
+            Tensor((num_envs,)) | None: Terrain generator branch ids for all environments.
+        """
+        return getattr(self, "_terrain_kind_ids", None)
     
     @property
     def terrain_levels(self):

@@ -35,6 +35,23 @@ from . import terrain_utils
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg
 
 class Terrain:
+    KIND_SLOPE = 0
+    KIND_RANDOM_ROUGH = 1
+    KIND_STAIRS_DOWN = 2
+    KIND_STAIRS_UP = 3
+    KIND_DISCRETE_OBSTACLES = 4
+    KIND_STEPPING_STONES = 5
+    KIND_GAP = 6
+    KIND_PIT = 7
+    KIND_MULTIPLE_HIGH_PLATFORMS = 8
+    KIND_HIGH_PLATFORM_GAPS = 9
+    FORWARD_ONLY_COMMAND_KIND_IDS = (
+        KIND_GAP,
+        KIND_PIT,
+        KIND_MULTIPLE_HIGH_PLATFORMS,
+        KIND_HIGH_PLATFORM_GAPS,
+    )
+
     def __init__(self, cfg: LeggedRobotCfg.terrain) -> None:
 
         self.cfg = cfg
@@ -49,6 +66,7 @@ class Terrain:
 
         self.cfg.num_sub_terrains = cfg.num_rows * cfg.num_cols
         self.env_origins = np.zeros((cfg.num_rows, cfg.num_cols, 3))
+        self.terrain_kind_ids = np.full((cfg.num_rows, cfg.num_cols), -1, dtype=np.int64)
 
         self.width_per_env_pixels = int(self.env_width / cfg.horizontal_scale)
         self.length_per_env_pixels = int(self.env_length / cfg.horizontal_scale)
@@ -94,7 +112,7 @@ class Terrain:
             choice = np.random.uniform(0, 1)
             difficulty = np.random.choice([0.5, 0.75, 0.9])
             terrain = self.make_terrain(choice, difficulty)
-            self.add_terrain_to_map(terrain, i, j)
+            self.add_terrain_to_map(terrain, i, j, self._terrain_kind_from_choice(choice))
 
     def curiculum(self):
         for j in range(self.cfg.num_cols):     # Y
@@ -103,10 +121,11 @@ class Terrain:
                 choice = j / self.cfg.num_cols + 0.001 # change terrain type along Y axis, col
 
                 terrain = self.make_terrain(choice, difficulty)
-                self.add_terrain_to_map(terrain, i, j)
+                self.add_terrain_to_map(terrain, i, j, self._terrain_kind_from_choice(choice))
 
     def selected_terrain(self):
         terrain_type = self.cfg.terrain_kwargs.pop('type')
+        terrain_kind_id = self._terrain_kind_from_name(terrain_type)
         for k in range(self.cfg.num_sub_terrains):
             # Env coordinates in the world
             (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
@@ -118,7 +137,30 @@ class Terrain:
                               horizontal_scale=self.cfg.horizontal_scale)
 
             eval(terrain_type)(terrain, **self.cfg.terrain_kwargs, terrain_type=self.type)
-            self.add_terrain_to_map(terrain, i, j)
+            self.add_terrain_to_map(terrain, i, j, terrain_kind_id)
+
+    def _terrain_kind_from_choice(self, choice):
+        for terrain_kind_id, upper_bound in enumerate(self.proportions):
+            if choice < upper_bound:
+                return terrain_kind_id
+        return -1
+
+    def _terrain_kind_from_name(self, terrain_type):
+        terrain_kind_names = {
+            "pyramid_sloped_terrain": self.KIND_SLOPE,
+            "random_uniform_terrain": self.KIND_RANDOM_ROUGH,
+            "pyramid_stairs_terrain": self.KIND_STAIRS_DOWN,
+            "discrete_obstacles_terrain": self.KIND_DISCRETE_OBSTACLES,
+            "stepping_stones_terrain": self.KIND_STEPPING_STONES,
+            "gap_terrain": self.KIND_GAP,
+            "pit_terrain": self.KIND_PIT,
+            "multiple_high_platforms_terrain": self.KIND_MULTIPLE_HIGH_PLATFORMS,
+            "high_platform_gaps_terrain": self.KIND_HIGH_PLATFORM_GAPS,
+        }
+        for terrain_name, terrain_kind_id in terrain_kind_names.items():
+            if terrain_name in terrain_type:
+                return terrain_kind_id
+        return -1
 
     def make_terrain(self, choice, difficulty):
         terrain = terrain_utils.SubTerrain(   "terrain",
@@ -221,7 +263,7 @@ class Terrain:
 
         return terrain
 
-    def add_terrain_to_map(self, terrain, row, col):
+    def add_terrain_to_map(self, terrain, row, col, terrain_kind_id=-1):
         i = row
         j = col
         # map coordinate system
@@ -230,6 +272,7 @@ class Terrain:
         start_y = self.border + j * self.width_per_env_pixels
         end_y = self.border + (j + 1) * self.width_per_env_pixels
         self.height_field_raw[start_x: end_x, start_y:end_y] = terrain.height_field_raw
+        self.terrain_kind_ids[i, j] = terrain_kind_id
 
         # add edge mask for the terrain, to indicate the edge points of the terrain, for use in rewards
         self.edge_mask[start_x: end_x, start_y:end_y] = terrain.edge_mask

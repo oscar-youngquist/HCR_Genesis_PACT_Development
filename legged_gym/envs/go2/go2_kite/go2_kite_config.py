@@ -94,13 +94,13 @@ class GO2KITECfg( LeggedRobotCfg ):
             "high_platform_params": {
                 "high_platform_height": "0.1 + 0.3 * difficulty",
                 "high_platform_length": "np.random.uniform(0.6, 1.6)",
-                "high_platform_width": "np.random.uniform(1.0, 2.0)",
+                "high_platform_width": "np.random.uniform(6.0, 8.0)",
                 "high_platform_interval": "np.random.uniform(1.0, 2.0)",
             },
             "high_platform_gaps_params": {
                 "high_platform_height": "0.1 + 0.3 * difficulty",
                 "high_platform_length": "np.random.uniform(1.6, 2.0)",
-                "high_platform_width": "np.random.uniform(1.0, 2.0)",
+                "high_platform_width": "np.random.uniform(6.0, 8.0)",
                 "high_platform_distance_y": "np.random.uniform(0.2, 2.0)",
                 "gap_size": "0.1 + difficulty * 0.8",
             },

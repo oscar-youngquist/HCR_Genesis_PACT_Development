@@ -260,6 +260,9 @@ class GenesisSimulator_KITE(Simulator):
                                                    torch.clip(self._terrain_levels[env_ids], 0))  # (the minumum level is zero)
         self._env_origins[env_ids] = self._terrain_origins[self._terrain_levels[env_ids],
             self._terrain_types[env_ids]]
+        if hasattr(self, "_terrain_kind_grid"):
+            self._terrain_kind_ids[env_ids] = self._terrain_kind_grid[self._terrain_levels[env_ids],
+                self._terrain_types[env_ids]]
 
     def push_robots(self):
         dofs_vel = self._robot.get_dofs_velocity()
@@ -1423,6 +1426,10 @@ class GenesisSimulator_KITE(Simulator):
             self._max_terrain_level = self._cfg.terrain.num_rows
             self._terrain_origins = torch.from_numpy(
                 self._terrain.env_origins).to(self._device).to(torch.float)
+            self._terrain_kind_grid = torch.from_numpy(
+                self._terrain.terrain_kind_ids).to(self._device).to(torch.long)
+            self._terrain_kind_ids = self._terrain_kind_grid[self._terrain_levels,
+                                                            self._terrain_types]
             self._env_origins[:] = self._terrain_origins[self._terrain_levels,
                                                        self._terrain_types]
         else:
