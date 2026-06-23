@@ -260,8 +260,11 @@ class MotionRobustDepthEncoder(nn.Module):
         attn_out = attn_out.squeeze(1)
         latent = self.fc(attn_out)
 
-        mean = self.mean_out(latent)
-        logvar = self.logvar_out(latent)
+        mean_h1 = self.activation(self.mean_h1(latent))
+        logvar_h1 = self.activation(self.logvar_h1(latent))
+
+        mean = self.mean_out(mean_h1)
+        logvar = self.logvar_out(logvar_h1)
 
         aux = {
             "attention_weights": attn_weights,

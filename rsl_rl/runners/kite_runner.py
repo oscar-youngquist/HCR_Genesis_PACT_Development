@@ -57,10 +57,13 @@ class OnPolicyRunnerKITE:
                  train_cfg,
                  log_dir=None,
                  device='cpu'):
-        torch.autograd.set_detect_anomaly(True)
         self.cfg=train_cfg["runner"]
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
+        self.debug_autograd_anomaly = self.alg_cfg.get(
+            "debug_autograd_anomaly", False
+        )
+        torch.autograd.set_detect_anomaly(self.debug_autograd_anomaly)
         
         self.device = device
         self.env = env
@@ -203,12 +206,14 @@ class OnPolicyRunnerKITE:
     #     learned coordconv coordinate transform
     def _build_depth_torso_state(self, imu_depth_torso_state):
         """Gate predicted velocity versus simulator velocity for depth input."""
+        if not self.alg.use_depth_vel_boot:
+            return imu_depth_torso_state
+
         depth_torso_state = imu_depth_torso_state.clone()
-        if self.alg.use_depth_vel_boot:
-            depth_torso_state[:, 2:5] = self.depth_torso_lin_vel_est.to(
-                device=depth_torso_state.device,
-                dtype=depth_torso_state.dtype,
-            )
+        depth_torso_state[:, 2:5] = self.depth_torso_lin_vel_est.to(
+            device=depth_torso_state.device,
+            dtype=depth_torso_state.dtype,
+        )
         return depth_torso_state
 
     # function to load a boot-strap initial model and reset the std
@@ -285,13 +290,14 @@ class OnPolicyRunnerKITE:
                     
                     # Advance depth latent history after the action generated
                     #     from the previous history has been stored.
-                    self.depth_latent_history = torch.cat(
-                        [
-                            self.depth_latent_history[:, 1:],
-                            latest_depth_latent.detach().unsqueeze(1),
-                        ],
-                        dim=1,
-                    )
+                    if self.depth_latent_history.shape[1] > 0:
+                        if self.depth_latent_history.shape[1] > 1:
+                            self.depth_latent_history[:, :-1].copy_(
+                                self.depth_latent_history[:, 1:].clone()
+                            )
+                        self.depth_latent_history[:, -1].copy_(
+                            latest_depth_latent.detach()
+                        )
                     if dones.any():
                         self.depth_latent_history[dones.bool()] = 0.0
 

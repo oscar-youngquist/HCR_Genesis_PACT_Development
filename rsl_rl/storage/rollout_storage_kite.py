@@ -40,7 +40,6 @@ class RolloutStorageKITE:
             self.depth_latent_history = None
             self.depth_torso_state = None
             self.terrain_map = None
-            self.contrastive_negative_anchor = None
             self.dones = None
 
             self.explicit_labels = None  # same timestep as observations, used by encoder output
@@ -75,16 +74,20 @@ class RolloutStorageKITE:
         priv_obs_history_shape,
         contrastive_anchor_shape,
         device="cpu",
+        storage_dtype=torch.bfloat16,
+        store_action_distribution=True,
     ):
 
         self.device = device
+        self.storage_dtype = storage_dtype
+        self.store_action_distribution = store_action_distribution
 
         self.obs_shape        = obs_shape
         self.actions_shape    = actions_shape
 
         # Core PPO tensors.
-        self.observations        = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
-        self.observation_history = torch.zeros(num_transitions_per_env, num_envs, *obs_hist_shape, device=self.device)    
+        self.observations        = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device, dtype=self.storage_dtype)
+        self.observation_history = torch.zeros(num_transitions_per_env, num_envs, *obs_hist_shape, device=self.device, dtype=self.storage_dtype)    
         # Raw privileged history is kept so PPO can rebuild critic inputs from
         # current privileged encoders during the update step.
         self.privileged_observation_history = torch.zeros(
@@ -92,6 +95,7 @@ class RolloutStorageKITE:
             num_envs,
             *priv_obs_history_shape,
             device=self.device,
+            dtype=self.storage_dtype,
         )
         # Store only the newest processed depth image. Previous visual context
         # is stored as depth-frame latents to reduce rollout VRAM.
@@ -100,12 +104,14 @@ class RolloutStorageKITE:
             num_envs,
             *depth_image_shape,
             device=self.device,
+            dtype=self.storage_dtype,
         )
         self.depth_latent_history = torch.zeros(
             num_transitions_per_env,
             num_envs,
             *depth_latent_history_shape,
             device=self.device,
+            dtype=self.storage_dtype,
         )
         # 8D body-motion conditioning vector for the depth-frame encoder.
         self.depth_torso_state = torch.zeros(
@@ -113,6 +119,7 @@ class RolloutStorageKITE:
             num_envs,
             *depth_torso_state_shape,
             device=self.device,
+            dtype=self.storage_dtype,
         )
         # Privileged terrain supervision map: height plus surface normal field.
         self.terrain_maps = torch.zeros(
@@ -120,19 +127,13 @@ class RolloutStorageKITE:
             num_envs,
             *terrain_map_shape,
             device=self.device,
-        )
-        # One random negative anchor is shared by the staged contrastive losses.
-        self.contrastive_negative_anchors = torch.zeros(
-            num_transitions_per_env,
-            num_envs,
-            *contrastive_anchor_shape,
-            device=self.device,
+            dtype=self.storage_dtype,
         )
         self.dones               = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
         
         # Auxiliary supervision targets used by the KITE encoder losses.
-        self.explicit_labels = torch.zeros(num_transitions_per_env, num_envs, *explicit_shape, device=self.device)
-        self.observation_targets = torch.zeros(num_transitions_per_env, num_envs, *single_critic_obs_shape, device=self.device)
+        self.explicit_labels = torch.zeros(num_transitions_per_env, num_envs, *explicit_shape, device=self.device, dtype=self.storage_dtype)
+        self.observation_targets = torch.zeros(num_transitions_per_env, num_envs, *single_critic_obs_shape, device=self.device, dtype=self.storage_dtype)
 
         
         # PPO rollout tensors.
@@ -142,8 +143,8 @@ class RolloutStorageKITE:
         self.values           = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.returns          = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.advantages       = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-        self.mu               = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
-        self.sigma            = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+        self.mu               = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device) if self.store_action_distribution else None
+        self.sigma            = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device) if self.store_action_distribution else None
 
         #  Shared
         self.num_transitions_per_env = num_transitions_per_env
@@ -169,7 +170,6 @@ class RolloutStorageKITE:
         self.depth_latent_history[self.step].copy_(transition.depth_latent_history)
         self.depth_torso_state[self.step].copy_(transition.depth_torso_state)
         self.terrain_maps[self.step].copy_(transition.terrain_map)
-        self.contrastive_negative_anchors[self.step].copy_(transition.contrastive_negative_anchor)
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
         
         # Auxiliary labels for explicit-state and dynamics reconstruction heads.
@@ -181,8 +181,9 @@ class RolloutStorageKITE:
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.values[self.step].copy_(transition.values)
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
-        self.mu[self.step].copy_(transition.action_mean)
-        self.sigma[self.step].copy_(transition.action_sigma)
+        if self.store_action_distribution:
+            self.mu[self.step].copy_(transition.action_mean)
+            self.sigma[self.step].copy_(transition.action_sigma)
         
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
@@ -243,7 +244,6 @@ class RolloutStorageKITE:
         depth_latent_history = self.depth_latent_history.flatten(0, 1)
         depth_torso_state = self.depth_torso_state.flatten(0, 1)
         terrain_maps = self.terrain_maps.flatten(0, 1)
-        contrastive_negative_anchors = self.contrastive_negative_anchors.flatten(0, 1)
 
         explicit_labels = self.explicit_labels.flatten(0,1)
         obs_targets = self.observation_targets.flatten(0,1)
@@ -253,8 +253,8 @@ class RolloutStorageKITE:
         returns = self.returns.flatten(0, 1)
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
-        old_mu = self.mu.flatten(0, 1)
-        old_sigma = self.sigma.flatten(0, 1)
+        old_mu = self.mu.flatten(0, 1) if self.store_action_distribution else None
+        old_sigma = self.sigma.flatten(0, 1) if self.store_action_distribution else None
 
         dones = self.dones.flatten(0, 1)
 
@@ -266,18 +266,17 @@ class RolloutStorageKITE:
                 batch_idx = indices[start:end]
 
                 # Baseline PPO stuff
-                obs_batch = observations[batch_idx]
-                obs_hist_batch = obs_history[batch_idx]
-                privileged_obs_history_batch = privileged_obs_history[batch_idx]
-                depth_images_batch = depth_images[batch_idx]
-                depth_latent_history_batch = depth_latent_history[batch_idx]
-                depth_torso_state_batch = depth_torso_state[batch_idx]
-                terrain_maps_batch = terrain_maps[batch_idx]
-                contrastive_negative_anchor_batch = contrastive_negative_anchors[batch_idx]
+                obs_batch = observations[batch_idx].float()
+                obs_hist_batch = obs_history[batch_idx].float()
+                privileged_obs_history_batch = privileged_obs_history[batch_idx].float()
+                depth_images_batch = depth_images[batch_idx].float()
+                depth_latent_history_batch = depth_latent_history[batch_idx].float()
+                depth_torso_state_batch = depth_torso_state[batch_idx].float()
+                terrain_maps_batch = terrain_maps[batch_idx].float()
 
                 # Auxiliary KITE encoder targets.
-                explicit_labels_batch = explicit_labels[batch_idx]
-                obs_labels_batch = obs_targets[batch_idx]
+                explicit_labels_batch = explicit_labels[batch_idx].float()
+                obs_labels_batch = obs_targets[batch_idx].float()
 
                 # PPO action/value tensors.
                 actions_batch = actions[batch_idx]
@@ -285,8 +284,8 @@ class RolloutStorageKITE:
                 returns_batch = returns[batch_idx]
                 old_actions_log_prob_batch = old_actions_log_prob[batch_idx]
                 advantages_batch = advantages[batch_idx]
-                old_mu_batch = old_mu[batch_idx]
-                old_sigma_batch = old_sigma[batch_idx]
+                old_mu_batch = old_mu[batch_idx] if old_mu is not None else None
+                old_sigma_batch = old_sigma[batch_idx] if old_sigma is not None else None
 
                 terminated_batch = 1.0 - dones[batch_idx]
   
@@ -299,7 +298,6 @@ class RolloutStorageKITE:
                     depth_latent_history_batch,
                     depth_torso_state_batch,
                     terrain_maps_batch,
-                    contrastive_negative_anchor_batch,
                     explicit_labels_batch,
                     obs_labels_batch,
                     actions_batch,

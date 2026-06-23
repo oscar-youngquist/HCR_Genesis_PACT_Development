@@ -342,7 +342,8 @@ class PPO_KITE:
                                               action_shape, explicit_shape, depth_image_shape,
                                               depth_latent_history_shape, depth_torso_state_shape,
                                               terrain_map_shape, priv_obs_history_shape,
-                                              contrastive_anchor_shape, self.device)
+                                              contrastive_anchor_shape, self.device,
+                                              store_action_distribution=self.schedule == "adaptive")
 
     def test_mode(self):
         self.actor_critic.test()
@@ -572,10 +573,6 @@ class PPO_KITE:
         self.transition.depth_latent_history = depth_latent_history
         self.transition.depth_torso_state = depth_torso_state
         self.transition.terrain_map = terrain_map
-        self.transition.contrastive_negative_anchor = torch.empty_like(
-            latest_depth_latent
-        ).uniform_(-1.0, 1.0)
-
         return all_actions, latest_depth_latent, body_velo_est
     
     def process_env_step(self, rewards, dones, infos, obs_labels, explicit_labels):
@@ -718,9 +715,9 @@ class PPO_KITE:
 
     def _zero_encoder_optimizer(self, name):
         if hasattr(self.enc_optimizer, "optimizers"):
-            self.enc_optimizer.optimizers[name].zero_grad()
+            self.enc_optimizer.optimizers[name].zero_grad(set_to_none=True)
         else:
-            self.enc_optimizer.zero_grad()
+            self.enc_optimizer.zero_grad(set_to_none=True)
 
     def _step_encoder_optimizer(self, name):
         if hasattr(self.enc_optimizer, "optimizers"):
@@ -733,7 +730,7 @@ class PPO_KITE:
         self.actor_critic.depth_frame_encoder.train()
         self.depth_decoder.train()
         self._zero_encoder_optimizer("visual_frame")
-        self.depth_decoder_optimizer.zero_grad()
+        self.depth_decoder_optimizer.zero_grad(set_to_none=True)
         
         # Encode the current depth image
         depth_mean, depth_logvar, latest_depth_z, depth_aux = self.actor_critic.depth_frame_encoder(
@@ -781,7 +778,7 @@ class PPO_KITE:
         self.actor_critic.depth_sequence_encoder.train()
         self.priv_terrain_decoder.eval()
         self._zero_encoder_optimizer("visual_sequence")
-        self.aux_projection_optimizer.zero_grad()
+        self.aux_projection_optimizer.zero_grad(set_to_none=True)
 
         # history-batch from storage, latest_depth_z from depth-decoder update step
         depth_sequence = torch.cat(
@@ -837,7 +834,7 @@ class PPO_KITE:
         self.actor_critic.proprio_context_encoder.train()
         self.priv_dynamics_decoder.eval()
         self._zero_encoder_optimizer("proprioceptive")
-        self.aux_projection_optimizer.zero_grad()
+        self.aux_projection_optimizer.zero_grad(set_to_none=True)
         
         # Encode the current properioceptive observation history
         prop_mean, prop_logvar, proprio_z = self.actor_critic.proprio_context_encoder(obs_hist_batch)
@@ -886,7 +883,7 @@ class PPO_KITE:
     ):    
         self.actor_critic.context_encoder.train()
         self._zero_encoder_optimizer("modality_mixer")
-        self.aux_projection_optimizer.zero_grad()
+        self.aux_projection_optimizer.zero_grad(set_to_none=True)
         
         # Use previously computed (now detached) depth sequence latent and obs-history latent
         #     to produce mizer latent and explicit estimation values
@@ -978,7 +975,7 @@ class PPO_KITE:
                 dyn_recon_from_mix, terrain_recon_from_mix, body_velo_est
 
     def _privileged_encoder_decoder_updates(self, terrain_maps_batch, privileged_obs_history_batch, obs_target, mask):
-        self.privileged_optimizer.zero_grad()
+        self.privileged_optimizer.zero_grad(set_to_none=True)
 
         # Encode -> Decode the height + surface normal map
         terrain_priv_z = self.priv_terrain_encoder(terrain_maps_batch)
@@ -1161,12 +1158,12 @@ class PPO_KITE:
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for terminated_batch, obs_batch, obs_hist_batch, privileged_obs_history_batch, depth_images_batch, depth_latent_history_batch, \
-            depth_torso_state_batch, terrain_maps_batch, contrastive_negative_anchor_batch, explicit_labels_batch, obs_target, actions_batch, \
+            depth_torso_state_batch, terrain_maps_batch, explicit_labels_batch, obs_target, actions_batch, \
                 target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch in generator:
             
             self.actor_critic.train()
-            self.act_optimizer.zero_grad()
-            self.enc_optimizer.zero_grad()
+            self.act_optimizer.zero_grad(set_to_none=True)
+            self.enc_optimizer.zero_grad(set_to_none=True)
 
             torch.cuda.synchronize()
             t0 = time.perf_counter()
@@ -1198,6 +1195,13 @@ class PPO_KITE:
 
                 torch.cuda.synchronize()
                 t0 = time.perf_counter()
+
+                contrastive_negative_anchor_batch = torch.empty(
+                    depth_images_batch.shape[0],
+                    self.actor_critic.depth_latent_dim,
+                    device=depth_images_batch.device,
+                    dtype=depth_images_batch.dtype,
+                ).uniform_(-1.0, 1.0)
 
                 aux_losses = self._update_auxiliary_encoders(obs_hist_batch, privileged_obs_history_batch, depth_images_batch, depth_latent_history_batch,
                                                              depth_torso_state_batch, terrain_maps_batch, contrastive_negative_anchor_batch,
