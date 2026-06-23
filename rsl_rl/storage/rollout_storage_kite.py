@@ -263,7 +263,9 @@ class RolloutStorageKITE:
 
                 start = i*mini_batch_size
                 end = (i+1)*mini_batch_size
-                batch_idx = indices[start:end]
+                # Keep the random minibatch membership, but sort indices so
+                # large rollout tensor gathers are more contiguous on GPU.
+                batch_idx = indices[start:end].sort().values
 
                 # Baseline PPO stuff
                 obs_batch = observations[batch_idx].float()

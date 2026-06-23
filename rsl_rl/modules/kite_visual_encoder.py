@@ -430,12 +430,31 @@ class MotionRobustDepthDecoder(nn.Module):
         if transform_matrices.shape != (batch_size, 2, 2):
             transform_matrices = transform_matrices.view(batch_size, 2, 2)
 
-        flat_grid = self.base_coord_grid.expand(batch_size, -1, -1, -1)
+        flat_grid = self.base_coord_grid.to(dtype=transform_matrices.dtype)
+        flat_grid = flat_grid.expand(batch_size, -1, -1, -1)
         flat_grid = flat_grid.view(batch_size, 2, -1)
 
         # The encoder writes coords in the stabilized frame; the decoder uses
         # the reciprocal map to condition reconstruction back in image space.
-        decode_transform_matrices = torch.linalg.pinv(transform_matrices)
+        # These matrices are only 2x2 and are regularized near identity, so a
+        # guarded analytic inverse is faster than a batched SVD-based pinv.
+        a = transform_matrices[:, 0, 0]
+        b = transform_matrices[:, 0, 1]
+        c = transform_matrices[:, 1, 0]
+        d = transform_matrices[:, 1, 1]
+        det = a * d - b * c
+        det_sign = torch.where(det >= 0.0, torch.ones_like(det), -torch.ones_like(det))
+        safe_det = det_sign * det.abs().clamp_min(1.0e-6)
+        inv_det = safe_det.reciprocal()
+        decode_transform_matrices = torch.stack(
+            [
+                d * inv_det,
+                -b * inv_det,
+                -c * inv_det,
+                a * inv_det,
+            ],
+            dim=-1,
+        ).view(batch_size, 2, 2)
         decoded_flat_grid = torch.bmm(decode_transform_matrices, flat_grid)
         coords_full = decoded_flat_grid.view(batch_size, 2, height, width)
 

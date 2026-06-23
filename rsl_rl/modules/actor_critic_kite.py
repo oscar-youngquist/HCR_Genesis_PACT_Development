@@ -496,6 +496,7 @@ class ActorCritic_KITE(nn.Module):
         depth_image=None,
         depth_latent_history=None,
         depth_torso_state=None,
+        return_latest_depth_z=False,
     ):
         if obs is None:
             obs = obs_history[:, -self.num_actor_obs:]
@@ -530,6 +531,12 @@ class ActorCritic_KITE(nn.Module):
             depth_seq_z,
             proprio_z,
         )
+
+        # Rollout collection also needs the latest frame latent to advance the
+        # asynchronous visual history. Returning it here avoids a second depth
+        # frame encoder pass in PPO_KITE.act().
+        if return_latest_depth_z:
+            return mean, logvar, z, body_velo, feet_state, latest_depth_z
 
         return mean, logvar, z, body_velo, feet_state
     
@@ -643,6 +650,32 @@ class ActorCritic_KITE(nn.Module):
         return sample, body_velo_est, feet_state_est
 
     @torch.jit.ignore
+    def act_with_estimates_and_depth_latent(
+        self,
+        obs,
+        obs_history,
+        depth_image=None,
+        depth_latent_history=None,
+        depth_torso_state=None,
+        **kwargs,
+    ):
+        _, _, z, body_velo_est, feet_state_est, latest_depth_z = self.cenet_enc_forward(
+            obs_history,
+            obs=obs,
+            depth_image=depth_image,
+            depth_latent_history=depth_latent_history,
+            depth_torso_state=depth_torso_state,
+            return_latest_depth_z=True,
+        )
+
+        context_state = torch.cat([body_velo_est, feet_state_est], dim=-1)
+        current_obs = torch.cat((obs, z, context_state), dim=-1)
+        self.update_distribution(current_obs)
+        sample = self.distribution.sample()
+
+        return sample, body_velo_est, feet_state_est, latest_depth_z
+
+    @torch.jit.ignore
     def act(
         self,
         obs,
@@ -700,6 +733,36 @@ class ActorCritic_KITE(nn.Module):
         sample = self.distribution.sample()
 
         return sample, body_velo_est, feet_state_est
+
+    @torch.jit.ignore
+    def act_bootmask_with_estimates_and_depth_latent(
+        self,
+        obs,
+        obs_history,
+        depth_image=None,
+        depth_latent_history=None,
+        depth_torso_state=None,
+        **kwargs,
+    ):
+        _, _, z, body_velo_est, feet_state_est, latest_depth_z = self.cenet_enc_forward(
+            obs_history,
+            obs=obs,
+            depth_image=depth_image,
+            depth_latent_history=depth_latent_history,
+            depth_torso_state=depth_torso_state,
+            return_latest_depth_z=True,
+        )
+
+        context_state = torch.cat([body_velo_est, feet_state_est], dim=-1)
+        boot_mask = torch.zeros(
+            (z.shape[0], z.shape[1] + context_state.shape[1]),
+            device=obs.device,
+        )
+        current_obs = torch.cat((obs, boot_mask), dim=-1)
+        self.update_distribution(current_obs)
+        sample = self.distribution.sample()
+
+        return sample, body_velo_est, feet_state_est, latest_depth_z
 
     @torch.jit.ignore
     def act_bootmask(

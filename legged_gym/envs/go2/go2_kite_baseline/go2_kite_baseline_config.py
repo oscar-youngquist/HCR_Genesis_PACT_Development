@@ -691,6 +691,9 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         lam   = 0.95
         desired_kl = 0.01
         max_grad_norm = 1.0
+        # Enables expensive CUDA synchronizations/cache clears for profiling
+        # and OOM debugging. Keep False for normal training speed.
+        gpu_debugging = False
 
         # Adaptive entropy coefficient curriculum
         entropy_coef = 0.01
