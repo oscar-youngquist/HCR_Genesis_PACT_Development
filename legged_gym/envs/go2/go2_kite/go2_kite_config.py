@@ -64,45 +64,52 @@ class GO2KITECfg( LeggedRobotCfg ):
         terrain_kwargs = None # Dict of arguments for selected terrain
         max_init_terrain_level = 0 # starting curriculum level
         
-        terrain_length = 8.0 # [m] length of each subterrain, X direction
+        terrain_length = 10.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 3.0 # [m] size of the flat platform at the center of each subterrain
         num_rows = 10  # number of terrain rows (levels), X direction
-        num_cols = 20  # number of terrain cols (types), Y direction
+        num_cols = 10  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
         # terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
         
         # slope, random-rough, stairs-down, stairs-up, discrete, stepping-stone, gap (jump), pit (climb-up), high-platform (climb), platform+gap (climb and jump) 
-        terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.00, 0.20, 0.10, 0.10, 0.10]
-        # terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 1.00, 0.00, 0.00, 0.00, 0.00]
+        # terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.00, 0.20, 0.10, 0.10, 0.10]
+        terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 0.20, 0.00, 0.00, 0.40, 0.40]
         simplify_mesh = True
         
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.6",
-            "step_height": "0.05 + 0.2 * difficulty",
+            "step_height": "0.05 + 0.3 * difficulty",
             "discrete_height": "0.05 + 0.2 * difficulty",
             "stepping_stones_params": {
-                "stone_length": "np.random.uniform(0.4, 1.2)",
-                "stone_width": "np.random.uniform(0.4, 1.2)",
-                "stone_distance_x": "0.1 + 0.7 * difficulty",
-                "stone_distance_y": "np.random.uniform(0.2, 0.8)",
-                "max_height": "0.20",
+                "stone_length": "max(0.20, np.random.uniform(0.5, 0.8) - 0.3 * difficulty)",
+                "stone_width": "max(0.20, np.random.uniform(0.5, 0.8) - 0.3 * difficulty)",
+                "stone_distance_x": "0.1 + 0.3 * difficulty",
+                "stone_distance_y": "np.random.uniform(0.1, 0.4)",
+                "max_height": "0.10",
+                "min_stone_length": "0.20",
+                "min_stone_width": "0.20",
+                "stepping_stone_edge_clearance": "0.4",
             },
-            "gap_size": "0.1 + difficulty * 0.3",
+            "gap_size": "0.1 + difficulty * 0.4",
             "pit_depth": "0.1 + 0.3 * difficulty",
             "high_platform_params": {
                 "high_platform_height": "0.1 + 0.3 * difficulty",
                 "high_platform_length": "np.random.uniform(0.6, 1.6)",
                 "high_platform_width": "np.random.uniform(6.0, 8.0)",
                 "high_platform_interval": "np.random.uniform(1.0, 2.0)",
+                "min_high_platform_interval": "0.8",
+                "min_high_platform_edge_clearance": "0.8",
             },
             "high_platform_gaps_params": {
                 "high_platform_height": "0.1 + 0.3 * difficulty",
                 "high_platform_length": "np.random.uniform(1.6, 2.0)",
                 "high_platform_width": "np.random.uniform(6.0, 8.0)",
                 "high_platform_distance_y": "np.random.uniform(0.2, 2.0)",
-                "gap_size": "0.1 + difficulty * 0.3",
+                "gap_size": "0.1 + difficulty * 0.4",
+                "min_high_platform_track_width": "0.35",
+                "min_high_platform_edge_clearance": "0.8",
             },
         }
         # trimesh only:
@@ -686,6 +693,14 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # Enables expensive CUDA synchronizations/cache clears for profiling
         # and OOM debugging. Keep False for normal training speed.
         gpu_debugging = False
+
+        # Prints synchronized phase timings for collection and learning.
+        # Keep disabled for normal training because CUDA syncs perturb runtime.
+        profile_training = False
+        profile_learning = False
+        profile_iterations = 1
+        profile_warmup_iterations = 0
+        profile_sync_cuda = True
         
         # When False, log only compact per-model auxiliary loss totals.
         # Enable for the full detailed encoder-loss breakdown.

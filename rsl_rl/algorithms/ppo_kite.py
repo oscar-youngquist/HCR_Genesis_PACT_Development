@@ -112,6 +112,7 @@ class PPO_KITE:
                  versatility_lambda_e=0.1,
                  gpu_debugging=False,
                  log_detailed_encoder_losses=False,
+                 profile_learning=False,
                  ):
         
         self.device = device
@@ -158,6 +159,8 @@ class PPO_KITE:
         self.versatility_lambda_e = versatility_lambda_e
         self.gpu_debugging = gpu_debugging
         self.log_detailed_encoder_losses = log_detailed_encoder_losses
+        self.profile_learning = profile_learning
+        self.last_update_timers = {}
         
         # Contrastive loss weights/margin shared across all contrastive updates
         self.contrastive_weight = contrastive_weight
@@ -342,7 +345,7 @@ class PPO_KITE:
 
     def _sync_if_debugging(self):
         """Synchronize CUDA only when detailed GPU timings are requested."""
-        if self.gpu_debugging and torch.cuda.is_available():
+        if (self.gpu_debugging or self.profile_learning) and torch.cuda.is_available():
             torch.cuda.synchronize()
 
     def _empty_cache_if_debugging(self):
@@ -1085,14 +1088,29 @@ class PPO_KITE:
     ):
         mask = terminated_batch.float()
         losses = {}
+        profile = {} if self.profile_learning else None
+
+        def profile_mark(name, start_time):
+            if profile is None:
+                return None
+            # CUDA work is asynchronous; synchronize only during profiling so
+            # per-phase timings reflect actual GPU completion time.
+            self._sync_if_debugging()
+            profile[name] = profile.get(name, 0.0) + (time.perf_counter() - start_time)
+            return time.perf_counter()
 
         # Shared privileged anchors for contrastive alignment. These are
         # detached because the student-side encoders are updated by the merged
         # non-privileged auxiliary step below.
+        if profile is not None:
+            self._sync_if_debugging()
+            t_profile = time.perf_counter()
         terrain_positive = dynamics_positive = None
         with torch.no_grad():
             terrain_positive = self.priv_terrain_encoder(terrain_maps_batch)
             dynamics_positive = self.priv_dynamics_encoder(privileged_obs_history_batch)
+        if profile is not None:
+            t_profile = profile_mark("aux_positive_anchors", t_profile)
 
         # 1. Update the single-frame depth autoencoder in its own graph. This
         # releases depth-image decoder activations before building the larger
@@ -1109,6 +1127,8 @@ class PPO_KITE:
             mask,
         )
         self._empty_cache_if_debugging()
+        if profile is not None:
+            t_profile = profile_mark("aux_depth_frame", t_profile)
 
         # 2-4. Merge the depth-sequence, proprioceptive, and modality-mixer
         # student updates into one forward/backward/step.
@@ -1129,6 +1149,8 @@ class PPO_KITE:
             transform_identity_loss.detach(),
         )
         del latest_depth_z
+        if profile is not None:
+            t_profile = profile_mark("aux_sequence_proprio_mixer", t_profile)
 
         # Boot probability only needs compact aggregate statistics. Compute
         # them immediately after the mixer update, move them to CPU, and drop
@@ -1146,11 +1168,15 @@ class PPO_KITE:
         del aux["terrain_recon_from_mix"]
         del aux["body_velo_est"]
         self._empty_cache_if_debugging()
+        if profile is not None:
+            t_profile = profile_mark("aux_boot_summary", t_profile)
         
         # 5. Privileged terrain/dynamics encoder-decoder update:
         #    refresh the teacher-side representations used as positive anchors.
         privileged_loss, privileged_dynamics_loss, privileged_terrain_loss = self._privileged_encoder_decoder_updates(terrain_maps_batch, privileged_obs_history_batch, 
                                                                                                                       obs_target, mask)
+        if profile is not None:
+            t_profile = profile_mark("aux_privileged_teacher", t_profile)
 
         # Total Encoder(s) update loss
         losses["total"] = self._detach_scalar(aux["non_privileged_loss"] + privileged_loss)
@@ -1181,6 +1207,8 @@ class PPO_KITE:
         del terrain_positive, dynamics_positive
         del contrastive_negative_anchor_batch
         self._empty_cache_if_debugging()
+        if profile is not None:
+            t_profile = profile_mark("aux_loss_aggregation", t_profile)
 
         # Loss details for logging. The compact path logs per-model totals and
         # a small number of aggregate losses; detailed mode restores all leaves.
@@ -1242,6 +1270,8 @@ class PPO_KITE:
                 "privileged_dynamics_recon": self._detach_scalar(privileged_dynamics_loss),
             })
         del aux
+        if profile is not None:
+            losses["profile"] = profile
 
         return losses
 
@@ -1255,49 +1285,61 @@ class PPO_KITE:
         mean_aux_decoder_loss = 0
         mean_aux_loss_details = {}
 
-        timers = {
-            "update_wall": 0.0,
-            "minibatch_wall": 0.0,
-            "rl_loss": 0.0,
-            "act_step": 0.0,
-            "aux_update": 0.0,
-            "boot_stats": 0.0,
-            "boot_prob": 0.0,
-            "spec_norm" : 0.0}
+        profile_update = self.profile_learning
+        timers = None
+        if profile_update:
+            timers = {
+                "update_wall": 0.0,
+                "minibatch_wall": 0.0,
+                "rl_loss": 0.0,
+                "act_step": 0.0,
+                "aux_update": 0.0,
+                "boot_stats": 0.0,
+                "boot_prob": 0.0,
+                "spec_norm": 0.0,
+            }
 
         boot_summary = None
         vel_boot_summary = None
 
-        update_wall_start = time.perf_counter()
+        if profile_update:
+            self._sync_if_debugging()
+            update_wall_start = time.perf_counter()
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for terminated_batch, obs_batch, obs_hist_batch, privileged_obs_history_batch, depth_images_batch, depth_latent_history_batch, \
             depth_torso_state_batch, terrain_maps_batch, explicit_labels_batch, obs_target, actions_batch, \
                 target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch in generator:
-            minibatch_wall_start = time.perf_counter()
+            if profile_update:
+                self._sync_if_debugging()
+                minibatch_wall_start = time.perf_counter()
             
             self.actor_critic.train()
             self.act_optimizer.zero_grad(set_to_none=True)
             self.enc_optimizer.zero_grad(set_to_none=True)
 
-            self._sync_if_debugging()
-            t0 = time.perf_counter()
+            if profile_update:
+                self._sync_if_debugging()
+                t0 = time.perf_counter()
             # Perform RL update
             ppo_loss, surrogate_loss, value_loss = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch, privileged_obs_history_batch, depth_images_batch,
                                                                          depth_latent_history_batch, depth_torso_state_batch, terrain_maps_batch, old_sigma_batch,
                                                                          old_mu_batch, old_actions_log_prob_batch, advantages_batch, target_values_batch, returns_batch)
             
-            self._sync_if_debugging()
-            timers["rl_loss"] += time.perf_counter() - t0
+            if profile_update:
+                self._sync_if_debugging()
+                timers["rl_loss"] += time.perf_counter() - t0
 
-            self._sync_if_debugging()
-            t0 = time.perf_counter()
+            if profile_update:
+                self._sync_if_debugging()
+                t0 = time.perf_counter()
 
             ppo_loss.backward()
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.act_optimizer.step()
 
-            self._sync_if_debugging()
-            timers["act_step"] += time.perf_counter() - t0
+            if profile_update:
+                self._sync_if_debugging()
+                timers["act_step"] += time.perf_counter() - t0
             
             # Accumulate detached scalar tensors and convert to Python floats
             # once after the update to avoid many per-minibatch GPU syncs.
@@ -1309,8 +1351,9 @@ class PPO_KITE:
             for _ in range(self.num_enc_epochs):
                 self.actor_critic.train()
 
-                self._sync_if_debugging()
-                t0 = time.perf_counter()
+                if profile_update:
+                    self._sync_if_debugging()
+                    t0 = time.perf_counter()
 
                 contrastive_negative_anchor_batch = torch.empty(
                     depth_images_batch.shape[0],
@@ -1323,11 +1366,15 @@ class PPO_KITE:
                                                              depth_torso_state_batch, terrain_maps_batch, contrastive_negative_anchor_batch,
                                                              explicit_labels_batch, obs_target, terminated_batch)
                 
-                self._sync_if_debugging()
-                timers["aux_update"] += time.perf_counter() - t0
+                if profile_update:
+                    self._sync_if_debugging()
+                    timers["aux_update"] += time.perf_counter() - t0
+                    for profile_name, profile_value in aux_losses.get("profile", {}).items():
+                        timers[profile_name] = timers.get(profile_name, 0.0) + profile_value
 
-                self._sync_if_debugging()
-                t0 = time.perf_counter()
+                if profile_update:
+                    self._sync_if_debugging()
+                    t0 = time.perf_counter()
 
                 # Boot summaries are already reduced and moved to CPU inside
                 # the auxiliary update, so the PPO loop never holds large
@@ -1343,7 +1390,8 @@ class PPO_KITE:
                     ("velocity",),
                 )
 
-                timers["boot_stats"] += time.perf_counter() - t0
+                if profile_update:
+                    timers["boot_stats"] += time.perf_counter() - t0
 
                 # Log losses
                 mean_aux_loss += aux_losses["total"]
@@ -1358,13 +1406,15 @@ class PPO_KITE:
 
             # Keeps the interaction of incoming data with layer wieghts below the threashold that 
             #     saturates the tanh activation function.
-            self._sync_if_debugging()
-            t0 = time.perf_counter()
+            if profile_update:
+                self._sync_if_debugging()
+                t0 = time.perf_counter()
             self.spectral_normalization(self.actor_critic, sigma_max=6.0)
 
-            self._sync_if_debugging()
-            timers["spec_norm"] += time.perf_counter() - t0
-            timers["minibatch_wall"] += time.perf_counter() - minibatch_wall_start
+            if profile_update:
+                self._sync_if_debugging()
+                timers["spec_norm"] += time.perf_counter() - t0
+                timers["minibatch_wall"] += time.perf_counter() - minibatch_wall_start
 
             # Release large minibatch references before the generator yields
             # the next batch. This is mainly a peak-VRAM guard for the depth
@@ -1393,16 +1443,18 @@ class PPO_KITE:
             )
 
 
-        self._sync_if_debugging()
-        t0 = time.perf_counter()
+        if profile_update:
+            self._sync_if_debugging()
+            t0 = time.perf_counter()
 
         # Estimate whether the modality mixer reconstructs privileged dynamics
         # plus terrain better than a mean predictor. All statistics live on CPU.
         pboot = self._boot_probability_from_summary(boot_summary)
         vel_pboot = self._boot_probability_from_summary(vel_boot_summary)
 
-        timers["boot_prob"] += time.perf_counter() - t0
-        timers["update_wall"] = time.perf_counter() - update_wall_start
+        if profile_update:
+            timers["boot_prob"] += time.perf_counter() - t0
+            timers["update_wall"] = time.perf_counter() - update_wall_start
 
         # Use the (scaled) ratio of mean-prediction performance to actual prediction performance
         #     to determine if encoder bootstrapping is performed.
@@ -1413,13 +1465,15 @@ class PPO_KITE:
 
         self.storage.clear()
 
-        # Get the average time for the various tracked timers
-        for key in timers.keys():
-            if key not in ("boot_prob", "update_wall"):
-                timers[key] /= num_updates
-
-
-        print("update timers:", {k: round(v, 4) for k, v in timers.items()})
+        if profile_update:
+            # Get the average time for the various tracked timers
+            for key in timers.keys():
+                if key not in ("boot_prob", "update_wall"):
+                    timers[key] /= num_updates
+            self.last_update_timers = {k: float(v) for k, v in timers.items()}
+            print("update timers:", {k: round(v, 4) for k, v in timers.items()})
+        else:
+            self.last_update_timers = {}
 
         return mean_value_loss, mean_surrogate_loss, mean_aux_loss, mean_aux_decoder_loss, \
             mean_explicit_loss, mean_reconstruction_loss, mean_kl_loss, mean_aux_loss_details

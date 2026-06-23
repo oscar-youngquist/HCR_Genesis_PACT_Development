@@ -64,6 +64,32 @@ class OnPolicyRunnerKITE:
             "debug_autograd_anomaly", False
         )
         torch.autograd.set_detect_anomaly(self.debug_autograd_anomaly)
+        self.profile_training = self.cfg.get(
+            "profile_training",
+            self.alg_cfg.get("profile_training", False),
+        )
+        env_profile_training = os.getenv("KITE_PROFILE_TRAINING")
+        if env_profile_training is not None:
+            self.profile_training = env_profile_training.lower() in ("1", "true", "yes", "on")
+        self.profile_iterations = int(self.cfg.get(
+            "profile_iterations",
+            self.alg_cfg.get("profile_iterations", 1),
+        ))
+        self.profile_iterations = int(os.getenv("KITE_PROFILE_ITERATIONS", self.profile_iterations))
+        self.profile_warmup_iterations = int(self.cfg.get(
+            "profile_warmup_iterations",
+            self.alg_cfg.get("profile_warmup_iterations", 0),
+        ))
+        self.profile_warmup_iterations = int(os.getenv("KITE_PROFILE_WARMUP_ITERATIONS", self.profile_warmup_iterations))
+        self.profile_sync_cuda = bool(self.cfg.get(
+            "profile_sync_cuda",
+            self.alg_cfg.get("profile_sync_cuda", True),
+        ))
+        env_profile_sync = os.getenv("KITE_PROFILE_SYNC_CUDA")
+        if env_profile_sync is not None:
+            self.profile_sync_cuda = env_profile_sync.lower() in ("1", "true", "yes", "on")
+        if self.profile_training:
+            self.alg_cfg["profile_learning"] = True
         
         self.device = device
         self.env = env
@@ -227,6 +253,44 @@ class OnPolicyRunnerKITE:
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
 
+    def _profile_active(self, iteration):
+        if not self.profile_training:
+            return False
+        start = self.current_learning_iteration + self.profile_warmup_iterations
+        stop = start + self.profile_iterations
+        return start <= iteration < stop
+
+    def _profile_sync(self, active):
+        if active and self.profile_sync_cuda and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    def _profile_mark(self, stats, name, start_time, active):
+        # Synchronize only in profile mode; normal training keeps CUDA async.
+        self._profile_sync(active)
+        if active:
+            stats[name] = stats.get(name, 0.0) + (time.perf_counter() - start_time)
+        return time.perf_counter()
+
+    def _print_iteration_profile(self, iteration, collection_profile, learn_profile):
+        total = collection_profile.get("collection_wall", 0.0) + learn_profile.get("learn_wall", 0.0)
+        print("\n[KITE Profile] iteration", iteration)
+        print(f"  total_profiled_wall: {total:.4f}s")
+
+        def print_block(title, stats):
+            block_total = stats.get(
+                "collection_wall",
+                stats.get("learn_wall", stats.get("update_wall", sum(stats.values()))),
+            )
+            print(f"  {title}:")
+            for name, value in sorted(stats.items(), key=lambda item: item[1], reverse=True):
+                pct = 100.0 * value / max(block_total, 1.0e-9)
+                print(f"    {name:32s} {value:8.4f}s  {pct:6.2f}%")
+
+        print_block("collection", collection_profile)
+        print_block("learning", learn_profile)
+        if getattr(self.alg, "last_update_timers", None):
+            print_block("ppo_update", self.alg.last_update_timers)
+
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
         if self.log_dir is not None and self.writer is None:
@@ -261,19 +325,42 @@ class OnPolicyRunnerKITE:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
+            profile_active = self._profile_active(it)
+            self.alg.profile_learning = profile_active
+            collection_profile = {} if profile_active else None
+            learn_profile = {} if profile_active else None
             start = time.time()
+            if profile_active:
+                self._profile_sync(True)
+                collection_profile_start = time.perf_counter()
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
+                    if profile_active:
+                        step_profile_start = time.perf_counter()
                     # Call the algorithms act() method to store current transition data and predict actions
                     with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
                         # alg.act stores the pre-step transition and returns
                         # the newest frame latent used to advance visual memory.
                         actions, latest_depth_latent, latest_torso_lin_vel_est = self.alg.act(obs, critic_obs, obs_hist, privileged_obs, depth_image, self.depth_latent_history, depth_torso_state, terrain_map) # obs_t, (obs_t-1)
-                         
+                    if profile_active:
+                        step_profile_start = self._profile_mark(
+                            collection_profile,
+                            "collect_act",
+                            step_profile_start,
+                            True,
+                        )
+
                     # Submit the predicted action and extract the resulting state... 
                     obs, privileged_obs, obs_hist, exp_labels, depth_obs, depth_torso_state, terrain_map, rewards, dones, infos = self.env.step(actions)  # obs_t+1  (obs_t)
-                    
+                    if profile_active:
+                        step_profile_start = self._profile_mark(
+                            collection_profile,
+                            "collect_env_step",
+                            step_profile_start,
+                            True,
+                        )
+
                     # move everything to the correct device
                     obs = obs.to(self.device)
                     obs_hist = obs_hist.to(self.device)
@@ -289,8 +376,23 @@ class OnPolicyRunnerKITE:
                     terrain_map = terrain_map.to(self.device)
                     rewards = rewards.to(self.device)
                     dones = dones.to(self.device)
+                    if profile_active:
+                        step_profile_start = self._profile_mark(
+                            collection_profile,
+                            "collect_tensor_prep",
+                            step_profile_start,
+                            True,
+                        )
+
                     critic_obs = self.alg.build_critic_obs(privileged_obs, terrain_map)
-                    
+                    if profile_active:
+                        step_profile_start = self._profile_mark(
+                            collection_profile,
+                            "collect_critic_obs",
+                            step_profile_start,
+                            True,
+                        )
+
                     # Advance depth latent history after the action generated
                     #     from the previous history has been stored.
                     if self.depth_latent_history.shape[1] > 0:
@@ -303,11 +405,25 @@ class OnPolicyRunnerKITE:
                         )
                     if dones.any():
                         self.depth_latent_history[dones.bool()] = 0.0
+                    if profile_active:
+                        step_profile_start = self._profile_mark(
+                            collection_profile,
+                            "collect_depth_history",
+                            step_profile_start,
+                            True,
+                        )
 
                     # Log the labels associated with the context decoder as well as the typical stuff
                     # Pass next privileged obs as the dynamics reconstruction
                     # target; critic_obs itself contains learned latents.
                     self.alg.process_env_step(rewards, dones, infos, privileged_obs, exp_labels)
+                    if profile_active:
+                        step_profile_start = self._profile_mark(
+                            collection_profile,
+                            "collect_process_step",
+                            step_profile_start,
+                            True,
+                        )
 
                     if self.log_dir is not None:
                         # Book keeping
@@ -320,20 +436,55 @@ class OnPolicyRunnerKITE:
                         lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
                         cur_reward_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
+                    if profile_active:
+                        step_profile_start = self._profile_mark(
+                            collection_profile,
+                            "collect_logging_bookkeeping",
+                            step_profile_start,
+                            True,
+                        )
 
+                if profile_active:
+                    self._profile_sync(True)
+                    collection_profile["collection_wall"] = time.perf_counter() - collection_profile_start
                 stop = time.time()
                 collection_time = stop - start
 
                 # Learning step
                 start = stop
+                if profile_active:
+                    self._profile_sync(True)
+                    learn_profile_start = time.perf_counter()
+                    learn_phase_start = learn_profile_start
                 self.alg.compute_returns(critic_obs)
+                if profile_active:
+                    learn_phase_start = self._profile_mark(
+                        learn_profile,
+                        "learn_compute_returns",
+                        learn_phase_start,
+                        True,
+                    )
             
             mean_value_loss, mean_surrogate_loss, mean_aux_loss, mean_aux_decoder_loss, mean_explicit_loss, mean_reconstruction_loss, mean_kl_loss, mean_aux_loss_details = self.alg.update()
+            if profile_active:
+                learn_phase_start = self._profile_mark(
+                    learn_profile,
+                    "learn_alg_update",
+                    learn_phase_start,
+                    True,
+                )
             
             # Step the reward curriculum if we are doing that
             if self.env.use_reward_curriculum:
                 self.env.step_reward_curriculum(it)
             self.env.step_command_resampling_time_curriculum(it)
+            if profile_active:
+                learn_phase_start = self._profile_mark(
+                    learn_profile,
+                    "learn_reward_command_curriculum",
+                    learn_phase_start,
+                    True,
+                )
             
             # Step domain randomization when tracking performance is available.
             if self.env.simulator.use_domainrand_curriculum:
@@ -380,6 +531,13 @@ class OnPolicyRunnerKITE:
                         self.env.simulator.domain_rand_disturbance_progress,
                         it,
                     )
+            if profile_active:
+                learn_phase_start = self._profile_mark(
+                    learn_profile,
+                    "learn_domain_rand_curriculum",
+                    learn_phase_start,
+                    True,
+                )
 
             entropy_coef = self.alg.current_entropy_coef
             if ep_infos and self.use_adaptive_entropy:
@@ -404,15 +562,33 @@ class OnPolicyRunnerKITE:
                 entropy_coef = self.alg.update_adaptive_entropy_coef(
                     performance_metrics
                 )
+            if profile_active:
+                learn_phase_start = self._profile_mark(
+                    learn_profile,
+                    "learn_adaptive_entropy",
+                    learn_phase_start,
+                    True,
+                )
             
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:
                 self.log(locals())
                 self.writer.add_scalar("Policy/entropy_coef", entropy_coef, it)
+            if profile_active:
+                learn_phase_start = self._profile_mark(
+                    learn_profile,
+                    "learn_logging",
+                    learn_phase_start,
+                    True,
+                )
 
             if it % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+            if profile_active:
+                self._profile_sync(True)
+                learn_profile["learn_wall"] = time.perf_counter() - learn_profile_start
+                self._print_iteration_profile(it, collection_profile, learn_profile)
             ep_infos.clear()
         
         self.current_learning_iteration += num_learning_iterations

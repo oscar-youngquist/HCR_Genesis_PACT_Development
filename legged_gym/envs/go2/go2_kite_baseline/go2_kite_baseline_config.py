@@ -80,11 +80,14 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
             "step_height": "0.05 + 0.2 * difficulty",
             "discrete_height": "0.05 + 0.2 * difficulty",
             "stepping_stones_params": {
-                "stone_length": "np.random.uniform(1.6, 2.0)",
-                "stone_width": "np.random.uniform(1.0, 2.0)",
+                "stone_length": "max(0.8, np.random.uniform(1.6, 2.0) - 0.8 * difficulty)",
+                "stone_width": "max(0.5, np.random.uniform(1.0, 2.0) - 0.5 * difficulty)",
                 "stone_distance_x": "0.1 + 0.8 * difficulty",
                 "stone_distance_y": "np.random.uniform(0.3, 0.5)",
                 "max_height": "0",
+                "min_stone_length": "0.25",
+                "min_stone_width": "0.25",
+                "stepping_stone_edge_clearance": "0.4",
             },
             "gap_size": "0.1 + difficulty * 0.8",
             "pit_depth": "0.1 + 0.5 * difficulty",
@@ -93,6 +96,8 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
                 "high_platform_length": "np.random.uniform(0.6, 1.6)",
                 "high_platform_width": "np.random.uniform(1.0, 2.0)",
                 "high_platform_interval": "np.random.uniform(1.0, 2.0)",
+                "min_high_platform_interval": "0.8",
+                "min_high_platform_edge_clearance": "0.8",
             },
             "high_platform_gaps_params": {
                 "high_platform_height": "0.1 + 0.5 * difficulty",
@@ -100,6 +105,8 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
                 "high_platform_width": "np.random.uniform(1.0, 2.0)",
                 "high_platform_distance_y": "np.random.uniform(0.2, 2.0)",
                 "gap_size": "0.1 + difficulty * 0.8",
+                "min_high_platform_track_width": "0.35",
+                "min_high_platform_edge_clearance": "0.8",
             },
         }
         # terrain_proportions = [0.20, 0.25, 0.00, 0.00, 0.30, 0.25]
@@ -694,6 +701,13 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         # Enables expensive CUDA synchronizations/cache clears for profiling
         # and OOM debugging. Keep False for normal training speed.
         gpu_debugging = False
+        # Prints synchronized phase timings for collection and learning.
+        # Keep disabled for normal training because CUDA syncs perturb runtime.
+        profile_training = False
+        profile_learning = False
+        profile_iterations = 1
+        profile_warmup_iterations = 0
+        profile_sync_cuda = True
         # When False, log only compact per-model auxiliary loss totals.
         # Enable for the full detailed encoder-loss breakdown.
         log_detailed_encoder_losses = False

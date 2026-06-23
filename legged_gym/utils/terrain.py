@@ -46,6 +46,7 @@ class Terrain:
     KIND_MULTIPLE_HIGH_PLATFORMS = 8
     KIND_HIGH_PLATFORM_GAPS = 9
     FORWARD_ONLY_COMMAND_KIND_IDS = (
+        KIND_STEPPING_STONES,
         KIND_GAP,
         KIND_PIT,
         KIND_MULTIPLE_HIGH_PLATFORMS,
@@ -223,6 +224,9 @@ class Terrain:
                                                   stone_distance_y=eval(stepping_stones_params["stone_distance_y"]),
                                                   max_height=eval(stepping_stones_params["max_height"]),
                                                   platform_size=self.platform_size,
+                                                  min_stone_length=eval(stepping_stones_params.get("min_stone_length", "0.25")),
+                                                  min_stone_width=eval(stepping_stones_params.get("min_stone_width", "0.25")),
+                                                  stepping_stone_edge_clearance=eval(stepping_stones_params.get("stepping_stone_edge_clearance", "0.4")),
                                                   terrain_type=self.type,
                                                   simplify_mesh=self.simplify_mesh)
         elif choice < self.proportions[6]: # gap
@@ -245,6 +249,8 @@ class Terrain:
                                                         high_platform_length=eval(high_platform_params["high_platform_length"]),
                                                         high_platform_width=eval(high_platform_params["high_platform_width"]),
                                                         high_platform_interval=eval(high_platform_params["high_platform_interval"]),
+                                                        min_high_platform_interval=eval(high_platform_params.get("min_high_platform_interval", "0.8")),
+                                                        min_high_platform_edge_clearance=eval(high_platform_params.get("min_high_platform_edge_clearance", "0.8")),
                                                         platform_size=self.platform_size,
                                                         terrain_type=self.type,
                                                         simplify_mesh=self.simplify_mesh)
@@ -257,6 +263,8 @@ class Terrain:
                                                         high_platform_width=eval(high_platform_gaps_params["high_platform_width"]),
                                                         high_platform_distance_y=eval(high_platform_gaps_params["high_platform_distance_y"]),
                                                         gap_size=eval(high_platform_gaps_params["gap_size"]),
+                                                        min_high_platform_track_width=eval(high_platform_gaps_params.get("min_high_platform_track_width", "0.35")),
+                                                        min_high_platform_edge_clearance=eval(high_platform_gaps_params.get("min_high_platform_edge_clearance", "0.8")),
                                                         platform_size=self.platform_size,
                                                         terrain_type=self.type,
                                                         simplify_mesh=self.simplify_mesh)

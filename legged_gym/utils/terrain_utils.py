@@ -74,9 +74,12 @@ def random_uniform_terrain(terrain : SubTerrain,
     y = np.linspace(flat_edge * terrain.horizontal_scale,
                     (terrain.width - flat_edge) * terrain.horizontal_scale, height_field_downsampled.shape[1])
 
-    # f = interpolate.interp2d(y, x, height_field_downsampled, kind='linear')
+    # height_field_downsampled is indexed as [x, y] because SubTerrain stores
+    # height fields as [length, width]. RectBivariateSpline expects z.shape to
+    # match (len(x), len(y)), so keep the same axis order here. This matters for
+    # non-square terrains such as KITE's 12m x 8m curriculum tiles.
     f = interpolate.RectBivariateSpline(
-        y, x, height_field_downsampled, kx=1, ky=1
+        x, y, height_field_downsampled, kx=1, ky=1
     )
 
     x_upsampled = np.linspace(flat_edge * terrain.horizontal_scale,
@@ -85,7 +88,7 @@ def random_uniform_terrain(terrain : SubTerrain,
     y_upsampled = np.linspace(flat_edge * terrain.horizontal_scale,
                               (terrain.width - flat_edge) * terrain.horizontal_scale,
                               terrain.width - 2 * flat_edge)
-    z_upsampled = np.rint(f(y_upsampled, x_upsampled))
+    z_upsampled = np.rint(f(x_upsampled, y_upsampled))
 
     terrain.height_field_raw[flat_edge:-flat_edge, flat_edge:-flat_edge] += z_upsampled.astype(np.int16)
 
@@ -496,6 +499,9 @@ def stepping_stones_terrain(terrain : SubTerrain,
                             max_height : float,
                             platform_size : float =1.,
                             depth : float =-10,
+                            min_stone_length : float = 0.25,
+                            min_stone_width : float = 0.25,
+                            stepping_stone_edge_clearance : float = 0.4,
                             terrain_type: str = None,
                             simplify_mesh: bool = False) -> SubTerrain:
     """
@@ -510,6 +516,9 @@ def stepping_stones_terrain(terrain : SubTerrain,
         max_height (float): maximum height of the stones (positive and negative) [meters]
         platform_size (float): size of the flat platform at the center of the terrain [meters]
         depth (float): depth of the holes (default=-10.) [meters]
+        min_stone_length (float): minimum x-size for any generated stone [meters]
+        min_stone_width (float): minimum y-size for any generated stone [meters]
+        stepping_stone_edge_clearance (float): flat seam margin at subterrain edges [meters]
         terrain_type (str): type of the terrain (heightfield or trimesh)
         simplify_mesh (bool): whether to simplify the mesh
     Returns:
@@ -523,6 +532,13 @@ def stepping_stones_terrain(terrain : SubTerrain,
     stone_width = int(stone_width / terrain.horizontal_scale)
     stone_distance_x = int(stone_distance_x / terrain.horizontal_scale)
     stone_distance_y = int(stone_distance_y / terrain.horizontal_scale)
+    min_stone_length = int(min_stone_length / terrain.horizontal_scale)
+    min_stone_width = int(min_stone_width / terrain.horizontal_scale)
+    stepping_stone_edge_clearance = int(stepping_stone_edge_clearance / terrain.horizontal_scale)
+    stone_length = max(stone_length, min_stone_length, 1)
+    stone_width = max(stone_width, min_stone_width, 1)
+    stone_distance_x = max(stone_distance_x, 0)
+    stone_distance_y = max(stone_distance_y, 0)
     max_height = int(max_height / terrain.vertical_scale)
     platform_size = int(platform_size / terrain.horizontal_scale)
     height_range = np.arange(-max_height-1, max_height, step=1)
@@ -532,53 +548,50 @@ def stepping_stones_terrain(terrain : SubTerrain,
         # initialize list of meshes
         meshes_list = list()
 
-    start_x = 0
-    start_y = 0
     terrain.height_field_raw[:, :] = int(depth / terrain.vertical_scale)
-    if terrain.length >= terrain.width:
-        while start_y < terrain.width:
-            stop_y = min(terrain.width, start_y + stone_width)
-            start_x = 0
-            # fill row
-            while start_x < terrain.length:
-                stop_x = min(terrain.length, start_x + stone_length)
-                height = np.random.choice(height_range)
-                terrain.height_field_raw[start_x: stop_x, start_y: stop_y] = height
-                # generate the box mesh for the stone
-                if terrain_type == "trimesh":
-                    box_center = ((stop_x + start_x) / 2 * terrain.horizontal_scale,
-                                  (start_y + stop_y) / 2 * terrain.horizontal_scale,
-                                  depth / 2)
-                    box_dim = ((stop_x - start_x) * terrain.horizontal_scale,
-                               (stop_y - start_y) * terrain.horizontal_scale,
-                               abs(depth))
-                    box_mesh = trimesh.creation.box(box_dim, trimesh.transformations.translation_matrix(box_center))
-                    meshes_list.append(box_mesh)
 
-                start_x += stone_length + stone_distance_x
-            start_y += stone_width + stone_distance_y
-    elif terrain.width > terrain.length:
-        while start_x < terrain.length:
-            stop_x = min(terrain.length, start_x + stone_length)
-            start_y = 0
-            # fill column
-            while start_y < terrain.width:
-                stop_y = min(terrain.width, start_y + stone_width)
-                height = np.random.choice(height_range)
-                terrain.height_field_raw[start_x: stop_x, start_y: stop_y] = height
-                # generate the box mesh for the stone
-                if terrain_type == "trimesh":
-                    box_center = ((stop_x + start_x) / 2 * terrain.horizontal_scale,
-                                  (start_y + stop_y) / 2 * terrain.horizontal_scale,
-                                    depth)
-                    box_dim = ((stop_x - start_x) * terrain.horizontal_scale,
-                               (stop_y - start_y) * terrain.horizontal_scale,
-                               abs(depth))
-                    box_mesh = trimesh.creation.box(box_dim, trimesh.transformations.translation_matrix(box_center))
-                    meshes_list.append(box_mesh)
+    def centered_complete_starts(total_size, block_size, gap_size, edge_clearance):
+        # Build a centered lattice of complete stones. This removes clipped
+        # terminal stones, and turns leftover cells into symmetric margins.
+        edge_clearance = min(edge_clearance, max(0, (total_size - block_size) // 2))
+        usable_size = total_size - 2 * edge_clearance
+        block_size = min(block_size, usable_size)
+        num_blocks = max(1, (usable_size + gap_size) // (block_size + gap_size))
+        total_blocks_size = num_blocks * block_size + (num_blocks - 1) * gap_size
+        start = edge_clearance + (usable_size - total_blocks_size) // 2
+        return [start + i * (block_size + gap_size) for i in range(num_blocks)], block_size
 
-                start_y += stone_width + stone_distance_y
-            start_x += stone_length + stone_distance_x
+    x_starts, stone_length = centered_complete_starts(
+        terrain.length, stone_length, stone_distance_x, stepping_stone_edge_clearance
+    )
+    y_starts, stone_width = centered_complete_starts(
+        terrain.width, stone_width, stone_distance_y, stepping_stone_edge_clearance
+    )
+
+    # The seam bands are flat ground, so the centered lattice never leaves an
+    # unrecoverable void exactly where neighboring subterrains meet.
+    if stepping_stone_edge_clearance > 0:
+        terrain.height_field_raw[:stepping_stone_edge_clearance, :] = 0
+        terrain.height_field_raw[-stepping_stone_edge_clearance:, :] = 0
+        terrain.height_field_raw[:, :stepping_stone_edge_clearance] = 0
+        terrain.height_field_raw[:, -stepping_stone_edge_clearance:] = 0
+
+    for start_x in x_starts:
+        stop_x = start_x + stone_length
+        for start_y in y_starts:
+            stop_y = start_y + stone_width
+            height = np.random.choice(height_range)
+            terrain.height_field_raw[start_x: stop_x, start_y: stop_y] = height
+            # Generate only full-size stone meshes; no clipped terminal boxes.
+            if terrain_type == "trimesh":
+                box_center = ((stop_x + start_x) / 2 * terrain.horizontal_scale,
+                              (start_y + stop_y) / 2 * terrain.horizontal_scale,
+                              depth / 2)
+                box_dim = ((stop_x - start_x) * terrain.horizontal_scale,
+                           (stop_y - start_y) * terrain.horizontal_scale,
+                           abs(depth))
+                box_mesh = trimesh.creation.box(box_dim, trimesh.transformations.translation_matrix(box_center))
+                meshes_list.append(box_mesh)
 
     x1 = (terrain.length - platform_size) // 2
     x2 = (terrain.length + platform_size) // 2
@@ -741,6 +754,8 @@ def multiple_high_platforms_terrain(terrain : SubTerrain,
                           high_platform_width: float,
                           high_platform_interval: float,
                           platform_size: float = 1.,
+                          min_high_platform_interval: float = 0.8,
+                          min_high_platform_edge_clearance: float = 0.8,
                           terrain_type: str = None,
                           simplify_mesh: bool = False) -> SubTerrain:
     """Generate multiple high platforms in the X direction track
@@ -751,6 +766,8 @@ def multiple_high_platforms_terrain(terrain : SubTerrain,
         high_platform_length (float): the length of the high platform in X direction (in meters)
         high_platform_width (float): the width of the high platform in Y direction (in meters)
         high_platform_interval (float): the interval between two high platforms (in meters)
+        min_high_platform_interval (float): minimum flat landing distance between platforms (in meters)
+        min_high_platform_edge_clearance (float): minimum flat margin at subterrain edges (in meters)
         platform_size (float, optional): size of the platform in the middle of the terrain. Defaults to 1..
         terrain_type (str, optional): type of the terrain. Defaults to None.
         simplify_mesh (bool, optional): whether to simplify the terrain mesh. Defaults to False.
@@ -765,6 +782,11 @@ def multiple_high_platforms_terrain(terrain : SubTerrain,
     high_platform_length = int(high_platform_length / terrain.horizontal_scale)
     high_platform_width = int(high_platform_width / terrain.horizontal_scale)
     high_platform_interval = int(high_platform_interval / terrain.horizontal_scale)
+    min_high_platform_interval = int(min_high_platform_interval / terrain.horizontal_scale)
+    min_high_platform_edge_clearance = int(min_high_platform_edge_clearance / terrain.horizontal_scale)
+    # Keep enough flat ground between platforms for a full step-down before the
+    # next climb, even if a config samples a smaller interval.
+    high_platform_interval = max(high_platform_interval, min_high_platform_interval)
     platform_size = int(platform_size / terrain.horizontal_scale / 2)
 
     if terrain_type == "trimesh":
@@ -775,11 +797,14 @@ def multiple_high_platforms_terrain(terrain : SubTerrain,
     # positive x direction
     x_center = terrain.length // 2
     y_center = terrain.width // 2
-    y_start = y_center -high_platform_width // 2
-    y_end = y_center + high_platform_width // 2
+    y_start = max(0, y_center - high_platform_width // 2)
+    y_end = min(terrain.width, y_center + high_platform_width // 2)
     x_start = x_center + platform_size
     x_end = x_start + high_platform_length
-    while x_end < terrain.length:
+    # Stop before the subterrain boundary so adjacent tiles cannot create an
+    # accidental too-short interval across the seam.
+    x_limit_pos = terrain.length - min_high_platform_edge_clearance
+    while x_end <= x_limit_pos:
         terrain.height_field_raw[x_start:x_end, y_start:y_end] = high_platform_height
         if terrain_type == "trimesh":
             box_center = (0.5 * (x_start + x_end) * terrain.horizontal_scale,
@@ -796,7 +821,8 @@ def multiple_high_platforms_terrain(terrain : SubTerrain,
     # negative x direction
     x_end = x_center - platform_size
     x_start = x_end - high_platform_length
-    while x_start > 0:
+    x_limit_neg = min_high_platform_edge_clearance
+    while x_start >= x_limit_neg:
         terrain.height_field_raw[x_start:x_end, y_start:y_end] = high_platform_height
         if terrain_type == "trimesh":
             box_center = (0.5 * (x_start + x_end) * terrain.horizontal_scale,
@@ -857,6 +883,8 @@ def high_platform_gaps_terrain(terrain : SubTerrain,
                     high_platform_distance_y: float,
                     platform_size: float = 1.,
                     depth: float = -10.,
+                    min_high_platform_track_width: float = 0.35,
+                    min_high_platform_edge_clearance: float = 0.8,
                     terrain_type: str = None,
                     simplify_mesh: bool = False) -> SubTerrain:
     """Generate a terrain with a high platform and multiple gaps in the X direction track
@@ -870,6 +898,8 @@ def high_platform_gaps_terrain(terrain : SubTerrain,
         high_platform_distance_y (float): distance between high platforms in the y direction (in meters)
         platform_size (float, optional): size of the platform in the middle of the terrain. Defaults to 1..
         depth (float, optional): depth of the gap. Defaults to -10..
+        min_high_platform_track_width (float): reject clipped side tracks narrower than this width (in meters)
+        min_high_platform_edge_clearance (float): minimum safe margin at subterrain edges (in meters)
         terrain_type (str, optional): type of the terrain. Defaults to None.
         simplify_mesh (bool, optional): whether to simplify the terrain mesh. Defaults to False.
     Returns:
@@ -883,6 +913,8 @@ def high_platform_gaps_terrain(terrain : SubTerrain,
     high_platform_length = int(high_platform_length / terrain.horizontal_scale)
     high_platform_width = int(high_platform_width / terrain.horizontal_scale)
     high_platform_distance_y = int(high_platform_distance_y / terrain.horizontal_scale)
+    min_high_platform_track_width = int(min_high_platform_track_width / terrain.horizontal_scale)
+    min_high_platform_edge_clearance = int(min_high_platform_edge_clearance / terrain.horizontal_scale)
     depth = int(depth / terrain.vertical_scale)
     platform_size = int(platform_size / terrain.horizontal_scale / 2)
 
@@ -905,10 +937,20 @@ def high_platform_gaps_terrain(terrain : SubTerrain,
         meshes_list.append(bottom_mesh)
 
     def generate_x_direction_track(terrain, y_start, y_end):
+        x_limit_pos = terrain.length - min_high_platform_edge_clearance
+        x_limit_neg = min_high_platform_edge_clearance
+        # Keep a flat band at subterrain seams. This prevents neighboring tiles
+        # from creating unavoidable voids where the procedural sequence stops.
+        terrain.height_field_raw[:x_limit_neg, y_start:y_end] = 0
+        terrain.height_field_raw[x_limit_pos:, y_start:y_end] = 0
+
         # positive x direction track
         x_start = x_center + platform_size
         x_end = x_start + high_platform_length
-        while x_start < terrain.length:
+        # Only draw full platforms. The terminal margin is kept as a safe
+        # flat landing, which avoids creating a partial platform or a wider
+        # unrecoverable void at the subterrain boundary.
+        while x_end <= x_limit_pos:
             terrain.height_field_raw[x_start:x_end, y_start:y_end] = high_platform_height
             if terrain_type == "trimesh":
                 box_center = (0.5 * (x_start + x_end) * terrain.horizontal_scale,
@@ -920,12 +962,12 @@ def high_platform_gaps_terrain(terrain : SubTerrain,
                 box_mesh = trimesh.creation.box(box_dim, trimesh.transformations.translation_matrix(box_center))
                 meshes_list.append(box_mesh)
             x_start = x_end + gap_size
-            x_end = min(x_start + high_platform_length, terrain.length)
+            x_end = x_start + high_platform_length
 
         # negative x direction track
         x_end = x_center - platform_size
         x_start = x_end - high_platform_length
-        while x_end > 0:
+        while x_start >= x_limit_neg:
             terrain.height_field_raw[x_start:x_end, y_start:y_end] = high_platform_height
             if terrain_type == "trimesh":
                 box_center = (0.5 * (x_start + x_end) * terrain.horizontal_scale,
@@ -937,7 +979,7 @@ def high_platform_gaps_terrain(terrain : SubTerrain,
                 box_mesh = trimesh.creation.box(box_dim, trimesh.transformations.translation_matrix(box_center))
                 meshes_list.append(box_mesh)
             x_end = x_start - gap_size
-            x_start = max(x_end - high_platform_length, 0)
+            x_start = x_end - high_platform_length
 
         return terrain
 
@@ -945,26 +987,20 @@ def high_platform_gaps_terrain(terrain : SubTerrain,
     # only generate high platforms on the x direction track
     x_center = terrain.length // 2
     y_center = terrain.width // 2
-    # first generate the high platform and gaps in the middle of the x direction track
-    y_start = y_center - high_platform_width // 2
-    y_end = y_center + high_platform_width // 2
-    terrain = generate_x_direction_track(terrain, y_start, y_end)
-
-    # generate high platforms and gaps towards both sides of the y direction
-    # positive y direction
-    y_start = y_center + high_platform_width // 2 + high_platform_distance_y
-    y_end = y_start + high_platform_width
-    while y_start < y_center + platform_size:
+    y_corridor_start = max(0, y_center - platform_size)
+    y_corridor_end = min(terrain.width, y_center + platform_size)
+    y_corridor_width = y_corridor_end - y_corridor_start
+    track_width = min(y_corridor_width, max(high_platform_width, min_high_platform_track_width))
+    track_distance = max(0, high_platform_distance_y)
+    # Pack complete lanes into the corridor and center the whole layout. Any
+    # leftover width becomes symmetric margin instead of a clipped side lane.
+    num_tracks = max(1, (y_corridor_width + track_distance) // (track_width + track_distance))
+    total_track_width = num_tracks * track_width + (num_tracks - 1) * track_distance
+    y_start = y_corridor_start + (y_corridor_width - total_track_width) // 2
+    for track_idx in range(num_tracks):
+        y_end = y_start + track_width
         terrain = generate_x_direction_track(terrain, y_start, y_end)
-        y_start = y_end + high_platform_distance_y
-        y_end = y_start + high_platform_width
-    # negative y direction
-    y_end = y_center - high_platform_width // 2 - high_platform_distance_y
-    y_start = y_end - high_platform_width
-    while y_end > y_center - platform_size:
-        terrain = generate_x_direction_track(terrain, y_start, y_end)
-        y_end = y_start - high_platform_distance_y
-        y_start = y_end - high_platform_width
+        y_start = y_end + track_distance
 
     # ground platform
     x1 = terrain.length // 2 - platform_size
