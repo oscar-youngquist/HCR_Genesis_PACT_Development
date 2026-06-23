@@ -203,6 +203,8 @@ class ActorCritic_KITE(nn.Module):
         self.num_actions = num_actions
         self.init_noise_std = init_noise_std
         
+        self.body_velo_dim = mixer_velo_dim
+        self.feet_state_dim = mixer_feet_state_dim
         
         # Depth-image encoder paramaters
         self.depth_image_resolution = depth_image_resolution

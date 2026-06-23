@@ -710,7 +710,6 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         modality_terrain_weight = 1.0
         modality_dynamics_weight = 1.0
         modality_explicit_weight = 1.0
-        modality_kl_weight = 1.0e-3
         contrastive_weight = 0.1
         contrastive_lambda = 0.5
         contrastive_margin = 1.0

@@ -6,7 +6,7 @@ class GO2KITECfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 45
-        num_privileged_obs = 45 + (51 + 33) # robot_state + privileged info
+        num_privileged_obs = 132
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 + 12 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -57,7 +57,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         debug_surface_normal_refresh_steps = 5
 
         # positions of the sampling height around the base (relative to the base of the robot) 11x18 = 198
-        measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1] #  rows
+        measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0] #  rows
         measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]                          #  cols
 
         selected = False # select a unique terrain type and pass all arguments
@@ -74,7 +74,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         # terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
         
         # slope, random-rough, stairs-down, stairs-up, discrete, stepping-stone, gap (jump), pit (climb-up), high-platform (climb), platform+gap (climb and jump) 
-        terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.15, 0.05, 0.10, 0.10]
+        terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.00, 0.20, 0.10, 0.10, 0.10]
         # terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 1.00, 0.00, 0.00, 0.00, 0.00]
         simplify_mesh = True
         
@@ -293,13 +293,13 @@ class GO2KITECfg( LeggedRobotCfg ):
         rendered_envs_idx.extend([i for i in range(500, 503, 1)])  # number of environments to be rendered
         rendered_envs_idx.extend([i for i in range(900, 903, 1)])  # number of environments to be rendered
 
-        rendered_envs_idx.extend([i for i in range(1500, 1503, 1)])
-        rendered_envs_idx.extend([i for i in range(3500, 3503, 1)])
-        rendered_envs_idx.extend([i for i in range(4000, 4003, 1)])
+        # rendered_envs_idx.extend([i for i in range(1500, 1503, 1)])
+        # rendered_envs_idx.extend([i for i in range(3500, 3503, 1)])
+        # rendered_envs_idx.extend([i for i in range(4000, 4003, 1)])
 
-        rendered_envs_idx.extend([i for i in range(1700, 1703, 1)])
-        rendered_envs_idx.extend([i for i in range(2200, 2203, 1)])
-        rendered_envs_idx.extend([i for i in range(3900, 3903, 1)])
+        # rendered_envs_idx.extend([i for i in range(1700, 1703, 1)])
+        # rendered_envs_idx.extend([i for i in range(2200, 2203, 1)])
+        # rendered_envs_idx.extend([i for i in range(3900, 3903, 1)])
         # rendered_envs_idx = [0, 1000, 3500]
         add_camera = False
 
@@ -624,29 +624,29 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         terrain_decoder_encoded_spatial_dim = (3,4)
         terrain_decoder_channels = 64
 
-        privileged_dynamics_latent_dim = 16
+        privileged_dynamics_latent_dim = 32
         priv_mixer_num_blocks = 2
-        priv_mixer_hidden_dim = 128
-        priv_mixer_token_dim = 128
-        priv_mixer_channel_dim = 256
+        priv_mixer_hidden_dim = 64
+        priv_mixer_token_dim = 64
+        priv_mixer_channel_dim = 128
         priv_mixer_use_layer_norm = True
-        privileged_dynamics_decoder_layers = [32,64,128,256]
+        privileged_dynamics_decoder_layers = [64,128,256]
 
         # Depth Image/Sequence Models
         depth_image_latent_dim = 32
         depth_image_norm = "layer"
-        depth_sequence_length = 5
+        depth_sequence_length = 3
         depth_sequence_norm = "layer"
         cnn_activation = 'elu'
         
         # Proprioceptive Context encoder
         proprio_in_dim = 450
-        proprio_latent_dim = 16
+        proprio_latent_dim = 32
         proprio_use_norm = True
         proprio_num_blocks = 2
-        proprio_hidden_dim = 128
-        proprio_token_dim = 128
-        proprio_channel_dim = 256
+        proprio_hidden_dim = 64
+        proprio_token_dim = 64
+        proprio_channel_dim = 128
 
         # Modality Mixer Network
         mixer_velo_dim = 3                   # torso velocity state [v_x, v_y, v_z]
@@ -654,9 +654,9 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         mixer_latent_dim = 32
         mixer_use_norm = True
         mixer_num_blocks = 2
-        mixer_hidden_dim = 128
-        mixer_token_dim = 128
-        mixer_channel_dim = 256
+        mixer_hidden_dim = 64
+        mixer_token_dim = 64
+        mixer_channel_dim = 128
 
         # Actor/critic
         actor_layers = [512,256,128]
@@ -695,7 +695,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
        
         #     loss weights for sequence of latent-depth-images encoder
         depth_sequence_terrain_weight = 1.0
-        depth_sequence_kl_weight = 1.0e-3
+        depth_sequence_kl_weight = 1.0
         
         #     loss weights for proprioceptive history context encoder
         proprio_dynamics_weight = 1.0
@@ -705,7 +705,6 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         modality_terrain_weight = 1.0    # terrain reconstruction loss
         modality_dynamics_weight = 1.0   # privliged obs reconstruction loss
         modality_explicit_weight = 1.0   # torso-velo + feet-state estimation reconstruction loss
-        modality_kl_weight = 1.0e-3      # kl-divergence
         versatility_weight = 0.01        # latent versatility loss
         versatility_lambda_e = 0.1       # weight of KL-regularization on the versility loss
 
@@ -718,7 +717,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_KITE'
         algorithm_class_name = 'PPO_KITE'
         num_steps_per_env = 24 # per iteration
-        max_iterations = 8000 # number of policy updates
+        max_iterations = 10000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb

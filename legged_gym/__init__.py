@@ -36,6 +36,21 @@ elif sys.version_info[1] <= 8 and sys.version_info[1] >= 6: # >=3.6 and <3.9 for
 
 if "genesis" in SIMULATOR:
     try: 
+        import numba
+
+        _numba_jit = numba.jit
+        _numba_njit = numba.njit
+
+        def _jit_without_cache(*args, **kwargs):
+            kwargs["cache"] = False
+            return _numba_jit(*args, **kwargs)
+
+        def _njit_without_cache(*args, **kwargs):
+            kwargs["cache"] = False
+            return _numba_njit(*args, **kwargs)
+
+        numba.jit = _jit_without_cache
+        numba.njit = _njit_without_cache
         import genesis as gs
     except ImportError as e:
         print("Failed to import Genesis. Please ensure that the Genesis is properly installed and configured.")

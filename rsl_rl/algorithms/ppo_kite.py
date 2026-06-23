@@ -207,7 +207,7 @@ class PPO_KITE:
             latent_dim=privileged_terrain_latent_dim,
             cnn_activation=priv_activation_func,
             decoder_hidden_dim=terrain_decoder_hidden_dim,
-            encoded_spatial_dim=terrain_decoder_encoded_spatial_dim,
+            encoded_spatial_shape=terrain_decoder_encoded_spatial_dim,
             decoder_channels=terrain_decoder_channels,
             norm_type=cnn_norm_type,
         ).to(self.device)
@@ -222,8 +222,8 @@ class PPO_KITE:
             activation=priv_activation_func,
             num_mixer_blocks=priv_mixer_num_blocks,
             hidden_dim=priv_mixer_hidden_dim,
-            token_dim=priv_mixer_token_dim,
-            channel_dim=priv_mixer_channel_dim,
+            token_mlp_dim=priv_mixer_token_dim,
+            channel_mlp_dim=priv_mixer_channel_dim,
             use_layer_norm=priv_mixer_use_layer_norm,
             device=device,
         ).to(self.device)

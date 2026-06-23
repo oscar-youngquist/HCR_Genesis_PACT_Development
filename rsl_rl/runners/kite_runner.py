@@ -30,6 +30,7 @@
 
 import time
 import os
+import inspect
 from collections import deque
 import statistics
 
@@ -101,7 +102,7 @@ class OnPolicyRunnerKITE:
                                                             self.policy_cfg["mixer_feet_state_dim"],
                                                             self.policy_cfg["mixer_latent_dim"],
                                                             self.policy_cfg["mixer_use_norm"],
-                                                            self.policy_cfg["mixer_blocks"],
+                                                            self.policy_cfg.get("mixer_num_blocks", self.policy_cfg.get("mixer_blocks", 2)),
                                                             self.policy_cfg["mixer_hidden_dim"],
                                                             self.policy_cfg["mixer_token_dim"],
                                                             self.policy_cfg["mixer_channel_dim"],
@@ -125,6 +126,12 @@ class OnPolicyRunnerKITE:
             len(self.env.cfg.terrain.measured_points_y),
             4,
         )
+        alg_init_params = set(inspect.signature(alg_class.__init__).parameters)
+        alg_cfg = {
+            key: value
+            for key, value in self.alg_cfg.items()
+            if key in alg_init_params
+        }
         self.alg: PPO_KITE = alg_class(
             actor_critic,
             latest_privileged_obs_dim,
@@ -146,7 +153,7 @@ class OnPolicyRunnerKITE:
             priv_mixer_channel_dim=self.policy_cfg.get("priv_mixer_channel_dim", 256),
             priv_mixer_use_layer_norm=self.policy_cfg.get("priv_mixer_use_layer_norm", True),
             device=self.device,
-            **self.alg_cfg,
+            **alg_cfg,
         )
         
         self.num_steps_per_env = self.cfg["num_steps_per_env"]

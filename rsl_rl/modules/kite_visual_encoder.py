@@ -151,15 +151,21 @@ class MotionRobustDepthEncoder(nn.Module):
 
         self.global_query = nn.Parameter(torch.randn(1, 1, 32))
 
-        self.fc = nn.Sequential(
-            nn.Linear(32, target_latent_dim),
-            self.activation,
-        )
+        output_hdim = 2 * target_latent_dim
 
-        self.mean_out = nn.Linear(target_latent_dim, target_latent_dim)
+        self.fc = nn.Sequential(
+            nn.Linear(32, output_hdim),
+            self.activation,
+        )        
+        
+        self.mean_h1 = nn.Linear(output_hdim, output_hdim)
+
+        self.mean_out = nn.Linear(output_hdim, target_latent_dim)
+
+        self.logvar_h1 = nn.Linear(output_hdim, output_hdim)
 
         self.logvar_out = nn.Sequential(
-            nn.Linear(target_latent_dim, target_latent_dim),
+            nn.Linear(output_hdim, target_latent_dim),
             nn.Hardtanh(min_val=-5.0, max_val=5.0),
         )
 
@@ -293,8 +299,11 @@ class MotionRobustDepthEncoder(nn.Module):
         attn_out = attn_out.squeeze(1)
         latent = self.fc(attn_out)
 
-        mean = self.mean_out(latent)
-        logvar = self.logvar_out(latent)
+        mean_h1 = self.activation(self.mean_h1(latent))
+        logvar_h1 = self.activation(self.logvar_h1(latent))
+
+        mean = self.mean_out(mean_h1)
+        logvar = self.logvar_out(logvar_h1)
 
         return mean, logvar
 
@@ -352,8 +361,15 @@ class MotionRobustDepthDecoder(nn.Module):
             torch.cat([x_grid, y_grid], dim=1),
         )
 
+        h_dim = 32 * 6 * 8
+
         self.fc = nn.Sequential(
-            nn.Linear(target_latent_dim, 32 * 6 * 8),
+            nn.Linear(target_latent_dim,h_dim),
+            self.activation,
+        )
+        
+        self.h1 = nn.Sequential(
+            nn.Linear(h_dim, h_dim),
             self.activation,
         )
 
@@ -453,6 +469,7 @@ class MotionRobustDepthDecoder(nn.Module):
         coord_dict = self.compute_motion_conditioned_coords(batch_size, transform_matrices)
 
         x = self.fc(z)
+        x = self.h1(x)
         x = x.view(batch_size, 32, 6, 8)
 
         x = torch.cat([x, coord_dict["coords_6_8"]], dim=1)
@@ -552,21 +569,26 @@ class ConvDepthSequenceEncoder(nn.Module):
 
         assert current_len == 1, "Temporal conv stack should reduce sequence length to 1."
 
+        output_hdim = 2 * output_dim
+
         self.fc = nn.Sequential(
-            nn.Linear(current_channels, output_dim),
+            nn.Linear(current_channels, output_hdim),
             self.activation,
         )
 
         if self.use_latest_skip:
-            self.latest_skip = nn.Linear(feature_dim, output_dim)
+            self.latest_skip = nn.Linear(feature_dim, output_hdim)
             self.latest_skip_scale = nn.Parameter(torch.tensor(0.1))
         else:
             self.latest_skip = None
+        
+        self.mean_h1 = nn.Linear(output_hdim, output_hdim)
+        self.logvar_h1 = nn.Linear(output_hdim, output_hdim)
 
-        self.mean_out = nn.Linear(output_dim, output_dim)
+        self.mean_out = nn.Linear(output_hdim, output_dim)
 
         self.logvar_out = nn.Sequential(
-            nn.Linear(output_dim, output_dim),
+            nn.Linear(output_hdim, output_dim),
             nn.Hardtanh(min_val=-5.0, max_val=5.0),
         )
 
@@ -612,9 +634,12 @@ class ConvDepthSequenceEncoder(nn.Module):
             latent = self.activation(latent)
         else:
             latent = temporal_latent
-
-        mean = self.mean_out(latent)
-        logvar = self.logvar_out(latent)
+        
+        mean_h1 = self.activation(self.mean_h1(latent))
+        logvar_h1 = self.activation(self.logvar_h1(latent))
+        
+        mean = self.mean_out(mean_h1)
+        logvar = self.logvar_out(logvar_h1)
 
         return mean, logvar
 
