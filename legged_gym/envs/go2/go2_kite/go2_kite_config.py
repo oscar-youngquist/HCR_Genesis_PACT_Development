@@ -56,9 +56,9 @@ class GO2KITECfg( LeggedRobotCfg ):
         debug_surface_normal_color = (1.0, 0.8, 0.0, 1.0)
         debug_surface_normal_refresh_steps = 5
 
-        # positions of the sampling height around the base (relative to the base of the robot) 11x18 = 198
-        measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0] #  rows
-        measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]                          #  cols
+        # positions of the sampling height around the base (relative to the base of the robot) 11x18 = 153
+        measured_points_x = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2] #  rows
+        measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4]                          #  cols
 
         selected = False # select a unique terrain type and pass all arguments
         terrain_kwargs = None # Dict of arguments for selected terrain
@@ -577,9 +577,11 @@ class GO2KITECfg( LeggedRobotCfg ):
         curriculum_ema_alpha = 0.05
         curriculum_best_window = 400
         curriculum_best_quantile = 0.90
-        curriculum_recovery_ratio = 0.90
-        curriculum_min_lin_tracking = 0.60
-        curriculum_min_ang_tracking = 0.60
+        curriculum_recovery_ratio = 0.80
+        
+        curriculum_min_lin_tracking = 0.50
+        curriculum_min_ang_tracking = 0.30
+        
         curriculum_min_episode_fraction = 0.25
         curriculum_update_interval_steps = 10000
 
@@ -624,7 +626,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         terrain_decoder_encoded_spatial_dim = (3,4)
         terrain_decoder_channels = 64
 
-        privileged_dynamics_latent_dim = 32
+        privileged_dynamics_latent_dim = 16
         priv_mixer_num_blocks = 2
         priv_mixer_hidden_dim = 64
         priv_mixer_token_dim = 64
@@ -641,7 +643,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         
         # Proprioceptive Context encoder
         proprio_in_dim = 450
-        proprio_latent_dim = 32
+        proprio_latent_dim = 16
         proprio_use_norm = True
         proprio_num_blocks = 2
         proprio_hidden_dim = 64
@@ -707,7 +709,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         modality_terrain_weight = 1.0    # terrain reconstruction loss
         modality_dynamics_weight = 1.0   # privliged obs reconstruction loss
         modality_explicit_weight = 1.0   # torso-velo + feet-state estimation reconstruction loss
-        versatility_weight = 0.01        # latent versatility loss
+        versatility_weight = 0.1        # latent versatility loss
         versatility_lambda_e = 0.1       # weight of KL-regularization on the versility loss
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.
