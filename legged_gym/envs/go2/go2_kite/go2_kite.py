@@ -760,7 +760,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             )
             self.commands[forward_only_env_ids, 1] = 0.0
             if self.cfg.commands.heading_command:
-                self.commands[forward_only_env_ids, 3] = 0.0
+                self.commands[forward_only_env_ids, 3] = torch_rand_float(-0.349, 0.349, (len(env_ids), 1), device=self.device).squeeze(1)  # +/- 20 degrees
             else:
                 self.commands[forward_only_env_ids, 2] = 0.0
 

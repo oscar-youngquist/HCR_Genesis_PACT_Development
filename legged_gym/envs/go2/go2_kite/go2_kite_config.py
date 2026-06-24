@@ -68,14 +68,14 @@ class GO2KITECfg( LeggedRobotCfg ):
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 3.0 # [m] size of the flat platform at the center of each subterrain
         num_rows = 10  # number of terrain rows (levels), X direction
-        num_cols = 10  # number of terrain cols (types), Y direction
+        num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
         # terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
         
         # slope, random-rough, stairs-down, stairs-up, discrete, stepping-stone, gap (jump), pit (climb-up), high-platform (climb), platform+gap (climb and jump) 
-        # terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.00, 0.20, 0.10, 0.10, 0.10]
-        terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 0.20, 0.00, 0.00, 0.40, 0.40]
+        terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
+        # terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 0.20, 0.00, 0.00, 0.40, 0.40]
         simplify_mesh = True
         
         terrain_curriculum_difficulty = {
@@ -466,7 +466,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             alive_bonus           = 0.001
 
             stand_still_contact = -0.5
-            dof_pos_stand_still = -0.1
+            dof_pos_stand_still = -0.5
             # dof_vel_stand_still = -0.5
 
             # command tracking
@@ -511,13 +511,13 @@ class GO2KITECfg( LeggedRobotCfg ):
             vhip_angular_acc = -0.001
 
             # Foot-placement limits
-            front_foot_overreach = -10000.0
+            front_foot_overreach = -1000.0
             rear_foot_overreach = -10.0
 
             # gait
-            feet_air_time    = 0.70            # tracking reward for long steps
+            feet_air_time    = 0.30            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height
+            foot_clearance_terrain_aware = 0.50  # tracking reward for feet reaching the desired clearance responsive to terrain height
             hip_pos = -0.20
             
             foot_slip        = -0.01           # penalty for feet slipping
@@ -557,6 +557,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             #                      }
 
             curr_reward_keys = ["torque_limits",
+                                "joint_power",
                                 "action_rate",
                                 "action_smoothness",
                                 "dof_acc",
@@ -564,7 +565,8 @@ class GO2KITECfg( LeggedRobotCfg ):
                                 "swing_vel_ellipsoid_terrain"
                                 ]
             
-            curr_reward_bounds = {"torque_limits":[-1.0e-5,-1.0e-3],
+            curr_reward_bounds = {"torque_limits":[-1.0e-4,-1.0e-2],
+                                  "joint_power":[-2.0e-5, -2.0e-7],
                                   "action_rate":[-0.01, -0.001],
                                   "action_smoothness":[-0.01, -0.001],
                                   "dof_acc":[-2.0e-7, -2.0e-8],
@@ -590,7 +592,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         curriculum_min_ang_tracking = 0.30
         
         curriculum_min_episode_fraction = 0.25
-        curriculum_update_interval_steps = 10000
+        curriculum_update_interval_steps = 5000
 
         lin_vel_x_step = 0.10
         lin_vel_y_step = 0.05
@@ -704,12 +706,12 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         
         # When False, log only compact per-model auxiliary loss totals.
         # Enable for the full detailed encoder-loss breakdown.
-        log_detailed_encoder_losses = False
+        log_detailed_encoder_losses = True
 
         # Adaptive entropy coefficient curriculum
-        entropy_coef = 0.01
+        entropy_coef = 0.02
         use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.005, 0.01]
+        adaptive_ent_bounds = [0.005, 0.02]
         adaptive_ent_lin_threshold = 0.75
         adaptive_ent_ang_threshold = 0.35
         adaptive_ent_ter_threshold = 6.0
@@ -718,8 +720,8 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # KITE specific piepline configs
         #    Loss weights for single-depth-image encoder
         depth_frame_recon_weight = 1.0
-        depth_frame_kl_weight = 1.0e-3
-        depth_transform_identity_weight = 1.0e-3
+        depth_frame_kl_weight = 1.0e-2
+        depth_transform_identity_weight = 1.0e-2
        
         #     loss weights for sequence of latent-depth-images encoder
         depth_sequence_terrain_weight = 1.0
@@ -737,7 +739,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         versatility_lambda_e = 0.2        # weight of KL-regularization on the versility loss
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.
-        contrastive_weight = 0.1
+        contrastive_weight = 1.0
         contrastive_lambda = 0.5
         contrastive_margin = 1.0
 
