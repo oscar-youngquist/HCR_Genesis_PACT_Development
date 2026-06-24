@@ -400,7 +400,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
         stiffness = {'joint': 30.0}   # [N*m/rad]
-        damping   = {'joint': 0.60}     # [N*m*s/rad]
+        damping   = {'joint': 0.70}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.00   # action scale:  target torque = torque_scale * tau_action + defaultTorque
@@ -476,7 +476,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             alive_bonus           = 0.001
 
             stand_still_contact = -0.5
-            dof_pos_stand_still = -0.5
+            dof_pos_stand_still = -0.1
             # dof_vel_stand_still = -0.5
 
             # command tracking
@@ -488,10 +488,10 @@ class GO2KITECfg( LeggedRobotCfg ):
             sparse_contacts   = 0.01         
             
             # smoothness and stability
-            lin_vel_z        = -2.0
+            lin_vel_z        = -1.0
             base_height      = -1.0
             ang_vel_xy       = -0.05
-            orientation      = -0.2
+            orientation      = -0.1
             dof_acc          = -2.0e-7
             joint_power      = -2.0e-5
             joint_power_dist = -1.0e-5
@@ -732,13 +732,20 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         depth_frame_recon_weight = 1.0
         depth_frame_kl_weight = 1.0e-2
         depth_transform_identity_weight = 1.0e-2
+
+        # Adaptive beta scheduling for VAE KL terms:
+        # beta <- clamp(exp(delta * (tau - recon_loss_ema)) * beta).
+        use_adaptive_kl_beta = True
+        adaptive_kl_beta_delta = 0.05
+        adaptive_kl_beta_ema_alpha = 0.05
+        depth_frame_kl_recon_target = 0.15
+        depth_frame_kl_beta_min = 1.0e-4
+        depth_frame_kl_beta_max = 1.0e-1
        
         #     loss weights for sequence of latent-depth-images encoder
-        depth_sequence_terrain_weight = 1.0
         depth_sequence_kl_weight = 0.1
         
         #     loss weights for proprioceptive history context encoder
-        proprio_dynamics_weight = 1.0
         proprio_kl_weight = 0.1
         
         #     loss weights for depth+proprio modality mixing encoder
@@ -747,6 +754,11 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         modality_explicit_weight = 1.0    # torso-velo + feet-state estimation reconstruction loss
         versatility_weight = 0.1          # latent versatility loss
         versatility_lambda_e = 1.0        # weight of KL-regularization on the versility loss
+        
+        modality_pipeline_kl_weight = 0.5 # shared adaptive beta for seq/proprio/mixer KL
+        modality_pipeline_kl_recon_target = 0.10
+        modality_pipeline_kl_beta_min = 0.1
+        modality_pipeline_kl_beta_max = 5.0
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.
         contrastive_weight = 0.1

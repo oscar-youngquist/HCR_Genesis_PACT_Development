@@ -162,20 +162,20 @@ def override_kite_play_configs(env_cfg, args, kite_viz_args):
         env_cfg.terrain.border_size = 1.0
 
         # Default to a visual terrain that exercises the depth pipeline.
-        env_cfg.terrain.terrain_kwargs = {
-            "type": "terrain_utils.random_uniform_terrain",
-            "min_height": -0.05,
-            "max_height": 0.05,
-            "step": 0.005,
-            "downsampled_scale": 0.2,
-        }
+        # env_cfg.terrain.terrain_kwargs = {
+        #     "type": "terrain_utils.random_uniform_terrain",
+        #     "min_height": -0.05,
+        #     "max_height": 0.05,
+        #     "step": 0.005,
+        #     "downsampled_scale": 0.2,
+        # }
         # KITE training terrain presets. Uncomment one block at a time to
         # inspect a specific visual terrain in play mode.
         #
         # # Slope up/down.
         # env_cfg.terrain.terrain_kwargs = {
         #     "type": "terrain_utils.pyramid_sloped_terrain",
-        #     "slope": 0.35,
+        #     "slope": 0.10,
         #     "platform_size": env_cfg.terrain.platform_size,
         # }
         # env_cfg.terrain.terrain_kwargs = {
@@ -218,18 +218,18 @@ def override_kite_play_configs(env_cfg, args, kite_viz_args):
         # }
         #
         # # Stepping stones.
-        # env_cfg.terrain.terrain_kwargs = {
-        #     "type": "terrain_utils.stepping_stones_terrain",
-        #     "stone_length": 0.55,
-        #     "stone_width": 0.55,
-        #     "stone_distance_x": 0.25,
-        #     "stone_distance_y": 0.25,
-        #     "max_height": 0.10,
-        #     "platform_size": env_cfg.terrain.platform_size,
-        #     "min_stone_length": 0.20,
-        #     "min_stone_width": 0.20,
-        #     "stepping_stone_edge_clearance": 0.4,
-        # }
+        env_cfg.terrain.terrain_kwargs = {
+            "type": "terrain_utils.stepping_stones_terrain",
+            "stone_length": 0.55,
+            "stone_width": 0.55,
+            "stone_distance_x": 0.25,
+            "stone_distance_y": 0.25,
+            "max_height": 0.10,
+            "platform_size": env_cfg.terrain.platform_size,
+            "min_stone_length": 0.20,
+            "min_stone_width": 0.20,
+            "stepping_stone_edge_clearance": 0.4,
+        }
         #
         # # Gap terrain.
         # env_cfg.terrain.terrain_kwargs = {
@@ -274,15 +274,16 @@ def override_kite_play_configs(env_cfg, args, kite_viz_args):
         env_cfg.commands.heading_command = False
 
     env_cfg.commands.resampling_time = 5.0
-    env_cfg.commands.ranges.lin_vel_x = [-2.0, 2.0]
-    env_cfg.commands.ranges.lin_vel_y = [-0.5, 0.5]
-    env_cfg.commands.ranges.ang_vel_yaw = [-2.0, 2.0]
+    env_cfg.commands.ranges.lin_vel_x = [-0.5, 0.5]
+    env_cfg.commands.ranges.lin_vel_y = [-0.3, 0.3]
+    env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
     env_cfg.commands.ranges.heading = [-3.14, 3.14]
 
     env_cfg.termination.roll_threshold = 1.57
     env_cfg.termination.pitch_threshold = 1.57
     env_cfg.termination.height_min = 0.0
     env_cfg.asset.fix_base_link = False
+    env_cfg.termination.reset_unrecoverable_gaps = True
 
     # Disable stochastic training disturbances for a cleaner visual-policy run.
     env_cfg.noise.add_noise = False
@@ -306,10 +307,10 @@ def _update_commands(env, args, joystick=None):
         env.commands[:, 3] = 0.0
         return
 
-    env.commands[:, 0] = 1.0
-    env.commands[:, 1] = 0.0
-    env.commands[:, 2] = 0.0
-    env.commands[:, 3] = 0.0
+    # env.commands[:, 0] = 1.0
+    # env.commands[:, 1] = 0.0
+    # env.commands[:, 2] = 0.0
+    # env.commands[:, 3] = 0.0
 
 
 def _follow_robot_camera(env, robot_index=0):

@@ -733,6 +733,12 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         depth_frame_recon_weight = 1.0
         depth_frame_kl_weight = 1.0e-3
         depth_transform_identity_weight = 1.0e-3
+        use_adaptive_kl_beta = True
+        adaptive_kl_beta_delta = 0.05
+        adaptive_kl_beta_ema_alpha = 0.05
+        depth_frame_kl_recon_target = 0.15
+        depth_frame_kl_beta_min = 1.0e-5
+        depth_frame_kl_beta_max = 1.0e-1
         depth_sequence_terrain_weight = 1.0
         depth_sequence_kl_weight = 1.0e-3
         proprio_dynamics_weight = 1.0
@@ -745,6 +751,10 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         contrastive_margin = 1.0
         versatility_weight = 0.01
         versatility_lambda_e = 0.1
+        modality_pipeline_kl_weight = 1.0e-3
+        modality_pipeline_kl_recon_target = 0.50
+        modality_pipeline_kl_beta_min = 1.0e-5
+        modality_pipeline_kl_beta_max = 1.0e-1
 
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_KITE'

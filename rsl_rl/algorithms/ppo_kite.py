@@ -33,6 +33,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import time
+import math
 from contextlib import contextmanager, nullcontext
 
 import numpy as np
@@ -133,7 +134,7 @@ class CompositeDepthLoss(nn.Module):
     """
     Combines pixel-wise L1 loss, gradient loss, and SSIM loss.
     """
-    def __init__(self, w_l1=1.0, w_grad=0.5, w_ssim=0.2):
+    def __init__(self, w_l1=0.5, w_grad=0.25, w_ssim=0.25):
         super().__init__()
         self.grad_loss = DepthGradientLoss()
         self.ssim_loss = SSIMLoss()
@@ -214,10 +215,8 @@ class PPO_KITE:
                  depth_frame_kl_weight=1.0e-3,
                  depth_transform_identity_weight=1.0e-3,
 
-                 depth_sequence_terrain_weight=1.0,
                  depth_sequence_kl_weight=1.0,
 
-                 proprio_dynamics_weight=1.0,
                  proprio_kl_weight=1.0,
                  
                  modality_terrain_weight=1.0,
@@ -230,6 +229,16 @@ class PPO_KITE:
                  
                  versatility_weight=0.01,
                  versatility_lambda_e=0.1,
+                 use_adaptive_kl_beta=True,
+                 adaptive_kl_beta_delta=0.05,
+                 adaptive_kl_beta_ema_alpha=0.05,
+                 depth_frame_kl_recon_target=0.15,
+                 depth_frame_kl_beta_min=1.0e-5,
+                 depth_frame_kl_beta_max=1.0e-1,
+                 modality_pipeline_kl_weight=None,
+                 modality_pipeline_kl_recon_target=0.5,
+                 modality_pipeline_kl_beta_min=1.0e-5,
+                 modality_pipeline_kl_beta_max=1.0,
                  gpu_debugging=False,
                  log_detailed_encoder_losses=False,
                  profile_learning=False,
@@ -264,12 +273,10 @@ class PPO_KITE:
         self.depth_frame_recon_weight = depth_frame_recon_weight              
         self.depth_frame_kl_weight = depth_frame_kl_weight
         self.depth_transform_identity_weight = depth_transform_identity_weight
-        self.depth_sequence_terrain_weight = depth_sequence_terrain_weight
         self.depth_sequence_kl_weight = depth_sequence_kl_weight
         self.depth_frame_reconstruction_loss = CompositeDepthLoss().to(self.device)
         
         # loss weights for proprioceptive history encoder losses
-        self.proprio_dynamics_weight = proprio_dynamics_weight
         self.proprio_kl_weight = proprio_kl_weight
         
         # modality-mixer network loss component weights
@@ -278,6 +285,24 @@ class PPO_KITE:
         self.modality_explicit_weight = modality_explicit_weight
         self.versatility_weight = versatility_weight
         self.versatility_lambda_e = versatility_lambda_e
+        self.use_adaptive_kl_beta = use_adaptive_kl_beta
+        self.adaptive_kl_beta_delta = adaptive_kl_beta_delta
+        self.adaptive_kl_beta_ema_alpha = adaptive_kl_beta_ema_alpha
+        self.depth_frame_kl_recon_target = depth_frame_kl_recon_target
+        self.depth_frame_kl_beta_min = depth_frame_kl_beta_min
+        self.depth_frame_kl_beta_max = depth_frame_kl_beta_max
+        if modality_pipeline_kl_weight is None:
+            modality_pipeline_kl_weight = depth_sequence_kl_weight
+        self.modality_pipeline_kl_weight = modality_pipeline_kl_weight
+        self.modality_pipeline_kl_recon_target = modality_pipeline_kl_recon_target
+        self.modality_pipeline_kl_beta_min = modality_pipeline_kl_beta_min
+        self.modality_pipeline_kl_beta_max = modality_pipeline_kl_beta_max
+        self.depth_frame_kl_recon_ema = None
+        self.modality_pipeline_kl_recon_ema = None
+        if self.use_adaptive_kl_beta:
+            self.depth_sequence_kl_weight = self.modality_pipeline_kl_weight
+            self.proprio_kl_weight = self.modality_pipeline_kl_weight
+            self.versatility_lambda_e = self.modality_pipeline_kl_weight
         self.gpu_debugging = gpu_debugging
         self.log_detailed_encoder_losses = log_detailed_encoder_losses
         self.profile_learning = profile_learning
@@ -658,7 +683,7 @@ class PPO_KITE:
     #    visited states and the latent variable inferred by the multi-
     #    modal context encoder."
     # This loss is borrowed from DreamWaQ++ - https://dreamwaqpp.github.io/static/paper.pdf
-    def _versatility_kl_metric(self, mean, logvar, mask):
+    def _versatility_kl_metric(self, mean, logvar, mask, kl_weight=None):
         # Using torch.sum() and dividing by _denom so "masked" samples are not counted torwards
         #     the mean calculations
         _mask = mask.squeeze(-1).float()                           # (B,)
@@ -714,9 +739,12 @@ class PPO_KITE:
         # Calculate the VAE encoder's KL-divergence
         kl_loss = self._kl_loss(mean, logvar, mask)
 
-        # Maximize: J = MI - lambda_e * KL
+        if kl_weight is None:
+            kl_weight = self.versatility_lambda_e
+
+        # Maximize: J = MI - beta * KL
         # Minimize: loss = -J
-        vers_loss = -mutual_info + self.versatility_lambda_e * kl_loss
+        vers_loss = -mutual_info + kl_weight * kl_loss
 
         # populate the log-dict
         vers_log = {"marginal_entropy":marginal_entropy.detach(),
@@ -727,8 +755,61 @@ class PPO_KITE:
 
         return vers_loss, vers_log
     
-    def _update_kl_weight(self, kl_weight, kl_threashold, metric):
-        k = torch.exp()
+    def _update_kl_weight(self, beta, target_recon_loss, recon_loss, beta_min, beta_max):
+        """Apply beta <- clamp(exp(delta * (tau - L_recon)) * beta)."""
+        k = math.exp(
+            self.adaptive_kl_beta_delta
+            * (float(target_recon_loss) - float(recon_loss))
+        )
+        return float(np.clip(k * float(beta), beta_min, beta_max))
+
+    def _update_adaptive_kl_betas(self, depth_recon_loss, modality_recon_loss):
+        """Update KL betas from EMA reconstruction losses after each PPO update."""
+        if not self.use_adaptive_kl_beta:
+            return
+
+        alpha = float(self.adaptive_kl_beta_ema_alpha)
+        depth_recon_loss = float(depth_recon_loss)
+        modality_recon_loss = float(modality_recon_loss)
+
+        if self.depth_frame_kl_recon_ema is None:
+            self.depth_frame_kl_recon_ema = depth_recon_loss
+        else:
+            self.depth_frame_kl_recon_ema = (
+                (1.0 - alpha) * self.depth_frame_kl_recon_ema
+                + alpha * depth_recon_loss
+            )
+
+        if self.modality_pipeline_kl_recon_ema is None:
+            self.modality_pipeline_kl_recon_ema = modality_recon_loss
+        else:
+            self.modality_pipeline_kl_recon_ema = (
+                (1.0 - alpha) * self.modality_pipeline_kl_recon_ema
+                + alpha * modality_recon_loss
+            )
+
+        self.depth_frame_kl_weight = self._update_kl_weight(
+            self.depth_frame_kl_weight,
+            self.depth_frame_kl_recon_target,
+            self.depth_frame_kl_recon_ema,
+            self.depth_frame_kl_beta_min,
+            self.depth_frame_kl_beta_max,
+        )
+
+        self.modality_pipeline_kl_weight = self._update_kl_weight(
+            self.modality_pipeline_kl_weight,
+            self.modality_pipeline_kl_recon_target,
+            self.modality_pipeline_kl_recon_ema,
+            self.modality_pipeline_kl_beta_min,
+            self.modality_pipeline_kl_beta_max,
+        )
+
+        # The sequence encoder, proprioceptive encoder, and modality mixer use
+        # one shared adaptive beta so they regularize together as the mixer
+        # reconstruction quality changes.
+        self.depth_sequence_kl_weight = self.modality_pipeline_kl_weight
+        self.proprio_kl_weight = self.modality_pipeline_kl_weight
+        self.versatility_lambda_e = self.modality_pipeline_kl_weight
 
     def act(self, obs, critic_obs, obs_history, privileged_obs_history, depth_image, depth_latent_history, depth_torso_state, terrain_map):
         # if self.actor_critic.is_recurrent:
@@ -1358,6 +1439,14 @@ class PPO_KITE:
         )
         losses["decoder"] = self._detach_scalar(aux["depth_recon_loss"] + privileged_loss)
         losses["depth_transform_identity"] = self._detach_scalar(aux["transform_identity_loss"])
+        losses["kl_scheduler"] = {
+            "depth_frame_recon": self._detach_scalar(aux["depth_recon_loss"]),
+            "modality_recon": self._detach_scalar(
+                aux["mix_terrain_loss"]
+                + aux["mix_dyn_loss"]
+                + aux["explicit_loss"]
+            ),
+        }
         
         losses["boot_summary"] = boot_summary
         # The positive anchors and detached student latents are no longer
@@ -1442,6 +1531,8 @@ class PPO_KITE:
         mean_kl_loss = 0
         mean_aux_decoder_loss = 0
         mean_aux_loss_details = {}
+        mean_depth_kl_recon_signal = 0
+        mean_modality_kl_recon_signal = 0
 
         profile_update = self.profile_learning
         timers = None
@@ -1557,6 +1648,12 @@ class PPO_KITE:
                 mean_reconstruction_loss += aux_losses["recon"]
                 mean_kl_loss += aux_losses["total_kl"]
                 mean_aux_decoder_loss += aux_losses["decoder"]
+                mean_depth_kl_recon_signal += aux_losses["kl_scheduler"][
+                    "depth_frame_recon"
+                ]
+                mean_modality_kl_recon_signal += aux_losses["kl_scheduler"][
+                    "modality_recon"
+                ]
                 
                 for name, value in aux_losses["detail"].items():
                     mean_aux_loss_details[name] = (mean_aux_loss_details.get(name, 0.0) + value)
@@ -1595,10 +1692,27 @@ class PPO_KITE:
         mean_kl_loss = self._finish_log_scalar(mean_kl_loss / (num_updates * self.num_enc_epochs))
         mean_explicit_loss = self._finish_log_scalar(mean_explicit_loss / (num_updates * self.num_enc_epochs))
         mean_reconstruction_loss = self._finish_log_scalar(mean_reconstruction_loss / (num_updates * self.num_enc_epochs))
+        mean_depth_kl_recon_signal = self._finish_log_scalar(
+            mean_depth_kl_recon_signal / (num_updates * self.num_enc_epochs)
+        )
+        mean_modality_kl_recon_signal = self._finish_log_scalar(
+            mean_modality_kl_recon_signal / (num_updates * self.num_enc_epochs)
+        )
         for name in mean_aux_loss_details:
             mean_aux_loss_details[name] = self._finish_log_scalar(
                 mean_aux_loss_details[name] / (num_updates * self.num_enc_epochs)
             )
+
+        self._update_adaptive_kl_betas(
+            mean_depth_kl_recon_signal,
+            mean_modality_kl_recon_signal,
+        )
+        mean_aux_loss_details["kl_beta_depth_frame"] = self.depth_frame_kl_weight
+        mean_aux_loss_details["kl_beta_modality_pipeline"] = self.modality_pipeline_kl_weight
+        if self.depth_frame_kl_recon_ema is not None:
+            mean_aux_loss_details["kl_recon_ema_depth_frame"] = self.depth_frame_kl_recon_ema
+        if self.modality_pipeline_kl_recon_ema is not None:
+            mean_aux_loss_details["kl_recon_ema_modality_pipeline"] = self.modality_pipeline_kl_recon_ema
 
 
         if profile_update:
