@@ -568,7 +568,7 @@ class PPO_KITE:
         marginal_var = mean_pred_var + mean_conditional_var + 1e-6
 
         # adding small value for numerical stability
-        # marginal_var = mean_pred_var + 1e-6                              # (1,)
+        marginal_var = mean_pred_var + 1e-6                              # (1,)
 
         # H(z), approximating the marginal q(z) as diagonal Gaussian
         #     H(z) is large when the means are spread out over the batch.
