@@ -151,7 +151,7 @@ class MultimodalMixerVAE(nn.Module):
 
         self.out_logvar = nn.Sequential(
             nn.Linear(2 * output_dim, output_dim),
-            nn.Hardtanh(min_val=0.0, max_val=logvar_max),
+            nn.Hardtanh(min_val=-logvar_max, max_val=logvar_max),
         )
 
         # ------------------------------------------------------------------

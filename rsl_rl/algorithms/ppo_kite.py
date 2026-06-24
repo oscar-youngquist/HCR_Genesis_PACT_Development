@@ -561,11 +561,11 @@ class PPO_KITE:
         # #       which is what we use during deployment, so ignoring this for now
         # # #
         # E[sigma_i^2]
-        mean_conditional_var = torch.sum(torch.exp(logvar) * _mask_col,dim=0,) / _denom  # (latent_dim,)
+        # mean_conditional_var = torch.sum(torch.exp(logvar) * _mask_col,dim=0,) / _denom  # (latent_dim,)
 
-        # Law of total variance:
-        # Var(z) = Var(E[z|o]) + E[Var(z|o)]
-        marginal_var = mean_pred_var + mean_conditional_var + 1e-6
+        # # Law of total variance:
+        # # Var(z) = Var(E[z|o]) + E[Var(z|o)]
+        # marginal_var = mean_pred_var + mean_conditional_var + 1e-6
 
         # adding small value for numerical stability
         marginal_var = mean_pred_var + 1e-6                              # (1,)

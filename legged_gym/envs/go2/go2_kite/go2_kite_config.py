@@ -746,10 +746,10 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         modality_dynamics_weight = 1.0    # privliged obs reconstruction loss
         modality_explicit_weight = 1.0    # torso-velo + feet-state estimation reconstruction loss
         versatility_weight = 0.1          # latent versatility loss
-        versatility_lambda_e = 1.0        # weight of KL-regularization on the versility loss
+        versatility_lambda_e = 0.3        # weight of KL-regularization on the versility loss
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.
-        contrastive_weight = 1.0
+        contrastive_weight = 0.1
         contrastive_lambda = 0.5
         contrastive_margin = 1.0
 
