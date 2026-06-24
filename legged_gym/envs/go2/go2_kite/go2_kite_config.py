@@ -293,8 +293,8 @@ class GO2KITECfg( LeggedRobotCfg ):
 
     class viewer:
         ref_env = 0
-        pos = [2, 2, 2]       # [m]
-        lookat = [0., 0, 1.]  # [m]
+        pos = [0.5, 1.5, 0.5]       # [m]
+        lookat = [0., 0, 0.0]  # [m]
         # rendered_envs_idx = [1500]
         rendered_envs_idx = [i for i in range(0, 3, 1)]  # number of environments to be rendered
         rendered_envs_idx.extend([i for i in range(500, 503, 1)])  # number of environments to be rendered
@@ -598,15 +598,15 @@ class GO2KITECfg( LeggedRobotCfg ):
         curriculum_best_quantile = 0.90
         curriculum_recovery_ratio = 0.80
         
-        curriculum_min_lin_tracking = 0.50
+        curriculum_min_lin_tracking = 0.70
         curriculum_min_ang_tracking = 0.30
         
         curriculum_min_episode_fraction = 0.25
-        curriculum_update_interval_steps = 5000
+        curriculum_update_interval_steps = 10000
 
-        lin_vel_x_step = 0.10
+        lin_vel_x_step = 0.25
         lin_vel_y_step = 0.05
-        ang_vel_yaw_step = 0.10
+        ang_vel_yaw_step = 0.25
         max_lin_vel_y = 0.30
         max_ang_vel_yaw = 3.0
         bias_lin_vel_x_with_curriculum = True
@@ -746,7 +746,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         modality_dynamics_weight = 1.0    # privliged obs reconstruction loss
         modality_explicit_weight = 1.0    # torso-velo + feet-state estimation reconstruction loss
         versatility_weight = 0.1          # latent versatility loss
-        versatility_lambda_e = 0.3        # weight of KL-regularization on the versility loss
+        versatility_lambda_e = 1.0        # weight of KL-regularization on the versility loss
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.
         contrastive_weight = 0.1
@@ -767,7 +767,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         
         
         # load_run = "Apr15_11-53-35_50hz_spec_jointrand_stairs"
-        load_run = "Apr15_21-58-54_50hz_spec_jointrand_stairs_baseline"
+        load_run = "Jun24_00-00-13_50hz_spec_jointrand_stairs"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/kite_feasibility/baseline_model_stairs.csv"

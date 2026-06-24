@@ -47,6 +47,126 @@ from rsl_rl.modules.kite_privileged_encoders import (
 )
 from rsl_rl.storage import RolloutStorageKITE
 
+class DepthGradientLoss(nn.Module):
+    """
+    Penalizes differences in spatial gradients (X and Y directions) 
+    to preserve sharp edges and geometric boundaries.
+    """
+    def __init__(self):
+        super().__init__()
+        # Sobel/Prewitt style kernels for edge extraction
+        kernel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3)
+        kernel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3)
+        
+        self.register_buffer('kernel_x', kernel_x)
+        self.register_buffer('kernel_y', kernel_y)
+
+    def _masked_sample_mean(self, values, mask):
+        sample_values = values.reshape(values.shape[0], -1).mean(dim=1)
+        if mask is None:
+            return sample_values.mean()
+        sample_mask = mask.squeeze(-1).float()
+        denom = torch.clamp(sample_mask.sum(), min=1.0)
+        return torch.sum(sample_values * sample_mask) / denom
+
+    def forward(self, pred, target, mask=None):
+        # Calculate gradients using 2D convolutions
+        pred_grad_x = F.conv2d(pred, self.kernel_x, padding=1)
+        pred_grad_y = F.conv2d(pred, self.kernel_y, padding=1)
+        
+        target_grad_x = F.conv2d(target, self.kernel_x, padding=1)
+        target_grad_y = F.conv2d(target, self.kernel_y, padding=1)
+        
+        # Calculate L1 distance of the gradients while respecting terminated
+        # episode masks at the sample level.
+        loss_x = self._masked_sample_mean(
+            torch.abs(pred_grad_x - target_grad_x),
+            mask,
+        )
+        loss_y = self._masked_sample_mean(
+            torch.abs(pred_grad_y - target_grad_y),
+            mask,
+        )
+        
+        return loss_x + loss_y
+
+class SSIMLoss(nn.Module):
+    """
+    Structural Similarity Index Measure (SSIM) Loss adapted for deep learning.
+    Measures luminance, contrast, and structure similarity.
+    """
+    def __init__(self, window_size=11):
+        super().__init__()
+        self.window_size = window_size
+        self.C1 = 0.01 ** 2
+        self.C2 = 0.03 ** 2
+
+    def _masked_sample_mean(self, values, mask):
+        sample_values = values.reshape(values.shape[0], -1).mean(dim=1)
+        if mask is None:
+            return sample_values.mean()
+        sample_mask = mask.squeeze(-1).float()
+        denom = torch.clamp(sample_mask.sum(), min=1.0)
+        return torch.sum(sample_values * sample_mask) / denom
+
+    def forward(self, pred, target, mask=None):
+        # Continuous average using a uniform or Gaussian kernel (uniform used here for simplicity)
+        mu_p = F.avg_pool2d(pred, self.window_size, stride=1, padding=self.window_size//2)
+        mu_t = F.avg_pool2d(target, self.window_size, stride=1, padding=self.window_size//2)
+        
+        mu_p_sq = mu_p.pow(2)
+        mu_t_sq = mu_t.pow(2)
+        mu_p_t = mu_p * mu_t
+        
+        sigma_p_sq = F.avg_pool2d(pred * pred, self.window_size, stride=1, padding=self.window_size//2) - mu_p_sq
+        sigma_t_sq = F.avg_pool2d(target * target, self.window_size, stride=1, padding=self.window_size//2) - mu_t_sq
+        sigma_pt = F.avg_pool2d(pred * target, self.window_size, stride=1, padding=self.window_size//2) - mu_p_t
+        
+        ssim_idx = ((2 * mu_p_t + self.C1) * (2 * sigma_pt + self.C2)) / \
+                   ((mu_p_sq + mu_t_sq + self.C1) * (sigma_p_sq + sigma_t_sq + self.C2))
+        
+        # Return 1 - SSIM bounded within [0, 1] for optimization, averaged
+        # only across non-terminated rollout samples when a mask is provided.
+        return self._masked_sample_mean((1.0 - ssim_idx) / 2.0, mask)
+
+class CompositeDepthLoss(nn.Module):
+    """
+    Combines pixel-wise L1 loss, gradient loss, and SSIM loss.
+    """
+    def __init__(self, w_l1=1.0, w_grad=0.5, w_ssim=0.2):
+        super().__init__()
+        self.grad_loss = DepthGradientLoss()
+        self.ssim_loss = SSIMLoss()
+        
+        # Hyperparameters weights to balance the three criteria
+        self.w_l1 = w_l1
+        self.w_grad = w_grad
+        self.w_ssim = w_ssim
+
+    def _masked_l1_loss(self, pred, target, mask):
+        sample_values = torch.abs(pred - target).reshape(
+            pred.shape[0],
+            -1,
+        ).mean(dim=1)
+        if mask is None:
+            return sample_values.mean()
+        sample_mask = mask.squeeze(-1).float()
+        denom = torch.clamp(sample_mask.sum(), min=1.0)
+        return torch.sum(sample_values * sample_mask) / denom
+
+    def forward(self, pred, target, mask=None):
+        l1 = self._masked_l1_loss(pred, target, mask)
+        l_grad = self.grad_loss(pred, target, mask)
+        l_ssim = self.ssim_loss(pred, target, mask)
+        
+        # Weighted summation
+        total_loss = (
+            self.w_l1 * l1
+            + self.w_grad * l_grad
+            + self.w_ssim * l_ssim
+        )
+        return total_loss
+
 class PPO_KITE:
     actor_critic: ActorCritic_KITE
     def __init__(self,
@@ -146,6 +266,7 @@ class PPO_KITE:
         self.depth_transform_identity_weight = depth_transform_identity_weight
         self.depth_sequence_terrain_weight = depth_sequence_terrain_weight
         self.depth_sequence_kl_weight = depth_sequence_kl_weight
+        self.depth_frame_reconstruction_loss = CompositeDepthLoss().to(self.device)
         
         # loss weights for proprioceptive history encoder losses
         self.proprio_dynamics_weight = proprio_dynamics_weight
@@ -813,8 +934,14 @@ class PPO_KITE:
         transform_matrices = depth_aux["transform_matrices"].float()
         depth_recon, _ = self.actor_critic.depth_frame_decoder(latest_depth_z, transform_matrices)
         
-        # Calculate the depth-image reconstruction loss
-        depth_recon_loss = self._masked_mse_loss(depth_recon, depth_images_batch, mask)
+        # Composite reconstruction loss: pixel L1 + depth-gradient loss +
+        # SSIM loss. Each component averages only across non-terminated
+        # rollout samples according to the provided mask.
+        depth_recon_loss = self.depth_frame_reconstruction_loss(
+            depth_recon,
+            depth_images_batch,
+            mask,
+        )
         
         # Calculate the depth-encoder KL-divergency loss
         depth_kl = self._kl_loss(depth_mean, depth_logvar, mask)
