@@ -95,7 +95,7 @@ class GenesisSimulator_KITE_Depth(GenesisSimulator_KITE):
     def _update_depth_images(self, force=False):
         if not force and not self._cfg.sensor.add_depth:
             return
-        pixels = self._depth_camera_sensor.update().clone()
+        pixels = self._depth_camera_sensor.update()
         if self.depth_images.shape[1] > 1:
             self.depth_images[:, 1:] = self.depth_images[:, :-1].clone()
         self.depth_images[:, 0] = pixels[:, 0]

@@ -39,7 +39,7 @@ class KITEDepthAsyncPipeline(nn.Module):
         depth_torso_state: torch.Tensor,
         depth_latent_history: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        _, _, latest_depth_latent, _ = self.depth_frame_encoder(
+        _, _, latest_depth_latent, _ = self.depth_frame_encoder.forward_inference(
             depth_image,
             depth_torso_state,
         )
@@ -47,7 +47,7 @@ class KITEDepthAsyncPipeline(nn.Module):
             [depth_latent_history, latest_depth_latent.unsqueeze(1)],
             dim=1,
         )
-        _, _, depth_sequence_latent = self.depth_sequence_encoder(
+        depth_sequence_latent = self.depth_sequence_encoder.forward_inference(
             depth_latent_sequence
         )
         updated_depth_latent_history = depth_latent_sequence[:, 1:, :]
@@ -76,15 +76,14 @@ class KITEActorAsyncPipeline(nn.Module):
         obs_history: torch.Tensor,
         depth_sequence_latent: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        _, _, proprio_latent = self.proprio_context_encoder(obs_history)
-        _, _, context_latent, body_velo_est, feet_state_est = (
-            self.context_encoder(depth_sequence_latent, proprio_latent)
+        proprio_latent = self.proprio_context_encoder.forward_inference(obs_history)
+        context_latent, body_velo_est, feet_state_est = (
+            self.context_encoder.forward_inference(depth_sequence_latent, proprio_latent)
         )
-        context_state = torch.cat([body_velo_est, feet_state_est], dim=-1)
-        actor_input = torch.cat([obs, context_latent, context_state], dim=-1)
+        actor_input = torch.cat([obs, context_latent, body_velo_est, feet_state_est], dim=-1)
         actions = self.actor(actor_input)
 
-        return actions, context_latent, body_velo_est, feet_state_est
+        return actions
 
 
 def build_kite_async_deployment_pipelines(

@@ -41,6 +41,7 @@ class KITEDepthMixin:
             dtype=torch.float32,
             device=self.device,
         )
+        self.depth_sensor_obs_write_idx = 0
         self.depth_sensor_latency = torch.empty(
             self.num_envs, device=self.device
         ).uniform_(*cfg.latency_range)
@@ -50,6 +51,11 @@ class KITEDepthMixin:
         self.depth_sensor_obs_refreshed = False
         self.depth_env_ids = torch.arange(
             self.num_envs, device=self.device
+        )
+        self._sky_artifact_values = torch.as_tensor(
+            cfg.sky_artifacts_values,
+            device=self.device,
+            dtype=torch.float32,
         )
 
     def get_depth_observations(self):
@@ -64,13 +70,16 @@ class KITEDepthMixin:
             return
 
         cfg = self.cfg.sensor.depth_camera_config
-        self.depth_sensor_obs_buffer = torch.roll(
-            self.depth_sensor_obs_buffer, shifts=-1, dims=0
-        )
         processed = self._process_depth_images(
             self.simulator.depth_images[:, 0]
         )
-        self.depth_sensor_obs_buffer[-1] = processed
+
+        # Keep the latency buffer in-place and advance a write index instead
+        # of rolling the whole tensor every depth update.
+        write_idx = self.depth_sensor_obs_write_idx
+        self.depth_sensor_obs_buffer[write_idx] = processed
+        buffer_length = self.depth_sensor_obs_buffer.shape[0]
+        self.depth_sensor_obs_write_idx = (write_idx + 1) % buffer_length
 
         refresh_steps = max(1, int(cfg.refresh_duration / self.dt))
         refresh = (
@@ -81,13 +90,15 @@ class KITEDepthMixin:
             refresh,
             requested_delay,
             self.depth_sensor_delayed_frames + 1,
-        ).clamp(0, self.depth_sensor_obs_buffer.shape[0] - 1)
+        ).clamp(0, buffer_length - 1)
 
+        # Delayed-frame lookup is relative to the most recently written slot.
+        # The output tensor below still keeps the downstream-facing order
+        # [latest, previous, older, ...].
+        latest_idx = (self.depth_sensor_obs_write_idx - 1) % buffer_length
         frame_indices = (
-            self.depth_sensor_obs_buffer.shape[0]
-            - 1
-            - self.depth_sensor_delayed_frames
-        )
+            latest_idx - self.depth_sensor_delayed_frames
+        ) % buffer_length
         latest = self.depth_sensor_obs_buffer[
             frame_indices, self.depth_env_ids
         ]
@@ -160,14 +171,12 @@ class KITEDepthMixin:
 
         far_mask = depth > cfg.stereo_far_distance
         near_mask = (depth >= cfg.stereo_min_distance) & ~far_mask
-        if far_mask.any():
-            depth[far_mask] += torch.randn_like(depth[far_mask]).abs() * (
-                cfg.stereo_far_noise_std
-            )
-        if near_mask.any():
-            depth[near_mask] += torch.randn_like(depth[near_mask]) * (
-                cfg.stereo_near_noise_std
-            )
+        if far_mask.any() and cfg.stereo_far_noise_std > 0:
+            far_noise = torch.randn_like(depth).abs() * cfg.stereo_far_noise_std
+            depth = torch.where(far_mask, depth + far_noise, depth)
+        if near_mask.any() and cfg.stereo_near_noise_std > 0:
+            near_noise = torch.randn_like(depth) * cfg.stereo_near_noise_std
+            depth = torch.where(near_mask, depth + near_noise, depth)
 
         too_close = depth < cfg.stereo_min_distance
         if too_close.any():
@@ -185,11 +194,7 @@ class KITEDepthMixin:
             torch.rand_like(depth) < cfg.sky_artifacts_prob
         ) & sky
         if artifacts.any():
-            values = torch.tensor(
-                cfg.sky_artifacts_values,
-                device=depth.device,
-                dtype=depth.dtype,
-            )
+            values = self._sky_artifact_values.to(dtype=depth.dtype)
             choices = torch.randint(
                 values.numel(), depth.shape, device=depth.device
             )

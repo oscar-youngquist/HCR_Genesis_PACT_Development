@@ -496,11 +496,20 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
+        foot_clearance_excess_margin = 0.04
+        foot_clearance_excess_weight = 0.25
         
         overreach_x_max = 0.36
         rear_foot_x_nominal = -0.20
         rear_foot_x_margin = 0.08
         support_polygon_sigma = 0.01
+        vhip_angle_deadband = 0.1
+        vhip_acc_deadband = 0.001
+        feet_spread_x_min = 0.40
+        feet_spread_y_min = 0.35
+        feet_spread_alpha_diag = 0.8
+        feet_spread_contact_mode = "blend"
+        pd_target_tau_max = [25.0, 25.0, 35.0, 25.0, 25.0, 35.0, 25.0, 25.0, 35.0, 25.0, 25.0, 35.0]
 
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
@@ -508,6 +517,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         use_reward_curriculum = True
 
         max_contact_force = 200.0
+        contact_force_threshold = 5.0
         feet_edge_threshold = 0.05
         class scales( LeggedRobotCfg.rewards.scales ):
             # General

@@ -162,6 +162,113 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
     def get_prev_obs(self):
         return self.last_obs_buf, self.last_obs_hist, self.llast_obs_buf, self.llast_obs_hist
 
+    def _cached_step_value(self, key, compute_fn):
+        """Return a reward helper tensor recomputed at most once per physics step."""
+        if self._reward_cache_step != self.common_step_counter:
+            self._reward_cache.clear()
+            self._reward_cache_step = self.common_step_counter
+        if key not in self._reward_cache:
+            self._reward_cache[key] = compute_fn()
+        return self._reward_cache[key]
+
+    def _feet_contact_fz(self):
+        return self._cached_step_value(
+            "feet_contact_fz",
+            lambda: self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2],
+        )
+
+    def _feet_contact_mask(self):
+        return self._cached_step_value(
+            "feet_contact_mask",
+            lambda: self._feet_contact_fz() > self.cfg.rewards.contact_force_threshold,
+        )
+
+    def _command_norm(self, cols):
+        return self._cached_step_value(
+            f"command_norm_{cols}",
+            lambda: torch.norm(self.commands[:, :cols], dim=1),
+        )
+
+    def _base_height_over_terrain(self):
+        return self._cached_step_value(
+            "base_height_over_terrain",
+            lambda: torch.mean(
+                self.simulator.base_pos[:, 2].unsqueeze(1)
+                - self.simulator.measured_heights,
+                dim=1,
+            ),
+        )
+
+    def _scaled_pos_actions(self):
+        return self._cached_step_value(
+            "scaled_pos_actions",
+            lambda: self.actions[:, 0:12] * self.cfg.control.action_scale
+            + self.simulator.default_dof_pos,
+        )
+
+    def _joint_power_per_dof(self):
+        return self._cached_step_value(
+            "joint_power_per_dof",
+            lambda: self.simulator.torques * self.simulator.dof_vel,
+        )
+
+    def _feet_vel_xy_norm(self):
+        return self._cached_step_value(
+            "feet_vel_xy_norm",
+            lambda: torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1),
+        )
+
+    def _local_terrain_height_under_feet(self):
+        def compute():
+            h_patch = self.simulator._height_around_feet
+            if h_patch.ndim == 4:
+                h_patch = h_patch.view(h_patch.shape[0], h_patch.shape[1], -1)
+            return torch.max(h_patch, dim=-1)[0]
+        return self._cached_step_value("local_terrain_height_under_feet", compute)
+
+    def _terrain_aware_foot_target_height(self):
+        return self._cached_step_value(
+            "terrain_aware_foot_target_height",
+            lambda: (
+                self.cfg.rewards.foot_clearance_target
+                + self.cfg.rewards.foot_height_offset
+                + self._local_terrain_height_under_feet()
+            ),
+        )
+
+    def _feet_pos_base_frame(self):
+        def compute():
+            feet_rel = self.simulator.feet_pos - self.simulator.base_pos[:, None, :]
+            return torch.stack(
+                [
+                    quat_rotate_inverse(self.simulator.base_quat, feet_rel[:, foot_id, :])
+                    for foot_id in range(feet_rel.shape[1])
+                ],
+                dim=1,
+            )
+        return self._cached_step_value("feet_pos_base_frame", compute)
+
+    def _vhip_terms(self):
+        def compute():
+            com_pos = self.simulator.base_pos[:, :3]
+            normal_forces = self.simulator.link_contact_forces[
+                :, self.simulator.feet_indices, 2:3
+            ]
+            total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)
+            cop_pos = torch.sum(self.simulator.feet_pos * normal_forces, dim=1) / total_force
+            pendulum_length = torch.norm(com_pos - cop_pos, dim=1).clamp(min=1e-6)
+            cos_theta = torch.clamp(com_pos[:, 2] / pendulum_length, -1.0, 1.0)
+            theta = torch.acos(cos_theta)
+            angular_acc = -(9.81 / pendulum_length) * torch.sin(theta)
+            return theta, angular_acc
+        return self._cached_step_value("vhip_terms", compute)
+
+    def _feet_near_edge_mask(self):
+        return self._cached_step_value(
+            "feet_near_edge",
+            lambda: self.simulator.calc_feet_near_edge(),
+        )
+
     def post_physics_step(self):
         """ check terminations, compute observations and rewards
             calls self._post_physics_step_callback() for common computations 
@@ -285,7 +392,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         """
         fail_buf = torch.any(
             torch.norm(self.simulator.link_contact_forces[:, self.simulator.termination_contact_indices, :], dim=-1)
-            > 10.0, dim=1)
+            > self.cfg.rewards.contact_force_threshold, dim=1)
         # print(f"contact termination: {fail_buf}")
         # fail_buf |= self.simulator.projected_gravity[:, 2] > self.cfg.rewards.max_projected_gravity
         # print(f"gravity termination: {self.simulator.projected_gravity[:, 2] > self.cfg.rewards.max_projected_gravity}")
@@ -294,7 +401,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             # more sophisticated termination conditions
             rpy = self.simulator._base_euler
             r, p = wrap_to_pi(rpy[:,0]), wrap_to_pi(rpy[:,1])
-            base_height = torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) - self.simulator.measured_heights, dim=1)
+            base_height = self._base_height_over_terrain()
             
             if "roll" in self.cfg.termination.termination_terms:
                 r_term_buff = torch.abs(r) > self.cfg.termination.roll_threshold
@@ -1110,6 +1217,8 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         """
         self.common_step_counter = 0
         self.extras = {}
+        self._reward_cache_step = -1
+        self._reward_cache = {}
         self.noise_scale_vec = self._get_noise_scale_vec()
         self.forward_vec = torch.zeros(
             (self.num_envs, 3), device=self.device, dtype=torch.float
@@ -1137,6 +1246,11 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel],
                                            device=self.device, dtype=torch.float,
                                            requires_grad=False)
+        self.pd_target_tau_max = torch.as_tensor(
+            self.cfg.rewards.pd_target_tau_max,
+            device=self.device,
+            dtype=torch.float,
+        )
         self.actions = torch.zeros(
             (self.num_envs, self.num_actions), device=self.device, dtype=torch.float)
         self.last_actions = torch.zeros_like(self.actions)
@@ -1454,8 +1568,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         eps = 1e-6
         J = _sanitize_tensor(self.leg_jacobians)                                # (B, 4, 3, nj)
         n = _sanitize_tensor(self.simulator._normal_vector_around_feet.reshape(-1, 4, 3))   # (B, 4, 3)
-        swing = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
-                 ).float()                                                # (B, 4)
+        swing = self._feet_contact_mask().float()                         # (B, 4)
 
         # velocity ellipsoid matrix: M = J J^T
         M = J @ J.transpose(-1, -2)                             # (B, 4, 3, 3)
@@ -1571,7 +1684,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
 
         # stance mask from normal contact force
         fn_meas = torch.sum(grf_w * normals_w, dim=-1)                          # (N,4)
-        stance_mask = fn_meas > 1.0
+        stance_mask = fn_meas > self.cfg.rewards.contact_force_threshold
         stance_f = stance_mask.to(dtype)
 
         # --------------------------------------------------
@@ -1823,8 +1936,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
 
     def _reward_base_height(self):
         # Penalize base height away from target
-        base_height = torch.mean(self.simulator.base_pos[:, 2].unsqueeze(
-            1) - self.simulator.measured_heights, dim=1)
+        base_height = self._base_height_over_terrain()
         # print(f"base height: {base_height}")
         rew = torch.square(base_height - self.cfg.rewards.base_height_target)
         return rew
@@ -1834,11 +1946,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         return torch.exp(-torch.sum(roll_pitch ** 2, dim=1) / 0.5)
 
     def _potential_height(self):
-        base_height = torch.mean(
-            self.simulator.base_pos[:, 2].unsqueeze(1)
-            - self.simulator.measured_heights,
-            dim=1,
-        )
+        base_height = self._base_height_over_terrain()
         height_error = torch.square(
             base_height - self.cfg.rewards.base_height_target
         )
@@ -1876,7 +1984,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
     
     def _reward_dof_power(self):
         # Penalize power consumption
-        return torch.sum(torch.abs(self.simulator.torques * self.simulator.dof_vel), dim=1)
+        return torch.sum(torch.abs(self._joint_power_per_dof()), dim=1)
 
     def _reward_dof_acc(self):
         # Penalize dof accelerations
@@ -1915,10 +2023,10 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
 
     def _reward_collision(self):
         # Penalize collisions on selected bodies
-        # print(f"contacts: {(torch.norm(self.simulator.link_contact_forces[0, self.simulator.penalized_contact_indices, :], dim=-1) > 0.1)}")
+        # print(f"contacts: {(torch.norm(self.simulator.link_contact_forces[0, self.simulator.penalized_contact_indices, :], dim=-1) > self.cfg.rewards.contact_force_threshold)}")
         rew = torch.sum(1.*(torch.norm(
             self.simulator.link_contact_forces[:, self.simulator.penalized_contact_indices, :], 
-            dim=-1) > 0.1), dim=1)
+            dim=-1) > self.cfg.rewards.contact_force_threshold), dim=1)
         # print(f"collision reward: {rew[0]}")
         return rew
 
@@ -1951,33 +2059,25 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             e.g. self.rew_buf -= scale * p  (or set reward_scales[...] negative).
         """
         # -------------------- hyperparameters (tune) --------------------
-        y_min = 0.35      # min lateral separation target [m]
-        x_min = 0.40      # min fore-aft separation target [m]
-        alpha_diag = 0.8  # diagonal pair blend: weight on lateral term (0..1)
-        fz_thr = 5.0      # contact threshold [N] if using forces
+        y_min = self.cfg.rewards.feet_spread_y_min
+        x_min = self.cfg.rewards.feet_spread_x_min
+        alpha_diag = self.cfg.rewards.feet_spread_alpha_diag
+        fz_thr = self.cfg.rewards.contact_force_threshold
 
         # contact weighting mode:
         #   "both"  -> w_ij = c_i * c_j  (strict stance-only)
         #   "blend" -> w_ij = 0.5*(c_i + c_j) (some signal when one foot swings)
-        contact_mode = "blend"
+        contact_mode = self.cfg.rewards.feet_spread_contact_mode
         # ----------------------------------------------------------------
 
         # Assumed foot order: 0=FL, 1=FR, 2=RL, 3=RR (common in RSL-RL / legged_gym setups)
         # FL, FR, RL, RR = 0, 1, 2, 3
         FR, FL, RR, RL = 0, 1, 2, 3
 
-        # Trasnform feet pose into base-frame
-        feet_base_01 = quat_rotate_inverse(self.simulator.base_quat, (self.simulator.feet_pos[:,0,:] - self.simulator.base_pos))
-        feet_base_02 = quat_rotate_inverse(self.simulator.base_quat, (self.simulator.feet_pos[:,1,:] - self.simulator.base_pos))
-        feet_base_03 = quat_rotate_inverse(self.simulator.base_quat, (self.simulator.feet_pos[:,2,:] - self.simulator.base_pos))
-        feet_base_04 = quat_rotate_inverse(self.simulator.base_quat, (self.simulator.feet_pos[:,3,:] - self.simulator.base_pos))
-
-        feet_stack_base = torch.stack([feet_base_01, feet_base_02, feet_base_03, feet_base_04], dim=1)  # (N,4,3)
-        
-        feet_xy = feet_stack_base[:,:,:2]  # (N,4,2) use XY for support polygon in ground plane
+        feet_xy = self._feet_pos_base_frame()[:, :, :2]  # (N,4,2)
 
         # contact mask (N,4) in {0,1}
-        c = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > fz_thr).float()
+        c = (self._feet_contact_fz() > fz_thr).float()
 
         # Define pair groups per your constraint
         side_pairs   = [(FL, FR), (RL, RR)]      # left/right
@@ -2047,9 +2147,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         return torch.exp(-4.0*lin_vel_error)
 
     def _reward_dof_act_limits(self):
-        pos_actions = self.actions[:,0:12]
-        # actions_scaled = pos_actions * self.cfg.control.action_scale
-        actions_scaled = pos_actions * self.cfg.control.action_scale + self.simulator.default_dof_pos
+        actions_scaled = self._scaled_pos_actions()
         
         # Penalize dof positions too close to the limit
         out_of_limits = -(actions_scaled - self.simulator.dof_pos_limits_hard[:, 0]).clip(max=0.)  # lower limit
@@ -2065,15 +2163,15 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
 
     def _reward_joint_power(self):
         # penalize large amounts of motor power
-        return torch.sum(torch.abs(self.simulator.dof_vel * self.simulator.torques), dim=1)
+        return torch.sum(torch.abs(self._joint_power_per_dof()), dim=1)
 
     def _reward_joint_power_dist(self):
         # Penalize uneven distributions of motor power
-        return torch.var(self.simulator.torques*self.simulator.dof_vel, dim=1)
+        return torch.var(self._joint_power_per_dof(), dim=1)
 
     def _reward_foot_slip(self):
         # penalize feet that are in-contact for any movement in the x/y direction
-        contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.
+        contact = self._feet_contact_mask()
         return  torch.sum(torch.square(contact * torch.sum(self.simulator.feet_vel[:,:,:2], dim=-1)), dim=-1)
 
     def _reward_feet_contact_forces(self):
@@ -2081,40 +2179,35 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         return torch.sum((torch.norm(self.simulator.link_contact_forces[:, self.simulator.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
 
     def _reward_feet_near_edge(self):
-        feet_near_edge = self.simulator.calc_feet_near_edge()
-        feet_contact = (
-            self.simulator.link_contact_forces[
-                :, self.simulator.feet_indices, 2
-            ]
-            > 10.0
-        )
+        feet_near_edge = self._feet_near_edge_mask()
+        feet_contact = self._feet_contact_mask()
         return torch.sum(feet_near_edge & feet_contact, dim=-1).float()
 
     def _reward_feet_air_time(self):
         # Reward long steps
-        contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.
+        contact = self._feet_contact_mask()
         contact_filt = torch.logical_or(contact, self.last_contacts)
         self.last_contacts = contact
         first_contact = (self.feet_air_time > 0.) * contact_filt
         self.feet_air_time += self.dt
         rew_airTime = torch.sum((self.feet_air_time - 0.5) * first_contact, dim=1)  # reward only on first contact with the ground
-        rew_airTime *= torch.norm(self.commands[:, :2], dim=1) > 0.1  # no reward for zero command
+        rew_airTime *= self._command_norm(2) > 0.1  # no reward for zero command
         self.feet_air_time *= ~contact_filt
         return rew_airTime
 
     def _reward_dof_vel_stand_still(self):
         # Penalize motion at zero commands
-        return torch.sum(torch.abs(self.simulator.dof_vel), dim=1) * (torch.norm(self.commands[:, :3], dim=1) < 0.1)
+        return torch.sum(torch.abs(self.simulator.dof_vel), dim=1) * (self._command_norm(3) < 0.1)
 
     def _reward_dof_pos_stand_still(self):
         # Penalize position deviation at zero commands
-        return torch.sum(torch.square(self.simulator.dof_pos - self.simulator.default_dof_pos), dim=1) * (torch.norm(self.commands[:, :3], dim=1) < 0.1)
+        return torch.sum(torch.square(self.simulator.dof_pos - self.simulator.default_dof_pos), dim=1) * (self._command_norm(3) < 0.1)
     
     def _reward_stand_still_contact(self):
         # Encourage feet contact with the ground at zero commands
-        contacts = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 0.1
+        contacts = self._feet_contact_mask()
         full_contact = torch.sum(1.*contacts, dim=1)==len(self.simulator.feet_indices)
-        return 1.0*full_contact * (torch.norm(self.commands[:, :3], dim=1) < 0.1)
+        return 1.0*full_contact * (self._command_norm(3) < 0.1)
     
     def _reward_dof_close_to_default(self):
         # Penalize dof position deviation from default
@@ -2127,7 +2220,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         """
         Encourage feet to be close to desired height while swinging
         """
-        foot_vel_xy_norm = torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1)
+        foot_vel_xy_norm = self._feet_vel_xy_norm()
         # print(f"feet pos: {self.simulator.feet_pos[:, :, 2]}")
         clearance_error = torch.sum(
             foot_vel_xy_norm * torch.square(
@@ -2155,33 +2248,19 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         """
 
         feet_z = self.simulator.feet_pos[:, :, 2]                       # (N,4)
-        foot_vel_xy_norm = torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1)  # (N,4)
-
-        # Flatten 3x3 terrain patch if needed, then take local max height near each foot
-        h_patch = self.simulator._height_around_feet
-        if h_patch.ndim == 4:   # (N,4,3,3)
-            h_patch = h_patch.view(h_patch.shape[0], h_patch.shape[1], -1)  # (N,4,9)
-
-        local_terrain_h = torch.max(h_patch, dim=-1)[0]                # (N,4)
-
-        # Terrain-aware desired foot height
-        z_des = (
-            self.cfg.rewards.foot_clearance_target
-            + self.cfg.rewards.foot_height_offset
-            + local_terrain_h
-        )                                                               # (N,4)
+        foot_vel_xy_norm = self._feet_vel_xy_norm()  # (N,4)
+        z_des = self._terrain_aware_foot_target_height()  # (N,4)
 
         # Main tracking error: encourage feet to reach desired terrain-aware height
         track_err = torch.square(feet_z - z_des)                        # (N,4)
 
         # Soft over-swing penalty: only penalize when foot goes too far above desired height
         # Margin gives some freedom to overshoot a little during learning
-        excess_margin = 0.04  # [m], tune: 0.03 - 0.06
+        excess_margin = self.cfg.rewards.foot_clearance_excess_margin
         excess = torch.relu(feet_z - (z_des + excess_margin))           # (N,4)
         excess_err = torch.square(excess)
 
-        # Weight excess penalty less than main tracking term
-        excess_weight = 0.25  # tune: 0.1 - 0.5
+        excess_weight = self.cfg.rewards.foot_clearance_excess_weight
 
         total_err = torch.sum(
             foot_vel_xy_norm * (track_err + excess_weight * excess_err),
@@ -2193,27 +2272,14 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
 
     def _reward_front_foot_overreach(self):
         # Assumed order is FR/L, FL/R....
-        front_1 = quat_rotate_inverse(
-            self.simulator.base_quat,
-            self.simulator.feet_pos[:, 0, :] - self.simulator.base_pos
-        )  # (N,3)
-
-        front_2 = quat_rotate_inverse(
-            self.simulator.base_quat,
-            self.simulator.feet_pos[:, 1, :] - self.simulator.base_pos
-        )  # (N,3)
-
-        front_x_1 = front_1[:, 0]   # (N,)
-        front_x_2 = front_2[:, 0]   # (N,)
-
-        front_x = torch.stack([front_x_1, front_x_2], dim=1)   # (N,2)
+        front_x = self._feet_pos_base_frame()[:, :2, 0]
 
         
         overreach = torch.relu(front_x - self.cfg.rewards.overreach_x_max)
         
         # stance/contact gating
         contact = (
-            self.simulator.link_contact_forces[:, self.simulator.feet_indices[:2], 2] > 5.0
+            self._feet_contact_fz()[:, :2] > self.cfg.rewards.contact_force_threshold
         ).float()
 
         penalty = torch.sum(contact * overreach ** 2, dim=1)
@@ -2241,15 +2307,13 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             self.simulator.feet_indices:        4 foot link ids
             self.cfg.rewards.support_polygon_sigma: float
         """
-        fz_thr = 5.0
+        fz_thr = self.cfg.rewards.contact_force_threshold
         sigma = self.cfg.rewards.support_polygon_sigma
 
         base_xy = self.simulator.base_pos[:, :2]                      # (N,2)
         feet_xy = self.simulator.feet_pos[:, :, :2]                  # (N,4,2)
 
-        contact = (
-            self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > fz_thr
-        ).float()                                                    # (N,4)
+        contact = (self._feet_contact_fz() > fz_thr).float()         # (N,4)
 
         n_stance = torch.sum(contact, dim=1)                         # (N,)
 
@@ -2319,60 +2383,29 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         return rew
 
     def _compute_vhip_angle(self):
-        com_pos = self.simulator.base_pos[:, :3]
-        foot_contact_forces = self.simulator.link_contact_forces[
-            :, self.simulator.feet_indices, :
-        ]
-        normal_forces = foot_contact_forces[:, :, 2:3]
-        total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)
-        cop_pos = (
-            torch.sum(self.simulator.feet_pos * normal_forces, dim=1)
-            / total_force
-        )
-        pendulum_length = torch.norm(com_pos - cop_pos, dim=1).clamp(min=1e-6)
-        cos_theta = torch.clamp(com_pos[:, 2] / pendulum_length, -1.0, 1.0)
-        return torch.acos(cos_theta)
+        return self._vhip_terms()[0]
 
     def _compute_vhip_acceleration(self):
-        theta = self._compute_vhip_angle()
-        com_pos = self.simulator.base_pos[:, :3]
-        foot_contact_forces = self.simulator.link_contact_forces[
-            :, self.simulator.feet_indices, :
-        ]
-        normal_forces = foot_contact_forces[:, :, 2:3]
-        total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)
-        cop_pos = (
-            torch.sum(self.simulator.feet_pos * normal_forces, dim=1)
-            / total_force
-        )
-        pendulum_length = torch.norm(com_pos - cop_pos, dim=1).clamp(min=1e-6)
-        return -(9.81 / pendulum_length) * torch.sin(theta)
+        return self._vhip_terms()[1]
 
     def _reward_vhip_angle(self):
-        return torch.clamp(torch.abs(self._compute_vhip_angle()) - 0.1, min=0.0)
+        return torch.clamp(
+            torch.abs(self._compute_vhip_angle()) - self.cfg.rewards.vhip_angle_deadband,
+            min=0.0,
+        )
 
     def _reward_vhip_angular_acc(self):
         return torch.clamp(
-            torch.abs(self._compute_vhip_acceleration()) - 0.001, min=0.0
+            torch.abs(self._compute_vhip_acceleration()) - self.cfg.rewards.vhip_acc_deadband,
+            min=0.0,
         )
 
     def _reward_rear_foot_overreach(self):
-        rear_1 = quat_rotate_inverse(
-            self.simulator.base_quat,
-            self.simulator.feet_pos[:, 2, :] - self.simulator.base_pos,
-        )
-        rear_2 = quat_rotate_inverse(
-            self.simulator.base_quat,
-            self.simulator.feet_pos[:, 3, :] - self.simulator.base_pos,
-        )
-        rear_x = torch.stack([rear_1[:, 0], rear_2[:, 0]], dim=1)
+        rear_x = self._feet_pos_base_frame()[:, 2:4, 0]
         x_error = torch.abs(rear_x - self.cfg.rewards.rear_foot_x_nominal)
         overreach = torch.relu(x_error - self.cfg.rewards.rear_foot_x_margin)
         contact = (
-            self.simulator.link_contact_forces[
-                :, self.simulator.feet_indices[2:4], 2
-            ]
-            > 5.0
+            self._feet_contact_fz()[:, 2:4] > self.cfg.rewards.contact_force_threshold
         ).float()
         return torch.sum(contact * overreach ** 2, dim=1)
 
@@ -2384,11 +2417,11 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         Uses a quadratic hinge outside the admissible target range.
         """
 
-        tau_max = [25.0, 25.0, 35.0, 25.0, 25.0, 35.0, 25.0, 25.0, 35.0, 25.0, 25.0, 35.0]  # [Nm]
+        tau_max = self.pd_target_tau_max.to(dtype=self.simulator.dof_pos.dtype)
 
         q      = self.simulator.dof_pos        # (N, dof)
         qdot   = self.simulator.dof_vel        # (N, dof)
-        q_des  = self.actions[:, :12] * self.cfg.control.action_scale + self.simulator.default_dof_pos  # (N, dof)
+        q_des  = self._scaled_pos_actions()  # (N, dof)
     
         Kp = self.simulator._kp_scale * self.simulator._p_gains  # (N, dof)
         Kd = self.simulator._kd_scale * self.simulator._d_gains  # (N, dof)
@@ -2407,7 +2440,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
 
     def _reward_foot_landing_vel(self):
         z_vels = self.simulator.feet_vel[:, :, 2]
-        contacts = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 0.1
+        contacts = self._feet_contact_mask()
         about_to_land = ((self.simulator.feet_pos[:, :, 2] -
                           self.cfg.rewards.foot_height_offset) <
                          self.cfg.rewards.about_landing_threshold) & (~contacts) & (z_vels < 0.0)
@@ -2426,8 +2459,8 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         return torch.sum(torch.square(foot_acc), dim=(1, 2))
 
     def _reward_sparse_contacts(self):
-        fz = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2]
-        contact_prob = torch.sigmoid(10.0*(fz - 10.0))
+        fz = self._feet_contact_fz()
+        contact_prob = torch.sigmoid(10.0*(fz - self.cfg.rewards.contact_force_threshold))
         num_contacts = torch.sum(contact_prob, dim=-1)
         
         return torch.exp(-torch.square(num_contacts - 2.0)) 
@@ -2445,11 +2478,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
     def _reward_dof_tracking(self):
         # control_type = 'P'
         # Pull out the position control actions
-        pos_actions = self.actions[:,0:12]
-
-        # Scale the position actions
-        actions_ = pos_actions * self.cfg.control.action_scale + self.simulator.default_dof_pos
-        error = torch.sum(torch.square(actions_ - self.simulator.dof_pos), dim=-1)
+        error = torch.sum(torch.square(self._scaled_pos_actions() - self.simulator.dof_pos), dim=-1)
         return torch.exp(-4.0*error)
 
     def _reward_hip_pos(self):

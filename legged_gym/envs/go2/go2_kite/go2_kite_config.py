@@ -57,7 +57,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         debug_surface_normal_refresh_steps = 5
 
         # positions of the sampling height around the base (relative to the base of the robot) 11x18 = 153
-        measured_points_x = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2] #  rows
+        measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2] #  rows
         measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4]                          #  cols
 
         selected = False # select a unique terrain type and pass all arguments
@@ -442,11 +442,20 @@ class GO2KITECfg( LeggedRobotCfg ):
         
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
+        foot_clearance_excess_margin = 0.04
+        foot_clearance_excess_weight = 0.25
         
         overreach_x_max = 0.36
         rear_foot_x_nominal = -0.20
         rear_foot_x_margin = 0.16
         support_polygon_sigma = 0.01
+        vhip_angle_deadband = 0.1
+        vhip_acc_deadband = 0.001
+        feet_spread_x_min = 0.40
+        feet_spread_y_min = 0.35
+        feet_spread_alpha_diag = 0.8
+        feet_spread_contact_mode = "blend"
+        pd_target_tau_max = [25.0, 25.0, 35.0, 25.0, 25.0, 35.0, 25.0, 25.0, 35.0, 25.0, 25.0, 35.0]
 
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
@@ -454,6 +463,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         use_reward_curriculum = True
 
         max_contact_force = 200.0
+        contact_force_threshold = 5.0
         feet_edge_threshold = 0.05
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
@@ -627,7 +637,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # Privileged Encoder/Decoder
         priv_activation = 'elu'
 
-        privileged_terrain_latent_dim = 32
+        privileged_terrain_latent_dim = 64
         cnn_norm_type = "layer"
         terrain_encoder_attention_dim = 128
         terrain_encoder_n_heads = 4
@@ -635,7 +645,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         terrain_decoder_encoded_spatial_dim = (3,4)
         terrain_decoder_channels = 64
 
-        privileged_dynamics_latent_dim = 16
+        privileged_dynamics_latent_dim = 32
         priv_mixer_num_blocks = 2
         priv_mixer_hidden_dim = 64
         priv_mixer_token_dim = 64
@@ -644,15 +654,15 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         privileged_dynamics_decoder_layers = [64,128,256]
 
         # Depth Image/Sequence Models
-        depth_image_latent_dim = 32
+        depth_image_latent_dim = 64
         depth_image_norm = "layer"
-        depth_sequence_length = 3
+        depth_sequence_length = 5
         depth_sequence_norm = "layer"
         cnn_activation = 'elu'
         
         # Proprioceptive Context encoder
         proprio_in_dim = 450
-        proprio_latent_dim = 16
+        proprio_latent_dim = 32
         proprio_use_norm = True
         proprio_num_blocks = 2
         proprio_hidden_dim = 64
@@ -662,7 +672,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # Modality Mixer Network
         mixer_velo_dim = 3                   # torso velocity state [v_x, v_y, v_z]
         mixer_feet_state_dim = 20            # [feet-contact-state (4), feet-height (4), surface-normal under feet (12)]
-        mixer_latent_dim = 32
+        mixer_latent_dim = 64
         mixer_use_norm = True
         mixer_num_blocks = 2
         mixer_hidden_dim = 64
@@ -735,8 +745,8 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         modality_terrain_weight  = 1.0    # terrain reconstruction loss
         modality_dynamics_weight = 1.0    # privliged obs reconstruction loss
         modality_explicit_weight = 1.0    # torso-velo + feet-state estimation reconstruction loss
-        versatility_weight = 0.2          # latent versatility loss
-        versatility_lambda_e = 0.2        # weight of KL-regularization on the versility loss
+        versatility_weight = 0.1          # latent versatility loss
+        versatility_lambda_e = 1.0        # weight of KL-regularization on the versility loss
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.
         contrastive_weight = 1.0

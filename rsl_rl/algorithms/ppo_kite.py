@@ -561,7 +561,7 @@ class PPO_KITE:
         # #       which is what we use during deployment, so ignoring this for now
         # # #
         # E[sigma_i^2]
-        mean_conditional_var = torch.sum(torch.exp(logvar) * _mask,dim=0,) / _denom  # (latent_dim,)
+        mean_conditional_var = torch.sum(torch.exp(logvar) * _mask_col,dim=0,) / _denom  # (latent_dim,)
 
         # Law of total variance:
         # Var(z) = Var(E[z|o]) + E[Var(z|o)]
@@ -595,7 +595,7 @@ class PPO_KITE:
 
         # Maximize: J = MI - lambda_e * KL
         # Minimize: loss = -J
-        vers_loss = -(mutual_info - self.versatility_lambda_e * kl_loss)
+        vers_loss = -mutual_info + self.versatility_lambda_e * kl_loss
 
         # populate the log-dict
         vers_log = {"marginal_entropy":marginal_entropy.detach(),
@@ -605,6 +605,9 @@ class PPO_KITE:
                     }
 
         return vers_loss, vers_log
+    
+    def _update_kl_weight(self, kl_weight, kl_threashold, metric):
+        k = torch.exp()
 
     def act(self, obs, critic_obs, obs_history, privileged_obs_history, depth_image, depth_latent_history, depth_torso_state, terrain_map):
         # if self.actor_critic.is_recurrent:
@@ -975,38 +978,66 @@ class PPO_KITE:
                 terrain_recon_from_mix = self.priv_terrain_decoder(mix_terrain_z)
                 dyn_recon_from_mix = self.priv_dynamics_decoder(mix_dynamics_z)
 
-            explicit_est = torch.cat([body_velo_est, feet_state_est], dim=-1)
             mix_terrain_loss, mix_terrain_recon_log = self._terrain_recon_loss(
                 terrain_recon_from_mix,
                 terrain_maps_batch,
                 mask,
             )
             mix_dyn_loss = self._masked_mse_loss(dyn_recon_from_mix, obs_target, mask)
-            explicit_loss = self._masked_mse_loss(
-                explicit_est,
-                explicit_labels_batch,
+
+            # Cosine similarity loss for surface normals under feets
+            pred_surface_norm_under_feet = F.normalize(feet_state_est[:,8:],p=2,dim=1,eps=1e-6)
+            gt_surface_norm_under_feet = explicit_labels_batch[:,self.actor_critic.body_velo_dim+8:]
+
+            norm_explicit_loss = self._masked_sample_mean(
+                1.0 - F.cosine_similarity(pred_surface_norm_under_feet, gt_surface_norm_under_feet, dim=-1, eps=1e-6),
                 mask,
             )
-            del explicit_est
+
+            
+            # MSE loss for explicit body velocity and feet contact/height predictions.
+            # pred_feet_height_contact = feet_state_est[:,0:8]
+            # mse_explicit_est = torch.cat([body_velo_est, pred_feet_height_contact], dim=-1)
+            # mse_explicit_labels = explicit_labels_batch[:,0:self.actor_critic.body_velo_dim+8]
+
+            # explicit_loss = self._masked_mse_loss(
+            #     mse_explicit_est,
+            #     mse_explicit_labels,
+            #     mask,
+            # )
+
+            # explicit_loss += norm_explicit_loss
+            
+            # del mse_explicit_est, mse_explicit_labels, pred_surface_norm_under_feet, gt_surface_norm_under_feet
+
+            del pred_surface_norm_under_feet, gt_surface_norm_under_feet
+
 
             body_velo_dim = self.actor_critic.body_velo_dim
             feet_state_dim = self.actor_critic.feet_state_dim
+            
             torso_velo_explicit_loss = self._masked_mse_loss(
                 body_velo_est,
                 explicit_labels_batch[:, :body_velo_dim],
                 mask,
             )
+            
             if feet_state_dim > 0:
                 feet_state_explicit_loss = self._masked_mse_loss(
-                    feet_state_est,
+                    feet_state_est[
+                        :, body_velo_dim:body_velo_dim + 8
+                    ],
                     explicit_labels_batch[
-                        :, body_velo_dim:body_velo_dim + feet_state_dim
+                        :, body_velo_dim:body_velo_dim + 8
                     ],
                     mask,
-                )
+                ) + norm_explicit_loss
             else:
                 feet_state_explicit_loss = explicit_loss.new_zeros(())
 
+            explicit_loss = feet_state_explicit_loss + torso_velo_explicit_loss
+            
+            
             mix_terrain_contrast_loss = self._normalized_contrastive_loss(
                 mix_terrain_z,
                 terrain_positive,
