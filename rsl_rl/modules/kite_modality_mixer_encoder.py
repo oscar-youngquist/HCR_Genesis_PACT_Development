@@ -8,8 +8,6 @@ from typing import Tuple, List, Dict, Any
 from .module_utils import (
     MLPMixerBlock,
     get_activation,
-    make_1d_norm,
-    make_2d_norm,
 )
 
 
@@ -153,7 +151,7 @@ class MultimodalMixerVAE(nn.Module):
 
         self.out_logvar = nn.Sequential(
             nn.Linear(2 * output_dim, output_dim),
-            nn.Hardtanh(min_val=logvar_min, max_val=logvar_max),
+            nn.Hardtanh(min_val=0.0, max_val=logvar_max),
         )
 
         # ------------------------------------------------------------------
