@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +10,7 @@ from .module_utils import (
     EfficientMultiHeadAttention,
     get_activation,
     make_1d_norm,
-    make_2d_norm,
+    SmoothClampLayer,
 )
 
 
@@ -92,6 +93,8 @@ class MotionRobustDepthEncoder(nn.Module):
         cnn_activation: str = "elu",
         norm_type: str = "none",
         use_vae: bool = True,
+        vae_std_min: float = 0.01,
+        vae_std_max: float = 2.0,
         attention_dropout: float = 0.0,
     ):
         super().__init__()
@@ -166,7 +169,7 @@ class MotionRobustDepthEncoder(nn.Module):
 
         self.logvar_out = nn.Sequential(
             nn.Linear(output_hdim, target_latent_dim),
-            nn.Hardtanh(min_val=-5.0, max_val=5.0),
+            SmoothClampLayer(min_val=2.0*math.log(vae_std_min), max_val=2.0*math.log(vae_std_max)),
         )
 
         self._initialize_weights()
@@ -551,6 +554,8 @@ class ConvDepthSequenceEncoder(nn.Module):
         activation: str = "elu",
         norm_type: str = "none",
         use_vae: bool = True,
+        std_min: float = 0.01,
+        std_max: float = 1.5,
         use_latest_skip: bool = True,
     ):
         super().__init__()
@@ -611,7 +616,7 @@ class ConvDepthSequenceEncoder(nn.Module):
 
         self.logvar_out = nn.Sequential(
             nn.Linear(output_hdim, output_dim),
-            nn.Hardtanh(min_val=-5.0, max_val=5.0),
+            SmoothClampLayer(min_val=2.0*math.log(std_min), max_val=2.0*math.log(std_max)),
         )
 
         self._initialize_weights()

@@ -438,6 +438,39 @@ class ReconDimensionProjectionHead(nn.Module):
         z = self.net(x)
         return z
 
+
+class SmoothClampLayer(nn.Module):
+    """
+    Smoothly maps unconstrained inputs to a bounded interval [min_val, max_val].
+
+    Unlike torch.clamp or nn.Hardtanh, this keeps gradients nonzero almost
+    everywhere because it uses a sigmoid parameterization:
+
+        y = min_val + (max_val - min_val) * sigmoid(x)
+
+    Useful for bounding VAE log-variance outputs, e.g.
+        logvar in [-6, 0]
+    """
+
+    def __init__(self, min_val: float, max_val: float):
+        super().__init__()
+
+        if max_val <= min_val:
+            raise ValueError(
+                f"max_val must be greater than min_val, got "
+                f"min_val={min_val}, max_val={max_val}"
+            )
+
+        self.min_val = float(min_val)
+        self.max_val = float(max_val)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.min_val + (self.max_val - self.min_val) * torch.sigmoid(x)
+
+    def extra_repr(self) -> str:
+        return f"min_val={self.min_val}, max_val={self.max_val}"    
+
+
 def get_activation(act_name):
     if act_name == "elu":
         return nn.ELU(inplace=True)

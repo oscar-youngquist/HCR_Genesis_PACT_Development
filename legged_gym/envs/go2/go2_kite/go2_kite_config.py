@@ -656,8 +656,12 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # Depth Image/Sequence Models
         depth_image_latent_dim = 64
         depth_image_norm = "layer"
+        depth_image_std_min = 0.01
+        depth_image_std_max = 2.0
         depth_sequence_length = 5
         depth_sequence_norm = "layer"
+        depth_sequence_std_min = 0.01
+        depth_sequence_std_max = 1.5
         cnn_activation = 'elu'
         
         # Proprioceptive Context encoder
@@ -668,6 +672,8 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         proprio_hidden_dim = 64
         proprio_token_dim = 64
         proprio_channel_dim = 128
+        proprio_std_min = 0.01
+        proprio_std_max = 1.5
 
         # Modality Mixer Network
         mixer_velo_dim = 3                   # torso velocity state [v_x, v_y, v_z]
@@ -678,6 +684,8 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         mixer_hidden_dim = 64
         mixer_token_dim = 64
         mixer_channel_dim = 128
+        mixer_std_min = 0.01
+        mixer_std_max = 1.5
 
         # Actor/critic
         actor_layers = [512,256,128]

@@ -140,9 +140,13 @@ class ActorCritic_KITE(nn.Module):
                  depth_image_latent_dim=32,
                  depth_image_norm="layer",
                  depth_decoder_norm="none",
+                 depth_image_std_min=0.01,
+                 depth_image_std_max=2.0,
                  
                  depth_sequence_length=5,
                  depth_sequence_norm="layer",
+                 depth_sequence_std_min=0.01,
+                 depth_sequence_std_max=1.5,
                  
                  proprio_in_dim=450,
                  proprio_latent_dim=16,
@@ -151,6 +155,8 @@ class ActorCritic_KITE(nn.Module):
                  proprio_hidden_dim=128,
                  proprio_token_dim=128,
                  proprio_channel_dim=256,
+                 proprio_std_min=0.01,
+                 proprio_std_max=1.5,
                  
                  mixer_velo_dim=3,                   # torso velocity state [v_x, v_y, v_z]
                  mixer_feet_state_dim=20,            # [feet-contact-state (4), feet-height (4), surface-normal under feet (12)]
@@ -160,6 +166,8 @@ class ActorCritic_KITE(nn.Module):
                  mixer_hidden_dim=128,
                  mixer_token_dim=128,
                  mixer_channel_dim=256,
+                 mixer_std_min=0.01,
+                 mixer_std_max=1.5,
                  privileged_terrain_latent_dim=32,
                  privileged_dynamics_latent_dim=16,
                  
@@ -207,6 +215,8 @@ class ActorCritic_KITE(nn.Module):
             context_latent_size=proprio_latent_dim,
             activation=activation,
             use_layer_norm=proprio_use_norm,
+            std_min=proprio_std_min,
+            std_max=proprio_std_max,
         )
 
         # Single-depth image encoder
@@ -214,7 +224,9 @@ class ActorCritic_KITE(nn.Module):
             depth_image_resolution=self.depth_image_resolution,
             target_latent_dim=self.depth_latent_dim,
             cnn_activation=activation,
-            norm_type=depth_image_norm
+            norm_type=depth_image_norm,
+            vae_std_min=depth_image_std_min,
+            vae_std_max=depth_image_std_max,
         )
 
         # Single-depth image decoder. The frame encoder and decoder are trained
@@ -232,7 +244,9 @@ class ActorCritic_KITE(nn.Module):
             sequence_length=self.depth_sequence_length,
             output_dim=self.depth_latent_dim,
             activation=activation,
-            norm_type=depth_sequence_norm
+            norm_type=depth_sequence_norm,
+            std_min=depth_sequence_std_min,
+            std_max=depth_sequence_std_max,
         )
         
         # Modality mixer encoder
@@ -248,6 +262,8 @@ class ActorCritic_KITE(nn.Module):
             channel_mlp_dim=mixer_channel_dim,
             num_mixer_blocks=mixer_mixer_blocks,
             use_layer_norm=mixer_use_norm,
+            std_min=mixer_std_min,
+            std_max=mixer_std_max,
         )
 
         # Projection heads used only by the merged auxiliary update to map the

@@ -6,11 +6,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 from .module_utils import (
     MLPMixerBlock,
     get_activation,
-    init_weights,
+    SmoothClampLayer
 )
 
 class ProprioContextMLPMixerKITE(nn.Module):
@@ -68,7 +69,7 @@ class ProprioContextMLPMixerKITE(nn.Module):
         use_layer_norm:
             Whether to use LayerNorm inside mixer blocks.
 
-        logvar_min/logvar_max:
+        std_min/std_max:
             Bounds for VAE log-variance output.
 
         use_vae:
@@ -90,8 +91,8 @@ class ProprioContextMLPMixerKITE(nn.Module):
         context_latent_size: int = 16,
         activation: str = "elu",
         use_layer_norm: bool = True,
-        logvar_min: float = -5.0,
-        logvar_max: float = 5.0,
+        std_min: float = 0.01,
+        std_max: float = 1.50,
         use_vae: bool = True,
         device: str = "cpu",
     ) -> None:
@@ -115,8 +116,6 @@ class ProprioContextMLPMixerKITE(nn.Module):
         self.context_latent_size = context_latent_size
         self.activation_name = activation
         self.use_layer_norm = use_layer_norm
-        self.logvar_min = logvar_min
-        self.logvar_max = logvar_max
         self.use_vae = use_vae
         self.device = device
 
@@ -161,7 +160,7 @@ class ProprioContextMLPMixerKITE(nn.Module):
 
         self.ce_out_var = nn.Sequential(
             nn.Linear(output_hdim, context_latent_size),
-            nn.Hardtanh(min_val=logvar_min, max_val=logvar_max),
+            SmoothClampLayer(min_val=2.0*math.log(std_min), max_val=2.0*math.log(std_max)),
         )
 
         self._initialize_weights()

@@ -4,10 +4,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, List, Dict, Any
+import math
 
 from .module_utils import (
     MLPMixerBlock,
     get_activation,
+    SmoothClampLayer
 )
 
 
@@ -73,8 +75,8 @@ class MultimodalMixerVAE(nn.Module):
         feet_hidden: int = 64,
         activation: str = "elu",
         use_layer_norm: bool = True,
-        logvar_min: float = -5.0,
-        logvar_max: float = 5.0,
+        std_min: float = 0.01,
+        std_max: float = 1.50,
         use_vae: bool = True,
     ) -> None:
         super().__init__()
@@ -89,8 +91,6 @@ class MultimodalMixerVAE(nn.Module):
         self.output_dim = output_dim
         self.activation_name = activation
         self.use_layer_norm = use_layer_norm
-        self.logvar_min = logvar_min
-        self.logvar_max = logvar_max
         self.use_vae = use_vae
 
         self.activation = get_activation(activation)
@@ -151,7 +151,7 @@ class MultimodalMixerVAE(nn.Module):
 
         self.out_logvar = nn.Sequential(
             nn.Linear(2 * output_dim, output_dim),
-            nn.Hardtanh(min_val=-logvar_max, max_val=logvar_max),
+            nn.Hardtanh(min_val=2.0*math.log(std_min), max_val=2.0*math.log(std_max)),
         )
 
         # ------------------------------------------------------------------

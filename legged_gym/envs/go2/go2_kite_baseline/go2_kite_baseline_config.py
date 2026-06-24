@@ -672,7 +672,17 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         cenet_enc_latent_dim = 16
         # cenet_velo_dim = 3 + 4 + 4 + 12   # torso velocity, foot-contact indicator, foot-height 
         cenet_velo_dim = 3 + 4 + 4   # torso velocity, foot-contact indicator, foot-height 
+
+        # KITE visual/proprio/mixer variational std bounds.
+        depth_image_std_min = 0.01
+        depth_image_std_max = 2.0
         depth_sequence_length = 5
+        depth_sequence_std_min = 0.01
+        depth_sequence_std_max = 1.5
+        proprio_std_min = 0.01
+        proprio_std_max = 1.5
+        mixer_std_min = 0.01
+        mixer_std_max = 1.5
         privileged_terrain_latent_dim = 16
         privileged_dynamics_latent_dim = 16
 
