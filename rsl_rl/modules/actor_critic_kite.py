@@ -146,6 +146,7 @@ class ActorCritic_KITE(nn.Module):
                  depth_image_std_max=2.0,
                  
                  depth_sequence_length=5,
+                 depth_sequence_outdim=16,
                  depth_sequence_norm="layer",
                  depth_sequence_std_min=0.01,
                  depth_sequence_std_max=1.5,
@@ -254,7 +255,7 @@ class ActorCritic_KITE(nn.Module):
         self.depth_sequence_encoder = ConvDepthSequenceEncoder(
             feature_dim=self.depth_latent_dim,
             sequence_length=self.depth_sequence_length,
-            output_dim=self.depth_latent_dim,
+            output_dim=depth_sequence_outdim,
             activation=activation,
             norm_type=depth_sequence_norm,
             std_min=depth_sequence_std_min,
@@ -265,7 +266,7 @@ class ActorCritic_KITE(nn.Module):
         
         # Modality mixer encoder
         self.context_encoder = MultimodalGatedFusionVAE(
-            depth_latent_dim=self.depth_latent_dim,
+            depth_latent_dim=depth_sequence_outdim,
             proprio_latent_dim=proprio_latent_dim,
             hidden_dims=list(mixer_hidden_dims),
             output_dim=mixer_latent_dim,
@@ -283,7 +284,7 @@ class ActorCritic_KITE(nn.Module):
         # Reconstruction decoders consume the VAE samples directly; these heads
         # let the contrastive objective act through a small sacrificial layer.
         self.depth_sequence_contrastive_head = ContrastiveProjectionHead(
-            input_dim=self.depth_latent_dim,
+            input_dim=depth_sequence_outdim,
             projection_dim=privileged_terrain_latent_dim,
             activation=activation,
         )

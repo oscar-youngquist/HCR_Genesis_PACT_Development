@@ -99,10 +99,10 @@ class MultimodalGatedFusionVAE(nn.Module):
         
         for l in range(len(hidden_dims)-1):
             fusion_layers.append(nn.Linear(hidden_dims[l], hidden_dims[l+1]))
-            fusion_layers.append(get_activation(activation))
+            fusion_layers.append(self.activation)
         
         fusion_layers.append(nn.Linear(hidden_dims[-1], 2 * output_dim))
-        fusion_layers.append(get_activation(activation))
+        fusion_layers.append(self.activation)
 
         self.fusion_fc  = nn.Sequential(*fusion_layers)
 

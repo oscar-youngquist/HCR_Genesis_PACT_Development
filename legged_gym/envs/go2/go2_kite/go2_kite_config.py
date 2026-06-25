@@ -5,8 +5,8 @@ class GO2KITECfg( LeggedRobotCfg ):
     
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
-        num_observations = 57
-        num_privileged_obs = 144
+        num_observations = 45
+        num_privileged_obs = 132
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 + 12 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -639,10 +639,15 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         activation = 'elu' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid, swish (SiLU)
         init_noise_std = 1.00
 
+        # Latent dimensions
+        privileged_terrain_latent_dim = depth_sequence_outdim = 20
+        privileged_dynamics_latent_dim = proprio_latent_dim = 16
+        depth_image_latent_dim = 32
+        mixer_latent_dim = 16
+        
         # Privileged Encoder/Decoder
         priv_activation = 'elu'
 
-        privileged_terrain_latent_dim = 64
         cnn_norm_type = "layer"
         terrain_encoder_attention_dim = 128
         terrain_encoder_n_heads = 4
@@ -650,8 +655,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         terrain_decoder_encoded_spatial_dim = (3,4)
         terrain_decoder_channels = 64
 
-        privileged_dynamics_latent_dim = 32
-        priv_mixer_num_blocks = 2
+        priv_mixer_num_blocks = 3
         priv_mixer_hidden_dim = 64
         priv_mixer_token_dim = 64
         priv_mixer_channel_dim = 128
@@ -659,11 +663,11 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         privileged_dynamics_decoder_layers = [64,128,256]
 
         # Depth Image/Sequence Models
-        depth_image_latent_dim = 64
         depth_image_norm = "layer"
         depth_image_std_min = 0.1
         depth_image_std_max = 2.0
-        depth_sequence_length = 3
+        depth_sequence_length = 5
+
         depth_sequence_norm = "layer"
         depth_sequence_std_min = 0.1
         depth_sequence_std_max = 1.0
@@ -672,12 +676,11 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         cnn_activation = 'elu'
 
         # Proprioceptive Context encoder
-        proprio_in_dim = 570
-        proprio_latent_dim = 32
+        proprio_in_dim = 450
         proprio_use_norm = True
         proprio_num_blocks = 2
-        proprio_hidden_dim = 128
-        proprio_token_dim = 128
+        proprio_hidden_dim = 64
+        proprio_token_dim = 64
         proprio_channel_dim = 128
         proprio_std_min = 0.10
         proprio_std_max = 1.0
@@ -685,12 +688,10 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # Modality Mixer Network
         mixer_velo_dim = 3                   # torso velocity state [v_x, v_y, v_z]
         mixer_feet_state_dim = 20            # [feet-contact-state (4), feet-height (4), surface-normal under feet (12)]
-        mixer_latent_dim = 64
         mixer_use_norm = True
-        mixer_hidden_dims = [128, 64]
-        mixer_velo_hidden = 32
+        mixer_hidden_dims = [64, 32]
+        mixer_velo_hidden = 12
         mixer_feet_hidden = 32
-
         mixer_std_min = 0.10
         mixer_std_max = 1.0
 
@@ -752,13 +753,13 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         use_adaptive_kl_beta = True
         adaptive_kl_beta_delta = 0.05
         adaptive_kl_beta_ema_alpha = 0.05
-        depth_frame_kl_recon_target = 0.10
-        depth_frame_kl_beta_min = 1.0e-4
-        depth_frame_kl_beta_max = 1.0e-1
+        depth_frame_kl_recon_target = 0.05
+        depth_frame_kl_beta_min = 1.0e-5
+        depth_frame_kl_beta_max = 1.0e-2
        
         #     loss weights for sequence of latent-depth-images encoder
         depth_sequence_kl_weight = 0.1
-        depth_sequence_kl_recon_target = 0.10
+        depth_sequence_kl_recon_target = 0.05
         depth_sequence_kl_beta_min = 0.5
         depth_sequence_kl_beta_max = 5.0
         
@@ -768,21 +769,18 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         proprio_kl_beta_min = 0.5
         proprio_kl_beta_max = 5.0
         
+        #     reconstruction losses attached to the underlying student encoders
+        depth_sequence_terrain_weight  = 1.0    # terrain reconstruction loss
+        proprio_dynamics_weight = 1.0           # privileged obs reconstruction loss
+
         #     loss weights for depth+proprio modality mixing encoder
-        modality_terrain_weight  = 1.0    # terrain reconstruction loss
-        modality_dynamics_weight = 1.0    # privliged obs reconstruction loss
         modality_explicit_weight = 1.0    # torso-velo + feet-state estimation reconstruction loss
         versatility_weight = 0.01         # latent versatility loss
         versatility_lambda_e = 1.0        # weight of KL-regularization on the versility loss
-        mixer_kl_weight = 1.0
+        mixer_kl_weight = 0.5
         mixer_kl_recon_target = 0.10
-        mixer_kl_beta_min = 0.5
+        mixer_kl_beta_min = 0.1
         mixer_kl_beta_max = 5.0
-        
-        modality_pipeline_kl_weight = 1.0 # legacy alias for mixer KL beta
-        modality_pipeline_kl_recon_target = 0.10
-        modality_pipeline_kl_beta_min = 0.5
-        modality_pipeline_kl_beta_max = 5.0
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.
         contrastive_weight = 0.1

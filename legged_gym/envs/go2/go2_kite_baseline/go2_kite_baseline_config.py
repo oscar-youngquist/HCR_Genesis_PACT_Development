@@ -764,8 +764,6 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         proprio_kl_recon_target = 0.50
         proprio_kl_beta_min = 1.0e-5
         proprio_kl_beta_max = 1.0e-1
-        modality_terrain_weight = 1.0
-        modality_dynamics_weight = 1.0
         modality_explicit_weight = 1.0
         contrastive_weight = 0.1
         contrastive_lambda = 0.5
@@ -776,10 +774,6 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         mixer_kl_recon_target = 0.50
         mixer_kl_beta_min = 1.0e-5
         mixer_kl_beta_max = 1.0e-1
-        modality_pipeline_kl_weight = 1.0e-3
-        modality_pipeline_kl_recon_target = 0.50
-        modality_pipeline_kl_beta_min = 1.0e-5
-        modality_pipeline_kl_beta_max = 1.0e-1
 
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic_KITE'

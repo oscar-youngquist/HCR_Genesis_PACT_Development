@@ -120,6 +120,7 @@ class OnPolicyRunnerKITE:
                                                             self.policy_cfg.get("depth_image_std_min", 0.01),
                                                             self.policy_cfg.get("depth_image_std_max", 2.0),
                                                             self.policy_cfg.get("depth_sequence_length", 5),
+                                                            self.policy_cfg.get("depth_sequence_outdim", 16),
                                                             self.policy_cfg["depth_sequence_norm"],
                                                             self.policy_cfg.get("depth_sequence_std_min", 0.01),
                                                             self.policy_cfg.get("depth_sequence_std_max", 1.5),
