@@ -90,7 +90,6 @@ class DepthGradientLoss(nn.Module):
         )
         
         return loss_x + loss_y
-
 class SSIMLoss(nn.Module):
     """
     Structural Similarity Index Measure (SSIM) Loss adapted for deep learning.
@@ -216,7 +215,6 @@ class PPO_KITE:
                  depth_transform_identity_weight=1.0e-3,
 
                  depth_sequence_kl_weight=1.0,
-
                  proprio_kl_weight=1.0,
                  
                  modality_terrain_weight=1.0,
@@ -235,6 +233,16 @@ class PPO_KITE:
                  depth_frame_kl_recon_target=0.15,
                  depth_frame_kl_beta_min=1.0e-5,
                  depth_frame_kl_beta_max=1.0e-1,
+                 depth_sequence_kl_recon_target=None,
+                 depth_sequence_kl_beta_min=None,
+                 depth_sequence_kl_beta_max=None,
+                 proprio_kl_recon_target=None,
+                 proprio_kl_beta_min=None,
+                 proprio_kl_beta_max=None,
+                 mixer_kl_weight=None,
+                 mixer_kl_recon_target=None,
+                 mixer_kl_beta_min=None,
+                 mixer_kl_beta_max=None,
                  modality_pipeline_kl_weight=None,
                  modality_pipeline_kl_recon_target=0.5,
                  modality_pipeline_kl_beta_min=1.0e-5,
@@ -293,16 +301,46 @@ class PPO_KITE:
         self.depth_frame_kl_beta_max = depth_frame_kl_beta_max
         if modality_pipeline_kl_weight is None:
             modality_pipeline_kl_weight = depth_sequence_kl_weight
+        if mixer_kl_weight is None:
+            mixer_kl_weight = modality_pipeline_kl_weight
+        if depth_sequence_kl_recon_target is None:
+            depth_sequence_kl_recon_target = modality_pipeline_kl_recon_target
+        if proprio_kl_recon_target is None:
+            proprio_kl_recon_target = modality_pipeline_kl_recon_target
+        if mixer_kl_recon_target is None:
+            mixer_kl_recon_target = modality_pipeline_kl_recon_target
+        if depth_sequence_kl_beta_min is None:
+            depth_sequence_kl_beta_min = modality_pipeline_kl_beta_min
+        if depth_sequence_kl_beta_max is None:
+            depth_sequence_kl_beta_max = modality_pipeline_kl_beta_max
+        if proprio_kl_beta_min is None:
+            proprio_kl_beta_min = modality_pipeline_kl_beta_min
+        if proprio_kl_beta_max is None:
+            proprio_kl_beta_max = modality_pipeline_kl_beta_max
+        if mixer_kl_beta_min is None:
+            mixer_kl_beta_min = modality_pipeline_kl_beta_min
+        if mixer_kl_beta_max is None:
+            mixer_kl_beta_max = modality_pipeline_kl_beta_max
         self.modality_pipeline_kl_weight = modality_pipeline_kl_weight
         self.modality_pipeline_kl_recon_target = modality_pipeline_kl_recon_target
         self.modality_pipeline_kl_beta_min = modality_pipeline_kl_beta_min
         self.modality_pipeline_kl_beta_max = modality_pipeline_kl_beta_max
+        self.depth_sequence_kl_recon_target = depth_sequence_kl_recon_target
+        self.depth_sequence_kl_beta_min = depth_sequence_kl_beta_min
+        self.depth_sequence_kl_beta_max = depth_sequence_kl_beta_max
+        self.proprio_kl_recon_target = proprio_kl_recon_target
+        self.proprio_kl_beta_min = proprio_kl_beta_min
+        self.proprio_kl_beta_max = proprio_kl_beta_max
+        self.mixer_kl_recon_target = mixer_kl_recon_target
+        self.mixer_kl_beta_min = mixer_kl_beta_min
+        self.mixer_kl_beta_max = mixer_kl_beta_max
         self.depth_frame_kl_recon_ema = None
-        self.modality_pipeline_kl_recon_ema = None
+        self.depth_sequence_kl_recon_ema = None
+        self.proprio_kl_recon_ema = None
+        self.mixer_kl_recon_ema = None
         if self.use_adaptive_kl_beta:
-            self.depth_sequence_kl_weight = self.modality_pipeline_kl_weight
-            self.proprio_kl_weight = self.modality_pipeline_kl_weight
-            self.versatility_lambda_e = self.modality_pipeline_kl_weight
+            self.versatility_lambda_e = mixer_kl_weight
+            self.modality_pipeline_kl_weight = self.versatility_lambda_e
         self.gpu_debugging = gpu_debugging
         self.log_detailed_encoder_losses = log_detailed_encoder_losses
         self.profile_learning = profile_learning
@@ -763,30 +801,43 @@ class PPO_KITE:
         )
         return float(np.clip(k * float(beta), beta_min, beta_max))
 
-    def _update_adaptive_kl_betas(self, depth_recon_loss, modality_recon_loss):
+    def _ema_update(self, old_value, new_value, alpha):
+        if old_value is None:
+            return float(new_value)
+        return (1.0 - alpha) * old_value + alpha * float(new_value)
+
+    def _update_adaptive_kl_betas(
+        self,
+        depth_recon_loss,
+        depth_sequence_recon_loss,
+        proprio_recon_loss,
+        mixer_recon_loss,
+    ):
         """Update KL betas from EMA reconstruction losses after each PPO update."""
         if not self.use_adaptive_kl_beta:
             return
 
         alpha = float(self.adaptive_kl_beta_ema_alpha)
-        depth_recon_loss = float(depth_recon_loss)
-        modality_recon_loss = float(modality_recon_loss)
-
-        if self.depth_frame_kl_recon_ema is None:
-            self.depth_frame_kl_recon_ema = depth_recon_loss
-        else:
-            self.depth_frame_kl_recon_ema = (
-                (1.0 - alpha) * self.depth_frame_kl_recon_ema
-                + alpha * depth_recon_loss
-            )
-
-        if self.modality_pipeline_kl_recon_ema is None:
-            self.modality_pipeline_kl_recon_ema = modality_recon_loss
-        else:
-            self.modality_pipeline_kl_recon_ema = (
-                (1.0 - alpha) * self.modality_pipeline_kl_recon_ema
-                + alpha * modality_recon_loss
-            )
+        self.depth_frame_kl_recon_ema = self._ema_update(
+            self.depth_frame_kl_recon_ema,
+            depth_recon_loss,
+            alpha,
+        )
+        self.depth_sequence_kl_recon_ema = self._ema_update(
+            self.depth_sequence_kl_recon_ema,
+            depth_sequence_recon_loss,
+            alpha,
+        )
+        self.proprio_kl_recon_ema = self._ema_update(
+            self.proprio_kl_recon_ema,
+            proprio_recon_loss,
+            alpha,
+        )
+        self.mixer_kl_recon_ema = self._ema_update(
+            self.mixer_kl_recon_ema,
+            mixer_recon_loss,
+            alpha,
+        )
 
         self.depth_frame_kl_weight = self._update_kl_weight(
             self.depth_frame_kl_weight,
@@ -796,20 +847,32 @@ class PPO_KITE:
             self.depth_frame_kl_beta_max,
         )
 
-        self.modality_pipeline_kl_weight = self._update_kl_weight(
-            self.modality_pipeline_kl_weight,
-            self.modality_pipeline_kl_recon_target,
-            self.modality_pipeline_kl_recon_ema,
-            self.modality_pipeline_kl_beta_min,
-            self.modality_pipeline_kl_beta_max,
+        self.depth_sequence_kl_weight = self._update_kl_weight(
+            self.depth_sequence_kl_weight,
+            self.depth_sequence_kl_recon_target,
+            self.depth_sequence_kl_recon_ema,
+            self.depth_sequence_kl_beta_min,
+            self.depth_sequence_kl_beta_max,
         )
 
-        # The sequence encoder, proprioceptive encoder, and modality mixer use
-        # one shared adaptive beta so they regularize together as the mixer
-        # reconstruction quality changes.
-        self.depth_sequence_kl_weight = self.modality_pipeline_kl_weight
-        self.proprio_kl_weight = self.modality_pipeline_kl_weight
-        self.versatility_lambda_e = self.modality_pipeline_kl_weight
+        self.proprio_kl_weight = self._update_kl_weight(
+            self.proprio_kl_weight,
+            self.proprio_kl_recon_target,
+            self.proprio_kl_recon_ema,
+            self.proprio_kl_beta_min,
+            self.proprio_kl_beta_max,
+        )
+
+        self.versatility_lambda_e = self._update_kl_weight(
+            self.versatility_lambda_e,
+            self.mixer_kl_recon_target,
+            self.mixer_kl_recon_ema,
+            self.mixer_kl_beta_min,
+            self.mixer_kl_beta_max,
+        )
+
+        # Preserve the legacy aggregate name as the modality-mixer beta.
+        self.modality_pipeline_kl_weight = self.versatility_lambda_e
 
     def act(self, obs, critic_obs, obs_history, privileged_obs_history, depth_image, depth_latent_history, depth_torso_state, terrain_map):
         # if self.actor_critic.is_recurrent:
@@ -1149,52 +1212,67 @@ class PPO_KITE:
                 )
             )
 
-            # The sequence encoder no longer has its own terrain decoder or
-            # terrain contrastive objective. It is supervised through the
-            # modality-mixer terrain losses below, while still retaining its
-            # own KL regularization.
             seq_kl = self._kl_loss(seq_mean, seq_logvar, mask)
-            depth_sequence_loss = self.depth_sequence_kl_weight * seq_kl
+            depth_seq_contrast_z = self.actor_critic.depth_sequence_contrastive_head(
+                depth_seq_z
+            )
+            with self._frozen_module_params(self.priv_terrain_decoder):
+                terrain_recon_from_depth_seq = self.priv_terrain_decoder(depth_seq_z)
+            seq_terrain_loss, seq_terrain_recon_log = self._terrain_recon_loss(
+                terrain_recon_from_depth_seq,
+                terrain_maps_batch,
+                mask,
+            )
+            seq_terrain_contrast_loss = self._normalized_contrastive_loss(
+                depth_seq_contrast_z,
+                terrain_positive,
+                contrastive_negative_anchor_batch,
+                mask,
+            )
+            depth_sequence_loss = (
+                self.depth_sequence_kl_weight * seq_kl
+                + self.modality_terrain_weight * seq_terrain_loss
+                + self.contrastive_weight * seq_terrain_contrast_loss
+            )
 
             # 2. Proprioceptive student path.
             prop_mean, prop_logvar, proprio_z = (
                 self.actor_critic.proprio_context_encoder(obs_hist_batch)
             )
 
-            # The proprioceptive encoder no longer has a standalone dynamics
-            # reconstruction or contrastive objective. It is supervised through
-            # the modality mixer dynamics losses below, while retaining its KL.
             prop_kl = self._kl_loss(prop_mean, prop_logvar, mask)
-            proprio_loss = self.proprio_kl_weight * prop_kl
+            proprio_contrast_z = self.actor_critic.proprio_contrastive_head(
+                proprio_z
+            )
+            with self._frozen_module_params(self.priv_dynamics_decoder):
+                dyn_recon_from_proprio = self.priv_dynamics_decoder(proprio_z)
+            prop_dyn_loss = self._masked_mse_loss(
+                dyn_recon_from_proprio,
+                obs_target,
+                mask,
+            )
+            prop_dyn_contrast_loss = self._normalized_contrastive_loss(
+                proprio_contrast_z,
+                dynamics_positive,
+                contrastive_negative_anchor_batch,
+                mask,
+            )
+            proprio_loss = (
+                self.proprio_kl_weight * prop_kl
+                + self.modality_dynamics_weight * prop_dyn_loss
+                + self.contrastive_weight * prop_dyn_contrast_loss
+            )
 
-            # 3. Modality mixer path. Terrain/dynamics reconstruction losses
-            # backpropagate into the sequence and proprio encoders. The
-            # depth-frame encoder remains stop-grad because latest_depth_z was
-            # detached by the standalone frame autoencoder update.
+            # 3. Modality mixer path. The terrain/dynamics reconstruction and
+            # contrastive objectives now train the underlying visual-sequence
+            # and proprioceptive encoders directly. The mixer keeps only its
+            # explicit state heads and versatility/KL objective.
             mix_mean, mix_logvar, mix_z, body_velo_est, feet_state_est = (
                 self.actor_critic.context_encoder(
-                    # Allow modality terrain/dynamics/contrastive losses to
-                    # train the sequence encoder, while the sequence input
-                    # itself is still stop-grad from the frame encoder above.
                     depth_seq_z,
                     proprio_z,
                 )
             )
-            mix_terrain_z = self.actor_critic.mixer_to_terrain_latent(mix_z)
-            mix_dynamics_z = self.actor_critic.mixer_to_dynamics_latent(mix_z)
-            with self._frozen_module_params(
-                self.priv_terrain_decoder,
-                self.priv_dynamics_decoder,
-            ):
-                terrain_recon_from_mix = self.priv_terrain_decoder(mix_terrain_z)
-                dyn_recon_from_mix = self.priv_dynamics_decoder(mix_dynamics_z)
-
-            mix_terrain_loss, mix_terrain_recon_log = self._terrain_recon_loss(
-                terrain_recon_from_mix,
-                terrain_maps_batch,
-                mask,
-            )
-            mix_dyn_loss = self._masked_mse_loss(dyn_recon_from_mix, obs_target, mask)
 
             # Cosine similarity loss for surface normals under feets
             pred_surface_norm_under_feet = F.normalize(feet_state_est[:,8:],p=2,dim=1,eps=1e-6)
@@ -1249,30 +1327,13 @@ class PPO_KITE:
             explicit_loss = feet_state_explicit_loss + torso_velo_explicit_loss
             
             
-            mix_terrain_contrast_loss = self._normalized_contrastive_loss(
-                mix_terrain_z,
-                terrain_positive,
-                contrastive_negative_anchor_batch,
-                mask,
-            )
-            mix_dyn_contrast_loss = self._normalized_contrastive_loss(
-                mix_dynamics_z,
-                dynamics_positive,
-                contrastive_negative_anchor_batch,
-                mask,
-            )
-
-            mix_contrastive = mix_terrain_contrast_loss + mix_dyn_contrast_loss
             versatility_loss, versatility_log = self._versatility_kl_metric(
                 mix_mean,
                 mix_logvar,
                 mask,
             )
             modality_loss = (
-                self.modality_terrain_weight * mix_terrain_loss
-                + self.modality_dynamics_weight * mix_dyn_loss
-                + self.modality_explicit_weight * explicit_loss
-                + self.contrastive_weight * mix_contrastive
+                self.modality_explicit_weight * explicit_loss
                 + self.versatility_weight * versatility_loss
             )
 
@@ -1304,22 +1365,21 @@ class PPO_KITE:
             "transform_identity_loss": transform_identity_loss,
             "depth_sequence_loss": depth_sequence_loss,
             "seq_kl": seq_kl,
+            "seq_terrain_loss": seq_terrain_loss,
+            "seq_terrain_recon_log": seq_terrain_recon_log,
+            "seq_terrain_contrast_loss": seq_terrain_contrast_loss,
+            "terrain_recon_from_depth_seq": terrain_recon_from_depth_seq,
             "proprio_loss": proprio_loss,
             "prop_kl": prop_kl,
+            "prop_dyn_loss": prop_dyn_loss,
+            "prop_dyn_contrast_loss": prop_dyn_contrast_loss,
+            "dyn_recon_from_proprio": dyn_recon_from_proprio,
             "modality_loss": modality_loss,
-            "mix_terrain_loss": mix_terrain_loss,
-            "mix_terrain_recon_log": mix_terrain_recon_log,
-            "mix_dyn_loss": mix_dyn_loss,
             "explicit_loss": explicit_loss,
             "torso_velo_explicit_loss": torso_velo_explicit_loss,
             "feet_state_explicit_loss": feet_state_explicit_loss,
-            "mix_terrain_contrast_loss": mix_terrain_contrast_loss,
-            "mix_dyn_contrast_loss": mix_dyn_contrast_loss,
-            "mix_contrastive": mix_contrastive,
             "versatility_loss": versatility_loss,
             "versatility_log": versatility_log,
-            "dyn_recon_from_mix": dyn_recon_from_mix,
-            "terrain_recon_from_mix": terrain_recon_from_mix,
             "body_velo_est": body_velo_est,
         }
 
@@ -1401,15 +1461,15 @@ class PPO_KITE:
         # the large CUDA reconstructions before the privileged teacher update.
         boot_summary = self._make_boot_summary(
             obs_target,
-            aux["dyn_recon_from_mix"].detach(),
+            aux["dyn_recon_from_proprio"].detach(),
             terrain_maps_batch,
-            aux["terrain_recon_from_mix"].detach(),
+            aux["terrain_recon_from_depth_seq"].detach(),
             explicit_labels_batch,
             aux["body_velo_est"].detach(),
             mask,
         )
-        del aux["dyn_recon_from_mix"]
-        del aux["terrain_recon_from_mix"]
+        del aux["dyn_recon_from_proprio"]
+        del aux["terrain_recon_from_depth_seq"]
         del aux["body_velo_est"]
         self._empty_cache_if_debugging()
         if profile is not None:
@@ -1431,8 +1491,8 @@ class PPO_KITE:
         # Total reconstructed loss
         losses["recon"] = self._detach_scalar(
             aux["depth_recon_loss"]
-            + aux["mix_terrain_loss"]
-            + aux["mix_dyn_loss"]
+            + aux["seq_terrain_loss"]
+            + aux["prop_dyn_loss"]
         )
 
         # Total KL loss across all encoders
@@ -1446,11 +1506,9 @@ class PPO_KITE:
         losses["depth_transform_identity"] = self._detach_scalar(aux["transform_identity_loss"])
         losses["kl_scheduler"] = {
             "depth_frame_recon": self._detach_scalar(aux["depth_recon_loss"]),
-            "modality_recon": self._detach_scalar(
-                aux["mix_terrain_loss"]
-                + aux["mix_dyn_loss"]
-                + aux["explicit_loss"]
-            ),
+            "depth_sequence_recon": self._detach_scalar(aux["seq_terrain_loss"]),
+            "proprio_recon": self._detach_scalar(aux["prop_dyn_loss"]),
+            "mixer_recon": self._detach_scalar(aux["explicit_loss"]),
         }
         
         losses["boot_summary"] = boot_summary
@@ -1469,9 +1527,8 @@ class PPO_KITE:
             "depth_sequence_total": self._detach_scalar(aux["depth_sequence_loss"]),
             "proprio_total": self._detach_scalar(aux["proprio_loss"]),
             "modality_total": self._detach_scalar(aux["modality_loss"]),
-            "modality_recon": self._detach_scalar(
-                aux["mix_terrain_loss"] + aux["mix_dyn_loss"]
-            ),
+            "depth_sequence_terrain_recon": self._detach_scalar(aux["seq_terrain_loss"]),
+            "proprio_dynamics_recon": self._detach_scalar(aux["prop_dyn_loss"]),
             "privileged_total": self._detach_scalar(privileged_loss),
         }
         if self.log_detailed_encoder_losses:
@@ -1482,17 +1539,22 @@ class PPO_KITE:
                 "depth_autoencoder_recon": self._detach_scalar(aux["depth_recon_loss"]),
                 
                 "depth_sequence_kl": self._detach_scalar(aux["seq_kl"]),
+                "depth_sequence_terrain_recon": self._detach_scalar(aux["seq_terrain_loss"]),
+                "depth_sequence_terrain_height": self._detach_scalar(
+                    aux["seq_terrain_recon_log"]["height_loss"]
+                ),
+                "depth_sequence_terrain_normals": self._detach_scalar(
+                    aux["seq_terrain_recon_log"]["normal_cos"]
+                ),
+                "depth_sequence_terrain_contrastive": self._detach_scalar(
+                    aux["seq_terrain_contrast_loss"]
+                ),
                 
                 "proprio_kl": self._detach_scalar(aux["prop_kl"]),
-                
-                "modality_terrain_recon": self._detach_scalar(aux["mix_terrain_loss"]),
-                "modality_terrain_height": self._detach_scalar(
-                    aux["mix_terrain_recon_log"]["height_loss"]
+                "proprio_dynamics_recon": self._detach_scalar(aux["prop_dyn_loss"]),
+                "proprio_dynamics_contrastive": self._detach_scalar(
+                    aux["prop_dyn_contrast_loss"]
                 ),
-                "modality_terrain_normals": self._detach_scalar(
-                    aux["mix_terrain_recon_log"]["normal_cos"]
-                ),
-                "modality_dynamics_recon": self._detach_scalar(aux["mix_dyn_loss"]),
                 "modality_versatility": self._detach_scalar(aux["versatility_loss"]),
                 "modality_kl": self._detach_scalar(aux["versatility_log"]["kl"]),
                 "modality_marginal_entropy": self._detach_scalar(
@@ -1510,13 +1572,6 @@ class PPO_KITE:
                 ),
                 "modality_explicit_feet_state": self._detach_scalar(
                     aux["feet_state_explicit_loss"]
-                ),
-                "modality_contrastive": self._detach_scalar(aux["mix_contrastive"]),
-                "modality_terrain_contrastive": self._detach_scalar(
-                    aux["mix_terrain_contrast_loss"]
-                ),
-                "modality_dynamics_contrastive": self._detach_scalar(
-                    aux["mix_dyn_contrast_loss"]
                 ),
                 "privileged_terrain_recon": self._detach_scalar(privileged_terrain_loss),
                 "privileged_dynamics_recon": self._detach_scalar(privileged_dynamics_loss),
@@ -1537,7 +1592,9 @@ class PPO_KITE:
         mean_aux_decoder_loss = 0
         mean_aux_loss_details = {}
         mean_depth_kl_recon_signal = 0
-        mean_modality_kl_recon_signal = 0
+        mean_depth_sequence_kl_recon_signal = 0
+        mean_proprio_kl_recon_signal = 0
+        mean_mixer_kl_recon_signal = 0
 
         profile_update = self.profile_learning
         timers = None
@@ -1656,8 +1713,14 @@ class PPO_KITE:
                 mean_depth_kl_recon_signal += aux_losses["kl_scheduler"][
                     "depth_frame_recon"
                 ]
-                mean_modality_kl_recon_signal += aux_losses["kl_scheduler"][
-                    "modality_recon"
+                mean_depth_sequence_kl_recon_signal += aux_losses["kl_scheduler"][
+                    "depth_sequence_recon"
+                ]
+                mean_proprio_kl_recon_signal += aux_losses["kl_scheduler"][
+                    "proprio_recon"
+                ]
+                mean_mixer_kl_recon_signal += aux_losses["kl_scheduler"][
+                    "mixer_recon"
                 ]
                 
                 for name, value in aux_losses["detail"].items():
@@ -1700,8 +1763,14 @@ class PPO_KITE:
         mean_depth_kl_recon_signal = self._finish_log_scalar(
             mean_depth_kl_recon_signal / (num_updates * self.num_enc_epochs)
         )
-        mean_modality_kl_recon_signal = self._finish_log_scalar(
-            mean_modality_kl_recon_signal / (num_updates * self.num_enc_epochs)
+        mean_depth_sequence_kl_recon_signal = self._finish_log_scalar(
+            mean_depth_sequence_kl_recon_signal / (num_updates * self.num_enc_epochs)
+        )
+        mean_proprio_kl_recon_signal = self._finish_log_scalar(
+            mean_proprio_kl_recon_signal / (num_updates * self.num_enc_epochs)
+        )
+        mean_mixer_kl_recon_signal = self._finish_log_scalar(
+            mean_mixer_kl_recon_signal / (num_updates * self.num_enc_epochs)
         )
         for name in mean_aux_loss_details:
             mean_aux_loss_details[name] = self._finish_log_scalar(
@@ -1710,14 +1779,23 @@ class PPO_KITE:
 
         self._update_adaptive_kl_betas(
             mean_depth_kl_recon_signal,
-            mean_modality_kl_recon_signal,
+            mean_depth_sequence_kl_recon_signal,
+            mean_proprio_kl_recon_signal,
+            mean_mixer_kl_recon_signal,
         )
         mean_aux_loss_details["kl_beta_depth_frame"] = self.depth_frame_kl_weight
+        mean_aux_loss_details["kl_beta_depth_sequence"] = self.depth_sequence_kl_weight
+        mean_aux_loss_details["kl_beta_proprio"] = self.proprio_kl_weight
+        mean_aux_loss_details["kl_beta_mixer"] = self.versatility_lambda_e
         mean_aux_loss_details["kl_beta_modality_pipeline"] = self.modality_pipeline_kl_weight
         if self.depth_frame_kl_recon_ema is not None:
             mean_aux_loss_details["kl_recon_ema_depth_frame"] = self.depth_frame_kl_recon_ema
-        if self.modality_pipeline_kl_recon_ema is not None:
-            mean_aux_loss_details["kl_recon_ema_modality_pipeline"] = self.modality_pipeline_kl_recon_ema
+        if self.depth_sequence_kl_recon_ema is not None:
+            mean_aux_loss_details["kl_recon_ema_depth_sequence"] = self.depth_sequence_kl_recon_ema
+        if self.proprio_kl_recon_ema is not None:
+            mean_aux_loss_details["kl_recon_ema_proprio"] = self.proprio_kl_recon_ema
+        if self.mixer_kl_recon_ema is not None:
+            mean_aux_loss_details["kl_recon_ema_mixer"] = self.mixer_kl_recon_ema
 
 
         if profile_update:

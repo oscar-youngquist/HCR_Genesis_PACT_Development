@@ -123,6 +123,8 @@ class OnPolicyRunnerKITE:
                                                             self.policy_cfg["depth_sequence_norm"],
                                                             self.policy_cfg.get("depth_sequence_std_min", 0.01),
                                                             self.policy_cfg.get("depth_sequence_std_max", 1.5),
+                                                            self.policy_cfg.get("depth_sequence_conf_min", 0.1),
+                                                            self.policy_cfg.get("depth_sequence_conf_mask_scale", 0.2),
                                                             
                                                             self.policy_cfg["proprio_in_dim"],
                                                             self.policy_cfg["proprio_latent_dim"],

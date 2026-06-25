@@ -679,6 +679,8 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         depth_sequence_length = 5
         depth_sequence_std_min = 0.01
         depth_sequence_std_max = 1.5
+        depth_sequence_conf_min = 0.1
+        depth_sequence_conf_mask_scale = 0.2
         proprio_std_min = 0.01
         proprio_std_max = 1.5
         mixer_std_min = 0.01
@@ -754,8 +756,14 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         depth_frame_kl_beta_max = 1.0e-1
         depth_sequence_terrain_weight = 1.0
         depth_sequence_kl_weight = 1.0e-3
+        depth_sequence_kl_recon_target = 0.50
+        depth_sequence_kl_beta_min = 1.0e-5
+        depth_sequence_kl_beta_max = 1.0e-1
         proprio_dynamics_weight = 1.0
         proprio_kl_weight = 1.0e-3
+        proprio_kl_recon_target = 0.50
+        proprio_kl_beta_min = 1.0e-5
+        proprio_kl_beta_max = 1.0e-1
         modality_terrain_weight = 1.0
         modality_dynamics_weight = 1.0
         modality_explicit_weight = 1.0
@@ -764,6 +772,10 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         contrastive_margin = 1.0
         versatility_weight = 0.01
         versatility_lambda_e = 0.1
+        mixer_kl_weight = 1.0e-3
+        mixer_kl_recon_target = 0.50
+        mixer_kl_beta_min = 1.0e-5
+        mixer_kl_beta_max = 1.0e-1
         modality_pipeline_kl_weight = 1.0e-3
         modality_pipeline_kl_recon_target = 0.50
         modality_pipeline_kl_beta_min = 1.0e-5
