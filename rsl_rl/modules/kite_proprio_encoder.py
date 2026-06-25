@@ -72,9 +72,6 @@ class ProprioContextMLPMixerKITE(nn.Module):
         std_min/std_max:
             Bounds for VAE log-variance output.
 
-        use_vae:
-            If True, samples z during training. If False, z = mean.
-
         device:
             Kept for compatibility with your existing encoder API.
     """
@@ -93,7 +90,6 @@ class ProprioContextMLPMixerKITE(nn.Module):
         use_layer_norm: bool = True,
         std_min: float = 0.01,
         std_max: float = 1.50,
-        use_vae: bool = True,
         device: str = "cpu",
     ) -> None:
         super().__init__()
@@ -116,7 +112,6 @@ class ProprioContextMLPMixerKITE(nn.Module):
         self.context_latent_size = context_latent_size
         self.activation_name = activation
         self.use_layer_norm = use_layer_norm
-        self.use_vae = use_vae
         self.device = device
 
         self.activation = get_activation(activation)
@@ -379,10 +374,7 @@ class ProprioContextMLPMixerKITE(nn.Module):
         """
         mean, logvar = self.encode(X_C)
 
-        if self.use_vae and self.training:
-            z = self.reparameterization_trick(mean, logvar)
-        else:
-            z = mean
+        z = self.reparameterization_trick(mean, logvar)
 
         return mean, logvar, z
 

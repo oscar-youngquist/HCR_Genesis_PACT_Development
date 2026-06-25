@@ -59,7 +59,6 @@ class MultimodalGatedFusionVAE(nn.Module):
         use_layer_norm: bool = True,
         std_min: float = 0.01,
         std_max: float = 1.50,
-        use_vae: bool = True,
     ) -> None:
         super().__init__()
 
@@ -69,7 +68,6 @@ class MultimodalGatedFusionVAE(nn.Module):
         self.output_dim = output_dim
         self.activation_name = activation
         self.use_layer_norm = use_layer_norm
-        self.use_vae = use_vae
 
         self.activation = get_activation(activation)
 
@@ -421,10 +419,7 @@ class MultimodalGatedFusionVAE(nn.Module):
 
         mean, logvar = self.encode(z_depth_seq, z_proprio)
 
-        if self.use_vae and self.training:
-            z = self.reparameterization_trick(mean, logvar)
-        else:
-            z = mean
+        z = self.reparameterization_trick(mean, logvar)
 
         body_velo_est = self.velo_est_out(self.activation(self.velo_est_hidden(z)))
         feet_state_est = self.feet_est_out(self.activation(self.feet_est_hidden(z)))

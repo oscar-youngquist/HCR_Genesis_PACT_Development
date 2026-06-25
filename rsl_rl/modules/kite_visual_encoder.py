@@ -51,7 +51,6 @@ class MotionRobustDepthEncoder(nn.Module):
         target_latent_dim: int = 16,
         cnn_activation: str = "elu",
         norm_type: str = "none",
-        use_vae: bool = True,
         vae_std_min: float = 0.01,
         vae_std_max: float = 2.0,
         attention_dropout: float = 0.0,
@@ -61,7 +60,6 @@ class MotionRobustDepthEncoder(nn.Module):
         self.depth_image_resolution = depth_image_resolution
         self.target_latent_dim = target_latent_dim
         self.norm_type = norm_type
-        self.use_vae = use_vae
 
         in_height, in_width = depth_image_resolution
         self.activation = get_activation(cnn_activation)
@@ -345,10 +343,7 @@ class MotionRobustDepthEncoder(nn.Module):
             return_unet_skips=return_unet_skips,
         )
 
-        if self.use_vae and self.training:
-            z = reparameterize(mean, logvar)
-        else:
-            z = mean
+        z = reparameterize(mean, logvar)
 
         return mean, logvar, z, aux
 
@@ -669,9 +664,10 @@ class ConvDepthSequenceEncoder(nn.Module):
         output_dim: int = 16,
         activation: str = "elu",
         norm_type: str = "none",
-        use_vae: bool = True,
         std_min: float = 0.01,
         std_max: float = 1.5,
+        conf_min: float = 0.1,
+        conf_mask_scale: float = 0.2,
         use_latest_skip: bool = True,
     ):
         super().__init__()
@@ -680,8 +676,10 @@ class ConvDepthSequenceEncoder(nn.Module):
         self.sequence_length = sequence_length
         self.output_dim = output_dim
         self.norm_type = norm_type
-        self.use_vae = use_vae
         self.use_latest_skip = use_latest_skip
+
+        self.conf_min = conf_min
+        self.conf_mask_scale = conf_mask_scale
 
         self.activation = get_activation(activation)
 
@@ -721,11 +719,8 @@ class ConvDepthSequenceEncoder(nn.Module):
             self.activation,
         )
 
-        if self.use_latest_skip:
-            self.latest_skip = nn.Linear(feature_dim, output_hdim)
-            self.latest_skip_scale = nn.Parameter(torch.tensor(0.1))
-        else:
-            self.latest_skip = None
+        self.latest_skip = nn.Linear(feature_dim, output_hdim)
+        self.latest_skip_scale = nn.Parameter(torch.tensor(0.1))
         
         self.mean_h1 = nn.Linear(output_hdim, output_hdim)
         self.logvar_h1 = nn.Linear(output_hdim, output_hdim)
@@ -784,12 +779,11 @@ class ConvDepthSequenceEncoder(nn.Module):
 
         # Optional: initialize the skip more conservatively so it does not
         # dominate the temporal branch at the start of training.
-        if self.latest_skip is not None:
-            nn.init.xavier_uniform_(self.latest_skip.weight, gain=0.5)
-            if self.latest_skip.bias is not None:
-                nn.init.zeros_(self.latest_skip.bias)
+        nn.init.xavier_uniform_(self.latest_skip.weight, gain=0.5)
+        if self.latest_skip.bias is not None:
+            nn.init.zeros_(self.latest_skip.bias)
 
-    def encode(self, x: torch.Tensor):
+    def encode(self, x: torch.Tensor, logar_latest: torch.Tensor):
         """
         x: B x T x feature_dim
         """
@@ -804,12 +798,14 @@ class ConvDepthSequenceEncoder(nn.Module):
 
         temporal_latent = self.fc(h)
 
-        if self.latest_skip is not None:
-            latest_latent = self.latest_skip(latest_depth_latent)
-            latent = temporal_latent + self.latest_skip_scale * latest_latent
-            latent = self.activation(latent)
-        else:
-            latent = temporal_latent
+        latest_conf_mask = 1.0 - torch.tanh(self.conf_mask_scale, torch.exp(0.5*logar_latest))
+        latest_conf_mask = torch.clamp(latest_conf_mask, min=self.conf_min, max=1.0)
+        masked_latest_latent = latest_depth_latent * latest_conf_mask
+        latest_latent = self.latest_skip(masked_latest_latent)
+        
+        # latest_latent = self.latest_skip(latest_depth_latent)
+        latent = temporal_latent + self.latest_skip_scale * latest_latent
+        latent = self.activation(latent)
         
         mean_h1 = self.activation(self.mean_h1(latent))
         logvar_h1 = self.activation(self.logvar_h1(latent))
@@ -819,17 +815,14 @@ class ConvDepthSequenceEncoder(nn.Module):
 
         return mean, logvar
 
-    def forward(self, x: torch.Tensor):
-        mean, logvar = self.encode(x)
+    def forward(self, x: torch.Tensor, latest_logvar: torch.Tensor):
+        mean, logvar = self.encode(x, latest_logvar)
 
-        if self.use_vae and self.training:
-            z = reparameterize(mean, logvar)
-        else:
-            z = mean
+        z = reparameterize(mean, logvar)
 
         return mean, logvar, z
 
     @torch.no_grad()
-    def forward_inference(self, x: torch.Tensor):
-        mean, _ = self.encode(x)
+    def forward_inference(self, x: torch.Tensor, latest_logvar: torch.Tensor):
+        mean, _ = self.encode(x, latest_logvar)
         return mean
