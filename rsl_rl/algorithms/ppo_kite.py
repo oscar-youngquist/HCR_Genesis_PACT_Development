@@ -1000,20 +1000,18 @@ class PPO_KITE:
         self.enc_optimizer.step()
 
     def _depth_frame_autoencoder_update(self, depth_images_batch, depth_torso_state_batch, mask):
-        self.actor_critic.depth_frame_encoder.train()
-        self.actor_critic.depth_frame_decoder.train()
+        self.actor_critic.depth_frame_autoencoder.train()
         self.depth_frame_optimizer.zero_grad(set_to_none=True)
         
         # Keep the depth-frame autoencoder in fp32. Its decoder computes a
-        # pseudo-inverse transform, and mixing bf16 activations with fp32 pinv
-        # outputs can fail during backward.
-        depth_mean, depth_logvar, latest_depth_z, depth_aux = self.actor_critic.depth_frame_encoder(
+        # reciprocal transform, and mixing bf16 activations with fp32 geometry
+        # outputs can fail during backward. The training-only wrapper exposes
+        # U-Net reconstruction skips while preserving z as the policy bottleneck.
+        depth_recon, depth_mean, depth_logvar, latest_depth_z, depth_aux = self.actor_critic.depth_frame_autoencoder(
             depth_images_batch,
             depth_torso_state_batch,
         )
-
         transform_matrices = depth_aux["transform_matrices"].float()
-        depth_recon, _ = self.actor_critic.depth_frame_decoder(latest_depth_z, transform_matrices)
         
         # Composite reconstruction loss: pixel L1 + depth-gradient loss +
         # SSIM loss. Each component averages only across non-terminated

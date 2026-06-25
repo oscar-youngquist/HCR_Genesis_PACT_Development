@@ -7,13 +7,15 @@ from typing import Tuple, List, Dict, Any
 import math
 
 from .module_utils import (
+    MLPMixerBlock,
     get_activation,
     SmoothClampLayer
 )
 
-class MultimodalGatedFusionVAE(nn.Module):
+
+class MultimodalMixerVAE(nn.Module):
     """
-    Variational gated-fusion module for fusing depth and proprioceptive latents.
+    Variational two-token MLP-Mixer for fusing depth and proprioceptive latents.
 
     Inputs:
         z_depth_seq:
@@ -23,16 +25,29 @@ class MultimodalGatedFusionVAE(nn.Module):
             B x proprio_latent_dim
 
     The two modality latents are first normalized independently with LayerNorm,
-    then projected into a shared hidden dimension:
+    then projected into a shared hidden dimension and stacked as two modality
+    tokens:
 
         LayerNorm(z_depth_seq) -> depth projection   -> B x hidden_dim
         LayerNorm(z_proprio)   -> proprio projection -> B x hidden_dim
 
-    A learned feature-wise gate determines how much to use depth vs proprio:
+        tokens = [depth_token, proprio_token]
 
-        gate = sigmoid(W [depth_token, proprio_token])
+        B x 2 x hidden_dim
 
-        fused = gate * depth_token + (1 - gate) * proprio_token
+    The architecture is:
+
+        B x 2 x hidden_dim
+            -> MLP-Mixer block
+            -> MLP-Mixer block
+            -> modality-token pooling
+            -> VAE-style mean/logvar heads
+
+    Token mixing:
+        mixes information between the depth and proprioceptive modalities.
+
+    Channel mixing:
+        mixes within each modality token's hidden representation.
 
     Output:
         mean:
@@ -47,14 +62,17 @@ class MultimodalGatedFusionVAE(nn.Module):
 
     def __init__(
         self,
-        depth_latent_dim: int = 32,
+        depth_latent_dim: int = 16,
         proprio_latent_dim: int = 16,
-        hidden_dims = [128, 64],
+        hidden_dim: int = 64,
+        num_mixer_blocks: int = 2,
+        token_mlp_dim: int = 16,
+        channel_mlp_dim: int = 128,
         output_dim: int = 16,
-        velo_dim: int = 3,
-        feet_state_dim: int = 20,
-        velo_hidden: int = 32,
-        feet_hidden: int = 32,
+        velo_dim: int = 3,           # [v_x, v_y, v_x] - estimated torso velocity for current time-step
+        feet_state_dim: int = 20,    # [feet_contact_state (4), feet_height (4), surface_norm_under_feet (4x3=12)]
+        velo_hidden: int = 64,
+        feet_hidden: int = 64,
         activation: str = "elu",
         use_layer_norm: bool = True,
         std_min: float = 0.01,
@@ -65,7 +83,11 @@ class MultimodalGatedFusionVAE(nn.Module):
 
         self.depth_latent_dim = depth_latent_dim
         self.proprio_latent_dim = proprio_latent_dim
+        self.hidden_dim = hidden_dim
         self.num_tokens = 2
+        self.num_mixer_blocks = num_mixer_blocks
+        self.token_mlp_dim = token_mlp_dim
+        self.channel_mlp_dim = channel_mlp_dim
         self.output_dim = output_dim
         self.activation_name = activation
         self.use_layer_norm = use_layer_norm
@@ -75,38 +97,52 @@ class MultimodalGatedFusionVAE(nn.Module):
 
         # ------------------------------------------------------------------
         # Per-modality input normalization.
+        #
+        # These normalize each latent before projecting into the shared
+        # multimodal token space. This helps prevent one modality from
+        # dominating purely because its latent scale is larger.
         # ------------------------------------------------------------------
         self.depth_input_norm = nn.LayerNorm(depth_latent_dim)
         self.proprio_input_norm = nn.LayerNorm(proprio_latent_dim)
 
         # ------------------------------------------------------------------
-        # Modality-specific projections into a shared embedding space.
+        # Modality-specific projections into a shared token embedding space.
         # ------------------------------------------------------------------
-        self.depth_projection = nn.Linear(depth_latent_dim, hidden_dims[0])
-        self.proprio_projection = nn.Linear(proprio_latent_dim, hidden_dims[0])
+        self.depth_projection = nn.Linear(depth_latent_dim, hidden_dim)
+        self.proprio_projection = nn.Linear(proprio_latent_dim, hidden_dim)
+
+        # Optional learned modality embeddings. These let the mixer distinguish
+        # the depth token from the proprioceptive token even after projection.
+        self.modality_embedding = nn.Parameter(
+            torch.zeros(1, self.num_tokens, hidden_dim)
+        )
 
         # ------------------------------------------------------------------
-        # Gated fusion trunk.
-        #
-        # fused = gate * depth + (1 - gate) * proprio
+        # Two-token MLP-Mixer trunk.
         # ------------------------------------------------------------------
-        self.gate_fc = nn.Linear(2 * hidden_dims[0], hidden_dims[0])
+        self.mixer_blocks = nn.ModuleList(
+            [
+                MLPMixerBlock(
+                    num_tokens=self.num_tokens,
+                    hidden_dim=hidden_dim,
+                    token_mlp_dim=token_mlp_dim,
+                    channel_mlp_dim=channel_mlp_dim,
+                    activation=activation,
+                    use_layer_norm=use_layer_norm,
+                )
+                for _ in range(num_mixer_blocks)
+            ]
+        )
 
-        self.final_norm = nn.LayerNorm(hidden_dims[0]) if use_layer_norm else nn.Identity()
+        self.final_norm = nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity()
 
         # ------------------------------------------------------------------
         # Fused latent trunk.
         # ------------------------------------------------------------------
-        fusion_layers = []
-        
-        for l in range(len(hidden_dims)-1):
-            fusion_layers.append(nn.Linear(hidden_dims[l], hidden_dims[l+1]))
-            fusion_layers.append(get_activation(activation))
-        
-        fusion_layers.append(nn.Linear(hidden_dims[-1], 2 * output_dim))
-        fusion_layers.append(get_activation(activation))
-
-        self.fusion_fc  = nn.Sequential(*fusion_layers)
+        self.fusion_fc = nn.Sequential(
+            nn.Linear(hidden_dim, 2 * output_dim),
+            self.activation,
+        )
 
         self.latmean_h = nn.Linear(2 * output_dim, 2 * output_dim)
         self.latvar_h = nn.Linear(2 * output_dim, 2 * output_dim)
@@ -115,14 +151,11 @@ class MultimodalGatedFusionVAE(nn.Module):
 
         self.out_logvar = nn.Sequential(
             nn.Linear(2 * output_dim, output_dim),
-            SmoothClampLayer(
-                min_val=2.0 * math.log(std_min),
-                max_val=2.0 * math.log(std_max),
-            ),
+            SmoothClampLayer(min_val=2.0*math.log(std_min), max_val=2.0*math.log(std_max)),
         )
 
         # ------------------------------------------------------------------
-        # State estimation heads.
+        # State estimation heads
         # ------------------------------------------------------------------
         self.velo_est_hidden = nn.Linear(output_dim, velo_hidden)
         self.velo_est_out = nn.Linear(velo_hidden, velo_dim)
@@ -141,18 +174,13 @@ class MultimodalGatedFusionVAE(nn.Module):
             Kaiming uniform with leaky_relu gain approximation.
 
         Mean/logvar output heads:
-            Mean initialized near zero.
-            Logvar initialized near zero, corresponding to std near one.
+            Kaiming uniform with linear nonlinearity.
 
         LayerNorm:
             weight = 1, bias = 0.
 
         Modality embedding:
             Small normal initialization.
-
-        Gating:
-            Initialized to produce gate < 0.5, so the initial fusion is
-            slightly weight towards proprioception during early training.
         """
 
         # Modality input norms.
@@ -171,16 +199,8 @@ class MultimodalGatedFusionVAE(nn.Module):
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
 
-        # Gating layer.
-        #
-        # Because:
-        #     fused = gate * depth + (1 - gate) * proprio
-        #
-        # a negative gate bias makes the initial gate < 0.5, causing the model
-        # to initially rely more on proprioception than depth.
-        nn.init.zeros_(self.gate_fc.weight)
-        if self.gate_fc.bias is not None:
-            nn.init.constant_(self.gate_fc.bias, -1.0)
+        # Small modality identity embeddings.
+        nn.init.normal_(self.modality_embedding, mean=0.0, std=0.02)
 
         # Fusion trunk.
         for module in self.fusion_fc:
@@ -205,14 +225,40 @@ class MultimodalGatedFusionVAE(nn.Module):
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
 
+        # Mean output head.
+        # nn.init.kaiming_uniform_(
+        #     self.out_mean.weight,
+        #     a=1.0,
+        #     mode="fan_in",
+        #     nonlinearity="linear",
+        # )
+        # if self.out_mean.bias is not None:
+        #     nn.init.zeros_(self.out_mean.bias)
+
         # Initialize near zero so the initial posterior mean is close to the
         # N(0, I) prior. This keeps the initial KL_mu term small.
         nn.init.normal_(self.out_mean.weight, mean=0.0, std=1.0e-3)
         if self.out_mean.bias is not None:
             nn.init.zeros_(self.out_mean.bias)
 
+        # # Logvar output head.
+        # for module in self.out_logvar:
+        #     if isinstance(module, nn.Linear):
+        #         nn.init.kaiming_uniform_(
+        #             module.weight,
+        #             a=1.0,
+        #             mode="fan_in",
+        #             nonlinearity="linear",
+        #         )
+        #         if module.bias is not None:
+        #             nn.init.zeros_(module.bias)
+
         # Initialize the variance branch to output near-zero logvar, i.e.
         # std ≈ 1, so the initial KL contribution is near zero.
+        #
+        # Important: because SmoothClampLayer uses a sigmoid bound, logvar = 0
+        # may be the upper asymptote when std_max == 1.0, so we target a small
+        # negative value instead.
         smooth_bound = self.out_logvar[1]
         min_logvar = smooth_bound.min_val
         max_logvar = smooth_bound.max_val
@@ -233,7 +279,7 @@ class MultimodalGatedFusionVAE(nn.Module):
         if self.out_logvar[0].bias is not None:
             nn.init.constant_(self.out_logvar[0].bias, init_raw_logvar_bias)
 
-        # All LayerNorm layers.
+        # All LayerNorm layers, including those inside mixer blocks.
         for module in self.modules():
             if isinstance(module, nn.LayerNorm):
                 nn.init.ones_(module.weight)
@@ -344,28 +390,31 @@ class MultimodalGatedFusionVAE(nn.Module):
         depth_token = self.activation(self.depth_projection(z_depth_seq))
         proprio_token = self.activation(self.proprio_projection(z_proprio))
 
-        ##
-        # Feature-wise gated fusion.
-        ##
-        # gate close to 1.0 -> rely more on depth
-        # gate close to 0.0 -> rely more on proprioception
-        gate_input = torch.cat([depth_token, proprio_token], dim=-1)
-        gate = torch.sigmoid(self.gate_fc(gate_input))
+        # B x hidden_dim -> B x 1 x hidden_dim
+        depth_token = depth_token.unsqueeze(1)
+        proprio_token = proprio_token.unsqueeze(1)
 
-        # Perform gated fusion 
-        x = gate * depth_token + (1.0 - gate) * proprio_token
-        
-        # normalize fused results
+        # B x 2 x hidden_dim
+        x = torch.cat([depth_token, proprio_token], dim=1)
+
+        # Add learned modality identity embeddings.
+        x = x + self.modality_embedding
+
+        # Mixer trunk.
+        for block in self.mixer_blocks:
+            x = block(x)
+
         x = self.final_norm(x)
 
-        # run through fusion backbone
+        # Pool across the two modality tokens:
+        # B x 2 x hidden_dim -> B x hidden_dim
+        x = x.mean(dim=1)
+
         x = self.fusion_fc(x)
 
-        # run log-variance head
         lat_mean = self.activation(self.latmean_h(x))
         lat_var = self.activation(self.latvar_h(x))
 
-        # run mean head
         mean = self.out_mean(lat_mean)
         logvar = self.out_logvar(lat_var)
 
@@ -452,8 +501,8 @@ class MultimodalGatedFusionVAE(nn.Module):
                 B x output_dim
         """
         mean, _ = self.encode(z_depth_seq, z_proprio)
-
+        
         body_velo_est = self.velo_est_out(self.activation(self.velo_est_hidden(mean)))
         feet_state_est = self.feet_est_out(self.activation(self.feet_est_hidden(mean)))
-
+        
         return mean, body_velo_est, feet_state_est

@@ -8,12 +8,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .kite_modality_mixer_encoder import MultimodalMixerVAE
+from .kite_modality_mixer_encoder import MultimodalGatedFusionVAE
 from .kite_proprio_encoder import ProprioContextMLPMixerKITE
 from .kite_visual_encoder import (
     ConvDepthSequenceEncoder,
     MotionRobustDepthEncoder,
     MotionRobustDepthDecoder,
+    MotionRobustDepthAutoencoderUNet,
 )
 from .module_utils import get_activation, ReconDimensionProjectionHead
 
@@ -162,10 +163,9 @@ class ActorCritic_KITE(nn.Module):
                  mixer_feet_state_dim=20,            # [feet-contact-state (4), feet-height (4), surface-normal under feet (12)]
                  mixer_latent_dim=32,
                  mixer_use_norm=True,
-                 mixer_mixer_blocks=2,
-                 mixer_hidden_dim=128,
-                 mixer_token_dim=128,
-                 mixer_channel_dim=256,
+                 mixer_hidden_dims=(128, 64),
+                 mixer_velo_hidden=32,
+                 mixer_feet_hidden=32,
                  mixer_std_min=0.01,
                  mixer_std_max=1.5,
                  privileged_terrain_latent_dim=32,
@@ -236,6 +236,15 @@ class ActorCritic_KITE(nn.Module):
             target_latent_dim=self.depth_latent_dim,
             cnn_activation=activation,
             norm_type=depth_decoder_norm,
+            use_unet_skips=True,
+        )
+
+        # Training-only reconstruction wrapper. It reuses the standalone
+        # encoder/decoder modules above, so deployment can still export only
+        # the encoder while PPO can train with U-Net-style reconstruction skips.
+        self.depth_frame_autoencoder = MotionRobustDepthAutoencoderUNet(
+            self.depth_frame_encoder,
+            self.depth_frame_decoder,
         )
         
         # Depth-image latent sequence encoder
@@ -250,17 +259,16 @@ class ActorCritic_KITE(nn.Module):
         )
         
         # Modality mixer encoder
-        self.context_encoder = MultimodalMixerVAE(
+        self.context_encoder = MultimodalGatedFusionVAE(
             depth_latent_dim=self.depth_latent_dim,
             proprio_latent_dim=proprio_latent_dim,
+            hidden_dims=list(mixer_hidden_dims),
             output_dim=mixer_latent_dim,
             velo_dim=mixer_velo_dim,
             feet_state_dim=mixer_feet_state_dim,
+            velo_hidden=mixer_velo_hidden,
+            feet_hidden=mixer_feet_hidden,
             activation=activation,
-            hidden_dim=mixer_hidden_dim,
-            token_mlp_dim=mixer_token_dim,
-            channel_mlp_dim=mixer_channel_dim,
-            num_mixer_blocks=mixer_mixer_blocks,
             use_layer_norm=mixer_use_norm,
             std_min=mixer_std_min,
             std_max=mixer_std_max,

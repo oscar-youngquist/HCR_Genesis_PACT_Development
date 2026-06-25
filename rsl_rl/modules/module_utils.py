@@ -345,6 +345,41 @@ class ConvNormAct(nn.Module):
     def forward(self, x):
         return self.block(x)
 
+class Conv1dNormAct(nn.Module):
+    """
+    1D convolution block with configurable normalization.
+
+    Default:
+        Conv1d -> Identity -> activation
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        activation: nn.Module,
+        norm_type: str = "none",
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 0,
+    ):
+        super().__init__()
+
+        self.block = nn.Sequential(
+            nn.Conv1d(
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+            ),
+            make_1d_norm(norm_type, out_channels),
+            activation,
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
 
 # --------------------------------------------------------------------------
 # Optional contrastive projection head
@@ -361,7 +396,6 @@ class ContrastiveProjectionHead(nn.Module):
         self,
         input_dim: int,
         projection_dim: int = 32,
-        hidden_dim: int = 64,
         activation: str = "elu",
     ):
         super().__init__()
@@ -369,9 +403,8 @@ class ContrastiveProjectionHead(nn.Module):
         act = get_activation(activation)
 
         self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
             act,
-            nn.Linear(hidden_dim, projection_dim),
+            nn.Linear(input_dim, projection_dim),
         )
 
         self._initialize_weights()

@@ -7,52 +7,12 @@ import torch.nn.functional as F
 
 from .module_utils import (
     ConvNormAct,
+    Conv1dNormAct,
+    make_1d_norm,
     EfficientMultiHeadAttention,
     get_activation,
-    make_1d_norm,
     SmoothClampLayer,
 )
-
-
-# --------------------------------------------------------------------------
-# Helper blocks
-# --------------------------------------------------------------------------
-
-class Conv1dNormAct(nn.Module):
-    """
-    1D convolution block with configurable normalization.
-
-    Default:
-        Conv1d -> Identity -> activation
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        activation: nn.Module,
-        norm_type: str = "none",
-        kernel_size: int = 3,
-        stride: int = 1,
-        padding: int = 0,
-    ):
-        super().__init__()
-
-        self.block = nn.Sequential(
-            nn.Conv1d(
-                in_channels,
-                out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-            ),
-            make_1d_norm(norm_type, out_channels),
-            activation,
-        )
-
-    def forward(self, x):
-        return self.block(x)
-
 
 def reparameterize(mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     """
@@ -68,7 +28,6 @@ def reparameterize(mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
 # --------------------------------------------------------------------------
 # Motion-robust depth image encoder
 # --------------------------------------------------------------------------
-
 class MotionRobustDepthEncoder(nn.Module):
     """
     Encodes a single depth image into a latent vector.
@@ -154,10 +113,21 @@ class MotionRobustDepthEncoder(nn.Module):
 
         self.global_query = nn.Parameter(torch.randn(1, 1, 32))
 
+        # Attention pooling returns B x C, not a Conv1d-style B x C x L
+        # tensor. Use ordinary LayerNorm for that vector case while preserving
+        # the existing BatchNorm/GroupNorm behavior for other norm choices.
+        self.att_norm = (
+            nn.LayerNorm(32)
+            if norm_type.lower() == "layer"
+            else make_1d_norm(norm_type=norm_type, num_channels=32)
+        )
+
         output_hdim = 2 * target_latent_dim
 
         self.fc = nn.Sequential(
             nn.Linear(32, output_hdim),
+            self.activation,
+            nn.Linear(output_hdim, output_hdim),
             self.activation,
         )        
         
@@ -215,6 +185,11 @@ class MotionRobustDepthEncoder(nn.Module):
         if self.logvar_out[0].bias is not None:
             nn.init.constant_(self.logvar_out[0].bias, init_raw_logvar_bias)
 
+        # LayerNorm layers.
+        for module in self.modules():
+            if isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
 
         # Initialize IMU projector to identity transform.
         final_imu_layer = self.imu_projector[-1]
@@ -265,7 +240,12 @@ class MotionRobustDepthEncoder(nn.Module):
         return stabilized_coords, transform_matrices
 
     
-    def encode(self, depth_image: torch.Tensor, torso_state: torch.Tensor):
+    def encode(
+        self,
+        depth_image: torch.Tensor,
+        torso_state: torch.Tensor,
+        return_unet_skips: bool = False,
+    ):
         batch_size = depth_image.size(0)
 
         stabilized_coords, transform_matrices = self.compute_motion_conditioned_coords(
@@ -275,12 +255,12 @@ class MotionRobustDepthEncoder(nn.Module):
 
         x = torch.cat([depth_image, stabilized_coords], dim=1)
 
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
+        x1 = self.conv1(x)
+        x2 = self.conv2(x1)
+        x3 = self.conv3(x2)
 
-        b, c, h, w = x.shape
-        spatial_sequence = x.view(b, c, h * w).transpose(1, 2)
+        b, c, h, w = x3.shape
+        spatial_sequence = x3.view(b, c, h * w).transpose(1, 2)
 
         q = self.global_query.expand(batch_size, -1, -1)
 
@@ -290,7 +270,8 @@ class MotionRobustDepthEncoder(nn.Module):
             value=spatial_sequence,
         )
 
-        attn_out = attn_out.squeeze(1)
+        attn_out = self.att_norm(attn_out.squeeze(1))
+
         latent = self.fc(attn_out)
 
         mean_h1 = self.activation(self.mean_h1(latent))
@@ -303,6 +284,15 @@ class MotionRobustDepthEncoder(nn.Module):
             "attention_weights": attn_weights,
             "transform_matrices": transform_matrices,
         }
+        if return_unet_skips:
+            # These features are only requested by the training-only depth
+            # autoencoder wrapper. The normal actor/deployment path never asks
+            # for them, so the policy still consumes only the compact latent z.
+            aux["unet_skips"] = {
+                "skip_6_8": x3,
+                "skip_12_16": x2,
+                "skip_24_32": x1,
+            }
 
         return mean, logvar, aux
     
@@ -343,8 +333,17 @@ class MotionRobustDepthEncoder(nn.Module):
 
         return mean, logvar
 
-    def forward(self, depth_image: torch.Tensor, torso_state: torch.Tensor):
-        mean, logvar, aux = self.encode(depth_image, torso_state)
+    def forward(
+        self,
+        depth_image: torch.Tensor,
+        torso_state: torch.Tensor,
+        return_unet_skips: bool = False,
+    ):
+        mean, logvar, aux = self.encode(
+            depth_image,
+            torso_state,
+            return_unet_skips=return_unet_skips,
+        )
 
         if self.use_vae and self.training:
             z = reparameterize(mean, logvar)
@@ -362,7 +361,6 @@ class MotionRobustDepthEncoder(nn.Module):
 # --------------------------------------------------------------------------
 # Motion-robust depth decoder
 # --------------------------------------------------------------------------
-
 class MotionRobustDepthDecoder(nn.Module):
     """
     Decodes a latent vector back into a reconstructed depth image.
@@ -377,11 +375,15 @@ class MotionRobustDepthDecoder(nn.Module):
         target_latent_dim: int = 16,
         cnn_activation: str = "elu",
         norm_type: str = "none",
+        use_unet_skips: bool = False,
+        unet_skip_scale: float = 0.1,
     ):
         super().__init__()
 
         self.depth_image_resolution = depth_image_resolution
         self.norm_type = norm_type
+        self.use_unet_skips = use_unet_skips
+        self.unet_skip_scale = unet_skip_scale
 
         in_height, in_width = depth_image_resolution
         self.activation = get_activation(cnn_activation)
@@ -439,6 +441,18 @@ class MotionRobustDepthDecoder(nn.Module):
             stride=1,
             padding=1,
         )
+
+        if self.use_unet_skips:
+            # Residual skip adapters let the training-only autoencoder refine
+            # reconstructions with encoder feature maps while preserving the
+            # existing z -> decoder path as the primary bottleneck path.
+            self.skip_6_8 = nn.Conv2d(32, 32, kernel_size=1)
+            self.skip_12_16 = nn.Conv2d(16, 16, kernel_size=1)
+            self.skip_24_32 = nn.Conv2d(8, 8, kernel_size=1)
+        else:
+            self.skip_6_8 = None
+            self.skip_12_16 = None
+            self.skip_24_32 = None
 
         self._initialize_weights()
 
@@ -519,7 +533,31 @@ class MotionRobustDepthDecoder(nn.Module):
             "transform_matrices": decode_transform_matrices,
         }
 
-    def forward(self, z: torch.Tensor, transform_matrices: torch.Tensor):
+    def _apply_unet_skip(
+        self,
+        x: torch.Tensor,
+        unet_skips,
+        key: str,
+        projection: nn.Module,
+    ) -> torch.Tensor:
+        if not self.use_unet_skips or unet_skips is None or key not in unet_skips:
+            return x
+        skip = projection(unet_skips[key])
+        if skip.shape[-2:] != x.shape[-2:]:
+            skip = F.interpolate(
+                skip,
+                size=x.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+        return x + self.unet_skip_scale * skip
+
+    def forward(
+        self,
+        z: torch.Tensor,
+        transform_matrices: torch.Tensor,
+        unet_skips=None,
+    ):
         batch_size = z.size(0)
 
         coord_dict = self.compute_motion_conditioned_coords(batch_size, transform_matrices)
@@ -530,14 +568,17 @@ class MotionRobustDepthDecoder(nn.Module):
 
         x = torch.cat([x, coord_dict["coords_6_8"]], dim=1)
         x = self.conv_6_8(x)
+        x = self._apply_unet_skip(x, unet_skips, "skip_6_8", self.skip_6_8)
 
         x = F.interpolate(x, size=(12, 16), mode="nearest")
         x = torch.cat([x, coord_dict["coords_12_16"]], dim=1)
         x = self.conv_12_16(x)
+        x = self._apply_unet_skip(x, unet_skips, "skip_12_16", self.skip_12_16)
 
         x = F.interpolate(x, size=(24, 32), mode="nearest")
         x = torch.cat([x, coord_dict["coords_24_32"]], dim=1)
         x = self.conv_24_32(x)
+        x = self._apply_unet_skip(x, unet_skips, "skip_24_32", self.skip_24_32)
 
         height, width = self.depth_image_resolution
         x = F.interpolate(x, size=(height, width), mode="nearest")
@@ -548,6 +589,50 @@ class MotionRobustDepthDecoder(nn.Module):
         return reconstructed_depth_image, {
             "transform_matrices": coord_dict["transform_matrices"],
         }
+
+
+class MotionRobustDepthAutoencoderUNet(nn.Module):
+    """Training-only depth autoencoder with optional U-Net-style refinement.
+
+    The encoder and decoder remain standalone modules. This wrapper only
+    coordinates their joint training path: the encoder still produces the
+    policy-facing latent z, and skip features are exposed only to improve the
+    reconstruction objective during training.
+    """
+
+    def __init__(
+        self,
+        encoder: MotionRobustDepthEncoder,
+        decoder: MotionRobustDepthDecoder,
+    ):
+        super().__init__()
+        if not getattr(decoder, "use_unet_skips", False):
+            raise ValueError(
+                "MotionRobustDepthAutoencoderUNet requires a "
+                "MotionRobustDepthDecoder constructed with use_unet_skips=True."
+            )
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def forward(self, depth_image: torch.Tensor, torso_state: torch.Tensor):
+        mean, logvar, z, enc_aux = self.encoder(
+            depth_image,
+            torso_state,
+            return_unet_skips=True,
+        )
+        transform_matrices = enc_aux["transform_matrices"]
+        reconstructed_depth, dec_aux = self.decoder(
+            z,
+            transform_matrices,
+            unet_skips=enc_aux.get("unet_skips"),
+        )
+
+        aux = {
+            "encoder": enc_aux,
+            "decoder": dec_aux,
+            "transform_matrices": transform_matrices,
+        }
+        return reconstructed_depth, mean, logvar, z, aux
 
 
 # --------------------------------------------------------------------------
@@ -631,6 +716,8 @@ class ConvDepthSequenceEncoder(nn.Module):
 
         self.fc = nn.Sequential(
             nn.Linear(current_channels, output_hdim),
+            self.activation,
+            nn.Linear(output_hdim, output_hdim),
             self.activation,
         )
 

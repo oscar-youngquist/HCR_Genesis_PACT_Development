@@ -683,6 +683,9 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         proprio_std_max = 1.5
         mixer_std_min = 0.01
         mixer_std_max = 1.5
+        mixer_hidden_dims = [128, 64]
+        mixer_velo_hidden = 32
+        mixer_feet_hidden = 32
         privileged_terrain_latent_dim = 16
         privileged_dynamics_latent_dim = 16
 
