@@ -197,12 +197,18 @@ class ProprioContextMLPMixerKITE(nn.Module):
                 nn.init.zeros_(layer.bias)
 
         # Mean output head.
-        nn.init.kaiming_uniform_(
-            self.ce_out_mean.weight,
-            a=1.0,
-            mode="fan_in",
-            nonlinearity="linear",
-        )
+        # nn.init.kaiming_uniform_(
+        #     self.ce_out_mean.weight,
+        #     a=1.0,
+        #     mode="fan_in",
+        #     nonlinearity="linear",
+        # )
+        # if self.ce_out_mean.bias is not None:
+        #     nn.init.zeros_(self.ce_out_mean.bias)
+
+        # Initialize near zero so the initial posterior mean is close to the
+        # N(0, I) prior. This keeps the initial KL_mu term small.
+        nn.init.normal_(self.ce_out_mean.weight, mean=0.0, std=1.0e-3)
         if self.ce_out_mean.bias is not None:
             nn.init.zeros_(self.ce_out_mean.bias)
 
@@ -217,6 +223,29 @@ class ProprioContextMLPMixerKITE(nn.Module):
                 )
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+
+        # Important: because SmoothClampLayer uses a sigmoid bound, logvar = 0
+        # may be the upper asymptote when std_max == 1.0, so we target a small
+        # negative value instead.
+        smooth_bound = self.ce_out_var[1]
+        min_logvar = smooth_bound.min_val
+        max_logvar = smooth_bound.max_val
+
+        target_logvar = -0.05  # std ≈ exp(-0.025) ≈ 0.975, KL near zero
+
+        p = (target_logvar - min_logvar) / (max_logvar - min_logvar)
+        p = min(max(p, 1.0e-6), 1.0 - 1.0e-6)
+        init_raw_logvar_bias = math.log(p / (1.0 - p))
+
+        # Make the hidden logvar branch initially neutral.
+        nn.init.zeros_(self.ce_latvar_h.weight)
+        if self.ce_latvar_h.bias is not None:
+            nn.init.zeros_(self.ce_latvar_h.bias)
+
+        # Make the final raw-logvar head output a constant near unit std.
+        nn.init.zeros_(self.ce_out_var[0].weight)
+        if self.ce_out_var[0].bias is not None:
+            nn.init.constant_(self.ce_out_var[0].bias, init_raw_logvar_bias)
 
         # LayerNorm layers.
         for module in self.modules():

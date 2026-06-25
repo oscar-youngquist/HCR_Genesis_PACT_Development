@@ -402,8 +402,8 @@ class ActorCritic_KITE(nn.Module):
             raise ValueError(f"Parameters not categorized: {missing_params}")
         # print(f"Parameters with extra strong weight decay{special_decay}")
 
-        params_act = [{"params": [param_dict[pn] for pn in sorted(actor_set)],  "weight_decay": 0.0, "name":"actor"},
-                      {"params": [param_dict[pn] for pn in sorted(critic_set)], "weight_decay": 0.0, "name":"critic"},
+        params_act = [{"params": [param_dict[pn] for pn in sorted(actor_set)],  "weight_decay":weight_decay, "name":"actor"},
+                      {"params": [param_dict[pn] for pn in sorted(critic_set)], "weight_decay":weight_decay, "name":"critic"},
                       {"params": [param_dict[pn] for pn in sorted(no_decay)],   "weight_decay": 0.0}]
         params_depth_frame = [
             {
@@ -417,7 +417,7 @@ class ActorCritic_KITE(nn.Module):
             name: [
                 {
                     "params": [param_dict[pn] for pn in sorted(param_names)],
-                    "weight_decay": weight_decay,
+                    "weight_decay": 1e-3,
                     "name": name,
                 }
             ]

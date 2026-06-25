@@ -53,6 +53,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         
         self._init_buffers()
         self._prepare_reward_function()
+        self._print_forward_only_command_env_count()
         self.init_done = True
 
     def get_observations(self):
@@ -167,6 +168,25 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         return self._cached_step_value(
             f"command_norm_{cols}",
             lambda: torch.norm(self.commands[:, :cols], dim=1),
+        )
+
+    def _lin_vel_tracking_error(self):
+        return self._cached_step_value(
+            "lin_vel_tracking_error",
+            lambda: torch.sum(
+                torch.square(
+                    self.commands[:, :2] - self.simulator.base_lin_vel[:, :2]
+                ),
+                dim=1,
+            ),
+        )
+
+    def _ang_vel_tracking_error(self):
+        return self._cached_step_value(
+            "ang_vel_tracking_error",
+            lambda: torch.square(
+                self.commands[:, 2] - self.simulator.base_ang_vel[:, 2]
+            ),
         )
 
     def _base_height_over_terrain(self):
@@ -599,6 +619,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
                                       * self.obs_scales.dof_pos,                              # joint pose            12
                                     self.simulator.dof_vel * self.obs_scales.dof_vel,         # joint velocity        12
                                     self.actions[:,0:12],                                     # joint pose actions    12
+                                    self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)),    # joint torque actions  12
                                     ), dim=-1)                                                # 57
 
         # add noise if needed
@@ -912,6 +933,21 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             (num_envs, 1),
             self.device,
         ).squeeze(1)
+
+    def _print_forward_only_command_env_count(self):
+        """Print how many envs use obstacle-focused forward-only commands."""
+        if self.num_envs == 0:
+            return
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        forward_only_mask = self._get_forward_only_command_mask(env_ids)
+        num_forward_only = int(forward_only_mask.sum().item())
+        percent = 100.0 * num_forward_only / max(1, self.num_envs)
+        print(
+            "KITE forward-only command envs: "
+            f"{num_forward_only}/{self.num_envs} ({percent:.1f}%) "
+            "will sample positive x velocity, zero y velocity, and minimal heading change.",
+            flush=True,
+        )
 
     def _build_forward_only_command_terrain_kind_ids(self, sim_device):
         """Return terrain generator branch ids that use obstacle-focused commands."""
@@ -2117,9 +2153,12 @@ class Go2KITE(KITEDepthMixin, BaseTask):
 
     def _reward_tracking_lin_vel(self):
         # Tracking of linear velocity commands (xy axes)
-        lin_vel_error = torch.sum(torch.square(
-            self.commands[:, :2] - self.simulator.base_lin_vel[:, :2]), dim=1)
+        lin_vel_error = self._lin_vel_tracking_error()
         return torch.exp(-4.0*lin_vel_error)
+
+    def _reward_tracking_lin_vel_penalty(self):
+        # Bounded penalty that grows as linear command tracking fails.
+        return 1.0 - self._reward_tracking_lin_vel()
 
     def _reward_dof_act_limits(self):
         actions_scaled = self._scaled_pos_actions()
@@ -2132,9 +2171,12 @@ class Go2KITE(KITEDepthMixin, BaseTask):
 
     def _reward_tracking_ang_vel(self):
         # Tracking of angular velocity commands (yaw)
-        ang_vel_error = torch.square(
-            self.commands[:, 2] - self.simulator.base_ang_vel[:, 2])
+        ang_vel_error = self._ang_vel_tracking_error()
         return torch.exp(-4.0*ang_vel_error)
+
+    def _reward_tracking_ang_vel_penalty(self):
+        # Bounded penalty that grows as yaw-rate command tracking fails.
+        return 1.0 - self._reward_tracking_ang_vel()
 
     def _reward_joint_power(self):
         # penalize large amounts of motor power
@@ -2464,3 +2506,20 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             self.simulator.dof_pos[:, hip_joint_indices] - 
             self.simulator.default_dof_pos[:, hip_joint_indices]), dim=-1)
         return dof_pos_error
+
+    def _reward_stumble(self):
+        """
+        Penalize feet colliding with vertical surfaces / obstacles during swing.
+        """
+
+        contact_forces = self.simulator.link_contact_forces[:, self.simulator.feet_indices, :]  # (N,4,3)
+
+        horizontal_force = torch.norm(contact_forces[:, :, :2], dim=2)
+        vertical_force = torch.abs(contact_forces[:, :, 2])
+
+        contact = vertical_force > 1.0
+        swing = (~contact).float()
+
+        stumble = (horizontal_force > 4.0 * vertical_force) & (horizontal_force > 5.0)
+
+        return torch.sum(swing * stumble.float(), dim=1)

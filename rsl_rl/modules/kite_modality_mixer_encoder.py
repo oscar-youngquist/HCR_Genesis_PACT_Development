@@ -151,7 +151,7 @@ class MultimodalMixerVAE(nn.Module):
 
         self.out_logvar = nn.Sequential(
             nn.Linear(2 * output_dim, output_dim),
-            nn.Hardtanh(min_val=2.0*math.log(std_min), max_val=2.0*math.log(std_max)),
+            SmoothClampLayer(min_val=2.0*math.log(std_min), max_val=2.0*math.log(std_max)),
         )
 
         # ------------------------------------------------------------------
@@ -226,26 +226,58 @@ class MultimodalMixerVAE(nn.Module):
                 nn.init.zeros_(layer.bias)
 
         # Mean output head.
-        nn.init.kaiming_uniform_(
-            self.out_mean.weight,
-            a=1.0,
-            mode="fan_in",
-            nonlinearity="linear",
-        )
+        # nn.init.kaiming_uniform_(
+        #     self.out_mean.weight,
+        #     a=1.0,
+        #     mode="fan_in",
+        #     nonlinearity="linear",
+        # )
+        # if self.out_mean.bias is not None:
+        #     nn.init.zeros_(self.out_mean.bias)
+
+        # Initialize near zero so the initial posterior mean is close to the
+        # N(0, I) prior. This keeps the initial KL_mu term small.
+        nn.init.normal_(self.out_mean.weight, mean=0.0, std=1.0e-3)
         if self.out_mean.bias is not None:
             nn.init.zeros_(self.out_mean.bias)
 
-        # Logvar output head.
-        for module in self.out_logvar:
-            if isinstance(module, nn.Linear):
-                nn.init.kaiming_uniform_(
-                    module.weight,
-                    a=1.0,
-                    mode="fan_in",
-                    nonlinearity="linear",
-                )
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
+        # # Logvar output head.
+        # for module in self.out_logvar:
+        #     if isinstance(module, nn.Linear):
+        #         nn.init.kaiming_uniform_(
+        #             module.weight,
+        #             a=1.0,
+        #             mode="fan_in",
+        #             nonlinearity="linear",
+        #         )
+        #         if module.bias is not None:
+        #             nn.init.zeros_(module.bias)
+
+        # Initialize the variance branch to output near-zero logvar, i.e.
+        # std ≈ 1, so the initial KL contribution is near zero.
+        #
+        # Important: because SmoothClampLayer uses a sigmoid bound, logvar = 0
+        # may be the upper asymptote when std_max == 1.0, so we target a small
+        # negative value instead.
+        smooth_bound = self.out_logvar[1]
+        min_logvar = smooth_bound.min_val
+        max_logvar = smooth_bound.max_val
+
+        target_logvar = -0.05  # std ≈ exp(-0.025) ≈ 0.975, KL near zero
+
+        p = (target_logvar - min_logvar) / (max_logvar - min_logvar)
+        p = min(max(p, 1.0e-6), 1.0 - 1.0e-6)
+        init_raw_logvar_bias = math.log(p / (1.0 - p))
+
+        # Make the hidden logvar branch initially neutral.
+        nn.init.zeros_(self.latvar_h.weight)
+        if self.latvar_h.bias is not None:
+            nn.init.zeros_(self.latvar_h.bias)
+
+        # Make the final raw-logvar head output a constant near unit std.
+        nn.init.zeros_(self.out_logvar[0].weight)
+        if self.out_logvar[0].bias is not None:
+            nn.init.constant_(self.out_logvar[0].bias, init_raw_logvar_bias)
 
         # All LayerNorm layers, including those inside mixer blocks.
         for module in self.modules():

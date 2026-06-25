@@ -5,8 +5,8 @@ class GO2KITECfg( LeggedRobotCfg ):
     
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
-        num_observations = 45
-        num_privileged_obs = 132
+        num_observations = 57
+        num_privileged_obs = 144
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 + 12 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -75,6 +75,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         
         # slope, random-rough, stairs-down, stairs-up, discrete, stepping-stone, gap (jump), pit (climb-up), high-platform (climb), platform+gap (climb and jump) 
         terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
+        terrain_proportions = [0.10, 0.10, 0.15, 0.15, 0.15, 0.00, 0.00, 0.15, 0.20, 0.00]
         # terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 0.20, 0.00, 0.00, 0.40, 0.40]
         simplify_mesh = True
         
@@ -420,15 +421,15 @@ class GO2KITECfg( LeggedRobotCfg ):
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
         roll_threshold    = 0.7  # [rad] ~ 40 degrees
-        pitch_threshold   = 1.0  # [rad] ~ 40 degrees
+        pitch_threshold   = 1.39  # [rad] ~ 80 degrees - larger to allow for climbing
         height_min = 0.20       # [m]
         height_max = 1.50       # [m]
 
         # Reset after a foot or the base falls into terrain marked as a deep void.
-        reset_unrecoverable_gaps = True
+        reset_unrecoverable_gaps = False
         gap_terrain_depth_threshold = 1.0  # void height below the environment origin [m]
-        gap_foot_drop_threshold = 0.25     # foot height below the environment origin [m]
-        gap_base_drop_threshold = 0.30     # base height below the environment origin [m]
+        gap_foot_drop_threshold = 0.75     # foot height below the environment origin [m]
+        gap_base_drop_threshold = 0.75     # base height below the environment origin [m]
         gap_min_fallen_feet = 1
         gap_reset_steps = 4
         gap_terrain_projection_max_distance = 1.5
@@ -468,9 +469,9 @@ class GO2KITECfg( LeggedRobotCfg ):
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
-            collision             = -10.0
+            collision             = -1.0
             dof_pos_limits        = -2.0
-            dof_close_to_default  = -0.01
+            dof_close_to_default  = -0.00
             torque_limits         = -0.0001
 
             alive_bonus           = 0.001
@@ -479,9 +480,13 @@ class GO2KITECfg( LeggedRobotCfg ):
             dof_pos_stand_still = -0.1
             # dof_vel_stand_still = -0.5
 
-            # command tracking
-            tracking_lin_vel  = 1.0
-            tracking_ang_vel  = 0.5
+            # Psuedo Potential rewards -> command tracking
+            #    positve pulls towards tracking
+            tracking_lin_vel  = 1.00
+            tracking_ang_vel  = 0.50
+            #    negative pushes away from not tracking
+            tracking_lin_vel_penalty = -0.5
+            tracking_ang_vel_penalty = -0.25
             
             dof_tracking      = 0.00
             aligned_torques   = 0.00
@@ -491,7 +496,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             lin_vel_z        = -1.0
             base_height      = -1.0
             ang_vel_xy       = -0.05
-            orientation      = -0.1
+            orientation      = -0.2
             dof_acc          = -2.0e-7
             joint_power      = -2.0e-5
             joint_power_dist = -1.0e-5
@@ -521,19 +526,19 @@ class GO2KITECfg( LeggedRobotCfg ):
             vhip_angular_acc = -0.001
 
             # Foot-placement limits
-            front_foot_overreach = -1000.0
+            front_foot_overreach = -10000.0
             rear_foot_overreach = -10.0
 
             # gait
-            feet_air_time    = 0.30            # tracking reward for long steps
+            feet_air_time    = 1.00            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.50  # tracking reward for feet reaching the desired clearance responsive to terrain height
-            hip_pos = -0.20
+            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height
+            hip_pos = -0.05
             
             foot_slip        = -0.01           # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_near_edge = -1.0
-            feet_spread_pairwise_axes = 0.0
+            stumble          = -0.2
 
             torso_force_wrench_ellipsoid = 0.2
             swing_vel_ellipsoid_terrain  = 0.1
@@ -576,12 +581,12 @@ class GO2KITECfg( LeggedRobotCfg ):
                                 ]
             
             curr_reward_bounds = {"torque_limits":[-1.0e-4,-1.0e-2],
-                                  "joint_power":[-2.0e-5, -2.0e-7],
-                                  "action_rate":[-0.01, -0.001],
-                                  "action_smoothness":[-0.01, -0.001],
-                                  "dof_acc":[-2.0e-7, -2.0e-8],
-                                  "torso_force_wrench_ellipsoid":[0.2, 0.6],
-                                  "swing_vel_ellipsoid_terrain":[0.1, 0.4]
+                                  "joint_power":[-2.0e-6, -2.0e-8],
+                                  "action_rate":[-0.001, -0.0001],
+                                  "action_smoothness":[-0.001, -0.0001],
+                                  "dof_acc":[-2.0e-8, -2.0e-10],
+                                  "torso_force_wrench_ellipsoid":[0.1, 0.35],
+                                  "swing_vel_ellipsoid_terrain":[0.05, 0.3]
                                  }
 
             curr_steps = 1000
@@ -604,7 +609,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         curriculum_min_episode_fraction = 0.25
         curriculum_update_interval_steps = 10000
 
-        lin_vel_x_step = 0.25
+        lin_vel_x_step = 0.50
         lin_vel_y_step = 0.05
         ang_vel_yaw_step = 0.25
         max_lin_vel_y = 0.30
@@ -629,7 +634,7 @@ class GO2KITECfg( LeggedRobotCfg ):
 class GO2KITECfgPPO( LeggedRobotCfgPPO ):
     seed = 1
     runner_class_name = "KITERunner" # Teacher-Student Runner
-    
+
     class policy( LeggedRobotCfgPPO.policy ):
         activation = 'elu' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid, swish (SiLU)
         init_noise_std = 1.00
@@ -656,24 +661,24 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # Depth Image/Sequence Models
         depth_image_latent_dim = 64
         depth_image_norm = "layer"
-        depth_image_std_min = 0.01
+        depth_image_std_min = 0.1
         depth_image_std_max = 2.0
-        depth_sequence_length = 5
+        depth_sequence_length = 3
         depth_sequence_norm = "layer"
-        depth_sequence_std_min = 0.01
-        depth_sequence_std_max = 1.5
+        depth_sequence_std_min = 0.1
+        depth_sequence_std_max = 1.0
         cnn_activation = 'elu'
-        
+
         # Proprioceptive Context encoder
-        proprio_in_dim = 450
+        proprio_in_dim = 570
         proprio_latent_dim = 32
         proprio_use_norm = True
         proprio_num_blocks = 2
-        proprio_hidden_dim = 64
-        proprio_token_dim = 64
+        proprio_hidden_dim = 128
+        proprio_token_dim = 128
         proprio_channel_dim = 128
-        proprio_std_min = 0.01
-        proprio_std_max = 1.5
+        proprio_std_min = 0.10
+        proprio_std_max = 1.0
 
         # Modality Mixer Network
         mixer_velo_dim = 3                   # torso velocity state [v_x, v_y, v_z]
@@ -681,18 +686,18 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         mixer_latent_dim = 64
         mixer_use_norm = True
         mixer_num_blocks = 2
-        mixer_hidden_dim = 64
-        mixer_token_dim = 64
+        mixer_hidden_dim = 128
+        mixer_token_dim = 128
         mixer_channel_dim = 128
-        mixer_std_min = 0.01
-        mixer_std_max = 1.5
+
+        mixer_std_min = 0.10
+        mixer_std_max = 1.0
 
         # Actor/critic
         actor_layers = [512,256,128]
         critic_layers = [512,256,128]
 
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
-        
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
@@ -746,7 +751,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         use_adaptive_kl_beta = True
         adaptive_kl_beta_delta = 0.05
         adaptive_kl_beta_ema_alpha = 0.05
-        depth_frame_kl_recon_target = 0.15
+        depth_frame_kl_recon_target = 0.10
         depth_frame_kl_beta_min = 1.0e-4
         depth_frame_kl_beta_max = 1.0e-1
        
@@ -760,12 +765,12 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         modality_terrain_weight  = 1.0    # terrain reconstruction loss
         modality_dynamics_weight = 1.0    # privliged obs reconstruction loss
         modality_explicit_weight = 1.0    # torso-velo + feet-state estimation reconstruction loss
-        versatility_weight = 0.1          # latent versatility loss
+        versatility_weight = 0.01         # latent versatility loss
         versatility_lambda_e = 1.0        # weight of KL-regularization on the versility loss
         
-        modality_pipeline_kl_weight = 0.5 # shared adaptive beta for seq/proprio/mixer KL
+        modality_pipeline_kl_weight = 1.0 # shared adaptive beta for seq/proprio/mixer KL
         modality_pipeline_kl_recon_target = 0.10
-        modality_pipeline_kl_beta_min = 0.1
+        modality_pipeline_kl_beta_min = 0.5
         modality_pipeline_kl_beta_max = 5.0
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.

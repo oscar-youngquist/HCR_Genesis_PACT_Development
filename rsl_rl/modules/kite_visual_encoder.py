@@ -186,6 +186,36 @@ class MotionRobustDepthEncoder(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
+        # Initialize near zero so the initial posterior mean is close to the
+        # N(0, I) prior. This keeps the initial KL_mu term small.
+        nn.init.normal_(self.mean_out.weight, mean=0.0, std=1.0e-3)
+        if self.mean_out.bias is not None:
+            nn.init.zeros_(self.mean_out.bias)
+
+        # Important: because SmoothClampLayer uses a sigmoid bound, logvar = 0
+        # may be the upper asymptote when std_max == 1.0, so we target a small
+        # negative value instead.
+        smooth_bound = self.logvar_out[1]
+        min_logvar = smooth_bound.min_val
+        max_logvar = smooth_bound.max_val
+
+        target_logvar = -0.05  # std ≈ exp(-0.025) ≈ 0.975, KL near zero
+
+        p = (target_logvar - min_logvar) / (max_logvar - min_logvar)
+        p = min(max(p, 1.0e-6), 1.0 - 1.0e-6)
+        init_raw_logvar_bias = math.log(p / (1.0 - p))
+
+        # Make the hidden logvar branch initially neutral.
+        nn.init.zeros_(self.logvar_h1.weight)
+        if self.logvar_h1.bias is not None:
+            nn.init.zeros_(self.logvar_h1.bias)
+
+        # Make the final raw-logvar head output a constant near unit std.
+        nn.init.zeros_(self.logvar_out[0].weight)
+        if self.logvar_out[0].bias is not None:
+            nn.init.constant_(self.logvar_out[0].bias, init_raw_logvar_bias)
+
+
         # Initialize IMU projector to identity transform.
         final_imu_layer = self.imu_projector[-1]
         nn.init.zeros_(final_imu_layer.weight)
@@ -368,14 +398,15 @@ class MotionRobustDepthDecoder(nn.Module):
         )
 
         h_dim = 32 * 6 * 8
+        h_dim_half = int((h_dim - target_latent_dim) / 2)
 
         self.fc = nn.Sequential(
-            nn.Linear(target_latent_dim,h_dim),
+            nn.Linear(target_latent_dim,h_dim_half),
             self.activation,
         )
         
         self.h1 = nn.Sequential(
-            nn.Linear(h_dim, h_dim),
+            nn.Linear(h_dim_half, h_dim),
             self.activation,
         )
 
@@ -632,6 +663,37 @@ class ConvDepthSequenceEncoder(nn.Module):
                 )
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+
+        # Initialize near zero so the initial posterior mean is close to the
+        # N(0, I) prior. This keeps the initial KL_mu term small.
+        nn.init.normal_(self.mean_out.weight, mean=0.0, std=1.0e-3)
+        if self.mean_out.bias is not None:
+            nn.init.zeros_(self.mean_out.bias)
+
+
+        # Important: because SmoothClampLayer uses a sigmoid bound, logvar = 0
+        # may be the upper asymptote when std_max == 1.0, so we target a small
+        # negative value instead.
+        smooth_bound = self.logvar_out[1]
+        min_logvar = smooth_bound.min_val
+        max_logvar = smooth_bound.max_val
+
+        target_logvar = -0.05  # std ≈ exp(-0.025) ≈ 0.975, KL near zero
+
+        p = (target_logvar - min_logvar) / (max_logvar - min_logvar)
+        p = min(max(p, 1.0e-6), 1.0 - 1.0e-6)
+        init_raw_logvar_bias = math.log(p / (1.0 - p))
+
+        # Make the hidden logvar branch initially neutral.
+        nn.init.zeros_(self.logvar_h1.weight)
+        if self.logvar_h1.bias is not None:
+            nn.init.zeros_(self.logvar_h1.bias)
+
+        # Make the final raw-logvar head output a constant near unit std.
+        nn.init.zeros_(self.logvar_out[0].weight)
+        if self.logvar_out[0].bias is not None:
+            nn.init.constant_(self.logvar_out[0].bias, init_raw_logvar_bias)
+
 
         # Optional: initialize the skip more conservatively so it does not
         # dominate the temporal branch at the start of training.
