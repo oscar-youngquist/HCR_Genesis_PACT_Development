@@ -788,11 +788,11 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # debug_warmpinn_wb
         run_name = '50hz_spec_jointrand_stairs'
         experiment_name = 'go2_kite_rough'
-        save_interval = 500
+        save_interval = 100
         
         
         # load_run = "Apr15_11-53-35_50hz_spec_jointrand_stairs"
-        load_run = "Jun24_00-00-13_50hz_spec_jointrand_stairs"
+        load_run = "Jun24_23-51-05_50hz_spec_jointrand_stairs"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/kite_feasibility/baseline_model_stairs.csv"
