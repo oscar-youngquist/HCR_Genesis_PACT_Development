@@ -776,14 +776,13 @@ class ConvDepthSequenceEncoder(nn.Module):
         if self.logvar_out[0].bias is not None:
             nn.init.constant_(self.logvar_out[0].bias, init_raw_logvar_bias)
 
-
         # Optional: initialize the skip more conservatively so it does not
         # dominate the temporal branch at the start of training.
         nn.init.xavier_uniform_(self.latest_skip.weight, gain=0.5)
         if self.latest_skip.bias is not None:
             nn.init.zeros_(self.latest_skip.bias)
 
-    def encode(self, x: torch.Tensor, logar_latest: torch.Tensor):
+    def encode(self, x: torch.Tensor, latest_logvar: torch.Tensor):
         """
         x: B x T x feature_dim
         """
@@ -798,7 +797,13 @@ class ConvDepthSequenceEncoder(nn.Module):
 
         temporal_latent = self.fc(h)
 
-        latest_conf_mask = 1.0 - torch.tanh(self.conf_mask_scale, torch.exp(0.5*logar_latest))
+        # Convert the most recent frame posterior variance into a confidence
+        # gate for the direct latest-latent skip. Higher predicted std means
+        # lower confidence in that frame, so the skip contributes less.
+        latest_std = torch.exp(0.5 * latest_logvar)
+        latest_conf_mask = 1.0 - torch.tanh(
+            self.conf_mask_scale * latest_std
+        )
         latest_conf_mask = torch.clamp(latest_conf_mask, min=self.conf_min, max=1.0)
         masked_latest_latent = latest_depth_latent * latest_conf_mask
         latest_latent = self.latest_skip(masked_latest_latent)

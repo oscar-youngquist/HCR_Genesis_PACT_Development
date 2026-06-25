@@ -1050,6 +1050,7 @@ class PPO_KITE:
             depth_kl,
             transform_identity_loss,
             latest_depth_z.detach(),
+            depth_logvar.detach(),
         )
 
     def _privileged_encoder_decoder_updates(self, terrain_maps_batch, privileged_obs_history_batch, obs_target, mask):
@@ -1108,6 +1109,7 @@ class PPO_KITE:
         obs_hist_batch,
         depth_latent_history_batch,
         latest_depth_z,
+        latest_depth_logvar,
         terrain_maps_batch,
         contrastive_negative_anchor_batch,
         explicit_labels_batch,
@@ -1141,7 +1143,10 @@ class PPO_KITE:
                 dim=1,
             )
             seq_mean, seq_logvar, depth_seq_z = (
-                self.actor_critic.depth_sequence_encoder(depth_sequence)
+                self.actor_critic.depth_sequence_encoder(
+                    depth_sequence,
+                    latest_depth_logvar,
+                )
             )
 
             # The sequence encoder no longer has its own terrain decoder or
@@ -1358,6 +1363,7 @@ class PPO_KITE:
             depth_kl,
             transform_identity_loss,
             latest_depth_z,
+            latest_depth_logvar,
         ) = self._depth_frame_autoencoder_update(
             depth_images_batch,
             depth_torso_state_batch,
@@ -1373,6 +1379,7 @@ class PPO_KITE:
             obs_hist_batch,
             depth_latent_history_batch,
             latest_depth_z,
+            latest_depth_logvar,
             terrain_maps_batch,
             contrastive_negative_anchor_batch,
             explicit_labels_batch,
@@ -1385,7 +1392,7 @@ class PPO_KITE:
             depth_kl.detach(),
             transform_identity_loss.detach(),
         )
-        del latest_depth_z
+        del latest_depth_z, latest_depth_logvar
         if profile is not None:
             t_profile = profile_mark("aux_sequence_proprio_mixer", t_profile)
 

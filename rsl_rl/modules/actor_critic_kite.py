@@ -40,7 +40,7 @@ class KITEDepthAsyncPipeline(nn.Module):
         depth_torso_state: torch.Tensor,
         depth_latent_history: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        _, _, latest_depth_latent, _ = self.depth_frame_encoder.forward_inference(
+        latest_depth_latent, latest_depth_logvar = self.depth_frame_encoder.encode_inf(
             depth_image,
             depth_torso_state,
         )
@@ -49,7 +49,8 @@ class KITEDepthAsyncPipeline(nn.Module):
             dim=1,
         )
         depth_sequence_latent = self.depth_sequence_encoder.forward_inference(
-            depth_latent_sequence
+            depth_latent_sequence,
+            latest_depth_logvar,
         )
         updated_depth_latent_history = depth_latent_sequence[:, 1:, :]
 
@@ -82,7 +83,7 @@ class KITEActorAsyncPipeline(nn.Module):
             self.context_encoder.forward_inference(depth_sequence_latent, proprio_latent)
         )
         actor_input = torch.cat([obs, context_latent, body_velo_est, feet_state_est], dim=-1)
-        actions = self.actor(actor_input)
+        actions = self.actor.actor_forward(actor_input)
 
         return actions
 
@@ -548,7 +549,7 @@ class ActorCritic_KITE(nn.Module):
 
         # encode the most recent depth image (always done during simulated training)
         depth_image = self._format_depth_image(depth_image, obs)
-        _, _, latest_depth_z, _ = self.depth_frame_encoder(
+        _, latest_depth_logvar, latest_depth_z, _ = self.depth_frame_encoder(
             depth_image,
             depth_torso_state,
         )
@@ -560,7 +561,7 @@ class ActorCritic_KITE(nn.Module):
         )
         # Encode the latent depth-image sequence
         _, _, depth_seq_z = (
-            self.depth_sequence_encoder(depth_sequence)
+            self.depth_sequence_encoder(depth_sequence, latest_depth_logvar)
         )
 
         mean, logvar, z, body_velo, feet_state = self.context_encoder(
@@ -590,7 +591,7 @@ class ActorCritic_KITE(nn.Module):
         proprio_z = self.proprio_context_encoder.forward_inference(obs_history)
 
         depth_image = self._format_depth_image(depth_image, obs)
-        latest_depth_z = self.depth_frame_encoder.forward_inference(
+        latest_depth_z, latest_depth_logvar = self.depth_frame_encoder.encode_inf(
             depth_image,
             depth_torso_state,
         )
@@ -599,7 +600,8 @@ class ActorCritic_KITE(nn.Module):
             depth_latent_history,
         )
         depth_seq_z = self.depth_sequence_encoder.forward_inference(
-            depth_sequence
+            depth_sequence,
+            latest_depth_logvar,
         )
 
         z, body_velo, feet_state = self.context_encoder.forward_inference(
