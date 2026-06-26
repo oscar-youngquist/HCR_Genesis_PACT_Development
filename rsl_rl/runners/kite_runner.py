@@ -119,6 +119,7 @@ class OnPolicyRunnerKITE:
                                                             self.policy_cfg.get("depth_decoder_norm", "none"),
                                                             self.policy_cfg.get("depth_image_std_min", 0.01),
                                                             self.policy_cfg.get("depth_image_std_max", 2.0),
+                                                            self.policy_cfg.get("depth_autoencoder_skip_dropout_prob", 0.25),
                                                             self.policy_cfg.get("depth_sequence_length", 5),
                                                             self.policy_cfg.get("depth_sequence_outdim", 16),
                                                             self.policy_cfg["depth_sequence_norm"],
@@ -349,7 +350,7 @@ class OnPolicyRunnerKITE:
                     if profile_active:
                         step_profile_start = time.perf_counter()
                     # Call the algorithms act() method to store current transition data and predict actions
-                    with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                    with torch.inference_mode(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
                         # alg.act stores the pre-step transition and returns
                         # the newest frame latent used to advance visual memory.
                         actions, latest_depth_latent, latest_torso_lin_vel_est = self.alg.act(obs, critic_obs, obs_hist, privileged_obs, depth_image, self.depth_latent_history, depth_torso_state, terrain_map) # obs_t, (obs_t-1)

@@ -676,6 +676,7 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         # KITE visual/proprio/mixer variational std bounds.
         depth_image_std_min = 0.01
         depth_image_std_max = 2.0
+        depth_autoencoder_skip_dropout_prob = 0.25
         depth_sequence_length = 5
         depth_sequence_std_min = 0.01
         depth_sequence_std_max = 1.5

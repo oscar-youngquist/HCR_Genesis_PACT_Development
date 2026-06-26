@@ -10,7 +10,7 @@ export SIMULATOR=genesis_kite_depth
 # Visualization/debug example:
 python play_exp_kite.py --task=go2_kite --use_joystick --follow_robot --gpu=cuda:0 \
   --render-depth-image --render-depth-reconstruction --render-height-field --render-surface-normals --debug-robot-id=0 \
-  --normal-length=0.12 --normal-refresh-steps=5 --viz-height-offset=0.02
+  --normal-length=0.12 --normal-refresh-steps=5 --viz-height-offset=0.02 --depth-reconstruction-scale 4
 
 # export SIMULATOR=genesis
 # python play.py --task=go2_dreamwaq

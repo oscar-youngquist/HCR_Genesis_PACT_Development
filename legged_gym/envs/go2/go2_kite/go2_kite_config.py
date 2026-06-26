@@ -5,8 +5,8 @@ class GO2KITECfg( LeggedRobotCfg ):
     
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
-        num_observations = 45
-        num_privileged_obs = 132
+        num_observations = 57
+        num_privileged_obs = 144
         num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 + 12 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -75,7 +75,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         
         # slope, random-rough, stairs-down, stairs-up, discrete, stepping-stone, gap (jump), pit (climb-up), high-platform (climb), platform+gap (climb and jump) 
         terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
-        terrain_proportions = [0.10, 0.10, 0.15, 0.15, 0.15, 0.00, 0.00, 0.15, 0.20, 0.00]
+        terrain_proportions = [0.10, 0.10, 0.15, 0.15, 0.10, 0.00, 0.15, 0.10, 0.15, 0.00]
         # terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 0.20, 0.00, 0.00, 0.40, 0.40]
         simplify_mesh = True
         
@@ -471,7 +471,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             termination           = 0.0
             collision             = -1.0
             dof_pos_limits        = -2.0
-            dof_close_to_default  = -0.00
+            dof_close_to_default  = -0.01
             torque_limits         = -0.0001
 
             alive_bonus           = 0.001
@@ -533,7 +533,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             feet_air_time    = 1.00            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
             foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height
-            hip_pos = -0.05
+            hip_pos = -0.10
             
             foot_slip        = -0.01           # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
@@ -585,8 +585,8 @@ class GO2KITECfg( LeggedRobotCfg ):
                                   "action_rate":[-0.001, -0.0001],
                                   "action_smoothness":[-0.001, -0.0001],
                                   "dof_acc":[-2.0e-8, -2.0e-10],
-                                  "torso_force_wrench_ellipsoid":[0.1, 0.35],
-                                  "swing_vel_ellipsoid_terrain":[0.05, 0.3]
+                                  "torso_force_wrench_ellipsoid":[0.2, 0.40],
+                                  "swing_vel_ellipsoid_terrain":[0.10, 0.30]
                                  }
 
             curr_steps = 1000
@@ -601,13 +601,13 @@ class GO2KITECfg( LeggedRobotCfg ):
         curriculum_ema_alpha = 0.05
         curriculum_best_window = 400
         curriculum_best_quantile = 0.90
-        curriculum_recovery_ratio = 0.80
+        curriculum_recovery_ratio = 0.70
         
         curriculum_min_lin_tracking = 0.70
-        curriculum_min_ang_tracking = 0.30
+        curriculum_min_ang_tracking = 0.35
         
         curriculum_min_episode_fraction = 0.25
-        curriculum_update_interval_steps = 10000
+        curriculum_update_interval_steps = 16000
 
         lin_vel_x_step = 0.50
         lin_vel_y_step = 0.05
@@ -666,6 +666,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         depth_image_norm = "layer"
         depth_image_std_min = 0.1
         depth_image_std_max = 2.0
+        depth_autoencoder_skip_dropout_prob = 0.25
         depth_sequence_length = 5
 
         depth_sequence_norm = "layer"
@@ -676,9 +677,9 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         cnn_activation = 'elu'
 
         # Proprioceptive Context encoder
-        proprio_in_dim = 450
+        proprio_in_dim = 570
         proprio_use_norm = True
-        proprio_num_blocks = 2
+        proprio_num_blocks = 3
         proprio_hidden_dim = 64
         proprio_token_dim = 64
         proprio_channel_dim = 128
@@ -734,9 +735,9 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         log_detailed_encoder_losses = True
 
         # Adaptive entropy coefficient curriculum
-        entropy_coef = 0.02
+        entropy_coef = 0.01
         use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.005, 0.02]
+        adaptive_ent_bounds = [0.005, 0.01]
         adaptive_ent_lin_threshold = 0.75
         adaptive_ent_ang_threshold = 0.35
         adaptive_ent_ter_threshold = 6.0
@@ -760,14 +761,14 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         #     loss weights for sequence of latent-depth-images encoder
         depth_sequence_kl_weight = 0.1
         depth_sequence_kl_recon_target = 0.05
-        depth_sequence_kl_beta_min = 0.5
-        depth_sequence_kl_beta_max = 5.0
+        depth_sequence_kl_beta_min = 0.01
+        depth_sequence_kl_beta_max = 1.0
         
         #     loss weights for proprioceptive history context encoder
         proprio_kl_weight = 0.1
-        proprio_kl_recon_target = 0.10
-        proprio_kl_beta_min = 0.5
-        proprio_kl_beta_max = 5.0
+        proprio_kl_recon_target = 0.05
+        proprio_kl_beta_min = 0.01
+        proprio_kl_beta_max = 1.0
         
         #     reconstruction losses attached to the underlying student encoders
         depth_sequence_terrain_weight  = 1.0    # terrain reconstruction loss
@@ -778,12 +779,12 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         versatility_weight = 0.01         # latent versatility loss
         versatility_lambda_e = 1.0        # weight of KL-regularization on the versility loss
         mixer_kl_weight = 0.5
-        mixer_kl_recon_target = 0.10
+        mixer_kl_recon_target = 0.05
         mixer_kl_beta_min = 0.1
-        mixer_kl_beta_max = 5.0
+        mixer_kl_beta_max = 1.0
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.
-        contrastive_weight = 0.1
+        contrastive_weight = 0.01
         contrastive_lambda = 0.5
         contrastive_margin = 1.0
 
@@ -795,13 +796,13 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = '50hz_spec_jointrand_stairs'
-        experiment_name = 'go2_kite_rough'
+        run_name = '50hz_nogap_parkour'
+        experiment_name = 'go2_kite'
         save_interval = 100
         
         
         # load_run = "Apr15_11-53-35_50hz_spec_jointrand_stairs"
-        load_run = "Jun24_23-51-05_50hz_spec_jointrand_stairs"
+        load_run = "Jun25_19-22-30_50hz_nogap_parkour"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/kite_feasibility/baseline_model_stairs.csv"

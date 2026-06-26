@@ -11,7 +11,8 @@ import math
 from .module_utils import (
     MLPMixerBlock,
     get_activation,
-    SmoothClampLayer
+    SmoothClampLayer,
+    init_weights
 )
 
 class ProprioContextMLPMixerKITE(nn.Module):
@@ -387,5 +388,131 @@ class ProprioContextMLPMixerKITE(nn.Module):
             mean:
                 B x context_latent_size
         """
+        mean, _ = self.encode(X_C)
+        return mean
+
+
+
+
+###
+#
+#   Context Encoder/Decoder models used to provide conditioning input
+#
+###
+class ProprioceptiveContextEncoder(nn.Module):
+    """VAE-style encoder for processing context information with velocity prediction.
+
+    Encodes high-dimensional context into a latent distribution while simultaneously
+    predicting torso velocity. Uses ELU activations and Xavier initialization.
+
+    Args:
+        context_input_dim (int): Dimension of input context features. Default: 230.
+        context_layer_sizes (List[int]): Sizes of hidden layers. Default: [128, 64, 32].
+        context_latent_size (int): Dimension of latent space. Default: 16.
+        context_torso_velo_size (int): Dimension of velocity output. Default: 3.
+        device (str): Device for tensor operations. Default: "cpu".
+    """
+    def __init__(
+        self,
+        context_input_dim: int = 230,
+        context_layer_sizes: List[int] = [128, 64],
+        context_latent_size: int = 16,
+        activation: str = 'elu',
+        std_min: float = 0.01,
+        std_max: float = 1.50,
+        device: str = "cpu"
+    ) -> None:
+        super().__init__()
+
+        output_hdim = 2*context_latent_size
+
+        # VAE-style context encoder layers
+        # Input Layer
+        self.ce_in = nn.Linear(context_input_dim, context_layer_sizes[0])
+        # Hidden Layers
+        self.ce_h1 = nn.Linear(context_layer_sizes[0], context_layer_sizes[1])
+        self.ce_h2 = nn.Linear(context_layer_sizes[1], output_hdim)
+        # Output Layers
+
+        self.ce_latmean_h = nn.Linear(output_hdim, output_hdim)
+        self.ce_latvar_h  = nn.Linear(output_hdim, output_hdim)
+
+        self.ce_out_mean = nn.Linear(output_hdim, context_latent_size)
+        self.ce_out_var = nn.Sequential(
+            nn.Linear(output_hdim, context_latent_size),
+            SmoothClampLayer(min_val=2.0*math.log(std_min), max_val=2.0*math.log(std_max)),
+        )
+        
+        self.activation = get_activation(activation)
+
+        # self.ce_timestep = nn.Linear(context_layer_sizes[2], 1)
+        self.device = device
+        self._initialize_weights()
+
+    def _initialize_weights(self) -> None:
+        """Initialize all linear layers with Xavier uniform distribution."""
+        for layer in [self.ce_in, 
+                      self.ce_h1,
+                      self.ce_h2,
+                      self.ce_latmean_h,
+                      self.ce_latvar_h]:
+            
+            nn.init.xavier_uniform_(layer.weight)
+            
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
+
+        self.ce_out_var.apply(init_weights)
+        self.ce_velo_var.apply(init_weights)
+
+    def encode(self, X_C: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Forward pass through encoder
+        x = self.activation(self.ce_in(X_C))
+        # x = self.drop_1(x)
+        x = self.activation(self.ce_h1(x))
+        # x = self.drop_2(x)
+        x = self.activation(self.ce_h2(x))
+
+        lat_mean = self.activation(self.ce_latmean_h(x))
+        lat_var  = self.activation(self.ce_latvar_h(x))
+
+
+        return self.ce_out_mean(lat_mean), self.ce_out_var(lat_var)
+
+    def reparameterization_trick(
+        self,
+        mean: torch.Tensor,
+        logvar: torch.Tensor
+    ) -> torch.Tensor:
+        """Sample from latent space using reparameterization trick.
+
+        Args:
+            mean: Latent space mean
+            logvar: Latent space log variance
+
+        Returns:
+            Sampled latent vector
+        """
+        epsilon = torch.randn_like(logvar).to(logvar.device)
+        return mean + torch.exp(0.5 * logvar) * epsilon
+
+    def forward(self, X_C: torch.Tensor):
+        """Complete forward pass including encoding and sampling.
+
+        Args:
+            X_C: Input context tensor
+
+        Returns:
+            Tuple containing:
+                - mean: Latent space mean
+                - logvar: Latent space log variance
+                - z: Sampled latent vector
+                - torso_velo: Predicted velocity
+        """
+        mean, logvar = self.encode(X_C)
+        z = self.reparameterization_trick(mean, logvar)
+        return mean, logvar, z
+    
+    def forward_inference(self, X_C: torch.Tensor):
         mean, _ = self.encode(X_C)
         return mean

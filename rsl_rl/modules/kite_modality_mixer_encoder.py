@@ -11,7 +11,7 @@ from .module_utils import (
     SmoothClampLayer
 )
 
-class MultimodalGatedFusionVAE(nn.Module):
+class MultimodalFusionVAE(nn.Module):
     """
     Variational gated-fusion module for fusing depth and proprioceptive latents.
 
@@ -84,13 +84,9 @@ class MultimodalGatedFusionVAE(nn.Module):
         self.proprio_projection = nn.Linear(proprio_latent_dim, hidden_dims[0])
 
         # ------------------------------------------------------------------
-        # Gated fusion trunk.
-        #
-        # fused = gate * depth + (1 - gate) * proprio
+        # Modality-fusion layer.
         # ------------------------------------------------------------------
-        self.gate_fc = nn.Linear(2 * hidden_dims[0], hidden_dims[0])
-
-        self.final_norm = nn.LayerNorm(hidden_dims[0]) if use_layer_norm else nn.Identity()
+        self.merge_fc = nn.Linear(2 * hidden_dims[0], hidden_dims[0])
 
         # ------------------------------------------------------------------
         # Fused latent trunk.
@@ -169,17 +165,6 @@ class MultimodalGatedFusionVAE(nn.Module):
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
 
-        # Gating layer.
-        #
-        # Because:
-        #     fused = gate * depth + (1 - gate) * proprio
-        #
-        # a negative gate bias makes the initial gate < 0.5, causing the model
-        # to initially rely more on proprioception than depth.
-        nn.init.zeros_(self.gate_fc.weight)
-        if self.gate_fc.bias is not None:
-            nn.init.constant_(self.gate_fc.bias, -1.0)
-
         # Fusion trunk.
         for module in self.fusion_fc:
             if isinstance(module, nn.Linear):
@@ -193,7 +178,7 @@ class MultimodalGatedFusionVAE(nn.Module):
                     nn.init.zeros_(module.bias)
 
         # Hidden VAE heads.
-        for layer in [self.latmean_h, self.latvar_h]:
+        for layer in [self.latmean_h, self.latvar_h, self.merge_fc]:
             nn.init.kaiming_uniform_(
                 layer.weight,
                 a=1.0,
@@ -347,14 +332,17 @@ class MultimodalGatedFusionVAE(nn.Module):
         ##
         # gate close to 1.0 -> rely more on depth
         # gate close to 0.0 -> rely more on proprioception
-        gate_input = torch.cat([depth_token, proprio_token], dim=-1)
-        gate = torch.sigmoid(self.gate_fc(gate_input))
+        # gate_input = torch.cat([depth_token, proprio_token], dim=-1)
+        # gate = torch.sigmoid(self.gate_fc(gate_input))
 
-        # Perform gated fusion 
-        x = gate * depth_token + (1.0 - gate) * proprio_token
+        # # Perform gated fusion 
+        # x = gate * depth_token + (1.0 - gate) * proprio_token
         
-        # normalize fused results
-        x = self.final_norm(x)
+        # # normalize fused results
+        # x = self.final_norm(x)
+
+        merge_input = torch.cat([depth_token, proprio_token], dim=-1)
+        x = self.activation(self.merge_fc(merge_input))
 
         # run through fusion backbone
         x = self.fusion_fc(x)

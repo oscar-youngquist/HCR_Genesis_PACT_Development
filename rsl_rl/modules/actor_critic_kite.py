@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .kite_modality_mixer_encoder import MultimodalGatedFusionVAE
+from .kite_modality_mixer_encoder import MultimodalFusionVAE
 from .kite_proprio_encoder import ProprioContextMLPMixerKITE
 from .kite_visual_encoder import (
     ConvDepthSequenceEncoder,
@@ -16,7 +16,7 @@ from .kite_visual_encoder import (
     MotionRobustDepthDecoder,
     MotionRobustDepthAutoencoderUNet,
 )
-from .module_utils import ContrastiveProjectionHead, get_activation
+from .module_utils import ContrastiveProjectionHead, ReconHead, get_activation
 
 
 class KITEDepthAsyncPipeline(nn.Module):
@@ -144,6 +144,7 @@ class ActorCritic_KITE(nn.Module):
                  depth_decoder_norm="none",
                  depth_image_std_min=0.01,
                  depth_image_std_max=2.0,
+                 depth_autoencoder_skip_dropout_prob=0.25,
                  
                  depth_sequence_length=5,
                  depth_sequence_outdim=16,
@@ -249,6 +250,7 @@ class ActorCritic_KITE(nn.Module):
         self.depth_frame_autoencoder = MotionRobustDepthAutoencoderUNet(
             self.depth_frame_encoder,
             self.depth_frame_decoder,
+            skip_dropout_prob=depth_autoencoder_skip_dropout_prob,
         )
         
         # Depth-image latent sequence encoder
@@ -265,7 +267,7 @@ class ActorCritic_KITE(nn.Module):
         )
         
         # Modality mixer encoder
-        self.context_encoder = MultimodalGatedFusionVAE(
+        self.context_encoder = MultimodalFusionVAE(
             depth_latent_dim=depth_sequence_outdim,
             proprio_latent_dim=proprio_latent_dim,
             hidden_dims=list(mixer_hidden_dims),
@@ -288,9 +290,19 @@ class ActorCritic_KITE(nn.Module):
             projection_dim=privileged_terrain_latent_dim,
             activation=activation,
         )
+        self.depth_sequence_recon_head = ReconHead(
+            input_dim=depth_sequence_outdim,
+            recon_dim=privileged_terrain_latent_dim,
+            activation=activation,
+        )
         self.proprio_contrastive_head = ContrastiveProjectionHead(
             input_dim=proprio_latent_dim,
             projection_dim=privileged_dynamics_latent_dim,
+            activation=activation,
+        )
+        self.proprio_recon_head = ReconHead(
+            input_dim=proprio_latent_dim,
+            recon_dim=privileged_dynamics_latent_dim,
             activation=activation,
         )
         
@@ -367,8 +379,10 @@ class ActorCritic_KITE(nn.Module):
         encoder_prefix_to_group = {
             "proprio_context_encoder.": "proprioceptive",
             "proprio_contrastive_head.": "proprioceptive",
+            "proprio_recon_head.": "proprioceptive",
             "depth_sequence_encoder.": "visual_sequence",
             "depth_sequence_contrastive_head.": "visual_sequence",
+            "depth_sequence_recon_head.": "visual_sequence",
             "context_encoder.": "modality_mixer",
         }
         depth_frame_prefixes = (

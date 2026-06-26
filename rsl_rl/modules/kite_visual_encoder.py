@@ -320,7 +320,7 @@ class MotionRobustDepthEncoder(nn.Module):
             value=spatial_sequence,
         )
 
-        attn_out = attn_out.squeeze(1)
+        attn_out = self.att_norm(attn_out.squeeze(1))
         latent = self.fc(attn_out)
 
         mean_h1 = self.activation(self.mean_h1(latent))
@@ -599,6 +599,7 @@ class MotionRobustDepthAutoencoderUNet(nn.Module):
         self,
         encoder: MotionRobustDepthEncoder,
         decoder: MotionRobustDepthDecoder,
+        skip_dropout_prob: float = 0.25,
     ):
         super().__init__()
         if not getattr(decoder, "use_unet_skips", False):
@@ -608,6 +609,7 @@ class MotionRobustDepthAutoencoderUNet(nn.Module):
             )
         self.encoder = encoder
         self.decoder = decoder
+        self.skip_dropout_prob = float(skip_dropout_prob)
 
     def forward(self, depth_image: torch.Tensor, torso_state: torch.Tensor):
         mean, logvar, z, enc_aux = self.encoder(
@@ -616,10 +618,30 @@ class MotionRobustDepthAutoencoderUNet(nn.Module):
             return_unet_skips=True,
         )
         transform_matrices = enc_aux["transform_matrices"]
+        unet_skips = enc_aux.get("unet_skips")
+        if self.training and self.skip_dropout_prob > 0.0:
+            # Per-sample whole-skip dropout weakens the reconstruction shortcut
+            # without rescaling the kept skip activations. Each batch element
+            # either keeps or drops all of its U-Net skip tensors together.
+            if unet_skips is not None:
+                keep_mask = (
+                    torch.rand(
+                        depth_image.shape[0],
+                        1,
+                        1,
+                        1,
+                        device=depth_image.device,
+                    )
+                    >= self.skip_dropout_prob
+                ).to(dtype=depth_image.dtype)
+                unet_skips = {
+                    name: skip * keep_mask.to(dtype=skip.dtype)
+                    for name, skip in unet_skips.items()
+                }
         reconstructed_depth, dec_aux = self.decoder(
-            z,
+            mean,
             transform_matrices,
-            unet_skips=enc_aux.get("unet_skips"),
+            unet_skips=unet_skips,
         )
 
         aux = {
@@ -720,7 +742,9 @@ class ConvDepthSequenceEncoder(nn.Module):
         )
 
         self.latest_skip = nn.Linear(feature_dim, output_hdim)
-        self.latest_skip_scale = nn.Parameter(torch.tensor(0.1))
+        self.latest_skip_scale = nn.Parameter(torch.ones(output_hdim)* 0.1)
+
+        self.skip_norm = nn.LayerNorm(output_hdim)
         
         self.mean_h1 = nn.Linear(output_hdim, output_hdim)
         self.logvar_h1 = nn.Linear(output_hdim, output_hdim)
@@ -810,6 +834,7 @@ class ConvDepthSequenceEncoder(nn.Module):
         
         # latest_latent = self.latest_skip(latest_depth_latent)
         latent = temporal_latent + self.latest_skip_scale * latest_latent
+        latent = self.skip_norm(latent)
         latent = self.activation(latent)
         
         mean_h1 = self.activation(self.mean_h1(latent))

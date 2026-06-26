@@ -59,6 +59,9 @@ class DepthGradientLoss(nn.Module):
         kernel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3)
         kernel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3)
         
+        kernel_x = kernel_x / 8.0
+        kernel_y = kernel_y / 8.0
+
         self.register_buffer('kernel_x', kernel_x)
         self.register_buffer('kernel_y', kernel_y)
 
@@ -71,12 +74,17 @@ class DepthGradientLoss(nn.Module):
         return torch.sum(sample_values * sample_mask) / denom
 
     def forward(self, pred, target, mask=None):
+        # F.conv2d does not accept padding_mode directly, so pad explicitly
+        # before applying the fixed Sobel kernels.
+        pred_padded = F.pad(pred, (1, 1, 1, 1), mode="replicate")
+        target_padded = F.pad(target, (1, 1, 1, 1), mode="replicate")
+
         # Calculate gradients using 2D convolutions
-        pred_grad_x = F.conv2d(pred, self.kernel_x, padding=1)
-        pred_grad_y = F.conv2d(pred, self.kernel_y, padding=1)
+        pred_grad_x = F.conv2d(pred_padded, self.kernel_x)
+        pred_grad_y = F.conv2d(pred_padded, self.kernel_y)
         
-        target_grad_x = F.conv2d(target, self.kernel_x, padding=1)
-        target_grad_y = F.conv2d(target, self.kernel_y, padding=1)
+        target_grad_x = F.conv2d(target_padded, self.kernel_x)
+        target_grad_y = F.conv2d(target_padded, self.kernel_y)
         
         # Calculate L1 distance of the gradients while respecting terminated
         # episode masks at the sample level.
@@ -284,8 +292,8 @@ class PPO_KITE:
         self.proprio_kl_weight = proprio_kl_weight
         
         # Student encoder reconstruction weights. Terrain reconstruction trains
-        # the depth-sequence encoder; privileged-dynamics reconstruction trains
-        # the proprioceptive encoder.
+        #   the depth-sequence encoder; privileged-dynamics reconstruction trains
+        #   the proprioceptive encoder.
         self.depth_sequence_terrain_weight = depth_sequence_terrain_weight
         self.proprio_dynamics_weight = proprio_dynamics_weight
         self.modality_explicit_weight = modality_explicit_weight
@@ -328,8 +336,8 @@ class PPO_KITE:
         self.storage = None # initialized later
 
         # Actor-critic owns the non-privileged trainable modules and returns
-        # three optimizers: RL actor/critic, depth-frame autoencoder, and the
-        # merged sequence/proprio/mixer auxiliary path.
+        #   three optimizers: RL actor/critic, depth-frame autoencoder, and the
+        #   merged sequence/proprio/mixer auxiliary path.
         self.act_optimizer, self.depth_frame_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(learning_rate)
         
         # Transition data structure from storage class
@@ -455,8 +463,8 @@ class PPO_KITE:
         """Build critic input from privileged dynamics and learned terrain latents."""
         latest_privileged_obs = self._latest_privileged_obs(privileged_obs_history)
         # The critic uses privileged latents as inputs, but the RL optimizer
-        # does not train the privileged encoders. Avoid building graphs when
-        # those latents will be detached immediately.
+        #   does not train the privileged encoders. Avoid building graphs when
+        #   those latents will be detached immediately.
         context = torch.no_grad() if detach_latents else nullcontext()
         with context:
             terrain_latent = self.priv_terrain_encoder(terrain_map)
@@ -522,7 +530,7 @@ class PPO_KITE:
 
         return {
             # Store only reduced CPU statistics; the batch-sized target/recon
-            # tensors can be released before the next auxiliary backward pass.
+            #   tensors can be released before the next auxiliary backward pass.
             "sum_x": (flat_target * sample_weight).sum(dim=0).detach().cpu(),
             "sum_x2": (flat_target * flat_target * sample_weight).sum(dim=0).detach().cpu(),
             "sse": self._cpu_float(
@@ -637,10 +645,9 @@ class PPO_KITE:
 
     def _normalized_contrastive_loss(self, z, positive, negative, mask):
         """Apply contrastive loss after normalizing student and anchor latents."""
-        projected_z = F.normalize(z, p=2, dim=-1, eps=1e-6)
         positive = F.normalize(positive.detach(), p=2, dim=-1, eps=1e-6)
         negative = F.normalize(negative.detach(), p=2, dim=-1, eps=1e-6)
-        return self._contrastive_loss(projected_z, positive, negative, mask)
+        return self._contrastive_loss(z, positive, negative, mask)
 
     def _terrain_recon_loss(self, terrain_recon, terrain_target, mask):
         """Terrain decoder loss: MSE on heights plus cosine loss on normals."""
@@ -1184,8 +1191,11 @@ class PPO_KITE:
             depth_seq_contrast_z = self.actor_critic.depth_sequence_contrastive_head(
                 depth_seq_z
             )
+            depth_seq_recon_z = self.actor_critic.depth_sequence_recon_head(
+                depth_seq_z
+            )
             with self._frozen_module_params(self.priv_terrain_decoder):
-                terrain_recon_from_depth_seq = self.priv_terrain_decoder(depth_seq_z)
+                terrain_recon_from_depth_seq = self.priv_terrain_decoder(depth_seq_recon_z)
             seq_terrain_loss, seq_terrain_recon_log = self._terrain_recon_loss(
                 terrain_recon_from_depth_seq,
                 terrain_maps_batch,
@@ -1212,8 +1222,11 @@ class PPO_KITE:
             proprio_contrast_z = self.actor_critic.proprio_contrastive_head(
                 proprio_z
             )
+            proprio_recon_z = self.actor_critic.proprio_recon_head(
+                proprio_z
+            )
             with self._frozen_module_params(self.priv_dynamics_decoder):
-                dyn_recon_from_proprio = self.priv_dynamics_decoder(proprio_z)
+                dyn_recon_from_proprio = self.priv_dynamics_decoder(proprio_recon_z)
             prop_dyn_loss = self._masked_mse_loss(
                 dyn_recon_from_proprio,
                 obs_target,
@@ -1232,10 +1245,10 @@ class PPO_KITE:
             )
 
             # 3. Modality mixer path.
-            mix_mean, mix_logvar, mix_z, body_velo_est, feet_state_est = (
+            mix_mean, mix_logvar, _, body_velo_est, feet_state_est = (
                 self.actor_critic.context_encoder(
-                    depth_seq_z,
-                    proprio_z,
+                    depth_seq_z.detach().clone(),
+                    proprio_z.detach().clone(),
                 )
             )
 
@@ -1313,7 +1326,15 @@ class PPO_KITE:
             self.max_grad_norm,
         )
         nn.utils.clip_grad_norm_(
+            self.actor_critic.depth_sequence_recon_head.parameters(),
+            self.max_grad_norm,
+        )
+        nn.utils.clip_grad_norm_(
             self.actor_critic.proprio_context_encoder.parameters(),
+            self.max_grad_norm,
+        )
+        nn.utils.clip_grad_norm_(
+            self.actor_critic.proprio_recon_head.parameters(),
             self.max_grad_norm,
         )
         nn.utils.clip_grad_norm_(
@@ -1596,6 +1617,7 @@ class PPO_KITE:
             if profile_update:
                 self._sync_if_debugging()
                 t0 = time.perf_counter()
+            
             # Perform RL update
             ppo_loss, surrogate_loss, value_loss = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch, privileged_obs_history_batch, depth_images_batch,
                                                                          depth_latent_history_batch, depth_torso_state_batch, terrain_maps_batch, old_sigma_batch,
@@ -1653,8 +1675,8 @@ class PPO_KITE:
                     t0 = time.perf_counter()
 
                 # Boot summaries are already reduced and moved to CPU inside
-                # the auxiliary update, so the PPO loop never holds large
-                # reconstruction tensors just for boot-probability bookkeeping.
+                #   the auxiliary update, so the PPO loop never holds large
+                #   reconstruction tensors just for boot-probability bookkeeping.
                 boot_summary = self._accumulate_boot_summary(
                     boot_summary,
                     aux_losses["boot_summary"],
@@ -1705,8 +1727,8 @@ class PPO_KITE:
                 timers["minibatch_wall"] += time.perf_counter() - minibatch_wall_start
 
             # Release large minibatch references before the generator yields
-            # the next batch. This is mainly a peak-VRAM guard for the depth
-            # image and terrain-map tensors.
+            #   the next batch. This is mainly a peak-VRAM guard for the depth
+            #   image and terrain-map tensors.
             del terminated_batch, obs_batch, obs_hist_batch
             del privileged_obs_history_batch, depth_images_batch
             del depth_latent_history_batch, depth_torso_state_batch
@@ -1767,7 +1789,7 @@ class PPO_KITE:
             t0 = time.perf_counter()
 
         # Estimate whether the modality mixer reconstructs privileged dynamics
-        # plus terrain better than a mean predictor. All statistics live on CPU.
+        #   plus terrain better than a mean predictor. All statistics live on CPU.
         pboot = self._boot_probability_from_summary(boot_summary)
         vel_pboot = self._boot_probability_from_summary(vel_boot_summary)
 
@@ -1805,8 +1827,8 @@ class PPO_KITE:
                          old_actions_log_prob_batch,
                          advantages_batch, target_values_batch, returns_batch):
         # The RL optimizer only owns actor/critic parameters. Build the actor
-        # conditioning from frozen encoder outputs so PPO does not spend time
-        # or VRAM constructing encoder graphs that auxiliary losses train later.
+        #   conditioning from frozen encoder outputs so PPO does not spend time
+        #   or VRAM constructing encoder graphs that auxiliary losses train later.
         with torch.no_grad():
             _, _, z, body_velo_est, feet_state_est = self.actor_critic.cenet_enc_forward(
                 obs_hist_batch,

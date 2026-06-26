@@ -404,7 +404,9 @@ class ContrastiveProjectionHead(nn.Module):
 
         self.net = nn.Sequential(
             act,
-            nn.Linear(input_dim, projection_dim),
+            nn.Linear(input_dim, projection_dim*2),
+            act,
+            nn.Linear(projection_dim*2, projection_dim),
         )
 
         self._initialize_weights()
@@ -428,7 +430,7 @@ class ContrastiveProjectionHead(nn.Module):
 
 
 
-class ReconDimensionProjectionHead(nn.Module):
+class ReconHead(nn.Module):
     """
     Dimension-matching head for aligning history encoders with privileged decoders.
 
