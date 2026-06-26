@@ -613,15 +613,21 @@ class GO2KITECfg( LeggedRobotCfg ):
         curriculum_min_ang_tracking = 0.35
         
         curriculum_min_episode_fraction = 0.25
-        curriculum_update_interval_steps = 16000
+        curriculum_update_interval_steps = 10000
+        
+        lin_vel_x_terrain_gate_cutoff = 1.0
+        lin_vel_x_terrain_gate_resume_level = 5.0
+        ang_vel_yaw_terrain_gate_cutoff = 1.5
+        ang_vel_yaw_terrain_gate_resume_level = 5.0
 
-        lin_vel_x_step = 0.50
+        lin_vel_x_step = 0.25
         lin_vel_y_step = 0.05
         ang_vel_yaw_step = 0.25
         max_lin_vel_y = 0.30
         max_ang_vel_yaw = 3.0
         bias_lin_vel_x_with_curriculum = True
-        lin_vel_x_forward_bias_final = 0.85
+        
+        lin_vel_x_forward_bias_final = 0.60
         lin_vel_x_high_speed_bias_power_final = 0.50
         
         randomize_resampling_time = False

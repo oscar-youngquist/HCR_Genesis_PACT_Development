@@ -641,6 +641,10 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         curriculum_min_ang_tracking = 0.70
         curriculum_min_episode_fraction = 0.25
         curriculum_update_interval_steps = 12000
+        lin_vel_x_terrain_gate_cutoff = 1.0
+        lin_vel_x_terrain_gate_resume_level = 3.0
+        ang_vel_yaw_terrain_gate_cutoff = 1.0
+        ang_vel_yaw_terrain_gate_resume_level = 3.0
 
         lin_vel_x_step = 0.10
         lin_vel_y_step = 0.05

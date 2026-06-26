@@ -1154,6 +1154,25 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             )
             return ema, best, required
 
+        def command_curriculum_terrain_gate_open(command_name, cutoff_name, resume_name):
+            """Pause command growth after a cutoff until terrain difficulty catches up."""
+            cutoff = getattr(
+                self.cfg.commands,
+                cutoff_name,
+                float("inf"),
+            )
+            resume_level = getattr(
+                self.cfg.commands,
+                resume_name,
+                0.0,
+            )
+            if self.command_ranges[command_name][1] < cutoff:
+                return True
+            if not hasattr(self.simulator, "terrain_levels"):
+                return True
+            terrain_level = torch.mean(self.simulator.terrain_levels.float()).item()
+            return terrain_level >= resume_level
+
         # Linear and angular tracking have separate EMAs and recovery targets,
         # allowing one command family to progress without waiting for the other.
         (
@@ -1186,6 +1205,11 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             >= self.command_lin_required_tracking
             and self.common_step_counter - self.last_lin_update_idx
             >= update_interval
+            and command_curriculum_terrain_gate_open(
+                "lin_vel_x",
+                "lin_vel_x_terrain_gate_cutoff",
+                "lin_vel_x_terrain_gate_resume_level",
+            )
         ):
             self.last_lin_update_idx = self.common_step_counter
             self.command_ranges["lin_vel_x"][0] = np.clip(
@@ -1220,6 +1244,11 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             >= self.command_ang_required_tracking
             and self.common_step_counter - self.last_ang_update_idx
             >= update_interval
+            and command_curriculum_terrain_gate_open(
+                "ang_vel_yaw",
+                "ang_vel_yaw_terrain_gate_cutoff",
+                "ang_vel_yaw_terrain_gate_resume_level",
+            )
         ):
             self.last_ang_update_idx = self.common_step_counter
             self.command_ranges["ang_vel_yaw"][0] = np.clip(
