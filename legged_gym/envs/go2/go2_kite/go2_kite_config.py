@@ -697,8 +697,8 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         mixer_feet_state_dim = 20            # [feet-contact-state (4), feet-height (4), surface-normal under feet (12)]
         mixer_use_norm = True
         mixer_hidden_dims = [64, 32]
-        mixer_velo_hidden = 12
-        mixer_feet_hidden = 32
+        mixer_velo_hidden = 64
+        mixer_feet_hidden = 64
         mixer_std_min = 0.10
         mixer_std_max = 1.0
 

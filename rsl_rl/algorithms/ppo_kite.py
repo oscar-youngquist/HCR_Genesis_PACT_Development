@@ -1192,7 +1192,7 @@ class PPO_KITE:
                 depth_seq_z
             )
             depth_seq_recon_z = self.actor_critic.depth_sequence_recon_head(
-                depth_seq_z
+                seq_mean
             )
             with self._frozen_module_params(self.priv_terrain_decoder):
                 terrain_recon_from_depth_seq = self.priv_terrain_decoder(depth_seq_recon_z)
@@ -1223,21 +1223,24 @@ class PPO_KITE:
                 proprio_z
             )
             proprio_recon_z = self.actor_critic.proprio_recon_head(
-                proprio_z
+                prop_mean
             )
             with self._frozen_module_params(self.priv_dynamics_decoder):
                 dyn_recon_from_proprio = self.priv_dynamics_decoder(proprio_recon_z)
+            
             prop_dyn_loss = self._masked_mse_loss(
                 dyn_recon_from_proprio,
                 obs_target,
                 mask,
             )
+            
             prop_dyn_contrast_loss = self._normalized_contrastive_loss(
                 proprio_contrast_z,
                 dynamics_positive,
                 contrastive_negative_anchor_batch,
                 mask,
             )
+            
             proprio_loss = (
                 self.proprio_kl_weight * prop_kl
                 + self.proprio_dynamics_weight * prop_dyn_loss

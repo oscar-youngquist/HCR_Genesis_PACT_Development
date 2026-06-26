@@ -621,8 +621,8 @@ class MotionRobustDepthAutoencoderUNet(nn.Module):
         unet_skips = enc_aux.get("unet_skips")
         if self.training and self.skip_dropout_prob > 0.0:
             # Per-sample whole-skip dropout weakens the reconstruction shortcut
-            # without rescaling the kept skip activations. Each batch element
-            # either keeps or drops all of its U-Net skip tensors together.
+            #   without rescaling the kept skip activations. Each batch element
+            #   either keeps or drops all of its U-Net skip tensors together.
             if unet_skips is not None:
                 keep_mask = (
                     torch.rand(
