@@ -518,6 +518,8 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
 
         max_contact_force = 200.0
         contact_force_threshold = 5.0
+        swing_ema_alpha = 0.97
+        swing_height_ema_alpha = 0.95
         feet_edge_threshold = 0.05
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
@@ -580,8 +582,11 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
 
             # gait
             feet_air_time    = 1.00            # tracking reward for long steps
+            swing_participation_balance = 0.2
+            diagonal_pair_balance = 0.1
+            completed_swing_height_balance = 0.2
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height
             hip_pos = -0.05
             
             foot_slip        = -0.01           # penalty for feet slipping

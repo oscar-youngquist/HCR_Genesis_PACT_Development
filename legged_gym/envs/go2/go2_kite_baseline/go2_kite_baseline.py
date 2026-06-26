@@ -183,6 +183,53 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             lambda: self._feet_contact_fz() > self.cfg.rewards.contact_force_threshold,
         )
 
+    def _gait_order_tensor(self, values):
+        """Return foot tensors in gait reward order [FL, FR, RL, RR]."""
+        return values[:, self.gait_foot_order, ...]
+
+    def _gait_contact_mask(self):
+        contact = torch.abs(self._feet_contact_fz()) > self.cfg.rewards.contact_force_threshold
+        return self._gait_order_tensor(contact)
+
+    def _gait_terrain_relative_foot_height(self):
+        feet_height = self.simulator.feet_pos[:, :, 2]
+        if hasattr(self, "_local_terrain_height_under_feet"):
+            feet_height = feet_height - self._local_terrain_height_under_feet()
+        return self._gait_order_tensor(feet_height)
+
+    def _update_gait_swing_statistics(self):
+        """Update persistent per-env swing statistics once per env step."""
+        contact = self._gait_contact_mask()
+        swing = (~contact).float()
+
+        alpha = self.cfg.rewards.swing_ema_alpha
+        self.feet_swing_ema[:] = alpha * self.feet_swing_ema + (1.0 - alpha) * swing
+
+        foot_height = self._gait_terrain_relative_foot_height()
+        self.feet_swing_peak_height[:] = torch.where(
+            swing.bool(),
+            torch.maximum(self.feet_swing_peak_height, foot_height),
+            self.feet_swing_peak_height,
+        )
+
+        touchdown = (~self.prev_feet_contact) & contact
+        height_alpha = self.cfg.rewards.swing_height_ema_alpha
+        updated_height_ema = (
+            height_alpha * self.feet_swing_height_ema
+            + (1.0 - height_alpha) * self.feet_swing_peak_height
+        )
+        self.feet_swing_height_ema[:] = torch.where(
+            touchdown,
+            updated_height_ema,
+            self.feet_swing_height_ema,
+        )
+        self.feet_swing_peak_height[:] = torch.where(
+            touchdown,
+            torch.zeros_like(self.feet_swing_peak_height),
+            self.feet_swing_peak_height,
+        )
+        self.prev_feet_contact[:] = contact
+
     def _command_norm(self, cols):
         return self._cached_step_value(
             f"command_norm_{cols}",
@@ -283,6 +330,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         # compute observations, rewards, resets, ...
         self.check_termination()
         
+        self._update_gait_swing_statistics()
         self.compute_reward()
         
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
@@ -500,6 +548,10 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         self.last_actions[env_ids] = 0.
         self.actions[env_ids] = 0.
         self.feet_air_time[env_ids] = 0.
+        self.feet_swing_ema[env_ids] = 0.
+        self.feet_swing_peak_height[env_ids] = 0.
+        self.feet_swing_height_ema[env_ids] = 0.
+        self.prev_feet_contact[env_ids] = True
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
         self.fail_buf[env_ids] = 0
@@ -1259,6 +1311,18 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         self.feet_air_time = torch.zeros(
             (self.num_envs, len(self.simulator.feet_indices)), device=self.device, dtype=torch.float)
         self.last_contacts = torch.zeros((self.num_envs, len(self.simulator.feet_indices)), device=self.device, dtype=torch.int)
+        foot_names = list(getattr(self.cfg.asset, "foot_name", ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]))
+        gait_order_names = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+        gait_order = [foot_names.index(name) for name in gait_order_names]
+        self.gait_foot_order = torch.as_tensor(gait_order, device=self.device, dtype=torch.long)
+        self.feet_swing_ema = torch.zeros(
+            (self.num_envs, 4), device=self.device, dtype=torch.float
+        )
+        self.feet_swing_peak_height = torch.zeros_like(self.feet_swing_ema)
+        self.feet_swing_height_ema = torch.zeros_like(self.feet_swing_ema)
+        self.prev_feet_contact = torch.ones(
+            (self.num_envs, 4), device=self.device, dtype=torch.bool
+        )
 
         # history of single observations
         self.last_obs_buf = torch.zeros(
@@ -2194,6 +2258,25 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         rew_airTime *= self._command_norm(2) > 0.1  # no reward for zero command
         self.feet_air_time *= ~contact_filt
         return rew_airTime
+
+    def _reward_swing_participation_balance(self):
+        # Penalize uneven long-horizon swing participation across feet.
+        mean_swing = self.feet_swing_ema.mean(dim=1, keepdim=True)
+        return -torch.mean(torch.square(self.feet_swing_ema - mean_swing), dim=1)
+
+    def _reward_diagonal_pair_balance(self):
+        # Gait order is [FL, FR, RL, RR], so diagonals are FL/RR and FR/RL.
+        diag_a = 0.5 * (self.feet_swing_ema[:, 0] + self.feet_swing_ema[:, 3])
+        diag_b = 0.5 * (self.feet_swing_ema[:, 1] + self.feet_swing_ema[:, 2])
+        return -torch.square(diag_a - diag_b)
+
+    def _reward_completed_swing_height_balance(self):
+        # Penalize uneven completed-swing peak heights across feet.
+        mean_height = self.feet_swing_height_ema.mean(dim=1, keepdim=True)
+        return -torch.mean(
+            torch.square(self.feet_swing_height_ema - mean_height),
+            dim=1,
+        )
 
     def _reward_dof_vel_stand_still(self):
         # Penalize motion at zero commands

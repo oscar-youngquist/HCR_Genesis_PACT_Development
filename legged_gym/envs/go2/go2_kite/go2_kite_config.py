@@ -426,7 +426,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         height_max = 1.50       # [m]
 
         # Reset after a foot or the base falls into terrain marked as a deep void.
-        reset_unrecoverable_gaps = False
+        reset_unrecoverable_gaps = True
         gap_terrain_depth_threshold = 1.0  # void height below the environment origin [m]
         gap_foot_drop_threshold = 0.75     # foot height below the environment origin [m]
         gap_base_drop_threshold = 0.75     # base height below the environment origin [m]
@@ -463,9 +463,11 @@ class GO2KITECfg( LeggedRobotCfg ):
 
         use_reward_curriculum = True
 
-        max_contact_force = 200.0
+        max_contact_force       = 200.0
         contact_force_threshold = 15.0
-        feet_edge_threshold = 0.05
+        swing_ema_alpha         = 0.97
+        swing_height_ema_alpha  = 0.95
+        feet_edge_threshold     = 0.05
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
@@ -530,20 +532,24 @@ class GO2KITECfg( LeggedRobotCfg ):
             rear_foot_overreach = -10.0
 
             # gait
-            feet_air_time    = 1.00            # tracking reward for long steps
-            # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height
-            hip_pos = -0.10
-            
-            foot_slip        = -1.0           # penalty for feet slipping
-            feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
-            feet_near_edge = -1.0
-            stumble          = -1.0
+            feet_air_time    = 1.00                # (-) tracking reward for long steps
+            foot_clearance_terrain_aware = 0.70    # (+) tracking reward for feet reaching the desired clearance responsive to terrain height            
+            foot_slip        = -1.0                # penalty for feet slipping
+            feet_contact_forces = -1.0e-3          # penalty for high contact forces on the feet
+            feet_near_edge = -1.0                  # penalty for feet being in contact near any edge terrain  
+            stumble          = -1.0                # penalty for making horizontal contact during swing phase.
+            hip_pos = -0.10                        # hip joints specifically should be close to default. Ued to avoid learning unnecessarily wide gaits.
 
-            torso_force_wrench_ellipsoid = 0.2
-            swing_vel_ellipsoid_terrain  = 0.1
+            # Added these gait balance rewards to discourage observed behavior of diagonals pairs of feet behaving differently.
+            swing_participation_balance = 0.2      # (-) encourages all feet to swing for roughly the same amount of time an episode
+            diagonal_pair_balance = 0.1            # (-) encourages diagonal pairs of feet specifically to wing the same amount of time per episode
+            completed_swing_height_balance = 0.2   # (-) enocurages all swing feet to reach the desired height throughout a swing
 
-        # KITE reward terms
+            # Novel KITE-specific whole-body posture + terrain regualrization/alignment rewards
+            torso_force_wrench_ellipsoid = 0.2     # encourage whole-body postures that align well conditioned force generation with the terrain
+            swing_vel_ellipsoid_terrain  = 0.1     # align swing feet with the terrain underfoot.
+
+        # KITE reward paramaters
         class kite_rewards():
             ellipsoid_main_weight = 0.6
             ellipsoid_force_aux_weight = 0.35
