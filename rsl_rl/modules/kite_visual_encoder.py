@@ -639,7 +639,7 @@ class MotionRobustDepthAutoencoderUNet(nn.Module):
                     for name, skip in unet_skips.items()
                 }
         reconstructed_depth, dec_aux = self.decoder(
-            mean,
+            z,
             transform_matrices,
             unet_skips=unet_skips,
         )
