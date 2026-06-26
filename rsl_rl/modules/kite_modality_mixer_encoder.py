@@ -118,10 +118,10 @@ class MultimodalFusionVAE(nn.Module):
         # ------------------------------------------------------------------
         # State estimation heads.
         # ------------------------------------------------------------------
-        self.velo_est_hidden = nn.Linear(2 * output_dim, velo_hidden)
+        self.velo_est_hidden = nn.Linear(output_dim, velo_hidden)
         self.velo_est_out = nn.Linear(velo_hidden, velo_dim)
 
-        self.feet_est_hidden = nn.Linear(2 * output_dim, feet_hidden)
+        self.feet_est_hidden = nn.Linear(output_dim, feet_hidden)
         self.feet_est_out = nn.Linear(feet_hidden, feet_state_dim)
 
         self._initialize_weights()
