@@ -464,7 +464,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         use_reward_curriculum = True
 
         max_contact_force = 200.0
-        contact_force_threshold = 5.0
+        contact_force_threshold = 15.0
         feet_edge_threshold = 0.05
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
@@ -485,8 +485,8 @@ class GO2KITECfg( LeggedRobotCfg ):
             tracking_lin_vel  = 1.00
             tracking_ang_vel  = 0.50
             #    negative pushes away from not tracking
-            tracking_lin_vel_penalty = -0.5
-            tracking_ang_vel_penalty = -0.25
+            tracking_lin_vel_penalty = -0.2
+            tracking_ang_vel_penalty = -0.1
             
             dof_tracking      = 0.00
             aligned_torques   = 0.00
@@ -526,19 +526,19 @@ class GO2KITECfg( LeggedRobotCfg ):
             vhip_angular_acc = -0.001
 
             # Foot-placement limits
-            front_foot_overreach = -10000.0
+            front_foot_overreach = -1000.0
             rear_foot_overreach = -10.0
 
             # gait
             feet_air_time    = 1.00            # tracking reward for long steps
             # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
-            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height
+            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height
             hip_pos = -0.10
             
-            foot_slip        = -0.01           # penalty for feet slipping
+            foot_slip        = -1.0           # penalty for feet slipping
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_near_edge = -1.0
-            stumble          = -0.2
+            stumble          = -1.0
 
             torso_force_wrench_ellipsoid = 0.2
             swing_vel_ellipsoid_terrain  = 0.1
@@ -802,7 +802,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         
         
         # load_run = "Apr15_11-53-35_50hz_spec_jointrand_stairs"
-        load_run = "Jun25_19-22-30_50hz_nogap_parkour"
+        load_run = "Jun25_23-11-12_50hz_nogap_parkour"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/kite_feasibility/baseline_model_stairs.csv"

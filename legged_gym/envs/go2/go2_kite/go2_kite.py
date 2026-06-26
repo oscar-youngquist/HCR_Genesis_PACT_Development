@@ -350,34 +350,38 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         ).view(1, 4).expand(N, 4)  # (N, 4)
         side_sign = torch.nan_to_num(side_sign, nan=1.0, posinf=1.0, neginf=-1.0)
 
-        q0 = q[:, :, 0]  # (N, 4)
-        q1 = q[:, :, 1]
-        q2 = q[:, :, 2]
+        q0 = q[:, :, 0]  # abad / hip roll
+        q1 = q[:, :, 1]  # thigh / hip pitch
+        q2 = q[:, :, 2]  # calf / knee
 
-        s1 = torch.sin(q0)
-        s2 = torch.sin(-q1)
-        s3 = torch.sin(-q2)
+        s0 = torch.sin(q0)
+        c0 = torch.cos(q0)
 
-        c1 = torch.cos(q0)
-        c2 = torch.cos(-q1)
-        c3 = torch.cos(-q2)
+        s1 = torch.sin(q1)
+        c1 = torch.cos(q1)
 
-        c23 = c2 * c3 - s2 * s3
-        s23 = s2 * c3 + c2 * s3
+        s12 = torch.sin(q1 + q2)
+        c12 = torch.cos(q1 + q2)
+
+        C = l2 * c1 + l3 * c12
+        S = l2 * s1 + l3 * s12
 
         J = torch.zeros(N, 4, 3, 3, device=device, dtype=dtype)
 
+        # x row
         J[:, :, 0, 0] = 0.0
-        J[:, :, 0, 1] = l3 * c23 + l2 * c2
-        J[:, :, 0, 2] = l3 * c23
+        J[:, :, 0, 1] = -C
+        J[:, :, 0, 2] = -l3 * c12
 
-        J[:, :, 1, 0] = l3 * c1 * c23 + l2 * c1 * c2 - (l1 + l4) * side_sign * s1
-        J[:, :, 1, 1] = -l3 * s1 * s23 - l2 * s1 * s2
-        J[:, :, 1, 2] = -l3 * s1 * s23
+        # y row
+        J[:, :, 1, 0] = -side_sign * l1 * s0 + C * c0
+        J[:, :, 1, 1] = -S * s0
+        J[:, :, 1, 2] = -l3 * s12 * s0
 
-        J[:, :, 2, 0] = l3 * s1 * c23 + l2 * c2 * s1 + (l1 + l4) * side_sign * c1
-        J[:, :, 2, 1] = l3 * c1 * s23 + l2 * c1 * s2
-        J[:, :, 2, 2] = l3 * c1 * s23
+        # z row
+        J[:, :, 2, 0] = side_sign * l1 * c0 + C * s0
+        J[:, :, 2, 1] = S * c0
+        J[:, :, 2, 2] = l3 * s12 * c0
 
         return torch.nan_to_num(J, nan=0.0, posinf=1e6, neginf=-1e6)
 
