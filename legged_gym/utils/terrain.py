@@ -138,6 +138,7 @@ class Terrain:
                               horizontal_scale=self.cfg.horizontal_scale)
 
             eval(terrain_type)(terrain, **self.cfg.terrain_kwargs, terrain_type=self.type)
+            self._add_optional_roughness(terrain, difficulty=1.0, terrain_kind_id=terrain_kind_id)
             self.add_terrain_to_map(terrain, i, j, terrain_kind_id)
 
     def _terrain_kind_from_choice(self, choice):
@@ -169,6 +170,7 @@ class Terrain:
                                 length=self.length_per_env_pixels,
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
+        terrain_kind_id = self._terrain_kind_from_choice(choice)
         slope = eval(self.terrain_curriculum_difficulty["slope"])
         step_height = eval(self.terrain_curriculum_difficulty["step_height"])
         discrete_obstacles_height = eval(self.terrain_curriculum_difficulty["discrete_height"])
@@ -269,7 +271,57 @@ class Terrain:
                                                         terrain_type=self.type,
                                                         simplify_mesh=self.simplify_mesh)
 
+        self._add_optional_roughness(
+            terrain,
+            difficulty=difficulty,
+            terrain_kind_id=terrain_kind_id,
+        )
         return terrain
+
+    def _add_optional_roughness(self, terrain, difficulty, terrain_kind_id):
+        """Layer random-uniform roughness onto a generated terrain if enabled."""
+        if not getattr(self.cfg, "add_terrain_roughness", False):
+            return
+
+        rough_kind_ids = getattr(self.cfg, "terrain_roughness_kind_ids", None)
+        if rough_kind_ids:
+            rough_kind_ids = set(int(kind_id) for kind_id in rough_kind_ids)
+            if int(terrain_kind_id) not in rough_kind_ids:
+                return
+
+        height_range = getattr(
+            self.cfg,
+            "terrain_roughness_height_range",
+            [0.0, 0.04],
+        )
+        min_height = float(height_range[0])
+        max_height = float(height_range[1])
+        difficulty = float(np.clip(difficulty, 0.0, 1.0))
+        roughness_ceiling = min_height + (max_height - min_height) * difficulty
+        roughness_height = np.random.uniform(min_height, roughness_ceiling)
+        if roughness_height <= 0.0:
+            return
+
+        # Mutate the height field only; if this subterrain is later used as a
+        # trimesh, rebuild the mesh from the roughened height samples below.
+        terrain_utils.random_uniform_terrain(
+            terrain,
+            min_height=-roughness_height,
+            max_height=roughness_height,
+            step=float(getattr(self.cfg, "terrain_roughness_step", 0.005)),
+            downsampled_scale=float(
+                getattr(self.cfg, "terrain_roughness_downsampled_scale", 0.2)
+            ),
+            terrain_type="heightfield",
+        )
+
+        if self.type == "trimesh":
+            vertices, triangles = terrain_utils.convert_heightfield_to_trimesh(
+                terrain.height_field_raw,
+                terrain.horizontal_scale,
+                terrain.vertical_scale,
+            )
+            terrain.terrain_mesh = trimesh.Trimesh(vertices=vertices, faces=triangles)
 
     def add_terrain_to_map(self, terrain, row, col, terrain_kind_id=-1):
         i = row

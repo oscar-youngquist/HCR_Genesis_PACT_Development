@@ -69,6 +69,15 @@ class LeggedRobotCfg(BaseConfig):
             "gap_size": "difficulty",
             "pit_depth": "0.3 * difficulty",
         }
+        # Optional post-process roughness that can be layered onto generated
+        # terrain types in addition to the standalone random-uniform terrain.
+        add_terrain_roughness = False
+        terrain_roughness_height_range = [0.0, 0.04]  # [m], difficulty-scaled
+        terrain_roughness_step = 0.005                # [m]
+        terrain_roughness_downsampled_scale = 0.2     # [m]
+        # None/empty applies roughness to every generated terrain kind. Use
+        # Terrain.KIND_* ids to restrict this to selected terrain families.
+        terrain_roughness_kind_ids = None
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 

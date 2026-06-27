@@ -75,6 +75,13 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         terrain_proportions = [0.10, 0.05, 0.10, 0.10, 0.15,
                                0.10, 0.15, 0.05, 0.10, 0.10]
         simplify_mesh = True
+        add_terrain_roughness = False
+        terrain_roughness_height_range = [0.0, 0.04]
+        terrain_roughness_step = 0.005
+        terrain_roughness_downsampled_scale = 0.2
+        # None applies roughness to all terrain kinds when enabled. To restrict
+        # it, use terrain kind ids from legged_gym.utils.terrain.Terrain.
+        terrain_roughness_kind_ids = None
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.4",
             "step_height": "0.05 + 0.2 * difficulty",
@@ -493,6 +500,8 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         soft_torque_limit = 0.90
         base_height_target = 0.33
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
+        tracking_lin_vel_error_scale = 4.0
+        tracking_ang_vel_error_scale = 4.0
         
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
@@ -654,6 +663,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         bias_lin_vel_x_with_curriculum = True
         lin_vel_x_forward_bias_final = 0.85
         lin_vel_x_high_speed_bias_power_final = 0.50
+        zero_command_threshold = 0.10
         
         randomize_resampling_time = False
         resampling_time_min = 1.0

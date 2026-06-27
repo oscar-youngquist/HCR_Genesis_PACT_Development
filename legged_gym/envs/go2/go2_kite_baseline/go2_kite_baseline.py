@@ -942,8 +942,14 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
             else:
                 self.commands[forward_only_env_ids, 2] = 0.0
 
-        # set small commands to zero
-        command_is_active = torch.norm(self.commands[env_ids, :3], dim=1) > 0.2
+        # Set small commands to zero using the same threshold that gates
+        # stand-still rewards, so the policy sees one consistent definition of
+        # "zero command" during command sampling and reward computation.
+        zero_command_threshold = self.cfg.commands.zero_command_threshold
+        command_is_active = (
+            torch.norm(self.commands[env_ids, :3], dim=1)
+            > zero_command_threshold
+        )
         command_is_active = command_is_active | forward_only_mask
         self.commands[env_ids, :3] *= command_is_active.unsqueeze(1)
 
@@ -2237,7 +2243,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         # Tracking of linear velocity commands (xy axes)
         lin_vel_error = torch.sum(torch.square(
             self.commands[:, :2] - self.simulator.base_lin_vel[:, :2]), dim=1)
-        return torch.exp(-4.0*lin_vel_error)
+        return torch.exp(-self.cfg.rewards.tracking_lin_vel_error_scale * lin_vel_error)
 
     def _reward_dof_act_limits(self):
         actions_scaled = self._scaled_pos_actions()
@@ -2252,7 +2258,7 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
         # Tracking of angular velocity commands (yaw)
         ang_vel_error = torch.square(
             self.commands[:, 2] - self.simulator.base_ang_vel[:, 2])
-        return torch.exp(-4.0*ang_vel_error)
+        return torch.exp(-self.cfg.rewards.tracking_ang_vel_error_scale * ang_vel_error)
 
     def _reward_joint_power(self):
         # penalize large amounts of motor power
@@ -2309,17 +2315,24 @@ class Go2KITEBaseline(KITEDepthMixin, BaseTask):
 
     def _reward_dof_vel_stand_still(self):
         # Penalize motion at zero commands
-        return torch.sum(torch.abs(self.simulator.dof_vel), dim=1) * (self._command_norm(3) < 0.1)
+        return torch.sum(torch.abs(self.simulator.dof_vel), dim=1) * (
+            self._command_norm(3) < self.cfg.commands.zero_command_threshold
+        )
 
     def _reward_dof_pos_stand_still(self):
         # Penalize position deviation at zero commands
-        return torch.sum(torch.square(self.simulator.dof_pos - self.simulator.default_dof_pos), dim=1) * (self._command_norm(3) < 0.1)
+        return torch.sum(
+            torch.square(self.simulator.dof_pos - self.simulator.default_dof_pos),
+            dim=1,
+        ) * (self._command_norm(3) < self.cfg.commands.zero_command_threshold)
     
     def _reward_stand_still_contact(self):
         # Encourage feet contact with the ground at zero commands
         contacts = self._feet_contact_mask()
         full_contact = torch.sum(1.*contacts, dim=1)==len(self.simulator.feet_indices)
-        return 1.0*full_contact * (self._command_norm(3) < 0.1)
+        return 1.0 * full_contact * (
+            self._command_norm(3) < self.cfg.commands.zero_command_threshold
+        )
     
     def _reward_dof_close_to_default(self):
         # Penalize dof position deviation from default

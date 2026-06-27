@@ -18,6 +18,13 @@ from legged_gym.utils import get_args, init_genesis, task_registry
 from legged_gym.utils.math_utils import quat_rotate_inverse
 
 
+# File-local joystick command limits for KITE play mode. The stick axes are
+# normalized to [-1, 1] and then scaled into these command ranges.
+JOYSTICK_LIN_VEL_X_RANGE = (-0.75, 0.75)
+JOYSTICK_LIN_VEL_Y_RANGE = (-0.3, 0.3)
+JOYSTICK_ANG_VEL_YAW_RANGE = (-1.0, 1.0)
+
+
 def parse_kite_visualization_args():
     """Parse KITE-only visualization flags before the shared parser runs."""
     parser = argparse.ArgumentParser(add_help=False)
@@ -317,9 +324,9 @@ def override_kite_play_configs(env_cfg, args, kite_viz_args):
         env_cfg.commands.heading_command = False
 
     env_cfg.commands.resampling_time = 5.0
-    env_cfg.commands.ranges.lin_vel_x = [-0.5, 0.5]
-    env_cfg.commands.ranges.lin_vel_y = [-0.3, 0.3]
-    env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
+    env_cfg.commands.ranges.lin_vel_x = list(JOYSTICK_LIN_VEL_X_RANGE)
+    env_cfg.commands.ranges.lin_vel_y = list(JOYSTICK_LIN_VEL_Y_RANGE)
+    env_cfg.commands.ranges.ang_vel_yaw = list(JOYSTICK_ANG_VEL_YAW_RANGE)
     env_cfg.commands.ranges.heading = [-3.14, 3.14]
 
     env_cfg.termination.roll_threshold = 1.57
@@ -340,13 +347,31 @@ def override_kite_play_configs(env_cfg, args, kite_viz_args):
         env_cfg.viewer.add_camera = True
 
 
+def _scale_joystick_axis(axis_value, command_range):
+    """Scale a normalized joystick axis into a signed command range."""
+    min_command, max_command = command_range
+    axis_value = float(np.clip(axis_value, -1.0, 1.0))
+    if axis_value >= 0.0:
+        return axis_value * max(0.0, float(max_command))
+    return axis_value * max(0.0, abs(float(min_command)))
+
+
 def _update_commands(env, args, joystick=None):
     """Apply either joystick commands or a simple fixed forward command."""
     if joystick is not None:
         joystick.update()
-        env.commands[:, 0] = -joystick.ly
-        env.commands[:, 1] = -joystick.lx
-        env.commands[:, 2] = -joystick.rx
+        env.commands[:, 0] = _scale_joystick_axis(
+            -joystick.ly,
+            JOYSTICK_LIN_VEL_X_RANGE,
+        )
+        env.commands[:, 1] = _scale_joystick_axis(
+            -joystick.lx,
+            JOYSTICK_LIN_VEL_Y_RANGE,
+        )
+        env.commands[:, 2] = _scale_joystick_axis(
+            -joystick.rx,
+            JOYSTICK_ANG_VEL_YAW_RANGE,
+        )
         env.commands[:, 3] = 0.0
         return
 
