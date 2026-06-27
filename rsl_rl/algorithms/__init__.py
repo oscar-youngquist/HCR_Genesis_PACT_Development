@@ -41,3 +41,4 @@ from .ppo_postau import PPO_PosTau
 from .ppo_rl2ac import PPO_RL2AC
 from .ppo_abl1 import PPO_ABL1
 from .ppo_abl3 import PPO_ABL3 
+from .ppo_unifp import PPO_UniFP

@@ -5,6 +5,7 @@ import time
 from legged_gym.simulator import GenesisSimulator, IsaacGymSimulator, IsaacLabSimulator, GenesisSimulator_PACT, GenesisSimulator_PACT_Pos
 from legged_gym.simulator import GenesisSimulator_PACT_Water, GenesisSimulator_PACT_NoPINN, GenesisSimulator_PACT_PosTau, GenesisSimulator_PACT_RL2AC
 from legged_gym.simulator import GenesisSimulator_KITE, GenesisSimulator_KITE_Depth
+from legged_gym.simulator import GenesisSimulatorB1Z1UniFP
 from legged_gym import SIMULATOR
 
 # Base class for RL tasks
@@ -64,6 +65,10 @@ class BaseTask():
             )
         elif SIMULATOR == "genesis_kite_depth":
             self.simulator = GenesisSimulator_KITE_Depth(
+                cfg, sim_params, sim_device, self.headless
+            )
+        elif SIMULATOR == "genesis_b1z1_unifp":
+            self.simulator = GenesisSimulatorB1Z1UniFP(
                 cfg, sim_params, sim_device, self.headless
             )
         

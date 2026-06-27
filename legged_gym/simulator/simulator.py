@@ -413,6 +413,16 @@ class Simulator(ABC):
             Tensor((num_envs, num_feet, 3)): Velocities of the feet in the world frame.
         """
         return self._feet_vel
+
+    @property
+    def ee_pos(self):
+        """Returns the end-effector position in the world frame, if available."""
+        return self._ee_pos
+
+    @property
+    def ee_vel(self):
+        """Returns the end-effector velocity in the world frame, if available."""
+        return self._ee_vel
     
     @property
     def last_feet_vel(self):

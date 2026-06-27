@@ -1,0 +1,502 @@
+import numpy as np
+
+
+class B1Z1UniFPCfg:
+    seed = 1
+
+    class env:
+        num_envs = 4096
+        num_observations = 73
+        num_privileged_obs = 149
+        num_priv_stack = 3
+        num_explicit_recon_obs = 12
+        num_pred_obs = 12
+        num_actions = 17
+        num_gripper_joints = 2
+        num_obs_hist = 32
+        env_spacing = 0.5
+        episode_length_s = 20
+        grf_dim = 12
+        whole_body_dim = 25
+        fail_to_terminal_time_s = 0.0
+        send_timeouts = True
+        debug = False
+        debug_viz = False
+        debug_draw_height_points_around_base = False
+        debug_draw_height_points_around_feet = False
+        debug_draw_terrain_height_points = False
+
+    class goal_ee:
+        num_commands = 3
+        traj_time = [1.0, 3.0]
+        hold_time = [0.5, 2.0]
+        command_mode = "sphere"
+        collision_upper_limits = [0.25, 0.2, -0.15]
+        collision_lower_limits = [-0.7, -0.2, -0.8]
+        underground_limit = -0.7
+        num_collision_check_samples = 10
+        arm_induced_pitch = 0.38
+
+        class sphere_center:
+            x_offset = 0.3
+            y_offset = 0.0
+            z_invariant_offset = 0.70
+
+        class ranges:
+            init_pos_start = [0.66, np.pi / 4, 0.0]
+            init_pos_end = [0.66, 0.0, 0.0]
+            pos_l = [0.40, 0.85]
+            pos_p = [-np.pi / 3, np.pi / 3]
+            pos_y = [-np.pi / 2, np.pi / 2]
+            delta_orn_r = [-0.5, 0.5]
+            delta_orn_p = [-0.5, 0.5]
+            delta_orn_y = [-0.5, 0.5]
+
+        sphere_error_scale = [1.0, 1.0, 1.0]
+        orn_error_scale = [1.0, 1.0, 1.0]
+
+    class init_state:
+        pos = [0.0, 0.0, 0.6]
+        rot = [0.0, 0.0, 0.0, 1.0]
+        lin_vel = [0.0, 0.0, 0.0]
+        ang_vel = [0.0, 0.0, 0.0]
+        roll_random_scale = 0.0
+        pitch_random_scale = 0.0
+        yaw_random_scale = 0.0
+        default_joint_angles = {
+            "FR_hip_joint": -0.2,
+            "FR_thigh_joint": 0.8,
+            "FR_calf_joint": -1.5,
+            "FL_hip_joint": 0.2,
+            "FL_thigh_joint": 0.8,
+            "FL_calf_joint": -1.5,
+            "RR_hip_joint": -0.2,
+            "RR_thigh_joint": 0.8,
+            "RR_calf_joint": -1.5,
+            "RL_hip_joint": 0.2,
+            "RL_thigh_joint": 0.8,
+            "RL_calf_joint": -1.5,
+            "z1_waist": 0.0,
+            "z1_shoulder": 1.48,
+            "z1_elbow": -1.5,
+            "z1_wrist_angle": 0.0,
+            "z1_forearm_roll": 0.0,
+            "z1_wrist_rotate": 1.57,
+            "z1_jointGripper": -0.785,
+        }
+        yaw_angle_range = [0.0, 3.14]
+        rand_yaw_range = np.pi / 2
+        origin_perturb_range = 0.5
+        init_vel_perturb_range = 0.1
+
+    class asset:
+        name = "b1z1"
+        file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/b1z1_current/urdf/b1z1.urdf"
+        base_name = "trunk"
+        base_mass_name = "trunk"
+        base_com_name = "trunk"
+        dof_names = [
+            "FR_hip_joint",
+            "FR_thigh_joint",
+            "FR_calf_joint",
+            "FL_hip_joint",
+            "FL_thigh_joint",
+            "FL_calf_joint",
+            "RR_hip_joint",
+            "RR_thigh_joint",
+            "RR_calf_joint",
+            "RL_hip_joint",
+            "RL_thigh_joint",
+            "RL_calf_joint",
+            "z1_waist",
+            "z1_shoulder",
+            "z1_elbow",
+            "z1_wrist_angle",
+            "z1_forearm_roll",
+            "z1_wrist_rotate",
+            "z1_jointGripper",
+        ]
+        foot_name = ["FR_foot", "FL_foot", "RR_foot", "RL_foot"]
+        gripper_name = "ee_gripper_link"
+        penalize_contacts_on = ["thigh", "calf", "trunk"]
+        terminate_after_contacts_on = []
+        links_to_keep = ["FR_foot", "FL_foot", "RR_foot", "RL_foot", "ee_gripper_link"]
+        self_collisions = False
+        flip_visual_attachments = False
+        fix_base_link = False
+        obtain_link_contact_states = True
+        contact_state_link_names = ["thigh", "calf", "foot", "trunk", "ee_gripper_link"]
+        base_link_name = "trunk"
+        disable_gravity = False
+        collapse_fixed_joints = True
+        default_dof_drive_mode = 3
+        replace_cylinder_with_capsule = False
+        density = 0.001
+        angular_damping = 0.0
+        linear_damping = 0.0
+        max_angular_velocity = 1000.0
+        max_linear_velocity = 1000.0
+        armature = 0.0
+        thickness = 0.01
+        dof_vel_limits = []
+
+    class terrain:
+        mesh_type = "heightfield"
+        simplify_mesh = True
+        plane_length = 200.0
+        horizontal_scale = 0.1
+        vertical_scale = 0.005
+        static_friction = 1.0
+        dynamic_friction = 1.0
+        restitution = 0.0
+        border_size = 20.0
+        border_height = 1.0
+        curriculum = False
+        obtain_terrain_info_around_feet = True
+        measure_heights = True
+        measured_points_x = [-0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0,
+                             0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+        measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0.0,
+                             0.1, 0.2, 0.3, 0.4, 0.5]
+        selected = False
+        terrain_kwargs = None
+        max_init_terrain_level = 1
+        terrain_length = 8.0
+        terrain_width = 8.0
+        platform_size = 4.0
+        num_rows = 10
+        num_cols = 20
+        terrain_proportions = [0.00, 1.00, 0.00, 0.00, 0.00, 0.00]
+        terrain_curriculum_difficulty = {
+            "slope": "difficulty * 0.4",
+            "step_height": "0.04 + 0.16 * difficulty",
+            "discrete_height": "0.04 + 0.16 * difficulty",
+            "stepping_stones_params": {
+                "stone_length": "1.5 * (1.05 - difficulty)",
+                "stone_width": "1.5 * (1.05 - difficulty)",
+                "stone_distance_x": "0.05 if difficulty == 0 else 0.1",
+                "stone_distance_y": "0.05 if difficulty == 0 else 0.1",
+                "max_height": "0.0",
+            },
+            "gap_size": "difficulty",
+            "pit_depth": "0.3 * difficulty",
+        }
+        slope_treshold = 0.75
+
+    class sim:
+        dt = 0.002
+        substeps = 1
+        max_collision_pairs = 100
+        IK_max_targets = 2
+        gravity = [0.0, 0.0, -9.81]
+        up_axis = 1
+        use_gpu_pipeline = True
+
+        class physx:
+            use_gpu = True
+            num_subscenes = 0
+            num_threads = 10
+            solver_type = 1
+            num_position_iterations = 4
+            num_velocity_iterations = 0
+            contact_offset = 0.01
+            rest_offset = 0.0
+            bounce_threshold_velocity = 0.5
+            max_depenetration_velocity = 1.0
+            max_gpu_contact_pairs = 2**23
+            default_buffer_size_multiplier = 5
+            contact_collection = 2
+
+    class control:
+        control_type = "P"
+        stiffness = {
+            "hip": 80.0,
+            "thigh": 80.0,
+            "calf": 80.0,
+            "z1_waist": 64.0,
+            "z1_shoulder": 128.0,
+            "z1_elbow": 64.0,
+            "z1_wrist_angle": 64.0,
+            "z1_forearm_roll": 64.0,
+            "z1_wrist_rotate": 64.0,
+            "z1_jointGripper": 64.0,
+        }
+        damping = {
+            "hip": 2.0,
+            "thigh": 2.0,
+            "calf": 2.0,
+            "z1_waist": 1.5,
+            "z1_shoulder": 3.0,
+            "z1_elbow": 1.5,
+            "z1_wrist_angle": 1.5,
+            "z1_forearm_roll": 1.5,
+            "z1_wrist_rotate": 1.5,
+            "z1_jointGripper": 1.5,
+        }
+        action_scale = 0.25
+        dt = 0.008
+        decimation = 4
+        use_tradeoff_curriculum = False
+        tradeoff_init_weights = [1.0, 1.0]
+        tradeoff_final_weights = [1.0, 1.0]
+        tradeoff_steps = 1
+        tradeoff_threshold = 1.0
+
+    class commands:
+        curriculum = True
+        max_curriculum = 1.0
+        num_commands = 15
+        resampling_time = 5.0
+        heading_command = False
+        curriculum_threshold = 0.8
+        zero_vel_cmd_prob = 0.3
+        zero_vel_cmd_prob_after_force = 0.8
+        force_start_step = 8000
+        push_gripper_stators = True
+        max_push_force_xyz_gripper_cmd = [-60.0, 60.0]
+        max_push_force_xyz_gripper_ext = [-60.0, 60.0]
+        gripper_force_kp_range = [200.0, 200.0]
+        gripper_force_kd_range = [3.0, 3.0]
+        push_robot_base = False
+        max_push_force_xyz_base_cmd = [-50.0, 50.0]
+        max_push_force_xyz_base_ext = [-50.0, 50.0]
+        base_force_kp_range = [200.0, 200.0]
+        base_force_kd_range = [200.0, 200.0]
+
+        class ranges:
+            lin_vel_x = [-0.6, 0.6]
+            lin_vel_y = [-0.4, 0.4]
+            ang_vel_yaw = [-0.6, 0.6]
+            heading = [-3.14, 3.14]
+
+    class normalization:
+        class obs_scales:
+            lin_vel = 1.0
+            ang_vel = 0.25
+            dof_pos = 1.0
+            dof_vel = 0.05
+            grf = 0.01
+            height_measurements = 5.0
+            ee_sphe_radius_cmd = 1.0
+            ee_sphe_pitch_cmd = 1.0
+            ee_sphe_yaw_cmd = 1.0
+            ee_force = 0.01
+            base_force = 0.01
+        clip_observations = 100.0
+        clip_actions = 50.0
+
+    class domain_rand:
+        use_domainrand_curriculum = True
+        com_rand_z_positive = False
+        randomize_friction = True
+        friction_range = [0.3, 2.0]
+        randomize_base_mass = True
+        added_mass_min = 0.0
+        min_added_mass_max = 15.0
+        max_added_mass_max = 15.0
+        randomize_com_displacement = True
+        com_displacement_x_min = 0.15
+        com_displacement_x_max = 0.15
+        com_displacement_y_min = 0.15
+        com_displacement_y_max = 0.15
+        com_displacement_z_min = 0.15
+        com_displacement_z_min_pos = 0.15
+        com_displacement_z_max = 0.15
+        push_robots = True
+        push_interval_s = 8.0
+        push_interval_min = 5.0
+        push_interval_max = 15.0
+        max_push_vel_xy = 0.8
+        min_push_vel_xy = 0.2
+        max_vertical_push = 0.10
+        min_vertical_push = 0.0
+        vert_interval_min = 5.0
+        vert_interval_max = 15.0
+        max_push_torque = 0.50
+        min_push_torque = 0.0
+        wrench_timeout_min = 5.0
+        wrench_timeout_max = 15.0
+        randomize_ctrl_delay = True
+        ctrl_delay_step_range = [0, 3]
+        randomize_pd_gain = True
+        kp_range = [0.8, 1.2]
+        kd_range = [0.8, 1.2]
+        randomize_motor_strength = True
+        motor_strength_range = [0.85, 1.15]
+        randomize_joint_armature = True
+        joint_armature_range = [0.0, 0.03]
+        randomize_joint_friction = True
+        joint_friction_range_start = [0.0, 0.02]
+        joint_friction_range_end = [0.0, 0.04]
+        randomize_joint_stiffness = False
+        joint_stiffness_range_start = [0.0, 0.0]
+        joint_stiffness_range_end = [0.0, 0.0]
+        randomize_joint_damping = True
+        joint_damping_range_start = [0.30, 0.40]
+        joint_damping_range_end = [0.00, 0.50]
+        num_push_steps = 500
+        push_warmup = 3000
+        best_reward_window = 200
+        best_reward_quantile = 0.90
+        recovery_ratio = 0.90
+        step_interval = 10
+        reward_ema_alpha = 0.05
+        min_reward_to_step = 0.60
+        joint_dynamics_progress_delta = 0.02
+        mass_com_progress_delta = 0.01
+        disturbance_progress_delta = 0.01
+        use_joint_dynamics_curriculum = True
+        use_mass_com_curriculum = False
+        use_disturbance_curriculum = False
+
+    class noise:
+        add_noise = True
+        noise_level = 1.0
+        class noise_scales:
+            dof_pos = 0.01
+            dof_vel = 1.5
+            ang_vel = 0.5
+            gravity = 0.06
+            height_measurements = 0.1
+
+    class arm:
+        mount_offset = [0.3, 0.0, 0.09]
+        init_target_ee_base = [0.2, 0.0, 0.2]
+        grasp_offset = 0.08
+
+    class termination:
+        termination_terms = ["roll", "pitch", "height_min", "height_max"]
+        roll_threshold = 0.7
+        pitch_threshold = 1.0
+        height_min = 0.20
+        height_max = 1.50
+
+    class constraints:
+        class limits:
+            pass
+
+    class rewards:
+        only_positive_rewards = False
+        use_reward_curriculum = True
+        tracking_sigma = 0.25
+        tracking_ee_sigma = 1.0
+        sigma_force = 1.0 / 50.0
+        soft_dof_pos_limit = 0.8
+        soft_dof_vel_limit = 1.0
+        soft_torque_limit = 0.9
+        base_height_target = 0.50
+        max_contact_force = 200.0
+        foot_height_offset = 0.02
+        cycle_time = 0.64
+        target_joint_pos_scale = 0.17
+        target_joint_pos_thd = 0.5
+
+        class scales:
+            termination = -1.0
+            feet_contact_number = 2.0
+            tracking_lin_vel_force_world = 2.0
+            tracking_ang_vel = 1.0
+            torques = -5.0e-6
+            stand_still = 0.5
+            ref_dof_leg = 1.0
+            alive = 1.5
+            lin_vel_z = -1.5
+            feet_air_time = 1.0
+            feet_height = 1.0
+            ang_vel_xy = -0.02
+            dof_acc = -2.5e-7
+            dof_vel = -8.0e-4
+            dof_acc_arm = -4.5e-7
+            dof_vel_arm = -2.0e-4
+            collision = -5.0
+            action_rate = -0.02
+            action_rate_arm = -0.045
+            dof_pos_limits = -10.0
+            torque_limits = -0.005
+            hip_pos = -0.5
+            feet_drag = -0.0008
+            feet_contact_forces = -0.001
+            base_height = -2.0
+            feet_pos_xy = -0.5
+            feet_height_high = -15.0
+            roll = -0.25
+            tracking_ee_force_world = 2.0
+
+        class reward_curriculum:
+            curr_reward_keys = ["collision", "action_rate", "action_rate_arm", "dof_acc", "dof_acc_arm"]
+            curr_reward_bounds = {
+                "collision": [-1.0, -5.0],
+                "action_rate": [-0.005, -0.02],
+                "action_rate_arm": [-0.01, -0.045],
+                "dof_acc": [-5.0e-8, -2.5e-7],
+                "dof_acc_arm": [-1.0e-7, -4.5e-7],
+            }
+            warmup_steps = 1000
+            curr_steps = 3000
+
+    class viewer:
+        ref_env = 0
+        pos = [2, 2, 2]
+        lookat = [0.0, 0.0, 1.0]
+        rendered_envs_idx = [0, 1, 2]
+        add_camera = False
+
+    class sensor:
+        add_depth = False
+        use_warp = False
+        class depth_camera_config:
+            num_sensors = 1
+            num_history = 1
+            near_clip = 0.1
+            far_clip = 10.0
+            near_plane = 0.1
+            far_plane = 10.0
+            resolution = (80, 60)
+            horizontal_fov_deg = 75
+            pos = (0.3, 0.0, 0.1)
+            euler = (0.0, 0.0, 0.0)
+            decimation = 5
+            calculate_depth = True
+            segmentation_camera = False
+            return_pointcloud = False
+            pointcloud_in_world_frame = False
+
+
+class B1Z1UniFPCfgPPO:
+    seed = 1
+    runner_class_name = "UniFPRunner"
+
+    class policy:
+        actor_hidden_dims = [512, 256, 128]
+        critic_hidden_dims = [512, 256, 128]
+        activation = "elu"
+        init_noise_std = 1.0
+
+    class algorithm:
+        value_loss_coef = 1.0
+        use_clipped_value_loss = True
+        clip_param = 0.2
+        entropy_coef = 0.005
+        learning_rate = 1.0e-3
+        schedule = "adaptive"
+        gamma = 0.998
+        lam = 0.95
+        desired_kl = 0.01
+        max_grad_norm = 1.0
+        num_learning_epochs = 5
+        num_mini_batches = 4
+        use_spo = False
+
+    class runner:
+        policy_class_name = "ActorCriticUniFP"
+        algorithm_class_name = "PPO_UniFP"
+        num_steps_per_env = 24
+        max_iterations = 8000
+        save_interval = 500
+        run_name = ""
+        experiment_name = "b1z1_unifp_genesis"
+        sync_wandb = False
+        resume = False
+        load_run = -1
+        checkpoint = -1
+        resume_path = None

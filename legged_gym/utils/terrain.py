@@ -82,11 +82,11 @@ class Terrain:
         # edge mask to indicate the edge points of the terrain, for use in rewards
         self.edge_mask = np.zeros((self.tot_rows, self.tot_cols), dtype=bool)
         self.terrain_meshes = []
+        self.terrain_curriculum_difficulty = cfg.terrain_curriculum_difficulty
         if cfg.curriculum and cfg.selected:
             raise ValueError("Curriculum and selected terrain cannot be both True.")
         if cfg.curriculum:
             print("Generating curriculum terrain...")
-            self.terrain_curriculum_difficulty = cfg.terrain_curriculum_difficulty
             self.curiculum()
         elif cfg.selected:
             print("Generating selected terrain...")

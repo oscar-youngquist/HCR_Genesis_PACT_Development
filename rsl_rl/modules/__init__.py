@@ -47,3 +47,4 @@ from .actor_critic_kite import (
 from .actor_critic_pact_pos import ActorCritic_PACT_Pos
 from .actor_critic_postau import ActorCritic_PosTau
 from .actor_critic_rl2ac import ActorCritic_RL2AC
+from .actor_critic_unifp import ActorCriticUniFP
