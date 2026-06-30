@@ -1218,12 +1218,12 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             )
         ):
             self.last_lin_update_idx = self.common_step_counter
-            self.command_ranges["lin_vel_x"][0] = np.clip(
-                self.command_ranges["lin_vel_x"][0]
-                - self.cfg.commands.lin_vel_x_step,
-                -self.cfg.commands.max_curriculum,
-                0.0,
-            )
+            # self.command_ranges["lin_vel_x"][0] = np.clip(
+            #     self.command_ranges["lin_vel_x"][0]
+            #     - self.cfg.commands.lin_vel_x_step,
+            #     -self.cfg.commands.max_curriculum,
+            #     0.0,
+            # )
             self.command_ranges["lin_vel_x"][1] = np.clip(
                 self.command_ranges["lin_vel_x"][1]
                 + self.cfg.commands.lin_vel_x_step,
@@ -2330,17 +2330,54 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         return -torch.mean(torch.square(self.feet_swing_ema - mean_swing), dim=1)
 
     def _reward_diagonal_pair_balance(self):
-        # Gait order is [FL, FR, RL, RR], so diagonals are FL/RR and FR/RL.
+        # Gait order is [FR, FL, RR, RL], so diagonals are FL/RR and FR/RL.
         diag_a = 0.5 * (self.feet_swing_ema[:, 0] + self.feet_swing_ema[:, 3])
         diag_b = 0.5 * (self.feet_swing_ema[:, 1] + self.feet_swing_ema[:, 2])
         return -torch.square(diag_a - diag_b)
 
+    # def _reward_completed_swing_height_balance(self):
+    #     # Penalize uneven completed-swing peak heights across feet.
+    #     mean_height = self.feet_swing_height_ema.mean(dim=1, keepdim=True)
+        
+    #     return -torch.mean(
+    #         torch.square(self.feet_swing_height_ema - mean_height),
+    #         dim=1,
+    #     )
+    
     def _reward_completed_swing_height_balance(self):
-        # Penalize uneven completed-swing peak heights across feet.
-        mean_height = self.feet_swing_height_ema.mean(dim=1, keepdim=True)
-        return -torch.mean(
-            torch.square(self.feet_swing_height_ema - mean_height),
+        """
+        Penalize uneven completed-swing peak heights across feet, and penalize
+        feet whose completed-swing height EMA is below a minimum target.
+        """
+
+        # feet_swing_height_ema: (num_envs, 4)
+        swing_heights = self.feet_swing_height_ema
+
+        # Balance term: all feet should have similar completed swing heights.
+        mean_height = swing_heights.mean(dim=1, keepdim=True)
+
+        height_imbalance = torch.mean(
+            torch.square(swing_heights - mean_height),
             dim=1,
+        )
+
+        # Minimum-height term: each foot should clear at least a target height.
+        # min_height = self.cfg.rewards.completed_swing_min_height
+        min_height = self._terrain_aware_foot_target_height() 
+
+        height_deficit = torch.clamp(
+            min_height - swing_heights,
+            min=0.0,
+        )
+
+        min_height_penalty = torch.mean(
+            torch.square(height_deficit),
+            dim=1,
+        )
+
+        return -(
+            height_imbalance
+            + self.cfg.rewards.completed_swing_min_height_weight * min_height_penalty
         )
 
     def _reward_dof_vel_stand_still(self):

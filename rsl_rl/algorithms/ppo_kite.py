@@ -700,6 +700,33 @@ class PPO_KITE:
     #    modal context encoder."
     # This loss is borrowed from DreamWaQ++ - https://dreamwaqpp.github.io/static/paper.pdf
     def _versatility_kl_metric(self, mean, logvar, mask, kl_weight=None):
+        vers_loss, vers_log = self._versatility_metric(mean, logvar, mask)
+
+        # Calculate the VAE encoder's KL-divergence
+        kl_loss = self._kl_loss(mean, logvar, mask)
+
+        if kl_weight is None:
+            kl_weight = self.versatility_lambda_e
+
+        # Maximize: J = MI - beta * KL
+        # Minimize: loss = -J
+        vers_loss += kl_weight * kl_loss
+
+        # populate the log-dict
+        vers_log["kl"] = kl_loss.detach()
+
+        return vers_loss, vers_log
+
+
+    # "We incorporate an unsupervised RL objective through mu-
+    #    tual information (MI) maximization for promoting skill dis-
+    #    covery. This objective allows the emergence of novel behaviors
+    #    while preserving stable behaviors induced by the handcrafted
+    #    reward functions. Specifically, we maximize the MI between
+    #    visited states and the latent variable inferred by the multi-
+    #    modal context encoder."
+    # This loss is borrowed from DreamWaQ++ - https://dreamwaqpp.github.io/static/paper.pdf
+    def _versatility_metric(self, mean, logvar, mask):
         # Using torch.sum() and dividing by _denom so "masked" samples are not counted torwards
         #     the mean calculations
         _mask = mask.squeeze(-1).float()                           # (B,)
@@ -752,21 +779,14 @@ class PPO_KITE:
         #     observation-conditioned and not purely noisy.
         mutual_info = marginal_entropy - conditional_entropy                                       # (1, )
 
-        # Calculate the VAE encoder's KL-divergence
-        kl_loss = self._kl_loss(mean, logvar, mask)
-
-        if kl_weight is None:
-            kl_weight = self.versatility_lambda_e
-
         # Maximize: J = MI - beta * KL
         # Minimize: loss = -J
-        vers_loss = -mutual_info + kl_weight * kl_loss
+        vers_loss = -mutual_info
 
         # populate the log-dict
         vers_log = {"marginal_entropy":marginal_entropy.detach(),
                     "conditional_entropy":conditional_entropy.detach(),
                     "mutual_info":mutual_info.detach(),
-                    "kl":kl_loss.detach()
                     }
 
         return vers_loss, vers_log
@@ -1307,16 +1327,19 @@ class PPO_KITE:
 
             explicit_loss = feet_state_explicit_loss + torso_velo_explicit_loss
             
-            
-            versatility_loss, versatility_log = self._versatility_kl_metric(
+            modality_kl = self._kl_loss(mix_mean, mix_logvar, mask)
+
+            versatility_loss, versatility_log = self._versatility_metric(
                 mix_mean,
                 mix_logvar,
                 mask,
             )
-            modality_loss = (
-                self.modality_explicit_weight * explicit_loss
-                + self.versatility_weight * versatility_loss
-            )
+            # modality_loss = (
+            #     self.modality_explicit_weight * explicit_loss
+            #     + self.versatility_weight * versatility_loss
+            # )
+
+            modality_loss = self.modality_explicit_weight * explicit_loss + self.versatility_lambda_e * modality_kl + self.versatility_weight * versatility_loss
 
         non_privileged_loss = (
             depth_sequence_loss
@@ -1369,6 +1392,7 @@ class PPO_KITE:
             "feet_state_explicit_loss": feet_state_explicit_loss,
             "versatility_loss": versatility_loss,
             "versatility_log": versatility_log,
+            "modality_kl":modality_kl,
             "body_velo_est": body_velo_est,
         }
 
@@ -1489,7 +1513,8 @@ class PPO_KITE:
             aux["depth_kl"]
             + aux["seq_kl"]
             + aux["prop_kl"]
-            + aux["versatility_log"]["kl"]
+            # + aux["versatility_log"]["kl"]
+            + aux["modality_kl"]
         )
         losses["decoder"] = self._detach_scalar(aux["depth_recon_loss"] + privileged_loss)
         losses["depth_transform_identity"] = self._detach_scalar(aux["transform_identity_loss"])
@@ -1545,7 +1570,8 @@ class PPO_KITE:
                     aux["prop_dyn_contrast_loss"]
                 ),
                 "modality_versatility": self._detach_scalar(aux["versatility_loss"]),
-                "modality_kl": self._detach_scalar(aux["versatility_log"]["kl"]),
+                # "modality_kl": self._detach_scalar(aux["versatility_log"]["kl"]),
+                "modality_kl": self._detach_scalar(aux["modality_kl"]),
                 "modality_marginal_entropy": self._detach_scalar(
                     aux["versatility_log"]["marginal_entropy"]
                 ),

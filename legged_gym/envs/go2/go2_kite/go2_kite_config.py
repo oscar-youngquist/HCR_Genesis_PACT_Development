@@ -71,11 +71,11 @@ class GO2KITECfg( LeggedRobotCfg ):
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        # terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
+        terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
         
         # slope, random-rough, stairs-down, stairs-up, discrete, stepping-stone, gap (jump), pit (climb-up), high-platform (climb), platform+gap (climb and jump) 
         # terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
-        terrain_proportions = [0.10, 0.10, 0.15, 0.15, 0.10, 0.00, 0.15, 0.10, 0.15, 0.00]
+        # terrain_proportions = [0.10, 0.10, 0.15, 0.15, 0.10, 0.00, 0.15, 0.10, 0.15, 0.00]
         # terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 0.20, 0.00, 0.00, 0.40, 0.40]
         simplify_mesh = True
         add_terrain_roughness = True
@@ -89,7 +89,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.6",
             "step_height": "0.05 + 0.3 * difficulty",
-            "discrete_height": "0.05 + 0.2 * difficulty",
+            "discrete_height": "0.05 + 0.3 * difficulty",
             "stepping_stones_params": {
                 "stone_length": "max(0.20, np.random.uniform(0.5, 0.8) - 0.3 * difficulty)",
                 "stone_width": "max(0.20, np.random.uniform(0.5, 0.8) - 0.3 * difficulty)",
@@ -408,7 +408,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         # control_type = 'P'
         # Much smaller values than typical... only used for feedback control
         stiffness = {'joint': 30.0}   # [N*m/rad]
-        damping   = {'joint': 0.70}     # [N*m*s/rad]
+        damping   = {'joint': 0.75}     # [N*m*s/rad]
         
         action_scale = 0.25   # action scale: target angle = action_scale * pose_action + defaultAngle
         torque_scale = 10.00   # action scale:  target torque = torque_scale * tau_action + defaultTorque
@@ -433,7 +433,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         height_max = 1.50       # [m]
 
         # Reset after a foot or the base falls into terrain marked as a deep void.
-        reset_unrecoverable_gaps = True
+        reset_unrecoverable_gaps = False
         gap_terrain_depth_threshold = 1.0  # void height below the environment origin [m]
         gap_foot_drop_threshold = 0.75     # foot height below the environment origin [m]
         gap_base_drop_threshold = 0.75     # base height below the environment origin [m]
@@ -445,7 +445,7 @@ class GO2KITECfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
         soft_torque_limit = 0.90
-        base_height_target = 0.33
+        base_height_target = 0.32
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         tracking_lin_vel_error_scale = 8.0
         tracking_ang_vel_error_scale = 8.0
@@ -468,15 +468,17 @@ class GO2KITECfg( LeggedRobotCfg ):
         pd_target_tau_max = [25.0, 25.0, 35.0, 25.0, 25.0, 35.0, 25.0, 25.0, 35.0, 25.0, 25.0, 35.0]
 
         foot_clearance_tracking_sigma = 0.01
-        only_positive_rewards = False
+        only_positive_rewards = True
 
         use_reward_curriculum = True
 
         max_contact_force       = 200.0
-        contact_force_threshold = 20.0
+        contact_force_threshold = 5.0
         swing_ema_alpha         = 0.97
         swing_height_ema_alpha  = 0.95
         feet_edge_threshold     = 0.05
+
+        completed_swing_min_height_weight = 1.0
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
@@ -496,7 +498,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             tracking_lin_vel  = 1.00
             tracking_ang_vel  = 0.50
             #    negative pushes away from not tracking
-            tracking_lin_vel_penalty = -0.50
+            tracking_lin_vel_penalty = -0.5
             tracking_ang_vel_penalty = -0.25
             
             dof_tracking      = 0.00
@@ -541,10 +543,10 @@ class GO2KITECfg( LeggedRobotCfg ):
             rear_foot_overreach = -10.0
 
             # gait
-            feet_air_time    = 1.00                # (-) tracking reward for long steps
-            foot_clearance_terrain_aware = 0.70    # (+) tracking reward for feet reaching the desired clearance responsive to terrain height            
-            foot_slip        = -0.1                # penalty for feet slipping
-            feet_contact_forces = -1.0e-3          # penalty for high contact forces on the feet
+            feet_air_time    = 0.80                # (-) tracking reward for long steps
+            foot_clearance_terrain_aware = 0.40    # (+) tracking reward for feet reaching the desired clearance responsive to terrain height            
+            foot_slip        = -0.01               # penalty for feet slipping
+            feet_contact_forces = -1.0e-2          # penalty for high contact forces on the feet
             feet_near_edge = -1.0                  # penalty for feet being in contact near any edge terrain  
             stumble          = -0.4                # penalty for making horizontal contact during swing phase.
             hip_pos = -0.10                        # hip joints specifically should be close to default. Ued to avoid learning unnecessarily wide gaits.
@@ -555,8 +557,8 @@ class GO2KITECfg( LeggedRobotCfg ):
             completed_swing_height_balance = 0.10   # (-) enocurages all swing feet to reach the desired height throughout a swing
 
             # Novel KITE-specific whole-body posture + terrain regualrization/alignment rewards
-            torso_force_wrench_ellipsoid = 0.2     # encourage whole-body postures that align well conditioned force generation with the terrain
-            swing_vel_ellipsoid_terrain  = 0.1     # align swing feet with the terrain underfoot.
+            torso_force_wrench_ellipsoid = 0.2     # (+) encourage whole-body postures that align well conditioned force generation with the terrain
+            swing_vel_ellipsoid_terrain  = 0.1     # (+) align swing feet with the terrain underfoot.
 
         # KITE reward paramaters
         class kite_rewards():
@@ -600,8 +602,8 @@ class GO2KITECfg( LeggedRobotCfg ):
                                   "action_rate":[-0.001, -0.0001],
                                   "action_smoothness":[-0.001, -0.0001],
                                   "dof_acc":[-2.0e-8, -2.0e-10],
-                                  "torso_force_wrench_ellipsoid":[0.2, 0.40],
-                                  "swing_vel_ellipsoid_terrain":[0.10, 0.30]
+                                  "torso_force_wrench_ellipsoid":[0.1, 0.35],
+                                  "swing_vel_ellipsoid_terrain":[0.05, 0.30]
                                  }
 
             curr_steps = 1000
@@ -618,7 +620,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         curriculum_best_quantile = 0.90
         curriculum_recovery_ratio = 0.70
         
-        curriculum_min_lin_tracking = 0.65
+        curriculum_min_lin_tracking = 0.80
         curriculum_min_ang_tracking = 0.35
         
         curriculum_min_episode_fraction = 0.25
@@ -629,9 +631,9 @@ class GO2KITECfg( LeggedRobotCfg ):
         ang_vel_yaw_terrain_gate_cutoff = 1.5
         ang_vel_yaw_terrain_gate_resume_level = 5.0
 
-        lin_vel_x_step = 0.25
+        lin_vel_x_step = 0.50
         lin_vel_y_step = 0.05
-        ang_vel_yaw_step = 0.25
+        ang_vel_yaw_step = 0.50
         max_lin_vel_y = 0.30
         max_ang_vel_yaw = 3.0
         bias_lin_vel_x_with_curriculum = True
@@ -757,9 +759,9 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         log_detailed_encoder_losses = True
 
         # Adaptive entropy coefficient curriculum
-        entropy_coef = 0.01
+        entropy_coef = 0.02
         use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.005, 0.01]
+        adaptive_ent_bounds = [0.01, 0.02]
         adaptive_ent_lin_threshold = 0.75
         adaptive_ent_ang_threshold = 0.35
         adaptive_ent_ter_threshold = 6.0
@@ -798,12 +800,13 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
 
         #     loss weights for depth+proprio modality mixing encoder
         modality_explicit_weight = 1.0    # torso-velo + feet-state estimation reconstruction loss
-        versatility_weight = 0.01         # latent versatility loss
+        versatility_weight = 0.001         # latent versatility loss
         versatility_lambda_e = 1.0        # weight of KL-regularization on the versility loss
-        mixer_kl_weight = 0.5
-        mixer_kl_recon_target = 0.05
-        mixer_kl_beta_min = 0.1
-        mixer_kl_beta_max = 1.0
+        
+        mixer_kl_weight = 1.0
+        mixer_kl_recon_target = 0.10
+        mixer_kl_beta_min = 0.8
+        mixer_kl_beta_max = 2.0
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.
         contrastive_weight = 0.01
@@ -824,7 +827,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         
         
         # load_run = "Apr15_11-53-35_50hz_spec_jointrand_stairs"
-        load_run = "Jun26_18-07-13_50hz_nogap_parkour"
+        load_run = "Jun29_08-30-31_50hz_nogap_parkour"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/kite_feasibility/baseline_model_stairs.csv"

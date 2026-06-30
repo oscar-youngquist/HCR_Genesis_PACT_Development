@@ -274,7 +274,7 @@ def override_kite_play_configs(env_cfg, args, kite_viz_args):
         #     "stone_width": 0.55,
         #     "stone_distance_x": 0.25,
         #     "stone_distance_y": 0.25,
-        #     "max_height": 0.10,
+        #     "max_height": 0.20,
         #     "platform_size": env_cfg.terrain.platform_size,
         #     "min_stone_length": 0.20,
         #     "min_stone_width": 0.20,
