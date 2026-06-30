@@ -563,7 +563,7 @@ class B1Z1UniFPCfgPPO:
         num_steps_per_env = 24
         max_iterations = 8000
         save_interval = 500
-        run_name = ""
+        run_name = "unifp_baseline"
         experiment_name = "b1z1_unifp_genesis"
         sync_wandb = False
         resume = False
