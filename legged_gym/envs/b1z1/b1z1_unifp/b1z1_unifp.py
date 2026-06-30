@@ -52,16 +52,25 @@ class B1Z1UniFP(BaseTask):
         return self.obs_buf, self.obs_history, self.privileged_obs_buf, self.explicit_labels_buf
 
     def reset(self):
+        """Reset all robots."""
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
         obs, privileged_obs, _, _, _, _, _, _ = self.step(
-            torch.zeros(self.num_envs, self.num_actions, device=self.device)
+            torch.zeros(
+                self.num_envs,
+                self.num_actions,
+                device=self.device,
+                requires_grad=False,
+            )
         )
         return obs, privileged_obs
 
     def step(self, actions):
+        """Apply actions, simulate, and return the PACT-style env tuple."""
         actions = self._pre_sim_step(actions)
         if self.force_randomization_active and self.cfg.commands.push_gripper_stators:
-            self._update_ee_force_disturbances()
+            self._push_gripper(torch.arange(self.num_envs, device=self.device))
+        if self.force_randomization_active and self.cfg.commands.push_robot_base:
+            self._push_robot_base(torch.arange(self.num_envs, device=self.device))
         self.simulator.step(actions)
         self.post_physics_step()
 
@@ -79,6 +88,12 @@ class B1Z1UniFP(BaseTask):
             self.simulator._grfs_buf * self.obs_scales.grf,
         )
 
+    def get_failure_idx(self):
+        return self.reset_buf * ~self.time_out_buf
+
+    def get_prev_obs(self):
+        return self.last_obs_buf, self.last_obs_hist, self.llast_obs_buf, self.llast_obs_hist
+
     @property
     def force_randomization_active(self):
         return self.common_step_counter > self.cfg.commands.force_start_step * self.cfg.runner_steps_per_iter
@@ -92,6 +107,8 @@ class B1Z1UniFP(BaseTask):
         self.compute_reward()
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
+        if getattr(self.cfg, "sensor", None) is not None and self.cfg.sensor.add_depth:
+            self.simulator.update_depth_images()
         self.compute_observations()
         if self.debug:
             self.simulator.draw_debug_vis()
@@ -125,12 +142,19 @@ class B1Z1UniFP(BaseTask):
         self.reset_buf = self.fail_buf | self.time_out_buf
 
     def reset_idx(self, env_ids):
+        """Reset selected environments and fill PACT-style episode logs."""
         if len(env_ids) == 0:
             return
         if self.cfg.terrain.curriculum:
             self._update_terrain_curriculum(env_ids)
         if self.cfg.commands.curriculum and self.common_step_counter % self.max_episode_length == 0:
             self._update_command_curriculum(env_ids)
+
+        episode_ee_goal_sphere = self.curr_ee_goal_sphere[env_ids].clone()
+        episode_ee_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_gripper_cmd[env_ids], dim=1))
+        episode_ee_force_ext_norm = torch.mean(torch.norm(self.ee_force_ext_world[env_ids], dim=1))
+        episode_base_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_base_cmd[env_ids], dim=1))
+        episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
 
         self._resample_commands(env_ids)
         self._resample_ee_goal(env_ids, is_init=True)
@@ -146,15 +170,22 @@ class B1Z1UniFP(BaseTask):
         self.reset_buf[env_ids] = 1
         self.fail_buf[env_ids] = 0
         self.ee_force_ext_world[env_ids] = 0.0
+        self.base_force_ext_world[env_ids] = 0.0
         self.current_Fxyz_gripper_cmd[env_ids] = 0.0
         self.current_Fxyz_base_cmd[env_ids] = 0.0
+        self._reset_force_events(env_ids)
+        self._randomize_force_gains(env_ids)
+        if hasattr(self.simulator, "apply_ee_force"):
+            self.simulator.apply_ee_force(self.ee_force_ext_world)
+        if hasattr(self.simulator, "apply_base_force"):
+            self.simulator.apply_base_force(self.base_force_ext_world)
 
         self.last_obs_buf[env_ids] = 0.0
         self.llast_obs_buf[env_ids] = 0.0
         for i in range(self.obs_history_deque.maxlen):
-            self.obs_history_deque[i][env_ids] = 0.0
+            self.obs_history_deque[i][env_ids] *= 0.0
         for i in range(self.critic_obs_deque.maxlen):
-            self.critic_obs_deque[i][env_ids] = 0.0
+            self.critic_obs_deque[i][env_ids] *= 0.0
 
         self.extras["episode"] = {}
         for key in self.episode_sums.keys():
@@ -164,11 +195,39 @@ class B1Z1UniFP(BaseTask):
             self.extras["episode"]["terrain_level"] = torch.mean(self.simulator.terrain_levels.float())
         if self.cfg.commands.curriculum:
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
+        if self.cfg.domain_rand.use_domainrand_curriculum:
+            phase_to_idx = {
+                "joint_dynamics": 0.0,
+                "mass_com": 1.0,
+                "disturbance": 2.0,
+                "complete": 3.0,
+            }
+            self.extras["episode"]["domain_rand_phase"] = phase_to_idx.get(
+                self.simulator.domain_rand_phase,
+                -1.0,
+            )
+            self.extras["episode"]["domain_rand_joint_dynamics_progress"] = (
+                self.simulator.domain_rand_joint_dynamics_progress
+            )
+            self.extras["episode"]["domain_rand_mass_com_progress"] = (
+                self.simulator.domain_rand_mass_com_progress
+            )
+            self.extras["episode"]["domain_rand_disturbance_progress"] = (
+                self.simulator.domain_rand_disturbance_progress
+            )
+        self.extras["episode"]["ee_goal_radius"] = torch.mean(episode_ee_goal_sphere[:, 0])
+        self.extras["episode"]["ee_goal_pitch"] = torch.mean(episode_ee_goal_sphere[:, 1])
+        self.extras["episode"]["ee_goal_yaw"] = torch.mean(episode_ee_goal_sphere[:, 2])
+        self.extras["episode"]["ee_force_cmd_norm"] = episode_ee_force_cmd_norm
+        self.extras["episode"]["ee_force_ext_norm"] = episode_ee_force_ext_norm
+        self.extras["episode"]["base_force_cmd_norm"] = episode_base_force_cmd_norm
+        self.extras["episode"]["base_force_ext_norm"] = episode_base_force_ext_norm
+        self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
 
         if self.cfg.domain_rand.randomize_ctrl_delay:
-            self.action_queue[env_ids] = 0.0
+            self.action_queue[env_ids] *= 0.0
             self.action_delay[env_ids] = torch.randint(
                 self.cfg.domain_rand.ctrl_delay_step_range[0],
                 self.cfg.domain_rand.ctrl_delay_step_range[1] + 1,
@@ -280,8 +339,14 @@ class B1Z1UniFP(BaseTask):
         self.critic_obs_deque.append(critic_obs[:, : self.cfg.env.num_privileged_obs])
         self.privileged_obs_buf = torch.cat([self.critic_obs_deque[i] for i in range(self.critic_obs_deque.maxlen)], dim=-1)
 
+        self.llast_obs_hist = self.last_obs_hist.clone().detach()
+        self.last_obs_hist = self.obs_history.clone().detach()
         self.obs_history_deque.append(self.obs_buf)
         self.obs_history = torch.cat([self.obs_history_deque[i] for i in range(self.obs_history_deque.maxlen)], dim=-1)
+
+    def set_viewer_camera(self, pos, lookat):
+        """Set viewer camera position and direction."""
+        self.simulator.set_viewer_camera(eye=pos, target=lookat)
 
     def _pre_sim_step(self, actions):
         actions = torch.clip(actions, -self.cfg.normalization.clip_actions, self.cfg.normalization.clip_actions).to(self.device)
@@ -369,17 +434,177 @@ class B1Z1UniFP(BaseTask):
         stance[:, 2] = phase >= 0.5
         return stance
 
-    def _update_ee_force_disturbances(self):
-        force_min, force_max = self.cfg.commands.max_push_force_xyz_gripper_ext
-        cmd_min, cmd_max = self.cfg.commands.max_push_force_xyz_gripper_cmd
-        refresh = self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0
-        env_ids = refresh.nonzero(as_tuple=False).flatten()
-        if len(env_ids) == 0:
-            return
-        self.ee_force_ext_world[env_ids] = torch_rand_float(force_min, force_max, (len(env_ids), 3), self.device)
-        self.current_Fxyz_gripper_cmd[env_ids] = torch_rand_float(cmd_min, cmd_max, (len(env_ids), 3), self.device)
+    def _rand_force_interval(self, min_steps, max_steps, shape):
+        low = int(min_steps)
+        high = max(int(max_steps), low + 1)
+        return torch.randint(low, high, shape, device=self.device)
+
+    def _sample_force_target(self, env_ids, force_range, *, zero_z=False, z_scale=1.0):
+        force_min, force_max = force_range
+        target = torch_rand_float(force_min, force_max, (len(env_ids), 3), self.device)
+        if zero_z:
+            target[:, 2] = 0.0
+        else:
+            target[:, 2] *= z_scale
+        return target
+
+    def _update_force_stream(
+        self,
+        env_ids_all,
+        *,
+        interval,
+        interval_min,
+        interval_max,
+        duration,
+        duration_min,
+        duration_max,
+        settling_time,
+        forced_prob,
+        selected,
+        freed,
+        target,
+        output,
+        force_range,
+        zero_z=False,
+        z_scale=1.0,
+    ):
+        new_env_ids = env_ids_all[(self.episode_length_buf[env_ids_all] % interval[env_ids_all]) == 0]
+        if len(new_env_ids) > 0:
+            freed[new_env_ids] = torch.rand(len(new_env_ids), device=self.device) > forced_prob
+            target[new_env_ids] = self._sample_force_target(new_env_ids, force_range, zero_z=zero_z, z_scale=z_scale)
+            sampled_duration = torch_rand_float(duration_min, duration_max, (len(new_env_ids), 1), self.device).view(len(new_env_ids))
+            max_duration = ((interval[new_env_ids].float() - settling_time) / 2.0).clamp_min(1.0)
+            sampled_duration = torch.minimum(sampled_duration, max_duration)
+            duration[new_env_ids] = sampled_duration
+            selected[new_env_ids] = True
+            self._force_push_end_time_for(output)[new_env_ids] = self.episode_length_buf[new_env_ids] + sampled_duration
+
+        selected_env_ids = env_ids_all[selected[env_ids_all]]
+        if len(selected_env_ids) > 0:
+            end_time = self._force_push_end_time_for(output)
+            before_end = self.episode_length_buf[selected_env_ids] < end_time[selected_env_ids].to(torch.int32)
+            step1_env_ids = selected_env_ids[before_end]
+            if len(step1_env_ids) > 0:
+                dur = duration[step1_env_ids].unsqueeze(-1)
+                elapsed = self.episode_length_buf[step1_env_ids].unsqueeze(-1) - (end_time[step1_env_ids].unsqueeze(-1) - dur)
+                output[step1_env_ids] = (target[step1_env_ids] / dur) * torch.clamp(elapsed, torch.zeros_like(dur), dur)
+
+            after_settling = self.episode_length_buf[selected_env_ids] > (end_time[selected_env_ids] + settling_time).to(torch.int32)
+            step2_env_ids = selected_env_ids[after_settling]
+            if len(step2_env_ids) > 0:
+                dur = duration[step2_env_ids].unsqueeze(-1)
+                elapsed = self.episode_length_buf[step2_env_ids].unsqueeze(-1) - (end_time[step2_env_ids].unsqueeze(-1) + settling_time)
+                output[step2_env_ids] = target[step2_env_ids] - (target[step2_env_ids] / dur) * torch.clamp(
+                    elapsed,
+                    torch.zeros_like(dur),
+                    dur,
+                )
+
+            finished = self.episode_length_buf[selected_env_ids] >= (
+                end_time[selected_env_ids] + settling_time + duration[selected_env_ids]
+            ).to(torch.int32)
+            finished_env_ids = selected_env_ids[finished]
+            if len(finished_env_ids) > 0:
+                selected[finished_env_ids] = False
+                target[finished_env_ids] = 0.0
+                output[finished_env_ids] = 0.0
+                end_time[finished_env_ids] = 0.0
+                duration[finished_env_ids] = 0.0
+                interval[finished_env_ids] = self._rand_force_interval(
+                    interval_min,
+                    interval_max,
+                    (len(finished_env_ids),),
+                )
+
+        if torch.any(freed):
+            selected[freed] = False
+            target[freed] = 0.0
+            output[freed] = 0.0
+            self._force_push_end_time_for(output)[freed] = 0.0
+            duration[freed] = 0.0
+
+    def _force_push_end_time_for(self, output):
+        if output is self.current_Fxyz_gripper_cmd:
+            return self.push_end_time_gripper_cmd
+        if output is self.ee_force_ext_world:
+            return self.push_end_time_gripper_ext
+        if output is self.current_Fxyz_base_cmd:
+            return self.push_end_time_base_cmd
+        return self.push_end_time_base_ext
+
+    def _push_gripper(self, env_ids_all):
+        self._update_force_stream(
+            env_ids_all,
+            interval=self.push_interval_gripper_cmd,
+            interval_min=self.push_interval_gripper_cmd_min,
+            interval_max=self.push_interval_gripper_cmd_max,
+            duration=self.push_duration_gripper_cmd,
+            duration_min=self.push_duration_gripper_cmd_min,
+            duration_max=self.push_duration_gripper_cmd_max,
+            settling_time=self.settling_time_force_gripper,
+            forced_prob=self.cfg.commands.gripper_forced_prob_cmd,
+            selected=self.selected_env_ids_gripper_cmd,
+            freed=self.freed_envs_gripper_cmd,
+            target=self.force_target_gripper_cmd,
+            output=self.current_Fxyz_gripper_cmd,
+            force_range=self.cfg.commands.max_push_force_xyz_gripper_cmd,
+        )
+        self._update_force_stream(
+            env_ids_all,
+            interval=self.push_interval_gripper_ext,
+            interval_min=self.push_interval_gripper_ext_min,
+            interval_max=self.push_interval_gripper_ext_max,
+            duration=self.push_duration_gripper_ext,
+            duration_min=self.push_duration_gripper_ext_min,
+            duration_max=self.push_duration_gripper_ext_max,
+            settling_time=self.settling_time_force_gripper,
+            forced_prob=self.cfg.commands.gripper_forced_prob_ext,
+            selected=self.selected_env_ids_gripper_ext,
+            freed=self.freed_envs_gripper_ext,
+            target=self.force_target_gripper_ext,
+            output=self.ee_force_ext_world,
+            force_range=self.cfg.commands.max_push_force_xyz_gripper_ext,
+        )
         if hasattr(self.simulator, "apply_ee_force"):
             self.simulator.apply_ee_force(self.ee_force_ext_world)
+
+    def _push_robot_base(self, env_ids_all):
+        self._update_force_stream(
+            env_ids_all,
+            interval=self.push_interval_base_cmd,
+            interval_min=self.push_interval_base_cmd_min,
+            interval_max=self.push_interval_base_cmd_max,
+            duration=self.push_duration_base_cmd,
+            duration_min=self.push_duration_base_cmd_min,
+            duration_max=self.push_duration_base_cmd_max,
+            settling_time=self.settling_time_force_base,
+            forced_prob=self.cfg.commands.base_forced_prob_cmd,
+            selected=self.selected_env_ids_base_cmd,
+            freed=self.freed_envs_base_cmd,
+            target=self.force_target_base_cmd,
+            output=self.current_Fxyz_base_cmd,
+            force_range=self.cfg.commands.max_push_force_xyz_base_cmd,
+            zero_z=True,
+        )
+        self._update_force_stream(
+            env_ids_all,
+            interval=self.push_interval_base_ext,
+            interval_min=self.push_interval_base_ext_min,
+            interval_max=self.push_interval_base_ext_max,
+            duration=self.push_duration_base_ext,
+            duration_min=self.push_duration_base_ext_min,
+            duration_max=self.push_duration_base_ext_max,
+            settling_time=self.settling_time_force_base,
+            forced_prob=self.cfg.commands.base_forced_prob_ext,
+            selected=self.selected_env_ids_base_ext,
+            freed=self.freed_envs_base_ext,
+            target=self.force_target_base_ext,
+            output=self.base_force_ext_world,
+            force_range=self.cfg.commands.max_push_force_xyz_base_ext,
+            z_scale=self.cfg.commands.force_z_base_ext_scale,
+        )
+        if hasattr(self.simulator, "apply_base_force"):
+            self.simulator.apply_base_force(self.base_force_ext_world)
 
     def _reset_dofs(self, env_ids):
         dof_pos = self.simulator.default_dof_pos.repeat(len(env_ids), 1)
@@ -501,6 +726,8 @@ class B1Z1UniFP(BaseTask):
         self.obs_history = torch.zeros(self.num_envs, self.cfg.env.num_observations * self.cfg.env.num_obs_hist, device=self.device)
         self.last_obs_buf = torch.zeros_like(self.obs_buf)
         self.llast_obs_buf = torch.zeros_like(self.obs_buf)
+        self.last_obs_hist = torch.zeros_like(self.obs_history)
+        self.llast_obs_hist = torch.zeros_like(self.obs_history)
 
         self.critic_obs_deque = deque(maxlen=self.cfg.env.num_priv_stack)
         for _ in range(self.cfg.env.num_priv_stack):
@@ -531,8 +758,52 @@ class B1Z1UniFP(BaseTask):
         self.base_force_ext_world = torch.zeros(self.num_envs, 3, device=self.device)
         self.current_Fxyz_gripper_cmd = torch.zeros(self.num_envs, 3, device=self.device)
         self.current_Fxyz_base_cmd = torch.zeros(self.num_envs, 3, device=self.device)
+        self.freed_envs_gripper_cmd = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.freed_envs_gripper_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.selected_env_ids_gripper_cmd = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.selected_env_ids_gripper_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.push_interval_gripper_cmd = self._rand_force_interval(
+            self.push_interval_gripper_cmd_min,
+            self.push_interval_gripper_cmd_max,
+            (self.num_envs,),
+        )
+        self.push_interval_gripper_ext = self._rand_force_interval(
+            self.push_interval_gripper_ext_min,
+            self.push_interval_gripper_ext_max,
+            (self.num_envs,),
+        )
+        self.push_end_time_gripper_cmd = torch.zeros(self.num_envs, device=self.device)
+        self.push_end_time_gripper_ext = torch.zeros(self.num_envs, device=self.device)
+        self.push_duration_gripper_cmd = torch.zeros(self.num_envs, device=self.device)
+        self.push_duration_gripper_ext = torch.zeros(self.num_envs, device=self.device)
+        self.force_target_gripper_cmd = torch.zeros(self.num_envs, 3, device=self.device)
+        self.force_target_gripper_ext = torch.zeros(self.num_envs, 3, device=self.device)
+
+        self.freed_envs_base_cmd = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.freed_envs_base_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.selected_env_ids_base_cmd = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.selected_env_ids_base_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.push_interval_base_cmd = self._rand_force_interval(
+            self.push_interval_base_cmd_min,
+            self.push_interval_base_cmd_max,
+            (self.num_envs,),
+        )
+        self.push_interval_base_ext = self._rand_force_interval(
+            self.push_interval_base_ext_min,
+            self.push_interval_base_ext_max,
+            (self.num_envs,),
+        )
+        self.push_end_time_base_cmd = torch.zeros(self.num_envs, device=self.device)
+        self.push_end_time_base_ext = torch.zeros(self.num_envs, device=self.device)
+        self.push_duration_base_cmd = torch.zeros(self.num_envs, device=self.device)
+        self.push_duration_base_ext = torch.zeros(self.num_envs, device=self.device)
+        self.force_target_base_cmd = torch.zeros(self.num_envs, 3, device=self.device)
+        self.force_target_base_ext = torch.zeros(self.num_envs, 3, device=self.device)
         self.gripper_force_kps = torch_rand_float(*self.cfg.commands.gripper_force_kp_range, (self.num_envs, 1), self.device)
+        self.gripper_force_kds = torch_rand_float(*self.cfg.commands.gripper_force_kd_range, (self.num_envs, 1), self.device)
         self.base_force_kps = torch_rand_float(*self.cfg.commands.base_force_kp_range, (self.num_envs, 1), self.device)
+        self.base_force_kds = torch_rand_float(*self.cfg.commands.base_force_kd_range, (self.num_envs, 1), self.device)
+        self._randomize_force_gains(torch.arange(self.num_envs, device=self.device))
 
         self.noise_scale_vec = self._get_noise_scale_vec()
         self.add_noise = self.cfg.noise.add_noise
@@ -550,7 +821,6 @@ class B1Z1UniFP(BaseTask):
                 (self.num_envs,),
                 device=self.device,
             )
-
     def _parse_cfg(self, cfg, sim_device):
         self.dt = cfg.control.dt
         self.debug = cfg.env.debug
@@ -573,10 +843,37 @@ class B1Z1UniFP(BaseTask):
         self.kd_scale_offset = (cfg.domain_rand.kd_range[0] + cfg.domain_rand.kd_range[1]) / 2
         cfg.domain_rand.push_interval = np.ceil(cfg.domain_rand.push_interval_s / self.dt)
         cfg.runner_steps_per_iter = 24
+        self.push_interval_gripper_cmd_min = np.ceil(cfg.commands.push_gripper_interval_s_cmd[0] / self.dt)
+        self.push_interval_gripper_cmd_max = np.ceil(cfg.commands.push_gripper_interval_s_cmd[1] / self.dt)
+        self.push_interval_gripper_ext_min = np.ceil(cfg.commands.push_gripper_interval_s_ext[0] / self.dt)
+        self.push_interval_gripper_ext_max = np.ceil(cfg.commands.push_gripper_interval_s_ext[1] / self.dt)
+        self.push_duration_gripper_cmd_min = np.ceil(cfg.commands.push_gripper_duration_s_cmd[0] / self.dt)
+        self.push_duration_gripper_cmd_max = np.ceil(cfg.commands.push_gripper_duration_s_cmd[1] / self.dt)
+        self.push_duration_gripper_ext_min = np.ceil(cfg.commands.push_gripper_duration_s_ext[0] / self.dt)
+        self.push_duration_gripper_ext_max = np.ceil(cfg.commands.push_gripper_duration_s_ext[1] / self.dt)
+        self.settling_time_force_gripper = np.ceil(cfg.commands.settling_time_force_gripper_s / self.dt)
+        self.push_interval_base_cmd_min = np.ceil(cfg.commands.push_base_interval_s_cmd[0] / self.dt)
+        self.push_interval_base_cmd_max = np.ceil(cfg.commands.push_base_interval_s_cmd[1] / self.dt)
+        self.push_interval_base_ext_min = np.ceil(cfg.commands.push_base_interval_s_ext[0] / self.dt)
+        self.push_interval_base_ext_max = np.ceil(cfg.commands.push_base_interval_s_ext[1] / self.dt)
+        self.push_duration_base_cmd_min = np.ceil(cfg.commands.push_base_duration_s_cmd[0] / self.dt)
+        self.push_duration_base_cmd_max = np.ceil(cfg.commands.push_base_duration_s_cmd[1] / self.dt)
+        self.push_duration_base_ext_min = np.ceil(cfg.commands.push_base_duration_s_ext[0] / self.dt)
+        self.push_duration_base_ext_max = np.ceil(cfg.commands.push_base_duration_s_ext[1] / self.dt)
+        self.settling_time_force_base = np.ceil(cfg.commands.settling_time_force_base_s / self.dt)
+
+        self.wb_dim = cfg.env.whole_body_dim
+        self.grf_dim = cfg.env.grf_dim
 
     # Rewards
     def _reward_tracking_lin_vel_force_world(self):
-        force_offset = self.base_force_ext_world[:, :2] / self.base_force_kps
+        base_yaw_quat = quat_from_euler_xyz(
+            torch.zeros(self.num_envs, device=self.device),
+            torch.zeros(self.num_envs, device=self.device),
+            self.simulator.base_euler[:, 2],
+        )
+        force_offset = quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world) + self.current_Fxyz_base_cmd
+        force_offset = force_offset[:, :2] / self.base_force_kds
         error = torch.sum(torch.square(self.commands[:, :2] + force_offset - self.simulator.base_lin_vel[:, :2]), dim=1)
         return torch.exp(-error / self.cfg.rewards.tracking_sigma)
 

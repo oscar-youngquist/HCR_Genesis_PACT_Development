@@ -11,7 +11,6 @@ from legged_gym.utils.math_utils import *
 import random
 
 import torch.nn.functional as F
-import pinocchio as pn
 from collections import deque
 
 if SIMULATOR == "genesis":
@@ -24,16 +23,6 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         super().__init__(cfg, sim_params, device, headless)
         self.first_loop = True
         self.first_loop_feedback = None
-
-    def _create_async_pino_workers(self):
-        # PACT_POS currently does not run the async Pinocchio dynamics path in
-        # post_physics_step, so avoid starting unused worker processes.
-        self.async_pino_manager = None
-
-    def _shutdown_asynic_pino_workers(self):
-        if self.async_pino_manager is not None:
-            self.async_pino_manager.shutdown()
-            self.async_pino_manager = None
     
     #----- Public methods -----#
     def step(self, actions):
@@ -53,22 +42,13 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             self._robot.control_dofs_force(
                 self._torques, self._dof_indices)
             
+            self._apply_external_forces()
             self._scene.step()
             
             self._dof_pos[:] = self._robot.get_dofs_position(
                 self._dof_indices)
             self._dof_vel[:] = self._robot.get_dofs_velocity(
                 self._dof_indices)
-
-    def _get_pinn_wb_dynamics(self):
-        #           total GT forces  ,  generalized mass mat, bias vector
-        return self._contact_forces_buff, self._wb_mass_mat_buff, self._wb_bias_vec_buff, self._torso_6dof_acceleration
-
-    def _get_pinn_feedback(self, pos_actions, dof_pos, dof_vel):
-        feedback_torques = (
-            self._cahed_pgain * (pos_actions + self._default_dof_pos - dof_pos) - self._cahed_dgain * dof_vel
-        )
-        return feedback_torques
 
     def post_physics_step(self):
         self.common_step_counter += 1
@@ -93,56 +73,11 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         self._ee_vel[:] = self._robot.get_links_vel()[:, self._gripper_index, :]
         self._dof_tau[:] = self._robot.get_dofs_force(self._dof_indices)
 
-
-        # Some pinn specific stuff
         self._base_world_lin_vel[:] = self._robot.get_vel()
         self._base_world_ang_vel[:] = self._robot.get_ang()
         
-        # Used to train the model, so reorganize this to match the model inidices
-        #     extract the values used to calculate the dynamics consitentcy reward separately.
+        # Ground reaction forces in the task's foot order.
         self._grfs_buf[:] = self._robot.get_links_net_contact_force()[:, self._feet_indices, :].reshape(self._base_pos.shape[0], self._grf_dim)
-
-        # # All the below is done in the pinocchio indexing scheme [FL, FR, RL, RR]
-        # # Use the Pinocchio library to calculate the (1) contact forces and (2) whole-body dynamics of the robot for use
-        # #     in the dynamic consistency reward and PINN loss. All done in WORLD FRAME!
-        
-        # #     extract the contact forces in pinocchio order GRF
-        # contact_temp = self._link_contact_forces[:, self.pino_feet_indices, :]
-
-        # #     push all the CUDA stuff from GPU to CPU for use by the PinocchioAsync class
-        # #     The whole-body pose
-        # wb_pos_np = torch.concatenate([self._base_pos, self._base_quat, self._dof_pos[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
-        
-        # #     The whole-body velocity
-        # wb_vel_np = torch.concatenate([self._base_world_lin_vel, self._base_world_ang_vel, self._dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
-        
-        # #     The previous whole-body velocity
-        # wb_vel_prev_np = torch.concatenate([self._last_base_world_lin_vel, self._last_base_world_ang_vel, self._last_dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
-
-        # #     The GRF forces
-        # grf_np = contact_temp.reshape(contact_temp.shape[0], 12).unsqueeze(2).cpu().numpy()
-
-        # #     Pass the numpy (cpu) data structures to shared memeory
-        # self.async_pino_manager.shared.q[:]       = wb_pos_np        # num_envs x 19
-        # self.async_pino_manager.shared.qd[:]      = wb_vel_np        # num_envs x 18
-        # self.async_pino_manager.shared.qd_prev[:] = wb_vel_prev_np   # num_envs x 18
-        # self.async_pino_manager.shared.grf[:]     = grf_np           # num_envs x 4 x 3
-        # self.async_pino_manager.shared.dt[0]      = self._control_dt
-
-        # self.async_pino_manager.compute_async()
-        # self.async_pino_manager.wait()            # blocking, wait until all workers are done
-
-        # # now stack the tensor lists to get the necessary state values
-        # self._wb_dynamics_buff[:]        = torch.from_numpy(
-        #     self.async_pino_manager.shared.wb_dynamics).to(self._device) # num_envs x 18
-        # self._contact_forces_buff[:]     = torch.from_numpy(
-        #     self.async_pino_manager.shared.wb_contacts).to(self._device) # num_envs x 18
-        # self._wb_mass_mat_buff[:]        = torch.from_numpy(
-        #     self.async_pino_manager.shared.mass_mat).to(self._device)    # num_envs x 18 x 18
-        # self._wb_bias_vec_buff[:]        = torch.from_numpy(
-        #     self.async_pino_manager.shared.bias).to(self._device)        # num_envs x 18
-        # self._torso_6dof_acceleration[:] = torch.from_numpy(
-        #     self.async_pino_manager.shared.acc6d).to(self._device)       # num_envs x 6
         
         
         # Link contact state
@@ -184,13 +119,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         
         self._dof_tau[env_ids] = 0.
         
-        # PINN stuff
         self._grfs_buf[env_ids] = 0.
-        self._contact_forces_buff[env_ids] = 0.
-        self._wb_dynamics_buff[env_ids] = 0.
-        self._wb_mass_mat_buff[env_ids] = 0.
-        self._wb_bias_vec_buff[env_ids] = 0.
-        self._torso_6dof_acceleration[env_ids] = 0.
         self._base_world_lin_vel[env_ids] = 0.
         self._base_world_ang_vel[env_ids] = 0.
         self._last_base_world_lin_vel[env_ids] = 0.
@@ -612,6 +541,10 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             p_mc, self.max_mass_bounds[0], self.mass_bounds_diff
         )
 
+        self.grip_mass_max_value = _interp(
+            p_mc, self.grip_max_mass_bounds[0], self.grip_mass_bounds_diff
+        )
+
         self.com_delta_x_value = _interp(
             p_mc, self.com_delta_x_bounds[0], self.com_delta_x_diff
         )
@@ -721,6 +654,14 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         self.mass_min = self._cfg.domain_rand.added_mass_min
         self.mass_bounds_diff = self.max_mass_bounds[1] - self.max_mass_bounds[0]
         self.mass_max_value = self.max_mass_bounds[0]
+
+        self.grip_max_mass_bounds = [self._cfg.domain_rand.min_gripper_added_mass_max,
+                                self._cfg.domain_rand.max_gripper_added_mass_max]
+
+        self.grip_mass_min = self._cfg.domain_rand.gripper_mass_min
+        self.grip_mass_bounds_diff = self.grip_max_mass_bounds[1] - self.grip_max_mass_bounds[0]
+        self.grip_mass_max_value = self.grip_max_mass_bounds[0]
+
 
         self.com_delta_x_bounds = [self._cfg.domain_rand.com_displacement_x_min, self._cfg.domain_rand.com_displacement_x_max]
         self.com_delta_x_diff = self.com_delta_x_bounds[1] - self.com_delta_x_bounds[0]
@@ -985,60 +926,6 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
                 if flag:
                     link_indices.append(link.idx - self._robot.link_start)
             return link_indices
-        
-        ###
-        #  Load an istance of the robot model within a pinocchio rigid body dynamics library class
-        #      and create the necessary index maps.
-        ###
-        
-        # Create a pinocchio dynamics model and data container
-        self.pino_model = pn.buildModelFromUrdf(os.path.join(asset_root, asset_file), pn.JointModelFreeFlyer())
-        self.pino_data  = self.pino_model.createData()
-
-        # Create the joint mappings from model-2-pino and pino-2-model - model: [FR, FL, RR, RL], pino: [FL, FR, RL, RR]
-        pino_dof_names = [name for name in self.pino_model.names[2:]]   # skip the universe and base joints
-
-        print("pino_dof_names", pino_dof_names)
-
-        # Maps from the [FR, FL, RR, RL] leg order used by the model to the [FL, FR, RL, RR] order used by pinocchio 
-        #       I have confirmed that this is the order the joints load in for these URDF's but this should
-        #       be safe for aribitrary orderings.
-        self.model_2_pino_joint_map = []
-        for dof_name in pino_dof_names:
-            self.model_2_pino_joint_map.append(self._dof_names.index(dof_name))
-
-        print("self.model_2_pino_joint_map")
-        print(self.model_2_pino_joint_map)
-        
-        # Maps from pinocchio's leg order to the [FR, FL, RR, RL] ordering used by the learning model and
-        #      enforced in this code. Note, pinocchio's DOF positions uses a quat for the orientation
-        #      and so has a lightly different indexing scheme from the output of the elements of the 
-        #      dynamics equations we will use, so we need both
-        self.pino_2_model_joint_pos_map = []
-        self.pino_2_model_joint_act_map = []
-        for joint_name in self._dof_names:
-            joint_id = self.pino_model.getJointId(joint_name)  # pull out the pinocchio idx for this joint
-            joint = self.pino_model.joints[joint_id]           # pull out the joint itself
-            v_idx = joint.idx_v                                # Get the start index of the joint's DoFs in the velocity vector (v)
-            q_idx = joint.idx_q                                # Get the start index of the joint's DoFs in the configuration vector (q)
-            # The joints we care about only have a single DOF...
-            self.pino_2_model_joint_act_map.append(v_idx)
-            self.pino_2_model_joint_pos_map.append(q_idx)
-
-        print("self.pino_2_model_joint_pos_map and self.pino_2_model_joint_act_map")
-        print(self.pino_2_model_joint_pos_map)
-        print(self.pino_2_model_joint_act_map)
-
-
-        # Also need a separate list of foot names and indicies... so stupid...
-        self.pino_foot_names = []
-
-        for frame in self.pino_model.frames:
-            name = frame.name
-            if name.endswith("foot"):
-                self.pino_foot_names.append(name)
-
-        self.pino_feet_indices = find_link_indices(self.pino_foot_names)
 
         self._termination_contact_indices = find_link_indices(
             self._cfg.asset.terminate_after_contacts_on)
@@ -1068,6 +955,14 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             raise ValueError(f"Could not find gripper link containing {self._cfg.asset.gripper_name}")
         self._gripper_index = gripper_indices[0]
         print(f"gripper link index: {self._gripper_index}")
+        self._external_force_link_indices = torch.tensor(
+            [
+                self._robot.link_start + self._gripper_index,
+                self._robot.link_start + self._base_link_index,
+            ],
+            dtype=torch.int32,
+            device=self._device,
+        )
         
         if self._cfg.asset.obtain_link_contact_states:
             self._contact_state_link_indices = find_link_indices(
@@ -1215,22 +1110,12 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         )
         self._ee_vel = torch.zeros_like(self._ee_pos)
         self._ee_force_world = torch.zeros_like(self._ee_pos)
+        self._base_force_world = torch.zeros_like(self._base_pos)
+        self._external_force_world = torch.zeros(
+            (self._num_envs, 2, 3), device=self._device, dtype=torch.float
+        )
 
-        # Pinocchio PINN stuff
         self._grfs_buf = torch.zeros((self._num_envs, self._grf_dim), device=self._device, dtype=torch.float)
-        
-        self._contact_forces_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
-        
-        self._wb_dynamics_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
-        
-        # Holds the generalized mass matrix computed by pinocchio, reshaped to match the model order (FR, FL, RR, RL)
-        self._wb_mass_mat_buff = torch.zeros((self._num_envs, self._wb_dim, self._wb_dim), device=self._device, dtype=torch.float)
-        
-        # Hold the bias vector (gravity, corilis, centerfugal) calculated by pinocchio, reshaped to match the model order
-        self._wb_bias_vec_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
-
-        self._torso_6dof_acceleration = torch.zeros(self._num_envs, 6, device=self._device, dtype=torch.float)
-
         self._base_world_lin_vel = torch.zeros_like(self._base_lin_vel)
         self._base_world_ang_vel = torch.zeros_like(self._base_ang_vel)
 
@@ -1473,14 +1358,34 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         return torques
 
     def apply_ee_force(self, force_world):
-        """Store the target EE disturbance force for the UniFP baseline.
-
-        Genesis force-application APIs vary across versions, so the baseline
-        environment treats this buffer as the source of truth for observations
-        and force-position rewards. The physical application hook is isolated
-        here for the follow-up runtime pass.
-        """
+        """Store the target world-frame EE disturbance force."""
         self._ee_force_world[:] = force_world
+
+    def apply_base_force(self, force_world):
+        """Store the target world-frame base disturbance force."""
+        self._base_force_world[:] = force_world
+
+    def _apply_external_forces(self):
+        """Apply UniFP EE/base external force buffers to Genesis links.
+
+        The original Isaac Gym implementation writes a full rigid-body force
+        tensor and applies it in global/world space before each simulator step.
+        Genesis clears external forces after each scene step, so the compact
+        EE/base force tensor is rebuilt and applied every control substep.
+        """
+        if not hasattr(self, "_external_force_link_indices"):
+            return
+        if not torch.any(self._ee_force_world) and not torch.any(self._base_force_world):
+            return
+        self._external_force_world[:, 0, :] = self._ee_force_world
+        self._external_force_world[:, 1, :] = self._base_force_world
+        self._robot._solver.apply_links_external_force(
+            force=self._external_force_world,
+            links_idx=self._external_force_link_indices,
+            envs_idx=None,
+            ref="link_com",
+            local=False,
+        )
     
 
     def _init_domain_params(self):
@@ -1490,6 +1395,8 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         
         self._added_base_mass = torch.ones(
             self._num_envs, 1, dtype=torch.float, device=self._device, requires_grad=False)
+        
+        self._added_gripper_mass = torch.zeros_like(self._added_base_mass)
         
         self._rand_push_vels = torch.zeros(
             self._num_envs, 3, dtype=torch.float, device=self._device, requires_grad=False)
@@ -1540,6 +1447,14 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         added_mass = gs.rand((len(env_ids), 1), dtype=float) * (max_mass - min_mass) + min_mass
         self._added_base_mass[env_ids] = added_mass[:].detach().clone()
         self._robot.set_mass_shift(added_mass, self._base_link_index, env_ids)
+
+    def _randomize_gripper_mass(self, env_ids=None):
+        min_grip_mass, max_grip_mas = self.grip_mass_min, self.grip_mass_max_value
+
+        added_mass = gs.rand((len(env_ids), 1), dtype=float) * (max_grip_mas - min_grip_mass) + min_grip_mass
+        self._added_gripper_mass[env_ids] = added_mass[:].detach().clone()
+        self._robot.set_mass_shift(added_mass, self._gripper_index, env_ids)
+
 
     def _randomize_com_displacement(self, env_ids):
         ''' Randomize center of mass displacement of the robot'''

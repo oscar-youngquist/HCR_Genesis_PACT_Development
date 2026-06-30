@@ -91,7 +91,7 @@ class B1Z1UniFPCfg:
 
     class asset:
         name = "b1z1"
-        file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/b1z1_current/urdf/b1z1.urdf"
+        file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/b1z1_current/urdf/b1z1_genesis.urdf"
         base_name = "trunk"
         base_mass_name = "trunk"
         base_com_name = "trunk"
@@ -137,6 +137,7 @@ class B1Z1UniFPCfg:
         max_angular_velocity = 1000.0
         max_linear_velocity = 1000.0
         armature = 0.0
+        
         thickness = 0.01
         dof_vel_limits = []
 
@@ -149,9 +150,9 @@ class B1Z1UniFPCfg:
         static_friction = 1.0
         dynamic_friction = 1.0
         restitution = 0.0
-        border_size = 20.0
+        border_size = 5.0
         border_height = 1.0
-        curriculum = False
+        curriculum = True
         obtain_terrain_info_around_feet = True
         measure_heights = True
         measured_points_x = [-0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0,
@@ -210,9 +211,9 @@ class B1Z1UniFPCfg:
     class control:
         control_type = "P"
         stiffness = {
-            "hip": 80.0,
-            "thigh": 80.0,
-            "calf": 80.0,
+            "hip": 175.0,
+            "thigh": 175.0,
+            "calf": 300.0,
             "z1_waist": 64.0,
             "z1_shoulder": 128.0,
             "z1_elbow": 64.0,
@@ -222,9 +223,9 @@ class B1Z1UniFPCfg:
             "z1_jointGripper": 64.0,
         }
         damping = {
-            "hip": 2.0,
-            "thigh": 2.0,
-            "calf": 2.0,
+            "hip": 7.5,
+            "thigh": 7.5,
+            "calf": 12.5,
             "z1_waist": 1.5,
             "z1_shoulder": 3.0,
             "z1_elbow": 1.5,
@@ -234,8 +235,9 @@ class B1Z1UniFPCfg:
             "z1_jointGripper": 1.5,
         }
         action_scale = 0.25
-        dt = 0.008
+        dt = 0.02
         decimation = 4
+        
         use_tradeoff_curriculum = False
         tradeoff_init_weights = [1.0, 1.0]
         tradeoff_final_weights = [1.0, 1.0]
@@ -246,22 +248,50 @@ class B1Z1UniFPCfg:
         curriculum = True
         max_curriculum = 1.0
         num_commands = 15
+        
         resampling_time = 5.0
+        
         heading_command = False
+        
         curriculum_threshold = 0.8
+        
         zero_vel_cmd_prob = 0.3
         zero_vel_cmd_prob_after_force = 0.8
+        
         force_start_step = 8000
+
         push_gripper_stators = True
+        push_gripper_interval_s_cmd = [3.5, 9.0]
+        push_gripper_duration_s_cmd = [1.0, 3.0]
+        gripper_forced_prob_cmd = 0.8
+        push_gripper_interval_s_ext = [3.5, 9.0]
+        push_gripper_duration_s_ext = [1.0, 3.0]
+        gripper_forced_prob_ext = 0.8
+        randomize_gripper_force_gains = True
         max_push_force_xyz_gripper_cmd = [-60.0, 60.0]
         max_push_force_xyz_gripper_ext = [-60.0, 60.0]
+
         gripper_force_kp_range = [200.0, 200.0]
         gripper_force_kd_range = [3.0, 3.0]
-        push_robot_base = False
+        gripper_prop_kd = 0.1
+        settling_time_force_gripper_s = 1.0
+        
+        push_robot_base = True
+        push_base_interval_s_cmd = [3.5, 9.0]
+        push_base_duration_s_cmd = [1.0, 3.0]
+        base_forced_prob_cmd = 0.8
+        push_base_interval_s_ext = [6.0, 12.0]
+        push_base_duration_s_ext = [1.0, 3.0]
+        base_forced_prob_ext = 0.8
+        randomize_base_force_gains = True
         max_push_force_xyz_base_cmd = [-50.0, 50.0]
         max_push_force_xyz_base_ext = [-50.0, 50.0]
+        
         base_force_kp_range = [200.0, 200.0]
         base_force_kd_range = [200.0, 200.0]
+        base_prop_kd = 0.1
+        force_z_base_ext_scale = 0.1
+        settling_time_force_base_s = 3.0
 
         class ranges:
             lin_vel_x = [-0.6, 0.6]
@@ -287,22 +317,32 @@ class B1Z1UniFPCfg:
 
     class domain_rand:
         use_domainrand_curriculum = True
-        com_rand_z_positive = False
-        randomize_friction = True
+        randomize_friction = True  
         friction_range = [0.3, 2.0]
+
         randomize_base_mass = True
-        added_mass_min = 0.0
-        min_added_mass_max = 15.0
+        added_mass_min = -5.0  
+        min_added_mass_max = 5.0
         max_added_mass_max = 15.0
+  
+        randomize_gripper_mass = True
+        gripper_mass_min = -0.1
+        min_gripper_added_mass_max = 0.1
+        max_gripper_added_mass_max = 0.25
+
         randomize_com_displacement = True
+        com_rand_z_positive = False
         com_displacement_x_min = 0.15
         com_displacement_x_max = 0.15
+   
         com_displacement_y_min = 0.15
         com_displacement_y_max = 0.15
+   
         com_displacement_z_min = 0.15
         com_displacement_z_min_pos = 0.15
         com_displacement_z_max = 0.15
-        push_robots = True
+     
+        push_robots = False
         push_interval_s = 8.0
         push_interval_min = 5.0
         push_interval_max = 15.0
@@ -316,26 +356,35 @@ class B1Z1UniFPCfg:
         min_push_torque = 0.0
         wrench_timeout_min = 5.0
         wrench_timeout_max = 15.0
+     
         randomize_ctrl_delay = True
         ctrl_delay_step_range = [0, 3]
+     
         randomize_pd_gain = True
         kp_range = [0.8, 1.2]
         kd_range = [0.8, 1.2]
+     
         randomize_motor_strength = True
         motor_strength_range = [0.85, 1.15]
+        
         randomize_joint_armature = True
         joint_armature_range = [0.0, 0.03]
+        
         randomize_joint_friction = True
         joint_friction_range_start = [0.0, 0.02]
         joint_friction_range_end = [0.0, 0.04]
+        
         randomize_joint_stiffness = False
         joint_stiffness_range_start = [0.0, 0.0]
         joint_stiffness_range_end = [0.0, 0.0]
+        
         randomize_joint_damping = True
         joint_damping_range_start = [0.30, 0.40]
         joint_damping_range_end = [0.00, 0.50]
+        
         num_push_steps = 500
         push_warmup = 3000
+        
         best_reward_window = 200
         best_reward_quantile = 0.90
         recovery_ratio = 0.90
@@ -346,7 +395,7 @@ class B1Z1UniFPCfg:
         mass_com_progress_delta = 0.01
         disturbance_progress_delta = 0.01
         use_joint_dynamics_curriculum = True
-        use_mass_com_curriculum = False
+        use_mass_com_curriculum = True
         use_disturbance_curriculum = False
 
     class noise:
@@ -394,31 +443,47 @@ class B1Z1UniFPCfg:
         class scales:
             termination = -1.0
             feet_contact_number = 2.0
+            
             tracking_lin_vel_force_world = 2.0
             tracking_ang_vel = 1.0
+            
             torques = -5.0e-6
             stand_still = 0.5
+            
             ref_dof_leg = 1.0
+            
             alive = 1.5
+            
             lin_vel_z = -1.5
             feet_air_time = 1.0
             feet_height = 1.0
             ang_vel_xy = -0.02
+            
             dof_acc = -2.5e-7
             dof_vel = -8.0e-4
+            
             dof_acc_arm = -4.5e-7
             dof_vel_arm = -2.0e-4
             collision = -5.0
+            
             action_rate = -0.02
+            
             action_rate_arm = -0.045
+            
             dof_pos_limits = -10.0
+            
             torque_limits = -0.005
+            
             hip_pos = -0.5
+            
             feet_drag = -0.0008
             feet_contact_forces = -0.001
+            
             base_height = -2.0
+            
             feet_pos_xy = -0.5
             feet_height_high = -15.0
+            
             roll = -0.25
             tracking_ee_force_world = 2.0
 
@@ -438,7 +503,12 @@ class B1Z1UniFPCfg:
         ref_env = 0
         pos = [2, 2, 2]
         lookat = [0.0, 0.0, 1.0]
-        rendered_envs_idx = [0, 1, 2]
+        num_rendered_envs = 100
+        rendered_envs_idx = np.random.choice(
+            np.arange(1000),
+            size=num_rendered_envs,
+            replace=False,
+        )
         add_camera = False
 
     class sensor:

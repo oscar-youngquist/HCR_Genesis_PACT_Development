@@ -135,6 +135,29 @@ class OnPolicyRunnerUniFP:
                     tracking = torch.stack(vals).mean().item()
                 if tracking is not None:
                     self.env.simulator._step_domian_rand(it, tracking)
+                if self.writer is not None:
+                    reward_ema = self.env.simulator.domain_rand_reward_ema
+                    self.writer.add_scalar(
+                        "Values/domain_rand_reward_ema",
+                        reward_ema if reward_ema is not None else 0.0,
+                        it,
+                    )
+                    self.writer.add_scalar("Values/required_reward", self.env.simulator.required_reward, it)
+                    self.writer.add_scalar(
+                        "Values/domain_rand_joint_dynamics_progress",
+                        self.env.simulator.domain_rand_joint_dynamics_progress,
+                        it,
+                    )
+                    self.writer.add_scalar(
+                        "Values/domain_rand_mass_com_progress",
+                        self.env.simulator.domain_rand_mass_com_progress,
+                        it,
+                    )
+                    self.writer.add_scalar(
+                        "Values/domain_rand_disturbance_progress",
+                        self.env.simulator.domain_rand_disturbance_progress,
+                        it,
+                    )
 
             if self.log_dir is not None:
                 self.log(locals())
@@ -151,6 +174,7 @@ class OnPolicyRunnerUniFP:
         self.tot_time += locs["collection_time"] + locs["learn_time"]
         iteration_time = locs["collection_time"] + locs["learn_time"]
 
+        ep_string = ""
         if locs["ep_infos"]:
             for key in locs["ep_infos"][0]:
                 infotensor = torch.tensor([], device=self.device)
@@ -161,7 +185,9 @@ class OnPolicyRunnerUniFP:
                     if len(value.shape) == 0:
                         value = value.unsqueeze(0)
                     infotensor = torch.cat((infotensor, value.to(self.device)))
-                self.writer.add_scalar("Episode/" + key, torch.mean(infotensor), locs["it"])
+                value = torch.mean(infotensor)
+                self.writer.add_scalar("Episode/" + key, value, locs["it"])
+                ep_string += f"{f'Mean episode {key}:':>{pad}} {value:.4f}\n"
 
         mean_std = self.alg.actor_critic.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / iteration_time)
@@ -172,21 +198,46 @@ class OnPolicyRunnerUniFP:
             self.writer.add_scalar("Loss/adaptation_" + key, value, locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
+        self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
+        self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
 
         if len(locs["rewbuffer"]) > 0:
             self.writer.add_scalar("Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
             self.writer.add_scalar("Train/mean_episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
+            self.writer.add_scalar("Train/mean_reward/time", statistics.mean(locs["rewbuffer"]), self.tot_time)
+            self.writer.add_scalar(
+                "Train/mean_episode_length/time",
+                statistics.mean(locs["lenbuffer"]),
+                self.tot_time,
+            )
 
-        print(
+        header = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
+        log_string = (
             f"{'#' * width}\n"
-            f"Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']}\n"
-            f"Computation: {fps} steps/s\n"
-            f"Value loss: {locs['mean_value_loss']:.4f}\n"
-            f"Surrogate loss: {locs['mean_surrogate_loss']:.4f}\n"
-            f"Adaptation loss: {locs['mean_adaptation_module_loss']:.4f}\n"
-            f"Mean action noise std: {mean_std.item():.2f}\n"
-            f"Iteration time: {iteration_time:.2f}s\n"
+            f"{header.center(width, ' ')}\n\n"
+            f"{'Computation:':>{pad}} {fps:.0f} steps/s "
+            f"(collection: {locs['collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"
+            f"{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"
+            f"{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"
+            f"{'Adaptation loss:':>{pad}} {locs['mean_adaptation_module_loss']:.4f}\n"
         )
+        for key, value in locs["mean_adaptation_losses"].items():
+            log_string += f"{f'Adaptation {key} loss:':>{pad}} {value:.4f}\n"
+        log_string += f"{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"
+        if len(locs["rewbuffer"]) > 0:
+            log_string += (
+                f"{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"
+                f"{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"
+            )
+        log_string += ep_string
+        log_string += (
+            f"{'-' * width}\n"
+            f"{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"
+            f"{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"
+            f"{'Total time:':>{pad}} {self.tot_time:.2f}s\n"
+            f"{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (locs['num_learning_iterations'] - locs['it']):.1f}s\n"
+        )
+        print(log_string)
 
     def save(self, path, infos=None):
         torch.save(

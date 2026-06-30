@@ -219,12 +219,14 @@ Relevant code:
 ```text
 B1Z1UniFP.force_randomization_active
 B1Z1UniFP._update_ee_force_disturbances()
+B1Z1UniFP._update_base_force_disturbances()
 B1Z1UniFP._reward_tracking_ee_force_world()
 B1Z1UniFP._reward_tracking_lin_vel_force_world()
 GenesisSimulatorB1Z1UniFP.apply_ee_force()
+GenesisSimulatorB1Z1UniFP.apply_base_force()
 ```
 
-The current simulator hook stores the EE force disturbance in the simulator and environment buffers. The exact Genesis rigid-body force application API is isolated behind `apply_ee_force()` for the follow-up runtime validation pass.
+The simulator hooks store the EE and base force disturbances in simulator buffers, then apply them to the corresponding Genesis links before every simulator substep.
 
 ## EE Force Randomization Mechanics
 
@@ -310,6 +312,93 @@ settling_time_force_gripper_s
 
 Those fields should be restored if the goal is strict force-randomization fidelity rather than an initial Genesis baseline.
 
+## Base Force Randomization Mechanics
+
+The Genesis UniFP port now disables the generic domain-randomization base push pipeline:
+
+```text
+cfg.domain_rand.push_robots = False
+```
+
+That means `B1Z1UniFP._post_physics_step_callback()` no longer calls the simulator's generic `push_robots()` perturbation path. Base disturbances instead follow the same UniFP command/disturbance abstraction used by the EE.
+
+The base force path uses two quantities:
+
+```text
+current_Fxyz_base_cmd
+base_force_ext_world
+```
+
+`current_Fxyz_base_cmd` is the commanded base force component. It is written into command dimensions `12:15`, so the policy can observe it through the command slice.
+
+`base_force_ext_world` is the external base force disturbance. It is not directly written into the command vector. It is rotated into the yaw-aligned local frame for explicit/adaptation labels, and it shifts the effective base velocity command inside `tracking_lin_vel_force_world`.
+
+The path is enabled by:
+
+```text
+cfg.commands.push_robot_base = True
+```
+
+After the same force-randomization activation threshold used by the EE path, `B1Z1UniFP.step()` calls:
+
+```text
+B1Z1UniFP._update_base_force_disturbances()
+```
+
+Sampling is tied to the command resampling period:
+
+```python
+episode_length_buf % int(cfg.commands.resampling_time / dt) == 0
+```
+
+The configured bounds are:
+
+```text
+cfg.commands.max_push_force_xyz_base_ext = [-50.0, 50.0]
+cfg.commands.max_push_force_xyz_base_cmd = [-50.0, 50.0]
+```
+
+Each refreshed environment receives uniform XYZ samples:
+
+```python
+base_force_ext_world[env_ids] =
+    uniform(force_min, force_max, shape=(num_refreshed_envs, 3))
+
+current_Fxyz_base_cmd[env_ids] =
+    uniform(cmd_min, cmd_max, shape=(num_refreshed_envs, 3))
+```
+
+The command vector is updated in `update_curr_ee_goal()`:
+
+```python
+commands[:, 12:15] = current_Fxyz_base_cmd
+```
+
+The force-aware base tracking reward uses the yaw-local external base force plus the commanded base force as an impedance-like velocity-command offset:
+
+```python
+base_force_local = yaw_inverse_rotation(base_force_ext_world)
+
+effective_base_velocity_command =
+    commands[:, :2]
+    + (base_force_local + current_Fxyz_base_cmd)[:, :2] / base_force_kds
+```
+
+and then compares that target against the actual base linear velocity:
+
+```python
+tracking_lin_vel_force_world =
+    exp(-||effective_base_velocity_command - base_lin_vel[:, :2]||^2 / tracking_sigma)
+```
+
+On reset, both base force buffers are cleared and the simulator-side base force buffer is updated through:
+
+```text
+GenesisSimulatorB1Z1UniFP.apply_base_force(base_force_ext_world)
+```
+
+As with the EE hook, this updates the simulator buffer used by the per-substep Genesis force application path.
+
 ### Command Vector Interaction
 
 After each EE goal update, the task writes the current EE force command into the command vector:
@@ -361,23 +450,41 @@ tracking_ee_force_world =
 
 This is the main UniFP force-position trick: force control is converted into a target-position shift using a stiffness-like gain instead of directly asking the policy to output force/torque.
 
-### Physical Application Status In The Genesis Port
+### Physical Application In The Genesis Port
 
 The port currently includes:
 
 ```text
 GenesisSimulatorB1Z1UniFP.apply_ee_force(force_world)
+GenesisSimulatorB1Z1UniFP.apply_base_force(force_world)
 ```
 
-At the moment this hook stores the target EE force in a simulator buffer:
+These hooks store the target forces in simulator buffers:
 
 ```python
 self._ee_force_world[:] = force_world
+self._base_force_world[:] = force_world
 ```
 
-The force is therefore available for observations, adaptation labels, and rewards, but the current hook does **not yet apply a real rigid-body force to the Genesis articulation**. That part still needs to be completed against the exact Genesis rigid-body force API available in the installed version.
+During `GenesisSimulatorB1Z1UniFP.step()`, the simulator rebuilds a compact external-force tensor:
 
-Until that hook is completed, the port models the UniFP force-randomization learning signal, but not the full physical EE disturbance dynamics.
+```python
+external_force_world[:, 0, :] = ee_force_world
+external_force_world[:, 1, :] = base_force_world
+```
+
+and applies it before each `scene.step()` using Genesis 0.3.11's rigid solver API:
+
+```python
+robot._solver.apply_links_external_force(
+    force=external_force_world,
+    links_idx=[gripper_link_global_idx, base_link_global_idx],
+    ref="link_com",
+    local=False,
+)
+```
+
+This mirrors the original Isaac Gym approach of applying world-frame rigid-body force tensors every simulation substep. The Genesis call uses `ref="link_com"` so the force is applied as a linear force at the link center of mass, matching the no-explicit-torque behavior of Isaac Gym's `apply_rigid_body_force_tensors(..., torques=None, GLOBAL_SPACE)`.
 
 ### Strict-Fidelity Follow-Up
 
