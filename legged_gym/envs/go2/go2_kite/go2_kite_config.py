@@ -785,14 +785,14 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         #     loss weights for sequence of latent-depth-images encoder
         depth_sequence_kl_weight = 0.1
         depth_sequence_kl_recon_target = 0.05
-        depth_sequence_kl_beta_min = 0.01
-        depth_sequence_kl_beta_max = 1.0
+        depth_sequence_kl_beta_min = 0.10
+        depth_sequence_kl_beta_max = 2.0
         
         #     loss weights for proprioceptive history context encoder
         proprio_kl_weight = 0.1
-        proprio_kl_recon_target = 0.05
-        proprio_kl_beta_min = 0.01
-        proprio_kl_beta_max = 1.0
+        proprio_kl_recon_target = 0.075
+        proprio_kl_beta_min = 0.10
+        proprio_kl_beta_max = 2.0
         
         #     reconstruction losses attached to the underlying student encoders
         depth_sequence_terrain_weight  = 1.0    # terrain reconstruction loss
@@ -804,8 +804,8 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         versatility_lambda_e = 1.0        # weight of KL-regularization on the versility loss
         
         mixer_kl_weight = 1.0
-        mixer_kl_recon_target = 0.10
-        mixer_kl_beta_min = 0.8
+        mixer_kl_recon_target = 0.075
+        mixer_kl_beta_min = 0.5
         mixer_kl_beta_max = 2.0
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.
