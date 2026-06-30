@@ -218,8 +218,9 @@ Relevant code:
 
 ```text
 B1Z1UniFP.force_randomization_active
-B1Z1UniFP._update_ee_force_disturbances()
-B1Z1UniFP._update_base_force_disturbances()
+B1Z1UniFP._push_gripper()
+B1Z1UniFP._push_robot_base()
+B1Z1UniFP._update_force_stream()
 B1Z1UniFP._reward_tracking_ee_force_world()
 B1Z1UniFP._reward_tracking_lin_vel_force_world()
 GenesisSimulatorB1Z1UniFP.apply_ee_force()
@@ -257,60 +258,76 @@ runner_steps_per_iter = 24
 activation = 192000 environment steps
 ```
 
-Before this threshold, EE force disturbances stay at zero except for reset clearing. After the threshold, the task samples EE forces when the force refresh condition is met.
+Before this threshold, EE and base force disturbances stay at zero except for reset clearing. After the threshold, the task runs the original UniFP-style force event scheduler.
 
 ### Sampling
 
-The Genesis port currently samples both commanded and external EE force vectors in:
+The Genesis port now uses the same force-window structure as the original UniFP implementation. Instead of resampling force vectors directly on the command resampling period, it maintains independent event streams for:
 
 ```text
-B1Z1UniFP._update_ee_force_disturbances()
+EE commanded force
+EE external force
+base commanded force
+base external force
 ```
 
-The sampling bounds are:
+Each stream has randomized per-env intervals, randomized durations, a forced-probability gate, a ramp-up phase, a settling/hold phase, a ramp-down phase, and a reset-to-zero phase.
+
+For the EE path, `B1Z1UniFP.step()` calls:
 
 ```text
+B1Z1UniFP._push_gripper()
+```
+
+That method updates both:
+
+```text
+current_Fxyz_gripper_cmd
+ee_force_ext_world
+```
+
+The relevant config fields are:
+
+```text
+cfg.commands.push_gripper_interval_s_cmd = [3.5, 9.0]
+cfg.commands.push_gripper_duration_s_cmd = [1.0, 3.0]
+cfg.commands.gripper_forced_prob_cmd = 0.8
+cfg.commands.push_gripper_interval_s_ext = [3.5, 9.0]
+cfg.commands.push_gripper_duration_s_ext = [1.0, 3.0]
+cfg.commands.gripper_forced_prob_ext = 0.8
+cfg.commands.settling_time_force_gripper_s = 1.0
 cfg.commands.max_push_force_xyz_gripper_ext = [-60.0, 60.0]
 cfg.commands.max_push_force_xyz_gripper_cmd = [-60.0, 60.0]
 ```
 
-The current implementation samples each force component uniformly:
+At the beginning of a force event, target forces are sampled uniformly:
 
 ```python
-ee_force_ext_world[env_ids] =
-    uniform(force_min, force_max, shape=(num_refreshed_envs, 3))
+force_target_gripper_ext[env_ids] =
+    uniform(force_min, force_max, shape=(num_selected_envs, 3))
 
-current_Fxyz_gripper_cmd[env_ids] =
-    uniform(cmd_min, cmd_max, shape=(num_refreshed_envs, 3))
+force_target_gripper_cmd[env_ids] =
+    uniform(cmd_min, cmd_max, shape=(num_selected_envs, 3))
 ```
 
-The refresh condition is currently tied to the command resampling period:
+Then the active force ramps from zero to the target over the sampled duration:
 
 ```python
-episode_length_buf % int(cfg.commands.resampling_time / dt) == 0
+current_force =
+    force_target / duration
+    * clamp(episode_step - (push_end_time - duration), 0, duration)
 ```
 
-With the current config:
+After `settling_time_force_gripper`, the force ramps back to zero:
 
-```text
-resampling_time = 5.0 s
-dt = 0.008 s
-refresh period = 625 policy steps
+```python
+current_force =
+    force_target
+    - force_target / duration
+      * clamp(episode_step - (push_end_time + settling_time), 0, duration)
 ```
 
-This is simpler than the original UniFP Isaac Gym implementation, which separately parameterized command-force and external-force intervals, durations, forced probabilities, and settling windows:
-
-```text
-push_gripper_interval_s_cmd
-push_gripper_duration_s_cmd
-gripper_forced_prob_cmd
-push_gripper_interval_s_ext
-push_gripper_duration_s_ext
-gripper_forced_prob_ext
-settling_time_force_gripper_s
-```
-
-Those fields should be restored if the goal is strict force-randomization fidelity rather than an initial Genesis baseline.
+When the event completes, the selected flag, target force, current force, duration, and end time are cleared, and a new random interval is sampled for that environment.
 
 ## Base Force Randomization Mechanics
 
@@ -342,31 +359,25 @@ cfg.commands.push_robot_base = True
 After the same force-randomization activation threshold used by the EE path, `B1Z1UniFP.step()` calls:
 
 ```text
-B1Z1UniFP._update_base_force_disturbances()
+B1Z1UniFP._push_robot_base()
 ```
 
-Sampling is tied to the command resampling period:
-
-```python
-episode_length_buf % int(cfg.commands.resampling_time / dt) == 0
-```
-
-The configured bounds are:
+The base path uses the same event scheduler, but with separate interval/duration/probability fields:
 
 ```text
+cfg.commands.push_base_interval_s_cmd = [3.5, 9.0]
+cfg.commands.push_base_duration_s_cmd = [1.0, 3.0]
+cfg.commands.base_forced_prob_cmd = 0.8
+cfg.commands.push_base_interval_s_ext = [6.0, 12.0]
+cfg.commands.push_base_duration_s_ext = [1.0, 3.0]
+cfg.commands.base_forced_prob_ext = 0.8
+cfg.commands.settling_time_force_base_s = 3.0
 cfg.commands.max_push_force_xyz_base_ext = [-50.0, 50.0]
 cfg.commands.max_push_force_xyz_base_cmd = [-50.0, 50.0]
+cfg.commands.force_z_base_ext_scale = 0.1
 ```
 
-Each refreshed environment receives uniform XYZ samples:
-
-```python
-base_force_ext_world[env_ids] =
-    uniform(force_min, force_max, shape=(num_refreshed_envs, 3))
-
-current_Fxyz_base_cmd[env_ids] =
-    uniform(cmd_min, cmd_max, shape=(num_refreshed_envs, 3))
-```
+Like the original UniFP code, commanded base force samples have zero vertical component. External base force samples include a vertical component, but it is scaled by `force_z_base_ext_scale`.
 
 The command vector is updated in `update_curr_ee_goal()`:
 

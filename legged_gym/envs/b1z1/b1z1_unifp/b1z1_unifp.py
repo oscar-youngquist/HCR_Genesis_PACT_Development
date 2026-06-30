@@ -434,6 +434,80 @@ class B1Z1UniFP(BaseTask):
         stance[:, 2] = phase >= 0.5
         return stance
 
+    def _randomize_force_gains(self, env_ids):
+        if len(env_ids) == 0:
+            return
+        if self.cfg.commands.randomize_gripper_force_gains:
+            self.gripper_force_kps[env_ids] = torch_rand_float(
+                *self.cfg.commands.gripper_force_kp_range,
+                (len(env_ids), 1),
+                self.device,
+            )
+            if self.cfg.commands.gripper_prop_kd > 0:
+                self.gripper_force_kds[env_ids] = self.gripper_force_kps[env_ids] * self.cfg.commands.gripper_prop_kd
+            else:
+                self.gripper_force_kds[env_ids] = torch_rand_float(
+                    *self.cfg.commands.gripper_force_kd_range,
+                    (len(env_ids), 1),
+                    self.device,
+                )
+        if self.cfg.commands.randomize_base_force_gains:
+            self.base_force_kps[env_ids] = torch_rand_float(
+                *self.cfg.commands.base_force_kp_range,
+                (len(env_ids), 1),
+                self.device,
+            )
+            self.base_force_kds[env_ids] = torch_rand_float(
+                *self.cfg.commands.base_force_kd_range,
+                (len(env_ids), 1),
+                self.device,
+            )
+
+    def _reset_force_events(self, env_ids):
+        if len(env_ids) == 0:
+            return
+        self.freed_envs_gripper_cmd[env_ids] = False
+        self.freed_envs_gripper_ext[env_ids] = False
+        self.selected_env_ids_gripper_cmd[env_ids] = False
+        self.selected_env_ids_gripper_ext[env_ids] = False
+        self.force_target_gripper_cmd[env_ids] = 0.0
+        self.force_target_gripper_ext[env_ids] = 0.0
+        self.push_end_time_gripper_cmd[env_ids] = 0.0
+        self.push_end_time_gripper_ext[env_ids] = 0.0
+        self.push_duration_gripper_cmd[env_ids] = 0.0
+        self.push_duration_gripper_ext[env_ids] = 0.0
+        self.push_interval_gripper_cmd[env_ids] = self._rand_force_interval(
+            self.push_interval_gripper_cmd_min,
+            self.push_interval_gripper_cmd_max,
+            (len(env_ids),),
+        )
+        self.push_interval_gripper_ext[env_ids] = self._rand_force_interval(
+            self.push_interval_gripper_ext_min,
+            self.push_interval_gripper_ext_max,
+            (len(env_ids),),
+        )
+
+        self.freed_envs_base_cmd[env_ids] = False
+        self.freed_envs_base_ext[env_ids] = False
+        self.selected_env_ids_base_cmd[env_ids] = False
+        self.selected_env_ids_base_ext[env_ids] = False
+        self.force_target_base_cmd[env_ids] = 0.0
+        self.force_target_base_ext[env_ids] = 0.0
+        self.push_end_time_base_cmd[env_ids] = 0.0
+        self.push_end_time_base_ext[env_ids] = 0.0
+        self.push_duration_base_cmd[env_ids] = 0.0
+        self.push_duration_base_ext[env_ids] = 0.0
+        self.push_interval_base_cmd[env_ids] = self._rand_force_interval(
+            self.push_interval_base_cmd_min,
+            self.push_interval_base_cmd_max,
+            (len(env_ids),),
+        )
+        self.push_interval_base_ext[env_ids] = self._rand_force_interval(
+            self.push_interval_base_ext_min,
+            self.push_interval_base_ext_max,
+            (len(env_ids),),
+        )
+
     def _rand_force_interval(self, min_steps, max_steps, shape):
         low = int(min_steps)
         high = max(int(max_steps), low + 1)
