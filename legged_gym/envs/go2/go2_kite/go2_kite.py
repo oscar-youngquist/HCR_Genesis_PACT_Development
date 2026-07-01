@@ -806,6 +806,12 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         """ Callback called at the beginning of the step function, before stepping the simulation
         """
         clip_actions = self.cfg.normalization.clip_actions
+        actions = torch.nan_to_num(
+            actions,
+            nan=0.0,
+            posinf=clip_actions,
+            neginf=-clip_actions,
+        )
         actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
         
         # update history of actions

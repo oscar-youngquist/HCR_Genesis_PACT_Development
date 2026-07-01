@@ -302,10 +302,18 @@ class Terrain:
         if roughness_height <= 0.0:
             return
 
-        # Mutate the height field only; if this subterrain is later used as a
-        # trimesh, rebuild the mesh from the roughened height samples below.
+        # Generate roughness into a scratch terrain first. This lets us mask
+        # the roughness away from discontinuities before touching the real
+        # terrain height field.
+        roughness = terrain_utils.SubTerrain(
+            "roughness",
+            width=terrain.width,
+            length=terrain.length,
+            vertical_scale=terrain.vertical_scale,
+            horizontal_scale=terrain.horizontal_scale,
+        )
         terrain_utils.random_uniform_terrain(
-            terrain,
+            roughness,
             min_height=-roughness_height,
             max_height=roughness_height,
             step=float(getattr(self.cfg, "terrain_roughness_step", 0.005)),
@@ -314,6 +322,22 @@ class Terrain:
             ),
             terrain_type="heightfield",
         )
+        roughness_delta = roughness.height_field_raw
+
+        unsafe_mask = self._roughness_unsafe_mask(terrain)
+        roughness_delta = roughness_delta.copy()
+        roughness_delta[unsafe_mask] = 0
+
+        height_field = (
+            terrain.height_field_raw.astype(np.int32)
+            + roughness_delta.astype(np.int32)
+        )
+        int16_info = np.iinfo(terrain.height_field_raw.dtype)
+        terrain.height_field_raw[:] = np.clip(
+            height_field,
+            int16_info.min,
+            int16_info.max,
+        ).astype(terrain.height_field_raw.dtype)
 
         if self.type == "trimesh":
             vertices, triangles = terrain_utils.convert_heightfield_to_trimesh(
@@ -322,6 +346,50 @@ class Terrain:
                 terrain.vertical_scale,
             )
             terrain.terrain_mesh = trimesh.Trimesh(vertices=vertices, faces=triangles)
+
+    def _roughness_unsafe_mask(self, terrain):
+        """Return terrain cells where roughness should be suppressed."""
+        unsafe_mask = np.zeros_like(terrain.height_field_raw, dtype=bool)
+
+        if getattr(self.cfg, "terrain_roughness_protect_edges", True):
+            clearance_cells = int(
+                getattr(self.cfg, "terrain_roughness_edge_clearance", 0.15)
+                / terrain.horizontal_scale
+            )
+            unsafe_mask |= self._dilate_mask(terrain.edge_mask, clearance_cells)
+
+        border_cells = int(
+            getattr(self.cfg, "terrain_roughness_border_clearance", 0.20)
+            / terrain.horizontal_scale
+        )
+        if border_cells > 0:
+            border_cells = min(
+                border_cells,
+                terrain.height_field_raw.shape[0] // 2,
+                terrain.height_field_raw.shape[1] // 2,
+            )
+            unsafe_mask[:border_cells, :] = True
+            unsafe_mask[-border_cells:, :] = True
+            unsafe_mask[:, :border_cells] = True
+            unsafe_mask[:, -border_cells:] = True
+
+        return unsafe_mask
+
+    @staticmethod
+    def _dilate_mask(mask, radius):
+        """Square dilate a boolean mask by radius cells using NumPy only."""
+        if radius <= 0 or not mask.any():
+            return mask.copy()
+        padded = np.pad(mask, radius, mode="constant", constant_values=False)
+        dilated = np.zeros_like(mask, dtype=bool)
+        span = 2 * radius + 1
+        for dx in range(span):
+            for dy in range(span):
+                dilated |= padded[
+                    dx: dx + mask.shape[0],
+                    dy: dy + mask.shape[1],
+                ]
+        return dilated
 
     def add_terrain_to_map(self, terrain, row, col, terrain_kind_id=-1):
         i = row

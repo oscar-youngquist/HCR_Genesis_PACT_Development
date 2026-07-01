@@ -78,7 +78,10 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         add_terrain_roughness = False
         terrain_roughness_height_range = [0.0, 0.04]
         terrain_roughness_step = 0.005
-        terrain_roughness_downsampled_scale = 0.2
+        terrain_roughness_downsampled_scale = 0.30
+        terrain_roughness_protect_edges = True
+        terrain_roughness_edge_clearance = 0.20
+        terrain_roughness_border_clearance = 0.30
         # None applies roughness to all terrain kinds when enabled. To restrict
         # it, use terrain kind ids from legged_gym.utils.terrain.Terrain.
         terrain_roughness_kind_ids = None

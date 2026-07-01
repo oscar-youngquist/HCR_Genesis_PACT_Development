@@ -71,7 +71,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        terrain_proportions = [0.10, 0.15, 0.20, 0.20, 0.20, 0.15]
+        terrain_proportions = [0.15, 0.15, 0.25, 0.25, 0.20]
         
         # slope, random-rough, stairs-down, stairs-up, discrete, stepping-stone, gap (jump), pit (climb-up), high-platform (climb), platform+gap (climb and jump) 
         # terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
@@ -79,12 +79,26 @@ class GO2KITECfg( LeggedRobotCfg ):
         # terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 0.20, 0.00, 0.00, 0.40, 0.40]
         simplify_mesh = True
         add_terrain_roughness = True
-        terrain_roughness_height_range = [0.0, 0.05]
+        terrain_roughness_height_range = [0.0, 0.02]
         terrain_roughness_step = 0.005
-        terrain_roughness_downsampled_scale = 0.2
+        terrain_roughness_downsampled_scale = 0.30
+        terrain_roughness_protect_edges = True
+        terrain_roughness_edge_clearance = 0.20
+        terrain_roughness_border_clearance = 0.20
         # None applies roughness to all terrain kinds when enabled. To restrict
         # it, use terrain kind ids from legged_gym.utils.terrain.Terrain.
-        terrain_roughness_kind_ids = None
+        terrain_roughness_kind_ids = [0,  # slope
+                                    #   2,  # stairs down
+                                    #   3,  # stairs up
+                                    #   4,  # discrete obstacles
+                                      ]
+        # Riskier terrain kinds that can be included once the edge/border
+        # protection is validated:
+        # 5  # stepping stones
+        # 6  # gap
+        # 7  # pit
+        # 8  # multiple high platforms
+        # 9  # high platform gaps
         
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.6",
@@ -126,7 +140,7 @@ class GO2KITECfg( LeggedRobotCfg ):
     class sim:
         # Common
         dt = 0.005                 # 500 Hz
-        substeps = 1
+        substeps = 2
         # For Genesis
         max_collision_pairs = 100  # More collision pairs will occupy more GPU memory and slow down the simulation
         IK_max_targets = 2         # Fewer IK targets will lead to fewer memory usage
@@ -548,7 +562,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             foot_slip        = -0.01               # penalty for feet slipping
             feet_contact_forces = -1.0e-2          # penalty for high contact forces on the feet
             feet_near_edge = -1.0                  # penalty for feet being in contact near any edge terrain  
-            stumble          = -0.4                # penalty for making horizontal contact during swing phase.
+            stumble          = -10.0                # penalty for making horizontal contact during swing phase.
             hip_pos = -0.10                        # hip joints specifically should be close to default. Ued to avoid learning unnecessarily wide gaits.
 
             # Added these gait balance rewards to discourage observed behavior of diagonals pairs of feet behaving differently.
@@ -602,8 +616,8 @@ class GO2KITECfg( LeggedRobotCfg ):
                                   "action_rate":[-0.001, -0.0001],
                                   "action_smoothness":[-0.001, -0.0001],
                                   "dof_acc":[-2.0e-8, -2.0e-10],
-                                  "torso_force_wrench_ellipsoid":[0.1, 0.35],
-                                  "swing_vel_ellipsoid_terrain":[0.05, 0.30]
+                                  "torso_force_wrench_ellipsoid":[0.2, 0.35],
+                                  "swing_vel_ellipsoid_terrain":[0.1, 0.30]
                                  }
 
             curr_steps = 1000
@@ -822,6 +836,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         
         # debug_warmpinn_wb
         run_name = '50hz_nogap_parkour'
+        # run_name = 'terrain_debug_test'
         experiment_name = 'go2_kite'
         save_interval = 100
         

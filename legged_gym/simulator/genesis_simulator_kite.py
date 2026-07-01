@@ -780,7 +780,7 @@ class GenesisSimulator_KITE(Simulator):
         self._control_dt = self._cfg.control.dt
 
         self.sim_dt = self._control_dt / self._cfg.control.decimation
-        self.sim_substeps = 1
+        self.sim_substeps = max(1, int(getattr(self._cfg.sim, "substeps", 1)))
 
         self._batch_dofs_links_info = self._cfg.domain_rand.randomize_joint_armature or \
                 self._cfg.domain_rand.randomize_joint_friction or \

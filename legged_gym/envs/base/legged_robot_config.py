@@ -74,7 +74,10 @@ class LeggedRobotCfg(BaseConfig):
         add_terrain_roughness = False
         terrain_roughness_height_range = [0.0, 0.04]  # [m], difficulty-scaled
         terrain_roughness_step = 0.005                # [m]
-        terrain_roughness_downsampled_scale = 0.2     # [m]
+        terrain_roughness_downsampled_scale = 0.2     # [m], larger is smoother
+        terrain_roughness_protect_edges = True
+        terrain_roughness_edge_clearance = 0.15       # [m], flat ledge around terrain edges
+        terrain_roughness_border_clearance = 0.20     # [m], flat subterrain seam band
         # None/empty applies roughness to every generated terrain kind. Use
         # Terrain.KIND_* ids to restrict this to selected terrain families.
         terrain_roughness_kind_ids = None
