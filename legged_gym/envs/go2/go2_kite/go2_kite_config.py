@@ -514,10 +514,11 @@ class GO2KITECfg( LeggedRobotCfg ):
             #    negative pushes away from not tracking
             tracking_lin_vel_penalty = -0.5
             tracking_ang_vel_penalty = -0.25
-            
+
             dof_tracking      = 0.00
             aligned_torques   = 0.00
-            sparse_contacts   = 0.01         
+            sparse_contacts   = 0.01
+            heading_error     = -0.1 
             
             # smoothness and stability
             lin_vel_z        = -1.0

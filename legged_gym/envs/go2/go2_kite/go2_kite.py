@@ -2268,12 +2268,35 @@ class Go2KITE(KITEDepthMixin, BaseTask):
     def _reward_tracking_lin_vel(self):
         reward = self._reward_tracking_lin_vel_base()
 
-        if self.cfg.commands.heading_command:
-            heading_error = torch.abs(self.heading - self.commands[:, 3])
-            heading_coef = (1.0 + torch.cos(heading_error)) / 2.0
-            reward = reward * heading_coef
+        # if self.cfg.commands.heading_command:
+        #     heading_error = torch.abs(self.heading - self.commands[:, 3])
+        #     self.heading_coef = (1.0 + torch.cos(heading_error)) / 2.0
+        #     reward = reward * self.heading_coef
 
         return reward
+    
+    def _reward_heading_error(self):
+        """
+        Smooth bounded heading-error reward.
+
+        Returns:
+            0 when heading error is 0
+            1 when wrapped heading error magnitude is pi
+        """
+        heading_error = self.heading - self.commands[:, 3]
+
+        # Wrap heading error to [-pi, pi]
+        heading_error = torch.atan2(
+            torch.sin(heading_error),
+            torch.cos(heading_error),
+        )
+
+        # Smoothly maps:
+        # |error| = 0  -> 0
+        # |error| = pi -> 1
+        heading_error_reward = (1.0 - torch.cos(heading_error)) / 2.0
+
+        return heading_error_reward
 
     def _reward_tracking_lin_vel_penalty(self):
         return 1.0 - self._reward_tracking_lin_vel_base()
