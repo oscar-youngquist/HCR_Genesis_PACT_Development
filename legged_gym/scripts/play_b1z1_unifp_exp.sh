@@ -7,7 +7,9 @@ conda activate /home/oyoungquist/.conda/envs/genesis_lr
 export SIMULATOR=genesis_b1z1_unifp
 
 python play_exp_unifp.py --task=b1z1_unifp --seed=1 --gpu=cuda:0 \
-  --use_joystick --follow_robot --render_ee_goal_debug "$@"
+  --use_joystick --follow_robot --render_ee_goal_debug --render_ee_frame_debug \
+  --no-apply_ee_external_forces --no-apply_base_external_forces --no-use_unifp_impedance_controller \
+  --ee_eval_mode=random_sphere "$@"
 
 # Examples:
 #   Disable physical external disturbances:

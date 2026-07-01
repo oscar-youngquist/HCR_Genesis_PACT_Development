@@ -37,7 +37,20 @@ def cart2sphere(cart_coords):
 
 
 class B1Z1UniFP(BaseTask):
-    """Genesis port of the original UniFP B1/Z1 position-force baseline."""
+    """Genesis port of the original UniFP B1/Z1 position-force baseline.
+
+    The environment keeps the UniFP learning problem intact:
+    - 17 learned position actions for 12 B1 leg joints + 5 Z1 arm joints.
+    - A 15-D command vector: base velocity, EE spherical position, reserved
+      orientation slots, EE force command, and base force command.
+    - A CSE/adaptation target (`explicit_labels_buf`) containing base velocity,
+      EE spherical state, EE external force, and base external force.
+    - UniFP force-randomization streams that separately sample commanded force
+      offsets and physically applied external disturbances.
+
+    The surrounding API is shaped like the Genesis/PACT environments so the
+    existing HCR runner, logging, and simulator wrappers can train the baseline.
+    """
 
     def __init__(self, cfg, sim_params, sim_device, headless):
         self.cfg = cfg
@@ -67,12 +80,20 @@ class B1Z1UniFP(BaseTask):
     def step(self, actions):
         """Apply actions, simulate, and return the PACT-style env tuple."""
         actions = self._pre_sim_step(actions)
+
+        # UniFP delays force randomization until `force_start_step * steps_per_iter`.
+        # After that point, commanded force offsets become part of the policy input,
+        # and optional external forces are applied through the Genesis simulator.
         if self.force_randomization_active and self.cfg.commands.push_gripper_stators:
             self._push_gripper(torch.arange(self.num_envs, device=self.device))
         if self.force_randomization_active and self.cfg.commands.push_robot_base:
             self._push_robot_base(torch.arange(self.num_envs, device=self.device))
+
+        # Play/eval can optionally mimic the paper's external impedance wrapper.
+        # It must use estimator outputs, not simulator ground-truth forces.
         if self.cfg.commands.use_external_impedance_compensation:
             self._apply_external_impedance_compensation()
+
         self.simulator.step(actions)
         self.post_physics_step()
 
@@ -98,9 +119,13 @@ class B1Z1UniFP(BaseTask):
 
     @property
     def force_randomization_active(self):
+        # Original UniFP gates the force curriculum by PPO iteration count
+        # (`force_start_step * 24`). `runner_steps_per_iter` makes that explicit.
         return self.common_step_counter > self.cfg.commands.force_start_step * self.cfg.runner_steps_per_iter
 
     def post_physics_step(self):
+        # Match the Isaac-Gym UniFP order: refresh simulator state, resample
+        # commands/goals, terminate, reward, reset, then build next observations.
         self.episode_length_buf += 1
         self.common_step_counter += 1
         self.simulator.post_physics_step()
@@ -147,11 +172,16 @@ class B1Z1UniFP(BaseTask):
         """Reset selected environments and fill PACT-style episode logs."""
         if len(env_ids) == 0:
             return
+
+        # HCR curricula run from reset-time episode statistics. The original
+        # UniFP command curriculum is usually disabled for B1Z1, but the hook is
+        # kept so this port can run the same machinery when enabled.
         if self.cfg.terrain.curriculum:
             self._update_terrain_curriculum(env_ids)
         if self.cfg.commands.curriculum and self.common_step_counter % self.max_episode_length == 0:
             self._update_command_curriculum(env_ids)
 
+        # Snapshot episode-level force/goal statistics before state is zeroed.
         episode_ee_goal_sphere = self.curr_ee_goal_sphere[env_ids].clone()
         episode_ee_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_gripper_cmd[env_ids], dim=1))
         episode_ee_force_ext_norm = torch.mean(torch.norm(self.ee_force_ext_world[env_ids], dim=1))
@@ -162,8 +192,12 @@ class B1Z1UniFP(BaseTask):
         self._resample_ee_goal(env_ids, is_init=True)
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
+        # Simulator reset applies Genesis-side domain randomization and writes
+        # root/DOF state into the Genesis entity.
         self.simulator.reset_idx(env_ids)
 
+        # Clear action histories, force streams, and estimator state so the next
+        # rollout segment starts with a clean UniFP command/force state.
         self.actions[env_ids] = 0.0
         self.last_actions[env_ids] = 0.0
         self.llast_actions[env_ids] = 0.0
@@ -179,6 +213,10 @@ class B1Z1UniFP(BaseTask):
         self.estimated_base_force_local[env_ids] = 0.0
         self._reset_force_events(env_ids)
         self._randomize_force_gains(env_ids)
+
+        # Force buffers live in the env, but Genesis consumes them in the
+        # simulator. Push zeros immediately so reset environments do not keep
+        # stale external forces for one control step.
         if hasattr(self.simulator, "apply_ee_force"):
             self.simulator.apply_ee_force(self.ee_force_ext_world)
         if hasattr(self.simulator, "apply_base_force"):
@@ -253,6 +291,15 @@ class B1Z1UniFP(BaseTask):
             self.episode_sums["termination"] += rew
 
     def compute_observations(self):
+        """Build UniFP actor, critic, and adaptation-target observations.
+
+        Actor input is the stacked noisy proprioceptive history. The adaptation
+        decoder is trained to predict `explicit_labels_buf`, matching original
+        UniFP's `obs_pred`: base velocity, EE spherical position, EE force, and
+        base force. The critic gets a privileged stack containing these labels,
+        domain-randomization variables, contact/gait state, and the same current
+        policy-facing commands.
+        """
         self.llast_obs_buf = self.last_obs_buf.clone().detach()
         self.last_obs_buf = self.obs_buf.clone().detach()
 
@@ -264,11 +311,19 @@ class B1Z1UniFP(BaseTask):
             base_rpy[:, 2],
         )
         ee_center = self.get_ee_goal_spherical_center(base_yaw_quat)
+
+        # UniFP represents the EE target/state in a yaw-aligned spherical frame
+        # centered at the Z1 waist/workspace origin, not in raw world XYZ.
         ee_local_cart = quat_rotate_inverse(base_yaw_quat, self.simulator.ee_pos - ee_center)
         self.ee_pos_sphe_arm = cart2sphere(ee_local_cart)
 
+        # Force labels are also yaw-frame quantities. These are privileged during
+        # training and become estimator predictions at deployment/play time.
         ee_force_local = quat_rotate_inverse(base_yaw_quat, self.ee_force_ext_world)
         base_force_local = quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world)
+
+        # The commanded EE force acts like an external impedance offset: the
+        # target position is shifted by force / virtual stiffness.
         force_offset_world = self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)
         ee_goal_offset_local = quat_rotate_inverse(
             base_yaw_quat,
@@ -283,6 +338,8 @@ class B1Z1UniFP(BaseTask):
         dof_pos_err = (self.simulator.dof_pos[:, :17] - self.simulator.default_dof_pos[:, :17]) * self.obs_scales.dof_pos
         dof_vel = self.simulator.dof_vel[:, :17] * self.obs_scales.dof_vel
 
+        # Current single-frame actor observation. The runner stacks this over
+        # `num_obs_hist` frames before feeding the UniFP adaptation encoder.
         self.obs_buf = torch.cat(
             (
                 body_orientation,
@@ -299,6 +356,7 @@ class B1Z1UniFP(BaseTask):
         if self.add_noise:
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
 
+        # Supervised target for the UniFP CSE/adaptation decoder.
         self.explicit_labels_buf = torch.cat(
             (
                 self.simulator.base_lin_vel * self.obs_scales.lin_vel,
@@ -314,6 +372,10 @@ class B1Z1UniFP(BaseTask):
         mass_params[:, 1:4] = self.simulator._base_com_bias
         stance_mask = self._get_gait_phase()
         contact_mask = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
+
+        # Privileged critic observation mirrors the original UniFP ordering:
+        # estimator labels first, then randomized dynamics/contact/gait state,
+        # current robot state, commands, and force-shifted EE target.
         critic_obs = torch.cat(
             (
                 self.explicit_labels_buf,
@@ -407,6 +469,14 @@ class B1Z1UniFP(BaseTask):
             radius=0.05,
             color=(0.0, 1.0, 1.0, 0.8),
         )
+        if self.cfg.env.render_ee_frame_debug:
+            tcp_from_link06 = self._get_debug_tcp_from_link06(env_ids)
+            if tcp_from_link06 is not None:
+                scene.draw_debug_spheres(
+                    tcp_from_link06,
+                    radius=0.035,
+                    color=(1.0, 0.5, 0.0, 0.9),
+                )
 
         force_vec = force_offset.detach().cpu().numpy()
         goal_pos = self.curr_ee_goal_cart_world[env_ids].detach().cpu().numpy()
@@ -419,6 +489,34 @@ class B1Z1UniFP(BaseTask):
                     color=(1.0, 0.0, 1.0, 0.8),
                 )
 
+    def _get_debug_tcp_from_link06(self, env_ids):
+        """Reconstruct the URDF TCP from link06 for checking fixed-link frame alignment."""
+        robot = getattr(self.simulator, "_robot", None)
+        if robot is None:
+            return None
+        link06_index = getattr(self, "_debug_link06_index", None)
+        if link06_index is None:
+            link06_index = None
+            for link in robot.links:
+                if link.name == "link06":
+                    link06_index = link.idx - robot.link_start
+                    break
+            self._debug_link06_index = link06_index
+        if link06_index is None:
+            return None
+
+        link06_pos = robot.get_links_pos()[:, link06_index, :][env_ids]
+        link06_quat_gs = robot.get_links_quat()[:, link06_index, :][env_ids]
+        link06_quat = torch.empty_like(link06_quat_gs)
+        link06_quat[:, :3] = link06_quat_gs[:, 1:4]
+        link06_quat[:, 3] = link06_quat_gs[:, 0]
+        tcp_offset = torch.tensor(
+            self.cfg.goal_ee.debug_tcp_from_link06_offset,
+            device=self.device,
+            dtype=link06_pos.dtype,
+        ).repeat(len(env_ids), 1)
+        return link06_pos + quat_apply(link06_quat, tcp_offset)
+
     def set_impedance_force_estimates(self, obs_pred):
         """Set estimator-predicted local force values used by the play-time impedance controller."""
         if isinstance(obs_pred, np.ndarray):
@@ -428,6 +526,7 @@ class B1Z1UniFP(BaseTask):
         if obs_pred.shape[1] < 12:
             raise RuntimeError(f"Expected at least 12 predicted UniFP labels, got {obs_pred.shape[1]}")
 
+        # Decoder target layout: [base_vel(3), ee_sphere(3), ee_force(3), base_force(3)].
         self.estimated_ee_force_local[:] = obs_pred[:, 6:9] / self.obs_scales.ee_force
         self.estimated_base_force_local[:] = obs_pred[:, 9:12] / self.obs_scales.base_force
 
@@ -441,53 +540,137 @@ class B1Z1UniFP(BaseTask):
         self.commands[:, 12:15] = self.current_Fxyz_base_cmd
 
     def _pre_sim_step(self, actions):
+        """Clip/store actor actions and optionally apply actuator delay."""
         actions = torch.clip(actions, -self.cfg.normalization.clip_actions, self.cfg.normalization.clip_actions).to(self.device)
         self.llast_actions[:] = self.last_actions[:]
         self.last_actions[:] = self.actions[:]
         self.actions[:] = actions[:]
         if self.cfg.domain_rand.randomize_ctrl_delay:
+            # Genesis port inherits the HCR delay queue: the policy sees the
+            # current observation but the simulator receives an older action.
             self.action_queue[:, 1:] = self.action_queue[:, :-1].clone()
             self.action_queue[:, 0] = actions.clone()
             actions = self.action_queue[torch.arange(self.num_envs, device=self.device), self.action_delay].clone()
         return actions
 
     def _post_physics_step_callback(self):
+        """Periodic UniFP command updates after simulator state refresh."""
         env_ids = (
             self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0
         ).nonzero(as_tuple=False).flatten()
         self._resample_commands(env_ids)
         self.update_curr_ee_goal()
+        self._update_heading_command()
         if self.cfg.domain_rand.push_robots:
             self.simulator.push_robots()
 
     def _resample_commands(self, env_ids):
         if len(env_ids) == 0:
             return
+        # Command slots 0:3 are base x/y/yaw velocity commands.
         self.commands[env_ids, 0] = torch_rand_float(*self.command_ranges["lin_vel_x"], (len(env_ids), 1), self.device).squeeze(1)
         self.commands[env_ids, 1] = torch_rand_float(*self.command_ranges["lin_vel_y"], (len(env_ids), 1), self.device).squeeze(1)
-        self.commands[env_ids, 2] = torch_rand_float(*self.command_ranges["ang_vel_yaw"], (len(env_ids), 1), self.device).squeeze(1)
+        if self.cfg.commands.heading_command:
+            # UniFP slots 3:6 are already EE spherical commands, so desired
+            # heading is kept in a side buffer and converted to yaw rate.
+            self.heading_commands[env_ids] = torch_rand_float(
+                *self.command_ranges["heading"],
+                (len(env_ids), 1),
+                self.device,
+            ).squeeze(1)
+        else:
+            self.commands[env_ids, 2] = torch_rand_float(*self.command_ranges["ang_vel_yaw"], (len(env_ids), 1), self.device).squeeze(1)
+
+        # UniFP samples many standing commands; after force randomization starts
+        # that probability increases so the force policy sees static balancing
+        # cases under disturbance.
         zero_prob = self.cfg.commands.zero_vel_cmd_prob_after_force if self.force_randomization_active else self.cfg.commands.zero_vel_cmd_prob
         zero_mask = torch.rand(len(env_ids), device=self.device) < zero_prob
-        self.commands[env_ids[zero_mask], :3] = 0.0
+        zero_env_ids = env_ids[zero_mask]
+        self.commands[zero_env_ids, :2] = 0.0
+        if self.cfg.commands.heading_command:
+            self.heading_commands[zero_env_ids] = self.simulator.base_euler[zero_env_ids, 2]
+        else:
+            self.commands[zero_env_ids, 2] = 0.0
         self._resample_ee_goal(env_ids)
 
+    def _update_heading_command(self):
+        """PACT-style desired heading conversion without using UniFP command slot 3."""
+        if not self.cfg.commands.heading_command:
+            return
+        forward = quat_apply(self.simulator.base_quat, self.forward_vec)
+        heading = torch.atan2(forward[:, 1], forward[:, 0])
+        self.commands[:, 2] = torch.clip(
+            0.5 * wrap_to_pi(self.heading_commands - heading),
+            self.cfg.commands.ranges.ang_vel_yaw[0],
+            self.cfg.commands.ranges.ang_vel_yaw[1],
+        )
+
     def _resample_ee_goal(self, env_ids, is_init=False):
+        """Sample a new EE spherical target and timing profile.
+
+        UniFP commands the EE as radius/pitch/yaw around a yaw-aligned arm
+        workspace origin. Non-initial samples are rejected if the interpolated
+        path passes through the configured B1 body collision box or underground.
+        """
         if len(env_ids) == 0:
             return
+        init_env_ids = env_ids.clone()
         if is_init:
             self.ee_goal_sphere[env_ids] = self.init_end_ee_sphere
         else:
-            self.ee_goal_sphere[env_ids, 0] = torch_rand_float(*self.cfg.goal_ee.ranges.pos_l, (len(env_ids), 1), self.device).squeeze(1)
-            self.ee_goal_sphere[env_ids, 1] = torch_rand_float(*self.cfg.goal_ee.ranges.pos_p, (len(env_ids), 1), self.device).squeeze(1)
-            self.ee_goal_sphere[env_ids, 2] = torch_rand_float(*self.cfg.goal_ee.ranges.pos_y, (len(env_ids), 1), self.device).squeeze(1)
-        self.ee_start_sphere[env_ids] = self.curr_ee_goal_sphere[env_ids]
+            self.ee_start_sphere[env_ids] = self.curr_ee_goal_sphere[env_ids]
+            remaining_env_ids = env_ids
+            for _ in range(10):
+                self._resample_ee_goal_sphere_once(remaining_env_ids)
+                rejection_mask = self.collision_check(remaining_env_ids)
+                # Keep only rejected envs in the loop; accepted envs retain the
+                # most recent sample and stop resampling.
+                remaining_env_ids = remaining_env_ids[rejection_mask]
+                if len(remaining_env_ids) == 0:
+                    break
+        if is_init:
+            self.ee_start_sphere[env_ids] = self.curr_ee_goal_sphere[env_ids]
         self.goal_timer[env_ids] = 0.0
         self.traj_timesteps[env_ids] = torch_rand_float(*self.cfg.goal_ee.traj_time, (len(env_ids), 1), self.device).squeeze(1) / self.dt
         self.traj_total_timesteps[env_ids] = self.traj_timesteps[env_ids] + (
             torch_rand_float(*self.cfg.goal_ee.hold_time, (len(env_ids), 1), self.device).squeeze(1) / self.dt
         )
+        self.curr_ee_goal_cart[init_env_ids] = sphere2cart(self.curr_ee_goal_sphere[init_env_ids])
+
+    def _resample_ee_goal_sphere_once(self, env_ids):
+        if len(env_ids) == 0:
+            return
+        self.ee_goal_sphere[env_ids, 0] = torch_rand_float(*self.cfg.goal_ee.ranges.pos_l, (len(env_ids), 1), self.device).squeeze(1)
+        self.ee_goal_sphere[env_ids, 1] = torch_rand_float(*self.cfg.goal_ee.ranges.pos_p, (len(env_ids), 1), self.device).squeeze(1)
+        self.ee_goal_sphere[env_ids, 2] = torch_rand_float(*self.cfg.goal_ee.ranges.pos_y, (len(env_ids), 1), self.device).squeeze(1)
+
+    def collision_check(self, env_ids):
+        """Return True for EE target paths that should be rejected."""
+        if len(env_ids) == 0:
+            return torch.zeros(0, dtype=torch.bool, device=self.device)
+        # Check the whole linear spherical interpolation, not just the final
+        # target, because intermediate EE targets can clip through the torso.
+        ee_target_all_sphere = torch.lerp(
+            self.ee_start_sphere[env_ids, :, None],
+            self.ee_goal_sphere[env_ids, :, None],
+            self.collision_check_t,
+        ).squeeze(-1)
+        ee_target_cart = sphere2cart(
+            torch.permute(ee_target_all_sphere, (2, 0, 1)).reshape(-1, 3)
+        ).reshape(self.num_collision_check_samples, -1, 3)
+        collision_mask = torch.any(
+            torch.logical_and(
+                torch.all(ee_target_cart < self.collision_upper_limits, dim=-1),
+                torch.all(ee_target_cart > self.collision_lower_limits, dim=-1),
+            ),
+            dim=0,
+        )
+        underground_mask = torch.any(ee_target_cart[..., 2] < self.underground_limit, dim=0)
+        return collision_mask | underground_mask
 
     def update_curr_ee_goal(self):
+        """Advance the EE trajectory and publish UniFP command slots."""
         self.goal_timer += 1
         done = self.goal_timer > self.traj_total_timesteps
         if torch.any(done):
@@ -504,6 +687,10 @@ class B1Z1UniFP(BaseTask):
             base_yaw_quat,
             self.curr_ee_goal_cart,
         )
+
+        # Command vector layout used by the actor:
+        # 0:3 base velocity, 3:6 EE spherical target, 6:9 reserved orientation,
+        # 9:12 EE force command, 12:15 base force command.
         self.commands[:, 3:6] = self.curr_ee_goal_sphere
         self.commands[:, 9:12] = self.current_Fxyz_gripper_cmd
         self.commands[:, 12:15] = self.current_Fxyz_base_cmd
@@ -515,9 +702,13 @@ class B1Z1UniFP(BaseTask):
         return self.simulator.base_euler[:, :2]
 
     def _get_phase(self):
+        # This port currently uses an episode-time trot phase. Original UniFP
+        # used a command-gated gait index; this keeps the observation shape and
+        # reward hooks alive in the Genesis baseline.
         return (self.episode_length_buf.float() * self.dt / self.cfg.rewards.cycle_time) % 1.0
 
     def _get_gait_phase(self):
+        """Return diagonal-stance mask used by critic contacts and gait rewards."""
         phase = self._get_phase()
         stance = torch.zeros(self.num_envs, 4, device=self.device)
         stance[:, 0] = phase < 0.5
@@ -527,6 +718,7 @@ class B1Z1UniFP(BaseTask):
         return stance
 
     def _randomize_force_gains(self, env_ids):
+        """Randomize virtual impedance gains used to turn force into offsets."""
         if len(env_ids) == 0:
             return
         if self.cfg.commands.randomize_gripper_force_gains:
@@ -556,6 +748,7 @@ class B1Z1UniFP(BaseTask):
             )
 
     def _reset_force_events(self, env_ids):
+        """Clear and resample per-env timers for all four UniFP force streams."""
         if len(env_ids) == 0:
             return
         self.freed_envs_gripper_cmd[env_ids] = False
@@ -606,6 +799,7 @@ class B1Z1UniFP(BaseTask):
         return torch.randint(low, high, shape, device=self.device)
 
     def _sample_force_target(self, env_ids, force_range, *, zero_z=False, z_scale=1.0):
+        """Sample a force target for command or external-force streams."""
         force_min, force_max = force_range
         target = torch_rand_float(force_min, force_max, (len(env_ids), 3), self.device)
         if zero_z:
@@ -634,8 +828,18 @@ class B1Z1UniFP(BaseTask):
         zero_z=False,
         z_scale=1.0,
     ):
+        """Update one triangular UniFP force profile.
+
+        A stream owns its own interval, duration, selected/free masks, target,
+        and output tensor. The profile ramps 0 -> target, holds through a
+        settling interval, then ramps target -> 0. The same helper is used for:
+        EE commanded force, EE external force, base commanded force, and base
+        external force.
+        """
         new_env_ids = env_ids_all[(self.episode_length_buf[env_ids_all] % interval[env_ids_all]) == 0]
         if len(new_env_ids) > 0:
+            # `forced_prob` controls whether this env receives the sampled
+            # profile or is marked free/zero for this interval.
             freed[new_env_ids] = torch.rand(len(new_env_ids), device=self.device) > forced_prob
             target[new_env_ids] = self._sample_force_target(new_env_ids, force_range, zero_z=zero_z, z_scale=z_scale)
             sampled_duration = torch_rand_float(duration_min, duration_max, (len(new_env_ids), 1), self.device).view(len(new_env_ids))
@@ -648,6 +852,8 @@ class B1Z1UniFP(BaseTask):
         selected_env_ids = env_ids_all[selected[env_ids_all]]
         if len(selected_env_ids) > 0:
             end_time = self._force_push_end_time_for(output)
+
+            # Ramp up until `end_time`.
             before_end = self.episode_length_buf[selected_env_ids] < end_time[selected_env_ids].to(torch.int32)
             step1_env_ids = selected_env_ids[before_end]
             if len(step1_env_ids) > 0:
@@ -655,6 +861,7 @@ class B1Z1UniFP(BaseTask):
                 elapsed = self.episode_length_buf[step1_env_ids].unsqueeze(-1) - (end_time[step1_env_ids].unsqueeze(-1) - dur)
                 output[step1_env_ids] = (target[step1_env_ids] / dur) * torch.clamp(elapsed, torch.zeros_like(dur), dur)
 
+            # Ramp down after the configured settling plateau.
             after_settling = self.episode_length_buf[selected_env_ids] > (end_time[selected_env_ids] + settling_time).to(torch.int32)
             step2_env_ids = selected_env_ids[after_settling]
             if len(step2_env_ids) > 0:
@@ -666,6 +873,8 @@ class B1Z1UniFP(BaseTask):
                     dur,
                 )
 
+            # Once the full profile is over, clear the stream and sample a new
+            # interval before the next force event.
             finished = self.episode_length_buf[selected_env_ids] >= (
                 end_time[selected_env_ids] + settling_time + duration[selected_env_ids]
             ).to(torch.int32)
@@ -683,6 +892,8 @@ class B1Z1UniFP(BaseTask):
                 )
 
         if torch.any(freed):
+            # Free envs are explicitly zeroed so old targets cannot leak across
+            # intervals or resets.
             selected[freed] = False
             target[freed] = 0.0
             output[freed] = 0.0
@@ -699,6 +910,7 @@ class B1Z1UniFP(BaseTask):
         return self.push_end_time_base_ext
 
     def _push_gripper(self, env_ids_all):
+        """Update EE commanded-force and external-force streams."""
         self._update_force_stream(
             env_ids_all,
             interval=self.push_interval_gripper_cmd,
@@ -740,6 +952,7 @@ class B1Z1UniFP(BaseTask):
             self.simulator.apply_ee_force(self.ee_force_ext_world)
 
     def _push_robot_base(self, env_ids_all):
+        """Update base commanded-force and external-force streams."""
         self._update_force_stream(
             env_ids_all,
             interval=self.push_interval_base_cmd,
@@ -783,12 +996,14 @@ class B1Z1UniFP(BaseTask):
             self.simulator.apply_base_force(self.base_force_ext_world)
 
     def _reset_dofs(self, env_ids):
+        """Reset all B1/Z1 DOFs with Genesis-port perturbations."""
         dof_pos = self.simulator.default_dof_pos.repeat(len(env_ids), 1)
         dof_pos += torch_rand_float(-0.3, 0.3, dof_pos.shape, self.device)
         dof_vel = torch.zeros_like(dof_pos)
         self.simulator.reset_dofs(env_ids, dof_pos, dof_vel)
 
     def _reset_root_states(self, env_ids):
+        """Reset base pose at the terrain origin and sample initial velocities."""
         base_pos = self.simulator.base_init_pos.reshape(1, -1).repeat(len(env_ids), 1)
         base_pos += self.simulator._env_origins[env_ids]
         base_pos[:, :2] += torch_rand_float(-0.5, 0.5, (len(env_ids), 2), self.device)
@@ -798,6 +1013,7 @@ class B1Z1UniFP(BaseTask):
         self.simulator.reset_root_states(env_ids, base_pos, base_quat, base_lin_vel, base_ang_vel)
 
     def _update_terrain_curriculum(self, env_ids):
+        """PACT/legged-gym terrain curriculum retained for Genesis training."""
         if not self.init_done:
             return
         distance = torch.norm(self.simulator.base_pos[env_ids, :2] - self.simulator._env_origins[env_ids, :2], dim=1)
@@ -806,6 +1022,7 @@ class B1Z1UniFP(BaseTask):
         self.simulator.update_terrain_curriculum(env_ids, move_up, move_down & ~move_up)
 
     def _update_command_curriculum(self, env_ids):
+        """Expand base velocity command ranges when tracking is good enough."""
         if "tracking_lin_vel_force_world" not in self.episode_sums:
             return
         mean_tracking = torch.mean(self.episode_sums["tracking_lin_vel_force_world"][env_ids]) / self.max_episode_length
@@ -815,6 +1032,7 @@ class B1Z1UniFP(BaseTask):
                 self.command_ranges[key][1] = np.clip(self.command_ranges[key][1] + 0.1, 0.0, self.cfg.commands.max_curriculum)
 
     def step_reward_curriculum(self, num_iters):
+        """Cosine-ramp selected reward scales during training."""
         if not self.use_reward_curriculum:
             return
         if num_iters < self.reward_warmup_steps:
@@ -862,6 +1080,7 @@ class B1Z1UniFP(BaseTask):
         self.forward_vec[:, 0] = 1.0
         self.fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, device=self.device)
+        self.heading_commands = torch.zeros(self.num_envs, device=self.device)
         self.commands_scale = torch.tensor(
             [
                 self.obs_scales.lin_vel,
@@ -926,6 +1145,24 @@ class B1Z1UniFP(BaseTask):
         self.curr_ee_goal_cart = sphere2cart(self.curr_ee_goal_sphere)
         self.curr_ee_goal_cart_world = torch.zeros_like(self.curr_ee_goal_cart)
         self.ee_pos_sphe_arm = torch.zeros_like(self.curr_ee_goal_cart)
+        self.collision_lower_limits = torch.tensor(
+            self.cfg.goal_ee.collision_lower_limits,
+            device=self.device,
+            dtype=torch.float,
+        )
+        self.collision_upper_limits = torch.tensor(
+            self.cfg.goal_ee.collision_upper_limits,
+            device=self.device,
+            dtype=torch.float,
+        )
+        self.underground_limit = self.cfg.goal_ee.underground_limit
+        self.num_collision_check_samples = self.cfg.goal_ee.num_collision_check_samples
+        self.collision_check_t = torch.linspace(
+            0.0,
+            1.0,
+            self.num_collision_check_samples,
+            device=self.device,
+        )[None, None, :]
         self.traj_timesteps = torch.ones(self.num_envs, device=self.device) / self.dt
         self.traj_total_timesteps = self.traj_timesteps.clone()
         self.goal_timer = torch.zeros(self.num_envs, device=self.device)

@@ -25,7 +25,8 @@ class B1Z1UniFPCfg:
         debug_draw_height_points_around_base = False
         debug_draw_height_points_around_feet = False
         debug_draw_terrain_height_points = False
-        render_ee_goal_debug = True
+        render_ee_goal_debug = False
+        render_ee_frame_debug = False
 
     class goal_ee:
         num_commands = 3
@@ -57,6 +58,7 @@ class B1Z1UniFPCfg:
 
         sphere_error_scale = [1.0, 1.0, 1.0]
         orn_error_scale = [1.0, 1.0, 1.0]
+        debug_tcp_from_link06_offset = [0.186, 0.0, 0.0]
 
     class init_state:
         pos = [0.0, 0.0, 0.6]
@@ -119,9 +121,9 @@ class B1Z1UniFPCfg:
             "z1_wrist_rotate",
             "z1_jointGripper",
         ]
-        foot_name = ["FR_foot", "FL_foot", "RR_foot", "RL_foot"]
+        foot_name = ["FR_foot", "FL_foot", "RR_foot", "RL_foot", "jointGripper"]
         gripper_name = "ee_gripper_link"
-        penalize_contacts_on = ["thigh", "calf", "trunk"]
+        penalize_contacts_on = ["thigh", "calf", "trunk", "wrist", "shoulder", "elbow", "forearm"]
         terminate_after_contacts_on = []
         links_to_keep = ["FR_foot", "FL_foot", "RR_foot", "RL_foot", "ee_gripper_link"]
         self_collisions = False
@@ -268,9 +270,11 @@ class B1Z1UniFPCfg:
         push_gripper_interval_s_cmd = [3.5, 9.0]
         push_gripper_duration_s_cmd = [1.0, 3.0]
         gripper_forced_prob_cmd = 0.8
+        
         push_gripper_interval_s_ext = [3.5, 9.0]
         push_gripper_duration_s_ext = [1.0, 3.0]
         gripper_forced_prob_ext = 0.8
+        
         randomize_gripper_force_gains = True
         max_push_force_xyz_gripper_cmd = [-60.0, 60.0]
         max_push_force_xyz_gripper_ext = [-60.0, 60.0]
@@ -511,8 +515,8 @@ class B1Z1UniFPCfg:
 
     class viewer:
         ref_env = 0
-        pos = [2, 2, 2]
-        lookat = [0.0, 0.0, 1.0]
+        pos = [1, 2, 2]
+        lookat = [0.0, 0.0, 0.0]
         num_rendered_envs = 100
         rendered_envs_idx = np.random.choice(
             np.arange(4000),
@@ -579,6 +583,6 @@ class B1Z1UniFPCfgPPO:
         experiment_name = "b1z1_unifp_genesis"
         sync_wandb = False
         resume = False
-        load_run = "Jun30_17-49-44_unifp_baseline"
+        load_run = "Jun30_19-26-06_unifp_baseline"
         checkpoint = -1
         resume_path = None
