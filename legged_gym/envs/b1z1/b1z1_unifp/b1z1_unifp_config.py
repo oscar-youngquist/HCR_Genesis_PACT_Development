@@ -463,6 +463,9 @@ class B1Z1UniFPCfg:
             collision = -5.0
             dof_pos_limits = -10.0
             torque_limits = -0.005
+            
+            # Add in close to default reward
+            
             stand_still = 0.5
 
             alive = 0.001
@@ -486,14 +489,18 @@ class B1Z1UniFPCfg:
             torques = -5.0e-6
 
             # Leg posture shaping
-            ref_dof_leg = 1.0
+            ref_dof_leg = 0.0
             hip_pos = -0.5
 
             # Gait shaping
             feet_drag = -0.0008
             feet_contact_forces = -0.001
-            feet_pos_xy = -0.5
             feet_air_time = 1.0
+            
+            # Replace with rear/front foot overreach penalties 
+            feet_pos_xy = -0.5
+            
+            # Replace with foot_clearance_terrain_aware
             feet_height = 1.0
             feet_height_high = -15.0
 

@@ -331,9 +331,9 @@ class B1Z1UniFP(BaseTask):
         )
         ee_goal_offset_sphere = cart2sphere(ee_goal_offset_local)
 
-        phase = self._get_phase()
-        sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
-        cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
+        # phase = self._get_phase()
+        # sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
+        # cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
         body_orientation = self.get_body_orientation()
         dof_pos_err = (self.simulator.dof_pos[:, :17] - self.simulator.default_dof_pos[:, :17]) * self.obs_scales.dof_pos
         dof_vel = self.simulator.dof_vel[:, :17] * self.obs_scales.dof_vel
@@ -347,8 +347,8 @@ class B1Z1UniFP(BaseTask):
                 dof_pos_err,
                 dof_vel,
                 self.actions,
-                sin_pos,
-                cos_pos,
+                # sin_pos,
+                # cos_pos,
                 self.commands * self.commands_scale,
             ),
             dim=-1,
@@ -370,7 +370,7 @@ class B1Z1UniFP(BaseTask):
         mass_params = torch.zeros(self.num_envs, 22, device=self.device)
         mass_params[:, 0:1] = self.simulator._added_base_mass
         mass_params[:, 1:4] = self.simulator._base_com_bias
-        stance_mask = self._get_gait_phase()
+        # stance_mask = self._get_gait_phase()
         contact_mask = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
 
         # Privileged critic observation mirrors the original UniFP ordering:
@@ -383,15 +383,15 @@ class B1Z1UniFP(BaseTask):
                 mass_params,
                 self.simulator._friction_values - self.friction_value_offset,
                 self.simulator._motor_strength[:, :17] - 1.0,
-                stance_mask,
+                # stance_mask,
                 contact_mask,
                 self.simulator.projected_gravity,
                 self.simulator.base_ang_vel * self.obs_scales.ang_vel,
                 dof_pos_err,
                 dof_vel,
                 self.actions,
-                sin_pos,
-                cos_pos,
+                # sin_pos,
+                # cos_pos,
                 self.commands * self.commands_scale,
                 ee_goal_offset_sphere * self.ee_sphere_scale,
             ),
