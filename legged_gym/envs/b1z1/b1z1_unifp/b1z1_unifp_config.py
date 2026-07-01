@@ -146,6 +146,12 @@ class B1Z1UniFPCfg:
         thickness = 0.01
         dof_vel_limits = []
 
+        abad_link_length = 0.12675
+        hip_link_length = 0.35
+        knee_link_length = 0.35
+        knee_link_y_offset = 0.0
+        side_signs = [-1.0, 1.0, -1.0, 1.0]  # FR, FL, RR, RL
+
     class terrain:
         mesh_type = "heightfield"
         simplify_mesh = True
@@ -504,9 +510,59 @@ class B1Z1UniFPCfg:
             feet_height = 1.0
             feet_height_high = -15.0
 
+            # Replace with sparse-contacts reward
             feet_contact_number = 2.0
             
             roll = -0.25
+
+            # Leg and Arm Posture Conditioning
+            arm_ee_force_manipulability = 0.2
+            torso_force_wrench_ellipsoid = 0.2
+
+        class manip_rewards():
+            # Leg Posture Conditioning
+            ellipsoid_main_weight = 0.6
+            ellipsoid_force_aux_weight = 0.35
+            ellipsoid_wrench_aux_weight = 0.35
+            ellipsoid_friction_weight = 0.30
+
+            ellipsoid_wrench_length_scale = 1.125
+            ellipsoid_force_size_scale = 0.50
+            ellipsoid_wrench_size_scale = 0.50
+
+            ellipsoid_force_z_ratio_min = 1.2
+            ellipsoid_force_z_ratio_max = 4.0
+            ellipsoid_force_xy_ratio_max = 2.0
+            ellipsoid_wrench_cond_max = 6.0
+
+            ellipsoid_mu_friction = 0.6
+            ellipsoid_normal_force_margin = 5.0
+            ellipsoid_tangential_force_margin = 2.0
+
+            # Arm Posture Conditioning
+            # Numerical regularization
+            arm_ellipsoid_inv_eps = 1e-5
+
+            # Size reward:
+            # Larger values make the size reward saturate faster.
+            arm_ellipsoid_force_size_scale = 0.02
+
+            # Isotropy reward:
+            # cond = lam_max / lam_min.
+            # A value near 1 is perfectly isotropic.
+            arm_ellipsoid_force_cond_max = 4.0
+            arm_ellipsoid_iso_sharpness = 1.0
+
+            # Log-spread isotropy:
+            # Larger values penalize nonuniform eigenvalues more strongly.
+            arm_ellipsoid_log_iso_scale = 1.0
+
+            # Blend condition-number isotropy and log-spread isotropy.
+            arm_ellipsoid_cond_iso_weight = 0.5
+
+            # Final blend between large and isotropic.
+            arm_ellipsoid_size_weight = 0.5
+            arm_ellipsoid_iso_weight = 0.5
 
         class reward_curriculum:
             curr_reward_keys = ["collision", "action_rate", "action_rate_arm", "dof_acc", "dof_acc_arm"]

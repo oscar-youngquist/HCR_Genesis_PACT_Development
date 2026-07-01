@@ -14,6 +14,8 @@ from legged_gym.utils.math_utils import (
     wrap_to_pi,
 )
 
+from legged_gym.envs.b1z1.b1z1_unifp.b1z1_reward_helpers import _eig_desc, _geom_mean, _interval_reward, _safe_inv, _safe_normalize, _safe_pinv, _sanitize_tensor, _skew, _upper_reward, _rot_x, _rot_y, _rot_z
+
 
 def sphere2cart(sphere_coords):
     radius = sphere_coords[:, 0]
@@ -130,6 +132,13 @@ class B1Z1UniFP(BaseTask):
         self.common_step_counter += 1
         self.simulator.post_physics_step()
         self._post_physics_step_callback()
+
+        # Leg main-ip update specific update
+        self.leg_jacobians[:] = self.compute_all_leg_jacobians(self.simulator.dof_pos[:,0:12].view(-1, 4, 3))
+
+        self._compute_z1_arm_jacobian_buffer()
+
+
         self.check_termination()
         self.compute_reward()
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
@@ -139,6 +148,186 @@ class B1Z1UniFP(BaseTask):
         self.compute_observations()
         if self.debug:
             self.simulator.draw_debug_vis()
+
+    def compute_z1_arm_jacobian(self, q_arm: torch.Tensor) -> torch.Tensor:
+        """
+        Compute translational EE Jacobian for the Z1 arm.
+
+        Args:
+            q_arm: shape (N, 6), ordered as:
+                [
+                    z1_waist,
+                    z1_shoulder,
+                    z1_elbow,
+                    z1_wrist_angle,
+                    z1_forearm_roll,
+                    z1_wrist_rotate,
+                ]
+
+        Returns:
+            J: shape (N, 3, 6)
+        """
+        assert q_arm.ndim == 2 and q_arm.shape[1] == 6, (
+            f"Expected q_arm shape (N, 6), got {q_arm.shape}"
+        )
+
+        q_arm = torch.nan_to_num(q_arm, nan=0.0, posinf=0.0, neginf=0.0)
+
+        N = q_arm.shape[0]
+        device = q_arm.device
+        dtype = q_arm.dtype
+
+        # Cast constants only if needed.
+        joint_offsets = self.z1_joint_offsets.to(device=device, dtype=dtype)
+        joint_axes = self.z1_joint_axes.to(device=device, dtype=dtype)
+        link00_offset = self.z1_link00_offset.to(device=device, dtype=dtype)
+        ee_offset = self.z1_ee_offset.to(device=device, dtype=dtype)
+
+        # Current transform from base to active frame.
+        R = torch.eye(3, device=device, dtype=dtype).expand(N, 3, 3).clone()
+        p = link00_offset.view(1, 3).expand(N, 3).clone()
+
+        joint_pos = torch.empty(N, 6, 3, device=device, dtype=dtype)
+        joint_axis_world = torch.empty(N, 6, 3, device=device, dtype=dtype)
+
+        for i in range(6):
+            # p = p + R @ offset_i
+            p = p + torch.einsum("nij,j->ni", R, joint_offsets[i])
+
+            # store joint origin
+            joint_pos[:, i, :] = p
+
+            # axis_world = R @ axis_local
+            joint_axis_world[:, i, :] = torch.einsum("nij,j->ni", R, joint_axes[i])
+
+            qi = q_arm[:, i]
+            c = torch.cos(qi)
+            s = torch.sin(qi)
+
+            R_next = R.clone()
+
+            if i == 0 or i == 4:
+                # local z rotation
+                # R = R @ Rz(q)
+                r0 = R[:, :, 0].clone()
+                r1 = R[:, :, 1].clone()
+
+                R_next[:, :, 0] = c[:, None] * r0 + s[:, None] * r1
+                R_next[:, :, 1] = -s[:, None] * r0 + c[:, None] * r1
+                R_next[:, :, 2] = R[:, :, 2]
+
+            elif i == 1 or i == 2 or i == 3:
+                # local y rotation
+                # R = R @ Ry(q)
+                r0 = R[:, :, 0].clone()
+                r2 = R[:, :, 2].clone()
+
+                R_next[:, :, 0] = c[:, None] * r0 - s[:, None] * r2
+                R_next[:, :, 1] = R[:, :, 1]
+                R_next[:, :, 2] = s[:, None] * r0 + c[:, None] * r2
+
+            else:
+                # i == 5, local x rotation
+                # R = R @ Rx(q)
+                r1 = R[:, :, 1].clone()
+                r2 = R[:, :, 2].clone()
+
+                R_next[:, :, 0] = R[:, :, 0]
+                R_next[:, :, 1] = c[:, None] * r1 + s[:, None] * r2
+                R_next[:, :, 2] = -s[:, None] * r1 + c[:, None] * r2
+
+            R = R_next
+
+        p_ee = p + torch.einsum("nij,j->ni", R, ee_offset)
+
+        r = p_ee[:, None, :] - joint_pos  # [N, 6, 3]
+
+        # cross(axis, r), then transpose to [N, 3, 6]
+        J_cols = torch.cross(joint_axis_world, r, dim=2)
+
+        J = J_cols.transpose(1, 2).contiguous()
+
+        return torch.nan_to_num(J, nan=0.0, posinf=1e6, neginf=-1e6)
+
+    def _compute_z1_arm_jacobian_buffer(self):
+        q_arm = self.simulator.dof_pos[:, self.simulator._arm_dof_ids]
+        self._z1_arm_jacobian[:] = self.compute_z1_arm_jacobian(q_arm)
+
+    def compute_all_leg_jacobians(self, q: torch.Tensor) -> torch.Tensor:
+        """
+        Compute translational Jacobians for all 4 legs.
+
+        Args:
+            q:
+                Joint angles for all legs.
+                Shape (N, 4, 3), ordered per leg as [abad, hip, knee].
+
+        Returns:
+            J:
+                Batched translational Jacobians in the base frame.
+                Shape (N, 4, 3, 3)
+
+        Required config entries
+        -----------------------
+        self.cfg.robot.abad_link_length
+        self.cfg.robot.hip_link_length
+        self.cfg.robot.knee_link_length
+        self.cfg.robot.knee_link_y_offset
+        self.cfg.robot.side_signs   # e.g. [1.0, -1.0, 1.0, -1.0]
+        """
+        assert q.ndim == 3 and q.shape[1:] == (4, 3), f"Expected q shape (N, 4, 3), got {q.shape}"
+        q = torch.nan_to_num(q, nan=0.0, posinf=0.0, neginf=0.0)
+
+        dtype = q.dtype
+        device = q.device
+        N = q.shape[0]
+
+        l1 = torch.as_tensor(self.cfg.asset.abad_link_length, device=device, dtype=dtype)
+        l2 = torch.as_tensor(self.cfg.asset.hip_link_length, device=device, dtype=dtype)
+        l3 = torch.as_tensor(self.cfg.asset.knee_link_length, device=device, dtype=dtype)
+        l4 = torch.as_tensor(self.cfg.asset.knee_link_y_offset, device=device, dtype=dtype)
+
+        side_sign = torch.as_tensor(
+            self.cfg.asset.side_signs,
+            device=device,
+            dtype=dtype,
+        ).view(1, 4).expand(N, 4)  # (N, 4)
+        side_sign = torch.nan_to_num(side_sign, nan=1.0, posinf=1.0, neginf=-1.0)
+
+        q0 = q[:, :, 0]  # abad / hip roll
+        q1 = q[:, :, 1]  # thigh / hip pitch
+        q2 = q[:, :, 2]  # calf / knee
+
+        s0 = torch.sin(q0)
+        c0 = torch.cos(q0)
+
+        s1 = torch.sin(q1)
+        c1 = torch.cos(q1)
+
+        s12 = torch.sin(q1 + q2)
+        c12 = torch.cos(q1 + q2)
+
+        C = l2 * c1 + l3 * c12
+        S = l2 * s1 + l3 * s12
+
+        J = torch.zeros(N, 4, 3, 3, device=device, dtype=dtype)
+
+        # x row
+        J[:, :, 0, 0] = 0.0
+        J[:, :, 0, 1] = -C
+        J[:, :, 0, 2] = -l3 * c12
+
+        # y row
+        J[:, :, 1, 0] = -side_sign * l1 * s0 + C * c0
+        J[:, :, 1, 1] = -S * s0
+        J[:, :, 1, 2] = -l3 * s12 * s0
+
+        # z row
+        J[:, :, 2, 0] = side_sign * l1 * c0 + C * s0
+        J[:, :, 2, 1] = S * c0
+        J[:, :, 2, 2] = l3 * s12 * c0
+
+        return torch.nan_to_num(J, nan=0.0, posinf=1e6, neginf=-1e6)
 
     def check_termination(self):
         self.fail_buf[:] = 0
@@ -1220,6 +1409,52 @@ class B1Z1UniFP(BaseTask):
         self.base_force_kds = torch_rand_float(*self.cfg.commands.base_force_kd_range, (self.num_envs, 1), self.device)
         self._randomize_force_gains(torch.arange(self.num_envs, device=self.device))
 
+        self.z1_arm_jacobian = torch.zeros(
+            self.num_envs,
+            3,
+            6,
+            device=self.device,
+            dtype=torch.float,
+        )
+
+        self.leg_jacobians = torch.zeros((self.num_envs, 4, 3, 3), dtype=torch.float, device=self.device)
+
+        # Taken from b1z1 URDF, hardcoded for now...
+        self.z1_link00_offset = torch.tensor(
+            [0.3000, 0.0000, 0.0900],
+            device=self.device,
+            dtype=torch.float,
+        )
+        self.z1_joint_offsets = torch.tensor(
+            [
+                [0.0000, 0.0000, 0.0585],
+                [0.0000, 0.0000, 0.0450],
+                [-0.3500, 0.0000, 0.0000],
+                [0.2180, 0.0000, 0.0570],
+                [0.0700, 0.0000, 0.0000],
+                [0.0492, 0.0000, 0.0000],
+            ],
+            device=self.device,
+            dtype=torch.float,
+        )
+        self.z1_joint_axes = torch.tensor(
+            [
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0],
+            ],
+            device=self.device,
+            dtype=torch.float,
+        )
+        self.z1_ee_offset = torch.tensor(
+            [0.0510 + 0.1350, 0.0000, 0.0000],
+            device=self.device,
+            dtype=torch.float,
+        )
+
         self.noise_scale_vec = self._get_noise_scale_vec()
         self.add_noise = self.cfg.noise.add_noise
 
@@ -1404,3 +1639,375 @@ class B1Z1UniFP(BaseTask):
 
     def _reward_ref_dof_leg(self):
         return torch.exp(-torch.mean(torch.square(self.simulator.dof_pos[:, :12] - self.ref_dof_pos), dim=1))
+
+    def _reward_torso_force_wrench_ellipsoid(self):
+        """
+        Force / wrench ellipsoid reward using:
+            J_legs: (N, 4, 3, 3)
+
+        """
+        device = self.simulator.base_pos.device
+        dtype = self.simulator.base_pos.dtype
+        N = self.simulator.base_pos.shape[0]
+
+        # --------------------------------------------------
+        # state
+        # --------------------------------------------------
+        J_b = _sanitize_tensor(self.leg_jacobians)                                                # (N,4,3,3)
+        tau_leg = _sanitize_tensor(self.simulator._dof_tau.view(-1, 4, 3))                        # (N,4,3)
+        tau_max = torch.clamp(_sanitize_tensor(self.simulator._torque_limits.view(-1, 4, 3)).abs(), min=1e-6)                  # (N,4,3) or broadcastable
+
+        foot_pos_w = _sanitize_tensor(self.simulator.feet_pos)          # (N,4,3)
+        base_pos_w = _sanitize_tensor(self.simulator.base_pos)          # (N,3)
+        foot_pos_rel_base_w = foot_pos_w - base_pos_w[:, None, :]               # (N,4,3)
+
+        grf_w = _sanitize_tensor(self.simulator._grfs_buf.view(-1, 4, 3))                         # (N,4,3)
+        normals_w = _safe_normalize(self.simulator._normal_vector_around_feet.view(-1,4,3), dim=-1, eps=1e-6)      # (N,4,3)
+        default_n = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype).view(1, 1, 3)
+        normals_norm = torch.linalg.norm(normals_w, dim=-1, keepdim=True)
+        normals_w = torch.where(normals_norm > 1e-6, normals_w, default_n)
+
+        # stance mask from normal contact force
+        fn_meas = torch.sum(grf_w * normals_w, dim=-1)                          # (N,4)
+        stance_mask = fn_meas > self.cfg.rewards.contact_force_threshold
+        stance_f = stance_mask.to(dtype)
+
+        # --------------------------------------------------
+        # rotate Jacobians from base frame -> world frame
+        # --------------------------------------------------
+        base_quat = _safe_normalize(self.simulator.base_quat, dim=-1, eps=1e-6)
+        x, y, z, w = base_quat[:, 0], base_quat[:, 1], base_quat[:, 2], base_quat[:, 3]
+        xx, yy, zz = x*x, y*y, z*z
+        xy, xz, yz = x*y, x*z, y*z
+        wx, wy, wz = w*x, w*y, w*z
+        R_wb = torch.stack([
+            torch.stack([1 - 2*(yy + zz),     2*(xy - wz),     2*(xz + wy)], dim=-1),
+            torch.stack([    2*(xy + wz), 1 - 2*(xx + zz),     2*(yz - wx)], dim=-1),
+            torch.stack([    2*(xz - wy),     2*(yz + wx), 1 - 2*(xx + yy)], dim=-1),
+        ], dim=-2)                                                               # (N,3,3)
+
+        J_w = _sanitize_tensor(torch.matmul(R_wb[:, None, :, :], J_b))                             # (N,4,3,3)
+
+        # --------------------------------------------------
+        # primary capability matrices
+        #   M_i = J_i diag(tau_max_i^2) J_i^T
+        #   S_F = sum_i M_i^{-1}
+        #   S_W = sum_i A_i M_i^{-1} A_i^T
+        # --------------------------------------------------
+        Lw = max(float(self.cfg.rewards.manip_rewards.ellipsoid_wrench_length_scale), 1e-6)
+
+        S_F = torch.zeros(N, 3, 3, device=device, dtype=dtype)
+        S_W = torch.zeros(N, 6, 6, device=device, dtype=dtype)
+        I3 = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(N, 3, 3)
+
+        for i in range(4):
+            J_i = J_w[:, i]                                                      # (N,3,3)
+            tau_max_i = tau_max[:, i]                                            # (N,3)
+
+            Wtau_inv_i = torch.diag_embed(tau_max_i ** 2)                        # (N,3,3)
+            M_i = J_i @ Wtau_inv_i @ J_i.transpose(-1, -2)                       # (N,3,3)
+            M_i = _sanitize_tensor(0.5 * (M_i + M_i.transpose(-1, -2)))
+            M_i_inv = _safe_inv(M_i, eps=1e-5)
+
+            mask_i = stance_f[:, i].view(N, 1, 1)
+            S_F = S_F + mask_i * M_i_inv
+
+            A_i = torch.cat([
+                I3,
+                _skew(foot_pos_rel_base_w[:, i]) / Lw,
+            ], dim=-2)                                                           # (N,6,3)
+
+            S_W = S_W + mask_i * (A_i @ M_i_inv @ A_i.transpose(-1, -2))
+
+        S_F = _sanitize_tensor(0.5 * (S_F + S_F.transpose(-1, -2)))
+        S_W = _sanitize_tensor(0.5 * (S_W + S_W.transpose(-1, -2)))
+
+        # --------------------------------------------------
+        # force ellipsoid reward
+        #   F^T S_F^{-1} F <= 1
+        # --------------------------------------------------
+        evals_F, evecs_F = _eig_desc(S_F)
+        lam1, lam2, lam3 = evals_F[:, 0], evals_F[:, 1], evals_F[:, 2]
+
+        force_size = _geom_mean(evals_F)
+        r_force_size = 1.0 - torch.exp(-self.cfg.rewards.manip_rewards.ellipsoid_force_size_scale * force_size)
+        r_force_size = torch.clamp(_sanitize_tensor(r_force_size), 0.0, 1.0)
+
+        z_ratio = torch.clamp(_sanitize_tensor(lam1 / torch.clamp(0.5 * (lam2 + lam3), min=1e-8)), min=0.0, max=1e6)
+        xy_ratio = torch.clamp(_sanitize_tensor(lam2 / torch.clamp(lam3, min=1e-8)), min=0.0, max=1e6)
+
+        r_force_aniso = (
+            _interval_reward(
+                z_ratio,
+                self.cfg.rewards.manip_rewards.ellipsoid_force_z_ratio_min,
+                self.cfg.rewards.manip_rewards.ellipsoid_force_z_ratio_max,
+                sharpness=2.0,
+            )
+            *
+            _upper_reward(
+                xy_ratio,
+                self.cfg.rewards.manip_rewards.ellipsoid_force_xy_ratio_max,
+                sharpness=2.0,
+            )
+        )
+
+        ez = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype).view(1, 3)
+        u1 = evecs_F[:, :, 0]
+        u2 = evecs_F[:, :, 1]
+        u3 = evecs_F[:, :, 2]
+
+        align_z = torch.abs(torch.sum(u1 * ez, dim=-1))
+        align_xy = 1.0 - 0.5 * (u2[:, 2].abs() + u3[:, 2].abs())
+        align_xy = torch.clamp(align_xy, 0.0, 1.0)
+
+        r_force_align = torch.clamp(_sanitize_tensor(align_z * align_xy), 0.0, 1.0)
+        r_force_main = 0.6 * r_force_align + 0.25 * r_force_size + 0.15 * r_force_aniso
+        r_force_main = torch.clamp(_sanitize_tensor(r_force_main), 0.0, 1.0)
+
+        # --------------------------------------------------
+        # wrench ellipsoid reward
+        #   W_tilde^T S_W^{-1} W_tilde <= 1
+        # --------------------------------------------------
+        evals_W, _ = _eig_desc(S_W)
+
+        n_stance = stance_mask.sum(dim=1).clamp(min=1)                           # (N,)
+        k_active = torch.clamp(3 * n_stance, max=6)                              # (N,)
+
+        idx6 = torch.arange(6, device=device).view(1, 6)
+        active_mask = idx6 < k_active.unsqueeze(-1)
+
+        wrench_log = torch.where(
+            active_mask,
+            torch.log(torch.clamp(evals_W, min=1e-8)),
+            torch.zeros_like(evals_W),
+        ).sum(dim=1)
+
+        wrench_size = torch.exp(wrench_log / k_active.to(dtype))
+        r_wrench_size = 1.0 - torch.exp(-self.cfg.rewards.manip_rewards.ellipsoid_wrench_size_scale * wrench_size)
+        r_wrench_size = torch.clamp(_sanitize_tensor(r_wrench_size), 0.0, 1.0)
+
+        lam_max = evals_W[:, 0]
+        lam_min_active = torch.gather(evals_W, 1, (k_active - 1).long().unsqueeze(-1)).squeeze(-1)
+        cond_W = torch.clamp(_sanitize_tensor(lam_max / torch.clamp(lam_min_active, min=1e-8)), min=0.0, max=1e6)
+
+        r_wrench_cond = _upper_reward(
+            cond_W,
+            self.cfg.rewards.manip_rewards.ellipsoid_wrench_cond_max,
+            sharpness=1.0,
+        )
+
+        r_wrench_main = 0.6 * r_wrench_size + 0.4 * r_wrench_cond
+        r_wrench_main = torch.clamp(_sanitize_tensor(r_wrench_main), 0.0, 1.0)
+
+        # --------------------------------------------------
+        # auxiliary: realized force/wrench uses strong ellipsoid directions
+        # --------------------------------------------------
+        grf_stance = grf_w * stance_f.unsqueeze(-1)
+        F_meas = grf_stance.sum(dim=1)                                           # (N,3)
+        M_meas = torch.cross(foot_pos_rel_base_w, grf_stance, dim=-1).sum(dim=1)
+        W_meas = torch.cat([F_meas, M_meas / Lw], dim=-1)                        # (N,6)
+
+        H_F = _safe_pinv(S_F, eps=1e-5)
+        F_hat = _safe_normalize(F_meas, dim=-1, eps=1e-6)
+        force_dir_cost = torch.clamp(_sanitize_tensor(torch.einsum("bi,bij,bj->b", F_hat, H_F, F_hat)), min=0.0, max=1e6)
+        r_force_use = torch.clamp(_sanitize_tensor(torch.exp(-2.0 * force_dir_cost)), 0.0, 1.0)
+
+        r_force_principal_use = torch.clamp(_sanitize_tensor(torch.abs(torch.sum(F_hat * u1, dim=-1))), 0.0, 1.0)
+
+        H_W = _safe_pinv(S_W, eps=1e-5)
+        W_hat = _safe_normalize(W_meas, dim=-1, eps=1e-6)
+        wrench_dir_cost = torch.clamp(_sanitize_tensor(torch.einsum("bi,bij,bj->b", W_hat, H_W, W_hat)), min=0.0, max=1e6)
+        r_wrench_use = torch.clamp(_sanitize_tensor(torch.exp(-2.0 * wrench_dir_cost)), 0.0, 1.0)
+
+        # --------------------------------------------------
+        # auxiliary: terrain awareness via friction cone
+        # --------------------------------------------------
+        fn = _sanitize_tensor(torch.sum(grf_w * normals_w, dim=-1))                                # (N,4)
+        ft_vec = grf_w - fn.unsqueeze(-1) * normals_w
+        ft = _sanitize_tensor(torch.linalg.norm(ft_vec, dim=-1))
+
+        mu = self.cfg.rewards.manip_rewards.ellipsoid_mu_friction
+        fn_margin = self.cfg.rewards.manip_rewards.ellipsoid_normal_force_margin
+        ft_margin = self.cfg.rewards.manip_rewards.ellipsoid_tangential_force_margin
+
+        r_normal_support = torch.clamp(_sanitize_tensor(torch.exp(-2.0 * torch.relu(fn_margin - fn)**2)), 0.0, 1.0)
+        cone_violation = _sanitize_tensor(torch.relu(ft - mu * torch.relu(fn - ft_margin)))
+        r_friction = torch.clamp(_sanitize_tensor(torch.exp(-0.5 * cone_violation**2)), 0.0, 1.0)
+
+        r_contact_cone = (
+            (r_normal_support * r_friction) * stance_f
+        ).sum(dim=1) / torch.clamp(stance_f.sum(dim=1), min=1.0)
+
+        # --------------------------------------------------
+        # final reward
+        # --------------------------------------------------
+        r_main = 0.5 * r_force_main + 0.5 * r_wrench_main
+        r_aux = (
+            self.cfg.rewards.manip_rewards.ellipsoid_force_aux_weight
+            * (0.5 * r_force_use + 0.5 * r_force_principal_use)
+            +
+            self.cfg.rewards.manip_rewards.ellipsoid_wrench_aux_weight
+            * r_wrench_use
+            +
+            self.cfg.rewards.manip_rewards.ellipsoid_friction_weight
+            * r_contact_cone
+        )
+
+        reward = self.cfg.rewards.manip_rewards.ellipsoid_main_weight * r_main + (1.0 - self.cfg.rewards.manip_rewards.ellipsoid_main_weight) * r_aux
+        reward = reward * (n_stance > 0).to(dtype)
+        reward = torch.clamp(_sanitize_tensor(reward), 0.0, 1.0)
+
+        return reward
+    
+    def _reward_arm_ee_force_manipulability(self):
+        """
+        Reward Z1 arm configurations that support large, isotropic EE force generation.
+
+        Uses the translational EE Jacobian:
+
+            J_arm: (N, 3, 6)
+
+        and arm torque limits:
+
+            tau_max_arm: (N, 6) or (6,)
+
+        We construct a torque-weighted velocity manipulability matrix
+
+            M = J diag(tau_max^2) J^T
+
+        and use its inverse as the force ellipsoid shape matrix:
+
+            S_F = M^{-1}
+
+        Large eigenvalues of S_F indicate large force capability.
+        Isotropy is encouraged by keeping the condition number small.
+
+        Returns:
+            reward: (N,), bounded in [0, 1]
+        """
+        device = self._z1_arm_jacobian.device
+        dtype = self._z1_arm_jacobian.dtype
+        N = self._z1_arm_jacobian.shape[0]
+
+        # --------------------------------------------------
+        # State
+        # --------------------------------------------------
+        J_arm = _sanitize_tensor(self._z1_arm_jacobian)  # (N, 3, 6)
+
+        # Arm torque limits.
+        #
+        # Recommended:
+        #   self._arm_dof_cfg_ids: indices into self._torque_limits
+        #   self._arm_dof_ids:     absolute simulator DOF ids for indexing dof_pos
+        #
+        # self._torque_limits is usually ordered like self._cfg.asset.dof_names,
+        # so prefer _arm_dof_cfg_ids if available.
+        if hasattr(self, "_arm_dof_cfg_ids"):
+            tau_max_arm = self.simulator._torque_limits[self.simulator._arm_dof_cfg_ids]
+        else:
+            tau_max_arm = self.simulator._torque_limits[self.simulator._arm_dof_ids]
+
+        tau_max_arm = _sanitize_tensor(tau_max_arm).abs().to(device=device, dtype=dtype)
+
+        if tau_max_arm.ndim == 1:
+            tau_max_arm = tau_max_arm.view(1, 6).expand(N, 6)
+        elif tau_max_arm.ndim == 2 and tau_max_arm.shape[0] == 1:
+            tau_max_arm = tau_max_arm.expand(N, 6)
+
+        tau_max_arm = torch.clamp(tau_max_arm, min=1e-6)
+
+        # --------------------------------------------------
+        # Torque-weighted arm manipulability
+        # --------------------------------------------------
+        W_tau = torch.diag_embed(tau_max_arm ** 2)  # (N, 6, 6)
+
+        M = J_arm @ W_tau @ J_arm.transpose(-1, -2)  # (N, 3, 3)
+        M = _sanitize_tensor(0.5 * (M + M.transpose(-1, -2)))
+
+        # Force ellipsoid shape matrix.
+        #
+        # If M is close to singular, _safe_inv regularizes it.
+        # S_F eigenvalues are the force-capability ellipsoid axes squared,
+        # up to the chosen torque-limit metric.
+        S_F = _safe_inv(M, eps=self.cfg.rewards.manip_rewards.arm_ellipsoid_inv_eps)
+        S_F = _sanitize_tensor(0.5 * (S_F + S_F.transpose(-1, -2)))
+
+        # --------------------------------------------------
+        # Eigenvalues of force ellipsoid
+        # --------------------------------------------------
+        evals_F, _ = _eig_desc(S_F)  # descending: lam1 >= lam2 >= lam3
+        evals_F = torch.clamp(_sanitize_tensor(evals_F), min=1e-8, max=1e8)
+
+        lam1 = evals_F[:, 0]
+        lam2 = evals_F[:, 1]
+        lam3 = evals_F[:, 2]
+
+        # --------------------------------------------------
+        # (1) Large force ellipsoid reward
+        # --------------------------------------------------
+        force_size = _geom_mean(evals_F)
+
+        r_force_size = 1.0 - torch.exp(
+            -self.cfg.rewards.manip_rewards.arm_ellipsoid_force_size_scale
+            * force_size
+        )
+        r_force_size = torch.clamp(_sanitize_tensor(r_force_size), 0.0, 1.0)
+
+        # --------------------------------------------------
+        # (2) Isotropic force ellipsoid reward
+        # --------------------------------------------------
+        force_cond = torch.clamp(
+            _sanitize_tensor(lam1 / torch.clamp(lam3, min=1e-8)),
+            min=1.0,
+            max=1e6,
+        )
+
+        r_force_iso_cond = _upper_reward(
+            force_cond,
+            self.cfg.rewards.manip_rewards.arm_ellipsoid_force_cond_max,
+            sharpness=self.cfg.rewards.manip_rewards.arm_ellipsoid_iso_sharpness,
+        )
+        r_force_iso_cond = torch.clamp(_sanitize_tensor(r_force_iso_cond), 0.0, 1.0)
+
+        # Optional smoother isotropy term based on log-eigenvalue spread.
+        # This avoids relying only on lam1 / lam3.
+        log_evals = torch.log(evals_F)
+        log_mean = log_evals.mean(dim=1, keepdim=True)
+        log_spread = torch.mean(torch.square(log_evals - log_mean), dim=1)
+
+        r_force_iso_spread = torch.exp(
+            -self.cfg.rewards.manip_rewards.arm_ellipsoid_log_iso_scale
+            * log_spread
+        )
+        r_force_iso_spread = torch.clamp(_sanitize_tensor(r_force_iso_spread), 0.0, 1.0)
+
+        r_force_iso = (
+            self.cfg.rewards.manip_rewards.arm_ellipsoid_cond_iso_weight
+            * r_force_iso_cond
+            +
+            (1.0 - self.cfg.rewards.manip_rewards.arm_ellipsoid_cond_iso_weight)
+            * r_force_iso_spread
+        )
+        r_force_iso = torch.clamp(_sanitize_tensor(r_force_iso), 0.0, 1.0)
+
+        # --------------------------------------------------
+        # Final reward
+        # --------------------------------------------------
+        reward = (
+            self.cfg.rewards.manip_rewards.arm_ellipsoid_size_weight
+            * r_force_size
+            +
+            self.cfg.rewards.manip_rewards.arm_ellipsoid_iso_weight
+            * r_force_iso
+        )
+
+        norm = (
+            self.cfg.rewards.manip_rewards.arm_ellipsoid_size_weight
+            +
+            self.cfg.rewards.manip_rewards.arm_ellipsoid_iso_weight
+        )
+        reward = reward / max(float(norm), 1e-6)
+
+        reward = torch.clamp(_sanitize_tensor(reward), 0.0, 1.0)
+
+        return reward

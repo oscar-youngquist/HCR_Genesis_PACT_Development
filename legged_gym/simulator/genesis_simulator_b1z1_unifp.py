@@ -111,6 +111,8 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             self._randomize_pd_gain(env_ids)
         if self._cfg.domain_rand.randomize_motor_strength:
             self._randomize_motor_strength(env_ids)
+        if self._cfg.domain_rand.randomize_gripper_mass:
+            self._randomize_gripper_mass(env_ids)
         
         self._last_dof_vel[env_ids] = 0.
         self._last_feet_vel[env_ids] = 0.
@@ -969,6 +971,53 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
                 self._cfg.asset.contact_state_link_names
             )
 
+        # -------------------------------------------------------------------------
+        # Automatically find Z1 arm DOF indices
+        # -------------------------------------------------------------------------
+        z1_expected_order = [
+            "z1_waist",
+            "z1_shoulder",
+            "z1_elbow",
+            "z1_wrist_angle",
+            "z1_forearm_roll",
+            "z1_wrist_rotate",
+        ]
+
+        missing_arm_dofs = [
+            name for name in z1_expected_order
+            if name not in self._cfg.asset.dof_names
+        ]
+
+        if len(missing_arm_dofs) > 0:
+            raise ValueError(
+                f"Missing expected Z1 arm DOFs: {missing_arm_dofs}. "
+                f"Available DOFs: {self._cfg.asset.dof_names}"
+            )
+
+        # Absolute simulator DOF ids.
+        self._arm_dof_indices = {
+            name: self._robot.get_joint(name).dof_start
+            for name in z1_expected_order
+        }
+
+        self._arm_dof_ids = torch.tensor(
+            [self._arm_dof_indices[name] for name in z1_expected_order],
+            device=self._device,
+            dtype=torch.long,
+        )
+
+        # Config-order ids, useful for indexing self._torque_limits when
+        # self._torque_limits was created from self._dof_indices.
+        self._arm_dof_cfg_ids = torch.tensor(
+            [self._cfg.asset.dof_names.index(name) for name in z1_expected_order],
+            device=self._device,
+            dtype=torch.long,
+        )
+
+        print(f"arm dof indices: {self._arm_dof_indices}")
+        print(f"arm absolute dof ids: {self._arm_dof_ids}")
+        print(f"arm cfg-order dof ids: {self._arm_dof_cfg_ids}")
+
         # dof position limits
         self._dof_pos_limits = torch.stack(
             self._robot.get_dofs_limit(self._dof_indices), dim=1)
@@ -1005,6 +1054,9 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         # randomize base mass
         if self._cfg.domain_rand.randomize_base_mass:
             self._randomize_base_mass(np.arange(self._num_envs))
+        # randomize gripper mass
+        if self._cfg.domain_rand.randomize_gripper_mass:
+            self._randomize_gripper_mass(np.arange(self._num_envs))
         # randomize COM displacement
         if self._cfg.domain_rand.randomize_com_displacement:
             self._randomize_com_displacement(np.arange(self._num_envs))
