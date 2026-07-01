@@ -613,8 +613,8 @@ class GO2KITECfg( LeggedRobotCfg ):
             
             curr_reward_bounds = {"torque_limits":[-1.0e-4,-1.0e-2],
                                   "joint_power":[-2.0e-6, -2.0e-8],
-                                  "action_rate":[-0.001, -0.0001],
-                                  "action_smoothness":[-0.001, -0.0001],
+                                  "action_rate":[-0.01, -0.0001],
+                                  "action_smoothness":[-0.01, -0.0001],
                                   "dof_acc":[-2.0e-8, -2.0e-10],
                                   "torso_force_wrench_ellipsoid":[0.2, 0.35],
                                   "swing_vel_ellipsoid_terrain":[0.1, 0.30]
@@ -664,7 +664,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         
         heading_command = True # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
-            lin_vel_x = [-0.5, 0.5] # min max [m/s]
+            lin_vel_x = [-0.6, 0.6] # min max [m/s]
             lin_vel_y = [-0.3, 0.3]   # min max [m/s]
             ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
             heading = [-3.14, 3.14]
@@ -842,7 +842,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         
         
         # load_run = "Apr15_11-53-35_50hz_spec_jointrand_stairs"
-        load_run = "Jun30_15-10-27_50hz_nogap_parkour"
+        load_run = "Jun30_15-10-27_50hz_nogap_parkour_novers"
         checkpoint = -1
-        resume = True
+        resume = False
         exp_data_path = "exp_data/kite_feasibility/baseline_model_stairs.csv"
