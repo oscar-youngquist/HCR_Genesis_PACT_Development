@@ -557,7 +557,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             rear_foot_overreach = -10.0
 
             # gait
-            feet_air_time    = 0.80                # (-) tracking reward for long steps
+            feet_air_time    = 1.00                # (-) tracking reward for long steps
             foot_clearance_terrain_aware = 0.40    # (+) tracking reward for feet reaching the desired clearance responsive to terrain height            
             foot_slip        = -0.01               # penalty for feet slipping
             feet_contact_forces = -1.0e-2          # penalty for high contact forces on the feet
@@ -613,8 +613,8 @@ class GO2KITECfg( LeggedRobotCfg ):
             
             curr_reward_bounds = {"torque_limits":[-1.0e-4,-1.0e-2],
                                   "joint_power":[-2.0e-6, -2.0e-8],
-                                  "action_rate":[-0.01, -0.0001],
-                                  "action_smoothness":[-0.01, -0.0001],
+                                  "action_rate":[-0.001, -0.0001],
+                                  "action_smoothness":[-0.001, -0.0001],
                                   "dof_acc":[-2.0e-8, -2.0e-10],
                                   "torso_force_wrench_ellipsoid":[0.2, 0.35],
                                   "swing_vel_ellipsoid_terrain":[0.1, 0.30]
@@ -773,9 +773,9 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         log_detailed_encoder_losses = True
 
         # Adaptive entropy coefficient curriculum
-        entropy_coef = 0.02
+        entropy_coef = 0.01
         use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.01, 0.02]
+        adaptive_ent_bounds = [0.005, 0.012]
         adaptive_ent_lin_threshold = 0.75
         adaptive_ent_ang_threshold = 0.35
         adaptive_ent_ter_threshold = 6.0

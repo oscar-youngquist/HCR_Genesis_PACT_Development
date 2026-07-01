@@ -327,6 +327,9 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         self.simulator.post_physics_step()
         self._post_physics_step_callback()
 
+        # KITE specific update
+        self.leg_jacobians[:] = self.compute_all_leg_jacobians(self.simulator.dof_pos.view(-1, 4, 3))
+
         # compute observations, rewards, resets, ...
         self.check_termination()
         
@@ -341,9 +344,6 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             self._update_depth_observations()
         
         self.compute_observations()  # in some cases a simulation step might be required to refresh some obs (for example body positions)
-        
-        # KITE specific update
-        self.leg_jacobians[:] = self.compute_all_leg_jacobians(self.simulator.dof_pos.view(-1, 4, 3))
         
         if (
             self.debug
