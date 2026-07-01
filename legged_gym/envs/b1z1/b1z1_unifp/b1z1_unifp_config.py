@@ -25,6 +25,7 @@ class B1Z1UniFPCfg:
         debug_draw_height_points_around_base = False
         debug_draw_height_points_around_feet = False
         debug_draw_terrain_height_points = False
+        render_ee_goal_debug = True
 
     class goal_ee:
         num_commands = 3
@@ -38,9 +39,11 @@ class B1Z1UniFPCfg:
         arm_induced_pitch = 0.38
 
         class sphere_center:
+            # Genesis URDF z1_waist origin: base_static_joint [0.3, 0, 0.09]
+            # plus z1_waist joint [0, 0, 0.0585].
             x_offset = 0.3
             y_offset = 0.0
-            z_invariant_offset = 0.70
+            z_invariant_offset = 0.1485
 
         class ranges:
             init_pos_start = [0.66, np.pi / 4, 0.0]
@@ -261,6 +264,7 @@ class B1Z1UniFPCfg:
         force_start_step = 8000
 
         push_gripper_stators = True
+        apply_ee_external_forces = True
         push_gripper_interval_s_cmd = [3.5, 9.0]
         push_gripper_duration_s_cmd = [1.0, 3.0]
         gripper_forced_prob_cmd = 0.8
@@ -277,6 +281,7 @@ class B1Z1UniFPCfg:
         settling_time_force_gripper_s = 1.0
         
         push_robot_base = True
+        apply_base_external_forces = True
         push_base_interval_s_cmd = [3.5, 9.0]
         push_base_duration_s_cmd = [1.0, 3.0]
         base_forced_prob_cmd = 0.8
@@ -292,6 +297,9 @@ class B1Z1UniFPCfg:
         base_prop_kd = 0.1
         force_z_base_ext_scale = 0.1
         settling_time_force_base_s = 3.0
+        use_external_impedance_compensation = False
+        compensate_ee_external_force = True
+        compensate_base_external_force = True
 
         class ranges:
             lin_vel_x = [-0.6, 0.6]
@@ -430,62 +438,64 @@ class B1Z1UniFPCfg:
         tracking_sigma = 0.25
         tracking_ee_sigma = 1.0
         sigma_force = 1.0 / 50.0
+        
         soft_dof_pos_limit = 0.8
         soft_dof_vel_limit = 1.0
         soft_torque_limit = 0.9
-        base_height_target = 0.50
+        
+        base_height_target = 0.60
+        
         max_contact_force = 200.0
         foot_height_offset = 0.02
+        
         cycle_time = 0.64
+        
         target_joint_pos_scale = 0.17
         target_joint_pos_thd = 0.5
 
         class scales:
+            # Constraints
             termination = -1.0
-            feet_contact_number = 2.0
-            
-            tracking_lin_vel_force_world = 2.0
-            tracking_ang_vel = 1.0
-            
-            torques = -5.0e-6
-            stand_still = 0.5
-            
-            ref_dof_leg = 1.0
-            
-            alive = 1.5
-            
-            lin_vel_z = -1.5
-            feet_air_time = 1.0
-            feet_height = 1.0
-            ang_vel_xy = -0.02
-            
-            dof_acc = -2.5e-7
-            dof_vel = -8.0e-4
-            
-            dof_acc_arm = -4.5e-7
-            dof_vel_arm = -2.0e-4
             collision = -5.0
-            
-            action_rate = -0.02
-            
-            action_rate_arm = -0.045
-            
             dof_pos_limits = -10.0
-            
             torque_limits = -0.005
-            
-            hip_pos = -0.5
-            
-            feet_drag = -0.0008
-            feet_contact_forces = -0.001
+            stand_still = 0.5
+
+            alive = 0.001
+
+            # tracking
+            tracking_lin_vel_force_world = 1.0
+            tracking_ang_vel = 0.5
+            tracking_ee_force_world = 1.0
             
             base_height = -2.0
+            lin_vel_z = -1.0
+            ang_vel_xy = -0.02
+            dof_acc = -2.5e-7
+            dof_vel = -8.0e-4
+            action_rate = -0.02
             
+            dof_acc_arm = -4.5e-7
+            action_rate_arm = -0.045
+            dof_vel_arm = -2.0e-4
+
+            torques = -5.0e-6
+
+            # Leg posture shaping
+            ref_dof_leg = 1.0
+            hip_pos = -0.5
+
+            # Gait shaping
+            feet_drag = -0.0008
+            feet_contact_forces = -0.001
             feet_pos_xy = -0.5
+            feet_air_time = 1.0
+            feet_height = 1.0
             feet_height_high = -15.0
+
+            feet_contact_number = 2.0
             
             roll = -0.25
-            tracking_ee_force_world = 2.0
 
         class reward_curriculum:
             curr_reward_keys = ["collision", "action_rate", "action_rate_arm", "dof_acc", "dof_acc_arm"]
@@ -505,7 +515,7 @@ class B1Z1UniFPCfg:
         lookat = [0.0, 0.0, 1.0]
         num_rendered_envs = 100
         rendered_envs_idx = np.random.choice(
-            np.arange(1000),
+            np.arange(4000),
             size=num_rendered_envs,
             replace=False,
         )
@@ -561,12 +571,14 @@ class B1Z1UniFPCfgPPO:
         policy_class_name = "ActorCriticUniFP"
         algorithm_class_name = "PPO_UniFP"
         num_steps_per_env = 24
+        
         max_iterations = 8000
+        
         save_interval = 500
         run_name = "unifp_baseline"
         experiment_name = "b1z1_unifp_genesis"
         sync_wandb = False
         resume = False
-        load_run = -1
+        load_run = "Jun30_17-49-44_unifp_baseline"
         checkpoint = -1
         resume_path = None

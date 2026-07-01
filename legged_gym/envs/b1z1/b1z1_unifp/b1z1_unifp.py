@@ -71,6 +71,8 @@ class B1Z1UniFP(BaseTask):
             self._push_gripper(torch.arange(self.num_envs, device=self.device))
         if self.force_randomization_active and self.cfg.commands.push_robot_base:
             self._push_robot_base(torch.arange(self.num_envs, device=self.device))
+        if self.cfg.commands.use_external_impedance_compensation:
+            self._apply_external_impedance_compensation()
         self.simulator.step(actions)
         self.post_physics_step()
 
@@ -173,6 +175,8 @@ class B1Z1UniFP(BaseTask):
         self.base_force_ext_world[env_ids] = 0.0
         self.current_Fxyz_gripper_cmd[env_ids] = 0.0
         self.current_Fxyz_base_cmd[env_ids] = 0.0
+        self.estimated_ee_force_local[env_ids] = 0.0
+        self.estimated_base_force_local[env_ids] = 0.0
         self._reset_force_events(env_ids)
         self._randomize_force_gains(env_ids)
         if hasattr(self.simulator, "apply_ee_force"):
@@ -347,6 +351,94 @@ class B1Z1UniFP(BaseTask):
     def set_viewer_camera(self, pos, lookat):
         """Set viewer camera position and direction."""
         self.simulator.set_viewer_camera(eye=pos, target=lookat)
+
+    def set_camera(self, pos, lookat):
+        """Set the play-script camera using the available Genesis camera path."""
+        floating_camera = getattr(self.simulator, "_floating_camera", None)
+        if floating_camera is not None:
+            floating_camera.set_pose(pos=pos, lookat=lookat)
+        else:
+            self.set_viewer_camera(pos, lookat)
+
+    def draw_ee_goal_debug_vis(self, env_ids=None):
+        """Draw UniFP-style EE target markers in the Genesis viewer."""
+        if self.headless or not self.cfg.env.render_ee_goal_debug:
+            return
+        scene = getattr(self.simulator, "_scene", None)
+        if scene is None:
+            return
+
+        if env_ids is None:
+            rendered_envs = getattr(self.cfg.viewer, "rendered_envs_idx", [0])
+            env_ids = rendered_envs[: min(len(rendered_envs), 16)]
+        if len(env_ids) == 0:
+            return
+
+        env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        base_yaw_quat = quat_from_euler_xyz(
+            torch.zeros(len(env_ids), device=self.device),
+            torch.zeros(len(env_ids), device=self.device),
+            self.simulator.base_euler[env_ids, 2],
+        )
+        ee_center = self.simulator.base_pos[env_ids] + quat_apply(base_yaw_quat, self.ee_goal_center_offset[env_ids])
+        forces_cmd_world = quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd[env_ids])
+        force_offset = (self.ee_force_ext_world[env_ids] + forces_cmd_world) / self.gripper_force_kps[env_ids]
+        ee_goal_offset_world = self.curr_ee_goal_cart_world[env_ids] + force_offset
+        ee_pos = self.simulator.ee_pos[env_ids]
+
+        scene.clear_debug_objects()
+        scene.draw_debug_spheres(
+            self.curr_ee_goal_cart_world[env_ids],
+            radius=0.05,
+            color=(1.0, 1.0, 0.0, 0.8),
+        )
+        scene.draw_debug_spheres(
+            ee_goal_offset_world,
+            radius=0.05,
+            color=(1.0, 0.0, 1.0, 0.8),
+        )
+        scene.draw_debug_spheres(
+            ee_pos,
+            radius=0.05,
+            color=(0.0, 0.0, 1.0, 0.8),
+        )
+        scene.draw_debug_spheres(
+            ee_center,
+            radius=0.05,
+            color=(0.0, 1.0, 1.0, 0.8),
+        )
+
+        force_vec = force_offset.detach().cpu().numpy()
+        goal_pos = self.curr_ee_goal_cart_world[env_ids].detach().cpu().numpy()
+        for pos, vec in zip(goal_pos, force_vec):
+            if np.linalg.norm(vec) > 1.0e-4:
+                scene.draw_debug_arrow(
+                    pos,
+                    vec=vec,
+                    radius=0.01,
+                    color=(1.0, 0.0, 1.0, 0.8),
+                )
+
+    def set_impedance_force_estimates(self, obs_pred):
+        """Set estimator-predicted local force values used by the play-time impedance controller."""
+        if isinstance(obs_pred, np.ndarray):
+            obs_pred = torch.as_tensor(obs_pred, device=self.device, dtype=torch.float)
+        else:
+            obs_pred = obs_pred.to(device=self.device, dtype=torch.float)
+        if obs_pred.shape[1] < 12:
+            raise RuntimeError(f"Expected at least 12 predicted UniFP labels, got {obs_pred.shape[1]}")
+
+        self.estimated_ee_force_local[:] = obs_pred[:, 6:9] / self.obs_scales.ee_force
+        self.estimated_base_force_local[:] = obs_pred[:, 9:12] / self.obs_scales.base_force
+
+    def _apply_external_impedance_compensation(self):
+        """Cancel force offsets using estimator-predicted local forces, not simulator force buffers."""
+        if self.cfg.commands.compensate_ee_external_force:
+            self.current_Fxyz_gripper_cmd[:] = -self.estimated_ee_force_local
+        if self.cfg.commands.compensate_base_external_force:
+            self.current_Fxyz_base_cmd[:] = -self.estimated_base_force_local
+        self.commands[:, 9:12] = self.current_Fxyz_gripper_cmd
+        self.commands[:, 12:15] = self.current_Fxyz_base_cmd
 
     def _pre_sim_step(self, actions):
         actions = torch.clip(actions, -self.cfg.normalization.clip_actions, self.cfg.normalization.clip_actions).to(self.device)
@@ -623,22 +715,27 @@ class B1Z1UniFP(BaseTask):
             output=self.current_Fxyz_gripper_cmd,
             force_range=self.cfg.commands.max_push_force_xyz_gripper_cmd,
         )
-        self._update_force_stream(
-            env_ids_all,
-            interval=self.push_interval_gripper_ext,
-            interval_min=self.push_interval_gripper_ext_min,
-            interval_max=self.push_interval_gripper_ext_max,
-            duration=self.push_duration_gripper_ext,
-            duration_min=self.push_duration_gripper_ext_min,
-            duration_max=self.push_duration_gripper_ext_max,
-            settling_time=self.settling_time_force_gripper,
-            forced_prob=self.cfg.commands.gripper_forced_prob_ext,
-            selected=self.selected_env_ids_gripper_ext,
-            freed=self.freed_envs_gripper_ext,
-            target=self.force_target_gripper_ext,
-            output=self.ee_force_ext_world,
-            force_range=self.cfg.commands.max_push_force_xyz_gripper_ext,
-        )
+        if self.cfg.commands.apply_ee_external_forces:
+            self._update_force_stream(
+                env_ids_all,
+                interval=self.push_interval_gripper_ext,
+                interval_min=self.push_interval_gripper_ext_min,
+                interval_max=self.push_interval_gripper_ext_max,
+                duration=self.push_duration_gripper_ext,
+                duration_min=self.push_duration_gripper_ext_min,
+                duration_max=self.push_duration_gripper_ext_max,
+                settling_time=self.settling_time_force_gripper,
+                forced_prob=self.cfg.commands.gripper_forced_prob_ext,
+                selected=self.selected_env_ids_gripper_ext,
+                freed=self.freed_envs_gripper_ext,
+                target=self.force_target_gripper_ext,
+                output=self.ee_force_ext_world,
+                force_range=self.cfg.commands.max_push_force_xyz_gripper_ext,
+            )
+        else:
+            self.ee_force_ext_world[env_ids_all] = 0.0
+            self.selected_env_ids_gripper_ext[env_ids_all] = False
+            self.force_target_gripper_ext[env_ids_all] = 0.0
         if hasattr(self.simulator, "apply_ee_force"):
             self.simulator.apply_ee_force(self.ee_force_ext_world)
 
@@ -660,23 +757,28 @@ class B1Z1UniFP(BaseTask):
             force_range=self.cfg.commands.max_push_force_xyz_base_cmd,
             zero_z=True,
         )
-        self._update_force_stream(
-            env_ids_all,
-            interval=self.push_interval_base_ext,
-            interval_min=self.push_interval_base_ext_min,
-            interval_max=self.push_interval_base_ext_max,
-            duration=self.push_duration_base_ext,
-            duration_min=self.push_duration_base_ext_min,
-            duration_max=self.push_duration_base_ext_max,
-            settling_time=self.settling_time_force_base,
-            forced_prob=self.cfg.commands.base_forced_prob_ext,
-            selected=self.selected_env_ids_base_ext,
-            freed=self.freed_envs_base_ext,
-            target=self.force_target_base_ext,
-            output=self.base_force_ext_world,
-            force_range=self.cfg.commands.max_push_force_xyz_base_ext,
-            z_scale=self.cfg.commands.force_z_base_ext_scale,
-        )
+        if self.cfg.commands.apply_base_external_forces:
+            self._update_force_stream(
+                env_ids_all,
+                interval=self.push_interval_base_ext,
+                interval_min=self.push_interval_base_ext_min,
+                interval_max=self.push_interval_base_ext_max,
+                duration=self.push_duration_base_ext,
+                duration_min=self.push_duration_base_ext_min,
+                duration_max=self.push_duration_base_ext_max,
+                settling_time=self.settling_time_force_base,
+                forced_prob=self.cfg.commands.base_forced_prob_ext,
+                selected=self.selected_env_ids_base_ext,
+                freed=self.freed_envs_base_ext,
+                target=self.force_target_base_ext,
+                output=self.base_force_ext_world,
+                force_range=self.cfg.commands.max_push_force_xyz_base_ext,
+                z_scale=self.cfg.commands.force_z_base_ext_scale,
+            )
+        else:
+            self.base_force_ext_world[env_ids_all] = 0.0
+            self.selected_env_ids_base_ext[env_ids_all] = False
+            self.force_target_base_ext[env_ids_all] = 0.0
         if hasattr(self.simulator, "apply_base_force"):
             self.simulator.apply_base_force(self.base_force_ext_world)
 
@@ -832,6 +934,8 @@ class B1Z1UniFP(BaseTask):
         self.base_force_ext_world = torch.zeros(self.num_envs, 3, device=self.device)
         self.current_Fxyz_gripper_cmd = torch.zeros(self.num_envs, 3, device=self.device)
         self.current_Fxyz_base_cmd = torch.zeros(self.num_envs, 3, device=self.device)
+        self.estimated_ee_force_local = torch.zeros(self.num_envs, 3, device=self.device)
+        self.estimated_base_force_local = torch.zeros(self.num_envs, 3, device=self.device)
         self.freed_envs_gripper_cmd = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.freed_envs_gripper_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.selected_env_ids_gripper_cmd = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
