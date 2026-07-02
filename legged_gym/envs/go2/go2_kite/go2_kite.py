@@ -559,8 +559,12 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         self.last_obs_buf[env_ids] = 0.
         self.llast_obs_buf[env_ids] = 0.
 
-        self.obs_history_frames[:, env_ids] = 0.0
-        self.critic_obs_frames[:, env_ids] = 0.0
+        # clear history
+        # clear obs history for the envs that are reset
+        for i in range(self.obs_history_deque.maxlen):
+            self.obs_history_deque[i][env_ids] *= 0
+        for i in range(self.critic_obs_deque.maxlen):
+            self.critic_obs_deque[i][env_ids] *= 0
 
         # fill extras
         self.extras["episode"] = {}
@@ -659,87 +663,94 @@ class Go2KITE(KITEDepthMixin, BaseTask):
     def compute_observations(self):
         """ Computes observations
         """
-        self.llast_obs_buf.copy_(self.last_obs_buf)
-        self.last_obs_buf.copy_(self.obs_buf)
+        # Update previous observations
+        self.llast_obs_buf = self.last_obs_buf.clone().detach()
+        self.last_obs_buf = self.obs_buf.clone().detach()
 
         # Compute new observation
-        self.obs_buf[:, 0:3] = self.commands[:, :3] * self.commands_scale
-        self.obs_buf[:, 3:6] = self.simulator.projected_gravity
-        self.obs_buf[:, 6:9] = self.simulator.base_ang_vel * self.obs_scales.ang_vel
-        self.obs_buf[:, 9:21] = (
-            self.simulator.dof_pos - self.simulator.default_dof_pos
-        ) * self.obs_scales.dof_pos
-        self.obs_buf[:, 21:33] = self.simulator.dof_vel * self.obs_scales.dof_vel
-        self.obs_buf[:, 33:45] = self.actions[:, 0:12]
-        self.obs_buf[:, 45:57] = self.simulator.feedback_torques * (
-            1.0 / float(self.cfg.control.torque_scale)
-        )
-
-        feet_height = torch.clip(
-            self.simulator.feet_pos[:, :, 2]
-            - torch.mean(self.simulator.height_around_feet, dim=-1)
-            - self.cfg.rewards.foot_height_offset,
-            -1,
-            1,
-        )
-        self.explicit_labels_buf[:, 0:3] = (
-            self.simulator.base_lin_vel * self.obs_scales.lin_vel
-        )
-        self.explicit_labels_buf[:, 3:7] = self.simulator.link_contact_states[
-            :, self.simulator.feet_indices
-        ]
-        self.explicit_labels_buf[:, 7:11] = feet_height
-        self.explicit_labels_buf[:, 11:23] = (
-            self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1)
-        )
-
-        # track history buffer
-        self.llast_obs_hist.copy_(self.last_obs_hist)
-        self.last_obs_hist.copy_(self.obs_history)
-        self._append_flattened_history(
-            self.obs_history_frames,
-            "obs_history_write_idx",
-            self.obs_buf,
-            self.obs_history,
-        )
-
-        # build up privlieged domain randomization buffer
-        self._update_domain_randomization_info()
-        self.critic_obs_buf_single[:, 0:57]._copy(self.obs_buf)
-        self.critic_obs_buf_single[:, 57:58] = torch.mean(
-            self.simulator.base_pos[:, 2].unsqueeze(1)
-            - self.simulator.measured_heights,
-            dim=1,
-            keepdim=True,
-        )
-        self.critic_obs_buf_single[:, 58:61] = (
-            self.simulator.base_lin_vel * self.obs_scales.lin_vel
-        )
-        self.critic_obs_buf_single[:, 61:73] = (
-            self.simulator._grfs_buf * self.obs_scales.grf
-        )
-        self.critic_obs_buf_single[:, 73:85] = (
-            self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1)
-        )
-        self.critic_obs_buf_single[:, 85:89] = self.simulator.link_contact_states[
-            :, self.simulator.feet_indices
-        ]
-        self.critic_obs_buf_single[:, 89:93] = feet_height
-        self.critic_obs_buf_single[:, 93:144] = self.domain_randomization_info_buf
+        self.obs_buf = torch.cat((self.commands[:, :3] * self.commands_scale,                 # velocity commands     3
+                                  self.simulator.projected_gravity,                           # projected gravity vec 3
+                                  self.simulator.base_ang_vel * self.obs_scales.ang_vel,      # angular velocity      3
+                                  (self.simulator.dof_pos - self.simulator.default_dof_pos)
+                                      * self.obs_scales.dof_pos,                              # joint pose            12
+                                    self.simulator.dof_vel * self.obs_scales.dof_vel,         # joint velocity        12
+                                    self.actions[:,0:12],                                     # joint pose actions    12
+                                    self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)),    # joint torque actions  12
+                                    ), dim=-1)                                                # 57
 
         # add noise if needed
         if self.add_noise:
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
 
+        # build the explicit labels buffer
+        self.explicit_labels_buf = torch.cat((
+            self.simulator.base_lin_vel * self.obs_scales.lin_vel,                     # torso linear velocity         3
+            self.simulator.link_contact_states[:,self.simulator.feet_indices],         # contact states of feet        4
+            torch.clip(self.simulator.feet_pos[:, :, 2] -
+                torch.mean(self.simulator.height_around_feet, dim=-1) -
+                self.cfg.rewards.foot_height_offset, -1, 1.),                              # feet height               4
+            self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1)        # 12 - terrain info around feet
+        ), dim=-1)
+
+        # track history buffer
+        self.llast_obs_hist = self.last_obs_hist.clone().detach()
+        self.last_obs_hist = self.obs_history.clone().detach()
+
+        self.obs_history_deque.append(self.obs_buf)
+        self.obs_history = torch.cat(
+            [self.obs_history_deque[i] for i in range(self.obs_history_deque.maxlen)],
+            dim=-1,
+        )
+
+        # build up privlieged domain randomization buffer
+        domain_randomization_info = torch.cat((
+            (self.simulator._friction_values - self.friction_value_offset),  # 1
+            self.simulator._added_base_mass,                                 # 1
+            self.simulator._base_com_bias,                                   # 3
+            self.simulator._rand_push_vels,                                  # 3
+            self.simulator._rand_wrench_vels,                                # 3
+            (self.simulator._kp_scale - self.kp_scale_offset),               # num_actions
+            (self.simulator._kd_scale - self.kd_scale_offset),               # num_actions
+            self.simulator._motor_strength,                                  # num_actions
+            self.simulator._joint_armature,                                  # 1
+            self.simulator._joint_friction,                                  # 1
+            self.simulator._joint_damping,                                   # 1
+            self.simulator._joint_stiffness,                                 # 1
+            ), dim=-1)                                                       # 51
+
+        critic_obs = torch.cat(
+            (
+                self.commands[:, :3] * self.commands_scale,                            # velocity commands     3
+                self.simulator.projected_gravity,                                      # projected gravity vec 3
+                self.simulator.base_ang_vel * self.obs_scales.ang_vel,                 # angular velocity      3
+                (self.simulator.dof_pos - self.simulator.default_dof_pos)
+                    * self.obs_scales.dof_pos,                                         # joint pose            12
+                self.simulator.dof_vel * self.obs_scales.dof_vel,                      # joint velocity        12
+                self.actions[:,0:12],                                                  # joint pose actions    12
+                self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)), 
+                torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) -
+                           self.simulator.measured_heights, dim=1, keepdim=True),      # 1  - base height
+                self.simulator.base_lin_vel * self.obs_scales.lin_vel,                 # 3  - base linear velocity
+                self.simulator._grfs_buf * self.obs_scales.grf,                        # 12 - ground reaction forces experienced by feet
+                self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain (surface normals) around feet
+                self.simulator.link_contact_states[:,self.simulator.feet_indices],     # 4  - contact states of feet
+                torch.clip(self.simulator.feet_pos[:, :, 2] -
+                    torch.mean(self.simulator.height_around_feet, dim=-1) -
+                    self.cfg.rewards.foot_height_offset, -1, 1.),                      # 4  - feet height
+                domain_randomization_info                                              # 51 - privileged domain randomization values
+            ),
+            dim=-1,
+        ) # 132
+
         # add hieght measurements to asymmetric critic if approperiate
         self._update_privileged_terrain_map()
         self._update_depth_torso_state()
 
-        self._append_flattened_history(
-            self.critic_obs_frames,
-            "critic_obs_write_idx",
-            self.critic_obs_buf_single,
-            self.privileged_obs_buf,
+        self.critic_obs_deque.append(critic_obs)
+        self.privileged_obs_buf = torch.cat(
+            [self.critic_obs_deque[i]
+                for i in range(self.critic_obs_deque.maxlen)],
+            dim=-1,
         )
 
     def _update_privileged_terrain_map(self):
@@ -753,6 +764,8 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             self.terrain_map_buf[..., 3] = 1.0
             return
 
+        num_x = len(self.cfg.terrain.measured_points_x)
+        num_y = len(self.cfg.terrain.measured_points_y)
         heights = torch.clip(
             self.simulator.base_pos[:, 2].unsqueeze(1)
             - 0.5
@@ -761,54 +774,14 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             1,
         ) * self.obs_scales.height_measurements
         heights *= self.height_noise_vec
-        height_map = heights.view(
-            self.num_envs, self.num_terrain_points_x, self.num_terrain_points_y, 1
-        )
+        height_map = heights.view(self.num_envs, num_x, num_y, 1)
         normal_map = self.simulator.measured_surface_normals.view(
             self.num_envs,
-            self.num_terrain_points_x,
-            self.num_terrain_points_y,
+            num_x,
+            num_y,
             3,
         )
-        self.terrain_map_buf[..., 0:1].copy_(height_map)
-        self.terrain_map_buf[..., 1:4].copy_(normal_map)
-
-    def _append_flattened_history(self, frames, write_idx_name, value, flat_output):
-        write_idx = getattr(self, write_idx_name)
-        frames[write_idx].copy_(value)
-        write_idx = (write_idx + 1) % frames.shape[0]
-        setattr(self, write_idx_name, write_idx)
-
-        frame_dim = value.shape[1]
-        split = frames.shape[0] - write_idx
-        if split > 0:
-            flat_output[:, : split * frame_dim].copy_(
-                frames[write_idx:].permute(1, 0, 2).reshape(self.num_envs, -1)
-            )
-        if write_idx > 0:
-            flat_output[:, split * frame_dim :].copy_(
-                frames[:write_idx].permute(1, 0, 2).reshape(self.num_envs, -1)
-            )
-
-    def _update_domain_randomization_info(self):
-        self.domain_randomization_info_buf[:, 0:1] = (
-            self.simulator._friction_values - self.friction_value_offset
-        )
-        self.domain_randomization_info_buf[:, 1:2] = self.simulator._added_base_mass
-        self.domain_randomization_info_buf[:, 2:5] = self.simulator._base_com_bias
-        self.domain_randomization_info_buf[:, 5:8] = self.simulator._rand_push_vels
-        self.domain_randomization_info_buf[:, 8:11] = self.simulator._rand_wrench_vels
-        self.domain_randomization_info_buf[:, 11:23] = (
-            self.simulator._kp_scale - self.kp_scale_offset
-        )
-        self.domain_randomization_info_buf[:, 23:35] = (
-            self.simulator._kd_scale - self.kd_scale_offset
-        )
-        self.domain_randomization_info_buf[:, 35:47] = self.simulator._motor_strength
-        self.domain_randomization_info_buf[:, 47:48] = self.simulator._joint_armature
-        self.domain_randomization_info_buf[:, 48:49] = self.simulator._joint_friction
-        self.domain_randomization_info_buf[:, 49:50] = self.simulator._joint_damping
-        self.domain_randomization_info_buf[:, 50:51] = self.simulator._joint_stiffness
+        self.terrain_map_buf = torch.cat((height_map, normal_map), dim=-1)
 
     def _update_depth_torso_state(self):
         """Collect IMU fields for the depth encoder's 8D torso state.
@@ -1427,6 +1400,9 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             device=self.device,
         )
 
+        # observation history buffer
+        self.obs_history_deque = deque(maxlen=self.cfg.env.num_obs_hist)
+
         self.obs_history = torch.zeros(
             (self.num_envs, self.num_obs * self.num_obs_hist), device=self.device, dtype=torch.float)
         
@@ -1435,17 +1411,6 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         
         self.llast_obs_hist = torch.zeros(
             (self.num_envs, self.num_obs * self.num_obs_hist), device=self.device, dtype=torch.float)
-
-        self.obs_history_frames = torch.zeros(
-            (
-                self.cfg.env.num_obs_hist,
-                self.num_envs,
-                self.cfg.env.num_observations,
-            ),
-            dtype=torch.float,
-            device=self.device,
-        )
-        self.obs_history_write_idx = 0
         
         self.leg_jacobians = torch.zeros((self.num_envs, 4, 3, 3), dtype=torch.float, device=self.device)
         # IMU/depth-conditioning state for MotionRobustDepthEncoder. Columns
@@ -1456,49 +1421,41 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             dtype=torch.float,
             device=self.device,
         )
-        self.num_terrain_points_x = len(self.cfg.terrain.measured_points_x)
-        self.num_terrain_points_y = len(self.cfg.terrain.measured_points_y)
         # Privileged terrain target used by TerrainAttentionEncoder and
         # TerrainTwoHeadDecoder. Channel order is height + XYZ normal.
         self.terrain_map_buf = torch.zeros(
             (
                 self.num_envs,
-                self.num_terrain_points_x,
-                self.num_terrain_points_y,
+                len(self.cfg.terrain.measured_points_x),
+                len(self.cfg.terrain.measured_points_y),
                 4,
             ),
             dtype=torch.float,
             device=self.device,
         )
         self.terrain_map_buf[..., 3] = 1.0
-        self.critic_obs_buf_single = torch.zeros(
-            (self.num_envs, self.cfg.env.num_privileged_obs),
-            dtype=torch.float,
-            device=self.device,
-        )
-        self.privileged_obs_buf = torch.zeros(
-            (
-                self.num_envs,
-                self.cfg.env.num_priv_stack * self.cfg.env.num_privileged_obs,
-            ),
-            dtype=torch.float,
-            device=self.device,
-        )
-        self.critic_obs_frames = torch.zeros(
-            (
-                self.cfg.env.num_priv_stack,
-                self.num_envs,
-                self.cfg.env.num_privileged_obs,
-            ),
-            dtype=torch.float,
-            device=self.device,
-        )
-        self.critic_obs_write_idx = 0
-        self.domain_randomization_info_buf = torch.zeros(
-            (self.num_envs, 51),
-            dtype=torch.float,
-            device=self.device,
-        )
+
+        for _ in range(self.cfg.env.num_obs_hist):
+            self.obs_history_deque.append(
+                torch.zeros(
+                    self.num_envs,
+                    self.cfg.env.num_observations,
+                    dtype=torch.float,
+                    device=self.device,
+                )
+            )
+
+        # dqueue of critic observations. -> used to stablize critic predictions
+        self.critic_obs_deque = deque(maxlen=self.cfg.env.num_priv_stack)
+        for _ in range(self.cfg.env.num_priv_stack):
+            self.critic_obs_deque.append(
+                torch.zeros(
+                    self.num_envs,
+                    self.cfg.env.num_privileged_obs,
+                    dtype=torch.float,
+                    device=self.device,
+                )
+            )
 
         # explicit recon obs buffer (torso lin.velo, feet contact state, feet height)
         self.explicit_labels_buf = torch.zeros(
