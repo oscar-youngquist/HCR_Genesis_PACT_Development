@@ -40,8 +40,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             self._torques = self._compute_torques(actions)
             
             # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
-            self._robot.control_dofs_force(
-                torch.clip(self._torques,-1.1*self._torque_limits,1.1*self._torque_limits), self._dof_indices)
+            self._robot.control_dofs_force(self._torques, self._dof_indices)
             
             self._apply_external_forces()
             self._scene.step()

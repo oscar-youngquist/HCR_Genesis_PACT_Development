@@ -2076,7 +2076,7 @@ class B1Z1UniFP(BaseTask):
 
     def _reward_dof_close_to_default(self):
         # Penalize dof position deviation from default
-        return torch.sum(torch.square(self.simulator.dof_pos - self.simulator.default_dof_pos), dim=1)
+        return torch.sum(torch.square(self.simulator.dof_pos[:,:12] - self.simulator.default_dof_pos[:,:12]), dim=1)
 
     def _reward_stand_still_contact(self):
         # Encourage feet contact with the ground at zero commands

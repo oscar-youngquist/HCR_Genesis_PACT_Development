@@ -493,7 +493,7 @@ class B1Z1UniFPCfg:
             termination = -1.0
             collision = -5.0
             dof_pos_limits = -10.0
-            torque_limits = -0.005
+            torque_limits = -0.001
             dof_close_to_default = -0.1
 
             # Add in close to default reward
@@ -537,8 +537,8 @@ class B1Z1UniFPCfg:
             ref_dof_leg = 0.0
 
             # I developed these
-            front_foot_overreach = -100.0
-            rear_foot_overreach = -10.0
+            front_foot_overreach = -10.0
+            rear_foot_overreach = -1.0
 
             # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
             support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
@@ -547,7 +547,7 @@ class B1Z1UniFPCfg:
 
             # Gait shaping
             feet_drag = -0.01
-            feet_contact_forces = -0.001
+            feet_contact_forces = -0.0001
             feet_air_time = 1.0
             foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height            
 
