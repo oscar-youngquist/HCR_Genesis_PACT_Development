@@ -69,7 +69,7 @@ class B1Z1UniFP(BaseTask):
 
     def reset(self):
         """Reset all robots."""
-        self.reset_idx(torch.arange(self.num_envs, device=self.device))
+        self.reset_idx(self.all_env_ids)
         obs, privileged_obs, _, _, _, _, _, _ = self.step(
             torch.zeros(
                 self.num_envs,
@@ -88,9 +88,9 @@ class B1Z1UniFP(BaseTask):
         # After that point, commanded force offsets become part of the policy input,
         # and optional external forces are applied through the Genesis simulator.
         if self.force_randomization_active and self.cfg.commands.push_gripper_stators:
-            self._push_gripper(torch.arange(self.num_envs, device=self.device))
+            self._push_gripper(self.all_env_ids)
         if self.force_randomization_active and self.cfg.commands.push_robot_base:
-            self._push_robot_base(torch.arange(self.num_envs, device=self.device))
+            self._push_robot_base(self.all_env_ids)
 
         # Play/eval can optionally mimic the paper's external impedance wrapper.
         # It must use estimator outputs, not simulator ground-truth forces.
@@ -135,7 +135,10 @@ class B1Z1UniFP(BaseTask):
         self._post_physics_step_callback()
 
         # Leg main-ip update specific update
-        self.leg_jacobians[:] = self.compute_all_leg_jacobians(self.simulator.dof_pos[:,0:12].view(-1, 4, 3))
+        self.compute_all_leg_jacobians(
+            self.simulator.dof_pos[:, 0:12].view(-1, 4, 3),
+            out=self.leg_jacobians,
+        )
 
         self._compute_z1_arm_jacobian_buffer()
 
@@ -254,7 +257,7 @@ class B1Z1UniFP(BaseTask):
         q_arm = self.simulator.dof_pos[:, self.simulator._arm_dof_cfg_ids]
         self.z1_arm_jacobian[:] = self.compute_z1_arm_jacobian(q_arm)
 
-    def compute_all_leg_jacobians(self, q: torch.Tensor) -> torch.Tensor:
+    def compute_all_leg_jacobians(self, q: torch.Tensor, out: torch.Tensor = None) -> torch.Tensor:
         """
         Compute translational Jacobians for all 4 legs.
 
@@ -283,16 +286,10 @@ class B1Z1UniFP(BaseTask):
         device = q.device
         N = q.shape[0]
 
-        l1 = torch.as_tensor(self.cfg.asset.abad_link_length, device=device, dtype=dtype)
-        l2 = torch.as_tensor(self.cfg.asset.hip_link_length, device=device, dtype=dtype)
-        l3 = torch.as_tensor(self.cfg.asset.knee_link_length, device=device, dtype=dtype)
-        l4 = torch.as_tensor(self.cfg.asset.knee_link_y_offset, device=device, dtype=dtype)
-
-        side_sign = torch.as_tensor(
-            self.cfg.asset.side_signs,
-            device=device,
-            dtype=dtype,
-        ).view(1, 4).expand(N, 4)  # (N, 4)
+        l1 = self._abad_link_length
+        l2 = self._hip_link_length
+        l3 = self._knee_link_length
+        side_sign = self._leg_side_sign.expand(N, 4)
         side_sign = torch.nan_to_num(side_sign, nan=1.0, posinf=1.0, neginf=-1.0)
 
         q0 = q[:, :, 0]  # abad / hip roll
@@ -311,7 +308,7 @@ class B1Z1UniFP(BaseTask):
         C = l2 * c1 + l3 * c12
         S = l2 * s1 + l3 * s12
 
-        J = torch.zeros(N, 4, 3, 3, device=device, dtype=dtype)
+        J = self.leg_jacobians if out is None else out
 
         # x row
         J[:, :, 0, 0] = 0.0
@@ -328,7 +325,7 @@ class B1Z1UniFP(BaseTask):
         J[:, :, 2, 1] = S * c0
         J[:, :, 2, 2] = l3 * s12 * c0
 
-        return torch.nan_to_num(J, nan=0.0, posinf=1e6, neginf=-1e6)
+        return torch.nan_to_num(J, nan=0.0, posinf=1e6, neginf=-1e6, out=J)
 
     def check_termination(self):
         self.fail_buf[:] = 0
@@ -418,10 +415,10 @@ class B1Z1UniFP(BaseTask):
 
         self.last_obs_buf[env_ids] = 0.0
         self.llast_obs_buf[env_ids] = 0.0
-        for i in range(self.obs_history_deque.maxlen):
-            self.obs_history_deque[i][env_ids] *= 0.0
-        for i in range(self.critic_obs_deque.maxlen):
-            self.critic_obs_deque[i][env_ids] *= 0.0
+        for obs_slot in self.obs_history_slots:
+            obs_slot[env_ids] = 0.0
+        for critic_slot in self.critic_obs_slots:
+            critic_slot[env_ids] = 0.0
 
         self.extras["episode"] = {}
         for key in self.episode_sums.keys():
@@ -494,16 +491,12 @@ class B1Z1UniFP(BaseTask):
         domain-randomization variables, contact/gait state, and the same current
         policy-facing commands.
         """
-        self.llast_obs_buf = self.last_obs_buf.clone().detach()
-        self.last_obs_buf = self.obs_buf.clone().detach()
+        self.llast_obs_buf.copy_(self.last_obs_buf)
+        self.last_obs_buf.copy_(self.obs_buf)
 
         base_quat = self.simulator.base_quat
         base_rpy = self.simulator.base_euler
-        base_yaw_quat = quat_from_euler_xyz(
-            torch.zeros_like(base_rpy[:, 0]),
-            torch.zeros_like(base_rpy[:, 1]),
-            base_rpy[:, 2],
-        )
+        base_yaw_quat = self._get_base_yaw_quat()
         ee_center = self.get_ee_goal_spherical_center(base_yaw_quat)
 
         # UniFP represents the EE target/state in a yaw-aligned spherical frame
@@ -535,7 +528,7 @@ class B1Z1UniFP(BaseTask):
 
         # Current single-frame actor observation. The runner stacks this over
         # `num_obs_hist` frames before feeding the UniFP adaptation encoder.
-        self.obs_buf = torch.cat(
+        torch.cat(
             (
                 body_orientation,
                 self.simulator.base_ang_vel * self.obs_scales.ang_vel,
@@ -547,12 +540,13 @@ class B1Z1UniFP(BaseTask):
                 self.commands * self.commands_scale,
             ),
             dim=-1,
+            out=self.obs_buf,
         )
         if self.add_noise:
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
 
         # Supervised target for the UniFP CSE/adaptation decoder.
-        self.explicit_labels_buf = torch.cat(
+        torch.cat(
             (
                 self.simulator.base_lin_vel * self.obs_scales.lin_vel,
                 self.ee_pos_sphe_arm * self.ee_sphere_scale,
@@ -560,9 +554,11 @@ class B1Z1UniFP(BaseTask):
                 base_force_local * self.obs_scales.base_force,
             ),
             dim=-1,
+            out=self.explicit_labels_buf,
         )
 
-        mass_params = torch.zeros(self.num_envs, 22, device=self.device)
+        mass_params = self._mass_params_buf
+        mass_params.zero_()
         mass_params[:, 0:1] = self.simulator._added_base_mass
         mass_params[:, 1:4] = self.simulator._base_com_bias
         # stance_mask = self._get_gait_phase()
@@ -571,7 +567,8 @@ class B1Z1UniFP(BaseTask):
         # Privileged critic observation mirrors the original UniFP ordering:
         # estimator labels first, then randomized dynamics/contact/gait state,
         # current robot state, commands, and force-shifted EE target.
-        critic_obs = torch.cat(
+        critic_obs = self._critic_obs_buf
+        torch.cat(
             (
                 self.explicit_labels_buf,
                 self.simulator.dof_pos[:, :12] - self.ref_dof_pos,
@@ -591,19 +588,41 @@ class B1Z1UniFP(BaseTask):
                 ee_goal_offset_sphere * self.ee_sphere_scale,
             ),
             dim=-1,
+            out=critic_obs,
         )
         if critic_obs.shape[1] != self.cfg.env.num_privileged_obs:
             raise RuntimeError(
                 f"B1Z1 UniFP privileged observation size mismatch: "
                 f"got {critic_obs.shape[1]}, expected {self.cfg.env.num_privileged_obs}"
             )
-        self.critic_obs_deque.append(critic_obs[:, : self.cfg.env.num_privileged_obs])
-        self.privileged_obs_buf = torch.cat([self.critic_obs_deque[i] for i in range(self.critic_obs_deque.maxlen)], dim=-1)
+        self._critic_obs_slot = (self._critic_obs_slot + 1) % len(self.critic_obs_slots)
+        self.critic_obs_slots[self._critic_obs_slot].copy_(critic_obs[:, : self.cfg.env.num_privileged_obs])
+        # Preserve deque semantics: concatenate slots in oldest -> newest order.
+        ordered_critic_slots = self.critic_obs_slots[self._critic_obs_slot + 1 :] + self.critic_obs_slots[: self._critic_obs_slot + 1]
+        torch.cat(ordered_critic_slots, dim=-1, out=self.privileged_obs_buf)
 
-        self.llast_obs_hist = self.last_obs_hist.clone().detach()
-        self.last_obs_hist = self.obs_history.clone().detach()
-        self.obs_history_deque.append(self.obs_buf)
-        self.obs_history = torch.cat([self.obs_history_deque[i] for i in range(self.obs_history_deque.maxlen)], dim=-1)
+        self.llast_obs_hist.copy_(self.last_obs_hist)
+        self.last_obs_hist.copy_(self.obs_history)
+        self._obs_history_slot = (self._obs_history_slot + 1) % len(self.obs_history_slots)
+        self.obs_history_slots[self._obs_history_slot].copy_(self.obs_buf)
+        # Preserve deque semantics: concatenate slots in oldest -> newest order.
+        ordered_obs_slots = self.obs_history_slots[self._obs_history_slot + 1 :] + self.obs_history_slots[: self._obs_history_slot + 1]
+        torch.cat(ordered_obs_slots, dim=-1, out=self.obs_history)
+
+    def _get_base_yaw_quat(self, env_ids=None):
+        """Return yaw-only xyzw quaternions without full Euler conversion."""
+        if env_ids is None:
+            yaw = self.simulator.base_euler[:, 2]
+            out = self._base_yaw_quat_buf
+        else:
+            n = len(env_ids)
+            yaw = self.simulator.base_euler[env_ids, 2]
+            out = self._base_yaw_quat_subset_buf[:n]
+        half_yaw = 0.5 * yaw
+        out[:, 0:2] = 0.0
+        out[:, 2] = torch.sin(half_yaw)
+        out[:, 3] = torch.cos(half_yaw)
+        return out
 
     def set_viewer_camera(self, pos, lookat):
         """Set viewer camera position and direction."""
@@ -632,11 +651,7 @@ class B1Z1UniFP(BaseTask):
             return
 
         env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
-        base_yaw_quat = quat_from_euler_xyz(
-            torch.zeros(len(env_ids), device=self.device),
-            torch.zeros(len(env_ids), device=self.device),
-            self.simulator.base_euler[env_ids, 2],
-        )
+        base_yaw_quat = self._get_base_yaw_quat(env_ids)
         ee_center = self.simulator.base_pos[env_ids] + quat_apply(base_yaw_quat, self.ee_goal_center_offset[env_ids])
         forces_cmd_world = quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd[env_ids])
         force_offset = (self.ee_force_ext_world[env_ids] + forces_cmd_world) / self.gripper_force_kps[env_ids]
@@ -745,7 +760,7 @@ class B1Z1UniFP(BaseTask):
             # current observation but the simulator receives an older action.
             self.action_queue[:, 1:] = self.action_queue[:, :-1].clone()
             self.action_queue[:, 0] = actions.clone()
-            actions = self.action_queue[torch.arange(self.num_envs, device=self.device), self.action_delay].clone()
+            actions = self.action_queue[self.all_env_ids, self.action_delay].clone()
         return actions
 
     def _post_physics_step_callback(self):
@@ -911,14 +926,10 @@ class B1Z1UniFP(BaseTask):
     def _refresh_curr_ee_goal_world(self, env_ids=None):
         """Refresh cached world-frame EE target positions from spherical commands."""
         if env_ids is None:
-            env_ids = torch.arange(self.num_envs, device=self.device)
+            env_ids = self.all_env_ids
         if len(env_ids) == 0:
             return
-        base_yaw_quat = quat_from_euler_xyz(
-            torch.zeros(len(env_ids), device=self.device),
-            torch.zeros(len(env_ids), device=self.device),
-            self.simulator.base_euler[env_ids, 2],
-        )
+        base_yaw_quat = self._get_base_yaw_quat(env_ids)
         # UniFP spherical commands are yaw-aligned around the arm workspace
         # center, so only base yaw rotates the local target into world space.
         self.curr_ee_goal_cart_world[env_ids] = self.get_ee_goal_spherical_center(base_yaw_quat, env_ids) + quat_apply(
@@ -947,11 +958,7 @@ class B1Z1UniFP(BaseTask):
 
     def _capture_default_ee_local_quat(self):
         """Capture canonical EE orientation relative to the UniFP base-yaw frame."""
-        base_yaw_quat = quat_from_euler_xyz(
-            torch.zeros(self.num_envs, device=self.device),
-            torch.zeros(self.num_envs, device=self.device),
-            self.simulator.base_euler[:, 2],
-        )
+        base_yaw_quat = self._get_base_yaw_quat()
         ee_quat = self._normalize_quat(self.simulator.ee_quat)
         return self._normalize_quat(quat_mul(self._quat_conjugate(base_yaw_quat), ee_quat))
 
@@ -1356,6 +1363,7 @@ class B1Z1UniFP(BaseTask):
     def _init_buffers(self):
         self.common_step_counter = 0
         self.extras = {}
+        self.all_env_ids = torch.arange(self.num_envs, device=self.device)
         self.forward_vec = torch.zeros(self.num_envs, 3, device=self.device)
         self.forward_vec[:, 0] = 1.0
         self.fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -1395,18 +1403,29 @@ class B1Z1UniFP(BaseTask):
         self.feet_air_time = torch.zeros(self.num_envs, len(self.simulator.feet_indices), device=self.device)
         self.last_contacts = torch.zeros_like(self.feet_air_time)
 
-        self.obs_history_deque = deque(maxlen=self.cfg.env.num_obs_hist)
-        for _ in range(self.cfg.env.num_obs_hist):
-            self.obs_history_deque.append(torch.zeros(self.num_envs, self.cfg.env.num_observations, device=self.device))
+        self.obs_history_slots = [
+            torch.zeros(self.num_envs, self.cfg.env.num_observations, device=self.device)
+            for _ in range(self.cfg.env.num_obs_hist)
+        ]
+        self._obs_history_slot = self.cfg.env.num_obs_hist - 1
         self.obs_history = torch.zeros(self.num_envs, self.cfg.env.num_observations * self.cfg.env.num_obs_hist, device=self.device)
         self.last_obs_buf = torch.zeros_like(self.obs_buf)
         self.llast_obs_buf = torch.zeros_like(self.obs_buf)
         self.last_obs_hist = torch.zeros_like(self.obs_history)
         self.llast_obs_hist = torch.zeros_like(self.obs_history)
 
-        self.critic_obs_deque = deque(maxlen=self.cfg.env.num_priv_stack)
-        for _ in range(self.cfg.env.num_priv_stack):
-            self.critic_obs_deque.append(torch.zeros(self.num_envs, self.cfg.env.num_privileged_obs, device=self.device))
+        self.critic_obs_slots = [
+            torch.zeros(self.num_envs, self.cfg.env.num_privileged_obs, device=self.device)
+            for _ in range(self.cfg.env.num_priv_stack)
+        ]
+        self._critic_obs_slot = self.cfg.env.num_priv_stack - 1
+        self._critic_obs_buf = torch.zeros(self.num_envs, self.cfg.env.num_privileged_obs, device=self.device)
+        self._mass_params_buf = torch.zeros(self.num_envs, 22, device=self.device)
+        self.privileged_obs_buf = torch.zeros(
+            self.num_envs,
+            self.cfg.env.num_privileged_obs * self.cfg.env.num_priv_stack,
+            device=self.device,
+        )
         self.explicit_labels_buf = torch.zeros(self.num_envs, self.cfg.env.num_explicit_recon_obs, device=self.device)
 
         self.ref_dof_pos = self.simulator.default_dof_pos[:, :12].repeat(self.num_envs, 1)
@@ -1425,6 +1444,10 @@ class B1Z1UniFP(BaseTask):
         self.ee_start_sphere = self.ee_goal_sphere.clone()
         self.curr_ee_goal_cart = sphere2cart(self.curr_ee_goal_sphere)
         self.curr_ee_goal_cart_world = torch.zeros_like(self.curr_ee_goal_cart)
+        self._base_yaw_quat_buf = torch.zeros(self.num_envs, 4, device=self.device)
+        self._base_yaw_quat_buf[:, 3] = 1.0
+        self._base_yaw_quat_subset_buf = torch.zeros_like(self._base_yaw_quat_buf)
+        self._base_yaw_quat_subset_buf[:, 3] = 1.0
         # Default EE orientation is captured once from the canonical initialized
         # robot and stored in the base-yaw frame used by UniFP EE commands.
         self.default_ee_local_quat = self._capture_default_ee_local_quat()
@@ -1502,7 +1525,7 @@ class B1Z1UniFP(BaseTask):
         self.gripper_force_kds = torch_rand_float(*self.cfg.commands.gripper_force_kd_range, (self.num_envs, 1), self.device)
         self.base_force_kps = torch_rand_float(*self.cfg.commands.base_force_kp_range, (self.num_envs, 1), self.device)
         self.base_force_kds = torch_rand_float(*self.cfg.commands.base_force_kd_range, (self.num_envs, 1), self.device)
-        self._randomize_force_gains(torch.arange(self.num_envs, device=self.device))
+        self._randomize_force_gains(self.all_env_ids)
 
         self.z1_arm_jacobian = torch.zeros(
             self.num_envs,
@@ -1513,6 +1536,10 @@ class B1Z1UniFP(BaseTask):
         )
 
         self.leg_jacobians = torch.zeros((self.num_envs, 4, 3, 3), dtype=torch.float, device=self.device)
+        self._abad_link_length = torch.tensor(self.cfg.asset.abad_link_length, device=self.device, dtype=torch.float)
+        self._hip_link_length = torch.tensor(self.cfg.asset.hip_link_length, device=self.device, dtype=torch.float)
+        self._knee_link_length = torch.tensor(self.cfg.asset.knee_link_length, device=self.device, dtype=torch.float)
+        self._leg_side_sign = torch.tensor(self.cfg.asset.side_signs, device=self.device, dtype=torch.float).view(1, 4)
 
         self.prev_ee_error = torch.zeros(
             self.num_envs,
@@ -1618,11 +1645,7 @@ class B1Z1UniFP(BaseTask):
 
     # Rewards
     def _reward_tracking_lin_vel_force_world(self):
-        base_yaw_quat = quat_from_euler_xyz(
-            torch.zeros(self.num_envs, device=self.device),
-            torch.zeros(self.num_envs, device=self.device),
-            self.simulator.base_euler[:, 2],
-        )
+        base_yaw_quat = self._get_base_yaw_quat()
         force_offset = quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world) + self.current_Fxyz_base_cmd
         force_offset = force_offset[:, :2] / self.base_force_kds
         error = torch.sum(torch.square(self.commands[:, :2] + force_offset - self.simulator.base_lin_vel[:, :2]), dim=1)
@@ -1632,11 +1655,7 @@ class B1Z1UniFP(BaseTask):
         return torch.exp(-torch.square(self.commands[:, 2] - self.simulator.base_ang_vel[:, 2]) / self.cfg.rewards.tracking_sigma)
 
     def _reward_tracking_ee_force_world(self):
-        base_yaw_quat = quat_from_euler_xyz(
-            torch.zeros(self.num_envs, device=self.device),
-            torch.zeros(self.num_envs, device=self.device),
-            self.simulator.base_euler[:, 2],
-        )
+        base_yaw_quat = self._get_base_yaw_quat()
         force_offset = (self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)) / self.gripper_force_kps
         target = self.curr_ee_goal_cart_world + force_offset
         error = torch.sum(torch.square(target - self.simulator.ee_pos), dim=1)
@@ -1644,11 +1663,7 @@ class B1Z1UniFP(BaseTask):
 
     def _reward_tracking_ee_orientation_default(self):
         """Reward keeping the EE frame at its default yaw-aligned orientation."""
-        base_yaw_quat = quat_from_euler_xyz(
-            torch.zeros(self.num_envs, device=self.device),
-            torch.zeros(self.num_envs, device=self.device),
-            self.simulator.base_euler[:, 2],
-        )
+        base_yaw_quat = self._get_base_yaw_quat()
         # The reference is the default EE frame expressed in the base-yaw frame.
         # Rotating it by current yaw avoids punishing normal commanded turning.
         target_ee_quat = self._normalize_quat(quat_mul(base_yaw_quat, self.default_ee_local_quat))
@@ -2442,11 +2457,7 @@ class B1Z1UniFP(BaseTask):
 
     def _reward_arm_progress_before_torso(self):
         """Reward reducing EE error while keeping torso upright."""
-        base_yaw_quat = quat_from_euler_xyz(
-            torch.zeros(self.num_envs, device=self.device),
-            torch.zeros(self.num_envs, device=self.device),
-            self.simulator.base_euler[:, 2],
-        )
+        base_yaw_quat = self._get_base_yaw_quat()
         force_offset = (self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)) / self.gripper_force_kps
         target = self.curr_ee_goal_cart_world + force_offset
         ee_error = torch.norm(target - self.simulator.ee_pos, dim=1)
@@ -2469,11 +2480,7 @@ class B1Z1UniFP(BaseTask):
 
     def _reward_early_torso_tilt(self):
         """Penalize torso tilt before the EE has reached the target."""
-        base_yaw_quat = quat_from_euler_xyz(
-            torch.zeros(self.num_envs, device=self.device),
-            torch.zeros(self.num_envs, device=self.device),
-            self.simulator.base_euler[:, 2],
-        )
+        base_yaw_quat = self._get_base_yaw_quat()
         force_offset = (self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)) / self.gripper_force_kps
         target = self.curr_ee_goal_cart_world + force_offset
         ee_error = torch.norm(target - self.simulator.ee_pos, dim=1)

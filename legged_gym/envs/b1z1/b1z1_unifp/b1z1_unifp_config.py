@@ -602,11 +602,19 @@ class B1Z1UniFPCfg:
             arm_ellipsoid_iso_weight = 0.5
 
         class reward_curriculum:
-            curr_reward_keys = ["collision", "action_rate", "action_rate_arm", "dof_acc", "dof_acc_arm"]
+            curr_reward_keys = ["collision", 
+                                "action_rate", 
+                                "action_rate_arm",
+                                "action_smoothness",
+                                "action_smoothness_arm",
+                                "dof_acc", 
+                                "dof_acc_arm"]
             curr_reward_bounds = {
                 "collision": [-1.0, -5.0],
-                "action_rate": [-0.005, -0.02],
-                "action_rate_arm": [-0.01, -0.045],
+                "action_rate": [-0.001, -0.01],
+                "action_rate_arm": [-0.002, -0.02],
+                "action_smoothness":[-0.001, -0.01],
+                "action_smoothness_arm":[-0.002, -0.02],
                 "dof_acc": [-5.0e-8, -2.5e-7],
                 "dof_acc_arm": [-1.0e-7, -4.5e-7],
             }
