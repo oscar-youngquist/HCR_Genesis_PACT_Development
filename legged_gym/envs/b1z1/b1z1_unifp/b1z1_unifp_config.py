@@ -5,7 +5,7 @@ class B1Z1UniFPCfg:
     seed = 1
 
     class env:
-        num_envs = 1000
+        num_envs = 4096
         num_observations = 71
         num_privileged_obs = 143
         num_priv_stack = 3
@@ -179,7 +179,7 @@ class B1Z1UniFPCfg:
         terrain_width = 8.0
         platform_size = 4.0
         num_rows = 10
-        num_cols = 20
+        num_cols = 10
         terrain_proportions = [0.00, 1.00, 0.00, 0.00, 0.00, 0.00]
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.4",
@@ -262,9 +262,9 @@ class B1Z1UniFPCfg:
         max_curriculum = 1.0
         num_commands = 15
         
-        resampling_time = 5.0
+        resampling_time = 10.0
         
-        heading_command = False
+        heading_command = True
         
         curriculum_threshold = 0.8
         
@@ -450,7 +450,7 @@ class B1Z1UniFPCfg:
             pass
 
     class rewards:
-        only_positive_rewards = False
+        only_positive_rewards = True
         use_reward_curriculum = True
         tracking_sigma = 0.25
         tracking_ee_sigma = 1.0
@@ -464,24 +464,41 @@ class B1Z1UniFPCfg:
         base_height_target = 0.60
         
         max_contact_force = 200.0
-        contact_force_threshold = 15.0
+        contact_force_threshold = 1.0
+        
+        foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.02
+        foot_clearance_tracking_sigma = 0.01
         
         cycle_time = 0.64
         
         target_joint_pos_scale = 0.17
         target_joint_pos_thd = 0.5
 
+        ee_tracking_sigma = 25.0
+        upright_gate_sigma = 10.0
+
+        arm_before_torso_ee_thresh = 0.08
+        arm_before_torso_gate_sharpness = 40.0
+
+        overreach_x_max = 0.42   # cm
+        rear_foot_x_nominal = -0.37
+        rear_foot_x_margin = 0.10
+        
+        support_polygon_sigma = 0.01
+
+        torso_tilt_deadband = 0.10
         class scales:
             # Constraints
             termination = -1.0
             collision = -5.0
             dof_pos_limits = -10.0
             torque_limits = -0.005
-            
+            dof_close_to_default = -0.1
+
             # Add in close to default reward
-            
-            stand_still = 0.5
+            stand_still = -0.5
+            stand_still_contact = -0.5
 
             alive = 0.001
 
@@ -490,44 +507,54 @@ class B1Z1UniFPCfg:
             tracking_ang_vel = 0.5
             tracking_ee_force_world = 1.0
             tracking_ee_orientation_default = 0.2
-            
-            base_height = -2.0
-            lin_vel_z = -1.0
-            ang_vel_xy = -0.02
-            dof_acc = -2.5e-7
-            dof_vel = -8.0e-4
-            action_rate = -0.02
-            
-            dof_acc_arm = -4.5e-7
-            action_rate_arm = -0.045
-            dof_vel_arm = -2.0e-4
 
-            torques = -5.0e-6
+            # Style rewards encouraging using the arm
+            arm_progress_before_torso = 0.3
+            early_torso_tilt = 0.2
+            feet_contact_number = 0.01
+
+            # Base
+            base_height = -2.0
+            lin_vel_z   = -1.0
+            ang_vel_xy  = -0.05
+            roll        = -0.25
+
+            # Legs
+            dof_acc           = -2.5e-7
+            action_rate       = -0.01
+            action_smoothness = -0.01
+            joint_power       = -2.e-5
+            joint_power_dist  = -1.e-5
+
+            # Arm
+            dof_acc_arm = -4.5e-7
+            action_rate_arm = -0.02
+            action_smoothness_arm = -0.02
+            joint_power = -4.e-5
+            joint_power_dist = -2.e-5
 
             # Leg posture shaping
             ref_dof_leg = 0.0
-            hip_pos = -0.5
+
+            # I developed these
+            front_foot_overreach = -100.0
+            rear_foot_overreach = -10.0
+
+            # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
+            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
+            vhip_angle = -0.1                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
+            vhip_angular_acc = -0.001         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
 
             # Gait shaping
-            feet_drag = -0.0008
+            feet_drag = -0.01
             feet_contact_forces = -0.001
             feet_air_time = 1.0
-            
-            # Replace with rear/front foot overreach penalties 
-            feet_pos_xy = -0.5
-            
-            # Replace with foot_clearance_terrain_aware
-            feet_height = 1.0
-            feet_height_high = -15.0
-
-            # Replace with sparse-contacts reward
-            feet_contact_number = 2.0
-            
-            roll = -0.25
+            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height            
 
             # Leg and Arm Posture Conditioning
             arm_ee_force_manipulability = 0.2
             torso_force_wrench_ellipsoid = 0.2
+            hip_pos = -0.5
 
         class manip_rewards():
             # Leg Posture Conditioning
