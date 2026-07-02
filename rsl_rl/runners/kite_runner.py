@@ -256,6 +256,10 @@ class OnPolicyRunnerKITE:
         )
         return depth_torso_state
 
+    def _to_device_if_needed(self, tensor):
+        target_device = torch.device(self.device)
+        return tensor if tensor.device == target_device else tensor.to(target_device)
+
     # function to load a boot-strap initial model and reset the std
     def _load_pretrained_model(self):
         pretrained_path = self.policy_cfg["pretrained_path"]
@@ -373,20 +377,23 @@ class OnPolicyRunnerKITE:
                         )
 
                     # move everything to the correct device
-                    obs = obs.to(self.device)
-                    obs_hist = obs_hist.to(self.device)
-                    privileged_obs = privileged_obs.to(self.device) if privileged_obs is not None else obs
-                    exp_labels = exp_labels.to(self.device)
-                    depth_image = depth_obs[:, 0:1].to(self.device)
+                    obs = self._to_device_if_needed(obs)
+                    obs_hist = self._to_device_if_needed(obs_hist)
+                    privileged_obs = self._to_device_if_needed(privileged_obs) if privileged_obs is not None else obs
+                    exp_labels = self._to_device_if_needed(exp_labels)
+                    depth_image = self._to_device_if_needed(depth_obs[:, 0:1])
                     self.depth_torso_lin_vel_est = latest_torso_lin_vel_est     # copy this for use in the _build_depth_torso_state function
-                    if dones.any():
-                        self.depth_torso_lin_vel_est[dones.bool()] = 0.0
-                    depth_torso_state = self._build_depth_torso_state(
-                        depth_torso_state.to(self.device)
+                    dones = self._to_device_if_needed(dones)
+                    done_mask = dones.bool()
+                    self.depth_torso_lin_vel_est.masked_fill_(
+                        done_mask.view(-1, 1),
+                        0.0,
                     )
-                    terrain_map = terrain_map.to(self.device)
-                    rewards = rewards.to(self.device)
-                    dones = dones.to(self.device)
+                    depth_torso_state = self._build_depth_torso_state(
+                        self._to_device_if_needed(depth_torso_state)
+                    )
+                    terrain_map = self._to_device_if_needed(terrain_map)
+                    rewards = self._to_device_if_needed(rewards)
                     if profile_active:
                         step_profile_start = self._profile_mark(
                             collection_profile,
@@ -414,8 +421,10 @@ class OnPolicyRunnerKITE:
                         self.depth_latent_history[:, -1].copy_(
                             latest_depth_latent.detach()
                         )
-                    if dones.any():
-                        self.depth_latent_history[dones.bool()] = 0.0
+                        self.depth_latent_history.masked_fill_(
+                            done_mask.view(-1, 1, 1),
+                            0.0,
+                        )
                     if profile_active:
                         step_profile_start = self._profile_mark(
                             collection_profile,
