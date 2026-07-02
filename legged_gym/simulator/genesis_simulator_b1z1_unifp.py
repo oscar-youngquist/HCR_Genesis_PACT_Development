@@ -39,8 +39,9 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         for _ in range(self._cfg.control.decimation):
             self._torques = self._compute_torques(actions)
             
+            # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
             self._robot.control_dofs_force(
-                self._torques, self._dof_indices)
+                torch.clip(self._torques,-1.1*self._torque_limits,1.1*self._torque_limits), self._dof_indices)
             
             self._apply_external_forces()
             self._scene.step()
@@ -71,6 +72,11 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         self._feet_vel[:] = self._robot.get_links_vel()[:, self._feet_indices, :]
         self._ee_pos[:] = self._robot.get_links_pos()[:, self._gripper_index, :]
         self._ee_vel[:] = self._robot.get_links_vel()[:, self._gripper_index, :]
+        ee_quat_gs = self._robot.get_links_quat()[:, self._gripper_index, :]
+        # Genesis reports link quaternions in wxyz order; the UniFP task uses
+        # xyzw everywhere else, matching the base quaternion buffer above.
+        self._ee_quat[:, -1] = ee_quat_gs[:, 0]
+        self._ee_quat[:, :3] = ee_quat_gs[:, 1:4]
         self._dof_tau[:] = self._robot.get_dofs_force(self._dof_indices)
 
         self._base_world_lin_vel[:] = self._robot.get_vel()
@@ -619,8 +625,6 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         # Domain rand curriculum stuff
         self.n_digits = 2
 
-        print("++++++++++++++ self.n_digits -- ", self.n_digits)
-
         self.vert_interval_min = self._cfg.domain_rand.vert_interval_min
         self.vert_interval_max = self._cfg.domain_rand.vert_interval_max
 
@@ -1104,8 +1108,6 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
                              self._device),
             decimals=self.n_digits).float()
         
-        print(self.wrench_timeouts)
-        
         self.env_identities = torch.arange(
             self._num_envs,
             device=self._device,
@@ -1161,6 +1163,10 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             (self._num_envs, 3), device=self._device, dtype=torch.float
         )
         self._ee_vel = torch.zeros_like(self._ee_pos)
+        self._ee_quat = torch.zeros(
+            (self._num_envs, 4), device=self._device, dtype=torch.float
+        )
+        self._ee_quat[:, -1] = 1.0
         self._ee_force_world = torch.zeros_like(self._ee_pos)
         self._base_force_world = torch.zeros_like(self._base_pos)
         self._external_force_world = torch.zeros(
@@ -1673,3 +1679,13 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             list[int]: Indices of the feet links in the contact sensors.
         """
         return self._feet_indices
+
+    @property
+    def ee_quat(self):
+        """Return current EE link orientation in xyzw quaternion order."""
+        # Refresh on access so reset-time/default-orientation captures are not
+        # limited by whether post_physics_step has already populated the cache.
+        ee_quat_gs = self._robot.get_links_quat()[:, self._gripper_index, :]
+        self._ee_quat[:, -1] = ee_quat_gs[:, 0]
+        self._ee_quat[:, :3] = ee_quat_gs[:, 1:4]
+        return self._ee_quat

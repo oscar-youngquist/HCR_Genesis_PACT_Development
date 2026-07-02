@@ -5,9 +5,9 @@ class B1Z1UniFPCfg:
     seed = 1
 
     class env:
-        num_envs = 4096
-        num_observations = 73
-        num_privileged_obs = 149
+        num_envs = 1000
+        num_observations = 71
+        num_privileged_obs = 143
         num_priv_stack = 3
         num_explicit_recon_obs = 12
         num_pred_obs = 12
@@ -93,6 +93,8 @@ class B1Z1UniFPCfg:
         rand_yaw_range = np.pi / 2
         origin_perturb_range = 0.5
         init_vel_perturb_range = 0.1
+        leg_dof_pos_perturb_range = [0.5, 1.5]
+        arm_dof_pos_perturb_range = [-0.5, 0.5]
 
     class asset:
         name = "b1z1"
@@ -266,6 +268,11 @@ class B1Z1UniFPCfg:
         
         curriculum_threshold = 0.8
         
+        ang_vel_yaw_clip = 0.2
+        ang_vel_pitch_clip = 0.5
+        lin_vel_x_clip = 0.1
+        lin_vel_y_clip = 0.1
+
         zero_vel_cmd_prob = 0.3
         zero_vel_cmd_prob_after_force = 0.8
         
@@ -447,6 +454,7 @@ class B1Z1UniFPCfg:
         use_reward_curriculum = True
         tracking_sigma = 0.25
         tracking_ee_sigma = 1.0
+        tracking_ee_orientation_sigma = 0.05
         sigma_force = 1.0 / 50.0
         
         soft_dof_pos_limit = 0.8
@@ -456,6 +464,7 @@ class B1Z1UniFPCfg:
         base_height_target = 0.60
         
         max_contact_force = 200.0
+        contact_force_threshold = 15.0
         foot_height_offset = 0.02
         
         cycle_time = 0.64
@@ -480,6 +489,7 @@ class B1Z1UniFPCfg:
             tracking_lin_vel_force_world = 1.0
             tracking_ang_vel = 0.5
             tracking_ee_force_world = 1.0
+            tracking_ee_orientation_default = 0.2
             
             base_height = -2.0
             lin_vel_z = -1.0
@@ -545,7 +555,7 @@ class B1Z1UniFPCfg:
 
             # Size reward:
             # Larger values make the size reward saturate faster.
-            arm_ellipsoid_force_size_scale = 0.02
+            arm_ellipsoid_force_size_scale = 0.80
 
             # Isotropy reward:
             # cond = lam_max / lam_min.

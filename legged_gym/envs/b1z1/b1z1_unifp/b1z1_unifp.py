@@ -9,6 +9,7 @@ from legged_gym.utils.math_utils import (
     quat_apply,
     quat_apply_yaw,
     quat_from_euler_xyz,
+    quat_mul,
     quat_rotate_inverse,
     torch_rand_float,
     wrap_to_pi,
@@ -250,8 +251,8 @@ class B1Z1UniFP(BaseTask):
         return torch.nan_to_num(J, nan=0.0, posinf=1e6, neginf=-1e6)
 
     def _compute_z1_arm_jacobian_buffer(self):
-        q_arm = self.simulator.dof_pos[:, self.simulator._arm_dof_ids]
-        self._z1_arm_jacobian[:] = self.compute_z1_arm_jacobian(q_arm)
+        q_arm = self.simulator.dof_pos[:, self.simulator._arm_dof_cfg_ids]
+        self.z1_arm_jacobian[:] = self.compute_z1_arm_jacobian(q_arm)
 
     def compute_all_leg_jacobians(self, q: torch.Tensor) -> torch.Tensor:
         """
@@ -384,6 +385,10 @@ class B1Z1UniFP(BaseTask):
         # Simulator reset applies Genesis-side domain randomization and writes
         # root/DOF state into the Genesis entity.
         self.simulator.reset_idx(env_ids)
+        # The reset EE command starts from init_pos_start; refresh the world
+        # cache after Genesis has accepted the randomized root pose/yaw.
+        self.curr_ee_goal_cart[env_ids] = sphere2cart(self.curr_ee_goal_sphere[env_ids])
+        self._refresh_curr_ee_goal_world(env_ids)
 
         # Clear action histories, force streams, and estimator state so the next
         # rollout segment starts with a clean UniFP command/force state.
@@ -520,9 +525,10 @@ class B1Z1UniFP(BaseTask):
         )
         ee_goal_offset_sphere = cart2sphere(ee_goal_offset_local)
 
-        # phase = self._get_phase()
-        # sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
-        # cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
+        phase = self._get_phase()
+        sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
+        cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
+        
         body_orientation = self.get_body_orientation()
         dof_pos_err = (self.simulator.dof_pos[:, :17] - self.simulator.default_dof_pos[:, :17]) * self.obs_scales.dof_pos
         dof_vel = self.simulator.dof_vel[:, :17] * self.obs_scales.dof_vel
@@ -748,6 +754,7 @@ class B1Z1UniFP(BaseTask):
             self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0
         ).nonzero(as_tuple=False).flatten()
         self._resample_commands(env_ids)
+        self._randomize_force_gains(env_ids)
         self.update_curr_ee_goal()
         self._update_heading_command()
         if self.cfg.domain_rand.push_robots:
@@ -781,6 +788,26 @@ class B1Z1UniFP(BaseTask):
             self.heading_commands[zero_env_ids] = self.simulator.base_euler[zero_env_ids, 2]
         else:
             self.commands[zero_env_ids, 2] = 0.0
+
+        # Original UniFP snaps small sampled base commands to a full stop so
+        # "standing" and "walking" are cleanly separated.
+        if self.cfg.commands.heading_command:
+            non_stop = (
+                (torch.abs(self.commands[env_ids, 0]) > self.cfg.commands.lin_vel_x_clip)
+                | (torch.abs(self.commands[env_ids, 1]) > self.cfg.commands.lin_vel_y_clip)
+            )
+        else:
+            non_stop = (
+                (torch.abs(self.commands[env_ids, 0]) > self.cfg.commands.lin_vel_x_clip)
+                | (torch.abs(self.commands[env_ids, 1]) > self.cfg.commands.lin_vel_y_clip)
+                | (torch.abs(self.commands[env_ids, 2]) > self.cfg.commands.ang_vel_yaw_clip)
+            )
+        stop_env_ids = env_ids[~non_stop]
+        self.commands[stop_env_ids, :2] = 0.0
+        if self.cfg.commands.heading_command:
+            self.heading_commands[stop_env_ids] = self.simulator.base_euler[stop_env_ids, 2]
+        else:
+            self.commands[stop_env_ids, 2] = 0.0
         self._resample_ee_goal(env_ids)
 
     def _update_heading_command(self):
@@ -806,7 +833,13 @@ class B1Z1UniFP(BaseTask):
             return
         init_env_ids = env_ids.clone()
         if is_init:
+            # Original UniFP reset starts each episode from init_pos_start and
+            # interpolates toward init_pos_end instead of beginning at the final
+            # target immediately.
+            self.ee_start_sphere[env_ids] = self.init_start_ee_sphere
             self.ee_goal_sphere[env_ids] = self.init_end_ee_sphere
+            self.curr_ee_goal_sphere[env_ids] = self.init_start_ee_sphere
+            self.commands[env_ids, 3:6] = self.curr_ee_goal_sphere[env_ids]
         else:
             self.ee_start_sphere[env_ids] = self.curr_ee_goal_sphere[env_ids]
             remaining_env_ids = env_ids
@@ -818,14 +851,13 @@ class B1Z1UniFP(BaseTask):
                 remaining_env_ids = remaining_env_ids[rejection_mask]
                 if len(remaining_env_ids) == 0:
                     break
-        if is_init:
-            self.ee_start_sphere[env_ids] = self.curr_ee_goal_sphere[env_ids]
         self.goal_timer[env_ids] = 0.0
         self.traj_timesteps[env_ids] = torch_rand_float(*self.cfg.goal_ee.traj_time, (len(env_ids), 1), self.device).squeeze(1) / self.dt
         self.traj_total_timesteps[env_ids] = self.traj_timesteps[env_ids] + (
             torch_rand_float(*self.cfg.goal_ee.hold_time, (len(env_ids), 1), self.device).squeeze(1) / self.dt
         )
         self.curr_ee_goal_cart[init_env_ids] = sphere2cart(self.curr_ee_goal_sphere[init_env_ids])
+        self._refresh_curr_ee_goal_world(init_env_ids)
 
     def _resample_ee_goal_sphere_once(self, env_ids):
         if len(env_ids) == 0:
@@ -867,15 +899,7 @@ class B1Z1UniFP(BaseTask):
         ratio = (self.goal_timer / self.traj_timesteps).clamp(0.0, 1.0).unsqueeze(1)
         self.curr_ee_goal_sphere = self.ee_start_sphere + ratio * (self.ee_goal_sphere - self.ee_start_sphere)
         self.curr_ee_goal_cart = sphere2cart(self.curr_ee_goal_sphere)
-        base_yaw_quat = quat_from_euler_xyz(
-            torch.zeros(self.num_envs, device=self.device),
-            torch.zeros(self.num_envs, device=self.device),
-            self.simulator.base_euler[:, 2],
-        )
-        self.curr_ee_goal_cart_world = self.get_ee_goal_spherical_center(base_yaw_quat) + quat_apply(
-            base_yaw_quat,
-            self.curr_ee_goal_cart,
-        )
+        self._refresh_curr_ee_goal_world()
 
         # Command vector layout used by the actor:
         # 0:3 base velocity, 3:6 EE spherical target, 6:9 reserved orientation,
@@ -884,11 +908,52 @@ class B1Z1UniFP(BaseTask):
         self.commands[:, 9:12] = self.current_Fxyz_gripper_cmd
         self.commands[:, 12:15] = self.current_Fxyz_base_cmd
 
-    def get_ee_goal_spherical_center(self, base_yaw_quat):
-        return self.simulator.base_pos + quat_apply(base_yaw_quat, self.ee_goal_center_offset)
+    def _refresh_curr_ee_goal_world(self, env_ids=None):
+        """Refresh cached world-frame EE target positions from spherical commands."""
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        if len(env_ids) == 0:
+            return
+        base_yaw_quat = quat_from_euler_xyz(
+            torch.zeros(len(env_ids), device=self.device),
+            torch.zeros(len(env_ids), device=self.device),
+            self.simulator.base_euler[env_ids, 2],
+        )
+        # UniFP spherical commands are yaw-aligned around the arm workspace
+        # center, so only base yaw rotates the local target into world space.
+        self.curr_ee_goal_cart_world[env_ids] = self.get_ee_goal_spherical_center(base_yaw_quat, env_ids) + quat_apply(
+            base_yaw_quat,
+            self.curr_ee_goal_cart[env_ids],
+        )
+
+    def get_ee_goal_spherical_center(self, base_yaw_quat, env_ids=None):
+        """Return the Genesis-correct arm workspace center for EE spherical goals."""
+        if env_ids is None:
+            return self.simulator.base_pos + quat_apply(base_yaw_quat, self.ee_goal_center_offset)
+        return self.simulator.base_pos[env_ids] + quat_apply(base_yaw_quat, self.ee_goal_center_offset[env_ids])
 
     def get_body_orientation(self):
         return self.simulator.base_euler[:, :2]
+
+    def _normalize_quat(self, quat):
+        """Normalize xyzw quaternions defensively before orientation rewards."""
+        return quat / torch.norm(quat, dim=-1, keepdim=True).clamp_min(1.0e-6)
+
+    def _quat_conjugate(self, quat):
+        """Return the conjugate of an xyzw quaternion batch."""
+        quat_conj = quat.clone()
+        quat_conj[:, :3] *= -1.0
+        return quat_conj
+
+    def _capture_default_ee_local_quat(self):
+        """Capture canonical EE orientation relative to the UniFP base-yaw frame."""
+        base_yaw_quat = quat_from_euler_xyz(
+            torch.zeros(self.num_envs, device=self.device),
+            torch.zeros(self.num_envs, device=self.device),
+            self.simulator.base_euler[:, 2],
+        )
+        ee_quat = self._normalize_quat(self.simulator.ee_quat)
+        return self._normalize_quat(quat_mul(self._quat_conjugate(base_yaw_quat), ee_quat))
 
     def _get_phase(self):
         # This port currently uses an episode-time trot phase. Original UniFP
@@ -1185,9 +1250,24 @@ class B1Z1UniFP(BaseTask):
             self.simulator.apply_base_force(self.base_force_ext_world)
 
     def _reset_dofs(self, env_ids):
-        """Reset all B1/Z1 DOFs with Genesis-port perturbations."""
+        """Reset B1/Z1 DOFs with original UniFP perturbation structure."""
         dof_pos = self.simulator.default_dof_pos.repeat(len(env_ids), 1)
-        dof_pos += torch_rand_float(-0.3, 0.3, dof_pos.shape, self.device)
+        leg_low, leg_high = self.cfg.init_state.leg_dof_pos_perturb_range
+        arm_low, arm_high = self.cfg.init_state.arm_dof_pos_perturb_range
+        # UniFP perturbs legs multiplicatively around their default crouch pose.
+        dof_pos[:, :12] = self.simulator.default_dof_pos[:, :12].repeat(len(env_ids), 1) * torch_rand_float(
+            leg_low,
+            leg_high,
+            (len(env_ids), 12),
+            self.device,
+        )
+        # Arm joints are perturbed additively; gripper joints remain at default.
+        dof_pos[:, 12:17] += torch_rand_float(
+            arm_low,
+            arm_high,
+            (len(env_ids), self.num_actions - 12),
+            self.device,
+        )
         dof_vel = torch.zeros_like(dof_pos)
         self.simulator.reset_dofs(env_ids, dof_pos, dof_vel)
 
@@ -1196,7 +1276,18 @@ class B1Z1UniFP(BaseTask):
         base_pos = self.simulator.base_init_pos.reshape(1, -1).repeat(len(env_ids), 1)
         base_pos += self.simulator._env_origins[env_ids]
         base_pos[:, :2] += torch_rand_float(-0.5, 0.5, (len(env_ids), 2), self.device)
-        base_quat = self.simulator.base_init_quat.reshape(1, -1).repeat(len(env_ids), 1)
+        # Original UniFP randomizes initial yaw while keeping roll/pitch at zero.
+        rand_yaw = self.cfg.init_state.rand_yaw_range * torch_rand_float(
+            -1.0,
+            1.0,
+            (len(env_ids), 1),
+            self.device,
+        ).squeeze(1)
+        base_quat = quat_from_euler_xyz(
+            torch.zeros_like(rand_yaw),
+            torch.zeros_like(rand_yaw),
+            rand_yaw,
+        )
         base_lin_vel = torch_rand_float(-0.1, 0.1, (len(env_ids), 3), self.device)
         base_ang_vel = torch_rand_float(-0.1, 0.1, (len(env_ids), 3), self.device)
         self.simulator.reset_root_states(env_ids, base_pos, base_quat, base_lin_vel, base_ang_vel)
@@ -1327,12 +1418,16 @@ class B1Z1UniFP(BaseTask):
             ],
             device=self.device,
         ).repeat(self.num_envs, 1)
+        self.init_start_ee_sphere = torch.tensor(self.cfg.goal_ee.ranges.init_pos_start, device=self.device).unsqueeze(0)
         self.init_end_ee_sphere = torch.tensor(self.cfg.goal_ee.ranges.init_pos_end, device=self.device).unsqueeze(0)
         self.ee_goal_sphere = self.init_end_ee_sphere.repeat(self.num_envs, 1)
         self.curr_ee_goal_sphere = self.ee_goal_sphere.clone()
         self.ee_start_sphere = self.ee_goal_sphere.clone()
         self.curr_ee_goal_cart = sphere2cart(self.curr_ee_goal_sphere)
         self.curr_ee_goal_cart_world = torch.zeros_like(self.curr_ee_goal_cart)
+        # Default EE orientation is captured once from the canonical initialized
+        # robot and stored in the base-yaw frame used by UniFP EE commands.
+        self.default_ee_local_quat = self._capture_default_ee_local_quat()
         self.ee_pos_sphe_arm = torch.zeros_like(self.curr_ee_goal_cart)
         self.collision_lower_limits = torch.tensor(
             self.cfg.goal_ee.collision_lower_limits,
@@ -1541,6 +1636,21 @@ class B1Z1UniFP(BaseTask):
         error = torch.sum(torch.square(target - self.simulator.ee_pos), dim=1)
         return torch.exp(-error / self.cfg.rewards.tracking_ee_sigma)
 
+    def _reward_tracking_ee_orientation_default(self):
+        """Reward keeping the EE frame at its default yaw-aligned orientation."""
+        base_yaw_quat = quat_from_euler_xyz(
+            torch.zeros(self.num_envs, device=self.device),
+            torch.zeros(self.num_envs, device=self.device),
+            self.simulator.base_euler[:, 2],
+        )
+        # The reference is the default EE frame expressed in the base-yaw frame.
+        # Rotating it by current yaw avoids punishing normal commanded turning.
+        target_ee_quat = self._normalize_quat(quat_mul(base_yaw_quat, self.default_ee_local_quat))
+        ee_quat = self._normalize_quat(self.simulator.ee_quat)
+        quat_dot = torch.sum(ee_quat * target_ee_quat, dim=1).abs().clamp(0.0, 1.0)
+        orientation_error = 1.0 - torch.square(quat_dot)
+        return torch.exp(-orientation_error / self.cfg.rewards.tracking_ee_orientation_sigma)
+
     def _reward_termination(self):
         return (self.reset_buf.bool() & ~self.time_out_buf.bool()).float()
 
@@ -1654,8 +1764,8 @@ class B1Z1UniFP(BaseTask):
         # state
         # --------------------------------------------------
         J_b = _sanitize_tensor(self.leg_jacobians)                                                # (N,4,3,3)
-        tau_leg = _sanitize_tensor(self.simulator._dof_tau.view(-1, 4, 3))                        # (N,4,3)
-        tau_max = torch.clamp(_sanitize_tensor(self.simulator._torque_limits.view(-1, 4, 3)).abs(), min=1e-6)                  # (N,4,3) or broadcastable
+        tau_leg = _sanitize_tensor(self.simulator._dof_tau[:,0:12].view(-1, 4, 3))                        # (N,4,3)
+        tau_max = torch.clamp(_sanitize_tensor(self.simulator._torque_limits[:,0:12].view(-1, 4, 3)).abs(), min=1e-6)                  # (N,4,3) or broadcastable
 
         foot_pos_w = _sanitize_tensor(self.simulator.feet_pos)          # (N,4,3)
         base_pos_w = _sanitize_tensor(self.simulator.base_pos)          # (N,3)
@@ -1885,14 +1995,14 @@ class B1Z1UniFP(BaseTask):
         Returns:
             reward: (N,), bounded in [0, 1]
         """
-        device = self._z1_arm_jacobian.device
-        dtype = self._z1_arm_jacobian.dtype
-        N = self._z1_arm_jacobian.shape[0]
+        device = self.z1_arm_jacobian.device
+        dtype = self.z1_arm_jacobian.dtype
+        N = self.z1_arm_jacobian.shape[0]
 
         # --------------------------------------------------
         # State
         # --------------------------------------------------
-        J_arm = _sanitize_tensor(self._z1_arm_jacobian)  # (N, 3, 6)
+        J_arm = _sanitize_tensor(self.z1_arm_jacobian)  # (N, 3, 6)
 
         # Arm torque limits.
         #
@@ -1902,10 +2012,7 @@ class B1Z1UniFP(BaseTask):
         #
         # self._torque_limits is usually ordered like self._cfg.asset.dof_names,
         # so prefer _arm_dof_cfg_ids if available.
-        if hasattr(self, "_arm_dof_cfg_ids"):
-            tau_max_arm = self.simulator._torque_limits[self.simulator._arm_dof_cfg_ids]
-        else:
-            tau_max_arm = self.simulator._torque_limits[self.simulator._arm_dof_ids]
+        tau_max_arm = self.simulator._torque_limits[:,self.simulator._arm_dof_cfg_ids]
 
         tau_max_arm = _sanitize_tensor(tau_max_arm).abs().to(device=device, dtype=dtype)
 
@@ -1915,7 +2022,6 @@ class B1Z1UniFP(BaseTask):
             tau_max_arm = tau_max_arm.expand(N, 6)
 
         tau_max_arm = torch.clamp(tau_max_arm, min=1e-6)
-
         # --------------------------------------------------
         # Torque-weighted arm manipulability
         # --------------------------------------------------
