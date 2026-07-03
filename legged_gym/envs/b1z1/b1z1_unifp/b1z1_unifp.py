@@ -1770,10 +1770,14 @@ class B1Z1UniFP(BaseTask):
 
     def _reward_feet_air_time(self):
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0
+        contact_filt = torch.logical_or(contact, self.last_contacts)
+        self.last_contacts = contact
+        first_contact = (self.feet_air_time > 0.) * contact_filt
         self.feet_air_time += self.dt
-        rew = torch.sum((self.feet_air_time - 0.5) * contact.float(), dim=1)
-        self.feet_air_time *= ~contact
-        return rew
+        rew_airTime = torch.sum((self.feet_air_time - 0.5) * first_contact, dim=1)  # reward only on first contact with the ground
+        rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.1  # no reward for zero command
+        self.feet_air_time *= ~contact_filt
+        return rew_airTime
 
     def _reward_feet_height(self):
         return torch.mean(torch.square(self.simulator.feet_pos[:, :, 2] - 0.08), dim=1)
@@ -2499,4 +2503,4 @@ class B1Z1UniFP(BaseTask):
             min=0.0,
         )
 
-        return -not_reached_gate * excess_tilt
+        return not_reached_gate * excess_tilt

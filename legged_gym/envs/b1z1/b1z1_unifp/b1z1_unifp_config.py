@@ -223,30 +223,34 @@ class B1Z1UniFPCfg:
 
     class control:
         control_type = "P"
-        stiffness = {
-            "hip": 175.0,
-            "thigh": 175.0,
-            "calf": 300.0,
-            "z1_waist": 64.0,
-            "z1_shoulder": 128.0,
-            "z1_elbow": 64.0,
-            "z1_wrist_angle": 64.0,
-            "z1_forearm_roll": 64.0,
-            "z1_wrist_rotate": 64.0,
-            "z1_jointGripper": 64.0,
-        }
-        damping = {
-            "hip": 7.5,
-            "thigh": 7.5,
-            "calf": 12.5,
-            "z1_waist": 1.5,
-            "z1_shoulder": 3.0,
-            "z1_elbow": 1.5,
-            "z1_wrist_angle": 1.5,
-            "z1_forearm_roll": 1.5,
-            "z1_wrist_rotate": 1.5,
-            "z1_jointGripper": 1.5,
-        }
+        # stiffness = {
+        #     "hip": 175.0,
+        #     "thigh": 175.0,
+        #     "calf": 300.0,
+        #     "z1_waist": 64.0,
+        #     "z1_shoulder": 128.0,
+        #     "z1_elbow": 64.0,
+        #     "z1_wrist_angle": 64.0,
+        #     "z1_forearm_roll": 64.0,
+        #     "z1_wrist_rotate": 64.0,
+        #     "z1_jointGripper": 64.0,
+        # }
+        # damping = {
+        #     "hip": 7.5,
+        #     "thigh": 7.5,
+        #     "calf": 12.5,
+        #     "z1_waist": 1.5,
+        #     "z1_shoulder": 3.0,
+        #     "z1_elbow": 1.5,
+        #     "z1_wrist_angle": 1.5,
+        #     "z1_forearm_roll": 1.5,
+        #     "z1_wrist_rotate": 1.5,
+        #     "z1_jointGripper": 1.5,
+        # }
+
+        stiffness = {"joint":100.0, "z1_waist": 64.0,}
+        damping = {"joint": 5.0,"z1": 1.5,}
+
         action_scale = 0.25
         dt = 0.02
         decimation = 4
@@ -270,6 +274,7 @@ class B1Z1UniFPCfg:
         
         ang_vel_yaw_clip = 0.2
         ang_vel_pitch_clip = 0.5
+        
         lin_vel_x_clip = 0.1
         lin_vel_y_clip = 0.1
 
@@ -450,7 +455,7 @@ class B1Z1UniFPCfg:
             pass
 
     class rewards:
-        only_positive_rewards = True
+        only_positive_rewards = False
         use_reward_curriculum = True
         tracking_sigma = 0.25
         tracking_ee_sigma = 1.0
@@ -463,7 +468,7 @@ class B1Z1UniFPCfg:
         
         base_height_target = 0.60
         
-        max_contact_force = 200.0
+        max_contact_force = 400.0
         contact_force_threshold = 1.0
         
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
@@ -510,7 +515,7 @@ class B1Z1UniFPCfg:
 
             # Style rewards encouraging using the arm
             arm_progress_before_torso = 0.3
-            early_torso_tilt = 0.2
+            early_torso_tilt = -0.2
             feet_contact_number = 0.01
 
             # Base
@@ -530,8 +535,8 @@ class B1Z1UniFPCfg:
             dof_acc_arm = -4.5e-7
             action_rate_arm = -0.02
             action_smoothness_arm = -0.02
-            joint_power = -4.e-5
-            joint_power_dist = -2.e-5
+            joint_power_arm = -4.e-5
+            joint_power_dist_arm = -2.e-5
 
             # Leg posture shaping
             ref_dof_leg = 0.0
@@ -668,7 +673,7 @@ class B1Z1UniFPCfgPPO:
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.005
+        entropy_coef = 0.001
         learning_rate = 1.0e-3
         schedule = "adaptive"
         gamma = 0.998

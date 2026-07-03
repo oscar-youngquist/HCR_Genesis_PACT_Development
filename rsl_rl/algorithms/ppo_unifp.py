@@ -44,15 +44,31 @@ class PPO_UniFP:
         # PPO components
         self.actor_critic = actor_critic
         self.actor_critic.to(self.device)
-        
+
         self.adaptation_labels = self.actor_critic.adaptation_labels
         self.adaptation_dims = self.actor_critic.adaptation_dims
         self.adaptation_weights = self.actor_critic.adaptation_weights
-        
+
         self.storage = None # initialized later
-        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
-        self.adaptation_module_optimizer = optim.Adam(self.actor_critic.parameters(),
-                                                      lr=Adaptation_Args.adaptation_module_learning_rate)
+
+        # Keep PPO and CSE/adaptation optimization separated. PPO should only
+        # step the policy mean, value function, and learned action std; the
+        # supervised adaptation update owns the encoder/decoder latent path.
+        self.ppo_parameters = [
+            *self.actor_critic.actor_body.parameters(),
+            *self.actor_critic.critic_body.parameters(),
+            self.actor_critic.std,
+        ]
+        self.adaptation_module_parameters = [
+            *self.actor_critic.adaptation_encoder_module.parameters(),
+            *self.actor_critic.adaptation_decoder_module.parameters(),
+        ]
+
+        self.optimizer = optim.Adam(self.ppo_parameters, lr=learning_rate)
+        self.adaptation_module_optimizer = optim.Adam(
+            self.adaptation_module_parameters,
+            lr=Adaptation_Args.adaptation_module_learning_rate,
+        )
         self.transition = RolloutStorageUniFP.Transition()
 
         # PPO parameters
@@ -65,12 +81,13 @@ class PPO_UniFP:
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_pred_shape, action_shape):
         self.storage = RolloutStorageUniFP(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_pred_shape, action_shape, self.device)
 
     def test_mode(self):
         self.actor_critic.test()
-    
+
     def train_mode(self):
         self.actor_critic.train()
 
@@ -86,7 +103,7 @@ class PPO_UniFP:
         self.transition.critic_observations = critic_obs
         self.transition.observation_preds = obs_pred
         return self.transition.actions
-    
+
     def process_env_step(self, rewards, dones, infos):
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
@@ -98,7 +115,7 @@ class PPO_UniFP:
         self.storage.add_transitions(self.transition)
         self.transition.clear()
         self.actor_critic.reset(dones)
-    
+
     def compute_returns(self, last_critic_obs):
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
@@ -107,7 +124,7 @@ class PPO_UniFP:
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_adaptation_module_loss = 0
-        
+
         mean_adaptation_losses = {}
         label_start_end = {}
         si = 0
@@ -115,7 +132,7 @@ class PPO_UniFP:
             label_start_end[label] = (si, si + length)
             si = si + length
             mean_adaptation_losses[label] = 0
-        
+
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for obs_batch, critic_obs_batch, obs_pred_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
             old_mu_batch, old_sigma_batch, masks_batch in generator:
@@ -139,7 +156,7 @@ class PPO_UniFP:
                             self.learning_rate = max(1e-5, self.learning_rate / 1.5)
                         elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
                             self.learning_rate = min(1e-2, self.learning_rate * 1.5)
-                        
+
                         for param_group in self.optimizer.param_groups:
                             param_group['lr'] = self.learning_rate
 
@@ -163,11 +180,16 @@ class PPO_UniFP:
 
                 loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
-                # Gradient step
+                # Gradient step. Clip only PPO-owned parameters so encoder
+                # gradients produced by the policy latent path cannot shrink the
+                # actor/critic/std update norm.
                 self.optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+                nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
                 self.optimizer.step()
+                # PPO backprop still traverses the adaptation encoder to build
+                # actor latents; clear those non-stepped gradients immediately.
+                self.adaptation_module_optimizer.zero_grad()
 
                 mean_value_loss += value_loss.item()
                 mean_surrogate_loss += surrogate_loss.item()
