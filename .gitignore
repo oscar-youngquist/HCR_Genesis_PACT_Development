@@ -25,6 +25,8 @@ dist/
 target/
 dist/
 
+*.pt
+
 **/exp_data*/*
 **.csv
 **/exp_data/*

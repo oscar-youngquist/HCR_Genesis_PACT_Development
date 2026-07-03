@@ -1141,10 +1141,15 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             # tracking reward is bounded by 1, this is the attained fraction of
             # the maximum possible tracking reward for each episode.
             episode_steps = self.episode_length_buf[valid_ids].float().clamp(min=1.0)
+            
+            # if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > \
+                # self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel"]:
+
             normalized = (
                 self.episode_sums[reward_name][valid_ids]
                 / (episode_steps * scale)
             ).clamp(0.0, 1.0)
+            
             sample = normalized.mean().item()
 
             # Smooth reset-batch performance so a single unusually good or bad

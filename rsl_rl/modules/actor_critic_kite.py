@@ -83,9 +83,9 @@ class KITEActorAsyncPipeline(nn.Module):
             self.context_encoder.forward_inference(depth_sequence_latent, proprio_latent)
         )
         actor_input = torch.cat([obs, context_latent, body_velo_est, feet_state_est], dim=-1)
-        actions = self.actor.actor_forward(actor_input)
+        actions = self.actor(actor_input)
 
-        return actions
+        return actions, context_latent, body_velo_est, feet_state_est
 
 
 def build_kite_async_deployment_pipelines(
@@ -110,6 +110,77 @@ def script_kite_async_deployment_pipelines(
     return torch.jit.script(depth_pipeline), torch.jit.script(actor_pipeline)
 
 
+def trace_kite_async_deployment_pipelines(
+    actor_critic,
+    device="cpu",
+) -> Tuple[torch.jit.ScriptModule, torch.jit.ScriptModule]:
+    """Trace the separated KITE deployment modules with TorchScript."""
+    depth_pipeline, actor_pipeline = build_kite_async_deployment_pipelines(
+        actor_critic,
+        device=device,
+    )
+    example_obs = torch.zeros(
+        1,
+        actor_critic.num_actor_obs,
+        dtype=torch.float32,
+        device=device,
+    )
+    example_obs_history = torch.zeros(
+        1,
+        actor_critic.proprio_context_encoder.context_input_dim,
+        dtype=torch.float32,
+        device=device,
+    )
+    example_depth_image = torch.zeros(
+        1,
+        1,
+        *actor_critic.depth_image_resolution,
+        dtype=torch.float32,
+        device=device,
+    )
+    example_depth_torso_state = torch.zeros(
+        1,
+        8,
+        dtype=torch.float32,
+        device=device,
+    )
+    example_depth_latent_history = torch.zeros(
+        1,
+        actor_critic.depth_sequence_length - 1,
+        actor_critic.depth_latent_dim,
+        dtype=torch.float32,
+        device=device,
+    )
+    example_depth_sequence_latent = torch.zeros(
+        1,
+        actor_critic.context_encoder.depth_latent_dim,
+        dtype=torch.float32,
+        device=device,
+    )
+
+    with torch.no_grad():
+        depth_trace = torch.jit.trace(
+            depth_pipeline,
+            (
+                example_depth_image,
+                example_depth_torso_state,
+                example_depth_latent_history,
+            ),
+            check_trace=False,
+        )
+        actor_trace = torch.jit.trace(
+            actor_pipeline,
+            (
+                example_obs,
+                example_obs_history,
+                example_depth_sequence_latent,
+            ),
+            check_trace=False,
+        )
+
+    return depth_trace, actor_trace
+
+
 def export_kite_async_deployment_pipelines(
     actor_critic,
     path: str,
@@ -119,7 +190,7 @@ def export_kite_async_deployment_pipelines(
     import os
 
     os.makedirs(path, exist_ok=True)
-    depth_script, actor_script = script_kite_async_deployment_pipelines(
+    depth_script, actor_script = trace_kite_async_deployment_pipelines(
         actor_critic,
         device=device,
     )
@@ -141,7 +212,7 @@ class ActorCritic_KITE(nn.Module):
                  depth_image_resolution=(48, 64),
                  depth_image_latent_dim=32,
                  depth_image_norm="layer",
-                 depth_decoder_norm="none",
+                 depth_decoder_norm="layer",
                  depth_image_std_min=0.01,
                  depth_image_std_max=2.0,
                  depth_autoencoder_skip_dropout_prob=0.25,

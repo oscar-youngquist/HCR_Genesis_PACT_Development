@@ -20,9 +20,9 @@ from legged_gym.utils.math_utils import quat_rotate_inverse
 
 # File-local joystick command limits for KITE play mode. The stick axes are
 # normalized to [-1, 1] and then scaled into these command ranges.
-JOYSTICK_LIN_VEL_X_RANGE = (-0.75, 0.75)
+JOYSTICK_LIN_VEL_X_RANGE = (-0.5, 1.0)
 JOYSTICK_LIN_VEL_Y_RANGE = (-0.3, 0.3)
-JOYSTICK_ANG_VEL_YAW_RANGE = (-1.0, 1.0)
+JOYSTICK_ANG_VEL_YAW_RANGE = (-2.0, 2.0)
 
 
 def parse_kite_visualization_args():
@@ -235,21 +235,21 @@ def override_kite_play_configs(env_cfg, args, kite_viz_args):
         # }
         #
         # # Random rough terrain.
-        # env_cfg.terrain.terrain_kwargs = {
-        #     "type": "terrain_utils.random_uniform_terrain",
-        #     "min_height": -0.10,
-        #     "max_height": 0.10,
-        #     "step": 0.005,
-        #     "downsampled_scale": 0.2,
-        # }
-        #
-        # Stairs down/up.
         env_cfg.terrain.terrain_kwargs = {
-            "type": "terrain_utils.pyramid_stairs_terrain",
-            "step_width": 0.4,
-            "step_height": -0.10,
-            "platform_size": env_cfg.terrain.platform_size,
+            "type": "terrain_utils.random_uniform_terrain",
+            "min_height": -0.08,
+            "max_height": 0.08,
+            "step": 0.005,
+            "downsampled_scale": 0.2,
         }
+        #
+        # # Stairs down/up.
+        # env_cfg.terrain.terrain_kwargs = {
+        #     "type": "terrain_utils.pyramid_stairs_terrain",
+        #     "step_width": 0.4,
+        #     "step_height": -0.10,
+        #     "platform_size": env_cfg.terrain.platform_size,
+        # }
         # env_cfg.terrain.terrain_kwargs = {
         #     "type": "terrain_utils.pyramid_stairs_terrain",
         #     "step_width": 0.4,
@@ -322,6 +322,7 @@ def override_kite_play_configs(env_cfg, args, kite_viz_args):
 
     if args.use_joystick:
         env_cfg.commands.heading_command = False
+        env_cfg.rewards.scales.heading_error = False
 
     env_cfg.commands.resampling_time = 5.0
     env_cfg.commands.ranges.lin_vel_x = list(JOYSTICK_LIN_VEL_X_RANGE)
@@ -342,6 +343,7 @@ def override_kite_play_configs(env_cfg, args, kite_viz_args):
     env_cfg.domain_rand.randomize_motor_strength = False
     env_cfg.domain_rand.randomize_com_displacement = False
     env_cfg.domain_rand.randomize_base_mass = False
+
 
     if args.record_frames or args.follow_robot:
         env_cfg.viewer.add_camera = True

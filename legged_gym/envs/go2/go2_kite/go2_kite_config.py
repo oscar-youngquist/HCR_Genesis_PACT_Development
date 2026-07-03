@@ -849,7 +849,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         
         
         # load_run = "Apr15_11-53-35_50hz_spec_jointrand_stairs"
-        load_run = "Jun30_15-10-27_50hz_nogap_parkour_novers"
+        load_run = "Jul02_18-35-22_50hz_nogap_parkour"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/kite_feasibility/baseline_model_stairs.csv"
