@@ -53,12 +53,17 @@ class LeggedRobotCfg(BaseConfig):
         num_rows = 4  # number of terrain rows (levels), X direction
         num_cols = 4  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
-        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
-        terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
+        # Order: slope, rough, stairs down, stairs up, discrete, wave,
+        # stepping stones, gap, pit, platforms, platforms and gaps.
+        terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.4",
             "step_height": "0.04 + 0.16 * difficulty",
             "discrete_height": "0.04 + 0.16 * difficulty",
+            "wave_params": {
+                "num_waves": "1",
+                "amplitude": "0.05 + 0.10 * difficulty",
+            },
             "stepping_stones_params": {
                 "stone_length": "1.5 * (1.05 - difficulty)",
                 "stone_width": "1.5 * (1.05 - difficulty)",

@@ -40,11 +40,13 @@ class Terrain:
     KIND_STAIRS_DOWN = 2
     KIND_STAIRS_UP = 3
     KIND_DISCRETE_OBSTACLES = 4
-    KIND_STEPPING_STONES = 5
-    KIND_GAP = 6
-    KIND_PIT = 7
-    KIND_MULTIPLE_HIGH_PLATFORMS = 8
-    KIND_HIGH_PLATFORM_GAPS = 9
+    KIND_WAVE = 5
+    KIND_STEPPING_STONES = 6
+    KIND_GAP = 7
+    KIND_PIT = 8
+    KIND_MULTIPLE_HIGH_PLATFORMS = 9
+    KIND_HIGH_PLATFORM_GAPS = 10
+    NUM_TERRAIN_KINDS = KIND_HIGH_PLATFORM_GAPS + 1
     FORWARD_ONLY_COMMAND_KIND_IDS = (
         KIND_STEPPING_STONES,
         KIND_GAP,
@@ -63,7 +65,11 @@ class Terrain:
         self.env_length = cfg.terrain_length
         self.env_width = cfg.terrain_width
         self.platform_size = cfg.platform_size
-        self.proportions = [np.sum(cfg.terrain_proportions[:i+1]) for i in range(len(cfg.terrain_proportions))]
+        terrain_proportions = self._terrain_proportions(cfg.terrain_proportions)
+        self.proportions = [
+            np.sum(terrain_proportions[:i + 1])
+            for i in range(len(terrain_proportions))
+        ]
 
         self.cfg.num_sub_terrains = cfg.num_rows * cfg.num_cols
         self.env_origins = np.zeros((cfg.num_rows, cfg.num_cols, 3))
@@ -153,6 +159,7 @@ class Terrain:
             "random_uniform_terrain": self.KIND_RANDOM_ROUGH,
             "pyramid_stairs_terrain": self.KIND_STAIRS_DOWN,
             "discrete_obstacles_terrain": self.KIND_DISCRETE_OBSTACLES,
+            "wave_terrain": self.KIND_WAVE,
             "stepping_stones_terrain": self.KIND_STEPPING_STONES,
             "gap_terrain": self.KIND_GAP,
             "pit_terrain": self.KIND_PIT,
@@ -175,6 +182,7 @@ class Terrain:
         step_height = eval(self.terrain_curriculum_difficulty["step_height"])
         discrete_obstacles_height = eval(self.terrain_curriculum_difficulty["discrete_height"])
         rough_height = 0.02 + 0.10*difficulty
+        wave_params = self.terrain_curriculum_difficulty.get("wave_params", {})
         stepping_stones_params = self.terrain_curriculum_difficulty["stepping_stones_params"]
         gap_size = eval(self.terrain_curriculum_difficulty["gap_size"])
         pit_depth = eval(self.terrain_curriculum_difficulty["pit_depth"])
@@ -217,7 +225,14 @@ class Terrain:
                                                      platform_size=self.platform_size,
                                                      terrain_type=self.type,
                                                      simplify_mesh=self.simplify_mesh)
-        elif choice < self.proportions[5]: # stepping stones
+        elif choice < self.proportions[5]: # wave
+            terrain_utils.wave_terrain(
+                terrain,
+                num_waves=int(eval(wave_params.get("num_waves", "1"))),
+                amplitude=eval(wave_params.get("amplitude", "0.05 + 0.10 * difficulty")),
+                terrain_type=self.type,
+            )
+        elif choice < self.proportions[6]: # stepping stones
             terrain_utils.stepping_stones_terrain(terrain,
                                                   stone_length=eval(stepping_stones_params["stone_length"]),
                                                 #   stone_length=eval(stepping_stones_params["stone_width"]),
@@ -231,19 +246,19 @@ class Terrain:
                                                   stepping_stone_edge_clearance=eval(stepping_stones_params.get("stepping_stone_edge_clearance", "0.4")),
                                                   terrain_type=self.type,
                                                   simplify_mesh=self.simplify_mesh)
-        elif choice < self.proportions[6]: # gap
+        elif choice < self.proportions[7]: # gap
             terrain_utils.gap_terrain(terrain,
                                       gap_size=gap_size,
                                       platform_size=self.platform_size,
                                       terrain_type=self.type,
                                       simplify_mesh=self.simplify_mesh)
-        elif choice < self.proportions[7]: # pit
+        elif choice < self.proportions[8]: # pit
             terrain_utils.pit_terrain(terrain,
                                       depth=pit_depth,
                                       platform_size=self.platform_size,
                                       terrain_type=self.type,
                                       simplify_mesh=self.simplify_mesh)
-        elif choice < self.proportions[8]: # multiple high platforms
+        elif choice < self.proportions[9]: # multiple high platforms
             if high_platform_params is None:
                 raise ValueError("high_platform_params is required for multiple high platforms terrain.")
             terrain_utils.multiple_high_platforms_terrain(terrain,
@@ -256,7 +271,7 @@ class Terrain:
                                                         platform_size=self.platform_size,
                                                         terrain_type=self.type,
                                                         simplify_mesh=self.simplify_mesh)
-        elif choice < self.proportions[9]: # high platform gaps
+        elif choice < self.proportions[10]: # high platform gaps
             if high_platform_gaps_params is None:
                 raise ValueError("high_platform_gaps_params is required for high platform gaps terrain.")
             terrain_utils.high_platform_gaps_terrain(terrain,
@@ -277,6 +292,17 @@ class Terrain:
             terrain_kind_id=terrain_kind_id,
         )
         return terrain
+
+    def _terrain_proportions(self, proportions):
+        proportions = list(proportions)
+        if len(proportions) > self.NUM_TERRAIN_KINDS:
+            raise ValueError(
+                f"terrain_proportions has {len(proportions)} entries, expected "
+                f"at most {self.NUM_TERRAIN_KINDS}."
+            )
+        if len(proportions) < self.NUM_TERRAIN_KINDS:
+            proportions += [0.0] * (self.NUM_TERRAIN_KINDS - len(proportions))
+        return proportions
 
     def _add_optional_roughness(self, terrain, difficulty, terrain_kind_id):
         """Layer random-uniform roughness onto a generated terrain if enabled."""

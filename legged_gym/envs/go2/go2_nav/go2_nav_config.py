@@ -26,8 +26,9 @@ class GO2NavCfg( LeggedRobotNavCfg ):
         platform_size = 3.0
         num_rows = 10  # number of terrain rows (levels)
         num_cols = 20  # number of terrain cols (types)
-        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping stones, gap, pit]
-        terrain_proportions = [0.2, 0.2, 0.2, 0.2, 0.1, 0.1]
+        # Order: slope, rough, stairs down, stairs up, discrete, wave,
+        # stepping stones, gap, pit, platforms, platforms and gaps.
+        terrain_proportions = [0.2, 0.2, 0.2, 0.2, 0.1, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0]
 
     class init_state( LeggedRobotNavCfg.init_state ):
         pos = [0.0, 0.0, 0.42] # x,y,z [m]
