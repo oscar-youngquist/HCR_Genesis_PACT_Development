@@ -325,6 +325,12 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         self.common_step_counter += 1
 
         self.simulator.post_physics_step()
+        self.max_move_distance = self.max_move_distance.maximum(
+            torch.norm(
+                self.simulator.base_pos[:, :2] - self.simulator.env_origins[:, :2],
+                dim=1,
+            )
+        )
         self._post_physics_step_callback()
 
         # KITE specific update
@@ -850,15 +856,28 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         if not self.init_done:
             # don't change on initial reset
             return
-        distance = torch.norm(
-            self.simulator.base_pos[env_ids, :2] - self.simulator.env_origins[env_ids, :2], dim=1)
+        distance = self.max_move_distance[env_ids]
         # robots that walked far enough progress to harder terains
         move_up = distance > (self.simulator._terrain.env_length / 2.0)
         # robots that walked less than half of their required distance go to simpler terrains
-        move_down = (distance < torch.norm(
-            self.commands[env_ids, :2], dim=1)*self.max_episode_length_s*0.5) * ~move_up
+        if getattr(self.cfg.terrain, "move_down_by_accumulated_xy_command", False):
+            required_distance = (
+                torch.norm(self.commands_xy_accumulation[env_ids], dim=1)
+                * self.cfg.commands.resampling_time
+                * (1.0 - self._get_zero_command_probability())
+                * 0.5
+            )
+        else:
+            required_distance = (
+                torch.norm(self.commands[env_ids, :2], dim=1)
+                * self.max_episode_length_s
+                * 0.5
+            )
+        move_down = (distance < required_distance) * ~move_up
         
         self.simulator.update_terrain_curriculum(env_ids, move_up, move_down)
+        self.max_move_distance[env_ids] = 0.0
+        self.commands_xy_accumulation[env_ids] = 0.0
     
     def _reset_dofs(self, env_ids):
         dof_pos = torch.zeros((len(env_ids), self.num_actions), dtype=torch.float, 
@@ -916,11 +935,36 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         ).nonzero(as_tuple=False).flatten()
         self._resample_commands(env_ids)
         if self.cfg.commands.heading_command:
-            forward = quat_apply(self.simulator.base_quat, self.forward_vec)
-            self.heading = torch.atan2(forward[:, 1], forward[:, 0])
-            self.commands[:, 2] = torch.clip(
-                0.5 * wrap_to_pi(self.commands[:, 3] - self.heading), self.cfg.commands.ranges.ang_vel_yaw[0], 
-                                                                 self.cfg.commands.ranges.ang_vel_yaw[1])
+            update_heading_env_ids = torch.arange(self.num_envs, device=self.device)
+            if self.heading_yaw_override.any():
+                update_heading_env_ids = update_heading_env_ids[~self.heading_yaw_override]
+            if len(update_heading_env_ids) > 0:
+                forward = quat_apply(
+                    self.simulator.base_quat[update_heading_env_ids],
+                    self.forward_vec[update_heading_env_ids],
+                )
+                self.heading[update_heading_env_ids] = torch.atan2(forward[:, 1], forward[:, 0])
+                # self.commands[update_heading_env_ids, 2] = torch.clip(
+                #     0.5 * wrap_to_pi(
+                #         self.commands[update_heading_env_ids, 3]
+                #         - self.heading[update_heading_env_ids]
+                #     ),
+                #     self.command_ranges["ang_vel_yaw"][0],
+                #     self.command_ranges["ang_vel_yaw"][1],
+                # )
+                heading_error = wrap_to_pi(
+                    self.commands[update_heading_env_ids, 3]
+                    - self.heading[update_heading_env_ids]
+                )
+
+                ang_vel_min = self.command_ranges["ang_vel_yaw"][0]
+                ang_vel_max = self.command_ranges["ang_vel_yaw"][1]
+                ang_vel_abs_max = min(abs(ang_vel_min), abs(ang_vel_max))
+
+                self.commands[update_heading_env_ids, 2] = torch.clip(
+                    heading_error / torch.pi * ang_vel_abs_max,
+                    ang_vel_min,
+                    ang_vel_max,)
 
         if self.cfg.domain_rand.push_robots:
             self.simulator.push_robots()
@@ -955,6 +999,9 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             else:
                 self.commands[forward_only_env_ids, 2] = 0.0
 
+        self.heading_yaw_override[env_ids] = False
+        self._apply_zero_command_sampling(env_ids, forward_only_mask)
+
         # Set small commands to zero using the same threshold that gates
         # stand-still rewards, so the policy sees one consistent definition of
         # "zero command" during command sampling and reward computation.
@@ -966,7 +1013,70 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         command_is_active = command_is_active | forward_only_mask
         self.commands[env_ids, :3] *= command_is_active.unsqueeze(1)
 
+        self.commands_xy_accumulation[env_ids] += self.commands[env_ids, :2]
         self.command_resample_timeouts[env_ids] = self._sample_command_resample_timeouts(len(env_ids))
+
+    def _apply_zero_command_sampling(self, env_ids, protected_mask=None):
+        zero_command_proba = self._get_zero_command_probability()
+        if zero_command_proba <= 0.0:
+            return
+
+        zero_mask = torch.rand(len(env_ids), device=self.device) < zero_command_proba
+        if protected_mask is not None:
+            zero_mask &= ~protected_mask
+        zero_env_ids = env_ids[zero_mask]
+        if len(zero_env_ids) == 0:
+            return
+
+        self.commands[zero_env_ids, :2] = 0.0
+        self.commands[zero_env_ids, 2] = 0.0
+        if self.cfg.commands.heading_command:
+            forward = quat_apply(self.simulator.base_quat[zero_env_ids], self.forward_vec[zero_env_ids])
+            self.commands[zero_env_ids, 3] = torch.atan2(forward[:, 1], forward[:, 0])
+
+        max_yaw_prob = getattr(self.cfg.commands, "limit_ang_vel_at_zero_command_prob", 0.0)
+        if max_yaw_prob <= 0.0:
+            return
+
+        yaw_mask = torch.rand(len(zero_env_ids), device=self.device) < max_yaw_prob
+        yaw_env_ids = zero_env_ids[yaw_mask]
+        if len(yaw_env_ids) == 0:
+            return
+
+        direction = torch.rand(len(yaw_env_ids), device=self.device) < 0.5
+        self.commands[yaw_env_ids, 2] = torch.where(
+            direction,
+            torch.full(
+                (len(yaw_env_ids),),
+                self.command_ranges["ang_vel_yaw"][0],
+                device=self.device,
+            ),
+            torch.full(
+                (len(yaw_env_ids),),
+                self.command_ranges["ang_vel_yaw"][1],
+                device=self.device,
+            ),
+        )
+        if self.cfg.commands.heading_command:
+            self.heading_yaw_override[yaw_env_ids] = True
+
+    def _get_zero_command_probability(self):
+        curriculum = getattr(self.cfg.commands, "zero_command_curriculum", None)
+        if curriculum is not None:
+            return self._get_current_linear_schedule_value(curriculum)
+        return getattr(self.cfg.commands, "zero_command_prob", 0.0)
+
+    def _get_current_linear_schedule_value(self, config):
+        start_iter = config["start_iter"]
+        end_iter = config["end_iter"]
+        start_value = config["start_value"]
+        end_value = config["end_value"]
+        if self.common_step_counter <= start_iter:
+            return start_value
+        if self.common_step_counter >= end_iter:
+            return end_value
+        ratio = (self.common_step_counter - start_iter) / (end_iter - start_iter)
+        return start_value + ratio * (end_value - start_value)
 
     def _get_forward_only_command_mask(self, env_ids):
         """Return envs on obstacle terrain columns that should only receive forward commands."""
@@ -1367,6 +1477,18 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         self.commands = torch.zeros(
             (self.num_envs, self.cfg.commands.num_commands), device=self.device, dtype=torch.float)
         self.command_resample_timeouts = self._sample_command_resample_timeouts(self.num_envs)
+        self.commands_xy_accumulation = torch.zeros(
+            (self.num_envs, 2), device=self.device, dtype=torch.float
+        )
+        self.max_move_distance = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device
+        )
+        self.heading_yaw_override = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.heading = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device
+        )
         
         self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel],
                                            device=self.device, dtype=torch.float,
@@ -1633,6 +1755,19 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         self.forward_only_command_terrain_types = self._build_forward_only_command_terrain_types(
             sim_device
         )
+        self.dynamic_sigma_cfg = getattr(self.cfg.rewards, "dynamic_sigma", None)
+        if self.dynamic_sigma_cfg is not None:
+            max_sigmas = self.dynamic_sigma_cfg["max_sigma"]
+            if len(max_sigmas) < len(self.cfg.terrain.terrain_proportions):
+                raise ValueError(
+                    "rewards.dynamic_sigma['max_sigma'] must cover every terrain kind"
+                )
+            self.terrain_max_sigmas = torch.tensor(
+                max_sigmas,
+                device=sim_device,
+                dtype=torch.float,
+                requires_grad=False,
+            )
         if self.cfg.terrain.mesh_type not in ['heightfield', "trimesh"]:
             self.cfg.terrain.curriculum = False
         self.max_episode_length_s = self.cfg.env.episode_length_s
@@ -2187,8 +2322,80 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         return torch.sum((torch.abs(self.simulator.torques) - self.simulator.torque_limits*self.cfg.rewards.soft_torque_limit).clip(min=0.), dim=1)
 
     def _reward_tracking_lin_vel_base(self):
+        if self.dynamic_sigma_cfg is not None:
+            lin_vel_error_sq = torch.square(
+                self.commands[:, :2] - self.simulator.base_lin_vel[:, :2]
+            )
+            sigma_x = self._get_dynamic_sigma(
+                torch.abs(self.commands[:, 0]),
+                self.dynamic_sigma_cfg["min_lin_vel"],
+                self.dynamic_sigma_cfg["max_lin_vel"],
+            )
+            sigma_y = self._get_dynamic_sigma(
+                torch.abs(self.commands[:, 1]),
+                self.dynamic_sigma_cfg["min_lin_vel"],
+                self.dynamic_sigma_cfg["max_lin_vel"],
+            )
+            return torch.exp(-(lin_vel_error_sq[:, 0] / sigma_x + lin_vel_error_sq[:, 1] / sigma_y))
+
         lin_vel_error = self._lin_vel_tracking_error()
+
         return torch.exp(-self.cfg.rewards.tracking_lin_vel_error_scale * lin_vel_error)
+
+    def _get_dynamic_sigma(self, target_vel_abs, v_min, v_max):
+        """Return the tracking-reward sigma for each env at the current command.
+
+        The base tracking reward is exp(-error^2 / sigma). Larger sigma makes
+        the reward less strict, which is useful for terrain families where exact
+        velocity tracking is less important than making progress safely.
+        """
+        default_sigma = self.cfg.rewards.tracking_sigma
+        if (
+            not self.cfg.terrain.curriculum
+            or self.dynamic_sigma_cfg is None
+        ):
+            return torch.full_like(target_vel_abs, default_sigma)
+
+        # Prefer simulator.terrain_kind_ids when available. These are stable
+        # Terrain.KIND_* ids assigned by legged_gym.utils.terrain.Terrain, so
+        # dynamic_sigma["max_sigma"][Terrain.KIND_WAVE] controls wave terrain,
+        # [Terrain.KIND_STEPPING_STONES] controls stepping stones, etc. This is
+        # safer than using raw curriculum column ids because terrain_proportions
+        # can change how many columns each terrain family occupies.
+        terrain_types = self.simulator.terrain_kind_ids
+        if terrain_types is None:
+            # Legacy fallback: terrain_types are curriculum column/type ids.
+            # This only matches max_sigma correctly when columns follow the same
+            # order as the terrain proportion index scheme.
+            terrain_types = self.simulator.terrain_types
+
+        # Look up the per-env maximum sigma from the terrain kind. The config
+        # list must cover every Terrain.KIND_* id in order:
+        # slope, rough, stairs down, stairs up, discrete, wave, stepping stones,
+        # gap, pit, platforms, platforms and gaps.
+        target_sigmas = self.terrain_max_sigmas[terrain_types]
+
+        # Start strict for small commands, then blend toward the terrain-specific
+        # max sigma as the commanded speed enters [v_min, v_max). Commands at or
+        # above v_max receive the full terrain-specific sigma.
+        sigma = torch.full_like(target_vel_abs, default_sigma)
+
+        if v_max > v_min:
+            mask = (target_vel_abs >= v_min) & (target_vel_abs < v_max)
+            if mask.any():
+                ratio = (target_vel_abs[mask] - v_min) / (v_max - v_min)
+                sigma[mask] = default_sigma + ratio * (target_sigmas[mask] - default_sigma)
+
+        mask = target_vel_abs >= v_max
+        if mask.any():
+            sigma[mask] = target_sigmas[mask]
+
+        # Terrain rows encode curriculum difficulty. Low terrain levels stay
+        # closer to the default strict sigma; harder rows are allowed to use more
+        # of the terrain-specific relaxation computed above.
+        terrain_levels = self.simulator.terrain_levels.float()
+        level_scale = torch.clamp(torch.exp((terrain_levels + 1.0) / 10.0) - 1.0, max=1.0)
+        return default_sigma + level_scale * (sigma - default_sigma)
 
     def _reward_tracking_lin_vel(self):
         reward = self._reward_tracking_lin_vel_base()
@@ -2237,6 +2444,13 @@ class Go2KITE(KITEDepthMixin, BaseTask):
 
     def _reward_tracking_ang_vel(self):
         # Tracking of angular velocity commands (yaw)
+        if self.dynamic_sigma_cfg is not None:
+            sigma = self._get_dynamic_sigma(
+                torch.abs(self.commands[:, 2]),
+                self.dynamic_sigma_cfg["min_ang_vel"],
+                self.dynamic_sigma_cfg["max_ang_vel"],
+            )
+            return torch.exp(-self._ang_vel_tracking_error() / sigma)
         ang_vel_error = self._ang_vel_tracking_error()
         return torch.exp(-self.cfg.rewards.tracking_ang_vel_error_scale * ang_vel_error)
 
@@ -2651,7 +2865,8 @@ class Go2KITE(KITEDepthMixin, BaseTask):
     def _reward_x_command_hip_symmetry(self):
         hip_dof_indices = [0, 3, 6, 9]                                                             # indicies in config space
         hip_pos = self.simulator.dof_pos[:, hip_dof_indices]
-        x_command_ratio = torch.abs(self.commands[:,0]) / torch.norm(self.commands[:,:3], dim=1)   # how much of the command is subsumed by "forwards"
+        command_norm = torch.norm(self.commands[:, :3], dim=1).clamp(min=1e-6)
+        x_command_ratio = torch.abs(self.commands[:, 0]) / command_norm                            # how much of the command is subsumed by "forwards"
         rew = torch.abs(hip_pos[:,0]+hip_pos[:,1]) + torch.abs(hip_pos[:,2]+hip_pos[:,3])          # calculate hip symmetry
         return rew * x_command_ratio                                                               # weight by the command ratio
 

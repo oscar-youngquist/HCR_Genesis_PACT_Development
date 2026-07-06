@@ -38,6 +38,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         restitution = 0. # coefficient of restitution of the terrain
         border_size = 5.0 # [m]
         curriculum = True
+        move_down_by_accumulated_xy_command = True
         # obtain terrain height information around feet (default: 9 points around feet), measure_
         # x  x   x
         # x F(x) x
@@ -77,13 +78,12 @@ class GO2KITECfg( LeggedRobotCfg ):
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 3.0 # [m] size of the flat platform at the center of each subterrain
-        num_rows = 2  # number of terrain rows (levels), X direction
-        num_cols = 2  # number of terrain cols (types), Y direction
+        num_rows = 10  # number of terrain rows (levels), X direction
+        num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # Order: slope, rough, stairs down, stairs up, discrete, wave,
         # stepping stones, gap, pit, platforms, platforms and gaps.
-        terrain_proportions = [0.15, 0.15, 0.25, 0.25, 0.10,
-                               0.10, 0.00, 0.00, 0.00, 0.00, 0.00]
+        terrain_proportions = [0.15, 0.15, 0.25, 0.25, 0.10, 0.10, 0.00, 0.00, 0.00, 0.00, 0.00]
 
         # terrain_proportions = [0.09, 0.09, 0.09, 0.09, 0.09, 0.10, 0.09, 0.09, 0.09, 0.09, 0.09]
         # terrain_proportions = [0.10, 0.10, 0.15, 0.15, 0.10, 0.00, 0.15, 0.10, 0.15, 0.00, 0.00]
@@ -93,7 +93,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         edge_mask_dilation_cells = 0
 
         add_terrain_roughness = True
-        terrain_roughness_height_range = [0.0, 0.02]
+        terrain_roughness_height_range = [0.0, 0.04]
         terrain_roughness_step = 0.005
         terrain_roughness_downsampled_scale = 0.30
         terrain_roughness_protect_edges = True
@@ -102,12 +102,11 @@ class GO2KITECfg( LeggedRobotCfg ):
         # None applies roughness to all terrain kinds when enabled. To restrict
         # it, use terrain kind ids from legged_gym.utils.terrain.Terrain.
         terrain_roughness_kind_ids = [0,  # slope
-                                    #   2,  # stairs down
-                                    #   3,  # stairs up
-                                    #   4,  # discrete obstacles
+                                      5,  # wave
                                       ]
-
-        # 5  # wave
+        # 2,  # stairs down
+        # 3,  # stairs up
+        # 4,  # discrete obstacles
         # 6  # stepping stones
         # 7  # gap
         # 8  # pit
@@ -479,9 +478,22 @@ class GO2KITECfg( LeggedRobotCfg ):
         soft_torque_limit = 0.90
         base_height_target = 0.36
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
+
+        # Order: slope, rough, stairs down, stairs up, discrete, wave,
+        # stepping stones, gap, pit, platforms, platforms and gaps.
+        dynamic_sigma = {
+            "min_lin_vel": 0.5,
+            "max_lin_vel": 1.5,
+            "min_ang_vel": 1.0,
+            "max_ang_vel": 2.0,
+            "max_sigma": [1/4, 1/4, 1/2, 1/2, 3/4, 5/12, 1, 1, 1, 1, 1],  # parkour envs are most relaxed
+        }
+
+        #### Currently unused
         tracking_lin_vel_error_scale = 4.0
         tracking_ang_vel_error_scale = 4.0
-        
+        ####
+
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022   # height of the foot coordinate origin above ground [m]
         foot_clearance_excess_margin = 0.04
@@ -696,6 +708,9 @@ class GO2KITECfg( LeggedRobotCfg ):
         lin_vel_x_forward_bias_final = 0.60
         lin_vel_x_high_speed_bias_power_final = 0.50
         zero_command_threshold = 0.05
+        zero_command_prob = 0.10
+        zero_command_curriculum = None
+        limit_ang_vel_at_zero_command_prob = 0.20
         
         randomize_resampling_time = False
         resampling_time_min = 1.0

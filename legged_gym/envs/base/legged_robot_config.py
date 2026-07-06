@@ -31,6 +31,7 @@ class LeggedRobotCfg(BaseConfig):
         static_friction = 1.0 # coefficient of static friction of the terrain
         dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
         restitution = 0. # coefficient of restitution of the terrain
+        move_down_by_accumulated_xy_command = False # use accumulated xy command distance for terrain down-curriculum
         
         
         # rough terrain only:
@@ -166,6 +167,7 @@ class LeggedRobotCfg(BaseConfig):
         
         only_positive_rewards = True
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
+        dynamic_sigma = None # optional terrain/command-dependent tracking sigma config
         soft_dof_pos_limit = 1. # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 1.
         soft_torque_limit = 1.
@@ -183,6 +185,9 @@ class LeggedRobotCfg(BaseConfig):
         resampling_time = 10. # time before command are changed[s]
         heading_command = True # if true: compute ang vel command from heading error
         curriculum_threshold = 0.8 # threshold for curriculum learning, if the tracking reward is above this threshold, increase the command range
+        zero_command_prob = 0.0 # probability of forcing sampled commands to zero linear velocity
+        zero_command_curriculum = None # optional schedule overriding zero_command_prob
+        limit_ang_vel_at_zero_command_prob = 0.0 # probability of max yaw-rate when zero linear command is sampled
         class ranges:
             lin_vel_x = [-1.0, 1.0] # min max [m/s]
             lin_vel_y = [-1.0, 1.0]   # min max [m/s]

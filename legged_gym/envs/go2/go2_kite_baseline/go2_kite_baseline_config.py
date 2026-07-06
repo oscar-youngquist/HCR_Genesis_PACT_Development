@@ -39,6 +39,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         restitution = 0. # coefficient of restitution of the terrain
         border_size = 20.0 # [m]
         curriculum = True
+        move_down_by_accumulated_xy_command = True
         # obtain terrain height information around feet (default: 9 points around feet), measure_
         # x  x   x
         # x F(x) x
@@ -518,6 +519,13 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         soft_torque_limit = 0.90
         base_height_target = 0.33
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
+        dynamic_sigma = {
+            "min_lin_vel": 0.5,
+            "max_lin_vel": 1.5,
+            "min_ang_vel": 1.0,
+            "max_ang_vel": 2.0,
+            "max_sigma": [5/12, 1/4, 1/4, 1/2, 1/2, 3/4, 1, 1, 1/4, 1/4, 1/4],
+        }
         tracking_lin_vel_error_scale = 4.0
         tracking_ang_vel_error_scale = 4.0
         
@@ -682,6 +690,9 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         lin_vel_x_forward_bias_final = 0.85
         lin_vel_x_high_speed_bias_power_final = 0.50
         zero_command_threshold = 0.10
+        zero_command_prob = 0.10
+        zero_command_curriculum = None
+        limit_ang_vel_at_zero_command_prob = 0.20
         
         randomize_resampling_time = False
         resampling_time_min = 1.0
