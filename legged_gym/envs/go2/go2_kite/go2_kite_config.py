@@ -7,11 +7,11 @@ class GO2KITECfg( LeggedRobotCfg ):
         num_envs = 4096
         num_observations = 57
         num_privileged_obs = 144
-        num_priv_stack = 3
+        num_priv_stack = 5
         num_explicit_recon_obs = 3 + 4 + 4 + 12 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 5
+        num_obs_hist = 10
         grf_dim = 12
         whole_body_dim = 18
         debug = False # if debugging, visualize contacts, 
@@ -32,7 +32,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         # obtain_terrain_info_around_feet = True
 
         # rough terrain only:
-        mesh_type = "heightfield"
+        mesh_type = "trimesh"
         static_friction = 1.0 # coefficient of static friction of the terrain
         dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
         restitution = 0. # coefficient of restitution of the terrain
@@ -92,7 +92,7 @@ class GO2KITECfg( LeggedRobotCfg ):
                                     #   3,  # stairs up
                                     #   4,  # discrete obstacles
                                       ]
-        # Riskier terrain kinds that can be included once the edge/border
+        # Riskier terrain kinds that can be included once the edge/borderterrain_roughness_border_clearance
         # protection is validated:
         # 5  # stepping stones
         # 6  # gap
@@ -135,7 +135,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             },
         }
         # trimesh only:
-        slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
+        slope_treshold = 1.5 # slopes above this threshold will be corrected to vertical surfaces
 
     class sim:
         # Common
@@ -722,8 +722,8 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         cnn_activation = 'elu'
 
         # Proprioceptive Context encoder
-        # proprio_in_dim = 570
-        proprio_in_dim = 285
+        proprio_in_dim = 570
+        # proprio_in_dim = 285
         proprio_use_norm = True
         proprio_num_blocks = 3
         proprio_hidden_dim = 64
@@ -845,7 +845,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # debug_warmpinn_wb
         run_name = '50hz_nogap_parkour'
         # run_name = 'terrain_debug_test'
-        experiment_name = 'go2_kite_debugging'
+        experiment_name = 'go2_kite'
         save_interval = 100
         
         
