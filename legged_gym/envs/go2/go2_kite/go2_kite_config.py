@@ -14,7 +14,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         num_obs_hist = 5
         grf_dim = 12
         whole_body_dim = 18
-        debug = False # if debugging, visualize contacts, 
+        debug = True # if debugging, visualize contacts,
         debug_viz = False # draw debug visualizations
 
     
@@ -56,6 +56,16 @@ class GO2KITECfg( LeggedRobotCfg ):
         debug_surface_normal_color = (1.0, 0.8, 0.0, 1.0)
         debug_surface_normal_refresh_steps = 5
 
+        debug_draw_edge_mask = False
+        debug_edge_mask_env_id = 0
+        debug_edge_mask_refresh_steps = 20
+        debug_edge_mask_stride_cells = 1
+        debug_edge_mask_max_points = 0
+        debug_edge_mask_radius = 0.01
+        debug_edge_mask_height_offset = 0.035
+        debug_edge_mask_color = (1.0, 0.1, 0.1, 0.9)
+        debug_edge_non_edge_color = (0.1, 0.35, 1.0, 0.35)
+
         # positions of the sampling height around the base (relative to the base of the robot) 11x18 = 153
         measured_points_x = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2] #  rows
         measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4]                          #  cols
@@ -67,17 +77,21 @@ class GO2KITECfg( LeggedRobotCfg ):
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
         platform_size = 3.0 # [m] size of the flat platform at the center of each subterrain
-        num_rows = 10  # number of terrain rows (levels), X direction
-        num_cols = 20  # number of terrain cols (types), Y direction
+        num_rows = 2  # number of terrain rows (levels), X direction
+        num_cols = 2  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        terrain_proportions = [0.15, 0.15, 0.25, 0.25, 0.20]
-        
+        # terrain_proportions = [0.15, 0.15, 0.25, 0.25, 0.20]
+        terrain_proportions = [0.00, 0.00, 1.0, 0.0, 0.00]
+
         # slope, random-rough, stairs-down, stairs-up, discrete, stepping-stone, gap (jump), pit (climb-up), high-platform (climb), platform+gap (climb and jump) 
         # terrain_proportions = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
         # terrain_proportions = [0.10, 0.10, 0.15, 0.15, 0.10, 0.00, 0.15, 0.10, 0.15, 0.00]
         # terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 0.20, 0.00, 0.00, 0.40, 0.40]
         simplify_mesh = True
+
+        edge_mask_dilation_cells = 0
+
         add_terrain_roughness = True
         terrain_roughness_height_range = [0.0, 0.02]
         terrain_roughness_step = 0.005
@@ -487,10 +501,18 @@ class GO2KITECfg( LeggedRobotCfg ):
 
         max_contact_force       = 200.0
         contact_force_threshold = 5.0
+
+        # Used to prevent exploting "sloped" edges (artifact of heighfield's being unable to generate vertical faces)
+        feet_edge_threshold     = 0.05             # [m]
+        edge_clearance_lateral_cells = (-1, 0, 1)
+        edge_clearance_forward_cells = (0, 1, 2)
+        edge_swing_clearance_margin = 0.04         # [m]
+        swing_collision_max_normal_z = 0.85
+        swing_collision_min_speed = 0.05
+
+        # Used to create "balanced" swing-leg participation
         swing_ema_alpha         = 0.97
         swing_height_ema_alpha  = 0.95
-        feet_edge_threshold     = 0.05
-
         completed_swing_min_height_weight = 1.0
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
@@ -511,8 +533,8 @@ class GO2KITECfg( LeggedRobotCfg ):
             tracking_lin_vel  = 1.00
             tracking_ang_vel  = 0.50
             #    negative pushes away from not tracking
-            tracking_lin_vel_penalty = -0.5
-            tracking_ang_vel_penalty = -0.25
+            tracking_lin_vel_penalty = 0.0
+            tracking_ang_vel_penalty = 0.0
 
             dof_tracking      = 0.00
             aligned_torques   = 0.00
@@ -563,12 +585,16 @@ class GO2KITECfg( LeggedRobotCfg ):
             feet_contact_forces          = -1.0e-2 # penalty for high contact forces on the feet
             feet_near_edge               = -1.0    # penalty for feet being in contact near any edge terrain  
             stumble                      = -10.0   # penalty for making horizontal contact during swing phase.
+            edge_swing_clearance         = -2.0    # penalty for not lifitng foot above edges of vertical surfaces
+            swing_foot_collision_edge    = -1.0    # penlaty for swigning feet into the artifical "slope" surfaces around edges in heightfield terrains
+
+            # Targted posture regularization
             hip_pos                      = -0.05   # hip joints specifically should be close to default. Ued to avoid learning unnecessarily wide gaits.
 
             # Added these gait balance rewards to discourage observed behavior of diagonals pairs of feet behaving differently.
-            swing_participation_balance    = 0.10   # (-) encourages all feet to swing for roughly the same amount of time an episode
+            swing_participation_balance    = 0.05   # (-) encourages all feet to swing for roughly the same amount of time an episode
             diagonal_pair_balance          = 0.10   # (-) encourages diagonal pairs of feet specifically to wing the same amount of time per episode
-            completed_swing_height_balance = 0.10   # (-) enocurages all swing feet to reach the desired height throughout a swing
+            completed_swing_height_balance = 0.05   # (-) enocurages all swing feet to reach the desired height throughout a swing
 
             # Novel KITE-specific whole-body posture + terrain regualrization/alignment rewards
             torso_force_wrench_ellipsoid = 0.2     # (+) encourage whole-body postures that align well conditioned force generation with the terrain
@@ -614,16 +640,17 @@ class GO2KITECfg( LeggedRobotCfg ):
                                 "rear_foot_overreach",
                                 ]
             
-            curr_reward_bounds = {"torque_limits":[-1.0e-6, -1.0e-2],
-                                  "joint_power":[-2.0e-6, -2.0e-8],
-                                  "action_rate":[-0.001, -0.0001],
-                                  "action_smoothness":[-0.001, -0.0001],
-                                  "dof_acc":[-2.0e-8, -2.0e-10],
+            curr_reward_bounds = {"torque_limits":[-1.0e-4, -1.0e-2],
+                                  "joint_power":[-2.0e-5, -2.0e-6],
+                                  "action_rate":[-0.01, -0.001],
+                                  "action_smoothness":[-0.01, -0.001],
+                                  "dof_acc":[-2.0e-7, -2.0e-7],
                                   "torso_force_wrench_ellipsoid":[0.05, 0.30],
                                   "swing_vel_ellipsoid_terrain":[0.05, 0.30],
-                                  "stumble":[-0.1, -10.0],
+                                  "stumble":[-1.0, -10.0],
                                   "front_foot_overreach":[-1.0, -100.0],
-                                  "rear_foot_overreach":[-0.1, -10.0]
+                                  "rear_foot_overreach":[-1.0, -10.0],
+
                                  }
 
             curr_steps = 5000

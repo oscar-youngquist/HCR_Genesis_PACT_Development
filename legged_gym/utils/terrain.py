@@ -403,7 +403,11 @@ class Terrain:
         self.terrain_kind_ids[i, j] = terrain_kind_id
 
         # add edge mask for the terrain, to indicate the edge points of the terrain, for use in rewards
-        self.edge_mask[start_x: end_x, start_y:end_y] = terrain.edge_mask
+        edge_mask_dilation_cells = int(getattr(self.cfg, "edge_mask_dilation_cells", 0))
+        self.edge_mask[start_x: end_x, start_y:end_y] = self._dilate_mask(
+            terrain.edge_mask,
+            edge_mask_dilation_cells,
+        )
 
         env_origin_x = (i + 0.5) * self.env_length
         env_origin_y = (j + 0.5) * self.env_width

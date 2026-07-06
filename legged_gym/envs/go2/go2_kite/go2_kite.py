@@ -2723,6 +2723,9 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             self.simulator.default_dof_pos[:, hip_joint_indices]), dim=-1)
         return dof_pos_error
 
+
+    # Rewards to try and mitigate the robot learning to exploit the heightfield "slope" 
+    #    where vertical edges should be. 
     def _reward_stumble(self):
         """
         Penalize feet colliding with vertical surfaces / obstacles during swing.
@@ -2739,3 +2742,68 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         stumble = (horizontal_force > 4.0 * vertical_force) & (horizontal_force > 5.0)
 
         return torch.sum(swing * stumble.float(), dim=1)
+
+
+    def _reward_edge_swing_clearance(self):
+        """
+        Penalize swing feet near stair/obstacle edges if they are below the
+        forward-looking local terrain height plus a clearance margin.
+
+        Positive penalty; use with a negative reward scale.
+        """
+        feet_near_edge = self._feet_near_edge_mask()
+        swing = ~self._feet_contact_mask()
+
+        feet_z = self.simulator.feet_pos[:, :, 2]
+
+        edge_target_z = (
+            self.simulator._max_height_ahead_feet
+            + self.cfg.rewards.edge_swing_clearance_margin
+        )
+
+        clearance_error = torch.relu(edge_target_z - feet_z)
+        mask = (feet_near_edge & swing).float()
+
+        return torch.sum(mask * torch.square(clearance_error), dim=-1)
+
+
+    def _reward_swing_foot_collision_edge(self):
+        """
+        Penalize swing feet moving into steep/slanted terrain near stair/obstacle edges.
+
+        Positive penalty; use with a negative reward scale.
+        Discourages using artificial heightfield slopes as ramps.
+        """
+        feet_near_edge = self._feet_near_edge_mask()          # (N, 4), bool
+        feet_contact = self._feet_contact_mask()              # (N, 4), bool
+        swing = ~feet_contact                                 # (N, 4), bool
+
+        foot_vel_xy = self.simulator.feet_vel[:, :, :2]                     # (N, 4, 2)
+        normals = self.simulator._normal_vector_around_feet.view(-1,4,3)  # (N, 4, 3)
+
+        normal_xy = normals[:, :, :2]
+        normal_xy_norm = torch.linalg.norm(normal_xy, dim=-1, keepdim=True)
+        normal_xy_dir = normal_xy / normal_xy_norm.clamp_min(1e-6)
+
+        valid_face_dir = normal_xy_norm.squeeze(-1) > 1e-4
+
+        # Smaller n_z means a steeper/slanted artificial face.
+        steep_face = normals[:, :, 2] < self.cfg.rewards.swing_collision_max_normal_z
+
+        # Positive when foot velocity points into the local terrain face.
+        # If validation shows the sign is reversed, change this to:
+        # into_face_speed = -torch.sum(foot_vel_xy * normal_xy_dir, dim=-1)
+        into_face_speed = torch.sum(foot_vel_xy * normal_xy_dir, dim=-1)
+
+        into_face_speed = torch.relu(
+            into_face_speed - self.cfg.rewards.swing_collision_min_speed
+        )
+
+        mask = (
+            feet_near_edge
+            & swing
+            & steep_face
+            & valid_face_dir
+        ).float()
+
+        return torch.sum(mask * torch.square(into_face_speed), dim=-1)

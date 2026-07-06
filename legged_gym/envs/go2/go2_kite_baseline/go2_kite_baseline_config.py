@@ -56,6 +56,15 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         debug_surface_normal_radius = 0.003
         debug_surface_normal_color = (1.0, 0.8, 0.0, 1.0)
         debug_surface_normal_refresh_steps = 5
+        debug_draw_edge_mask = False
+        debug_edge_mask_env_id = 0
+        debug_edge_mask_refresh_steps = 20
+        debug_edge_mask_stride_cells = 1
+        debug_edge_mask_max_points = 0
+        debug_edge_mask_radius = 0.01
+        debug_edge_mask_height_offset = 0.035
+        debug_edge_mask_color = (1.0, 0.1, 0.1, 0.9)
+        debug_edge_non_edge_color = (0.1, 0.35, 1.0, 0.35)
 
         # positions of the sampling height around the base (relative to the base of the robot)
         measured_points_x = [-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6] # 11x13 = 143
@@ -80,6 +89,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         terrain_roughness_step = 0.005
         terrain_roughness_downsampled_scale = 0.30
         terrain_roughness_protect_edges = True
+        edge_mask_dilation_cells = 1
         terrain_roughness_edge_clearance = 0.20
         terrain_roughness_border_clearance = 0.30
         # None applies roughness to all terrain kinds when enabled. To restrict
