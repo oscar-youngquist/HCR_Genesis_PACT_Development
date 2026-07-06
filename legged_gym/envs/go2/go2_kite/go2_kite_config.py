@@ -587,9 +587,11 @@ class GO2KITECfg( LeggedRobotCfg ):
             stumble                      = -10.0   # penalty for making horizontal contact during swing phase.
             edge_swing_clearance         = -2.0    # penalty for not lifitng foot above edges of vertical surfaces
             swing_foot_collision_edge    = -1.0    # penlaty for swigning feet into the artifical "slope" surfaces around edges in heightfield terrains
-
+            feet_regulation              = -0.1   # penalty for learning a (1) lift (2) swing (3) touchdown swing-leg cycle
+            
             # Targted posture regularization
             hip_pos                      = -0.05   # hip joints specifically should be close to default. Ued to avoid learning unnecessarily wide gaits.
+            x_command_hip_symmetry       = -0.2    # hip joints should be symmetric when moving forwards fast
 
             # Added these gait balance rewards to discourage observed behavior of diagonals pairs of feet behaving differently.
             swing_participation_balance    = 0.05   # (-) encourages all feet to swing for roughly the same amount of time an episode
@@ -638,6 +640,7 @@ class GO2KITECfg( LeggedRobotCfg ):
                                 "stumble",
                                 "front_foot_overreach",
                                 "rear_foot_overreach",
+                                "feet_regulation"
                                 ]
             
             curr_reward_bounds = {"torque_limits":[-1.0e-4, -1.0e-2],
@@ -650,7 +653,7 @@ class GO2KITECfg( LeggedRobotCfg ):
                                   "stumble":[-1.0, -10.0],
                                   "front_foot_overreach":[-1.0, -100.0],
                                   "rear_foot_overreach":[-1.0, -10.0],
-
+                                  "feet_regulation":[-0.05, -0.5]
                                  }
 
             curr_steps = 5000

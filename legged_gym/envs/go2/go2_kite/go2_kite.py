@@ -1140,14 +1140,19 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             # Remove episode length and the active reward scale. Since each raw
             # tracking reward is bounded by 1, this is the attained fraction of
             # the maximum possible tracking reward for each episode.
-            episode_steps = self.episode_length_buf[valid_ids].float().clamp(min=1.0)
+            # episode_steps = self.episode_length_buf[valid_ids].float().clamp(min=1.0)
             
             # if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > \
                 # self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel"]:
 
+            # normalized = (
+            #     self.episode_sums[reward_name][valid_ids]
+            #     / (episode_steps * scale)
+            # ).clamp(0.0, 1.0)
+
             normalized = (
                 self.episode_sums[reward_name][valid_ids]
-                / (episode_steps * scale)
+                / (self.max_episode_length * scale)
             ).clamp(0.0, 1.0)
             
             sample = normalized.mean().item()
@@ -1236,12 +1241,12 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             )
         ):
             self.last_lin_update_idx = self.common_step_counter
-            # self.command_ranges["lin_vel_x"][0] = np.clip(
-            #     self.command_ranges["lin_vel_x"][0]
-            #     - self.cfg.commands.lin_vel_x_step,
-            #     -self.cfg.commands.max_curriculum,
-            #     0.0,
-            # )
+            self.command_ranges["lin_vel_x"][0] = np.clip(
+                self.command_ranges["lin_vel_x"][0]
+                - self.cfg.commands.lin_vel_x_step,
+                -1.0,
+                0.0,
+            )
             self.command_ranges["lin_vel_x"][1] = np.clip(
                 self.command_ranges["lin_vel_x"][1]
                 + self.cfg.commands.lin_vel_x_step,
@@ -2177,101 +2182,9 @@ class Go2KITE(KITEDepthMixin, BaseTask):
     #     # clip to max error = 1 rad/s per joint to avoid huge penalties
     #     return torch.sum((torch.abs(self.simulator.torques) - self.simulator.torques_limits*self.cfg.rewards.soft_dof_vel_limit).clip(min=0., max=1.), dim=1)
 
-    def _reward_feet_spread_pairwise_axes(self):
-        """
-        Pair-aware, axis-separated MIN-SEPARATION penalty.
-
-        Only penalizes when distances are BELOW thresholds:
-        - Side pairs (left/right): (FL,FR), (RL,RR) -> penalize ONLY if |dx| < x_min  (ignore y)
-        - Lateral pairs (front/back on same side): (FL,RL), (FR,RR) -> penalize ONLY if |dy| < y_min (ignore x)
-        - Diagonal pairs: (FL,RR), (FR,RL) -> penalize if below thresholds on x and/or y (weighted blend)
-
-        Returns:
-        p: (N,) >= 0  (0 when constraints satisfied). You typically SUBTRACT this from total reward,
-            e.g. self.rew_buf -= scale * p  (or set reward_scales[...] negative).
-        """
-        # -------------------- hyperparameters (tune) --------------------
-        y_min = self.cfg.rewards.feet_spread_y_min
-        x_min = self.cfg.rewards.feet_spread_x_min
-        alpha_diag = self.cfg.rewards.feet_spread_alpha_diag
-        fz_thr = self.cfg.rewards.contact_force_threshold
-
-        # contact weighting mode:
-        #   "both"  -> w_ij = c_i * c_j  (strict stance-only)
-        #   "blend" -> w_ij = 0.5*(c_i + c_j) (some signal when one foot swings)
-        contact_mode = self.cfg.rewards.feet_spread_contact_mode
-        # ----------------------------------------------------------------
-
-        # Assumed foot order: 0=FL, 1=FR, 2=RL, 3=RR (common in RSL-RL / legged_gym setups)
-        # FL, FR, RL, RR = 0, 1, 2, 3
-        FR, FL, RR, RL = 0, 1, 2, 3
-
-        feet_xy = self._feet_pos_base_frame()[:, :, :2]  # (N,4,2)
-
-        # contact mask (N,4) in {0,1}
-        c = (self._feet_contact_fz() > fz_thr).float()
-
-        # Define pair groups per your constraint
-        side_pairs   = [(FL, FR), (RL, RR)]      # left/right
-        lateral_pairs = [(FL, RL), (FR, RR)]     # front/back on same side
-        diag_pairs   = [(FL, RR), (FR, RL)]      # diagonals
-
-        def w_pair(i, j):
-            if contact_mode == "blend":
-                return 0.5 * (c[:, i] + c[:, j])
-            return c[:, i] * c[:, j]
-
-        # Hinge penalty: >0 only when below threshold, 0 otherwise
-        def hinge(thresh_minus_val):
-            return torch.square(torch.relu(thresh_minus_val))
-
-        p = torch.zeros(feet_xy.shape[0], device=feet_xy.device)
-        denom = torch.zeros_like(p)
-
-        # Side pairs: penalize ONLY if |dx| < x_min (ignore y)
-        for i, j in side_pairs:
-            dxy = feet_xy[:, i] - feet_xy[:, j]
-            dx = torch.abs(dxy[:, 0])
-            wij = w_pair(i, j)
-            pij = hinge(x_min - dx)            # (N,)
-            p += wij * pij
-            denom += wij
-
-        # Lateral pairs: penalize ONLY if |dy| < y_min (ignore x)
-        for i, j in lateral_pairs:
-            dxy = feet_xy[:, i] - feet_xy[:, j]
-            dy = torch.abs(dxy[:, 1])
-            wij = w_pair(i, j)
-            pij = hinge(y_min - dy)            # (N,)
-            p += wij * pij
-            denom += wij
-
-        # Diagonal pairs: penalize shortfall on both axes (weighted blend)
-        for i, j in diag_pairs:
-            dxy = feet_xy[:, i] - feet_xy[:, j]
-            dx = torch.abs(dxy[:, 0])
-            dy = torch.abs(dxy[:, 1])
-            wij = w_pair(i, j)
-
-            px = hinge(x_min - dx)
-            py = hinge(y_min - dy)
-            pij = alpha_diag * py + (1.0 - alpha_diag) * px
-            p += wij * pij
-            denom += wij
-
-        # Average over active pairs; if none active, penalty 0
-        p = torch.where(denom > 0.0, p / (denom + 1e-6), torch.zeros_like(p))
-
-        # Optional: normalize by thresholds to make it roughly scale-free:
-        p = p / (alpha_diag * y_min + (1.0 - alpha_diag) * x_min + 1e-6)
-
-        return p
-
-
     def _reward_torque_limits(self):
         # penalize torques too close to the limit
         return torch.sum((torch.abs(self.simulator.torques) - self.simulator.torque_limits*self.cfg.rewards.soft_torque_limit).clip(min=0.), dim=1)
-
 
     def _reward_tracking_lin_vel_base(self):
         lin_vel_error = self._lin_vel_tracking_error()
@@ -2723,6 +2636,24 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             self.simulator.default_dof_pos[:, hip_joint_indices]), dim=-1)
         return dof_pos_error
 
+
+    def _reward_feet_regulation(self):
+        base_height = self._base_height_over_terrain()                                            # (N, )
+        feet_pos = self.simulator.feet_pos                                                        # (N, 4, 3)
+        feet_xy_vel = self.simulator.feet_vel[:,:,0:2]                                            # (N, 4, 2)
+        base_pos = self.simulator.base_pos.unsqueeze(1)                                           # (N, 1, 3)
+        delta_feet = feet_pos - base_pos                                                          # (N, 4, 3)
+        feet2base_height = (delta_feet * self.simulator.projected_gravity.unsqueeze(1)).sum(-1)   # (N, 4)
+        feet_height = torch.clamp(base_height.unsqueeze(1) - feet2base_height, min=0.0)           # (N, 4)
+        rew = (feet_xy_vel.pow(2).sum(-1) * torch.exp(-feet_height / (0.025 * self.cfg.rewards.base_height_target))).sum(-1)  # (N, )
+        return rew
+
+    def _reward_x_command_hip_symmetry(self):
+        hip_dof_indices = [0, 3, 6, 9]                                                             # indicies in config space
+        hip_pos = self.simulator.dof_pos[:, hip_dof_indices]
+        x_command_ratio = torch.abs(self.commands[:,0]) / torch.norm(self.commands[:,:3], dim=1)   # how much of the command is subsumed by "forwards"
+        rew = torch.abs(hip_pos[:,0]+hip_pos[:,1]) + torch.abs(hip_pos[:,2]+hip_pos[:,3])          # calculate hip symmetry
+        return rew * x_command_ratio                                                               # weight by the command ratio
 
     # Rewards to try and mitigate the robot learning to exploit the heightfield "slope" 
     #    where vertical edges should be. 
