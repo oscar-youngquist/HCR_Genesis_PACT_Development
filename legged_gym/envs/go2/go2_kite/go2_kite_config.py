@@ -7,11 +7,11 @@ class GO2KITECfg( LeggedRobotCfg ):
         num_envs = 4096
         num_observations = 57
         num_privileged_obs = 144
-        num_priv_stack = 5
+        num_priv_stack = 3
         num_explicit_recon_obs = 3 + 4 + 4 + 12 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 10
+        num_obs_hist = 5
         grf_dim = 12
         whole_body_dim = 18
         debug = False # if debugging, visualize contacts, 
@@ -459,7 +459,7 @@ class GO2KITECfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
         soft_torque_limit = 0.90
-        base_height_target = 0.32
+        base_height_target = 0.36
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         tracking_lin_vel_error_scale = 4.0
         tracking_ang_vel_error_scale = 4.0
@@ -722,7 +722,8 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         cnn_activation = 'elu'
 
         # Proprioceptive Context encoder
-        proprio_in_dim = 570
+        # proprio_in_dim = 570
+        proprio_in_dim = 285
         proprio_use_norm = True
         proprio_num_blocks = 3
         proprio_hidden_dim = 64
@@ -844,7 +845,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # debug_warmpinn_wb
         run_name = '50hz_nogap_parkour'
         # run_name = 'terrain_debug_test'
-        experiment_name = 'go2_kite'
+        experiment_name = 'go2_kite_debugging'
         save_interval = 100
         
         
