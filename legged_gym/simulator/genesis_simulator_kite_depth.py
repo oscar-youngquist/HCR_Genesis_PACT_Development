@@ -229,6 +229,12 @@ class GenesisSimulator_KITE_Depth(GenesisSimulator_KITE):
             self._terrain.edge_mask, device=self._device, dtype=torch.bool
         )
 
+    def _create_trimesh(self):
+        super()._create_trimesh()
+        self._edge_mask = torch.as_tensor(
+            self._terrain.edge_mask, device=self._device, dtype=torch.bool
+        )
+
     def _create_warp_env(self):
         terrain_mesh = self._gs_terrain.geoms[0].get_trimesh()
         terrain_mesh = terrain_mesh.copy()

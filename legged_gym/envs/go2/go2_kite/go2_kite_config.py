@@ -7,11 +7,11 @@ class GO2KITECfg( LeggedRobotCfg ):
         num_envs = 4096
         num_observations = 57
         num_privileged_obs = 144
-        num_priv_stack = 5
+        num_priv_stack = 3
         num_explicit_recon_obs = 3 + 4 + 4 + 12 # torso lin-velo, feet contact states, feet height
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 10
+        num_obs_hist = 5
         grf_dim = 12
         whole_body_dim = 18
         debug = False # if debugging, visualize contacts, 
@@ -21,8 +21,8 @@ class GO2KITECfg( LeggedRobotCfg ):
     class terrain( LeggedRobotCfg.terrain ):
         # mesh_type = 'plane' # plane, heightfield, trimesh
         # plane_length = 200.0 # [m]. plane size is 200x200x10 by default
-        # horizontal_scale = 0.1 # [m] distance between height samples in x and y direction
-        # vertical_scale = 0.005 # [m] distance between height samples in z direction
+        horizontal_scale = 0.1  # [m] distance between height samples in x and y direction
+        vertical_scale = 0.005  # [m] distance between height samples in z direction
         # border_size = 5 # [m] length of the border surrounding the terrain
         # border_height = 1.0 # [m] height of the border surrounding the terrain
         # curriculum = False # whether to use terrain curriculum, starting from easier terrains and gradually increasing the difficulty
@@ -32,7 +32,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         # obtain_terrain_info_around_feet = True
 
         # rough terrain only:
-        mesh_type = "trimesh"
+        mesh_type = "heightfield"
         static_friction = 1.0 # coefficient of static friction of the terrain
         dynamic_friction = 1.0 # coefficient of dynamic friction of the terrain
         restitution = 0. # coefficient of restitution of the terrain
@@ -92,8 +92,7 @@ class GO2KITECfg( LeggedRobotCfg ):
                                     #   3,  # stairs up
                                     #   4,  # discrete obstacles
                                       ]
-        # Riskier terrain kinds that can be included once the edge/borderterrain_roughness_border_clearance
-        # protection is validated:
+
         # 5  # stepping stones
         # 6  # gap
         # 7  # pit
@@ -150,7 +149,7 @@ class GO2KITECfg( LeggedRobotCfg ):
                             [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721],
                             [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721],
                             [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721]]
-        pos = [0.0, 0.0, 0.42] # x,y,z [m]
+        pos = [0.0, 0.0, 0.48] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
             'FL_hip_joint': 0.1,     # [rad]
             'RL_hip_joint': 0.1,     # [rad]
@@ -558,17 +557,17 @@ class GO2KITECfg( LeggedRobotCfg ):
             rear_foot_overreach = -10.0
 
             # gait
-            feet_air_time    = 1.00                # (-) tracking reward for long steps
+            feet_air_time                = 1.00    # (-) tracking reward for long steps
             foot_clearance_terrain_aware = 0.40    # (+) tracking reward for feet reaching the desired clearance responsive to terrain height            
-            foot_slip        = -0.01               # penalty for feet slipping
-            feet_contact_forces = -1.0e-2          # penalty for high contact forces on the feet
-            feet_near_edge = -1.0                  # penalty for feet being in contact near any edge terrain  
-            stumble          = -10.0                # penalty for making horizontal contact during swing phase.
-            hip_pos = -0.10                        # hip joints specifically should be close to default. Ued to avoid learning unnecessarily wide gaits.
+            foot_slip                    = -0.01   # penalty for feet slipping
+            feet_contact_forces          = -1.0e-2 # penalty for high contact forces on the feet
+            feet_near_edge               = -1.0    # penalty for feet being in contact near any edge terrain  
+            stumble                      = -10.0   # penalty for making horizontal contact during swing phase.
+            hip_pos                      = -0.05   # hip joints specifically should be close to default. Ued to avoid learning unnecessarily wide gaits.
 
             # Added these gait balance rewards to discourage observed behavior of diagonals pairs of feet behaving differently.
-            swing_participation_balance = 0.10      # (-) encourages all feet to swing for roughly the same amount of time an episode
-            diagonal_pair_balance = 0.10            # (-) encourages diagonal pairs of feet specifically to wing the same amount of time per episode
+            swing_participation_balance    = 0.10   # (-) encourages all feet to swing for roughly the same amount of time an episode
+            diagonal_pair_balance          = 0.10   # (-) encourages diagonal pairs of feet specifically to wing the same amount of time per episode
             completed_swing_height_balance = 0.10   # (-) enocurages all swing feet to reach the desired height throughout a swing
 
             # Novel KITE-specific whole-body posture + terrain regualrization/alignment rewards
@@ -722,8 +721,8 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         cnn_activation = 'elu'
 
         # Proprioceptive Context encoder
-        proprio_in_dim = 570
-        # proprio_in_dim = 285
+        # proprio_in_dim = 570
+        proprio_in_dim = 285
         proprio_use_norm = True
         proprio_num_blocks = 3
         proprio_hidden_dim = 64
@@ -845,7 +844,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # debug_warmpinn_wb
         run_name = '50hz_nogap_parkour'
         # run_name = 'terrain_debug_test'
-        experiment_name = 'go2_kite'
+        experiment_name = 'go2_kite_debugging'
         save_interval = 100
         
         

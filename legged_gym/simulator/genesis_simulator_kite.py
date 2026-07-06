@@ -793,7 +793,7 @@ class GenesisSimulator_KITE(Simulator):
         # Domain rand curriculum stuff
         self.n_digits = 2
 
-        print("++++++++++++++ self.n_digits -- ", self.n_digits)
+        # print("++++++++++++++ self.n_digits -- ", self.n_digits)
 
         self.vert_interval_min = self._cfg.domain_rand.vert_interval_min
         self.vert_interval_max = self._cfg.domain_rand.vert_interval_max
@@ -1014,7 +1014,6 @@ class GenesisSimulator_KITE(Simulator):
             self._terrain = Terrain(self._cfg.terrain)
             self._create_heightfield()
         elif mesh_type == 'trimesh':
-            raise NotImplementedError("Trimesh terrain is not validated yet in Genesis, please use heightfield for now.")
             self._terrain = Terrain(self._cfg.terrain)
             self._create_trimesh()
         else:
@@ -1251,8 +1250,6 @@ class GenesisSimulator_KITE(Simulator):
                              (self._cfg.env.num_envs,1),
                              self._device),
             decimals=self.n_digits).float()
-        
-        print(self.wrench_timeouts)
         
         self.env_identities = torch.arange(
             self._num_envs,
