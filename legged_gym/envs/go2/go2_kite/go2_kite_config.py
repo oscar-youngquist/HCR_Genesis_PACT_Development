@@ -845,9 +845,9 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         log_detailed_encoder_losses = True
 
         # Adaptive entropy coefficient curriculum
-        entropy_coef = 0.02
+        entropy_coef = 0.01
         use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.01, 0.02]
+        adaptive_ent_bounds = [0.008, 0.012]
         adaptive_ent_lin_threshold = 0.80
         adaptive_ent_ang_threshold = 0.40
         adaptive_ent_ter_threshold = 6.0
