@@ -5,8 +5,8 @@ class GO2KITECfg( LeggedRobotCfg ):
     
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
-        num_observations = 57
-        num_privileged_obs = 144
+        num_observations = 45
+        num_privileged_obs = 132
         num_priv_stack = 3
         num_explicit_recon_obs = 3 + 4 + 4 + 12 # torso lin-velo, feet contact states, feet height
         num_actions = 12
@@ -527,6 +527,9 @@ class GO2KITECfg( LeggedRobotCfg ):
         swing_collision_max_normal_z = 0.85
         swing_collision_min_speed = 0.05
 
+        position_progress_min_cmd = 0.05
+        position_no_progress_fraction = 0.25
+
         # Used to create "balanced" swing-leg participation
         swing_ema_alpha         = 0.97
         swing_height_ema_alpha  = 0.95
@@ -552,6 +555,10 @@ class GO2KITECfg( LeggedRobotCfg ):
             #    negative pushes away from not tracking
             tracking_lin_vel_penalty = 0.0
             tracking_ang_vel_penalty = 0.0
+
+            # Asymmetric PB reward for making progress in the desired direction
+            position_progress    =  0.5
+            position_no_progress = -0.2
 
             dof_tracking      = 0.00
             aligned_torques   = 0.00
@@ -742,57 +749,58 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # Privileged Encoder/Decoder
         priv_activation = 'elu'
 
-        cnn_norm_type = "layer"
+        cnn_norm_type                 = "layer"
         terrain_encoder_attention_dim = 128
-        terrain_encoder_n_heads = 4
-        terrain_decoder_hidden_dim = 128
+        terrain_encoder_n_heads       = 4
+        terrain_decoder_hidden_dim    = 128
+        terrain_decoder_channels      = 64
         terrain_decoder_encoded_spatial_dim = (3,4)
-        terrain_decoder_channels = 64
 
-        priv_mixer_num_blocks = 3
-        priv_mixer_hidden_dim = 64
-        priv_mixer_token_dim = 64
-        priv_mixer_channel_dim = 128
+
+        priv_mixer_num_blocks     = 3
+        priv_mixer_hidden_dim     = 64
+        priv_mixer_token_dim      = 64
+        priv_mixer_channel_dim    = 128
         priv_mixer_use_layer_norm = True
         privileged_dynamics_decoder_layers = [64,128,256]
 
         # Depth Image/Sequence Models
-        depth_image_norm = "layer"
-        depth_image_std_min = 0.1
-        depth_image_std_max = 2.0
-        depth_autoencoder_skip_dropout_prob = 0.25
-        depth_sequence_length = 5
+        depth_image_norm                    = "layer"
+        depth_image_std_min                 = 0.1
+        depth_image_std_max                 = 2.0
+        depth_autoencoder_skip_dropout_prob = 0.50
+        depth_sequence_length               = 5
 
-        depth_sequence_norm = "layer"
-        depth_sequence_std_min = 0.1
-        depth_sequence_std_max = 1.0
-        depth_sequence_conf_min = 0.1
+        depth_sequence_norm            = "layer"
+        depth_sequence_std_min         = 0.1
+        depth_sequence_std_max         = 1.0
+        depth_sequence_conf_min        = 0.1
         depth_sequence_conf_mask_scale = 0.2
-        cnn_activation = 'elu'
+        cnn_activation                 = 'elu'
 
         # Proprioceptive Context encoder
-        # proprio_in_dim = 570
-        proprio_in_dim = 285
-        proprio_use_norm = True
-        proprio_num_blocks = 3
-        proprio_hidden_dim = 64
-        proprio_token_dim = 64
+        # proprio_in_dim      = 570
+        proprio_in_dim      = 225
+        proprio_use_norm    = True
+        proprio_num_blocks  = 3
+        proprio_hidden_dim  = 64
+        proprio_token_dim   = 64
         proprio_channel_dim = 128
-        proprio_std_min = 0.10
-        proprio_std_max = 1.0
+        proprio_std_min     = 0.10
+        proprio_std_max     = 1.0
 
         # Modality Mixer Network
-        mixer_velo_dim = 3                   # torso velocity state [v_x, v_y, v_z]
+        mixer_velo_dim       = 3             # torso velocity state [v_x, v_y, v_z]
         mixer_feet_state_dim = 20            # [feet-contact-state (4), feet-height (4), surface-normal under feet (12)]
-        mixer_use_norm = True
-        mixer_hidden_dims = [64, 32]
-        mixer_velo_hidden = 128
-        mixer_feet_hidden = 128
-        mixer_std_min = 0.10
-        mixer_std_max = 1.0
+        mixer_use_norm       = True
+        mixer_hidden_dims    = [64, 32]
+        mixer_velo_hidden    = 128
+        mixer_feet_hidden    = 128
+        mixer_std_min        = 0.10
+        mixer_std_max        = 1.0
 
         # Actor/critic
-        actor_layers = [512,256,128]
+        actor_layers  = [512,256,128]
         critic_layers = [512,256,128]
 
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"

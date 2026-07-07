@@ -72,6 +72,9 @@ class GenesisSimulator_KITE(Simulator):
 
     def post_physics_step(self):
         self.common_step_counter += 1
+
+        # Copy the previous base pose before updating
+        self._lbase_pos[:] = self._base_pos.clone().detach()
         
         # prepare quantities
         self._base_pos[:] = self._robot.get_pos()
@@ -1398,6 +1401,9 @@ class GenesisSimulator_KITE(Simulator):
         
         self._base_pos = torch.zeros(
             (self._num_envs, 3), device=self._device, dtype=torch.float)
+        
+        self._lbase_pos = torch.zeros_like(self.base_pos)
+
         self._base_quat = torch.zeros(
             (self._num_envs, 4), device=self._device, dtype=torch.float)
         self._base_quat_gs = torch.zeros(

@@ -681,7 +681,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
                                       * self.obs_scales.dof_pos,                              # joint pose            12
                                     self.simulator.dof_vel * self.obs_scales.dof_vel,         # joint velocity        12
                                     self.actions[:,0:12],                                     # joint pose actions    12
-                                    self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)),    # joint torque actions  12
+                                    # self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)),    # joint torque actions  12
                                     ), dim=-1)                                                # 57
 
         # add noise if needed
@@ -733,7 +733,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
                     * self.obs_scales.dof_pos,                                         # joint pose            12
                 self.simulator.dof_vel * self.obs_scales.dof_vel,                      # joint velocity        12
                 self.actions[:,0:12],                                                  # joint pose actions    12
-                self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)), 
+                # self.simulator.feedback_torques * (1.0/float(self.cfg.control.torque_scale)), 
                 torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) -
                            self.simulator.measured_heights, dim=1, keepdim=True),      # 1  - base height
                 self.simulator.base_lin_vel * self.obs_scales.lin_vel,                 # 3  - base linear velocity
@@ -1799,6 +1799,11 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         self.bound_diff = self.tradeoff_upperbounds - self.tradeoff_lowerbounds 
         self.use_tradeoff = self.cfg.control.use_tradeoff_curriculum
 
+        print("self.use_tradeoff - ", self.use_tradeoff)
+
+        # We want to be at the full bounds right away, but we want to skip back sometimes for exploration
+        self.tradeoff_step_ctr = torch.zeros((self.cfg.env.num_envs, 1), device=sim_device, dtype=torch.float)
+
     def _sample_command_resample_timeouts(self, num_envs):
         if self.randomize_command_resampling_time:
             command_timeouts_s = torch_rand_float(
@@ -1819,11 +1824,21 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             torch.round(command_timeouts_s / self.dt).long(),
             min=1,
         )
-        
-        print("self.use_tradeoff - ", self.use_tradeoff)
 
-        # We want to be at the full bounds right away, but we want to skip back sometimes for exploration
-        self.tradeoff_step_ctr = torch.zeros((self.cfg.env.num_envs, 1), device=sim_device, dtype=torch.float)
+    def _command_xy_dir_and_mag(self):
+        """Returns normalized commanded xy direction and command magnitude."""
+        cmd_xy = self.commands[:, :2]                                      # (N, 2)
+        cmd_mag = torch.linalg.norm(cmd_xy, dim=-1, keepdim=True)          # (N, 1)
+        cmd_dir = cmd_xy / cmd_mag.clamp_min(1e-6)                         # (N, 2)
+        
+        return cmd_dir, cmd_mag.squeeze(-1)                                # (N, 2), (N,)
+    
+    def _base_pos_delta(self):
+        base_pos_xy      = self.simulator.base_pos[:,:2]    # (N, 2)
+        prev_base_pos_xy = self.simulator._lbase_pos[:,:2]  # (N, 2)
+        delta_base_pose = base_pos_xy - prev_base_pos_xy
+
+        return delta_base_pose
 
     # ------------ reward functions----------------
     
@@ -2953,3 +2968,57 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         ).float()
 
         return torch.sum(mask * torch.square(into_face_speed), dim=-1)
+
+    def _reward_position_progress(self):
+        """
+        Reward base position progress aligned with the commanded xy velocity.
+
+        Positive reward. Encourages actual displacement in the commanded direction,
+        not just instantaneous velocity tracking.
+        """
+        cmd_dir, cmd_mag = self._command_xy_dir_and_mag()
+
+        delta_pos_xy = self._base_pos_delta()                      # (N, 2)
+
+        aligned_progress = torch.sum(delta_pos_xy * cmd_dir, dim=-1)       # (N,)
+
+        min_cmd = getattr(
+            self.cfg.rewards,
+            "position_progress_min_cmd",
+            0.05,
+        )
+        command_active = (cmd_mag > min_cmd).float()
+
+        return command_active * torch.relu(aligned_progress)
+    
+    def _reward_position_no_progress(self):
+        """
+        Penalize insufficient base position progress along the commanded xy direction.
+
+        Positive penalty magnitude. Use with a negative reward scale.
+        """
+        cmd_dir, cmd_mag = self._command_xy_dir_and_mag()
+        delta_pos_xy = self._base_pos_delta()
+
+        aligned_progress = torch.sum(delta_pos_xy * cmd_dir, dim=-1)       # (N,)
+
+        desired_progress = cmd_mag * self.dt                                    # (N,)
+
+        progress_fraction = getattr(
+            self.cfg.rewards,
+            "position_no_progress_fraction",
+            0.25,
+        )
+
+        min_required_progress = progress_fraction * desired_progress
+
+        min_cmd = getattr(
+            self.cfg.rewards,
+            "position_progress_min_cmd",
+            0.05,
+        )
+        command_active = (cmd_mag > min_cmd).float()
+
+        no_progress_error = torch.relu(min_required_progress - aligned_progress)
+
+        return command_active * torch.square(no_progress_error)
