@@ -165,7 +165,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         )
 
     def _gait_order_tensor(self, values):
-        """Return foot tensors in gait reward order [FL, FR, RL, RR]."""
+        """Return foot tensors in gait reward order [FR, FL, RR, RL]."""
         return values[:, self.gait_foot_order, ...]
 
     def _gait_contact_mask(self):
@@ -1493,11 +1493,6 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel],
                                            device=self.device, dtype=torch.float,
                                            requires_grad=False)
-        self.pd_target_tau_max = torch.as_tensor(
-            self.cfg.rewards.pd_target_tau_max,
-            device=self.device,
-            dtype=torch.float,
-        )
         self.actions = torch.zeros(
             (self.num_envs, self.num_actions), device=self.device, dtype=torch.float)
         self.last_actions = torch.zeros_like(self.actions)
@@ -1506,8 +1501,9 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         self.feet_air_time = torch.zeros(
             (self.num_envs, len(self.simulator.feet_indices)), device=self.device, dtype=torch.float)
         self.last_contacts = torch.zeros((self.num_envs, len(self.simulator.feet_indices)), device=self.device, dtype=torch.int)
-        foot_names = list(getattr(self.cfg.asset, "foot_name", ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]))
-        gait_order_names = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+       
+        foot_names = list(getattr(self.cfg.asset, "foot_name", ['FR_foot', 'FL_foot', 'RR_foot', 'RL_foot']))
+        gait_order_names = ['FR_foot', 'FL_foot', 'RR_foot', 'RL_foot']
         gait_order = [foot_names.index(name) for name in gait_order_names]
         self.gait_foot_order = torch.as_tensor(gait_order, device=self.device, dtype=torch.long)
         self.feet_swing_ema = torch.zeros(
@@ -2991,25 +2987,56 @@ class Go2KITE(KITEDepthMixin, BaseTask):
 
         return command_active * torch.relu(aligned_progress)
     
+    # def _reward_position_no_progress(self):
+    #     """
+    #     Penalize insufficient base position progress along the commanded xy direction.
+
+    #     Positive penalty magnitude. Use with a negative reward scale.
+    #     """
+    #     cmd_dir, cmd_mag = self._command_xy_dir_and_mag()
+    #     delta_pos_xy = self._base_pos_delta()
+
+    #     aligned_progress = torch.sum(delta_pos_xy * cmd_dir, dim=-1)       # (N,)
+
+    #     desired_progress = cmd_mag * self.dt                                    # (N,)
+
+    #     progress_fraction = getattr(
+    #         self.cfg.rewards,
+    #         "position_no_progress_fraction",
+    #         0.25,
+    #     )
+
+    #     min_required_progress = progress_fraction * desired_progress
+
+    #     min_cmd = getattr(
+    #         self.cfg.rewards,
+    #         "position_progress_min_cmd",
+    #         0.05,
+    #     )
+    #     command_active = (cmd_mag > min_cmd).float()
+
+    #     no_progress_error = torch.relu(min_required_progress - aligned_progress)
+
+    #     return command_active * torch.square(no_progress_error)
+    
     def _reward_position_no_progress(self):
         """
-        Penalize insufficient base position progress along the commanded xy direction.
+        Smooth bounded no-progress penalty.
 
-        Positive penalty magnitude. Use with a negative reward scale.
+        0 when sufficient progress.
+        Near 1 for severe no-progress / backward-progress cases.
         """
         cmd_dir, cmd_mag = self._command_xy_dir_and_mag()
         delta_pos_xy = self._base_pos_delta()
 
-        aligned_progress = torch.sum(delta_pos_xy * cmd_dir, dim=-1)       # (N,)
-
-        desired_progress = cmd_mag * self.dt                                    # (N,)
+        aligned_progress = torch.sum(delta_pos_xy * cmd_dir, dim=-1)
+        desired_progress = cmd_mag * self.dt
 
         progress_fraction = getattr(
             self.cfg.rewards,
             "position_no_progress_fraction",
             0.25,
         )
-
         min_required_progress = progress_fraction * desired_progress
 
         min_cmd = getattr(
@@ -3019,6 +3046,16 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         )
         command_active = (cmd_mag > min_cmd).float()
 
-        no_progress_error = torch.relu(min_required_progress - aligned_progress)
+        progress_deficit = (
+            min_required_progress - aligned_progress
+        ) / min_required_progress.clamp_min(1e-6)
 
-        return command_active * torch.square(no_progress_error)
+        sharpness = getattr(
+            self.cfg.rewards,
+            "position_no_progress_sharpness",
+            2.0,
+        )
+
+        penalty = 1.0 - torch.exp(-sharpness * torch.relu(progress_deficit))
+
+        return command_active * penalty

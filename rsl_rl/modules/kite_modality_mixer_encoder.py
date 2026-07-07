@@ -123,7 +123,11 @@ class MultimodalFusionVAE(nn.Module):
         self.velo_est_out = nn.Linear(velo_hidden, velo_dim)
 
         self.feet_est_hidden = nn.Linear(output_dim, feet_hidden)
-        self.feet_est_out = nn.Linear(feet_hidden, feet_state_dim)
+        # self.feet_est_out = nn.Linear(feet_hidden, feet_state_dim)
+
+        self.feet_contact_est = nn.Linear(feet_hidden, 4)
+        self.feet_height_est  = nn.Linear(feet_hidden, 4)
+        self.feet_normal_est  = nn.Linear(feet_hidden, 12)
 
         self._initialize_weights()
 
@@ -252,14 +256,41 @@ class MultimodalFusionVAE(nn.Module):
         if self.feet_est_hidden.bias is not None:
             nn.init.zeros_(self.feet_est_hidden.bias)
 
+        # nn.init.kaiming_uniform_(
+        #     self.feet_est_out.weight,
+        #     a=1.0,
+        #     mode="fan_in",
+        #     nonlinearity="linear",
+        # )
+        # if self.feet_est_out.bias is not None:
+        #     nn.init.zeros_(self.feet_est_out.bias)
+
         nn.init.kaiming_uniform_(
-            self.feet_est_out.weight,
+            self.feet_normal_est.weight,
             a=1.0,
             mode="fan_in",
             nonlinearity="linear",
         )
-        if self.feet_est_out.bias is not None:
-            nn.init.zeros_(self.feet_est_out.bias)
+        if self.feet_normal_est.bias is not None:
+            nn.init.zeros_(self.feet_normal_est.bias)
+
+        nn.init.kaiming_uniform_(
+            self.feet_height_est.weight,
+            a=1.0,
+            mode="fan_in",
+            nonlinearity="linear",
+        )
+        if self.feet_height_est.bias is not None:
+            nn.init.zeros_(self.feet_height_est.bias)
+
+        nn.init.kaiming_uniform_(
+            self.feet_contact_est.weight,
+            a=1.0,
+            mode="fan_in",
+            nonlinearity="linear",
+        )
+        if self.feet_contact_est.bias is not None:
+            nn.init.zeros_(self.feet_contact_est.bias)
 
     def _check_inputs(
         self,
@@ -380,6 +411,17 @@ class MultimodalFusionVAE(nn.Module):
         epsilon = torch.randn_like(logvar).to(logvar.device)
         return mean + torch.exp(0.5 * logvar) * epsilon
 
+    def est_feet(self, z_sample):
+        feet_hidden = self.activation(self.feet_est_hidden(z_sample))
+
+        feet_contact = self.feet_contact_est(feet_hidden)
+        feet_height = self.feet_height_est(feet_hidden)
+        feet_normal = F.normalize(self.feet_normal_est(feet_hidden), p=2, dim=1, eps=1e-6)
+
+        feet_state_est = torch.cat((feet_contact, feet_height, feet_normal), dim=-1)
+
+        return feet_state_est
+    
     def forward(
         self,
         z_depth_seq: torch.Tensor,
@@ -410,8 +452,10 @@ class MultimodalFusionVAE(nn.Module):
 
         z = self.reparameterization_trick(mean, logvar)
 
-        body_velo_est = self.velo_est_out(self.activation(self.velo_est_hidden(mean)))
-        feet_state_est = self.feet_est_out(self.activation(self.feet_est_hidden(mean)))
+        body_velo_est = self.velo_est_out(self.activation(self.velo_est_hidden(z)))
+        # feet_state_est = self.feet_est_out(self.activation(self.feet_est_hidden(z)))
+
+        feet_state_est = self.est_feet(z)
 
         return mean, logvar, z, body_velo_est, feet_state_est
 
@@ -438,6 +482,8 @@ class MultimodalFusionVAE(nn.Module):
         mean, _ = self.encode(z_depth_seq, z_proprio)
 
         body_velo_est = self.velo_est_out(self.activation(self.velo_est_hidden(mean)))
-        feet_state_est = self.feet_est_out(self.activation(self.feet_est_hidden(mean)))
+        # feet_state_est = self.feet_est_out(self.activation(self.feet_est_hidden(mean)))
+
+        feet_state_est = self.est_feet(mean)
 
         return mean, body_velo_est, feet_state_est

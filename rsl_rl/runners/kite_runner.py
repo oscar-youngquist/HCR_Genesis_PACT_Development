@@ -186,6 +186,8 @@ class OnPolicyRunnerKITE:
             cnn_norm_type=self.policy_cfg.get("cnn_norm_type", "layer"),
             terrain_encoder_attention_dim=self.policy_cfg.get("terrain_encoder_attention_dim", 128),
             terrain_encoder_n_heads=self.policy_cfg.get("terrain_encoder_n_heads", 4),
+            privileged_terrain_std_min=self.policy_cfg.get("privileged_terrain_std_min", 0.01),
+            privileged_terrain_std_max=self.policy_cfg.get("privileged_terrain_std_max", 1.5),
             terrain_decoder_hidden_dim=self.policy_cfg.get("terrain_decoder_hidden_dim", 128),
             terrain_decoder_encoded_spatial_dim=self.policy_cfg.get("terrain_decoder_encoded_spatial_dim", (3,4)),
             terrain_decoder_channels=self.policy_cfg.get("terrain_decoder_channels", 64),
@@ -195,6 +197,8 @@ class OnPolicyRunnerKITE:
             priv_mixer_token_dim=self.policy_cfg.get("priv_mixer_token_dim", 128),
             priv_mixer_channel_dim=self.policy_cfg.get("priv_mixer_channel_dim", 256),
             priv_mixer_use_layer_norm=self.policy_cfg.get("priv_mixer_use_layer_norm", True),
+            privileged_dynamics_std_min=self.policy_cfg.get("privileged_dynamics_std_min", 0.01),
+            privileged_dynamics_std_max=self.policy_cfg.get("privileged_dynamics_std_max", 1.5),
             device=self.device,
             **alg_cfg,
         )

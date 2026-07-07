@@ -445,7 +445,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         torque_scale = 10.00   # action scale:  target torque = torque_scale * tau_action + defaultTorque
         
         
-        dt =  0.02     # control frequency 200Hz
+        dt =  0.02     # control frequency 50Hz
         decimation = 4  # decimation: Number of control action updates @ sim DT per policy DT
 
         # Assumed order - tau_ff, tau_fb
@@ -502,17 +502,14 @@ class GO2KITECfg( LeggedRobotCfg ):
         overreach_x_max = 0.36
         rear_foot_x_nominal = -0.20
         rear_foot_x_margin = 0.16
+        
         support_polygon_sigma = 0.01
+        
         vhip_angle_deadband = 0.1
         vhip_acc_deadband = 0.001
-        feet_spread_x_min = 0.40
-        feet_spread_y_min = 0.35
-        feet_spread_alpha_diag = 0.8
-        feet_spread_contact_mode = "blend"
-        pd_target_tau_max = [25.0, 25.0, 35.0, 25.0, 25.0, 35.0, 25.0, 25.0, 35.0, 25.0, 25.0, 35.0]
 
         foot_clearance_tracking_sigma = 0.01
-        only_positive_rewards = True
+        only_positive_rewards = False
 
         use_reward_curriculum = True
 
@@ -527,8 +524,9 @@ class GO2KITECfg( LeggedRobotCfg ):
         swing_collision_max_normal_z = 0.85
         swing_collision_min_speed = 0.05
 
+        # Position-based progress reward/penalty
         position_progress_min_cmd = 0.05
-        position_no_progress_fraction = 0.25
+        position_no_progress_fraction = 0.75
 
         # Used to create "balanced" swing-leg participation
         swing_ema_alpha         = 0.97
@@ -557,8 +555,8 @@ class GO2KITECfg( LeggedRobotCfg ):
             tracking_ang_vel_penalty = 0.0
 
             # Asymmetric PB reward for making progress in the desired direction
-            position_progress    =  0.5
-            position_no_progress = -0.2
+            position_progress    =  0.0
+            position_no_progress = -1.0
 
             dof_tracking      = 0.00
             aligned_torques   = 0.00
@@ -603,8 +601,8 @@ class GO2KITECfg( LeggedRobotCfg ):
             rear_foot_overreach = -10.0
 
             # gait
-            feet_air_time                = 1.00    # (-) tracking reward for long steps
-            foot_clearance_terrain_aware = 0.40    # (+) tracking reward for feet reaching the desired clearance responsive to terrain height            
+            feet_air_time                = 0.50    # (-) tracking reward for long steps
+            foot_clearance_terrain_aware = 0.30    # (+) tracking reward for feet reaching the desired clearance responsive to terrain height            
             foot_slip                    = -0.01   # penalty for feet slipping
             feet_contact_forces          = -1.0e-2 # penalty for high contact forces on the feet
             feet_near_edge               = -1.0    # penalty for feet being in contact near any edge terrain  
@@ -615,12 +613,12 @@ class GO2KITECfg( LeggedRobotCfg ):
             
             # Targted posture regularization
             hip_pos                      = -0.05   # hip joints specifically should be close to default. Ued to avoid learning unnecessarily wide gaits.
-            x_command_hip_symmetry       = -0.2    # hip joints should be symmetric when moving forwards fast
+            x_command_hip_symmetry       = -0.05    # hip joints should be symmetric when moving forwards fast
 
             # Added these gait balance rewards to discourage observed behavior of diagonals pairs of feet behaving differently.
-            swing_participation_balance    = 0.05   # (-) encourages all feet to swing for roughly the same amount of time an episode
+            swing_participation_balance    = 0.10   # (-) encourages all feet to swing for roughly the same amount of time an episode
             diagonal_pair_balance          = 0.10   # (-) encourages diagonal pairs of feet specifically to wing the same amount of time per episode
-            completed_swing_height_balance = 0.05   # (-) enocurages all swing feet to reach the desired height throughout a swing
+            completed_swing_height_balance = 0.10   # (-) enocurages all swing feet to reach the desired height throughout a swing
 
             # Novel KITE-specific whole-body posture + terrain regualrization/alignment rewards
             torso_force_wrench_ellipsoid = 0.2     # (+) encourage whole-body postures that align well conditioned force generation with the terrain
@@ -664,24 +662,28 @@ class GO2KITECfg( LeggedRobotCfg ):
                                 "stumble",
                                 "front_foot_overreach",
                                 "rear_foot_overreach",
-                                "feet_regulation"
+                                "feet_regulation",
+                                "lin_vel_z",
+                                "base_height",
                                 ]
             
             curr_reward_bounds = {"torque_limits":[-1.0e-4, -1.0e-2],
-                                  "joint_power":[-2.0e-5, -2.0e-6],
-                                  "action_rate":[-0.01, -0.001],
-                                  "action_smoothness":[-0.01, -0.001],
-                                  "dof_acc":[-2.0e-7, -2.0e-7],
-                                  "torso_force_wrench_ellipsoid":[0.05, 0.30],
-                                  "swing_vel_ellipsoid_terrain":[0.05, 0.30],
+                                  "joint_power":[-2.0e-6, -2.0e-5],
+                                  "action_rate":[-0.0001, -0.01],
+                                  "action_smoothness":[-0.0001, -0.01],
+                                  "dof_acc":[-2.0e-8, -2.0e-7],
+                                  "torso_force_wrench_ellipsoid":[0.1, 0.40],
+                                  "swing_vel_ellipsoid_terrain":[0.1, 0.30],
                                   "stumble":[-1.0, -10.0],
                                   "front_foot_overreach":[-1.0, -100.0],
                                   "rear_foot_overreach":[-1.0, -10.0],
-                                  "feet_regulation":[-0.05, -0.5]
+                                  "feet_regulation":[-0.05, -0.5],
+                                  "lin_vel_z":[-1.0, -0.01],
+                                  "base_height":[-1.0, -10.0]
                                  }
 
             curr_steps = 5000
-            warmup_steps = 1000
+            warmup_steps = 1500
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -716,8 +718,9 @@ class GO2KITECfg( LeggedRobotCfg ):
         lin_vel_x_high_speed_bias_power_final = 0.50
         zero_command_threshold = 0.05
         zero_command_prob = 0.10
-        zero_command_curriculum = None
-        limit_ang_vel_at_zero_command_prob = 0.20
+        # Warm up sampling pure zero commands, let the policy learn to walk first
+        zero_command_curriculum = {'start_iter': 0, 'end_iter': 1500, 'start_value': 0.0, 'end_value': 0.1}
+        limit_ang_vel_at_zero_command_prob = 0.10
         
         randomize_resampling_time = False
         resampling_time_min = 1.0
@@ -763,6 +766,10 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         priv_mixer_channel_dim    = 128
         priv_mixer_use_layer_norm = False
         privileged_dynamics_decoder_layers = [64,128,256]
+        privileged_terrain_std_min = 0.10
+        privileged_terrain_std_max = 1.0
+        privileged_dynamics_std_min = 0.10
+        privileged_dynamics_std_max = 1.0
 
         # Depth Image/Sequence Models
         depth_image_norm                    = "layer"
@@ -795,7 +802,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         mixer_use_norm       = False
         mixer_hidden_dims    = [128, 64, 32]
         mixer_velo_hidden    = 128
-        mixer_feet_hidden    = 128
+        mixer_feet_hidden    = 256
         mixer_std_min        = 0.10
         mixer_std_max        = 1.0
 
@@ -872,6 +879,17 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         proprio_kl_recon_target = 0.075
         proprio_kl_beta_min = 0.10
         proprio_kl_beta_max = 2.0
+
+        #     loss weights for privileged teacher VAEs
+        privileged_terrain_kl_weight = 0.1
+        privileged_terrain_kl_recon_target = 0.05
+        privileged_terrain_kl_beta_min = 0.10
+        privileged_terrain_kl_beta_max = 2.0
+
+        privileged_dynamics_kl_weight = 0.1
+        privileged_dynamics_kl_recon_target = 0.05
+        privileged_dynamics_kl_beta_min = 0.10
+        privileged_dynamics_kl_beta_max = 2.0
         
         #     reconstruction losses attached to the underlying student encoders
         depth_sequence_terrain_weight  = 1.0    # terrain reconstruction loss
@@ -902,12 +920,12 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # debug_warmpinn_wb
         run_name = '50hz_nogap_parkour'
         # run_name = 'terrain_debug_test'
-        experiment_name = 'go2_kite_debugging'
+        experiment_name = 'go2_kite'
         save_interval = 100
         
         
         # load_run = "Apr15_11-53-35_50hz_spec_jointrand_stairs"
-        load_run = "Jul02_18-35-22_50hz_nogap_parkour"
+        load_run = "Jul07_00-41-07_50hz_nogap_parkour"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/kite_feasibility/baseline_model_stairs.csv"

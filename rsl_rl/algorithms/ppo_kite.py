@@ -208,6 +208,8 @@ class PPO_KITE:
                  cnn_norm_type="layer",
                  terrain_encoder_attention_dim=128,
                  terrain_encoder_n_heads=4,
+                 privileged_terrain_std_min=0.01,
+                 privileged_terrain_std_max=1.5,
                  terrain_decoder_hidden_dim=128,
                  terrain_decoder_encoded_spatial_dim=(3,4),
                  terrain_decoder_channels=64,
@@ -217,6 +219,8 @@ class PPO_KITE:
                  priv_mixer_token_dim=32,
                  priv_mixer_channel_dim=64,
                  priv_mixer_use_layer_norm=True,
+                 privileged_dynamics_std_min=0.01,
+                 privileged_dynamics_std_max=1.5,
 
                  depth_frame_recon_weight=1.0,
                  depth_frame_kl_weight=1.0e-3,
@@ -247,6 +251,14 @@ class PPO_KITE:
                  proprio_kl_recon_target=0.5,
                  proprio_kl_beta_min=1.0e-5,
                  proprio_kl_beta_max=1.0,
+                 privileged_terrain_kl_weight=0.1,
+                 privileged_terrain_kl_recon_target=0.5,
+                 privileged_terrain_kl_beta_min=1.0e-5,
+                 privileged_terrain_kl_beta_max=1.0,
+                 privileged_dynamics_kl_weight=0.1,
+                 privileged_dynamics_kl_recon_target=0.5,
+                 privileged_dynamics_kl_beta_min=1.0e-5,
+                 privileged_dynamics_kl_beta_max=1.0,
                  mixer_kl_weight=0.1,
                  mixer_kl_recon_target=0.5,
                  mixer_kl_beta_min=1.0e-5,
@@ -311,12 +323,22 @@ class PPO_KITE:
         self.proprio_kl_recon_target = proprio_kl_recon_target
         self.proprio_kl_beta_min = proprio_kl_beta_min
         self.proprio_kl_beta_max = proprio_kl_beta_max
+        self.privileged_terrain_kl_weight = privileged_terrain_kl_weight
+        self.privileged_terrain_kl_recon_target = privileged_terrain_kl_recon_target
+        self.privileged_terrain_kl_beta_min = privileged_terrain_kl_beta_min
+        self.privileged_terrain_kl_beta_max = privileged_terrain_kl_beta_max
+        self.privileged_dynamics_kl_weight = privileged_dynamics_kl_weight
+        self.privileged_dynamics_kl_recon_target = privileged_dynamics_kl_recon_target
+        self.privileged_dynamics_kl_beta_min = privileged_dynamics_kl_beta_min
+        self.privileged_dynamics_kl_beta_max = privileged_dynamics_kl_beta_max
         self.mixer_kl_recon_target = mixer_kl_recon_target
         self.mixer_kl_beta_min = mixer_kl_beta_min
         self.mixer_kl_beta_max = mixer_kl_beta_max
         self.depth_frame_kl_recon_ema = None
         self.depth_sequence_kl_recon_ema = None
         self.proprio_kl_recon_ema = None
+        self.privileged_terrain_kl_recon_ema = None
+        self.privileged_dynamics_kl_recon_ema = None
         self.mixer_kl_recon_ema = None
         if self.use_adaptive_kl_beta:
             self.versatility_lambda_e = mixer_kl_weight
@@ -363,6 +385,8 @@ class PPO_KITE:
             norm_type=cnn_norm_type,
             attention_dim=terrain_encoder_attention_dim,
             n_heads=terrain_encoder_n_heads,
+            std_min=privileged_terrain_std_min,
+            std_max=privileged_terrain_std_max,
         ).to(self.device)
 
         # Two-headed (height, surface normals) privileged terrain decoder network
@@ -390,6 +414,8 @@ class PPO_KITE:
             token_mlp_dim=priv_mixer_token_dim,
             channel_mlp_dim=priv_mixer_channel_dim,
             use_layer_norm=priv_mixer_use_layer_norm,
+            std_min=privileged_dynamics_std_min,
+            std_max=privileged_dynamics_std_max,
             device=device,
         ).to(self.device)
 
@@ -467,8 +493,12 @@ class PPO_KITE:
         #   those latents will be detached immediately.
         context = torch.no_grad() if detach_latents else nullcontext()
         with context:
-            terrain_latent = self.priv_terrain_encoder(terrain_map)
-            dynamics_latent = self.priv_dynamics_encoder(privileged_obs_history)
+            if detach_latents:
+                terrain_latent = self.priv_terrain_encoder.forward_inference(terrain_map)
+                dynamics_latent = self.priv_dynamics_encoder.forward_inference(privileged_obs_history)
+            else:
+                terrain_latent, _ = self.priv_terrain_encoder.encode(terrain_map)
+                dynamics_latent, _ = self.priv_dynamics_encoder.encode(privileged_obs_history)
         if detach_latents:
             terrain_latent = terrain_latent.detach()
             dynamics_latent = dynamics_latent.detach()
@@ -487,6 +517,17 @@ class PPO_KITE:
     def _masked_mse_loss(self, prediction, target, mask):
         """MSE averaged over valid samples only."""
         return self._masked_sample_mean((prediction - target).pow(2), mask)
+
+    def _masked_bce_with_logits_loss(self, prediction, target, mask):
+        """Binary cross-entropy averaged over valid samples only."""
+        return self._masked_sample_mean(
+            F.binary_cross_entropy_with_logits(
+                prediction,
+                target,
+                reduction="none",
+            ),
+            mask,
+        )
 
     def _cpu_float(self, value):
         """Detach a scalar tensor immediately so logging does not hold CUDA refs."""
@@ -809,6 +850,8 @@ class PPO_KITE:
         depth_recon_loss,
         depth_sequence_recon_loss,
         proprio_recon_loss,
+        privileged_terrain_recon_loss,
+        privileged_dynamics_recon_loss,
         mixer_recon_loss,
     ):
         """Update KL betas from EMA reconstruction losses after each PPO update."""
@@ -829,6 +872,16 @@ class PPO_KITE:
         self.proprio_kl_recon_ema = self._ema_update(
             self.proprio_kl_recon_ema,
             proprio_recon_loss,
+            alpha,
+        )
+        self.privileged_terrain_kl_recon_ema = self._ema_update(
+            self.privileged_terrain_kl_recon_ema,
+            privileged_terrain_recon_loss,
+            alpha,
+        )
+        self.privileged_dynamics_kl_recon_ema = self._ema_update(
+            self.privileged_dynamics_kl_recon_ema,
+            privileged_dynamics_recon_loss,
             alpha,
         )
         self.mixer_kl_recon_ema = self._ema_update(
@@ -859,6 +912,22 @@ class PPO_KITE:
             self.proprio_kl_recon_ema,
             self.proprio_kl_beta_min,
             self.proprio_kl_beta_max,
+        )
+
+        self.privileged_terrain_kl_weight = self._update_kl_weight(
+            self.privileged_terrain_kl_weight,
+            self.privileged_terrain_kl_recon_target,
+            self.privileged_terrain_kl_recon_ema,
+            self.privileged_terrain_kl_beta_min,
+            self.privileged_terrain_kl_beta_max,
+        )
+
+        self.privileged_dynamics_kl_weight = self._update_kl_weight(
+            self.privileged_dynamics_kl_weight,
+            self.privileged_dynamics_kl_recon_target,
+            self.privileged_dynamics_kl_recon_ema,
+            self.privileged_dynamics_kl_beta_min,
+            self.privileged_dynamics_kl_beta_max,
         )
 
         self.versatility_lambda_e = self._update_kl_weight(
@@ -1119,7 +1188,7 @@ class PPO_KITE:
 
         with self._aux_autocast():
             # Encode -> Decode the height + surface normal map
-            terrain_priv_z = self.priv_terrain_encoder(terrain_maps_batch)
+            terrain_mean, terrain_logvar, terrain_priv_z = self.priv_terrain_encoder(terrain_maps_batch)
             terrain_priv_recon = self.priv_terrain_decoder(terrain_priv_z)
             
             # terrain recon log
@@ -1128,7 +1197,12 @@ class PPO_KITE:
                 terrain_maps_batch,
                 mask,
             )
-        privileged_terrain_loss.backward()
+            privileged_terrain_kl = self._kl_loss(terrain_mean, terrain_logvar, mask)
+            privileged_terrain_total = (
+                privileged_terrain_loss
+                + self.privileged_terrain_kl_weight * privileged_terrain_kl
+            )
+        privileged_terrain_total.backward()
         nn.utils.clip_grad_norm_(
             list(self.priv_terrain_encoder.parameters())
             + list(self.priv_terrain_decoder.parameters()),
@@ -1136,20 +1210,27 @@ class PPO_KITE:
         )
         self.privileged_optimizer.step()
         privileged_terrain_log = privileged_terrain_loss.detach()
-        del terrain_priv_z, terrain_priv_recon, privileged_terrain_loss
+        privileged_terrain_kl_log = privileged_terrain_kl.detach()
+        del terrain_mean, terrain_logvar, terrain_priv_z, terrain_priv_recon
+        del privileged_terrain_loss, privileged_terrain_kl, privileged_terrain_total
         self._empty_cache_if_debugging()
 
         self.privileged_optimizer.zero_grad(set_to_none=True)
         with self._aux_autocast():
             # Encode -> decode the privileged observation history -> next time-step privileged obs
-            dyn_priv_z = self.priv_dynamics_encoder(privileged_obs_history_batch)
+            dyn_mean, dyn_logvar, dyn_priv_z = self.priv_dynamics_encoder(privileged_obs_history_batch)
             dyn_priv_recon = self.priv_dynamics_decoder(dyn_priv_z)
             privileged_dynamics_loss = self._masked_mse_loss(
                 dyn_priv_recon,
                 obs_target,
                 mask,
             )
-        privileged_dynamics_loss.backward()
+            privileged_dynamics_kl = self._kl_loss(dyn_mean, dyn_logvar, mask)
+            privileged_dynamics_total = (
+                privileged_dynamics_loss
+                + self.privileged_dynamics_kl_weight * privileged_dynamics_kl
+            )
+        privileged_dynamics_total.backward()
         nn.utils.clip_grad_norm_(
             list(self.priv_dynamics_encoder.parameters())
             + list(self.priv_dynamics_decoder.parameters()),
@@ -1157,10 +1238,23 @@ class PPO_KITE:
         )
         self.privileged_optimizer.step()
         privileged_dynamics_log = privileged_dynamics_loss.detach()
-        del dyn_priv_z, dyn_priv_recon, privileged_dynamics_loss
+        privileged_dynamics_kl_log = privileged_dynamics_kl.detach()
+        del dyn_mean, dyn_logvar, dyn_priv_z, dyn_priv_recon
+        del privileged_dynamics_loss, privileged_dynamics_kl, privileged_dynamics_total
 
-        privileged_loss = privileged_terrain_log + privileged_dynamics_log
-        return privileged_loss, privileged_dynamics_log, privileged_terrain_log
+        privileged_loss = (
+            privileged_terrain_log
+            + privileged_dynamics_log
+            + self.privileged_terrain_kl_weight * privileged_terrain_kl_log
+            + self.privileged_dynamics_kl_weight * privileged_dynamics_kl_log
+        )
+        return (
+            privileged_loss,
+            privileged_dynamics_log,
+            privileged_terrain_log,
+            privileged_dynamics_kl_log,
+            privileged_terrain_kl_log,
+        )
 
     def _non_privileged_auxiliary_update(
         self,
@@ -1212,7 +1306,7 @@ class PPO_KITE:
                 depth_seq_z
             )
             depth_seq_recon_z = self.actor_critic.depth_sequence_recon_head(
-                seq_mean
+                depth_seq_z
             )
             with self._frozen_module_params(self.priv_terrain_decoder):
                 terrain_recon_from_depth_seq = self.priv_terrain_decoder(depth_seq_recon_z)
@@ -1243,7 +1337,7 @@ class PPO_KITE:
                 proprio_z
             )
             proprio_recon_z = self.actor_critic.proprio_recon_head(
-                prop_mean
+                proprio_z
             )
             with self._frozen_module_params(self.priv_dynamics_decoder):
                 dyn_recon_from_proprio = self.priv_dynamics_decoder(proprio_recon_z)
@@ -1268,40 +1362,19 @@ class PPO_KITE:
             )
 
             # 3. Modality mixer path.
-            mix_mean, mix_logvar, _, body_velo_est, feet_state_est = (
+            mix_mean, mix_logvar, mix_z, _, _ = (
                 self.actor_critic.context_encoder(
                     depth_seq_z.detach().clone(),
                     proprio_z.detach().clone(),
                 )
             )
-
-            # Cosine similarity loss for surface normals under feet
-            pred_surface_norm_under_feet = F.normalize(feet_state_est[:,8:],p=2,dim=1,eps=1e-6)
-            gt_surface_norm_under_feet = explicit_labels_batch[:,self.actor_critic.body_velo_dim+8:]
-
-            norm_explicit_loss = self._masked_sample_mean(
-                1.0 - F.cosine_similarity(pred_surface_norm_under_feet, gt_surface_norm_under_feet, dim=-1, eps=1e-6),
-                mask,
+            body_velo_est = self.actor_critic.context_encoder.velo_est_out(
+                self.actor_critic.context_encoder.activation(
+                    self.actor_critic.context_encoder.velo_est_hidden(mix_z)
+                )
             )
 
-            
-            # MSE loss for explicit body velocity and feet contact/height predictions.
-            # pred_feet_height_contact = feet_state_est[:,0:8]
-            # mse_explicit_est = torch.cat([body_velo_est, pred_feet_height_contact], dim=-1)
-            # mse_explicit_labels = explicit_labels_batch[:,0:self.actor_critic.body_velo_dim+8]
-
-            # explicit_loss = self._masked_mse_loss(
-            #     mse_explicit_est,
-            #     mse_explicit_labels,
-            #     mask,
-            # )
-
-            # explicit_loss += norm_explicit_loss
-            
-            # del mse_explicit_est, mse_explicit_labels, pred_surface_norm_under_feet, gt_surface_norm_under_feet
-
-            del pred_surface_norm_under_feet, gt_surface_norm_under_feet
-
+            feet_state_est = self.actor_critic.context_encoder.est_feet(mix_z)
 
             body_velo_dim = self.actor_critic.body_velo_dim
             feet_state_dim = self.actor_critic.feet_state_dim
@@ -1313,17 +1386,53 @@ class PPO_KITE:
             )
             
             if feet_state_dim > 0:
-                feet_state_explicit_loss = self._masked_mse_loss(
-                    feet_state_est[
-                        :, body_velo_dim:body_velo_dim + 8
-                    ],
-                    explicit_labels_batch[
-                        :, body_velo_dim:body_velo_dim + 8
-                    ],
-                    mask,
-                ) + norm_explicit_loss
+                feet_loss_terms = []
+
+                contact_dim = min(4, feet_state_dim)
+                if contact_dim > 0:
+                    feet_contact_loss = self._masked_bce_with_logits_loss(
+                        feet_state_est[:, :contact_dim],
+                        explicit_labels_batch[
+                            :, body_velo_dim:body_velo_dim + contact_dim
+                        ].float(),
+                        mask,
+                    )
+                    feet_loss_terms.append(feet_contact_loss)
+
+                height_dim = min(4, max(feet_state_dim - 4, 0))
+                if height_dim > 0:
+                    height_start = body_velo_dim + 4
+                    feet_height_loss = self._masked_mse_loss(
+                        feet_state_est[:, 4:4 + height_dim],
+                        explicit_labels_batch[
+                            :, height_start:height_start + height_dim
+                        ],
+                        mask,
+                    )
+                    feet_loss_terms.append(feet_height_loss)
+
+                normal_dim = max(feet_state_dim - 8, 0)
+                if normal_dim > 0:
+                    normal_start = body_velo_dim + 8
+                    pred_surface_norm_under_feet = feet_state_est[:, 8:8 + normal_dim]
+                    gt_surface_norm_under_feet = explicit_labels_batch[
+                        :, normal_start:normal_start + normal_dim
+                    ]
+                    feet_normal_loss = self._masked_sample_mean(
+                        1.0 - F.cosine_similarity(
+                            pred_surface_norm_under_feet,
+                            gt_surface_norm_under_feet,
+                            dim=-1,
+                            eps=1e-6,
+                        ),
+                        mask,
+                    )
+                    feet_loss_terms.append(feet_normal_loss)
+                    del pred_surface_norm_under_feet, gt_surface_norm_under_feet
+
+                feet_state_explicit_loss = sum(feet_loss_terms)
             else:
-                feet_state_explicit_loss = explicit_loss.new_zeros(())
+                feet_state_explicit_loss = torso_velo_explicit_loss.new_zeros(())
 
             explicit_loss = feet_state_explicit_loss + torso_velo_explicit_loss
             
@@ -1422,8 +1531,8 @@ class PPO_KITE:
             t_profile = time.perf_counter()
         terrain_positive = dynamics_positive = None
         with torch.no_grad():
-            terrain_positive = self.priv_terrain_encoder(terrain_maps_batch)
-            dynamics_positive = self.priv_dynamics_encoder(privileged_obs_history_batch)
+            _, _, terrain_positive = self.priv_terrain_encoder(terrain_maps_batch)
+            _, _, dynamics_positive = self.priv_dynamics_encoder(privileged_obs_history_batch)
         if profile is not None:
             t_profile = profile_mark("aux_positive_anchors", t_profile)
 
@@ -1490,8 +1599,18 @@ class PPO_KITE:
         
         # 5. Privileged terrain/dynamics encoder-decoder update:
         #    refresh the teacher-side representations used as positive anchors.
-        privileged_loss, privileged_dynamics_loss, privileged_terrain_loss = self._privileged_encoder_decoder_updates(terrain_maps_batch, privileged_obs_history_batch, 
-                                                                                                                      obs_target, mask)
+        (
+            privileged_loss,
+            privileged_dynamics_loss,
+            privileged_terrain_loss,
+            privileged_dynamics_kl,
+            privileged_terrain_kl,
+        ) = self._privileged_encoder_decoder_updates(
+            terrain_maps_batch,
+            privileged_obs_history_batch,
+            obs_target,
+            mask,
+        )
         if profile is not None:
             t_profile = profile_mark("aux_privileged_teacher", t_profile)
 
@@ -1513,6 +1632,8 @@ class PPO_KITE:
             aux["depth_kl"]
             + aux["seq_kl"]
             + aux["prop_kl"]
+            + privileged_terrain_kl
+            + privileged_dynamics_kl
             # + aux["versatility_log"]["kl"]
             + aux["modality_kl"]
         )
@@ -1522,6 +1643,8 @@ class PPO_KITE:
             "depth_frame_recon": self._detach_scalar(aux["depth_recon_loss"]),
             "depth_sequence_recon": self._detach_scalar(aux["seq_terrain_loss"]),
             "proprio_recon": self._detach_scalar(aux["prop_dyn_loss"]),
+            "privileged_terrain_recon": self._detach_scalar(privileged_terrain_loss),
+            "privileged_dynamics_recon": self._detach_scalar(privileged_dynamics_loss),
             "mixer_recon": self._detach_scalar(aux["explicit_loss"]),
         }
         
@@ -1544,6 +1667,8 @@ class PPO_KITE:
             "depth_sequence_terrain_recon": self._detach_scalar(aux["seq_terrain_loss"]),
             "proprio_dynamics_recon": self._detach_scalar(aux["prop_dyn_loss"]),
             "privileged_total": self._detach_scalar(privileged_loss),
+            "privileged_terrain_kl": self._detach_scalar(privileged_terrain_kl),
+            "privileged_dynamics_kl": self._detach_scalar(privileged_dynamics_kl),
         }
         if self.log_detailed_encoder_losses:
             losses["detail"].update({
@@ -1590,6 +1715,8 @@ class PPO_KITE:
                 ),
                 "privileged_terrain_recon": self._detach_scalar(privileged_terrain_loss),
                 "privileged_dynamics_recon": self._detach_scalar(privileged_dynamics_loss),
+                "privileged_terrain_kl": self._detach_scalar(privileged_terrain_kl),
+                "privileged_dynamics_kl": self._detach_scalar(privileged_dynamics_kl),
             })
         del aux
         if profile is not None:
@@ -1609,6 +1736,8 @@ class PPO_KITE:
         mean_depth_kl_recon_signal = 0
         mean_depth_sequence_kl_recon_signal = 0
         mean_proprio_kl_recon_signal = 0
+        mean_privileged_terrain_kl_recon_signal = 0
+        mean_privileged_dynamics_kl_recon_signal = 0
         mean_mixer_kl_recon_signal = 0
 
         profile_update = self.profile_learning
@@ -1735,6 +1864,12 @@ class PPO_KITE:
                 mean_proprio_kl_recon_signal += aux_losses["kl_scheduler"][
                     "proprio_recon"
                 ]
+                mean_privileged_terrain_kl_recon_signal += aux_losses["kl_scheduler"][
+                    "privileged_terrain_recon"
+                ]
+                mean_privileged_dynamics_kl_recon_signal += aux_losses["kl_scheduler"][
+                    "privileged_dynamics_recon"
+                ]
                 mean_mixer_kl_recon_signal += aux_losses["kl_scheduler"][
                     "mixer_recon"
                 ]
@@ -1785,6 +1920,12 @@ class PPO_KITE:
         mean_proprio_kl_recon_signal = self._finish_log_scalar(
             mean_proprio_kl_recon_signal / (num_updates * self.num_enc_epochs)
         )
+        mean_privileged_terrain_kl_recon_signal = self._finish_log_scalar(
+            mean_privileged_terrain_kl_recon_signal / (num_updates * self.num_enc_epochs)
+        )
+        mean_privileged_dynamics_kl_recon_signal = self._finish_log_scalar(
+            mean_privileged_dynamics_kl_recon_signal / (num_updates * self.num_enc_epochs)
+        )
         mean_mixer_kl_recon_signal = self._finish_log_scalar(
             mean_mixer_kl_recon_signal / (num_updates * self.num_enc_epochs)
         )
@@ -1797,11 +1938,15 @@ class PPO_KITE:
             mean_depth_kl_recon_signal,
             mean_depth_sequence_kl_recon_signal,
             mean_proprio_kl_recon_signal,
+            mean_privileged_terrain_kl_recon_signal,
+            mean_privileged_dynamics_kl_recon_signal,
             mean_mixer_kl_recon_signal,
         )
         mean_aux_loss_details["kl_beta_depth_frame"] = self.depth_frame_kl_weight
         mean_aux_loss_details["kl_beta_depth_sequence"] = self.depth_sequence_kl_weight
         mean_aux_loss_details["kl_beta_proprio"] = self.proprio_kl_weight
+        mean_aux_loss_details["kl_beta_privileged_terrain"] = self.privileged_terrain_kl_weight
+        mean_aux_loss_details["kl_beta_privileged_dynamics"] = self.privileged_dynamics_kl_weight
         mean_aux_loss_details["kl_beta_mixer"] = self.versatility_lambda_e
         if self.depth_frame_kl_recon_ema is not None:
             mean_aux_loss_details["kl_recon_ema_depth_frame"] = self.depth_frame_kl_recon_ema
@@ -1809,6 +1954,10 @@ class PPO_KITE:
             mean_aux_loss_details["kl_recon_ema_depth_sequence"] = self.depth_sequence_kl_recon_ema
         if self.proprio_kl_recon_ema is not None:
             mean_aux_loss_details["kl_recon_ema_proprio"] = self.proprio_kl_recon_ema
+        if self.privileged_terrain_kl_recon_ema is not None:
+            mean_aux_loss_details["kl_recon_ema_privileged_terrain"] = self.privileged_terrain_kl_recon_ema
+        if self.privileged_dynamics_kl_recon_ema is not None:
+            mean_aux_loss_details["kl_recon_ema_privileged_dynamics"] = self.privileged_dynamics_kl_recon_ema
         if self.mixer_kl_recon_ema is not None:
             mean_aux_loss_details["kl_recon_ema_mixer"] = self.mixer_kl_recon_ema
 

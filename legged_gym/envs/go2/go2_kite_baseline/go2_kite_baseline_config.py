@@ -739,6 +739,10 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         mixer_feet_hidden = 32
         privileged_terrain_latent_dim = 16
         privileged_dynamics_latent_dim = 16
+        privileged_terrain_std_min = 0.01
+        privileged_terrain_std_max = 1.5
+        privileged_dynamics_std_min = 0.01
+        privileged_dynamics_std_max = 1.5
 
         # Context Decoder
         # cenet_dec_input_dim = 27 + 12
@@ -813,6 +817,14 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         proprio_kl_recon_target = 0.50
         proprio_kl_beta_min = 1.0e-5
         proprio_kl_beta_max = 1.0e-1
+        privileged_terrain_kl_weight = 1.0e-3
+        privileged_terrain_kl_recon_target = 0.50
+        privileged_terrain_kl_beta_min = 1.0e-5
+        privileged_terrain_kl_beta_max = 1.0e-1
+        privileged_dynamics_kl_weight = 1.0e-3
+        privileged_dynamics_kl_recon_target = 0.50
+        privileged_dynamics_kl_beta_min = 1.0e-5
+        privileged_dynamics_kl_beta_max = 1.0e-1
         modality_explicit_weight = 1.0
         contrastive_weight = 0.1
         contrastive_lambda = 0.5

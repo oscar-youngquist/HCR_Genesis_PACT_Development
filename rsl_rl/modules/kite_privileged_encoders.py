@@ -3,12 +3,14 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 from typing import Tuple, List, Dict, Any
 
 from .module_utils import (
     ConvNormAct,
     EfficientMultiHeadAttention,
     MLPMixerBlock,
+    SmoothClampLayer,
     get_activation,
 )
 
@@ -34,6 +36,8 @@ class TerrainAttentionEncoder(nn.Module):
         norm_type: str = "none",
         attention_dim: int = 128,
         n_heads: int = 4,
+        std_min: float = 0.01,
+        std_max: float = 1.5,
     ):
         super().__init__()
 
@@ -96,8 +100,17 @@ class TerrainAttentionEncoder(nn.Module):
 
         self.global_query = nn.Parameter(torch.randn(1, 1, attention_dim))
 
+        output_hdim = 2 * latent_dim
         self.fc = nn.Sequential(
-            nn.Linear(attention_dim, latent_dim),
+            nn.Linear(attention_dim, output_hdim),
+            self.activation,
+        )
+        self.mean_h1 = nn.Linear(output_hdim, output_hdim)
+        self.logvar_h1 = nn.Linear(output_hdim, output_hdim)
+        self.mean_out = nn.Linear(output_hdim, latent_dim)
+        self.logvar_out = nn.Sequential(
+            nn.Linear(output_hdim, latent_dim),
+            SmoothClampLayer(min_val=2.0 * math.log(std_min), max_val=2.0 * math.log(std_max)),
         )
 
         self._initialize_weights()
@@ -122,7 +135,26 @@ class TerrainAttentionEncoder(nn.Module):
 
         nn.init.normal_(self.global_query, mean=0.0, std=0.02)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        nn.init.normal_(self.mean_out.weight, mean=0.0, std=1.0e-3)
+        if self.mean_out.bias is not None:
+            nn.init.zeros_(self.mean_out.bias)
+
+        smooth_bound = self.logvar_out[1]
+        min_logvar = smooth_bound.min_val
+        max_logvar = smooth_bound.max_val
+        target_logvar = -0.05
+        p = (target_logvar - min_logvar) / (max_logvar - min_logvar)
+        p = min(max(p, 1.0e-6), 1.0 - 1.0e-6)
+        init_raw_logvar_bias = math.log(p / (1.0 - p))
+
+        nn.init.zeros_(self.logvar_h1.weight)
+        if self.logvar_h1.bias is not None:
+            nn.init.zeros_(self.logvar_h1.bias)
+        nn.init.zeros_(self.logvar_out[0].weight)
+        if self.logvar_out[0].bias is not None:
+            nn.init.constant_(self.logvar_out[0].bias, init_raw_logvar_bias)
+
+    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         x: B x H x W x 4
         """
@@ -145,9 +177,27 @@ class TerrainAttentionEncoder(nn.Module):
 
         pooled = pooled.squeeze(1)  # B x C
 
-        z = self.fc(pooled)
+        latent = self.fc(pooled)
+        mean_h1 = self.activation(self.mean_h1(latent))
+        logvar_h1 = self.activation(self.logvar_h1(latent))
+        mean = self.mean_out(mean_h1)
+        logvar = self.logvar_out(logvar_h1)
 
-        return z
+        return mean, logvar
+
+    def reparameterization_trick(self, mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        epsilon = torch.randn_like(logvar).to(logvar.device)
+        return mean + torch.exp(0.5 * logvar) * epsilon
+
+    def forward(self, x: torch.Tensor):
+        mean, logvar = self.encode(x)
+        z = self.reparameterization_trick(mean, logvar)
+        return mean, logvar, z
+
+    @torch.no_grad()
+    def forward_inference(self, x: torch.Tensor) -> torch.Tensor:
+        mean, _ = self.encode(x)
+        return mean
     
 class TerrainTwoHeadDecoder(nn.Module):
     """
@@ -430,6 +480,8 @@ class PrviDynamicsMLPMixerKITE(nn.Module):
         context_latent_size: int = 16,
         activation: str = "elu",
         use_layer_norm: bool = True,
+        std_min: float = 0.01,
+        std_max: float = 1.50,
         device: str = "cpu",
     ) -> None:
         super().__init__()
@@ -489,12 +541,16 @@ class PrviDynamicsMLPMixerKITE(nn.Module):
         self.final_norm = nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity()
 
         # ------------------------------------------------------------------
-        # Deterministic latent projection for critic conditioning.
+        # VAE-style latent heads.
         # ------------------------------------------------------------------
-        self.fc = nn.Sequential(
-            nn.Linear(hidden_dim, 2 * context_latent_size),
-            self.activation,
-            nn.Linear(2 * context_latent_size, context_latent_size),
+        output_hdim = 2 * context_latent_size
+        self.ce_h = nn.Linear(hidden_dim, output_hdim)
+        self.ce_latmean_h = nn.Linear(output_hdim, output_hdim)
+        self.ce_latvar_h = nn.Linear(output_hdim, output_hdim)
+        self.ce_out_mean = nn.Linear(output_hdim, context_latent_size)
+        self.ce_out_var = nn.Sequential(
+            nn.Linear(output_hdim, context_latent_size),
+            SmoothClampLayer(min_val=2.0 * math.log(std_min), max_val=2.0 * math.log(std_max)),
         )
 
         self._initialize_weights()
@@ -524,19 +580,49 @@ class PrviDynamicsMLPMixerKITE(nn.Module):
         if self.token_embedding.bias is not None:
             nn.init.zeros_(self.token_embedding.bias)
 
-        # Latent projection MLP.
-        for i, module in enumerate(self.fc):
-            if isinstance(module, nn.Linear):
-                is_final_layer = i == len(self.fc) - 1
+        for layer in [
+            self.ce_h,
+            self.ce_latmean_h,
+            self.ce_latvar_h,
+        ]:
+            nn.init.kaiming_uniform_(
+                layer.weight,
+                a=1.0,
+                mode="fan_in",
+                nonlinearity="leaky_relu",
+            )
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
 
+        nn.init.normal_(self.ce_out_mean.weight, mean=0.0, std=1.0e-3)
+        if self.ce_out_mean.bias is not None:
+            nn.init.zeros_(self.ce_out_mean.bias)
+
+        for module in self.ce_out_var:
+            if isinstance(module, nn.Linear):
                 nn.init.kaiming_uniform_(
                     module.weight,
                     a=1.0,
                     mode="fan_in",
-                    nonlinearity="linear" if is_final_layer else "leaky_relu",
+                    nonlinearity="linear",
                 )
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+
+        smooth_bound = self.ce_out_var[1]
+        min_logvar = smooth_bound.min_val
+        max_logvar = smooth_bound.max_val
+        target_logvar = -0.05
+        p = (target_logvar - min_logvar) / (max_logvar - min_logvar)
+        p = min(max(p, 1.0e-6), 1.0 - 1.0e-6)
+        init_raw_logvar_bias = math.log(p / (1.0 - p))
+
+        nn.init.zeros_(self.ce_latvar_h.weight)
+        if self.ce_latvar_h.bias is not None:
+            nn.init.zeros_(self.ce_latvar_h.bias)
+        nn.init.zeros_(self.ce_out_var[0].weight)
+        if self.ce_out_var[0].bias is not None:
+            nn.init.constant_(self.ce_out_var[0].bias, init_raw_logvar_bias)
 
         # LayerNorm layers.
         for module in self.modules():
@@ -592,7 +678,7 @@ class PrviDynamicsMLPMixerKITE(nn.Module):
             f"but got {tuple(X_C.shape)}."
         )
 
-    def encode(self, X_C: torch.Tensor) -> torch.Tensor:
+    def encode(self, X_C: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Encodes privileged observation history into a deterministic latent.
 
@@ -622,12 +708,23 @@ class PrviDynamicsMLPMixerKITE(nn.Module):
         # B x 131 x hidden_dim -> B x hidden_dim
         x = x.mean(dim=1)
 
-        # Deterministic latent projection.
-        z = self.fc(x)
+        x = self.activation(self.ce_h(x))
+        lat_mean = self.activation(self.ce_latmean_h(x))
+        lat_var = self.activation(self.ce_latvar_h(x))
+        mean = self.ce_out_mean(lat_mean)
+        logvar = self.ce_out_var(lat_var)
 
-        return z
+        return mean, logvar
 
-    def forward(self, X_C: torch.Tensor) -> torch.Tensor:
+    def reparameterization_trick(
+        self,
+        mean: torch.Tensor,
+        logvar: torch.Tensor,
+    ) -> torch.Tensor:
+        epsilon = torch.randn_like(logvar).to(logvar.device)
+        return mean + torch.exp(0.5 * logvar) * epsilon
+
+    def forward(self, X_C: torch.Tensor):
         """
         Complete deterministic forward pass.
 
@@ -641,7 +738,14 @@ class PrviDynamicsMLPMixerKITE(nn.Module):
             z:
                 B x context_latent_size
         """
-        return self.encode(X_C)
+        mean, logvar = self.encode(X_C)
+        z = self.reparameterization_trick(mean, logvar)
+        return mean, logvar, z
+
+    @torch.no_grad()
+    def forward_inference(self, X_C: torch.Tensor) -> torch.Tensor:
+        mean, _ = self.encode(X_C)
+        return mean
 
 class PrivDynamicsDecoder(nn.Module):
     """Decoder network for reconstructing next state from latent representation and velocity.
