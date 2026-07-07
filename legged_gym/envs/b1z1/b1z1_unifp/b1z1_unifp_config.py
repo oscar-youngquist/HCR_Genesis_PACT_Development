@@ -616,10 +616,10 @@ class B1Z1UniFPCfg:
                                 "dof_acc_arm"]
             curr_reward_bounds = {
                 "collision": [-1.0, -5.0],
-                "action_rate": [-0.001, -0.01],
-                "action_rate_arm": [-0.002, -0.02],
-                "action_smoothness":[-0.001, -0.01],
-                "action_smoothness_arm":[-0.002, -0.02],
+                "action_rate": [-0.0001, -0.01],
+                "action_rate_arm": [-0.0002, -0.02],
+                "action_smoothness":[-0.0001, -0.01],
+                "action_smoothness_arm":[-0.0002, -0.02],
                 "dof_acc": [-5.0e-8, -2.5e-7],
                 "dof_acc_arm": [-1.0e-7, -4.5e-7],
             }
@@ -673,8 +673,8 @@ class B1Z1UniFPCfgPPO:
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.001
-        learning_rate = 1.0e-3
+        entropy_coef = 0.01
+        learning_rate = 3.0e-4
         schedule = "adaptive"
         gamma = 0.998
         lam = 0.95
