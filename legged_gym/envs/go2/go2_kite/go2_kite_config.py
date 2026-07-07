@@ -657,12 +657,19 @@ class GO2KITECfg( LeggedRobotCfg ):
                                 "action_rate",
                                 "action_smoothness",
                                 "dof_acc",
+                                
                                 "torso_force_wrench_ellipsoid", 
                                 "swing_vel_ellipsoid_terrain",
+                                
                                 "stumble",
                                 "front_foot_overreach",
                                 "rear_foot_overreach",
                                 "feet_regulation",
+                                "edge_swing_clearance",
+                                "swing_foot_collision_edge",
+
+                                "position_no_progress",
+                                
                                 "lin_vel_z",
                                 "base_height",
                                 ]
@@ -672,18 +679,25 @@ class GO2KITECfg( LeggedRobotCfg ):
                                   "action_rate":[-0.0001, -0.01],
                                   "action_smoothness":[-0.0001, -0.01],
                                   "dof_acc":[-2.0e-8, -2.0e-7],
+                                  
                                   "torso_force_wrench_ellipsoid":[0.1, 0.40],
                                   "swing_vel_ellipsoid_terrain":[0.1, 0.30],
+                                  
                                   "stumble":[-1.0, -10.0],
                                   "front_foot_overreach":[-1.0, -100.0],
                                   "rear_foot_overreach":[-1.0, -10.0],
                                   "feet_regulation":[-0.05, -0.5],
+                                  "edge_swing_clearance":[-0.1, -2.0],
+                                  "swing_foot_collision_edge":[-0.1, -2.0],
+                                  
                                   "lin_vel_z":[-1.0, -0.01],
-                                  "base_height":[-1.0, -10.0]
+                                  "base_height":[-1.0, -10.0],
+                                 
+                                  "position_no_progress":[-0.2, -1.0],
                                  }
 
-            curr_steps = 5000
-            warmup_steps = 1500
+            curr_steps = 4500
+            warmup_steps = 500
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -847,7 +861,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # Adaptive entropy coefficient curriculum
         entropy_coef = 0.01
         use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.008, 0.012]
+        adaptive_ent_bounds = [0.005, 0.012]
         adaptive_ent_lin_threshold = 0.80
         adaptive_ent_ang_threshold = 0.40
         adaptive_ent_ter_threshold = 6.0
