@@ -761,7 +761,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         priv_mixer_hidden_dim     = 64
         priv_mixer_token_dim      = 64
         priv_mixer_channel_dim    = 128
-        priv_mixer_use_layer_norm = True
+        priv_mixer_use_layer_norm = False
         privileged_dynamics_decoder_layers = [64,128,256]
 
         # Depth Image/Sequence Models
@@ -781,7 +781,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # Proprioceptive Context encoder
         # proprio_in_dim      = 570
         proprio_in_dim      = 225
-        proprio_use_norm    = True
+        proprio_use_norm    = False
         proprio_num_blocks  = 3
         proprio_hidden_dim  = 64
         proprio_token_dim   = 64
@@ -792,8 +792,8 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # Modality Mixer Network
         mixer_velo_dim       = 3             # torso velocity state [v_x, v_y, v_z]
         mixer_feet_state_dim = 20            # [feet-contact-state (4), feet-height (4), surface-normal under feet (12)]
-        mixer_use_norm       = True
-        mixer_hidden_dims    = [64, 32]
+        mixer_use_norm       = False
+        mixer_hidden_dims    = [128, 64, 32]
         mixer_velo_hidden    = 128
         mixer_feet_hidden    = 128
         mixer_std_min        = 0.10

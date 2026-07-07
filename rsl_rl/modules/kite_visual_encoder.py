@@ -398,14 +398,14 @@ class MotionRobustDepthDecoder(nn.Module):
         h_dim_half = int((h_dim - target_latent_dim) / 2)
 
         self.fc = nn.Sequential(
-            nn.Linear(target_latent_dim,h_dim_half),
+            nn.Linear(target_latent_dim,h_dim),
             self.activation,
         )
         
-        self.h1 = nn.Sequential(
-            nn.Linear(h_dim_half, h_dim),
-            self.activation,
-        )
+        # self.h1 = nn.Sequential(
+        #     nn.Linear(h_dim_half, h_dim),
+        #     self.activation,
+        # )
 
         self.conv_6_8 = ConvNormAct(
             32 + 2,
@@ -558,7 +558,7 @@ class MotionRobustDepthDecoder(nn.Module):
         coord_dict = self.compute_motion_conditioned_coords(batch_size, transform_matrices)
 
         x = self.fc(z)
-        x = self.h1(x)
+        # x = self.h1(x)
         x = x.view(batch_size, 32, 6, 8)
 
         x = torch.cat([x, coord_dict["coords_6_8"]], dim=1)

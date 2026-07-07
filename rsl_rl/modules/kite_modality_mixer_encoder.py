@@ -80,13 +80,14 @@ class MultimodalFusionVAE(nn.Module):
         # ------------------------------------------------------------------
         # Modality-specific projections into a shared embedding space.
         # ------------------------------------------------------------------
-        self.depth_projection = nn.Linear(depth_latent_dim, hidden_dims[0])
-        self.proprio_projection = nn.Linear(proprio_latent_dim, hidden_dims[0])
+        embed_dim = int(hidden_dims[0] / 2) 
+        self.depth_projection = nn.Linear(depth_latent_dim, embed_dim)
+        self.proprio_projection = nn.Linear(proprio_latent_dim, embed_dim)
 
         # ------------------------------------------------------------------
         # Modality-fusion layer.
         # ------------------------------------------------------------------
-        self.merge_fc = nn.Linear(2 * hidden_dims[0], hidden_dims[0])
+        self.merge_fc = nn.Linear(2 * embed_dim, hidden_dims[0])
 
         # ------------------------------------------------------------------
         # Fused latent trunk.
