@@ -1851,7 +1851,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         eps = 1e-6
         J = _sanitize_tensor(self.leg_jacobians)                                            # (B, 4, 3, nj)
         n = _sanitize_tensor(self.simulator._normal_vector_around_feet.reshape(-1, 4, 3))   # (B, 4, 3)
-        swing = self._feet_contact_mask().float()                                           # (B, 4)
+        swing = (~self._feet_contact_mask()).float()                                           # (B, 4)
 
         # velocity ellipsoid matrix: M = J J^T
         M = J @ J.transpose(-1, -2)                             # (B, 4, 3, 3)

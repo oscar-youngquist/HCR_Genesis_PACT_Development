@@ -73,7 +73,7 @@ class GO2KITECfg( LeggedRobotCfg ):
 
         selected = False # select a unique terrain type and pass all arguments
         terrain_kwargs = None # Dict of arguments for selected terrain
-        max_init_terrain_level = 0 # starting curriculum level
+        max_init_terrain_level = 1 # starting curriculum level
         
         terrain_length = 8.0 # [m] length of each subterrain, X direction
         terrain_width = 8.0 # [m] width of each subterrain, Y direction
