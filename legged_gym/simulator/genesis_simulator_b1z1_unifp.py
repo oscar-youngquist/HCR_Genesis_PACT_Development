@@ -1217,12 +1217,24 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
 
         self._p_gains, self._d_gains = [], []
         for dof_name in self._cfg.asset.dof_names:
+            selected_key = None
             for key in stiffness.keys():
                 if key in dof_name:
-                    self._p_gains.append(stiffness[key])
-                    self._d_gains.append(damping[key])
+                    # A name such as z1_jointGripper matches both "joint" and
+                    # "z1"; keep one gain per DOF and prefer the later,
+                    # more-specific match from the config.
+                    selected_key = key
+            if selected_key is None:
+                raise KeyError(f"No PD gain configured for DOF '{dof_name}'")
+            self._p_gains.append(stiffness[selected_key])
+            self._d_gains.append(damping[selected_key])
         self._p_gains = torch.tensor(self._p_gains, device=self._device)
         self._d_gains = torch.tensor(self._d_gains, device=self._device)
+        if len(self._p_gains) != len(self._dof_indices):
+            raise RuntimeError(
+                f"PD gain count mismatch: got {len(self._p_gains)} gains for "
+                f"{len(self._dof_indices)} motor DOFs"
+            )
         
         self._cahed_pgain = self._p_gains.clone()
         self._cahed_dgain = self._d_gains.clone()

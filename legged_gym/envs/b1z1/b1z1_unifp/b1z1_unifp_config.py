@@ -126,7 +126,7 @@ class B1Z1UniFPCfg:
         foot_name = ["FR_foot", "FL_foot", "RR_foot", "RL_foot", "jointGripper"]
         gripper_name = "ee_gripper_link"
         penalize_contacts_on = ["thigh", "calf", "trunk", "wrist", "shoulder", "elbow", "forearm"]
-        terminate_after_contacts_on = []
+        terminate_after_contacts_on = ["trunk", "thigh", "shoulder", ]
         links_to_keep = ["FR_foot", "FL_foot", "RR_foot", "RL_foot", "ee_gripper_link"]
         self_collisions = False
         flip_visual_attachments = False
@@ -248,7 +248,7 @@ class B1Z1UniFPCfg:
         #     "z1_jointGripper": 1.5,
         # }
 
-        stiffness = {"joint":100.0, "z1_waist": 64.0,}
+        stiffness = {"joint":100.0, "z1": 64.0,}
         damping = {"joint": 5.0,"z1": 1.5,}
 
         action_scale = 0.25
@@ -372,16 +372,20 @@ class B1Z1UniFPCfg:
         com_displacement_z_min_pos = 0.15
         com_displacement_z_max = 0.15
      
-        push_robots = False
+        push_robots = True
         push_interval_s = 8.0
+        
         push_interval_min = 5.0
         push_interval_max = 15.0
+        
         max_push_vel_xy = 0.8
         min_push_vel_xy = 0.2
+        
         max_vertical_push = 0.10
         min_vertical_push = 0.0
         vert_interval_min = 5.0
         vert_interval_max = 15.0
+        
         max_push_torque = 0.50
         min_push_torque = 0.0
         wrench_timeout_min = 5.0
@@ -553,8 +557,8 @@ class B1Z1UniFPCfg:
             # Gait shaping
             feet_drag = -0.01
             feet_contact_forces = -0.0001
-            feet_air_time = 1.0
-            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height            
+            feet_air_time = 0.70
+            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height            
 
             # Leg and Arm Posture Conditioning
             arm_ee_force_manipulability = 0.2
@@ -613,7 +617,10 @@ class B1Z1UniFPCfg:
                                 "action_smoothness",
                                 "action_smoothness_arm",
                                 "dof_acc", 
-                                "dof_acc_arm"]
+                                "dof_acc_arm",
+                                "collision",
+                                "dof_pos_limits",
+                                ]
             curr_reward_bounds = {
                 "collision": [-1.0, -5.0],
                 "action_rate": [-0.0001, -0.01],
@@ -621,7 +628,9 @@ class B1Z1UniFPCfg:
                 "action_smoothness":[-0.0001, -0.01],
                 "action_smoothness_arm":[-0.0002, -0.02],
                 "dof_acc": [-5.0e-8, -2.5e-7],
-                "dof_acc_arm": [-1.0e-7, -4.5e-7],
+                "dof_acc_arm": [-1.0e-8, -4.5e-7],
+                "collision":[-1.0, -5.0],
+                "dof_pos_limits":[-2.0, -10.0]
             }
             warmup_steps = 1000
             curr_steps = 3000
@@ -689,7 +698,7 @@ class B1Z1UniFPCfgPPO:
         algorithm_class_name = "PPO_UniFP"
         num_steps_per_env = 24
         
-        max_iterations = 8000
+        max_iterations = 20000
         
         save_interval = 500
         run_name = "unifp_baseline"
