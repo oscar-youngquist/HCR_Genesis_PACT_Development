@@ -329,15 +329,29 @@ class B1Z1UniFP(BaseTask):
 
     def check_termination(self):
         self.fail_buf[:] = 0
+        self.contact_fail_buf[:] = 0
         if len(self.simulator.termination_contact_indices) > 0:
-            self.fail_buf |= torch.any(
-                torch.norm(
-                    self.simulator.link_contact_forces[:, self.simulator.termination_contact_indices, :],
-                    dim=-1,
-                )
-                > 10.0,
+            # Contact termination is based on net link contact force for the
+            # configured termination links. A patience counter avoids resetting
+            # on one-frame spikes.
+            contact_force_norm = torch.norm(
+                self.simulator.link_contact_forces[:, self.simulator.termination_contact_indices, :],
+                dim=-1,
+            )
+            undesired_contact = torch.any(
+                contact_force_norm > self.cfg.termination.contact_force_threshold,
                 dim=1,
             )
+            self.termination_contact_counter = torch.where(
+                undesired_contact,
+                self.termination_contact_counter + 1,
+                torch.zeros_like(self.termination_contact_counter),
+            )
+            contact_patience_steps = max(1, int(self.cfg.termination.contact_patience_steps))
+            self.contact_fail_buf |= self.termination_contact_counter >= contact_patience_steps
+            self.fail_buf |= self.contact_fail_buf
+        else:
+            self.termination_contact_counter[:] = 0
         rpy = self.simulator.base_euler
         base_height = torch.mean(
             self.simulator.base_pos[:, 2].unsqueeze(1) - self.simulator.measured_heights,
@@ -374,6 +388,7 @@ class B1Z1UniFP(BaseTask):
         episode_ee_force_ext_norm = torch.mean(torch.norm(self.ee_force_ext_world[env_ids], dim=1))
         episode_base_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_base_cmd[env_ids], dim=1))
         episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
+        episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
 
         self._resample_commands(env_ids)
         self._resample_ee_goal(env_ids, is_init=True)
@@ -396,6 +411,8 @@ class B1Z1UniFP(BaseTask):
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
         self.fail_buf[env_ids] = 0
+        self.contact_fail_buf[env_ids] = 0
+        self.termination_contact_counter[env_ids] = 0
         self.ee_force_ext_world[env_ids] = 0.0
         self.base_force_ext_world[env_ids] = 0.0
         self.current_Fxyz_gripper_cmd[env_ids] = 0.0
@@ -456,6 +473,7 @@ class B1Z1UniFP(BaseTask):
         self.extras["episode"]["base_force_cmd_norm"] = episode_base_force_cmd_norm
         self.extras["episode"]["base_force_ext_norm"] = episode_base_force_ext_norm
         self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
+        self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
 
@@ -1367,6 +1385,10 @@ class B1Z1UniFP(BaseTask):
         self.forward_vec = torch.zeros(self.num_envs, 3, device=self.device)
         self.forward_vec[:, 0] = 1.0
         self.fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.contact_fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Counts consecutive control steps with termination contact.
+        # Clearing this counter when contact disappears implements patience.
+        self.termination_contact_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, device=self.device)
         self.heading_commands = torch.zeros(self.num_envs, device=self.device)
         self.commands_scale = torch.tensor(

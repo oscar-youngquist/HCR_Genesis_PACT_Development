@@ -1051,37 +1051,41 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             )
             
         self._init_domain_params()
+        # Genesis' CUDA solver expects env indices that can index CUDA tensors.
+        # Reset-time calls already pass torch env ids, so use the same form for
+        # startup randomization instead of NumPy arrays.
+        all_env_ids = torch.arange(self._num_envs, device=self._device)
         # randomize friction
         if self._cfg.domain_rand.randomize_friction:
-            self._randomize_friction(np.arange(self._num_envs))
+            self._randomize_friction(all_env_ids)
         # randomize base mass
         if self._cfg.domain_rand.randomize_base_mass:
-            self._randomize_base_mass(np.arange(self._num_envs))
+            self._randomize_base_mass(all_env_ids)
         # randomize gripper mass
         if self._cfg.domain_rand.randomize_gripper_mass:
-            self._randomize_gripper_mass(np.arange(self._num_envs))
+            self._randomize_gripper_mass(all_env_ids)
         # randomize COM displacement
         if self._cfg.domain_rand.randomize_com_displacement:
-            self._randomize_com_displacement(np.arange(self._num_envs))
+            self._randomize_com_displacement(all_env_ids)
         # randomize joint armature
         if self._cfg.domain_rand.randomize_joint_armature:
-            self._randomize_joint_armature(np.arange(self._num_envs))
+            self._randomize_joint_armature(all_env_ids)
         # randomize joint friction
         if self._cfg.domain_rand.randomize_joint_friction:
-            self._randomize_joint_friction(np.arange(self._num_envs))
+            self._randomize_joint_friction(all_env_ids)
         # randomize joint damping
         if self._cfg.domain_rand.randomize_joint_damping:
-            self._randomize_joint_damping(np.arange(self._num_envs))
+            self._randomize_joint_damping(all_env_ids)
         # randomize joint stiffness
         if self._cfg.domain_rand.randomize_joint_stiffness:
-            self._randomize_joint_stiffness(np.arange(self._num_envs))
+            self._randomize_joint_stiffness(all_env_ids)
         # randomize pd gain
         if self._cfg.domain_rand.randomize_pd_gain:
-            self._randomize_pd_gain(np.arange(self._num_envs))
+            self._randomize_pd_gain(all_env_ids)
         # randomize motor strength factor
         if self._cfg.domain_rand.randomize_motor_strength:
-            self._randomize_motor_strength(np.arange(self._num_envs))
-            
+            self._randomize_motor_strength(all_env_ids)
+
     def _init_buffers(self):
         self.common_step_counter = 0
 

@@ -125,8 +125,8 @@ class B1Z1UniFPCfg:
         ]
         foot_name = ["FR_foot", "FL_foot", "RR_foot", "RL_foot", "jointGripper"]
         gripper_name = "ee_gripper_link"
-        penalize_contacts_on = ["thigh", "calf", "trunk", "wrist", "shoulder", "elbow", "forearm"]
-        terminate_after_contacts_on = []
+        penalize_contacts_on = ["trunk", "thigh", "calf", "wrist", "shoulder", "elbow", "forearm"]
+        terminate_after_contacts_on = ["thigh", "shoulder"]
         links_to_keep = ["FR_foot", "FL_foot", "RR_foot", "RL_foot", "ee_gripper_link"]
         self_collisions = False
         flip_visual_attachments = False
@@ -453,6 +453,8 @@ class B1Z1UniFPCfg:
         pitch_threshold = 1.0
         height_min = 0.20
         height_max = 1.50
+        contact_force_threshold = 10.0
+        contact_patience_steps = 25
 
     class constraints:
         class limits:
@@ -525,7 +527,7 @@ class B1Z1UniFPCfg:
 
             # Base
             base_height = -2.0
-            lin_vel_z   = -1.0
+            lin_vel_z   = -1.5
             ang_vel_xy  = -0.05
             roll        = -0.25
 
@@ -558,12 +560,12 @@ class B1Z1UniFPCfg:
             # Gait shaping
             feet_drag = -0.01
             feet_contact_forces = -0.0001
-            feet_air_time = 0.70
-            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height            
+            feet_air_time = 1.00
+            foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height            
 
             # Leg and Arm Posture Conditioning
-            arm_ee_force_manipulability = 0.0
-            torso_force_wrench_ellipsoid = 0.0
+            arm_ee_force_manipulability = 0.2
+            torso_force_wrench_ellipsoid = 0.2
             hip_pos = -0.05
 
         class manip_rewards():
@@ -621,6 +623,7 @@ class B1Z1UniFPCfg:
                                 "dof_acc_arm",
                                 "collision",
                                 "dof_pos_limits",
+                                "feet_contact_forces"
                                 ]
             curr_reward_bounds = {
                 "collision": [-1.0, -5.0],
@@ -631,7 +634,8 @@ class B1Z1UniFPCfg:
                 "dof_acc": [-5.0e-8, -2.5e-7],
                 "dof_acc_arm": [-1.0e-8, -4.5e-7],
                 "collision":[-1.0, -5.0],
-                "dof_pos_limits":[-2.0, -10.0]
+                "dof_pos_limits":[-2.0, -10.0],
+                "feet_contact_forces":[-1.0e-4, -1.0e-2]
             }
             warmup_steps = 1000
             curr_steps = 3000
@@ -683,7 +687,7 @@ class B1Z1UniFPCfgPPO:
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.0
+        entropy_coef = 0.0001
         learning_rate = 3.0e-4
         schedule = "adaptive"
         gamma = 0.998
