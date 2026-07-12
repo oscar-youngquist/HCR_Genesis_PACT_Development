@@ -1426,6 +1426,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
 
         torques = self._motor_strength * self.feedback_torques
 
+        # self.unclipped_torques = torques.clone()
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
         # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
         return torques

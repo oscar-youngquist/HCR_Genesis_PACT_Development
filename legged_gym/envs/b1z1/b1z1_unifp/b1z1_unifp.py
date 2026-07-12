@@ -419,6 +419,9 @@ class B1Z1UniFP(BaseTask):
         self.current_Fxyz_base_cmd[env_ids] = 0.0
         self.estimated_ee_force_local[env_ids] = 0.0
         self.estimated_base_force_local[env_ids] = 0.0
+        self.prev_ee_error[env_ids] = 0.0
+        self.last_contacts[env_ids] = 0.0
+        
         self._reset_force_events(env_ids)
         self._randomize_force_gains(env_ids)
 
@@ -957,9 +960,22 @@ class B1Z1UniFP(BaseTask):
 
     def get_ee_goal_spherical_center(self, base_yaw_quat, env_ids=None):
         """Return the Genesis-correct arm workspace center for EE spherical goals."""
+        center = None
         if env_ids is None:
-            return self.simulator.base_pos + quat_apply(base_yaw_quat, self.ee_goal_center_offset)
-        return self.simulator.base_pos[env_ids] + quat_apply(base_yaw_quat, self.ee_goal_center_offset[env_ids])
+            center = torch.cat([self.simulator.base_pos[:, :2], torch.zeros(self.num_envs, 1, device=self.device)], dim=1)
+            rotated_offset = quat_apply(base_yaw_quat, self.ee_goal_center_offset)
+            center = center[:,:2] + rotated_offset[:,:2]
+            terrain_z = torch.mean(self.simulator.measured_heights,dim=1)
+            center[:, 2] = terrain_z + self.ee_goal_center_offset[:, 2]
+            return center
+        
+        center = torch.cat([self.simulator.base_pos[env_ids, :2], torch.zeros(len(env_ids), 1, device=self.device)], dim=1)
+        rotated_offset = quat_apply(base_yaw_quat, self.ee_goal_center_offset[env_ids])
+        center = center[:,:2] + rotated_offset[:,:2]
+        terrain_z = torch.mean(self.simulator.measured_heights[env_ids],dim=1)
+        center[:, 2] = terrain_z + self.ee_goal_center_offset[env_ids, 2]
+        
+        return center
 
     def get_body_orientation(self):
         return self.simulator.base_euler[:, :2]
@@ -1670,7 +1686,12 @@ class B1Z1UniFP(BaseTask):
         base_yaw_quat = self._get_base_yaw_quat()
         force_offset = quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world) + self.current_Fxyz_base_cmd
         force_offset = force_offset[:, :2] / self.base_force_kds
-        error = torch.sum(torch.square(self.commands[:, :2] + force_offset - self.simulator.base_lin_vel[:, :2]), dim=1)
+        base_lin_vel_offset = self.commands[:, :2] + force_offset
+        
+        non_stop_sign = (torch.abs(base_lin_vel_offset[:, 0]) > self.cfg.commands.lin_vel_x_clip) | (torch.abs(base_lin_vel_offset[:, 1]) > self.cfg.commands.lin_vel_y_clip) | (torch.abs(self.commands[:, 2]) > self.cfg.commands.ang_vel_yaw_clip)
+        base_lin_vel_offset[:, :3] *= non_stop_sign.unsqueeze(1)
+        
+        error = torch.sum(torch.square(base_lin_vel_offset - self.simulator.base_lin_vel[:, :2]), dim=1)
         return torch.exp(-error / self.cfg.rewards.tracking_sigma)
 
     def _reward_tracking_ang_vel(self):
@@ -1680,7 +1701,7 @@ class B1Z1UniFP(BaseTask):
         base_yaw_quat = self._get_base_yaw_quat()
         force_offset = (self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)) / self.gripper_force_kps
         target = self.curr_ee_goal_cart_world + force_offset
-        error = torch.sum(torch.square(target - self.simulator.ee_pos), dim=1)
+        error = torch.sum(torch.abs(target - self.simulator.ee_pos), dim=1)
         return torch.exp(-error / self.cfg.rewards.tracking_ee_sigma)
 
     def _reward_tracking_ee_orientation_default(self):

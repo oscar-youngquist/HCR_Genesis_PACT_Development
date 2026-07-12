@@ -54,17 +54,17 @@ class PPO_UniFP:
         # Keep PPO and CSE/adaptation optimization separated. PPO should only
         # step the policy mean, value function, and learned action std; the
         # supervised adaptation update owns the encoder/decoder latent path.
-        self.ppo_parameters = [
-            *self.actor_critic.actor_body.parameters(),
-            *self.actor_critic.critic_body.parameters(),
-            self.actor_critic.std,
-        ]
+        # self.ppo_parameters = [
+        #     *self.actor_critic.actor_body.parameters(),
+        #     *self.actor_critic.critic_body.parameters(),
+        #     self.actor_critic.std,
+        # ]
         self.adaptation_module_parameters = [
             *self.actor_critic.adaptation_encoder_module.parameters(),
             *self.actor_critic.adaptation_decoder_module.parameters(),
         ]
 
-        self.optimizer = optim.Adam(self.ppo_parameters, lr=learning_rate)
+        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
         self.adaptation_module_optimizer = optim.Adam(
             self.adaptation_module_parameters,
             lr=Adaptation_Args.adaptation_module_learning_rate,

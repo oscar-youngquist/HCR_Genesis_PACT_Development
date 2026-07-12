@@ -44,7 +44,8 @@ class B1Z1UniFPCfg:
             # plus z1_waist joint [0, 0, 0.0585].
             x_offset = 0.3
             y_offset = 0.0
-            z_invariant_offset = 0.1485
+            # NOTE - the 0.60 corresponds to the desired base height.
+            z_invariant_offset = 0.60 + 0.1485
 
         class ranges:
             init_pos_start = [0.66, np.pi / 4, 0.0]
@@ -464,7 +465,7 @@ class B1Z1UniFPCfg:
         only_positive_rewards = False
         use_reward_curriculum = True
         tracking_sigma = 0.25
-        tracking_ee_sigma = 1.0
+        tracking_ee_sigma = 0.50
         tracking_ee_orientation_sigma = 0.05
         sigma_force = 1.0 / 50.0
         
@@ -505,11 +506,11 @@ class B1Z1UniFPCfg:
             collision = -5.0
             dof_pos_limits = -10.0
             torque_limits = -0.001
-            dof_close_to_default = -0.1
+            dof_close_to_default = 0.0
 
             # Add in close to default reward
-            stand_still = -0.5
-            stand_still_contact = -0.5
+            stand_still         = -0.5
+            stand_still_contact = 0.5
 
             alive = 0.01
 
