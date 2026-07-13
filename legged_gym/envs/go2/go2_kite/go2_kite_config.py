@@ -691,12 +691,12 @@ class GO2KITECfg( LeggedRobotCfg ):
                                   "swing_foot_collision_edge":[-0.1, -2.0],
                                   
                                   "lin_vel_z":[-1.0, -0.01],
-                                  "base_height":[-1.0, -0.1],
+                                  "base_height":[-1.0, -0.6],
                                  
                                   "position_no_progress":[-0.2, -0.4],
                                  }
 
-            curr_steps = 500
+            curr_steps = 10000
             warmup_steps = 1000
 
     class commands(LeggedRobotCfg.commands):
@@ -780,7 +780,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # priv_mixer_token_dim      = 64
         # priv_mixer_channel_dim    = 128
         # priv_mixer_use_layer_norm = False
-        privileged_dynamics_context_layer_sizes = [256, 64]
+        privileged_dynamics_context_layer_sizes = [256, 128]
         privileged_dynamics_decoder_layers = [64,128,256]
         privileged_terrain_std_min = 0.10
         privileged_terrain_std_max = 1.0
@@ -810,7 +810,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # proprio_hidden_dim  = 64
         # proprio_token_dim   = 64
         # proprio_channel_dim = 128
-        proprio_context_layer_sizes = [128, 64]
+        proprio_context_layer_sizes = [256, 128]
         proprio_std_min     = 0.10
         proprio_std_max     = 1.0
 
