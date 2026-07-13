@@ -185,7 +185,7 @@ class PPO_UniFP:
                 # actor/critic/std update norm.
                 self.optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
+                nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
                 # PPO backprop still traverses the adaptation encoder to build
                 # actor latents; clear those non-stepped gradients immediately.

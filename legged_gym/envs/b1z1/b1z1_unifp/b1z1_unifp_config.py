@@ -267,7 +267,7 @@ class B1Z1UniFPCfg:
         max_curriculum = 1.0
         num_commands = 15
         
-        resampling_time = 5.0
+        resampling_time = 10.0
         
         heading_command = True
         
@@ -506,20 +506,20 @@ class B1Z1UniFPCfg:
             collision = -5.0
             dof_pos_limits = -10.0
             torque_limits = -0.001
-            dof_close_to_default = 0.0
+            dof_close_to_default = -0.0001
 
             # Add in close to default reward
             stand_still         = -0.5
             stand_still_contact = 0.5
 
-            alive = 0.01
+            alive = 0.1
 
             # tracking
             tracking_lin_vel_force_world = 1.0
             tracking_ang_vel = 0.5
             
             tracking_ee_force_world = 1.0
-            tracking_ee_orientation_default = 0.2
+            tracking_ee_orientation_default = 0.0
 
             # Style rewards encouraging using the arm
             arm_progress_before_torso = 0.3
@@ -567,7 +567,7 @@ class B1Z1UniFPCfg:
             # Leg and Arm Posture Conditioning
             arm_ee_force_manipulability = 0.2
             torso_force_wrench_ellipsoid = 0.2
-            hip_pos = -0.05
+            hip_pos = -0.10
 
         class manip_rewards():
             # Leg Posture Conditioning
@@ -622,7 +622,6 @@ class B1Z1UniFPCfg:
                                 "action_smoothness_arm",
                                 "dof_acc", 
                                 "dof_acc_arm",
-                                "collision",
                                 "dof_pos_limits",
                                 "feet_contact_forces"
                                 ]
@@ -634,9 +633,8 @@ class B1Z1UniFPCfg:
                 "action_smoothness_arm":[-0.002, -0.02],
                 "dof_acc": [-5.0e-8, -2.5e-7],
                 "dof_acc_arm": [-1.0e-8, -4.5e-7],
-                "collision":[-1.0, -5.0],
                 "dof_pos_limits":[-2.0, -10.0],
-                "feet_contact_forces":[-1.0e-4, -1.0e-2]
+                "feet_contact_forces":[-1.0e-5, -1.0e-4]
             }
             warmup_steps = 1000
             curr_steps = 3000
@@ -688,7 +686,7 @@ class B1Z1UniFPCfgPPO:
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.0001
+        entropy_coef = 0.01
         learning_rate = 3.0e-4
         schedule = "adaptive"
         gamma = 0.998

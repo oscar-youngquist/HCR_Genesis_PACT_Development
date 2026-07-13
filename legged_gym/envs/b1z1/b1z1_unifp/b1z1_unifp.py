@@ -964,16 +964,16 @@ class B1Z1UniFP(BaseTask):
         if env_ids is None:
             center = torch.cat([self.simulator.base_pos[:, :2], torch.zeros(self.num_envs, 1, device=self.device)], dim=1)
             rotated_offset = quat_apply(base_yaw_quat, self.ee_goal_center_offset)
-            center = center[:,:2] + rotated_offset[:,:2]
+            center[:, :2] = center[:,:2] + rotated_offset[:,:2]
             terrain_z = torch.mean(self.simulator.measured_heights,dim=1)
-            center[:, 2] = terrain_z + self.ee_goal_center_offset[:, 2]
+            center[:, 2] = terrain_z + self.cfg.goal_ee.sphere_center.z_invariant_offset
             return center
         
         center = torch.cat([self.simulator.base_pos[env_ids, :2], torch.zeros(len(env_ids), 1, device=self.device)], dim=1)
         rotated_offset = quat_apply(base_yaw_quat, self.ee_goal_center_offset[env_ids])
-        center = center[:,:2] + rotated_offset[:,:2]
+        center[:, :2] = center[:,:2] + rotated_offset[:,:2]
         terrain_z = torch.mean(self.simulator.measured_heights[env_ids],dim=1)
-        center[:, 2] = terrain_z + self.ee_goal_center_offset[env_ids, 2]
+        center[:, 2] = terrain_z + self.cfg.goal_ee.sphere_center.z_invariant_offset
         
         return center
 
