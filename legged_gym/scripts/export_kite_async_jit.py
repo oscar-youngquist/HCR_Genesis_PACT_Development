@@ -103,11 +103,11 @@ def _build_untrained_kite_actor_critic(env_cfg, train_cfg, device="cpu"):
         policy_cfg.get("depth_sequence_conf_mask_scale", 0.2),
         policy_cfg["proprio_in_dim"],
         policy_cfg["proprio_latent_dim"],
-        policy_cfg["proprio_use_norm"],
-        policy_cfg["proprio_num_blocks"],
-        policy_cfg["proprio_hidden_dim"],
-        policy_cfg["proprio_token_dim"],
-        policy_cfg["proprio_channel_dim"],
+        policy_cfg.get("proprio_use_norm", True),
+        policy_cfg.get("proprio_num_blocks", 2),
+        policy_cfg.get("proprio_hidden_dim", 128),
+        policy_cfg.get("proprio_token_dim", 128),
+        policy_cfg.get("proprio_channel_dim", 256),
         policy_cfg.get("proprio_std_min", 0.01),
         policy_cfg.get("proprio_std_max", 1.5),
         policy_cfg["mixer_velo_dim"],
@@ -126,6 +126,7 @@ def _build_untrained_kite_actor_critic(env_cfg, train_cfg, device="cpu"):
         policy_cfg["critic_layers"],
         policy_cfg["activation"],
         policy_cfg["init_noise_std"],
+        proprio_context_layer_sizes=policy_cfg.get("proprio_context_layer_sizes", [256, 128]),
     )
     return actor_critic.eval().to(device)
 

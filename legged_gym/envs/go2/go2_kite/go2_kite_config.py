@@ -774,11 +774,13 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         terrain_decoder_encoded_spatial_dim = (3,4)
 
 
-        priv_mixer_num_blocks     = 3
-        priv_mixer_hidden_dim     = 64
-        priv_mixer_token_dim      = 64
-        priv_mixer_channel_dim    = 128
-        priv_mixer_use_layer_norm = False
+        # Old privileged dynamics MLP-Mixer encoder params.
+        # priv_mixer_num_blocks     = 3
+        # priv_mixer_hidden_dim     = 64
+        # priv_mixer_token_dim      = 64
+        # priv_mixer_channel_dim    = 128
+        # priv_mixer_use_layer_norm = False
+        privileged_dynamics_context_layer_sizes = [128, 64]
         privileged_dynamics_decoder_layers = [64,128,256]
         privileged_terrain_std_min = 0.10
         privileged_terrain_std_max = 1.0
@@ -802,11 +804,13 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # Proprioceptive Context encoder
         # proprio_in_dim      = 570
         proprio_in_dim      = 225
-        proprio_use_norm    = False
-        proprio_num_blocks  = 3
-        proprio_hidden_dim  = 64
-        proprio_token_dim   = 64
-        proprio_channel_dim = 128
+        # Old proprioceptive MLP-Mixer encoder params.
+        # proprio_use_norm    = False
+        # proprio_num_blocks  = 3
+        # proprio_hidden_dim  = 64
+        # proprio_token_dim   = 64
+        # proprio_channel_dim = 128
+        proprio_context_layer_sizes = [128, 64]
         proprio_std_min     = 0.10
         proprio_std_max     = 1.0
 

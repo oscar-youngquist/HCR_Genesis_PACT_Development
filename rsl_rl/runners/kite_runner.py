@@ -130,11 +130,11 @@ class OnPolicyRunnerKITE:
                                                             
                                                             self.policy_cfg["proprio_in_dim"],
                                                             self.policy_cfg["proprio_latent_dim"],
-                                                            self.policy_cfg["proprio_use_norm"],
-                                                            self.policy_cfg["proprio_num_blocks"],
-                                                            self.policy_cfg["proprio_hidden_dim"],
-                                                            self.policy_cfg["proprio_token_dim"],
-                                                            self.policy_cfg["proprio_channel_dim"],
+                                                            self.policy_cfg.get("proprio_use_norm", True),
+                                                            self.policy_cfg.get("proprio_num_blocks", 2),
+                                                            self.policy_cfg.get("proprio_hidden_dim", 128),
+                                                            self.policy_cfg.get("proprio_token_dim", 128),
+                                                            self.policy_cfg.get("proprio_channel_dim", 256),
                                                             self.policy_cfg.get("proprio_std_min", 0.01),
                                                             self.policy_cfg.get("proprio_std_max", 1.5),
                                                             
@@ -154,6 +154,7 @@ class OnPolicyRunnerKITE:
                                                             self.policy_cfg["critic_layers"],
                                                             self.policy_cfg["activation"],
                                                             self.policy_cfg["init_noise_std"],
+                                                            proprio_context_layer_sizes=self.policy_cfg.get("proprio_context_layer_sizes", [256, 128]),
                                                             ).to(self.device)        
         print("Created Actor-Critic Model")
         pretty_print_module(actor_critic)
@@ -192,11 +193,7 @@ class OnPolicyRunnerKITE:
             terrain_decoder_encoded_spatial_dim=self.policy_cfg.get("terrain_decoder_encoded_spatial_dim", (3,4)),
             terrain_decoder_channels=self.policy_cfg.get("terrain_decoder_channels", 64),
             privileged_dynamics_decoder_layers=self.policy_cfg.get("privileged_dynamics_decoder_layers", [32,64,128,256]),
-            priv_mixer_num_blocks=self.policy_cfg.get("priv_mixer_num_blocks", 2),
-            priv_mixer_hidden_dim=self.policy_cfg.get("priv_mixer_hidden_dim", 128),
-            priv_mixer_token_dim=self.policy_cfg.get("priv_mixer_token_dim", 128),
-            priv_mixer_channel_dim=self.policy_cfg.get("priv_mixer_channel_dim", 256),
-            priv_mixer_use_layer_norm=self.policy_cfg.get("priv_mixer_use_layer_norm", True),
+            privileged_dynamics_context_layer_sizes=self.policy_cfg.get("privileged_dynamics_context_layer_sizes", [256, 128]),
             privileged_dynamics_std_min=self.policy_cfg.get("privileged_dynamics_std_min", 0.01),
             privileged_dynamics_std_max=self.policy_cfg.get("privileged_dynamics_std_max", 1.5),
             device=self.device,

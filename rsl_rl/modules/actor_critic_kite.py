@@ -9,7 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .kite_modality_mixer_encoder import MultimodalFusionVAE
-from .kite_proprio_encoder import ProprioContextMLPMixerKITE
+# from .kite_proprio_encoder import ProprioContextMLPMixerKITE
+from .kite_proprio_encoder import ProprioceptiveContextEncoder
 from .kite_visual_encoder import (
     ConvDepthSequenceEncoder,
     MotionRobustDepthEncoder,
@@ -252,6 +253,7 @@ class ActorCritic_KITE(nn.Module):
                  critic_layers=[128,256,128,64],
                  activation="elu", 
                  init_noise_std=1.0,
+                 proprio_context_layer_sizes=(256, 128),
                  ):
         super().__init__()
 
@@ -279,18 +281,26 @@ class ActorCritic_KITE(nn.Module):
         
         self.mixer_latent_dim = mixer_latent_dim
         
-        # Create proprioceptive context encoder
-        self.proprio_context_encoder = ProprioContextMLPMixerKITE(
+        # Old MLP-Mixer proprioceptive context encoder.
+        # self.proprio_context_encoder = ProprioContextMLPMixerKITE(
+        #     context_input_dim=proprio_in_dim,
+        #     num_tokens=num_actor_obs,
+        #     input_dim_per_token=num_act_hist,
+        #     hidden_dim=proprio_hidden_dim,
+        #     num_mixer_blocks=proprio_mixer_blocks,
+        #     token_mlp_dim=proprio_token_dim,
+        #     channel_mlp_dim=proprio_channel_dim,
+        #     context_latent_size=proprio_latent_dim,
+        #     activation=activation,
+        #     use_layer_norm=proprio_use_norm,
+        #     std_min=proprio_std_min,
+        #     std_max=proprio_std_max,
+        # )
+        self.proprio_context_encoder = ProprioceptiveContextEncoder(
             context_input_dim=proprio_in_dim,
-            num_tokens=num_actor_obs,
-            input_dim_per_token=num_act_hist,
-            hidden_dim=proprio_hidden_dim,
-            num_mixer_blocks=proprio_mixer_blocks,
-            token_mlp_dim=proprio_token_dim,
-            channel_mlp_dim=proprio_channel_dim,
+            context_layer_sizes=list(proprio_context_layer_sizes),
             context_latent_size=proprio_latent_dim,
             activation=activation,
-            use_layer_norm=proprio_use_norm,
             std_min=proprio_std_min,
             std_max=proprio_std_max,
         )
@@ -494,19 +504,38 @@ class ActorCritic_KITE(nn.Module):
         # Validate parameter separation
         param_dict   = {pn: p for pn, p in self.named_parameters()}
         encoder_set = set().union(*encoder_sets.values())
-        inter_params = actor_set & no_decay & encoder_set & critic_set & depth_frame_set
-        if inter_params:
-            raise ValueError(f"Parameters in all sets: {inter_params}")
-        missing_params = param_dict.keys() - (
-            actor_set | no_decay | encoder_set | critic_set | depth_frame_set
-        )
-        if missing_params:
-            raise ValueError(f"Parameters not categorized: {missing_params}")
+        # inter_params = actor_set & no_decay & encoder_set & critic_set & depth_frame_set
+        # if inter_params:
+        #     raise ValueError(f"Parameters in all sets: {inter_params}")
+        # missing_params = param_dict.keys() - (
+        #     actor_set | no_decay | encoder_set | critic_set | depth_frame_set
+        # )
+        # if missing_params:
+        #     raise ValueError(f"Parameters not categorized: {missing_params}")
         # print(f"Parameters with extra strong weight decay{special_decay}")
+        parameter_sets = {
+            "actor": actor_set,
+            "critic": critic_set,
+            "no_decay": no_decay,
+            "encoder": encoder_set,
+            "depth_frame": depth_frame_set,
+        }
+
+        set_names = list(parameter_sets)
+
+        for i, name_a in enumerate(set_names):
+            for name_b in set_names[i + 1:]:
+                overlap = parameter_sets[name_a] & parameter_sets[name_b]
+
+                if overlap:
+                    raise ValueError(
+                        f"Parameters appear in both {name_a} and {name_b}: "
+                        f"{sorted(overlap)}"
+                    )
 
         params_act = [{"params": [param_dict[pn] for pn in sorted(actor_set)],  "weight_decay":weight_decay, "name":"actor"},
                       {"params": [param_dict[pn] for pn in sorted(critic_set)], "weight_decay":weight_decay, "name":"critic"},
-                      {"params": [param_dict[pn] for pn in sorted(no_decay)],   "weight_decay": 0.0}]
+                      {"params": [param_dict[pn] for pn in sorted(no_decay)],   "weight_decay": 0.0}]        
         params_depth_frame = [
             {
                 "params": [param_dict[pn] for pn in sorted(depth_frame_set)],
@@ -514,7 +543,6 @@ class ActorCritic_KITE(nn.Module):
                 "name": "depth_frame_autoencoder",
             }
         ]
-        
         params_enc = {
             name: [
                 {
@@ -528,33 +556,99 @@ class ActorCritic_KITE(nn.Module):
 
         return params_act, params_depth_frame, params_enc
 
-    def configure_optimizers(self,
-                             learning_rate: float = 1e-4,
-                             weight_decay: float = 1e-6,
-                             strong_decay: float = 1e-1,
-                             betas: Tuple[float, float] = (0.9, 0.999)) -> torch.optim.Optimizer:
-        """Configure the AdamW optimizer with parameter groups.
+    # def configure_optimizers(self,
+    #                          learning_rate: float = 1e-4,
+    #                          weight_decay: float = 1e-6,
+    #                          strong_decay: float = 1e-1,
+    #                          betas: Tuple[float, float] = (0.9, 0.999)) -> torch.optim.Optimizer:
+    #     """Configure the AdamW optimizer with parameter groups.
 
-        Actor and critic share one AdamW optimizer. The merged KITE auxiliary
-        update uses one Adam optimizer over all non-privileged encoder groups.
+    #     Actor and critic share one AdamW optimizer. The merged KITE auxiliary
+    #     update uses one Adam optimizer over all non-privileged encoder groups.
             
-        Returns:
-            Configured AdamW optimizer.
-        """
-        opt_groups_act, opt_groups_depth_frame, opt_groups_enc = self.get_optim_groups(weight_decay=weight_decay, strong_decay=strong_decay)
-        act_opt = torch.optim.AdamW(opt_groups_act, lr=learning_rate)
-        depth_frame_opt = torch.optim.Adam(
-            opt_groups_depth_frame,
-            lr=2.0e-4,
-            betas=betas,
+    #     Returns:
+    #         Configured AdamW optimizer.
+    #     """
+    #     opt_groups_act, opt_groups_depth_frame, opt_groups_enc = self.get_optim_groups(weight_decay=weight_decay, strong_decay=strong_decay)
+        
+    #     enc_groups = [
+    #         group
+    #         for groups in opt_groups_enc.values()
+    #         for group in groups
+    #     ]
+    
+    #     # Also add encoder paramaters to actor
+    #     opt_groups_act.extend(enc_groups)
+        
+    #     act_opt = torch.optim.AdamW(opt_groups_act, lr=learning_rate)
+    #     depth_frame_opt = torch.optim.Adam(
+    #         opt_groups_depth_frame,
+    #         lr=2.0e-4,
+    #         betas=betas,
+    #     )
+    #     enc_opt = torch.optim.Adam(enc_groups, lr=2.0e-4, betas=betas)
+        
+    #     return act_opt, depth_frame_opt, enc_opt
+    
+    def configure_optimizers(
+        self,
+        learning_rate: float = 1e-4,
+        weight_decay: float = 1e-6,
+        strong_decay: float = 1e-1,
+        betas: Tuple[float, float] = (0.9, 0.999),
+    ):
+        opt_groups_act, opt_groups_depth_frame, opt_groups_enc = (
+            self.get_optim_groups(
+                weight_decay=weight_decay,
+                strong_decay=strong_decay,
+            )
         )
-        enc_groups = [
+
+        # Flatten the encoder groups returned by get_optim_groups().
+        base_enc_groups = [
             group
             for groups in opt_groups_enc.values()
             for group in groups
         ]
-        enc_opt = torch.optim.Adam(enc_groups, lr=2.0e-4, betas=betas)
-        
+
+        # Independent parameter-group dictionaries, but referencing the same
+        # underlying nn.Parameter objects.
+        ppo_enc_groups = [
+            {
+                "params": list(group["params"]),
+                "weight_decay": group.get("weight_decay", 0.0),
+                "name": f"ppo_{group['name']}",
+            }
+            for group in base_enc_groups
+        ]
+
+        auxiliary_enc_groups = [
+            {
+                "params": list(group["params"]),
+                "weight_decay": group.get("weight_decay", 0.0),
+                "name": f"auxiliary_{group['name']}",
+            }
+            for group in base_enc_groups
+        ]
+
+        act_opt = torch.optim.AdamW(
+            [*opt_groups_act, *ppo_enc_groups],
+            lr=learning_rate,
+            betas=betas,
+        )
+
+        depth_frame_opt = torch.optim.AdamW(
+            opt_groups_depth_frame,
+            lr=2.0e-4,
+            betas=betas,
+        )
+
+        enc_opt = torch.optim.AdamW(
+            auxiliary_enc_groups,
+            lr=2.0e-4,
+            betas=betas,
+        )
+
         return act_opt, depth_frame_opt, enc_opt
 
     def reset(self, dones=None):

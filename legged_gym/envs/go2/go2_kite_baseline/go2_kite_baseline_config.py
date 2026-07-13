@@ -732,6 +732,7 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         depth_sequence_conf_mask_scale = 0.2
         proprio_std_min = 0.01
         proprio_std_max = 1.5
+        proprio_context_layer_sizes = [256, 128]
         mixer_std_min = 0.01
         mixer_std_max = 1.5
         mixer_hidden_dims = [128, 64]
@@ -743,6 +744,7 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         privileged_terrain_std_max = 1.5
         privileged_dynamics_std_min = 0.01
         privileged_dynamics_std_max = 1.5
+        privileged_dynamics_context_layer_sizes = [256, 128]
 
         # Context Decoder
         # cenet_dec_input_dim = 27 + 12

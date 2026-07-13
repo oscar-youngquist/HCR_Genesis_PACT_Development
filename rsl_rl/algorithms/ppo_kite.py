@@ -42,7 +42,8 @@ import random
 from rsl_rl.modules import ActorCritic_KITE
 from rsl_rl.modules.kite_privileged_encoders import (
     PrivDynamicsDecoder,
-    PrviDynamicsMLPMixerKITE,
+    # PrviDynamicsMLPMixerKITE,
+    PrivilegedProprioceptiveContextEncoder,
     TerrainAttentionEncoder,
     TerrainTwoHeadDecoder,
 )
@@ -266,6 +267,7 @@ class PPO_KITE:
                  gpu_debugging=False,
                  log_detailed_encoder_losses=False,
                  profile_learning=False,
+                 privileged_dynamics_context_layer_sizes=[256, 128],
                  ):
         
         self.device = device
@@ -402,18 +404,27 @@ class PPO_KITE:
         ).to(self.device)
         
         
-        # Privileged dynamics MLP-Mixer encoder (treats time-step obs features as tokens, time-steps as channels)        
-        self.priv_dynamics_encoder = PrviDynamicsMLPMixerKITE(
+        # Old privileged dynamics MLP-Mixer encoder.
+        # self.priv_dynamics_encoder = PrviDynamicsMLPMixerKITE(
+        #     context_input_dim=self.num_priv_obs_history * self.num_priv_obs,
+        #     num_tokens=self.num_priv_obs,
+        #     input_dim_per_token=self.num_priv_obs_history,
+        #     context_latent_size=privileged_dynamics_latent_dim,
+        #     activation=priv_activation_func,
+        #     num_mixer_blocks=priv_mixer_num_blocks,
+        #     hidden_dim=priv_mixer_hidden_dim,
+        #     token_mlp_dim=priv_mixer_token_dim,
+        #     channel_mlp_dim=priv_mixer_channel_dim,
+        #     use_layer_norm=priv_mixer_use_layer_norm,
+        #     std_min=privileged_dynamics_std_min,
+        #     std_max=privileged_dynamics_std_max,
+        #     device=device,
+        # ).to(self.device)
+        self.priv_dynamics_encoder = PrivilegedProprioceptiveContextEncoder(
             context_input_dim=self.num_priv_obs_history * self.num_priv_obs,
-            num_tokens=self.num_priv_obs,
-            input_dim_per_token=self.num_priv_obs_history,
+            context_layer_sizes=list(privileged_dynamics_context_layer_sizes),
             context_latent_size=privileged_dynamics_latent_dim,
             activation=priv_activation_func,
-            num_mixer_blocks=priv_mixer_num_blocks,
-            hidden_dim=priv_mixer_hidden_dim,
-            token_mlp_dim=priv_mixer_token_dim,
-            channel_mlp_dim=priv_mixer_channel_dim,
-            use_layer_norm=priv_mixer_use_layer_norm,
             std_min=privileged_dynamics_std_min,
             std_max=privileged_dynamics_std_max,
             device=device,

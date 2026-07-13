@@ -747,6 +747,161 @@ class PrviDynamicsMLPMixerKITE(nn.Module):
         mean, _ = self.encode(X_C)
         return mean
 
+class PrivilegedProprioceptiveContextEncoder(nn.Module):
+    """VAE-style encoder for processing context information with velocity prediction.
+
+    Encodes high-dimensional context into a latent distribution while simultaneously
+    predicting torso velocity. Uses ELU activations and Xavier initialization.
+
+    Args:
+        context_input_dim (int): Dimension of input context features. Default: 225.
+        context_layer_sizes (List[int]): Sizes of hidden layers. Default: [128, 64, 32].
+        context_latent_size (int): Dimension of latent space. Default: 16.
+        context_torso_velo_size (int): Dimension of velocity output. Default: 3.
+        device (str): Device for tensor operations. Default: "cpu".
+    """
+    def __init__(
+        self,
+        context_input_dim: int = 396,
+        context_layer_sizes: List[int] = [256, 128],
+        context_latent_size: int = 16,
+        activation: str = 'elu',
+        std_min: float = 0.01,
+        std_max: float = 1.50,
+        device: str = "cpu"
+    ) -> None:
+        super().__init__()
+
+        output_hdim = 2*context_latent_size
+
+        # VAE-style context encoder layers
+        # Input Layer
+        self.ce_in = nn.Linear(context_input_dim, context_layer_sizes[0])
+        # Hidden Layers
+        self.ce_h1 = nn.Linear(context_layer_sizes[0], context_layer_sizes[1])
+        self.ce_h2 = nn.Linear(context_layer_sizes[1], output_hdim)
+        # Output Layers
+
+        self.ce_latmean_h = nn.Linear(output_hdim, output_hdim)
+        self.ce_latvar_h  = nn.Linear(output_hdim, output_hdim)
+
+        self.ce_out_mean = nn.Linear(output_hdim, context_latent_size)
+        self.ce_out_var = nn.Sequential(
+            nn.Linear(output_hdim, context_latent_size),
+            SmoothClampLayer(min_val=2.0*math.log(std_min), max_val=2.0*math.log(std_max)),
+        )
+        
+        self.activation = get_activation(activation)
+
+        # self.ce_timestep = nn.Linear(context_layer_sizes[2], 1)
+        self.device = device
+        self._initialize_weights()
+
+    def _initialize_weights(self) -> None:
+        """Initialize all linear layers with Xavier uniform distribution."""
+        for layer in [self.ce_in, 
+                      self.ce_h1,
+                      self.ce_h2,
+                      self.ce_latmean_h]:
+            
+            nn.init.xavier_uniform_(layer.weight)
+            
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
+
+        # Initialize near zero so the initial posterior mean is close to the
+        # N(0, I) prior. This keeps the initial KL_mu term small.
+        nn.init.normal_(self.ce_out_mean.weight, mean=0.0, std=1.0e-3)
+        if self.ce_out_mean.bias is not None:
+            nn.init.zeros_(self.ce_out_mean.bias)
+
+        # Logvar output head inside Sequential.
+        for module in self.ce_out_var:
+            if isinstance(module, nn.Linear):
+                nn.init.kaiming_uniform_(
+                    module.weight,
+                    a=1.0,
+                    mode="fan_in",
+                    nonlinearity="linear",
+                )
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+        # Important: because SmoothClampLayer uses a sigmoid bound, logvar = 0
+        # may be the upper asymptote when std_max == 1.0, so we target a small
+        # negative value instead.
+        smooth_bound = self.ce_out_var[1]
+        min_logvar = smooth_bound.min_val
+        max_logvar = smooth_bound.max_val
+
+        target_logvar = -0.05  # std ≈ exp(-0.025) ≈ 0.975, KL near zero
+
+        p = (target_logvar - min_logvar) / (max_logvar - min_logvar)
+        p = min(max(p, 1.0e-6), 1.0 - 1.0e-6)
+        init_raw_logvar_bias = math.log(p / (1.0 - p))
+
+        # Make the hidden logvar branch initially neutral.
+        nn.init.zeros_(self.ce_latvar_h.weight)
+        if self.ce_latvar_h.bias is not None:
+            nn.init.zeros_(self.ce_latvar_h.bias)
+
+        # Make the final raw-logvar head output a constant near unit std.
+        nn.init.zeros_(self.ce_out_var[0].weight)
+        if self.ce_out_var[0].bias is not None:
+            nn.init.constant_(self.ce_out_var[0].bias, init_raw_logvar_bias)
+
+    def encode(self, X_C: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Forward pass through encoder
+        x = self.activation(self.ce_in(X_C))
+        # x = self.drop_1(x)
+        x = self.activation(self.ce_h1(x))
+        # x = self.drop_2(x)
+        x = self.activation(self.ce_h2(x))
+
+        lat_mean = self.activation(self.ce_latmean_h(x))
+        lat_var  = self.activation(self.ce_latvar_h(x))
+
+
+        return self.ce_out_mean(lat_mean), self.ce_out_var(lat_var)
+
+    def reparameterization_trick(
+        self,
+        mean: torch.Tensor,
+        logvar: torch.Tensor
+    ) -> torch.Tensor:
+        """Sample from latent space using reparameterization trick.
+
+        Args:
+            mean: Latent space mean
+            logvar: Latent space log variance
+
+        Returns:
+            Sampled latent vector
+        """
+        epsilon = torch.randn_like(logvar).to(logvar.device)
+        return mean + torch.exp(0.5 * logvar) * epsilon
+
+    def forward(self, X_C: torch.Tensor):
+        """Complete forward pass including encoding and sampling.
+
+        Args:
+            X_C: Input context tensor
+
+        Returns:
+            Tuple containing:
+                - mean: Latent space mean
+                - logvar: Latent space log variance
+                - z: Sampled latent vector
+                - torso_velo: Predicted velocity
+        """
+        mean, logvar = self.encode(X_C)
+        z = self.reparameterization_trick(mean, logvar)
+        return mean, logvar, z
+    
+    def forward_inference(self, X_C: torch.Tensor):
+        mean, _ = self.encode(X_C)
+        return mean
+
 class PrivDynamicsDecoder(nn.Module):
     """Decoder network for reconstructing next state from latent representation and velocity.
     

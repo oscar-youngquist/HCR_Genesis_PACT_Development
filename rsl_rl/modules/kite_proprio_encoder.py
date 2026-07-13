@@ -406,7 +406,7 @@ class ProprioceptiveContextEncoder(nn.Module):
     predicting torso velocity. Uses ELU activations and Xavier initialization.
 
     Args:
-        context_input_dim (int): Dimension of input context features. Default: 230.
+        context_input_dim (int): Dimension of input context features. Default: 225.
         context_layer_sizes (List[int]): Sizes of hidden layers. Default: [128, 64, 32].
         context_latent_size (int): Dimension of latent space. Default: 16.
         context_torso_velo_size (int): Dimension of velocity output. Default: 3.
@@ -414,8 +414,8 @@ class ProprioceptiveContextEncoder(nn.Module):
     """
     def __init__(
         self,
-        context_input_dim: int = 230,
-        context_layer_sizes: List[int] = [128, 64],
+        context_input_dim: int = 225,
+        context_layer_sizes: List[int] = [256, 128],
         context_latent_size: int = 16,
         activation: str = 'elu',
         std_min: float = 0.01,
@@ -454,16 +454,53 @@ class ProprioceptiveContextEncoder(nn.Module):
         for layer in [self.ce_in, 
                       self.ce_h1,
                       self.ce_h2,
-                      self.ce_latmean_h,
-                      self.ce_latvar_h]:
+                      self.ce_latmean_h]:
             
             nn.init.xavier_uniform_(layer.weight)
             
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
 
-        self.ce_out_var.apply(init_weights)
-        self.ce_velo_var.apply(init_weights)
+        # Initialize near zero so the initial posterior mean is close to the
+        # N(0, I) prior. This keeps the initial KL_mu term small.
+        nn.init.normal_(self.ce_out_mean.weight, mean=0.0, std=1.0e-3)
+        if self.ce_out_mean.bias is not None:
+            nn.init.zeros_(self.ce_out_mean.bias)
+
+        # Logvar output head inside Sequential.
+        for module in self.ce_out_var:
+            if isinstance(module, nn.Linear):
+                nn.init.kaiming_uniform_(
+                    module.weight,
+                    a=1.0,
+                    mode="fan_in",
+                    nonlinearity="linear",
+                )
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+        # Important: because SmoothClampLayer uses a sigmoid bound, logvar = 0
+        # may be the upper asymptote when std_max == 1.0, so we target a small
+        # negative value instead.
+        smooth_bound = self.ce_out_var[1]
+        min_logvar = smooth_bound.min_val
+        max_logvar = smooth_bound.max_val
+
+        target_logvar = -0.05  # std ≈ exp(-0.025) ≈ 0.975, KL near zero
+
+        p = (target_logvar - min_logvar) / (max_logvar - min_logvar)
+        p = min(max(p, 1.0e-6), 1.0 - 1.0e-6)
+        init_raw_logvar_bias = math.log(p / (1.0 - p))
+
+        # Make the hidden logvar branch initially neutral.
+        nn.init.zeros_(self.ce_latvar_h.weight)
+        if self.ce_latvar_h.bias is not None:
+            nn.init.zeros_(self.ce_latvar_h.bias)
+
+        # Make the final raw-logvar head output a constant near unit std.
+        nn.init.zeros_(self.ce_out_var[0].weight)
+        if self.ce_out_var[0].bias is not None:
+            nn.init.constant_(self.ce_out_var[0].bias, init_raw_logvar_bias)
 
     def encode(self, X_C: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # Forward pass through encoder
