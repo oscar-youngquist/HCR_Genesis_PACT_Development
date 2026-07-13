@@ -224,33 +224,33 @@ class B1Z1UniFPCfg:
 
     class control:
         control_type = "P"
-        stiffness = {
-            "hip": 175.0,
-            "thigh": 175.0,
-            "calf": 300.0,
-            "z1_waist": 64.0,
-            "z1_shoulder": 128.0,
-            "z1_elbow": 64.0,
-            "z1_wrist_angle": 64.0,
-            "z1_forearm_roll": 64.0,
-            "z1_wrist_rotate": 64.0,
-            "z1_jointGripper": 64.0,
-        }
-        damping = {
-            "hip": 7.5,
-            "thigh": 7.5,
-            "calf": 12.5,
-            "z1_waist": 1.5,
-            "z1_shoulder": 3.0,
-            "z1_elbow": 1.5,
-            "z1_wrist_angle": 1.5,
-            "z1_forearm_roll": 1.5,
-            "z1_wrist_rotate": 1.5,
-            "z1_jointGripper": 1.5,
-        }
+        # stiffness = {
+        #     "hip": 175.0,
+        #     "thigh": 175.0,
+        #     "calf": 300.0,
+        #     "z1_waist": 64.0,
+        #     "z1_shoulder": 128.0,
+        #     "z1_elbow": 64.0,
+        #     "z1_wrist_angle": 64.0,
+        #     "z1_forearm_roll": 64.0,
+        #     "z1_wrist_rotate": 64.0,
+        #     "z1_jointGripper": 64.0,
+        # }
+        # damping = {
+        #     "hip": 7.5,
+        #     "thigh": 7.5,
+        #     "calf": 12.5,
+        #     "z1_waist": 1.5,
+        #     "z1_shoulder": 3.0,
+        #     "z1_elbow": 1.5,
+        #     "z1_wrist_angle": 1.5,
+        #     "z1_forearm_roll": 1.5,
+        #     "z1_wrist_rotate": 1.5,
+        #     "z1_jointGripper": 1.5,
+        # }
 
-        # stiffness = {"joint":100.0, "z1": 64.0,}
-        # damping = {"joint": 5.0,"z1": 1.5,}
+        stiffness = {"joint":100.0, "z1": 64.0,}
+        damping = {"joint": 5.0,"z1": 1.5,}
 
         action_scale = 0.25
         dt = 0.02
@@ -515,10 +515,10 @@ class B1Z1UniFPCfg:
             alive = 0.1
 
             # tracking
-            tracking_lin_vel_force_world = 1.0
-            tracking_ang_vel = 0.5
+            tracking_lin_vel_force_world = 2.0
+            tracking_ang_vel = 1.0
             
-            tracking_ee_force_world = 1.0
+            tracking_ee_force_world = 2.0
             tracking_ee_orientation_default = 0.0
 
             # Style rewards encouraging using the arm
@@ -534,14 +534,14 @@ class B1Z1UniFPCfg:
 
             # Legs
             dof_acc           = -2.5e-7
-            action_rate       = -0.01
+            action_rate       = -0.02
             action_smoothness = -0.01
             joint_power       = -2.e-5
             joint_power_dist  = -1.e-5
 
             # Arm
             dof_acc_arm = -4.5e-7
-            action_rate_arm = -0.02
+            action_rate_arm = -0.04
             action_smoothness_arm = -0.02
             joint_power_arm = -4.e-5
             joint_power_dist_arm = -2.e-5
@@ -616,28 +616,32 @@ class B1Z1UniFPCfg:
 
         class reward_curriculum:
             curr_reward_keys = ["collision", 
-                                "action_rate", 
-                                "action_rate_arm",
+                                # "action_rate", 
+                                # "action_rate_arm",
                                 "action_smoothness",
                                 "action_smoothness_arm",
                                 "dof_acc", 
                                 "dof_acc_arm",
                                 "dof_pos_limits",
-                                "feet_contact_forces"
+                                "feet_contact_forces",
+                                "base_height",
+                                "lin_vel_z",
                                 ]
             curr_reward_bounds = {
                 "collision": [-1.0, -5.0],
-                "action_rate": [-0.001, -0.01],
-                "action_rate_arm": [-0.002, -0.02],
+                # "action_rate": [-0.001, -0.01],
+                # "action_rate_arm": [-0.002, -0.02],
                 "action_smoothness":[-0.001, -0.01],
                 "action_smoothness_arm":[-0.002, -0.02],
                 "dof_acc": [-5.0e-8, -2.5e-7],
                 "dof_acc_arm": [-1.0e-8, -4.5e-7],
                 "dof_pos_limits":[-2.0, -10.0],
-                "feet_contact_forces":[-1.0e-5, -1.0e-4]
+                "feet_contact_forces":[-1.0e-5, -1.0e-4],
+                # "base_height":[-1.0, -2.0],
+                # "lin_vel_z":[-1.00, -2.0],
             }
-            warmup_steps = 1000
-            curr_steps = 3000
+            warmup_steps = 12000
+            curr_steps = 6000
 
     class viewer:
         ref_env = 0
@@ -686,7 +690,7 @@ class B1Z1UniFPCfgPPO:
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.01
+        entropy_coef = 0.001
         learning_rate = 3.0e-4
         schedule = "adaptive"
         gamma = 0.998
