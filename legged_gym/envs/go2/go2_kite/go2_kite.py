@@ -1261,7 +1261,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             # ).clamp(0.0, 1.0)
 
             normalized = (
-                self.episode_sums[reward_name][valid_ids]
+                self.episode_sums[reward_name][env_ids]
                 / (self.max_episode_length * scale)
             ).clamp(0.0, 1.0)
             
