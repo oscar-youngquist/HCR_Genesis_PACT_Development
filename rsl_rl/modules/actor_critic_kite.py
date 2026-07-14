@@ -14,8 +14,6 @@ from .kite_proprio_encoder import ProprioceptiveContextEncoder
 from .kite_visual_encoder import (
     ConvDepthSequenceEncoder,
     MotionRobustDepthEncoder,
-    MotionRobustDepthDecoder,
-    MotionRobustDepthAutoencoderUNet,
 )
 from .module_utils import ContrastiveProjectionHead, ReconHead, get_activation
 
@@ -41,7 +39,7 @@ class KITEDepthAsyncPipeline(nn.Module):
         depth_torso_state: torch.Tensor,
         depth_latent_history: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        latest_depth_latent, latest_depth_logvar = self.depth_frame_encoder.encode_inf(
+        latest_depth_latent = self.depth_frame_encoder.encode_inf(
             depth_image,
             depth_torso_state,
         )
@@ -51,7 +49,6 @@ class KITEDepthAsyncPipeline(nn.Module):
         )
         depth_sequence_latent = self.depth_sequence_encoder.forward_inference(
             depth_latent_sequence,
-            latest_depth_logvar,
         )
         updated_depth_latent_history = depth_latent_sequence[:, 1:, :]
 
@@ -213,10 +210,6 @@ class ActorCritic_KITE(nn.Module):
                  depth_image_resolution=(48, 64),
                  depth_image_latent_dim=32,
                  depth_image_norm="layer",
-                 depth_decoder_norm="layer",
-                 depth_image_std_min=0.01,
-                 depth_image_std_max=2.0,
-                 depth_autoencoder_skip_dropout_prob=0.25,
                  
                  depth_sequence_length=5,
                  depth_sequence_outdim=16,
@@ -311,27 +304,6 @@ class ActorCritic_KITE(nn.Module):
             target_latent_dim=self.depth_latent_dim,
             cnn_activation=activation,
             norm_type=depth_image_norm,
-            vae_std_min=depth_image_std_min,
-            vae_std_max=depth_image_std_max,
-        )
-
-        # Single-depth image decoder. The frame encoder and decoder are trained
-        # together as a standalone depth autoencoder update in PPO.
-        self.depth_frame_decoder = MotionRobustDepthDecoder(
-            depth_image_resolution=self.depth_image_resolution,
-            target_latent_dim=self.depth_latent_dim,
-            cnn_activation=activation,
-            norm_type=depth_decoder_norm,
-            use_unet_skips=True,
-        )
-
-        # Training-only reconstruction wrapper. It reuses the standalone
-        # encoder/decoder modules above, so deployment can still export only
-        # the encoder while PPO can train with U-Net-style reconstruction skips.
-        self.depth_frame_autoencoder = MotionRobustDepthAutoencoderUNet(
-            self.depth_frame_encoder,
-            self.depth_frame_decoder,
-            skip_dropout_prob=depth_autoencoder_skip_dropout_prob,
         )
         
         # Depth-image latent sequence encoder
@@ -437,19 +409,18 @@ class ActorCritic_KITE(nn.Module):
         self.std.data.fill_(std_val)
 
     def get_optim_groups(self, weight_decay: float = 1e-4, strong_decay: float = 1e-1):
-        """Separate actor/critic, depth-frame, and merged encoder params.
+        """Separate actor/critic and merged encoder params.
         
         Args:
             weight_decay (float): Weight decay value for regularization. Default: 1e-4.
             
         Returns:
-            Actor/critic parameter groups, depth-frame autoencoder groups, and
-            merged sequence/proprio/mixer encoder groups.
+            Actor/critic parameter groups and merged sequence/proprio/mixer
+            encoder groups.
         """
         critic_set = set()
         actor_set = set()
         no_decay  = set()
-        depth_frame_set = set()
         encoder_sets = {
             "proprioceptive": set(),
             "visual_sequence": set(),
@@ -461,23 +432,16 @@ class ActorCritic_KITE(nn.Module):
             "proprio_context_encoder.": "proprioceptive",
             "proprio_contrastive_head.": "proprioceptive",
             "proprio_recon_head.": "proprioceptive",
+            "depth_frame_encoder.": "visual_sequence",
             "depth_sequence_encoder.": "visual_sequence",
             "depth_sequence_contrastive_head.": "visual_sequence",
             "depth_sequence_recon_head.": "visual_sequence",
             "context_encoder.": "modality_mixer",
         }
-        depth_frame_prefixes = (
-            "depth_frame_encoder.",
-            "depth_frame_decoder.",
-        )
 
         for mn, m in self.named_modules():
             for pn, p in m.named_parameters():
                 fpn = f"{mn}.{pn}" if mn else pn  # full param name
-                if fpn.startswith(depth_frame_prefixes):
-                    depth_frame_set.add(fpn)
-                    continue
-
                 encoder_group = None
                 for prefix, group_name in encoder_prefix_to_group.items():
                     if fpn.startswith(prefix):
@@ -504,11 +468,11 @@ class ActorCritic_KITE(nn.Module):
         # Validate parameter separation
         param_dict   = {pn: p for pn, p in self.named_parameters()}
         encoder_set = set().union(*encoder_sets.values())
-        # inter_params = actor_set & no_decay & encoder_set & critic_set & depth_frame_set
+        # inter_params = actor_set & no_decay & encoder_set & critic_set
         # if inter_params:
         #     raise ValueError(f"Parameters in all sets: {inter_params}")
         # missing_params = param_dict.keys() - (
-        #     actor_set | no_decay | encoder_set | critic_set | depth_frame_set
+        #     actor_set | no_decay | encoder_set | critic_set
         # )
         # if missing_params:
         #     raise ValueError(f"Parameters not categorized: {missing_params}")
@@ -518,7 +482,6 @@ class ActorCritic_KITE(nn.Module):
             "critic": critic_set,
             "no_decay": no_decay,
             "encoder": encoder_set,
-            "depth_frame": depth_frame_set,
         }
 
         set_names = list(parameter_sets)
@@ -536,13 +499,6 @@ class ActorCritic_KITE(nn.Module):
         params_act = [{"params": [param_dict[pn] for pn in sorted(actor_set)],  "weight_decay":weight_decay, "name":"actor"},
                       {"params": [param_dict[pn] for pn in sorted(critic_set)], "weight_decay":weight_decay, "name":"critic"},
                       {"params": [param_dict[pn] for pn in sorted(no_decay)],   "weight_decay": 0.0}]        
-        params_depth_frame = [
-            {
-                "params": [param_dict[pn] for pn in sorted(depth_frame_set)],
-                "weight_decay": weight_decay,
-                "name": "depth_frame_autoencoder",
-            }
-        ]
         params_enc = {
             name: [
                 {
@@ -554,42 +510,8 @@ class ActorCritic_KITE(nn.Module):
             for name, param_names in encoder_sets.items()
         }
 
-        return params_act, params_depth_frame, params_enc
+        return params_act, params_enc
 
-    # def configure_optimizers(self,
-    #                          learning_rate: float = 1e-4,
-    #                          weight_decay: float = 1e-6,
-    #                          strong_decay: float = 1e-1,
-    #                          betas: Tuple[float, float] = (0.9, 0.999)) -> torch.optim.Optimizer:
-    #     """Configure the AdamW optimizer with parameter groups.
-
-    #     Actor and critic share one AdamW optimizer. The merged KITE auxiliary
-    #     update uses one Adam optimizer over all non-privileged encoder groups.
-            
-    #     Returns:
-    #         Configured AdamW optimizer.
-    #     """
-    #     opt_groups_act, opt_groups_depth_frame, opt_groups_enc = self.get_optim_groups(weight_decay=weight_decay, strong_decay=strong_decay)
-        
-    #     enc_groups = [
-    #         group
-    #         for groups in opt_groups_enc.values()
-    #         for group in groups
-    #     ]
-    
-    #     # Also add encoder paramaters to actor
-    #     opt_groups_act.extend(enc_groups)
-        
-    #     act_opt = torch.optim.AdamW(opt_groups_act, lr=learning_rate)
-    #     depth_frame_opt = torch.optim.Adam(
-    #         opt_groups_depth_frame,
-    #         lr=2.0e-4,
-    #         betas=betas,
-    #     )
-    #     enc_opt = torch.optim.Adam(enc_groups, lr=2.0e-4, betas=betas)
-        
-    #     return act_opt, depth_frame_opt, enc_opt
-    
     def configure_optimizers(
         self,
         learning_rate: float = 1e-4,
@@ -597,7 +519,7 @@ class ActorCritic_KITE(nn.Module):
         strong_decay: float = 1e-1,
         betas: Tuple[float, float] = (0.9, 0.999),
     ):
-        opt_groups_act, opt_groups_depth_frame, opt_groups_enc = (
+        opt_groups_act, opt_groups_enc = (
             self.get_optim_groups(
                 weight_decay=weight_decay,
                 strong_decay=strong_decay,
@@ -637,19 +559,13 @@ class ActorCritic_KITE(nn.Module):
             betas=betas,
         )
 
-        depth_frame_opt = torch.optim.AdamW(
-            opt_groups_depth_frame,
-            lr=2.0e-4,
-            betas=betas,
-        )
-
         enc_opt = torch.optim.AdamW(
             auxiliary_enc_groups,
             lr=2.0e-4,
             betas=betas,
         )
 
-        return act_opt, depth_frame_opt, enc_opt
+        return act_opt, enc_opt
 
     def reset(self, dones=None):
         pass
@@ -736,7 +652,7 @@ class ActorCritic_KITE(nn.Module):
 
         # encode the most recent depth image (always done during simulated training)
         depth_image = self._format_depth_image(depth_image, obs)
-        _, latest_depth_logvar, latest_depth_z, _ = self.depth_frame_encoder(
+        latest_depth_z, _ = self.depth_frame_encoder(
             depth_image,
             depth_torso_state,
         )
@@ -748,7 +664,7 @@ class ActorCritic_KITE(nn.Module):
         )
         # Encode the latent depth-image sequence
         _, _, depth_seq_z = (
-            self.depth_sequence_encoder(depth_sequence, latest_depth_logvar)
+            self.depth_sequence_encoder(depth_sequence)
         )
 
         mean, logvar, z, body_velo, feet_state = self.context_encoder(
@@ -778,7 +694,7 @@ class ActorCritic_KITE(nn.Module):
         proprio_z = self.proprio_context_encoder.forward_inference(obs_history)
 
         depth_image = self._format_depth_image(depth_image, obs)
-        latest_depth_z, latest_depth_logvar = self.depth_frame_encoder.encode_inf(
+        latest_depth_z = self.depth_frame_encoder.encode_inf(
             depth_image,
             depth_torso_state,
         )
@@ -788,7 +704,6 @@ class ActorCritic_KITE(nn.Module):
         )
         depth_seq_z = self.depth_sequence_encoder.forward_inference(
             depth_sequence,
-            latest_depth_logvar,
         )
 
         z, body_velo, feet_state = self.context_encoder.forward_inference(

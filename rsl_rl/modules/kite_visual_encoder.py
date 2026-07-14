@@ -38,8 +38,6 @@ class MotionRobustDepthEncoder(nn.Module):
             [roll, pitch, v_x, v_y, v_z, gyro_x, gyro_y, gyro_z]
 
     Outputs:
-        mean:   B x latent_dim
-        logvar: B x latent_dim
         z:      B x latent_dim
         aux:    dict
     """
@@ -51,8 +49,6 @@ class MotionRobustDepthEncoder(nn.Module):
         target_latent_dim: int = 16,
         cnn_activation: str = "elu",
         norm_type: str = "none",
-        vae_std_min: float = 0.01,
-        vae_std_max: float = 2.0,
         attention_dropout: float = 0.0,
     ):
         super().__init__()
@@ -81,8 +77,25 @@ class MotionRobustDepthEncoder(nn.Module):
             nn.Linear(16, 4),
         )
 
+        kernel_x = torch.tensor(
+            [[-1, 0, 1],
+            [-2, 0, 2],
+            [-1, 0, 1]],
+            dtype=torch.float32,
+        ).view(1, 1, 3, 3) / 8.0
+
+        kernel_y = torch.tensor(
+            [[-1, -2, -1],
+            [ 0,  0,  0],
+            [ 1,  2,  1]],
+            dtype=torch.float32,
+        ).view(1, 1, 3, 3) / 8.0
+
+        self.register_buffer("depth_grad_kernel_x", kernel_x)
+        self.register_buffer("depth_grad_kernel_y", kernel_y)
+
         self.conv1 = ConvNormAct(
-            cnn_input_channel + 2,
+            cnn_input_channel + 3 + 2,    # depth image, depth-image graident info, CoordConv grid
             8,
             self.activation,
             norm_type=norm_type,
@@ -129,16 +142,8 @@ class MotionRobustDepthEncoder(nn.Module):
             self.activation,
         )        
         
-        self.mean_h1 = nn.Linear(output_hdim, output_hdim)
-
-        self.mean_out = nn.Linear(output_hdim, target_latent_dim)
-
-        self.logvar_h1 = nn.Linear(output_hdim, output_hdim)
-
-        self.logvar_out = nn.Sequential(
-            nn.Linear(output_hdim, target_latent_dim),
-            SmoothClampLayer(min_val=2.0*math.log(vae_std_min), max_val=2.0*math.log(vae_std_max)),
-        )
+        self.latent_h1 = nn.Linear(output_hdim, output_hdim)
+        self.latent_out = nn.Linear(output_hdim, target_latent_dim)
 
         self._initialize_weights()
 
@@ -154,34 +159,9 @@ class MotionRobustDepthEncoder(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-        # Initialize near zero so the initial posterior mean is close to the
-        # N(0, I) prior. This keeps the initial KL_mu term small.
-        nn.init.normal_(self.mean_out.weight, mean=0.0, std=1.0e-3)
-        if self.mean_out.bias is not None:
-            nn.init.zeros_(self.mean_out.bias)
-
-        # Important: because SmoothClampLayer uses a sigmoid bound, logvar = 0
-        # may be the upper asymptote when std_max == 1.0, so we target a small
-        # negative value instead.
-        smooth_bound = self.logvar_out[1]
-        min_logvar = smooth_bound.min_val
-        max_logvar = smooth_bound.max_val
-
-        target_logvar = -0.05  # std ≈ exp(-0.025) ≈ 0.975, KL near zero
-
-        p = (target_logvar - min_logvar) / (max_logvar - min_logvar)
-        p = min(max(p, 1.0e-6), 1.0 - 1.0e-6)
-        init_raw_logvar_bias = math.log(p / (1.0 - p))
-
-        # Make the hidden logvar branch initially neutral.
-        nn.init.zeros_(self.logvar_h1.weight)
-        if self.logvar_h1.bias is not None:
-            nn.init.zeros_(self.logvar_h1.bias)
-
-        # Make the final raw-logvar head output a constant near unit std.
-        nn.init.zeros_(self.logvar_out[0].weight)
-        if self.logvar_out[0].bias is not None:
-            nn.init.constant_(self.logvar_out[0].bias, init_raw_logvar_bias)
+        nn.init.normal_(self.latent_out.weight, mean=0.0, std=1.0e-3)
+        if self.latent_out.bias is not None:
+            nn.init.zeros_(self.latent_out.bias)
 
         # LayerNorm layers.
         for module in self.modules():
@@ -237,12 +217,28 @@ class MotionRobustDepthEncoder(nn.Module):
 
         return stabilized_coords, transform_matrices
 
+
+    def compute_depth_gradients(self, depth_image: torch.Tensor) -> torch.Tensor:
+        """
+        depth_image: B x 1 x H x W
+
+        Returns:
+            depth_grads: B x 2 x H x W
+                channels are [grad_x, grad_y]
+        """
+        depth_padded = F.pad(depth_image, (1, 1, 1, 1), mode="replicate")
+
+        grad_x = F.conv2d(depth_padded, self.depth_grad_kernel_x)
+        grad_y = F.conv2d(depth_padded, self.depth_grad_kernel_y)
+
+        grad_mag = torch.sqrt(grad_x.square() + grad_y.square() + 1.0e-6)
+    
+        return torch.cat([grad_x, grad_y, grad_mag], dim=1)
     
     def encode(
         self,
         depth_image: torch.Tensor,
         torso_state: torch.Tensor,
-        return_unet_skips: bool = False,
     ):
         batch_size = depth_image.size(0)
 
@@ -251,7 +247,11 @@ class MotionRobustDepthEncoder(nn.Module):
             torso_state,
         )
 
-        x = torch.cat([depth_image, stabilized_coords], dim=1)
+        # x = torch.cat([depth_image, stabilized_coords], dim=1)
+
+        depth_grads = self.compute_depth_gradients(depth_image)
+
+        x = torch.cat([depth_image, depth_grads, stabilized_coords], dim=1)
 
         x1 = self.conv1(x)
         x2 = self.conv2(x1)
@@ -272,27 +272,15 @@ class MotionRobustDepthEncoder(nn.Module):
 
         latent = self.fc(attn_out)
 
-        mean_h1 = self.activation(self.mean_h1(latent))
-        logvar_h1 = self.activation(self.logvar_h1(latent))
-
-        mean = self.mean_out(mean_h1)
-        logvar = self.logvar_out(logvar_h1)
+        latent_h1 = self.activation(self.latent_h1(latent))
+        z = self.latent_out(latent_h1)
 
         aux = {
             "attention_weights": attn_weights,
             "transform_matrices": transform_matrices,
         }
-        if return_unet_skips:
-            # These features are only requested by the training-only depth
-            # autoencoder wrapper. The normal actor/deployment path never asks
-            # for them, so the policy still consumes only the compact latent z.
-            aux["unet_skips"] = {
-                "skip_6_8": x3,
-                "skip_12_16": x2,
-                "skip_24_32": x1,
-            }
 
-        return mean, logvar, aux
+        return z, aux
     
 
     def encode_inf(self, depth_image: torch.Tensor, torso_state: torch.Tensor):
@@ -323,333 +311,26 @@ class MotionRobustDepthEncoder(nn.Module):
         attn_out = self.att_norm(attn_out.squeeze(1))
         latent = self.fc(attn_out)
 
-        mean_h1 = self.activation(self.mean_h1(latent))
-        logvar_h1 = self.activation(self.logvar_h1(latent))
+        latent_h1 = self.activation(self.latent_h1(latent))
+        z = self.latent_out(latent_h1)
 
-        mean = self.mean_out(mean_h1)
-        logvar = self.logvar_out(logvar_h1)
-
-        return mean, logvar
+        return z
 
     def forward(
         self,
         depth_image: torch.Tensor,
         torso_state: torch.Tensor,
-        return_unet_skips: bool = False,
     ):
-        mean, logvar, aux = self.encode(
+        z, aux = self.encode(
             depth_image,
             torso_state,
-            return_unet_skips=return_unet_skips,
         )
 
-        z = reparameterize(mean, logvar)
-
-        return mean, logvar, z, aux
+        return z, aux
 
     @torch.no_grad()
     def forward_inference(self, depth_image: torch.Tensor, torso_state: torch.Tensor):
-        mean, _ = self.encode_inf(depth_image, torso_state)
-        return mean
-
-
-# --------------------------------------------------------------------------
-# Motion-robust depth decoder
-# --------------------------------------------------------------------------
-class MotionRobustDepthDecoder(nn.Module):
-    """
-    Decodes a latent vector back into a reconstructed depth image.
-
-    Uses interpolation + Conv2d blocks rather than ConvTranspose2d.
-    """
-
-    def __init__(
-        self,
-        depth_image_resolution=(48, 64),
-        cnn_output_channel: int = 1,
-        target_latent_dim: int = 16,
-        cnn_activation: str = "elu",
-        norm_type: str = "none",
-        use_unet_skips: bool = False,
-        unet_skip_scale: float = 0.1,
-    ):
-        super().__init__()
-
-        self.depth_image_resolution = depth_image_resolution
-        self.norm_type = norm_type
-        self.use_unet_skips = use_unet_skips
-        self.unet_skip_scale = unet_skip_scale
-
-        in_height, in_width = depth_image_resolution
-        self.activation = get_activation(cnn_activation)
-
-        y_grid = torch.linspace(-1, 1, in_height).view(1, 1, in_height, 1)
-        y_grid = y_grid.repeat(1, 1, 1, in_width)
-
-        x_grid = torch.linspace(-1, 1, in_width).view(1, 1, 1, in_width)
-        x_grid = x_grid.repeat(1, 1, in_height, 1)
-
-        self.register_buffer(
-            "base_coord_grid",
-            torch.cat([x_grid, y_grid], dim=1),
-        )
-
-        h_dim = 32 * 6 * 8
-        h_dim_half = int((h_dim - target_latent_dim) / 2)
-
-        self.fc = nn.Sequential(
-            nn.Linear(target_latent_dim,h_dim),
-            self.activation,
-        )
-        
-        # self.h1 = nn.Sequential(
-        #     nn.Linear(h_dim_half, h_dim),
-        #     self.activation,
-        # )
-
-        self.conv_6_8 = ConvNormAct(
-            32 + 2,
-            32,
-            self.activation,
-            norm_type=norm_type,
-            stride=1,
-        )
-        self.conv_12_16 = ConvNormAct(
-            32 + 2,
-            16,
-            self.activation,
-            norm_type=norm_type,
-            stride=1,
-        )
-        self.conv_24_32 = ConvNormAct(
-            16 + 2,
-            8,
-            self.activation,
-            norm_type=norm_type,
-            stride=1,
-        )
-
-        self.final_head = nn.Conv2d(
-            8 + 2,
-            cnn_output_channel,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-        )
-
-        if self.use_unet_skips:
-            # Residual skip adapters let the training-only autoencoder refine
-            # reconstructions with encoder feature maps while preserving the
-            # existing z -> decoder path as the primary bottleneck path.
-            self.skip_6_8 = nn.Conv2d(32, 32, kernel_size=1)
-            self.skip_12_16 = nn.Conv2d(16, 16, kernel_size=1)
-            self.skip_24_32 = nn.Conv2d(8, 8, kernel_size=1)
-        else:
-            self.skip_6_8 = None
-            self.skip_12_16 = None
-            self.skip_24_32 = None
-
-        self._initialize_weights()
-
-    def _initialize_weights(self) -> None:
-        for m in self.modules():
-            if isinstance(m, (nn.Conv2d, nn.Linear)):
-                nn.init.kaiming_uniform_(
-                    m.weight,
-                    a=1.0,
-                    mode="fan_in",
-                    nonlinearity="leaky_relu",
-                )
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def compute_motion_conditioned_coords(
-        self,
-        batch_size: int,
-        transform_matrices: torch.Tensor,
-    ):
-        height, width = self.depth_image_resolution
-
-        if transform_matrices.shape != (batch_size, 2, 2):
-            transform_matrices = transform_matrices.view(batch_size, 2, 2)
-
-        flat_grid = self.base_coord_grid.to(dtype=transform_matrices.dtype)
-        flat_grid = flat_grid.expand(batch_size, -1, -1, -1)
-        flat_grid = flat_grid.view(batch_size, 2, -1)
-
-        # The encoder writes coords in the stabilized frame; the decoder uses
-        # the reciprocal map to condition reconstruction back in image space.
-        # These matrices are only 2x2 and are regularized near identity, so a
-        # guarded analytic inverse is faster than a batched SVD-based pinv.
-        a = transform_matrices[:, 0, 0]
-        b = transform_matrices[:, 0, 1]
-        c = transform_matrices[:, 1, 0]
-        d = transform_matrices[:, 1, 1]
-        det = a * d - b * c
-        det_sign = torch.where(det >= 0.0, torch.ones_like(det), -torch.ones_like(det))
-        safe_det = det_sign * det.abs().clamp_min(1.0e-6)
-        inv_det = safe_det.reciprocal()
-        decode_transform_matrices = torch.stack(
-            [
-                d * inv_det,
-                -b * inv_det,
-                -c * inv_det,
-                a * inv_det,
-            ],
-            dim=-1,
-        ).view(batch_size, 2, 2)
-        decoded_flat_grid = torch.bmm(decode_transform_matrices, flat_grid)
-        coords_full = decoded_flat_grid.view(batch_size, 2, height, width)
-
-        coords_6_8 = F.interpolate(
-            coords_full,
-            size=(6, 8),
-            mode="bilinear",
-            align_corners=False,
-        )
-        coords_12_16 = F.interpolate(
-            coords_full,
-            size=(12, 16),
-            mode="bilinear",
-            align_corners=False,
-        )
-        coords_24_32 = F.interpolate(
-            coords_full,
-            size=(24, 32),
-            mode="bilinear",
-            align_corners=False,
-        )
-
-        return {
-            "coords_6_8": coords_6_8,
-            "coords_12_16": coords_12_16,
-            "coords_24_32": coords_24_32,
-            "coords_full": coords_full,
-            "transform_matrices": decode_transform_matrices,
-        }
-
-    def _apply_unet_skip(
-        self,
-        x: torch.Tensor,
-        unet_skips,
-        key: str,
-        projection: nn.Module,
-    ) -> torch.Tensor:
-        if not self.use_unet_skips or unet_skips is None or key not in unet_skips:
-            return x
-        skip = projection(unet_skips[key])
-        if skip.shape[-2:] != x.shape[-2:]:
-            skip = F.interpolate(
-                skip,
-                size=x.shape[-2:],
-                mode="bilinear",
-                align_corners=False,
-            )
-        return x + self.unet_skip_scale * skip
-
-    def forward(
-        self,
-        z: torch.Tensor,
-        transform_matrices: torch.Tensor,
-        unet_skips=None,
-    ):
-        batch_size = z.size(0)
-
-        coord_dict = self.compute_motion_conditioned_coords(batch_size, transform_matrices)
-
-        x = self.fc(z)
-        # x = self.h1(x)
-        x = x.view(batch_size, 32, 6, 8)
-
-        x = torch.cat([x, coord_dict["coords_6_8"]], dim=1)
-        x = self.conv_6_8(x)
-        x = self._apply_unet_skip(x, unet_skips, "skip_6_8", self.skip_6_8)
-
-        x = F.interpolate(x, size=(12, 16), mode="nearest")
-        x = torch.cat([x, coord_dict["coords_12_16"]], dim=1)
-        x = self.conv_12_16(x)
-        x = self._apply_unet_skip(x, unet_skips, "skip_12_16", self.skip_12_16)
-
-        x = F.interpolate(x, size=(24, 32), mode="nearest")
-        x = torch.cat([x, coord_dict["coords_24_32"]], dim=1)
-        x = self.conv_24_32(x)
-        x = self._apply_unet_skip(x, unet_skips, "skip_24_32", self.skip_24_32)
-
-        height, width = self.depth_image_resolution
-        x = F.interpolate(x, size=(height, width), mode="nearest")
-        x = torch.cat([x, coord_dict["coords_full"]], dim=1)
-
-        reconstructed_depth_image = self.final_head(x)
-
-        return reconstructed_depth_image, {
-            "transform_matrices": coord_dict["transform_matrices"],
-        }
-
-
-class MotionRobustDepthAutoencoderUNet(nn.Module):
-    """Training-only depth autoencoder with optional U-Net-style refinement.
-
-    The encoder and decoder remain standalone modules. This wrapper only
-    coordinates their joint training path: the encoder still produces the
-    policy-facing latent z, and skip features are exposed only to improve the
-    reconstruction objective during training.
-    """
-
-    def __init__(
-        self,
-        encoder: MotionRobustDepthEncoder,
-        decoder: MotionRobustDepthDecoder,
-        skip_dropout_prob: float = 0.25,
-    ):
-        super().__init__()
-        if not getattr(decoder, "use_unet_skips", False):
-            raise ValueError(
-                "MotionRobustDepthAutoencoderUNet requires a "
-                "MotionRobustDepthDecoder constructed with use_unet_skips=True."
-            )
-        self.encoder = encoder
-        self.decoder = decoder
-        self.skip_dropout_prob = float(skip_dropout_prob)
-
-    def forward(self, depth_image: torch.Tensor, torso_state: torch.Tensor):
-        mean, logvar, z, enc_aux = self.encoder(
-            depth_image,
-            torso_state,
-            return_unet_skips=True,
-        )
-        transform_matrices = enc_aux["transform_matrices"]
-        unet_skips = enc_aux.get("unet_skips")
-        if self.training and self.skip_dropout_prob > 0.0:
-            # Per-sample whole-skip dropout weakens the reconstruction shortcut
-            #   without rescaling the kept skip activations. Each batch element
-            #   either keeps or drops all of its U-Net skip tensors together.
-            if unet_skips is not None:
-                keep_mask = (
-                    torch.rand(
-                        depth_image.shape[0],
-                        1,
-                        1,
-                        1,
-                        device=depth_image.device,
-                    )
-                    >= self.skip_dropout_prob
-                ).to(dtype=depth_image.dtype)
-                unet_skips = {
-                    name: skip * keep_mask.to(dtype=skip.dtype)
-                    for name, skip in unet_skips.items()
-                }
-        reconstructed_depth, dec_aux = self.decoder(
-            z,
-            transform_matrices,
-            unet_skips=unet_skips,
-        )
-
-        aux = {
-            "encoder": enc_aux,
-            "decoder": dec_aux,
-            "transform_matrices": transform_matrices,
-        }
-        return reconstructed_depth, mean, logvar, z, aux
+        return self.encode_inf(depth_image, torso_state)
 
 
 # --------------------------------------------------------------------------
@@ -806,11 +487,19 @@ class ConvDepthSequenceEncoder(nn.Module):
         if self.latest_skip.bias is not None:
             nn.init.zeros_(self.latest_skip.bias)
 
-    def encode(self, x: torch.Tensor, latest_logvar: torch.Tensor):
+    def encode(self, x: torch.Tensor):
         """
         x: B x T x feature_dim
         """
+        depth_std = x.std(dim=1, unbiased=False)  # B x feature_dim
+        depth__mean = x.mean(dim=1)                    # B x D
+
         latest_depth_latent = x[:, -1, :]  # B x feature_dim
+
+        # Filter-out/down-weight temporal outliers from the most recent latent
+        latest_deviation = torch.abs(latest_depth_latent - depth__mean) / (depth_std + 1e-4)
+        conf = 1.0 - torch.tanh(latest_deviation)
+        conf = torch.clamp(conf, max=1.0, min=0.01)
 
         h = x.permute(0, 2, 1)  # B x feature_dim x T
 
@@ -820,19 +509,8 @@ class ConvDepthSequenceEncoder(nn.Module):
         h = h.flatten(start_dim=1)
 
         temporal_latent = self.fc(h)
-
-        # Convert the most recent frame posterior variance into a confidence
-        # gate for the direct latest-latent skip. Higher predicted std means
-        # lower confidence in that frame, so the skip contributes less.
-        latest_std = torch.exp(0.5 * latest_logvar)
-        latest_conf_mask = 1.0 - torch.tanh(
-            self.conf_mask_scale * latest_std
-        )
-        latest_conf_mask = torch.clamp(latest_conf_mask, min=self.conf_min, max=1.0)
-        masked_latest_latent = latest_depth_latent * latest_conf_mask
-        latest_latent = self.latest_skip(masked_latest_latent)
         
-        # latest_latent = self.latest_skip(latest_depth_latent)
+        latest_latent = self.latest_skip(latest_depth_latent * conf)
         latent = temporal_latent + self.latest_skip_scale * latest_latent
         latent = self.skip_norm(latent)
         latent = self.activation(latent)
@@ -845,14 +523,14 @@ class ConvDepthSequenceEncoder(nn.Module):
 
         return mean, logvar
 
-    def forward(self, x: torch.Tensor, latest_logvar: torch.Tensor):
-        mean, logvar = self.encode(x, latest_logvar)
+    def forward(self, x: torch.Tensor):
+        mean, logvar = self.encode(x)
 
         z = reparameterize(mean, logvar)
 
         return mean, logvar, z
 
     @torch.no_grad()
-    def forward_inference(self, x: torch.Tensor, latest_logvar: torch.Tensor):
-        mean, _ = self.encode(x, latest_logvar)
+    def forward_inference(self, x: torch.Tensor):
+        mean, _ = self.encode(x)
         return mean

@@ -721,10 +721,6 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         # cenet_velo_dim = 3 + 4 + 4 + 12   # torso velocity, foot-contact indicator, foot-height 
         cenet_velo_dim = 3 + 4 + 4   # torso velocity, foot-contact indicator, foot-height 
 
-        # KITE visual/proprio/mixer variational std bounds.
-        depth_image_std_min = 0.01
-        depth_image_std_max = 2.0
-        depth_autoencoder_skip_dropout_prob = 0.25
         depth_sequence_length = 5
         depth_sequence_std_min = 0.01
         depth_sequence_std_max = 1.5
@@ -800,15 +796,9 @@ class GO2KITEBaselineCfgPPO( LeggedRobotCfgPPO ):
         adaptive_ent_ang_threshold = 0.35
         adaptive_ent_ter_threshold = 6.0
         adaptive_ent_softmax_temp = 2.0
-        depth_frame_recon_weight = 1.0
-        depth_frame_kl_weight = 1.0e-3
-        depth_transform_identity_weight = 1.0e-3
         use_adaptive_kl_beta = True
         adaptive_kl_beta_delta = 0.05
         adaptive_kl_beta_ema_alpha = 0.05
-        depth_frame_kl_recon_target = 0.15
-        depth_frame_kl_beta_min = 1.0e-5
-        depth_frame_kl_beta_max = 1.0e-1
         depth_sequence_terrain_weight = 1.0
         depth_sequence_kl_weight = 1.0e-3
         depth_sequence_kl_recon_target = 0.50

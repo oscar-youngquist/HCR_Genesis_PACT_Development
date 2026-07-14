@@ -41,18 +41,6 @@ def parse_kite_visualization_args():
         help="show the processed depth image for --debug-robot-id",
     )
     parser.add_argument(
-        "--render-depth-reconstruction",
-        action="store_true",
-        default=False,
-        help="show actual and reconstructed processed depth images side-by-side",
-    )
-    parser.add_argument(
-        "--depth-reconstruction-scale",
-        type=float,
-        default=1.0,
-        help="display scale multiplier for actual/reconstructed depth images",
-    )
-    parser.add_argument(
         "--render-height-field",
         action="store_true",
         default=False,
@@ -450,9 +438,6 @@ def interaction_loop(train_cfg, env, policy, args, kite_viz_args):
             policy,
             depth_image,
             depth_torso_state,
-            render_reconstruction=kite_viz_args.render_depth_reconstruction,
-            debug_robot_id=kite_viz_args.debug_robot_id,
-            reconstruction_scale=kite_viz_args.depth_reconstruction_scale,
         )
 
         (
@@ -485,87 +470,18 @@ def env_policy_latest_depth_latent(
     policy,
     depth_image,
     depth_torso_state,
-    render_reconstruction=False,
-    debug_robot_id=0,
-    reconstruction_scale=1.0,
 ):
-    """Fetch the frame latent and optionally render its decoder reconstruction."""
+    """Fetch the deterministic frame latent."""
     actor_critic = getattr(policy, "__self__", None)
     if actor_critic is None or not hasattr(actor_critic, "depth_frame_encoder"):
         raise AttributeError(
             "KITE play expects policy to be ActorCritic_KITE.act_inference."
         )
-    if render_reconstruction:
-        if hasattr(actor_critic, "depth_frame_autoencoder"):
-            # Use the training-time autoencoder wrapper for visualization so
-            # the rendered reconstruction includes the same U-Net skip path
-            # used by the depth-frame reconstruction objective.
-            depth_recon, _mean, _logvar, latest_depth_z, _aux = (
-                actor_critic.depth_frame_autoencoder(depth_image, depth_torso_state)
-            )
-        else:
-            # Compatibility fallback for older checkpoints created before the
-            # U-Net wrapper existed.
-            _mean, _logvar, latest_depth_z, depth_aux = (
-                actor_critic.depth_frame_encoder(depth_image, depth_torso_state)
-            )
-            depth_recon, _ = actor_critic.depth_frame_decoder(
-                latest_depth_z,
-                depth_aux["transform_matrices"],
-            )
-        _show_depth_reconstruction(
-            depth_image,
-            depth_recon,
-            int(debug_robot_id),
-            float(reconstruction_scale),
-        )
-        return latest_depth_z.detach()
 
     return actor_critic.depth_frame_encoder.forward_inference(
         depth_image,
         depth_torso_state,
     ).detach()
-
-
-def _show_depth_reconstruction(
-    depth_image,
-    depth_recon,
-    debug_robot_id,
-    reconstruction_scale=1.0,
-):
-    """Show actual processed depth next to the decoder reconstruction."""
-    if not 0 <= debug_robot_id < depth_image.shape[0]:
-        return
-
-    import cv2 as cv
-
-    actual = depth_image[debug_robot_id, 0].detach().clamp(0.0, 1.0)
-    recon = depth_recon[debug_robot_id, 0].detach().clamp(0.0, 1.0)
-    actual_pixels = (actual * 255.0).byte().cpu().numpy()
-    recon_pixels = (recon * 255.0).byte().cpu().numpy()
-    separator = np.full(
-        (actual_pixels.shape[0], 4),
-        127,
-        dtype=actual_pixels.dtype,
-    )
-    comparison = np.concatenate(
-        (actual_pixels, separator, recon_pixels),
-        axis=1,
-    )
-    scale = max(1.0e-3, float(reconstruction_scale))
-    if scale != 1.0:
-        comparison = cv.resize(
-            comparison,
-            None,
-            fx=scale,
-            fy=scale,
-            interpolation=cv.INTER_NEAREST,
-        )
-    cv.imshow(
-        f"KITE Depth actual | recon env {debug_robot_id}",
-        comparison,
-    )
-    cv.waitKey(1)
 
 
 def compute_all_foot_positions_fk(env, q, include_hip_offset=False):

@@ -785,8 +785,8 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         init_noise_std = 1.00
 
         # Latent dimensions
-        privileged_terrain_latent_dim = depth_sequence_outdim = 20
-        privileged_dynamics_latent_dim = proprio_latent_dim = 16
+        privileged_terrain_latent_dim = depth_sequence_outdim = 32
+        privileged_dynamics_latent_dim = proprio_latent_dim = 32
         depth_image_latent_dim = 32
         mixer_latent_dim = 16
         
@@ -808,7 +808,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         # priv_mixer_channel_dim    = 128
         # priv_mixer_use_layer_norm = False
         privileged_dynamics_context_layer_sizes = [256, 128]
-        privileged_dynamics_decoder_layers = [64,128,256]
+        privileged_dynamics_decoder_layers = [128,256,512]
         privileged_terrain_std_min = 0.10
         privileged_terrain_std_max = 1.0
         privileged_dynamics_std_min = 0.10
@@ -816,9 +816,6 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
 
         # Depth Image/Sequence Models
         depth_image_norm                    = "layer"
-        depth_image_std_min                 = 0.1
-        depth_image_std_max                 = 2.0
-        depth_autoencoder_skip_dropout_prob = 0.50
         depth_sequence_length               = 5
 
         depth_sequence_norm            = "layer"
@@ -899,20 +896,11 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         adaptive_ent_ter_threshold = 6.0
         adaptive_ent_softmax_temp = 2.0
         
-        # KITE specific piepline configs
-        #    Loss weights for single-depth-image encoder
-        depth_frame_recon_weight = 1.0
-        depth_frame_kl_weight = 1.0e-2
-        depth_transform_identity_weight = 1.0e-2
-
         # Adaptive beta scheduling for VAE KL terms:
         # beta <- clamp(exp(delta * (tau - recon_loss_ema)) * beta).
         use_adaptive_kl_beta = True
         adaptive_kl_beta_delta = 0.05
         adaptive_kl_beta_ema_alpha = 0.05
-        depth_frame_kl_recon_target = 0.05
-        depth_frame_kl_beta_min = 1.0e-5
-        depth_frame_kl_beta_max = 1.0e-2
        
         #     loss weights for sequence of latent-depth-images encoder
         depth_sequence_kl_weight = 0.1
@@ -946,9 +934,9 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         versatility_weight = 0.001         # latent versatility loss
         versatility_lambda_e = 1.0        # weight of KL-regularization on the versility loss
         
-        mixer_kl_weight = 1.0
+        mixer_kl_weight = 0.1
         mixer_kl_recon_target = 0.075
-        mixer_kl_beta_min = 0.5
+        mixer_kl_beta_min = 0.1
         mixer_kl_beta_max = 2.0
 
         #     shared weights for contrastive loss used between variational encoder and privileged counter-parts.

@@ -116,10 +116,6 @@ class OnPolicyRunnerKITE:
                                                             self.env.depth_output_resolution,
                                                             self.policy_cfg["depth_image_latent_dim"],
                                                             self.policy_cfg["depth_image_norm"],
-                                                            self.policy_cfg.get("depth_decoder_norm", "none"),
-                                                            self.policy_cfg.get("depth_image_std_min", 0.01),
-                                                            self.policy_cfg.get("depth_image_std_max", 2.0),
-                                                            self.policy_cfg.get("depth_autoencoder_skip_dropout_prob", 0.25),
                                                             self.policy_cfg.get("depth_sequence_length", 5),
                                                             self.policy_cfg.get("depth_sequence_outdim", 16),
                                                             self.policy_cfg["depth_sequence_norm"],
@@ -703,7 +699,6 @@ class OnPolicyRunnerKITE:
         checkpoint = {
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'act_optimizer_state_dict': self.alg.act_optimizer.state_dict(),
-            'depth_frame_optimizer_state_dict': self.alg.depth_frame_optimizer.state_dict(),
             'enc_optimizer_state_dict': self.alg.enc_optimizer.state_dict(),
             'priv_terrain_encoder_state_dict': self.alg.priv_terrain_encoder.state_dict(),
             'priv_terrain_decoder_state_dict': self.alg.priv_terrain_decoder.state_dict(),
@@ -722,7 +717,6 @@ class OnPolicyRunnerKITE:
         # Load optimizer(s)
         if load_optimizer:
             self.alg.act_optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
-            self.alg.depth_frame_optimizer.load_state_dict(loaded_dict['depth_frame_optimizer_state_dict'])
             self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
             self.alg.privileged_optimizer.load_state_dict(loaded_dict['privileged_optimizer_state_dict'])
         if 'priv_terrain_encoder_state_dict' in loaded_dict:

@@ -49,133 +49,6 @@ from rsl_rl.modules.kite_privileged_encoders import (
 )
 from rsl_rl.storage import RolloutStorageKITE
 
-class DepthGradientLoss(nn.Module):
-    """
-    Penalizes differences in spatial gradients (X and Y directions) 
-    to preserve sharp edges and geometric boundaries.
-    """
-    def __init__(self):
-        super().__init__()
-        # Sobel/Prewitt style kernels for edge extraction
-        kernel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3)
-        kernel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3)
-        
-        kernel_x = kernel_x / 8.0
-        kernel_y = kernel_y / 8.0
-
-        self.register_buffer('kernel_x', kernel_x)
-        self.register_buffer('kernel_y', kernel_y)
-
-    def _masked_sample_mean(self, values, mask):
-        sample_values = values.reshape(values.shape[0], -1).mean(dim=1)
-        if mask is None:
-            return sample_values.mean()
-        sample_mask = mask.squeeze(-1).float()
-        denom = torch.clamp(sample_mask.sum(), min=1.0)
-        return torch.sum(sample_values * sample_mask) / denom
-
-    def forward(self, pred, target, mask=None):
-        # F.conv2d does not accept padding_mode directly, so pad explicitly
-        # before applying the fixed Sobel kernels.
-        pred_padded = F.pad(pred, (1, 1, 1, 1), mode="replicate")
-        target_padded = F.pad(target, (1, 1, 1, 1), mode="replicate")
-
-        # Calculate gradients using 2D convolutions
-        pred_grad_x = F.conv2d(pred_padded, self.kernel_x)
-        pred_grad_y = F.conv2d(pred_padded, self.kernel_y)
-        
-        target_grad_x = F.conv2d(target_padded, self.kernel_x)
-        target_grad_y = F.conv2d(target_padded, self.kernel_y)
-        
-        # Calculate L1 distance of the gradients while respecting terminated
-        # episode masks at the sample level.
-        loss_x = self._masked_sample_mean(
-            torch.abs(pred_grad_x - target_grad_x),
-            mask,
-        )
-        loss_y = self._masked_sample_mean(
-            torch.abs(pred_grad_y - target_grad_y),
-            mask,
-        )
-        
-        return loss_x + loss_y
-class SSIMLoss(nn.Module):
-    """
-    Structural Similarity Index Measure (SSIM) Loss adapted for deep learning.
-    Measures luminance, contrast, and structure similarity.
-    """
-    def __init__(self, window_size=11):
-        super().__init__()
-        self.window_size = window_size
-        self.C1 = 0.01 ** 2
-        self.C2 = 0.03 ** 2
-
-    def _masked_sample_mean(self, values, mask):
-        sample_values = values.reshape(values.shape[0], -1).mean(dim=1)
-        if mask is None:
-            return sample_values.mean()
-        sample_mask = mask.squeeze(-1).float()
-        denom = torch.clamp(sample_mask.sum(), min=1.0)
-        return torch.sum(sample_values * sample_mask) / denom
-
-    def forward(self, pred, target, mask=None):
-        # Continuous average using a uniform or Gaussian kernel (uniform used here for simplicity)
-        mu_p = F.avg_pool2d(pred, self.window_size, stride=1, padding=self.window_size//2)
-        mu_t = F.avg_pool2d(target, self.window_size, stride=1, padding=self.window_size//2)
-        
-        mu_p_sq = mu_p.pow(2)
-        mu_t_sq = mu_t.pow(2)
-        mu_p_t = mu_p * mu_t
-        
-        sigma_p_sq = F.avg_pool2d(pred * pred, self.window_size, stride=1, padding=self.window_size//2) - mu_p_sq
-        sigma_t_sq = F.avg_pool2d(target * target, self.window_size, stride=1, padding=self.window_size//2) - mu_t_sq
-        sigma_pt = F.avg_pool2d(pred * target, self.window_size, stride=1, padding=self.window_size//2) - mu_p_t
-        
-        ssim_idx = ((2 * mu_p_t + self.C1) * (2 * sigma_pt + self.C2)) / \
-                   ((mu_p_sq + mu_t_sq + self.C1) * (sigma_p_sq + sigma_t_sq + self.C2))
-        
-        # Return 1 - SSIM bounded within [0, 1] for optimization, averaged
-        # only across non-terminated rollout samples when a mask is provided.
-        return self._masked_sample_mean((1.0 - ssim_idx) / 2.0, mask)
-
-class CompositeDepthLoss(nn.Module):
-    """
-    Combines pixel-wise L1 loss, gradient loss, and SSIM loss.
-    """
-    def __init__(self, w_l1=0.80, w_grad=1.00, w_ssim=0.20):
-        super().__init__()
-        self.grad_loss = DepthGradientLoss()
-        self.ssim_loss = SSIMLoss()
-        
-        # Hyperparameters weights to balance the three criteria
-        self.w_l1 = w_l1
-        self.w_grad = w_grad
-        self.w_ssim = w_ssim
-
-    def _masked_l1_loss(self, pred, target, mask):
-        sample_values = torch.abs(pred - target).reshape(
-            pred.shape[0],
-            -1,
-        ).mean(dim=1)
-        if mask is None:
-            return sample_values.mean()
-        sample_mask = mask.squeeze(-1).float()
-        denom = torch.clamp(sample_mask.sum(), min=1.0)
-        return torch.sum(sample_values * sample_mask) / denom
-
-    def forward(self, pred, target, mask=None):
-        l1 = self._masked_l1_loss(pred, target, mask)
-        l_grad = self.grad_loss(pred, target, mask)
-        l_ssim = self.ssim_loss(pred, target, mask)
-        
-        # Weighted summation
-        total_loss = (
-            self.w_l1 * l1
-            + self.w_grad * l_grad
-            + self.w_ssim * l_ssim
-        )
-        return total_loss
-
 class PPO_KITE:
     actor_critic: ActorCritic_KITE
     def __init__(self,
@@ -223,10 +96,6 @@ class PPO_KITE:
                  privileged_dynamics_std_min=0.01,
                  privileged_dynamics_std_max=1.5,
 
-                 depth_frame_recon_weight=1.0,
-                 depth_frame_kl_weight=1.0e-3,
-                 depth_transform_identity_weight=1.0e-3,
-
                  depth_sequence_kl_weight=1.0,
                  proprio_kl_weight=1.0,
                  
@@ -243,9 +112,6 @@ class PPO_KITE:
                  use_adaptive_kl_beta=True,
                  adaptive_kl_beta_delta=0.05,
                  adaptive_kl_beta_ema_alpha=0.05,
-                 depth_frame_kl_recon_target=0.15,
-                 depth_frame_kl_beta_min=1.0e-5,
-                 depth_frame_kl_beta_max=1.0e-1,
                  depth_sequence_kl_recon_target=0.5,
                  depth_sequence_kl_beta_min=1.0e-5,
                  depth_sequence_kl_beta_max=1.0,
@@ -295,12 +161,7 @@ class PPO_KITE:
         self.privileged_terrain_latent_dim = privileged_terrain_latent_dim
         self.privileged_dynamics_latent_dim = privileged_dynamics_latent_dim
 
-        # loss weights for depth-image processing
-        self.depth_frame_recon_weight = depth_frame_recon_weight              
-        self.depth_frame_kl_weight = depth_frame_kl_weight
-        self.depth_transform_identity_weight = depth_transform_identity_weight
         self.depth_sequence_kl_weight = depth_sequence_kl_weight
-        self.depth_frame_reconstruction_loss = CompositeDepthLoss().to(self.device)
         
         # loss weights for proprioceptive history encoder losses
         self.proprio_kl_weight = proprio_kl_weight
@@ -316,9 +177,6 @@ class PPO_KITE:
         self.use_adaptive_kl_beta = use_adaptive_kl_beta
         self.adaptive_kl_beta_delta = adaptive_kl_beta_delta
         self.adaptive_kl_beta_ema_alpha = adaptive_kl_beta_ema_alpha
-        self.depth_frame_kl_recon_target = depth_frame_kl_recon_target
-        self.depth_frame_kl_beta_min = depth_frame_kl_beta_min
-        self.depth_frame_kl_beta_max = depth_frame_kl_beta_max
         self.depth_sequence_kl_recon_target = depth_sequence_kl_recon_target
         self.depth_sequence_kl_beta_min = depth_sequence_kl_beta_min
         self.depth_sequence_kl_beta_max = depth_sequence_kl_beta_max
@@ -336,7 +194,6 @@ class PPO_KITE:
         self.mixer_kl_recon_target = mixer_kl_recon_target
         self.mixer_kl_beta_min = mixer_kl_beta_min
         self.mixer_kl_beta_max = mixer_kl_beta_max
-        self.depth_frame_kl_recon_ema = None
         self.depth_sequence_kl_recon_ema = None
         self.proprio_kl_recon_ema = None
         self.privileged_terrain_kl_recon_ema = None
@@ -359,10 +216,7 @@ class PPO_KITE:
         self.actor_critic.to(self.device)
         self.storage = None # initialized later
 
-        # Actor-critic owns the non-privileged trainable modules and returns
-        #   three optimizers: RL actor/critic, depth-frame autoencoder, and the
-        #   merged sequence/proprio/mixer auxiliary path.
-        self.act_optimizer, self.depth_frame_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(learning_rate)
+        self.act_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(learning_rate)
         
         # Transition data structure from storage class
         self.transition = RolloutStorageKITE.Transition()
@@ -738,14 +592,6 @@ class PPO_KITE:
 
         return kl_loss
 
-    def _transform_identity_loss(self, transform_matrices, mask):
-        identity = torch.eye(
-            2,
-            device=transform_matrices.device,
-            dtype=transform_matrices.dtype,
-        ).view(1, 2, 2)
-        return self._masked_sample_mean((transform_matrices - identity).pow(2), mask)
-
     # "We incorporate an unsupervised RL objective through mu-
     #    tual information (MI) maximization for promoting skill dis-
     #    covery. This objective allows the emergence of novel behaviors
@@ -861,7 +707,6 @@ class PPO_KITE:
 
     def _update_adaptive_kl_betas(
         self,
-        depth_recon_loss,
         depth_sequence_recon_loss,
         proprio_recon_loss,
         privileged_terrain_recon_loss,
@@ -873,11 +718,6 @@ class PPO_KITE:
             return
 
         alpha = float(self.adaptive_kl_beta_ema_alpha)
-        self.depth_frame_kl_recon_ema = self._ema_update(
-            self.depth_frame_kl_recon_ema,
-            depth_recon_loss,
-            alpha,
-        )
         self.depth_sequence_kl_recon_ema = self._ema_update(
             self.depth_sequence_kl_recon_ema,
             depth_sequence_recon_loss,
@@ -902,14 +742,6 @@ class PPO_KITE:
             self.mixer_kl_recon_ema,
             mixer_recon_loss,
             alpha,
-        )
-
-        self.depth_frame_kl_weight = self._update_kl_weight(
-            self.depth_frame_kl_weight,
-            self.depth_frame_kl_recon_target,
-            self.depth_frame_kl_recon_ema,
-            self.depth_frame_kl_beta_min,
-            self.depth_frame_kl_beta_max,
         )
 
         self.depth_sequence_kl_weight = self._update_kl_weight(
@@ -1140,60 +972,6 @@ class PPO_KITE:
         """Step every non-privileged encoder optimizer after one merged backward."""
         self.enc_optimizer.step()
 
-    def _depth_frame_autoencoder_update(self, depth_images_batch, depth_torso_state_batch, mask):
-        self.actor_critic.depth_frame_autoencoder.train()
-        self.depth_frame_optimizer.zero_grad(set_to_none=True)
-        
-        # Keep the depth-frame autoencoder in fp32. Its decoder computes a
-        # reciprocal transform, and mixing bf16 activations with fp32 geometry
-        # outputs can fail during backward. The training-only wrapper exposes
-        # U-Net reconstruction skips while preserving z as the policy bottleneck.
-        depth_recon, depth_mean, depth_logvar, latest_depth_z, depth_aux = self.actor_critic.depth_frame_autoencoder(
-            depth_images_batch,
-            depth_torso_state_batch,
-        )
-        transform_matrices = depth_aux["transform_matrices"].float()
-        
-        # Composite reconstruction loss: pixel L1 + depth-gradient loss +
-        # SSIM loss. Each component averages only across non-terminated
-        # rollout samples according to the provided mask.
-        depth_recon_loss = self.depth_frame_reconstruction_loss(
-            depth_recon,
-            depth_images_batch,
-            mask,
-        )
-        
-        # Calculate the depth-encoder KL-divergency loss
-        depth_kl = self._kl_loss(depth_mean, depth_logvar, mask)
-
-        # Regularize the shared encoder/decoder transform toward the identity.
-        transform_identity_loss = self._transform_identity_loss(transform_matrices, mask)
-        
-        # Calculate the total depth-frame reconstruction loss
-        depth_frame_loss = (
-            self.depth_frame_recon_weight * depth_recon_loss
-            + self.depth_frame_kl_weight * depth_kl
-            + self.depth_transform_identity_weight * transform_identity_loss
-        )
-        # The reconstruction loss keeps the needed graph references; drop the
-        # large image tensor before building the other auxiliary branches.
-        del depth_recon
-
-        # Step, norm-clip, and step optimizers for the joint autoencoder.
-        depth_frame_loss.backward()
-        nn.utils.clip_grad_norm_(self.actor_critic.depth_frame_encoder.parameters(), self.max_grad_norm)
-        nn.utils.clip_grad_norm_(self.actor_critic.depth_frame_decoder.parameters(), self.max_grad_norm)
-        self.depth_frame_optimizer.step()
-
-        return (
-            depth_frame_loss,
-            depth_recon_loss,
-            depth_kl,
-            transform_identity_loss,
-            latest_depth_z.detach(),
-            depth_logvar.detach(),
-        )
-
     def _privileged_encoder_decoder_updates(self, terrain_maps_batch, privileged_obs_history_batch, obs_target, mask):
         # Terrain and dynamics teacher updates are intentionally separated.
         # The terrain decoder has the large map-shaped activation graph, so we
@@ -1277,9 +1055,9 @@ class PPO_KITE:
     def _non_privileged_auxiliary_update(
         self,
         obs_hist_batch,
+        depth_images_batch,
         depth_latent_history_batch,
-        latest_depth_z,
-        latest_depth_logvar,
+        depth_torso_state_batch,
         terrain_maps_batch,
         contrastive_negative_anchor_batch,
         explicit_labels_batch,
@@ -1287,27 +1065,27 @@ class PPO_KITE:
         terrain_positive,
         dynamics_positive,
         mask,
-        depth_frame_loss,
-        depth_recon_loss,
-        depth_kl,
-        transform_identity_loss,
     ):
         """Merge sequence, proprioceptive, and mixer auxiliary updates into one step."""
+        self.actor_critic.depth_frame_encoder.train()
         self.actor_critic.depth_sequence_encoder.train()
         self.actor_critic.proprio_context_encoder.train()
         self.actor_critic.context_encoder.train()
         self.priv_terrain_decoder.eval()
         self.priv_dynamics_decoder.eval()
 
-        # The depth-frame autoencoder is updated immediately before this
-        # function. Zero the shared encoder optimizer again so this backward
-        # only contributes sequence/proprio/mixer gradients.
         self._zero_all_encoder_optimizers()
 
         with self._aux_autocast():
             # 1. Depth-sequence student path. The latest frame latent comes
-            # from the standalone frame update as a detached tensor, so this
-            # graph starts at the sequence encoder.
+            # from the deterministic frame encoder, so its parameters are
+            # trained by the sequence-level terrain reconstruction objective.
+            latest_depth_z, _ = (
+                self.actor_critic.depth_frame_encoder(
+                    depth_images_batch,
+                    depth_torso_state_batch,
+                )
+            )
             depth_sequence = torch.cat(
                 [depth_latent_history_batch, latest_depth_z.unsqueeze(1)],
                 dim=1,
@@ -1315,7 +1093,6 @@ class PPO_KITE:
             seq_mean, seq_logvar, depth_seq_z = (
                 self.actor_critic.depth_sequence_encoder(
                     depth_sequence,
-                    latest_depth_logvar,
                 )
             )
 
@@ -1456,17 +1233,17 @@ class PPO_KITE:
             
             modality_kl = self._kl_loss(mix_mean, mix_logvar, mask)
 
-            # versatility_loss, versatility_log = self._versatility_metric(
-            #     mix_mean,
-            #     mix_logvar,
-            #     mask,
-            # )
-            # modality_loss = (
-            #     self.modality_explicit_weight * explicit_loss
-            #     + self.versatility_weight * versatility_loss
-            # )
+            versatility_loss, versatility_log = self._versatility_metric(
+                mix_mean,
+                mix_logvar,
+                mask,
+            )
+            modality_loss = (
+                self.modality_explicit_weight * explicit_loss
+                + self.versatility_weight * versatility_loss
+            )
 
-            modality_loss = self.modality_explicit_weight * explicit_loss + self.versatility_lambda_e * modality_kl
+            # modality_loss = self.modality_explicit_weight * explicit_loss + self.versatility_lambda_e * modality_kl
 
         non_privileged_loss = (
             depth_sequence_loss
@@ -1490,18 +1267,16 @@ class PPO_KITE:
         #     self.actor_critic.proprio_recon_head.parameters(),
         #     self.max_grad_norm,
         # )
-        # nn.utils.clip_grad_norm_(
-        #     self.actor_critic.context_encoder.parameters(),
-        #     self.max_grad_norm,
-        # )
+
+        # Clip this in case the versility loss results in large gradient update
+        nn.utils.clip_grad_norm_(
+            self.actor_critic.context_encoder.parameters(),
+            self.max_grad_norm,
+        )
         self._step_all_encoder_optimizers()
 
         return {
-            "non_privileged_loss": depth_frame_loss + non_privileged_loss,
-            "depth_frame_loss": depth_frame_loss,
-            "depth_recon_loss": depth_recon_loss,
-            "depth_kl": depth_kl,
-            "transform_identity_loss": transform_identity_loss,
+            "non_privileged_loss": non_privileged_loss,
             "depth_sequence_loss": depth_sequence_loss,
             "seq_kl": seq_kl,
             "seq_terrain_loss": seq_terrain_loss,
@@ -1517,8 +1292,8 @@ class PPO_KITE:
             "explicit_loss": explicit_loss,
             "torso_velo_explicit_loss": torso_velo_explicit_loss,
             "feet_state_explicit_loss": feet_state_explicit_loss,
-            # "versatility_loss": versatility_loss,
-            # "versatility_log": versatility_log,
+            "versatility_loss": versatility_loss,
+            "versatility_log": versatility_log,
             "modality_kl":modality_kl,
             "body_velo_est": body_velo_est,
         }
@@ -1554,32 +1329,13 @@ class PPO_KITE:
         if profile is not None:
             t_profile = profile_mark("aux_positive_anchors", t_profile)
 
-        # 1. Update the single-frame depth autoencoder in its own graph. This
-        # releases depth-image decoder activations before building the larger
-        # sequence/proprio/mixer graph.
-        (
-            depth_frame_loss,
-            depth_recon_loss,
-            depth_kl,
-            transform_identity_loss,
-            latest_depth_z,
-            latest_depth_logvar,
-        ) = self._depth_frame_autoencoder_update(
-            depth_images_batch,
-            depth_torso_state_batch,
-            mask,
-        )
-        self._empty_cache_if_debugging()
-        if profile is not None:
-            t_profile = profile_mark("aux_depth_frame", t_profile)
-
-        # 2-4. Merge the depth-sequence, proprioceptive, and modality-mixer
+        # 1-3. Merge the depth-frame/depth-sequence, proprioceptive, and modality-mixer
         # student updates into one forward/backward/step.
         aux = self._non_privileged_auxiliary_update(
             obs_hist_batch,
+            depth_images_batch,
             depth_latent_history_batch,
-            latest_depth_z,
-            latest_depth_logvar,
+            depth_torso_state_batch,
             terrain_maps_batch,
             contrastive_negative_anchor_batch,
             explicit_labels_batch,
@@ -1587,12 +1343,7 @@ class PPO_KITE:
             terrain_positive,
             dynamics_positive,
             mask,
-            depth_frame_loss.detach(),
-            depth_recon_loss.detach(),
-            depth_kl.detach(),
-            transform_identity_loss.detach(),
         )
-        del latest_depth_z, latest_depth_logvar
         if profile is not None:
             t_profile = profile_mark("aux_sequence_proprio_mixer", t_profile)
 
@@ -1640,25 +1391,20 @@ class PPO_KITE:
         
         # Total reconstructed loss
         losses["recon"] = self._detach_scalar(
-            aux["depth_recon_loss"]
-            + aux["seq_terrain_loss"]
+            aux["seq_terrain_loss"]
             + aux["prop_dyn_loss"]
         )
 
         # Total KL loss across all encoders
         losses["total_kl"] = self._detach_scalar(
-            aux["depth_kl"]
-            + aux["seq_kl"]
+            aux["seq_kl"]
             + aux["prop_kl"]
             + privileged_terrain_kl
             + privileged_dynamics_kl
-            # + aux["versatility_log"]["kl"]
             + aux["modality_kl"]
         )
-        losses["decoder"] = self._detach_scalar(aux["depth_recon_loss"] + privileged_loss)
-        losses["depth_transform_identity"] = self._detach_scalar(aux["transform_identity_loss"])
+        losses["decoder"] = self._detach_scalar(privileged_loss)
         losses["kl_scheduler"] = {
-            "depth_frame_recon": self._detach_scalar(aux["depth_recon_loss"]),
             "depth_sequence_recon": self._detach_scalar(aux["seq_terrain_loss"]),
             "proprio_recon": self._detach_scalar(aux["prop_dyn_loss"]),
             "privileged_terrain_recon": self._detach_scalar(privileged_terrain_loss),
@@ -1678,7 +1424,6 @@ class PPO_KITE:
         # Loss details for logging. The compact path logs per-model totals and
         # a small number of aggregate losses; detailed mode restores all leaves.
         losses["detail"] = {
-            "depth_frame_total": self._detach_scalar(aux["depth_frame_loss"]),
             "depth_sequence_total": self._detach_scalar(aux["depth_sequence_loss"]),
             "proprio_total": self._detach_scalar(aux["proprio_loss"]),
             "modality_total": self._detach_scalar(aux["modality_loss"]),
@@ -1690,11 +1435,6 @@ class PPO_KITE:
         }
         if self.log_detailed_encoder_losses:
             losses["detail"].update({
-                "depth_frame_recon": self._detach_scalar(aux["depth_recon_loss"]),
-                "depth_frame_kl": self._detach_scalar(aux["depth_kl"]),
-                "depth_frame_transform_identity": self._detach_scalar(aux["transform_identity_loss"]),
-                "depth_autoencoder_recon": self._detach_scalar(aux["depth_recon_loss"]),
-                
                 "depth_sequence_kl": self._detach_scalar(aux["seq_kl"]),
                 "depth_sequence_terrain_recon": self._detach_scalar(aux["seq_terrain_loss"]),
                 "depth_sequence_terrain_height": self._detach_scalar(
@@ -1715,15 +1455,15 @@ class PPO_KITE:
                 # "modality_versatility": self._detach_scalar(aux["versatility_loss"]),
                 # "modality_kl": self._detach_scalar(aux["versatility_log"]["kl"]),
                 "modality_kl": self._detach_scalar(aux["modality_kl"]),
-                # "modality_marginal_entropy": self._detach_scalar(
-                #     aux["versatility_log"]["marginal_entropy"]
-                # ),
-                # "modality_conditional_entropy": self._detach_scalar(
-                #     aux["versatility_log"]["conditional_entropy"]
-                # ),
-                # "modality_mutual_info": self._detach_scalar(
-                #     aux["versatility_log"]["mutual_info"]
-                # ),
+                "modality_marginal_entropy": self._detach_scalar(
+                    aux["versatility_log"]["marginal_entropy"]
+                ),
+                "modality_conditional_entropy": self._detach_scalar(
+                    aux["versatility_log"]["conditional_entropy"]
+                ),
+                "modality_mutual_info": self._detach_scalar(
+                    aux["versatility_log"]["mutual_info"]
+                ),
                 "modality_explicit": self._detach_scalar(aux["explicit_loss"]),
                 "modality_explicit_torso_velo": self._detach_scalar(
                     aux["torso_velo_explicit_loss"]
@@ -1751,7 +1491,6 @@ class PPO_KITE:
         mean_kl_loss = 0
         mean_aux_decoder_loss = 0
         mean_aux_loss_details = {}
-        mean_depth_kl_recon_signal = 0
         mean_depth_sequence_kl_recon_signal = 0
         mean_proprio_kl_recon_signal = 0
         mean_privileged_terrain_kl_recon_signal = 0
@@ -1782,11 +1521,15 @@ class PPO_KITE:
         for terminated_batch, obs_batch, obs_hist_batch, privileged_obs_history_batch, depth_images_batch, depth_latent_history_batch, \
             depth_torso_state_batch, terrain_maps_batch, explicit_labels_batch, obs_target, actions_batch, \
                 target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch in generator:
+            
             if profile_update:
                 self._sync_if_debugging()
                 minibatch_wall_start = time.perf_counter()
             
             self.actor_critic.train()
+            self.priv_terrain_decoder.train()
+            self.priv_dynamics_decoder.train()
+            
             self.act_optimizer.zero_grad(set_to_none=True)
             self.enc_optimizer.zero_grad(set_to_none=True)
             self.privileged_optimizer.zero_grad(set_to_none=True)
@@ -1881,9 +1624,6 @@ class PPO_KITE:
                 mean_reconstruction_loss += aux_losses["recon"]
                 mean_kl_loss += aux_losses["total_kl"]
                 mean_aux_decoder_loss += aux_losses["decoder"]
-                mean_depth_kl_recon_signal += aux_losses["kl_scheduler"][
-                    "depth_frame_recon"
-                ]
                 mean_depth_sequence_kl_recon_signal += aux_losses["kl_scheduler"][
                     "depth_sequence_recon"
                 ]
@@ -1937,9 +1677,6 @@ class PPO_KITE:
         mean_kl_loss = self._finish_log_scalar(mean_kl_loss / (num_updates * self.num_enc_epochs))
         mean_explicit_loss = self._finish_log_scalar(mean_explicit_loss / (num_updates * self.num_enc_epochs))
         mean_reconstruction_loss = self._finish_log_scalar(mean_reconstruction_loss / (num_updates * self.num_enc_epochs))
-        mean_depth_kl_recon_signal = self._finish_log_scalar(
-            mean_depth_kl_recon_signal / (num_updates * self.num_enc_epochs)
-        )
         mean_depth_sequence_kl_recon_signal = self._finish_log_scalar(
             mean_depth_sequence_kl_recon_signal / (num_updates * self.num_enc_epochs)
         )
@@ -1961,21 +1698,17 @@ class PPO_KITE:
             )
 
         self._update_adaptive_kl_betas(
-            mean_depth_kl_recon_signal,
             mean_depth_sequence_kl_recon_signal,
             mean_proprio_kl_recon_signal,
             mean_privileged_terrain_kl_recon_signal,
             mean_privileged_dynamics_kl_recon_signal,
             mean_mixer_kl_recon_signal,
         )
-        mean_aux_loss_details["kl_beta_depth_frame"] = self.depth_frame_kl_weight
         mean_aux_loss_details["kl_beta_depth_sequence"] = self.depth_sequence_kl_weight
         mean_aux_loss_details["kl_beta_proprio"] = self.proprio_kl_weight
         mean_aux_loss_details["kl_beta_privileged_terrain"] = self.privileged_terrain_kl_weight
         mean_aux_loss_details["kl_beta_privileged_dynamics"] = self.privileged_dynamics_kl_weight
         mean_aux_loss_details["kl_beta_mixer"] = self.versatility_lambda_e
-        if self.depth_frame_kl_recon_ema is not None:
-            mean_aux_loss_details["kl_recon_ema_depth_frame"] = self.depth_frame_kl_recon_ema
         if self.depth_sequence_kl_recon_ema is not None:
             mean_aux_loss_details["kl_recon_ema_depth_sequence"] = self.depth_sequence_kl_recon_ema
         if self.proprio_kl_recon_ema is not None:
