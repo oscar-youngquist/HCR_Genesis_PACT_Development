@@ -502,17 +502,20 @@ class PPO_KITE:
         # The critic uses privileged latents as inputs, but the RL optimizer
         #   does not train the privileged encoders. Avoid building graphs when
         #   those latents will be detached immediately.
-        context = torch.no_grad() if detach_latents else nullcontext()
-        with context:
-            if detach_latents:
-                terrain_latent = self.priv_terrain_encoder.forward_inference(terrain_map)
-                dynamics_latent = self.priv_dynamics_encoder.forward_inference(privileged_obs_history)
-            else:
-                terrain_latent, _ = self.priv_terrain_encoder.encode(terrain_map)
-                dynamics_latent, _ = self.priv_dynamics_encoder.encode(privileged_obs_history)
-        if detach_latents:
-            terrain_latent = terrain_latent.detach()
-            dynamics_latent = dynamics_latent.detach()
+        # context = torch.no_grad() if detach_latents else nullcontext()
+        # with context:
+        #     if detach_latents:
+        #         terrain_latent = self.priv_terrain_encoder.forward_inference(terrain_map)
+        #         dynamics_latent = self.priv_dynamics_encoder.forward_inference(privileged_obs_history)
+        #     else:
+        
+        terrain_latent, _ = self.priv_terrain_encoder.encode(terrain_map)
+        dynamics_latent, _ = self.priv_dynamics_encoder.encode(privileged_obs_history)
+        
+        # if detach_latents:
+        #     terrain_latent = terrain_latent.detach()
+        #     dynamics_latent = dynamics_latent.detach()
+        
         return torch.cat(
             [latest_privileged_obs, terrain_latent, dynamics_latent],
             dim=-1,
@@ -1214,14 +1217,16 @@ class PPO_KITE:
                 + self.privileged_terrain_kl_weight * privileged_terrain_kl
             )
         privileged_terrain_total.backward()
-        nn.utils.clip_grad_norm_(
-            list(self.priv_terrain_encoder.parameters())
-            + list(self.priv_terrain_decoder.parameters()),
-            self.max_grad_norm,
-        )
+        # nn.utils.clip_grad_norm_(
+        #     list(self.priv_terrain_encoder.parameters())
+        #     + list(self.priv_terrain_decoder.parameters()),
+        #     self.max_grad_norm,
+        # )
         self.privileged_optimizer.step()
+       
         privileged_terrain_log = privileged_terrain_loss.detach()
         privileged_terrain_kl_log = privileged_terrain_kl.detach()
+       
         del terrain_mean, terrain_logvar, terrain_priv_z, terrain_priv_recon
         del privileged_terrain_loss, privileged_terrain_kl, privileged_terrain_total
         self._empty_cache_if_debugging()
@@ -1242,11 +1247,13 @@ class PPO_KITE:
                 + self.privileged_dynamics_kl_weight * privileged_dynamics_kl
             )
         privileged_dynamics_total.backward()
-        nn.utils.clip_grad_norm_(
-            list(self.priv_dynamics_encoder.parameters())
-            + list(self.priv_dynamics_decoder.parameters()),
-            self.max_grad_norm,
-        )
+
+        # nn.utils.clip_grad_norm_(
+        #     list(self.priv_dynamics_encoder.parameters())
+        #     + list(self.priv_dynamics_decoder.parameters()),
+        #     self.max_grad_norm,
+        # )
+       
         self.privileged_optimizer.step()
         privileged_dynamics_log = privileged_dynamics_loss.detach()
         privileged_dynamics_kl_log = privileged_dynamics_kl.detach()
@@ -1782,6 +1789,7 @@ class PPO_KITE:
             self.actor_critic.train()
             self.act_optimizer.zero_grad(set_to_none=True)
             self.enc_optimizer.zero_grad(set_to_none=True)
+            self.privileged_optimizer.zero_grad(set_to_none=True)
 
             if profile_update:
                 self._sync_if_debugging()
@@ -1802,7 +1810,14 @@ class PPO_KITE:
 
             ppo_loss.backward()
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            
+            # Also clip for the priv. encoders
+            nn.utils.clip_grad_norm_(list(self.priv_terrain_encoder.parameters()) + list(self.priv_terrain_decoder.parameters()), self.max_grad_norm)
+            nn.utils.clip_grad_norm_(list(self.priv_dynamics_encoder.parameters()) + list(self.priv_dynamics_decoder.parameters()), self.max_grad_norm,)
+            
             self.act_optimizer.step()
+            # Also step the priv. encoders that are consumed by the critic
+            self.privileged_optimizer.step()
 
             if profile_update:
                 self._sync_if_debugging()
@@ -2015,10 +2030,7 @@ class PPO_KITE:
                          old_sigma_batch, old_mu_batch,
                          old_actions_log_prob_batch,
                          advantages_batch, target_values_batch, returns_batch):
-        # The RL optimizer only owns actor/critic parameters. Build the actor
-        #   conditioning from frozen encoder outputs so PPO does not spend time
-        #   or VRAM constructing encoder graphs that auxiliary losses train later.
-        # with torch.no_grad():
+        
         _, _, z, body_velo_est, feet_state_est = self.actor_critic.cenet_enc_forward(
             obs_hist_batch,
             obs=obs_batch,
@@ -2041,11 +2053,14 @@ class PPO_KITE:
 
         # PPO action log-probability and value estimates for the mini-batch.
         actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
+        
         critic_obs_batch = self.build_critic_obs(
             privileged_obs_history_batch,
             terrain_maps_batch,
         )
+        
         value_batch            = self.actor_critic.evaluate(critic_obs_batch)
+        
         mu_batch               = self.actor_critic.action_mean
         sigma_batch            = self.actor_critic.action_std
         entropy_batch          = self.actor_critic.entropy
