@@ -5,7 +5,7 @@ class B1Z1UniFPCfg:
     seed = 1
 
     class env:
-        num_envs = 6000
+        num_envs = 5120
         num_observations = 71
         num_privileged_obs = 143
         num_priv_stack = 3
@@ -514,11 +514,11 @@ class B1Z1UniFPCfg:
             stand_still         = -0.5
             stand_still_contact = 0.5
 
-            alive = 1.5
+            alive = 0.5
 
             # tracking
             tracking_lin_vel_force_world = 2.0
-            tracking_ang_vel = 1.0
+            tracking_ang_vel = 0.5
             
             tracking_ee_force_world = 2.0
             tracking_ee_orientation_default = 0.0
@@ -692,8 +692,8 @@ class B1Z1UniFPCfgPPO:
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.001
-        learning_rate = 3.0e-4
+        entropy_coef = 0.005
+        learning_rate = 2.0e-4
         schedule = "adaptive"  # adaptive
         gamma = 0.99
         lam = 0.95
@@ -708,7 +708,7 @@ class B1Z1UniFPCfgPPO:
         algorithm_class_name = "PPO_UniFP"
         num_steps_per_env = 24
         
-        max_iterations = 20000
+        max_iterations = 25000
         
         save_interval = 500
         run_name = "unifp_baseline"
