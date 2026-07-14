@@ -1803,7 +1803,7 @@ class B1Z1UniFP(BaseTask):
         limits = self.simulator.torque_limits
         if limits.ndim == 2:
             limits = limits[0]
-        return torch.sum((torch.abs(self.simulator.torques[:, :17]) - limits[:17] * self.cfg.rewards.soft_torque_limit).clip(min=0.0), dim=1)
+        return torch.sum((torch.abs(self.simulator.unclipped_torques[:, :17]) - limits[:17] * self.cfg.rewards.soft_torque_limit).clip(min=0.0), dim=1)
 
     def _reward_hip_pos(self):
         return torch.sum(torch.square(self.simulator.dof_pos[:, [0, 3, 6, 9]]), dim=1)

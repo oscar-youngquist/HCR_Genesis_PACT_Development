@@ -1034,6 +1034,8 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         self._torque_limits = self._robot.get_dofs_force_range(self._dof_indices)[
             1]
         
+        print("B1Z1 Torque Limits - ", self._torque_limits)
+
         self.torque_limits_lower = self._torque_limits.clone()
         self.torque_limits_diff = torch.zeros_like(self._torque_limits)
 
@@ -1426,10 +1428,10 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
 
         torques = self._motor_strength * self.feedback_torques
 
-        # self.unclipped_torques = torques.clone()
+        self.unclipped_torques = torques.clone()
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
-        # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
-        return torques
+        return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
+        # return torques
 
     def apply_ee_force(self, force_world):
         """Store the target world-frame EE disturbance force."""
