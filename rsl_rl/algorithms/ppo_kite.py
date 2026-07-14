@@ -1467,26 +1467,26 @@ class PPO_KITE:
             + modality_loss
         )
         non_privileged_loss.backward()
-        nn.utils.clip_grad_norm_(
-            self.actor_critic.depth_sequence_encoder.parameters(),
-            self.max_grad_norm,
-        )
-        nn.utils.clip_grad_norm_(
-            self.actor_critic.depth_sequence_recon_head.parameters(),
-            self.max_grad_norm,
-        )
-        nn.utils.clip_grad_norm_(
-            self.actor_critic.proprio_context_encoder.parameters(),
-            self.max_grad_norm,
-        )
-        nn.utils.clip_grad_norm_(
-            self.actor_critic.proprio_recon_head.parameters(),
-            self.max_grad_norm,
-        )
-        nn.utils.clip_grad_norm_(
-            self.actor_critic.context_encoder.parameters(),
-            self.max_grad_norm,
-        )
+        # nn.utils.clip_grad_norm_(
+        #     self.actor_critic.depth_sequence_encoder.parameters(),
+        #     self.max_grad_norm,
+        # )
+        # nn.utils.clip_grad_norm_(
+        #     self.actor_critic.depth_sequence_recon_head.parameters(),
+        #     self.max_grad_norm,
+        # )
+        # nn.utils.clip_grad_norm_(
+        #     self.actor_critic.proprio_context_encoder.parameters(),
+        #     self.max_grad_norm,
+        # )
+        # nn.utils.clip_grad_norm_(
+        #     self.actor_critic.proprio_recon_head.parameters(),
+        #     self.max_grad_norm,
+        # )
+        # nn.utils.clip_grad_norm_(
+        #     self.actor_critic.context_encoder.parameters(),
+        #     self.max_grad_norm,
+        # )
         self._step_all_encoder_optimizers()
 
         return {
@@ -2018,24 +2018,24 @@ class PPO_KITE:
         # The RL optimizer only owns actor/critic parameters. Build the actor
         #   conditioning from frozen encoder outputs so PPO does not spend time
         #   or VRAM constructing encoder graphs that auxiliary losses train later.
-        with torch.no_grad():
-            _, _, z, body_velo_est, feet_state_est = self.actor_critic.cenet_enc_forward(
-                obs_hist_batch,
-                obs=obs_batch,
-                depth_image=depth_images_batch,
-                depth_latent_history=depth_latent_history_batch,
-                depth_torso_state=depth_torso_state_batch,
+        # with torch.no_grad():
+        _, _, z, body_velo_est, feet_state_est = self.actor_critic.cenet_enc_forward(
+            obs_hist_batch,
+            obs=obs_batch,
+            depth_image=depth_images_batch,
+            depth_latent_history=depth_latent_history_batch,
+            depth_torso_state=depth_torso_state_batch,
+        )
+        context_state = torch.cat([body_velo_est, feet_state_est], dim=-1)
+        if self.use_boot:
+            actor_context = torch.cat((z, context_state), dim=-1)
+        else:
+            actor_context = torch.zeros(
+                (obs_batch.shape[0], z.shape[1] + context_state.shape[1]),
+                device=obs_batch.device,
+                dtype=obs_batch.dtype,
             )
-            context_state = torch.cat([body_velo_est, feet_state_est], dim=-1)
-            if self.use_boot:
-                actor_context = torch.cat((z, context_state), dim=-1)
-            else:
-                actor_context = torch.zeros(
-                    (obs_batch.shape[0], z.shape[1] + context_state.shape[1]),
-                    device=obs_batch.device,
-                    dtype=obs_batch.dtype,
-                )
-            current_obs = torch.cat((obs_batch, actor_context), dim=-1)
+        current_obs = torch.cat((obs_batch, actor_context), dim=-1)
 
         self.actor_critic.update_distribution(current_obs)
 
