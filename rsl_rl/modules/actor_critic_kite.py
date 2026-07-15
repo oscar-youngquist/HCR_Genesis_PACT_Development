@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .kite_modality_mixer_encoder import MultimodalFusionVAE
+from .kite_modality_mixer_encoder import MultimodalFusionVAE, MixerLatentDecoder
 # from .kite_proprio_encoder import ProprioContextMLPMixerKITE
 from .kite_proprio_encoder import ProprioceptiveContextEncoder
 from .kite_visual_encoder import (
@@ -206,11 +206,11 @@ class ActorCritic_KITE(nn.Module):
                  num_actor_obs=45,
                  num_act_hist=10,
                  num_critic_obs=132,
-                 
+
                  depth_image_resolution=(48, 64),
                  depth_image_latent_dim=32,
                  depth_image_norm="layer",
-                 
+
                  depth_sequence_length=5,
                  depth_sequence_outdim=16,
                  depth_sequence_norm="layer",
@@ -218,17 +218,12 @@ class ActorCritic_KITE(nn.Module):
                  depth_sequence_std_max=1.5,
                  depth_sequence_conf_min=0.1,
                  depth_sequence_conf_mask_scale=0.2,
-                 
+
                  proprio_in_dim=450,
                  proprio_latent_dim=16,
-                 proprio_use_norm=True,
-                 proprio_mixer_blocks=2,
-                 proprio_hidden_dim=128,
-                 proprio_token_dim=128,
-                 proprio_channel_dim=256,
                  proprio_std_min=0.01,
                  proprio_std_max=1.5,
-                 
+
                  mixer_velo_dim=3,                   # torso velocity state [v_x, v_y, v_z]
                  mixer_feet_state_dim=20,            # [feet-contact-state (4), feet-height (4), surface-normal under feet (12)]
                  mixer_latent_dim=32,
@@ -238,31 +233,30 @@ class ActorCritic_KITE(nn.Module):
                  mixer_feet_hidden=32,
                  mixer_std_min=0.01,
                  mixer_std_max=1.5,
-                 privileged_terrain_latent_dim=32,
-                 privileged_dynamics_latent_dim=16,
-                 
+                 mixer_decoder_dims=(32, 64, 128),
+
                  num_actions=12,
                  actor_layers=[512,256,128],
                  critic_layers=[128,256,128,64],
-                 activation="elu", 
+                 activation="elu",
                  init_noise_std=1.0,
                  proprio_context_layer_sizes=(256, 128),
                  ):
         super().__init__()
 
-        
+
         # some generic paramaters
         self.num_actor_obs = num_actor_obs
         self.num_actions = num_actions
         self.init_noise_std = init_noise_std
-        
+
         self.body_velo_dim = mixer_velo_dim
         self.feet_state_dim = mixer_feet_state_dim
-        
+
         # Depth-image encoder paramaters
         self.depth_image_resolution = depth_image_resolution
         self.depth_latent_dim = depth_image_latent_dim
-        
+
         # Number of depth-frame latents consumed by the sequence encoder. The
         #      runner stores depth_sequence_length - 1 previous latents plus the
         #      current image encoded on demand.
@@ -270,25 +264,10 @@ class ActorCritic_KITE(nn.Module):
 
         # Proprioceptive Encoder paramaters
         self.proprio_latent_dim = proprio_latent_dim
-        
-        
+
+
         self.mixer_latent_dim = mixer_latent_dim
-        
-        # Old MLP-Mixer proprioceptive context encoder.
-        # self.proprio_context_encoder = ProprioContextMLPMixerKITE(
-        #     context_input_dim=proprio_in_dim,
-        #     num_tokens=num_actor_obs,
-        #     input_dim_per_token=num_act_hist,
-        #     hidden_dim=proprio_hidden_dim,
-        #     num_mixer_blocks=proprio_mixer_blocks,
-        #     token_mlp_dim=proprio_token_dim,
-        #     channel_mlp_dim=proprio_channel_dim,
-        #     context_latent_size=proprio_latent_dim,
-        #     activation=activation,
-        #     use_layer_norm=proprio_use_norm,
-        #     std_min=proprio_std_min,
-        #     std_max=proprio_std_max,
-        # )
+
         self.proprio_context_encoder = ProprioceptiveContextEncoder(
             context_input_dim=proprio_in_dim,
             context_layer_sizes=list(proprio_context_layer_sizes),
@@ -305,7 +284,7 @@ class ActorCritic_KITE(nn.Module):
             cnn_activation=activation,
             norm_type=depth_image_norm,
         )
-        
+
         # Depth-image latent sequence encoder
         self.depth_sequence_encoder = ConvDepthSequenceEncoder(
             feature_dim=self.depth_latent_dim,
@@ -318,7 +297,7 @@ class ActorCritic_KITE(nn.Module):
             conf_min=depth_sequence_conf_min,
             conf_mask_scale=depth_sequence_conf_mask_scale,
         )
-        
+
         # Modality mixer encoder
         self.context_encoder = MultimodalFusionVAE(
             depth_latent_dim=depth_sequence_outdim,
@@ -335,30 +314,12 @@ class ActorCritic_KITE(nn.Module):
             std_max=mixer_std_max,
         )
 
-        # # Contrastive alignment heads are used only during auxiliary training.
-        # # Reconstruction decoders consume the VAE samples directly; these heads
-        # # let the contrastive objective act through a small sacrificial layer.
-        # self.depth_sequence_contrastive_head = ContrastiveProjectionHead(
-        #     input_dim=depth_sequence_outdim,
-        #     projection_dim=privileged_terrain_latent_dim,
-        #     activation=activation,
-        # )
-        # self.depth_sequence_recon_head = ReconHead(
-        #     input_dim=depth_sequence_outdim,
-        #     recon_dim=privileged_terrain_latent_dim,
-        #     activation=activation,
-        # )
-        # self.proprio_contrastive_head = ContrastiveProjectionHead(
-        #     input_dim=proprio_latent_dim,
-        #     projection_dim=privileged_dynamics_latent_dim,
-        #     activation=activation,
-        # )
-        # self.proprio_recon_head = ReconHead(
-        #     input_dim=proprio_latent_dim,
-        #     recon_dim=privileged_dynamics_latent_dim,
-        #     activation=activation,
-        # )
-        
+        # Modality Mixer Decoder -
+        #     Recover the input latents used to contruct the modality encoder
+        self.context_decoder = MixerLatentDecoder(input_dim=mixer_latent_dim,
+                                                  layers=mixer_decoder_dims,
+                                                  decode_dim=int(depth_sequence_outdim+proprio_latent_dim),)
+
         # Get the activation function used by the actor and critic networks
         activation = get_activation(activation)
 
@@ -366,20 +327,20 @@ class ActorCritic_KITE(nn.Module):
         #  Construct the layers for the actor network
         ###
         # Shared layer between output branches
-        actor_input_dim = num_actor_obs + mixer_latent_dim + mixer_velo_dim +  mixer_feet_state_dim # current obs o_t, force-aware latent dynamics z_t, explicit esitmation v_t 
+        actor_input_dim = num_actor_obs + mixer_latent_dim + mixer_velo_dim +  mixer_feet_state_dim # current obs o_t, force-aware latent dynamics z_t, explicit esitmation v_t
 
         shared_trunk_layers = []
         shared_trunk_layers.append(nn.Linear(actor_input_dim, actor_layers[0]))
         shared_trunk_layers.append(activation)
-        
+
         for l in range(len(actor_layers)-1):
             shared_trunk_layers.append(nn.Linear(actor_layers[l], actor_layers[l+1]))
             shared_trunk_layers.append(activation)
-        
+
         shared_trunk_layers.append(nn.Linear(actor_layers[-1], num_actions))
-        
+
         self.actor = nn.Sequential(*shared_trunk_layers)
-        
+
         ###
         #  Construct layers for the critic network
         ###
@@ -395,25 +356,25 @@ class ActorCritic_KITE(nn.Module):
         self.critic = nn.Sequential(*_critic_layers)
 
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-        
+
         self.distribution = None
-        
+
         self.current_obs = None
-        
+
         self._std_clip_lwr = 0.1
-        
+
         # disable args validation for speedup
         Normal.set_default_validate_args = False
 
-    def _init_std(self, std_val=1.00):                
+    def _init_std(self, std_val=1.00):
         self.std.data.fill_(std_val)
 
     def get_optim_groups(self, weight_decay: float = 1e-4, strong_decay: float = 1e-1):
         """Separate actor/critic and merged encoder params.
-        
+
         Args:
             weight_decay (float): Weight decay value for regularization. Default: 1e-4.
-            
+
         Returns:
             Actor/critic parameter groups and merged sequence/proprio/mixer
             encoder groups.
@@ -437,6 +398,7 @@ class ActorCritic_KITE(nn.Module):
             # "depth_sequence_contrastive_head.": "visual_sequence",
             # "depth_sequence_recon_head.": "visual_sequence",
             "context_encoder.": "modality_mixer",
+            "context_decoder":"modality_mixer",
         }
 
         for mn, m in self.named_modules():
@@ -498,7 +460,7 @@ class ActorCritic_KITE(nn.Module):
 
         params_act = [{"params": [param_dict[pn] for pn in sorted(actor_set)],  "weight_decay":weight_decay, "name":"actor"},
                       {"params": [param_dict[pn] for pn in sorted(critic_set)], "weight_decay":weight_decay, "name":"critic"},
-                      {"params": [param_dict[pn] for pn in sorted(no_decay)],   "weight_decay": 0.0}]        
+                      {"params": [param_dict[pn] for pn in sorted(no_decay)],   "weight_decay": 0.0}]
         params_enc = {
             name: [
                 {
@@ -620,14 +582,14 @@ class ActorCritic_KITE(nn.Module):
             [depth_latent_history, latest_depth_z.unsqueeze(1)],
             dim=1,
         )
-        
+
         if sequence.shape[1] < self.depth_sequence_length:
             pad_count = self.depth_sequence_length - sequence.shape[1]
             padding = latest_depth_z.unsqueeze(1).repeat(1, pad_count, 1)
             sequence = torch.cat([padding, sequence], dim=1)
-        
+
         return sequence[:, -self.depth_sequence_length:, :]
-    
+
     # forward methods for the histroical context VAE
     def cenet_enc_forward(
         self,
@@ -679,7 +641,7 @@ class ActorCritic_KITE(nn.Module):
             return mean, logvar, z, body_velo, feet_state, latest_depth_z
 
         return mean, logvar, z, body_velo, feet_state
-    
+
     def cenet_enc_inference(
         self,
         obs_history,
@@ -748,7 +710,7 @@ class ActorCritic_KITE(nn.Module):
     @torch.jit.ignore
     def _clip_std(self,):
         self.std.data.clamp_(self._std_clip_lwr, 5.0)
-        
+
     def _set_std_clip_lwr(self, clip_val=0.1):
         self._std_clip_lwr = clip_val
 
@@ -769,7 +731,7 @@ class ActorCritic_KITE(nn.Module):
         depth_torso_state=None,
         **kwargs,
     ):
-        _, _, z, body_velo_est, feet_state_est = self.cenet_enc_forward(
+        lat_mean, _, z, body_velo_est, feet_state_est = self.cenet_enc_forward(
             obs_history,
             obs=obs,
             depth_image=depth_image,
@@ -778,10 +740,10 @@ class ActorCritic_KITE(nn.Module):
         )
 
         context_state = torch.cat([body_velo_est, feet_state_est], dim=-1)
-        
+
         # create the actors observation
-        current_obs = torch.cat((obs,z,context_state), dim=-1)
-        
+        current_obs = torch.cat((obs,lat_mean,context_state), dim=-1)
+
         # Upated the PPO training distribution
         self.update_distribution(current_obs)
 
@@ -799,7 +761,7 @@ class ActorCritic_KITE(nn.Module):
         depth_torso_state=None,
         **kwargs,
     ):
-        _, _, z, body_velo_est, feet_state_est, latest_depth_z = self.cenet_enc_forward(
+        lat_mean, _, z, body_velo_est, feet_state_est, latest_depth_z = self.cenet_enc_forward(
             obs_history,
             obs=obs,
             depth_image=depth_image,
@@ -809,7 +771,7 @@ class ActorCritic_KITE(nn.Module):
         )
 
         context_state = torch.cat([body_velo_est, feet_state_est], dim=-1)
-        current_obs = torch.cat((obs, z, context_state), dim=-1)
+        current_obs = torch.cat((obs, lat_mean, context_state), dim=-1)
         self.update_distribution(current_obs)
         sample = self.distribution.sample()
 
@@ -848,7 +810,7 @@ class ActorCritic_KITE(nn.Module):
         depth_torso_state=None,
         **kwargs,
     ):
-        _, _, z, body_velo_est, feet_state_est = self.cenet_enc_forward(
+        lat_mean, _, z, body_velo_est, feet_state_est = self.cenet_enc_forward(
             obs_history,
             obs=obs,
             depth_image=depth_image,
@@ -857,16 +819,16 @@ class ActorCritic_KITE(nn.Module):
         )
 
         context_state = torch.cat([body_velo_est, feet_state_est], dim=-1)
-        
+
         # create the actors observation
-        current_obs = torch.cat((obs,z,context_state), dim=-1)
+        # current_obs = torch.cat((obs,lat_mean,context_state), dim=-1)
 
         # Mask the latent/velo from the encoder with zeros
-        boot_mask = torch.zeros((z.shape[0], (z.shape[1] + context_state.shape[1])), device=obs.device)
+        boot_mask = torch.zeros((lat_mean.shape[0], (lat_mean.shape[1] + context_state.shape[1])), device=obs.device)
 
         # create the actors observation
-        current_obs = torch.cat((obs,boot_mask), dim=-1)   
-        
+        current_obs = torch.cat((obs,boot_mask), dim=-1)
+
         # Upated the PPO training distribution
         self.update_distribution(current_obs)
 
@@ -945,10 +907,10 @@ class ActorCritic_KITE(nn.Module):
         )
 
         context_state = torch.cat([body_velo_est, feet_state_est], dim=-1)
-        
+
         # create the actors observation
         current_obs = torch.cat((obs,z,context_state), dim=-1)
-                
+
         # call the actors forward method and return it's results
         actions = self.actor_forward(current_obs)
 

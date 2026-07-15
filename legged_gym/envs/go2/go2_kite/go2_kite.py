@@ -858,7 +858,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
             return
         distance = self.max_move_distance[env_ids]
         # robots that walked far enough progress to harder terains
-        move_up = distance > (self.simulator._terrain.env_length / 2.0)
+        move_up = distance > (self.simulator._terrain.env_length / 3.0)
         # robots that walked less than half of their required distance go to simpler terrains
         if getattr(self.cfg.terrain, "move_down_by_accumulated_xy_command", False):
             required_distance = (
@@ -982,6 +982,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         self.commands[env_ids, 0] = self._sample_lin_vel_x_commands(env_ids)
         self.commands[env_ids, 1] = torch_rand_float(
             self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1], (len(env_ids),1), self.device).squeeze(1)
+        
         if self.cfg.commands.heading_command:
             self.commands[env_ids, 3] = torch_rand_float(self.command_ranges["heading"][0], self.command_ranges["heading"][1], (len(env_ids), 1), device=self.device).squeeze(1)
         else:
@@ -2442,7 +2443,8 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         return heading_error_reward
 
     def _reward_tracking_lin_vel_penalty(self):
-        return 1.0 - self._reward_tracking_lin_vel_base()
+        # return 1.0 - self._reward_tracking_lin_vel_base()
+        return torch.norm((self.commands[:, :2] - self.simulator.base_lin_vel[:, :2]), dim= 1)
 
     def _reward_dof_act_limits(self):
         actions_scaled = self._scaled_pos_actions()
@@ -2467,7 +2469,8 @@ class Go2KITE(KITEDepthMixin, BaseTask):
 
     def _reward_tracking_ang_vel_penalty(self):
         # Bounded penalty that grows as yaw-rate command tracking fails.
-        return 1.0 - self._reward_tracking_ang_vel()
+        # return 1.0 - self._reward_tracking_ang_vel()
+        return torch.abs(self.commands[:, 2] - self.simulator.base_ang_vel[:, 2])
 
     def _reward_joint_power(self):
         # penalize large amounts of motor power

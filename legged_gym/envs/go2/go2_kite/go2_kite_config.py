@@ -216,7 +216,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             grf = 0.01
             height_measurements = 5.0
         clip_observations = 100.
-        clip_actions = 100.
+        clip_actions = 10.
 
     class domain_rand(LeggedRobotCfg.domain_rand):
         use_domainrand_curriculum = True
@@ -233,37 +233,37 @@ class GO2KITECfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 5.00
-        max_push_vel_xy = 1.00
-        min_push_vel_xy = 0.50
+        max_push_vel_xy = 0.50
+        min_push_vel_xy = 0.20
 
-        max_vertical_push = 0.50
-        min_vertical_push = 0.20
+        max_vertical_push = 0.30
+        min_vertical_push = 0.10
         vert_interval_max = 15.0
         vert_interval_min = 5.00
 
-        max_push_torque = 1.00
-        min_push_torque = 0.50
+        max_push_torque = 0.60
+        min_push_torque = 0.20
         wrench_timeout_min = 5.00
         wrench_timeout_max = 15.0
         
         # Randomized base mass, applied at COM
         randomize_base_mass = True
-        min_added_mass_max = 3.0
-        max_added_mass_max = 4.0
+        min_added_mass_max = 2.0
+        max_added_mass_max = 3.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
-        com_displacement_x_min = 0.05
-        com_displacement_x_max = 0.075
+        com_displacement_x_min = 0.025
+        com_displacement_x_max = 0.05
         
-        com_displacement_y_min = 0.05
-        com_displacement_y_max = 0.075
+        com_displacement_y_min = 0.025
+        com_displacement_y_max = 0.05
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.05
-        com_displacement_z_max = 0.075
+        com_displacement_z_min = 0.025
+        com_displacement_z_max = 0.05
         
         # Control delay
         randomize_ctrl_delay = True
@@ -476,7 +476,7 @@ class GO2KITECfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
         soft_torque_limit = 0.90
-        base_height_target = 0.40
+        base_height_target = 0.38
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
 
         # Order: slope, rough, stairs down, stairs up, discrete, wave,
@@ -509,7 +509,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         vhip_acc_deadband = 0.001
 
         foot_clearance_tracking_sigma = 0.01
-        only_positive_rewards = False
+        only_positive_rewards = True
 
         use_reward_curriculum = True
 
@@ -552,8 +552,8 @@ class GO2KITECfg( LeggedRobotCfg ):
             tracking_ang_vel  = 0.50
             
             #    negative pushes away from not tracking
-            tracking_lin_vel_penalty = 0.0
-            tracking_ang_vel_penalty = 0.0
+            tracking_lin_vel_penalty = -0.2
+            tracking_ang_vel_penalty = -0.1
 
             # Asymmetric PB reward for making progress in the desired direction
             position_progress    =  0.1
@@ -706,7 +706,7 @@ class GO2KITECfg( LeggedRobotCfg ):
                                   # these get stronger after initial gait discovery in order to prevent maladapted 
                                   #    swing-beahviors that transfer poorly to the real world   
                                   "stumble":[-0.2, -1.0],
-                                  "feet_regulation":[-0.01, -0.10],
+                                  "feet_regulation":[-0.01, -0.05],
                                   "edge_swing_clearance":[-0.1, -1.0],
                                   "swing_foot_collision_edge":[-0.1, -1.0],
                                   
@@ -717,7 +717,7 @@ class GO2KITECfg( LeggedRobotCfg ):
                                   # Later in training, exact velo-command following may be difficult,
                                   # so, increase these values that are about rewarding/penalizing 
                                   # position-based progress in the commanded direction, not strict tracking performance.
-                                  "position_no_progress":[-0.0, -0.2],
+                                  "position_no_progress":[-0.00, -0.2],
                                   "position_progress":[0.00, 0.5],
 
                                   # These enforce a balance gait and at the swing-level  
@@ -774,10 +774,10 @@ class GO2KITECfg( LeggedRobotCfg ):
         
         heading_command = True # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
-            lin_vel_x = [-0.6, 0.6] # min max [m/s]
-            lin_vel_y = [-0.5, 0.5]   # min max [m/s]
+            lin_vel_x = [0.3, 0.5] # min max [m/s]
+            lin_vel_y = [-0.0, 0.0]   # min max [m/s]
             ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
-            heading = [-3.14, 3.14]
+            heading = [-1.57, 1.57]
 
 class GO2KITECfgPPO( LeggedRobotCfgPPO ):
     seed = 1
@@ -791,7 +791,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         privileged_terrain_latent_dim = depth_sequence_outdim = 32
         privileged_dynamics_latent_dim = proprio_latent_dim = 32
         depth_image_latent_dim = 32
-        mixer_latent_dim = 16
+        mixer_latent_dim = 32
         
         # Privileged Encoder/Decoder
         priv_activation = 'elu'
@@ -846,11 +846,13 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         mixer_velo_dim       = 3             # torso velocity state [v_x, v_y, v_z]
         mixer_feet_state_dim = 20            # [feet-contact-state (4), feet-height (4), surface-normal under feet (12)]
         mixer_use_norm       = False
-        mixer_hidden_dims    = [128, 64, 32]
+        mixer_hidden_dims    = [128, 64]
         mixer_velo_hidden    = 128
         mixer_feet_hidden    = 256
         mixer_std_min        = 0.10
         mixer_std_max        = 1.0
+
+        mixer_decoder_dims = [128, 256, 512]
 
         # Actor/critic
         actor_layers  = [512,256,128]

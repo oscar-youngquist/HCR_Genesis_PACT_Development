@@ -126,11 +126,6 @@ class OnPolicyRunnerKITE:
                                                             
                                                             self.policy_cfg["proprio_in_dim"],
                                                             self.policy_cfg["proprio_latent_dim"],
-                                                            self.policy_cfg.get("proprio_use_norm", True),
-                                                            self.policy_cfg.get("proprio_num_blocks", 2),
-                                                            self.policy_cfg.get("proprio_hidden_dim", 128),
-                                                            self.policy_cfg.get("proprio_token_dim", 128),
-                                                            self.policy_cfg.get("proprio_channel_dim", 256),
                                                             self.policy_cfg.get("proprio_std_min", 0.01),
                                                             self.policy_cfg.get("proprio_std_max", 1.5),
                                                             
@@ -143,8 +138,8 @@ class OnPolicyRunnerKITE:
                                                             self.policy_cfg.get("mixer_feet_hidden", 32),
                                                             self.policy_cfg.get("mixer_std_min", 0.01),
                                                             self.policy_cfg.get("mixer_std_max", 1.5),
-                                                            self.policy_cfg.get("privileged_terrain_latent_dim", 32),
-                                                            self.policy_cfg.get("privileged_dynamics_latent_dim", 16),
+                                                            self.policy_cfg.get("mixer_decoder_dims", [32, 64, 128]),
+
                                                             self.env.num_actions,
                                                             self.policy_cfg["actor_layers"],
                                                             self.policy_cfg["critic_layers"],
