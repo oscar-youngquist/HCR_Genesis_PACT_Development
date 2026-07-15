@@ -78,7 +78,7 @@ class CommandScheduler:
         self.args = args
         self.base_mode = args.base_command_mode
         if self.base_mode == "auto":
-            self.base_mode = "joystick" if args.use_joystick else "fixed"
+            self.base_mode = "joystick" if args.use_joystick else "random"
         self.ee_mode = args.ee_eval_mode
         self.base_hold_steps = max(1, int(args.base_command_hold_s / env.dt))
         self.ee_hold_steps = max(1, int(args.ee_command_hold_s / env.dt))
@@ -382,7 +382,7 @@ def interaction_loop(env, policy, args):
     robot_index = 0
     base_mode = args.base_command_mode
     if base_mode == "auto":
-        base_mode = "joystick" if args.use_joystick else "fixed"
+        base_mode = "joystick" if args.use_joystick else "random"
     joystick = Joystick(joystick_type=args.joystick_type) if base_mode == "joystick" else None
     scheduler = CommandScheduler(env, args)
     metrics = EvalMetrics(args.metrics_window_steps)

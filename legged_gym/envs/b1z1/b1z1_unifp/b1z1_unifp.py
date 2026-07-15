@@ -673,7 +673,8 @@ class B1Z1UniFP(BaseTask):
 
         env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
         base_yaw_quat = self._get_base_yaw_quat(env_ids)
-        ee_center = self.simulator.base_pos[env_ids] + quat_apply(base_yaw_quat, self.ee_goal_center_offset[env_ids])
+        # ee_center = self.simulator.base_pos[env_ids] + quat_apply(base_yaw_quat, self.ee_goal_center_offset[env_ids])
+        ee_center = self.get_ee_goal_spherical_center(base_yaw_quat, env_ids)
         forces_cmd_world = quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd[env_ids])
         force_offset = (self.ee_force_ext_world[env_ids] + forces_cmd_world) / self.gripper_force_kps[env_ids]
         ee_goal_offset_world = self.curr_ee_goal_cart_world[env_ids] + force_offset
