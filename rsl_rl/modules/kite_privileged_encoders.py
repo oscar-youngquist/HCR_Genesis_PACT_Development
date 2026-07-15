@@ -12,6 +12,7 @@ from .module_utils import (
     MLPMixerBlock,
     SmoothClampLayer,
     get_activation,
+    init_weights
 )
 
 
@@ -788,7 +789,8 @@ class PrivilegedProprioceptiveContextEncoder(nn.Module):
         self.ce_out_mean = nn.Linear(output_hdim, context_latent_size)
         self.ce_out_var = nn.Sequential(
             nn.Linear(output_hdim, context_latent_size),
-            SmoothClampLayer(min_val=2.0*math.log(std_min), max_val=2.0*math.log(std_max)),
+            # SmoothClampLayer(min_val=2.0*math.log(std_min), max_val=2.0*math.log(std_max)),
+            SmoothClampLayer(min_val=-5.0, max_val=5.0),
         )
         
         self.activation = get_activation(activation)
@@ -802,53 +804,57 @@ class PrivilegedProprioceptiveContextEncoder(nn.Module):
         for layer in [self.ce_in, 
                       self.ce_h1,
                       self.ce_h2,
-                      self.ce_latmean_h]:
+                      self.ce_latmean_h,
+                      self.ce_latvar_h,
+                      self.ce_out_mean]:
             
             nn.init.xavier_uniform_(layer.weight)
             
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
 
-        # Initialize near zero so the initial posterior mean is close to the
-        # N(0, I) prior. This keeps the initial KL_mu term small.
-        nn.init.normal_(self.ce_out_mean.weight, mean=0.0, std=1.0e-3)
-        if self.ce_out_mean.bias is not None:
-            nn.init.zeros_(self.ce_out_mean.bias)
+        self.ce_out_var.apply(init_weights)
 
-        # Logvar output head inside Sequential.
-        for module in self.ce_out_var:
-            if isinstance(module, nn.Linear):
-                nn.init.kaiming_uniform_(
-                    module.weight,
-                    a=1.0,
-                    mode="fan_in",
-                    nonlinearity="linear",
-                )
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
+        # # Initialize near zero so the initial posterior mean is close to the
+        # # N(0, I) prior. This keeps the initial KL_mu term small.
+        # nn.init.normal_(self.ce_out_mean.weight, mean=0.0, std=1.0e-3)
+        # if self.ce_out_mean.bias is not None:
+        #     nn.init.zeros_(self.ce_out_mean.bias)
 
-        # Important: because SmoothClampLayer uses a sigmoid bound, logvar = 0
-        # may be the upper asymptote when std_max == 1.0, so we target a small
-        # negative value instead.
-        smooth_bound = self.ce_out_var[1]
-        min_logvar = smooth_bound.min_val
-        max_logvar = smooth_bound.max_val
+        # # Logvar output head inside Sequential.
+        # for module in self.ce_out_var:
+        #     if isinstance(module, nn.Linear):
+        #         nn.init.kaiming_uniform_(
+        #             module.weight,
+        #             a=1.0,
+        #             mode="fan_in",
+        #             nonlinearity="linear",
+        #         )
+        #         if module.bias is not None:
+        #             nn.init.zeros_(module.bias)
 
-        target_logvar = -0.05  # std ≈ exp(-0.025) ≈ 0.975, KL near zero
+        # # Important: because SmoothClampLayer uses a sigmoid bound, logvar = 0
+        # # may be the upper asymptote when std_max == 1.0, so we target a small
+        # # negative value instead.
+        # smooth_bound = self.ce_out_var[1]
+        # min_logvar = smooth_bound.min_val
+        # max_logvar = smooth_bound.max_val
 
-        p = (target_logvar - min_logvar) / (max_logvar - min_logvar)
-        p = min(max(p, 1.0e-6), 1.0 - 1.0e-6)
-        init_raw_logvar_bias = math.log(p / (1.0 - p))
+        # target_logvar = -0.05  # std ≈ exp(-0.025) ≈ 0.975, KL near zero
 
-        # Make the hidden logvar branch initially neutral.
-        nn.init.zeros_(self.ce_latvar_h.weight)
-        if self.ce_latvar_h.bias is not None:
-            nn.init.zeros_(self.ce_latvar_h.bias)
+        # p = (target_logvar - min_logvar) / (max_logvar - min_logvar)
+        # p = min(max(p, 1.0e-6), 1.0 - 1.0e-6)
+        # init_raw_logvar_bias = math.log(p / (1.0 - p))
 
-        # Make the final raw-logvar head output a constant near unit std.
-        nn.init.zeros_(self.ce_out_var[0].weight)
-        if self.ce_out_var[0].bias is not None:
-            nn.init.constant_(self.ce_out_var[0].bias, init_raw_logvar_bias)
+        # # Make the hidden logvar branch initially neutral.
+        # nn.init.zeros_(self.ce_latvar_h.weight)
+        # if self.ce_latvar_h.bias is not None:
+        #     nn.init.zeros_(self.ce_latvar_h.bias)
+
+        # # Make the final raw-logvar head output a constant near unit std.
+        # nn.init.zeros_(self.ce_out_var[0].weight)
+        # if self.ce_out_var[0].bias is not None:
+        #     nn.init.constant_(self.ce_out_var[0].bias, init_raw_logvar_bias)
 
     def encode(self, X_C: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # Forward pass through encoder

@@ -15,7 +15,7 @@ from .kite_visual_encoder import (
     ConvDepthSequenceEncoder,
     MotionRobustDepthEncoder,
 )
-from .module_utils import ContrastiveProjectionHead, ReconHead, get_activation
+from .module_utils import ContrastiveProjectionHead, ReconHead, get_activation, init_weights
 
 
 class KITEDepthAsyncPipeline(nn.Module):
@@ -335,29 +335,29 @@ class ActorCritic_KITE(nn.Module):
             std_max=mixer_std_max,
         )
 
-        # Contrastive alignment heads are used only during auxiliary training.
-        # Reconstruction decoders consume the VAE samples directly; these heads
-        # let the contrastive objective act through a small sacrificial layer.
-        self.depth_sequence_contrastive_head = ContrastiveProjectionHead(
-            input_dim=depth_sequence_outdim,
-            projection_dim=privileged_terrain_latent_dim,
-            activation=activation,
-        )
-        self.depth_sequence_recon_head = ReconHead(
-            input_dim=depth_sequence_outdim,
-            recon_dim=privileged_terrain_latent_dim,
-            activation=activation,
-        )
-        self.proprio_contrastive_head = ContrastiveProjectionHead(
-            input_dim=proprio_latent_dim,
-            projection_dim=privileged_dynamics_latent_dim,
-            activation=activation,
-        )
-        self.proprio_recon_head = ReconHead(
-            input_dim=proprio_latent_dim,
-            recon_dim=privileged_dynamics_latent_dim,
-            activation=activation,
-        )
+        # # Contrastive alignment heads are used only during auxiliary training.
+        # # Reconstruction decoders consume the VAE samples directly; these heads
+        # # let the contrastive objective act through a small sacrificial layer.
+        # self.depth_sequence_contrastive_head = ContrastiveProjectionHead(
+        #     input_dim=depth_sequence_outdim,
+        #     projection_dim=privileged_terrain_latent_dim,
+        #     activation=activation,
+        # )
+        # self.depth_sequence_recon_head = ReconHead(
+        #     input_dim=depth_sequence_outdim,
+        #     recon_dim=privileged_terrain_latent_dim,
+        #     activation=activation,
+        # )
+        # self.proprio_contrastive_head = ContrastiveProjectionHead(
+        #     input_dim=proprio_latent_dim,
+        #     projection_dim=privileged_dynamics_latent_dim,
+        #     activation=activation,
+        # )
+        # self.proprio_recon_head = ReconHead(
+        #     input_dim=proprio_latent_dim,
+        #     recon_dim=privileged_dynamics_latent_dim,
+        #     activation=activation,
+        # )
         
         # Get the activation function used by the actor and critic networks
         activation = get_activation(activation)
@@ -430,12 +430,12 @@ class ActorCritic_KITE(nn.Module):
         blacklist = (nn.LayerNorm, nn.Embedding, nn.Parameter)
         encoder_prefix_to_group = {
             "proprio_context_encoder.": "proprioceptive",
-            "proprio_contrastive_head.": "proprioceptive",
-            "proprio_recon_head.": "proprioceptive",
+            # "proprio_contrastive_head.": "proprioceptive",
+            # "proprio_recon_head.": "proprioceptive",
             "depth_frame_encoder.": "visual_sequence",
             "depth_sequence_encoder.": "visual_sequence",
-            "depth_sequence_contrastive_head.": "visual_sequence",
-            "depth_sequence_recon_head.": "visual_sequence",
+            # "depth_sequence_contrastive_head.": "visual_sequence",
+            # "depth_sequence_recon_head.": "visual_sequence",
             "context_encoder.": "modality_mixer",
         }
 

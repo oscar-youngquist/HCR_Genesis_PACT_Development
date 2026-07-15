@@ -102,7 +102,7 @@ class OnPolicyRunnerKITE:
             else self.env.num_obs
         )
         num_critic_obs = (
-            latest_privileged_obs_dim
+            latest_privileged_obs_dim * self.env.cfg.env.num_priv_stack
             + self.policy_cfg.get("privileged_terrain_latent_dim", 32)
             + self.policy_cfg.get("privileged_dynamics_latent_dim", 16)
         )

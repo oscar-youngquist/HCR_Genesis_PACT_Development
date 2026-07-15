@@ -371,7 +371,7 @@ class PPO_KITE:
         #     dynamics_latent = dynamics_latent.detach()
         
         return torch.cat(
-            [latest_privileged_obs, terrain_latent, dynamics_latent],
+            [privileged_obs_history, terrain_latent, dynamics_latent],
             dim=-1,
         )
 
@@ -1097,21 +1097,23 @@ class PPO_KITE:
             )
 
             seq_kl = self._kl_loss(seq_mean, seq_logvar, mask)
-            depth_seq_contrast_z = self.actor_critic.depth_sequence_contrastive_head(
-                depth_seq_z
-            )
-            depth_seq_recon_z = self.actor_critic.depth_sequence_recon_head(
-                depth_seq_z
-            )
+            # depth_seq_contrast_z = self.actor_critic.depth_sequence_contrastive_head(
+            #     depth_seq_z
+            # )
+            # depth_seq_recon_z = self.actor_critic.depth_sequence_recon_head(
+            #     depth_seq_z
+            # )
+
             with self._frozen_module_params(self.priv_terrain_decoder):
-                terrain_recon_from_depth_seq = self.priv_terrain_decoder(depth_seq_recon_z)
+                terrain_recon_from_depth_seq = self.priv_terrain_decoder(depth_seq_z)
+            
             seq_terrain_loss, seq_terrain_recon_log = self._terrain_recon_loss(
                 terrain_recon_from_depth_seq,
                 terrain_maps_batch,
                 mask,
             )
             seq_terrain_contrast_loss = self._normalized_contrastive_loss(
-                depth_seq_contrast_z,
+                depth_seq_z,
                 terrain_positive,
                 contrastive_negative_anchor_batch,
                 mask,
@@ -1128,14 +1130,15 @@ class PPO_KITE:
             )
 
             prop_kl = self._kl_loss(prop_mean, prop_logvar, mask)
-            proprio_contrast_z = self.actor_critic.proprio_contrastive_head(
-                proprio_z
-            )
-            proprio_recon_z = self.actor_critic.proprio_recon_head(
-                proprio_z
-            )
+            # proprio_contrast_z = self.actor_critic.proprio_contrastive_head(
+            #     proprio_z
+            # )
+            # proprio_recon_z = self.actor_critic.proprio_recon_head(
+            #     proprio_z
+            # )
+
             with self._frozen_module_params(self.priv_dynamics_decoder):
-                dyn_recon_from_proprio = self.priv_dynamics_decoder(proprio_recon_z)
+                dyn_recon_from_proprio = self.priv_dynamics_decoder(proprio_z)
             
             prop_dyn_loss = self._masked_mse_loss(
                 dyn_recon_from_proprio,
@@ -1144,7 +1147,7 @@ class PPO_KITE:
             )
             
             prop_dyn_contrast_loss = self._normalized_contrastive_loss(
-                proprio_contrast_z,
+                proprio_z,
                 dynamics_positive,
                 contrastive_negative_anchor_batch,
                 mask,
@@ -1233,17 +1236,17 @@ class PPO_KITE:
             
             modality_kl = self._kl_loss(mix_mean, mix_logvar, mask)
 
-            versatility_loss, versatility_log = self._versatility_metric(
-                mix_mean,
-                mix_logvar,
-                mask,
-            )
-            modality_loss = (
-                self.modality_explicit_weight * explicit_loss
-                + self.versatility_weight * versatility_loss
-            )
+            # versatility_loss, versatility_log = self._versatility_metric(
+            #     mix_mean,
+            #     mix_logvar,
+            #     mask,
+            # )
+            # modality_loss = (
+            #     self.modality_explicit_weight * explicit_loss
+            #     + self.versatility_weight * versatility_loss
+            # )
 
-            # modality_loss = self.modality_explicit_weight * explicit_loss + self.versatility_lambda_e * modality_kl
+            modality_loss = self.modality_explicit_weight * explicit_loss + self.versatility_lambda_e * modality_kl
 
         non_privileged_loss = (
             depth_sequence_loss
@@ -1292,8 +1295,8 @@ class PPO_KITE:
             "explicit_loss": explicit_loss,
             "torso_velo_explicit_loss": torso_velo_explicit_loss,
             "feet_state_explicit_loss": feet_state_explicit_loss,
-            "versatility_loss": versatility_loss,
-            "versatility_log": versatility_log,
+            # "versatility_loss": versatility_loss,
+            # "versatility_log": versatility_log,
             "modality_kl":modality_kl,
             "body_velo_est": body_velo_est,
         }
@@ -1455,15 +1458,15 @@ class PPO_KITE:
                 # "modality_versatility": self._detach_scalar(aux["versatility_loss"]),
                 # "modality_kl": self._detach_scalar(aux["versatility_log"]["kl"]),
                 "modality_kl": self._detach_scalar(aux["modality_kl"]),
-                "modality_marginal_entropy": self._detach_scalar(
-                    aux["versatility_log"]["marginal_entropy"]
-                ),
-                "modality_conditional_entropy": self._detach_scalar(
-                    aux["versatility_log"]["conditional_entropy"]
-                ),
-                "modality_mutual_info": self._detach_scalar(
-                    aux["versatility_log"]["mutual_info"]
-                ),
+                # "modality_marginal_entropy": self._detach_scalar(
+                #     aux["versatility_log"]["marginal_entropy"]
+                # ),
+                # "modality_conditional_entropy": self._detach_scalar(
+                #     aux["versatility_log"]["conditional_entropy"]
+                # ),
+                # "modality_mutual_info": self._detach_scalar(
+                #     aux["versatility_log"]["mutual_info"]
+                # ),
                 "modality_explicit": self._detach_scalar(aux["explicit_loss"]),
                 "modality_explicit_torso_velo": self._detach_scalar(
                     aux["torso_velo_explicit_loss"]

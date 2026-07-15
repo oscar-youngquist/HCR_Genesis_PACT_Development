@@ -222,22 +222,22 @@ def override_kite_play_configs(env_cfg, args, kite_viz_args):
         #     "platform_size": env_cfg.terrain.platform_size,
         # }
         #
-        # # Random rough terrain.
-        # env_cfg.terrain.terrain_kwargs = {
-        #     "type": "terrain_utils.random_uniform_terrain",
-        #     "min_height": -0.08,
-        #     "max_height": 0.08,
-        #     "step": 0.005,
-        #     "downsampled_scale": 0.2,
-        # }
+        # Random rough terrain.
+        env_cfg.terrain.terrain_kwargs = {
+            "type": "terrain_utils.random_uniform_terrain",
+            "min_height": -0.04,
+            "max_height": 0.04,
+            "step": 0.005,
+            "downsampled_scale": 0.2,
+        }
         #
         # # Stairs down/up.
-        env_cfg.terrain.terrain_kwargs = {
-            "type": "terrain_utils.pyramid_stairs_terrain",
-            "step_width": 0.4,
-            "step_height": -0.10,
-            "platform_size": env_cfg.terrain.platform_size,
-        }
+        # env_cfg.terrain.terrain_kwargs = {
+        #     "type": "terrain_utils.pyramid_stairs_terrain",
+        #     "step_width": 0.4,
+        #     "step_height": -0.10,
+        #     "platform_size": env_cfg.terrain.platform_size,
+        # }
         # env_cfg.terrain.terrain_kwargs = {
         #     "type": "terrain_utils.pyramid_stairs_terrain",
         #     "step_width": 0.4,

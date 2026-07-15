@@ -291,7 +291,11 @@ class MotionRobustDepthEncoder(nn.Module):
             torso_state,
         )
 
-        x = torch.cat([depth_image, stabilized_coords], dim=1)
+        # x = torch.cat([depth_image, stabilized_coords], dim=1)
+
+        depth_grads = self.compute_depth_gradients(depth_image)
+
+        x = torch.cat([depth_image, depth_grads, stabilized_coords], dim=1)
 
         x = self.conv1(x)
         x = self.conv2(x)
