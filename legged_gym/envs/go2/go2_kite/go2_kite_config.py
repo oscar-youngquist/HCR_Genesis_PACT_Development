@@ -774,8 +774,8 @@ class GO2KITECfg( LeggedRobotCfg ):
         
         heading_command = True # if true: compute ang vel command from heading error
         class ranges(LeggedRobotCfg.commands.ranges):
-            lin_vel_x = [0.3, 0.5] # min max [m/s]
-            lin_vel_y = [-0.0, 0.0]   # min max [m/s]
+            lin_vel_x = [0.3, 0.8] # min max [m/s]
+            lin_vel_y = [-0.5, 0.5]   # min max [m/s]
             ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
             heading = [-1.57, 1.57]
 
