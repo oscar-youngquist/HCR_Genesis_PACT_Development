@@ -83,7 +83,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         num_subterrains = num_rows * num_cols
         # Order: slope, rough, stairs down, stairs up, discrete, wave,
         # stepping stones, gap, pit, platforms, platforms and gaps.
-        terrain_proportions = [0.15, 0.15, 0.25, 0.25, 0.10, 0.10, 0.00, 0.00, 0.00, 0.00, 0.00]
+        terrain_proportions = [0.10, 0.10, 0.25, 0.25, 0.15, 0.15, 0.00, 0.00, 0.00, 0.00, 0.00]
 
         # terrain_proportions = [0.09, 0.09, 0.09, 0.09, 0.09, 0.10, 0.09, 0.09, 0.09, 0.09, 0.09]
         # terrain_proportions = [0.10, 0.10, 0.15, 0.15, 0.10, 0.00, 0.15, 0.10, 0.15, 0.00, 0.00]
@@ -717,17 +717,17 @@ class GO2KITECfg( LeggedRobotCfg ):
                                   # Later in training, exact velo-command following may be difficult,
                                   # so, increase these values that are about rewarding/penalizing 
                                   # position-based progress in the commanded direction, not strict tracking performance.
-                                  "position_no_progress":[-0.00, -0.2],
-                                  "position_progress":[0.00, 0.5],
+                                  "position_no_progress":[-0.1, -0.2],
+                                  "position_progress":[0.20, 0.5],
 
                                   # These enforce a balance gait and at the swing-level  
-                                  "swing_participation_balance":[0.0, 0.10],
-                                  "diagonal_pair_balance":[0.0, 0.10],
-                                  "completed_swing_height_balance":[0.0, 0.10],
+                                  "swing_participation_balance":[0.01, 0.10],
+                                  "diagonal_pair_balance":[0.01, 0.10],
+                                  "completed_swing_height_balance":[0.01, 0.10],
                                  }
 
-            curr_steps = 10000
-            warmup_steps = 10000
+            curr_steps = 8000
+            warmup_steps = 4000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -754,7 +754,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         lin_vel_x_step = 0.25
         lin_vel_y_step = 0.05
         ang_vel_yaw_step = 0.25
-        max_lin_vel_y = 0.30
+        max_lin_vel_y = 0.50
         max_ang_vel_yaw = 3.0
         bias_lin_vel_x_with_curriculum = True
         
@@ -763,7 +763,7 @@ class GO2KITECfg( LeggedRobotCfg ):
         zero_command_threshold = 0.05
         zero_command_prob = 0.10
         # Warm up sampling pure zero commands, let the policy learn to walk first
-        zero_command_curriculum = {'start_iter': 0, 'end_iter': 2000, 'start_value': 0.0, 'end_value': 0.1}
+        zero_command_curriculum = {'start_iter': 0, 'end_iter': 1500, 'start_value': 0.0, 'end_value': 0.1}
         limit_ang_vel_at_zero_command_prob = 0.10
         
         randomize_resampling_time = False
@@ -893,9 +893,9 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         log_detailed_encoder_losses = True
 
         # Adaptive entropy coefficient curriculum
-        entropy_coef = 0.01
+        entropy_coef = 0.015
         use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.005, 0.012]
+        adaptive_ent_bounds = [0.008, 0.02]
         adaptive_ent_lin_threshold = 0.80
         adaptive_ent_ang_threshold = 0.40
         adaptive_ent_ter_threshold = 6.0
@@ -953,7 +953,7 @@ class GO2KITECfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_KITE'
         algorithm_class_name = 'PPO_KITE'
         num_steps_per_env = 24 # per iteration
-        max_iterations = 20000 # number of policy updates
+        max_iterations = 16000 # number of policy updates
         grf_dim = 12
         
         # debug_warmpinn_wb
