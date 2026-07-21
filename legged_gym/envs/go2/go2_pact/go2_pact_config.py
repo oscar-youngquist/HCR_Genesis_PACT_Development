@@ -362,14 +362,14 @@ class GO2PACTCfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
         soft_torque_limit = 0.90
-        base_height_target = 0.30
+        base_height_target = 0.38
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.28
-        rear_foot_x_nominal = -0.22
+        rear_foot_x_nominal = -0.24
         rear_foot_x_margin = 0.08
         support_polygon_sigma = 0.01
         
