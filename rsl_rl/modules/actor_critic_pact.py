@@ -372,8 +372,29 @@ class ActorCritic_PACT(nn.Module):
             Configured AdamW optimizer.
         """
         opt_groups_act, opt_groups_enc = self.get_optim_groups(weight_decay=weight_decay, strong_decay=strong_decay)
-        act_opt = torch.optim.AdamW(opt_groups_act, lr=learning_rate)
-        enc_opt = torch.optim.AdamW(opt_groups_enc, lr=2.0e-4)
+
+        # PPO and the auxiliary VAE update both optimize the context encoder.
+        # These are separate optimizer param-group dictionaries that point at
+        # the same underlying nn.Parameter objects.
+        ppo_enc_groups = [
+            {
+                "params": list(group["params"]),
+                "weight_decay": group.get("weight_decay", 0.0),
+                "name": f"ppo_{group['name']}",
+            }
+            for group in opt_groups_enc
+        ]
+        auxiliary_enc_groups = [
+            {
+                "params": list(group["params"]),
+                "weight_decay": group.get("weight_decay", 0.0),
+                "name": f"auxiliary_{group['name']}",
+            }
+            for group in opt_groups_enc
+        ]
+
+        act_opt = torch.optim.AdamW([*opt_groups_act, *ppo_enc_groups], lr=learning_rate, betas=betas)
+        enc_opt = torch.optim.AdamW(auxiliary_enc_groups, lr=2.0e-4, betas=betas)
         return act_opt, enc_opt
 
     def reset(self, dones=None):

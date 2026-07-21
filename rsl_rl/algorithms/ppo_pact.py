@@ -44,11 +44,13 @@ from rsl_rl.storage import RolloutStoragePACT
 
 from .pc_grad import PCGrad
 
-from .encoder_pinn_grad_utils import (
-    compute_encoder_grads_from_loss,
-    add_projected_pinn_grads_to_encoder,
-    zero_module_grads,
-)
+# Old manual PINN-to-encoder gradient projection path. PPO now owns encoder
+# parameter groups directly, so PPO/PINN gradients flow through the optimizer.
+# from .encoder_pinn_grad_utils import (
+#     compute_encoder_grads_from_loss,
+#     add_projected_pinn_grads_to_encoder,
+#     zero_module_grads,
+# )
 
 class PPO_PACT:
     actor_critic: ActorCritic_PACT
@@ -96,7 +98,10 @@ class PPO_PACT:
         self.num_enc_epochs = num_encoder_epochs
         self.vae_beta = vae_kld_weight
 
-        self.pinn_encoder_grad_weight = pinn_encoder_weight
+        # Old manual PINN-to-encoder gradient projection scale. Kept as an
+        # init argument for config compatibility, but no longer used because
+        # PPO gradients now flow into the encoder through act_optimizer.
+        # self.pinn_encoder_grad_weight = pinn_encoder_weight
 
         # Adaptive entropy coefficent algorithm values
         self.use_adaptive_entropy = use_adaptive_entropy
@@ -381,31 +386,29 @@ class PPO_PACT:
 
 
             # ------------------------------------------------------------
-            # Save PINN gradients w.r.t. the encoder before PCGrad.
+            # Old manual PINN gradient extraction for the encoder.
             #
-            # This does not write to .grad. It only returns a detached copy of the
-            # PINN gradient for context_encoder parameters.
-            #
-            # If act_bootmask disconnects the encoder from current_actions, these
-            # gradients will be None / empty, which is handled safely later.
+            # PPO optimizer param groups now include context_encoder
+            # parameters, so the PINN/RL signal backpropagates into the encoder
+            # through the normal PPO optimizer step.
             # ------------------------------------------------------------
-            pinn_encoder_grads = None
-            pinn_encoder_grad_info = None
-            pinn_encoder_has_grad = False
-
-            if weighted_pinn_loss is not None:
-                pinn_encoder_grads, pinn_encoder_grad_info = compute_encoder_grads_from_loss(
-                    weighted_pinn_loss,
-                    self.actor_critic.context_encoder,
-                )
-
-                # Handle either dataclass-style diagnostics or dict-style diagnostics.
-                if hasattr(pinn_encoder_grad_info, "has_any_grad"):
-                    pinn_encoder_has_grad = pinn_encoder_grad_info.has_any_grad
-                elif isinstance(pinn_encoder_grad_info, dict):
-                    pinn_encoder_has_grad = pinn_encoder_grad_info.get("has_any_grad", False)
-                else:
-                    pinn_encoder_has_grad = any(g is not None for g in pinn_encoder_grads)
+            # pinn_encoder_grads = None
+            # pinn_encoder_grad_info = None
+            # pinn_encoder_has_grad = False
+            #
+            # if weighted_pinn_loss is not None:
+            #     pinn_encoder_grads, pinn_encoder_grad_info = compute_encoder_grads_from_loss(
+            #         weighted_pinn_loss,
+            #         self.actor_critic.context_encoder,
+            #     )
+            #
+            #     # Handle either dataclass-style diagnostics or dict-style diagnostics.
+            #     if hasattr(pinn_encoder_grad_info, "has_any_grad"):
+            #         pinn_encoder_has_grad = pinn_encoder_grad_info.has_any_grad
+            #     elif isinstance(pinn_encoder_grad_info, dict):
+            #         pinn_encoder_has_grad = pinn_encoder_grad_info.get("has_any_grad", False)
+            #     else:
+            #         pinn_encoder_has_grad = any(g is not None for g in pinn_encoder_grads)
             
             # PCGrad - back-propigate the loss
             if self.pinn_weight > 0 and self.pinn_weight_final > 0 and pinn_loss is not None:    # just being extra cautious
@@ -415,7 +418,9 @@ class PPO_PACT:
             else:
                 self.act_optimizer.pc_backward(ppo_losses)
             
-            zero_module_grads(self.actor_critic.context_encoder)
+            # Encoder grads are intentionally kept so the PPO optimizer can
+            # update encoder parameters directly.
+            # zero_module_grads(self.actor_critic.context_encoder)
 
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.act_optimizer.step()
@@ -446,25 +451,19 @@ class PPO_PACT:
                 vae_loss.backward()
 
                 # --------------------------------------------------------
-                # Add PCGrad-projected PINN gradient to encoder update.
-                #
-                # Only apply on the first encoder epoch. If num_enc_epochs > 1,
-                # the additional epochs remain VAE-only and do not repeatedly reuse
-                # the same stale PINN gradient.
-                #
-                # If bootmask disconnected the encoder, pinn_encoder_has_grad will be
-                # False and this block is skipped safely.
+                # Old manual PINN-gradient injection into the auxiliary encoder
+                # update. The PPO optimizer now applies that signal directly.
                 # --------------------------------------------------------
-                if (
-                    enc_epoch == 0
-                    and pinn_encoder_grads is not None
-                    and pinn_encoder_has_grad
-                ):
-                    add_projected_pinn_grads_to_encoder(
-                        self.actor_critic.context_encoder,
-                        pinn_encoder_grads,
-                        scale=self.pinn_encoder_grad_weight,
-                    )
+                # if (
+                #     enc_epoch == 0
+                #     and pinn_encoder_grads is not None
+                #     and pinn_encoder_has_grad
+                # ):
+                #     add_projected_pinn_grads_to_encoder(
+                #         self.actor_critic.context_encoder,
+                #         pinn_encoder_grads,
+                #         scale=self.pinn_encoder_grad_weight,
+                #     )
 
 
                 nn.utils.clip_grad_norm_(self.actor_critic.context_encoder.parameters(), self.max_grad_norm)
