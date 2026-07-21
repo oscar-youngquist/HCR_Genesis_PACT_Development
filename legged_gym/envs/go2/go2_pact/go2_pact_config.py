@@ -394,7 +394,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
             alive_bonus           = 0.001
 
             dof_vel_stand_still = 0.0
-            stand_still_contact = -0.5
+            stand_still_contact = 0.5
             dof_pos_stand_still = -0.1
 
             # command tracking
@@ -456,7 +456,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
             hip_pos = -0.2
             
             foot_slip        = -0.01          # penalty for feet slipping
-            stumble          = -1.0
+            stumble          = -4.0
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
 
         class reward_curriculum():
