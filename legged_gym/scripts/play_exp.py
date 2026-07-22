@@ -33,8 +33,8 @@ def override_configs(env_cfg, args):
         
         # random uniform terrain
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.random_uniform_terrain", 
-                                        #   "min_height" : -0.10, "max_height": 0.10, 
-                                        #   "step":0.005, "downsampled_scale" : 0.2}
+        #                                   "min_height" : -0.15, "max_height": 0.15, 
+        #                                   "step":0.005, "downsampled_scale" : 0.2}
         # # slope
         # env_cfg.terrain.terrain_kwargs = {"type": "terrain_utils.pyramid_sloped_terrain",
         #                                   "slope": -0.4, "platform_size": 3.0}
@@ -84,8 +84,9 @@ def override_configs(env_cfg, args):
     env_cfg.termination.pitch_threshold = 1.57
     env_cfg.termination.height_min = 0.0
 
-    env_cfg.asset.terminate_after_contacts_on = ["base","trunk","hip"]
+    # env_cfg.asset.terminate_after_contacts_on = ["base","trunk","hip"]
     # env_cfg.asset.terminate_after_contacts_on = ["base","trunk"]
+    env_cfg.asset.terminate_after_contacts_on = []
 
     env_cfg.control.randomize_pact_weights = False
 
@@ -110,9 +111,9 @@ def override_configs(env_cfg, args):
     env_cfg.domain_rand.randomize_pd_gain = False
     env_cfg.domain_rand.randomize_motor_strength = False
     
-    env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_com_displacement = False
-    env_cfg.domain_rand.randomize_base_mass = False
+    env_cfg.domain_rand.push_robots = True
+    env_cfg.domain_rand.randomize_com_displacement = True
+    env_cfg.domain_rand.randomize_base_mass = True
     
     env_cfg.domain_rand.min_added_mass_max = 10.0
     env_cfg.domain_rand.max_added_mass_max = 10.0
@@ -379,7 +380,7 @@ def play(args):
     # export policy as a jit module (used to run it from C++ or python)
     path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', 'pact_corl', train_cfg.runner.experiment_name, 
                             train_cfg.runner.load_run, 'exported')
-    export_policy(ppo_runner, path, args, env_cfg, train_cfg)
+    # export_policy(ppo_runner, path, args, env_cfg, train_cfg)
 
     interaction_loop(train_cfg, env, policy, args)
 

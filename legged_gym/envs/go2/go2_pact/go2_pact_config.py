@@ -572,7 +572,7 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         # load_run = "May10_20-41-46_pact_100hz_spec_smartcurr"    # most recent model with strong boot and rear-overreah, 3000 pos-boot start
         # load_run = "May11_21-55-58_pact_100hz_spec_smartcurr"    # best performing aligned model
         # load_run = "May14_18-35-56_pact_100hz_spec_smartcurr_stricterer"
-        load_run = "Jun16_17-05-56_pact_100hz_spec_smartcurr_stricterer"
+        load_run = "Jul21_19-42-17_pact_100hz_spec_smartcurr_stricterer"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pact_stairs_12-16kg.csv"
