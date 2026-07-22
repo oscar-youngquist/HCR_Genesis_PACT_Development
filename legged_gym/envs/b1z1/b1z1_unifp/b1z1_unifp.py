@@ -2150,7 +2150,14 @@ class B1Z1UniFP(BaseTask):
         # --------------------------------------------------
         J_b = _sanitize_tensor(self.leg_jacobians)                                                # (N,4,3,3)
         tau_leg = _sanitize_tensor(self.simulator._dof_tau[:,0:12].view(-1, 4, 3))                        # (N,4,3)
-        tau_max = torch.clamp(_sanitize_tensor(self.simulator._torque_limits[:,0:12].view(-1, 4, 3)).abs(), min=1e-6)                  # (N,4,3) or broadcastable
+        # Genesis stores static torque limits as a 1-D DOF vector, while some
+        # simulator/domain-rand paths may provide per-env limits as (N, dof).
+        torque_limits = self.simulator._torque_limits
+        if torque_limits.ndim == 1:
+            tau_max = torque_limits[:12].view(1, 4, 3).expand(N, 4, 3)
+        else:
+            tau_max = torque_limits[:, :12].view(-1, 4, 3)
+        tau_max = torch.clamp(_sanitize_tensor(tau_max).abs(), min=1e-6)                  # (N,4,3) or broadcastable
 
         foot_pos_w = _sanitize_tensor(self.simulator.feet_pos)          # (N,4,3)
         base_pos_w = _sanitize_tensor(self.simulator.base_pos)          # (N,3)
@@ -2397,7 +2404,11 @@ class B1Z1UniFP(BaseTask):
         #
         # self._torque_limits is usually ordered like self._cfg.asset.dof_names,
         # so prefer _arm_dof_cfg_ids if available.
-        tau_max_arm = self.simulator._torque_limits[:,self.simulator._arm_dof_cfg_ids]
+        torque_limits = self.simulator._torque_limits
+        if torque_limits.ndim == 1:
+            tau_max_arm = torque_limits[self.simulator._arm_dof_cfg_ids]
+        else:
+            tau_max_arm = torque_limits[:, self.simulator._arm_dof_cfg_ids]
 
         tau_max_arm = _sanitize_tensor(tau_max_arm).abs().to(device=device, dtype=dtype)
 
