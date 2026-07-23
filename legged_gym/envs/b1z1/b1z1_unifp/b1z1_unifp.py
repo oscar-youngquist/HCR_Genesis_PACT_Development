@@ -408,6 +408,7 @@ class B1Z1UniFP(BaseTask):
         self.last_actions[env_ids] = 0.0
         self.llast_actions[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
+        self.gait_indices[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
         self.fail_buf[env_ids] = 0
@@ -420,7 +421,8 @@ class B1Z1UniFP(BaseTask):
         self.estimated_ee_force_local[env_ids] = 0.0
         self.estimated_base_force_local[env_ids] = 0.0
         self.prev_ee_error[env_ids] = 0.0
-        self.last_contacts[env_ids] = 0.0
+        # Contact history is a boolean latch used by feet-air-time filtering.
+        self.last_contacts[env_ids] = False
         
         self._reset_force_events(env_ids)
         self._randomize_force_gains(env_ids)
@@ -540,6 +542,7 @@ class B1Z1UniFP(BaseTask):
         ee_goal_offset_sphere = cart2sphere(ee_goal_offset_local)
 
         phase = self._get_phase()
+        self.compute_ref_state()
         sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
         cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
         
@@ -556,8 +559,8 @@ class B1Z1UniFP(BaseTask):
                 dof_pos_err,
                 dof_vel,
                 self.actions,
-                # sin_pos,
-                # cos_pos,
+                sin_pos,
+                cos_pos,
                 self.commands * self.commands_scale,
             ),
             dim=-1,
@@ -582,7 +585,7 @@ class B1Z1UniFP(BaseTask):
         mass_params.zero_()
         mass_params[:, 0:1] = self.simulator._added_base_mass
         mass_params[:, 1:4] = self.simulator._base_com_bias
-        # stance_mask = self._get_gait_phase()
+        stance_mask = self._get_gait_phase()
         contact_mask = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
 
         # Privileged critic observation mirrors the original UniFP ordering:
@@ -596,15 +599,15 @@ class B1Z1UniFP(BaseTask):
                 mass_params,
                 self.simulator._friction_values - self.friction_value_offset,
                 self.simulator._motor_strength[:, :17] - 1.0,
-                # stance_mask,
+                stance_mask,
                 contact_mask,
                 self.simulator.projected_gravity,
                 self.simulator.base_ang_vel * self.obs_scales.ang_vel,
                 dof_pos_err,
                 dof_vel,
                 self.actions,
-                # sin_pos,
-                # cos_pos,
+                sin_pos,
+                cos_pos,
                 self.commands * self.commands_scale,
                 ee_goal_offset_sphere * self.ee_sphere_scale,
             ),
@@ -792,8 +795,9 @@ class B1Z1UniFP(BaseTask):
         ).nonzero(as_tuple=False).flatten()
         self._resample_commands(env_ids)
         self._randomize_force_gains(env_ids)
-        self.update_curr_ee_goal()
         self._update_heading_command()
+        self._step_contact_targets()
+        self.update_curr_ee_goal()
         if self.cfg.domain_rand.push_robots:
             self.simulator.push_robots()
 
@@ -997,21 +1001,75 @@ class B1Z1UniFP(BaseTask):
         ee_quat = self._normalize_quat(self.simulator.ee_quat)
         return self._normalize_quat(quat_mul(self._quat_conjugate(base_yaw_quat), ee_quat))
 
+    def get_walking_cmd_mask(self, env_ids=None, return_all=False):
+        """Return envs whose base command is large enough to count as walking."""
+        if env_ids is None:
+            env_ids = self.all_env_ids
+        walking_mask0 = torch.abs(self.commands[env_ids, 0]) > self.cfg.commands.lin_vel_x_clip
+        walking_mask1 = torch.abs(self.commands[env_ids, 1]) > self.cfg.commands.lin_vel_y_clip
+        walking_mask2 = torch.abs(self.commands[env_ids, 2]) > self.cfg.commands.ang_vel_yaw_clip
+        walking_mask = walking_mask0 | walking_mask1 | walking_mask2
+        if return_all:
+            return walking_mask0, walking_mask1, walking_mask2, walking_mask
+        return walking_mask
+
+    def _step_contact_targets(self):
+        """Advance the UniFP gait clock and pin it to phase zero while standing."""
+        cycle_time = self.cfg.rewards.cycle_time
+        standing_mask = ~self.get_walking_cmd_mask()
+        self.gait_indices = torch.remainder(self.gait_indices + self.dt / cycle_time, 1.0)
+        self.gait_indices[standing_mask] = 0.0
+
     def _get_phase(self):
-        # This port currently uses an episode-time trot phase. Original UniFP
-        # used a command-gated gait index; this keeps the observation shape and
-        # reward hooks alive in the Genesis baseline.
-        return (self.episode_length_buf.float() * self.dt / self.cfg.rewards.cycle_time) % 1.0
+        """Return the persistent UniFP gait phase in [0, 1)."""
+        return self.gait_indices
 
     def _get_gait_phase(self):
-        """Return diagonal-stance mask used by critic contacts and gait rewards."""
+        """Return the original UniFP diagonal-trot stance mask.
+
+        The mask is float-valued with 1 for stance and 0 for swing. The
+        `target_joint_pos_thd` offset creates a double-support window around
+        phase transitions, matching the Isaac Gym UniFP implementation.
+        """
         phase = self._get_phase()
-        stance = torch.zeros(self.num_envs, 4, device=self.device)
-        stance[:, 0] = phase < 0.5
-        stance[:, 3] = phase < 0.5
-        stance[:, 1] = phase >= 0.5
-        stance[:, 2] = phase >= 0.5
-        return stance
+        sin_pos = torch.sin(2 * torch.pi * phase)
+        sin_pos_l = sin_pos.clone() + self.cfg.rewards.target_joint_pos_thd
+        sin_pos_r = sin_pos.clone() - self.cfg.rewards.target_joint_pos_thd
+
+        stance_mask = torch.zeros((self.num_envs, 4), device=self.device)
+        # Feet are ordered [FR, FL, RR, RL] in this Genesis port. Original UniFP
+        # pairs FL/RR and FR/RL as diagonal stance groups.
+        stance_mask[:, 1] = sin_pos_l >= 0
+        stance_mask[:, 2] = sin_pos_l >= 0
+        stance_mask[:, 0] = sin_pos_r < 0
+        stance_mask[:, 3] = sin_pos_r < 0
+        return stance_mask
+
+    def compute_ref_state(self):
+        """Compute the original UniFP gait-phase reference leg pose."""
+        phase = self._get_phase()
+        sin_pos = torch.sin(2 * torch.pi * phase)
+        sin_pos_l = sin_pos.clone() + self.cfg.rewards.target_joint_pos_thd
+        sin_pos_r = sin_pos.clone() - self.cfg.rewards.target_joint_pos_thd
+
+        self.ref_dof_pos = self.simulator.default_dof_pos[:, :12].repeat(self.num_envs, 1).clone()
+        scale_1 = self.cfg.rewards.target_joint_pos_scale / (1 - self.cfg.rewards.target_joint_pos_thd)
+        scale_2 = scale_1 * 2
+        idx = self.leg_dof_indices
+
+        # Original UniFP zeros the stance half of each diagonal before applying
+        # the sinusoidal swing offsets to thigh/calf reference joints.
+        sin_pos_l[sin_pos_l > 0] = 0.0
+        self.ref_dof_pos[:, idx["FL_thigh_joint"]] -= sin_pos_l * scale_1
+        self.ref_dof_pos[:, idx["FL_calf_joint"]] += sin_pos_l * scale_2
+        self.ref_dof_pos[:, idx["RR_thigh_joint"]] -= sin_pos_l * scale_1
+        self.ref_dof_pos[:, idx["RR_calf_joint"]] += sin_pos_l * scale_2
+
+        sin_pos_r[sin_pos_r < 0] = 0.0
+        self.ref_dof_pos[:, idx["FR_thigh_joint"]] += sin_pos_r * scale_1
+        self.ref_dof_pos[:, idx["FR_calf_joint"]] -= sin_pos_r * scale_2
+        self.ref_dof_pos[:, idx["RL_thigh_joint"]] += sin_pos_r * scale_1
+        self.ref_dof_pos[:, idx["RL_calf_joint"]] -= sin_pos_r * scale_2
 
     def _randomize_force_gains(self, env_ids):
         """Randomize virtual impedance gains used to turn force into offsets."""
@@ -1440,7 +1498,18 @@ class B1Z1UniFP(BaseTask):
         self.last_actions = torch.zeros_like(self.actions)
         self.llast_actions = torch.zeros_like(self.actions)
         self.feet_air_time = torch.zeros(self.num_envs, len(self.simulator.feet_indices), device=self.device)
-        self.last_contacts = torch.zeros_like(self.feet_air_time)
+        # Boolean previous-step foot-contact latch. Keeping this bool avoids
+        # ambiguous reward dtype changes when contact rewards reuse the buffer.
+        self.last_contacts = torch.zeros(
+            self.num_envs,
+            len(self.simulator.feet_indices),
+            dtype=torch.bool,
+            device=self.device,
+        )
+        # Original UniFP uses a persistent phase variable instead of deriving
+        # phase directly from episode time. The phase only advances while a
+        # walking command is active and is reset to zero for standing commands.
+        self.gait_indices = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
         self.obs_history_slots = [
             torch.zeros(self.num_envs, self.cfg.env.num_observations, device=self.device)
@@ -1467,6 +1536,19 @@ class B1Z1UniFP(BaseTask):
         )
         self.explicit_labels_buf = torch.zeros(self.num_envs, self.cfg.env.num_explicit_recon_obs, device=self.device)
 
+        self.leg_dof_indices = {
+            name: self.cfg.asset.dof_names.index(name)
+            for name in (
+                "FL_thigh_joint",
+                "FL_calf_joint",
+                "FR_thigh_joint",
+                "FR_calf_joint",
+                "RL_thigh_joint",
+                "RL_calf_joint",
+                "RR_thigh_joint",
+                "RR_calf_joint",
+            )
+        }
         self.ref_dof_pos = self.simulator.default_dof_pos[:, :12].repeat(self.num_envs, 1)
         self.ee_goal_center_offset = torch.tensor(
             [
@@ -1815,12 +1897,14 @@ class B1Z1UniFP(BaseTask):
     def _reward_feet_air_time(self):
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0
         contact_filt = torch.logical_or(contact, self.last_contacts)
-        self.last_contacts = contact
+        # Preserve the buffer object and dtype so other rewards cannot inherit
+        # accidental bool/float conversions through aliasing.
+        self.last_contacts.copy_(contact)
         first_contact = (self.feet_air_time > 0.) * contact_filt
         self.feet_air_time += self.dt
         rew_airTime = torch.clamp(torch.sum((self.feet_air_time - 0.5) * first_contact, dim=1), min=0.0)  # reward only on first contact with the ground
         rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.1  # no reward for zero command
-        self.feet_air_time *= ~contact_filt
+        self.feet_air_time *= (~contact_filt).float()
         return rew_airTime
 
     def _reward_feet_height(self):
@@ -1834,7 +1918,12 @@ class B1Z1UniFP(BaseTask):
         return torch.sum(torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1) * contact.float(), dim=1)
 
     def _reward_feet_pos_xy(self):
-        return torch.sum(torch.square(self.simulator.feet_pos[:, :, :2] - self.simulator.base_pos[:, None, :2]), dim=(1, 2))
+        # Original UniFP penalizes each foot drifting far from its matching
+        # thigh in world XY, rather than measuring foot spread from the base.
+        feet_pos_xy = self.simulator.feet_pos[:, :, :2]
+        thigh_pos_xy = self.simulator.thigh_pos[:, :, :2]
+        diff = torch.norm(feet_pos_xy - thigh_pos_xy, dim=2).view(self.num_envs, -1)
+        return torch.mean(diff, dim=1)
 
     def _reward_front_foot_overreach(self):
         # Assumed order is FR/L, FL/R....
@@ -2099,7 +2188,7 @@ class B1Z1UniFP(BaseTask):
 
         # Soft over-swing penalty: only penalize when foot goes too far above desired height
         # Margin gives some freedom to overshoot a little during learning
-        excess_margin = 0.04  # [m], tune: 0.03 - 0.06
+        excess_margin = 0.10  # [m], tune: 0.03 - 0.06
         excess = torch.relu(feet_z - (z_des + excess_margin))           # (N,4)
         # excess = F.softplus(feet_z - (z_des + excess_margin))           # (N,4)
         excess_err = torch.square(excess)
@@ -2115,8 +2204,46 @@ class B1Z1UniFP(BaseTask):
         return torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma)
 
     def _reward_feet_contact_number(self):
-        contact = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0).float()
-        return torch.exp(-torch.square(torch.sum(contact, dim=1) - 2.0))
+        """
+        Reward foot contacts that match the UniFP gait-phase stance mask.
+
+        This replaces the temporary "exactly two contacts" reward with the
+        original UniFP phase-conditioned version.
+        """
+        contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
+        stance_mask = self._get_gait_phase().bool()
+        # Reward values must be floating point even though contacts and stance
+        # masks are boolean phase/contact predicates.
+        matched = contact == stance_mask
+        reward = torch.where(
+            matched,
+            torch.ones_like(self.feet_air_time),
+            torch.full_like(self.feet_air_time, -0.3),
+        )
+        return torch.mean(reward, dim=1)
+
+    def _reward_walking_ref_dof(self):
+        """Reward tracking the gait-phase reference leg pose while walking."""
+        self.compute_ref_state()
+        joint_pos = self.simulator.dof_pos[:, :12].clone()
+        pos_target = self.ref_dof_pos.clone()
+        dof_error = torch.sum(torch.abs(joint_pos - pos_target), dim=1)
+        rew = torch.exp(-dof_error * 0.2)
+        rew[~self.get_walking_cmd_mask()] = 0.0
+        return rew
+
+    def _reward_walking_ref_swing_dof(self):
+        """Reward only swing-leg joints tracking the gait-phase reference pose."""
+        self.compute_ref_state()
+        joint_pos = self.simulator.dof_pos[:, :12].clone()
+        pos_target = self.ref_dof_pos.clone()
+        stance_mask = self._get_gait_phase()
+        stance_mask = torch.stack([stance_mask, stance_mask, stance_mask], 2).reshape(self.num_envs, 12)
+        dof_error = torch.abs(joint_pos - pos_target)
+        dof_error[stance_mask == 1] = 0.0
+        rew = torch.exp(-torch.sum(dof_error, dim=1) * 0.2)
+        rew[~self.get_walking_cmd_mask()] = 0.0
+        return rew
 
     def _reward_stand_still(self):
         moving = torch.norm(self.commands[:, :3], dim=1) > 0.1

@@ -6,8 +6,12 @@ class B1Z1UniFPCfg:
 
     class env:
         num_envs = 5120
-        num_observations = 71
-        num_privileged_obs = 143
+        # Original UniFP single-frame actor obs is 73-D. The last two entries
+        # are sin/cos of the command-gated gait phase.
+        num_observations = 73
+        # Original UniFP single-frame critic obs is 149-D. It adds the 4-D
+        # stance mask plus the same sin/cos gait phase used by the actor.
+        num_privileged_obs = 149
         num_priv_stack = 3
         num_explicit_recon_obs = 12
         num_pred_obs = 12
@@ -129,6 +133,7 @@ class B1Z1UniFPCfg:
             "z1_jointGripper",
         ]
         foot_name = ["FR_foot", "FL_foot", "RR_foot", "RL_foot"]
+        thigh_name = ["FR_thigh", "FL_thigh", "RR_thigh", "RL_thigh"]
         gripper_name = "ee_gripper_link"
         penalize_contacts_on = ["trunk", "thigh", "calf", "wrist", "shoulder", "elbow", "forearm"]
         terminate_after_contacts_on = []
@@ -227,9 +232,9 @@ class B1Z1UniFPCfg:
     class control:
         control_type = "P"
         stiffness = {
-            "hip": 175.0,
-            "thigh": 175.0,
-            "calf": 300.0,
+            "hip": 250.0,
+            "thigh": 250.0,
+            "calf": 400.0,
             "z1_waist": 64.0,
             "z1_shoulder": 128.0,
             "z1_elbow": 64.0,
@@ -265,7 +270,7 @@ class B1Z1UniFPCfg:
         tradeoff_threshold = 1.0
 
     class commands:
-        curriculum = True
+        curriculum = False
         max_curriculum = 1.0
         num_commands = 15
         
@@ -327,8 +332,8 @@ class B1Z1UniFPCfg:
         compensate_base_external_force = True
 
         class ranges:
-            lin_vel_x = [-0.5, 0.5]
-            lin_vel_y = [-1.0, 1.0]
+            lin_vel_x = [-0.8, 0.8]
+            lin_vel_y = [-0.6, 0.6]
             ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
 
@@ -349,12 +354,12 @@ class B1Z1UniFPCfg:
         clip_actions = 100.0
 
     class domain_rand:
-        use_domainrand_curriculum = True
+        use_domainrand_curriculum = False
         randomize_friction = True  
         friction_range = [0.3, 2.0]
 
         randomize_base_mass = True
-        added_mass_min = -5.0  
+        added_mass_min = -2.0  
         min_added_mass_max = 5.0
         max_added_mass_max = 15.0
   
@@ -395,7 +400,7 @@ class B1Z1UniFPCfg:
         wrench_timeout_max = 15.0
      
         randomize_ctrl_delay = True
-        ctrl_delay_step_range = [0, 3]
+        ctrl_delay_step_range = [0, 2]
      
         randomize_pd_gain = True
         kp_range = [0.8, 1.2]
@@ -404,10 +409,10 @@ class B1Z1UniFPCfg:
         randomize_motor_strength = True
         motor_strength_range = [0.85, 1.15]
         
-        randomize_joint_armature = True
+        randomize_joint_armature = False
         joint_armature_range = [0.0, 0.03]
         
-        randomize_joint_friction = True
+        randomize_joint_friction = False
         joint_friction_range_start = [0.0, 0.02]
         joint_friction_range_end = [0.0, 0.04]
         
@@ -415,7 +420,7 @@ class B1Z1UniFPCfg:
         joint_stiffness_range_start = [0.0, 0.0]
         joint_stiffness_range_end = [0.0, 0.0]
         
-        randomize_joint_damping = True
+        randomize_joint_damping = False
         joint_damping_range_start = [0.30, 0.40]
         joint_damping_range_end = [0.00, 0.50]
         
@@ -465,10 +470,13 @@ class B1Z1UniFPCfg:
 
     class rewards:
         only_positive_rewards = False
-        use_reward_curriculum = True
+        use_reward_curriculum = False
+        
         tracking_sigma = 0.25
         tracking_ee_sigma = 0.50
+        
         tracking_ee_orientation_sigma = 0.05
+        
         sigma_force = 1.0 / 50.0
         
         soft_dof_pos_limit = 0.8
@@ -480,12 +488,12 @@ class B1Z1UniFPCfg:
         max_contact_force = 400.0
         contact_force_threshold = 1.0
         
-        foot_clearance_target = 0.09 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.10 # desired foot clearance above ground [m]
         foot_height_offset = 0.02
         foot_clearance_tracking_sigma = 0.01
         
-        cycle_time = 0.64
-        
+        # Gait-phase guidance settings
+        cycle_time = 1.00
         target_joint_pos_scale = 0.17
         target_joint_pos_thd = 0.5
 
@@ -511,45 +519,52 @@ class B1Z1UniFPCfg:
             dof_close_to_default = -0.0001
 
             # Add in close to default reward
-            stand_still         = -0.5
-            stand_still_contact = 0.5
+            stand_still         = -0.5            #
+            stand_still_contact = 0.5             #
 
-            alive = 0.5
+            alive = 1.5
 
             # tracking
-            tracking_lin_vel_force_world = 2.0
-            tracking_ang_vel = 0.5
+            tracking_lin_vel_force_world = 2.0    #
+            tracking_ang_vel = 1.0                #
             
             tracking_ee_force_world = 2.0
             tracking_ee_orientation_default = 0.0
 
             # Style rewards encouraging using the arm
-            arm_progress_before_torso = 0.3
-            early_torso_tilt = -0.2
-            feet_contact_number = 0.01
+            # arm_progress_before_torso = 0.3
+            # early_torso_tilt = -0.2
+            # feet_contact_number = 0.01
+            arm_progress_before_torso = 0.0
+            early_torso_tilt = 0.0
+            
+            
+            # gait-phase based leg posture shaping
+            ref_dof_leg = 1.0
+            walking_ref_dof = 0.0
+            walking_ref_swing_dof = 0.0
+            feet_contact_number = 2.00             #
 
             # Base
-            base_height = -5.0
+            base_height = -2.0
             lin_vel_z   = -2.0
-            ang_vel_xy  = -0.20
-            roll        = -0.25
+            ang_vel_xy  = -0.02
+            
+            roll        = 0.0
 
             # Legs
             dof_acc           = -2.5e-7
-            action_rate       = -0.01
-            action_smoothness = -0.01
+            action_rate       = -0.02
+            action_smoothness = 0.00
             joint_power       = -2.e-5
             joint_power_dist  = -1.e-5
 
             # Arm
             dof_acc_arm = -4.5e-7
-            action_rate_arm = -0.02
-            action_smoothness_arm = -0.02
-            joint_power_arm = -4.e-5
+            action_rate_arm = -0.045
+            action_smoothness_arm = 0.00
+            joint_power_arm = -2.e-5
             joint_power_dist_arm = -2.e-5
-
-            # Leg posture shaping
-            ref_dof_leg = 0.0
 
             # I developed these
             front_foot_overreach = -10.0
@@ -557,19 +572,20 @@ class B1Z1UniFPCfg:
 
             # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
             support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
-            vhip_angle = -0.1                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
-            vhip_angular_acc = -0.001         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
+            vhip_angle = 0.0                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
+            vhip_angular_acc = 0.0         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
 
             # Gait shaping
-            feet_drag = -0.01
-            feet_contact_forces = -0.0001
+            feet_drag = -0.0008
+            feet_pos_xy = -0.5
+            feet_contact_forces = -0.001
             feet_air_time = 1.00
             foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height            
 
             # Leg and Arm Posture Conditioning
             arm_ee_force_manipulability = 0.2
             torso_force_wrench_ellipsoid = 0.2
-            hip_pos = -0.30
+            hip_pos = -0.50
 
         class manip_rewards():
             # Leg Posture Conditioning
@@ -692,8 +708,8 @@ class B1Z1UniFPCfgPPO:
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.005
-        learning_rate = 2.0e-4
+        entropy_coef = 0.01
+        learning_rate = 1.0e-3
         schedule = "adaptive"  # adaptive
         gamma = 0.99
         lam = 0.95

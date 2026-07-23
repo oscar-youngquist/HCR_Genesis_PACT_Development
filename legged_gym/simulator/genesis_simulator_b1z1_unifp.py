@@ -67,9 +67,11 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         self._dof_pos[:] = self._robot.get_dofs_position(self._dof_indices)
         self._dof_vel[:] = self._robot.get_dofs_velocity(self._dof_indices)
         self._link_contact_forces[:] = self._robot.get_links_net_contact_force()
-        self._feet_pos[:] = self._robot.get_links_pos()[:, self._feet_indices, :]
+        link_pos = self._robot.get_links_pos()
+        self._feet_pos[:] = link_pos[:, self._feet_indices, :]
+        self._thigh_pos[:] = link_pos[:, self._thigh_indices, :]
         self._feet_vel[:] = self._robot.get_links_vel()[:, self._feet_indices, :]
-        self._ee_pos[:] = self._robot.get_links_pos()[:, self._gripper_index, :]
+        self._ee_pos[:] = link_pos[:, self._gripper_index, :]
         self._ee_vel[:] = self._robot.get_links_vel()[:, self._gripper_index, :]
         ee_quat_gs = self._robot.get_links_quat()[:, self._gripper_index, :]
         # Genesis reports link quaternions in wxyz order; the UniFP task uses
@@ -951,6 +953,17 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         
         print(f"feet names: {self._feet_names}, feet link indices: {self._feet_indices}")
         assert len(self._feet_indices) > 0
+
+        self._thigh_names = getattr(
+            self._cfg.asset,
+            "thigh_name",
+            ["FR_thigh", "FL_thigh", "RR_thigh", "RL_thigh"],
+        )
+        if isinstance(self._thigh_names, str):
+            self._thigh_names = [self._thigh_names]
+        self._thigh_indices = find_link_indices(self._thigh_names)
+        print(f"thigh names: {self._thigh_names}, thigh link indices: {self._thigh_indices}")
+        assert len(self._thigh_indices) == len(self._feet_indices)
         
         self._base_link_index = self._robot.base_link_idx - self._robot.link_start
         print(f"base link index: {self._base_link_index}")
@@ -1160,6 +1173,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         self._feet_pos = torch.zeros(
             (self._num_envs, len(self._feet_indices), 3), device=self._device, dtype=torch.float
         )
+        self._thigh_pos = torch.zeros_like(self._feet_pos)
         self._feet_vel = torch.zeros(
             (self._num_envs, len(self._feet_indices), 3), device=self._device, dtype=torch.float
         )
@@ -1406,7 +1420,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         # gripper DOFs stay at their default PD targets.
         pos_actions_scaled = torch.zeros_like(self._dof_pos)
         pos_actions_scaled[:, :self._num_learned_actions] = (
-            actions[:, :self._num_learned_actions] * self._cfg.control.action_scale
+            self._motor_strength[:,:self._num_learned_actions] * actions[:, :self._num_learned_actions] * self._cfg.control.action_scale
         )
         
         # get two dimensional gains
@@ -1426,7 +1440,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
 
         # torques = (self.feedforward_tau_weight) * self.feedforward_torques + (self.feedback_tau_weight)*self.feedback_torques
 
-        torques = self._motor_strength * self.feedback_torques
+        torques = self.feedback_torques
 
         self.unclipped_torques = torques.clone()
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
@@ -1697,6 +1711,16 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             list[int]: Indices of the feet links in the contact sensors.
         """
         return self._feet_indices
+
+    @property
+    def thigh_indices(self):
+        """Return thigh link indices in the same leg order as feet_indices."""
+        return self._thigh_indices
+
+    @property
+    def thigh_pos(self):
+        """Return thigh link positions in world frame."""
+        return self._thigh_pos
 
     @property
     def ee_quat(self):
