@@ -1421,6 +1421,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         pos_actions_scaled = torch.zeros_like(self._dof_pos)
         pos_actions_scaled[:, :self._num_learned_actions] = (
             self._motor_strength[:,:self._num_learned_actions] * actions[:, :self._num_learned_actions] * self._cfg.control.action_scale
+            # self._motor_strength[:,:12] * actions[:, :12] * self._cfg.control.action_scale
         )
         
         # get two dimensional gains

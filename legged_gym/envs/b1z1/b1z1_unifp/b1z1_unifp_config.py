@@ -8,10 +8,10 @@ class B1Z1UniFPCfg:
         num_envs = 5120
         # Original UniFP single-frame actor obs is 73-D. The last two entries
         # are sin/cos of the command-gated gait phase.
-        num_observations = 73
+        num_observations = 71
         # Original UniFP single-frame critic obs is 149-D. It adds the 4-D
         # stance mask plus the same sin/cos gait phase used by the actor.
-        num_privileged_obs = 149
+        num_privileged_obs = 147 + 66 + 187
         num_priv_stack = 3
         num_explicit_recon_obs = 12
         num_pred_obs = 12
@@ -135,7 +135,7 @@ class B1Z1UniFPCfg:
         foot_name = ["FR_foot", "FL_foot", "RR_foot", "RL_foot"]
         thigh_name = ["FR_thigh", "FL_thigh", "RR_thigh", "RL_thigh"]
         gripper_name = "ee_gripper_link"
-        penalize_contacts_on = ["trunk", "thigh", "calf", "wrist", "shoulder", "elbow", "forearm"]
+        penalize_contacts_on = ["trunk", "thigh", "hip", "calf"]
         terminate_after_contacts_on = []
         links_to_keep = ["FR_foot", "FL_foot", "RR_foot", "RL_foot", "ee_gripper_link"]
         self_collisions = False
@@ -175,20 +175,20 @@ class B1Z1UniFPCfg:
         restitution = 0.0
         border_size = 5.0
         border_height = 1.0
-        curriculum = False
+        curriculum = True
         obtain_terrain_info_around_feet = True
         measure_heights = True
         measured_points_x = [-0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
         measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
         selected = False
         terrain_kwargs = None
-        max_init_terrain_level = 5
+        max_init_terrain_level = 2
         terrain_length = 8.0
         terrain_width = 8.0
         platform_size = 4.0
         num_rows = 10
         num_cols = 20
-        terrain_proportions = [0.00, 1.00, 0.00, 0.00, 0.00, 0.00]
+        terrain_proportions = [0.30, 0.40, 0.00, 0.00, 0.30, 0.00, 0.0, 0.0, 0.0, 0.0]
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.4",
             "step_height": "0.04 + 0.16 * difficulty",
@@ -232,9 +232,9 @@ class B1Z1UniFPCfg:
     class control:
         control_type = "P"
         stiffness = {
-            "hip": 250.0,
-            "thigh": 250.0,
-            "calf": 400.0,
+            "hip": 300.0,
+            "thigh": 300.0,
+            "calf": 500.0,
             "z1_waist": 64.0,
             "z1_shoulder": 128.0,
             "z1_elbow": 64.0,
@@ -244,7 +244,7 @@ class B1Z1UniFPCfg:
             "z1_jointGripper": 64.0,
         }
         damping = {
-            "hip": 7.5,
+            "hip": 757,
             "thigh": 7.5,
             "calf": 12.5,
             "z1_waist": 1.5,
@@ -256,8 +256,8 @@ class B1Z1UniFPCfg:
             "z1_jointGripper": 1.5,
         }
 
-        # stiffness = {"joint":100.0, "z1": 64.0,}
-        # damping = {"joint": 5.0,"z1": 1.5,}
+        # stiffness = {"joint":100.0, "z1": 30.0,}
+        # damping = {"joint": 5.0,"z1": 0.70,}
 
         action_scale = 0.25
         dt = 0.02
@@ -270,29 +270,29 @@ class B1Z1UniFPCfg:
         tradeoff_threshold = 1.0
 
     class commands:
-        curriculum = False
+        curriculum = True
         max_curriculum = 1.0
         num_commands = 15
         
-        resampling_time = 5.0
+        resampling_time = 10.0
         
         heading_command = False
         
-        curriculum_threshold = 0.6
+        curriculum_threshold = 1.8
         
-        ang_vel_yaw_clip = 0.2
+        ang_vel_yaw_clip = 0.1
         ang_vel_pitch_clip = 0.5
         
-        lin_vel_x_clip = 0.1
-        lin_vel_y_clip = 0.1
+        lin_vel_x_clip = 0.05
+        lin_vel_y_clip = 0.05
 
-        zero_vel_cmd_prob = 0.3
+        zero_vel_cmd_prob = 0.1
         zero_vel_cmd_prob_after_force = 0.8
         
         force_start_step = 8000
 
-        push_gripper_stators = True
-        apply_ee_external_forces = True
+        push_gripper_stators = False
+        apply_ee_external_forces = False
         push_gripper_interval_s_cmd = [3.5, 9.0]
         push_gripper_duration_s_cmd = [1.0, 3.0]
         gripper_forced_prob_cmd = 0.8
@@ -332,7 +332,7 @@ class B1Z1UniFPCfg:
         compensate_base_external_force = True
 
         class ranges:
-            lin_vel_x = [-0.8, 0.8]
+            lin_vel_x = [-0.5, 0.5]
             lin_vel_y = [-0.6, 0.6]
             ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
@@ -351,7 +351,7 @@ class B1Z1UniFPCfg:
             ee_force = 0.01
             base_force = 0.01
         clip_observations = 100.0
-        clip_actions = 100.0
+        clip_actions = 50.0
 
     class domain_rand:
         use_domainrand_curriculum = False
@@ -461,8 +461,8 @@ class B1Z1UniFPCfg:
         pitch_threshold = 1.0
         height_min = 0.10
         height_max = 2.00
-        contact_force_threshold = 10.0
-        contact_patience_steps = 25
+        contact_force_threshold = 1.0
+        contact_patience_steps = 5
 
     class constraints:
         class limits:
@@ -470,7 +470,7 @@ class B1Z1UniFPCfg:
 
     class rewards:
         only_positive_rewards = False
-        use_reward_curriculum = False
+        use_reward_curriculum = True
         
         tracking_sigma = 0.25
         tracking_ee_sigma = 0.50
@@ -488,7 +488,7 @@ class B1Z1UniFPCfg:
         max_contact_force = 400.0
         contact_force_threshold = 1.0
         
-        foot_clearance_target = 0.10 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.20 # desired foot clearance above ground [m]
         foot_height_offset = 0.02
         foot_clearance_tracking_sigma = 0.01
         
@@ -497,7 +497,7 @@ class B1Z1UniFPCfg:
         target_joint_pos_scale = 0.17
         target_joint_pos_thd = 0.5
 
-        ee_tracking_sigma = 25.0
+        ee_tracking_sigma = 25.0 
         upright_gate_sigma = 10.0
 
         arm_before_torso_ee_thresh = 0.08
@@ -516,13 +516,13 @@ class B1Z1UniFPCfg:
             collision = -5.0
             dof_pos_limits = -10.0
             torque_limits = -0.001
-            dof_close_to_default = -0.0001
+            dof_close_to_default = 0.0
 
             # Add in close to default reward
             stand_still         = -0.5            #
             stand_still_contact = 0.5             #
 
-            alive = 1.5
+            alive = 0.01
 
             # tracking
             tracking_lin_vel_force_world = 2.0    #
@@ -540,31 +540,36 @@ class B1Z1UniFPCfg:
             
             
             # gait-phase based leg posture shaping
-            ref_dof_leg = 1.0
+            ref_dof_leg = 0.0
             walking_ref_dof = 0.0
             walking_ref_swing_dof = 0.0
-            feet_contact_number = 2.00             #
+            feet_contact_number = 0.50             #
+            hip_pos = -0.50
 
             # Base
             base_height = -2.0
-            lin_vel_z   = -2.0
+            lin_vel_z   = -1.0
             ang_vel_xy  = -0.02
-            
-            roll        = 0.0
+            roll        = -0.2
 
             # Legs
             dof_acc           = -2.5e-7
             action_rate       = -0.02
-            action_smoothness = 0.00
+            action_smoothness = -0.01
             joint_power       = -2.e-5
-            joint_power_dist  = -1.e-5
+            joint_power_dist  = -1.e-8
 
             # Arm
             dof_acc_arm = -4.5e-7
             action_rate_arm = -0.045
-            action_smoothness_arm = 0.00
+            action_smoothness_arm = -0.02
             joint_power_arm = -2.e-5
-            joint_power_dist_arm = -2.e-5
+            joint_power_dist_arm = -2.e-8
+            # dof_acc_arm = 0.0
+            # action_rate_arm = 0.0
+            # action_smoothness_arm = 0.00
+            # joint_power_arm = 0.0
+            # joint_power_dist_arm = 0.0
 
             # I developed these
             front_foot_overreach = -10.0
@@ -583,9 +588,8 @@ class B1Z1UniFPCfg:
             foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height            
 
             # Leg and Arm Posture Conditioning
-            arm_ee_force_manipulability = 0.2
+            arm_ee_force_manipulability = 0.0
             torso_force_wrench_ellipsoid = 0.2
-            hip_pos = -0.50
 
         class manip_rewards():
             # Leg Posture Conditioning
@@ -702,14 +706,14 @@ class B1Z1UniFPCfgPPO:
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
         activation = "elu"
-        init_noise_std = 1.0
+        init_noise_std = 0.65
 
     class algorithm:
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
         entropy_coef = 0.01
-        learning_rate = 1.0e-3
+        learning_rate = 3.0e-4
         schedule = "adaptive"  # adaptive
         gamma = 0.99
         lam = 0.95

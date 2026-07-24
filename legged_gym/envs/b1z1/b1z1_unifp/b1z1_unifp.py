@@ -559,8 +559,8 @@ class B1Z1UniFP(BaseTask):
                 dof_pos_err,
                 dof_vel,
                 self.actions,
-                sin_pos,
-                cos_pos,
+                # sin_pos,
+                # cos_pos,
                 self.commands * self.commands_scale,
             ),
             dim=-1,
@@ -606,14 +606,34 @@ class B1Z1UniFP(BaseTask):
                 dof_pos_err,
                 dof_vel,
                 self.actions,
-                sin_pos,
-                cos_pos,
+                # sin_pos,
+                # cos_pos,
                 self.commands * self.commands_scale,
                 ee_goal_offset_sphere * self.ee_sphere_scale,
+                self.simulator._rand_push_vels,                                  # 3
+                self.simulator._rand_wrench_vels,                                # 3
+                (self.simulator._kp_scale - self.kp_scale_offset),               # num_actions
+                (self.simulator._kd_scale - self.kd_scale_offset),               # num_actions
+                self.simulator._motor_strength,                                  # num_actions
+                self.simulator._joint_armature,                                  # 1
+                self.simulator._joint_friction,                                  # 1
+                self.simulator._joint_damping,                                   # 1
             ),
             dim=-1,
             out=critic_obs,
         )
+
+        # add height measurements to asymmetric critic if approperiate
+        if self.cfg.terrain.measure_heights:
+            heights = torch.clip(self.simulator.base_pos[:, 2].unsqueeze(1) - 0.5 \
+                                 - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements # 81
+
+            if self.add_noise:
+                heights *= self.height_noise_vec
+
+            critic_obs = torch.cat((critic_obs, heights), dim=-1) # 207
+
+
         if critic_obs.shape[1] != self.cfg.env.num_privileged_obs:
             raise RuntimeError(
                 f"B1Z1 UniFP privileged observation size mismatch: "
@@ -1408,8 +1428,8 @@ class B1Z1UniFP(BaseTask):
         mean_tracking = torch.mean(self.episode_sums["tracking_lin_vel_force_world"][env_ids]) / self.max_episode_length
         if mean_tracking > self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel_force_world"]:
             for key in ["lin_vel_x", "lin_vel_y", "ang_vel_yaw"]:
-                self.command_ranges[key][0] = np.clip(self.command_ranges[key][0] - 0.1, -self.cfg.commands.max_curriculum, 0.0)
-                self.command_ranges[key][1] = np.clip(self.command_ranges[key][1] + 0.1, 0.0, self.cfg.commands.max_curriculum)
+                self.command_ranges[key][0] = np.clip(self.command_ranges[key][0] - 0.5, -self.cfg.commands.max_curriculum, 0.0)
+                self.command_ranges[key][1] = np.clip(self.command_ranges[key][1] + 0.5, 0.0, self.cfg.commands.max_curriculum)
 
     def step_reward_curriculum(self, num_iters):
         """Cosine-ramp selected reward scales during training."""
@@ -1451,6 +1471,12 @@ class B1Z1UniFP(BaseTask):
         noise_vec[2:5] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
         noise_vec[5:22] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
         noise_vec[22:39] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
+
+        self.height_noise_vec = torch.zeros(self.simulator._num_height_points, device=self.device)
+
+        if self.cfg.terrain.measure_heights:
+            self.height_noise_vec[:] = noise_scales.height_measurements * noise_level * self.obs_scales.height_measurements
+
         return noise_vec
 
     def _init_buffers(self):
