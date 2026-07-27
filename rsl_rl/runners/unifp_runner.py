@@ -8,7 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from rsl_rl.algorithms import PPO_UniFP
 from rsl_rl.env import VecEnv
-from rsl_rl.modules import ActorCriticUniFP
+from rsl_rl.modules import ActorCriticB1UniFP, ActorCriticUniFP
 from rsl_rl.utils import pretty_print_module
 
 

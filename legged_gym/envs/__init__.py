@@ -120,6 +120,7 @@ from legged_gym.envs.go2.go2_kite_baseline.go2_kite_baseline import Go2KITEBasel
 
 from legged_gym.envs.b1z1.b1z1_unifp.b1z1_unifp_config import B1Z1UniFPCfg, B1Z1UniFPCfgPPO
 from legged_gym.envs.b1z1.b1z1_unifp.b1z1_unifp import B1Z1UniFP
+from legged_gym.envs.b1.b1_unifp import B1UniFP, B1UniFPCfg, B1UniFPCfgPPO
 
 from legged_gym.utils.task_registry import task_registry
 
@@ -156,3 +157,4 @@ task_registry.register("go2_pact", Go2PACT, GO2PACTCfg(), GO2PACTCfgPPO())
 task_registry.register("go2_kite", Go2KITE, GO2KITECfg(), GO2KITECfgPPO())
 task_registry.register("go2_kite_baseline", Go2KITEBaseline, GO2KITEBaselineCfg(), GO2KITEBaselineCfgPPO())
 task_registry.register("b1z1_unifp", B1Z1UniFP, B1Z1UniFPCfg(), B1Z1UniFPCfgPPO())
+task_registry.register("b1_unifp", B1UniFP, B1UniFPCfg(), B1UniFPCfgPPO())

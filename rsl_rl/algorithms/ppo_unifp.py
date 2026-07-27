@@ -211,8 +211,8 @@ class PPO_UniFP:
                             start, end = label_start_end[label]
                             selection_indices = torch.linspace(start, end - 1, steps=end - start, dtype=torch.long)
 
-                            idx_adaptation_loss = F.mse_loss(adaptation_pred[:, selection_indices] * weight,
-                                                            adaptation_target[:, selection_indices] * weight)
+                            idx_adaptation_loss = weight*F.mse_loss(adaptation_pred[:, selection_indices],
+                                                            adaptation_target[:, selection_indices])
                             mean_adaptation_losses[label] += idx_adaptation_loss.item()
 
                             adaptation_loss += idx_adaptation_loss
@@ -226,9 +226,9 @@ class PPO_UniFP:
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
-        mean_adaptation_module_loss /= (num_updates * Adaptation_Args.num_adaptation_module_substeps * Adaptation_Args.adaptation_batch_size)
+        mean_adaptation_module_loss /= (num_updates * Adaptation_Args.num_adaptation_module_substeps)
         for label in self.adaptation_labels:
-            mean_adaptation_losses[label] /= (num_updates * Adaptation_Args.num_adaptation_module_substeps * Adaptation_Args.adaptation_batch_size)
+            mean_adaptation_losses[label] /= (num_updates * Adaptation_Args.num_adaptation_module_substeps)
         self.storage.clear()
 
         return mean_value_loss, mean_surrogate_loss, mean_adaptation_module_loss, mean_adaptation_losses

@@ -1839,6 +1839,9 @@ class B1Z1UniFP(BaseTask):
     def _reward_roll(self):
         return torch.square(self.simulator.base_euler[:, 0])
 
+    def _reward_pitch(self):
+        return torch.square(self.simulator.base_euler[:, 1])
+
     def _reward_base_height(self):
         base_height = torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) - self.simulator.measured_heights, dim=1)
         return torch.square(base_height - self.cfg.rewards.base_height_target)

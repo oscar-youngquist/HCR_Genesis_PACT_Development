@@ -26,6 +26,8 @@ class ActorCriticUniFP(nn.Module):
                         critic_hidden_dims=[256, 256, 256],
                         activation='elu',
                         init_noise_std=1.0,
+                        min_noise_std=1.0e-3,
+                        max_noise_std=float("inf"),
                         **kwargs):
         if kwargs:
             print("ActorCritic.__init__ got unexpected arguments, which will be ignored: " + str([key for key in kwargs.keys()]))
@@ -108,8 +110,20 @@ class ActorCriticUniFP(nn.Module):
         print(f"Actor MLP: {self.actor_body}")
         print(f"Critic MLP: {self.critic_body}")
 
-        # Action noise
-        self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+        # Action noise. Each setting accepts either one scalar shared by every
+        # action or a flat sequence with one value per action dimension.
+        initial_std = self._std_config_tensor(init_noise_std, num_actions, "init_noise_std")
+        minimum_std = self._std_config_tensor(min_noise_std, num_actions, "min_noise_std")
+        maximum_std = self._std_config_tensor(max_noise_std, num_actions, "max_noise_std")
+        if torch.any(minimum_std <= 0.0):
+            raise ValueError("min_noise_std values must all be greater than zero")
+        if torch.any(maximum_std < minimum_std):
+            raise ValueError("max_noise_std must be greater than or equal to min_noise_std in every action dimension")
+        self.std = nn.Parameter(initial_std)
+        # Non-persistent buffers follow model device transfers without adding
+        # keys that would break loading checkpoints created before std bounds.
+        self.register_buffer("_std_clip_lwr", minimum_std, persistent=False)
+        self.register_buffer("_std_clip_upr", maximum_std, persistent=False)
         self.distribution = None
         # disable args validation for speedup
         Normal.set_default_validate_args = False
@@ -118,15 +132,32 @@ class ActorCriticUniFP(nn.Module):
     # not used at the moment
     def init_weights(sequential, scales):
         [torch.nn.init.orthogonal_(module.weight, gain=scales[idx]) for idx, module in
-         enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))]
+        enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))]
 
+    @staticmethod
+    def _std_config_tensor(value, num_actions, name):
+        """Expand a scalar or validate a per-action standard-deviation list."""
+        tensor = torch.as_tensor(value, dtype=torch.float)
+        if tensor.ndim == 0:
+            return tensor.repeat(num_actions)
+        if tensor.ndim != 1 or tensor.numel() != num_actions:
+            raise ValueError(
+                f"{name} must be a scalar or a flat list of {num_actions} values; "
+                f"got shape {tuple(tensor.shape)}"
+            )
+        return tensor.clone()
 
     def reset(self, dones=None):
         pass
 
     def forward(self):
         raise NotImplementedError
-    
+
+    @torch.no_grad
+    @torch.jit.ignore
+    def _clip_std(self):
+        self.std.copy_(torch.maximum(torch.minimum(self.std, self._std_clip_upr), self._std_clip_lwr))
+
     @property
     def action_mean(self):
         return self.distribution.mean
@@ -142,6 +173,7 @@ class ActorCriticUniFP(nn.Module):
     def update_distribution(self, observations):
         latent = self.adaptation_encoder_module(observations)
         mean = self.actor_body(torch.cat((observations[:, -self.num_obs_now:], latent), dim=-1))
+        self._clip_std()
         self.distribution = Normal(mean, mean*0. + self.std)
 
     def act(self, observations, **kwargs):

@@ -67,7 +67,7 @@ class BaseTask():
             self.simulator = GenesisSimulator_KITE_Depth(
                 cfg, sim_params, sim_device, self.headless
             )
-        elif SIMULATOR == "genesis_b1z1_unifp":
+        elif SIMULATOR in ("genesis_b1z1_unifp", "genesis_b1_unifp"):
             self.simulator = GenesisSimulatorB1Z1UniFP(
                 cfg, sim_params, sim_device, self.headless
             )

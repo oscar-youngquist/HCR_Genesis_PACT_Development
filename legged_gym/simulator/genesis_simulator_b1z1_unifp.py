@@ -71,13 +71,14 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         self._feet_pos[:] = link_pos[:, self._feet_indices, :]
         self._thigh_pos[:] = link_pos[:, self._thigh_indices, :]
         self._feet_vel[:] = self._robot.get_links_vel()[:, self._feet_indices, :]
-        self._ee_pos[:] = link_pos[:, self._gripper_index, :]
-        self._ee_vel[:] = self._robot.get_links_vel()[:, self._gripper_index, :]
-        ee_quat_gs = self._robot.get_links_quat()[:, self._gripper_index, :]
-        # Genesis reports link quaternions in wxyz order; the UniFP task uses
-        # xyzw everywhere else, matching the base quaternion buffer above.
-        self._ee_quat[:, -1] = ee_quat_gs[:, 0]
-        self._ee_quat[:, :3] = ee_quat_gs[:, 1:4]
+        if self._has_gripper:
+            self._ee_pos[:] = link_pos[:, self._gripper_index, :]
+            self._ee_vel[:] = self._robot.get_links_vel()[:, self._gripper_index, :]
+            ee_quat_gs = self._robot.get_links_quat()[:, self._gripper_index, :]
+            # Genesis reports link quaternions in wxyz order; the UniFP task uses
+            # xyzw everywhere else, matching the base quaternion buffer above.
+            self._ee_quat[:, -1] = ee_quat_gs[:, 0]
+            self._ee_quat[:, :3] = ee_quat_gs[:, 1:4]
         self._dof_tau[:] = self._robot.get_dofs_force(self._dof_indices)
 
         self._base_world_lin_vel[:] = self._robot.get_vel()
@@ -118,7 +119,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             self._randomize_pd_gain(env_ids)
         if self._cfg.domain_rand.randomize_motor_strength:
             self._randomize_motor_strength(env_ids)
-        if self._cfg.domain_rand.randomize_gripper_mass:
+        if self._has_gripper and self._cfg.domain_rand.randomize_gripper_mass:
             self._randomize_gripper_mass(env_ids)
         
         self._last_dof_vel[env_ids] = 0.
@@ -550,9 +551,10 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             p_mc, self.max_mass_bounds[0], self.mass_bounds_diff
         )
 
-        self.grip_mass_max_value = _interp(
-            p_mc, self.grip_max_mass_bounds[0], self.grip_mass_bounds_diff
-        )
+        if self._has_gripper:
+            self.grip_mass_max_value = _interp(
+                p_mc, self.grip_max_mass_bounds[0], self.grip_mass_bounds_diff
+            )
 
         self.com_delta_x_value = _interp(
             p_mc, self.com_delta_x_bounds[0], self.com_delta_x_diff
@@ -662,12 +664,14 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         self.mass_bounds_diff = self.max_mass_bounds[1] - self.max_mass_bounds[0]
         self.mass_max_value = self.max_mass_bounds[0]
 
-        self.grip_max_mass_bounds = [self._cfg.domain_rand.min_gripper_added_mass_max,
-                                self._cfg.domain_rand.max_gripper_added_mass_max]
-
-        self.grip_mass_min = self._cfg.domain_rand.gripper_mass_min
-        self.grip_mass_bounds_diff = self.grip_max_mass_bounds[1] - self.grip_max_mass_bounds[0]
-        self.grip_mass_max_value = self.grip_max_mass_bounds[0]
+        if hasattr(self._cfg.asset, "gripper_name"):
+            self.grip_max_mass_bounds = [
+                self._cfg.domain_rand.min_gripper_added_mass_max,
+                self._cfg.domain_rand.max_gripper_added_mass_max,
+            ]
+            self.grip_mass_min = self._cfg.domain_rand.gripper_mass_min
+            self.grip_mass_bounds_diff = self.grip_max_mass_bounds[1] - self.grip_max_mass_bounds[0]
+            self.grip_mass_max_value = self.grip_max_mass_bounds[0]
 
 
         self.com_delta_x_bounds = [self._cfg.domain_rand.com_displacement_x_min, self._cfg.domain_rand.com_displacement_x_max]
@@ -968,16 +972,18 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         self._base_link_index = self._robot.base_link_idx - self._robot.link_start
         print(f"base link index: {self._base_link_index}")
 
-        gripper_indices = find_link_indices([self._cfg.asset.gripper_name])
-        if len(gripper_indices) == 0:
-            raise ValueError(f"Could not find gripper link containing {self._cfg.asset.gripper_name}")
-        self._gripper_index = gripper_indices[0]
-        print(f"gripper link index: {self._gripper_index}")
+        self._has_gripper = hasattr(self._cfg.asset, "gripper_name")
+        if self._has_gripper:
+            gripper_indices = find_link_indices([self._cfg.asset.gripper_name])
+            if len(gripper_indices) == 0:
+                raise ValueError(f"Could not find gripper link containing {self._cfg.asset.gripper_name}")
+            self._gripper_index = gripper_indices[0]
+            print(f"gripper link index: {self._gripper_index}")
+        external_links = ([self._robot.link_start + self._gripper_index] if self._has_gripper else []) + [
+            self._robot.link_start + self._base_link_index
+        ]
         self._external_force_link_indices = torch.tensor(
-            [
-                self._robot.link_start + self._gripper_index,
-                self._robot.link_start + self._base_link_index,
-            ],
+            external_links,
             dtype=torch.int32,
             device=self._device,
         )
@@ -1004,35 +1010,14 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             if name not in self._cfg.asset.dof_names
         ]
 
-        if len(missing_arm_dofs) > 0:
-            raise ValueError(
-                f"Missing expected Z1 arm DOFs: {missing_arm_dofs}. "
-                f"Available DOFs: {self._cfg.asset.dof_names}"
+        if not missing_arm_dofs:
+            self._arm_dof_indices = {name: self._robot.get_joint(name).dof_start for name in z1_expected_order}
+            self._arm_dof_ids = torch.tensor(
+                [self._arm_dof_indices[name] for name in z1_expected_order], device=self._device, dtype=torch.long
             )
-
-        # Absolute simulator DOF ids.
-        self._arm_dof_indices = {
-            name: self._robot.get_joint(name).dof_start
-            for name in z1_expected_order
-        }
-
-        self._arm_dof_ids = torch.tensor(
-            [self._arm_dof_indices[name] for name in z1_expected_order],
-            device=self._device,
-            dtype=torch.long,
-        )
-
-        # Config-order ids, useful for indexing self._torque_limits when
-        # self._torque_limits was created from self._dof_indices.
-        self._arm_dof_cfg_ids = torch.tensor(
-            [self._cfg.asset.dof_names.index(name) for name in z1_expected_order],
-            device=self._device,
-            dtype=torch.long,
-        )
-
-        print(f"arm dof indices: {self._arm_dof_indices}")
-        print(f"arm absolute dof ids: {self._arm_dof_ids}")
-        print(f"arm cfg-order dof ids: {self._arm_dof_cfg_ids}")
+            self._arm_dof_cfg_ids = torch.tensor(
+                [self._cfg.asset.dof_names.index(name) for name in z1_expected_order], device=self._device, dtype=torch.long
+            )
 
         # dof position limits
         self._dof_pos_limits = torch.stack(
@@ -1047,7 +1032,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         self._torque_limits = self._robot.get_dofs_force_range(self._dof_indices)[
             1]
         
-        print("B1Z1 Torque Limits - ", self._torque_limits)
+        print(f"{self._cfg.asset.name.upper()} Torque Limits - ", self._torque_limits)
 
         self.torque_limits_lower = self._torque_limits.clone()
         self.torque_limits_diff = torch.zeros_like(self._torque_limits)
@@ -1077,7 +1062,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         if self._cfg.domain_rand.randomize_base_mass:
             self._randomize_base_mass(all_env_ids)
         # randomize gripper mass
-        if self._cfg.domain_rand.randomize_gripper_mass:
+        if self._has_gripper and self._cfg.domain_rand.randomize_gripper_mass:
             self._randomize_gripper_mass(all_env_ids)
         # randomize COM displacement
         if self._cfg.domain_rand.randomize_com_displacement:
@@ -1178,18 +1163,19 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             (self._num_envs, len(self._feet_indices), 3), device=self._device, dtype=torch.float
         )
         self._last_feet_vel = torch.zeros_like(self._feet_vel)
-        self._ee_pos = torch.zeros(
-            (self._num_envs, 3), device=self._device, dtype=torch.float
-        )
-        self._ee_vel = torch.zeros_like(self._ee_pos)
-        self._ee_quat = torch.zeros(
-            (self._num_envs, 4), device=self._device, dtype=torch.float
-        )
-        self._ee_quat[:, -1] = 1.0
-        self._ee_force_world = torch.zeros_like(self._ee_pos)
+        if self._has_gripper:
+            self._ee_pos = torch.zeros(
+                (self._num_envs, 3), device=self._device, dtype=torch.float
+            )
+            self._ee_vel = torch.zeros_like(self._ee_pos)
+            self._ee_quat = torch.zeros(
+                (self._num_envs, 4), device=self._device, dtype=torch.float
+            )
+            self._ee_quat[:, -1] = 1.0
+            self._ee_force_world = torch.zeros_like(self._ee_pos)
         self._base_force_world = torch.zeros_like(self._base_pos)
         self._external_force_world = torch.zeros(
-            (self._num_envs, 2, 3), device=self._device, dtype=torch.float
+            (self._num_envs, len(self._external_force_link_indices), 3), device=self._device, dtype=torch.float
         )
 
         self._grfs_buf = torch.zeros((self._num_envs, self._grf_dim), device=self._device, dtype=torch.float)
@@ -1466,10 +1452,14 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         """
         if not hasattr(self, "_external_force_link_indices"):
             return
-        if not torch.any(self._ee_force_world) and not torch.any(self._base_force_world):
+        has_ee_force = self._has_gripper and torch.any(self._ee_force_world)
+        if not has_ee_force and not torch.any(self._base_force_world):
             return
-        self._external_force_world[:, 0, :] = self._ee_force_world
-        self._external_force_world[:, 1, :] = self._base_force_world
+        if self._has_gripper:
+            self._external_force_world[:, 0, :] = self._ee_force_world
+            self._external_force_world[:, 1, :] = self._base_force_world
+        else:
+            self._external_force_world[:, 0, :] = self._base_force_world
         self._robot._solver.apply_links_external_force(
             force=self._external_force_world,
             links_idx=self._external_force_link_indices,
@@ -1487,7 +1477,8 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         self._added_base_mass = torch.ones(
             self._num_envs, 1, dtype=torch.float, device=self._device, requires_grad=False)
         
-        self._added_gripper_mass = torch.zeros_like(self._added_base_mass)
+        if self._has_gripper:
+            self._added_gripper_mass = torch.zeros_like(self._added_base_mass)
         
         self._rand_push_vels = torch.zeros(
             self._num_envs, 3, dtype=torch.float, device=self._device, requires_grad=False)

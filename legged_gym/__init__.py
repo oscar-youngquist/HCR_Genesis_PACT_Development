@@ -27,6 +27,8 @@ if sys.version_info[1] >= 10: # >=3.10 for genesis and isaacsim
         SIMULATOR = "genesis_kite_depth"
     elif simulator_type == "genesis_b1z1_unifp":
         SIMULATOR = "genesis_b1z1_unifp"
+    elif simulator_type == "genesis_b1_unifp":
+        SIMULATOR = "genesis_b1_unifp"
     elif simulator_type == "isaaclab":
         SIMULATOR = "isaaclab"
     else:
