@@ -877,11 +877,17 @@ class B1Z1UniFP(BaseTask):
             return
         forward = quat_apply(self.simulator.base_quat, self.forward_vec)
         heading = torch.atan2(forward[:, 1], forward[:, 0])
-        self.commands[:, 2] = torch.clip(
-            0.5 * wrap_to_pi(self.heading_commands - heading),
-            self.cfg.commands.ranges.ang_vel_yaw[0],
-            self.cfg.commands.ranges.ang_vel_yaw[1],
-        )
+        normalized_heading_error = wrap_to_pi(self.heading_commands - heading) / torch.pi
+        yaw_rate_min, yaw_rate_max = self.command_ranges["ang_vel_yaw"]
+
+        # Map [-pi, 0, pi] heading error to [min yaw rate, 0, max yaw rate].
+        # The piecewise mapping preserves a zero command for zero error while
+        # supporting asymmetric limits and curriculum-adjusted command ranges.
+        self.commands[:, 2] = torch.where(
+            normalized_heading_error >= 0.0,
+            normalized_heading_error * yaw_rate_max,
+            -normalized_heading_error * yaw_rate_min,
+        ).clamp(min=yaw_rate_min, max=yaw_rate_max)
 
     def _resample_ee_goal(self, env_ids, is_init=False):
         """Sample a new EE spherical target and timing profile.
@@ -1939,7 +1945,7 @@ class B1Z1UniFP(BaseTask):
         self.last_contacts.copy_(contact)
         first_contact = (self.feet_air_time > 0.) * contact_filt
         self.feet_air_time += self.dt
-        rew_airTime = torch.clamp(torch.sum((self.feet_air_time - 0.5) * first_contact, dim=1), min=0.0)  # reward only on first contact with the ground
+        rew_airTime = torch.clamp(torch.sum((self.feet_air_time - 0.18) * first_contact, dim=1), min=0.0)  # reward only on first contact with the ground
         rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.1  # no reward for zero command
         self.feet_air_time *= (~contact_filt).float()
         return rew_airTime
@@ -2221,7 +2227,10 @@ class B1Z1UniFP(BaseTask):
         """
 
         feet_z = self.simulator.feet_pos[:, :, 2]                       # (N,4)
-        foot_vel_xy_norm = torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1)  # (N,4)
+        # foot_vel_xy_norm = torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1)  # (N,4)
+
+        contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
+        swing = ~contact
 
         # Flatten 3x3 terrain patch if needed, then take local max height near each foot
         h_patch = self.simulator._height_around_feet
@@ -2251,7 +2260,7 @@ class B1Z1UniFP(BaseTask):
         excess_weight = 0.25  # tune: 0.1 - 0.5
 
         total_err = torch.sum(
-            foot_vel_xy_norm * (track_err + excess_weight * excess_err),
+            swing * (track_err + excess_weight * excess_err),
             dim=-1
         )                                                               # (N,)
 
@@ -2716,7 +2725,6 @@ class B1Z1UniFP(BaseTask):
         self.prev_ee_error[:] = ee_error
 
         return ee_progress * upright_gate
-
 
     def _reward_early_torso_tilt(self):
         """Penalize torso tilt before the EE has reached the target."""

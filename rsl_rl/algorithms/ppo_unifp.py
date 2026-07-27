@@ -171,6 +171,69 @@ class PPO_UniFP:
         self.transition.clear()
         self.actor_critic.reset(dones)
 
+    def spectral_normalization(
+        self,
+        model: nn.Module,
+        sigma_max: float = 1.0,
+        n_power_iters: int = 1,
+    ):
+        """
+        Spectral-norm clip all Linear layers except selected output layers.
+
+        Args:
+            model: network to normalize in-place
+            sigma_max: maximum allowed spectral norm
+            n_power_iters: number of power iterations for sigma estimate
+        """
+
+        whitelist = (nn.Linear,)
+
+        # lazily create persistent power-iteration vectors
+        if not hasattr(self, "_spec_u"):
+            self._spec_u = {}
+
+        for module_name, module in model.named_modules():
+            if not isinstance(module, whitelist):
+                continue
+
+            # skip known output layers
+            if module_name.endswith("out") or module_name.endswith("mean") or module_name.endswith("var") or "critic" in module_name:
+                continue
+
+            for param_name, param in module.named_parameters(recurse=False):
+                if param_name != "weight" or param.ndim != 2:
+                    continue
+
+                full_name = f"{module_name}.{param_name}" if module_name else param_name
+                W = param.data  # [out_dim, in_dim]
+
+                # initialize persistent u vector once per parameter
+                if full_name not in self._spec_u or self._spec_u[full_name].shape[0] != W.shape[0]:
+                    u = torch.randn(W.shape[0], device=W.device, dtype=W.dtype)
+                    u = u / (u.norm() + 1e-12)
+                    self._spec_u[full_name] = u
+
+                u = self._spec_u[full_name]
+
+                with torch.no_grad():
+                    # power iteration
+                    for _ in range(n_power_iters):
+                        v = W.t().mv(u)
+                        v = v / (v.norm() + 1e-12)
+
+                        u = W.mv(v)
+                        u = u / (u.norm() + 1e-12)
+
+                    # sigma ~= u^T W v
+                    sigma = torch.dot(u, W.mv(v))
+
+                    # save updated u for next call
+                    self._spec_u[full_name] = u
+
+                    # clip only if above threshold
+                    if sigma > sigma_max:
+                        param.data.mul_(sigma_max / (sigma + 1e-12))
+
     def compute_returns(self, last_critic_obs):
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
@@ -278,6 +341,10 @@ class PPO_UniFP:
                         self.adaptation_module_optimizer.step()
 
                         mean_adaptation_module_loss += adaptation_loss.item()
+
+        # Keeps the interaction of incoming data with layer wieghts below the threashold that 
+        #     saturates the tanh activation function.
+        self.spectral_normalization(self.actor_critic, sigma_max=6.0)
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates

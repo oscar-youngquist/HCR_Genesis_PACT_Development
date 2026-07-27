@@ -209,8 +209,8 @@ class B1UniFPCfg:
         # }
 
 
-        stiffness = {"joint":100.0}
-        damping = {"joint": 2.5}
+        stiffness = {"joint":200.0}
+        damping = {"joint":5.0}
 
         action_scale = 0.25
         dt = 0.02
@@ -573,8 +573,8 @@ class B1UniFPCfgPPO:
 
         # Each action-noise setting may be a scalar or a flat 12-value list in
         # asset.dof_names/action order: FR, FL, RR, RL x hip, thigh, calf.
-        init_noise_std = [0.8, 1.0, 1.0] * 4
-        min_noise_std = [0.15, 0.25, 0.25] * 4
+        init_noise_std = [0.40, 0.50, 0.50] * 4
+        min_noise_std = [0.10, 0.15, 0.15] * 4
         max_noise_std = 1.1
 
     class algorithm:
