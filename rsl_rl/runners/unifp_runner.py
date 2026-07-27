@@ -26,6 +26,7 @@ class OnPolicyRunnerUniFP:
         self.policy_cfg = train_cfg["policy"]
         self.device = device
         self.env = env
+        self.use_adaptive_entropy = self.alg_cfg.get("use_adaptive_entropy", False)
 
         num_single_obs = self.env.num_obs
         num_actor_obs = self.env.num_obs * self.env.num_obs_hist
@@ -107,9 +108,9 @@ class OnPolicyRunnerUniFP:
 
                     self.alg.process_env_step(rewards, dones, infos)
 
+                    if "episode" in infos:
+                        ep_infos.append(infos["episode"])
                     if self.log_dir is not None:
-                        if "episode" in infos:
-                            ep_infos.append(infos["episode"])
                         cur_reward_sum += rewards
                         cur_episode_length += 1
                         new_ids = (dones > 0).nonzero(as_tuple=False)
@@ -124,6 +125,20 @@ class OnPolicyRunnerUniFP:
 
             mean_value_loss, mean_surrogate_loss, mean_adaptation_module_loss, mean_adaptation_losses = self.alg.update()
             learn_time = time.time() - start
+
+            if ep_infos and self.use_adaptive_entropy:
+                performance_metrics = {
+                    "lin_vel_tracking": self._episode_metric_max(
+                        ep_infos, "rew_tracking_lin_vel_force_world"
+                    ),
+                    "ang_vel_tracking": self._episode_metric_max(
+                        ep_infos, "rew_tracking_ang_vel"
+                    ),
+                    "terrain_level": self._episode_metric_max(
+                        ep_infos, "terrain_level_mean"
+                    ),
+                }
+                self.alg.update_adaptive_entropy_coef(performance_metrics)
 
             if getattr(self.env, "use_reward_curriculum", False):
                 self.env.step_reward_curriculum(it)
@@ -197,6 +212,7 @@ class OnPolicyRunnerUniFP:
         for key, value in locs["mean_adaptation_losses"].items():
             self.writer.add_scalar("Loss/adaptation_" + key, value, locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
+        self.writer.add_scalar("Values/entropy", self.alg.current_entropy_coef, locs["it"])
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
@@ -224,6 +240,7 @@ class OnPolicyRunnerUniFP:
         for key, value in locs["mean_adaptation_losses"].items():
             log_string += f"{f'Adaptation {key} loss:':>{pad}} {value:.4f}\n"
         log_string += f"{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"
+        log_string += f"{'Entropy coefficient:':>{pad}} {self.alg.current_entropy_coef:.6f}\n"
         if len(locs["rewbuffer"]) > 0:
             log_string += (
                 f"{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"
@@ -238,6 +255,19 @@ class OnPolicyRunnerUniFP:
             f"{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (locs['num_learning_iterations'] - locs['it']):.1f}s\n"
         )
         print(log_string)
+
+    @staticmethod
+    def _episode_metric_max(ep_infos, key):
+        """Return the largest scalar episode metric, or zero if unavailable."""
+        values = []
+        for ep_info in ep_infos:
+            if key not in ep_info:
+                continue
+            value = ep_info[key]
+            if isinstance(value, torch.Tensor):
+                value = value.float().mean().item()
+            values.append(float(value))
+        return max(values, default=0.0)
 
     def save(self, path, infos=None):
         torch.save(

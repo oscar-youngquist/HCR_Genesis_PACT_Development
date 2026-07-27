@@ -9,8 +9,11 @@ class B1UniFPCfg:
         # gravity projection (2), angular velocity (3), leg positions (12),
         # leg velocities (12), previous actions (12), and commands (6).
         num_observations = 47
-        # 154-D dynamics/state block plus 187 terrain-height samples.
-        num_privileged_obs = 154 + 187
+        # Critic frame: 144-D dynamics/state block plus the 17 x 11 = 187
+        # terrain-height samples configured below.
+        num_critic_state_obs = 144
+        num_height_obs = 187
+        num_privileged_obs = num_critic_state_obs + num_height_obs
         num_priv_stack = 3
         num_explicit_recon_obs = 6
         num_pred_obs = 6
@@ -292,15 +295,15 @@ class B1UniFPCfg:
   
         randomize_com_displacement = True
         com_rand_z_positive = False
-        com_displacement_x_min = 0.15
-        com_displacement_x_max = 0.15
+        com_displacement_x_min = 0.05
+        com_displacement_x_max = 0.05
    
-        com_displacement_y_min = 0.15
-        com_displacement_y_max = 0.15
+        com_displacement_y_min = 0.05
+        com_displacement_y_max = 0.05
    
-        com_displacement_z_min = 0.15
+        com_displacement_z_min = 0.05
         com_displacement_z_min_pos = 0.15
-        com_displacement_z_max = 0.15
+        com_displacement_z_max = 0.05
      
         push_robots = True
         push_interval_s = 8.0
@@ -308,7 +311,7 @@ class B1UniFPCfg:
         push_interval_min = 5.0
         push_interval_max = 15.0
         
-        max_push_vel_xy = 0.8
+        max_push_vel_xy = 0.5
         min_push_vel_xy = 0.2
         
         max_vertical_push = 0.10
@@ -329,7 +332,7 @@ class B1UniFPCfg:
         kd_range = [0.8, 1.2]
      
         randomize_motor_strength = True
-        motor_strength_range = [0.85, 1.15]
+        motor_strength_range = [0.9, 1.1]
         
         randomize_joint_armature = False
         joint_armature_range = [0.0, 0.03]
@@ -387,7 +390,7 @@ class B1UniFPCfg:
             pass
 
     class rewards:
-        only_positive_rewards = True
+        only_positive_rewards = False
         use_reward_curriculum = True
         
         tracking_sigma = 0.25
@@ -402,13 +405,13 @@ class B1UniFPCfg:
         max_contact_force = 400.0
         contact_force_threshold = 1.0
         
-        foot_clearance_target = 0.20 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.10 # desired foot clearance above ground [m]
         foot_height_offset = 0.02
         foot_clearance_tracking_sigma = 0.01
         
         # Gait-phase guidance settings
-        cycle_time = 1.00
-        target_joint_pos_scale = 0.17
+        cycle_time = 0.64
+        target_joint_pos_scale = 0.20
         target_joint_pos_thd = 0.5
 
         upright_gate_sigma = 10.0
@@ -437,12 +440,15 @@ class B1UniFPCfg:
             # tracking
             tracking_lin_vel_force_world = 2.0    #
             tracking_ang_vel = 1.0                #
+
+            # Small positive reward for keeping the torso stable.
+            upright = 0.5
             
             # gait-phase based leg posture shaping
             ref_dof_leg = 0.0
             walking_ref_dof = 0.0
-            walking_ref_swing_dof = 0.0
-            feet_contact_number = 0.50             #
+            walking_ref_swing_dof = 0.50
+            feet_contact_number = 0.20
             hip_pos = -0.50
 
             # Base
@@ -469,11 +475,12 @@ class B1UniFPCfg:
             vhip_angular_acc = 0.0         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
 
             # Gait shaping
-            feet_drag = -0.0008
+            feet_drag = -0.01
+            stumble = -0.25
             feet_pos_xy = -0.5
             feet_contact_forces = -0.001
             feet_air_time = 1.00
-            foot_clearance_terrain_aware = 0.40  # tracking reward for feet reaching the desired clearance responsive to terrain height            
+            foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height
 
             # Leg posture conditioning
             torso_force_wrench_ellipsoid = 0.0
@@ -574,7 +581,17 @@ class B1UniFPCfgPPO:
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.001
+
+        # Adaptive entropy coefficient: increase exploration when velocity
+        # tracking or terrain-curriculum performance is below its target.
+        entropy_coef = 0.01
+        use_adaptive_entropy = True
+        adaptive_ent_bounds = [0.001, 0.01]
+        adaptive_ent_lin_threshold = 1.70
+        adaptive_ent_ang_threshold = 0.75
+        adaptive_ent_ter_threshold = 6.0
+        adaptive_ent_softmax_temp = 2.0
+
         learning_rate = 3.0e-4
         schedule = "adaptive"  # adaptive
         gamma = 0.99

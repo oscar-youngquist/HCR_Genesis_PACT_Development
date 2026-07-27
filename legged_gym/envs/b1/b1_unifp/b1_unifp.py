@@ -38,6 +38,7 @@ class B1UniFP(B1Z1UniFP):
         self.compute_all_leg_jacobians(
             self.simulator.dof_pos.view(-1, 4, 3), out=self.leg_jacobians
         )
+        self.compute_ref_state()
         self.check_termination()
         self.compute_reward()
         self.reset_idx(self.reset_buf.nonzero(as_tuple=False).flatten())
@@ -144,7 +145,11 @@ class B1UniFP(B1Z1UniFP):
         self.llast_obs_buf.copy_(self.last_obs_buf)
         self.last_obs_buf.copy_(self.obs_buf)
         base_force_local = quat_rotate_inverse(self._get_base_yaw_quat(), self.base_force_ext_world)
-        self.compute_ref_state()
+
+        phase = self._get_phase()
+        sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
+        cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
+
         dof_pos_err = (self.simulator.dof_pos - self.simulator.default_dof_pos) * self.obs_scales.dof_pos
         dof_vel = self.simulator.dof_vel * self.obs_scales.dof_vel
         torch.cat((
@@ -168,28 +173,58 @@ class B1UniFP(B1Z1UniFP):
         mass_params[:, 1:4] = self.simulator._base_com_bias
         stance = self._get_gait_phase()
         contacts = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
-        torch.cat((
-            self.explicit_labels_buf, self.simulator.dof_pos - self.ref_dof_pos,
-            mass_params, self.simulator._friction_values - self.friction_value_offset,
-            self.simulator._motor_strength - 1.0, stance, contacts,
-            self.simulator.projected_gravity, self.simulator.base_ang_vel * self.obs_scales.ang_vel,
-            dof_pos_err, dof_vel, self.actions, self.commands * self.commands_scale,
-            self.simulator._rand_push_vels, self.simulator._rand_wrench_vels,
-            self.simulator._kp_scale - self.kp_scale_offset,
-            self.simulator._kd_scale - self.kd_scale_offset,
-            self.simulator._motor_strength, self.simulator._joint_armature,
-            self.simulator._joint_friction, self.simulator._joint_damping,
-        ), dim=-1, out=self._critic_obs_buf)
+        critic_components = (
+            ("adaptation_labels", self.explicit_labels_buf),
+            ("reference_dof_error", self.simulator.dof_pos - self.ref_dof_pos),
+            ("mass_com", mass_params),
+            ("friction_offset", self.simulator._friction_values - self.friction_value_offset),
+            ("stance", stance),
+            ("contacts", contacts),
+            ("phase_sin", sin_pos),
+            ("phase_cos", cos_pos),
+            ("projected_gravity", self.simulator.projected_gravity),
+            ("base_angular_velocity", self.simulator.base_ang_vel * self.obs_scales.ang_vel),
+            ("dof_position_error", dof_pos_err),
+            ("dof_velocity", dof_vel),
+            ("actions", self.actions),
+            ("commands", self.commands * self.commands_scale),
+            ("push_velocity", self.simulator._rand_push_vels),
+            ("wrench_velocity", self.simulator._rand_wrench_vels),
+            ("kp_scale", self.simulator._kp_scale - self.kp_scale_offset),
+            ("kd_scale", self.simulator._kd_scale - self.kd_scale_offset),
+            ("motor_strength", self.simulator._motor_strength),
+            ("joint_armature", self.simulator._joint_armature),
+            ("joint_friction", self.simulator._joint_friction),
+            ("joint_damping", self.simulator._joint_damping),
+        )
+        critic_state = torch.cat([value for _, value in critic_components], dim=-1)
+        if critic_state.shape[1] != self.cfg.env.num_critic_state_obs:
+            layout = ", ".join(f"{name}={value.shape[1]}" for name, value in critic_components)
+            raise RuntimeError(
+                f"B1 UniFP critic state is {critic_state.shape[1]}D, expected "
+                f"{self.cfg.env.num_critic_state_obs}D ({layout})"
+            )
+        self._critic_obs_buf.copy_(critic_state)
+
         critic_obs = self._critic_obs_buf
+
         if self.cfg.terrain.measure_heights:
             heights = torch.clip(
                 self.simulator.base_pos[:, 2:3] - 0.5 - self.simulator.measured_heights, -1.0, 1.0
             ) * self.obs_scales.height_measurements
+            if heights.shape[1] != self.cfg.env.num_height_obs:
+                raise RuntimeError(
+                    f"B1 UniFP terrain observation is {heights.shape[1]}D, expected "
+                    f"{self.cfg.env.num_height_obs}D"
+                )
             self._critic_height_obs.copy_(heights)
+
         if self._critic_height_obs.shape[1] > 0:
             critic_obs = torch.cat((critic_obs, self._critic_height_obs), dim=-1)
+
         if critic_obs.shape[1] != self.cfg.env.num_privileged_obs:
             raise RuntimeError(f"B1 UniFP critic observation is {critic_obs.shape[1]}D, expected {self.cfg.env.num_privileged_obs}D")
+
         self._critic_obs_slot = (self._critic_obs_slot + 1) % len(self.critic_obs_slots)
         self.critic_obs_slots[self._critic_obs_slot].copy_(critic_obs)
         ordered = self.critic_obs_slots[self._critic_obs_slot + 1:] + self.critic_obs_slots[:self._critic_obs_slot + 1]
@@ -274,10 +309,25 @@ class B1UniFP(B1Z1UniFP):
         self.last_obs_hist = torch.zeros_like(self.obs_history); self.llast_obs_hist = torch.zeros_like(self.obs_history)
         self.critic_obs_slots = [torch.zeros(self.num_envs, self.cfg.env.num_privileged_obs, device=self.device) for _ in range(self.cfg.env.num_priv_stack)]
         self._critic_obs_slot = len(self.critic_obs_slots) - 1
-        self._critic_obs_buf = torch.zeros(self.num_envs, 154, device=self.device)
+        expected_privileged_obs = self.cfg.env.num_critic_state_obs + self.cfg.env.num_height_obs
+        if expected_privileged_obs != self.cfg.env.num_privileged_obs:
+            raise ValueError(
+                "B1 privileged-observation config is inconsistent: "
+                f"state ({self.cfg.env.num_critic_state_obs}) + heights "
+                f"({self.cfg.env.num_height_obs}) != total ({self.cfg.env.num_privileged_obs})"
+            )
+        configured_height_points = len(self.cfg.terrain.measured_points_x) * len(self.cfg.terrain.measured_points_y)
+        if configured_height_points != self.cfg.env.num_height_obs:
+            raise ValueError(
+                f"B1 terrain grid contains {configured_height_points} points, expected "
+                f"{self.cfg.env.num_height_obs}"
+            )
+        self._critic_obs_buf = torch.zeros(
+            self.num_envs, self.cfg.env.num_critic_state_obs, device=self.device
+        )
         self._critic_height_obs = torch.zeros(
             self.num_envs,
-            max(0, self.cfg.env.num_privileged_obs - self._critic_obs_buf.shape[1]),
+            self.cfg.env.num_height_obs,
             device=self.device,
         )
         self._mass_params_buf = torch.zeros(self.num_envs, 22, device=self.device)

@@ -1813,6 +1813,14 @@ class B1Z1UniFP(BaseTask):
         error = torch.sum(torch.abs(target - self.simulator.ee_pos), dim=1)
         return torch.exp(-error / self.cfg.rewards.tracking_ee_sigma)
 
+    def _reward_upright(self):
+        tilt_sq = torch.sum(
+            torch.square(self.simulator.projected_gravity[:, :2]),
+            dim=1,
+        )
+        return torch.exp(-tilt_sq / 0.10)
+
+
     def _reward_tracking_ee_orientation_default(self):
         """Reward keeping the EE frame at its default yaw-aligned orientation."""
         base_yaw_quat = self._get_base_yaw_quat()
@@ -1945,6 +1953,23 @@ class B1Z1UniFP(BaseTask):
     def _reward_feet_drag(self):
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0
         return torch.sum(torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1) * contact.float(), dim=1)
+
+    def _reward_stumble(self):
+        """
+        Penalize feet colliding with vertical surfaces / obstacles during swing.
+        """
+
+        contact_forces = self.simulator.link_contact_forces[:, self.simulator.feet_indices, :]  # (N,4,3)
+
+        horizontal_force = torch.norm(contact_forces[:, :, :2], dim=2)
+        vertical_force = torch.abs(contact_forces[:, :, 2])
+
+        contact = vertical_force > 1.0
+        swing = (~contact).float()
+
+        stumble = (horizontal_force > 4.0 * vertical_force) & (horizontal_force > 5.0)
+
+        return torch.sum(swing * stumble.float(), dim=1)
 
     def _reward_feet_pos_xy(self):
         # Original UniFP penalizes each foot drifting far from its matching

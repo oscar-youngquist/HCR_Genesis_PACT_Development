@@ -31,6 +31,12 @@ class PPO_UniFP:
                  use_clipped_value_loss=True,
                  schedule="fixed",
                  desired_kl=0.01,
+                 use_adaptive_entropy=False,
+                 adaptive_ent_bounds=(0.005, 0.01),
+                 adaptive_ent_lin_threshold=0.75,
+                 adaptive_ent_ang_threshold=0.35,
+                 adaptive_ent_ter_threshold=6.0,
+                 adaptive_ent_softmax_temp=2.0,
                  device='cpu',
                  **kwargs,
                  ):
@@ -40,6 +46,23 @@ class PPO_UniFP:
         self.desired_kl = desired_kl
         self.schedule = schedule
         self.learning_rate = learning_rate
+
+        # Adaptive entropy coefficient, ported from PPO_PACT. Bounds are
+        # ordered [coefficient at target performance, coefficient at maximum
+        # performance gap], so weaker policies receive more exploration.
+        if len(adaptive_ent_bounds) != 2:
+            raise ValueError("adaptive_ent_bounds must contain [low, high]")
+        if adaptive_ent_bounds[0] < 0.0 or adaptive_ent_bounds[1] < adaptive_ent_bounds[0]:
+            raise ValueError("adaptive_ent_bounds must satisfy 0 <= low <= high")
+        if adaptive_ent_softmax_temp <= 0.0:
+            raise ValueError("adaptive_ent_softmax_temp must be greater than zero")
+        self.use_adaptive_entropy = use_adaptive_entropy
+        self.entropy_coef_bounds = tuple(float(value) for value in adaptive_ent_bounds)
+        self.ent_linvelo_threshold = float(adaptive_ent_lin_threshold)
+        self.ent_angvelo_threshold = float(adaptive_ent_ang_threshold)
+        self.ent_terrain_threshold = float(adaptive_ent_ter_threshold)
+        self.ent_softmax_temperature = float(adaptive_ent_softmax_temp)
+        self.current_entropy_coef = float(entropy_coef)
 
         # PPO components
         self.actor_critic = actor_critic
@@ -90,6 +113,38 @@ class PPO_UniFP:
 
     def train_mode(self):
         self.actor_critic.train()
+
+    def set_entropy_coef(self, coef=1.0e-3):
+        if self.use_adaptive_entropy:
+            self.current_entropy_coef = float(coef)
+        else:
+            self.entropy_coef = float(coef)
+
+    def update_adaptive_entropy_coef(self, performance_metrics):
+        """Update exploration strength from B1 locomotion performance."""
+        lin_vel_tracking = float(performance_metrics.get("lin_vel_tracking", 0.0))
+        ang_vel_tracking = float(performance_metrics.get("ang_vel_tracking", 0.0))
+        terrain_level = float(performance_metrics.get("terrain_level", 0.0))
+
+        def normalized_gap(value, threshold):
+            if threshold <= 0.0:
+                return 0.0
+            return max(0.0, threshold - value) / threshold
+
+        gaps = torch.tensor(
+            [
+                normalized_gap(lin_vel_tracking, self.ent_linvelo_threshold),
+                normalized_gap(ang_vel_tracking, self.ent_angvelo_threshold),
+                normalized_gap(terrain_level, self.ent_terrain_threshold),
+            ],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        weights = F.softmax(gaps / self.ent_softmax_temperature, dim=0)
+        weighted_gap = torch.sum(weights * gaps).item()
+        low, high = self.entropy_coef_bounds
+        self.current_entropy_coef = low + weighted_gap * (high - low)
+        return self.current_entropy_coef
 
     def act(self, obs, critic_obs, obs_pred):
         # Compute the actions and values
@@ -178,7 +233,8 @@ class PPO_UniFP:
                 else:
                     value_loss = (returns_batch - value_batch).pow(2).mean()
 
-                loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+                entropy_coef = self.current_entropy_coef if self.use_adaptive_entropy else self.entropy_coef
+                loss = surrogate_loss + self.value_loss_coef * value_loss - entropy_coef * entropy_batch.mean()
 
                 # Gradient step. Clip only PPO-owned parameters so encoder
                 # gradients produced by the policy latent path cannot shrink the
