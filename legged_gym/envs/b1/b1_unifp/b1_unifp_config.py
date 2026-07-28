@@ -266,8 +266,8 @@ class B1UniFPCfg:
         compensate_base_external_force = True
 
         class ranges:
-            lin_vel_x = [-0.5, 0.5]
-            lin_vel_y = [-0.5, 0.5]
+            lin_vel_x = [0.2, 0.6]
+            lin_vel_y = [-0.0, 0.0]
             ang_vel_yaw = [-0.5, 0.5]
             heading = [-3.14, 3.14]
 
@@ -393,7 +393,7 @@ class B1UniFPCfg:
         only_positive_rewards = False
         use_reward_curriculum = False
         
-        tracking_sigma = 0.25
+        tracking_sigma = 0.10
         sigma_force = 1.0 / 50.0
         
         soft_dof_pos_limit = 0.8
@@ -442,21 +442,24 @@ class B1UniFPCfg:
             tracking_ang_vel = 1.0                #
 
             # Small positive reward for keeping the torso stable.
-            upright = 0.5
+            upright = 0.0
             
             # gait-phase based leg posture shaping
             ref_dof_leg = 0.0
             walking_ref_dof = 0.0
+
             walking_ref_swing_dof = 0.50
             feet_contact_number = 0.20
+
             hip_pos = -0.50
 
             # Base
             base_height = -2.0
             lin_vel_z   = -1.0
             ang_vel_xy  = -0.02
-            roll        = -0.2
-            pitch       = -0.1
+            roll        = -0.0
+            pitch       = -0.0
+            orientation = -0.2
 
             # Legs
             dof_acc           = -2.5e-7
@@ -480,7 +483,7 @@ class B1UniFPCfg:
             feet_pos_xy = -0.5
             feet_contact_forces = -0.001
             feet_air_time = 1.00
-            foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height
+            foot_clearance_terrain_aware = 0.50  # tracking reward for feet reaching the desired clearance responsive to terrain height
 
             # Leg posture conditioning
             torso_force_wrench_ellipsoid = 0.0

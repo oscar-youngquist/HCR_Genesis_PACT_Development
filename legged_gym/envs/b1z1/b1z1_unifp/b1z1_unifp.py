@@ -1805,9 +1805,38 @@ class B1Z1UniFP(BaseTask):
         
         non_stop_sign = (torch.abs(base_lin_vel_offset[:, 0]) > self.cfg.commands.lin_vel_x_clip) | (torch.abs(base_lin_vel_offset[:, 1]) > self.cfg.commands.lin_vel_y_clip) | (torch.abs(self.commands[:, 2]) > self.cfg.commands.ang_vel_yaw_clip)
         base_lin_vel_offset[:, :3] *= non_stop_sign.unsqueeze(1)
-        
+
         error = torch.sum(torch.square(base_lin_vel_offset - self.simulator.base_lin_vel[:, :2]), dim=1)
-        return torch.exp(-error / self.cfg.rewards.tracking_sigma)
+
+        # return torch.exp(-error / self.cfg.rewards.tracking_sigma)
+
+        # Remove the reward that comes from simply standing still IF the robot should be moving
+        #     help remove the incentive to stand-still to accumulate positive reward
+        target_mag = torch.norm(base_lin_vel_offset, dim=1)
+
+        tracking = torch.exp(-error / self.cfg.rewards.tracking_sigma)
+        standing_baseline = torch.exp(
+            -torch.sum(torch.square(base_lin_vel_offset), dim=1) / self.cfg.rewards.tracking_sigma
+        )
+
+        moving = target_mag > 0.1
+
+        max_improvement = (1.0 - standing_baseline).clamp_min(1e-4)
+
+        moving_reward = (
+            tracking - standing_baseline
+        ) / max_improvement
+
+        moving_reward = torch.clamp(moving_reward, -1.0, 1.0)
+
+        reward = torch.where(
+            moving,
+            moving_reward,
+            tracking,
+        )
+
+        return reward
+
 
     def _reward_tracking_ang_vel(self):
         return torch.exp(-torch.square(self.commands[:, 2] - self.simulator.base_ang_vel[:, 2]) / self.cfg.rewards.tracking_sigma)
@@ -1849,6 +1878,10 @@ class B1Z1UniFP(BaseTask):
 
     def _reward_ang_vel_xy(self):
         return torch.sum(torch.square(self.simulator.base_ang_vel[:, :2]), dim=1)
+
+    def _reward_orientation(self):
+        # Penalize non flat base orientation
+        return torch.sum(torch.square(self.simulator.projected_gravity[:, :2]), dim=1)
 
     def _reward_roll(self):
         return torch.square(self.simulator.base_euler[:, 0])
@@ -2232,6 +2265,8 @@ class B1Z1UniFP(BaseTask):
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
         swing = ~contact
 
+        moving = self.get_walking_cmd_mask()
+
         # Flatten 3x3 terrain patch if needed, then take local max height near each foot
         h_patch = self.simulator._height_around_feet
         if h_patch.ndim == 4:   # (N,4,3,3)
@@ -2264,7 +2299,7 @@ class B1Z1UniFP(BaseTask):
             dim=-1
         )                                                               # (N,)
 
-        return torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma)
+        return torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma) * moving.float()
 
     def _reward_feet_contact_number(self):
         """
@@ -2275,14 +2310,16 @@ class B1Z1UniFP(BaseTask):
         """
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
         stance_mask = self._get_gait_phase().bool()
+
         # Reward values must be floating point even though contacts and stance
         # masks are boolean phase/contact predicates.
         matched = contact == stance_mask
         reward = torch.where(
             matched,
-            torch.ones_like(self.feet_air_time),
-            torch.full_like(self.feet_air_time, -0.3),
+            1.0,
+            -1.0,
         )
+
         return torch.mean(reward, dim=1)
 
     def _reward_walking_ref_dof(self):
@@ -2298,14 +2335,19 @@ class B1Z1UniFP(BaseTask):
     def _reward_walking_ref_swing_dof(self):
         """Reward only swing-leg joints tracking the gait-phase reference pose."""
         self.compute_ref_state()
+
         joint_pos = self.simulator.dof_pos[:, :12].clone()
         pos_target = self.ref_dof_pos.clone()
+
         stance_mask = self._get_gait_phase()
         stance_mask = torch.stack([stance_mask, stance_mask, stance_mask], 2).reshape(self.num_envs, 12)
+
         dof_error = torch.abs(joint_pos - pos_target)
         dof_error[stance_mask == 1] = 0.0
-        rew = torch.exp(-torch.sum(dof_error, dim=1) * 0.2)
+
+        rew = torch.exp(-torch.sum(dof_error, dim=1) * 0.05)
         rew[~self.get_walking_cmd_mask()] = 0.0
+
         return rew
 
     def _reward_stand_still(self):
