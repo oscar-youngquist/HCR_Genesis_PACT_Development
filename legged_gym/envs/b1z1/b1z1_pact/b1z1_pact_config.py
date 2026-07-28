@@ -1,28 +1,31 @@
 import numpy as np
 
+from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
-class B1UniFPCfg:
+
+class B1Z1PACTCfg(LeggedRobotCfg):
     seed = 1
 
     class env:
         num_envs = 5120
-        # gravity projection (2), angular velocity (3), leg positions (12),
-        # leg velocities (12), previous actions (12), and commands (6).
-        num_observations = 47
-        # Critic frame: 144-D dynamics/state block plus the 17 x 11 = 187
-        # terrain-height samples configured below.
-        num_critic_state_obs = 144
-        num_height_obs = 187
-        num_privileged_obs = num_critic_state_obs + num_height_obs
+        # 2 body-orientation + 3 angular velocity + 17 joint positions +
+        # 17 joint velocities + 34 coupled PACT actions + 3 FK EE errors +
+        # 6 commands.
+        num_observations = 82
+        # One 408-D privileged frame, including 187 terrain-height values.
+        # The critic consumes a three-frame stack (1,224-D) in the runner.
+        num_privileged_obs = 408
         num_priv_stack = 3
-        num_explicit_recon_obs = 6
-        num_pred_obs = 6
-        num_actions = 12
+        num_explicit_recon_obs = 12
+        num_pred_obs = 12
+        num_actions = 17
+        num_policy_actions = 34
+        num_gripper_joints = 2
         num_obs_hist = 32
         env_spacing = 0.5
         episode_length_s = 20
         grf_dim = 12
-        whole_body_dim = 18
+        whole_body_dim = 25
         fail_to_terminal_time_s = 0.0
         send_timeouts = True
         debug = False
@@ -30,7 +33,41 @@ class B1UniFPCfg:
         debug_draw_height_points_around_base = False
         debug_draw_height_points_around_feet = False
         debug_draw_terrain_height_points = False
+        render_ee_goal_debug = False
+        render_ee_frame_debug = False
 
+    class goal_ee:
+        num_commands = 3
+        traj_time = [1.0, 3.0]
+        hold_time = [0.5, 2.0]
+        command_mode = "sphere"
+        collision_upper_limits = [0.1, 0.2, -0.05]
+        collision_lower_limits = [-0.9, -0.2, -0.7]
+        underground_limit = -0.7
+        num_collision_check_samples = 10
+        arm_induced_pitch = 0.38
+
+        class sphere_center:
+            # Genesis URDF z1_waist origin: base_static_joint [0.3, 0, 0.09]
+            # plus z1_waist joint [0, 0, 0.0585].
+            x_offset = 0.3
+            y_offset = 0.0
+            # NOTE - the 0.60 corresponds to the desired base height.
+            z_invariant_offset = 0.55 + 0.1485
+
+        class ranges:
+            init_pos_start = [0.5, np.pi / 8, 0.0]
+            init_pos_end = [0.7, 0.0, 0.0]
+            pos_l = [0.40, 0.95]
+            pos_p = [-1.0 * np.pi / 2.5, np.pi / 3.0]
+            pos_y = [-1.2, 1.2]
+            delta_orn_r = [-0.5, 0.5]
+            delta_orn_p = [-0.5, 0.5]
+            delta_orn_y = [-0.5, 0.5]
+
+        sphere_error_scale = [1.0, 1.0, 1.0]
+        orn_error_scale = [1.0, 1.0, 1.0]
+        debug_tcp_from_link06_offset = [0.186, 0.0, 0.0]
 
     class init_state:
         pos = [0.0, 0.0, 0.6]
@@ -41,47 +78,40 @@ class B1UniFPCfg:
         pitch_random_scale = 0.0
         yaw_random_scale = 0.0
         default_joint_angles = {
-            # "FR_hip_joint": -0.2,
-            # "FR_thigh_joint": 0.8,
-            # "FR_calf_joint": -1.5,
+            "FR_hip_joint": -0.2,
+            "FR_thigh_joint": 0.8,
+            "FR_calf_joint": -1.5,
          
-            # "FL_hip_joint": 0.2,
-            # "FL_thigh_joint": 0.8,
-            # "FL_calf_joint": -1.5,
+            "FL_hip_joint": 0.2,
+            "FL_thigh_joint": 0.8,
+            "FL_calf_joint": -1.5,
          
-            # "RR_hip_joint": -0.2,
-            # "RR_thigh_joint": 0.8,
-            # "RR_calf_joint": -1.5,
+            "RR_hip_joint": -0.2,
+            "RR_thigh_joint": 0.8,
+            "RR_calf_joint": -1.5,
          
-            # "RL_hip_joint": 0.2,
-            # "RL_thigh_joint": 0.8,
-            # "RL_calf_joint": -1.5,
-            'FR_hip_joint': -0.15,  # [rad]
-            'FR_thigh_joint': 0.67,     # [rad]
-            'FR_calf_joint': -1.32,  # [rad]
-
-            'FL_hip_joint': 0.15,   # [rad]
-            'FL_thigh_joint': 0.67,     # [rad]
-            'FL_calf_joint': -1.32,   # [rad]
-
-            'RR_hip_joint': -0.15,   # [rad]
-            'RR_thigh_joint': 0.67,   # [rad]
-            'RR_calf_joint': -1.32,    # [rad]
-
-            'RL_hip_joint': 0.15,   # [rad]
-            'RL_thigh_joint': 0.67,   # [rad]
-            'RL_calf_joint': -1.32,    # [rad]
+            "RL_hip_joint": 0.2,
+            "RL_thigh_joint": 0.8,
+            "RL_calf_joint": -1.5,
+         
+            "z1_waist": 0.0,
+            "z1_shoulder": 1.48,
+            "z1_elbow": -0.63,
+            "z1_wrist_angle": -0.84,
+            "z1_forearm_roll": 0.0,
+            "z1_wrist_rotate": 1.57,
+            "z1_jointGripper": -0.785,
         }
         yaw_angle_range = [0.0, 3.14]
         rand_yaw_range = np.pi / 2
         origin_perturb_range = 0.5
         init_vel_perturb_range = 0.1
-
-        leg_dof_pos_perturb_range = [0.15, 0.15]
+        leg_dof_pos_perturb_range = [0.5, 1.5]
+        arm_dof_pos_perturb_range = [-0.5, 0.5]
 
     class asset:
-        name = "b1"
-        file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/b1/urdf/b1_genesis.urdf"
+        name = "b1z1"
+        file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/b1z1_current/urdf/b1z1_genesis.urdf"
         base_name = "trunk"
         base_mass_name = "trunk"
         base_com_name = "trunk"
@@ -98,17 +128,25 @@ class B1UniFPCfg:
             "RL_hip_joint",
             "RL_thigh_joint",
             "RL_calf_joint",
+            "z1_waist",
+            "z1_shoulder",
+            "z1_elbow",
+            "z1_wrist_angle",
+            "z1_forearm_roll",
+            "z1_wrist_rotate",
+            "z1_jointGripper",
         ]
         foot_name = ["FR_foot", "FL_foot", "RR_foot", "RL_foot"]
         thigh_name = ["FR_thigh", "FL_thigh", "RR_thigh", "RL_thigh"]
+        gripper_name = "ee_gripper_link"
         penalize_contacts_on = ["trunk", "thigh", "hip", "calf"]
-        terminate_after_contacts_on = ["trunk", "thigh", "hip"]
-        links_to_keep = ["FR_foot", "FL_foot", "RR_foot", "RL_foot"]
+        terminate_after_contacts_on = []
+        links_to_keep = ["FR_foot", "FL_foot", "RR_foot", "RL_foot", "ee_gripper_link"]
         self_collisions = False
         flip_visual_attachments = False
         fix_base_link = False
         obtain_link_contact_states = True
-        contact_state_link_names = ["thigh", "calf", "foot", "trunk"]
+        contact_state_link_names = ["thigh", "calf", "foot", "trunk", "ee_gripper_link"]
         base_link_name = "trunk"
         disable_gravity = False
         collapse_fixed_joints = True
@@ -196,36 +234,54 @@ class B1UniFPCfg:
             contact_collection = 2
 
     class control:
+        # Coupled PACT control: the actor emits both position and feedforward
+        # torque branches. The simulator combines them before clipping.
         control_type = "P"
-        # stiffness = {
-        #     "hip": 300.0,
-        #     "thigh": 300.0,
-        #     "calf": 500.0,
-        # }
-        # damping = {
-        #     "hip": 7.5,
-        #     "thigh": 7.5,
-        #     "calf": 12.5,
-        # }
+        stiffness = {
+            "hip": 300.0,
+            "thigh": 300.0,
+            "calf": 500.0,
+            "z1_waist": 64.0,
+            "z1_shoulder": 128.0,
+            "z1_elbow": 64.0,
+            "z1_wrist_angle": 64.0,
+            "z1_forearm_roll": 64.0,
+            "z1_wrist_rotate": 64.0,
+            "z1_jointGripper": 64.0,
+        }
+        damping = {
+            "hip": 7.7,
+            "thigh": 7.5,
+            "calf": 12.5,
+            "z1_waist": 1.5,
+            "z1_shoulder": 3.0,
+            "z1_elbow": 1.5,
+            "z1_wrist_angle": 1.5,
+            "z1_forearm_roll": 1.5,
+            "z1_wrist_rotate": 1.5,
+            "z1_jointGripper": 1.5,
+        }
 
-
-        stiffness = {"joint":200.0}
-        damping = {"joint":5.0}
+        # stiffness = {"joint":100.0, "z1": 30.0,}
+        # damping = {"joint": 5.0,"z1": 0.70,}
 
         action_scale = 0.25
+        torque_scale = 10.0
         dt = 0.02
         decimation = 4
         
-        use_tradeoff_curriculum = False
-        tradeoff_init_weights = [1.0, 1.0]
+        use_tradeoff_curriculum = True
+        tradeoff_init_weights = [0.40, 1.60]
         tradeoff_final_weights = [1.0, 1.0]
-        tradeoff_steps = 1
-        tradeoff_threshold = 1.0
+        tradeoff_steps = 10
+        tradeoff_threshold = 0.70
 
     class commands:
         curriculum = True
         max_curriculum = 1.0
-        # [vx, vy, yaw_rate, torso_force_x, torso_force_y, torso_force_z]
+        # UniFP convention inside PACT training: the last three slots retain
+        # the yaw-aligned spherical EE target, but all force-command slots are
+        # removed.
         num_commands = 6
         
         resampling_time = 10.0
@@ -245,40 +301,51 @@ class B1UniFPCfg:
         
         force_start_step = 8000
 
+        push_gripper_stators = True
+        apply_ee_external_forces = True
+        push_gripper_interval_s_ext = [3.5, 9.0]
+        push_gripper_duration_s_ext = [1.0, 3.0]
+        gripper_forced_prob_ext = 0.8
+        
+        max_push_force_xyz_gripper_ext = [-60.0, 60.0]
+        randomize_gripper_force_gains = False
+        gripper_force_kp_range = [200.0, 200.0]
+        gripper_force_kd_range = [3.0, 3.0]
+        gripper_prop_kd = 0.1
+        settling_time_force_gripper_s = 1.0
+        
         push_robot_base = True
         apply_base_external_forces = True
-        push_base_interval_s_cmd = [3.5, 9.0]
-        push_base_duration_s_cmd = [1.0, 3.0]
-        base_forced_prob_cmd = 0.8
         push_base_interval_s_ext = [6.0, 12.0]
         push_base_duration_s_ext = [1.0, 3.0]
         base_forced_prob_ext = 0.8
-        randomize_base_force_gains = True
-        max_push_force_xyz_base_cmd = [-50.0, 50.0]
         max_push_force_xyz_base_ext = [-50.0, 50.0]
-        
+        randomize_base_force_gains = False
         base_force_kp_range = [200.0, 200.0]
         base_force_kd_range = [200.0, 200.0]
         base_prop_kd = 0.1
         force_z_base_ext_scale = 0.1
         settling_time_force_base_s = 3.0
-        use_external_impedance_compensation = False
-        compensate_base_external_force = True
+        # The impedance relation is a reward only. It never changes commands.
 
         class ranges:
             lin_vel_x = [-0.5, 0.5]
-            lin_vel_y = [-0.5, 0.5]
-            ang_vel_yaw = [-0.5, 0.5]
+            lin_vel_y = [-0.6, 0.6]
+            ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
 
     class normalization:
         class obs_scales:
-            lin_vel = 1.0
+            lin_vel = 2.0
             ang_vel = 0.25
             dof_pos = 1.0
             dof_vel = 0.05
             grf = 0.01
             height_measurements = 5.0
+            ee_sphe_radius_cmd = 0.5
+            ee_sphe_pitch_cmd = 1.0
+            ee_sphe_yaw_cmd = 1.3
+            ee_force = 0.01
             base_force = 0.01
         clip_observations = 100.0
         clip_actions = 100.0
@@ -286,32 +353,39 @@ class B1UniFPCfg:
     class domain_rand:
         use_domainrand_curriculum = False
         randomize_friction = True  
-        friction_range = [0.5, 1.5]
+        friction_range = [0.3, 2.0]
 
         randomize_base_mass = True
         added_mass_min = -2.0  
         min_added_mass_max = 5.0
-        max_added_mass_max = 5.0
+        max_added_mass_max = 15.0
   
+        randomize_gripper_mass = True
+        gripper_mass_min = -0.1
+        min_gripper_added_mass_max = 0.1
+        max_gripper_added_mass_max = 0.25
+
         randomize_com_displacement = True
         com_rand_z_positive = False
-        com_displacement_x_min = 0.05
-        com_displacement_x_max = 0.05
+        com_displacement_x_min = 0.15
+        com_displacement_x_max = 0.15
    
-        com_displacement_y_min = 0.05
-        com_displacement_y_max = 0.05
+        com_displacement_y_min = 0.15
+        com_displacement_y_max = 0.15
    
-        com_displacement_z_min = 0.05
+        com_displacement_z_min = 0.15
         com_displacement_z_min_pos = 0.15
-        com_displacement_z_max = 0.05
+        com_displacement_z_max = 0.15
      
-        push_robots = True
+        # B1Z1 PACT uses only the UniFP-style physical base/EE force events.
+        # Disable the generic velocity-push curriculum from the base pipeline.
+        push_robots = False
         push_interval_s = 8.0
         
         push_interval_min = 5.0
         push_interval_max = 15.0
         
-        max_push_vel_xy = 0.5
+        max_push_vel_xy = 0.8
         min_push_vel_xy = 0.2
         
         max_vertical_push = 0.10
@@ -324,15 +398,17 @@ class B1UniFPCfg:
         wrench_timeout_min = 5.0
         wrench_timeout_max = 15.0
      
-        randomize_ctrl_delay = True
-        ctrl_delay_step_range = [0, 1]
+        # Disabled initially so the state transition and PPO/PINN action are
+        # exactly aligned. Re-enable only with delayed-action storage support.
+        randomize_ctrl_delay = False
+        ctrl_delay_step_range = [0, 2]
      
         randomize_pd_gain = True
         kp_range = [0.8, 1.2]
         kd_range = [0.8, 1.2]
      
         randomize_motor_strength = True
-        motor_strength_range = [0.9, 1.1]
+        motor_strength_range = [0.85, 1.15]
         
         randomize_joint_armature = False
         joint_armature_range = [0.0, 0.03]
@@ -371,19 +447,23 @@ class B1UniFPCfg:
         class noise_scales:
             dof_pos = 0.01
             dof_vel = 1.5
-            ang_vel = 0.2
-            gravity = 0.05
+            ang_vel = 0.5
+            gravity = 0.06
             height_measurements = 0.1
 
+    class arm:
+        mount_offset = [0.3, 0.0, 0.09]
+        init_target_ee_base = [0.2, 0.0, 0.2]
+        grasp_offset = 0.08
 
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
-        roll_threshold = 0.65
-        pitch_threshold = 0.65
-        height_min = 0.30
+        roll_threshold = 0.8
+        pitch_threshold = 1.0
+        height_min = 0.10
         height_max = 2.00
         contact_force_threshold = 1.0
-        contact_patience_steps = 10
+        contact_patience_steps = 5
 
     class constraints:
         class limits:
@@ -391,9 +471,19 @@ class B1UniFPCfg:
 
     class rewards:
         only_positive_rewards = False
-        use_reward_curriculum = False
+        use_reward_curriculum = True
         
         tracking_sigma = 0.25
+        tracking_ee_sigma = 0.50
+        
+        tracking_ee_orientation_sigma = 0.05
+        impedance_virtual_mass = [1.0, 1.0, 1.0]
+        impedance_virtual_damping = [40.0, 40.0, 40.0]
+        impedance_virtual_stiffness = [200.0, 200.0, 200.0]
+        impedance_residual_weights = [1.0, 1.0, 1.0]
+        impedance_filter_alpha = 0.2
+        impedance_sigma = 2500.0
+        
         sigma_force = 1.0 / 50.0
         
         soft_dof_pos_limit = 0.8
@@ -405,16 +495,20 @@ class B1UniFPCfg:
         max_contact_force = 400.0
         contact_force_threshold = 1.0
         
-        foot_clearance_target = 0.10 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.20 # desired foot clearance above ground [m]
         foot_height_offset = 0.02
         foot_clearance_tracking_sigma = 0.01
         
         # Gait-phase guidance settings
-        cycle_time = 0.64
-        target_joint_pos_scale = 0.20
+        cycle_time = 1.00
+        target_joint_pos_scale = 0.17
         target_joint_pos_thd = 0.5
 
+        ee_tracking_sigma = 25.0 
         upright_gate_sigma = 10.0
+
+        arm_before_torso_ee_thresh = 0.08
+        arm_before_torso_gate_sharpness = 40.0
 
         overreach_x_max = 0.42   # cm
         rear_foot_x_nominal = -0.37
@@ -440,15 +534,24 @@ class B1UniFPCfg:
             # tracking
             tracking_lin_vel_force_world = 2.0    #
             tracking_ang_vel = 1.0                #
+            
+            tracking_ee_force_world = 2.0
+            tracking_ee_orientation_default = 0.0
+            impedance_consistency = 0.25
 
-            # Small positive reward for keeping the torso stable.
-            upright = 0.5
+            # Style rewards encouraging using the arm
+            # arm_progress_before_torso = 0.3
+            # early_torso_tilt = -0.2
+            # feet_contact_number = 0.01
+            arm_progress_before_torso = 0.0
+            early_torso_tilt = 0.0
+            
             
             # gait-phase based leg posture shaping
             ref_dof_leg = 0.0
             walking_ref_dof = 0.0
-            walking_ref_swing_dof = 0.50
-            feet_contact_number = 0.20
+            walking_ref_swing_dof = 0.0
+            feet_contact_number = 0.50             #
             hip_pos = -0.50
 
             # Base
@@ -456,7 +559,6 @@ class B1UniFPCfg:
             lin_vel_z   = -1.0
             ang_vel_xy  = -0.02
             roll        = -0.2
-            pitch       = -0.1
 
             # Legs
             dof_acc           = -2.5e-7
@@ -465,9 +567,21 @@ class B1UniFPCfg:
             joint_power       = -2.e-5
             joint_power_dist  = -1.e-8
 
+            # Arm
+            dof_acc_arm = -4.5e-7
+            action_rate_arm = -0.045
+            action_smoothness_arm = -0.02
+            joint_power_arm = -2.e-5
+            joint_power_dist_arm = -2.e-8
+            # dof_acc_arm = 0.0
+            # action_rate_arm = 0.0
+            # action_smoothness_arm = 0.00
+            # joint_power_arm = 0.0
+            # joint_power_dist_arm = 0.0
+
             # I developed these
-            front_foot_overreach = -0.0
-            rear_foot_overreach = -0.0
+            front_foot_overreach = -10.0
+            rear_foot_overreach = -1.0
 
             # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
             support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
@@ -475,15 +589,15 @@ class B1UniFPCfg:
             vhip_angular_acc = 0.0         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
 
             # Gait shaping
-            feet_drag = -0.01
-            stumble = -0.25
+            feet_drag = -0.0008
             feet_pos_xy = -0.5
             feet_contact_forces = -0.001
             feet_air_time = 1.00
-            foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height
+            foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height            
 
-            # Leg posture conditioning
-            torso_force_wrench_ellipsoid = 0.0
+            # Leg and Arm Posture Conditioning
+            arm_ee_force_manipulability = 0.0
+            torso_force_wrench_ellipsoid = 0.2
 
         class manip_rewards():
             # Leg Posture Conditioning
@@ -505,24 +619,55 @@ class B1UniFPCfg:
             ellipsoid_normal_force_margin = 5.0
             ellipsoid_tangential_force_margin = 2.0
 
+            # Arm Posture Conditioning
+            # Numerical regularization
+            arm_ellipsoid_inv_eps = 1e-5
+
+            # Size reward:
+            # Larger values make the size reward saturate faster.
+            arm_ellipsoid_force_size_scale = 0.80
+
+            # Isotropy reward:
+            # cond = lam_max / lam_min.
+            # A value near 1 is perfectly isotropic.
+            arm_ellipsoid_force_cond_max = 4.0
+            arm_ellipsoid_iso_sharpness = 1.0
+
+            # Log-spread isotropy:
+            # Larger values penalize nonuniform eigenvalues more strongly.
+            arm_ellipsoid_log_iso_scale = 1.0
+
+            # Blend condition-number isotropy and log-spread isotropy.
+            arm_ellipsoid_cond_iso_weight = 0.5
+
+            # Final blend between large and isotropic.
+            arm_ellipsoid_size_weight = 0.5
+            arm_ellipsoid_iso_weight = 0.5
+
         class reward_curriculum:
             curr_reward_keys = ["collision", 
                                 "action_rate", 
+                                "action_rate_arm",
                                 "action_smoothness",
+                                "action_smoothness_arm",
                                 "dof_acc", 
+                                "dof_acc_arm",
                                 "dof_pos_limits",
                                 "feet_contact_forces",
                                 "base_height",
                                 "lin_vel_z",
                                 ]
             curr_reward_bounds = {
-                "collision": [-1.0, -10.0],
-                "action_rate": [-0.002, -0.02],
+                "collision": [-2.0, -10.0],
+                "action_rate": [-0.001, -0.01],
+                "action_rate_arm": [-0.002, -0.02],
                 "action_smoothness":[-0.001, -0.01],
+                "action_smoothness_arm":[-0.002, -0.02],
                 "dof_acc": [-5.0e-8, -2.5e-7],
-                "dof_pos_limits":[-1.0, -10.0],
+                "dof_acc_arm": [-1.0e-8, -4.5e-7],
+                "dof_pos_limits":[-2.0, -10.0],
                 "feet_contact_forces":[-1.0e-5, -1.0e-4],
-                "base_height":[-1.0, -2.0],
+                "base_height":[-2.0, -5.0],
                 "lin_vel_z":[-1.00, -2.0],
             }
             warmup_steps = 12000
@@ -561,37 +706,43 @@ class B1UniFPCfg:
             pointcloud_in_world_frame = False
 
 
-class B1UniFPCfgPPO:
+class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
     seed = 1
-    runner_class_name = "B1UniFPRunner"
+    runner_class_name = "B1Z1PACTRunner"
 
     class policy:
-        actor_hidden_dims = [512, 256, 128]
-        critic_hidden_dims = [512, 256, 128]
+        actor_layers = [512, 256, 128]
+        critic_layers = [1024, 256, 128]
+        actor_hidden_dims = actor_layers
+        critic_hidden_dims = critic_layers
         activation = "elu"
-
-
-        # Each action-noise setting may be a scalar or a flat 12-value list in
-        # asset.dof_names/action order: FR, FL, RR, RL x hip, thigh, calf.
-        init_noise_std = [0.45, 0.55, 0.55] * 4
-        min_noise_std = [0.10, 0.15, 0.15] * 4
-        max_noise_std = 1.1
+        init_noise_std = 0.65
+        cenet_enc_layers = [256, 128]
+        cenet_latent_dim = 16
+        cenet_base_vel_dim = 3
+        cenet_base_wrench_dim = 6
+        cenet_ee_force_dim = 3
+        film_hidden_dim = 128
+        explicit_base_vel_weight = 1.0
+        explicit_base_wrench_weight = 1.0
+        explicit_ee_force_weight = 1.0
+        force_decoder_weight = 1.0
+        privileged_decoder_weight = 1.0
+        vae_kld_weight = 1.0e-3
+        pinn_loss_weight = 0.01
+        pinn_warmup = 100
+        pinn_init_steps = 100
+        predicted_force_detach = True
+        force_gate_ema_alpha = 0.05
+        force_gate_threshold = 0.05
+        force_gate_hysteresis = 0.075
+        force_gate_patience = 10
 
     class algorithm:
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-
-        # Adaptive entropy coefficient: increase exploration when velocity
-        # tracking or terrain-curriculum performance is below its target.
         entropy_coef = 0.01
-        use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.001, 0.01]
-        adaptive_ent_lin_threshold = 1.70
-        adaptive_ent_ang_threshold = 0.75
-        adaptive_ent_ter_threshold = 6.0
-        adaptive_ent_softmax_temp = 2.0
-
         learning_rate = 3.0e-4
         schedule = "adaptive"  # adaptive
         gamma = 0.99
@@ -600,20 +751,32 @@ class B1UniFPCfgPPO:
         max_grad_norm = 1.0
         num_learning_epochs = 5
         num_mini_batches = 4
+        # Persistent CPU workers evaluate the Pinocchio observed-state terms.
+        # A zero capacity selects the rollout/minibatch-derived capacity.
+        pino_num_workers = 8
+        pino_batch_capacity = 0
+        pino_worker_start_method = "spawn"
         use_spo = False
+        use_adaptive_entropy = True
+        adaptive_ent_bounds = [0.005, 0.01]
+        adaptive_ent_lin_threshold = 0.75
+        adaptive_ent_ang_threshold = 0.35
+        adaptive_ent_ter_threshold = 6.0
+        adaptive_ent_softmax_temp = 2.0
 
     class runner:
-        policy_class_name = "ActorCriticB1UniFP"
-        algorithm_class_name = "PPO_UniFP"
+        policy_class_name = "ActorCriticB1Z1PACT"
+        algorithm_class_name = "PPO_B1Z1PACT"
         num_steps_per_env = 24
+        grf_dim = 12
         
         max_iterations = 25000
         
         save_interval = 500
-        run_name = "b1_unifp_locomotion"
-        experiment_name = "b1_unifp_genesis"
+        run_name = "b1z1_pact_initial"
+        experiment_name = "b1z1_pact_genesis"
         sync_wandb = False
         resume = False
-        load_run = "Jul25_17-00-11_b1_unifp_locomotion"
-        checkpoint = 6000
+        load_run = "Jul14_11-16-03_unifp_baseline"
+        checkpoint = -1
         resume_path = None

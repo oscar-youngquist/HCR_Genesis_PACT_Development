@@ -42,6 +42,7 @@ from .abl3_runner import OnPolicyRunnerABL3
 from .kite_runner import OnPolicyRunnerKITE
 from .unifp_runner import OnPolicyRunnerUniFP
 from .b1_unifp_runner import OnPolicyRunnerB1UniFP
+from .b1z1_pact_runner import B1Z1PACTRunner
 
 from rsl_rl.utils.runner_registry import runner_registry
 runner_registry.register("OnPolicyRunner", OnPolicyRunner)
@@ -58,3 +59,4 @@ runner_registry.register("ABL3Runner", OnPolicyRunnerABL3)
 runner_registry.register("KITERunner", OnPolicyRunnerKITE)
 runner_registry.register("UniFPRunner", OnPolicyRunnerUniFP)
 runner_registry.register("B1UniFPRunner", OnPolicyRunnerB1UniFP)
+runner_registry.register("B1Z1PACTRunner", B1Z1PACTRunner)

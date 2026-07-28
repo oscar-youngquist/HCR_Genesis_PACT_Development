@@ -49,3 +49,4 @@ from .actor_critic_postau import ActorCritic_PosTau
 from .actor_critic_rl2ac import ActorCritic_RL2AC
 from .actor_critic_unifp import ActorCriticUniFP
 from .actor_critic_b1_unifp import ActorCriticB1UniFP
+from .actor_critic_b1z1_pact import ActorCriticB1Z1PACT, B1Z1PACTContextEncoder, B1Z1PACTDecoder

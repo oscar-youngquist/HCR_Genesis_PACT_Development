@@ -14,3 +14,4 @@ from .rollout_storage_pactpos import RolloutStoragePACTPos
 from .rollout_storage_abl import RolloutStoragePACTAblation
 from .rollout_storage_abl3 import RolloutStoragePACTAblation3
 from .rollout_storage_unifp import RolloutStorageUniFP
+from .rollout_storage_b1z1_pact import RolloutStorageB1Z1PACT
