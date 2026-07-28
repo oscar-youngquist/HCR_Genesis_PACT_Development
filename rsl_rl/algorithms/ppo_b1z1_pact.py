@@ -463,7 +463,11 @@ class PPO_B1Z1PACT:
 
             # PCGrad resolves conflicts between reward optimization and the
             # physical-consistency gradient before updating policy parameters.
-            self.actor_optimizer.pc_backward([ppo_loss, self.pinn_weight * pinn] if self.pinn_weight > 0 else [ppo_loss])
+            if self.pinn_weight >= self.cfg["pinn_loss_weight"]:
+                self.actor_optimizer.pc_backward_ppgrad([ppo_loss, self.pinn_weight * pinn] if self.pinn_weight > 0 else [ppo_loss])
+            else:
+                self.actor_optimizer.pc_backward_pinn([ppo_loss, self.pinn_weight * pinn] if self.pinn_weight > 0 else [ppo_loss])
+
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.actor_optimizer.step()
 
