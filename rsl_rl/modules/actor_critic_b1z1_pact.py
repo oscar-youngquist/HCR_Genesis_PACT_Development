@@ -38,24 +38,48 @@ class B1Z1PACTContextEncoder(nn.Module):
     def __init__(self, input_dim: int, latent_dim: int, hidden: Sequence[int], activation: str):
         super().__init__()
         trunk_dim = hidden[-1]
+
+        hidden_dim = 2 * latent_dim
+
         self.trunk = _mlp(input_dim, hidden[:-1], trunk_dim, activation)
-        self.latent_mean = nn.Linear(trunk_dim, latent_dim)
-        self.latent_logvar = nn.Sequential(nn.Linear(trunk_dim, latent_dim), nn.Hardtanh(-5.0, 5.0))
-        self.base_velocity = nn.Linear(trunk_dim, 3)
-        self.base_wrench = nn.Linear(trunk_dim, 6)
-        self.ee_force = nn.Linear(trunk_dim, 3)
+
+        # Stack some additional processing layers
+        self.latent_mean = nn.Sequential(nn.Linear(trunk_dim, hidden_dim),
+                                         _activation(activation),
+                                         nn.Linear(hidden_dim, latent_dim))
+
+
+        self.latent_logvar = nn.Sequential(nn.Linear(trunk_dim, hidden_dim),
+                                           _activation(activation),
+                                           nn.Linear(hidden_dim, latent_dim),
+                                           nn.Hardtanh(-5.0, 5.0))
+
+        self.base_velocity = nn.Sequential(nn.Linear(trunk_dim, hidden_dim),
+                                           _activation(activation),
+                                           nn.Linear(hidden_dim, 3))
+
+        self.base_wrench = nn.Sequential(nn.Linear(trunk_dim, hidden_dim),
+                                         _activation(activation),
+                                         nn.Linear(hidden_dim, 6))
+
+        self.ee_force = nn.Sequential(nn.Linear(trunk_dim, hidden_dim),
+                                      _activation(activation),
+                                      nn.Linear(hidden_dim, 3))
+
+        # Binary logits are trained with BCE. Contact probabilities are kept
+        # out of the actor interface and used only by explicit reconstruction.
+        self.foot_contact_logits = nn.Sequential(nn.Linear(trunk_dim, hidden_dim),
+                                                 _activation(activation),
+                                                 nn.Linear(hidden_dim, 4))
 
     def _initialize_weights(self) -> None:
         """Initialize all linear layers with Xavier uniform distribution."""
-        for layer in [self.trunk, self.latent_mean,
-                     self.base_velocity, self.base_wrench,
-                     self.ee_force]:
-            
-            nn.init.xavier_uniform_(layer.weight)
-            
-            if layer.bias is not None:
-                nn.init.zeros_(layer.bias)
-
+        self.trunk.apply(init_weights)
+        self.latent_mean.apply(init_weights)
+        self.base_velocity.apply(init_weights)
+        self.base_wrench.apply(init_weights)
+        self.ee_force.apply(init_weights)
+        self.foot_contact_logits.apply(init_weights)
         self.latent_logvar.apply(init_weights)
 
 
@@ -68,6 +92,7 @@ class B1Z1PACTContextEncoder(nn.Module):
             "base_velocity": self.base_velocity(feature),
             "base_wrench": self.base_wrench(feature),
             "ee_force": self.ee_force(feature),
+            "foot_contact_logits": self.foot_contact_logits(feature),
         }
 
     def forward_inf(self, history: torch.Tensor):
@@ -77,6 +102,7 @@ class B1Z1PACTContextEncoder(nn.Module):
                 "base_velocity": self.base_velocity(feature),
                 "base_wrench": self.base_wrench(feature),
                 "ee_force": self.ee_force(feature),
+                "foot_contact_logits": self.foot_contact_logits(feature),
                 }
 
 class FiLM(nn.Module):
@@ -84,7 +110,10 @@ class FiLM(nn.Module):
 
     def __init__(self, condition_dim: int, feature_dim: int, hidden_dim: int, activation: str):
         super().__init__()
-        self.network = _mlp(condition_dim, [hidden_dim], 2 * feature_dim, activation)
+        self.network = _mlp(condition_dim, [hidden_dim, hidden_dim], 2 * feature_dim, activation)
+
+        self.network.apply(init_weights)
+
         final = self.network[-1]
         nn.init.zeros_(final.weight)
         nn.init.zeros_(final.bias)
@@ -97,7 +126,7 @@ class FiLM(nn.Module):
 class B1Z1PACTDecoder(nn.Module):
     """Independent decoder head used for force or privileged-state targets."""
 
-    def __init__(self, input_dim: int, output_dim: int, hidden=(128, 256), activation: str = "elu"):
+    def __init__(self, input_dim: int, output_dim: int, hidden=(128, 256, 128), activation: str = "elu"):
         super().__init__()
         self.network = _mlp(input_dim, hidden, output_dim, activation)
         self.network.apply(init_weights)
@@ -112,19 +141,30 @@ class ActorCriticB1Z1PACT(nn.Module):
     is_recurrent = False
 
     def __init__(
-        self, num_actor_obs: int, num_critic_obs: int, num_actions: int,
-        history_dim: int, latent_dim: int = 16, actor_layers=(512, 256, 128),
-        critic_layers=(1024, 256, 128), context_layers=(256, 128),
-        film_hidden_dim: int = 128, activation: str = "elu", init_noise_std: float = 0.65,
+        self,
+        num_actor_obs: int,
+        num_critic_obs: int,
+        num_actions: int,
+        history_dim: int,
+        latent_dim: int = 16,
+        actor_layers=(512, 256, 128),
+        critic_layers=(1024, 256, 128),
+        context_layers=(256, 128),
+        film_hidden_dim: int = 64,
+        activation: str = "elu",
+        init_noise_std: float = 0.65,
     ):
         super().__init__()
         self.num_actions = num_actions
         self.context_encoder = B1Z1PACTContextEncoder(history_dim, latent_dim, context_layers, activation)
-        actor_input = num_actor_obs + latent_dim + 3 + 6 + 3
+        # The actor consumes the four estimated foot-contact probabilities;
+        # FiLM intentionally does not receive them.
+        actor_input = num_actor_obs + latent_dim + 3 + 6 + 3 + 4
         self.actor_trunk = _mlp(actor_input, actor_layers[:-1], actor_layers[-1], activation)
 
         # FiLM may use only predicted disturbances, tracking errors, and z.
         self.film = FiLM(latent_dim + 6 + 3 + 3 + 3, actor_layers[-1], film_hidden_dim, activation)
+
         self.position_head = nn.Linear(actor_layers[-1], num_actions)
         self.torque_head = nn.Linear(actor_layers[-1], num_actions)
         nn.init.uniform_(self.torque_head.weight, -1.0e-6, 1.0e-6)
@@ -174,7 +214,12 @@ class ActorCriticB1Z1PACT(nn.Module):
         base_error = command[:, :3] - context["base_velocity"]
         # The environment appends FK EE tracking error immediately before commands.
         ee_error = obs[:, -9:-6]
-        actor_input = torch.cat((obs, context["z"], context["base_velocity"], context["base_wrench"], context["ee_force"]), dim=-1)
+        contact_probability = torch.sigmoid(context["foot_contact_logits"])
+        actor_input = torch.cat(
+            (obs, context["z"], context["base_velocity"], context["base_wrench"], context["ee_force"], contact_probability),
+            dim=-1,
+        )
+        # Contact state is excluded from FiLM by design.
         film_condition = torch.cat((context["z"], context["base_wrench"], context["ee_force"], base_error, ee_error), dim=-1)
         return actor_input, film_condition
 
@@ -241,16 +286,6 @@ class ActorCriticB1Z1PACT(nn.Module):
 
     def reset(self, dones=None) -> None:
         return None
-
-    def optimizer_parameters(self) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
-        """Return disjoint actor/critic and context parameter sets."""
-        context = list(self.context_encoder.parameters())
-        context_ids = {id(p) for p in context}
-        actor_critic = [p for p in self.parameters() if id(p) not in context_ids]
-        if len({id(p) for p in actor_critic + context}) != len(actor_critic) + len(context):
-            raise RuntimeError("B1Z1 PACT optimizer parameter groups overlap")
-        return actor_critic, context
-
 
     def get_optim_groups(self, weight_decay: float = 1e-6, strong_decay: float = 1e-1):
         """Return disjoint AdamW groups for this B1/Z1 actor-critic.

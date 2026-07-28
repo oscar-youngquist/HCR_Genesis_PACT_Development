@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 import math
+import statistics
 from collections import deque
 
 import torch
@@ -35,6 +36,7 @@ class B1Z1PACTRunner:
         ).to(device)
 
         condition_dim = policy_cfg["cenet_latent_dim"] + 3 + 6 + 3
+
         self.force_decoder = B1Z1PACTDecoder(condition_dim, 15, activation=policy_cfg["activation"]).to(device)
         self.privileged_decoder = B1Z1PACTDecoder(condition_dim, env.num_privileged_obs, activation=policy_cfg["activation"]).to(device)
 
@@ -64,7 +66,7 @@ class B1Z1PACTRunner:
         merged.update({key: policy_cfg[key] for key in (
             "pinn_loss_weight", "pinn_warmup", "pinn_init_steps", "predicted_force_detach",
             "force_gate_ema_alpha", "force_gate_threshold", "force_gate_hysteresis", "force_gate_patience",
-            "explicit_base_vel_weight", "explicit_base_wrench_weight", "explicit_ee_force_weight",
+            "explicit_base_vel_weight", "explicit_base_wrench_weight", "explicit_ee_force_weight", "explicit_foot_contact_weight",
             "force_decoder_weight", "privileged_decoder_weight", "vae_kld_weight",
         )})
 
@@ -72,7 +74,7 @@ class B1Z1PACTRunner:
 
         self.alg.init_storage(
             env.num_envs, runner_cfg["num_steps_per_env"], env.num_obs, critic_dim,
-            history_dim, 2 * env.num_actions, 12, 15, env.num_privileged_obs, 180,
+            history_dim, 2 * env.num_actions, env.num_exp_labels, 15, env.num_privileged_obs, 180,
         )
 
         self.steps, self.save_interval = runner_cfg["num_steps_per_env"], runner_cfg["save_interval"]
@@ -123,7 +125,10 @@ class B1Z1PACTRunner:
             update_start = time.time()
             metrics = self.alg.update(iteration)
             learning_time = time.time() - update_start
-            self._log(iteration, metrics, collection_time, learning_time, rewards, lengths, ep_infos)
+            self._log(
+                iteration, self.current_learning_iteration + num_learning_iterations,
+                metrics, collection_time, learning_time, rewards, lengths, ep_infos,
+            )
             if self.log_dir and iteration % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, f"model_{iteration}.pt"))
             ep_infos.clear()
@@ -132,22 +137,63 @@ class B1Z1PACTRunner:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
         self.dynamics.close()
 
-    def _log(self, iteration, metrics, collection_time, learning_time, rewards, lengths, ep_infos):
+    def _log(self, iteration, total_iterations, metrics, collection_time, learning_time, rewards, lengths, ep_infos):
+        """Print the shared PACT/UniFP training panel plus B1Z1 diagnostics."""
         self.total_timesteps += self.steps * self.env.num_envs
-        self.total_time += collection_time + learning_time
+        iteration_time = collection_time + learning_time
+        self.total_time += iteration_time
+        fps = self.steps * self.env.num_envs / max(iteration_time, 1e-6)
+        position_std = self.actor_critic.std[:self.env.num_actions].mean().item()
+        torque_std = self.actor_critic.std[self.env.num_actions:].mean().item()
+        mean_reward = statistics.mean(rewards) if rewards else None
+        mean_length = statistics.mean(lengths) if lengths else None
+
         if self.writer:
             for name, value in metrics.items(): self.writer.add_scalar(f"Loss/{name}", value, iteration)
-            self.writer.add_scalar("Policy/position_noise_std", self.actor_critic.std[:self.env.num_actions].mean(), iteration)
-            self.writer.add_scalar("Policy/torque_noise_std", self.actor_critic.std[self.env.num_actions:].mean(), iteration)
-            self.writer.add_scalar("Perf/fps", self.steps * self.env.num_envs / max(collection_time + learning_time, 1e-6), iteration)
-            if rewards: self.writer.add_scalar("Train/mean_reward", sum(rewards) / len(rewards), iteration)
-            if lengths: self.writer.add_scalar("Train/mean_episode_length", sum(lengths) / len(lengths), iteration)
+            self.writer.add_scalar("Policy/position_noise_std", position_std, iteration)
+            self.writer.add_scalar("Policy/torque_noise_std", torque_std, iteration)
+            self.writer.add_scalar("Perf/fps", fps, iteration)
+            self.writer.add_scalar("Perf/collection_time", collection_time, iteration)
+            self.writer.add_scalar("Perf/learning_time", learning_time, iteration)
+            if mean_reward is not None: self.writer.add_scalar("Train/mean_reward", mean_reward, iteration)
+            if mean_length is not None: self.writer.add_scalar("Train/mean_episode_length", mean_length, iteration)
             if ep_infos:
                 for key, value in ep_infos[-1].items(): self.writer.add_scalar(f"Episode/{key}", float(value), iteration)
-        print(f"B1Z1 PACT iteration {iteration}: reward={sum(rewards)/len(rewards) if rewards else 0:.3f} "
-              f"ppo={metrics['surrogate']:.4f} pinn={metrics['pinn']:.4f} "
-              f"force_gate={metrics['force_gate_active']:.0f} "
-              f"z_boot={metrics['latent_boot_probability']:.2f} explicit_boot={metrics['explicit_boot_probability']:.2f}")
+
+        width, pad = 80, 35
+        header = f" \033[1m Learning iteration {iteration}/{total_iterations} \033[0m "
+        lines = [
+            "#" * width, header.center(width), "",
+            f"{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {collection_time:.3f}s, learning {learning_time:.3f}s)",
+            f"{'PINN loss:':>{pad}} {metrics['pinn']:.4f}",
+            f"{'Value function loss:':>{pad}} {metrics['value']:.4f}",
+            f"{'Surrogate loss:':>{pad}} {metrics['surrogate']:.4f}",
+            f"{'Base velocity loss:':>{pad}} {metrics['base_velo']:.4f}",
+            f"{'Base wrench loss:':>{pad}} {metrics['base_wrench']:.4f}",
+            f"{'EE force loss:':>{pad}} {metrics['ee_force']:.4f}",
+            f"{'Foot-contact BCE loss:':>{pad}} {metrics['foot_contact']:.4f}",
+            f"{'Privileged reconstruction loss:':>{pad}} {metrics['privileged_decoder']:.4f}",
+            f"{'Force decoder loss:':>{pad}} {metrics['force_decoder']:.4f}",
+            f"{'KL divergence loss:':>{pad}} {metrics['kl']:.4f}",
+            f"{'Position action noise std:':>{pad}} {position_std:.2f}",
+            f"{'Torque action noise std:':>{pad}} {torque_std:.2f}",
+            f"{'Force decoder gate:':>{pad}} {metrics['force_gate_active']:.0f}",
+            f"{'Latent bootstrap probability:':>{pad}} {metrics['latent_boot_probability']:.4f}",
+            f"{'Explicit bootstrap probability:':>{pad}} {metrics['explicit_boot_probability']:.4f}",
+        ]
+        if mean_reward is not None:
+            lines.extend((f"{'Mean reward:':>{pad}} {mean_reward:.2f}", f"{'Mean episode length:':>{pad}} {mean_length:.2f}"))
+        for key, value in (ep_infos[-1].items() if ep_infos else ()):
+            lines.append(f"{f'Mean episode {key}:':>{pad}} {float(value):.4f}")
+        eta = self.total_time / max(iteration + 1, 1) * max(total_iterations - iteration, 0)
+        lines.extend((
+            "-" * width,
+            f"{'Total timesteps:':>{pad}} {self.total_timesteps}",
+            f"{'Iteration time:':>{pad}} {iteration_time:.2f}s",
+            f"{'Total time:':>{pad}} {self.total_time:.2f}s",
+            f"{'ETA:':>{pad}} {eta:.1f}s",
+        ))
+        print("\n".join(lines))
 
     def save(self, path):
         torch.save({

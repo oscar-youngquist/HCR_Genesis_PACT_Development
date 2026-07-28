@@ -390,8 +390,8 @@ class B1UniFPCfg:
             pass
 
     class rewards:
-        only_positive_rewards = False
-        use_reward_curriculum = False
+        only_positive_rewards = True
+        use_reward_curriculum = True
         
         tracking_sigma = 0.10
         sigma_force = 1.0 / 50.0

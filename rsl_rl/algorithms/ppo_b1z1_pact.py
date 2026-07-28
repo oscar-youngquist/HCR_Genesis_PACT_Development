@@ -34,22 +34,6 @@ class PPO_B1Z1PACT:
         # actor/critic/context partitioning and its weight-decay conventions.
         actor_groups, context_groups = actor_critic.get_optim_groups()
 
-        self.actor_optimizer = PCGrad(optim.AdamW(actor_groups, lr=cfg["learning_rate"]), reduction="sum")
-
-        # # We want to reduce the LR of the critic
-        for param_group in self.actor_optimizer.optimizer.param_groups:
-            # specifically modifies the learning rate of the crtic specific parameters
-            if "name" in param_group.keys():
-                if "critic" in param_group["name"]:
-                    param_group['lr'] = (cfg["learning_rate"] / 3.0)
-
-        # The estimator is one coordinated system: history -> [z, state
-        # estimates] -> {force decoder, privileged decoder}. A single Adam
-        # state and one combined auxiliary loss prevent its heads from taking
-        # separate, sequential parameter steps on the same minibatch.
-        # Preserve the encoder group's decay from get_optim_groups(), then
-        # make decoder groups explicit as required by AdamW. Raw Parameter
-        # lists cannot be concatenated with optimizer-group dictionaries.
         encoder_weight_decay = context_groups[0].get("weight_decay", 0.0)
         auxiliary_groups = list(context_groups) + [
             {
@@ -63,14 +47,37 @@ class PPO_B1Z1PACT:
                 "name": "privileged_decoder",
             },
         ]
-        auxiliary_params = [parameter for group in auxiliary_groups for parameter in group["params"]]
-        actor_params = [parameter for group in actor_groups for parameter in group["params"]]
-        auxiliary_ids = {id(parameter) for parameter in auxiliary_params}
-        actor_ids = {id(parameter) for parameter in actor_params}
-        if len(auxiliary_ids) != len(auxiliary_params) or auxiliary_ids.intersection(actor_ids):
-            raise RuntimeError("B1Z1 PACT actor and auxiliary optimizer parameter groups must be disjoint")
 
-        self.auxiliary_optimizer = optim.AdamW(auxiliary_groups, lr=2.0e-4)
+        # We want the encoder to get updates from both (1) PPO/PINN training and (2) Encoder-specific representation training
+        # PPO/PINN update only the history encoder; reconstruction also owns
+        # both decoder heads through the shared auxiliary optimizer below.
+        ppo_enc_groups = [
+            {
+                "params": list(group["params"]),
+                "weight_decay": group.get("weight_decay", 0.0),
+                "name": f"ppo_{group['name']}",
+            }
+            for group in context_groups
+        ]
+        auxiliary_enc_groups = [
+            {
+                "params": list(group["params"]),
+                "weight_decay": group.get("weight_decay", 0.0),
+                "name": f"auxiliary_{group['name']}",
+            }
+            for group in auxiliary_groups
+        ]
+
+        self.actor_optimizer = PCGrad(optim.AdamW([*actor_groups,*ppo_enc_groups], lr=cfg["learning_rate"]), reduction="sum")
+
+        # # We want to reduce the LR of the critic
+        for param_group in self.actor_optimizer.optimizer.param_groups:
+            # specifically modifies the learning rate of the crtic specific parameters
+            if "name" in param_group.keys():
+                if "critic" in param_group["name"]:
+                    param_group['lr'] = (cfg["learning_rate"] / 3.0)
+
+        self.auxiliary_optimizer = optim.AdamW(auxiliary_enc_groups, lr=2.0e-4)
 
         self.transition = RolloutStorageB1Z1PACT.Transition()
         self.storage = None
@@ -299,12 +306,17 @@ class PPO_B1Z1PACT:
         pred_velo_loss = F.mse_loss(aux_context["base_velocity"], labels[:, :3])
         pred_base_wrench_loss = F.mse_loss(aux_context["base_wrench"], labels[:, 3:9])
         pred_ee_force_loss = F.mse_loss(aux_context["ee_force"], labels[:, 9:12])
+        # BCE-with-logits is the stable binary-state reconstruction loss.
+        pred_foot_contact_loss = F.binary_cross_entropy_with_logits(
+            aux_context["foot_contact_logits"], labels[:, 12:16],
+        )
 
         # Loss for explicit current-state-estimation
         aux_explicit = (
             self.cfg["explicit_base_vel_weight"] * pred_velo_loss
             + self.cfg["explicit_base_wrench_weight"] * pred_base_wrench_loss
             + self.cfg["explicit_ee_force_weight"] * pred_ee_force_loss
+            + self.cfg["explicit_foot_contact_weight"] * pred_foot_contact_loss
         )
 
         # VAE recon + KL losses
@@ -338,10 +350,17 @@ class PPO_B1Z1PACT:
             "base_velocity": pred_velo_loss,
             "base_wrench": pred_base_wrench_loss,
             "ee_force": pred_ee_force_loss,
+            "foot_contact": pred_foot_contact_loss,
             "force_decoder": aux_force_loss,
             "privileged_decoder": aux_privileged_loss,
             "kl": aux_kl,
-            "explicit_prediction": torch.cat((aux_context["base_velocity"], aux_context["base_wrench"], aux_context["ee_force"]), dim=-1).detach(),
+            # Sigmoid probabilities provide a bounded contact prediction for
+            # the original PACT MSE-based bootstrap statistic; BCE above is
+            # still the optimization objective for these binary labels.
+            "explicit_prediction": torch.cat((
+                aux_context["base_velocity"], aux_context["base_wrench"], aux_context["ee_force"],
+                torch.sigmoid(aux_context["foot_contact_logits"]),
+            ), dim=-1).detach(),
             "explicit_target": labels.detach(),
             "privileged_prediction": aux_privileged_prediction.detach(),
             "privileged_target": obs_target.detach(),
@@ -408,7 +427,7 @@ class PPO_B1Z1PACT:
             self.pinn_weight = progress * self.cfg["pinn_loss_weight"]
             self.pinn_updates += 1
         metrics = {name: 0.0 for name in (
-            "value", "surrogate", "base_velo", "base_wrench", "ee_force",
+            "value", "surrogate", "base_velo", "base_wrench", "ee_force", "foot_contact",
             "force_decoder", "privileged_decoder", "kl", "pinn",
         )}
         # PPO_PACT's float64 sufficient statistics. Keep one set per maskable
@@ -477,6 +496,7 @@ class PPO_B1Z1PACT:
             # Log metrics
             for name, val in (("value", value), ("surrogate", surrogate), ("base_velo", aux["base_velocity"]),
                               ("base_wrench", aux["base_wrench"]), ("ee_force", aux["ee_force"]),
+                              ("foot_contact", aux["foot_contact"]),
                               ("force_decoder", aux["force_decoder"]), ("privileged_decoder", aux["privileged_decoder"]),
                               ("kl", aux["kl"]), ("pinn", pinn)):
                 metrics[name] += val.detach().item()

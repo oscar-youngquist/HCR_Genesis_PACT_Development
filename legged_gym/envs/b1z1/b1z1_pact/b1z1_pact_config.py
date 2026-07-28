@@ -12,12 +12,12 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # 17 joint velocities + 34 coupled PACT actions + 3 FK EE errors +
         # 6 commands.
         num_observations = 82
-        # One 408-D privileged frame, including 187 terrain-height values.
-        # The critic consumes a three-frame stack (1,224-D) in the runner.
-        num_privileged_obs = 408
+        # One 412-D privileged frame, including 187 terrain-height values.
+        # The critic consumes a three-frame stack (1,236-D) in the runner.
+        num_privileged_obs = 412
         num_priv_stack = 3
-        num_explicit_recon_obs = 12
-        num_pred_obs = 12
+        num_explicit_recon_obs = 16
+        num_pred_obs = 16
         num_actions = 17
         num_policy_actions = 34
         num_gripper_joints = 2
@@ -711,27 +711,37 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
     runner_class_name = "B1Z1PACTRunner"
 
     class policy:
+
+        # Model paramaters
         actor_layers = [512, 256, 128]
         critic_layers = [1024, 256, 128]
         actor_hidden_dims = actor_layers
         critic_hidden_dims = critic_layers
+
         activation = "elu"
+
         init_noise_std = 0.65
+
         cenet_enc_layers = [256, 128]
         cenet_latent_dim = 16
         cenet_base_vel_dim = 3
         cenet_base_wrench_dim = 6
         cenet_ee_force_dim = 3
-        film_hidden_dim = 128
+        film_hidden_dim = 64
+
+        # Loss weights
         explicit_base_vel_weight = 1.0
         explicit_base_wrench_weight = 1.0
         explicit_ee_force_weight = 1.0
+        explicit_foot_contact_weight = 1.0
         force_decoder_weight = 1.0
         privileged_decoder_weight = 1.0
         vae_kld_weight = 1.0e-3
-        pinn_loss_weight = 0.01
+
+        pinn_loss_weight = 1.00
         pinn_warmup = 100
         pinn_init_steps = 100
+
         predicted_force_detach = True
         force_gate_ema_alpha = 0.05
         force_gate_threshold = 0.05

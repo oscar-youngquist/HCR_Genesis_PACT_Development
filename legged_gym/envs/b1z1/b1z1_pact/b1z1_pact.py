@@ -631,16 +631,19 @@ class B1Z1PACT(LeggedRobot):
         if self.add_noise:
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
 
-        # Context labels: command-space velocity, base wrench, EE force.
+        # Context labels: command-space velocity, base wrench, EE force, and
+        # four binary foot-contact indicators for the estimator BCE objective.
         # They are privileged during training and predicted from history later.
         base_command_velocity = torch.cat(
             (self.simulator.base_lin_vel[:, :2], self.simulator.base_ang_vel[:, 2:3]), dim=-1
         )
+        contact_mask = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
         torch.cat(
             (
                 base_command_velocity * self.obs_scales.lin_vel,
                 base_wrench_world * self.base_wrench_scale,
                 self.ee_force_ext_world * self.obs_scales.ee_force,
+                contact_mask,
             ),
             dim=-1,
             out=self.explicit_labels_buf,
@@ -651,7 +654,6 @@ class B1Z1PACT(LeggedRobot):
         mass_params[:, 0:1] = self.simulator._added_base_mass
         mass_params[:, 1:4] = self.simulator._base_com_bias
         stance_mask = self._get_gait_phase()
-        contact_mask = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
 
         # Privileged critic observation mirrors the original UniFP ordering:
         # estimator labels first, then randomized dynamics/contact/gait state,
