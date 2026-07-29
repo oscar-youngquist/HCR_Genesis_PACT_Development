@@ -44,7 +44,7 @@ class B1Z1UniFP(BaseTask):
 
     The environment keeps the UniFP learning problem intact:
     - 17 learned position actions for 12 B1 leg joints + 5 Z1 arm joints.
-    - A 15-D command vector: base velocity, EE spherical position, reserved
+    - A 15-D command vector: base velocity, EE spherical position, reservedself._reset_progress_statistics()
       orientation slots, EE force command, and base force command.
     - A CSE/adaptation target (`explicit_labels_buf`) containing base velocity,
       EE spherical state, EE external force, and base external force.
@@ -394,6 +394,7 @@ class B1Z1UniFP(BaseTask):
         self._resample_ee_goal(env_ids, is_init=True)
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
+        self._reset_progress_statistics(env_ids)
         # Simulator reset applies Genesis-side domain randomization and writes
         # root/DOF state into the Genesis entity.
         self.simulator.reset_idx(env_ids)
@@ -408,6 +409,12 @@ class B1Z1UniFP(BaseTask):
         self.last_actions[env_ids] = 0.0
         self.llast_actions[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
+        self.feet_stance_time[env_ids] = 0.0
+        self.last_contacts[env_ids] = False
+        self.valid_swing[env_ids] = False
+        self.step_liftoff_pos[env_ids] = 0.0
+        self.step_direction_world[env_ids] = 0.0
+        self.step_max_progress[env_ids] = 0.0
         self.gait_indices[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -421,9 +428,8 @@ class B1Z1UniFP(BaseTask):
         self.estimated_ee_force_local[env_ids] = 0.0
         self.estimated_base_force_local[env_ids] = 0.0
         self.prev_ee_error[env_ids] = 0.0
-        # Contact history is a boolean latch used by feet-air-time filtering.
-        self.last_contacts[env_ids] = False
-        
+        self.progress_vel_ema[env_ids] = 0.0
+
         self._reset_force_events(env_ids)
         self._randomize_force_gains(env_ids)
 
@@ -870,6 +876,8 @@ class B1Z1UniFP(BaseTask):
         else:
             self.commands[stop_env_ids, 2] = 0.0
         self._resample_ee_goal(env_ids)
+
+        self._reset_progress_statistics(env_ids)
 
     def _update_heading_command(self):
         """PACT-style desired heading conversion without using UniFP command slot 3."""
@@ -1529,7 +1537,7 @@ class B1Z1UniFP(BaseTask):
         self.actions = torch.zeros(self.num_envs, self.num_actions, device=self.device)
         self.last_actions = torch.zeros_like(self.actions)
         self.llast_actions = torch.zeros_like(self.actions)
-        self.feet_air_time = torch.zeros(self.num_envs, len(self.simulator.feet_indices), device=self.device)
+
         # Boolean previous-step foot-contact latch. Keeping this bool avoids
         # ambiguous reward dtype changes when contact rewards reuse the buffer.
         self.last_contacts = torch.zeros(
@@ -1538,6 +1546,27 @@ class B1Z1UniFP(BaseTask):
             dtype=torch.bool,
             device=self.device,
         )
+        self.feet_air_time = torch.zeros(self.num_envs, len(self.simulator.feet_indices), device=self.device)
+        self.feet_stance_time = torch.zeros_like(self.feet_air_time)
+        self.valid_swing = torch.zeros_like(self.last_contacts)
+
+        # Prevent multiple reward functions from updating the statistics in one step.
+        self._feet_stats_update_step = -1
+        self._feet_stats = {}
+
+        self.progress_vel_ema = torch.zeros(self.num_envs, 2, device=self.device)
+
+        self.step_liftoff_pos = torch.zeros(
+            self.num_envs, 4, 2, device=self.device
+        )
+        self.step_direction_world = torch.zeros_like(
+            self.step_liftoff_pos
+        )
+        self.step_max_progress = torch.zeros(
+            self.num_envs, 4, device=self.device
+        )
+
+
         # Original UniFP uses a persistent phase variable instead of deriving
         # phase directly from episode time. The phase only advances while a
         # walking command is active and is reset to zero for standing commands.
@@ -1808,34 +1837,34 @@ class B1Z1UniFP(BaseTask):
 
         error = torch.sum(torch.square(base_lin_vel_offset - self.simulator.base_lin_vel[:, :2]), dim=1)
 
-        # return torch.exp(-error / self.cfg.rewards.tracking_sigma)
+        return torch.exp(-error / self.cfg.rewards.tracking_sigma)
 
-        # Remove the reward that comes from simply standing still IF the robot should be moving
-        #     help remove the incentive to stand-still to accumulate positive reward
-        target_mag = torch.norm(base_lin_vel_offset, dim=1)
+        # # Remove the reward that comes from simply standing still IF the robot should be moving
+        # #     help remove the incentive to stand-still to accumulate positive reward
+        # target_mag = torch.norm(base_lin_vel_offset, dim=1)
 
-        tracking = torch.exp(-error / self.cfg.rewards.tracking_sigma)
-        standing_baseline = torch.exp(
-            -torch.sum(torch.square(base_lin_vel_offset), dim=1) / self.cfg.rewards.tracking_sigma
-        )
+        # tracking = torch.exp(-error / self.cfg.rewards.tracking_sigma)
+        # standing_baseline = torch.exp(
+        #     -torch.sum(torch.square(base_lin_vel_offset), dim=1) / self.cfg.rewards.tracking_sigma
+        # )
 
-        moving = target_mag > 0.1
+        # moving = target_mag > 0.1
 
-        max_improvement = (1.0 - standing_baseline).clamp_min(1e-4)
+        # max_improvement = (1.0 - standing_baseline).clamp_min(1e-4)
 
-        moving_reward = (
-            tracking - standing_baseline
-        ) / max_improvement
+        # moving_reward = (
+        #     tracking - standing_baseline
+        # ) / max_improvement
 
-        moving_reward = torch.clamp(moving_reward, -1.0, 1.0)
+        # moving_reward = torch.clamp(moving_reward, -1.0, 1.0)
 
-        reward = torch.where(
-            moving,
-            moving_reward,
-            tracking,
-        )
+        # reward = torch.where(
+        #     moving,
+        #     moving_reward,
+        #     tracking,
+        # )
 
-        return reward
+        # return reward.clamp_(min=0.0)
 
 
     def _reward_tracking_ang_vel(self):
@@ -1970,21 +1999,169 @@ class B1Z1UniFP(BaseTask):
     def _reward_feet_contact_forces(self):
         return torch.sum((torch.norm(self.simulator.link_contact_forces[:, self.simulator.feet_indices, :], dim=-1) - self.cfg.rewards.max_contact_force).clip(min=0.0), dim=1)
 
-    def _reward_feet_air_time(self):
-        contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0
-        contact_filt = torch.logical_or(contact, self.last_contacts)
-        # Preserve the buffer object and dtype so other rewards cannot inherit
-        # accidental bool/float conversions through aliasing.
-        self.last_contacts.copy_(contact)
-        first_contact = (self.feet_air_time > 0.) * contact_filt
+    def _update_feet_air_time_stats(self):
+        """
+        Update and cache foot contact, stance-time, and air-time statistics.
+
+        This function may be called by multiple rewards, but updates the stateful
+        buffers at most once per environment step.
+        """
+        current_step = int(self.common_step_counter)
+
+        if self._feet_stats_update_step == current_step:
+            return self._feet_stats
+
+        contact = (
+            self.simulator.link_contact_forces[
+                :, self.simulator.feet_indices, 2
+            ] > 1.0
+        )
+
+        previous_contact = self.last_contacts.clone()
+
+        # Two-sample contact filtering suppresses single-frame contact losses.
+        contact_filt = torch.logical_or(contact, previous_contact)
+
+        previous_air_time = self.feet_air_time.clone()
+        previous_stance_time = self.feet_stance_time.clone()
+
+        # Raw contact-to-noncontact transition.
+        liftoff = previous_contact & (~contact)
+
+        # Only accept liftoff after a meaningful stance interval. This reduces
+        # reward exploitation through rapid contact chatter.
+        valid_liftoff = (
+            liftoff
+            & (previous_stance_time >= 0.08)
+        )
+
+        # Preserve valid-swing status until the foot contacts again.
+        self.valid_swing &= ~contact
+        self.valid_swing |= valid_liftoff
+
+        # Advance air time before detecting touchdown, matching the original
+        # air-time reward convention.
         self.feet_air_time += self.dt
-        rew_airTime = torch.clamp(torch.sum((self.feet_air_time - 0.18) * first_contact, dim=1), min=0.0)  # reward only on first contact with the ground
-        rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.1  # no reward for zero command
+
+        first_contact = (
+            (previous_air_time > 0.0)
+            & contact_filt
+        )
+
+        # Save duration before resetting feet that have contacted.
+        touchdown_air_time = self.feet_air_time.clone()
+
+        # Air time is retained only while filtered contact is absent.
         self.feet_air_time *= (~contact_filt).float()
-        return rew_airTime
+
+        # Update stance duration.
+        self.feet_stance_time += self.dt
+        self.feet_stance_time *= contact_filt.float()
+
+        # Store the newest raw contact state without replacing the buffer.
+        self.last_contacts.copy_(contact)
+
+        self._feet_stats = {
+            "contact": contact,
+            "contact_filt": contact_filt,
+            "first_contact": first_contact,
+            "liftoff": liftoff,
+            "valid_liftoff": valid_liftoff,
+            "valid_swing": self.valid_swing.clone(),
+            "air_time": self.feet_air_time.clone(),
+            "touchdown_air_time": touchdown_air_time,
+            "stance_time": self.feet_stance_time.clone(),
+        }
+        self._feet_stats_update_step = current_step
+
+        return self._feet_stats
+
+    # def _reward_feet_air_time(self):
+    #     contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0
+    #     contact_filt = torch.logical_or(contact, self.last_contacts)
+    #     # Preserve the buffer object and dtype so other rewards cannot inherit
+    #     # accidental bool/float conversions through aliasing.
+    #     self.last_contacts.copy_(contact)
+    #     first_contact = (self.feet_air_time > 0.) * contact_filt
+    #     self.feet_air_time += self.dt
+    #     rew_airTime = torch.clamp(torch.sum((self.feet_air_time - 0.12) * first_contact, dim=1), min=0.0)  # reward only on first contact with the ground
+    #     rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.1  # no reward for zero command
+    #     self.feet_air_time *= (~contact_filt).float()
+    #     return rew_airTime
+
+    def _reward_feet_air_time(self):
+        """
+        Reward sufficiently long swing periods when the foot touches down.
+        """
+        stats = self._update_feet_air_time_stats()
+
+        first_contact = stats["first_contact"]
+        touchdown_air_time = stats["touchdown_air_time"]
+
+        per_foot_reward = torch.clamp(
+            touchdown_air_time - 0.5,
+            min=0.0,
+        )
+
+        reward = torch.sum(
+            per_foot_reward * first_contact.float(),
+            dim=1,
+        )
+
+        reward *= self.get_walking_cmd_mask().float()
+
+        return reward
+
+    def _reward_early_swing(self):
+        """
+        Reward upward foot motion during the beginning of a valid swing.
+
+        A swing is valid only when initiated after at least 0.08 seconds of
+        continuous stance. This helps suppress rapid tapping exploits.
+        """
+        stats = self._update_feet_air_time_stats()
+
+        contact = stats["contact"]
+        contact_filt = stats["contact_filt"]
+        air_time = stats["air_time"]
+        valid_swing = stats["valid_swing"]
+
+        # Apply guidance during the first 100 ms of a valid swing.
+        early_swing = (
+            (~contact_filt)
+            & valid_swing
+            & (air_time > 0.0)
+            & (air_time <= 0.10)
+        )
+
+        foot_vel_z = self.simulator.feet_vel[:, :, 2]
+
+        upward_velocity_reward = torch.clamp(
+            foot_vel_z / 0.40,
+            min=0.0,
+            max=1.0,
+        )
+
+        per_foot_reward = (
+            early_swing.float()
+            * upward_velocity_reward
+        )
+
+        # Prevent aerial hopping from earning swing-initiation reward.
+        support_gate = contact.sum(dim=1) >= 2
+
+        # Two swing feet constitute a full reward.
+        reward = per_foot_reward.sum(dim=1) / 2.0
+        reward *= support_gate.float()
+        reward *= self.get_walking_cmd_mask().float()
+
+        return reward
 
     def _reward_feet_height(self):
-        return torch.mean(torch.square(self.simulator.feet_pos[:, :, 2] - 0.08), dim=1)
+        feet_height = self.simulator.feet_pos[:, :, 2]
+        errors = torch.relu(feet_height - 0.10)
+        moving = self.get_walking_cmd_mask()
+        return torch.mean(torch.square(errors), dim=1) * moving.float()
 
     def _reward_feet_height_high(self):
         return torch.mean((self.simulator.feet_pos[:, :, 2] - 0.18).clip(min=0.0), dim=1)
@@ -2265,6 +2442,9 @@ class B1Z1UniFP(BaseTask):
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
         swing = ~contact
 
+        desired_swing = 1.0 - self._get_gait_phase()
+        num_swing = desired_swing.sum(dim=1)
+
         moving = self.get_walking_cmd_mask()
 
         # Flatten 3x3 terrain patch if needed, then take local max height near each foot
@@ -2294,12 +2474,26 @@ class B1Z1UniFP(BaseTask):
         # Weight excess penalty less than main tracking term
         excess_weight = 0.25  # tune: 0.1 - 0.5
 
+        # total_err = torch.sum(
+        #     swing * (track_err + excess_weight * excess_err),
+        #     dim=-1
+        # )                                                               # (N,)
+
+
         total_err = torch.sum(
-            swing * (track_err + excess_weight * excess_err),
+            swing * (track_err),
             dim=-1
         )                                                               # (N,)
 
-        return torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma) * moving.float()
+
+        rew = torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma)
+
+        # No clearance reward during double support.
+        # rew *= (num_swing > 0).float()
+        rew *= moving.float()
+
+        # return torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma) * moving.float()
+        return rew
 
     def _reward_feet_contact_number(self):
         """
@@ -2342,7 +2536,7 @@ class B1Z1UniFP(BaseTask):
         stance_mask = self._get_gait_phase()
         stance_mask = torch.stack([stance_mask, stance_mask, stance_mask], 2).reshape(self.num_envs, 12)
 
-        dof_error = torch.abs(joint_pos - pos_target)
+        dof_error = torch.square(joint_pos - pos_target)
         dof_error[stance_mask == 1] = 0.0
 
         rew = torch.exp(-torch.sum(dof_error, dim=1) * 0.05)
@@ -2790,3 +2984,373 @@ class B1Z1UniFP(BaseTask):
         )
 
         return not_reached_gate * excess_tilt
+
+    def _reward_no_progress(self):
+        """
+        Return a bounded penalty in [0, 1]:
+
+            0: sufficient locomotion progress
+            1: stationary, reversing, unsupported, or insufficient progress
+
+        Configure with a negative reward scale.
+        """
+
+        target_vel = self.commands[:, :2]
+        target_mag = torch.norm(target_vel, dim=1)
+
+        moving_cmd = target_mag > 0.15
+        target_dir = target_vel / target_mag.unsqueeze(1).clamp_min(1e-6)
+
+        # If base_lin_vel is world-frame, rotate it into the yaw-aligned command frame.
+        measured_vel = quat_rotate_inverse(
+            self._get_base_yaw_quat(),
+            self.simulator.base_lin_vel,
+        )[:, :2]
+
+        # Signed velocity EMA suppresses bouncing and alternating motion.
+        smoothing_time = 0.25
+        alpha = self.dt / (smoothing_time + self.dt)
+
+        self.progress_vel_ema.lerp_(
+            measured_vel,
+            alpha,
+        )
+
+        aligned_speed = torch.sum(
+            self.progress_vel_ema * target_dir,
+            dim=1,
+        )
+
+        # Require at least 40% of commanded speed before considering progress adequate.
+        required_speed = 0.40 * target_mag
+        progress_ratio = aligned_speed / required_speed.clamp_min(1e-6)
+
+        # Smooth transition from no progress to sufficient progress.
+        engagement = progress_ratio.clamp(0.0, 1.0)
+        engagement = engagement.square() * (3.0 - 2.0 * engagement)
+
+        # Do not count falling, jumping, or unsupported motion as locomotion.
+        contact = (
+            self.simulator.link_contact_forces[
+                :, self.simulator.feet_indices, 2
+            ] > 5.0
+        )
+        supported = contact.sum(dim=1) >= 2
+
+        # Confirm the sign convention: Genesis commonly gives approximately -1 here
+        # when the torso is upright.
+        upright = self.simulator.projected_gravity[:, 2] < -0.8
+
+        valid_locomotion = supported & upright
+        engagement *= valid_locomotion.float()
+
+        no_progress = 1.0 - engagement
+
+        # Avoid penalizing the policy immediately after reset.
+        grace_complete = self.episode_length_buf * self.dt > 0.30
+
+        return (
+            no_progress
+            * moving_cmd.float()
+            * grace_complete.float()
+        )
+
+    def _reset_progress_statistics(self, env_ids):
+        if len(env_ids) == 0:
+            return
+
+        self.progress_delta_buffer[env_ids] = 0.0
+        self.progress_desired_buffer[env_ids] = 0.0
+        self.progress_valid_steps[env_ids] = 0
+
+        self.last_progress_base_pos[env_ids] = (
+            self.simulator.base_pos[env_ids, :2]
+        )
+
+    def _update_progress_statistics(self):
+        """Update rolling actual and commanded world-frame displacement."""
+
+        current_step = int(self.common_step_counter)
+        if self._progress_update_step == current_step:
+            return
+
+        current_pos = self.simulator.base_pos[:, :2]
+
+        # Per-step physical displacement.
+        delta_pos = current_pos - self.last_progress_base_pos
+        self.last_progress_base_pos.copy_(current_pos)
+
+        # Reject reset/teleportation spikes.
+        delta_pos = torch.where(
+            torch.norm(delta_pos, dim=1, keepdim=True) < 0.25,
+            delta_pos,
+            torch.zeros_like(delta_pos),
+        )
+
+        # Convert yaw-frame velocity commands into world-frame displacement.
+        command_local = torch.zeros(
+            self.num_envs, 3, device=self.device
+        )
+        command_local[:, :2] = self.commands[:, :2]
+
+        command_world = quat_apply(
+            self._get_base_yaw_quat(),
+            command_local,
+        )[:, :2]
+
+        desired_delta = command_world * self.dt
+
+        index = self.progress_buffer_index
+        self.progress_delta_buffer[:, index] = delta_pos
+        self.progress_desired_buffer[:, index] = desired_delta
+
+        self.progress_valid_steps.add_(1)
+        self.progress_valid_steps.clamp_(
+            max=self.progress_window_steps
+        )
+
+        self.progress_buffer_index = (
+            index + 1
+        ) % self.progress_window_steps
+
+        self._progress_update_step = current_step
+
+
+    def _reward_no_physical_progress(self):
+        """
+        Bounded penalty in [0, 1].
+
+        0: sufficient net physical progress
+        1: standing, shuffling, reversing, or unsupported motion
+
+        Configure with a negative reward scale.
+        """
+        self._update_progress_statistics()
+
+        actual_displacement = self.progress_delta_buffer.sum(dim=1)
+        desired_displacement = self.progress_desired_buffer.sum(dim=1)
+
+        desired_distance = torch.norm(
+            desired_displacement,
+            dim=1,
+        )
+
+        desired_direction = (
+            desired_displacement
+            / desired_distance.unsqueeze(1).clamp_min(1e-6)
+        )
+
+        aligned_progress = torch.sum(
+            actual_displacement * desired_direction,
+            dim=1,
+        )
+
+        # Require 40% of commanded displacement over the window.
+        required_progress = 0.40 * desired_distance
+
+        progress_ratio = (
+            aligned_progress
+            / required_progress.clamp_min(1e-6)
+        )
+
+        # Smooth bounded progress score.
+        engagement = progress_ratio.clamp(0.0, 1.0)
+        engagement = engagement.square() * (
+            3.0 - 2.0 * engagement
+        )
+
+        # Only apply after enough history has accumulated.
+        minimum_history = max(
+            1, int(round(0.20 / self.dt))
+        )
+        history_ready = (
+            self.progress_valid_steps >= minimum_history
+        )
+
+        moving_command = (
+            torch.norm(self.commands[:, :2], dim=1) > 0.15
+        )
+
+        # Do not count falling or aerial motion as locomotion.
+        contact = (
+            self.simulator.link_contact_forces[
+                :, self.simulator.feet_indices, 2
+            ] > 5.0
+        )
+        supported = contact.sum(dim=1) >= 2
+        upright = self.simulator.projected_gravity[:, 2] < -0.8
+
+        engagement *= (supported & upright).float()
+
+        penalty = 1.0 - engagement
+
+        return (
+            penalty
+            * moving_command.float()
+            * history_ready.float()
+        )
+
+
+    def _reward_swing_foot_direction(self):
+        """Reward swing feet moving relative to the torso in the travel direction."""
+
+        command_xy = self.commands[:, :2]
+        command_mag = torch.norm(command_xy, dim=1)
+
+        moving = command_mag > 0.15
+        command_dir = (
+            command_xy
+            / command_mag.unsqueeze(1).clamp_min(1e-6)
+        )
+
+        contact = (
+            self.simulator.link_contact_forces[
+                :, self.simulator.feet_indices, 2
+            ] > 5.0
+        )
+        actual_swing = ~contact
+
+        desired_swing = 1.0 - self._get_gait_phase()
+        active_swing = actual_swing.float() * desired_swing
+
+        # World-frame foot velocity relative to the torso.
+        foot_vel_relative = (
+            self.simulator.feet_vel
+            - self.simulator.base_lin_vel.unsqueeze(1)
+        )
+
+        # Convert relative foot velocity to the yaw-aligned command frame.
+        yaw_quat = self._get_base_yaw_quat()
+        yaw_quat_feet = yaw_quat.unsqueeze(1).expand(-1, 4, -1)
+
+        foot_vel_local = quat_rotate_inverse(
+            yaw_quat_feet.reshape(-1, 4),
+            foot_vel_relative.reshape(-1, 3),
+        ).reshape(self.num_envs, 4, 3)
+
+        aligned_velocity = torch.sum(
+            foot_vel_local[:, :, :2]
+            * command_dir.unsqueeze(1),
+            dim=2,
+        )
+
+        # Signed bounded reward: forward swing positive, reverse swing negative.
+        per_foot_reward = torch.tanh(
+            aligned_velocity / 0.4
+        )
+
+        # Require ground support to avoid rewarding aerial leg motion.
+        supported = contact.sum(dim=1) >= 2
+
+        reward = torch.sum(
+            active_swing.float() * per_foot_reward,
+            dim=1,
+        ) / 2.0
+
+        reward *= supported.float()
+        reward *= moving.float()
+
+        return reward
+
+    def _reward_step_progress(self):
+        """
+        Reward new swing-foot displacement in the commanded travel direction.
+        """
+        stats = self._update_feet_air_time_stats()
+
+        valid_liftoff = stats["valid_liftoff"]
+        valid_swing = stats["valid_swing"]
+        first_contact = stats["first_contact"]
+        contact = stats["contact"]
+
+        feet_xy = self.simulator.feet_pos[:, :, :2]
+
+        # Convert command direction into the world frame.
+        command_local = torch.zeros(
+            self.num_envs, 3, device=self.device
+        )
+        command_local[:, :2] = self.commands[:, :2]
+
+        command_world = quat_apply(
+            self._get_base_yaw_quat(),
+            command_local,
+        )[:, :2]
+
+        command_mag = torch.norm(command_world, dim=1)
+        command_direction = (
+            command_world
+            / command_mag.unsqueeze(1).clamp_min(1e-6)
+        )
+
+        # Capture position and command direction at valid liftoff.
+        liftoff_mask = valid_liftoff.unsqueeze(-1)
+
+        self.step_liftoff_pos = torch.where(
+            liftoff_mask,
+            feet_xy,
+            self.step_liftoff_pos,
+        )
+
+        self.step_direction_world = torch.where(
+            liftoff_mask,
+            command_direction.unsqueeze(1).expand(-1, 4, -1),
+            self.step_direction_world,
+        )
+
+        self.step_max_progress[valid_liftoff] = 0.0
+
+        foot_displacement = feet_xy - self.step_liftoff_pos
+
+        aligned_progress = torch.sum(
+            foot_displacement * self.step_direction_world,
+            dim=2,
+        )
+
+        # Reward only improvements beyond the previous maximum.
+        new_max = torch.maximum(
+            self.step_max_progress,
+            aligned_progress,
+        )
+
+        incremental_progress = torch.relu(
+            new_max - self.step_max_progress
+        )
+
+        self.step_max_progress.copy_(new_max)
+
+        # Approximately 10 cm of swing progress gives a full cumulative reward.
+        target_step_length = 0.10
+
+        dense_reward = torch.clamp(
+            incremental_progress / target_step_length,
+            min=0.0,
+            max=1.0,
+        )
+
+        dense_reward *= valid_swing.float()
+
+        # Optional touchdown bonus for completing a useful step.
+        completed_progress = torch.clamp(
+            self.step_max_progress / target_step_length,
+            min=0.0,
+            max=1.0,
+        )
+
+        touchdown_bonus = (
+            first_contact.float() * completed_progress
+        )
+
+        supported = contact.sum(dim=1) >= 2
+        upright = self.simulator.projected_gravity[:, 2] < -0.8
+        moving = command_mag > 0.15
+
+        reward = (
+            dense_reward.sum(dim=1) / 2.0
+            + 0.25 * touchdown_bonus.sum(dim=1) / 2.0
+        )
+
+        reward *= supported.float()
+        reward *= upright.float()
+        reward *= moving.float()
+
+        return reward

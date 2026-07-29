@@ -1401,6 +1401,115 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             self._robot.set_pos(
                 self._base_pos[env_ids], zero_velocity=False, envs_idx=env_ids)
 
+    @torch.no_grad()
+    def _print_position_target_statistics(
+        self,
+        position_targets: torch.Tensor,
+        actions: torch.Tensor,
+        print_interval: int = 500,
+    ):
+        """
+        Print actual and running commanded-position coverage.
+
+        Args:
+            position_targets:
+                Absolute PD position targets, shape (num_envs, num_dofs).
+            actions:
+                Raw policy actions before scaling.
+            print_interval:
+                Number of control steps between reports.
+        """
+        num_joints = self._num_learned_actions
+        targets = position_targets[:, :num_joints]
+        actions = actions[:, :num_joints]
+
+        # Support either (num_dofs, 2) or (num_envs, num_dofs, 2).
+        limits = self._dof_pos_limits
+        if limits.ndim == 3:
+            limits = limits[0]
+
+        lower = limits[:num_joints, 0]
+        upper = limits[:num_joints, 1]
+        joint_range = (upper - lower).clamp_min(1e-6)
+
+        if not hasattr(self, "_target_debug_counter"):
+            self._target_debug_counter = 0
+            self._target_debug_min = torch.full_like(
+                lower, float("inf")
+            )
+            self._target_debug_max = torch.full_like(
+                upper, float("-inf")
+            )
+
+        self._target_debug_counter += 1
+
+        batch_min = targets.amin(dim=0)
+        batch_max = targets.amax(dim=0)
+
+        self._target_debug_min = torch.minimum(
+            self._target_debug_min, batch_min
+        )
+        self._target_debug_max = torch.maximum(
+            self._target_debug_max, batch_max
+        )
+
+        if self._target_debug_counter % print_interval != 0:
+            return
+
+        batch_mean = targets.mean(dim=0)
+        batch_std = targets.std(dim=0)
+
+        action_min = actions.amin(dim=0)
+        action_max = actions.amax(dim=0)
+
+        running_coverage = (
+            self._target_debug_max - self._target_debug_min
+        ) / joint_range
+
+        target_below_limit = (targets < lower).float().mean(dim=0)
+        target_above_limit = (targets > upper).float().mean(dim=0)
+
+        names = getattr(self, "_dof_names", None)
+
+        print("\nPosition-target coverage")
+        print(
+            "joint              limits          batch target       "
+            "running target     coverage   action range   outside"
+        )
+
+        for joint in range(num_joints):
+            name = (
+                names[joint]
+                if names is not None
+                else f"joint_{joint}"
+            )
+
+            outside = (
+                target_below_limit[joint]
+                + target_above_limit[joint]
+            )
+
+            print(
+                f"{name:<18} "
+                f"[{lower[joint].item():6.2f},"
+                f"{upper[joint].item():6.2f}]  "
+                f"[{batch_min[joint].item():6.2f},"
+                f"{batch_max[joint].item():6.2f}]  "
+                f"[{self._target_debug_min[joint].item():6.2f},"
+                f"{self._target_debug_max[joint].item():6.2f}]  "
+                f"{100.0 * running_coverage[joint].item():6.1f}%  "
+                f"[{action_min[joint].item():5.2f},"
+                f"{action_max[joint].item():5.2f}]  "
+                f"{100.0 * outside.item():5.1f}%"
+            )
+
+        print(
+            "Mean batch target standard deviation:",
+            round(batch_std.mean().item(), 4),
+        )
+
+
+
     def _compute_torques(self, actions):
         # UniFP learns 17 actions for 12 leg + 5 arm joints. The remaining
         # gripper DOFs stay at their default PD targets.
@@ -1409,6 +1518,13 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             self._motor_strength[:,:self._num_learned_actions] * actions[:, :self._num_learned_actions] * self._cfg.control.action_scale
             # self._motor_strength[:,:12] * actions[:, :12] * self._cfg.control.action_scale
         )
+
+
+        # self._print_position_target_statistics(
+        #     self._default_dof_pos + pos_actions_scaled,
+        #     actions,
+        #     print_interval=500,
+        # )
         
         # get two dimensional gains
         if self._p_gains.ndim == 1:
@@ -1429,10 +1545,12 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
 
         torques = self.feedback_torques
 
+        # print("Torque Norm - ", torch.round(torch.mean(torch.norm(torques, dim=-1)), decimals=4))
+
         self.unclipped_torques = torques.clone()
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
-        return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
-        # return torques
+        # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
+        return torques
 
     def apply_ee_force(self, force_world):
         """Store the target world-frame EE disturbance force."""

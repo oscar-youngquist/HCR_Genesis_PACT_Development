@@ -65,6 +65,20 @@ class B1UniFP(B1Z1UniFP):
         zero_ids = env_ids[zero]
         self.commands[zero_ids, :3] = 0.0
 
+        self._reset_progress_statistics(env_ids)
+
+    def _reset_progress_statistics(self, env_ids):
+        if len(env_ids) == 0:
+            return
+
+        self.progress_delta_buffer[env_ids] = 0.0
+        self.progress_desired_buffer[env_ids] = 0.0
+        self.progress_valid_steps[env_ids] = 0
+
+        self.last_progress_base_pos[env_ids] = (
+            self.simulator.base_pos[env_ids, :2]
+        )
+
     def reset_idx(self, env_ids):
         if len(env_ids) == 0:
             return
@@ -79,11 +93,19 @@ class B1UniFP(B1Z1UniFP):
         self._resample_commands(env_ids)
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
+
+        self._reset_progress_statistics(env_ids)
+
         self.simulator.reset_idx(env_ids)
 
         for buf in (self.actions, self.last_actions, self.llast_actions):
             buf[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
+        self.feet_stance_time[env_ids] = 0.0
+        self.valid_swing[env_ids] = False
+        self.step_liftoff_pos[env_ids] = 0.0
+        self.step_direction_world[env_ids] = 0.0
+        self.step_max_progress[env_ids] = 0.0
         self.gait_indices[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -93,6 +115,7 @@ class B1UniFP(B1Z1UniFP):
         self.base_force_ext_world[env_ids] = 0.0
         self.current_Fxyz_base_cmd[env_ids] = 0.0
         self.estimated_base_force_local[env_ids] = 0.0
+        self.progress_vel_ema[env_ids] = 0.0
         self.last_contacts[env_ids] = False
         self._reset_force_events(env_ids)
         self._randomize_force_gains(env_ids)
@@ -156,7 +179,9 @@ class B1UniFP(B1Z1UniFP):
             self.get_body_orientation(), 
             self.simulator.base_ang_vel * self.obs_scales.ang_vel,
             dof_pos_err, 
-            dof_vel, 
+            dof_vel,
+            sin_pos,
+            cos_pos, 
             self.actions, 
             self.commands * self.commands_scale,
         ), dim=-1, out=self.obs_buf)
@@ -301,6 +326,51 @@ class B1UniFP(B1Z1UniFP):
         self.last_actions = torch.zeros_like(self.actions); self.llast_actions = torch.zeros_like(self.actions)
         self.feet_air_time = torch.zeros(self.num_envs, 4, device=self.device)
         self.last_contacts = torch.zeros(self.num_envs, 4, dtype=torch.bool, device=self.device)
+        # The inherited air-time/early-swing rewards share these stateful
+        # buffers and cache their update once per control step.
+        self.feet_stance_time = torch.zeros_like(self.feet_air_time)
+        self.valid_swing = torch.zeros_like(self.last_contacts)
+        self._feet_stats_update_step = -1
+        self._feet_stats = {}
+
+        self.progress_vel_ema = torch.zeros(self.num_envs, 2, device=self.device)
+
+        self.progress_window_s = 0.40
+        self.progress_window_steps = max(
+            1, int(round(self.progress_window_s / self.dt))
+        )
+
+        self.progress_delta_buffer = torch.zeros(
+            self.num_envs,
+            self.progress_window_steps,
+            2,
+            device=self.device,
+        )
+
+        self.progress_desired_buffer = torch.zeros_like(
+            self.progress_delta_buffer
+        )
+
+        self.progress_valid_steps = torch.zeros(
+            self.num_envs,
+            dtype=torch.long,
+            device=self.device,
+        )
+
+        self.progress_buffer_index = 0
+        self.last_progress_base_pos = self.simulator.base_pos[:, :2].clone()
+        self._progress_update_step = -1
+
+        self.step_liftoff_pos = torch.zeros(
+            self.num_envs, 4, 2, device=self.device
+        )
+        self.step_direction_world = torch.zeros_like(
+            self.step_liftoff_pos
+        )
+        self.step_max_progress = torch.zeros(
+            self.num_envs, 4, device=self.device
+        )
+
         self.gait_indices = torch.zeros(self.num_envs, device=self.device)
         self.obs_history_slots = [torch.zeros_like(self.obs_buf) for _ in range(self.cfg.env.num_obs_hist)]
         self._obs_history_slot = len(self.obs_history_slots) - 1

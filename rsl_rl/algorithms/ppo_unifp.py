@@ -344,7 +344,7 @@ class PPO_UniFP:
 
         # Keeps the interaction of incoming data with layer wieghts below the threashold that 
         #     saturates the tanh activation function.
-        self.spectral_normalization(self.actor_critic, sigma_max=6.0)
+        self.spectral_normalization(self.actor_critic, sigma_max=10.0)
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
