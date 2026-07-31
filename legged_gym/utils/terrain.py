@@ -59,6 +59,7 @@ class Terrain:
         self.tot_rows = int(cfg.num_rows * self.length_per_env_pixels) + 2 * self.border
     
         self.height_field_raw = np.zeros((self.tot_rows , self.tot_cols), dtype=np.int16)
+        self.edge_mask = np.zeros((self.tot_rows, self.tot_cols), dtype=bool)
         self.terrain_meshes = []
         if cfg.curriculum and cfg.selected:
             raise ValueError("Curriculum and selected terrain cannot be both True.")
@@ -71,6 +72,17 @@ class Terrain:
         else:
             print("Generating randomized terrain...")
             self.randomized_terrain()   
+
+        # Mark cells adjacent to a height discontinuity for edge-aware rewards.
+        edge_threshold = max(1, int(0.04 / self.cfg.vertical_scale))
+        height_delta_x = np.abs(np.diff(self.height_field_raw.astype(np.int32), axis=0))
+        height_delta_y = np.abs(np.diff(self.height_field_raw.astype(np.int32), axis=1))
+        x_edges = height_delta_x > edge_threshold
+        y_edges = height_delta_y > edge_threshold
+        self.edge_mask[:-1, :] |= x_edges
+        self.edge_mask[1:, :] |= x_edges
+        self.edge_mask[:, :-1] |= y_edges
+        self.edge_mask[:, 1:] |= y_edges
         
         self.heightsamples = self.height_field_raw
         if self.type=="trimesh":

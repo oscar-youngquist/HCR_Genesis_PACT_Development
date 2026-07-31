@@ -82,6 +82,15 @@ class Go2PACT(BaseTask):
 
     def get_failure_idx(self):
         return self.reset_buf * ~self.time_out_buf * ~self.non_failure_reset_buf
+
+    def _feet_contact_mask(self):
+        return self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > self.cfg.rewards.contact_force_threshold
+
+    def _feet_near_edge_mask(self):
+        if getattr(self, "_feet_edge_cache_step", -1) != self.common_step_counter:
+            self._feet_edge_cache = self.simulator.calc_feet_near_edge()
+            self._feet_edge_cache_step = self.common_step_counter
+        return self._feet_edge_cache
     
     def get_scaled_pos_actions(self):
                 # control_type = 'P'
@@ -1116,6 +1125,47 @@ class Go2PACT(BaseTask):
     def _reward_feet_contact_forces(self):
         # penalize high contact forces
         return torch.sum((torch.norm(self.simulator.link_contact_forces[:, self.simulator.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
+
+    def _reward_feet_near_edge(self):
+        return torch.sum(self._feet_near_edge_mask() & self._feet_contact_mask(), dim=-1).float()
+
+    def _reward_edge_swing_clearance(self):
+        swing = ~self._feet_contact_mask()
+        target_z = self.simulator._max_height_ahead_feet + self.cfg.rewards.edge_swing_clearance_margin
+        clearance_error = torch.relu(target_z - self.simulator.feet_pos[:, :, 2])
+        mask = (self._feet_near_edge_mask() & swing).float()
+        return torch.sum(mask * torch.square(clearance_error), dim=-1)
+
+    def _reward_swing_foot_collision_edge(self):
+        swing = ~self._feet_contact_mask()
+        foot_vel_xy = self.simulator.feet_vel[:, :, :2]
+        normals = self.simulator._normal_vector_around_feet.view(-1, 4, 3)
+        normal_xy = normals[:, :, :2]
+        normal_xy_norm = torch.linalg.norm(normal_xy, dim=-1, keepdim=True)
+        normal_xy_dir = normal_xy / normal_xy_norm.clamp_min(1e-6)
+        into_face_speed = torch.relu(
+            torch.sum(foot_vel_xy * normal_xy_dir, dim=-1) - self.cfg.rewards.swing_collision_min_speed
+        )
+        mask = (
+            self._feet_near_edge_mask()
+            & swing
+            & (normals[:, :, 2] < self.cfg.rewards.swing_collision_max_normal_z)
+            & (normal_xy_norm.squeeze(-1) > 1e-4)
+        ).float()
+        return torch.sum(mask * torch.square(into_face_speed), dim=-1)
+
+    def _reward_feet_regulation(self):
+        base_height = torch.mean(
+            self.simulator.base_pos[:, 2].unsqueeze(1) - self.simulator.measured_heights,
+            dim=1,
+        )
+        delta_feet = self.simulator.feet_pos - self.simulator.base_pos.unsqueeze(1)
+        feet_to_base_height = (delta_feet * self.simulator.projected_gravity.unsqueeze(1)).sum(-1)
+        feet_height = torch.clamp(base_height.unsqueeze(1) - feet_to_base_height, min=0.0)
+        feet_xy_speed_sq = self.simulator.feet_vel[:, :, :2].pow(2).sum(-1)
+        return (feet_xy_speed_sq * torch.exp(
+            -feet_height / (0.025 * self.cfg.rewards.base_height_target)
+        )).sum(-1)
 
     def _reward_feet_air_time(self):
         # Reward long steps

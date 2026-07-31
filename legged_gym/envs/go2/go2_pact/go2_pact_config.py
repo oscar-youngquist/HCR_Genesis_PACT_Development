@@ -379,6 +379,14 @@ class GO2PACTCfg( LeggedRobotCfg ):
         use_reward_curriculum = True
 
         max_contact_force = 200.0
+        contact_force_threshold = 5.0
+
+        feet_edge_threshold = 0.05
+        edge_clearance_lateral_cells = (-1, 0, 1)
+        edge_clearance_forward_cells = (0, 1, 2)
+        edge_swing_clearance_margin = 0.04
+        swing_collision_max_normal_z = 0.85
+        swing_collision_min_speed = 0.05
 
         ff_ratio_target = 0.50
         ff_ratio_width  = 0.20
@@ -458,6 +466,10 @@ class GO2PACTCfg( LeggedRobotCfg ):
             foot_slip        = -0.01          # penalty for feet slipping
             stumble          = -4.0
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
+            feet_near_edge = -1.0
+            edge_swing_clearance = -2.0
+            swing_foot_collision_edge = -1.0
+            feet_regulation = -0.1
 
         class reward_curriculum():
             curr_reward_keys = ["ang_vel_xy", 

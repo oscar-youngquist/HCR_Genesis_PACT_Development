@@ -85,9 +85,9 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             'RR_hip_joint': -0.1,     # [rad]
 
             'FL_thigh_joint': 0.8,   # [rad]
-            'RL_thigh_joint': 0.8,   # [rad]
+            'RL_thigh_joint': 0.95,   # [rad]
             'FR_thigh_joint': 0.8,   # [rad]
-            'RR_thigh_joint': 0.8,   # [rad]
+            'RR_thigh_joint': 0.95,   # [rad]
 
             'FL_calf_joint': -1.5,   # [rad]
             'RL_calf_joint': -1.5,   # [rad]
@@ -237,16 +237,16 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         lookat = [0., 0, 1.]  # [m]
         # rendered_envs_idx = [1500]
         rendered_envs_idx = [i for i in range(0, 3, 1)]  # number of environments to be rendered
-        rendered_envs_idx.extend([i for i in range(500, 503, 1)])  # number of environments to be rendered
-        rendered_envs_idx.extend([i for i in range(900, 903, 1)])  # number of environments to be rendered
+        # rendered_envs_idx.extend([i for i in range(500, 503, 1)])  # number of environments to be rendered
+        # rendered_envs_idx.extend([i for i in range(900, 903, 1)])  # number of environments to be rendered
 
-        rendered_envs_idx.extend([i for i in range(1500, 1503, 1)])
-        rendered_envs_idx.extend([i for i in range(3500, 3503, 1)])
-        rendered_envs_idx.extend([i for i in range(4000, 4003, 1)])
+        # rendered_envs_idx.extend([i for i in range(1500, 1503, 1)])
+        # rendered_envs_idx.extend([i for i in range(3500, 3503, 1)])
+        # rendered_envs_idx.extend([i for i in range(4000, 4003, 1)])
 
-        rendered_envs_idx.extend([i for i in range(1700, 1703, 1)])
-        rendered_envs_idx.extend([i for i in range(2200, 2203, 1)])
-        rendered_envs_idx.extend([i for i in range(3900, 3903, 1)])
+        # rendered_envs_idx.extend([i for i in range(1700, 1703, 1)])
+        # rendered_envs_idx.extend([i for i in range(2200, 2203, 1)])
+        # rendered_envs_idx.extend([i for i in range(3900, 3903, 1)])
         # rendered_envs_idx = [0, 1000, 3500]
         add_camera = False
 
@@ -330,7 +330,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
         soft_torque_limit = 0.90
-        base_height_target = 0.30
+        base_height_target = 0.38
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
@@ -339,7 +339,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         overreach_x_max = 0.28
         support_polygon_sigma = 0.01
 
-        rear_foot_x_nominal = -0.20
+        rear_foot_x_nominal = -0.25
         rear_foot_x_margin = 0.08
 
         foot_clearance_tracking_sigma = 0.01
@@ -348,6 +348,14 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
         use_reward_curriculum = True
 
         max_contact_force = 200.0
+        contact_force_threshold = 5.0
+
+        feet_edge_threshold = 0.05
+        edge_clearance_lateral_cells = (-1, 0, 1)
+        edge_clearance_forward_cells = (0, 1, 2)
+        edge_swing_clearance_margin = 0.04
+        swing_collision_max_normal_z = 0.85
+        swing_collision_min_speed = 0.05
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
@@ -405,7 +413,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             
             # I developed these
             front_foot_overreach = -10000.0
-            rear_foot_overreach = -10.0
+            rear_foot_overreach = -100.0
 
             # gait
             feet_air_time    = 0.70            # tracking reward for long steps
@@ -416,6 +424,10 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             foot_slip        = -0.01           # penalty for feet slipping
             stumble          = -0.2
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
+            feet_near_edge = -1.0
+            edge_swing_clearance = -2.0
+            swing_foot_collision_edge = -1.0
+            feet_regulation = -0.1
             feet_spread_pairwise_axes = 0.0
 
         class reward_curriculum():
