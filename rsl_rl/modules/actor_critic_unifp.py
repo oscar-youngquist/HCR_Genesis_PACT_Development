@@ -1,13 +1,15 @@
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
-
+from .module_utils import init_weights
 
 class AC_Args:
 
     adaptation_module_encoder_hidden_dims = [512, 256, 128]
 
     adaptation_module_decoder_hidden_dims = [128, 64]
+
+    adaptation_module_decoder_recon_hidden_dims = [128, 256, 512]
     
     adaptation_labels = ["base_velocity_loss", "gripper_pos_loss", "force_ee_loss", "force_base_loss"] #, "force_loss"]
     adaptation_dims = [3, 3, 3, 3] #, 3]
@@ -22,6 +24,7 @@ class ActorCriticUniFP(nn.Module):
                         num_obs_pred,
                         num_single_obs,
                         num_actions,
+                        num_privileged_obs_single=None,
                         actor_hidden_dims=[256, 256, 256],
                         critic_hidden_dims=[256, 256, 256],
                         activation='elu',
@@ -44,25 +47,38 @@ class ActorCriticUniFP(nn.Module):
         self.num_obs = num_obs
         self.num_privileged_obs = num_privileged_obs
         self.num_obs_pred = num_obs_pred
-        self.num_latent_dim = int(num_obs / num_single_obs) * 2
+        # self.num_latent_dim = int(num_obs / num_single_obs) * 2
+        self.num_latent_dim = 16
         self.num_obs_now = num_single_obs
+        self.num_privileged_obs_single = num_privileged_obs_single or num_privileged_obs
 
         activation = get_activation(activation)
 
-        # Adaptation module
+        # Shared history trunk. As in PACT, the trunk feeds independent mean
+        # and log-variance projections instead of one concatenated output.
         adaptation_module_encoder_layers = []
         adaptation_module_encoder_layers.append(nn.Linear(self.num_obs, AC_Args.adaptation_module_encoder_hidden_dims[0]))
         adaptation_module_encoder_layers.append(activation)
-        for l in range(len(AC_Args.adaptation_module_encoder_hidden_dims)):
-            if l == len(AC_Args.adaptation_module_encoder_hidden_dims) - 1:
-                adaptation_module_encoder_layers.append(
-                    nn.Linear(AC_Args.adaptation_module_encoder_hidden_dims[l], self.num_latent_dim))
-            else:
-                adaptation_module_encoder_layers.append(
-                    nn.Linear(AC_Args.adaptation_module_encoder_hidden_dims[l],
-                              AC_Args.adaptation_module_encoder_hidden_dims[l + 1]))
-                adaptation_module_encoder_layers.append(activation)
+        for l in range(len(AC_Args.adaptation_module_encoder_hidden_dims) - 1):
+            adaptation_module_encoder_layers.append(
+                nn.Linear(AC_Args.adaptation_module_encoder_hidden_dims[l],
+                          AC_Args.adaptation_module_encoder_hidden_dims[l + 1]))
+            adaptation_module_encoder_layers.append(activation)
         self.adaptation_encoder_module = nn.Sequential(*adaptation_module_encoder_layers)
+        encoder_output_dim = AC_Args.adaptation_module_encoder_hidden_dims[-1]
+        self.adaptation_mean_module = nn.Linear(encoder_output_dim, self.num_latent_dim)
+        self.adaptation_logvar_module = nn.Sequential(
+            nn.Linear(encoder_output_dim, self.num_latent_dim),
+            nn.Hardtanh(min_val=-5.0, max_val=5.0),
+        )
+
+        # Initialize the encoder layers
+        self.adaptation_encoder_module.apply(init_weights)
+        self.adaptation_logvar_module.apply(init_weights)
+        torch.nn.init.xavier_uniform_(self.adaptation_mean_module.weight)
+        if self.adaptation_mean_module.bias is not None:
+            torch.nn.init.zeros_(self.adaptation_mean_module.bias)
+
 
 
         adaptation_module_decoder_layers = []
@@ -79,11 +95,35 @@ class ActorCriticUniFP(nn.Module):
                 adaptation_module_decoder_layers.append(activation)
         self.adaptation_decoder_module = nn.Sequential(*adaptation_module_decoder_layers)
 
+        # Initialize the state-estimator decoder
+        self.adaptation_decoder_module.apply(init_weights)
+
+        # The same sampled z predicts the next single privileged frame. This
+        # decoder is training-only; no privileged state enters the actor.
+        privileged_decoder_layers = []
+        privileged_decoder_layers.append(nn.Linear(self.num_latent_dim, AC_Args.adaptation_module_decoder_recon_hidden_dims[0]))
+        privileged_decoder_layers.append(activation)
+        for l in range(len(AC_Args.adaptation_module_decoder_recon_hidden_dims)):
+            if l == len(AC_Args.adaptation_module_decoder_recon_hidden_dims) - 1:
+                privileged_decoder_layers.append(
+                    nn.Linear(AC_Args.adaptation_module_decoder_recon_hidden_dims[l], 
+                              self.num_privileged_obs_single))
+            else:
+                privileged_decoder_layers.append(
+                    nn.Linear(AC_Args.adaptation_module_decoder_recon_hidden_dims[l], 
+                              AC_Args.adaptation_module_decoder_recon_hidden_dims[l+1]))
+                privileged_decoder_layers.append(activation)
+        self.privileged_decoder_module = nn.Sequential(*privileged_decoder_layers)
+
+        # Initialize the privileged reconstruction decoder layers
+        self.privileged_decoder_module.apply(init_weights)
 
 
         # Policy
         actor_layers = []
-        actor_layers.append(nn.Linear(self.num_obs_now + self.num_latent_dim, actor_hidden_dims[0]))
+        # Actor input = current observation + sampled z + explicit estimates.
+        actor_input_dim = self.num_obs_now + self.num_latent_dim + self.num_obs_pred
+        actor_layers.append(nn.Linear(actor_input_dim, actor_hidden_dims[0]))
         actor_layers.append(activation)
         for l in range(len(actor_hidden_dims)):
             if l == len(actor_hidden_dims) - 1:
@@ -106,7 +146,10 @@ class ActorCriticUniFP(nn.Module):
         self.critic_body = nn.Sequential(*critic_layers)
 
         print(f"Adaptation Encoder Module: {self.adaptation_encoder_module}")
+        print(f"Adaptation Mean Module: {self.adaptation_mean_module}")
+        print(f"Adaptation Logvar Module: {self.adaptation_logvar_module}")
         print(f"Adaptation Decoder Module: {self.adaptation_decoder_module}")
+        print(f"Privileged Decoder Module: {self.privileged_decoder_module}")
         print(f"Actor MLP: {self.actor_body}")
         print(f"Critic MLP: {self.critic_body}")
 
@@ -170,9 +213,28 @@ class ActorCriticUniFP(nn.Module):
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
 
+    def encode_context(self, observations, sample=True):
+        """Return VAE statistics and a reparameterized latent sample."""
+        encoded = self.adaptation_encoder_module(observations)
+        mean = self.adaptation_mean_module(encoded)
+        # PACT bounds log-variance in-module to keep exp(0.5 * logvar)
+        # numerically stable while retaining separate distribution heads.
+        logvar = self.adaptation_logvar_module(encoded)
+        z = mean + torch.exp(0.5 * logvar) * torch.randn_like(mean) if sample else mean
+        return mean, logvar, z
+
+    def actor_estimates(self, explicit_prediction):
+        """Map decoder outputs into the representation consumed by the actor."""
+        return explicit_prediction
+
     def update_distribution(self, observations):
-        latent = self.adaptation_encoder_module(observations)
-        mean = self.actor_body(torch.cat((observations[:, -self.num_obs_now:], latent), dim=-1))
+        _, _, latent = self.encode_context(observations, sample=True)
+        actor_inputs = [
+            observations[:, -self.num_obs_now:],
+            latent,
+            self.actor_estimates(self.adaptation_decoder_module(latent)),
+        ]
+        mean = self.actor_body(torch.cat(actor_inputs, dim=-1))
         self._clip_std()
         self.distribution = Normal(mean, mean*0. + self.std)
 
@@ -190,10 +252,11 @@ class ActorCriticUniFP(nn.Module):
         return self.act_student(ob["obs"], policy_info=policy_info)
 
     def act_student(self, observations, policy_info={}):
-        latent = self.adaptation_encoder_module(observations)
-        actions_mean = self.actor_body(torch.cat((observations[:, -self.num_obs_now:], latent), dim=-1))
+        _, _, latent = self.encode_context(observations, sample=False)
         obs_pred = self.adaptation_decoder_module(latent)
-        policy_info["latents"] = obs_pred.detach().cpu().numpy()
+        actor_inputs = [observations[:, -self.num_obs_now:], latent, self.actor_estimates(obs_pred)]
+        actions_mean = self.actor_body(torch.cat(actor_inputs, dim=-1))
+        policy_info["latents"] = self.actor_estimates(obs_pred).detach().cpu().numpy()
         return actions_mean
 
     def act_teacher(self, critic_observations, pred_obs, policy_info={}):
@@ -206,9 +269,9 @@ class ActorCriticUniFP(nn.Module):
         return value
 
     def get_student_latent(self, observations):
-        latent = self.adaptation_encoder_module(observations)
-        obs_pred = self.adaptation_decoder_module(latent)
-        return obs_pred
+        mean, logvar, latent = self.encode_context(observations, sample=True)
+        explicit = self.adaptation_decoder_module(latent)
+        return mean, logvar, latent, explicit, self.privileged_decoder_module(latent)
 
 def get_activation(act_name):
     if act_name == "elu":

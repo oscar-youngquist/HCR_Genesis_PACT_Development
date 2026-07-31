@@ -41,6 +41,7 @@ class OnPolicyRunnerUniFP:
             self.env.num_pred_obs,
             num_single_obs,
             self.env.num_actions,
+            num_privileged_obs_single=self.env.num_privileged_obs,
             **self.policy_cfg,
         ).to(self.device)
 
@@ -58,6 +59,7 @@ class OnPolicyRunnerUniFP:
             [num_actor_obs],
             [num_critic_obs],
             [self.env.num_pred_obs],
+            [self.env.num_privileged_obs],
             [self.env.num_actions],
         )
 
@@ -106,7 +108,10 @@ class OnPolicyRunnerUniFP:
                     rewards = rewards.to(self.device)
                     dones = dones.to(self.device)
 
-                    self.alg.process_env_step(rewards, dones, infos)
+                    # The final stack slot is the post-action, single-frame
+                    # privileged target for one-step latent reconstruction.
+                    next_privileged = critic_obs[:, -self.env.num_privileged_obs:]
+                    self.alg.process_env_step(rewards, dones, infos, next_privileged)
 
                     if "episode" in infos:
                         ep_infos.append(infos["episode"])

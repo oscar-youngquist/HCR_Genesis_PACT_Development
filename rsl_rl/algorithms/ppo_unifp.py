@@ -37,6 +37,8 @@ class PPO_UniFP:
                  adaptive_ent_ang_threshold=0.35,
                  adaptive_ent_ter_threshold=6.0,
                  adaptive_ent_softmax_temp=2.0,
+                 adaptation_privileged_weight=1.0,
+                 adaptation_kl_weight=1.0e-3,
                  device='cpu',
                  **kwargs,
                  ):
@@ -63,6 +65,8 @@ class PPO_UniFP:
         self.ent_terrain_threshold = float(adaptive_ent_ter_threshold)
         self.ent_softmax_temperature = float(adaptive_ent_softmax_temp)
         self.current_entropy_coef = float(entropy_coef)
+        self.adaptation_privileged_weight = float(adaptation_privileged_weight)
+        self.adaptation_kl_weight = float(adaptation_kl_weight)
 
         # PPO components
         self.actor_critic = actor_critic
@@ -77,17 +81,24 @@ class PPO_UniFP:
         # Keep PPO and CSE/adaptation optimization separated. PPO should only
         # step the policy mean, value function, and learned action std; the
         # supervised adaptation update owns the encoder/decoder latent path.
-        # self.ppo_parameters = [
-        #     *self.actor_critic.actor_body.parameters(),
-        #     *self.actor_critic.critic_body.parameters(),
-        #     self.actor_critic.std,
-        # ]
+        self.ppo_parameters = [
+            *self.actor_critic.actor_body.parameters(),
+            *self.actor_critic.critic_body.parameters(),
+            *self.actor_critic.adaptation_encoder_module.parameters(),
+            *self.actor_critic.adaptation_mean_module.parameters(),
+            *self.actor_critic.adaptation_logvar_module.parameters(),
+            self.actor_critic.std,
+        ]
         self.adaptation_module_parameters = [
             *self.actor_critic.adaptation_encoder_module.parameters(),
+            *self.actor_critic.adaptation_mean_module.parameters(),
+            *self.actor_critic.adaptation_logvar_module.parameters(),
             *self.actor_critic.adaptation_decoder_module.parameters(),
+            *self.actor_critic.privileged_decoder_module.parameters(),
         ]
 
-        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
+        self.optimizer = optim.Adam(self.ppo_parameters, lr=learning_rate)
+        
         self.adaptation_module_optimizer = optim.Adam(
             self.adaptation_module_parameters,
             lr=Adaptation_Args.adaptation_module_learning_rate,
@@ -105,8 +116,11 @@ class PPO_UniFP:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_pred_shape, action_shape):
-        self.storage = RolloutStorageUniFP(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_pred_shape, action_shape, self.device)
+    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_pred_shape, next_privileged_shape, action_shape):
+        self.storage = RolloutStorageUniFP(
+            num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape,
+            obs_pred_shape, next_privileged_shape, action_shape, self.device,
+        )
 
     def test_mode(self):
         self.actor_critic.test()
@@ -159,9 +173,10 @@ class PPO_UniFP:
         self.transition.observation_preds = obs_pred
         return self.transition.actions
 
-    def process_env_step(self, rewards, dones, infos):
+    def process_env_step(self, rewards, dones, infos, next_privileged_observations):
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
+        self.transition.next_privileged_observations = next_privileged_observations
         # Bootstrapping on time outs
         if 'time_outs' in infos:
             self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
@@ -250,15 +265,17 @@ class PPO_UniFP:
             label_start_end[label] = (si, si + length)
             si = si + length
             mean_adaptation_losses[label] = 0
+        mean_adaptation_losses["next_privileged_loss"] = 0
+        mean_adaptation_losses["kl_loss"] = 0
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for obs_batch, critic_obs_batch, obs_pred_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, masks_batch in generator:
+        for obs_batch, critic_obs_batch, obs_pred_batch, next_privileged_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
+            old_mu_batch, old_sigma_batch, dones_batch in generator:
 
 
-                self.actor_critic.act(obs_batch, masks=masks_batch)
+                self.actor_critic.act(obs_batch, masks=dones_batch)
                 actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
-                value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch)
+                value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=dones_batch)
                 mu_batch = self.actor_critic.action_mean
                 sigma_batch = self.actor_critic.action_std
                 entropy_batch = self.actor_critic.entropy
@@ -304,7 +321,7 @@ class PPO_UniFP:
                 # actor/critic/std update norm.
                 self.optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+                nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
                 self.optimizer.step()
                 # PPO backprop still traverses the adaptation encoder to build
                 # actor latents; clear those non-stepped gradients immediately.
@@ -321,20 +338,48 @@ class PPO_UniFP:
 
                     for epoch in range(Adaptation_Args.num_adaptation_module_substeps):
 
-                        adaptation_pred = self.actor_critic.get_student_latent(obs_batch)
+                        adaptation_output = self.actor_critic.get_student_latent(obs_batch)
                         with torch.no_grad():
                             adaptation_target = obs_pred_batch
+                            next_privileged_target = next_privileged_batch
+                        mean, logvar, _, adaptation_pred, privileged_pred = adaptation_output
                         adaptation_loss = 0
                         for idx, (label, length, weight) in enumerate(zip(self.adaptation_labels, self.adaptation_dims, self.adaptation_weights)):
 
                             start, end = label_start_end[label]
-                            selection_indices = torch.linspace(start, end - 1, steps=end - start, dtype=torch.long)
-
-                            idx_adaptation_loss = weight*F.mse_loss(adaptation_pred[:, selection_indices],
-                                                            adaptation_target[:, selection_indices])
+                            if label == "foot_contact_loss":
+                                # Decoder outputs logits; BCE supplies the
+                                # correct binary contact-state objective.
+                                idx_adaptation_loss = weight * F.binary_cross_entropy_with_logits(
+                                    adaptation_pred[:, start:end], adaptation_target[:, start:end]
+                                )
+                            else:
+                                idx_adaptation_loss = weight * F.mse_loss(
+                                    adaptation_pred[:, start:end], adaptation_target[:, start:end]
+                                )
                             mean_adaptation_losses[label] += idx_adaptation_loss.item()
 
                             adaptation_loss += idx_adaptation_loss
+
+                        # The target is one post-action privileged frame, not
+                        # the critic's full temporal stack. Terminal transitions
+                        # are excluded because reset state is not the successor
+                        # of the pre-reset observation encoded above.
+                        valid = (~dones_batch.bool()).float()
+                        privileged_error = (privileged_pred - next_privileged_target).square() * valid
+                        privileged_loss = privileged_error.sum() / (
+                            valid.sum().clamp_min(1.0) * privileged_pred.shape[-1]
+                        )
+                        kl_loss = -0.5 * (
+                            1.0 + logvar - mean.square() - logvar.exp()
+                        ).sum(dim=-1, keepdim=True)
+                        kl_loss = (kl_loss * valid).sum() / valid.sum().clamp_min(1.0)
+                        adaptation_loss += (
+                            self.adaptation_privileged_weight * privileged_loss
+                            + self.adaptation_kl_weight * kl_loss
+                        )
+                        mean_adaptation_losses["next_privileged_loss"] += privileged_loss.item()
+                        mean_adaptation_losses["kl_loss"] += kl_loss.item()
 
                         self.adaptation_module_optimizer.zero_grad()
                         adaptation_loss.backward()
@@ -350,7 +395,7 @@ class PPO_UniFP:
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
         mean_adaptation_module_loss /= (num_updates * Adaptation_Args.num_adaptation_module_substeps)
-        for label in self.adaptation_labels:
+        for label in mean_adaptation_losses:
             mean_adaptation_losses[label] /= (num_updates * Adaptation_Args.num_adaptation_module_substeps)
         self.storage.clear()
 

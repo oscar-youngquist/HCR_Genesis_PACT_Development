@@ -17,6 +17,9 @@ class B1UniFP(B1Z1UniFP):
 
     def step(self, actions):
         actions = self._pre_sim_step(actions)
+
+        # actions = torch.zeros_like(actions)
+
         if self.force_randomization_active and self.cfg.commands.push_robot_base:
             self._push_robot_base(self.all_env_ids)
         self.simulator.step(actions)
@@ -158,7 +161,7 @@ class B1UniFP(B1Z1UniFP):
         low, high = self.cfg.init_state.leg_dof_pos_perturb_range
         dof_pos = self.simulator.default_dof_pos.repeat(len(env_ids), 1)
 
-        dof_pos += torch_rand_float(-low, high, dof_pos.shape, self.device)
+        dof_pos += torch_rand_float(low, high, dof_pos.shape, self.device)
 
         # dof_pos += torch_rand_float(low, high, dof_pos.shape, self.device)
 
@@ -168,6 +171,20 @@ class B1UniFP(B1Z1UniFP):
         self.llast_obs_buf.copy_(self.last_obs_buf)
         self.last_obs_buf.copy_(self.obs_buf)
         base_force_local = quat_rotate_inverse(self._get_base_yaw_quat(), self.base_force_ext_world)
+
+        # # Express each world-frame foot position relative to the translating
+        # # and rotating B1 torso. The flattened transform gives
+        # # quat_rotate_inverse one quaternion-vector pair per foot.
+        # feet_from_base_world = self.simulator.feet_pos - self.simulator.base_pos.unsqueeze(1)
+        # base_quat_per_foot = self.simulator.base_quat.unsqueeze(1).expand(
+        #     -1, feet_from_base_world.shape[1], -1
+        # )
+        # feet_pos_base = quat_rotate_inverse(
+        #     base_quat_per_foot.reshape(-1, 4),
+        #     feet_from_base_world.reshape(-1, 3),
+        # ).view(self.num_envs, -1, 3)
+
+        # print("Feet positions in base frame:", feet_pos_base[0])
 
         phase = self._get_phase()
         sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
@@ -187,9 +204,23 @@ class B1UniFP(B1Z1UniFP):
         ), dim=-1, out=self.obs_buf)
         if self.add_noise:
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
+        contacts = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
+        # Terrain-relative foot clearance matches the PACT estimator target:
+        # h_foot - mean(local terrain patch) - nominal clearance offset.
+        foot_heights = torch.clip(
+            self.simulator.feet_pos[:, :, 2]
+            - torch.mean(self.simulator.height_around_feet, dim=-1)
+            - self.cfg.rewards.foot_height_offset,
+            -1.0,
+            1.0,
+        )
+        # Explicit target ordering is shared with ActorCriticB1UniFP:
+        # base velocity (3), base force (3), contacts (4), foot heights (4).
         torch.cat((
             self.simulator.base_lin_vel * self.obs_scales.lin_vel,
             base_force_local * self.obs_scales.base_force,
+            contacts,
+            foot_heights,
         ), dim=-1, out=self.explicit_labels_buf)
 
         mass_params = self._mass_params_buf
@@ -197,14 +228,13 @@ class B1UniFP(B1Z1UniFP):
         mass_params[:, 0:1] = self.simulator._added_base_mass
         mass_params[:, 1:4] = self.simulator._base_com_bias
         stance = self._get_gait_phase()
-        contacts = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
         critic_components = (
             ("adaptation_labels", self.explicit_labels_buf),
             ("reference_dof_error", self.simulator.dof_pos - self.ref_dof_pos),
             ("mass_com", mass_params),
             ("friction_offset", self.simulator._friction_values - self.friction_value_offset),
             ("stance", stance),
-            ("contacts", contacts),
+            # Contacts are already carried by adaptation_labels above.
             ("phase_sin", sin_pos),
             ("phase_cos", cos_pos),
             ("projected_gravity", self.simulator.projected_gravity),
@@ -262,8 +292,10 @@ class B1UniFP(B1Z1UniFP):
         torch.cat(ordered, dim=-1, out=self.obs_history)
 
     def set_impedance_force_estimates(self, obs_pred):
-        if obs_pred.shape[1] != 6:
-            raise RuntimeError(f"Expected 6 B1 UniFP labels, got {obs_pred.shape[1]}")
+        if obs_pred.shape[1] != self.cfg.env.num_explicit_recon_obs:
+            raise RuntimeError(
+                f"Expected {self.cfg.env.num_explicit_recon_obs} B1 UniFP labels, got {obs_pred.shape[1]}"
+            )
         self.estimated_base_force_local[:] = obs_pred[:, 3:6] / self.obs_scales.base_force
 
     def _randomize_force_gains(self, env_ids):
@@ -402,7 +434,9 @@ class B1UniFP(B1Z1UniFP):
         )
         self._mass_params_buf = torch.zeros(self.num_envs, 22, device=self.device)
         self.privileged_obs_buf = torch.zeros(self.num_envs, self.cfg.env.num_privileged_obs * self.cfg.env.num_priv_stack, device=self.device)
-        self.explicit_labels_buf = torch.zeros(self.num_envs, 6, device=self.device)
+        self.explicit_labels_buf = torch.zeros(
+            self.num_envs, self.cfg.env.num_explicit_recon_obs, device=self.device
+        )
         self.leg_dof_indices = {name: self.cfg.asset.dof_names.index(name) for name in (
             "FL_thigh_joint", "FL_calf_joint", "FR_thigh_joint", "FR_calf_joint",
             "RL_thigh_joint", "RL_calf_joint", "RR_thigh_joint", "RR_calf_joint")}

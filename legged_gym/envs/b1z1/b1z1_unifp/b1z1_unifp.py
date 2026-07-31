@@ -565,8 +565,8 @@ class B1Z1UniFP(BaseTask):
                 dof_pos_err,
                 dof_vel,
                 self.actions,
-                # sin_pos,
-                # cos_pos,
+                sin_pos,
+                cos_pos,
                 self.commands * self.commands_scale,
             ),
             dim=-1,
@@ -1093,13 +1093,13 @@ class B1Z1UniFP(BaseTask):
 
         # Original UniFP zeros the stance half of each diagonal before applying
         # the sinusoidal swing offsets to thigh/calf reference joints.
-        sin_pos_l[sin_pos_l > 0] = 0.0
+        sin_pos_l[sin_pos_l > 0] = sin_pos_l[sin_pos_l > 0] * (1 - self.cfg.rewards.target_joint_pos_thd) / (1 + self.cfg.rewards.target_joint_pos_thd) * 0.0
         self.ref_dof_pos[:, idx["FL_thigh_joint"]] -= sin_pos_l * scale_1
         self.ref_dof_pos[:, idx["FL_calf_joint"]] += sin_pos_l * scale_2
         self.ref_dof_pos[:, idx["RR_thigh_joint"]] -= sin_pos_l * scale_1
         self.ref_dof_pos[:, idx["RR_calf_joint"]] += sin_pos_l * scale_2
 
-        sin_pos_r[sin_pos_r < 0] = 0.0
+        sin_pos_r[sin_pos_r < 0] = sin_pos_r[sin_pos_r < 0] * (1 - self.cfg.rewards.target_joint_pos_thd) / (1 + self.cfg.rewards.target_joint_pos_thd) * 0.0
         self.ref_dof_pos[:, idx["FR_thigh_joint"]] += sin_pos_r * scale_1
         self.ref_dof_pos[:, idx["FR_calf_joint"]] -= sin_pos_r * scale_2
         self.ref_dof_pos[:, idx["RL_thigh_joint"]] += sin_pos_r * scale_1
@@ -1389,7 +1389,7 @@ class B1Z1UniFP(BaseTask):
         leg_low, leg_high = self.cfg.init_state.leg_dof_pos_perturb_range
         arm_low, arm_high = self.cfg.init_state.arm_dof_pos_perturb_range
         # UniFP perturbs legs multiplicatively around their default crouch pose.
-        dof_pos[:, :12] = self.simulator.default_dof_pos[:, :12].repeat(len(env_ids), 1) * torch_rand_float(
+        dof_pos[:, :12] = self.simulator.default_dof_pos[:, :12].repeat(len(env_ids), 1) + torch_rand_float(
             leg_low,
             leg_high,
             (len(env_ids), 12),
@@ -1422,7 +1422,7 @@ class B1Z1UniFP(BaseTask):
             torch.zeros_like(rand_yaw),
             rand_yaw,
         )
-        base_lin_vel = torch_rand_float(-0.1, 0.1, (len(env_ids), 3), self.device)
+        base_lin_vel = torch_rand_float(-0.10, 0.10, (len(env_ids), 3), self.device)
         base_ang_vel = torch_rand_float(-0.1, 0.1, (len(env_ids), 3), self.device)
         self.simulator.reset_root_states(env_ids, base_pos, base_quat, base_lin_vel, base_ang_vel)
 
@@ -1441,9 +1441,9 @@ class B1Z1UniFP(BaseTask):
             return
         mean_tracking = torch.mean(self.episode_sums["tracking_lin_vel_force_world"][env_ids]) / self.max_episode_length
         if mean_tracking > self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel_force_world"]:
-            for key in ["lin_vel_x", "lin_vel_y", "ang_vel_yaw"]:
-                self.command_ranges[key][0] = np.clip(self.command_ranges[key][0] - 0.5, -self.cfg.commands.max_curriculum, 0.0)
-                self.command_ranges[key][1] = np.clip(self.command_ranges[key][1] + 0.5, 0.0, self.cfg.commands.max_curriculum)
+            for key in ["lin_vel_x", "lin_vel_y"]:
+                self.command_ranges[key][0] = np.clip(self.command_ranges[key][0] - 0.2, -self.cfg.commands.max_curriculum, 0.0)
+                self.command_ranges[key][1] = np.clip(self.command_ranges[key][1] + 0.2, 0.0, self.cfg.commands.max_curriculum)
 
     def step_reward_curriculum(self, num_iters):
         """Cosine-ramp selected reward scales during training."""
@@ -2084,10 +2084,18 @@ class B1Z1UniFP(BaseTask):
     #     self.last_contacts.copy_(contact)
     #     first_contact = (self.feet_air_time > 0.) * contact_filt
     #     self.feet_air_time += self.dt
-    #     rew_airTime = torch.clamp(torch.sum((self.feet_air_time - 0.12) * first_contact, dim=1), min=0.0)  # reward only on first contact with the ground
+    #     rew_airTime = torch.sum((self.feet_air_time - 0.12) * first_contact, dim=1)  # reward only on first contact with the ground
     #     rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.1  # no reward for zero command
     #     self.feet_air_time *= (~contact_filt).float()
     #     return rew_airTime
+
+
+    def _reward_sparse_contacts(self):
+        fz = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2]
+        contact_prob = torch.sigmoid(10.0*(fz - 10.0))
+        num_contacts = torch.sum(contact_prob, dim=-1)
+        
+        return torch.exp(-torch.square(num_contacts - 2.0)) 
 
     def _reward_feet_air_time(self):
         """
@@ -2098,15 +2106,10 @@ class B1Z1UniFP(BaseTask):
         first_contact = stats["first_contact"]
         touchdown_air_time = stats["touchdown_air_time"]
 
-        per_foot_reward = torch.clamp(
-            touchdown_air_time - 0.5,
-            min=0.0,
-        )
+        error = (touchdown_air_time - 0.5)
+        error[:,0:2] *= 2                 # give twice the weight to the front feet
 
-        reward = torch.sum(
-            per_foot_reward * first_contact.float(),
-            dim=1,
-        )
+        reward = torch.sum(error * first_contact.float(), dim=1)
 
         reward *= self.get_walking_cmd_mask().float()
 
@@ -2212,8 +2215,20 @@ class B1Z1UniFP(BaseTask):
 
         front_x = torch.stack([front_x_1, front_x_2], dim=1)   # (N,2)
         
-        overreach = torch.relu(front_x - self.cfg.rewards.overreach_x_max)
-        
+        # overreach = torch.relu(front_x - self.cfg.rewards.overreach_x_max)
+
+        # Nominal rear-foot x location in base frame.
+        # This should usually be negative, e.g. -0.20 to -0.25 m.
+        front_x_nominal = self.cfg.rewards.front_foot_x_nominal
+
+        # Allowed deviation around nominal rear-foot x location.
+        # Example: 0.08 m allows rear_x in [nominal - 0.08, nominal + 0.08].
+        front_x_margin = self.cfg.rewards.foot_x_margin
+
+        # Penalize both too far forward and too far backward relative to nominal.
+        x_error = torch.abs(front_x - front_x_nominal)
+        overreach = torch.relu(x_error - front_x_margin)
+
         # stance/contact gating
         contact = (
             self.simulator.link_contact_forces[:, self.simulator.feet_indices[:2], 2] > 1.0
@@ -2250,11 +2265,11 @@ class B1Z1UniFP(BaseTask):
 
         # Nominal rear-foot x location in base frame.
         # This should usually be negative, e.g. -0.20 to -0.25 m.
-        rear_x_nominal = self.cfg.rewards.rear_foot_x_nominal
+        rear_x_nominal = -self.cfg.rewards.rear_foot_x_nominal
 
         # Allowed deviation around nominal rear-foot x location.
         # Example: 0.08 m allows rear_x in [nominal - 0.08, nominal + 0.08].
-        rear_x_margin = self.cfg.rewards.rear_foot_x_margin
+        rear_x_margin = self.cfg.rewards.foot_x_margin
 
         # Penalize both too far forward and too far backward relative to nominal.
         x_error = torch.abs(rear_x - rear_x_nominal)
@@ -2442,8 +2457,8 @@ class B1Z1UniFP(BaseTask):
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
         swing = ~contact
 
-        desired_swing = 1.0 - self._get_gait_phase()
-        num_swing = desired_swing.sum(dim=1)
+        # desired_swing = 1.0 - self._get_gait_phase()
+        num_swing = swing.sum(dim=1)
 
         moving = self.get_walking_cmd_mask()
 
@@ -2479,18 +2494,24 @@ class B1Z1UniFP(BaseTask):
         #     dim=-1
         # )                                                               # (N,)
 
+        # track_err[:,0:2] *= 2      # give twice the weight to the front feet
 
         total_err = torch.sum(
             swing * (track_err),
             dim=-1
         )                                                               # (N,)
 
-
         rew = torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma)
 
-        # No clearance reward during double support.
-        # rew *= (num_swing > 0).float()
-        rew *= moving.float()
+        # weights = torch.tensor([1.25, 1.25, 1.0, 1.0], device=self.device)
+
+        # quality = torch.exp(-track_err / self.cfg.rewards.foot_clearance_tracking_sigma)
+
+        # reward = (weights * swing * quality).sum(1) / \
+        #  (weights * swing).sum(1).clamp_min(1.0)
+
+        rew *= (num_swing > 0).float()     # gate reward for robots with no swigning feet.
+        # rew *= moving.float()
 
         # return torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma) * moving.float()
         return rew
@@ -2559,7 +2580,7 @@ class B1Z1UniFP(BaseTask):
         return 1.0*full_contact * (torch.norm(self.commands[:, :3], dim=1) < 0.1)
 
     def _reward_ref_dof_leg(self):
-        return torch.exp(-torch.mean(torch.square(self.simulator.dof_pos[:, :12] - self.ref_dof_pos), dim=1))
+        return torch.exp(-torch.sum(torch.abs(self.simulator.dof_pos[:, :12] - self.ref_dof_pos), dim=1)*0.1)
 
     def _reward_torso_force_wrench_ellipsoid(self):
         """
