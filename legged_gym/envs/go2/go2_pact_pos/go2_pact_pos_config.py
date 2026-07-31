@@ -413,7 +413,7 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             
             # I developed these
             front_foot_overreach = -10000.0
-            rear_foot_overreach = -100.0
+            rear_foot_overreach = -10.0
 
             # gait
             feet_air_time    = 0.70            # tracking reward for long steps
