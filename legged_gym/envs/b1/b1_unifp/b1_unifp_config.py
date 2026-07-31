@@ -152,7 +152,7 @@ class B1UniFPCfg:
         measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
         selected = False
         terrain_kwargs = None
-        max_init_terrain_level = 0
+        max_init_terrain_level = 2
         terrain_length = 8.0
         terrain_width = 8.0
         platform_size = 4.0
@@ -486,12 +486,12 @@ class B1UniFPCfg:
             vhip_angular_acc = -0.01          # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
 
             # Gait shaping
-            feet_drag = -0.01
+            feet_drag = -1.00
             stumble = -0.0
             feet_pos_xy = -0.2
             feet_contact_forces = -0.001
             feet_air_time = 1.00
-            early_swing = 1.00
+            early_swing = 10.00
             foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height
             swing_foot_direction = 0.00
             step_progress = 1.00
@@ -603,7 +603,7 @@ class B1UniFPCfgPPO:
 
         # Adaptive entropy coefficient: increase exploration when velocity
         # tracking or terrain-curriculum performance is below its target.
-        entropy_coef = 0.001
+        entropy_coef = 0.0001
         use_adaptive_entropy = False
         adaptive_ent_bounds = [0.001, 0.01]
         adaptive_ent_lin_threshold = 1.70

@@ -2134,7 +2134,7 @@ class B1Z1UniFP(BaseTask):
             (~contact_filt)
             & valid_swing
             & (air_time > 0.0)
-            & (air_time <= 0.10)
+            & (air_time <= 0.50)
         )
 
         foot_vel_z = self.simulator.feet_vel[:, :, 2]
