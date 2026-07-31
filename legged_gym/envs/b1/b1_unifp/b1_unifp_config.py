@@ -591,7 +591,7 @@ class B1UniFPCfgPPO:
 
         # Each action-noise setting may be a scalar or a flat 12-value list in
         # asset.dof_names/action order: FR, FL, RR, RL x hip, thigh, calf.
-        init_noise_std = [0.80, 1.00, 1.00] * 4
+        init_noise_std = [0.80, 0.80, 0.80] * 4
         # init_noise_std = [0.80, 1.00, 1.00, 0.80, 1.00, 1.00, 0.45, 0.60, 0.60, 0.45, 0.60, 0.60]
         min_noise_std = [0.10, 0.15, 0.15] * 4
         max_noise_std = 1.1

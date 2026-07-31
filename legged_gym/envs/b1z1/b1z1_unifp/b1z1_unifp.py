@@ -2452,15 +2452,13 @@ class B1Z1UniFP(BaseTask):
         """
 
         feet_z = self.simulator.feet_pos[:, :, 2]                       # (N,4)
-        # foot_vel_xy_norm = torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1)  # (N,4)
+        foot_vel_xy_norm = torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1)  # (N,4)
 
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
         swing = ~contact
 
         # desired_swing = 1.0 - self._get_gait_phase()
         num_swing = swing.sum(dim=1)
-
-        moving = self.get_walking_cmd_mask()
 
         # Flatten 3x3 terrain patch if needed, then take local max height near each foot
         h_patch = self.simulator._height_around_feet
@@ -2489,17 +2487,17 @@ class B1Z1UniFP(BaseTask):
         # Weight excess penalty less than main tracking term
         excess_weight = 0.25  # tune: 0.1 - 0.5
 
-        # total_err = torch.sum(
-        #     swing * (track_err + excess_weight * excess_err),
-        #     dim=-1
-        # )                                                               # (N,)
+        total_err = torch.sum(
+            foot_vel_xy_norm * (track_err + excess_weight * excess_err),
+            dim=-1
+        )                                                               # (N,)
 
         # track_err[:,0:2] *= 2      # give twice the weight to the front feet
 
-        total_err = torch.sum(
-            swing * (track_err),
-            dim=-1
-        )                                                               # (N,)
+        # total_err = torch.sum(
+            # swing * (track_err),
+            # dim=-1
+        # )                                                               # (N,)
 
         rew = torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma)
 
