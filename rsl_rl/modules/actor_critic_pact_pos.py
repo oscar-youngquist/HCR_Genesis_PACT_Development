@@ -395,6 +395,8 @@ class ActorCritic_PACT_Pos(nn.Module):
 
         act_opt = torch.optim.AdamW([*opt_groups_act, *ppo_enc_groups], lr=learning_rate, betas=betas)
         enc_opt = torch.optim.AdamW(auxiliary_enc_groups, lr=2.0e-4, betas=betas)
+        # act_opt = torch.optim.AdamW(opt_groups_act, lr=learning_rate, betas=betas)
+        # enc_opt = torch.optim.AdamW(opt_groups_enc, lr=2.0e-4, betas=betas)
         return act_opt, enc_opt
 
     def reset(self, dones=None):

@@ -424,11 +424,11 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             foot_slip        = -0.01           # penalty for feet slipping
             stumble          = -0.2
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
+
             feet_near_edge = -1.0
             edge_swing_clearance = -2.0
             swing_foot_collision_edge = -1.0
             feet_regulation = -0.1
-            feet_spread_pairwise_axes = 0.0
 
         class reward_curriculum():
             curr_reward_keys = ["orientation", 
