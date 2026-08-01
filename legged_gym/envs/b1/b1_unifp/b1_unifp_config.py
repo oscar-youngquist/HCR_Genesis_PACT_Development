@@ -492,8 +492,8 @@ class B1UniFPCfg:
             stumble = -0.01
 
             feet_contact_forces = -0.001
-            feet_air_time = 1.00
-            early_swing = 0.10
+            feet_air_time = 0.00
+            early_swing = 1.00
             foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height
 
 
@@ -595,7 +595,7 @@ class B1UniFPCfgPPO:
 
         # Each action-noise setting may be a scalar or a flat 12-value list in
         # asset.dof_names/action order: FR, FL, RR, RL x hip, thigh, calf.
-        init_noise_std = [0.90, 1.00, 1.00] * 4
+        init_noise_std = [0.45, 0.65, 0.65] * 4
         # init_noise_std = [0.80, 1.00, 1.00, 0.80, 1.00, 1.00, 0.45, 0.60, 0.60, 0.45, 0.60, 0.60]
         min_noise_std = [0.10, 0.15, 0.15] * 4
         max_noise_std = 1.1
@@ -607,7 +607,7 @@ class B1UniFPCfgPPO:
 
         # Adaptive entropy coefficient: increase exploration when velocity
         # tracking or terrain-curriculum performance is below its target.
-        entropy_coef = 0.0001
+        entropy_coef = 0.001
         use_adaptive_entropy = False
         adaptive_ent_bounds = [0.0, 0.001]
         adaptive_ent_lin_threshold = 1.70
@@ -622,7 +622,7 @@ class B1UniFPCfgPPO:
         desired_kl = 0.01
         max_grad_norm = 1.0
         adaptation_privileged_weight = 1.0
-        adaptation_kl_weight = 1.0
+        adaptation_kl_weight = 0.01
 
         num_learning_epochs = 5
         num_mini_batches = 4

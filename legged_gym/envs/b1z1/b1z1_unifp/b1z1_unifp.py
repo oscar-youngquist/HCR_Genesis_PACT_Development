@@ -2489,32 +2489,31 @@ class B1Z1UniFP(BaseTask):
         # Weight excess penalty less than main tracking term
         excess_weight = 0.25  # tune: 0.1 - 0.5
 
-        total_err = torch.sum(
-            foot_vel_xy_norm * (track_err + excess_weight * excess_err) * swing.float(),
-            dim=-1
-        )                                                               # (N,)
-
-        # track_err[:,0:2] *= 2      # give twice the weight to the front feet
-
         # total_err = torch.sum(
-            # swing * (track_err),
+            # foot_vel_xy_norm * (track_err + excess_weight * excess_err) * swing.float(),
             # dim=-1
         # )                                                               # (N,)
 
-        rew = torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma)
-
-        # weights = torch.tensor([1.25, 1.25, 1.0, 1.0], device=self.device)
-
-        # quality = torch.exp(-track_err / self.cfg.rewards.foot_clearance_tracking_sigma)
-
-        # reward = (weights * swing * quality).sum(1) / \
-        #  (weights * swing).sum(1).clamp_min(1.0)
-
-        rew *= (num_swing > 0).float()     # gate reward for robots with no swigning feet.
-        # rew *= moving.float()
-
         # return torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma) * moving.float()
-        return rew
+
+        # rew = torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma)
+
+        # rew *= (num_swing > 0).float()     # gate reward for robots with no swigning feet.
+
+        height_quality = torch.exp(-(track_err + excess_weight * excess_err) / self.cfg.rewards.foot_clearance_tracking_sigma)
+
+        motion_quality = torch.clamp(foot_vel_xy_norm / 0.30, 0.0, 1.0)
+
+        per_foot = (
+            swing.float()
+            * height_quality
+            * (0.25 + 0.75 * motion_quality)
+        )
+
+        reward = per_foot.sum(dim=1) / swing.sum(dim=1).clamp_min(1)
+        reward *= self.get_walking_cmd_mask().float()
+
+        return reward
 
     def _reward_feet_regulation(self):
         base_height = torch.mean(
@@ -3035,11 +3034,7 @@ class B1Z1UniFP(BaseTask):
         moving_cmd = target_mag > 0.15
         target_dir = target_vel / target_mag.unsqueeze(1).clamp_min(1e-6)
 
-        # If base_lin_vel is world-frame, rotate it into the yaw-aligned command frame.
-        measured_vel = quat_rotate_inverse(
-            self._get_base_yaw_quat(),
-            self.simulator.base_lin_vel,
-        )[:, :2]
+        measured_vel = self.simulator.base_lin_vel[:, :2]
 
         # Signed velocity EMA suppresses bouncing and alternating motion.
         smoothing_time = 0.25
