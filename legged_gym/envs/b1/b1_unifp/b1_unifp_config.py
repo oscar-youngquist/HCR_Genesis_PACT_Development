@@ -471,8 +471,8 @@ class B1UniFPCfg:
 
             # Legs
             dof_acc           = -2.5e-7
-            action_rate       = -0.02
-            action_smoothness = -0.0
+            action_rate       = -0.002
+            action_smoothness = -0.002
             joint_power       = -2.e-5
             joint_power_dist  = -1.e-6
 
@@ -595,7 +595,7 @@ class B1UniFPCfgPPO:
 
         # Each action-noise setting may be a scalar or a flat 12-value list in
         # asset.dof_names/action order: FR, FL, RR, RL x hip, thigh, calf.
-        init_noise_std = [0.40, 0.80, 0.80] * 4
+        init_noise_std = [0.90, 1.00, 1.00] * 4
         # init_noise_std = [0.80, 1.00, 1.00, 0.80, 1.00, 1.00, 0.45, 0.60, 0.60, 0.45, 0.60, 0.60]
         min_noise_std = [0.10, 0.15, 0.15] * 4
         max_noise_std = 1.1
@@ -641,6 +641,6 @@ class B1UniFPCfgPPO:
         experiment_name = "b1_unifp_genesis"
         sync_wandb = False
         resume = False
-        load_run = "Jul30_12-39-48_b1_unifp_locomotion"
-        checkpoint = 10000
+        load_run = "Aug01_15-23-50_b1_unifp_locomotion"
+        checkpoint = -1
         resume_path = None

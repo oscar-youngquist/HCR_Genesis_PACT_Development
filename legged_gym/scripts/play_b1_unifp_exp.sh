@@ -7,7 +7,7 @@ conda activate /home/oyoungquist/.conda/envs/genesis_lr
 export SIMULATOR=genesis_b1_unifp
 
 python play_exp_b1_unifp.py --task=b1_unifp --seed=1 --gpu=cuda:0 \
-  --follow_robot --terrain=rough --command_mode=random \
+  --follow_robot --terrain=rough --command_mode=joystick \
   --no-enable_torso_force_streams --no-apply_base_external_forces "$@"
 
 # Examples:
