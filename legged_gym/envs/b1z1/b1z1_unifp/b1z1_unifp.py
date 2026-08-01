@@ -2094,8 +2094,10 @@ class B1Z1UniFP(BaseTask):
         fz = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2]
         contact_prob = torch.sigmoid(10.0*(fz - 10.0))
         num_contacts = torch.sum(contact_prob, dim=-1)
+
+        moving = self.get_walking_cmd_mask()
         
-        return torch.exp(-torch.square(num_contacts - 2.0)) 
+        return torch.exp(-torch.square(num_contacts - 2.0)) * moving.float()
 
     def _reward_feet_air_time(self):
         """
@@ -2106,7 +2108,7 @@ class B1Z1UniFP(BaseTask):
         first_contact = stats["first_contact"]
         touchdown_air_time = stats["touchdown_air_time"]
 
-        error = (touchdown_air_time - 0.5)
+        error = (touchdown_air_time - 0.30)
         error[:,0:2] *= 2                 # give twice the weight to the front feet
 
         reward = torch.sum(error * first_contact.float(), dim=1)
@@ -2134,7 +2136,7 @@ class B1Z1UniFP(BaseTask):
             (~contact_filt)
             & valid_swing
             & (air_time > 0.0)
-            & (air_time <= 0.50)
+            & (air_time <= 0.18)
         )
 
         foot_vel_z = self.simulator.feet_vel[:, :, 2]
@@ -2488,7 +2490,7 @@ class B1Z1UniFP(BaseTask):
         excess_weight = 0.25  # tune: 0.1 - 0.5
 
         total_err = torch.sum(
-            foot_vel_xy_norm * (track_err + excess_weight * excess_err),
+            foot_vel_xy_norm * (track_err + excess_weight * excess_err) * swing.float(),
             dim=-1
         )                                                               # (N,)
 
@@ -2513,6 +2515,19 @@ class B1Z1UniFP(BaseTask):
 
         # return torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma) * moving.float()
         return rew
+
+    def _reward_feet_regulation(self):
+        base_height = torch.mean(
+            self.simulator.base_pos[:, 2].unsqueeze(1) - self.simulator.measured_heights,
+            dim=1,
+        )
+        delta_feet = self.simulator.feet_pos - self.simulator.base_pos.unsqueeze(1)
+        feet_to_base_height = (delta_feet * self.simulator.projected_gravity.unsqueeze(1)).sum(-1)
+        feet_height = torch.clamp(base_height.unsqueeze(1) - feet_to_base_height, min=0.0)
+        feet_xy_speed_sq = self.simulator.feet_vel[:, :, :2].pow(2).sum(-1)
+        return (feet_xy_speed_sq * torch.exp(
+            -feet_height / (0.025 * self.cfg.rewards.base_height_target)
+        )).sum(-1)
 
     def _reward_feet_contact_number(self):
         """

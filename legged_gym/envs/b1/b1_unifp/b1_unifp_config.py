@@ -8,10 +8,10 @@ class B1UniFPCfg:
         num_envs = 4096
         # gravity projection (2), angular velocity (3), leg positions (12),
         # leg velocities (12), previous actions (12), and commands (6).
-        num_observations = 47 + 2
+        num_observations = 47
         # Critic frame: 148-D dynamics/state block plus the 17 x 11 = 187
         # terrain-height samples configured below.
-        num_critic_state_obs = 148
+        num_critic_state_obs = 148 - 6
         num_height_obs = 187
         num_privileged_obs = num_critic_state_obs + num_height_obs
         num_priv_stack = 3
@@ -20,7 +20,7 @@ class B1UniFPCfg:
         num_explicit_recon_obs = 14
         num_pred_obs = 14
         num_actions = 12
-        num_obs_hist = 32
+        num_obs_hist = 10
         env_spacing = 0.5
         episode_length_s = 20
         grf_dim = 12
@@ -270,7 +270,7 @@ class B1UniFPCfg:
 
         class ranges:
             lin_vel_x = [0.3, 0.8]
-            lin_vel_y = [-0.0, 0.0]
+            lin_vel_y = [-0.8, 0.8]
             ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
 
@@ -422,7 +422,7 @@ class B1UniFPCfg:
         overreach_x_max = 0.42   # cm
         front_foot_x_nominal = 0.34
         rear_foot_x_nominal = 0.47
-        foot_x_margin = 0.08
+        foot_x_margin = 0.10
         
         support_polygon_sigma = 0.01
 
@@ -444,7 +444,7 @@ class B1UniFPCfg:
             # tracking
             tracking_lin_vel_force_world = 2.0    #
             tracking_ang_vel = 1.0                #
-            sparse_contacts = 0.2
+            sparse_contacts = 0.5
 
             no_physical_progress = -0.0
 
@@ -452,7 +452,7 @@ class B1UniFPCfg:
             upright = 0.1
             
             # gait-phase based leg posture shaping
-            ref_dof_leg = 1.0
+            ref_dof_leg = 0.0
             walking_ref_dof = 0.0
 
             walking_ref_swing_dof = 0.00
@@ -486,15 +486,19 @@ class B1UniFPCfg:
             vhip_angular_acc = -0.01          # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
 
             # Gait shaping
-            feet_drag = -1.00
-            stumble = -0.0
-            feet_pos_xy = -0.2
+            feet_drag = -0.10
+            feet_regulation = -1.00
+            feet_pos_xy = -0.0
+            stumble = -0.01
+
             feet_contact_forces = -0.001
             feet_air_time = 1.00
-            early_swing = 10.00
+            early_swing = 0.10
             foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height
+
+
             swing_foot_direction = 0.00
-            step_progress = 1.00
+            step_progress = 0.00
 
             # Leg posture conditioning
             torso_force_wrench_ellipsoid = 0.0
@@ -591,7 +595,7 @@ class B1UniFPCfgPPO:
 
         # Each action-noise setting may be a scalar or a flat 12-value list in
         # asset.dof_names/action order: FR, FL, RR, RL x hip, thigh, calf.
-        init_noise_std = [0.80, 0.80, 0.80] * 4
+        init_noise_std = [0.40, 0.80, 0.80] * 4
         # init_noise_std = [0.80, 1.00, 1.00, 0.80, 1.00, 1.00, 0.45, 0.60, 0.60, 0.45, 0.60, 0.60]
         min_noise_std = [0.10, 0.15, 0.15] * 4
         max_noise_std = 1.1
@@ -605,7 +609,7 @@ class B1UniFPCfgPPO:
         # tracking or terrain-curriculum performance is below its target.
         entropy_coef = 0.0001
         use_adaptive_entropy = False
-        adaptive_ent_bounds = [0.001, 0.01]
+        adaptive_ent_bounds = [0.0, 0.001]
         adaptive_ent_lin_threshold = 1.70
         adaptive_ent_ang_threshold = 0.75
         adaptive_ent_ter_threshold = 6.0
