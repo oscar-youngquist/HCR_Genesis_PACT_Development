@@ -74,7 +74,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        terrain_proportions = [0.10, 0.15, 0.25, 0.25, 0.20, 0.05]
+        terrain_proportions = [0.10, 0.10, 0.25, 0.25, 0.20, 0.10]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
@@ -102,9 +102,9 @@ class GO2PACTCfg( LeggedRobotCfg ):
             'RR_hip_joint': -0.1,     # [rad]
 
             'FL_thigh_joint': 0.8,   # [rad]
-            'RL_thigh_joint': 0.8,   # [rad]
+            'RL_thigh_joint': 0.95,   # [rad]
             'FR_thigh_joint': 0.8,   # [rad]
-            'RR_thigh_joint': 0.8,   # [rad]
+            'RR_thigh_joint': 0.95,   # [rad]
 
             'FL_calf_joint': -1.5,   # [rad]
             'RL_calf_joint': -1.5,   # [rad]
@@ -369,7 +369,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.28
-        rear_foot_x_nominal = -0.24
+        rear_foot_x_nominal = -0.25
         rear_foot_x_margin = 0.08
         support_polygon_sigma = 0.01
         
@@ -466,7 +466,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
             foot_slip        = -0.01          # penalty for feet slipping
             stumble          = -4.0
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
-            feet_near_edge = -1.0
+            feet_near_edge = -2.0
             edge_swing_clearance = -2.0
             swing_foot_collision_edge = -1.0
             feet_regulation = -0.1
@@ -537,7 +537,7 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/May09_19-14-36_pact_posboot_100hz_grf/model_3000_converted.pt"
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go2_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/May10_16-17-52_pact_posboot_100hz_grf/model_3000_converted.pt"
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/Jun10_18-16-06_pact_posboot_100hz_grf/model_3000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/Jul31_16-57-38_pact_posboot_100hz_grf/model_3000_converted.pt"
 
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
