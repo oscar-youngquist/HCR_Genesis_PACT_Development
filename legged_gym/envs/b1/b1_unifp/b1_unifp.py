@@ -484,7 +484,7 @@ class B1UniFP(B1Z1UniFP):
         self.kp_scale_offset = sum(cfg.domain_rand.kp_range) / 2
         self.kd_scale_offset = sum(cfg.domain_rand.kd_range) / 2
         cfg.domain_rand.push_interval = np.ceil(cfg.domain_rand.push_interval_s / self.dt)
-        cfg.runner_steps_per_iter = 24
+        cfg.runner_steps_per_iter = cfg.env.num_steps_per_env
         for kind in ("cmd", "ext"):
             setattr(self, f"push_interval_base_{kind}_min", np.ceil(getattr(cfg.commands, f"push_base_interval_s_{kind}")[0] / self.dt))
             setattr(self, f"push_interval_base_{kind}_max", np.ceil(getattr(cfg.commands, f"push_base_interval_s_{kind}")[1] / self.dt))

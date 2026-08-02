@@ -5,7 +5,7 @@ class B1UniFPCfg:
     seed = 1
 
     class env:
-        num_envs = 4096
+        num_envs = 500
         # gravity projection (2), angular velocity (3), leg positions (12),
         # leg velocities (12), previous actions (12), and commands (6).
         num_observations = 47
@@ -33,6 +33,7 @@ class B1UniFPCfg:
         debug_draw_height_points_around_feet = False
         debug_draw_terrain_height_points = False
 
+        num_steps_per_env = 32
 
     class init_state:
         pos = [0.0, 0.0, 0.6]
@@ -103,9 +104,9 @@ class B1UniFPCfg:
         ]
         foot_name = ["FR_foot", "FL_foot", "RR_foot", "RL_foot"]
         thigh_name = ["FR_thigh", "FL_thigh", "RR_thigh", "RL_thigh"]
-        penalize_contacts_on = ["trunk", "thigh", "hip"]
+        penalize_contacts_on = ["trunk", "thigh", "hip", "calf"]
 
-        terminate_after_contacts_on = ["trunk", "hip", "calf"]
+        terminate_after_contacts_on = ["trunk", "hip"]
 
         links_to_keep = ["FR_foot", "FL_foot", "RR_foot", "RL_foot"]
         self_collisions = False
@@ -430,23 +431,23 @@ class B1UniFPCfg:
         class scales:
             # Constraints
             termination = 0.0
-            collision = -5.0
-            dof_pos_limits = -10.0
+            collision = -1.0
+            dof_pos_limits = -2.0
             torque_limits = -0.001
-            dof_close_to_default = -0.01
+            dof_close_to_default = -0.001
 
             # Add in close to default reward
             stand_still         = -0.5            #
-            stand_still_contact = 0.5             #
+            stand_still_contact = 0.1             #
 
             alive = 0.01
 
             # tracking
             tracking_lin_vel_force_world = 2.0    #
             tracking_ang_vel = 1.0                #
-            sparse_contacts = 0.5
+            sparse_contacts = 0.2
 
-            no_physical_progress = -0.0
+            no_physical_progress = -0.10
 
             # Small positive reward for keeping the torso stable.
             upright = 0.1
@@ -459,7 +460,7 @@ class B1UniFPCfg:
             feet_contact_number = 0.00
 
 
-            hip_pos = -0.05
+            hip_pos = -0.00
 
             # Base
             base_height = -2.0
@@ -481,20 +482,20 @@ class B1UniFPCfg:
             rear_foot_overreach = -10.0
 
             # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
-            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
-            vhip_angle = -0.1                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
-            vhip_angular_acc = -0.01          # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
+            support_polygon = 0.0             # encourages well condition foot-placement realtive to the base CoM
+            vhip_angle = -0.0                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
+            vhip_angular_acc = -0.00          # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
 
             # Gait shaping
-            feet_drag = -0.10
-            feet_regulation = -1.00
+            feet_drag = -0.01
+            feet_regulation = -0.01
             feet_pos_xy = -0.0
             stumble = -0.01
 
             feet_contact_forces = -0.001
             feet_air_time = 0.00
-            early_swing = 1.00
-            foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height
+            early_swing = 0.10
+            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height
 
 
             swing_foot_direction = 0.00
@@ -554,9 +555,9 @@ class B1UniFPCfg:
         ref_env = 0
         pos = [1, 2, 2]
         lookat = [0.0, 0.0, 0.0]
-        num_rendered_envs = 20
+        num_rendered_envs = 15
         rendered_envs_idx = np.random.choice(
-            np.arange(4000),
+            np.arange(500),
             size=num_rendered_envs,
             replace=False,
         )
@@ -589,15 +590,15 @@ class B1UniFPCfgPPO:
 
     class policy:
         actor_hidden_dims = [512, 256, 128]
-        critic_hidden_dims = [512, 256, 128]
+        critic_hidden_dims = [1024, 512, 256, 128]
         activation = "elu"
 
 
         # Each action-noise setting may be a scalar or a flat 12-value list in
         # asset.dof_names/action order: FR, FL, RR, RL x hip, thigh, calf.
-        init_noise_std = [0.45, 0.65, 0.65] * 4
+        init_noise_std = [0.40, 0.60, 0.60] * 4
         # init_noise_std = [0.80, 1.00, 1.00, 0.80, 1.00, 1.00, 0.45, 0.60, 0.60, 0.45, 0.60, 0.60]
-        min_noise_std = [0.10, 0.15, 0.15] * 4
+        min_noise_std = [0.15, 0.25, 0.25] * 4
         max_noise_std = 1.1
 
     class algorithm:
@@ -607,7 +608,7 @@ class B1UniFPCfgPPO:
 
         # Adaptive entropy coefficient: increase exploration when velocity
         # tracking or terrain-curriculum performance is below its target.
-        entropy_coef = 0.001
+        entropy_coef = 0.0
         use_adaptive_entropy = False
         adaptive_ent_bounds = [0.0, 0.001]
         adaptive_ent_lin_threshold = 1.70

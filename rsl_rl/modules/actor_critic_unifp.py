@@ -228,7 +228,7 @@ class ActorCriticUniFP(nn.Module):
         return explicit_prediction
 
     def update_distribution(self, observations):
-        _, _, latent = self.encode_context(observations, sample=True)
+        mean, _, latent = self.encode_context(observations, sample=True)
         actor_inputs = [
             observations[:, -self.num_obs_now:],
             latent,

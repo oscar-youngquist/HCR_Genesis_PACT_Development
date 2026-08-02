@@ -1549,8 +1549,8 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
 
         self.unclipped_torques = torques.clone()
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
-        # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
-        return torques
+        return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
+        # return torques
 
     def apply_ee_force(self, force_world):
         """Store the target world-frame EE disturbance force."""

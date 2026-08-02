@@ -1802,7 +1802,7 @@ class B1Z1UniFP(BaseTask):
         self.kp_scale_offset = (cfg.domain_rand.kp_range[0] + cfg.domain_rand.kp_range[1]) / 2
         self.kd_scale_offset = (cfg.domain_rand.kd_range[0] + cfg.domain_rand.kd_range[1]) / 2
         cfg.domain_rand.push_interval = np.ceil(cfg.domain_rand.push_interval_s / self.dt)
-        cfg.runner_steps_per_iter = 24
+        cfg.runner_steps_per_iter = cfg.env.num_steps_per_env
         self.push_interval_gripper_cmd_min = np.ceil(cfg.commands.push_gripper_interval_s_cmd[0] / self.dt)
         self.push_interval_gripper_cmd_max = np.ceil(cfg.commands.push_gripper_interval_s_cmd[1] / self.dt)
         self.push_interval_gripper_ext_min = np.ceil(cfg.commands.push_gripper_interval_s_ext[0] / self.dt)

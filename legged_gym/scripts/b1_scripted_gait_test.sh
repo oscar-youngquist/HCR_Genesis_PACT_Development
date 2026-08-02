@@ -5,4 +5,4 @@
 conda activate /home/oyoungquist/.conda/envs/genesis_lr
 
 export SIMULATOR=genesis_b1_unifp
-python train.py --task=b1_unifp --seed=1 --gpu=cuda:0
+python b1_scripted_gait_test.py --task=b1_unifp --seed=1 --gpu=cuda:0
