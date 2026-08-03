@@ -18,6 +18,7 @@ import os
 import random
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -46,6 +47,12 @@ SCORE_WEIGHTS = {
     "reset": -20.0,
     "excessive_tilt": -8.0,
     "insufficient_height": -8.0,
+    "sustained_progress": 3.0,
+    "forward_cycle_fraction": 1.0,
+    "cycle_variation": -1.0,
+    "high_torque_usage": -1.0,
+    "torque_step_change": -1.0,
+    "stance_slip": -1.0,
 }
 
 CONSTRAINT_THRESHOLDS = {
@@ -80,6 +87,21 @@ METRIC_FIELDS = (
     "overall_contact_mismatch", "mean_contacting_feet",
     "mean_valid_swing_displacement", "min_valid_swing_displacement",
     "positive_valid_swing_fraction",
+    # Complete-cycle aggregates distinguish sustained gait motion from a
+    # one-time forward impulse. Partial first/final cycles are excluded.
+    "complete_cycle_count", "mean_cycle_body_frame_vx",
+    "mean_cycle_command_aligned_vx", "mean_cycle_command_aligned_progress",
+    "mean_cycle_positive_mechanical_work", "mean_cycle_contact_impulse",
+    "forward_cycle_fraction", "sustained_vx", "cycle_vx_cv",
+    # Torque burstiness and temporal roughness use the commanded, unclipped
+    # controller torque normalized by each joint's physical torque limit.
+    "torque_peak_to_rms", "high_torque_fraction",
+    "mean_normalized_torque_step_change", "p99_normalized_torque_step_change",
+    # Energetic, stance-slip, and contact-force diagnostics are recorded raw;
+    # only stance slip is scored until useful normalization scales are known.
+    "positive_mechanical_work", "command_aligned_distance", "work_per_meter",
+    "mean_stance_foot_slip", "peak_vertical_contact_force",
+    "p95_vertical_contact_force", "contact_impulse_cv",
 ) + tuple(
     f"{prefix}_{foot}"
     for prefix in (
@@ -285,6 +307,24 @@ def constraints_for(metrics: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def bounded(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def percentile(values: list[float], quantile: float) -> float:
+    """Return a finite linearly interpolated percentile without NumPy."""
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    position = bounded(quantile, 0.0, 1.0) * (len(ordered) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+
 def score_metrics(metrics: dict[str, Any], command_vx: float) -> float:
     command_scale = max(abs(command_vx), 0.1)
     velocity_tracking = max(0.0, 1.0 - metrics["mean_abs_vx_command_error"] / command_scale)
@@ -299,6 +339,13 @@ def score_metrics(metrics: dict[str, Any], command_vx: float) -> float:
     tilt = max(metrics["max_abs_roll"], metrics["max_abs_pitch"])
     excessive_tilt = min(2.0, max(0.0, (tilt - 0.40) / 0.25))
     insufficient_height = min(2.0, max(0.0, (0.35 - metrics["min_base_height"]) / 0.15))
+    sustained_progress = bounded(metrics["sustained_vx"] / command_scale, 0.0, 1.0)
+    cycle_variation = bounded(metrics["cycle_vx_cv"], 0.0, 2.0)
+    high_torque_usage = bounded(metrics["high_torque_fraction"] / 0.10, 0.0, 2.0)
+    torque_step_change = bounded(
+        metrics["mean_normalized_torque_step_change"] / 0.10, 0.0, 2.0
+    )
+    stance_slip = bounded(metrics["mean_stance_foot_slip"] / 0.20, 0.0, 2.0)
     components = {
         "velocity_tracking": velocity_tracking,
         "positive_swing": positive_swing,
@@ -311,6 +358,12 @@ def score_metrics(metrics: dict[str, Any], command_vx: float) -> float:
         "reset": float(int(metrics["reset_count"]) > 0),
         "excessive_tilt": excessive_tilt,
         "insufficient_height": insufficient_height,
+        "sustained_progress": sustained_progress,
+        "forward_cycle_fraction": bounded(metrics["forward_cycle_fraction"], 0.0, 1.0),
+        "cycle_variation": cycle_variation,
+        "high_torque_usage": high_torque_usage,
+        "torque_step_change": torque_step_change,
+        "stance_slip": stance_slip,
     }
     return sum(SCORE_WEIGHTS[name] * value for name, value in components.items())
 
@@ -457,7 +510,11 @@ def run_worker_trial(
         max_joint_errors: list[float] = []
         torque_ratios: list[float] = []
         torque_maxima: list[float] = []
+        normalized_torque_step_changes: list[float] = []
+        stance_slip_speeds: list[float] = []
+        vertical_contact_forces: list[float] = []
         saturation_counts = 0
+        high_torque_counts = 0
         torque_samples = 0
         mismatch_counts = [0, 0, 0, 0]
         contact_counts: list[float] = []
@@ -469,6 +526,24 @@ def run_worker_trial(
         liftoff_x = torch.zeros(1, 4, device=env.device)
         swing_active = torch.zeros(1, 4, dtype=torch.bool, device=env.device)
         swing_overlapped_desired = torch.zeros_like(swing_active)
+        previous_commanded_torque = None
+
+        # A cycle is complete only between two post-settling phase wraps. The
+        # segment before the first wrap and the unclosed final segment are ignored.
+        command_direction = 1.0 if command[0] > 0 else (-1.0 if command[0] < 0 else 0.0)
+        previous_phase = None
+        cycle_active = False
+        cycle_step_count = 0
+        cycle_body_vx_sum = 0.0
+        cycle_aligned_vx_sum = 0.0
+        cycle_progress = 0.0
+        cycle_positive_work = 0.0
+        cycle_contact_impulse = 0.0
+        cycle_body_vx_values: list[float] = []
+        cycle_aligned_vx_values: list[float] = []
+        cycle_progress_values: list[float] = []
+        cycle_work_values: list[float] = []
+        cycle_contact_impulse_values: list[float] = []
 
         status = "success"
         error = ""
@@ -490,7 +565,8 @@ def run_worker_trial(
             state_tensors = (
                 env.simulator.base_lin_vel, env.simulator.base_euler,
                 env.simulator.base_pos, env.simulator.dof_pos,
-                env.simulator.unclipped_torques,
+                env.simulator.unclipped_torques, env.simulator.feet_vel,
+                env.simulator.link_contact_forces,
             )
             if not all(torch.isfinite(value).all() for value in state_tensors):
                 status, error = "failed", "nonfinite simulator state"
@@ -529,10 +605,61 @@ def run_worker_trial(
             pitch = abs(float(env.simulator.base_euler[0, 1].item()))
             height = float(env.simulator.base_pos[0, 2].item())
             joint_error = q_ref - env.simulator.dof_pos[:, :12]
+            commanded_torque = env.simulator.unclipped_torques[:, :12]
+            torque_limits = env.simulator._torque_limits[:12].clamp_min(1.0e-6)
             torque_ratio = (
-                env.simulator.unclipped_torques[:, :12].abs()
-                / env.simulator._torque_limits[:12].clamp_min(1.0e-6)
+                commanded_torque.abs() / torque_limits
             )
+            if previous_commanded_torque is not None:
+                torque_step = (
+                    (commanded_torque - previous_commanded_torque).abs() / torque_limits
+                )
+                normalized_torque_step_changes.extend(torque_step.flatten().tolist())
+            previous_commanded_torque = commanded_torque.clone()
+
+            # Positive commanded mechanical work is integrated at control-rate
+            # using the measured post-step joint velocity.
+            positive_work_step = float(torch.clamp(
+                commanded_torque * env.simulator.dof_vel[:, :12], min=0.0
+            ).sum().item()) * env.dt
+            vertical_force = env.simulator.link_contact_forces[
+                :, env.simulator.feet_indices, 2
+            ].clamp_min(0.0)
+            vertical_contact_forces.extend(vertical_force.flatten().tolist())
+            contact_impulse_step = float(vertical_force.sum().item()) * env.dt
+
+            # A contacting foot should be nearly stationary in world XY; this
+            # directly measures stance slip using Genesis link velocity.
+            foot_xy_speed = torch.linalg.vector_norm(
+                env.simulator.feet_vel[:, :, :2], dim=-1
+            )
+            stance_slip_speeds.extend(foot_xy_speed[current_contact].tolist())
+
+            phase_now = float(env._get_phase()[0].item())
+            phase_wrapped = previous_phase is not None and phase_now < previous_phase
+            if phase_wrapped:
+                if cycle_active and cycle_step_count > 0:
+                    cycle_body_vx_values.append(cycle_body_vx_sum / cycle_step_count)
+                    cycle_aligned_vx_values.append(cycle_aligned_vx_sum / cycle_step_count)
+                    cycle_progress_values.append(cycle_progress)
+                    cycle_work_values.append(cycle_positive_work)
+                    cycle_contact_impulse_values.append(cycle_contact_impulse)
+                cycle_active = True
+                cycle_step_count = 0
+                cycle_body_vx_sum = 0.0
+                cycle_aligned_vx_sum = 0.0
+                cycle_progress = 0.0
+                cycle_positive_work = 0.0
+                cycle_contact_impulse = 0.0
+            if cycle_active:
+                aligned_vx = command_direction * vx
+                cycle_step_count += 1
+                cycle_body_vx_sum += vx
+                cycle_aligned_vx_sum += aligned_vx
+                cycle_progress += aligned_vx * env.dt
+                cycle_positive_work += positive_work_step
+                cycle_contact_impulse += contact_impulse_step
+            previous_phase = phase_now
 
             vx_values.append(vx)
             vx_errors.append(abs(vx - float(command[0].item())))
@@ -544,6 +671,7 @@ def run_worker_trial(
             torque_ratios.extend(torque_ratio.flatten().tolist())
             torque_maxima.append(float(torque_ratio.max().item()))
             saturation_counts += int((torque_ratio >= 1.0).sum().item())
+            high_torque_counts += int((torque_ratio > 0.8).sum().item())
             torque_samples += torque_ratio.numel()
             mismatch = current_contact != desired_stance
             for foot in range(4):
@@ -558,9 +686,34 @@ def run_worker_trial(
             def mean(values: list[float]) -> float:
                 return sum(values) / len(values) if values else 0.0
 
+            def population_std(values: list[float]) -> float:
+                value_mean = mean(values)
+                return math.sqrt(mean([(value - value_mean) ** 2 for value in values]))
+
             vx_mean = mean(vx_values)
-            vx_std = math.sqrt(mean([(value - vx_mean) ** 2 for value in vx_values]))
+            vx_std = population_std(vx_values)
             all_swings = [value for per_foot in swing_displacements for value in per_foot]
+            cycle_aligned_mean = mean(cycle_aligned_vx_values)
+            cycle_vx_cv = bounded(
+                population_std(cycle_aligned_vx_values)
+                / max(abs(cycle_aligned_mean), 1.0e-6),
+                0.0,
+                10.0,
+            ) if cycle_aligned_vx_values else 0.0
+            total_positive_work = sum(cycle_work_values)
+            command_aligned_distance = sum(cycle_progress_values)
+            torque_rms = math.sqrt(mean([ratio * ratio for ratio in torque_ratios]))
+            torque_peak_to_rms = (
+                percentile(torque_ratios, 0.99) / max(torque_rms, 1.0e-6)
+                if torque_ratios else 0.0
+            )
+            contact_impulse_mean = mean(cycle_contact_impulse_values)
+            contact_impulse_cv = bounded(
+                population_std(cycle_contact_impulse_values)
+                / max(abs(contact_impulse_mean), 1.0e-6),
+                0.0,
+                10.0,
+            ) if cycle_contact_impulse_values else 0.0
             metrics = {
                 "reset_count": reset_count,
                 "mean_body_frame_vx": vx_mean,
@@ -585,6 +738,34 @@ def run_worker_trial(
                     sum(value > 0.0 for value in all_swings) / len(all_swings)
                     if all_swings else 0.0
                 ),
+                "complete_cycle_count": len(cycle_aligned_vx_values),
+                "mean_cycle_body_frame_vx": mean(cycle_body_vx_values),
+                "mean_cycle_command_aligned_vx": cycle_aligned_mean,
+                "mean_cycle_command_aligned_progress": mean(cycle_progress_values),
+                "mean_cycle_positive_mechanical_work": mean(cycle_work_values),
+                "mean_cycle_contact_impulse": contact_impulse_mean,
+                "forward_cycle_fraction": (
+                    sum(value > 0.05 for value in cycle_aligned_vx_values)
+                    / len(cycle_aligned_vx_values)
+                    if cycle_aligned_vx_values else 0.0
+                ),
+                "sustained_vx": percentile(cycle_aligned_vx_values, 0.20),
+                "cycle_vx_cv": cycle_vx_cv,
+                "torque_peak_to_rms": torque_peak_to_rms,
+                "high_torque_fraction": high_torque_counts / max(1, torque_samples),
+                "mean_normalized_torque_step_change": mean(normalized_torque_step_changes),
+                "p99_normalized_torque_step_change": percentile(
+                    normalized_torque_step_changes, 0.99
+                ),
+                "positive_mechanical_work": total_positive_work,
+                "command_aligned_distance": command_aligned_distance,
+                "work_per_meter": total_positive_work / max(command_aligned_distance, 1.0e-6),
+                "mean_stance_foot_slip": mean(stance_slip_speeds),
+                "peak_vertical_contact_force": (
+                    max(vertical_contact_forces) if vertical_contact_forces else 0.0
+                ),
+                "p95_vertical_contact_force": percentile(vertical_contact_forces, 0.95),
+                "contact_impulse_cv": contact_impulse_cv,
             }
             for foot, name in enumerate(FOOT_NAMES):
                 values = swing_displacements[foot]
@@ -627,12 +808,42 @@ def worker_main(
     return 0
 
 
-def read_existing(path: Path) -> tuple[list[dict[str, str]], set[tuple[str, ...]]]:
+def read_existing(
+    path: Path,
+) -> tuple[list[dict[str, str]], set[tuple[str, ...]], tuple[str, ...]]:
     if not path.exists():
-        return [], set()
+        return [], set(), ()
     with path.open(newline="", encoding="utf-8") as stream:
-        rows = list(csv.DictReader(stream))
-    return rows, {parameter_key(row) for row in rows}
+        reader = csv.DictReader(stream)
+        rows = list(reader)
+        fieldnames = tuple(reader.fieldnames or ())
+    return rows, {parameter_key(row) for row in rows}, fieldnames
+
+
+def normalize_existing_row(row: dict[str, str]) -> dict[str, Any]:
+    """Upgrade an older row while keeping its score out of the new ranking."""
+    normalized = {
+        field: row.get(field, 0.0 if field in METRIC_FIELDS else "")
+        for field in CSV_FIELDS
+    }
+    for field in CONSTRAINT_FIELDS:
+        normalized[field] = row.get(field, False)
+    if "sustained_vx" not in row:
+        normalized["status"] = "legacy"
+        normalized["score"] = -1.0e9
+        old_error = row.get("error", "")
+        normalized["error"] = (old_error + "; " if old_error else "") + (
+            "legacy row predates sustained-cycle metrics"
+        )
+    return normalized
+
+
+def rewrite_results(path: Path, rows: list[dict[str, Any]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=CSV_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in CSV_FIELDS})
 
 
 def append_result(path: Path, result: dict[str, Any], write_header: bool) -> None:
@@ -649,6 +860,17 @@ def parse_worker_output(stdout: str) -> dict[str, Any] | None:
         if line.startswith(RESULT_SENTINEL):
             return json.loads(line[len(RESULT_SENTINEL):])
     return None
+
+
+def format_duration(seconds: float) -> str:
+    """Format sweep timing without hiding multi-hour or multi-day runs."""
+    seconds = max(0, int(round(seconds)))
+    days, remainder = divmod(seconds, 24 * 60 * 60)
+    hours, remainder = divmod(remainder, 60 * 60)
+    minutes, seconds = divmod(remainder, 60)
+    if days:
+        return f"{days}d {hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def display_top(rows: list[dict[str, Any]]) -> None:
@@ -722,7 +944,10 @@ def parent_main(args: argparse.Namespace, repository_args: list[str]) -> int:
     csv_path = args.output_dir / "b1_gait_sweep_results.csv"
     json_path = args.output_dir / "b1_gait_sweep_best.json"
     if args.resume:
-        existing_rows, completed = read_existing(csv_path)
+        existing_rows, completed, existing_fields = read_existing(csv_path)
+        if existing_fields and existing_fields != CSV_FIELDS:
+            existing_rows = [normalize_existing_row(row) for row in existing_rows]
+            rewrite_results(csv_path, existing_rows)
     else:
         existing_rows, completed = [], set()
         if csv_path.exists():
@@ -732,10 +957,13 @@ def parent_main(args: argparse.Namespace, repository_args: list[str]) -> int:
     write_header = not csv_path.exists() or csv_path.stat().st_size == 0
     pending = [candidate for candidate in candidates if parameter_key(candidate) not in completed]
     print(f"Pending trials: {len(pending):,}; skipped by resume: {len(candidates) - len(pending):,}")
+    sweep_start_time = time.monotonic()
+    completed_runtime = 0.0
 
     for index, parameters in enumerate(pending, 1):
         identifier = trial_id(parameters)
         print(f"[{index}/{len(pending)}] trial {identifier}", flush=True)
+        trial_start_time = time.monotonic()
         command = [
             sys.executable, str(Path(__file__).resolve()),
             "--worker", "--trial-json", json.dumps(parameters, separators=(",", ":")),
@@ -764,9 +992,15 @@ def parent_main(args: argparse.Namespace, repository_args: list[str]) -> int:
         append_result(csv_path, result, write_header)
         write_header = False
         results.append(result)
+        completed_runtime += time.monotonic() - trial_start_time
+        elapsed = time.monotonic() - sweep_start_time
+        average_runtime = completed_runtime / index
+        estimated_remaining = average_runtime * (len(pending) - index)
         print(
             f"  {result['status']}: score={float(result['score']):.3f} "
             f"vx={float(result['mean_body_frame_vx']):.3f} "
+            f"elapsed={format_duration(elapsed)} "
+            f"eta={format_duration(estimated_remaining)} "
             f"error={result.get('error', '')}"
         )
 
