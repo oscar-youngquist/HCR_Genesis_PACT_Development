@@ -78,9 +78,11 @@ class B1UniFPCfg:
         yaw_angle_range = [0.0, 3.14]
         rand_yaw_range = np.pi / 2
         origin_perturb_range = 0.5
-        init_vel_perturb_range = 0.1
+        # init_vel_perturb_range = 0.1
+        init_vel_perturb_range = 0.0
 
-        leg_dof_pos_perturb_range = [-0.05, 0.05]
+        # leg_dof_pos_perturb_range = [-0.05, 0.05]
+        leg_dof_pos_perturb_range = [-0.0, 0.0]
 
     class asset:
         name = "b1"
@@ -159,9 +161,10 @@ class B1UniFPCfg:
         platform_size = 4.0
         num_rows = 10
         num_cols = 20
-        terrain_proportions = [0.30, 0.40, 0.00, 0.00, 0.30, 0.00, 0.0, 0.0, 0.0, 0.0]
+        # terrain_proportions = [0.30, 0.40, 0.00, 0.00, 0.30, 0.00, 0.0, 0.0, 0.0, 0.0]
+        terrain_proportions = [1.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.0, 0.0, 0.0, 0.0]
         terrain_curriculum_difficulty = {
-            "slope": "difficulty * 0.4",
+            "slope": "difficulty * 0.0",
             "step_height": "0.04 + 0.16 * difficulty",
             "discrete_height": "0.04 + 0.16 * difficulty",
             "stepping_stones_params": {
@@ -202,15 +205,27 @@ class B1UniFPCfg:
 
     class control:
         control_type = "P"
+        # stiffness = {
+        #     "hip": 100.0,
+        #     "thigh": 100.0,
+        #     "calf": 200.0,
+        # }
+        # damping = {
+        #     "hip": 2.5,
+        #     "thigh": 2.5,
+        #     "calf": 5.0,
+        # }
+
         stiffness = {
-            "hip": 100.0,
-            "thigh": 100.0,
-            "calf": 200.0,
+            "hip":   300.0,
+            "thigh": 300.0,
+            "calf":  500.0,
         }
+
         damping = {
-            "hip": 2.5,
-            "thigh": 2.5,
-            "calf": 5.0,
+            "hip":   7.5,
+            "thigh": 7.5,
+            "calf":  12.5,
         }
 
         # stiffness = {"joint":200.0}

@@ -28,15 +28,16 @@ from legged_gym.utils import get_args, init_genesis, task_registry, quat_rotate_
 
 # Test settings. These can be edited directly for a particular run.
 TASK_NAME = "b1_unifp"
-NUM_ENVS = 64
+NUM_ENVS = 1
 TEST_DURATION_S = 10.0
 WALK_COMMAND = (0.5, 0.0, 0.0)
+SWEEP_PHASE_LEAD = 0.10
 
 # This is a diagnostic safety clamp on the normalized residual action. Set it
 # high enough to reproduce the configured reference, but inspect the printed
 # required-action maximum before increasing it further.
 MAX_ABS_ACTION = 2.0
-PRINT_EVERY_STEPS = 25
+PRINT_EVERY_STEPS = 1
 
 
 def disable_training_randomization(env_cfg) -> None:
@@ -86,11 +87,16 @@ def reference_position_to_action(env) -> tuple[torch.Tensor, torch.Tensor]:
 
     sweep_amplitude = 0.10  # radians; begin conservatively
 
+    sweep_phase = torch.remainder(
+        phase + SWEEP_PHASE_LEAD,
+        1.0,
+    )
+
     sweep = (
         sweep_amplitude
         * command_scale
         * direction
-        * torch.cos(2.0 * torch.pi * phase)
+        * torch.cos(2.0 * torch.pi * sweep_phase)
     )
 
     # FR/RL diagonal
@@ -114,7 +120,7 @@ def reference_position_to_action(env) -> tuple[torch.Tensor, torch.Tensor]:
         min=-MAX_ABS_ACTION,
         max=MAX_ABS_ACTION,
     )
-    return applied_actions, required_actions
+    return applied_actions, required_actions, q_ref.clone()
 
 
 def main() -> None:
@@ -144,21 +150,49 @@ def main() -> None:
     num_steps = int(round(TEST_DURATION_S / env.dt))
     reset_count = 0
 
+    foot_names = ["FR", "FL", "RR", "RL"]
+    idx = env.leg_dof_indices
+
+    thigh_ids = [
+        idx["FR_thigh_joint"],
+        idx["FL_thigh_joint"],
+        idx["RR_thigh_joint"],
+        idx["RL_thigh_joint"],
+    ]
+
+    previous_contacts = (
+        env.simulator.link_contact_forces[
+            :, env.simulator.feet_indices, 2
+        ] > 5.0
+    ).clone()
+
+    liftoff_foot_x = torch.zeros(
+        env.num_envs, 4,
+        device=env.device,
+    )
+
+    swing_active = torch.zeros(
+        env.num_envs, 4,
+        dtype=torch.bool,
+        device=env.device,
+    )
+
     for step in range(num_steps):
-        # A nonzero command lets the environment's existing
-        # _step_contact_targets() advance gait_indices during env.step().
-        # Reapply it every step so periodic command resampling cannot stop the
-        # gait clock during this deterministic test.
         env.commands[:, :3] = command
 
-        actions, required_actions = reference_position_to_action(env)
+        # Save the phase used to construct this action.
+        phase_cmd = env._get_phase().clone()
+        desired_stance = env._get_gait_phase().bool().clone()
 
-        # This follows the normal task path. B1UniFP.step() calls
-        # simulator.step(actions), which calls simulator._compute_torques().
+        actions, required_actions, q_ref = reference_position_to_action(env)
+
         env.step(actions)
 
         resets = env.reset_buf.bool()
         reset_count += int(resets.sum().item())
+
+        q_actual = env.simulator.dof_pos[:, :12]
+        q_tracking_error = q_ref - q_actual
 
         feet_from_base_world = (
             env.simulator.feet_pos
@@ -174,26 +208,73 @@ def main() -> None:
             feet_from_base_world.reshape(-1, 3),
         ).view(env.num_envs, 4, 3)
 
-        if step % PRINT_EVERY_STEPS == 0 or step == num_steps - 1:
-            phase = env._get_phase()
-            contacts = (
-                env.simulator.link_contact_forces[
-                    :, env.simulator.feet_indices, 2
-                ] > 5.0
-            ).float().sum(dim=1)
+        current_contacts = (
+            env.simulator.link_contact_forces[
+                :, env.simulator.feet_indices, 2
+            ] > 5.0
+        )
 
+        valid_envs = ~resets.unsqueeze(1)
+
+        liftoff = (
+            previous_contacts
+            & ~current_contacts
+            & valid_envs
+        )
+
+        touchdown = (
+            ~previous_contacts
+            & current_contacts
+            & swing_active
+            & valid_envs
+        )
+
+        liftoff_foot_x[liftoff] = feet_pos_base[:, :, 0][liftoff]
+        swing_active[liftoff] = True
+
+        swing_dx = feet_pos_base[:, :, 0] - liftoff_foot_x
+
+        commanded_torque = env.simulator.unclipped_torques[:, :12]
+
+        torque_ratio = (
+            commanded_torque.abs()
+            / env.simulator._torque_limits[:12].clamp_min(1e-6)
+        )
+
+        # Print valid touchdown displacement for the displayed environment.
+        for foot in range(4):
+            if touchdown[0, foot]:
+                print(
+                    f"TOUCHDOWN foot={foot_names[foot]} "
+                    f"phase={env._get_phase()[0].item():.3f} "
+                    f"swing_dx={swing_dx[0, foot].item():+.4f} m"
+                )
+
+        swing_active[touchdown] = False
+        swing_active[resets] = False
+        previous_contacts.copy_(current_contacts)
+
+        if step % PRINT_EVERY_STEPS == 0 or step == num_steps - 1:
             print(
                 f"step={step:4d} "
                 f"time={step * env.dt:6.2f}s "
-                f"phase={phase[0].item():.3f} "
-                f"contacts={contacts.float().mean().item():.2f} "
-                f"body_vx: {env.simulator.base_lin_vel[:, 0].mean().item():.3f} "
-                f"foot_x: {feet_pos_base[:, :, 0].mean(dim=0).tolist()} "
-                f"height={env.simulator.base_pos[:, 2].mean().item():.3f} "
-                f"|roll|={env.simulator.base_euler[:, 0].abs().mean().item():.3f} "
-                f"|pitch|={env.simulator.base_euler[:, 1].abs().mean().item():.3f} "
+                f"phase_cmd={phase_cmd[0].item():.3f} "
+                f"phase_now={env._get_phase()[0].item():.3f} "
+                f"body_vx={env.simulator.base_lin_vel[0, 0].item():+.3f} "
+                f"contacts={current_contacts[0].int().tolist()} "
+                f"desired_stance={desired_stance[0].int().tolist()} "
+                f"foot_x={[round(x, 3) for x in feet_pos_base[0, :, 0].tolist()]} "
+                f"foot_z={[round(z, 3) for z in feet_pos_base[0, :, 2].tolist()]} "
+                f"q_ref_thigh="
+                f"{[round(q_ref[0, i].item(), 3) for i in thigh_ids]} "
+                f"q_act_thigh="
+                f"{[round(q_actual[0, i].item(), 3) for i in thigh_ids]} "
+                f"q_err_max={q_tracking_error[0].abs().max().item():.3f} "
                 f"required|max_action|={required_actions.abs().max().item():.3f} "
                 f"applied|max_action|={actions.abs().max().item():.3f} "
+                f"torque_ratio_mean={torque_ratio.mean().item():.3f} "
+                f"torque_ratio_max={torque_ratio.max().item():.3f} "
+                f"torque_sat_frac={(torque_ratio > 0.95).float().mean().item():.3f} "
                 f"resets={reset_count}"
             )
 
