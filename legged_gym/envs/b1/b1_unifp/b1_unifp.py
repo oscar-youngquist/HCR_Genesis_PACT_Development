@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import torch
 
@@ -17,6 +19,8 @@ class B1UniFP(B1Z1UniFP):
 
     def step(self, actions):
         actions = self._pre_sim_step(actions)
+        self._diagnostic_previous_applied_actions.copy_(self._diagnostic_applied_actions)
+        self._diagnostic_applied_actions.copy_(actions.detach())
 
         # actions = torch.zeros_like(actions)
 
@@ -44,6 +48,7 @@ class B1UniFP(B1Z1UniFP):
         self.compute_ref_state()
         self.check_termination()
         self.compute_reward()
+        self._accumulate_rollout_diagnostics()
         self.reset_idx(self.reset_buf.nonzero(as_tuple=False).flatten())
         if self.cfg.sensor.add_depth:
             self.simulator.update_depth_images()
@@ -57,6 +62,319 @@ class B1UniFP(B1Z1UniFP):
         if self.cfg.commands.heading_command:
             self._update_heading_command()
         self._step_contact_targets()
+
+    def begin_rollout_diagnostics(self):
+        """Reset detached physical/gait aggregates for one policy rollout."""
+        self._rollout_diagnostic_sums = {}
+        self._rollout_diagnostic_counts = {}
+        self._rollout_diagnostic_maxima = {}
+
+    def _rollout_diagnostic_add(self, name, values, mask=None, square=False):
+        values = values.detach().float()
+        if mask is not None:
+            mask = mask.detach().bool()
+            values = values[mask]
+        if values.numel() == 0:
+            return
+        if square:
+            values = values.square()
+        self._rollout_diagnostic_sums[name] = self._rollout_diagnostic_sums.get(
+            name, values.new_zeros(())
+        ) + values.sum()
+        self._rollout_diagnostic_counts[name] = self._rollout_diagnostic_counts.get(
+            name, values.new_zeros(())
+        ) + values.new_tensor(values.numel())
+
+    def _rollout_diagnostic_max(self, name, values):
+        value = values.detach().float().max()
+        self._rollout_diagnostic_maxima[name] = torch.maximum(
+            self._rollout_diagnostic_maxima.get(name, value.new_zeros(())), value
+        )
+
+    @torch.no_grad()
+    def _accumulate_rollout_diagnostics(self):
+        """Collect control and gait measurements from the pre-reset simulator state."""
+        if not hasattr(self, "_rollout_diagnostic_sums"):
+            self.begin_rollout_diagnostics()
+
+        actions = self._diagnostic_applied_actions[:, :12]
+        motor_strength = self.simulator._motor_strength[:, :12]
+        target = (
+            self.simulator.default_dof_pos[:, :12]
+            + motor_strength * actions * self.cfg.control.action_scale
+        )
+        previous_target = (
+            self.simulator.default_dof_pos[:, :12]
+            + motor_strength * self._diagnostic_previous_applied_actions[:, :12]
+            * self.cfg.control.action_scale
+        )
+        dof_velocity = self.simulator.dof_vel[:, :12]
+        dof_acceleration = (
+            dof_velocity - self.simulator._last_dof_vel[:, :12]
+        ) / self.dt
+        torque = self.simulator.unclipped_torques[:, :12]
+        torque_limits = self.simulator._torque_limits
+        torque_limits = (
+            torque_limits[:12].unsqueeze(0)
+            if torque_limits.ndim == 1 else torque_limits[:, :12]
+        )
+
+        self._rollout_diagnostic_add(
+            "Control/joint_target_tracking_rmse", target - self.simulator.dof_pos[:, :12], square=True
+        )
+        self._rollout_diagnostic_add(
+            "Control/joint_target_delta_rms", target - previous_target, square=True
+        )
+        self._rollout_diagnostic_add("Control/dof_velocity_rms", dof_velocity, square=True)
+        self._rollout_diagnostic_add("Control/dof_acceleration_rms", dof_acceleration, square=True)
+        self._rollout_diagnostic_add("Control/torque_rms", torque, square=True)
+        self._rollout_diagnostic_max("Control/torque_abs_max", torque.abs())
+        at_limit = torque.abs() >= torque_limits.clamp_min(1.0e-12)
+        self._rollout_diagnostic_add("Control/torque_limit_fraction", at_limit)
+        # Absolute joint power is a useful shaking/energy diagnostic even when
+        # positive and negative work alternate within one control interval.
+        self._rollout_diagnostic_add(
+            "Control/mechanical_power_mean", (torque * dof_velocity).abs()
+        )
+
+        contact = (
+            self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
+        )
+        stance = self._get_gait_phase().bool()
+        walking = self.get_walking_cmd_mask()
+        contact_match = contact == stance
+        foot_speed = torch.norm(self.simulator.feet_vel, dim=-1)
+        foot_xy_speed = torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1)
+        stance_contact = stance & contact
+        valid_swing = (~stance) & (~contact) & walking.unsqueeze(1)
+
+        if hasattr(self.simulator, "_height_around_feet"):
+            terrain = self.simulator.height_around_feet
+            if terrain.ndim == 4:
+                terrain = terrain.flatten(2)
+            terrain_height = terrain.max(dim=-1).values
+        else:
+            terrain_height = torch.zeros_like(self.simulator.feet_pos[:, :, 2])
+        desired_foot_height = terrain_height + (
+            self.cfg.rewards.foot_height_offset + self.cfg.rewards.foot_clearance_target
+        )
+        clearance_success = self.simulator.feet_pos[:, :, 2] >= desired_foot_height
+
+        self._rollout_diagnostic_add("Gait/contact_match_fraction", contact_match)
+        self._rollout_diagnostic_add(
+            "Gait/stance_slip_speed_mean", foot_xy_speed, stance_contact
+        )
+        self._rollout_diagnostic_add(
+            "Gait/swing_clearance_success_fraction", clearance_success, valid_swing
+        )
+        self._rollout_diagnostic_add("Gait/swing_foot_speed_mean", foot_speed, valid_swing)
+
+        command_xy = self.commands[:, :2]
+        command_speed = torch.norm(command_xy, dim=1)
+        directed = command_speed > 1.0e-6
+        command_direction = command_xy / command_speed.clamp_min(1.0e-6).unsqueeze(1)
+        aligned_velocity = torch.sum(
+            self.simulator.base_lin_vel[:, :2] * command_direction, dim=1
+        )
+        self._rollout_diagnostic_add(
+            "Gait/backward_motion_fraction", aligned_velocity < 0.0, directed
+        )
+        vx = self.simulator.base_lin_vel[:, 0]
+        self._rollout_diagnostic_add("Gait/vx_mean", vx)
+        self._rollout_diagnostic_add("_Gait/vx_square", vx, square=True)
+        self._rollout_diagnostic_add(
+            "Gait/vx_tracking_mae", torch.abs(vx - self.commands[:, 0])
+        )
+        self._rollout_diagnostic_sums["_Gait/aligned_progress"] = (
+            self._rollout_diagnostic_sums.get("_Gait/aligned_progress", vx.new_zeros(()))
+            + (aligned_velocity[directed] * self.dt).sum()
+        )
+        self._rollout_diagnostic_sums["_Gait/commanded_progress"] = (
+            self._rollout_diagnostic_sums.get("_Gait/commanded_progress", vx.new_zeros(()))
+            + (command_speed[directed] * self.dt).sum()
+        )
+
+        diagonal_agreement = torch.stack(
+            (contact[:, 0] == contact[:, 3], contact[:, 1] == contact[:, 2]), dim=1
+        )
+        self._rollout_diagnostic_add("Gait/diagonal_contact_agreement", diagonal_agreement)
+        for foot_index, foot_name in enumerate(self.cfg.asset.foot_name):
+            prefix = f"GaitPerFoot/{foot_name}"
+            self._rollout_diagnostic_add(f"{prefix}/contact_duty_factor", contact[:, foot_index])
+            self._rollout_diagnostic_add(
+                f"{prefix}/contact_match_fraction", contact_match[:, foot_index]
+            )
+            self._rollout_diagnostic_add(
+                f"{prefix}/stance_slip_speed_mean",
+                foot_xy_speed[:, foot_index], stance_contact[:, foot_index],
+            )
+            self._rollout_diagnostic_add(
+                f"{prefix}/clearance_success_fraction",
+                clearance_success[:, foot_index], valid_swing[:, foot_index],
+            )
+
+        phase = self._get_phase()
+        phase_wrapped = phase < self._diagnostic_previous_phase
+        completed_cycle = phase_wrapped & self._diagnostic_cycle_active & walking
+        self._rollout_diagnostic_add(
+            "Gait/net_displacement_per_cycle",
+            self._diagnostic_cycle_progress,
+            completed_cycle,
+        )
+        self._diagnostic_cycle_progress[phase_wrapped] = 0.0
+        self._diagnostic_cycle_active[phase_wrapped & walking] = True
+        starts_cycle = (
+            walking
+            & (~self._diagnostic_cycle_active)
+            & (phase <= self.dt / self.cfg.rewards.cycle_time + 1.0e-6)
+        )
+        self._diagnostic_cycle_active[starts_cycle] = True
+        active_progress = self._diagnostic_cycle_active & directed
+        self._diagnostic_cycle_progress[active_progress] += (
+            aligned_velocity[active_progress] * self.dt
+        )
+        stopped = ~walking
+        self._diagnostic_cycle_active[stopped] = False
+        self._diagnostic_cycle_progress[stopped] = 0.0
+        self._diagnostic_previous_phase.copy_(phase)
+
+    @torch.no_grad()
+    def get_rollout_diagnostics(self):
+        """Finalize rollout aggregates as finite Python scalars for logging."""
+        rms_metrics = {
+            "Control/joint_target_tracking_rmse",
+            "Control/joint_target_delta_rms",
+            "Control/dof_velocity_rms",
+            "Control/dof_acceleration_rms",
+            "Control/torque_rms",
+        }
+        metrics = {}
+        for name, total in self._rollout_diagnostic_sums.items():
+            if name.startswith("_"):
+                continue
+            count = self._rollout_diagnostic_counts.get(name)
+            value = total / count.clamp_min(1.0) if count is not None else total
+            if name in rms_metrics:
+                value = torch.sqrt(value.clamp_min(0.0))
+            metrics[name] = value.item() if torch.isfinite(value) else 0.0
+        for name, value in self._rollout_diagnostic_maxima.items():
+            metrics[name] = value.item() if torch.isfinite(value) else 0.0
+
+        vx_count = self._rollout_diagnostic_counts.get("Gait/vx_mean")
+        if vx_count is not None and vx_count.item() > 0:
+            vx_mean = self._rollout_diagnostic_sums["Gait/vx_mean"] / vx_count
+            vx_second = self._rollout_diagnostic_sums["_Gait/vx_square"] / vx_count
+            metrics["Gait/vx_std"] = torch.sqrt(
+                (vx_second - vx_mean.square()).clamp_min(0.0)
+            ).item()
+        else:
+            metrics["Gait/vx_std"] = 0.0
+        actual = self._rollout_diagnostic_sums.get("_Gait/aligned_progress")
+        desired = self._rollout_diagnostic_sums.get("_Gait/commanded_progress")
+        metrics["Gait/aligned_progress_ratio"] = (
+            (actual / desired.clamp_min(1.0e-12)).item()
+            if actual is not None and desired is not None and desired.item() > 0.0 else 0.0
+        )
+        required = (
+            "Control/joint_target_tracking_rmse", "Control/joint_target_delta_rms",
+            "Control/dof_velocity_rms", "Control/dof_acceleration_rms",
+            "Control/torque_rms", "Control/torque_abs_max",
+            "Control/torque_limit_fraction", "Control/mechanical_power_mean",
+            "Gait/contact_match_fraction", "Gait/stance_slip_speed_mean",
+            "Gait/swing_clearance_success_fraction", "Gait/swing_foot_speed_mean",
+            "Gait/backward_motion_fraction", "Gait/vx_mean", "Gait/vx_std",
+            "Gait/vx_tracking_mae", "Gait/aligned_progress_ratio",
+            "Gait/net_displacement_per_cycle", "Gait/diagonal_contact_agreement",
+        )
+        for name in required:
+            metrics.setdefault(name, 0.0)
+        for foot_name in self.cfg.asset.foot_name:
+            for metric_name in (
+                "contact_duty_factor", "contact_match_fraction",
+                "stance_slip_speed_mean", "clearance_success_fraction",
+            ):
+                metrics.setdefault(f"GaitPerFoot/{foot_name}/{metric_name}", 0.0)
+        return metrics
+
+    def compute_ref_state(self):
+        """Build the UniFP swing pose, then add the optimized thigh sweep."""
+        # Keep the inherited thigh/calf swing trajectory and gait/contact clock
+        # exactly intact. The sweep phase lead applies only to this added term.
+        super().compute_ref_state()
+        phase = self._get_phase()
+        sweep_phase = torch.remainder(
+            phase + self.cfg.rewards.sweep_phase_lead,
+            1.0,
+        )
+        vx_command = self.commands[:, 0]
+        # The gain maps signed commanded velocity directly to joint-angle
+        # amplitude; the clamp bounds the reference at larger commands.
+        raw_sweep = (
+            self.cfg.rewards.sweep_velocity_gain
+            * vx_command
+            * torch.cos(2.0 * torch.pi * sweep_phase)
+        )
+        max_amplitude = self.cfg.rewards.max_sweep_amplitude
+        sweep = torch.clamp(
+            raw_sweep,
+            min=-max_amplitude,
+            max=max_amplitude,
+        )
+
+        idx = self.leg_dof_indices
+        self.ref_dof_pos[:, idx["FR_thigh_joint"]] += sweep
+        self.ref_dof_pos[:, idx["RL_thigh_joint"]] += sweep
+        self.ref_dof_pos[:, idx["FL_thigh_joint"]] -= sweep
+        self.ref_dof_pos[:, idx["RR_thigh_joint"]] -= sweep
+
+    def set_training_iteration(self, iteration):
+        """Set the true PPO iteration used by gait-guidance schedules."""
+        iteration = int(iteration)
+        if iteration < 0:
+            raise ValueError("training iteration must be nonnegative")
+        self.training_iteration = iteration
+
+    def _get_gait_guidance_multiplier(self, initial, final):
+        """Geometrically interpolate one guidance weight over PPO iterations."""
+        if not self.cfg.rewards.gait_guidance_decay_enabled:
+            return 1.0
+
+        duration = self.cfg.rewards.gait_guidance_decay_iterations
+        progress = min(max(self.training_iteration / duration, 0.0), 1.0)
+        if progress <= 0.0:
+            return float(initial)
+        if progress >= 1.0:
+            return float(final)
+
+        # Epsilon permits a zero endpoint while preserving exact endpoint values.
+        epsilon = 1.0e-12
+        effective_initial = max(float(initial), epsilon)
+        effective_final = max(float(final), epsilon)
+        return effective_initial * math.exp(
+            math.log(effective_final / effective_initial) * progress
+        )
+
+    def get_gait_guidance_multipliers(self):
+        """Expose current schedule values for runner/TensorBoard diagnostics."""
+        rewards = self.cfg.rewards
+        return {
+            "ref_dof_leg": self._get_gait_guidance_multiplier(
+                rewards.ref_dof_leg_initial_multiplier,
+                rewards.ref_dof_leg_final_multiplier,
+            ),
+            "feet_contact": self._get_gait_guidance_multiplier(
+                rewards.feet_contact_initial_multiplier,
+                rewards.feet_contact_final_multiplier,
+            ),
+        }
+
+    def _reward_ref_dof_leg(self):
+        raw_reward = super()._reward_ref_dof_leg()
+        return raw_reward * self.get_gait_guidance_multipliers()["ref_dof_leg"]
+
+    def _reward_feet_contact_number(self):
+        raw_reward = super()._reward_feet_contact_number()
+        return raw_reward * self.get_gait_guidance_multipliers()["feet_contact"]
 
     def _resample_commands(self, env_ids):
         if len(env_ids) == 0:
@@ -103,6 +421,9 @@ class B1UniFP(B1Z1UniFP):
 
         for buf in (self.actions, self.last_actions, self.llast_actions):
             buf[env_ids] = 0.0
+        if hasattr(self, "_diagnostic_applied_actions"):
+            self._diagnostic_applied_actions[env_ids] = 0.0
+            self._diagnostic_previous_applied_actions[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
         self.feet_stance_time[env_ids] = 0.0
         self.valid_swing[env_ids] = False
@@ -110,6 +431,10 @@ class B1UniFP(B1Z1UniFP):
         self.step_direction_world[env_ids] = 0.0
         self.step_max_progress[env_ids] = 0.0
         self.gait_indices[env_ids] = 0.0
+        if hasattr(self, "_diagnostic_cycle_progress"):
+            self._diagnostic_cycle_progress[env_ids] = 0.0
+            self._diagnostic_previous_phase[env_ids] = 0.0
+            self._diagnostic_cycle_active[env_ids] = False
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
         self.fail_buf[env_ids] = False
@@ -197,8 +522,8 @@ class B1UniFP(B1Z1UniFP):
             self.simulator.base_ang_vel * self.obs_scales.ang_vel,
             dof_pos_err, 
             dof_vel,
-            # sin_pos,
-            # cos_pos, 
+            sin_pos,
+            cos_pos, 
             self.actions, 
             self.commands * self.commands_scale,
         ), dim=-1, out=self.obs_buf)
@@ -233,10 +558,10 @@ class B1UniFP(B1Z1UniFP):
             ("reference_dof_error", self.simulator.dof_pos - self.ref_dof_pos),
             ("mass_com", mass_params),
             ("friction_offset", self.simulator._friction_values - self.friction_value_offset),
-            # ("stance", stance),
+            ("stance", stance),
             # Contacts are already carried by adaptation_labels above.
-            # ("phase_sin", sin_pos),
-            # ("phase_cos", cos_pos),
+            ("phase_sin", sin_pos),
+            ("phase_cos", cos_pos),
             ("projected_gravity", self.simulator.projected_gravity),
             ("base_angular_velocity", self.simulator.base_ang_vel * self.obs_scales.ang_vel),
             ("dof_position_error", dof_pos_err),
@@ -356,6 +681,8 @@ class B1UniFP(B1Z1UniFP):
 
         self.actions = torch.zeros(self.num_envs, 12, device=self.device)
         self.last_actions = torch.zeros_like(self.actions); self.llast_actions = torch.zeros_like(self.actions)
+        self._diagnostic_applied_actions = torch.zeros_like(self.actions)
+        self._diagnostic_previous_applied_actions = torch.zeros_like(self.actions)
         self.feet_air_time = torch.zeros(self.num_envs, 4, device=self.device)
         self.last_contacts = torch.zeros(self.num_envs, 4, dtype=torch.bool, device=self.device)
         # The inherited air-time/early-swing rewards share these stateful
@@ -404,6 +731,14 @@ class B1UniFP(B1Z1UniFP):
         )
 
         self.gait_indices = torch.zeros(self.num_envs, device=self.device)
+        self._diagnostic_cycle_progress = torch.zeros(self.num_envs, device=self.device)
+        self._diagnostic_previous_phase = torch.zeros(self.num_envs, device=self.device)
+        self._diagnostic_cycle_active = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.begin_rollout_diagnostics()
+        # Play/evaluation defaults to iteration zero until a runner supplies one.
+        self.training_iteration = 0
         self.obs_history_slots = [torch.zeros_like(self.obs_buf) for _ in range(self.cfg.env.num_obs_hist)]
         self._obs_history_slot = len(self.obs_history_slots) - 1
         self.obs_history = torch.zeros(self.num_envs, self.num_obs * self.num_obs_hist, device=self.device)
@@ -467,6 +802,22 @@ class B1UniFP(B1Z1UniFP):
             self.action_delay = torch.randint(0, max_delay + 1, (self.num_envs,), device=self.device)
 
     def _parse_cfg(self, cfg, sim_device):
+        if cfg.rewards.cycle_time <= 0.0:
+            raise ValueError("rewards.cycle_time must be positive")
+        if cfg.rewards.sweep_velocity_gain < 0.0:
+            raise ValueError("rewards.sweep_velocity_gain must be nonnegative")
+        if cfg.rewards.max_sweep_amplitude < 0.0:
+            raise ValueError("rewards.max_sweep_amplitude must be nonnegative")
+        if cfg.rewards.gait_guidance_decay_iterations <= 0:
+            raise ValueError("rewards.gait_guidance_decay_iterations must be positive")
+        for name in (
+            "ref_dof_leg_initial_multiplier",
+            "ref_dof_leg_final_multiplier",
+            "feet_contact_initial_multiplier",
+            "feet_contact_final_multiplier",
+        ):
+            if getattr(cfg.rewards, name) < 0.0:
+                raise ValueError(f"rewards.{name} must be nonnegative")
         self.dt = cfg.control.dt; self.debug = cfg.env.debug
         self.num_obs_hist = cfg.env.num_obs_hist; self.num_crit_obs_stack = cfg.env.num_priv_stack
         self.num_pred_obs = cfg.env.num_pred_obs; self.num_exp_labels = cfg.env.num_explicit_recon_obs

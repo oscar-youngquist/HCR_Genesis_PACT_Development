@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Run a velocity-scaled B1 UniFP reference gait open-loop.
+"""Run the B1 environment's existing UniFP reference gait open-loop.
 
-The environment owns the gait clock, while this test temporarily replaces its
-reference calculation:
+The environment already owns the gait clock and reference calculation:
 
     _step_contact_targets() -> _get_phase() -> compute_ref_state()
 
@@ -16,11 +15,9 @@ Therefore:
     action = (q_ref - q_default) / action_scale
 
 The normal ``env.step(actions)`` path then calls the simulator's existing
-``_compute_torques(actions)`` implementation. The original environment
-reference method is restored when the test finishes.
+``_compute_torques(actions)`` implementation.  No second gait generator or
+controller is implemented here.
 """
-
-import types
 
 import torch
 
@@ -33,18 +30,8 @@ from legged_gym.utils import get_args, init_genesis, task_registry, quat_rotate_
 TASK_NAME = "b1_unifp"
 NUM_ENVS = 1
 TEST_DURATION_S = 10.0
-WALK_COMMAND = (-0.5, 0.0, 0.0)
+WALK_COMMAND = (0.5, 0.0, 0.0)
 SWEEP_PHASE_LEAD = 0.175
-SWEEP_VELOCITY_GAIN = 0.28  # rad / (m/s): 0.5 m/s -> 0.14 rad
-MAX_SWEEP_AMPLITUDE = 0.18  # radians
-
-# Winning Phase-2 gait and controller settings. Defining these here prevents a
-# stale environment configuration from silently changing the visual test.
-CYCLE_TIME = 0.48
-TARGET_JOINT_POS_SCALE = 0.29
-TARGET_JOINT_POS_THD = 0.35
-STIFFNESS = {"hip": 250.0, "thigh": 250.0, "calf": 400.0}
-DAMPING = {"hip": 6.25, "thigh": 6.25, "calf": 10.0}
 
 # This is a diagnostic safety clamp on the normalized residual action. Set it
 # high enough to reproduce the configured reference, but inspect the printed
@@ -56,11 +43,6 @@ PRINT_EVERY_STEPS = 1
 def disable_training_randomization(env_cfg) -> None:
     """Keep this control-path test deterministic and on flat ground."""
     env_cfg.env.num_envs = NUM_ENVS
-    env_cfg.rewards.cycle_time = CYCLE_TIME
-    env_cfg.rewards.target_joint_pos_scale = TARGET_JOINT_POS_SCALE
-    env_cfg.rewards.target_joint_pos_thd = TARGET_JOINT_POS_THD
-    env_cfg.control.stiffness.update(STIFFNESS)
-    env_cfg.control.damping.update(DAMPING)
     # env_cfg.terrain.mesh_type = "plane"
     # env_cfg.terrain.curriculum = False
     # env_cfg.terrain.measure_heights = False
@@ -87,90 +69,44 @@ def disable_training_randomization(env_cfg) -> None:
             setattr(env_cfg.domain_rand, name, False)
 
 
-def velocity_scaled_compute_ref_state(self) -> None:
-    """Compute the UniFP pose plus a command-proportional thigh sweep."""
-    phase = self._get_phase()
-    sin_pos = torch.sin(2.0 * torch.pi * phase)
-    threshold = float(self.cfg.rewards.target_joint_pos_thd)
+def reference_position_to_action(env) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute the existing reference and convert it to policy actions."""
+    env.compute_ref_state()
 
-    if not -1.0 < threshold < 1.0:
-        raise ValueError(
-            "target_joint_pos_thd must lie strictly between -1 and 1, "
-            f"got {threshold}"
-        )
+    phase = env._get_phase()
+    idx = env.leg_dof_indices
 
-    sin_pos_l = sin_pos.clone() + threshold
-    sin_pos_r = sin_pos.clone() - threshold
-    self.ref_dof_pos = (
-        self.simulator.default_dof_pos[:, :12]
-        .repeat(self.num_envs, 1)
-        .clone()
+    vx = env.commands[:, 0]
+
+    direction = torch.sign(vx)
+    command_scale = torch.clamp(
+        torch.abs(vx) / 0.5,
+        min=0.0,
+        max=1.0,
     )
 
-    scale_1 = self.cfg.rewards.target_joint_pos_scale / (1.0 - threshold)
-    scale_2 = 2.0 * scale_1
-    idx = self.leg_dof_indices
+    sweep_amplitude = 0.14  # radians; begin conservatively
 
-    # Preserve the original UniFP diagonal swing-flexion reference.
-    sin_pos_l[sin_pos_l > 0.0] = 0.0
-    self.ref_dof_pos[:, idx["FL_thigh_joint"]] -= sin_pos_l * scale_1
-    self.ref_dof_pos[:, idx["FL_calf_joint"]] += sin_pos_l * scale_2
-    self.ref_dof_pos[:, idx["RR_thigh_joint"]] -= sin_pos_l * scale_1
-    self.ref_dof_pos[:, idx["RR_calf_joint"]] += sin_pos_l * scale_2
+    sweep_phase = torch.remainder(
+        phase + SWEEP_PHASE_LEAD,
+        1.0,
+    )
 
-    sin_pos_r[sin_pos_r < 0.0] = 0.0
-    self.ref_dof_pos[:, idx["FR_thigh_joint"]] += sin_pos_r * scale_1
-    self.ref_dof_pos[:, idx["FR_calf_joint"]] -= sin_pos_r * scale_2
-    self.ref_dof_pos[:, idx["RL_thigh_joint"]] += sin_pos_r * scale_1
-    self.ref_dof_pos[:, idx["RL_calf_joint"]] -= sin_pos_r * scale_2
-
-    # The signed command supplies both sweep magnitude and direction.
-    sweep_phase = torch.remainder(phase + SWEEP_PHASE_LEAD, 1.0)
-    raw_sweep = (
-        SWEEP_VELOCITY_GAIN
-        * self.commands[:, 0]
+    sweep = (
+        sweep_amplitude
+        * command_scale
+        * direction
         * torch.cos(2.0 * torch.pi * sweep_phase)
     )
-    sweep = torch.clamp(
-        raw_sweep,
-        min=-MAX_SWEEP_AMPLITUDE,
-        max=MAX_SWEEP_AMPLITUDE,
-    )
 
-    self.ref_dof_pos[:, idx["FR_thigh_joint"]] += sweep
-    self.ref_dof_pos[:, idx["RL_thigh_joint"]] += sweep
-    self.ref_dof_pos[:, idx["FL_thigh_joint"]] -= sweep
-    self.ref_dof_pos[:, idx["RR_thigh_joint"]] -= sweep
+    # FR/RL diagonal
+    env.ref_dof_pos[:, idx["FR_thigh_joint"]] += sweep
+    env.ref_dof_pos[:, idx["RL_thigh_joint"]] += sweep
 
+    # FL/RR diagonal: half-cycle offset
+    env.ref_dof_pos[:, idx["FL_thigh_joint"]] -= sweep
+    env.ref_dof_pos[:, idx["RR_thigh_joint"]] -= sweep
 
-def install_reference_override(env) -> dict[str, object]:
-    """Replace the environment reference aliases used by this task."""
-    method_names = [
-        name
-        for name in ("compute_ref_state", "compute_ref_dof")
-        if hasattr(env, name)
-    ]
-    if "compute_ref_state" not in method_names:
-        raise AttributeError("Environment does not define compute_ref_state()")
-
-    originals = {name: getattr(env, name) for name in method_names}
-    replacement = types.MethodType(velocity_scaled_compute_ref_state, env)
-    for name in method_names:
-        setattr(env, name, replacement)
-    return originals
-
-
-def restore_reference_methods(env, originals: dict[str, object]) -> None:
-    """Restore methods replaced solely for this diagnostic run."""
-    for name, method in originals.items():
-        setattr(env, name, method)
-
-
-def reference_position_to_action(
-    env,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute the overridden reference and convert it to policy actions."""
-    env.compute_ref_state()
 
     q_ref = env.ref_dof_pos[:, :12]
     q_default = env.simulator.default_dof_pos[:, :12]
@@ -201,7 +137,6 @@ def main() -> None:
         args=args,
         env_cfg=env_cfg,
     )
-    original_reference_methods = install_reference_override(env)
     env.reset()
 
     if env.num_actions != 12:
@@ -211,19 +146,6 @@ def main() -> None:
         WALK_COMMAND,
         device=env.device,
         dtype=env.commands.dtype,
-    )
-    expected_sweep_amplitude = min(
-        abs(WALK_COMMAND[0]) * SWEEP_VELOCITY_GAIN,
-        MAX_SWEEP_AMPLITUDE,
-    )
-    print(
-        "Velocity-scaled reference override enabled: "
-        f"methods={list(original_reference_methods)} "
-        f"cycle_time={CYCLE_TIME:.3f}s "
-        f"phase_lead={SWEEP_PHASE_LEAD:.3f} cycles "
-        f"vx={WALK_COMMAND[0]:+.3f}m/s "
-        f"amplitude={expected_sweep_amplitude:.3f}rad "
-        f"gain={SWEEP_VELOCITY_GAIN:.3f}rad/(m/s)"
     )
     num_steps = int(round(TEST_DURATION_S / env.dt))
     reset_count = 0
@@ -355,8 +277,6 @@ def main() -> None:
                 f"torque_sat_frac={(torque_ratio > 0.95).float().mean().item():.3f} "
                 f"resets={reset_count}"
             )
-
-    restore_reference_methods(env, original_reference_methods)
 
 
 if __name__ == "__main__":

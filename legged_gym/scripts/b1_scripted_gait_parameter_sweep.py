@@ -544,22 +544,41 @@ def run_worker_trial(
         cycle_progress_values: list[float] = []
         cycle_work_values: list[float] = []
         cycle_contact_impulse_values: list[float] = []
+        early_reject_enabled = bool(getattr(args, "sr_early_reject", False))
+        early_reject_grace = float(getattr(args, "sr_early_reject_grace_period", 0.0))
+        saturation_window_steps = max(
+            1,
+            int(round(float(getattr(args, "sr_early_reject_torque_window", env.dt)) / env.dt)),
+        )
+        saturation_threshold = float(
+            getattr(args, "sr_early_reject_torque_fraction", 1.0)
+        )
+        recent_saturation: list[float] = []
 
         status = "success"
         error = ""
+        early_rejection_reason = ""
         for step in range(total_steps):
             print(step)
             set_command()
             actions, q_ref = reference_action()
             print(actions)
             if not torch.isfinite(actions).all() or not torch.isfinite(q_ref).all():
-                status, error = "failed", "nonfinite action or reference position"
+                error = "nonfinite action or reference position"
+                if early_reject_enabled:
+                    status, early_rejection_reason = "early_rejected", "nonfinite_action"
+                else:
+                    status = "failed"
                 break
 
             env.step(actions)
             if bool(env.reset_buf.any()):
                 reset_count += int(env.reset_buf.sum().item())
-                status, error = "failed", "environment reset/fall during trial"
+                error = "environment reset/fall during trial"
+                if early_reject_enabled:
+                    status, early_rejection_reason = "early_rejected", "reset_or_fall"
+                else:
+                    status = "failed"
                 break
 
             state_tensors = (
@@ -569,11 +588,29 @@ def run_worker_trial(
                 env.simulator.link_contact_forces,
             )
             if not all(torch.isfinite(value).all() for value in state_tensors):
-                status, error = "failed", "nonfinite simulator state"
+                error = "nonfinite simulator state"
+                if early_reject_enabled:
+                    status, early_rejection_reason = "early_rejected", "nonfinite_state"
+                else:
+                    status = "failed"
                 break
 
             if step < settling_steps:
                 continue
+
+            trial_time = (step + 1) * env.dt
+            if early_reject_enabled and trial_time >= early_reject_grace:
+                roll_now = abs(float(env.simulator.base_euler[0, 0].item()))
+                pitch_now = abs(float(env.simulator.base_euler[0, 1].item()))
+                height_now = float(env.simulator.base_pos[0, 2].item())
+                if max(roll_now, pitch_now) > CONSTRAINT_THRESHOLDS["maximum_abs_tilt"]:
+                    status, error = "early_rejected", "excessive tilt"
+                    early_rejection_reason = "tilt_limit"
+                    break
+                if height_now < CONSTRAINT_THRESHOLDS["minimum_base_height"]:
+                    status, error = "early_rejected", "insufficient base height"
+                    early_rejection_reason = "height_limit"
+                    break
 
             current_contact = contacts()
             foot_pos_base = feet_in_base()
@@ -678,6 +715,18 @@ def run_worker_trial(
                 mismatch_counts[foot] += int(mismatch[0, foot].item())
             contact_counts.append(float(current_contact.float().sum().item()))
 
+            if early_reject_enabled:
+                recent_saturation.append(float((torque_ratio >= 1.0).float().mean().item()))
+                recent_saturation = recent_saturation[-saturation_window_steps:]
+                if (
+                    trial_time >= early_reject_grace
+                    and len(recent_saturation) == saturation_window_steps
+                    and sum(recent_saturation) / len(recent_saturation) > saturation_threshold
+                ):
+                    status, error = "early_rejected", "sustained torque saturation"
+                    early_rejection_reason = "torque_saturation"
+                    break
+
         if not vx_values:
             metrics = empty_metrics(reset_count)
             if status == "success":
@@ -777,9 +826,12 @@ def run_worker_trial(
 
         constraints = constraints_for(metrics)
         score = score_metrics(metrics, float(command[0].item()))
+        if status == "early_rejected":
+            score -= float(getattr(args, "sr_early_reject_penalty", 20.0))
         return {
             "trial_id": trial_id(parameters), **parameters,
             "status": status, "error": error, "score": score,
+            "early_rejection_reason": early_rejection_reason,
             **metrics, **constraints,
         }
     finally:

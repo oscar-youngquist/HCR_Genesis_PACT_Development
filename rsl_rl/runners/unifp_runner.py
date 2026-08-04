@@ -1,4 +1,5 @@
 import os
+import math
 import statistics
 import time
 from collections import deque
@@ -52,6 +53,14 @@ class OnPolicyRunnerUniFP:
         self.alg: PPO_UniFP = alg_class(actor_critic, device=self.device, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
+        self.enable_deterministic_diagnostics = self.cfg.get(
+            "enable_deterministic_diagnostics", False
+        )
+        self.deterministic_diagnostics_interval = self.cfg.get(
+            "deterministic_diagnostics_interval", 100
+        )
+        if self.deterministic_diagnostics_interval <= 0:
+            raise ValueError("deterministic_diagnostics_interval must be positive")
 
         self.alg.init_storage(
             self.env.num_envs,
@@ -95,10 +104,20 @@ class OnPolicyRunnerUniFP:
 
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
+            # The environment receives the checkpoint-aware PPO iteration, not
+            # an approximation based on simulation steps or episode resets.
+            if hasattr(self.env, "set_training_iteration"):
+                self.env.set_training_iteration(it)
+            self.alg.actor_critic.begin_rollout_diagnostics()
+            if hasattr(self.env, "begin_rollout_diagnostics"):
+                self.env.begin_rollout_diagnostics()
             start = time.time()
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
                     actions = self.alg.act(obs_history, critic_obs, obs_pred)
+                    self.alg.actor_critic.record_rollout_diagnostics(
+                        actions, self.env.cfg.normalization.clip_actions
+                    )
                     obs, privileged_obs, obs_history, obs_pred, rewards, dones, infos, _ = self.env.step(actions)
                     critic_obs = privileged_obs if privileged_obs is not None else obs
 
@@ -125,10 +144,50 @@ class OnPolicyRunnerUniFP:
                         cur_episode_length[new_ids] = 0
 
                 collection_time = time.time() - start
+                policy_diagnostics = self.alg.actor_critic.get_rollout_diagnostics()
+                environment_diagnostics = (
+                    self.env.get_rollout_diagnostics()
+                    if hasattr(self.env, "get_rollout_diagnostics") else {}
+                )
                 start = time.time()
                 self.alg.compute_returns(critic_obs)
 
-            mean_value_loss, mean_surrogate_loss, mean_adaptation_module_loss, mean_adaptation_losses = self.alg.update()
+            (
+                mean_value_loss,
+                mean_surrogate_loss,
+                mean_adaptation_module_loss,
+                mean_adaptation_losses,
+                ppo_diagnostics,
+            ) = self.alg.update()
+            subset_size = min(32, obs_history.shape[0])
+            diagnostic_observations = obs_history[:subset_size]
+            latent_resample_diagnostics = {}
+            deterministic_diagnostics = {}
+            if (
+                self.enable_deterministic_diagnostics
+                and it % self.deterministic_diagnostics_interval == 0
+            ):
+                deterministic_diagnostics = self.alg.actor_critic.deterministic_diagnostics(
+                    diagnostic_observations
+                )
+            else:
+                latent_resample_diagnostics = self.alg.actor_critic.latent_resample_diagnostics(
+                    diagnostic_observations
+                )
+            joint_names = self.env.cfg.asset.dof_names[:self.env.num_actions]
+            joint_std_diagnostics = {
+                f"PolicyStd/{joint_name}": self.alg.actor_critic.std[index].detach().item()
+                for index, joint_name in enumerate(joint_names)
+            }
+            diagnostic_metrics = {
+                **ppo_diagnostics,
+                **policy_diagnostics,
+                **environment_diagnostics,
+                **latent_resample_diagnostics,
+                **deterministic_diagnostics,
+                **joint_std_diagnostics,
+            }
+            self._validate_diagnostics(diagnostic_metrics)
             learn_time = time.time() - start
 
             if ep_infos and self.use_adaptive_entropy:
@@ -182,10 +241,12 @@ class OnPolicyRunnerUniFP:
             if self.log_dir is not None:
                 self.log(locals())
             if it % self.save_interval == 0 and self.log_dir is not None:
-                self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
+                self.save(os.path.join(self.log_dir, f"model_{it}.pt"), iteration=it)
             ep_infos.clear()
 
-        self.current_learning_iteration += num_learning_iterations
+        self.current_learning_iteration = tot_iter
+        if hasattr(self.env, "set_training_iteration"):
+            self.env.set_training_iteration(self.current_learning_iteration)
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
@@ -218,6 +279,15 @@ class OnPolicyRunnerUniFP:
             self.writer.add_scalar("Loss/adaptation_" + key, value, locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
         self.writer.add_scalar("Values/entropy", self.alg.current_entropy_coef, locs["it"])
+        for tag, value in locs["diagnostic_metrics"].items():
+            self.writer.add_scalar(tag, value, locs["it"])
+        if hasattr(self.env, "get_gait_guidance_multipliers"):
+            for name, multiplier in self.env.get_gait_guidance_multipliers().items():
+                self.writer.add_scalar(
+                    f"Values/gait_guidance_{name}_multiplier",
+                    multiplier,
+                    locs["it"],
+                )
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
@@ -274,12 +344,26 @@ class OnPolicyRunnerUniFP:
             values.append(float(value))
         return max(values, default=0.0)
 
-    def save(self, path, infos=None):
+    @staticmethod
+    def _validate_diagnostics(metrics):
+        """Fail early if a diagnostic is nonfinite or a fraction leaves [0, 1]."""
+        bounded_tokens = (
+            "fraction", "contact_match", "contact_duty",
+            "clearance_success", "diagonal_contact_agreement",
+        )
+        for name, value in metrics.items():
+            value = float(value)
+            if not math.isfinite(value):
+                raise RuntimeError(f"nonfinite diagnostic {name}: {value}")
+            if any(token in name for token in bounded_tokens) and not 0.0 <= value <= 1.0:
+                raise RuntimeError(f"bounded diagnostic {name} outside [0, 1]: {value}")
+
+    def save(self, path, infos=None, iteration=None):
         torch.save(
             {
                 "model_state_dict": self.alg.actor_critic.state_dict(),
                 "optimizer_state_dict": self.alg.optimizer.state_dict(),
-                "iter": self.current_learning_iteration,
+                "iter": self.current_learning_iteration if iteration is None else iteration,
                 "infos": infos,
             },
             path,
@@ -291,6 +375,8 @@ class OnPolicyRunnerUniFP:
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
         self.current_learning_iteration = loaded_dict["iter"]
+        if hasattr(self.env, "set_training_iteration"):
+            self.env.set_training_iteration(self.current_learning_iteration)
         return loaded_dict["infos"]
 
     def get_inference_policy(self, device=None):

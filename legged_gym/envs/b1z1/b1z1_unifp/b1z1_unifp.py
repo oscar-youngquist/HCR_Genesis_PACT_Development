@@ -2592,7 +2592,7 @@ class B1Z1UniFP(BaseTask):
         return 1.0*full_contact * (torch.norm(self.commands[:, :3], dim=1) < 0.1)
 
     def _reward_ref_dof_leg(self):
-        return torch.exp(-torch.sum(torch.abs(self.simulator.dof_pos[:, :12] - self.ref_dof_pos), dim=1)*0.1)
+        return torch.exp(-torch.sum(torch.abs(self.simulator.dof_pos[:, :12] - self.ref_dof_pos), dim=1) * 0.1)
 
     def _reward_torso_force_wrench_ellipsoid(self):
         """

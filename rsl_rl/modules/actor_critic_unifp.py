@@ -168,6 +168,11 @@ class ActorCriticUniFP(nn.Module):
         self.register_buffer("_std_clip_lwr", minimum_std, persistent=False)
         self.register_buffer("_std_clip_upr", maximum_std, persistent=False)
         self.distribution = None
+        self._diagnostic_history = None
+        self._diagnostic_sums = {}
+        self._diagnostic_counts = {}
+        self._last_latent_mean = None
+        self._last_latent_logvar = None
         # disable args validation for speedup
         Normal.set_default_validate_args = False
 
@@ -191,7 +196,12 @@ class ActorCriticUniFP(nn.Module):
         return tensor.clone()
 
     def reset(self, dones=None):
-        pass
+        if dones is None or self._diagnostic_history is None:
+            return
+        done_mask = dones.reshape(-1).bool()
+        self._diagnostic_history["length"][done_mask] = 0
+        for name in ("mean", "sample", "mean_delta", "sample_delta"):
+            self._diagnostic_history[name][done_mask] = 0.0
 
     def forward(self):
         raise NotImplementedError
@@ -228,7 +238,9 @@ class ActorCriticUniFP(nn.Module):
         return explicit_prediction
 
     def update_distribution(self, observations):
-        mean, _, latent = self.encode_context(observations, sample=True)
+        latent_mean, latent_logvar, latent = self.encode_context(observations, sample=True)
+        self._last_latent_mean = latent_mean.detach()
+        self._last_latent_logvar = latent_logvar.detach()
         actor_inputs = [
             observations[:, -self.num_obs_now:],
             latent,
@@ -237,6 +249,203 @@ class ActorCriticUniFP(nn.Module):
         mean = self.actor_body(torch.cat(actor_inputs, dim=-1))
         self._clip_std()
         self.distribution = Normal(mean, mean*0. + self.std)
+
+    def begin_rollout_diagnostics(self):
+        """Reset scalar accumulators while retaining cross-rollout action history."""
+        self._diagnostic_sums = {}
+        self._diagnostic_counts = {}
+
+    def _diagnostic_add(self, name, value, count):
+        value = value.detach()
+        count = count.detach() if isinstance(count, torch.Tensor) else value.new_tensor(count)
+        self._diagnostic_sums[name] = self._diagnostic_sums.get(
+            name, value.new_zeros(())
+        ) + value
+        self._diagnostic_counts[name] = self._diagnostic_counts.get(
+            name, value.new_zeros(())
+        ) + count
+
+    @torch.no_grad()
+    def record_rollout_diagnostics(self, sampled_action, action_clip):
+        """Accumulate detached action/latent statistics without resampling."""
+        action_mean = self.action_mean.detach()
+        sampled_action = sampled_action.detach()
+        if self._diagnostic_history is None or self._diagnostic_history["mean"].shape != action_mean.shape:
+            self._diagnostic_history = {
+                "mean": torch.zeros_like(action_mean),
+                "sample": torch.zeros_like(sampled_action),
+                "mean_delta": torch.zeros_like(action_mean),
+                "sample_delta": torch.zeros_like(sampled_action),
+                "length": torch.zeros(action_mean.shape[0], dtype=torch.long, device=action_mean.device),
+            }
+
+        history = self._diagnostic_history
+        numel = action_mean.numel()
+        self._diagnostic_add("action_mean_sq", action_mean.square().sum(), numel)
+        self._diagnostic_add("action_sample_sq", sampled_action.square().sum(), numel)
+        self._diagnostic_add(
+            "action_noise_sq", (sampled_action - action_mean).square().sum(), numel
+        )
+        self._diagnostic_sums["action_mean_abs_max"] = torch.maximum(
+            self._diagnostic_sums.get("action_mean_abs_max", action_mean.new_zeros(())),
+            action_mean.abs().max(),
+        )
+        clipped = sampled_action.abs() > float(action_clip)
+        self._diagnostic_add("action_clipped", clipped.sum(), clipped.numel())
+
+        first_valid = history["length"] >= 1
+        if first_valid.any():
+            mean_delta = action_mean - history["mean"]
+            sample_delta = sampled_action - history["sample"]
+            mask = first_valid.unsqueeze(1)
+            count = mask.sum() * action_mean.shape[1]
+            self._diagnostic_add("action_delta_mean_sq", (mean_delta.square() * mask).sum(), count)
+            self._diagnostic_add("action_delta_sample_sq", (sample_delta.square() * mask).sum(), count)
+
+            second_valid = history["length"] >= 2
+            if second_valid.any():
+                second_mask = second_valid.unsqueeze(1)
+                second_count = second_mask.sum() * action_mean.shape[1]
+                self._diagnostic_add(
+                    "action_second_mean_sq",
+                    ((mean_delta - history["mean_delta"]).square() * second_mask).sum(),
+                    second_count,
+                )
+                self._diagnostic_add(
+                    "action_second_sample_sq",
+                    ((sample_delta - history["sample_delta"]).square() * second_mask).sum(),
+                    second_count,
+                )
+            history["mean_delta"].copy_(mean_delta)
+            history["sample_delta"].copy_(sample_delta)
+
+        history["mean"].copy_(action_mean)
+        history["sample"].copy_(sampled_action)
+        history["length"].add_(1).clamp_(max=2)
+
+        if self._last_latent_mean is not None:
+            latent_std = torch.exp(0.5 * self._last_latent_logvar)
+            self._diagnostic_add(
+                "latent_mean_sq", self._last_latent_mean.square().sum(),
+                self._last_latent_mean.numel(),
+            )
+            self._diagnostic_add("latent_std", latent_std.sum(), latent_std.numel())
+            self._diagnostic_sums["latent_std_max"] = torch.maximum(
+                self._diagnostic_sums.get("latent_std_max", latent_std.new_zeros(())),
+                latent_std.max(),
+            )
+
+    @torch.no_grad()
+    def get_rollout_diagnostics(self):
+        """Return finite policy scalars accumulated over the latest rollout."""
+        def mean(name):
+            denominator = self._diagnostic_counts.get(name)
+            if denominator is None or denominator.item() <= 0:
+                return 0.0
+            return (self._diagnostic_sums[name] / denominator.clamp_min(1.0)).item()
+
+        def rms(name):
+            return mean(name) ** 0.5
+
+        std = self.std.detach()
+        lower = self._std_clip_lwr
+        upper = self._std_clip_upr
+        finite_upper = torch.isfinite(upper)
+        upper_fraction = (
+            ((std >= upper - 1.0e-6) & finite_upper).float().mean().item()
+            if finite_upper.any() else 0.0
+        )
+        return {
+            "Policy/action_mean_rms": rms("action_mean_sq"),
+            "Policy/action_mean_abs_max": self._diagnostic_sums.get(
+                "action_mean_abs_max", std.new_zeros(())
+            ).item(),
+            "Policy/action_sample_rms": rms("action_sample_sq"),
+            "Policy/action_noise_rms": rms("action_noise_sq"),
+            "Policy/action_delta_mean_rms": rms("action_delta_mean_sq"),
+            "Policy/action_delta_sample_rms": rms("action_delta_sample_sq"),
+            "Policy/action_second_difference_mean_rms": rms("action_second_mean_sq"),
+            "Policy/action_second_difference_sample_rms": rms("action_second_sample_sq"),
+            "Policy/action_clip_fraction": mean("action_clipped"),
+            "Policy/latent_mean_rms": rms("latent_mean_sq"),
+            "Policy/latent_posterior_std_mean": mean("latent_std"),
+            "Policy/latent_posterior_std_max": self._diagnostic_sums.get(
+                "latent_std_max", std.new_zeros(())
+            ).item(),
+            "Policy/std_mean": std.mean().item(),
+            "Policy/std_min": std.min().item(),
+            "Policy/std_max": std.max().item(),
+            "Policy/std_at_lower_bound_fraction": (std <= lower + 1.0e-6).float().mean().item(),
+            "Policy/std_at_upper_bound_fraction": upper_fraction,
+        }
+
+    def _actor_mean_from_latent(self, observations, latent):
+        explicit = self.actor_estimates(self.adaptation_decoder_module(latent))
+        actor_input = torch.cat(
+            (observations[:, -self.num_obs_now:], latent, explicit), dim=-1
+        )
+        return self.actor_body(actor_input)
+
+    @torch.no_grad()
+    def latent_resample_diagnostics(self, observations):
+        """Measure policy-mean sensitivity to latent sampling with isolated RNG."""
+        distribution = self.distribution
+        module_modes = [(module, module.training) for module in self.modules()]
+        devices = [] if observations.device.type == "cpu" else [observations.device.index]
+        try:
+            with torch.random.fork_rng(devices=devices):
+                _, _, latent_a = self.encode_context(observations, sample=True)
+                _, _, latent_b = self.encode_context(observations, sample=True)
+                action_a = self._actor_mean_from_latent(observations, latent_a)
+                action_b = self._actor_mean_from_latent(observations, latent_b)
+                return {
+                    "Policy/latent_resample_mean_action_delta_rms": torch.sqrt(
+                        torch.mean((action_a - action_b).square())
+                    ).item()
+                }
+        finally:
+            self.distribution = distribution
+            for module, training in module_modes:
+                module.training = training
+
+    @torch.no_grad()
+    def deterministic_diagnostics(self, observations):
+        """Compare latent/action sampling paths without changing model RNG/state."""
+        distribution = self.distribution
+        module_modes = [(module, module.training) for module in self.modules()]
+        devices = [] if observations.device.type == "cpu" else [observations.device.index]
+        try:
+            with torch.random.fork_rng(devices=devices):
+                latent_mean, _, _ = self.encode_context(observations, sample=False)
+                deterministic_mean = self._actor_mean_from_latent(observations, latent_mean)
+                std = torch.maximum(torch.minimum(self.std, self._std_clip_upr), self._std_clip_lwr)
+                gaussian_sample = deterministic_mean + torch.randn_like(deterministic_mean) * std
+                _, _, sampled_latent_a = self.encode_context(observations, sample=True)
+                _, _, sampled_latent_b = self.encode_context(observations, sample=True)
+                sampled_latent_mean_a = self._actor_mean_from_latent(observations, sampled_latent_a)
+                sampled_latent_mean_b = self._actor_mean_from_latent(observations, sampled_latent_b)
+
+                def delta_rms(first, second):
+                    return torch.sqrt(torch.mean((first - second).square())).item()
+
+                return {
+                    "Policy/deterministic_vs_gaussian_sample_action_delta_rms": delta_rms(
+                        deterministic_mean, gaussian_sample
+                    ),
+                    "Policy/deterministic_vs_sampled_latent_mean_action_delta_rms": delta_rms(
+                        deterministic_mean, sampled_latent_mean_a
+                    ),
+                    "Policy/gaussian_sample_vs_sampled_latent_mean_action_delta_rms": delta_rms(
+                        gaussian_sample, sampled_latent_mean_a
+                    ),
+                    "Policy/latent_resample_mean_action_delta_rms": delta_rms(
+                        sampled_latent_mean_a, sampled_latent_mean_b
+                    ),
+                }
+        finally:
+            self.distribution = distribution
+            for module, training in module_modes:
+                module.training = training
 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)

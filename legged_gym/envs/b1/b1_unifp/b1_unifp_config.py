@@ -8,10 +8,10 @@ class B1UniFPCfg:
         num_envs = 500
         # gravity projection (2), angular velocity (3), leg positions (12),
         # leg velocities (12), previous actions (12), and commands (6).
-        num_observations = 47
+        num_observations = 49
         # Critic frame: 148-D dynamics/state block plus the 17 x 11 = 187
         # terrain-height samples configured below.
-        num_critic_state_obs = 148 - 6
+        num_critic_state_obs = 148
         num_height_obs = 187
         num_privileged_obs = num_critic_state_obs + num_height_obs
         num_priv_stack = 3
@@ -78,11 +78,11 @@ class B1UniFPCfg:
         yaw_angle_range = [0.0, 3.14]
         rand_yaw_range = np.pi / 2
         origin_perturb_range = 0.5
-        # init_vel_perturb_range = 0.1
+        init_vel_perturb_range = 0.1
         init_vel_perturb_range = 0.0
 
-        # leg_dof_pos_perturb_range = [-0.05, 0.05]
-        leg_dof_pos_perturb_range = [-0.0, 0.0]
+        leg_dof_pos_perturb_range = [-0.05, 0.05]
+        # leg_dof_pos_perturb_range = [-0.0, 0.0]
 
     class asset:
         name = "b1"
@@ -161,10 +161,10 @@ class B1UniFPCfg:
         platform_size = 4.0
         num_rows = 10
         num_cols = 20
-        # terrain_proportions = [0.30, 0.40, 0.00, 0.00, 0.30, 0.00, 0.0, 0.0, 0.0, 0.0]
-        terrain_proportions = [1.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.0, 0.0, 0.0, 0.0]
+        terrain_proportions = [0.30, 0.40, 0.00, 0.00, 0.30, 0.00, 0.0, 0.0, 0.0, 0.0]
+        # terrain_proportions = [1.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.0, 0.0, 0.0, 0.0]
         terrain_curriculum_difficulty = {
-            "slope": "difficulty * 0.0",
+            "slope": "difficulty * 0.4",
             "step_height": "0.04 + 0.16 * difficulty",
             "discrete_height": "0.04 + 0.16 * difficulty",
             "stepping_stones_params": {
@@ -217,15 +217,15 @@ class B1UniFPCfg:
         # }
 
         stiffness = {
-            "hip":   300.0,
-            "thigh": 300.0,
-            "calf":  500.0,
+            "hip":   250.0,
+            "thigh": 250.0,
+            "calf":  400.0,
         }
 
         damping = {
-            "hip":   7.5,
-            "thigh": 7.5,
-            "calf":  12.5,
+            "hip":   6.25,
+            "thigh": 6.25,
+            "calf":  10.0,
         }
 
         # stiffness = {"joint":200.0}
@@ -251,7 +251,7 @@ class B1UniFPCfg:
         
         heading_command = False
         
-        curriculum_threshold = 0.8
+        curriculum_threshold = 1.6
         
         ang_vel_yaw_clip = 0.1
         ang_vel_pitch_clip = 0.5
@@ -286,13 +286,13 @@ class B1UniFPCfg:
 
         class ranges:
             lin_vel_x = [0.3, 0.8]
-            lin_vel_y = [-0.8, 0.8]
+            lin_vel_y = [-0.3, 0.3]
             ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
 
     class normalization:
         class obs_scales:
-            lin_vel = 1.0
+            lin_vel = 2.0
             ang_vel = 0.25
             dof_pos = 1.0
             dof_vel = 0.05
@@ -429,9 +429,20 @@ class B1UniFPCfg:
         foot_clearance_tracking_sigma = 0.003
         
         # Gait-phase guidance settings
-        cycle_time = 0.64
-        target_joint_pos_scale = 0.20
-        target_joint_pos_thd = 0.5
+        cycle_time = 0.48
+        sweep_phase_lead = 0.175
+        sweep_velocity_gain = 0.28
+        max_sweep_amplitude = 0.18
+        target_joint_pos_scale = 0.29
+        target_joint_pos_thd = 0.35
+
+        # Optionally fade scripted-gait guidance as PPO learns its own gait.
+        gait_guidance_decay_enabled = False
+        gait_guidance_decay_iterations = 10000
+        ref_dof_leg_initial_multiplier = 1.0
+        ref_dof_leg_final_multiplier = 0.05
+        feet_contact_initial_multiplier = 1.0
+        feet_contact_final_multiplier = 0.05
 
         upright_gate_sigma = 10.0
 
@@ -468,14 +479,14 @@ class B1UniFPCfg:
             upright = 0.1
             
             # gait-phase based leg posture shaping
-            ref_dof_leg = 0.0
+            ref_dof_leg = 1.0
             walking_ref_dof = 0.0
 
             walking_ref_swing_dof = 0.00
-            feet_contact_number = 0.00
+            feet_contact_number = 2.00
 
 
-            hip_pos = -0.00
+            hip_pos = -0.05
 
             # Base
             base_height = -2.0
@@ -487,8 +498,8 @@ class B1UniFPCfg:
 
             # Legs
             dof_acc           = -2.5e-7
-            action_rate       = -0.002
-            action_smoothness = -0.002
+            action_rate       = -0.02
+            action_smoothness = -0.02
             joint_power       = -2.e-5
             joint_power_dist  = -1.e-6
 
@@ -497,14 +508,14 @@ class B1UniFPCfg:
             rear_foot_overreach = -10.0
 
             # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
-            support_polygon = 0.0             # encourages well condition foot-placement realtive to the base CoM
-            vhip_angle = -0.0                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
-            vhip_angular_acc = -0.00          # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
+            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
+            vhip_angle = -0.1                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
+            vhip_angular_acc = -0.01          # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
 
             # Gait shaping
-            feet_drag = -0.01
-            feet_regulation = -0.01
-            feet_pos_xy = -0.0
+            feet_drag = -0.0001
+            feet_regulation = -0.001
+            feet_pos_xy = -0.01
             stumble = -0.01
 
             feet_contact_forces = -0.001
@@ -605,15 +616,15 @@ class B1UniFPCfgPPO:
 
     class policy:
         actor_hidden_dims = [512, 256, 128]
-        critic_hidden_dims = [1024, 512, 256, 128]
+        critic_hidden_dims = [512, 256, 128]
         activation = "elu"
 
 
         # Each action-noise setting may be a scalar or a flat 12-value list in
         # asset.dof_names/action order: FR, FL, RR, RL x hip, thigh, calf.
-        init_noise_std = [0.40, 0.60, 0.60] * 4
+        init_noise_std = [0.30, 0.50, 0.50] * 4
         # init_noise_std = [0.80, 1.00, 1.00, 0.80, 1.00, 1.00, 0.45, 0.60, 0.60, 0.45, 0.60, 0.60]
-        min_noise_std = [0.15, 0.25, 0.25] * 4
+        min_noise_std = [0.05, 0.15, 0.15] * 4
         max_noise_std = 1.1
 
     class algorithm:
@@ -631,7 +642,7 @@ class B1UniFPCfgPPO:
         adaptive_ent_ter_threshold = 6.0
         adaptive_ent_softmax_temp = 2.0
 
-        learning_rate = 3.0e-4
+        learning_rate = 1.0e-3
         schedule = "adaptive"  # adaptive
         gamma = 0.99
         lam = 0.95
@@ -656,6 +667,8 @@ class B1UniFPCfgPPO:
         run_name = "b1_unifp_locomotion"
         experiment_name = "b1_unifp_genesis"
         sync_wandb = False
+        enable_deterministic_diagnostics = True
+        deterministic_diagnostics_interval = 100
         resume = False
         load_run = "Aug01_15-23-50_b1_unifp_locomotion"
         checkpoint = -1
