@@ -517,6 +517,11 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         support_polygon_sigma = 0.01
 
         torso_tilt_deadband = 0.10
+
+        # Allow small corrective opposition between the coupled action heads;
+        # cancellation beyond this fraction of each joint's torque limit is
+        # penalized by ``_reward_torque_cancellation``.
+        torque_cancellation_deadband = 0.03
         class scales:
             # Constraints
             termination = 0.0
@@ -538,6 +543,10 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             tracking_ee_force_world = 2.0
             tracking_ee_orientation_default = 0.0
             impedance_consistency = 0.25
+
+            # Discourage the position-PD and direct-torque heads from wasting
+            # authority by producing large opposing torques on the same joint.
+            torque_cancellation = -0.05
 
             # Style rewards encouraging using the arm
             # arm_progress_before_torso = 0.3

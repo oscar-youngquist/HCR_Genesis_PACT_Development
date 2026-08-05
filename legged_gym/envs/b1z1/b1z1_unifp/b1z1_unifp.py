@@ -1,4 +1,5 @@
 from collections import deque
+import math
 
 import numpy as np
 import torch
@@ -47,7 +48,7 @@ class B1Z1UniFP(BaseTask):
     - A 15-D command vector: base velocity, EE spherical position, reservedself._reset_progress_statistics()
       orientation slots, EE force command, and base force command.
     - A CSE/adaptation target (`explicit_labels_buf`) containing base velocity,
-      EE spherical state, EE external force, and base external force.
+      EE spherical state, EE/base external force, foot contact, and foot height.
     - UniFP force-randomization streams that separately sample commanded force
       offsets and physically applied external disturbances.
 
@@ -547,10 +548,7 @@ class B1Z1UniFP(BaseTask):
         )
         ee_goal_offset_sphere = cart2sphere(ee_goal_offset_local)
 
-        phase = self._get_phase()
         self.compute_ref_state()
-        sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
-        cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
         
         body_orientation = self.get_body_orientation()
         dof_pos_err = (self.simulator.dof_pos[:, :17] - self.simulator.default_dof_pos[:, :17]) * self.obs_scales.dof_pos
@@ -565,76 +563,116 @@ class B1Z1UniFP(BaseTask):
                 dof_pos_err,
                 dof_vel,
                 self.actions,
-                sin_pos,
-                cos_pos,
                 self.commands * self.commands_scale,
             ),
             dim=-1,
         )
+        if self.obs_buf.shape[1] != self.cfg.env.num_observations:
+            raise RuntimeError(
+                f"B1Z1 UniFP actor observation is {self.obs_buf.shape[1]}D, expected "
+                f"{self.cfg.env.num_observations}D"
+            )
         if self.add_noise:
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
 
-        # Supervised target for the UniFP CSE/adaptation decoder.
+        contact_mask = (
+            self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
+        ).float()
+        # Match the B1 estimator's terrain-relative clearance target:
+        # h_foot - mean(local terrain patch) - nominal sole offset.
+        foot_heights = torch.clip(
+            self.simulator.feet_pos[:, :, 2]
+            - torch.mean(self.simulator.height_around_feet, dim=-1)
+            - self.cfg.rewards.foot_height_offset,
+            -1.0,
+            1.0,
+        )
+
+        # Supervised target order must match ActorCriticUniFP.adaptation_labels.
         self.explicit_labels_buf = torch.cat(
             (
                 self.simulator.base_lin_vel * self.obs_scales.lin_vel,
                 self.ee_pos_sphe_arm * self.ee_sphere_scale,
                 ee_force_local * self.obs_scales.ee_force,
                 base_force_local * self.obs_scales.base_force,
+                contact_mask,
+                foot_heights,
             ),
             dim=-1,
         )
+        if self.explicit_labels_buf.shape[1] != self.cfg.env.num_explicit_recon_obs:
+            raise RuntimeError(
+                f"B1Z1 UniFP explicit target is {self.explicit_labels_buf.shape[1]}D, "
+                f"expected {self.cfg.env.num_explicit_recon_obs}D"
+            )
 
         mass_params = self._mass_params_buf
         mass_params.zero_()
         mass_params[:, 0:1] = self.simulator._added_base_mass
         mass_params[:, 1:4] = self.simulator._base_com_bias
         stance_mask = self._get_gait_phase()
-        contact_mask = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
+
+        phase = self._get_phase()
+        sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
+        cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
 
         # Privileged critic observation mirrors the original UniFP ordering:
-        # estimator labels first, then randomized dynamics/contact/gait state,
+        # estimator labels first, then randomized dynamics and gait state,
         # current robot state, commands, and force-shifted EE target.
-        critic_obs = torch.cat(
-            (
-                self.explicit_labels_buf,
-                self.simulator.dof_pos[:, :12] - self.ref_dof_pos,
-                mass_params,
-                self.simulator._friction_values - self.friction_value_offset,
-                self.simulator._motor_strength[:, :17] - 1.0,
-                stance_mask,
-                contact_mask,
-                self.simulator.projected_gravity,
-                self.simulator.base_ang_vel * self.obs_scales.ang_vel,
-                dof_pos_err,
-                dof_vel,
-                self.actions,
-                # sin_pos,
-                # cos_pos,
-                self.commands * self.commands_scale,
-                ee_goal_offset_sphere * self.ee_sphere_scale,
-                self.simulator._rand_push_vels,                                  # 3
-                self.simulator._rand_wrench_vels,                                # 3
-                (self.simulator._kp_scale - self.kp_scale_offset),               # num_actions
-                (self.simulator._kd_scale - self.kd_scale_offset),               # num_actions
-                self.simulator._motor_strength,                                  # num_actions
-                self.simulator._joint_armature,                                  # 1
-                self.simulator._joint_friction,                                  # 1
-                self.simulator._joint_damping,                                   # 1
-            ),
-            dim=-1,
+        critic_components = (
+            ("adaptation_labels", self.explicit_labels_buf),
+            ("reference_dof_error", self.simulator.dof_pos[:, :12] - self.ref_dof_pos),
+            ("mass_com", mass_params),
+            ("friction_offset", self.simulator._friction_values - self.friction_value_offset),
+            ("motor_strength_offset", self.simulator._motor_strength[:, :17] - 1.0),
+            ("stance", stance_mask),
+            # Contacts are already present in adaptation_labels.
+            ("phase_sin", sin_pos),
+            ("phase_cos", cos_pos),
+            ("projected_gravity", self.simulator.projected_gravity),
+            ("base_angular_velocity", self.simulator.base_ang_vel * self.obs_scales.ang_vel),
+            ("dof_position_error", dof_pos_err),
+            ("dof_velocity", dof_vel),
+            ("actions", self.actions),
+            ("commands", self.commands * self.commands_scale),
+            ("ee_goal", ee_goal_offset_sphere * self.ee_sphere_scale),
+            ("push_velocity", self.simulator._rand_push_vels),
+            ("wrench_velocity", self.simulator._rand_wrench_vels),
+            ("kp_scale", self.simulator._kp_scale - self.kp_scale_offset),
+            ("kd_scale", self.simulator._kd_scale - self.kd_scale_offset),
+            ("motor_strength", self.simulator._motor_strength),
+            ("joint_armature", self.simulator._joint_armature),
+            ("joint_friction", self.simulator._joint_friction),
+            ("joint_damping", self.simulator._joint_damping),
         )
+        critic_state = torch.cat([value for _, value in critic_components], dim=-1)
+        if critic_state.shape[1] != self.cfg.env.num_critic_state_obs:
+            layout = ", ".join(
+                f"{name}={value.shape[1]}" for name, value in critic_components
+            )
+            raise RuntimeError(
+                f"B1Z1 UniFP critic state is {critic_state.shape[1]}D, expected "
+                f"{self.cfg.env.num_critic_state_obs}D ({layout})"
+            )
+        self._critic_obs_buf.copy_(critic_state)
+        critic_obs = self._critic_obs_buf
 
-        # add height measurements to asymmetric critic if approperiate
+        # Add the terrain grid to the asymmetric critic when configured.
         if self.cfg.terrain.measure_heights:
             heights = torch.clip(self.simulator.base_pos[:, 2].unsqueeze(1) - 0.5 \
-                                 - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements # 81
+                                 - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements
 
             if self.add_noise:
                 heights *= self.height_noise_vec
+            if heights.shape[1] != self.cfg.env.num_height_obs:
+                raise RuntimeError(
+                    f"B1Z1 UniFP terrain observation is {heights.shape[1]}D, expected "
+                    f"{self.cfg.env.num_height_obs}D"
+                )
+            self._critic_height_obs.copy_(heights)
 
-            critic_obs = torch.cat((critic_obs, heights), dim=-1) # 207
-
+        if self._critic_height_obs.shape[1] > 0:
+            critic_obs = torch.cat((critic_obs, self._critic_height_obs), dim=-1)
 
         if critic_obs.shape[1] != self.cfg.env.num_privileged_obs:
             raise RuntimeError(
@@ -1076,7 +1114,7 @@ class B1Z1UniFP(BaseTask):
         return stance_mask
 
     def compute_ref_state(self):
-        """Compute the original UniFP gait-phase reference leg pose."""
+        """Compute the UniFP swing pose and command-scaled fore-aft sweep."""
         phase = self._get_phase()
         sin_pos = torch.sin(2 * torch.pi * phase)
         sin_pos_l = sin_pos.clone() + self.cfg.rewards.target_joint_pos_thd
@@ -1100,6 +1138,67 @@ class B1Z1UniFP(BaseTask):
         self.ref_dof_pos[:, idx["FR_calf_joint"]] -= sin_pos_r * scale_2
         self.ref_dof_pos[:, idx["RL_thigh_joint"]] += sin_pos_r * scale_1
         self.ref_dof_pos[:, idx["RL_calf_joint"]] -= sin_pos_r * scale_2
+
+        # Convert signed forward velocity commands into a bounded thigh-angle
+        # amplitude. The phase lead applies only to this added fore-aft sweep,
+        # leaving the original UniFP lift/flexion and contact clock unshifted.
+        sweep_phase = torch.remainder(
+            phase + self.cfg.rewards.sweep_phase_lead,
+            1.0,
+        )
+        raw_sweep = (
+            self.cfg.rewards.sweep_velocity_gain
+            * self.commands[:, 0]
+            * torch.cos(2.0 * torch.pi * sweep_phase)
+        )
+        max_amplitude = self.cfg.rewards.max_sweep_amplitude
+        sweep = torch.clamp(raw_sweep, min=-max_amplitude, max=max_amplitude)
+
+        self.ref_dof_pos[:, idx["FR_thigh_joint"]] += sweep
+        self.ref_dof_pos[:, idx["RL_thigh_joint"]] += sweep
+        self.ref_dof_pos[:, idx["FL_thigh_joint"]] -= sweep
+        self.ref_dof_pos[:, idx["RR_thigh_joint"]] -= sweep
+
+    def set_training_iteration(self, iteration):
+        """Set the checkpoint-aware PPO iteration used by reward schedules."""
+        iteration = int(iteration)
+        if iteration < 0:
+            raise ValueError("training iteration must be nonnegative")
+        self.training_iteration = iteration
+
+    def _get_gait_guidance_multiplier(self, initial, final):
+        """Geometrically decay one gait-guidance multiplier over PPO updates."""
+        if not self.cfg.rewards.gait_guidance_decay_enabled:
+            return 1.0
+
+        duration = self.cfg.rewards.gait_guidance_decay_iterations
+        progress = min(max(self.training_iteration / duration, 0.0), 1.0)
+        if progress <= 0.0:
+            return float(initial)
+        if progress >= 1.0:
+            return float(final)
+
+        # Epsilon supports a zero final weight without taking log(0); the exact
+        # configured endpoint is returned once the schedule reaches duration.
+        epsilon = 1.0e-12
+        effective_initial = max(float(initial), epsilon)
+        effective_final = max(float(final), epsilon)
+        return effective_initial * math.exp(
+            math.log(effective_final / effective_initial) * progress
+        )
+
+    def get_gait_guidance_multipliers(self):
+        rewards = self.cfg.rewards
+        return {
+            "ref_dof_leg": self._get_gait_guidance_multiplier(
+                rewards.ref_dof_leg_initial_multiplier,
+                rewards.ref_dof_leg_final_multiplier,
+            ),
+            "feet_contact": self._get_gait_guidance_multiplier(
+                rewards.feet_contact_initial_multiplier,
+                rewards.feet_contact_final_multiplier,
+            ),
+        }
 
     def _randomize_force_gains(self, env_ids):
         """Randomize virtual impedance gains used to turn force into offsets."""
@@ -1391,6 +1490,7 @@ class B1Z1UniFP(BaseTask):
             (len(env_ids), 12),
             self.device,
         )
+        
         # Arm joints are perturbed additively; gripper joints remain at default.
         dof_pos[:, 12:17] += torch_rand_float(
             arm_low,
@@ -1552,6 +1652,31 @@ class B1Z1UniFP(BaseTask):
 
         self.progress_vel_ema = torch.zeros(self.num_envs, 2, device=self.device)
 
+        # Rolling world-frame displacement history used by the locomotion
+        # progress rewards. Commands may be resampled between episode resets,
+        # so each environment owns independent actual/desired history.
+        self.progress_window_s = 0.40
+        self.progress_window_steps = max(
+            1, int(round(self.progress_window_s / self.dt))
+        )
+        self.progress_delta_buffer = torch.zeros(
+            self.num_envs,
+            self.progress_window_steps,
+            2,
+            device=self.device,
+        )
+        self.progress_desired_buffer = torch.zeros_like(
+            self.progress_delta_buffer
+        )
+        self.progress_valid_steps = torch.zeros(
+            self.num_envs,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.progress_buffer_index = 0
+        self.last_progress_base_pos = self.simulator.base_pos[:, :2].clone()
+        self._progress_update_step = -1
+
         self.step_liftoff_pos = torch.zeros(
             self.num_envs, 4, 2, device=self.device
         )
@@ -1584,7 +1709,27 @@ class B1Z1UniFP(BaseTask):
             for _ in range(self.cfg.env.num_priv_stack)
         ]
         self._critic_obs_slot = self.cfg.env.num_priv_stack - 1
-        self._critic_obs_buf = torch.zeros(self.num_envs, self.cfg.env.num_privileged_obs, device=self.device)
+        expected_privileged_obs = self.cfg.env.num_critic_state_obs + self.cfg.env.num_height_obs
+        if expected_privileged_obs != self.cfg.env.num_privileged_obs:
+            raise ValueError(
+                "B1Z1 privileged-observation config is inconsistent: "
+                f"state ({self.cfg.env.num_critic_state_obs}) + heights "
+                f"({self.cfg.env.num_height_obs}) != total ({self.cfg.env.num_privileged_obs})"
+            )
+        configured_height_points = (
+            len(self.cfg.terrain.measured_points_x) * len(self.cfg.terrain.measured_points_y)
+        )
+        if configured_height_points != self.cfg.env.num_height_obs:
+            raise ValueError(
+                f"B1Z1 terrain grid contains {configured_height_points} points, expected "
+                f"{self.cfg.env.num_height_obs}"
+            )
+        self._critic_obs_buf = torch.zeros(
+            self.num_envs, self.cfg.env.num_critic_state_obs, device=self.device
+        )
+        self._critic_height_obs = torch.zeros(
+            self.num_envs, self.cfg.env.num_height_obs, device=self.device
+        )
         self._mass_params_buf = torch.zeros(self.num_envs, 22, device=self.device)
         self.privileged_obs_buf = torch.zeros(
             self.num_envs,
@@ -1592,6 +1737,9 @@ class B1Z1UniFP(BaseTask):
             device=self.device,
         )
         self.explicit_labels_buf = torch.zeros(self.num_envs, self.cfg.env.num_explicit_recon_obs, device=self.device)
+        # Evaluation defaults to iteration zero until the runner supplies the
+        # restored/current PPO iteration.
+        self.training_iteration = 0
 
         self.leg_dof_indices = {
             name: self.cfg.asset.dof_names.index(name)
@@ -1820,6 +1968,23 @@ class B1Z1UniFP(BaseTask):
 
         self.wb_dim = cfg.env.whole_body_dim
         self.grf_dim = cfg.env.grf_dim
+
+        if cfg.rewards.cycle_time <= 0.0:
+            raise ValueError("rewards.cycle_time must be positive")
+        if cfg.rewards.sweep_velocity_gain < 0.0:
+            raise ValueError("rewards.sweep_velocity_gain must be nonnegative")
+        if cfg.rewards.max_sweep_amplitude < 0.0:
+            raise ValueError("rewards.max_sweep_amplitude must be nonnegative")
+        if cfg.rewards.gait_guidance_decay_iterations <= 0:
+            raise ValueError("rewards.gait_guidance_decay_iterations must be positive")
+        for name in (
+            "ref_dof_leg_initial_multiplier",
+            "ref_dof_leg_final_multiplier",
+            "feet_contact_initial_multiplier",
+            "feet_contact_final_multiplier",
+        ):
+            if getattr(cfg.rewards, name) < 0.0:
+                raise ValueError(f"rewards.{name} must be nonnegative")
 
     # Rewards
     def _reward_tracking_lin_vel_force_world(self):
@@ -2543,7 +2708,9 @@ class B1Z1UniFP(BaseTask):
             -1.0,
         )
 
-        return torch.mean(reward, dim=1)
+        raw_reward = torch.mean(reward, dim=1)
+        multiplier = self.get_gait_guidance_multipliers()["feet_contact"]
+        return raw_reward * multiplier
 
     def _reward_walking_ref_dof(self):
         """Reward tracking the gait-phase reference leg pose while walking."""
@@ -2588,7 +2755,14 @@ class B1Z1UniFP(BaseTask):
         return 1.0*full_contact * (torch.norm(self.commands[:, :3], dim=1) < 0.1)
 
     def _reward_ref_dof_leg(self):
-        return torch.exp(-torch.sum(torch.abs(self.simulator.dof_pos[:, :12] - self.ref_dof_pos), dim=1) * 0.1)
+        raw_reward = torch.exp(
+            -torch.sum(
+                torch.abs(self.simulator.dof_pos[:, :12] - self.ref_dof_pos),
+                dim=1,
+            ) * 0.1
+        )
+        multiplier = self.get_gait_guidance_multipliers()["ref_dof_leg"]
+        return raw_reward * multiplier
 
     def _reward_torso_force_wrench_ellipsoid(self):
         """

@@ -1788,6 +1788,32 @@ class B1Z1PACT(LeggedRobot):
         error = torch.sum(torch.abs(self.curr_ee_goal_cart_world - self.simulator.ee_pos), dim=1)
         return torch.exp(-error / self.cfg.rewards.tracking_ee_sigma)
 
+    def _reward_torque_cancellation(self):
+        """Penalize substantial same-joint cancellation between action heads.
+
+        For effective feedback and feedforward contributions ``fb`` and ``ff``,
+
+          c_j = |fb_j| + |ff_j| - |fb_j + ff_j|
+
+        is zero when the contributions agree (or either is zero), and equals
+        twice the smaller magnitude when they oppose. Normalizing by each
+        joint's torque limit makes the deadband comparable across the B1 legs
+        and Z1 arm. Only learned joints are included because passive joints
+        have no feedforward action with which the PD branch could conflict.
+        """
+        count = self.simulator._num_learned_actions
+        feedback = self.simulator.combined_feedback_torques[:, :count]
+        feedforward = self.simulator.combined_feedforward_torques[:, :count]
+        torque_limits = self.simulator._torque_limits[:count].clamp_min(1.0e-6)
+
+        cancellation = (
+            feedback.abs() + feedforward.abs() - (feedback + feedforward).abs()
+        ).clamp_min(0.0)
+        normalized_excess = torch.relu(
+            cancellation / torque_limits - self.cfg.rewards.torque_cancellation_deadband
+        )
+        return torch.mean(normalized_excess.square(), dim=-1)
+
     def _reward_impedance_consistency(self):
         """Reward a virtual translational impedance relation without control.
 
@@ -1811,6 +1837,7 @@ class B1Z1PACT(LeggedRobot):
         # EE and the interpolated target. The low-pass step below prevents
         # contact/measurement noise from dominating the reward.
         raw_ee_vel = (ee_pos - self.prev_impedance_ee_pos) / self.dt
+        raw_target_vel = (target - self.prev_impedance_target) / self.dt
         alpha = self.cfg.rewards.impedance_filter_alpha
         ee_vel = alpha * raw_ee_vel + (1.0 - alpha) * self.prev_impedance_ee_vel
         target_vel = alpha * raw_target_vel + (1.0 - alpha) * self.prev_impedance_target_vel

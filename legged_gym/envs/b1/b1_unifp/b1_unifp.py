@@ -1,5 +1,3 @@
-import math
-
 import numpy as np
 import torch
 
@@ -295,86 +293,6 @@ class B1UniFP(B1Z1UniFP):
             ):
                 metrics.setdefault(f"GaitPerFoot/{foot_name}/{metric_name}", 0.0)
         return metrics
-
-    def compute_ref_state(self):
-        """Build the UniFP swing pose, then add the optimized thigh sweep."""
-        # Keep the inherited thigh/calf swing trajectory and gait/contact clock
-        # exactly intact. The sweep phase lead applies only to this added term.
-        super().compute_ref_state()
-        phase = self._get_phase()
-        sweep_phase = torch.remainder(
-            phase + self.cfg.rewards.sweep_phase_lead,
-            1.0,
-        )
-        vx_command = self.commands[:, 0]
-        # The gain maps signed commanded velocity directly to joint-angle
-        # amplitude; the clamp bounds the reference at larger commands.
-        raw_sweep = (
-            self.cfg.rewards.sweep_velocity_gain
-            * vx_command
-            * torch.cos(2.0 * torch.pi * sweep_phase)
-        )
-        max_amplitude = self.cfg.rewards.max_sweep_amplitude
-        sweep = torch.clamp(
-            raw_sweep,
-            min=-max_amplitude,
-            max=max_amplitude,
-        )
-
-        idx = self.leg_dof_indices
-        self.ref_dof_pos[:, idx["FR_thigh_joint"]] += sweep
-        self.ref_dof_pos[:, idx["RL_thigh_joint"]] += sweep
-        self.ref_dof_pos[:, idx["FL_thigh_joint"]] -= sweep
-        self.ref_dof_pos[:, idx["RR_thigh_joint"]] -= sweep
-
-    def set_training_iteration(self, iteration):
-        """Set the true PPO iteration used by gait-guidance schedules."""
-        iteration = int(iteration)
-        if iteration < 0:
-            raise ValueError("training iteration must be nonnegative")
-        self.training_iteration = iteration
-
-    def _get_gait_guidance_multiplier(self, initial, final):
-        """Geometrically interpolate one guidance weight over PPO iterations."""
-        if not self.cfg.rewards.gait_guidance_decay_enabled:
-            return 1.0
-
-        duration = self.cfg.rewards.gait_guidance_decay_iterations
-        progress = min(max(self.training_iteration / duration, 0.0), 1.0)
-        if progress <= 0.0:
-            return float(initial)
-        if progress >= 1.0:
-            return float(final)
-
-        # Epsilon permits a zero endpoint while preserving exact endpoint values.
-        epsilon = 1.0e-12
-        effective_initial = max(float(initial), epsilon)
-        effective_final = max(float(final), epsilon)
-        return effective_initial * math.exp(
-            math.log(effective_final / effective_initial) * progress
-        )
-
-    def get_gait_guidance_multipliers(self):
-        """Expose current schedule values for runner/TensorBoard diagnostics."""
-        rewards = self.cfg.rewards
-        return {
-            "ref_dof_leg": self._get_gait_guidance_multiplier(
-                rewards.ref_dof_leg_initial_multiplier,
-                rewards.ref_dof_leg_final_multiplier,
-            ),
-            "feet_contact": self._get_gait_guidance_multiplier(
-                rewards.feet_contact_initial_multiplier,
-                rewards.feet_contact_final_multiplier,
-            ),
-        }
-
-    def _reward_ref_dof_leg(self):
-        raw_reward = super()._reward_ref_dof_leg()
-        return raw_reward * self.get_gait_guidance_multipliers()["ref_dof_leg"]
-
-    def _reward_feet_contact_number(self):
-        raw_reward = super()._reward_feet_contact_number()
-        return raw_reward * self.get_gait_guidance_multipliers()["feet_contact"]
 
     def _resample_commands(self, env_ids):
         if len(env_ids) == 0:

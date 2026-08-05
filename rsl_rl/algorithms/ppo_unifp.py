@@ -90,9 +90,9 @@ class PPO_UniFP:
         self.ppo_parameters = [
             *self.actor_critic.actor_body.parameters(),
             *self.actor_critic.critic_body.parameters(),
-            # *self.actor_critic.adaptation_encoder_module.parameters(),
-            # *self.actor_critic.adaptation_mean_module.parameters(),
-            # *self.actor_critic.adaptation_logvar_module.parameters(),
+            *self.actor_critic.adaptation_encoder_module.parameters(),
+            *self.actor_critic.adaptation_mean_module.parameters(),
+            *self.actor_critic.adaptation_logvar_module.parameters(),
             self.actor_critic.std,
         ]
         self.adaptation_module_parameters = [

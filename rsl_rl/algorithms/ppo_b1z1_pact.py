@@ -57,7 +57,7 @@ class PPO_B1Z1PACT:
                 "weight_decay": group.get("weight_decay", 0.0),
                 "name": f"ppo_{group['name']}",
             }
-            for group in context_groups
+            for group in auxiliary_groups
         ]
         auxiliary_enc_groups = [
             {

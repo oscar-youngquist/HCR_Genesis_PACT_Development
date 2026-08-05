@@ -11,9 +11,16 @@ class AC_Args:
 
     adaptation_module_decoder_recon_hidden_dims = [128, 256, 512]
     
-    adaptation_labels = ["base_velocity_loss", "gripper_pos_loss", "force_ee_loss", "force_base_loss"] #, "force_loss"]
-    adaptation_dims = [3, 3, 3, 3] #, 3]
-    adaptation_weights = [.2, .2, 1.0, 1.0] #, 1]
+    adaptation_labels = [
+        "base_velocity_loss",
+        "gripper_pos_loss",
+        "force_ee_loss",
+        "force_base_loss",
+        "foot_contact_loss",
+        "foot_height_loss",
+    ]
+    adaptation_dims = [3, 3, 3, 3, 4, 4]
+    adaptation_weights = [0.2, 0.2, 1.0, 1.0, 1.0, 1.0]
 
 
 class ActorCriticUniFP(nn.Module):
@@ -234,8 +241,12 @@ class ActorCriticUniFP(nn.Module):
         return mean, logvar, z
 
     def actor_estimates(self, explicit_prediction):
-        """Map decoder outputs into the representation consumed by the actor."""
-        return explicit_prediction
+        """Convert contact logits while preserving all continuous estimates."""
+        return torch.cat((
+            explicit_prediction[:, :12],
+            torch.sigmoid(explicit_prediction[:, 12:16]),
+            explicit_prediction[:, 16:20],
+        ), dim=-1)
 
     def update_distribution(self, observations):
         latent_mean, latent_logvar, latent = self.encode_context(observations, sample=False)
