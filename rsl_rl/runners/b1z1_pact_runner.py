@@ -60,11 +60,11 @@ class B1Z1PACTRunner:
         merged.update({
             "dt": env.dt, "position_action_scale": env.cfg.control.action_scale,
             "torque_action_scale": env.cfg.control.torque_scale,
-            "pinn_block_weights": [1.0] * 6 + [1.0] * 12 + [1.0] * 7,
         })
 
         merged.update({key: policy_cfg[key] for key in (
             "pinn_loss_weight", "pinn_warmup", "pinn_init_steps", "predicted_force_detach",
+            "pinn_block_weights", "pinn_block_scale_floors", "pinn_normalization_epsilon",
             "force_gate_ema_alpha", "force_gate_threshold", "force_gate_hysteresis", "force_gate_patience",
             "explicit_base_vel_weight", "explicit_base_wrench_weight", "explicit_ee_force_weight", "explicit_foot_contact_weight",
             "force_decoder_weight", "privileged_decoder_weight", "vae_kld_weight",

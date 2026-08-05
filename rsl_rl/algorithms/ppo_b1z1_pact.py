@@ -273,20 +273,39 @@ class PPO_B1Z1PACT:
         # S^T tau inserts zeros for the unactuated free-flyer base coordinates.
         generalized_tau = torch.cat((torch.zeros(tau.shape[0], 6, device=tau.device), tau), dim=-1)
 
-        residual = torch.bmm(terms.mass_matrix, acceleration.unsqueeze(-1)).squeeze(-1) + terms.bias - terms.generalized_contacts - generalized_tau
+        inertial = torch.bmm(terms.mass_matrix, acceleration.unsqueeze(-1)).squeeze(-1)
+        residual = inertial + terms.bias - terms.generalized_contacts - generalized_tau
 
-        # Optional per-coordinate weighting can balance base, leg, and arm
-        # components without changing the underlying rigid-body equation.
-        block_weights = torch.tensor(self.cfg["pinn_block_weights"], device=residual.device)
+        # Give the floating-base force, floating-base moment, leg-torque, and
+        # arm-torque equations equal semantic footing after physical scaling.
+        # For each block, use one minibatch RMS scale built from the individual
+        # equation terms. Root-sum-squaring before normalization avoids the
+        # unstable small denominator produced when large physical terms cancel.
+        block_slices = (slice(0, 3), slice(3, 6), slice(6, 18), slice(18, 25))
+        block_weights = self.cfg["pinn_block_weights"]
+        block_floors = self.cfg["pinn_block_scale_floors"]
+        valid_rows = valid.squeeze(-1)
+        epsilon = self.cfg["pinn_normalization_epsilon"]
+        block_losses = []
+        for block, weight, floor in zip(block_slices, block_weights, block_floors):
+            block_valid = valid_rows[:, None]
+            valid_values = valid_rows.sum().clamp_min(1.0) * residual[:, block].shape[-1]
 
-        weighted = residual * block_weights
+            # The detached scale preconditions the gradient but cannot be
+            # inflated by the actor or force decoder to reduce the PINN loss.
+            scale_sq = sum(
+                (component[:, block].detach().square() * block_valid).sum() / valid_values
+                for component in (inertial, terms.bias, terms.generalized_contacts, generalized_tau)
+            )
+            scale = torch.sqrt(scale_sq + epsilon).clamp_min(floor)
 
-        # Normalize by torque magnitude so large commands do not automatically
-        # dominate the batch loss. Terminal/reset samples are excluded because
-        # their post-step state may already have been reset by the environment.
-        normalized = torch.linalg.vector_norm(weighted, dim=-1) / (torch.linalg.vector_norm(generalized_tau.detach(), dim=-1) + 1.0e-6)
+            normalized_error = residual[:, block] / scale
+            block_loss = (normalized_error.square() * block_valid).sum() / valid_values
+            block_losses.append(weight * block_loss)
 
-        return (normalized * valid.squeeze(-1)).sum() / valid.sum().clamp_min(1.0)
+        # Terminal/reset samples were excluded from both scale estimation and
+        # residual reduction, so no reset state can bias the minibatch loss.
+        return torch.stack(block_losses).sum()
 
 
     def _compute_vae_loss(self, obs_hist_batch, force_targets, obs_target, labels, valid):
