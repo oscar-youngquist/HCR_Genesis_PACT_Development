@@ -567,7 +567,9 @@
        origins in the link frame instead of applying the Isaac-oriented
        pi/2 X rotation used by b1z1.urdf. -->
   <joint name="base_static_joint" type="fixed">
-    <origin rpy="0 0 0" xyz="0.3 0 0.10" />
+    <!-- Keep the Z1 base 1.5 cm above the top of the 15 cm-tall B1 torso
+         collision box: 0.09 m mount height - 0.075 m torso half-height. -->
+    <origin rpy="0 0 0" xyz="0.3 0 0.09" />
     <parent link="base" />
     <child link="link00" />
   </joint>
