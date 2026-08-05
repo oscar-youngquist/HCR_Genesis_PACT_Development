@@ -33,6 +33,7 @@ dist/
 **/exp_data_corl**/*
 # **/exp_data_corl_02/*
 *.csv
+*.json
 
 # JetBrains IDE
 .idea/
