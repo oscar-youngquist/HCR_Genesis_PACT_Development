@@ -1148,6 +1148,7 @@ class Go2KITE(KITEDepthMixin, BaseTask):
         terrain_names = (
             "gap_terrain",
             "pit_terrain",
+            "center_platform_terrain",
             "multiple_high_platforms_terrain",
             "high_platform_gaps_terrain",
         )

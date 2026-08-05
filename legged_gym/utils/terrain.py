@@ -43,9 +43,10 @@ class Terrain:
     KIND_WAVE = 5
     KIND_STEPPING_STONES = 6
     KIND_GAP = 7
-    KIND_PIT = 8
-    KIND_MULTIPLE_HIGH_PLATFORMS = 9
-    KIND_HIGH_PLATFORM_GAPS = 10
+    KIND_CENTER_PLATFORM = 8
+    KIND_PIT = 9
+    KIND_MULTIPLE_HIGH_PLATFORMS = 10
+    KIND_HIGH_PLATFORM_GAPS = 11
     NUM_TERRAIN_KINDS = KIND_HIGH_PLATFORM_GAPS + 1
     FORWARD_ONLY_COMMAND_KIND_IDS = (
         KIND_STEPPING_STONES,
@@ -53,6 +54,7 @@ class Terrain:
         KIND_PIT,
         KIND_MULTIPLE_HIGH_PLATFORMS,
         KIND_HIGH_PLATFORM_GAPS,
+        KIND_CENTER_PLATFORM,
     )
 
     def __init__(self, cfg: LeggedRobotCfg.terrain) -> None:
@@ -165,6 +167,7 @@ class Terrain:
             "pit_terrain": self.KIND_PIT,
             "multiple_high_platforms_terrain": self.KIND_MULTIPLE_HIGH_PLATFORMS,
             "high_platform_gaps_terrain": self.KIND_HIGH_PLATFORM_GAPS,
+            "center_platform_terrain": self.KIND_CENTER_PLATFORM,
         }
         for terrain_name, terrain_kind_id in terrain_kind_names.items():
             if terrain_name in terrain_type:
@@ -186,6 +189,8 @@ class Terrain:
         stepping_stones_params = self.terrain_curriculum_difficulty["stepping_stones_params"]
         gap_size = eval(self.terrain_curriculum_difficulty["gap_size"])
         pit_depth = eval(self.terrain_curriculum_difficulty["pit_depth"])
+        center_platform_height = eval(self.terrain_curriculum_difficulty.get(
+            "center_platform_height", self.terrain_curriculum_difficulty["pit_depth"]))
         
         # get params if exist
         high_platform_params = self.terrain_curriculum_difficulty.get("high_platform_params", None)
@@ -252,13 +257,20 @@ class Terrain:
                                       platform_size=self.platform_size,
                                       terrain_type=self.type,
                                       simplify_mesh=self.simplify_mesh)
-        elif choice < self.proportions[8]: # pit
+        elif choice < self.proportions[8]: # center platform
+            terrain_utils.center_platform_terrain(
+                terrain,
+                height=center_platform_height,
+                platform_size=self.platform_size,
+                terrain_type=self.type,
+                simplify_mesh=self.simplify_mesh)
+        elif choice < self.proportions[9]: # pit
             terrain_utils.pit_terrain(terrain,
                                       depth=pit_depth,
                                       platform_size=self.platform_size,
                                       terrain_type=self.type,
                                       simplify_mesh=self.simplify_mesh)
-        elif choice < self.proportions[9]: # multiple high platforms
+        elif choice < self.proportions[10]: # multiple high platforms
             if high_platform_params is None:
                 raise ValueError("high_platform_params is required for multiple high platforms terrain.")
             terrain_utils.multiple_high_platforms_terrain(terrain,
@@ -271,7 +283,7 @@ class Terrain:
                                                         platform_size=self.platform_size,
                                                         terrain_type=self.type,
                                                         simplify_mesh=self.simplify_mesh)
-        elif choice < self.proportions[10]: # high platform gaps
+        elif choice < self.proportions[11]: # high platform gaps
             if high_platform_gaps_params is None:
                 raise ValueError("high_platform_gaps_params is required for high platform gaps terrain.")
             terrain_utils.high_platform_gaps_terrain(terrain,
@@ -285,7 +297,6 @@ class Terrain:
                                                         platform_size=self.platform_size,
                                                         terrain_type=self.type,
                                                         simplify_mesh=self.simplify_mesh)
-
         self._add_optional_roughness(
             terrain,
             difficulty=difficulty,

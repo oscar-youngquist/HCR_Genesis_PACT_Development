@@ -82,9 +82,9 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # Order: slope, rough, stairs down, stairs up, discrete, wave,
-        # stepping stones, gap, pit, platforms, platforms and gaps.
+        # stepping stones, gap, center platform, pit, platforms, platforms and gaps.
         terrain_proportions = [0.10, 0.05, 0.10, 0.10, 0.15,
-                               0.00, 0.10, 0.15, 0.05, 0.10, 0.10]
+                               0.00, 0.10, 0.15, 0.00, 0.05, 0.10, 0.10]
         simplify_mesh = True
         add_terrain_roughness = False
         terrain_roughness_height_range = [0.0, 0.04]
@@ -117,6 +117,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
             },
             "gap_size": "0.1 + difficulty * 0.8",
             "pit_depth": "0.1 + 0.5 * difficulty",
+            "center_platform_height": "0.1 + 0.5 * difficulty",
             "high_platform_params": {
                 "high_platform_height": "0.1 + 0.5 * difficulty",
                 "high_platform_length": "np.random.uniform(0.6, 1.6)",
@@ -135,7 +136,7 @@ class GO2KITEBaselineCfg( LeggedRobotCfg ):
                 "min_high_platform_edge_clearance": "0.8",
             },
         }
-        # terrain_proportions = [0.20, 0.25, 0.00, 0.00, 0.30, 0.25, 0.00, 0.00, 0.00, 0.00, 0.00]
+        # terrain_proportions = [0.20, 0.25, 0.00, 0.00, 0.30, 0.25, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 

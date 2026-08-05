@@ -82,12 +82,12 @@ class GO2KITECfg( LeggedRobotCfg ):
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # Order: slope, rough, stairs down, stairs up, discrete, wave,
-        # stepping stones, gap, pit, platforms, platforms and gaps.
-        terrain_proportions = [0.10, 0.10, 0.25, 0.25, 0.15, 0.15, 0.00, 0.00, 0.00, 0.00, 0.00]
+        # stepping stones, gap, center platform, pit, platforms, platforms and gaps.
+        terrain_proportions = [0.10, 0.10, 0.25, 0.25, 0.15, 0.15, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00]
 
-        # terrain_proportions = [0.09, 0.09, 0.09, 0.09, 0.09, 0.10, 0.09, 0.09, 0.09, 0.09, 0.09]
-        # terrain_proportions = [0.10, 0.10, 0.15, 0.15, 0.10, 0.00, 0.15, 0.10, 0.15, 0.00, 0.00]
-        # terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 0.20, 0.00, 0.00, 0.40, 0.40, 0.00]
+        # terrain_proportions = [0.09, 0.09, 0.09, 0.09, 0.09, 0.10, 0.09, 0.09, 0.00, 0.09, 0.09, 0.09]
+        # terrain_proportions = [0.10, 0.10, 0.15, 0.15, 0.10, 0.00, 0.15, 0.10, 0.00, 0.15, 0.00, 0.00]
+        # terrain_proportions = [0.00, 0.00, 0.00, 0.00, 0.00, 0.20, 0.00, 0.00, 0.00, 0.40, 0.40, 0.00]
         simplify_mesh = True
 
         edge_mask_dilation_cells = 0
@@ -109,9 +109,10 @@ class GO2KITECfg( LeggedRobotCfg ):
         # 4,  # discrete obstacles
         # 6  # stepping stones
         # 7  # gap
-        # 8  # pit
-        # 9  # multiple high platforms
-        # 10 # high platform gaps
+        # 8  # center platform
+        # 9  # pit
+        # 10 # multiple high platforms
+        # 11 # high platform gaps
         
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.4",
@@ -133,6 +134,7 @@ class GO2KITECfg( LeggedRobotCfg ):
             },
             "gap_size": "0.1 + difficulty * 0.4",
             "pit_depth": "0.1 + 0.3 * difficulty",
+            "center_platform_height": "0.1 + 0.3 * difficulty",
             "high_platform_params": {
                 "high_platform_height": "0.1 + 0.3 * difficulty",
                 "high_platform_length": "np.random.uniform(0.6, 1.6)",
