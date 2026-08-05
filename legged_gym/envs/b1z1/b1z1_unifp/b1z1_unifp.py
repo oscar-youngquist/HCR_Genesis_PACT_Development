@@ -85,12 +85,11 @@ class B1Z1UniFP(BaseTask):
         """Apply actions, simulate, and return the PACT-style env tuple."""
         actions = self._pre_sim_step(actions)
 
-        # UniFP delays force randomization until `force_start_step * steps_per_iter`.
-        # After that point, commanded force offsets become part of the policy input,
-        # and optional external forces are applied through the Genesis simulator.
-        if self.force_randomization_active and self.cfg.commands.push_gripper_stators:
+        # Physical force events are active from iteration zero; only their
+        # sampled external range changes with the training curriculum.
+        if self.cfg.commands.push_gripper_stators:
             self._push_gripper(self.all_env_ids)
-        if self.force_randomization_active and self.cfg.commands.push_robot_base:
+        if self.cfg.commands.push_robot_base:
             self._push_robot_base(self.all_env_ids)
 
         # Play/eval can optionally mimic the paper's external impedance wrapper.
@@ -123,9 +122,33 @@ class B1Z1UniFP(BaseTask):
 
     @property
     def force_randomization_active(self):
-        # Original UniFP gates the force curriculum by PPO iteration count
-        # (`force_start_step * 24`). `runner_steps_per_iter` makes that explicit.
-        return self.common_step_counter > self.cfg.commands.force_start_step * self.cfg.runner_steps_per_iter
+        return self.external_force_scale > 0.0
+
+    @property
+    def force_command_randomization_active(self):
+        """Keep UniFP's force-command interface behind its original gate."""
+        return self.training_iteration >= self.cfg.commands.force_start_step
+
+    @property
+    def external_force_scale(self):
+        """Current linear curriculum scale for physically applied forces."""
+        commands = self.cfg.commands
+        if self.training_iteration < commands.force_start_step:
+            return float(commands.external_force_initial_scale)
+        if commands.external_force_ramp_iterations == 0:
+            return float(commands.external_force_final_scale)
+        progress = min(
+            max(
+                (self.training_iteration - commands.force_start_step)
+                / max(1, commands.external_force_ramp_iterations),
+                0.0,
+            ),
+            1.0,
+        )
+        return float(
+            commands.external_force_initial_scale
+            + progress * (commands.external_force_final_scale - commands.external_force_initial_scale)
+        )
 
     def post_physics_step(self):
         # Match the Isaac-Gym UniFP order: refresh simulator state, resample
@@ -485,6 +508,7 @@ class B1Z1UniFP(BaseTask):
         self.extras["episode"]["base_force_cmd_norm"] = episode_base_force_cmd_norm
         self.extras["episode"]["base_force_ext_norm"] = episode_base_force_ext_norm
         self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
+        self.extras["episode"]["external_force_scale"] = self.external_force_scale
         self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -881,7 +905,11 @@ class B1Z1UniFP(BaseTask):
         # UniFP samples many standing commands; after force randomization starts
         # that probability increases so the force policy sees static balancing
         # cases under disturbance.
-        zero_prob = self.cfg.commands.zero_vel_cmd_prob_after_force if self.force_randomization_active else self.cfg.commands.zero_vel_cmd_prob
+        zero_prob = (
+            self.cfg.commands.zero_vel_cmd_prob_after_force
+            if self.force_command_randomization_active
+            else self.cfg.commands.zero_vel_cmd_prob
+        )
         zero_mask = torch.rand(len(env_ids), device=self.device) < zero_prob
         zero_env_ids = env_ids[zero_mask]
         self.commands[zero_env_ids, :2] = 0.0
@@ -1281,10 +1309,10 @@ class B1Z1UniFP(BaseTask):
         high = max(int(max_steps), low + 1)
         return torch.randint(low, high, shape, device=self.device)
 
-    def _sample_force_target(self, env_ids, force_range, *, zero_z=False, z_scale=1.0):
+    def _sample_force_target(self, env_ids, force_range, *, zero_z=False, z_scale=1.0, range_scale=1.0):
         """Sample a force target for command or external-force streams."""
         force_min, force_max = force_range
-        target = torch_rand_float(force_min, force_max, (len(env_ids), 3), self.device)
+        target = torch_rand_float(force_min, force_max, (len(env_ids), 3), self.device) * range_scale
         if zero_z:
             target[:, 2] = 0.0
         else:
@@ -1310,6 +1338,7 @@ class B1Z1UniFP(BaseTask):
         force_range,
         zero_z=False,
         z_scale=1.0,
+        range_scale=1.0,
     ):
         """Update one triangular UniFP force profile.
 
@@ -1324,7 +1353,9 @@ class B1Z1UniFP(BaseTask):
             # `forced_prob` controls whether this env receives the sampled
             # profile or is marked free/zero for this interval.
             freed[new_env_ids] = torch.rand(len(new_env_ids), device=self.device) > forced_prob
-            target[new_env_ids] = self._sample_force_target(new_env_ids, force_range, zero_z=zero_z, z_scale=z_scale)
+            target[new_env_ids] = self._sample_force_target(
+                new_env_ids, force_range, zero_z=zero_z, z_scale=z_scale, range_scale=range_scale,
+            )
             sampled_duration = torch_rand_float(duration_min, duration_max, (len(new_env_ids), 1), self.device).view(len(new_env_ids))
             max_duration = ((interval[new_env_ids].float() - settling_time) / 2.0).clamp_min(1.0)
             sampled_duration = torch.minimum(sampled_duration, max_duration)
@@ -1394,22 +1425,27 @@ class B1Z1UniFP(BaseTask):
 
     def _push_gripper(self, env_ids_all):
         """Update EE commanded-force and external-force streams."""
-        self._update_force_stream(
-            env_ids_all,
-            interval=self.push_interval_gripper_cmd,
-            interval_min=self.push_interval_gripper_cmd_min,
-            interval_max=self.push_interval_gripper_cmd_max,
-            duration=self.push_duration_gripper_cmd,
-            duration_min=self.push_duration_gripper_cmd_min,
-            duration_max=self.push_duration_gripper_cmd_max,
-            settling_time=self.settling_time_force_gripper,
-            forced_prob=self.cfg.commands.gripper_forced_prob_cmd,
-            selected=self.selected_env_ids_gripper_cmd,
-            freed=self.freed_envs_gripper_cmd,
-            target=self.force_target_gripper_cmd,
-            output=self.current_Fxyz_gripper_cmd,
-            force_range=self.cfg.commands.max_push_force_xyz_gripper_cmd,
-        )
+        if self.force_command_randomization_active:
+            self._update_force_stream(
+                env_ids_all,
+                interval=self.push_interval_gripper_cmd,
+                interval_min=self.push_interval_gripper_cmd_min,
+                interval_max=self.push_interval_gripper_cmd_max,
+                duration=self.push_duration_gripper_cmd,
+                duration_min=self.push_duration_gripper_cmd_min,
+                duration_max=self.push_duration_gripper_cmd_max,
+                settling_time=self.settling_time_force_gripper,
+                forced_prob=self.cfg.commands.gripper_forced_prob_cmd,
+                selected=self.selected_env_ids_gripper_cmd,
+                freed=self.freed_envs_gripper_cmd,
+                target=self.force_target_gripper_cmd,
+                output=self.current_Fxyz_gripper_cmd,
+                force_range=self.cfg.commands.max_push_force_xyz_gripper_cmd,
+            )
+        else:
+            self.current_Fxyz_gripper_cmd[env_ids_all] = 0.0
+            self.selected_env_ids_gripper_cmd[env_ids_all] = False
+            self.force_target_gripper_cmd[env_ids_all] = 0.0
         if self.cfg.commands.apply_ee_external_forces:
             self._update_force_stream(
                 env_ids_all,
@@ -1426,6 +1462,7 @@ class B1Z1UniFP(BaseTask):
                 target=self.force_target_gripper_ext,
                 output=self.ee_force_ext_world,
                 force_range=self.cfg.commands.max_push_force_xyz_gripper_ext,
+                range_scale=self.external_force_scale,
             )
         else:
             self.ee_force_ext_world[env_ids_all] = 0.0
@@ -1436,23 +1473,28 @@ class B1Z1UniFP(BaseTask):
 
     def _push_robot_base(self, env_ids_all):
         """Update base commanded-force and external-force streams."""
-        self._update_force_stream(
-            env_ids_all,
-            interval=self.push_interval_base_cmd,
-            interval_min=self.push_interval_base_cmd_min,
-            interval_max=self.push_interval_base_cmd_max,
-            duration=self.push_duration_base_cmd,
-            duration_min=self.push_duration_base_cmd_min,
-            duration_max=self.push_duration_base_cmd_max,
-            settling_time=self.settling_time_force_base,
-            forced_prob=self.cfg.commands.base_forced_prob_cmd,
-            selected=self.selected_env_ids_base_cmd,
-            freed=self.freed_envs_base_cmd,
-            target=self.force_target_base_cmd,
-            output=self.current_Fxyz_base_cmd,
-            force_range=self.cfg.commands.max_push_force_xyz_base_cmd,
-            zero_z=True,
-        )
+        if self.force_command_randomization_active:
+            self._update_force_stream(
+                env_ids_all,
+                interval=self.push_interval_base_cmd,
+                interval_min=self.push_interval_base_cmd_min,
+                interval_max=self.push_interval_base_cmd_max,
+                duration=self.push_duration_base_cmd,
+                duration_min=self.push_duration_base_cmd_min,
+                duration_max=self.push_duration_base_cmd_max,
+                settling_time=self.settling_time_force_base,
+                forced_prob=self.cfg.commands.base_forced_prob_cmd,
+                selected=self.selected_env_ids_base_cmd,
+                freed=self.freed_envs_base_cmd,
+                target=self.force_target_base_cmd,
+                output=self.current_Fxyz_base_cmd,
+                force_range=self.cfg.commands.max_push_force_xyz_base_cmd,
+                zero_z=True,
+            )
+        else:
+            self.current_Fxyz_base_cmd[env_ids_all] = 0.0
+            self.selected_env_ids_base_cmd[env_ids_all] = False
+            self.force_target_base_cmd[env_ids_all] = 0.0
         if self.cfg.commands.apply_base_external_forces:
             self._update_force_stream(
                 env_ids_all,
@@ -1470,6 +1512,7 @@ class B1Z1UniFP(BaseTask):
                 output=self.base_force_ext_world,
                 force_range=self.cfg.commands.max_push_force_xyz_base_ext,
                 z_scale=self.cfg.commands.force_z_base_ext_scale,
+                range_scale=self.external_force_scale,
             )
         else:
             self.base_force_ext_world[env_ids_all] = 0.0
@@ -1977,6 +2020,12 @@ class B1Z1UniFP(BaseTask):
             raise ValueError("rewards.max_sweep_amplitude must be nonnegative")
         if cfg.rewards.gait_guidance_decay_iterations <= 0:
             raise ValueError("rewards.gait_guidance_decay_iterations must be positive")
+        if cfg.commands.external_force_ramp_iterations < 0:
+            raise ValueError("commands.external_force_ramp_iterations must be nonnegative")
+        if cfg.commands.external_force_initial_scale < 0.0 or cfg.commands.external_force_final_scale < 0.0:
+            raise ValueError("external force curriculum scales must be nonnegative")
+        if cfg.commands.external_force_final_scale < cfg.commands.external_force_initial_scale:
+            raise ValueError("external_force_final_scale must be at least external_force_initial_scale")
         for name in (
             "ref_dof_leg_initial_multiplier",
             "ref_dof_leg_final_multiplier",

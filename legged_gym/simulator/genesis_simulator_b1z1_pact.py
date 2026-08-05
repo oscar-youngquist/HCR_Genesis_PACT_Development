@@ -989,6 +989,11 @@ class GenesisSimulatorB1Z1PACT(Simulator):
             dtype=torch.int32,
             device=self._device,
         )
+        self._base_external_torque_link_indices = torch.tensor(
+            [self._robot.link_start + self._base_link_index],
+            dtype=torch.int32,
+            device=self._device,
+        )
         
         if self._cfg.asset.obtain_link_contact_states:
             self._contact_state_link_indices = find_link_indices(
@@ -1176,6 +1181,7 @@ class GenesisSimulatorB1Z1PACT(Simulator):
             self._ee_quat[:, -1] = 1.0
             self._ee_force_world = torch.zeros_like(self._ee_pos)
         self._base_force_world = torch.zeros_like(self._base_pos)
+        self._base_torque_world = torch.zeros_like(self._base_pos)
         self._external_force_world = torch.zeros(
             (self._num_envs, len(self._external_force_link_indices), 3), device=self._device, dtype=torch.float
         )
@@ -1455,6 +1461,10 @@ class GenesisSimulatorB1Z1PACT(Simulator):
         """Store the target world-frame base disturbance force."""
         self._base_force_world[:] = force_world
 
+    def apply_base_torque(self, torque_world):
+        """Store the target world-frame external moment on the B1 torso."""
+        self._base_torque_world[:] = torque_world
+
     def _apply_external_forces(self):
         """Apply UniFP EE/base external force buffers to Genesis links.
 
@@ -1466,7 +1476,8 @@ class GenesisSimulatorB1Z1PACT(Simulator):
         if not hasattr(self, "_external_force_link_indices"):
             return
         has_ee_force = self._has_gripper and torch.any(self._ee_force_world)
-        if not has_ee_force and not torch.any(self._base_force_world):
+        has_base_torque = torch.any(self._base_torque_world)
+        if not has_ee_force and not torch.any(self._base_force_world) and not has_base_torque:
             return
         if self._has_gripper:
             self._external_force_world[:, 0, :] = self._ee_force_world
@@ -1480,6 +1491,14 @@ class GenesisSimulatorB1Z1PACT(Simulator):
             ref="link_com",
             local=False,
         )
+        if has_base_torque:
+            self._robot._solver.apply_links_external_torque(
+                torque=self._base_torque_world.unsqueeze(1),
+                links_idx=self._base_external_torque_link_indices,
+                envs_idx=None,
+                ref="link_com",
+                local=False,
+            )
     
 
     def _init_domain_params(self):

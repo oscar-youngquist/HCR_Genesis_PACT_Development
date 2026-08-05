@@ -86,11 +86,11 @@ class B1Z1PACT(LeggedRobot):
             raise RuntimeError(
                 f"B1Z1 PACT expects {2 * self.num_actions} coupled actions, got {actions.shape[-1]}"
             )
-        # UniFP convention inside PACT training: force events begin only after
-        # the original PPO-iteration gate, but are physical disturbances only.
-        if self.force_randomization_active and self.cfg.commands.push_gripper_stators:
+        # External events run from iteration zero. Their sampled range follows
+        # the iteration-based curriculum returned by external_force_scale.
+        if self.cfg.commands.push_gripper_stators:
             self._push_gripper(self.all_env_ids)
-        if self.force_randomization_active and self.cfg.commands.push_robot_base:
+        if self.cfg.commands.push_robot_base:
             self._push_robot_base(self.all_env_ids)
 
         self.simulator.step(actions)
@@ -142,7 +142,7 @@ class B1Z1PACT(LeggedRobot):
         # the torque actually sent to Genesis.
         kp = simulator._kp_scale * simulator._p_gains
         kd = simulator._kd_scale * simulator._d_gains
-        base_wrench = torch.cat((self.base_force_ext_world, torch.zeros_like(self.base_force_ext_world)), dim=-1)
+        base_wrench = torch.cat((self.base_force_ext_world, self.base_torque_ext_world), dim=-1)
         current_velocity = torch.cat((simulator._base_world_lin_vel, simulator._base_world_ang_vel, simulator.dof_vel), dim=-1)
         previous_velocity = torch.cat((simulator._last_base_world_lin_vel, simulator._last_base_world_ang_vel, simulator.last_dof_vel), dim=-1)
         return torch.cat((
@@ -164,9 +164,28 @@ class B1Z1PACT(LeggedRobot):
 
     @property
     def force_randomization_active(self):
-        # Original UniFP gates the force curriculum by PPO iteration count
-        # (`force_start_step * 24`). `runner_steps_per_iter` makes that explicit.
-        return self.common_step_counter > self.cfg.commands.force_start_step * self.cfg.runner_steps_per_iter
+        return self.external_force_scale > 0.0
+
+    @property
+    def external_force_scale(self):
+        """Current linear curriculum scale for all physical disturbances."""
+        commands = self.cfg.commands
+        if self.training_iteration < commands.force_start_step:
+            return float(commands.external_force_initial_scale)
+        if commands.external_force_ramp_iterations == 0:
+            return float(commands.external_force_final_scale)
+        progress = min(
+            max(
+                (self.training_iteration - commands.force_start_step)
+                / max(1, commands.external_force_ramp_iterations),
+                0.0,
+            ),
+            1.0,
+        )
+        return float(
+            commands.external_force_initial_scale
+            + progress * (commands.external_force_final_scale - commands.external_force_initial_scale)
+        )
 
     def post_physics_step(self):
         # Match the Isaac-Gym UniFP order: refresh simulator state, resample
@@ -457,6 +476,7 @@ class B1Z1PACT(LeggedRobot):
         episode_ee_goal_sphere = self.curr_ee_goal_sphere[env_ids].clone()
         episode_ee_force_ext_norm = torch.mean(torch.norm(self.ee_force_ext_world[env_ids], dim=1))
         episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
+        episode_base_torque_ext_norm = torch.mean(torch.norm(self.base_torque_ext_world[env_ids], dim=1))
         episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
 
         self._resample_commands(env_ids)
@@ -485,6 +505,7 @@ class B1Z1PACT(LeggedRobot):
         self.termination_contact_counter[env_ids] = 0
         self.ee_force_ext_world[env_ids] = 0.0
         self.base_force_ext_world[env_ids] = 0.0
+        self.base_torque_ext_world[env_ids] = 0.0
         self.prev_ee_error[env_ids] = 0.0
         self.prev_impedance_ee_pos[env_ids] = 0.0
         self.prev_impedance_ee_vel[env_ids] = 0.0
@@ -503,6 +524,8 @@ class B1Z1PACT(LeggedRobot):
             self.simulator.apply_ee_force(self.ee_force_ext_world)
         if hasattr(self.simulator, "apply_base_force"):
             self.simulator.apply_base_force(self.base_force_ext_world)
+        if hasattr(self.simulator, "apply_base_torque"):
+            self.simulator.apply_base_torque(self.base_torque_ext_world)
 
         self.last_obs_buf[env_ids] = 0.0
         self.llast_obs_buf[env_ids] = 0.0
@@ -546,6 +569,8 @@ class B1Z1PACT(LeggedRobot):
         self.extras["episode"]["ee_force_ext_norm"] = episode_ee_force_ext_norm
         self.extras["episode"]["base_force_cmd_norm"] = episode_base_force_cmd_norm
         self.extras["episode"]["base_force_ext_norm"] = episode_base_force_ext_norm
+        self.extras["episode"]["base_torque_ext_norm"] = episode_base_torque_ext_norm
+        self.extras["episode"]["external_force_scale"] = self.external_force_scale
         self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
         self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
         if self.cfg.env.send_timeouts:
@@ -601,8 +626,7 @@ class B1Z1PACT(LeggedRobot):
 
         # Dynamics labels use the world/LWA force frame so predicted force can
         # enter the Pinocchio residual without an ambiguous extra transform.
-        # Base torque is initially zero because Genesis applies at torso COM.
-        base_wrench_world = torch.cat((self.base_force_ext_world, torch.zeros_like(self.base_force_ext_world)), dim=-1)
+        base_wrench_world = torch.cat((self.base_force_ext_world, self.base_torque_ext_world), dim=-1)
         ee_goal_offset_sphere = self.curr_ee_goal_sphere
 
         phase = self._get_phase()
@@ -1288,15 +1312,26 @@ class B1Z1PACT(LeggedRobot):
             (len(env_ids),),
         )
 
+        self.freed_envs_base_torque_ext[env_ids] = False
+        self.selected_env_ids_base_torque_ext[env_ids] = False
+        self.force_target_base_torque_ext[env_ids] = 0.0
+        self.push_end_time_base_torque_ext[env_ids] = 0.0
+        self.push_duration_base_torque_ext[env_ids] = 0.0
+        self.push_interval_base_torque_ext[env_ids] = self._rand_force_interval(
+            self.push_interval_base_ext_min,
+            self.push_interval_base_ext_max,
+            (len(env_ids),),
+        )
+
     def _rand_force_interval(self, min_steps, max_steps, shape):
         low = int(min_steps)
         high = max(int(max_steps), low + 1)
         return torch.randint(low, high, shape, device=self.device)
 
-    def _sample_force_target(self, env_ids, force_range, *, zero_z=False, z_scale=1.0):
+    def _sample_force_target(self, env_ids, force_range, *, zero_z=False, z_scale=1.0, range_scale=1.0):
         """Sample a force target for command or external-force streams."""
         force_min, force_max = force_range
-        target = torch_rand_float(force_min, force_max, (len(env_ids), 3), self.device)
+        target = torch_rand_float(force_min, force_max, (len(env_ids), 3), self.device) * range_scale
         if zero_z:
             target[:, 2] = 0.0
         else:
@@ -1322,6 +1357,7 @@ class B1Z1PACT(LeggedRobot):
         force_range,
         zero_z=False,
         z_scale=1.0,
+        range_scale=1.0,
     ):
         """Update one triangular UniFP force profile.
 
@@ -1334,7 +1370,9 @@ class B1Z1PACT(LeggedRobot):
             # `forced_prob` controls whether this env receives the sampled
             # profile or is marked free/zero for this interval.
             freed[new_env_ids] = torch.rand(len(new_env_ids), device=self.device) > forced_prob
-            target[new_env_ids] = self._sample_force_target(new_env_ids, force_range, zero_z=zero_z, z_scale=z_scale)
+            target[new_env_ids] = self._sample_force_target(
+                new_env_ids, force_range, zero_z=zero_z, z_scale=z_scale, range_scale=range_scale,
+            )
             sampled_duration = torch_rand_float(duration_min, duration_max, (len(new_env_ids), 1), self.device).view(len(new_env_ids))
             max_duration = ((interval[new_env_ids].float() - settling_time) / 2.0).clamp_min(1.0)
             sampled_duration = torch.minimum(sampled_duration, max_duration)
@@ -1396,6 +1434,8 @@ class B1Z1PACT(LeggedRobot):
     def _force_push_end_time_for(self, output):
         if output is self.ee_force_ext_world:
             return self.push_end_time_gripper_ext
+        if output is self.base_torque_ext_world:
+            return self.push_end_time_base_torque_ext
         return self.push_end_time_base_ext
 
     def _push_gripper(self, env_ids_all):
@@ -1416,6 +1456,7 @@ class B1Z1PACT(LeggedRobot):
                 target=self.force_target_gripper_ext,
                 output=self.ee_force_ext_world,
                 force_range=self.cfg.commands.max_push_force_xyz_gripper_ext,
+                range_scale=self.external_force_scale,
             )
         else:
             self.ee_force_ext_world[env_ids_all] = 0.0
@@ -1443,6 +1484,7 @@ class B1Z1PACT(LeggedRobot):
                 output=self.base_force_ext_world,
                 force_range=self.cfg.commands.max_push_force_xyz_base_ext,
                 z_scale=self.cfg.commands.force_z_base_ext_scale,
+                range_scale=self.external_force_scale,
             )
         else:
             self.base_force_ext_world[env_ids_all] = 0.0
@@ -1450,6 +1492,30 @@ class B1Z1PACT(LeggedRobot):
             self.force_target_base_ext[env_ids_all] = 0.0
         if hasattr(self.simulator, "apply_base_force"):
             self.simulator.apply_base_force(self.base_force_ext_world)
+        if self.cfg.commands.apply_base_external_torques:
+            self._update_force_stream(
+                env_ids_all,
+                interval=self.push_interval_base_torque_ext,
+                interval_min=self.push_interval_base_ext_min,
+                interval_max=self.push_interval_base_ext_max,
+                duration=self.push_duration_base_torque_ext,
+                duration_min=self.push_duration_base_ext_min,
+                duration_max=self.push_duration_base_ext_max,
+                settling_time=self.settling_time_force_base,
+                forced_prob=self.cfg.commands.base_torque_forced_prob_ext,
+                selected=self.selected_env_ids_base_torque_ext,
+                freed=self.freed_envs_base_torque_ext,
+                target=self.force_target_base_torque_ext,
+                output=self.base_torque_ext_world,
+                force_range=self.cfg.commands.max_push_torque_xyz_base_ext,
+                range_scale=self.external_force_scale,
+            )
+        else:
+            self.base_torque_ext_world[env_ids_all] = 0.0
+            self.selected_env_ids_base_torque_ext[env_ids_all] = False
+            self.force_target_base_torque_ext[env_ids_all] = 0.0
+        if hasattr(self.simulator, "apply_base_torque"):
+            self.simulator.apply_base_torque(self.base_torque_ext_world)
 
     def _reset_dofs(self, env_ids):
         """Reset B1/Z1 DOFs with original UniFP perturbation structure."""
@@ -1723,6 +1789,7 @@ class B1Z1PACT(LeggedRobot):
 
         self.ee_force_ext_world = torch.zeros(self.num_envs, 3, device=self.device)
         self.base_force_ext_world = torch.zeros(self.num_envs, 3, device=self.device)
+        self.base_torque_ext_world = torch.zeros(self.num_envs, 3, device=self.device)
         self.freed_envs_gripper_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.selected_env_ids_gripper_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.push_interval_gripper_ext = self._rand_force_interval(
@@ -1744,6 +1811,14 @@ class B1Z1PACT(LeggedRobot):
         self.push_end_time_base_ext = torch.zeros(self.num_envs, device=self.device)
         self.push_duration_base_ext = torch.zeros(self.num_envs, device=self.device)
         self.force_target_base_ext = torch.zeros(self.num_envs, 3, device=self.device)
+        self.freed_envs_base_torque_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.selected_env_ids_base_torque_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.push_interval_base_torque_ext = self._rand_force_interval(
+            self.push_interval_base_ext_min, self.push_interval_base_ext_max, (self.num_envs,)
+        )
+        self.push_end_time_base_torque_ext = torch.zeros(self.num_envs, device=self.device)
+        self.push_duration_base_torque_ext = torch.zeros(self.num_envs, device=self.device)
+        self.force_target_base_torque_ext = torch.zeros(self.num_envs, 3, device=self.device)
         self.gripper_force_kps = torch_rand_float(*self.cfg.commands.gripper_force_kp_range, (self.num_envs, 1), self.device)
         self.gripper_force_kds = torch_rand_float(*self.cfg.commands.gripper_force_kd_range, (self.num_envs, 1), self.device)
         self.base_force_kps = torch_rand_float(*self.cfg.commands.base_force_kp_range, (self.num_envs, 1), self.device)
@@ -1874,6 +1949,12 @@ class B1Z1PACT(LeggedRobot):
             raise ValueError("rewards.max_sweep_amplitude must be nonnegative")
         if cfg.rewards.gait_guidance_decay_iterations <= 0:
             raise ValueError("rewards.gait_guidance_decay_iterations must be positive")
+        if cfg.commands.external_force_ramp_iterations < 0:
+            raise ValueError("commands.external_force_ramp_iterations must be nonnegative")
+        if cfg.commands.external_force_initial_scale < 0.0 or cfg.commands.external_force_final_scale < 0.0:
+            raise ValueError("external force curriculum scales must be nonnegative")
+        if cfg.commands.external_force_final_scale < cfg.commands.external_force_initial_scale:
+            raise ValueError("external_force_final_scale must be at least external_force_initial_scale")
         for name in (
             "ref_dof_leg_initial_multiplier",
             "ref_dof_leg_final_multiplier",

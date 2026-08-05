@@ -304,6 +304,11 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         zero_vel_cmd_prob_after_force = 0.8
         
         force_start_step = 8000
+        # External disturbances are present from iteration zero at quarter
+        # strength, then linearly reach their full ranges after this threshold.
+        external_force_initial_scale = 0.25
+        external_force_final_scale = 1.0
+        external_force_ramp_iterations = 2000
 
         push_gripper_stators = True
         apply_ee_external_forces = True
@@ -324,6 +329,11 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         push_base_duration_s_ext = [1.0, 3.0]
         base_forced_prob_ext = 0.8
         max_push_force_xyz_base_ext = [-50.0, 50.0]
+        apply_base_external_torques = True
+        base_torque_forced_prob_ext = 0.8
+        # Full-strength world-frame torso moment range [N m]. The shared
+        # curriculum starts this at +/-3 N m and ramps to +/-12 N m.
+        max_push_torque_xyz_base_ext = [-12.0, 12.0]
         randomize_base_force_gains = False
         base_force_kp_range = [200.0, 200.0]
         base_force_kd_range = [200.0, 200.0]

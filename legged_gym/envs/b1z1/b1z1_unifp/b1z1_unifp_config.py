@@ -312,9 +312,14 @@ class B1Z1UniFPCfg:
         zero_vel_cmd_prob_after_force = 0.8
         
         force_start_step = 8000
+        # Apply external disturbances throughout training at quarter strength,
+        # then linearly ramp to the original ranges after force_start_step.
+        external_force_initial_scale = 0.25
+        external_force_final_scale = 1.0
+        external_force_ramp_iterations = 2000
 
-        push_gripper_stators = False
-        apply_ee_external_forces = False
+        push_gripper_stators = True
+        apply_ee_external_forces = True
         push_gripper_interval_s_cmd = [3.5, 9.0]
         push_gripper_duration_s_cmd = [1.0, 3.0]
         gripper_forced_prob_cmd = 0.8
