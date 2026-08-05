@@ -661,9 +661,9 @@ class B1UniFPCfgPPO:
         algorithm_class_name = "PPO_UniFP"
         num_steps_per_env = 32
         
-        max_iterations = 25000
+        max_iterations = 500
         
-        save_interval = 500
+        save_interval = 100
         run_name = "b1_unifp_locomotion"
         experiment_name = "b1_unifp_genesis"
         sync_wandb = False

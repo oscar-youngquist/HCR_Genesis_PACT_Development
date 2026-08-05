@@ -10,8 +10,6 @@ from rsl_rl.storage.rollout_storage_unifp import RolloutStorageUniFP
 
 class Adaptation_Args():
     adaptation_module_learning_rate = 1.e-5
-    num_adaptation_module_substeps = 1
-    adaptation_batch_size = 64
 
 
 class PPO_UniFP:
@@ -39,6 +37,7 @@ class PPO_UniFP:
                  adaptive_ent_softmax_temp=2.0,
                  adaptation_privileged_weight=1.0,
                  adaptation_kl_weight=1.0e-3,
+                 num_encoder_epochs=1,
                  device='cpu',
                  **kwargs,
                  ):
@@ -48,6 +47,10 @@ class PPO_UniFP:
         self.desired_kl = desired_kl
         self.schedule = schedule
         self.learning_rate = learning_rate
+
+        print("UniFP PPO - Learning Rate - ", self.learning_rate)
+        print("UniFP PPO - Desired KL - ", self.desired_kl)
+        print("UniFP PPO - LR Schedule - ", self.schedule)
 
         # Adaptive entropy coefficient, ported from PPO_PACT. Bounds are
         # ordered [coefficient at target performance, coefficient at maximum
@@ -67,6 +70,9 @@ class PPO_UniFP:
         self.current_entropy_coef = float(entropy_coef)
         self.adaptation_privileged_weight = float(adaptation_privileged_weight)
         self.adaptation_kl_weight = float(adaptation_kl_weight)
+        self.num_enc_epochs = int(num_encoder_epochs)
+        if self.num_enc_epochs < 1:
+            raise ValueError("num_encoder_epochs must be at least 1")
 
         # PPO components
         self.actor_critic = actor_critic
@@ -84,9 +90,9 @@ class PPO_UniFP:
         self.ppo_parameters = [
             *self.actor_critic.actor_body.parameters(),
             *self.actor_critic.critic_body.parameters(),
-            *self.actor_critic.adaptation_encoder_module.parameters(),
-            *self.actor_critic.adaptation_mean_module.parameters(),
-            *self.actor_critic.adaptation_logvar_module.parameters(),
+            # *self.actor_critic.adaptation_encoder_module.parameters(),
+            # *self.actor_critic.adaptation_mean_module.parameters(),
+            # *self.actor_critic.adaptation_logvar_module.parameters(),
             self.actor_critic.std,
         ]
         self.adaptation_module_parameters = [
@@ -215,9 +221,9 @@ class PPO_UniFP:
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
         # need to record obs and critic_obs before env.step()
-        self.transition.observations = obs
-        self.transition.critic_observations = critic_obs
-        self.transition.observation_preds = obs_pred
+        self.transition.observations = obs.detach().clone()
+        self.transition.critic_observations = critic_obs.detach().clone()
+        self.transition.observation_preds = obs_pred.detach().clone()
         return self.transition.actions
 
     def process_env_step(self, rewards, dones, infos, next_privileged_observations):
@@ -346,7 +352,10 @@ class PPO_UniFP:
         gradient_sums = {name: 0.0 for name in self.diagnostic_parameter_groups}
         gradient_counts = {name: 0 for name in self.diagnostic_parameter_groups}
 
+        ppo_diagnostics["PPO/lr_before_update"] = self.learning_rate
+
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        first_epoch = True
         for obs_batch, critic_obs_batch, obs_pred_batch, next_privileged_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
             old_mu_batch, old_sigma_batch, dones_batch in generator:
 
@@ -358,15 +367,35 @@ class PPO_UniFP:
                 sigma_batch = self.actor_critic.action_std
                 entropy_batch = self.actor_critic.entropy
 
+
+                if first_epoch:
+                    mu_abs_diff = (mu_batch - old_mu_batch).abs()
+                    sigma_abs_diff = (sigma_batch - old_sigma_batch).abs()
+                    logprob_abs_diff = (
+                        actions_log_prob_batch - old_actions_log_prob_batch.squeeze(-1)
+                    ).abs()
+
+                    ppo_diagnostics["PPO/mu_abs_diff"] = mu_abs_diff.mean().item()
+                    ppo_diagnostics["PPO/sigma_abs_diff"] = sigma_abs_diff.mean().item()
+                    ppo_diagnostics["PPO/logprob_abs_diff"] = logprob_abs_diff.mean().item()
+
+
                 # KL
+                approximate_kl = None
                 if self.desired_kl != None and self.schedule == 'adaptive':
                     with torch.inference_mode():
                         kl = torch.sum(
                             torch.log(sigma_batch / old_sigma_batch + 1.e-5) + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch)) / (2.0 * torch.square(sigma_batch)) - 0.5, axis=-1)
                         kl_mean = torch.mean(kl)
 
+                        approximate_kl = kl_mean
+
+                        if first_epoch:
+                            ppo_diagnostics["PPO/pre_update_kl"] = kl_mean.item()
+                            first_epoch = False
+                        
                         if kl_mean > self.desired_kl * 2.0:
-                            self.learning_rate = max(1e-6, self.learning_rate / 1.5)
+                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
                         elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
                             self.learning_rate = min(1e-2, self.learning_rate * 1.5)
 
@@ -374,11 +403,10 @@ class PPO_UniFP:
                             param_group['lr'] = self.learning_rate
 
 
+
                 # Surrogate loss
                 ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
                 with torch.no_grad():
-                    log_ratio = actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch)
-                    approximate_kl = ((ratio - 1.0) - log_ratio).mean()
                     minibatch_sums["PPO/approx_kl"] += approximate_kl.item()
                     minibatch_sums["PPO/ratio_mean"] += ratio.mean().item()
                     minibatch_sums["PPO/ratio_std"] += ratio.std(unbiased=False).item()
@@ -420,13 +448,11 @@ class PPO_UniFP:
                 mean_value_loss += value_loss.item()
                 mean_surrogate_loss += surrogate_loss.item()
 
-                data_size = critic_obs_batch.shape[0]
-                num_train = int(data_size // 5 * 4)
-
-                # Adaptation module gradient step, only update concurrent state estimation module, not policy network
+                # Adaptation module gradient step: each encoder epoch reuses
+                # this complete PPO minibatch without adaptation sub-batching.
                 if len(self.adaptation_labels) > 0:
 
-                    for epoch in range(Adaptation_Args.num_adaptation_module_substeps):
+                    for _ in range(self.num_enc_epochs):
 
                         adaptation_output = self.actor_critic.get_student_latent(obs_batch)
                         with torch.no_grad():
@@ -481,18 +507,21 @@ class PPO_UniFP:
 
                         mean_adaptation_module_loss += adaptation_loss.item()
 
-        # Keeps the interaction of incoming data with layer wieghts below the threashold that 
-        #     saturates the tanh activation function.
-        self.spectral_normalization(self.actor_critic, sigma_max=10.0)
+                # Keeps the interaction of incoming data with layer wieghts below the threashold that 
+                #     saturates the tanh activation function.
+                self.spectral_normalization(self.actor_critic, sigma_max=10.0)
+
+        ppo_diagnostics["PPO/lr_after_update"] = self.learning_rate
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
-        mean_adaptation_module_loss /= (num_updates * Adaptation_Args.num_adaptation_module_substeps)
+        mean_adaptation_module_loss /= (num_updates * self.num_enc_epochs)
         for label in mean_adaptation_losses:
-            mean_adaptation_losses[label] /= (num_updates * Adaptation_Args.num_adaptation_module_substeps)
+            mean_adaptation_losses[label] /= (num_updates * self.num_enc_epochs)
 
-        ppo_diagnostics["PPO/learning_rate"] = float(self.optimizer.param_groups[0]["lr"])
+        ppo_diagnostics["PPO/param_learning_rate"] = float(self.optimizer.param_groups[0]["lr"])
+        ppo_diagnostics["PPO/class_learning_rate"] = float(self.learning_rate)
         for name, value in minibatch_sums.items():
             ppo_diagnostics[name] = value / max(1, num_updates)
         for name, parameters in self.diagnostic_parameter_groups.items():

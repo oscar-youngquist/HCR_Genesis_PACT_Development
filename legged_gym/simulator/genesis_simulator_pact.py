@@ -162,7 +162,6 @@ class GenesisSimulator_PACT(Simulator):
         self._torso_6dof_acceleration[:] = torch.from_numpy(
             self.async_pino_manager.shared.acc6d).to(self._device)       # num_envs x 6
         
-        
         # Link contact state
         if self._cfg.asset.obtain_link_contact_states:
             self._link_contact_states = 1. * (torch.norm(

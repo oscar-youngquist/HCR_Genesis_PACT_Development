@@ -723,6 +723,8 @@ class B1Z1UniFPCfgPPO:
         # B1Z1: reconstruct one next privileged frame and regularize q(z|h).
         adaptation_privileged_weight = 1.0
         adaptation_kl_weight = 1.0e-3
+        # Full PPO minibatch passes used for each adaptation/encoder update.
+        num_encoder_epochs = 1
         num_learning_epochs = 5
         num_mini_batches = 4
         use_spo = False
