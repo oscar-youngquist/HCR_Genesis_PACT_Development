@@ -5,7 +5,7 @@ class B1UniFPCfg:
     seed = 1
 
     class env:
-        num_envs = 500
+        num_envs = 6000
         # gravity projection (2), angular velocity (3), leg positions (12),
         # leg velocities (12), previous actions (12), and commands (6).
         num_observations = 49
@@ -309,20 +309,20 @@ class B1UniFPCfg:
 
         randomize_base_mass = True
         added_mass_min = -2.0  
-        min_added_mass_max = 5.0
-        max_added_mass_max = 5.0
+        min_added_mass_max = 10.0
+        max_added_mass_max = 15.0
   
         randomize_com_displacement = True
         com_rand_z_positive = False
         com_displacement_x_min = 0.05
-        com_displacement_x_max = 0.05
+        com_displacement_x_max = 0.15
    
         com_displacement_y_min = 0.05
-        com_displacement_y_max = 0.05
+        com_displacement_y_max = 0.15
    
         com_displacement_z_min = 0.05
         com_displacement_z_min_pos = 0.15
-        com_displacement_z_max = 0.05
+        com_displacement_z_max = 0.15
      
         push_robots = True
         push_interval_s = 8.0
@@ -330,16 +330,16 @@ class B1UniFPCfg:
         push_interval_min = 4.0
         push_interval_max = 8.0
         
-        max_push_vel_xy = 1.0
+        max_push_vel_xy = 1.5
         min_push_vel_xy = 1.0
         
-        max_vertical_push = 0.10
-        min_vertical_push = 0.0
+        max_vertical_push = 0.50
+        min_vertical_push = 0.10
         vert_interval_min = 5.0
         vert_interval_max = 15.0
         
-        max_push_torque = 0.50
-        min_push_torque = 0.0
+        max_push_torque = 1.50
+        min_push_torque = 0.5
         wrench_timeout_min = 5.0
         wrench_timeout_max = 15.0
      
@@ -353,10 +353,10 @@ class B1UniFPCfg:
         randomize_motor_strength = True
         motor_strength_range = [0.9, 1.1]
         
-        randomize_joint_armature = False
+        randomize_joint_armature = True
         joint_armature_range = [0.0, 0.03]
         
-        randomize_joint_friction = False
+        randomize_joint_friction = True
         joint_friction_range_start = [0.0, 0.02]
         joint_friction_range_end = [0.0, 0.04]
         
@@ -364,9 +364,9 @@ class B1UniFPCfg:
         joint_stiffness_range_start = [0.0, 0.0]
         joint_stiffness_range_end = [0.0, 0.0]
         
-        randomize_joint_damping = False
-        joint_damping_range_start = [0.30, 0.40]
-        joint_damping_range_end = [0.00, 0.50]
+        randomize_joint_damping = True
+        joint_damping_range_start = [0.30, 0.60]
+        joint_damping_range_end = [0.00, 0.80]
         
         num_push_steps = 500
         push_warmup = 10000
@@ -382,7 +382,7 @@ class B1UniFPCfg:
         disturbance_progress_delta = 0.01
         use_joint_dynamics_curriculum = True
         use_mass_com_curriculum = True
-        use_disturbance_curriculum = False
+        use_disturbance_curriculum = True
 
     class noise:
         add_noise = True
@@ -437,12 +437,12 @@ class B1UniFPCfg:
         target_joint_pos_thd = 0.35
 
         # Optionally fade scripted-gait guidance as PPO learns its own gait.
-        gait_guidance_decay_enabled = False
-        gait_guidance_decay_iterations = 10000
+        gait_guidance_decay_enabled = True
+        gait_guidance_decay_iterations = 5000
         ref_dof_leg_initial_multiplier = 1.0
-        ref_dof_leg_final_multiplier = 0.05
+        ref_dof_leg_final_multiplier = 0.01
         feet_contact_initial_multiplier = 1.0
-        feet_contact_final_multiplier = 0.05
+        feet_contact_final_multiplier = 0.01
 
         upright_gate_sigma = 10.0
 
@@ -464,7 +464,7 @@ class B1UniFPCfg:
 
             # Add in close to default reward
             stand_still         = -0.5            #
-            stand_still_contact = 0.1             #
+            stand_still_contact = 0.5             #
 
             alive = 0.01
 
@@ -486,7 +486,7 @@ class B1UniFPCfg:
             feet_contact_number = 2.00
 
 
-            hip_pos = -0.05
+            hip_pos = -0.3
 
             # Base
             base_height = -2.0
@@ -514,12 +514,12 @@ class B1UniFPCfg:
 
             # Gait shaping
             feet_drag = -0.0001
-            feet_regulation = -0.001
-            feet_pos_xy = -0.01
-            stumble = -0.01
+            feet_regulation = -0.1
+            feet_pos_xy = -0.1
+            stumble = -0.1
 
             feet_contact_forces = -0.001
-            feet_air_time = 0.00
+            feet_air_time = 1.00
             early_swing = 0.10
             foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height
 
@@ -528,7 +528,7 @@ class B1UniFPCfg:
             step_progress = 0.00
 
             # Leg posture conditioning
-            torso_force_wrench_ellipsoid = 0.0
+            torso_force_wrench_ellipsoid = 0.5
 
         class manip_rewards():
             # Leg Posture Conditioning
@@ -581,9 +581,9 @@ class B1UniFPCfg:
         ref_env = 0
         pos = [1, 2, 2]
         lookat = [0.0, 0.0, 0.0]
-        num_rendered_envs = 15
+        num_rendered_envs = 5
         rendered_envs_idx = np.random.choice(
-            np.arange(500),
+            np.arange(6000),
             size=num_rendered_envs,
             replace=False,
         )
@@ -616,13 +616,13 @@ class B1UniFPCfgPPO:
 
     class policy:
         actor_hidden_dims = [512, 256, 128]
-        critic_hidden_dims = [512, 256, 128]
+        critic_hidden_dims = [1024, 512, 256, 128]
         activation = "elu"
 
 
         # Each action-noise setting may be a scalar or a flat 12-value list in
         # asset.dof_names/action order: FR, FL, RR, RL x hip, thigh, calf.
-        init_noise_std = [0.30, 0.50, 0.50] * 4
+        init_noise_std = [0.80, 1.00, 1.00] * 4
         # init_noise_std = [0.80, 1.00, 1.00, 0.80, 1.00, 1.00, 0.45, 0.60, 0.60, 0.45, 0.60, 0.60]
         min_noise_std = [0.05, 0.15, 0.15] * 4
         max_noise_std = 1.1
@@ -634,15 +634,15 @@ class B1UniFPCfgPPO:
 
         # Adaptive entropy coefficient: increase exploration when velocity
         # tracking or terrain-curriculum performance is below its target.
-        entropy_coef = 0.0
+        entropy_coef = 0.01
         use_adaptive_entropy = False
-        adaptive_ent_bounds = [0.0, 0.001]
+        adaptive_ent_bounds = [0.0001, 0.01]
         adaptive_ent_lin_threshold = 1.70
         adaptive_ent_ang_threshold = 0.75
         adaptive_ent_ter_threshold = 6.0
         adaptive_ent_softmax_temp = 2.0
 
-        learning_rate = 1.0e-3
+        learning_rate = 3.0e-4
         schedule = "adaptive"  # adaptive
         gamma = 0.99
         lam = 0.95
@@ -661,9 +661,9 @@ class B1UniFPCfgPPO:
         algorithm_class_name = "PPO_UniFP"
         num_steps_per_env = 32
         
-        max_iterations = 500
+        max_iterations = 50000
         
-        save_interval = 100
+        save_interval = 500
         run_name = "b1_unifp_locomotion"
         experiment_name = "b1_unifp_genesis"
         sync_wandb = False
