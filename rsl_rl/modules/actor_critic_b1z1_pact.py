@@ -66,11 +66,15 @@ class B1Z1PACTContextEncoder(nn.Module):
                                       _activation(activation),
                                       nn.Linear(hidden_dim, 3))
 
-        # Binary logits are trained with BCE. Contact probabilities are kept
-        # out of the actor interface and used only by explicit reconstruction.
+        # Binary logits are trained with BCE. Their probabilities enter the
+        # actor directly, but remain outside the disturbance FiLM pathway.
         self.foot_contact_logits = nn.Sequential(nn.Linear(trunk_dim, hidden_dim),
                                                  _activation(activation),
                                                  nn.Linear(hidden_dim, 4))
+
+        self.foot_height = nn.Sequential(nn.Linear(trunk_dim, hidden_dim),
+                                         _activation(activation),
+                                         nn.Linear(hidden_dim, 4))
 
     def _initialize_weights(self) -> None:
         """Initialize all linear layers with Xavier uniform distribution."""
@@ -80,6 +84,7 @@ class B1Z1PACTContextEncoder(nn.Module):
         self.base_wrench.apply(init_weights)
         self.ee_force.apply(init_weights)
         self.foot_contact_logits.apply(init_weights)
+        self.foot_height.apply(init_weights)
         self.latent_logvar.apply(init_weights)
 
 
@@ -93,6 +98,7 @@ class B1Z1PACTContextEncoder(nn.Module):
             "base_wrench": self.base_wrench(feature),
             "ee_force": self.ee_force(feature),
             "foot_contact_logits": self.foot_contact_logits(feature),
+            "foot_height": self.foot_height(feature),
         }
 
     def forward_inf(self, history: torch.Tensor):
@@ -103,6 +109,7 @@ class B1Z1PACTContextEncoder(nn.Module):
                 "base_wrench": self.base_wrench(feature),
                 "ee_force": self.ee_force(feature),
                 "foot_contact_logits": self.foot_contact_logits(feature),
+                "foot_height": self.foot_height(feature),
                 }
 
 class FiLM(nn.Module):
@@ -118,9 +125,11 @@ class FiLM(nn.Module):
         nn.init.zeros_(final.weight)
         nn.init.zeros_(final.bias)
 
-    def forward(self, features: torch.Tensor, condition: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, features: torch.Tensor, condition: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         gamma, beta = self.network(condition).chunk(2, dim=-1)
-        return features * (1.0 + gamma) + beta, gamma.abs().mean(dim=-1)
+        # gamma=0 and beta=0 are exactly the identity feature transform.
+        identity_deviation = gamma.square().mean(dim=-1) + beta.square().mean(dim=-1)
+        return features * (1.0 + gamma) + beta, gamma.abs().mean(dim=-1), identity_deviation
 
 
 class B1Z1PACTDecoder(nn.Module):
@@ -152,14 +161,16 @@ class ActorCriticB1Z1PACT(nn.Module):
         context_layers=(256, 128),
         film_hidden_dim: int = 64,
         activation: str = "elu",
-        init_noise_std: float = 0.65,
+        init_noise_std: float | Sequence[float] = 0.65,
+        min_noise_std: float | Sequence[float] = 0.20,
+        max_noise_std: float | Sequence[float] = 5.0,
     ):
         super().__init__()
         self.num_actions = num_actions
         self.context_encoder = B1Z1PACTContextEncoder(history_dim, latent_dim, context_layers, activation)
-        # The actor consumes the four estimated foot-contact probabilities;
-        # FiLM intentionally does not receive them.
-        actor_input = num_actor_obs + latent_dim + 3 + 6 + 3 + 4
+        # The actor consumes estimated contact probabilities and foot heights;
+        # FiLM intentionally receives neither terrain/contact signal.
+        actor_input = num_actor_obs + latent_dim + 3 + 6 + 3 + 4 + 4
         self.actor_trunk = _mlp(actor_input, actor_layers[:-1], actor_layers[-1], activation)
 
         # FiLM may use only predicted disturbances, tracking errors, and z.
@@ -172,17 +183,39 @@ class ActorCriticB1Z1PACT(nn.Module):
 
         self.critic = _mlp(num_critic_obs, critic_layers, 1, activation)
 
-        self.std = nn.Parameter(torch.full((2 * num_actions,), init_noise_std))
-
-        self._std_clip_lwr = 0.20
+        action_dim = 2 * num_actions
+        self.std = nn.Parameter(self._std_config_tensor(init_noise_std, action_dim, "init_noise_std"))
+        self.register_buffer(
+            "_std_clip_lwr",
+            self._std_config_tensor(min_noise_std, action_dim, "min_noise_std"),
+        )
+        self.register_buffer(
+            "_std_clip_upr",
+            self._std_config_tensor(max_noise_std, action_dim, "max_noise_std"),
+        )
 
         self.distribution: Normal | None = None
 
         self.last_context: dict[str, torch.Tensor] | None = None
 
         self.last_film_magnitude: torch.Tensor | None = None
+        self.last_film_identity_deviation: torch.Tensor | None = None
+        self.last_tracking_error_sq: torch.Tensor | None = None
 
         Normal.set_default_validate_args = False
+
+    @staticmethod
+    def _std_config_tensor(value, action_dim: int, name: str) -> torch.Tensor:
+        """Expand a scalar or validate a per-action exploration profile."""
+        tensor = torch.as_tensor(value, dtype=torch.float)
+        if tensor.ndim == 0:
+            return tensor.repeat(action_dim)
+        if tensor.ndim != 1 or tensor.numel() != action_dim:
+            raise ValueError(
+                f"{name} must be a scalar or a flat list of {action_dim} values; "
+                f"got shape {tuple(tensor.shape)}"
+            )
+        return tensor.clone()
 
     def _bootmasked_context(
         self,
@@ -206,6 +239,11 @@ class ActorCriticB1Z1PACT(nn.Module):
             masked["base_velocity"] = explicit_labels[:, :3]
             masked["base_wrench"] = explicit_labels[:, 3:9]
             masked["ee_force"] = explicit_labels[:, 9:12]
+            # The actor consumes probabilities after sigmoid, so convert exact
+            # simulator labels into finite logits for the shared actor path.
+            contact = explicit_labels[:, 12:16].clamp(1.0e-4, 1.0 - 1.0e-4)
+            masked["foot_contact_logits"] = torch.logit(contact)
+            masked["foot_height"] = explicit_labels[:, 16:20]
         return masked
 
     def _actor_inputs(self, obs: torch.Tensor, context: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -214,20 +252,28 @@ class ActorCriticB1Z1PACT(nn.Module):
         base_error = command[:, :3] - context["base_velocity"]
         # The environment appends FK EE tracking error immediately before commands.
         ee_error = obs[:, -9:-6]
+        # Retain the six-dimensional tracking error used by FiLM so PPO can
+        # regularize modulation strength as a function of tracking quality.
+        self.last_tracking_error_sq = torch.cat((base_error, ee_error), dim=-1).square().mean(dim=-1)
         contact_probability = torch.sigmoid(context["foot_contact_logits"])
         actor_input = torch.cat(
-            (obs, context["z"], context["base_velocity"], context["base_wrench"], context["ee_force"], contact_probability),
+            (
+                obs, context["z"], context["base_velocity"],
+                context["base_wrench"], context["ee_force"],
+                contact_probability, context["foot_height"],
+            ),
             dim=-1,
         )
-        # Contact state is excluded from FiLM by design.
+        # Contact state and foot height are excluded from FiLM by design.
         film_condition = torch.cat((context["z"], context["base_wrench"], context["ee_force"], base_error, ee_error), dim=-1)
         return actor_input, film_condition
 
     def actor_forward(self, obs: torch.Tensor, context: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         actor_input, film_condition = self._actor_inputs(obs, context)
         features = self.actor_trunk(actor_input)
-        features, magnitude = self.film(features, film_condition)
+        features, magnitude, identity_deviation = self.film(features, film_condition)
         self.last_film_magnitude = magnitude
+        self.last_film_identity_deviation = identity_deviation
         return self.position_head(features), self.torque_head(features)
 
     def update_distribution(
@@ -243,7 +289,9 @@ class ActorCriticB1Z1PACT(nn.Module):
         actor_context = self._bootmasked_context(context, explicit_labels, mask_latent, mask_explicit)
         position, torque = self.actor_forward(obs, actor_context)
         mean = torch.cat((position, torque), dim=-1)
-        self.std.data.clamp_(self._std_clip_lwr, 5.0)
+        self.std.data.copy_(
+            torch.maximum(torch.minimum(self.std.data, self._std_clip_upr), self._std_clip_lwr)
+        )
         self.distribution = Normal(mean, mean * 0.0 + self.std)
         self.last_context = context
 

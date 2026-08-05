@@ -7,21 +7,25 @@ class B1Z1PACTCfg(LeggedRobotCfg):
     seed = 1
 
     class env:
-        num_envs = 5120
+        num_envs = 4096
         # 2 body-orientation + 3 angular velocity + 17 joint positions +
         # 17 joint velocities + 34 coupled PACT actions + 3 FK EE errors +
         # 6 commands.
         num_observations = 82
-        # One 412-D privileged frame, including 187 terrain-height values.
-        # The critic consumes a three-frame stack (1,236-D) in the runner.
-        num_privileged_obs = 412
+        # PACT retains its larger coupled-action state: 227 state/randomization
+        # values plus the same 187-point terrain grid used by UniFP.
+        num_critic_state_obs = 227
+        num_height_obs = 187
+        num_privileged_obs = num_critic_state_obs + num_height_obs
         num_priv_stack = 3
-        num_explicit_recon_obs = 16
-        num_pred_obs = 16
+        # Base velocity (3), base wrench (6), EE force (3), foot contacts (4),
+        # and terrain-relative foot heights (4).
+        num_explicit_recon_obs = 20
+        num_pred_obs = 20
         num_actions = 17
         num_policy_actions = 34
         num_gripper_joints = 2
-        num_obs_hist = 32
+        num_obs_hist = 10
         env_spacing = 0.5
         episode_length_s = 20
         grf_dim = 12
@@ -78,21 +82,21 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         pitch_random_scale = 0.0
         yaw_random_scale = 0.0
         default_joint_angles = {
-            "FR_hip_joint": -0.2,
-            "FR_thigh_joint": 0.8,
-            "FR_calf_joint": -1.5,
+            "FR_hip_joint": -0.15,
+            "FR_thigh_joint": 0.67,
+            "FR_calf_joint": -1.32,
          
-            "FL_hip_joint": 0.2,
-            "FL_thigh_joint": 0.8,
-            "FL_calf_joint": -1.5,
+            "FL_hip_joint": 0.15,
+            "FL_thigh_joint": 0.67,
+            "FL_calf_joint": -1.32,
          
-            "RR_hip_joint": -0.2,
-            "RR_thigh_joint": 0.8,
-            "RR_calf_joint": -1.5,
+            "RR_hip_joint": -0.15,
+            "RR_thigh_joint": 0.9,
+            "RR_calf_joint": -1.32,
          
-            "RL_hip_joint": 0.2,
-            "RL_thigh_joint": 0.8,
-            "RL_calf_joint": -1.5,
+            "RL_hip_joint": 0.15,
+            "RL_thigh_joint": 0.9,
+            "RL_calf_joint": -1.32,
          
             "z1_waist": 0.0,
             "z1_shoulder": 1.48,
@@ -106,8 +110,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         rand_yaw_range = np.pi / 2
         origin_perturb_range = 0.5
         init_vel_perturb_range = 0.1
-        leg_dof_pos_perturb_range = [0.5, 1.5]
-        arm_dof_pos_perturb_range = [-0.5, 0.5]
+        leg_dof_pos_perturb_range = [-0.15, 0.15]
+        arm_dof_pos_perturb_range = [-0.1, 0.1]
 
     class asset:
         name = "b1z1"
@@ -140,7 +144,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         thigh_name = ["FR_thigh", "FL_thigh", "RR_thigh", "RL_thigh"]
         gripper_name = "ee_gripper_link"
         penalize_contacts_on = ["trunk", "thigh", "hip", "calf"]
-        terminate_after_contacts_on = []
+        terminate_after_contacts_on = ["hip", "thigh"]
         links_to_keep = ["FR_foot", "FL_foot", "RR_foot", "RL_foot", "ee_gripper_link"]
         self_collisions = False
         flip_visual_attachments = False
@@ -238,9 +242,9 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # torque branches. The simulator combines them before clipping.
         control_type = "P"
         stiffness = {
-            "hip": 300.0,
-            "thigh": 300.0,
-            "calf": 500.0,
+            "hip": 250.0,
+            "thigh": 250.0,
+            "calf": 400.0,
             "z1_waist": 64.0,
             "z1_shoulder": 128.0,
             "z1_elbow": 64.0,
@@ -250,9 +254,9 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             "z1_jointGripper": 64.0,
         }
         damping = {
-            "hip": 7.7,
-            "thigh": 7.5,
-            "calf": 12.5,
+            "hip": 6.25,
+            "thigh": 6.25,
+            "calf": 10.0,
             "z1_waist": 1.5,
             "z1_shoulder": 3.0,
             "z1_elbow": 1.5,
@@ -278,7 +282,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
 
     class commands:
         curriculum = True
-        max_curriculum = 1.0
+        max_curriculum = 0.8
         # UniFP convention inside PACT training: the last three slots retain
         # the yaw-aligned spherical EE target, but all force-command slots are
         # removed.
@@ -286,9 +290,9 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         
         resampling_time = 10.0
         
-        heading_command = False
+        heading_command = True
         
-        curriculum_threshold = 1.8
+        curriculum_threshold = 0.8
         
         ang_vel_yaw_clip = 0.1
         ang_vel_pitch_clip = 0.5
@@ -329,8 +333,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # The impedance relation is a reward only. It never changes commands.
 
         class ranges:
-            lin_vel_x = [-0.5, 0.5]
-            lin_vel_y = [-0.6, 0.6]
+            lin_vel_x = [-0.8, 0.8]
+            lin_vel_y = [-0.4, 0.4]
             ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
 
@@ -351,7 +355,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         clip_actions = 100.0
 
     class domain_rand:
-        use_domainrand_curriculum = False
+        use_domainrand_curriculum = True
         randomize_friction = True  
         friction_range = [0.3, 2.0]
 
@@ -410,10 +414,10 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         randomize_motor_strength = True
         motor_strength_range = [0.85, 1.15]
         
-        randomize_joint_armature = False
+        randomize_joint_armature = True
         joint_armature_range = [0.0, 0.03]
         
-        randomize_joint_friction = False
+        randomize_joint_friction = True
         joint_friction_range_start = [0.0, 0.02]
         joint_friction_range_end = [0.0, 0.04]
         
@@ -421,12 +425,12 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         joint_stiffness_range_start = [0.0, 0.0]
         joint_stiffness_range_end = [0.0, 0.0]
         
-        randomize_joint_damping = False
+        randomize_joint_damping = True
         joint_damping_range_start = [0.30, 0.40]
         joint_damping_range_end = [0.00, 0.50]
         
         num_push_steps = 500
-        push_warmup = 10000
+        push_warmup = 20000
         
         best_reward_window = 200
         best_reward_quantile = 0.90
@@ -500,9 +504,19 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         foot_clearance_tracking_sigma = 0.01
         
         # Gait-phase guidance settings
-        cycle_time = 1.00
-        target_joint_pos_scale = 0.17
-        target_joint_pos_thd = 0.5
+        cycle_time = 0.48
+        sweep_phase_lead = 0.175
+        sweep_velocity_gain = 0.28
+        max_sweep_amplitude = 0.18
+        target_joint_pos_scale = 0.29
+        target_joint_pos_thd = 0.35
+
+        gait_guidance_decay_enabled = True
+        gait_guidance_decay_iterations = 5000
+        ref_dof_leg_initial_multiplier = 1.0
+        ref_dof_leg_final_multiplier = 0.01
+        feet_contact_initial_multiplier = 1.0
+        feet_contact_final_multiplier = 0.01
 
         ee_tracking_sigma = 25.0 
         upright_gate_sigma = 10.0
@@ -511,8 +525,10 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         arm_before_torso_gate_sharpness = 40.0
 
         overreach_x_max = 0.42   # cm
-        rear_foot_x_nominal = -0.37
-        rear_foot_x_margin = 0.10
+        front_foot_x_nominal = 0.34
+        # The rear reward negates this magnitude to obtain its base-frame x.
+        rear_foot_x_nominal = 0.47
+        foot_x_margin = 0.10
         
         support_polygon_sigma = 0.01
 
@@ -525,8 +541,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         class scales:
             # Constraints
             termination = 0.0
-            collision = -5.0
-            dof_pos_limits = -10.0
+            collision = -1.0
+            dof_pos_limits = -2.0
             torque_limits = -0.001
             dof_close_to_default = 0.0
 
@@ -549,30 +565,31 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             torque_cancellation = -0.05
 
             # Style rewards encouraging using the arm
-            # arm_progress_before_torso = 0.3
-            # early_torso_tilt = -0.2
+            arm_progress_before_torso = 0.3
+            early_torso_tilt = -0.2
             # feet_contact_number = 0.01
-            arm_progress_before_torso = 0.0
-            early_torso_tilt = 0.0
+            # arm_progress_before_torso = 0.0
+            # early_torso_tilt = 0.0
             
             
             # gait-phase based leg posture shaping
-            ref_dof_leg = 0.0
+            ref_dof_leg = 1.0
             walking_ref_dof = 0.0
             walking_ref_swing_dof = 0.0
-            feet_contact_number = 0.50             #
-            hip_pos = -0.50
+            feet_contact_number = 1.00             #
+            hip_pos = -0.30
 
             # Base
             base_height = -2.0
             lin_vel_z   = -1.0
             ang_vel_xy  = -0.02
             roll        = -0.2
+            orientation = -0.2
 
             # Legs
             dof_acc           = -2.5e-7
             action_rate       = -0.02
-            action_smoothness = -0.01
+            action_smoothness = -0.02
             joint_power       = -2.e-5
             joint_power_dist  = -1.e-8
 
@@ -590,22 +607,24 @@ class B1Z1PACTCfg(LeggedRobotCfg):
 
             # I developed these
             front_foot_overreach = -10.0
-            rear_foot_overreach = -1.0
+            rear_foot_overreach = -10.0
 
             # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
             support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
-            vhip_angle = 0.0                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
-            vhip_angular_acc = 0.0         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
+            vhip_angle = -0.1                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact
+            vhip_angular_acc = -0.01         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
 
             # Gait shaping
-            feet_drag = -0.0008
-            feet_pos_xy = -0.5
+            feet_drag = -0.0001
+            feet_regulation = -0.1
+            feet_pos_xy = -0.1
+            stumble = -0.1
             feet_contact_forces = -0.001
             feet_air_time = 1.00
-            foot_clearance_terrain_aware = 1.00  # tracking reward for feet reaching the desired clearance responsive to terrain height            
+            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height
 
             # Leg and Arm Posture Conditioning
-            arm_ee_force_manipulability = 0.0
+            arm_ee_force_manipulability = 0.2
             torso_force_wrench_ellipsoid = 0.2
 
         class manip_rewards():
@@ -654,32 +673,21 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             arm_ellipsoid_iso_weight = 0.5
 
         class reward_curriculum:
-            curr_reward_keys = ["collision", 
-                                "action_rate", 
-                                "action_rate_arm",
-                                "action_smoothness",
-                                "action_smoothness_arm",
-                                "dof_acc", 
-                                "dof_acc_arm",
+            curr_reward_keys = [
                                 "dof_pos_limits",
                                 "feet_contact_forces",
-                                "base_height",
                                 "lin_vel_z",
+                                "arm_ee_force_manipulability",
+                                "torso_force_wrench_ellipsoid",
                                 ]
             curr_reward_bounds = {
-                "collision": [-2.0, -10.0],
-                "action_rate": [-0.001, -0.01],
-                "action_rate_arm": [-0.002, -0.02],
-                "action_smoothness":[-0.001, -0.01],
-                "action_smoothness_arm":[-0.002, -0.02],
-                "dof_acc": [-5.0e-8, -2.5e-7],
-                "dof_acc_arm": [-1.0e-8, -4.5e-7],
                 "dof_pos_limits":[-2.0, -10.0],
                 "feet_contact_forces":[-1.0e-5, -1.0e-4],
-                "base_height":[-2.0, -5.0],
                 "lin_vel_z":[-1.00, -2.0],
+                "arm_ee_force_manipulability":[0.2, 0.5],
+                "torso_force_wrench_ellipsoid":[0.2, 0.5],
             }
-            warmup_steps = 12000
+            warmup_steps = 16000
             curr_steps = 6000
 
     class viewer:
@@ -723,13 +731,17 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
 
         # Model paramaters
         actor_layers = [512, 256, 128]
-        critic_layers = [1024, 256, 128]
+        critic_layers = [1024, 512, 256, 128]
         actor_hidden_dims = actor_layers
         critic_hidden_dims = critic_layers
 
         activation = "elu"
 
-        init_noise_std = 0.65
+        # Apply the UniFP per-joint exploration profile independently to both
+        # coupled heads. Both action branches are normalized policy outputs.
+        init_noise_std = ([0.40, 0.60, 0.60] * 4 + [0.65] * 5) * 2
+        min_noise_std = ([0.05, 0.15, 0.15] * 4 + [0.05] * 5) * 2
+        max_noise_std = 1.1
 
         cenet_enc_layers = [256, 128]
         cenet_latent_dim = 16
@@ -737,15 +749,21 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         cenet_base_wrench_dim = 6
         cenet_ee_force_dim = 3
         film_hidden_dim = 64
+        # Encourage FiLM to be an identity transform near a well-tracked
+        # command. The pressure decays exponentially with mean squared base
+        # velocity and EE-pose tracking error.
+        film_identity_loss_weight = 1.0e-3
+        film_identity_error_scale = 1.0
 
         # Loss weights
         explicit_base_vel_weight = 1.0
         explicit_base_wrench_weight = 1.0
         explicit_ee_force_weight = 1.0
         explicit_foot_contact_weight = 1.0
+        explicit_foot_height_weight = 1.0
         force_decoder_weight = 1.0
         privileged_decoder_weight = 1.0
-        vae_kld_weight = 1.0e-3
+        vae_kld_weight = 0.01
 
         pinn_loss_weight = 1.00
         pinn_warmup = 100
@@ -798,7 +816,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         num_steps_per_env = 24
         grf_dim = 12
         
-        max_iterations = 25000
+        max_iterations = 30000
         
         save_interval = 500
         run_name = "b1z1_pact_initial"

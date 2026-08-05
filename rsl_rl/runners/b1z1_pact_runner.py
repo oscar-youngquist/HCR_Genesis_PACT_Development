@@ -33,6 +33,8 @@ class B1Z1PACTRunner:
             critic_layers=policy_cfg["critic_layers"], context_layers=policy_cfg["cenet_enc_layers"],
             film_hidden_dim=policy_cfg["film_hidden_dim"], activation=policy_cfg["activation"],
             init_noise_std=policy_cfg["init_noise_std"],
+            min_noise_std=policy_cfg["min_noise_std"],
+            max_noise_std=policy_cfg["max_noise_std"],
         ).to(device)
 
         condition_dim = policy_cfg["cenet_latent_dim"] + 3 + 6 + 3
@@ -63,10 +65,12 @@ class B1Z1PACTRunner:
         })
 
         merged.update({key: policy_cfg[key] for key in (
+            "film_identity_loss_weight", "film_identity_error_scale",
             "pinn_loss_weight", "pinn_warmup", "pinn_init_steps", "predicted_force_detach",
             "pinn_block_weights", "pinn_block_scale_floors", "pinn_normalization_epsilon",
             "force_gate_ema_alpha", "force_gate_threshold", "force_gate_hysteresis", "force_gate_patience",
             "explicit_base_vel_weight", "explicit_base_wrench_weight", "explicit_ee_force_weight", "explicit_foot_contact_weight",
+            "explicit_foot_height_weight",
             "force_decoder_weight", "privileged_decoder_weight", "vae_kld_weight",
         )})
 
@@ -92,7 +96,12 @@ class B1Z1PACTRunner:
         rewards, lengths, ep_infos = deque(maxlen=100), deque(maxlen=100), []
         running_reward = torch.zeros(self.env.num_envs, 1, device=self.device)
         running_length = torch.zeros_like(running_reward)
-        for iteration in range(self.current_learning_iteration, self.current_learning_iteration + num_learning_iterations):
+        final_iteration = self.current_learning_iteration + num_learning_iterations
+        for iteration in range(self.current_learning_iteration, final_iteration):
+            # Reward schedules use the true checkpoint-aware PPO iteration,
+            # never an approximation based on environment transitions.
+            if hasattr(self.env, "set_training_iteration"):
+                self.env.set_training_iteration(iteration)
             start = time.time()
             for _ in range(self.steps):
                 with torch.inference_mode():
@@ -130,9 +139,11 @@ class B1Z1PACTRunner:
                 metrics, collection_time, learning_time, rewards, lengths, ep_infos,
             )
             if self.log_dir and iteration % self.save_interval == 0:
-                self.save(os.path.join(self.log_dir, f"model_{iteration}.pt"))
+                # Store the next PPO iteration so resumed schedules continue
+                # from the first iteration that has not yet been completed.
+                self.save(os.path.join(self.log_dir, f"model_{iteration}.pt"), iteration=iteration + 1)
             ep_infos.clear()
-        self.current_learning_iteration += num_learning_iterations
+        self.current_learning_iteration = final_iteration
         if self.log_dir:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
         self.dynamics.close()
@@ -155,6 +166,9 @@ class B1Z1PACTRunner:
             self.writer.add_scalar("Perf/fps", fps, iteration)
             self.writer.add_scalar("Perf/collection_time", collection_time, iteration)
             self.writer.add_scalar("Perf/learning_time", learning_time, iteration)
+            if hasattr(self.env, "get_gait_guidance_multipliers"):
+                for name, multiplier in self.env.get_gait_guidance_multipliers().items():
+                    self.writer.add_scalar(f"Schedule/gait_guidance_{name}", multiplier, iteration)
             if mean_reward is not None: self.writer.add_scalar("Train/mean_reward", mean_reward, iteration)
             if mean_length is not None: self.writer.add_scalar("Train/mean_episode_length", mean_length, iteration)
             if ep_infos:
@@ -168,10 +182,12 @@ class B1Z1PACTRunner:
             f"{'PINN loss:':>{pad}} {metrics['pinn']:.4f}",
             f"{'Value function loss:':>{pad}} {metrics['value']:.4f}",
             f"{'Surrogate loss:':>{pad}} {metrics['surrogate']:.4f}",
+            f"{'FiLM identity loss:':>{pad}} {metrics['film_identity']:.4f}",
             f"{'Base velocity loss:':>{pad}} {metrics['base_velo']:.4f}",
             f"{'Base wrench loss:':>{pad}} {metrics['base_wrench']:.4f}",
             f"{'EE force loss:':>{pad}} {metrics['ee_force']:.4f}",
             f"{'Foot-contact BCE loss:':>{pad}} {metrics['foot_contact']:.4f}",
+            f"{'Foot-height loss:':>{pad}} {metrics['foot_height']:.4f}",
             f"{'Privileged reconstruction loss:':>{pad}} {metrics['privileged_decoder']:.4f}",
             f"{'Force decoder loss:':>{pad}} {metrics['force_decoder']:.4f}",
             f"{'KL divergence loss:':>{pad}} {metrics['kl']:.4f}",
@@ -195,13 +211,14 @@ class B1Z1PACTRunner:
         ))
         print("\n".join(lines))
 
-    def save(self, path):
+    def save(self, path, iteration=None):
+        saved_iteration = self.current_learning_iteration if iteration is None else int(iteration)
         torch.save({
             "model_state_dict": self.actor_critic.state_dict(), "force_decoder_state_dict": self.force_decoder.state_dict(),
             "privileged_decoder_state_dict": self.privileged_decoder.state_dict(),
             "actor_optimizer": self.alg.actor_optimizer.optimizer.state_dict(),
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
-            "iteration": self.current_learning_iteration, "force_ema": self.alg.force_ema,
+            "iteration": saved_iteration, "force_ema": self.alg.force_ema,
             "force_gate_active": self.alg.force_gate_active, "force_gate_count": self.alg.force_gate_count,
             "use_boot_latent": self.alg.use_boot_latent,
             "use_boot_explicit": self.alg.use_boot_explicit,
@@ -217,6 +234,8 @@ class B1Z1PACTRunner:
             self.alg.actor_optimizer.optimizer.load_state_dict(checkpoint["actor_optimizer"])
             self.alg.auxiliary_optimizer.load_state_dict(checkpoint["auxiliary_optimizer"])
         self.current_learning_iteration = checkpoint.get("iteration", 0)
+        if hasattr(self.env, "set_training_iteration"):
+            self.env.set_training_iteration(self.current_learning_iteration)
         self.alg.force_ema = checkpoint.get("force_ema")
         self.alg.force_gate_active = checkpoint.get("force_gate_active", False)
         self.alg.force_gate_count = checkpoint.get("force_gate_count", 0)

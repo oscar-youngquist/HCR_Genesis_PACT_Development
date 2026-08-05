@@ -298,9 +298,9 @@ class B1Z1UniFPCfg:
         
         resampling_time = 10.0
         
-        heading_command = False
+        heading_command = True
         
-        curriculum_threshold = 1.8
+        curriculum_threshold = 0.8
         
         ang_vel_yaw_clip = 0.1
         ang_vel_pitch_clip = 0.5

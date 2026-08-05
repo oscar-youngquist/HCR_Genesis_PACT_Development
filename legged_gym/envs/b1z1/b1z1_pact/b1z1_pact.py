@@ -1,4 +1,5 @@
 from collections import deque
+import math
 
 import numpy as np
 import torch
@@ -627,6 +628,11 @@ class B1Z1PACT(LeggedRobot):
             ),
             dim=-1,
         )
+        if self.obs_buf.shape[1] != self.cfg.env.num_observations:
+            raise RuntimeError(
+                f"B1Z1 PACT actor observation is {self.obs_buf.shape[1]}D, expected "
+                f"{self.cfg.env.num_observations}D"
+            )
         if self.add_noise:
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
 
@@ -637,15 +643,31 @@ class B1Z1PACT(LeggedRobot):
             (self.simulator.base_lin_vel[:, :2], self.simulator.base_ang_vel[:, 2:3]), dim=-1
         )
         contact_mask = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
+        # Estimate terrain-relative sole clearance using the same target used
+        # by UniFP. These labels are actor inputs through the context estimator,
+        # but are deliberately excluded from disturbance FiLM conditioning.
+        foot_heights = torch.clip(
+            self.simulator.feet_pos[:, :, 2]
+            - torch.mean(self.simulator.height_around_feet, dim=-1)
+            - self.cfg.rewards.foot_height_offset,
+            -1.0,
+            1.0,
+        )
         self.explicit_labels_buf = torch.cat(
             (
                 base_command_velocity * self.obs_scales.lin_vel,
                 base_wrench_world * self.base_wrench_scale,
                 self.ee_force_ext_world * self.obs_scales.ee_force,
                 contact_mask,
+                foot_heights,
             ),
             dim=-1,
         )
+        if self.explicit_labels_buf.shape[1] != self.cfg.env.num_explicit_recon_obs:
+            raise RuntimeError(
+                f"B1Z1 PACT explicit target is {self.explicit_labels_buf.shape[1]}D, "
+                f"expected {self.cfg.env.num_explicit_recon_obs}D"
+            )
 
         mass_params = self._mass_params_buf
         mass_params.zero_()
@@ -653,51 +675,63 @@ class B1Z1PACT(LeggedRobot):
         mass_params[:, 1:4] = self.simulator._base_com_bias
         stance_mask = self._get_gait_phase()
 
-        # Privileged critic observation mirrors the original UniFP ordering:
-        # estimator labels first, then randomized dynamics/contact/gait state,
-        # current robot state, commands, and the unshifted EE target.
-        # Assemble the variable pre-height block without using an `out` buffer:
-        # it is 221-D before terrain heights and 408-D afterwards. Reusing the
-        # final 408-D buffer here would resize it every control step.
-        critic_obs = torch.cat(
-            (
-                self.explicit_labels_buf,
-                self.simulator.dof_pos[:, :12] - self.ref_dof_pos,
-                mass_params,
-                self.simulator._friction_values - self.friction_value_offset,
-                self.simulator._motor_strength[:, :17] - 1.0,
-                stance_mask,
-                contact_mask,
-                self.simulator.projected_gravity,
-                self.simulator.base_ang_vel * self.obs_scales.ang_vel,
-                dof_pos_err,
-                dof_vel,
-                self.actions,
-                # sin_pos,
-                # cos_pos,
-                self.commands * self.commands_scale,
-                ee_goal_offset_sphere * self.ee_sphere_scale,
-                self.simulator._rand_push_vels,                                  # 3
-                self.simulator._rand_wrench_vels,                                # 3
-                (self.simulator._kp_scale - self.kp_scale_offset),               # num_actions
-                (self.simulator._kd_scale - self.kd_scale_offset),               # num_actions
-                self.simulator._motor_strength,                                  # num_actions
-                self.simulator._joint_armature,                                  # 1
-                self.simulator._joint_friction,                                  # 1
-                self.simulator._joint_damping,                                   # 1
-            ),
-            dim=-1,
+        # Keep the shared UniFP critic layout explicit and dimension checked.
+        # PACT differs only where its method requires a 34-D coupled action,
+        # six commands, and its explicit base-wrench labels.
+        critic_components = (
+            ("explicit_labels", self.explicit_labels_buf),
+            ("reference_dof_error", self.simulator.dof_pos[:, :12] - self.ref_dof_pos),
+            ("mass_com", mass_params),
+            ("friction_offset", self.simulator._friction_values - self.friction_value_offset),
+            ("motor_strength_offset", self.simulator._motor_strength[:, :17] - 1.0),
+            ("stance", stance_mask),
+            # Contacts are already present in explicit_labels.
+            ("phase_sin", sin_pos),
+            ("phase_cos", cos_pos),
+            ("projected_gravity", self.simulator.projected_gravity),
+            ("base_angular_velocity", self.simulator.base_ang_vel * self.obs_scales.ang_vel),
+            ("dof_position_error", dof_pos_err),
+            ("dof_velocity", dof_vel),
+            ("actions", self.actions),
+            ("commands", self.commands * self.commands_scale),
+            ("ee_goal", ee_goal_offset_sphere * self.ee_sphere_scale),
+            ("push_velocity", self.simulator._rand_push_vels),
+            ("wrench_velocity", self.simulator._rand_wrench_vels),
+            ("kp_scale", self.simulator._kp_scale - self.kp_scale_offset),
+            ("kd_scale", self.simulator._kd_scale - self.kd_scale_offset),
+            ("motor_strength", self.simulator._motor_strength),
+            ("joint_armature", self.simulator._joint_armature),
+            ("joint_friction", self.simulator._joint_friction),
+            ("joint_damping", self.simulator._joint_damping),
         )
+        critic_state = torch.cat([value for _, value in critic_components], dim=-1)
+        if critic_state.shape[1] != self.cfg.env.num_critic_state_obs:
+            layout = ", ".join(
+                f"{name}={value.shape[1]}" for name, value in critic_components
+            )
+            raise RuntimeError(
+                f"B1Z1 PACT critic state is {critic_state.shape[1]}D, expected "
+                f"{self.cfg.env.num_critic_state_obs}D ({layout})"
+            )
+        self._critic_obs_buf.copy_(critic_state)
+        critic_obs = self._critic_obs_buf
 
         # add height measurements to asymmetric critic if approperiate
         if self.cfg.terrain.measure_heights:
             heights = torch.clip(self.simulator.base_pos[:, 2].unsqueeze(1) - 0.5 \
-                                 - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements # 81
+                                 - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements
 
             if self.add_noise:
                 heights *= self.height_noise_vec
+            if heights.shape[1] != self.cfg.env.num_height_obs:
+                raise RuntimeError(
+                    f"B1Z1 PACT terrain observation is {heights.shape[1]}D, expected "
+                    f"{self.cfg.env.num_height_obs}D"
+                )
+            self._critic_height_obs.copy_(heights)
 
-            critic_obs = torch.cat((critic_obs, heights), dim=-1) # 207
+        if self._critic_height_obs.shape[1] > 0:
+            critic_obs = torch.cat((critic_obs, self._critic_height_obs), dim=-1)
 
 
         if critic_obs.shape[1] != self.cfg.env.num_privileged_obs:
@@ -1114,7 +1148,7 @@ class B1Z1PACT(LeggedRobot):
         return stance_mask
 
     def compute_ref_state(self):
-        """Compute the original UniFP gait-phase reference leg pose."""
+        """Compute the UniFP swing pose and command-scaled fore-aft sweep."""
         phase = self._get_phase()
         sin_pos = torch.sin(2 * torch.pi * phase)
         sin_pos_l = sin_pos.clone() + self.cfg.rewards.target_joint_pos_thd
@@ -1138,6 +1172,65 @@ class B1Z1PACT(LeggedRobot):
         self.ref_dof_pos[:, idx["FR_calf_joint"]] -= sin_pos_r * scale_2
         self.ref_dof_pos[:, idx["RL_thigh_joint"]] += sin_pos_r * scale_1
         self.ref_dof_pos[:, idx["RL_calf_joint"]] -= sin_pos_r * scale_2
+
+        # Convert signed forward velocity commands into a bounded thigh-angle
+        # amplitude. Only this added sweep receives the optimized phase lead;
+        # the original UniFP lift/flexion and contact clock remain unshifted.
+        sweep_phase = torch.remainder(
+            phase + self.cfg.rewards.sweep_phase_lead,
+            1.0,
+        )
+        raw_sweep = (
+            self.cfg.rewards.sweep_velocity_gain
+            * self.commands[:, 0]
+            * torch.cos(2.0 * torch.pi * sweep_phase)
+        )
+        max_amplitude = self.cfg.rewards.max_sweep_amplitude
+        sweep = torch.clamp(raw_sweep, min=-max_amplitude, max=max_amplitude)
+
+        self.ref_dof_pos[:, idx["FR_thigh_joint"]] += sweep
+        self.ref_dof_pos[:, idx["RL_thigh_joint"]] += sweep
+        self.ref_dof_pos[:, idx["FL_thigh_joint"]] -= sweep
+        self.ref_dof_pos[:, idx["RR_thigh_joint"]] -= sweep
+
+    def set_training_iteration(self, iteration):
+        """Set the checkpoint-aware PPO iteration used by reward schedules."""
+        iteration = int(iteration)
+        if iteration < 0:
+            raise ValueError("training iteration must be nonnegative")
+        self.training_iteration = iteration
+
+    def _get_gait_guidance_multiplier(self, initial, final):
+        """Geometrically decay one gait-guidance multiplier over PPO updates."""
+        if not self.cfg.rewards.gait_guidance_decay_enabled:
+            return 1.0
+
+        duration = self.cfg.rewards.gait_guidance_decay_iterations
+        progress = min(max(self.training_iteration / duration, 0.0), 1.0)
+        if progress <= 0.0:
+            return float(initial)
+        if progress >= 1.0:
+            return float(final)
+
+        epsilon = 1.0e-12
+        effective_initial = max(float(initial), epsilon)
+        effective_final = max(float(final), epsilon)
+        return effective_initial * math.exp(
+            math.log(effective_final / effective_initial) * progress
+        )
+
+    def get_gait_guidance_multipliers(self):
+        rewards = self.cfg.rewards
+        return {
+            "ref_dof_leg": self._get_gait_guidance_multiplier(
+                rewards.ref_dof_leg_initial_multiplier,
+                rewards.ref_dof_leg_final_multiplier,
+            ),
+            "feet_contact": self._get_gait_guidance_multiplier(
+                rewards.feet_contact_initial_multiplier,
+                rewards.feet_contact_final_multiplier,
+            ),
+        }
 
     def _randomize_force_gains(self, env_ids):
         """Randomize virtual impedance gains used to turn force into offsets."""
@@ -1537,7 +1630,27 @@ class B1Z1PACT(LeggedRobot):
             for _ in range(self.cfg.env.num_priv_stack)
         ]
         self._critic_obs_slot = self.cfg.env.num_priv_stack - 1
-        self._critic_obs_buf = torch.zeros(self.num_envs, self.cfg.env.num_privileged_obs, device=self.device)
+        expected_privileged_obs = self.cfg.env.num_critic_state_obs + self.cfg.env.num_height_obs
+        if expected_privileged_obs != self.cfg.env.num_privileged_obs:
+            raise ValueError(
+                "B1Z1 PACT privileged-observation config is inconsistent: "
+                f"state ({self.cfg.env.num_critic_state_obs}) + heights "
+                f"({self.cfg.env.num_height_obs}) != total ({self.cfg.env.num_privileged_obs})"
+            )
+        configured_height_points = (
+            len(self.cfg.terrain.measured_points_x) * len(self.cfg.terrain.measured_points_y)
+        )
+        if configured_height_points != self.cfg.env.num_height_obs:
+            raise ValueError(
+                f"B1Z1 PACT terrain grid contains {configured_height_points} points, "
+                f"expected {self.cfg.env.num_height_obs}"
+            )
+        self._critic_obs_buf = torch.zeros(
+            self.num_envs, self.cfg.env.num_critic_state_obs, device=self.device
+        )
+        self._critic_height_obs = torch.zeros(
+            self.num_envs, self.cfg.env.num_height_obs, device=self.device
+        )
         self._mass_params_buf = torch.zeros(self.num_envs, 22, device=self.device)
         self.privileged_obs_buf = torch.zeros(
             self.num_envs,
@@ -1545,6 +1658,9 @@ class B1Z1PACT(LeggedRobot):
             device=self.device,
         )
         self.explicit_labels_buf = torch.zeros(self.num_envs, self.cfg.env.num_explicit_recon_obs, device=self.device)
+        # Evaluation defaults to iteration zero until the runner supplies the
+        # restored/current PPO iteration.
+        self.training_iteration = 0
 
         self.leg_dof_indices = {
             name: self.cfg.asset.dof_names.index(name)
@@ -1749,6 +1865,23 @@ class B1Z1PACT(LeggedRobot):
 
         self.wb_dim = cfg.env.whole_body_dim
         self.grf_dim = cfg.env.grf_dim
+
+        if cfg.rewards.cycle_time <= 0.0:
+            raise ValueError("rewards.cycle_time must be positive")
+        if cfg.rewards.sweep_velocity_gain < 0.0:
+            raise ValueError("rewards.sweep_velocity_gain must be nonnegative")
+        if cfg.rewards.max_sweep_amplitude < 0.0:
+            raise ValueError("rewards.max_sweep_amplitude must be nonnegative")
+        if cfg.rewards.gait_guidance_decay_iterations <= 0:
+            raise ValueError("rewards.gait_guidance_decay_iterations must be positive")
+        for name in (
+            "ref_dof_leg_initial_multiplier",
+            "ref_dof_leg_final_multiplier",
+            "feet_contact_initial_multiplier",
+            "feet_contact_final_multiplier",
+        ):
+            if getattr(cfg.rewards, name) < 0.0:
+                raise ValueError(f"rewards.{name} must be nonnegative")
         self.tradeoff_lowerbounds = torch.tensor(cfg.control.tradeoff_init_weights, device=sim_device)
         self.tradeoff_upperbounds = torch.tensor(cfg.control.tradeoff_final_weights, device=sim_device)
         self.tradeoff_num_steps = max(1, int(cfg.control.tradeoff_steps))
@@ -2045,7 +2178,12 @@ class B1Z1PACT(LeggedRobot):
 
         front_x = torch.stack([front_x_1, front_x_2], dim=1)   # (N,2)
         
-        overreach = torch.relu(front_x - self.cfg.rewards.overreach_x_max)
+        # Penalize stance feet on either side of the optimized nominal x
+        # location, rather than only limiting excessive forward extension.
+        front_x_nominal = self.cfg.rewards.front_foot_x_nominal
+        front_x_margin = self.cfg.rewards.foot_x_margin
+        x_error = torch.abs(front_x - front_x_nominal)
+        overreach = torch.relu(x_error - front_x_margin)
         
         # stance/contact gating
         contact = (
@@ -2081,13 +2219,12 @@ class B1Z1PACT(LeggedRobot):
 
         rear_x = torch.stack([rear_1[:, 0], rear_2[:, 0]], dim=1)  # (N,2)
 
-        # Nominal rear-foot x location in base frame.
-        # This should usually be negative, e.g. -0.20 to -0.25 m.
-        rear_x_nominal = self.cfg.rewards.rear_foot_x_nominal
+        # Config stores a positive magnitude; rear x is negative in base frame.
+        rear_x_nominal = -self.cfg.rewards.rear_foot_x_nominal
 
         # Allowed deviation around nominal rear-foot x location.
         # Example: 0.08 m allows rear_x in [nominal - 0.08, nominal + 0.08].
-        rear_x_margin = self.cfg.rewards.rear_foot_x_margin
+        rear_x_margin = self.cfg.rewards.foot_x_margin
 
         # Penalize both too far forward and too far backward relative to nominal.
         x_error = torch.abs(rear_x - rear_x_nominal)
@@ -2309,6 +2446,26 @@ class B1Z1PACT(LeggedRobot):
 
         return torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma)
 
+    def _reward_feet_regulation(self):
+        """Penalize fast foot motion near the ground using terrain height."""
+        base_height = torch.mean(
+            self.simulator.base_pos[:, 2].unsqueeze(1) - self.simulator.measured_heights,
+            dim=1,
+        )
+        delta_feet = self.simulator.feet_pos - self.simulator.base_pos.unsqueeze(1)
+        feet_to_base_height = (
+            delta_feet * self.simulator.projected_gravity.unsqueeze(1)
+        ).sum(-1)
+        feet_height = torch.clamp(
+            base_height.unsqueeze(1) - feet_to_base_height,
+            min=0.0,
+        )
+        feet_xy_speed_sq = self.simulator.feet_vel[:, :, :2].pow(2).sum(-1)
+        return (
+            feet_xy_speed_sq
+            * torch.exp(-feet_height / (0.025 * self.cfg.rewards.base_height_target))
+        ).sum(-1)
+
     def _reward_feet_contact_number(self):
         """
         Reward foot contacts that match the UniFP gait-phase stance mask.
@@ -2323,10 +2480,12 @@ class B1Z1PACT(LeggedRobot):
         matched = contact == stance_mask
         reward = torch.where(
             matched,
-            torch.ones_like(self.feet_air_time),
-            torch.full_like(self.feet_air_time, -0.3),
+            1.0,
+            -1.0,
         )
-        return torch.mean(reward, dim=1)
+        raw_reward = torch.mean(reward, dim=1)
+        multiplier = self.get_gait_guidance_multipliers()["feet_contact"]
+        return raw_reward * multiplier
 
     def _reward_walking_ref_dof(self):
         """Reward tracking the gait-phase reference leg pose while walking."""
@@ -2366,7 +2525,14 @@ class B1Z1PACT(LeggedRobot):
         return 1.0*full_contact * (torch.norm(self.commands[:, :3], dim=1) < 0.1)
 
     def _reward_ref_dof_leg(self):
-        return torch.exp(-torch.mean(torch.square(self.simulator.dof_pos[:, :12] - self.ref_dof_pos), dim=1))
+        raw_reward = torch.exp(
+            -torch.sum(
+                torch.abs(self.simulator.dof_pos[:, :12] - self.ref_dof_pos),
+                dim=1,
+            ) * 0.1
+        )
+        multiplier = self.get_gait_guidance_multipliers()["ref_dof_leg"]
+        return raw_reward * multiplier
 
     def _reward_torso_force_wrench_ellipsoid(self):
         """

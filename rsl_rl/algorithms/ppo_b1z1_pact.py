@@ -22,6 +22,12 @@ class PPO_B1Z1PACT:
         self.learning_rate = cfg["learning_rate"]
         self.desired_kl, self.schedule = cfg.get("desired_kl"), cfg.get("schedule", "fixed")
         self.use_clipped_value_loss = cfg.get("use_clipped_value_loss", True)
+        self.film_identity_loss_weight = cfg.get("film_identity_loss_weight", 0.0)
+        self.film_identity_error_scale = cfg.get("film_identity_error_scale", 1.0)
+        if self.film_identity_loss_weight < 0.0:
+            raise ValueError("film_identity_loss_weight must be nonnegative")
+        if self.film_identity_error_scale <= 0.0:
+            raise ValueError("film_identity_error_scale must be positive")
 
         # Match PPO_PACT's stochastic bootstrap gate. The decoder's
         # reconstruction quality determines the probability of using the
@@ -329,6 +335,9 @@ class PPO_B1Z1PACT:
         pred_foot_contact_loss = F.binary_cross_entropy_with_logits(
             aux_context["foot_contact_logits"], labels[:, 12:16],
         )
+        pred_foot_height_loss = F.mse_loss(
+            aux_context["foot_height"], labels[:, 16:20],
+        )
 
         # Loss for explicit current-state-estimation
         aux_explicit = (
@@ -336,6 +345,7 @@ class PPO_B1Z1PACT:
             + self.cfg["explicit_base_wrench_weight"] * pred_base_wrench_loss
             + self.cfg["explicit_ee_force_weight"] * pred_ee_force_loss
             + self.cfg["explicit_foot_contact_weight"] * pred_foot_contact_loss
+            + self.cfg["explicit_foot_height_weight"] * pred_foot_height_loss
         )
 
         # VAE recon + KL losses
@@ -370,6 +380,7 @@ class PPO_B1Z1PACT:
             "base_wrench": pred_base_wrench_loss,
             "ee_force": pred_ee_force_loss,
             "foot_contact": pred_foot_contact_loss,
+            "foot_height": pred_foot_height_loss,
             "force_decoder": aux_force_loss,
             "privileged_decoder": aux_privileged_loss,
             "kl": aux_kl,
@@ -379,6 +390,7 @@ class PPO_B1Z1PACT:
             "explicit_prediction": torch.cat((
                 aux_context["base_velocity"], aux_context["base_wrench"], aux_context["ee_force"],
                 torch.sigmoid(aux_context["foot_contact_logits"]),
+                aux_context["foot_height"],
             ), dim=-1).detach(),
             "explicit_target": labels.detach(),
             "privileged_prediction": aux_privileged_prediction.detach(),
@@ -431,11 +443,31 @@ class PPO_B1Z1PACT:
             value_loss = torch.maximum((values - batch["returns"]).square(), (value_clipped - batch["returns"]).square()).mean()
         else:
             value_loss = (values - batch["returns"]).square().mean()
-        ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * self.actor_critic.entropy.mean()
+        # Near a well-tracked command, FiLM should reduce to the identity
+        # transform: gamma=0 and beta=0. The exponential gate relaxes this
+        # constraint as base/EE tracking error grows, leaving FiLM free to
+        # produce stronger corrective modulation. Detaching the gate prevents
+        # the estimator from inflating its error merely to evade the penalty.
+        tracking_gate = torch.exp(
+            -self.actor_critic.last_tracking_error_sq.detach()
+            / self.film_identity_error_scale**2
+        )
+        film_identity_loss = (
+            tracking_gate * self.actor_critic.last_film_identity_deviation
+        ).mean()
+        ppo_loss = (
+            surrogate_loss
+            + self.value_loss_coef * value_loss
+            - self.entropy_coef * self.actor_critic.entropy.mean()
+            + self.film_identity_loss_weight * film_identity_loss
+        )
 
         context = self.actor_critic.last_context
         condition = torch.cat((context["z"], context["base_velocity"], context["base_wrench"], context["ee_force"]), dim=-1)
-        return ppo_loss, surrogate_loss, value_loss, kl_mean, self.actor_critic.action_mean, context, self.force_decoder(condition)
+        return (
+            ppo_loss, surrogate_loss, value_loss, film_identity_loss, kl_mean,
+            self.actor_critic.action_mean, context, self.force_decoder(condition),
+        )
 
 
     def update(self, iteration):
@@ -446,8 +478,8 @@ class PPO_B1Z1PACT:
             self.pinn_weight = progress * self.cfg["pinn_loss_weight"]
             self.pinn_updates += 1
         metrics = {name: 0.0 for name in (
-            "value", "surrogate", "base_velo", "base_wrench", "ee_force", "foot_contact",
-            "force_decoder", "privileged_decoder", "kl", "pinn",
+            "value", "surrogate", "base_velo", "base_wrench", "ee_force", "foot_contact", "foot_height",
+            "force_decoder", "privileged_decoder", "kl", "pinn", "film_identity",
         )}
         # PPO_PACT's float64 sufficient statistics. Keep one set per maskable
         # signal: next-privileged reconstruction for z and explicit-state
@@ -455,7 +487,7 @@ class PPO_B1Z1PACT:
         boot_stats = {"latent": [None, None, 0.0, 0], "explicit": [None, None, 0.0, 0]}
         updates = 0
         for batch in self.storage.mini_batches(self.mini_batches, self.epochs):
-            ppo_loss, surrogate, value, _, mean_actions, context, force_prediction = self._compute_rl_loss(batch)
+            ppo_loss, surrogate, value, film_identity, _, mean_actions, context, force_prediction = self._compute_rl_loss(batch)
             
             valid = (~batch["dones"].squeeze(-1)).float().unsqueeze(-1)
             # Both decoder losses use the next simulator state stored with this
@@ -520,8 +552,9 @@ class PPO_B1Z1PACT:
             for name, val in (("value", value), ("surrogate", surrogate), ("base_velo", aux["base_velocity"]),
                               ("base_wrench", aux["base_wrench"]), ("ee_force", aux["ee_force"]),
                               ("foot_contact", aux["foot_contact"]),
+                              ("foot_height", aux["foot_height"]),
                               ("force_decoder", aux["force_decoder"]), ("privileged_decoder", aux["privileged_decoder"]),
-                              ("kl", aux["kl"]), ("pinn", pinn)):
+                              ("kl", aux["kl"]), ("pinn", pinn), ("film_identity", film_identity)):
                 metrics[name] += val.detach().item()
             updates += 1
 
