@@ -8,7 +8,7 @@ class B1UniFPCfg:
         num_envs = 6000
         # gravity projection (2), angular velocity (3), leg positions (12),
         # leg velocities (12), previous actions (12), and commands (6).
-        num_observations = 49
+        num_observations = 47
         # Critic frame: 148-D dynamics/state block plus the 17 x 11 = 187
         # terrain-height samples configured below.
         num_critic_state_obs = 148
@@ -81,7 +81,7 @@ class B1UniFPCfg:
         init_vel_perturb_range = 0.1
         init_vel_perturb_range = 0.0
 
-        leg_dof_pos_perturb_range = [-0.05, 0.05]
+        leg_dof_pos_perturb_range = [-0.15, 0.15]
         # leg_dof_pos_perturb_range = [-0.0, 0.0]
 
     class asset:
@@ -164,9 +164,9 @@ class B1UniFPCfg:
         terrain_proportions = [0.30, 0.40, 0.00, 0.00, 0.30, 0.00, 0.0, 0.0, 0.0, 0.0]
         # terrain_proportions = [1.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.0, 0.0, 0.0, 0.0]
         terrain_curriculum_difficulty = {
-            "slope": "difficulty * 0.4",
+            "slope": "difficulty * 0.6",
             "step_height": "0.04 + 0.16 * difficulty",
-            "discrete_height": "0.04 + 0.16 * difficulty",
+            "discrete_height": "0.04 + 0.26 * difficulty",
             "stepping_stones_params": {
                 "stone_length": "1.5 * (1.05 - difficulty)",
                 "stone_width": "1.5 * (1.05 - difficulty)",
@@ -251,7 +251,7 @@ class B1UniFPCfg:
         
         heading_command = False
         
-        curriculum_threshold = 1.6
+        curriculum_threshold = 0.8
         
         ang_vel_yaw_clip = 0.1
         ang_vel_pitch_clip = 0.5
@@ -285,8 +285,8 @@ class B1UniFPCfg:
         compensate_base_external_force = True
 
         class ranges:
-            lin_vel_x = [0.3, 0.8]
-            lin_vel_y = [-0.3, 0.3]
+            lin_vel_x = [-0.4, 0.4]
+            lin_vel_y = [-0.4, 0.4]
             ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
 
@@ -622,7 +622,7 @@ class B1UniFPCfgPPO:
 
         # Each action-noise setting may be a scalar or a flat 12-value list in
         # asset.dof_names/action order: FR, FL, RR, RL x hip, thigh, calf.
-        init_noise_std = [0.80, 1.00, 1.00] * 4
+        init_noise_std = [0.40, 0.60, 0.60] * 4
         # init_noise_std = [0.80, 1.00, 1.00, 0.80, 1.00, 1.00, 0.45, 0.60, 0.60, 0.45, 0.60, 0.60]
         min_noise_std = [0.05, 0.15, 0.15] * 4
         max_noise_std = 1.1

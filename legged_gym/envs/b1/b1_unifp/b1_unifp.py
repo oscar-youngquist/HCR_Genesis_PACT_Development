@@ -522,8 +522,8 @@ class B1UniFP(B1Z1UniFP):
             self.simulator.base_ang_vel * self.obs_scales.ang_vel,
             dof_pos_err, 
             dof_vel,
-            sin_pos,
-            cos_pos, 
+            # sin_pos,
+            # cos_pos, 
             self.actions, 
             self.commands * self.commands_scale,
         ), dim=-1)
