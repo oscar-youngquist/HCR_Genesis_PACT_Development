@@ -558,7 +558,7 @@ class B1Z1UniFP(BaseTask):
 
         # Current single-frame actor observation. The runner stacks this over
         # `num_obs_hist` frames before feeding the UniFP adaptation encoder.
-        torch.cat(
+        self.obs_buf = torch.cat(
             (
                 body_orientation,
                 self.simulator.base_ang_vel * self.obs_scales.ang_vel,
@@ -570,13 +570,12 @@ class B1Z1UniFP(BaseTask):
                 self.commands * self.commands_scale,
             ),
             dim=-1,
-            out=self.obs_buf,
         )
         if self.add_noise:
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
 
         # Supervised target for the UniFP CSE/adaptation decoder.
-        torch.cat(
+        self.explicit_labels_buf = torch.cat(
             (
                 self.simulator.base_lin_vel * self.obs_scales.lin_vel,
                 self.ee_pos_sphe_arm * self.ee_sphere_scale,
@@ -584,7 +583,6 @@ class B1Z1UniFP(BaseTask):
                 base_force_local * self.obs_scales.base_force,
             ),
             dim=-1,
-            out=self.explicit_labels_buf,
         )
 
         mass_params = self._mass_params_buf
@@ -597,8 +595,7 @@ class B1Z1UniFP(BaseTask):
         # Privileged critic observation mirrors the original UniFP ordering:
         # estimator labels first, then randomized dynamics/contact/gait state,
         # current robot state, commands, and force-shifted EE target.
-        critic_obs = self._critic_obs_buf
-        torch.cat(
+        critic_obs = torch.cat(
             (
                 self.explicit_labels_buf,
                 self.simulator.dof_pos[:, :12] - self.ref_dof_pos,
@@ -626,7 +623,6 @@ class B1Z1UniFP(BaseTask):
                 self.simulator._joint_damping,                                   # 1
             ),
             dim=-1,
-            out=critic_obs,
         )
 
         # add height measurements to asymmetric critic if approperiate
@@ -649,7 +645,7 @@ class B1Z1UniFP(BaseTask):
         self.critic_obs_slots[self._critic_obs_slot].copy_(critic_obs[:, : self.cfg.env.num_privileged_obs])
         # Preserve deque semantics: concatenate slots in oldest -> newest order.
         ordered_critic_slots = self.critic_obs_slots[self._critic_obs_slot + 1 :] + self.critic_obs_slots[: self._critic_obs_slot + 1]
-        torch.cat(ordered_critic_slots, dim=-1, out=self.privileged_obs_buf)
+        self.privileged_obs_buf = torch.cat(ordered_critic_slots, dim=-1)
 
         self.llast_obs_hist.copy_(self.last_obs_hist)
         self.last_obs_hist.copy_(self.obs_history)
@@ -657,7 +653,7 @@ class B1Z1UniFP(BaseTask):
         self.obs_history_slots[self._obs_history_slot].copy_(self.obs_buf)
         # Preserve deque semantics: concatenate slots in oldest -> newest order.
         ordered_obs_slots = self.obs_history_slots[self._obs_history_slot + 1 :] + self.obs_history_slots[: self._obs_history_slot + 1]
-        torch.cat(ordered_obs_slots, dim=-1, out=self.obs_history)
+        self.obs_history = torch.cat(ordered_obs_slots, dim=-1)
 
     def _get_base_yaw_quat(self, env_ids=None):
         """Return yaw-only xyzw quaternions without full Euler conversion."""

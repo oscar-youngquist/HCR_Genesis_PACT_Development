@@ -517,7 +517,7 @@ class B1UniFP(B1Z1UniFP):
 
         dof_pos_err = (self.simulator.dof_pos - self.simulator.default_dof_pos) * self.obs_scales.dof_pos
         dof_vel = self.simulator.dof_vel * self.obs_scales.dof_vel
-        torch.cat((
+        self.obs_buf = torch.cat((
             self.get_body_orientation(), 
             self.simulator.base_ang_vel * self.obs_scales.ang_vel,
             dof_pos_err, 
@@ -526,10 +526,12 @@ class B1UniFP(B1Z1UniFP):
             cos_pos, 
             self.actions, 
             self.commands * self.commands_scale,
-        ), dim=-1, out=self.obs_buf)
+        ), dim=-1)
+
         if self.add_noise:
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
         contacts = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
+
         # Terrain-relative foot clearance matches the PACT estimator target:
         # h_foot - mean(local terrain patch) - nominal clearance offset.
         foot_heights = torch.clip(
@@ -539,14 +541,15 @@ class B1UniFP(B1Z1UniFP):
             -1.0,
             1.0,
         )
+
         # Explicit target ordering is shared with ActorCriticB1UniFP:
         # base velocity (3), base force (3), contacts (4), foot heights (4).
-        torch.cat((
+        self.explicit_labels_buf = torch.cat((
             self.simulator.base_lin_vel * self.obs_scales.lin_vel,
             base_force_local * self.obs_scales.base_force,
             contacts,
             foot_heights,
-        ), dim=-1, out=self.explicit_labels_buf)
+        ), dim=-1)
 
         mass_params = self._mass_params_buf
         mass_params.zero_()
@@ -608,13 +611,15 @@ class B1UniFP(B1Z1UniFP):
         self._critic_obs_slot = (self._critic_obs_slot + 1) % len(self.critic_obs_slots)
         self.critic_obs_slots[self._critic_obs_slot].copy_(critic_obs)
         ordered = self.critic_obs_slots[self._critic_obs_slot + 1:] + self.critic_obs_slots[:self._critic_obs_slot + 1]
-        torch.cat(ordered, dim=-1, out=self.privileged_obs_buf)
+        self.privileged_obs_buf = torch.cat(ordered, dim=-1)
+
         self.llast_obs_hist.copy_(self.last_obs_hist)
         self.last_obs_hist.copy_(self.obs_history)
         self._obs_history_slot = (self._obs_history_slot + 1) % len(self.obs_history_slots)
         self.obs_history_slots[self._obs_history_slot].copy_(self.obs_buf)
+
         ordered = self.obs_history_slots[self._obs_history_slot + 1:] + self.obs_history_slots[:self._obs_history_slot + 1]
-        torch.cat(ordered, dim=-1, out=self.obs_history)
+        self.obs_history = torch.cat(ordered, dim=-1)
 
     def set_impedance_force_estimates(self, obs_pred):
         if obs_pred.shape[1] != self.cfg.env.num_explicit_recon_obs:

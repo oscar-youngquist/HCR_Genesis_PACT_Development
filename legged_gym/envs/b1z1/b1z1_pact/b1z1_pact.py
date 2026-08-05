@@ -615,7 +615,7 @@ class B1Z1PACT(LeggedRobot):
 
         # Current single-frame actor observation. The 34-D action history is
         # the coupled PACT position/torque action, never a force command.
-        torch.cat(
+        self.obs_buf = torch.cat(
             (
                 body_orientation,
                 self.simulator.base_ang_vel * self.obs_scales.ang_vel,
@@ -626,7 +626,6 @@ class B1Z1PACT(LeggedRobot):
                 self.commands * self.commands_scale,
             ),
             dim=-1,
-            out=self.obs_buf,
         )
         if self.add_noise:
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
@@ -638,7 +637,7 @@ class B1Z1PACT(LeggedRobot):
             (self.simulator.base_lin_vel[:, :2], self.simulator.base_ang_vel[:, 2:3]), dim=-1
         )
         contact_mask = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
-        torch.cat(
+        self.explicit_labels_buf = torch.cat(
             (
                 base_command_velocity * self.obs_scales.lin_vel,
                 base_wrench_world * self.base_wrench_scale,
@@ -646,7 +645,6 @@ class B1Z1PACT(LeggedRobot):
                 contact_mask,
             ),
             dim=-1,
-            out=self.explicit_labels_buf,
         )
 
         mass_params = self._mass_params_buf
@@ -711,7 +709,7 @@ class B1Z1PACT(LeggedRobot):
         self.critic_obs_slots[self._critic_obs_slot].copy_(critic_obs[:, : self.cfg.env.num_privileged_obs])
         # Preserve deque semantics: concatenate slots in oldest -> newest order.
         ordered_critic_slots = self.critic_obs_slots[self._critic_obs_slot + 1 :] + self.critic_obs_slots[: self._critic_obs_slot + 1]
-        torch.cat(ordered_critic_slots, dim=-1, out=self.privileged_obs_buf)
+        self.privileged_obs_buf = torch.cat(ordered_critic_slots, dim=-1)
 
         self.llast_obs_hist.copy_(self.last_obs_hist)
         self.last_obs_hist.copy_(self.obs_history)
@@ -719,7 +717,7 @@ class B1Z1PACT(LeggedRobot):
         self.obs_history_slots[self._obs_history_slot].copy_(self.obs_buf)
         # Preserve deque semantics: concatenate slots in oldest -> newest order.
         ordered_obs_slots = self.obs_history_slots[self._obs_history_slot + 1 :] + self.obs_history_slots[: self._obs_history_slot + 1]
-        torch.cat(ordered_obs_slots, dim=-1, out=self.obs_history)
+        self.obs_history = torch.cat(ordered_obs_slots, dim=-1)
 
     def _get_base_yaw_quat(self, env_ids=None):
         """Return yaw-only xyzw quaternions without full Euler conversion."""
