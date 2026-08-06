@@ -9,19 +9,19 @@ class B1Z1PACTCfg(LeggedRobotCfg):
     class env:
         num_envs = 4096
         # 2 body-orientation + 3 angular velocity + 17 joint positions +
-        # 17 joint velocities + 34 coupled PACT actions + 3 FK EE errors +
-        # 6 commands.
-        num_observations = 82
-        # PACT retains its larger coupled-action state: 227 state/randomization
+        # 17 joint velocities + 34 coupled PACT actions + 6 commands. EE pose
+        # is estimated from history instead of exposed through an FK error.
+        num_observations = 79
+        # PACT retains its larger coupled-action state: 230 state/randomization
         # values plus the same 187-point terrain grid used by UniFP.
-        num_critic_state_obs = 227
+        num_critic_state_obs = 230
         num_height_obs = 187
         num_privileged_obs = num_critic_state_obs + num_height_obs
         num_priv_stack = 3
-        # Base velocity (3), base wrench (6), EE force (3), foot contacts (4),
-        # and terrain-relative foot heights (4).
-        num_explicit_recon_obs = 20
-        num_pred_obs = 20
+        # Base velocity (3), spherical EE pose (3), base wrench (6), EE force
+        # (3), foot contacts (4), and terrain-relative foot heights (4).
+        num_explicit_recon_obs = 23
+        num_pred_obs = 23
         num_actions = 17
         num_policy_actions = 34
         num_gripper_joints = 2
@@ -56,7 +56,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             # plus z1_waist joint [0, 0, 0.0585].
             x_offset = 0.3
             y_offset = 0.0
-            # NOTE - the 0.60 corresponds to the desired base height.
+            # The 0.55 term is the configured nominal B1 base height; 0.1485
+            # is the Z1 waist height in the base frame after the lowered mount.
             z_invariant_offset = 0.55 + 0.1485
 
         class ranges:
@@ -753,11 +754,17 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         min_noise_std = ([0.05, 0.15, 0.15] * 4 + [0.05] * 5) * 2
         max_noise_std = 1.1
 
-        cenet_enc_layers = [256, 128]
+        # Match UniFP's history VAE and latent-only explicit estimator sizes.
+        cenet_enc_layers = [512, 256, 128]
+        explicit_decoder_layers = [128, 64]
         cenet_latent_dim = 16
         cenet_base_vel_dim = 3
         cenet_base_wrench_dim = 6
         cenet_ee_force_dim = 3
+        # Independent decoder widths allow force prediction and privileged
+        # reconstruction capacity to be tuned without changing model code.
+        force_decoder_layers = [128, 256, 128]
+        privileged_decoder_layers = [128, 256, 512]
         film_hidden_dim = 64
         # Encourage FiLM to be an identity transform near a well-tracked
         # command. The pressure decays exponentially with mean squared base
@@ -766,7 +773,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         film_identity_error_scale = 1.0
 
         # Loss weights
-        explicit_base_vel_weight = 1.0
+        explicit_base_vel_weight = 0.2
+        explicit_ee_position_weight = 0.2
         explicit_base_wrench_weight = 1.0
         explicit_ee_force_weight = 1.0
         explicit_foot_contact_weight = 1.0
@@ -774,6 +782,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         force_decoder_weight = 1.0
         privileged_decoder_weight = 1.0
         vae_kld_weight = 0.01
+        adaptation_learning_rate = 1.0e-5
 
         pinn_loss_weight = 1.00
         pinn_warmup = 100

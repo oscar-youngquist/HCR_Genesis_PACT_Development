@@ -13,11 +13,11 @@ import random
 import torch.nn.functional as F
 from collections import deque
 
-if SIMULATOR == "genesis":
+if "genesis" in SIMULATOR:
     import genesis as gs
 
 """ ********** Genesis Simulator ********** """
-class GenesisSimulatorB1Z1UniFP(Simulator):
+class GenesisSimulatorB1Z1PACTPos(Simulator):
     def __init__(self, cfg, sim_params: dict, device, headless):
         self._sim_params = sim_params
         super().__init__(cfg, sim_params, device, headless)
@@ -71,6 +71,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         self._feet_pos[:] = link_pos[:, self._feet_indices, :]
         self._thigh_pos[:] = link_pos[:, self._thigh_indices, :]
         self._feet_vel[:] = self._robot.get_links_vel()[:, self._feet_indices, :]
+
         if self._has_gripper:
             self._ee_pos[:] = link_pos[:, self._gripper_index, :]
             self._ee_vel[:] = self._robot.get_links_vel()[:, self._gripper_index, :]
@@ -79,6 +80,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             # xyzw everywhere else, matching the base quaternion buffer above.
             self._ee_quat[:, -1] = ee_quat_gs[:, 0]
             self._ee_quat[:, :3] = ee_quat_gs[:, 1:4]
+
         self._dof_tau[:] = self._robot.get_dofs_force(self._dof_indices)
 
         self._base_world_lin_vel[:] = self._robot.get_vel()
@@ -987,6 +989,11 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             dtype=torch.int32,
             device=self._device,
         )
+        self._base_external_torque_link_indices = torch.tensor(
+            [self._robot.link_start + self._base_link_index],
+            dtype=torch.int32,
+            device=self._device,
+        )
         
         if self._cfg.asset.obtain_link_contact_states:
             self._contact_state_link_indices = find_link_indices(
@@ -1174,6 +1181,7 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             self._ee_quat[:, -1] = 1.0
             self._ee_force_world = torch.zeros_like(self._ee_pos)
         self._base_force_world = torch.zeros_like(self._base_pos)
+        self._base_torque_world = torch.zeros_like(self._base_pos)
         self._external_force_world = torch.zeros(
             (self._num_envs, len(self._external_force_link_indices), 3), device=self._device, dtype=torch.float
         )
@@ -1401,130 +1409,16 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             self._robot.set_pos(
                 self._base_pos[env_ids], zero_velocity=False, envs_idx=env_ids)
 
-    @torch.no_grad()
-    def _print_position_target_statistics(
-        self,
-        position_targets: torch.Tensor,
-        actions: torch.Tensor,
-        print_interval: int = 500,
-    ):
-        """
-        Print actual and running commanded-position coverage.
-
-        Args:
-            position_targets:
-                Absolute PD position targets, shape (num_envs, num_dofs).
-            actions:
-                Raw policy actions before scaling.
-            print_interval:
-                Number of control steps between reports.
-        """
-        num_joints = self._num_learned_actions
-        targets = position_targets[:, :num_joints]
-        actions = actions[:, :num_joints]
-
-        # Support either (num_dofs, 2) or (num_envs, num_dofs, 2).
-        limits = self._dof_pos_limits
-        if limits.ndim == 3:
-            limits = limits[0]
-
-        lower = limits[:num_joints, 0]
-        upper = limits[:num_joints, 1]
-        joint_range = (upper - lower).clamp_min(1e-6)
-
-        if not hasattr(self, "_target_debug_counter"):
-            self._target_debug_counter = 0
-            self._target_debug_min = torch.full_like(
-                lower, float("inf")
-            )
-            self._target_debug_max = torch.full_like(
-                upper, float("-inf")
-            )
-
-        self._target_debug_counter += 1
-
-        batch_min = targets.amin(dim=0)
-        batch_max = targets.amax(dim=0)
-
-        self._target_debug_min = torch.minimum(
-            self._target_debug_min, batch_min
-        )
-        self._target_debug_max = torch.maximum(
-            self._target_debug_max, batch_max
-        )
-
-        if self._target_debug_counter % print_interval != 0:
-            return
-
-        batch_mean = targets.mean(dim=0)
-        batch_std = targets.std(dim=0)
-
-        action_min = actions.amin(dim=0)
-        action_max = actions.amax(dim=0)
-
-        running_coverage = (
-            self._target_debug_max - self._target_debug_min
-        ) / joint_range
-
-        target_below_limit = (targets < lower).float().mean(dim=0)
-        target_above_limit = (targets > upper).float().mean(dim=0)
-
-        names = getattr(self, "_dof_names", None)
-
-        print("\nPosition-target coverage")
-        print(
-            "joint              limits          batch target       "
-            "running target     coverage   action range   outside"
-        )
-
-        for joint in range(num_joints):
-            name = (
-                names[joint]
-                if names is not None
-                else f"joint_{joint}"
-            )
-
-            outside = (
-                target_below_limit[joint]
-                + target_above_limit[joint]
-            )
-
-            print(
-                f"{name:<18} "
-                f"[{lower[joint].item():6.2f},"
-                f"{upper[joint].item():6.2f}]  "
-                f"[{batch_min[joint].item():6.2f},"
-                f"{batch_max[joint].item():6.2f}]  "
-                f"[{self._target_debug_min[joint].item():6.2f},"
-                f"{self._target_debug_max[joint].item():6.2f}]  "
-                f"{100.0 * running_coverage[joint].item():6.1f}%  "
-                f"[{action_min[joint].item():5.2f},"
-                f"{action_max[joint].item():5.2f}]  "
-                f"{100.0 * outside.item():5.1f}%"
-            )
-
-        print(
-            "Mean batch target standard deviation:",
-            round(batch_std.mean().item(), 4),
-        )
-
-
-
     def _compute_torques(self, actions):
-        # UniFP learns 17 actions for 12 leg + 5 arm joints. The remaining
-        # gripper DOFs stay at their default PD targets.
+        """Execute only position PD control, matching go2_pact_pos."""
+        if actions.shape[-1] != self._num_learned_actions:
+            raise RuntimeError(
+                f"Expected {self._num_learned_actions} position actions, got {actions.shape[-1]}"
+            )
         pos_actions_scaled = torch.zeros_like(self._dof_pos)
         pos_actions_scaled[:, :self._num_learned_actions] = (
-            self._motor_strength[:,:self._num_learned_actions] * actions[:, :self._num_learned_actions] * self._cfg.control.action_scale
-            # self._motor_strength[:,:12] * actions[:, :12] * self._cfg.control.action_scale
+            actions * self._cfg.control.action_scale
         )
-
-
-        # self._print_position_target_statistics(
-        #     self._default_dof_pos + pos_actions_scaled,
-        #     actions,
-        #     print_interval=500,
-        # )
         
         # get two dimensional gains
         if self._p_gains.ndim == 1:
@@ -1535,21 +1429,13 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
             self._kp_scale * self._p_gains * (pos_actions_scaled +self._default_dof_pos - self._dof_pos)
             - self._kd_scale * self._d_gains * self._dof_vel
         )
-
-        # now compute feedforward torques
-        if self.first_loop:
-            self.first_loop = False
-            self.first_loop_feedback = self.feedback_torques.clone()
-
-        # torques = (self.feedforward_tau_weight) * self.feedforward_torques + (self.feedback_tau_weight)*self.feedback_torques
-
-        torques = self.feedback_torques
-
-        # print("Torque Norm - ", torch.round(torch.mean(torch.norm(torques, dim=-1)), decimals=4))
-
+        self.feedforward_torques = torch.zeros_like(self.feedback_torques)
+        self.combined_feedback_torques = self._motor_strength * self.feedback_torques
+        self.combined_feedforward_torques = self.feedforward_torques
+        torques = self.combined_feedback_torques
         self.unclipped_torques = torques.clone()
+        # self.executed_torques = torch.clip(torques, -1.1 * self._torque_limits, 1.1 * self._torque_limits)
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
-        # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
         return torques
 
     def apply_ee_force(self, force_world):
@@ -1559,6 +1445,10 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
     def apply_base_force(self, force_world):
         """Store the target world-frame base disturbance force."""
         self._base_force_world[:] = force_world
+
+    def apply_base_torque(self, torque_world):
+        """Store the target world-frame external moment on the B1 torso."""
+        self._base_torque_world[:] = torque_world
 
     def _apply_external_forces(self):
         """Apply UniFP EE/base external force buffers to Genesis links.
@@ -1570,21 +1460,38 @@ class GenesisSimulatorB1Z1UniFP(Simulator):
         """
         if not hasattr(self, "_external_force_link_indices"):
             return
-        has_ee_force = self._has_gripper and torch.any(self._ee_force_world)
-        if not has_ee_force and not torch.any(self._base_force_world):
-            return
-        if self._has_gripper:
-            self._external_force_world[:, 0, :] = self._ee_force_world
-            self._external_force_world[:, 1, :] = self._base_force_world
-        else:
-            self._external_force_world[:, 0, :] = self._base_force_world
-        self._robot._solver.apply_links_external_force(
-            force=self._external_force_world,
-            links_idx=self._external_force_link_indices,
-            envs_idx=None,
-            ref="link_com",
-            local=False,
+        commands = self._cfg.commands
+        apply_ee_force = (
+            self._has_gripper
+            and commands.push_gripper_stators
+            and commands.apply_ee_external_forces
         )
+        apply_base_force = commands.push_robot_base and commands.apply_base_external_forces
+        apply_base_torque = commands.push_robot_base and commands.apply_base_external_torques
+
+        # Branch only on static Python configuration. Inspecting CUDA force
+        # buffers with torch.any() here would synchronize every physics substep.
+        if apply_ee_force or apply_base_force:
+            if self._has_gripper:
+                self._external_force_world[:, 0, :] = self._ee_force_world
+                self._external_force_world[:, 1, :] = self._base_force_world
+            else:
+                self._external_force_world[:, 0, :] = self._base_force_world
+            self._robot._solver.apply_links_external_force(
+                force=self._external_force_world,
+                links_idx=self._external_force_link_indices,
+                envs_idx=None,
+                ref="link_com",
+                local=False,
+            )
+        if apply_base_torque:
+            self._robot._solver.apply_links_external_torque(
+                torque=self._base_torque_world.unsqueeze(1),
+                links_idx=self._base_external_torque_link_indices,
+                envs_idx=None,
+                ref="link_com",
+                local=False,
+            )
     
 
     def _init_domain_params(self):

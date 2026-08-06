@@ -198,8 +198,10 @@ class OnPolicyRunnerUniFP:
                     "ang_vel_tracking": self._episode_metric_max(
                         ep_infos, "rew_tracking_ang_vel"
                     ),
+                    # B1Z1 emits ``terrain_level`` while older UniFP tasks may
+                    # still use ``terrain_level_mean``.
                     "terrain_level": self._episode_metric_max(
-                        ep_infos, "terrain_level_mean"
+                        ep_infos, "terrain_level", "terrain_level_mean"
                     ),
                 }
                 self.alg.update_adaptive_entropy_coef(performance_metrics)
@@ -332,11 +334,12 @@ class OnPolicyRunnerUniFP:
         print(log_string)
 
     @staticmethod
-    def _episode_metric_max(ep_infos, key):
+    def _episode_metric_max(ep_infos, *keys):
         """Return the largest scalar episode metric, or zero if unavailable."""
         values = []
         for ep_info in ep_infos:
-            if key not in ep_info:
+            key = next((candidate for candidate in keys if candidate in ep_info), None)
+            if key is None:
                 continue
             value = ep_info[key]
             if isinstance(value, torch.Tensor):
@@ -364,6 +367,7 @@ class OnPolicyRunnerUniFP:
                 "model_state_dict": self.alg.actor_critic.state_dict(),
                 "optimizer_state_dict": self.alg.optimizer.state_dict(),
                 "iter": self.current_learning_iteration if iteration is None else iteration,
+                "entropy_coef": self.alg.current_entropy_coef,
                 "infos": infos,
             },
             path,
@@ -375,6 +379,9 @@ class OnPolicyRunnerUniFP:
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
         self.current_learning_iteration = loaded_dict["iter"]
+        self.alg.current_entropy_coef = loaded_dict.get(
+            "entropy_coef", self.alg.current_entropy_coef
+        )
         if hasattr(self.env, "set_training_iteration"):
             self.env.set_training_iteration(self.current_learning_iteration)
         return loaded_dict["infos"]

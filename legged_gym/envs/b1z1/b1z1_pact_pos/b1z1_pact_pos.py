@@ -5,6 +5,7 @@ import numpy as np
 import torch
 
 from legged_gym.envs.base.base_task import BaseTask
+from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.utils.helpers import class_to_dict
 from legged_gym.utils.math_utils import (
     quat_apply,
@@ -16,7 +17,7 @@ from legged_gym.utils.math_utils import (
     wrap_to_pi,
 )
 
-from legged_gym.envs.b1z1.b1z1_unifp.b1z1_reward_helpers import _eig_desc, _geom_mean, _interval_reward, _safe_inv, _safe_normalize, _safe_pinv, _sanitize_tensor, _skew, _upper_reward, _rot_x, _rot_y, _rot_z
+from .b1z1_reward_helpers import _eig_desc, _geom_mean, _interval_reward, _safe_inv, _safe_normalize, _safe_pinv, _sanitize_tensor, _skew, _upper_reward, _rot_x, _rot_y, _rot_z
 
 
 def sphere2cart(sphere_coords):
@@ -40,27 +41,23 @@ def cart2sphere(cart_coords):
     return torch.stack((radius, pitch, yaw), dim=-1)
 
 
-class B1Z1UniFP(BaseTask):
-    """Genesis port of the original UniFP B1/Z1 position-force baseline.
+class B1Z1PACTPos(LeggedRobot):
+    """Position-only B1/Z1 PACT pretraining task.
 
-    The environment keeps the UniFP learning problem intact:
-    - 17 learned position actions for 12 B1 leg joints + 5 Z1 arm joints.
-    - A 15-D command vector: base velocity, EE spherical position, reservedself._reset_progress_statistics()
-      orientation slots, EE force command, and base force command.
-    - A CSE/adaptation target (`explicit_labels_buf`) containing base velocity,
-      EE spherical state, EE/base external force, foot contact, and foot height.
-    - UniFP force-randomization streams that separately sample commanded force
-      offsets and physically applied external disturbances.
-
-    The surrounding API is shaped like the Genesis/PACT environments so the
-    existing HCR runner, logging, and simulator wrappers can train the baseline.
+    UniFP convention inside PACT training: EE commands remain yaw-aligned
+    spherical trajectories around the Z1 waist and external forces retain the
+    original per-environment triangular event profiles. Unlike UniFP, force is
+    never a command and never shifts the position target.
     """
 
     def __init__(self, cfg, sim_params, sim_device, headless):
         self.cfg = cfg
         self.init_done = False
         self._parse_cfg(cfg, sim_device)
-        super().__init__(cfg, sim_params, sim_device, headless)
+        # We inherit only the base LeggedRobot task contract. Its generic
+        # initializer cannot construct this task's stacked PACT observations,
+        # so initialize the shared BaseTask state directly.
+        BaseTask.__init__(self, cfg, sim_params, sim_device, headless)
         self._init_buffers()
         self._prepare_reward_function()
         self.init_done = True
@@ -85,17 +82,16 @@ class B1Z1UniFP(BaseTask):
         """Apply actions, simulate, and return the PACT-style env tuple."""
         actions = self._pre_sim_step(actions)
 
-        # Physical force events are active from iteration zero; only their
-        # sampled external range changes with the training curriculum.
+        if actions.shape[-1] != self.num_actions:
+            raise RuntimeError(
+                f"B1Z1 PACT Pos expects {self.num_actions} position actions, got {actions.shape[-1]}"
+            )
+        # External events run from iteration zero. Their sampled range follows
+        # the iteration-based curriculum returned by external_force_scale.
         if self.cfg.commands.push_gripper_stators:
             self._push_gripper(self.all_env_ids)
         if self.cfg.commands.push_robot_base:
             self._push_robot_base(self.all_env_ids)
-
-        # Play/eval can optionally mimic the paper's external impedance wrapper.
-        # It must use estimator outputs, not simulator ground-truth forces.
-        if self.cfg.commands.use_external_impedance_compensation:
-            self._apply_external_impedance_compensation()
 
         self.simulator.step(actions)
         self.post_physics_step()
@@ -120,18 +116,91 @@ class B1Z1UniFP(BaseTask):
     def get_prev_obs(self):
         return self.last_obs_buf, self.last_obs_hist, self.llast_obs_buf, self.llast_obs_hist
 
+    def get_pact_dynamics_state(self):
+        """Package randomized joint state used by torque-head supervision.
+
+        The runner calls this after ``env.step(action_t)``. Therefore it stores
+        the transition endpoint ``x_(t+1)`` and the simulator's cached pre-step
+        velocity ``v_t``. PPO later forms ``vdot_(t+1) ~= (v_(t+1)-v_t)/dt``
+        and pairs it with the action that generated this transition. The
+        position-only PPO uses q, qdot, gains, motor strength, and default pose
+        to reconstruct the exact scaled PD-torque cloning target.
+
+        Layout (180 values):
+          [base position(3), base quaternion(4), q(19), v_(t+1)(25),
+           v_t(25), foot GRFs(12), EE force(3), base wrench(6), motor(19),
+           Kp(19), Kd(19), branch weights(2), default q(19), base dm(1),
+           base COM shift(3), gripper dm(1)].
+
+        Forces use world/LWA coordinates, matching Pinocchio's
+        ``LOCAL_WORLD_ALIGNED`` Jacobians. The last five values reproduce the
+        Genesis inertial randomization in the Pinocchio model before ``M`` and
+        ``h`` are evaluated.
+        """
+        simulator = self.simulator
+        # Store *effective* randomized gains and branch weights. Reconstructing
+        # tau from nominal gains would make the physics residual disagree with
+        # the torque actually sent to Genesis.
+        kp = simulator._kp_scale * simulator._p_gains
+        kd = simulator._kd_scale * simulator._d_gains
+        base_wrench = torch.cat((self.base_force_ext_world, self.base_torque_ext_world), dim=-1)
+        current_velocity = torch.cat((simulator._base_world_lin_vel, simulator._base_world_ang_vel, simulator.dof_vel), dim=-1)
+        previous_velocity = torch.cat((simulator._last_base_world_lin_vel, simulator._last_base_world_ang_vel, simulator.last_dof_vel), dim=-1)
+        return torch.cat((
+            simulator.base_pos, simulator.base_quat, simulator.dof_pos,
+            current_velocity, previous_velocity, simulator._grfs_buf,
+            self.ee_force_ext_world, base_wrench, simulator._motor_strength,
+            kp, kd, simulator.feedback_tau_weight, simulator.feedforward_tau_weight,
+            simulator.default_dof_pos.expand(self.num_envs, -1), simulator._added_base_mass,
+            simulator._base_com_bias, simulator._added_gripper_mass,
+        ), dim=-1)
+
+    def get_pact_pos_torque_clone_state(self):
+        """Return the compact randomized controller state for torque cloning.
+
+        Layout (76 values): motor strength (19), effective Kp (19), effective
+        Kd (19), and default joint position (19). The PPO-pos loss combines
+        this packet with the action-aligned joint state already present in the
+        actor observation, avoiding storage of the full PINN dynamics packet.
+        """
+        simulator = self.simulator
+        effective_kp = simulator._kp_scale * simulator._p_gains
+        effective_kd = simulator._kd_scale * simulator._d_gains
+        return torch.cat((
+            simulator._motor_strength,
+            effective_kp,
+            effective_kd,
+            simulator.default_dof_pos.expand(self.num_envs, -1),
+        ), dim=-1)
+
+    def get_force_decoder_target(self):
+        """Return normalized yaw-frame next-step force supervision."""
+        base_yaw_quat = self._get_base_yaw_quat()
+        grfs_local = quat_rotate_inverse(
+            base_yaw_quat[:, None, :].expand(-1, 4, -1).reshape(-1, 4),
+            self.simulator._grfs_buf.reshape(-1, 3),
+        ).reshape(self.num_envs, 12)
+        ee_force_local = quat_rotate_inverse(base_yaw_quat, self.ee_force_ext_world)
+        base_wrench_local = torch.cat((
+            quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world),
+            quat_rotate_inverse(base_yaw_quat, self.base_torque_ext_world),
+        ), dim=-1)
+        target = torch.cat((
+            grfs_local * self.obs_scales.grf,
+            ee_force_local * self.obs_scales.ee_force,
+            base_wrench_local * self.base_wrench_scale,
+        ), dim=-1)
+        if target.shape != (self.num_envs, 21):
+            raise RuntimeError(f"PACT-pos force target must be ({self.num_envs}, 21), got {tuple(target.shape)}")
+        return target
+
     @property
     def force_randomization_active(self):
         return self.external_force_scale > 0.0
 
     @property
-    def force_command_randomization_active(self):
-        """Keep UniFP's force-command interface behind its original gate."""
-        return self.training_iteration >= self.cfg.commands.force_start_step
-
-    @property
     def external_force_scale(self):
-        """Current linear curriculum scale for physically applied forces."""
+        """Current linear curriculum scale for all physical disturbances."""
         commands = self.cfg.commands
         if self.training_iteration < commands.force_start_step:
             return float(commands.external_force_initial_scale)
@@ -281,6 +350,33 @@ class B1Z1UniFP(BaseTask):
         q_arm = self.simulator.dof_pos[:, self.simulator._arm_dof_cfg_ids]
         self.z1_arm_jacobian[:] = self.compute_z1_arm_jacobian(q_arm)
 
+    def compute_z1_arm_fk(self, q_arm: torch.Tensor) -> torch.Tensor:
+        """Return the EE Cartesian position in the Z1 trunk frame.
+
+        This mirrors the retained analytic Jacobian chain so FiLM's EE tracking
+        error is genuinely computed from arm forward kinematics rather than a
+        hidden simulator link-position observation.
+        """
+        n = q_arm.shape[0]
+        R = torch.eye(3, dtype=q_arm.dtype, device=q_arm.device).expand(n, 3, 3).clone()
+        p = self.z1_link00_offset.to(q_arm).view(1, 3).expand(n, 3).clone()
+        offsets = self.z1_joint_offsets.to(q_arm)
+        for i in range(6):
+            p = p + torch.einsum("nij,j->ni", R, offsets[i])
+            c, s = torch.cos(q_arm[:, i]), torch.sin(q_arm[:, i])
+            next_R = R.clone()
+            if i in (0, 4):
+                r0, r1 = R[:, :, 0].clone(), R[:, :, 1].clone()
+                next_R[:, :, 0], next_R[:, :, 1] = c[:, None] * r0 + s[:, None] * r1, -s[:, None] * r0 + c[:, None] * r1
+            elif i in (1, 2, 3):
+                r0, r2 = R[:, :, 0].clone(), R[:, :, 2].clone()
+                next_R[:, :, 0], next_R[:, :, 2] = c[:, None] * r0 - s[:, None] * r2, s[:, None] * r0 + c[:, None] * r2
+            else:
+                r1, r2 = R[:, :, 1].clone(), R[:, :, 2].clone()
+                next_R[:, :, 1], next_R[:, :, 2] = c[:, None] * r1 + s[:, None] * r2, -s[:, None] * r1 + c[:, None] * r2
+            R = next_R
+        return p + torch.einsum("nij,j->ni", R, self.z1_ee_offset.to(q_arm))
+
     def compute_all_leg_jacobians(self, q: torch.Tensor, out: torch.Tensor = None) -> torch.Tensor:
         """
         Compute translational Jacobians for all 4 legs.
@@ -405,20 +501,20 @@ class B1Z1UniFP(BaseTask):
             self._update_terrain_curriculum(env_ids)
         if self.cfg.commands.curriculum and self.common_step_counter % self.max_episode_length == 0:
             self._update_command_curriculum(env_ids)
+        if self.use_tradeoff:
+            self.step_tradeoff_curriculum(env_ids)
 
         # Snapshot episode-level force/goal statistics before state is zeroed.
         episode_ee_goal_sphere = self.curr_ee_goal_sphere[env_ids].clone()
-        episode_ee_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_gripper_cmd[env_ids], dim=1))
         episode_ee_force_ext_norm = torch.mean(torch.norm(self.ee_force_ext_world[env_ids], dim=1))
-        episode_base_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_base_cmd[env_ids], dim=1))
         episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
+        episode_base_torque_ext_norm = torch.mean(torch.norm(self.base_torque_ext_world[env_ids], dim=1))
         episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
 
         self._resample_commands(env_ids)
         self._resample_ee_goal(env_ids, is_init=True)
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
-        self._reset_progress_statistics(env_ids)
         # Simulator reset applies Genesis-side domain randomization and writes
         # root/DOF state into the Genesis entity.
         self.simulator.reset_idx(env_ids)
@@ -433,12 +529,6 @@ class B1Z1UniFP(BaseTask):
         self.last_actions[env_ids] = 0.0
         self.llast_actions[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
-        self.feet_stance_time[env_ids] = 0.0
-        self.last_contacts[env_ids] = False
-        self.valid_swing[env_ids] = False
-        self.step_liftoff_pos[env_ids] = 0.0
-        self.step_direction_world[env_ids] = 0.0
-        self.step_max_progress[env_ids] = 0.0
         self.gait_indices[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -447,13 +537,15 @@ class B1Z1UniFP(BaseTask):
         self.termination_contact_counter[env_ids] = 0
         self.ee_force_ext_world[env_ids] = 0.0
         self.base_force_ext_world[env_ids] = 0.0
-        self.current_Fxyz_gripper_cmd[env_ids] = 0.0
-        self.current_Fxyz_base_cmd[env_ids] = 0.0
-        self.estimated_ee_force_local[env_ids] = 0.0
-        self.estimated_base_force_local[env_ids] = 0.0
+        self.base_torque_ext_world[env_ids] = 0.0
         self.prev_ee_error[env_ids] = 0.0
-        self.progress_vel_ema[env_ids] = 0.0
-
+        self.prev_impedance_ee_pos[env_ids] = 0.0
+        self.prev_impedance_ee_vel[env_ids] = 0.0
+        self.prev_impedance_target[env_ids] = self.curr_ee_goal_cart[env_ids]
+        self.prev_impedance_target_vel[env_ids] = 0.0
+        # Contact history is a boolean latch used by feet-air-time filtering.
+        self.last_contacts[env_ids] = False
+        
         self._reset_force_events(env_ids)
         self._randomize_force_gains(env_ids)
 
@@ -464,6 +556,8 @@ class B1Z1UniFP(BaseTask):
             self.simulator.apply_ee_force(self.ee_force_ext_world)
         if hasattr(self.simulator, "apply_base_force"):
             self.simulator.apply_base_force(self.base_force_ext_world)
+        if hasattr(self.simulator, "apply_base_torque"):
+            self.simulator.apply_base_torque(self.base_torque_ext_world)
 
         self.last_obs_buf[env_ids] = 0.0
         self.llast_obs_buf[env_ids] = 0.0
@@ -503,12 +597,11 @@ class B1Z1UniFP(BaseTask):
         self.extras["episode"]["ee_goal_radius"] = torch.mean(episode_ee_goal_sphere[:, 0])
         self.extras["episode"]["ee_goal_pitch"] = torch.mean(episode_ee_goal_sphere[:, 1])
         self.extras["episode"]["ee_goal_yaw"] = torch.mean(episode_ee_goal_sphere[:, 2])
-        self.extras["episode"]["ee_force_cmd_norm"] = episode_ee_force_cmd_norm
         self.extras["episode"]["ee_force_ext_norm"] = episode_ee_force_ext_norm
-        self.extras["episode"]["base_force_cmd_norm"] = episode_base_force_cmd_norm
         self.extras["episode"]["base_force_ext_norm"] = episode_base_force_ext_norm
-        self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
+        self.extras["episode"]["base_torque_ext_norm"] = episode_base_torque_ext_norm
         self.extras["episode"]["external_force_scale"] = self.external_force_scale
+        self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
         self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -548,7 +641,6 @@ class B1Z1UniFP(BaseTask):
         self.llast_obs_buf.copy_(self.last_obs_buf)
         self.last_obs_buf.copy_(self.obs_buf)
 
-        base_quat = self.simulator.base_quat
         base_rpy = self.simulator.base_euler
         base_yaw_quat = self._get_base_yaw_quat()
         ee_center = self.get_ee_goal_spherical_center(base_yaw_quat)
@@ -558,28 +650,22 @@ class B1Z1UniFP(BaseTask):
         ee_local_cart = quat_rotate_inverse(base_yaw_quat, self.simulator.ee_pos - ee_center)
         self.ee_pos_sphe_arm = cart2sphere(ee_local_cart)
 
-        # Force labels are also yaw-frame quantities. These are privileged during
-        # training and become estimator predictions at deployment/play time.
-        ee_force_local = quat_rotate_inverse(base_yaw_quat, self.ee_force_ext_world)
-        base_force_local = quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world)
+        # Dynamics labels use the world/LWA force frame so predicted force can
+        # enter the Pinocchio residual without an ambiguous extra transform.
+        base_wrench_world = torch.cat((self.base_force_ext_world, self.base_torque_ext_world), dim=-1)
+        ee_goal_offset_sphere = self.curr_ee_goal_sphere
 
-        # The commanded EE force acts like an external impedance offset: the
-        # target position is shifted by force / virtual stiffness.
-        force_offset_world = self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)
-        ee_goal_offset_local = quat_rotate_inverse(
-            base_yaw_quat,
-            self.curr_ee_goal_cart_world + force_offset_world / self.gripper_force_kps - ee_center,
-        )
-        ee_goal_offset_sphere = cart2sphere(ee_goal_offset_local)
-
+        phase = self._get_phase()
         self.compute_ref_state()
+        sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
+        cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
         
         body_orientation = self.get_body_orientation()
         dof_pos_err = (self.simulator.dof_pos[:, :17] - self.simulator.default_dof_pos[:, :17]) * self.obs_scales.dof_pos
         dof_vel = self.simulator.dof_vel[:, :17] * self.obs_scales.dof_vel
 
-        # Current single-frame actor observation. The runner stacks this over
-        # `num_obs_hist` frames before feeding the UniFP adaptation encoder.
+        # Current single-frame actor observation includes only the previously
+        # executed 17-D position action; the auxiliary torque head is hidden.
         self.obs_buf = torch.cat(
             (
                 body_orientation,
@@ -593,17 +679,29 @@ class B1Z1UniFP(BaseTask):
         )
         if self.obs_buf.shape[1] != self.cfg.env.num_observations:
             raise RuntimeError(
-                f"B1Z1 UniFP actor observation is {self.obs_buf.shape[1]}D, expected "
+                f"B1Z1 PACT actor observation is {self.obs_buf.shape[1]}D, expected "
                 f"{self.cfg.env.num_observations}D"
             )
         if self.add_noise:
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
 
-        contact_mask = (
-            self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
-        ).float()
-        # Match the B1 estimator's terrain-relative clearance target:
-        # h_foot - mean(local terrain patch) - nominal sole offset.
+        # Like UniFP, learned disturbance labels use the yaw-aligned robot
+        # frame, making them observable without exposing absolute heading.
+        ee_force_local = quat_rotate_inverse(base_yaw_quat, self.ee_force_ext_world)
+        base_wrench_local = torch.cat((
+            quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world),
+            quat_rotate_inverse(base_yaw_quat, self.base_torque_ext_world),
+        ), dim=-1)
+        # Context labels: command-space velocity and EE pose, base wrench, EE force, and
+        # four binary foot-contact indicators for the estimator BCE objective.
+        # They are privileged during training and predicted from history later.
+        base_command_velocity = torch.cat(
+            (self.simulator.base_lin_vel[:, :2], self.simulator.base_ang_vel[:, 2:3]), dim=-1
+        )
+        contact_mask = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
+        # Estimate terrain-relative sole clearance using the same target used
+        # by UniFP. These labels are actor inputs through the context estimator,
+        # but are deliberately excluded from disturbance FiLM conditioning.
         foot_heights = torch.clip(
             self.simulator.feet_pos[:, :, 2]
             - torch.mean(self.simulator.height_around_feet, dim=-1)
@@ -611,14 +709,12 @@ class B1Z1UniFP(BaseTask):
             -1.0,
             1.0,
         )
-
-        # Supervised target order must match ActorCriticUniFP.adaptation_labels.
         self.explicit_labels_buf = torch.cat(
             (
-                self.simulator.base_lin_vel * self.obs_scales.lin_vel,
+                base_command_velocity * self.obs_scales.lin_vel,
                 self.ee_pos_sphe_arm * self.ee_sphere_scale,
+                base_wrench_local * self.base_wrench_scale,
                 ee_force_local * self.obs_scales.ee_force,
-                base_force_local * self.obs_scales.base_force,
                 contact_mask,
                 foot_heights,
             ),
@@ -626,7 +722,7 @@ class B1Z1UniFP(BaseTask):
         )
         if self.explicit_labels_buf.shape[1] != self.cfg.env.num_explicit_recon_obs:
             raise RuntimeError(
-                f"B1Z1 UniFP explicit target is {self.explicit_labels_buf.shape[1]}D, "
+                f"B1Z1 PACT explicit target is {self.explicit_labels_buf.shape[1]}D, "
                 f"expected {self.cfg.env.num_explicit_recon_obs}D"
             )
 
@@ -636,21 +732,17 @@ class B1Z1UniFP(BaseTask):
         mass_params[:, 1:4] = self.simulator._base_com_bias
         stance_mask = self._get_gait_phase()
 
-        phase = self._get_phase()
-        sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
-        cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
-
-        # Privileged critic observation mirrors the original UniFP ordering:
-        # estimator labels first, then randomized dynamics and gait state,
-        # current robot state, commands, and force-shifted EE target.
+        # Keep the shared UniFP critic layout explicit and dimension checked.
+        # This position-only pretraining variant retains six commands and the
+        # explicit base-wrench labels but has a 17-D executed action.
         critic_components = (
-            ("adaptation_labels", self.explicit_labels_buf),
+            ("explicit_labels", self.explicit_labels_buf),
             ("reference_dof_error", self.simulator.dof_pos[:, :12] - self.ref_dof_pos),
             ("mass_com", mass_params),
             ("friction_offset", self.simulator._friction_values - self.friction_value_offset),
             ("motor_strength_offset", self.simulator._motor_strength[:, :17] - 1.0),
             ("stance", stance_mask),
-            # Contacts are already present in adaptation_labels.
+            # Contacts are already present in explicit_labels.
             ("phase_sin", sin_pos),
             ("phase_cos", cos_pos),
             ("projected_gravity", self.simulator.projected_gravity),
@@ -668,6 +760,7 @@ class B1Z1UniFP(BaseTask):
             ("joint_armature", self.simulator._joint_armature),
             ("joint_friction", self.simulator._joint_friction),
             ("joint_damping", self.simulator._joint_damping),
+            ("grfs", self.simulator._grfs_buf * self.obs_scales.grf)
         )
         critic_state = torch.cat([value for _, value in critic_components], dim=-1)
         if critic_state.shape[1] != self.cfg.env.num_critic_state_obs:
@@ -675,13 +768,13 @@ class B1Z1UniFP(BaseTask):
                 f"{name}={value.shape[1]}" for name, value in critic_components
             )
             raise RuntimeError(
-                f"B1Z1 UniFP critic state is {critic_state.shape[1]}D, expected "
+                f"B1Z1 PACT critic state is {critic_state.shape[1]}D, expected "
                 f"{self.cfg.env.num_critic_state_obs}D ({layout})"
             )
         self._critic_obs_buf.copy_(critic_state)
         critic_obs = self._critic_obs_buf
 
-        # Add the terrain grid to the asymmetric critic when configured.
+        # add height measurements to asymmetric critic if approperiate
         if self.cfg.terrain.measure_heights:
             heights = torch.clip(self.simulator.base_pos[:, 2].unsqueeze(1) - 0.5 \
                                  - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements
@@ -690,7 +783,7 @@ class B1Z1UniFP(BaseTask):
                 heights *= self.height_noise_vec
             if heights.shape[1] != self.cfg.env.num_height_obs:
                 raise RuntimeError(
-                    f"B1Z1 UniFP terrain observation is {heights.shape[1]}D, expected "
+                    f"B1Z1 PACT terrain observation is {heights.shape[1]}D, expected "
                     f"{self.cfg.env.num_height_obs}D"
                 )
             self._critic_height_obs.copy_(heights)
@@ -698,9 +791,10 @@ class B1Z1UniFP(BaseTask):
         if self._critic_height_obs.shape[1] > 0:
             critic_obs = torch.cat((critic_obs, self._critic_height_obs), dim=-1)
 
+
         if critic_obs.shape[1] != self.cfg.env.num_privileged_obs:
             raise RuntimeError(
-                f"B1Z1 UniFP privileged observation size mismatch: "
+                f"B1Z1 PACT privileged observation size mismatch: "
                 f"got {critic_obs.shape[1]}, expected {self.cfg.env.num_privileged_obs}"
             )
         self._critic_obs_slot = (self._critic_obs_slot + 1) % len(self.critic_obs_slots)
@@ -762,8 +856,9 @@ class B1Z1UniFP(BaseTask):
         base_yaw_quat = self._get_base_yaw_quat(env_ids)
         # ee_center = self.simulator.base_pos[env_ids] + quat_apply(base_yaw_quat, self.ee_goal_center_offset[env_ids])
         ee_center = self.get_ee_goal_spherical_center(base_yaw_quat, env_ids)
-        forces_cmd_world = quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd[env_ids])
-        force_offset = (self.ee_force_ext_world[env_ids] + forces_cmd_world) / self.gripper_force_kps[env_ids]
+        # This task never turns force into a shifted position command. The
+        # magenta marker is diagnostic only: the soft impedance equilibrium.
+        force_offset = self.ee_force_ext_world[env_ids] / self.gripper_force_kps[env_ids]
         ee_goal_offset_world = self.curr_ee_goal_cart_world[env_ids] + force_offset
         ee_pos = self.simulator.ee_pos[env_ids]
 
@@ -836,28 +931,6 @@ class B1Z1UniFP(BaseTask):
         ).repeat(len(env_ids), 1)
         return link06_pos + quat_apply(link06_quat, tcp_offset)
 
-    def set_impedance_force_estimates(self, obs_pred):
-        """Set estimator-predicted local force values used by the play-time impedance controller."""
-        if isinstance(obs_pred, np.ndarray):
-            obs_pred = torch.as_tensor(obs_pred, device=self.device, dtype=torch.float)
-        else:
-            obs_pred = obs_pred.to(device=self.device, dtype=torch.float)
-        if obs_pred.shape[1] < 12:
-            raise RuntimeError(f"Expected at least 12 predicted UniFP labels, got {obs_pred.shape[1]}")
-
-        # Decoder target layout: [base_vel(3), ee_sphere(3), ee_force(3), base_force(3)].
-        self.estimated_ee_force_local[:] = obs_pred[:, 6:9] / self.obs_scales.ee_force
-        self.estimated_base_force_local[:] = obs_pred[:, 9:12] / self.obs_scales.base_force
-
-    def _apply_external_impedance_compensation(self):
-        """Cancel force offsets using estimator-predicted local forces, not simulator force buffers."""
-        if self.cfg.commands.compensate_ee_external_force:
-            self.current_Fxyz_gripper_cmd[:] = -self.estimated_ee_force_local
-        if self.cfg.commands.compensate_base_external_force:
-            self.current_Fxyz_base_cmd[:] = -self.estimated_base_force_local
-        self.commands[:, 9:12] = self.current_Fxyz_gripper_cmd
-        self.commands[:, 12:15] = self.current_Fxyz_base_cmd
-
     def _pre_sim_step(self, actions):
         """Clip/store actor actions and optionally apply actuator delay."""
         actions = torch.clip(actions, -self.cfg.normalization.clip_actions, self.cfg.normalization.clip_actions).to(self.device)
@@ -905,11 +978,7 @@ class B1Z1UniFP(BaseTask):
         # UniFP samples many standing commands; after force randomization starts
         # that probability increases so the force policy sees static balancing
         # cases under disturbance.
-        zero_prob = (
-            self.cfg.commands.zero_vel_cmd_prob_after_force
-            if self.force_command_randomization_active
-            else self.cfg.commands.zero_vel_cmd_prob
-        )
+        zero_prob = self.cfg.commands.zero_vel_cmd_prob_after_force if self.force_randomization_active else self.cfg.commands.zero_vel_cmd_prob
         zero_mask = torch.rand(len(env_ids), device=self.device) < zero_prob
         zero_env_ids = env_ids[zero_mask]
         self.commands[zero_env_ids, :2] = 0.0
@@ -938,8 +1007,6 @@ class B1Z1UniFP(BaseTask):
         else:
             self.commands[stop_env_ids, 2] = 0.0
         self._resample_ee_goal(env_ids)
-
-        self._reset_progress_statistics(env_ids)
 
     def _update_heading_command(self):
         """PACT-style desired heading conversion without using UniFP command slot 3."""
@@ -1038,12 +1105,9 @@ class B1Z1UniFP(BaseTask):
         self.curr_ee_goal_cart = sphere2cart(self.curr_ee_goal_sphere)
         self._refresh_curr_ee_goal_world()
 
-        # Command vector layout used by the actor:
-        # 0:3 base velocity, 3:6 EE spherical target, 6:9 reserved orientation,
-        # 9:12 EE force command, 12:15 base force command.
+        # Command vector layout: base velocity followed by the UniFP spherical
+        # EE target. Force targets are deliberately absent.
         self.commands[:, 3:6] = self.curr_ee_goal_sphere
-        self.commands[:, 9:12] = self.current_Fxyz_gripper_cmd
-        self.commands[:, 12:15] = self.current_Fxyz_base_cmd
 
     def _refresh_curr_ee_goal_world(self, env_ids=None):
         """Refresh cached world-frame EE target positions from spherical commands."""
@@ -1155,21 +1219,21 @@ class B1Z1UniFP(BaseTask):
 
         # Original UniFP zeros the stance half of each diagonal before applying
         # the sinusoidal swing offsets to thigh/calf reference joints.
-        sin_pos_l[sin_pos_l > 0] = sin_pos_l[sin_pos_l > 0] * (1 - self.cfg.rewards.target_joint_pos_thd) / (1 + self.cfg.rewards.target_joint_pos_thd) * 0.0
+        sin_pos_l[sin_pos_l > 0] = 0.0
         self.ref_dof_pos[:, idx["FL_thigh_joint"]] -= sin_pos_l * scale_1
         self.ref_dof_pos[:, idx["FL_calf_joint"]] += sin_pos_l * scale_2
         self.ref_dof_pos[:, idx["RR_thigh_joint"]] -= sin_pos_l * scale_1
         self.ref_dof_pos[:, idx["RR_calf_joint"]] += sin_pos_l * scale_2
 
-        sin_pos_r[sin_pos_r < 0] = sin_pos_r[sin_pos_r < 0] * (1 - self.cfg.rewards.target_joint_pos_thd) / (1 + self.cfg.rewards.target_joint_pos_thd) * 0.0
+        sin_pos_r[sin_pos_r < 0] = 0.0
         self.ref_dof_pos[:, idx["FR_thigh_joint"]] += sin_pos_r * scale_1
         self.ref_dof_pos[:, idx["FR_calf_joint"]] -= sin_pos_r * scale_2
         self.ref_dof_pos[:, idx["RL_thigh_joint"]] += sin_pos_r * scale_1
         self.ref_dof_pos[:, idx["RL_calf_joint"]] -= sin_pos_r * scale_2
 
         # Convert signed forward velocity commands into a bounded thigh-angle
-        # amplitude. The phase lead applies only to this added fore-aft sweep,
-        # leaving the original UniFP lift/flexion and contact clock unshifted.
+        # amplitude. Only this added sweep receives the optimized phase lead;
+        # the original UniFP lift/flexion and contact clock remain unshifted.
         sweep_phase = torch.remainder(
             phase + self.cfg.rewards.sweep_phase_lead,
             1.0,
@@ -1206,8 +1270,6 @@ class B1Z1UniFP(BaseTask):
         if progress >= 1.0:
             return float(final)
 
-        # Epsilon supports a zero final weight without taking log(0); the exact
-        # configured endpoint is returned once the schedule reaches duration.
         epsilon = 1.0e-12
         effective_initial = max(float(initial), epsilon)
         effective_final = max(float(final), epsilon)
@@ -1259,46 +1321,37 @@ class B1Z1UniFP(BaseTask):
             )
 
     def _reset_force_events(self, env_ids):
-        """Clear and resample per-env timers for all four UniFP force streams."""
+        """Clear and resample timers for the external EE and base force streams."""
         if len(env_ids) == 0:
             return
-        self.freed_envs_gripper_cmd[env_ids] = False
         self.freed_envs_gripper_ext[env_ids] = False
-        self.selected_env_ids_gripper_cmd[env_ids] = False
         self.selected_env_ids_gripper_ext[env_ids] = False
-        self.force_target_gripper_cmd[env_ids] = 0.0
         self.force_target_gripper_ext[env_ids] = 0.0
-        self.push_end_time_gripper_cmd[env_ids] = 0.0
         self.push_end_time_gripper_ext[env_ids] = 0.0
-        self.push_duration_gripper_cmd[env_ids] = 0.0
         self.push_duration_gripper_ext[env_ids] = 0.0
-        self.push_interval_gripper_cmd[env_ids] = self._rand_force_interval(
-            self.push_interval_gripper_cmd_min,
-            self.push_interval_gripper_cmd_max,
-            (len(env_ids),),
-        )
         self.push_interval_gripper_ext[env_ids] = self._rand_force_interval(
             self.push_interval_gripper_ext_min,
             self.push_interval_gripper_ext_max,
             (len(env_ids),),
         )
 
-        self.freed_envs_base_cmd[env_ids] = False
         self.freed_envs_base_ext[env_ids] = False
-        self.selected_env_ids_base_cmd[env_ids] = False
         self.selected_env_ids_base_ext[env_ids] = False
-        self.force_target_base_cmd[env_ids] = 0.0
         self.force_target_base_ext[env_ids] = 0.0
-        self.push_end_time_base_cmd[env_ids] = 0.0
         self.push_end_time_base_ext[env_ids] = 0.0
-        self.push_duration_base_cmd[env_ids] = 0.0
         self.push_duration_base_ext[env_ids] = 0.0
-        self.push_interval_base_cmd[env_ids] = self._rand_force_interval(
-            self.push_interval_base_cmd_min,
-            self.push_interval_base_cmd_max,
+        self.push_interval_base_ext[env_ids] = self._rand_force_interval(
+            self.push_interval_base_ext_min,
+            self.push_interval_base_ext_max,
             (len(env_ids),),
         )
-        self.push_interval_base_ext[env_ids] = self._rand_force_interval(
+
+        self.freed_envs_base_torque_ext[env_ids] = False
+        self.selected_env_ids_base_torque_ext[env_ids] = False
+        self.force_target_base_torque_ext[env_ids] = 0.0
+        self.push_end_time_base_torque_ext[env_ids] = 0.0
+        self.push_duration_base_torque_ext[env_ids] = 0.0
+        self.push_interval_base_torque_ext[env_ids] = self._rand_force_interval(
             self.push_interval_base_ext_min,
             self.push_interval_base_ext_max,
             (len(env_ids),),
@@ -1342,11 +1395,9 @@ class B1Z1UniFP(BaseTask):
     ):
         """Update one triangular UniFP force profile.
 
-        A stream owns its own interval, duration, selected/free masks, target,
-        and output tensor. The profile ramps 0 -> target, holds through a
-        settling interval, then ramps target -> 0. The same helper is used for:
-        EE commanded force, EE external force, base commanded force, and base
-        external force.
+        A stream owns its interval, duration, selected/free masks, target, and
+        output tensor. The original UniFP profile ramps 0 -> target, holds,
+        then ramps target -> 0. Here it is used exclusively for disturbances.
         """
         new_env_ids = env_ids_all[(self.episode_length_buf[env_ids_all] % interval[env_ids_all]) == 0]
         if len(new_env_ids) > 0:
@@ -1415,37 +1466,14 @@ class B1Z1UniFP(BaseTask):
             duration[freed] = 0.0
 
     def _force_push_end_time_for(self, output):
-        if output is self.current_Fxyz_gripper_cmd:
-            return self.push_end_time_gripper_cmd
         if output is self.ee_force_ext_world:
             return self.push_end_time_gripper_ext
-        if output is self.current_Fxyz_base_cmd:
-            return self.push_end_time_base_cmd
+        if output is self.base_torque_ext_world:
+            return self.push_end_time_base_torque_ext
         return self.push_end_time_base_ext
 
     def _push_gripper(self, env_ids_all):
-        """Update EE commanded-force and external-force streams."""
-        if self.force_command_randomization_active:
-            self._update_force_stream(
-                env_ids_all,
-                interval=self.push_interval_gripper_cmd,
-                interval_min=self.push_interval_gripper_cmd_min,
-                interval_max=self.push_interval_gripper_cmd_max,
-                duration=self.push_duration_gripper_cmd,
-                duration_min=self.push_duration_gripper_cmd_min,
-                duration_max=self.push_duration_gripper_cmd_max,
-                settling_time=self.settling_time_force_gripper,
-                forced_prob=self.cfg.commands.gripper_forced_prob_cmd,
-                selected=self.selected_env_ids_gripper_cmd,
-                freed=self.freed_envs_gripper_cmd,
-                target=self.force_target_gripper_cmd,
-                output=self.current_Fxyz_gripper_cmd,
-                force_range=self.cfg.commands.max_push_force_xyz_gripper_cmd,
-            )
-        else:
-            self.current_Fxyz_gripper_cmd[env_ids_all] = 0.0
-            self.selected_env_ids_gripper_cmd[env_ids_all] = False
-            self.force_target_gripper_cmd[env_ids_all] = 0.0
+        """Update the external end-effector disturbance stream."""
         if self.cfg.commands.apply_ee_external_forces:
             self._update_force_stream(
                 env_ids_all,
@@ -1472,29 +1500,7 @@ class B1Z1UniFP(BaseTask):
             self.simulator.apply_ee_force(self.ee_force_ext_world)
 
     def _push_robot_base(self, env_ids_all):
-        """Update base commanded-force and external-force streams."""
-        if self.force_command_randomization_active:
-            self._update_force_stream(
-                env_ids_all,
-                interval=self.push_interval_base_cmd,
-                interval_min=self.push_interval_base_cmd_min,
-                interval_max=self.push_interval_base_cmd_max,
-                duration=self.push_duration_base_cmd,
-                duration_min=self.push_duration_base_cmd_min,
-                duration_max=self.push_duration_base_cmd_max,
-                settling_time=self.settling_time_force_base,
-                forced_prob=self.cfg.commands.base_forced_prob_cmd,
-                selected=self.selected_env_ids_base_cmd,
-                freed=self.freed_envs_base_cmd,
-                target=self.force_target_base_cmd,
-                output=self.current_Fxyz_base_cmd,
-                force_range=self.cfg.commands.max_push_force_xyz_base_cmd,
-                zero_z=True,
-            )
-        else:
-            self.current_Fxyz_base_cmd[env_ids_all] = 0.0
-            self.selected_env_ids_base_cmd[env_ids_all] = False
-            self.force_target_base_cmd[env_ids_all] = 0.0
+        """Update the external base disturbance stream."""
         if self.cfg.commands.apply_base_external_forces:
             self._update_force_stream(
                 env_ids_all,
@@ -1520,20 +1526,45 @@ class B1Z1UniFP(BaseTask):
             self.force_target_base_ext[env_ids_all] = 0.0
         if hasattr(self.simulator, "apply_base_force"):
             self.simulator.apply_base_force(self.base_force_ext_world)
+        if self.cfg.commands.apply_base_external_torques:
+            self._update_force_stream(
+                env_ids_all,
+                interval=self.push_interval_base_torque_ext,
+                interval_min=self.push_interval_base_ext_min,
+                interval_max=self.push_interval_base_ext_max,
+                duration=self.push_duration_base_torque_ext,
+                duration_min=self.push_duration_base_ext_min,
+                duration_max=self.push_duration_base_ext_max,
+                settling_time=self.settling_time_force_base,
+                forced_prob=self.cfg.commands.base_torque_forced_prob_ext,
+                selected=self.selected_env_ids_base_torque_ext,
+                freed=self.freed_envs_base_torque_ext,
+                target=self.force_target_base_torque_ext,
+                output=self.base_torque_ext_world,
+                force_range=self.cfg.commands.max_push_torque_xyz_base_ext,
+                range_scale=self.external_force_scale,
+            )
+        else:
+            self.base_torque_ext_world[env_ids_all] = 0.0
+            self.selected_env_ids_base_torque_ext[env_ids_all] = False
+            self.force_target_base_torque_ext[env_ids_all] = 0.0
+        if hasattr(self.simulator, "apply_base_torque"):
+            self.simulator.apply_base_torque(self.base_torque_ext_world)
 
     def _reset_dofs(self, env_ids):
         """Reset B1/Z1 DOFs with original UniFP perturbation structure."""
         dof_pos = self.simulator.default_dof_pos.repeat(len(env_ids), 1)
         leg_low, leg_high = self.cfg.init_state.leg_dof_pos_perturb_range
         arm_low, arm_high = self.cfg.init_state.arm_dof_pos_perturb_range
-        # UniFP applies bounded additive offsets around the crouched default.
+        # Add a small joint-angle offset while preserving the crouched default.
+        # Multiplying by [-0.15, 0.15] collapses the legs toward q=0 and causes
+        # the high-gain PD controller to launch the robot on its first step.
         dof_pos[:, :12] = self.simulator.default_dof_pos[:, :12].repeat(len(env_ids), 1) + torch_rand_float(
             leg_low,
             leg_high,
             (len(env_ids), 12),
             self.device,
         )
-        
         # Arm joints are perturbed additively; gripper joints remain at default.
         dof_pos[:, 12:17] += torch_rand_float(
             arm_low,
@@ -1561,7 +1592,7 @@ class B1Z1UniFP(BaseTask):
             torch.zeros_like(rand_yaw),
             rand_yaw,
         )
-        base_lin_vel = torch_rand_float(-0.10, 0.10, (len(env_ids), 3), self.device)
+        base_lin_vel = torch_rand_float(-0.1, 0.1, (len(env_ids), 3), self.device)
         base_ang_vel = torch_rand_float(-0.1, 0.1, (len(env_ids), 3), self.device)
         self.simulator.reset_root_states(env_ids, base_pos, base_quat, base_lin_vel, base_ang_vel)
 
@@ -1580,9 +1611,9 @@ class B1Z1UniFP(BaseTask):
             return
         mean_tracking = torch.mean(self.episode_sums["tracking_lin_vel_force_world"][env_ids]) / self.max_episode_length
         if mean_tracking > self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel_force_world"]:
-            for key in ["lin_vel_x", "lin_vel_y"]:
-                self.command_ranges[key][0] = np.clip(self.command_ranges[key][0] - 0.2, -self.cfg.commands.max_curriculum, 0.0)
-                self.command_ranges[key][1] = np.clip(self.command_ranges[key][1] + 0.2, 0.0, self.cfg.commands.max_curriculum)
+            for key in ["lin_vel_x", "lin_vel_y", "ang_vel_yaw"]:
+                self.command_ranges[key][0] = np.clip(self.command_ranges[key][0] - 0.5, -self.cfg.commands.max_curriculum, 0.0)
+                self.command_ranges[key][1] = np.clip(self.command_ranges[key][1] + 0.5, 0.0, self.cfg.commands.max_curriculum)
 
     def step_reward_curriculum(self, num_iters):
         """Cosine-ramp selected reward scales during training."""
@@ -1653,15 +1684,6 @@ class B1Z1UniFP(BaseTask):
                 self.obs_scales.ee_sphe_radius_cmd,
                 self.obs_scales.ee_sphe_pitch_cmd,
                 self.obs_scales.ee_sphe_yaw_cmd,
-                1.0,
-                1.0,
-                1.0,
-                self.obs_scales.ee_force,
-                self.obs_scales.ee_force,
-                self.obs_scales.ee_force,
-                self.obs_scales.base_force,
-                self.obs_scales.base_force,
-                self.obs_scales.base_force,
             ],
             device=self.device,
         )
@@ -1673,10 +1695,14 @@ class B1Z1UniFP(BaseTask):
             ],
             device=self.device,
         )
+        self.base_wrench_scale = torch.tensor(
+            [self.obs_scales.base_force] * 3 + [self.obs_scales.base_force] * 3,
+            device=self.device,
+        )
         self.actions = torch.zeros(self.num_envs, self.num_actions, device=self.device)
         self.last_actions = torch.zeros_like(self.actions)
         self.llast_actions = torch.zeros_like(self.actions)
-
+        self.feet_air_time = torch.zeros(self.num_envs, len(self.simulator.feet_indices), device=self.device)
         # Boolean previous-step foot-contact latch. Keeping this bool avoids
         # ambiguous reward dtype changes when contact rewards reuse the buffer.
         self.last_contacts = torch.zeros(
@@ -1685,52 +1711,6 @@ class B1Z1UniFP(BaseTask):
             dtype=torch.bool,
             device=self.device,
         )
-        self.feet_air_time = torch.zeros(self.num_envs, len(self.simulator.feet_indices), device=self.device)
-        self.feet_stance_time = torch.zeros_like(self.feet_air_time)
-        self.valid_swing = torch.zeros_like(self.last_contacts)
-
-        # Prevent multiple reward functions from updating the statistics in one step.
-        self._feet_stats_update_step = -1
-        self._feet_stats = {}
-
-        self.progress_vel_ema = torch.zeros(self.num_envs, 2, device=self.device)
-
-        # Rolling world-frame displacement history used by the locomotion
-        # progress rewards. Commands may be resampled between episode resets,
-        # so each environment owns independent actual/desired history.
-        self.progress_window_s = 0.40
-        self.progress_window_steps = max(
-            1, int(round(self.progress_window_s / self.dt))
-        )
-        self.progress_delta_buffer = torch.zeros(
-            self.num_envs,
-            self.progress_window_steps,
-            2,
-            device=self.device,
-        )
-        self.progress_desired_buffer = torch.zeros_like(
-            self.progress_delta_buffer
-        )
-        self.progress_valid_steps = torch.zeros(
-            self.num_envs,
-            dtype=torch.long,
-            device=self.device,
-        )
-        self.progress_buffer_index = 0
-        self.last_progress_base_pos = self.simulator.base_pos[:, :2].clone()
-        self._progress_update_step = -1
-
-        self.step_liftoff_pos = torch.zeros(
-            self.num_envs, 4, 2, device=self.device
-        )
-        self.step_direction_world = torch.zeros_like(
-            self.step_liftoff_pos
-        )
-        self.step_max_progress = torch.zeros(
-            self.num_envs, 4, device=self.device
-        )
-
-
         # Original UniFP uses a persistent phase variable instead of deriving
         # phase directly from episode time. The phase only advances while a
         # walking command is active and is reset to zero for standing commands.
@@ -1755,7 +1735,7 @@ class B1Z1UniFP(BaseTask):
         expected_privileged_obs = self.cfg.env.num_critic_state_obs + self.cfg.env.num_height_obs
         if expected_privileged_obs != self.cfg.env.num_privileged_obs:
             raise ValueError(
-                "B1Z1 privileged-observation config is inconsistent: "
+                "B1Z1 PACT privileged-observation config is inconsistent: "
                 f"state ({self.cfg.env.num_critic_state_obs}) + heights "
                 f"({self.cfg.env.num_height_obs}) != total ({self.cfg.env.num_privileged_obs})"
             )
@@ -1764,8 +1744,8 @@ class B1Z1UniFP(BaseTask):
         )
         if configured_height_points != self.cfg.env.num_height_obs:
             raise ValueError(
-                f"B1Z1 terrain grid contains {configured_height_points} points, expected "
-                f"{self.cfg.env.num_height_obs}"
+                f"B1Z1 PACT terrain grid contains {configured_height_points} points, "
+                f"expected {self.cfg.env.num_height_obs}"
             )
         self._critic_obs_buf = torch.zeros(
             self.num_envs, self.cfg.env.num_critic_state_obs, device=self.device
@@ -1845,51 +1825,36 @@ class B1Z1UniFP(BaseTask):
 
         self.ee_force_ext_world = torch.zeros(self.num_envs, 3, device=self.device)
         self.base_force_ext_world = torch.zeros(self.num_envs, 3, device=self.device)
-        self.current_Fxyz_gripper_cmd = torch.zeros(self.num_envs, 3, device=self.device)
-        self.current_Fxyz_base_cmd = torch.zeros(self.num_envs, 3, device=self.device)
-        self.estimated_ee_force_local = torch.zeros(self.num_envs, 3, device=self.device)
-        self.estimated_base_force_local = torch.zeros(self.num_envs, 3, device=self.device)
-        self.freed_envs_gripper_cmd = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.base_torque_ext_world = torch.zeros(self.num_envs, 3, device=self.device)
         self.freed_envs_gripper_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.selected_env_ids_gripper_cmd = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.selected_env_ids_gripper_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.push_interval_gripper_cmd = self._rand_force_interval(
-            self.push_interval_gripper_cmd_min,
-            self.push_interval_gripper_cmd_max,
-            (self.num_envs,),
-        )
         self.push_interval_gripper_ext = self._rand_force_interval(
             self.push_interval_gripper_ext_min,
             self.push_interval_gripper_ext_max,
             (self.num_envs,),
         )
-        self.push_end_time_gripper_cmd = torch.zeros(self.num_envs, device=self.device)
         self.push_end_time_gripper_ext = torch.zeros(self.num_envs, device=self.device)
-        self.push_duration_gripper_cmd = torch.zeros(self.num_envs, device=self.device)
         self.push_duration_gripper_ext = torch.zeros(self.num_envs, device=self.device)
-        self.force_target_gripper_cmd = torch.zeros(self.num_envs, 3, device=self.device)
         self.force_target_gripper_ext = torch.zeros(self.num_envs, 3, device=self.device)
 
-        self.freed_envs_base_cmd = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.freed_envs_base_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.selected_env_ids_base_cmd = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.selected_env_ids_base_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.push_interval_base_cmd = self._rand_force_interval(
-            self.push_interval_base_cmd_min,
-            self.push_interval_base_cmd_max,
-            (self.num_envs,),
-        )
         self.push_interval_base_ext = self._rand_force_interval(
             self.push_interval_base_ext_min,
             self.push_interval_base_ext_max,
             (self.num_envs,),
         )
-        self.push_end_time_base_cmd = torch.zeros(self.num_envs, device=self.device)
         self.push_end_time_base_ext = torch.zeros(self.num_envs, device=self.device)
-        self.push_duration_base_cmd = torch.zeros(self.num_envs, device=self.device)
         self.push_duration_base_ext = torch.zeros(self.num_envs, device=self.device)
-        self.force_target_base_cmd = torch.zeros(self.num_envs, 3, device=self.device)
         self.force_target_base_ext = torch.zeros(self.num_envs, 3, device=self.device)
+        self.freed_envs_base_torque_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.selected_env_ids_base_torque_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.push_interval_base_torque_ext = self._rand_force_interval(
+            self.push_interval_base_ext_min, self.push_interval_base_ext_max, (self.num_envs,)
+        )
+        self.push_end_time_base_torque_ext = torch.zeros(self.num_envs, device=self.device)
+        self.push_duration_base_torque_ext = torch.zeros(self.num_envs, device=self.device)
+        self.force_target_base_torque_ext = torch.zeros(self.num_envs, 3, device=self.device)
         self.gripper_force_kps = torch_rand_float(*self.cfg.commands.gripper_force_kp_range, (self.num_envs, 1), self.device)
         self.gripper_force_kds = torch_rand_float(*self.cfg.commands.gripper_force_kd_range, (self.num_envs, 1), self.device)
         self.base_force_kps = torch_rand_float(*self.cfg.commands.base_force_kp_range, (self.num_envs, 1), self.device)
@@ -1915,12 +1880,20 @@ class B1Z1UniFP(BaseTask):
             device=self.device,
             dtype=torch.float,
         )
+        self.prev_impedance_ee_pos = torch.zeros(self.num_envs, 3, device=self.device)
+        self.prev_impedance_ee_vel = torch.zeros_like(self.prev_impedance_ee_pos)
+        self.prev_impedance_target = self.curr_ee_goal_cart.clone()
+        self.prev_impedance_target_vel = torch.zeros_like(self.prev_impedance_ee_pos)
 
         # Taken from b1z1 URDF, hardcoded for now...
         self.z1_link00_offset = torch.tensor(
             [0.3000, 0.0000, 0.0900],
             device=self.device,
             dtype=torch.float,
+        )
+        # Same nominal local Z1 waist center used by the spherical command.
+        self.z1_workspace_center_local = torch.tensor(
+            [0.3000, 0.0000, 0.1485], device=self.device, dtype=torch.float
         )
         self.z1_joint_offsets = torch.tensor(
             [
@@ -1989,22 +1962,14 @@ class B1Z1UniFP(BaseTask):
         self.kp_scale_offset = (cfg.domain_rand.kp_range[0] + cfg.domain_rand.kp_range[1]) / 2
         self.kd_scale_offset = (cfg.domain_rand.kd_range[0] + cfg.domain_rand.kd_range[1]) / 2
         cfg.domain_rand.push_interval = np.ceil(cfg.domain_rand.push_interval_s / self.dt)
-        cfg.runner_steps_per_iter = cfg.env.num_steps_per_env
-        self.push_interval_gripper_cmd_min = np.ceil(cfg.commands.push_gripper_interval_s_cmd[0] / self.dt)
-        self.push_interval_gripper_cmd_max = np.ceil(cfg.commands.push_gripper_interval_s_cmd[1] / self.dt)
+        cfg.runner_steps_per_iter = 24
         self.push_interval_gripper_ext_min = np.ceil(cfg.commands.push_gripper_interval_s_ext[0] / self.dt)
         self.push_interval_gripper_ext_max = np.ceil(cfg.commands.push_gripper_interval_s_ext[1] / self.dt)
-        self.push_duration_gripper_cmd_min = np.ceil(cfg.commands.push_gripper_duration_s_cmd[0] / self.dt)
-        self.push_duration_gripper_cmd_max = np.ceil(cfg.commands.push_gripper_duration_s_cmd[1] / self.dt)
         self.push_duration_gripper_ext_min = np.ceil(cfg.commands.push_gripper_duration_s_ext[0] / self.dt)
         self.push_duration_gripper_ext_max = np.ceil(cfg.commands.push_gripper_duration_s_ext[1] / self.dt)
         self.settling_time_force_gripper = np.ceil(cfg.commands.settling_time_force_gripper_s / self.dt)
-        self.push_interval_base_cmd_min = np.ceil(cfg.commands.push_base_interval_s_cmd[0] / self.dt)
-        self.push_interval_base_cmd_max = np.ceil(cfg.commands.push_base_interval_s_cmd[1] / self.dt)
         self.push_interval_base_ext_min = np.ceil(cfg.commands.push_base_interval_s_ext[0] / self.dt)
         self.push_interval_base_ext_max = np.ceil(cfg.commands.push_base_interval_s_ext[1] / self.dt)
-        self.push_duration_base_cmd_min = np.ceil(cfg.commands.push_base_duration_s_cmd[0] / self.dt)
-        self.push_duration_base_cmd_max = np.ceil(cfg.commands.push_base_duration_s_cmd[1] / self.dt)
         self.push_duration_base_ext_min = np.ceil(cfg.commands.push_base_duration_s_ext[0] / self.dt)
         self.push_duration_base_ext_max = np.ceil(cfg.commands.push_base_duration_s_ext[1] / self.dt)
         self.settling_time_force_base = np.ceil(cfg.commands.settling_time_force_base_s / self.dt)
@@ -2034,58 +1999,118 @@ class B1Z1UniFP(BaseTask):
         ):
             if getattr(cfg.rewards, name) < 0.0:
                 raise ValueError(f"rewards.{name} must be nonnegative")
+        self.tradeoff_lowerbounds = torch.tensor(cfg.control.tradeoff_init_weights, device=sim_device)
+        self.tradeoff_upperbounds = torch.tensor(cfg.control.tradeoff_final_weights, device=sim_device)
+        self.tradeoff_num_steps = max(1, int(cfg.control.tradeoff_steps))
+        self.tradeoff_bound_diff = self.tradeoff_upperbounds - self.tradeoff_lowerbounds
+        self.use_tradeoff = cfg.control.use_tradeoff_curriculum
+        self.tradeoff_step_ctr = torch.zeros((cfg.env.num_envs, 1), device=sim_device)
+
+    def step_tradeoff_curriculum(self, env_ids):
+        """Advance position/torque mixing after successful velocity tracking.
+
+        This is the existing PACT curriculum, retained here because it changes
+        the actual torque composition observed by the whole-body loss.
+        """
+        tracking = self.episode_sums["tracking_lin_vel"][env_ids] / self.max_episode_length
+        success = tracking > self.cfg.control.tradeoff_threshold * self.reward_scales["tracking_lin_vel"]
+        self.tradeoff_step_ctr[env_ids[success]] = torch.clamp(
+            self.tradeoff_step_ctr[env_ids[success]] + 1.0, max=float(self.tradeoff_num_steps)
+        )
+        fraction = self.tradeoff_step_ctr[env_ids] / float(self.tradeoff_num_steps)
+        weights = self.tradeoff_lowerbounds + fraction * self.tradeoff_bound_diff
+        self.simulator.feedforward_tau_weight[env_ids] = weights[:, :1]
+        self.simulator.feedback_tau_weight[env_ids] = weights[:, 1:2]
 
     # Rewards
     def _reward_tracking_lin_vel_force_world(self):
-        base_yaw_quat = self._get_base_yaw_quat()
-        force_offset = quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world) + self.current_Fxyz_base_cmd
-        force_offset = force_offset[:, :2] / self.base_force_kds
-        base_lin_vel_offset = self.commands[:, :2] + force_offset
-        
-        non_stop_sign = (torch.abs(base_lin_vel_offset[:, 0]) > self.cfg.commands.lin_vel_x_clip) | (torch.abs(base_lin_vel_offset[:, 1]) > self.cfg.commands.lin_vel_y_clip) | (torch.abs(self.commands[:, 2]) > self.cfg.commands.ang_vel_yaw_clip)
-        base_lin_vel_offset[:, :3] *= non_stop_sign.unsqueeze(1)
-
-        error = torch.sum(torch.square(base_lin_vel_offset - self.simulator.base_lin_vel[:, :2]), dim=1)
-
+        # No external impedance wrapper: disturbance does not shift velocity
+        # commands. The coupled action policy must reject it itself.
+        error = torch.sum(torch.square(self.commands[:, :2] - self.simulator.base_lin_vel[:, :2]), dim=1)
         return torch.exp(-error / self.cfg.rewards.tracking_sigma)
-
-        # # Remove the reward that comes from simply standing still IF the robot should be moving
-        # #     help remove the incentive to stand-still to accumulate positive reward
-        # target_mag = torch.norm(base_lin_vel_offset, dim=1)
-
-        # tracking = torch.exp(-error / self.cfg.rewards.tracking_sigma)
-        # standing_baseline = torch.exp(
-        #     -torch.sum(torch.square(base_lin_vel_offset), dim=1) / self.cfg.rewards.tracking_sigma
-        # )
-
-        # moving = target_mag > 0.1
-
-        # max_improvement = (1.0 - standing_baseline).clamp_min(1e-4)
-
-        # moving_reward = (
-        #     tracking - standing_baseline
-        # ) / max_improvement
-
-        # moving_reward = torch.clamp(moving_reward, -1.0, 1.0)
-
-        # reward = torch.where(
-        #     moving,
-        #     moving_reward,
-        #     tracking,
-        # )
-
-        # return reward.clamp_(min=0.0)
-
 
     def _reward_tracking_ang_vel(self):
         return torch.exp(-torch.square(self.commands[:, 2] - self.simulator.base_ang_vel[:, 2]) / self.cfg.rewards.tracking_sigma)
 
     def _reward_tracking_ee_force_world(self):
-        base_yaw_quat = self._get_base_yaw_quat()
-        force_offset = (self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)) / self.gripper_force_kps
-        target = self.curr_ee_goal_cart_world + force_offset
-        error = torch.sum(torch.abs(target - self.simulator.ee_pos), dim=1)
+        # UniFP convention inside PACT training: keep its EE target trajectory,
+        # but never turn external force into a shifted Cartesian target.
+        error = torch.sum(torch.abs(self.curr_ee_goal_cart_world - self.simulator.ee_pos), dim=1)
         return torch.exp(-error / self.cfg.rewards.tracking_ee_sigma)
+
+    def _reward_torque_cancellation(self):
+        """Penalize substantial same-joint cancellation between action heads.
+
+        For effective feedback and feedforward contributions ``fb`` and ``ff``,
+
+          c_j = |fb_j| + |ff_j| - |fb_j + ff_j|
+
+        is zero when the contributions agree (or either is zero), and equals
+        twice the smaller magnitude when they oppose. Normalizing by each
+        joint's torque limit makes the deadband comparable across the B1 legs
+        and Z1 arm. Only learned joints are included because passive joints
+        have no feedforward action with which the PD branch could conflict.
+        """
+        count = self.simulator._num_learned_actions
+        feedback = self.simulator.combined_feedback_torques[:, :count]
+        feedforward = self.simulator.combined_feedforward_torques[:, :count]
+        torque_limits = self.simulator._torque_limits[:count].clamp_min(1.0e-6)
+
+        cancellation = (
+            feedback.abs() + feedforward.abs() - (feedback + feedforward).abs()
+        ).clamp_min(0.0)
+        normalized_excess = torch.relu(
+            cancellation / torque_limits - self.cfg.rewards.torque_cancellation_deadband
+        )
+        return torch.mean(normalized_excess.square(), dim=-1)
+
+    def _reward_impedance_consistency(self):
+        """Reward a virtual translational impedance relation without control.
+
+        In the yaw-aligned Z1 workspace, define EE position ``x`` and moving
+        target ``x_d``. The residual is
+
+          r_imp = M_v (xdd_d - xdd) + D_v (xd_d - xd)
+                  + K_v (x_d - x) - F_ext.
+
+        Intuitively, a compliant end effector at the target has zero residual:
+        its motion-induced inertial/damping/spring response balances the
+        external force. Unlike UniFP's external impedance wrapper, this code
+        only converts ``r_imp`` into reward. It never shifts ``x_d``, modifies
+        the six-command interface, or overwrites the coupled torque action.
+        """
+        base_yaw_quat = self._get_base_yaw_quat()
+        center = self.get_ee_goal_spherical_center(base_yaw_quat)
+        ee_pos = quat_rotate_inverse(base_yaw_quat, self.simulator.ee_pos - center)
+        target = self.curr_ee_goal_cart
+        # Finite differences give velocity/acceleration for both the physical
+        # EE and the interpolated target. The low-pass step below prevents
+        # contact/measurement noise from dominating the reward.
+        raw_ee_vel = (ee_pos - self.prev_impedance_ee_pos) / self.dt
+        raw_target_vel = (target - self.prev_impedance_target) / self.dt
+        alpha = self.cfg.rewards.impedance_filter_alpha
+        ee_vel = alpha * raw_ee_vel + (1.0 - alpha) * self.prev_impedance_ee_vel
+        target_vel = alpha * raw_target_vel + (1.0 - alpha) * self.prev_impedance_target_vel
+        ee_acc = (ee_vel - self.prev_impedance_ee_vel) / self.dt
+        target_acc = (target_vel - self.prev_impedance_target_vel) / self.dt
+        # Express the world-applied disturbance in the same yaw-aligned frame
+        # as x and x_d before comparing force with virtual impedance terms.
+        external_force = quat_rotate_inverse(base_yaw_quat, self.ee_force_ext_world)
+        mass = torch.tensor(self.cfg.rewards.impedance_virtual_mass, device=self.device)
+        damping = torch.tensor(self.cfg.rewards.impedance_virtual_damping, device=self.device)
+        stiffness = torch.tensor(self.cfg.rewards.impedance_virtual_stiffness, device=self.device)
+        weights = torch.tensor(self.cfg.rewards.impedance_residual_weights, device=self.device)
+        residual = mass * (target_acc - ee_acc) + damping * (target_vel - ee_vel) + stiffness * (target - ee_pos) - external_force
+        self.last_impedance_residual = residual
+        self.prev_impedance_ee_pos.copy_(ee_pos)
+        self.prev_impedance_ee_vel.copy_(ee_vel)
+        self.prev_impedance_target.copy_(target)
+        self.prev_impedance_target_vel.copy_(target_vel)
+
+        # A bounded exponential makes the shaping signal largest at force/
+        # position consistency while avoiding unbounded penalties under large
+        # randomized disturbances.
+        return torch.exp(-torch.sum(torch.square(weights * residual), dim=-1) / self.cfg.rewards.impedance_sigma)
 
     def _reward_upright(self):
         tilt_sq = torch.sum(
@@ -2118,10 +2143,6 @@ class B1Z1UniFP(BaseTask):
     def _reward_ang_vel_xy(self):
         return torch.sum(torch.square(self.simulator.base_ang_vel[:, :2]), dim=1)
 
-    def _reward_orientation(self):
-        # Penalize non flat base orientation
-        return torch.sum(torch.square(self.simulator.projected_gravity[:, :2]), dim=1)
-
     def _reward_roll(self):
         return torch.square(self.simulator.base_euler[:, 0])
 
@@ -2134,12 +2155,6 @@ class B1Z1UniFP(BaseTask):
 
     def _reward_torques(self):
         return torch.sum(torch.square(self.simulator.torques[:, :17]), dim=1)
-
-    def _reward_leg_torques(self):
-        return torch.sum(torch.square(self.simulator.torques[:, :12]), dim=1)
-
-    def _reward_arm_torques(self):
-        return torch.sum(torch.square(self.simulator.torques[:, 12:17]), dim=1)
 
     def _reward_dof_vel(self):
         return torch.sum(torch.square(self.simulator.dof_vel[:, :17]), dim=1)
@@ -2215,174 +2230,21 @@ class B1Z1UniFP(BaseTask):
     def _reward_feet_contact_forces(self):
         return torch.sum((torch.norm(self.simulator.link_contact_forces[:, self.simulator.feet_indices, :], dim=-1) - self.cfg.rewards.max_contact_force).clip(min=0.0), dim=1)
 
-    def _update_feet_air_time_stats(self):
-        """
-        Update and cache foot contact, stance-time, and air-time statistics.
-
-        This function may be called by multiple rewards, but updates the stateful
-        buffers at most once per environment step.
-        """
-        current_step = int(self.common_step_counter)
-
-        if self._feet_stats_update_step == current_step:
-            return self._feet_stats
-
-        contact = (
-            self.simulator.link_contact_forces[
-                :, self.simulator.feet_indices, 2
-            ] > 1.0
-        )
-
-        previous_contact = self.last_contacts.clone()
-
-        # Two-sample contact filtering suppresses single-frame contact losses.
-        contact_filt = torch.logical_or(contact, previous_contact)
-
-        previous_air_time = self.feet_air_time.clone()
-        previous_stance_time = self.feet_stance_time.clone()
-
-        # Raw contact-to-noncontact transition.
-        liftoff = previous_contact & (~contact)
-
-        # Only accept liftoff after a meaningful stance interval. This reduces
-        # reward exploitation through rapid contact chatter.
-        valid_liftoff = (
-            liftoff
-            & (previous_stance_time >= 0.08)
-        )
-
-        # Preserve valid-swing status until the foot contacts again.
-        self.valid_swing &= ~contact
-        self.valid_swing |= valid_liftoff
-
-        # Advance air time before detecting touchdown, matching the original
-        # air-time reward convention.
-        self.feet_air_time += self.dt
-
-        first_contact = (
-            (previous_air_time > 0.0)
-            & contact_filt
-        )
-
-        # Save duration before resetting feet that have contacted.
-        touchdown_air_time = self.feet_air_time.clone()
-
-        # Air time is retained only while filtered contact is absent.
-        self.feet_air_time *= (~contact_filt).float()
-
-        # Update stance duration.
-        self.feet_stance_time += self.dt
-        self.feet_stance_time *= contact_filt.float()
-
-        # Store the newest raw contact state without replacing the buffer.
-        self.last_contacts.copy_(contact)
-
-        self._feet_stats = {
-            "contact": contact,
-            "contact_filt": contact_filt,
-            "first_contact": first_contact,
-            "liftoff": liftoff,
-            "valid_liftoff": valid_liftoff,
-            "valid_swing": self.valid_swing.clone(),
-            "air_time": self.feet_air_time.clone(),
-            "touchdown_air_time": touchdown_air_time,
-            "stance_time": self.feet_stance_time.clone(),
-        }
-        self._feet_stats_update_step = current_step
-
-        return self._feet_stats
-
-    # def _reward_feet_air_time(self):
-    #     contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0
-    #     contact_filt = torch.logical_or(contact, self.last_contacts)
-    #     # Preserve the buffer object and dtype so other rewards cannot inherit
-    #     # accidental bool/float conversions through aliasing.
-    #     self.last_contacts.copy_(contact)
-    #     first_contact = (self.feet_air_time > 0.) * contact_filt
-    #     self.feet_air_time += self.dt
-    #     rew_airTime = torch.sum((self.feet_air_time - 0.12) * first_contact, dim=1)  # reward only on first contact with the ground
-    #     rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.1  # no reward for zero command
-    #     self.feet_air_time *= (~contact_filt).float()
-    #     return rew_airTime
-
-
-    def _reward_sparse_contacts(self):
-        fz = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2]
-        contact_prob = torch.sigmoid(10.0*(fz - 10.0))
-        num_contacts = torch.sum(contact_prob, dim=-1)
-
-        moving = self.get_walking_cmd_mask()
-        
-        return torch.exp(-torch.square(num_contacts - 2.0)) * moving.float()
-
     def _reward_feet_air_time(self):
-        """
-        Reward sufficiently long swing periods when the foot touches down.
-        """
-        stats = self._update_feet_air_time_stats()
-
-        first_contact = stats["first_contact"]
-        touchdown_air_time = stats["touchdown_air_time"]
-
-        error = (touchdown_air_time - 0.30)
-        error[:,0:2] *= 2                 # give twice the weight to the front feet
-
-        reward = torch.sum(error * first_contact.float(), dim=1)
-
-        reward *= self.get_walking_cmd_mask().float()
-
-        return reward
-
-    def _reward_early_swing(self):
-        """
-        Reward upward foot motion during the beginning of a valid swing.
-
-        A swing is valid only when initiated after at least 0.08 seconds of
-        continuous stance. This helps suppress rapid tapping exploits.
-        """
-        stats = self._update_feet_air_time_stats()
-
-        contact = stats["contact"]
-        contact_filt = stats["contact_filt"]
-        air_time = stats["air_time"]
-        valid_swing = stats["valid_swing"]
-
-        # Apply guidance during the first 100 ms of a valid swing.
-        early_swing = (
-            (~contact_filt)
-            & valid_swing
-            & (air_time > 0.0)
-            & (air_time <= 0.18)
-        )
-
-        foot_vel_z = self.simulator.feet_vel[:, :, 2]
-
-        upward_velocity_reward = torch.clamp(
-            foot_vel_z / 0.40,
-            min=0.0,
-            max=1.0,
-        )
-
-        per_foot_reward = (
-            early_swing.float()
-            * upward_velocity_reward
-        )
-
-        # Prevent aerial hopping from earning swing-initiation reward.
-        support_gate = contact.sum(dim=1) >= 2
-
-        # Two swing feet constitute a full reward.
-        reward = per_foot_reward.sum(dim=1) / 2.0
-        reward *= support_gate.float()
-        reward *= self.get_walking_cmd_mask().float()
-
-        return reward
+        contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0
+        contact_filt = torch.logical_or(contact, self.last_contacts)
+        # Preserve the buffer object and dtype so other rewards cannot inherit
+        # accidental bool/float conversions through aliasing.
+        self.last_contacts.copy_(contact)
+        first_contact = (self.feet_air_time > 0.) * contact_filt
+        self.feet_air_time += self.dt
+        rew_airTime = torch.clamp(torch.sum((self.feet_air_time - 0.18) * first_contact, dim=1), min=0.0)  # reward only on first contact with the ground
+        rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.1  # no reward for zero command
+        self.feet_air_time *= (~contact_filt).float()
+        return rew_airTime
 
     def _reward_feet_height(self):
-        feet_height = self.simulator.feet_pos[:, :, 2]
-        errors = torch.relu(feet_height - 0.10)
-        moving = self.get_walking_cmd_mask()
-        return torch.mean(torch.square(errors), dim=1) * moving.float()
+        return torch.mean(torch.square(self.simulator.feet_pos[:, :, 2] - 0.08), dim=1)
 
     def _reward_feet_height_high(self):
         return torch.mean((self.simulator.feet_pos[:, :, 2] - 0.18).clip(min=0.0), dim=1)
@@ -2433,20 +2295,13 @@ class B1Z1UniFP(BaseTask):
 
         front_x = torch.stack([front_x_1, front_x_2], dim=1)   # (N,2)
         
-        # overreach = torch.relu(front_x - self.cfg.rewards.overreach_x_max)
-
-        # Nominal rear-foot x location in base frame.
-        # This should usually be negative, e.g. -0.20 to -0.25 m.
+        # Penalize stance feet on either side of the optimized nominal x
+        # location, rather than only limiting excessive forward extension.
         front_x_nominal = self.cfg.rewards.front_foot_x_nominal
-
-        # Allowed deviation around nominal rear-foot x location.
-        # Example: 0.08 m allows rear_x in [nominal - 0.08, nominal + 0.08].
         front_x_margin = self.cfg.rewards.foot_x_margin
-
-        # Penalize both too far forward and too far backward relative to nominal.
         x_error = torch.abs(front_x - front_x_nominal)
         overreach = torch.relu(x_error - front_x_margin)
-
+        
         # stance/contact gating
         contact = (
             self.simulator.link_contact_forces[:, self.simulator.feet_indices[:2], 2] > 1.0
@@ -2481,8 +2336,7 @@ class B1Z1UniFP(BaseTask):
 
         rear_x = torch.stack([rear_1[:, 0], rear_2[:, 0]], dim=1)  # (N,2)
 
-        # Nominal rear-foot x location in base frame.
-        # This should usually be negative, e.g. -0.20 to -0.25 m.
+        # Config stores a positive magnitude; rear x is negative in base frame.
         rear_x_nominal = -self.cfg.rewards.rear_foot_x_nominal
 
         # Allowed deviation around nominal rear-foot x location.
@@ -2670,13 +2524,10 @@ class B1Z1UniFP(BaseTask):
         """
 
         feet_z = self.simulator.feet_pos[:, :, 2]                       # (N,4)
-        foot_vel_xy_norm = torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1)  # (N,4)
+        # foot_vel_xy_norm = torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1)  # (N,4)
 
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
         swing = ~contact
-
-        # desired_swing = 1.0 - self._get_gait_phase()
-        num_swing = swing.sum(dim=1)
 
         # Flatten 3x3 terrain patch if needed, then take local max height near each foot
         h_patch = self.simulator._height_around_feet
@@ -2705,44 +2556,32 @@ class B1Z1UniFP(BaseTask):
         # Weight excess penalty less than main tracking term
         excess_weight = 0.25  # tune: 0.1 - 0.5
 
-        # total_err = torch.sum(
-            # foot_vel_xy_norm * (track_err + excess_weight * excess_err) * swing.float(),
-            # dim=-1
-        # )                                                               # (N,)
+        total_err = torch.sum(
+            swing * (track_err + excess_weight * excess_err),
+            dim=-1
+        )                                                               # (N,)
 
-        # return torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma) * moving.float()
-
-        # rew = torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma)
-
-        # rew *= (num_swing > 0).float()     # gate reward for robots with no swigning feet.
-
-        height_quality = torch.exp(-(track_err + excess_weight * excess_err) / self.cfg.rewards.foot_clearance_tracking_sigma)
-
-        motion_quality = torch.clamp(foot_vel_xy_norm / 0.30, 0.0, 1.0)
-
-        per_foot = (
-            swing.float()
-            * height_quality
-            * (0.25 + 0.75 * motion_quality)
-        )
-
-        reward = per_foot.sum(dim=1) / swing.sum(dim=1).clamp_min(1)
-        reward *= self.get_walking_cmd_mask().float()
-
-        return reward
+        return torch.exp(-total_err / self.cfg.rewards.foot_clearance_tracking_sigma)
 
     def _reward_feet_regulation(self):
+        """Penalize fast foot motion near the ground using terrain height."""
         base_height = torch.mean(
             self.simulator.base_pos[:, 2].unsqueeze(1) - self.simulator.measured_heights,
             dim=1,
         )
         delta_feet = self.simulator.feet_pos - self.simulator.base_pos.unsqueeze(1)
-        feet_to_base_height = (delta_feet * self.simulator.projected_gravity.unsqueeze(1)).sum(-1)
-        feet_height = torch.clamp(base_height.unsqueeze(1) - feet_to_base_height, min=0.0)
+        feet_to_base_height = (
+            delta_feet * self.simulator.projected_gravity.unsqueeze(1)
+        ).sum(-1)
+        feet_height = torch.clamp(
+            base_height.unsqueeze(1) - feet_to_base_height,
+            min=0.0,
+        )
         feet_xy_speed_sq = self.simulator.feet_vel[:, :, :2].pow(2).sum(-1)
-        return (feet_xy_speed_sq * torch.exp(
-            -feet_height / (0.025 * self.cfg.rewards.base_height_target)
-        )).sum(-1)
+        return (
+            feet_xy_speed_sq
+            * torch.exp(-feet_height / (0.025 * self.cfg.rewards.base_height_target))
+        ).sum(-1)
 
     def _reward_feet_contact_number(self):
         """
@@ -2753,7 +2592,6 @@ class B1Z1UniFP(BaseTask):
         """
         contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
         stance_mask = self._get_gait_phase().bool()
-
         # Reward values must be floating point even though contacts and stance
         # masks are boolean phase/contact predicates.
         matched = contact == stance_mask
@@ -2762,7 +2600,6 @@ class B1Z1UniFP(BaseTask):
             1.0,
             -1.0,
         )
-
         raw_reward = torch.mean(reward, dim=1)
         multiplier = self.get_gait_guidance_multipliers()["feet_contact"]
         return raw_reward * multiplier
@@ -2780,19 +2617,14 @@ class B1Z1UniFP(BaseTask):
     def _reward_walking_ref_swing_dof(self):
         """Reward only swing-leg joints tracking the gait-phase reference pose."""
         self.compute_ref_state()
-
         joint_pos = self.simulator.dof_pos[:, :12].clone()
         pos_target = self.ref_dof_pos.clone()
-
         stance_mask = self._get_gait_phase()
         stance_mask = torch.stack([stance_mask, stance_mask, stance_mask], 2).reshape(self.num_envs, 12)
-
-        dof_error = torch.square(joint_pos - pos_target)
+        dof_error = torch.abs(joint_pos - pos_target)
         dof_error[stance_mask == 1] = 0.0
-
-        rew = torch.exp(-torch.sum(dof_error, dim=1) * 0.05)
+        rew = torch.exp(-torch.sum(dof_error, dim=1) * 0.2)
         rew[~self.get_walking_cmd_mask()] = 0.0
-
         return rew
 
     def _reward_stand_still(self):
@@ -3201,7 +3033,7 @@ class B1Z1UniFP(BaseTask):
     def _reward_arm_progress_before_torso(self):
         """Reward reducing EE error while keeping torso upright."""
         base_yaw_quat = self._get_base_yaw_quat()
-        force_offset = (self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)) / self.gripper_force_kps
+        force_offset = self.ee_force_ext_world / self.gripper_force_kps
         target = self.curr_ee_goal_cart_world + force_offset
         ee_error = torch.norm(target - self.simulator.ee_pos, dim=1)
 
@@ -3223,7 +3055,7 @@ class B1Z1UniFP(BaseTask):
     def _reward_early_torso_tilt(self):
         """Penalize torso tilt before the EE has reached the target."""
         base_yaw_quat = self._get_base_yaw_quat()
-        force_offset = (self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)) / self.gripper_force_kps
+        force_offset = self.ee_force_ext_world / self.gripper_force_kps
         target = self.curr_ee_goal_cart_world + force_offset
         ee_error = torch.norm(target - self.simulator.ee_pos, dim=1)
 
@@ -3242,369 +3074,3 @@ class B1Z1UniFP(BaseTask):
         )
 
         return not_reached_gate * excess_tilt
-
-    def _reward_no_progress(self):
-        """
-        Return a bounded penalty in [0, 1]:
-
-            0: sufficient locomotion progress
-            1: stationary, reversing, unsupported, or insufficient progress
-
-        Configure with a negative reward scale.
-        """
-
-        target_vel = self.commands[:, :2]
-        target_mag = torch.norm(target_vel, dim=1)
-
-        moving_cmd = target_mag > 0.15
-        target_dir = target_vel / target_mag.unsqueeze(1).clamp_min(1e-6)
-
-        measured_vel = self.simulator.base_lin_vel[:, :2]
-
-        # Signed velocity EMA suppresses bouncing and alternating motion.
-        smoothing_time = 0.25
-        alpha = self.dt / (smoothing_time + self.dt)
-
-        self.progress_vel_ema.lerp_(
-            measured_vel,
-            alpha,
-        )
-
-        aligned_speed = torch.sum(
-            self.progress_vel_ema * target_dir,
-            dim=1,
-        )
-
-        # Require at least 40% of commanded speed before considering progress adequate.
-        required_speed = 0.40 * target_mag
-        progress_ratio = aligned_speed / required_speed.clamp_min(1e-6)
-
-        # Smooth transition from no progress to sufficient progress.
-        engagement = progress_ratio.clamp(0.0, 1.0)
-        engagement = engagement.square() * (3.0 - 2.0 * engagement)
-
-        # Do not count falling, jumping, or unsupported motion as locomotion.
-        contact = (
-            self.simulator.link_contact_forces[
-                :, self.simulator.feet_indices, 2
-            ] > 5.0
-        )
-        supported = contact.sum(dim=1) >= 2
-
-        # Confirm the sign convention: Genesis commonly gives approximately -1 here
-        # when the torso is upright.
-        upright = self.simulator.projected_gravity[:, 2] < -0.8
-
-        valid_locomotion = supported & upright
-        engagement *= valid_locomotion.float()
-
-        no_progress = 1.0 - engagement
-
-        # Avoid penalizing the policy immediately after reset.
-        grace_complete = self.episode_length_buf * self.dt > 0.30
-
-        return (
-            no_progress
-            * moving_cmd.float()
-            * grace_complete.float()
-        )
-
-    def _reset_progress_statistics(self, env_ids):
-        if len(env_ids) == 0:
-            return
-
-        self.progress_delta_buffer[env_ids] = 0.0
-        self.progress_desired_buffer[env_ids] = 0.0
-        self.progress_valid_steps[env_ids] = 0
-
-        self.last_progress_base_pos[env_ids] = (
-            self.simulator.base_pos[env_ids, :2]
-        )
-
-    def _update_progress_statistics(self):
-        """Update rolling actual and commanded world-frame displacement."""
-
-        current_step = int(self.common_step_counter)
-        if self._progress_update_step == current_step:
-            return
-
-        current_pos = self.simulator.base_pos[:, :2]
-
-        # Per-step physical displacement.
-        delta_pos = current_pos - self.last_progress_base_pos
-        self.last_progress_base_pos.copy_(current_pos)
-
-        # Reject reset/teleportation spikes.
-        delta_pos = torch.where(
-            torch.norm(delta_pos, dim=1, keepdim=True) < 0.25,
-            delta_pos,
-            torch.zeros_like(delta_pos),
-        )
-
-        # Convert yaw-frame velocity commands into world-frame displacement.
-        command_local = torch.zeros(
-            self.num_envs, 3, device=self.device
-        )
-        command_local[:, :2] = self.commands[:, :2]
-
-        command_world = quat_apply(
-            self._get_base_yaw_quat(),
-            command_local,
-        )[:, :2]
-
-        desired_delta = command_world * self.dt
-
-        index = self.progress_buffer_index
-        self.progress_delta_buffer[:, index] = delta_pos
-        self.progress_desired_buffer[:, index] = desired_delta
-
-        self.progress_valid_steps.add_(1)
-        self.progress_valid_steps.clamp_(
-            max=self.progress_window_steps
-        )
-
-        self.progress_buffer_index = (
-            index + 1
-        ) % self.progress_window_steps
-
-        self._progress_update_step = current_step
-
-
-    def _reward_no_physical_progress(self):
-        """
-        Bounded penalty in [0, 1].
-
-        0: sufficient net physical progress
-        1: standing, shuffling, reversing, or unsupported motion
-
-        Configure with a negative reward scale.
-        """
-        self._update_progress_statistics()
-
-        actual_displacement = self.progress_delta_buffer.sum(dim=1)
-        desired_displacement = self.progress_desired_buffer.sum(dim=1)
-
-        desired_distance = torch.norm(
-            desired_displacement,
-            dim=1,
-        )
-
-        desired_direction = (
-            desired_displacement
-            / desired_distance.unsqueeze(1).clamp_min(1e-6)
-        )
-
-        aligned_progress = torch.sum(
-            actual_displacement * desired_direction,
-            dim=1,
-        )
-
-        # Require 40% of commanded displacement over the window.
-        required_progress = 0.40 * desired_distance
-
-        progress_ratio = (
-            aligned_progress
-            / required_progress.clamp_min(1e-6)
-        )
-
-        # Smooth bounded progress score.
-        engagement = progress_ratio.clamp(0.0, 1.0)
-        engagement = engagement.square() * (
-            3.0 - 2.0 * engagement
-        )
-
-        # Only apply after enough history has accumulated.
-        minimum_history = max(
-            1, int(round(0.20 / self.dt))
-        )
-        history_ready = (
-            self.progress_valid_steps >= minimum_history
-        )
-
-        moving_command = (
-            torch.norm(self.commands[:, :2], dim=1) > 0.15
-        )
-
-        # Do not count falling or aerial motion as locomotion.
-        contact = (
-            self.simulator.link_contact_forces[
-                :, self.simulator.feet_indices, 2
-            ] > 5.0
-        )
-        supported = contact.sum(dim=1) >= 2
-        upright = self.simulator.projected_gravity[:, 2] < -0.8
-
-        engagement *= (supported & upright).float()
-
-        penalty = 1.0 - engagement
-
-        return (
-            penalty
-            * moving_command.float()
-            * history_ready.float()
-        )
-
-
-    def _reward_swing_foot_direction(self):
-        """Reward swing feet moving relative to the torso in the travel direction."""
-
-        command_xy = self.commands[:, :2]
-        command_mag = torch.norm(command_xy, dim=1)
-
-        moving = command_mag > 0.15
-        command_dir = (
-            command_xy
-            / command_mag.unsqueeze(1).clamp_min(1e-6)
-        )
-
-        contact = (
-            self.simulator.link_contact_forces[
-                :, self.simulator.feet_indices, 2
-            ] > 5.0
-        )
-        actual_swing = ~contact
-
-        desired_swing = 1.0 - self._get_gait_phase()
-        active_swing = actual_swing.float() * desired_swing
-
-        # World-frame foot velocity relative to the torso.
-        foot_vel_relative = (
-            self.simulator.feet_vel
-            - self.simulator.base_lin_vel.unsqueeze(1)
-        )
-
-        # Convert relative foot velocity to the yaw-aligned command frame.
-        yaw_quat = self._get_base_yaw_quat()
-        yaw_quat_feet = yaw_quat.unsqueeze(1).expand(-1, 4, -1)
-
-        foot_vel_local = quat_rotate_inverse(
-            yaw_quat_feet.reshape(-1, 4),
-            foot_vel_relative.reshape(-1, 3),
-        ).reshape(self.num_envs, 4, 3)
-
-        aligned_velocity = torch.sum(
-            foot_vel_local[:, :, :2]
-            * command_dir.unsqueeze(1),
-            dim=2,
-        )
-
-        # Signed bounded reward: forward swing positive, reverse swing negative.
-        per_foot_reward = torch.tanh(
-            aligned_velocity / 0.4
-        )
-
-        # Require ground support to avoid rewarding aerial leg motion.
-        supported = contact.sum(dim=1) >= 2
-
-        reward = torch.sum(
-            active_swing.float() * per_foot_reward,
-            dim=1,
-        ) / 2.0
-
-        reward *= supported.float()
-        reward *= moving.float()
-
-        return reward
-
-    def _reward_step_progress(self):
-        """
-        Reward new swing-foot displacement in the commanded travel direction.
-        """
-        stats = self._update_feet_air_time_stats()
-
-        valid_liftoff = stats["valid_liftoff"]
-        valid_swing = stats["valid_swing"]
-        first_contact = stats["first_contact"]
-        contact = stats["contact"]
-
-        feet_xy = self.simulator.feet_pos[:, :, :2]
-
-        # Convert command direction into the world frame.
-        command_local = torch.zeros(
-            self.num_envs, 3, device=self.device
-        )
-        command_local[:, :2] = self.commands[:, :2]
-
-        command_world = quat_apply(
-            self._get_base_yaw_quat(),
-            command_local,
-        )[:, :2]
-
-        command_mag = torch.norm(command_world, dim=1)
-        command_direction = (
-            command_world
-            / command_mag.unsqueeze(1).clamp_min(1e-6)
-        )
-
-        # Capture position and command direction at valid liftoff.
-        liftoff_mask = valid_liftoff.unsqueeze(-1)
-
-        self.step_liftoff_pos = torch.where(
-            liftoff_mask,
-            feet_xy,
-            self.step_liftoff_pos,
-        )
-
-        self.step_direction_world = torch.where(
-            liftoff_mask,
-            command_direction.unsqueeze(1).expand(-1, 4, -1),
-            self.step_direction_world,
-        )
-
-        self.step_max_progress[valid_liftoff] = 0.0
-
-        foot_displacement = feet_xy - self.step_liftoff_pos
-
-        aligned_progress = torch.sum(
-            foot_displacement * self.step_direction_world,
-            dim=2,
-        )
-
-        # Reward only improvements beyond the previous maximum.
-        new_max = torch.maximum(
-            self.step_max_progress,
-            aligned_progress,
-        )
-
-        incremental_progress = torch.relu(
-            new_max - self.step_max_progress
-        )
-
-        self.step_max_progress.copy_(new_max)
-
-        # Approximately 10 cm of swing progress gives a full cumulative reward.
-        target_step_length = 0.10
-
-        dense_reward = torch.clamp(
-            incremental_progress / target_step_length,
-            min=0.0,
-            max=1.0,
-        )
-
-        dense_reward *= valid_swing.float()
-
-        # Optional touchdown bonus for completing a useful step.
-        completed_progress = torch.clamp(
-            self.step_max_progress / target_step_length,
-            min=0.0,
-            max=1.0,
-        )
-
-        touchdown_bonus = (
-            first_contact.float() * completed_progress
-        )
-
-        supported = contact.sum(dim=1) >= 2
-        upright = self.simulator.projected_gravity[:, 2] < -0.8
-        moving = command_mag > 0.15
-
-        reward = (
-            dense_reward.sum(dim=1) / 2.0
-            + 0.25 * touchdown_bonus.sum(dim=1) / 2.0
-        )
-
-        reward *= supported.float()
-        reward *= upright.float()
-        reward *= moving.float()
-
-        return reward

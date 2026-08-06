@@ -150,17 +150,30 @@ class B1Z1PACT(LeggedRobot):
             current_velocity, previous_velocity, simulator._grfs_buf,
             self.ee_force_ext_world, base_wrench, simulator._motor_strength,
             kp, kd, simulator.feedback_tau_weight, simulator.feedforward_tau_weight,
-            simulator.default_dof_pos, simulator._added_base_mass,
+            simulator.default_dof_pos.expand(self.num_envs, -1), simulator._added_base_mass,
             simulator._base_com_bias, simulator._added_gripper_mass,
         ), dim=-1)
 
     def get_force_decoder_target(self):
-        """Return next-step ``[GRF_1..4, F_EE]`` supervision for the decoder.
-
-        These measured values train the decoder before its predictions are
-        trusted by the PINN force gate. They are not policy commands.
-        """
-        return torch.cat((self.simulator._grfs_buf, self.ee_force_ext_world), dim=-1)
+        """Return normalized yaw-frame next-step force supervision."""
+        base_yaw_quat = self._get_base_yaw_quat()
+        grfs_local = quat_rotate_inverse(
+            base_yaw_quat[:, None, :].expand(-1, 4, -1).reshape(-1, 4),
+            self.simulator._grfs_buf.reshape(-1, 3),
+        ).reshape(self.num_envs, 12)
+        ee_force_local = quat_rotate_inverse(base_yaw_quat, self.ee_force_ext_world)
+        base_wrench_local = torch.cat((
+            quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world),
+            quat_rotate_inverse(base_yaw_quat, self.base_torque_ext_world),
+        ), dim=-1)
+        target = torch.cat((
+            grfs_local * self.obs_scales.grf,
+            ee_force_local * self.obs_scales.ee_force,
+            base_wrench_local * self.base_wrench_scale,
+        ), dim=-1)
+        if target.shape != (self.num_envs, 21):
+            raise RuntimeError(f"PACT force target must be ({self.num_envs}, 21), got {tuple(target.shape)}")
+        return target
 
     @property
     def force_randomization_active(self):
@@ -611,7 +624,6 @@ class B1Z1PACT(LeggedRobot):
         self.llast_obs_buf.copy_(self.last_obs_buf)
         self.last_obs_buf.copy_(self.obs_buf)
 
-        base_quat = self.simulator.base_quat
         base_rpy = self.simulator.base_euler
         base_yaw_quat = self._get_base_yaw_quat()
         ee_center = self.get_ee_goal_spherical_center(base_yaw_quat)
@@ -620,9 +632,6 @@ class B1Z1PACT(LeggedRobot):
         # centered at the Z1 waist/workspace origin, not in raw world XYZ.
         ee_local_cart = quat_rotate_inverse(base_yaw_quat, self.simulator.ee_pos - ee_center)
         self.ee_pos_sphe_arm = cart2sphere(ee_local_cart)
-        q_arm = self.simulator.dof_pos[:, self.simulator._arm_dof_cfg_ids]
-        ee_fk_cart = self.compute_z1_arm_fk(q_arm) - self.z1_workspace_center_local
-        ee_tracking_error = self.curr_ee_goal_cart - ee_fk_cart
 
         # Dynamics labels use the world/LWA force frame so predicted force can
         # enter the Pinocchio residual without an ambiguous extra transform.
@@ -647,7 +656,6 @@ class B1Z1PACT(LeggedRobot):
                 dof_pos_err,
                 dof_vel,
                 self.actions,
-                ee_tracking_error,
                 self.commands * self.commands_scale,
             ),
             dim=-1,
@@ -660,7 +668,14 @@ class B1Z1PACT(LeggedRobot):
         if self.add_noise:
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
 
-        # Context labels: command-space velocity, base wrench, EE force, and
+        # Like UniFP, learned disturbance labels use the yaw-aligned robot
+        # frame, making them observable without exposing absolute heading.
+        ee_force_local = quat_rotate_inverse(base_yaw_quat, self.ee_force_ext_world)
+        base_wrench_local = torch.cat((
+            quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world),
+            quat_rotate_inverse(base_yaw_quat, self.base_torque_ext_world),
+        ), dim=-1)
+        # Context labels: command-space velocity and EE pose, base wrench, EE force, and
         # four binary foot-contact indicators for the estimator BCE objective.
         # They are privileged during training and predicted from history later.
         base_command_velocity = torch.cat(
@@ -680,8 +695,9 @@ class B1Z1PACT(LeggedRobot):
         self.explicit_labels_buf = torch.cat(
             (
                 base_command_velocity * self.obs_scales.lin_vel,
-                base_wrench_world * self.base_wrench_scale,
-                self.ee_force_ext_world * self.obs_scales.ee_force,
+                self.ee_pos_sphe_arm * self.ee_sphere_scale,
+                base_wrench_local * self.base_wrench_scale,
+                ee_force_local * self.obs_scales.ee_force,
                 contact_mask,
                 foot_heights,
             ),
@@ -1522,8 +1538,10 @@ class B1Z1PACT(LeggedRobot):
         dof_pos = self.simulator.default_dof_pos.repeat(len(env_ids), 1)
         leg_low, leg_high = self.cfg.init_state.leg_dof_pos_perturb_range
         arm_low, arm_high = self.cfg.init_state.arm_dof_pos_perturb_range
-        # UniFP perturbs legs multiplicatively around their default crouch pose.
-        dof_pos[:, :12] = self.simulator.default_dof_pos[:, :12].repeat(len(env_ids), 1) * torch_rand_float(
+        # Add a small joint-angle offset while preserving the crouched default.
+        # Multiplying by [-0.15, 0.15] collapses the legs toward q=0 and causes
+        # the high-gain PD controller to launch the robot on its first step.
+        dof_pos[:, :12] = self.simulator.default_dof_pos[:, :12].repeat(len(env_ids), 1) + torch_rand_float(
             leg_low,
             leg_high,
             (len(env_ids), 12),

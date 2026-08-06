@@ -97,8 +97,8 @@ class B1Z1PACTDecoder(nn.Module):
         return self.network(condition)
 
 
-class ActorCriticB1Z1PACT(nn.Module):
-    """PACT actor with 17 position and 17 feedforward-torque outputs."""
+class ActorCriticB1Z1PACTPos(nn.Module):
+    """Position policy with an auxiliary scaled-PD-torque prediction head."""
 
     is_recurrent = False
 
@@ -143,7 +143,7 @@ class ActorCriticB1Z1PACT(nn.Module):
 
         self.critic = _mlp(num_critic_obs, critic_layers, 1, activation)
 
-        action_dim = 2 * num_actions
+        action_dim = num_actions
         self.std = nn.Parameter(self._std_config_tensor(init_noise_std, action_dim, "init_noise_std"))
         self.register_buffer(
             "_std_clip_lwr",
@@ -157,6 +157,8 @@ class ActorCriticB1Z1PACT(nn.Module):
         self.distribution: Normal | None = None
 
         self.last_context: dict[str, torch.Tensor] | None = None
+        self.last_position_mean: torch.Tensor | None = None
+        self.last_torque_mean: torch.Tensor | None = None
 
         self.last_film_magnitude: torch.Tensor | None = None
         self.last_film_identity_deviation: torch.Tensor | None = None
@@ -177,6 +179,45 @@ class ActorCriticB1Z1PACT(nn.Module):
             "foot_contact_logits": explicit[:, 15:19],
             "foot_height": explicit[:, 19:23],
         }
+
+    @staticmethod
+    def explicit_vector(context: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Assemble the normalized semantic explicit state consumed by the actor."""
+        return torch.cat((
+            context["base_velocity"], context["ee_position"],
+            context["base_wrench"], context["ee_force"],
+            torch.sigmoid(context["foot_contact_logits"]), context["foot_height"],
+        ), dim=-1)
+
+    @staticmethod
+    def context_with_explicit(
+        context: dict[str, torch.Tensor], explicit: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Replace explicit fields while retaining exactly the supplied latent."""
+        result = {key: value for key, value in context.items()}
+        result["base_velocity"] = explicit[:, 0:3]
+        result["ee_position"] = explicit[:, 3:6]
+        result["base_wrench"] = explicit[:, 6:12]
+        result["ee_force"] = explicit[:, 12:15]
+        # Explicit labels and decoder outputs are blended as probabilities.
+        contact = explicit[:, 15:19].clamp(1.0e-4, 1.0 - 1.0e-4)
+        result["foot_contact_logits"] = torch.logit(contact)
+        result["foot_height"] = explicit[:, 19:23]
+        return result
+
+    def blend_explicit_context(
+        self,
+        context: dict[str, torch.Tensor],
+        explicit_ground_truth: torch.Tensor,
+        alpha: float | torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Blend normalized ground-truth and deterministic predicted context."""
+        predicted = self.explicit_vector(context)
+        alpha_tensor = torch.as_tensor(alpha, device=predicted.device, dtype=predicted.dtype)
+        if alpha_tensor.ndim == 1:
+            alpha_tensor = alpha_tensor.unsqueeze(-1)
+        blended = (1.0 - alpha_tensor) * explicit_ground_truth + alpha_tensor * predicted
+        return self.context_with_explicit(context, blended)
 
     @staticmethod
     def _std_config_tensor(value, action_dim: int, name: str) -> torch.Tensor:
@@ -258,12 +299,20 @@ class ActorCriticB1Z1PACT(nn.Module):
         sample_context: bool = True,
         explicit_labels: torch.Tensor | None = None,
         mask_latent: bool = False,
-        mask_explicit: bool = False,
+        explicit_blend_alpha: float | torch.Tensor = 1.0,
     ) -> None:
         context = self.decode_context(self.context_encoder(history, sample=sample_context))
-        actor_context = self._bootmasked_context(context, explicit_labels, mask_latent, mask_explicit)
+        # Preserve the original latent bootstrap exactly; explicit context now
+        # follows a continuous curriculum instead of a Bernoulli switch.
+        actor_context = self._bootmasked_context(context, None, mask_latent, False)
+        if explicit_labels is not None:
+            actor_context = self.blend_explicit_context(
+                actor_context, explicit_labels, explicit_blend_alpha,
+            )
         position, torque = self.actor_forward(obs, actor_context)
-        mean = torch.cat((position, torque), dim=-1)
+        self.last_position_mean = position
+        self.last_torque_mean = torque
+        mean = position
         self.std.data.copy_(
             torch.maximum(torch.minimum(self.std.data, self._std_clip_upr), self._std_clip_lwr)
         )
@@ -272,22 +321,28 @@ class ActorCriticB1Z1PACT(nn.Module):
 
     def act(
         self, obs: torch.Tensor, history: torch.Tensor,
-        explicit_labels: torch.Tensor | None = None, mask_latent: bool = False, mask_explicit: bool = False,
+        explicit_labels: torch.Tensor | None = None, mask_latent: bool = False,
+        explicit_blend_alpha: float | torch.Tensor = 1.0,
     ) -> torch.Tensor:
         # Keep the rollout policy deterministic with respect to its latent
         # estimate. PPO's stored action distribution then remains comparable
         # during the update; exploration is supplied by the action Gaussian.
         self.update_distribution(
             obs, history, sample_context=False, explicit_labels=explicit_labels,
-            mask_latent=mask_latent, mask_explicit=mask_explicit,
+            mask_latent=mask_latent, explicit_blend_alpha=explicit_blend_alpha,
         )
         return self.distribution.sample()
 
-    def act_inference(self, obs: torch.Tensor, history: torch.Tensor) -> torch.Tensor:
+    def act_inference(
+        self, obs: torch.Tensor, history: torch.Tensor,
+        explicit_labels: torch.Tensor | None = None,
+        explicit_blend_alpha: float | torch.Tensor = 1.0,
+    ) -> torch.Tensor:
         context = self.decode_context(self.context_encoder.forward_inf(history))
-        position, torque = self.actor_forward(obs, context)
-        actions = torch.cat((position, torque), dim=-1)
-        return actions
+        if explicit_labels is not None:
+            context = self.blend_explicit_context(context, explicit_labels, explicit_blend_alpha)
+        position, _ = self.actor_forward(obs, context)
+        return position
 
     def evaluate(self, critic_obs: torch.Tensor) -> torch.Tensor:
         return self.critic(critic_obs)

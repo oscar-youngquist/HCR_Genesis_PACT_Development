@@ -17,8 +17,14 @@ class RolloutStorageB1Z1PACT:
         self.actions, self.mu, self.sigma = zeros(action_dim), zeros(action_dim), zeros(action_dim)
         self.values, self.rewards, self.returns, self.advantages = zeros(1), zeros(1), zeros(1), zeros(1)
         self.log_probs, self.dones = zeros(1), torch.zeros(steps, num_envs, 1, dtype=torch.bool, device=device)
-        self.explicit_labels = zeros(explicit_dim)
-        # ``force_targets`` supervise the measured next [4 GRFs, EE force].
+        # Both snapshots are explicit_t. Separate fields enforce their PPO
+        # reconstruction and current-state auxiliary roles.
+        self.actor_explicit_labels = zeros(explicit_dim)
+        self.explicit_targets = zeros(explicit_dim)
+        # Alpha is frozen for a rollout and stored per transition so PPO always
+        # reconstructs the exact explicit blend that generated action_t.
+        self.explicit_blend_alpha = zeros(1)
+        # Normalized next-state target: four GRFs, EE force, and base wrench.
         # The PINN may use predicted versions only after the reliability gate
         # says this decoder has learned the measurement relationship.
         self.force_targets = zeros(force_dim)
@@ -37,9 +43,16 @@ class RolloutStorageB1Z1PACT:
         # later, but every PINN field must remain paired with its own action_t.
         for name in (
             "observations", "critic_observations", "histories", "actions", "mu", "sigma", "values", "rewards",
-            "log_probs", "explicit_labels", "force_targets", "next_privileged", "dynamics_state",
+            "log_probs", "actor_explicit_labels", "explicit_targets",
+            "force_targets", "next_privileged", "dynamics_state",
         ):
             getattr(self, name)[self.step].copy_(getattr(transition, name))
+        # The storage class is shared with coupled PACT, whose discrete
+        # explicit bootstrap does not populate this PACT-position-only field.
+        if hasattr(transition, "explicit_blend_alpha"):
+            self.explicit_blend_alpha[self.step].copy_(transition.explicit_blend_alpha)
+        else:
+            self.explicit_blend_alpha[self.step].zero_()
         self.dones[self.step].copy_(transition.dones.view(-1, 1).bool())
         self.step += 1
 
@@ -61,7 +74,8 @@ class RolloutStorageB1Z1PACT:
         # to actions, transition states, force labels, and terminal masks.
         flat = {name: getattr(self, name).flatten(0, 1) for name in (
             "observations", "critic_observations", "histories", "actions", "mu", "sigma", "values", "returns", "advantages",
-            "log_probs", "dones", "explicit_labels", "force_targets", "next_privileged", "dynamics_state",
+            "log_probs", "dones", "actor_explicit_labels", "explicit_targets", "explicit_blend_alpha",
+            "force_targets", "next_privileged", "dynamics_state",
         )}
         for _ in range(epochs):
             indices = torch.randperm(count, device=self.device)

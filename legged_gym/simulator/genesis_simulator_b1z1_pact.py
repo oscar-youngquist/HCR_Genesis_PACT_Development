@@ -1449,9 +1449,9 @@ class GenesisSimulatorB1Z1PACT(Simulator):
         self.combined_feedforward_torques = self.feedforward_tau_weight * self.feedforward_torques
         torques = self.combined_feedback_torques + self.combined_feedforward_torques
         self.unclipped_torques = torques.clone()
-        self.executed_torques = torch.clip(torques, -1.1 * self._torque_limits, 1.1 * self._torque_limits)
+        # self.executed_torques = torch.clip(torques, -1.1 * self._torque_limits, 1.1 * self._torque_limits)
         # Have the limit be exceeded a little bit to get reward feedback based on exceeding the limits
-        return self.executed_torques
+        return torques
 
     def apply_ee_force(self, force_world):
         """Store the target world-frame EE disturbance force."""
@@ -1475,23 +1475,31 @@ class GenesisSimulatorB1Z1PACT(Simulator):
         """
         if not hasattr(self, "_external_force_link_indices"):
             return
-        has_ee_force = self._has_gripper and torch.any(self._ee_force_world)
-        has_base_torque = torch.any(self._base_torque_world)
-        if not has_ee_force and not torch.any(self._base_force_world) and not has_base_torque:
-            return
-        if self._has_gripper:
-            self._external_force_world[:, 0, :] = self._ee_force_world
-            self._external_force_world[:, 1, :] = self._base_force_world
-        else:
-            self._external_force_world[:, 0, :] = self._base_force_world
-        self._robot._solver.apply_links_external_force(
-            force=self._external_force_world,
-            links_idx=self._external_force_link_indices,
-            envs_idx=None,
-            ref="link_com",
-            local=False,
+        commands = self._cfg.commands
+        apply_ee_force = (
+            self._has_gripper
+            and commands.push_gripper_stators
+            and commands.apply_ee_external_forces
         )
-        if has_base_torque:
+        apply_base_force = commands.push_robot_base and commands.apply_base_external_forces
+        apply_base_torque = commands.push_robot_base and commands.apply_base_external_torques
+
+        # Branch only on static Python configuration. Inspecting CUDA force
+        # buffers with torch.any() here would synchronize every physics substep.
+        if apply_ee_force or apply_base_force:
+            if self._has_gripper:
+                self._external_force_world[:, 0, :] = self._ee_force_world
+                self._external_force_world[:, 1, :] = self._base_force_world
+            else:
+                self._external_force_world[:, 0, :] = self._base_force_world
+            self._robot._solver.apply_links_external_force(
+                force=self._external_force_world,
+                links_idx=self._external_force_link_indices,
+                envs_idx=None,
+                ref="link_com",
+                local=False,
+            )
+        if apply_base_torque:
             self._robot._solver.apply_links_external_torque(
                 torque=self._base_torque_world.unsqueeze(1),
                 links_idx=self._base_external_torque_link_indices,
