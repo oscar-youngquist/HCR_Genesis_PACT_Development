@@ -17,6 +17,7 @@ class PPO_B1Z1PACT:
     def __init__(self, actor_critic, privileged_decoder, dynamics_backend, cfg, device):
         self.actor_critic, self.privileged_decoder = actor_critic, privileged_decoder
         self.dynamics_backend, self.cfg, self.device = dynamics_backend, cfg, device
+        self.enable_additional_diagnostics = True
         self.clip_param, self.gamma, self.lam = cfg["clip_param"], cfg["gamma"], cfg["lam"]
         self.value_loss_coef, self.entropy_coef = cfg["value_loss_coef"], cfg["entropy_coef"]
         self.use_adaptive_entropy = cfg.get("use_adaptive_entropy", False)
@@ -148,11 +149,15 @@ class PPO_B1Z1PACT:
             mask_latent=False,
             mask_explicit=not self.use_boot_explicit,
         ).detach()
-        self.transition.observations, self.transition.critic_observations, self.transition.histories = obs, critic_obs, history
         self.transition.actions = actions
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
         self.transition.log_probs = self.actor_critic.get_actions_log_prob(actions).detach().unsqueeze(-1)
         self.transition.mu, self.transition.sigma = self.actor_critic.action_mean.detach(), self.actor_critic.action_std.detach()
+        # Snapshot every actor-time environment tensor before env.step(),
+        # exactly as UniFP does for its observation and estimator labels.
+        self.transition.observations = obs.detach().clone()
+        self.transition.critic_observations = critic_obs.detach().clone()
+        self.transition.histories = history.detach().clone()
         self.transition.actor_explicit_labels = explicit_labels.detach().clone()
         self.transition.explicit_targets = explicit_labels.detach().clone()
         return actions
@@ -161,13 +166,19 @@ class PPO_B1Z1PACT:
         # ``dynamics_state`` is the post-step state collected by the runner.
         # Storing it beside this transition keeps action_t, v_t, and v_(t+1)
         # together until the shuffled PPO update.
-        self.transition.rewards, self.transition.dones = rewards.view(-1, 1), dones
+        self.transition.rewards = rewards.clone()
+        self.transition.dones = dones
         self.transition.next_privileged = next_privileged
         self.transition.dynamics_state = dynamics_state
         if "time_outs" in infos:
-            self.transition.rewards += self.gamma * self.transition.values * infos["time_outs"].view(-1, 1).to(self.device)
+            # Rewards are [N], matching UniFP. Squeeze the [N, 1] bootstrap
+            # correction before in-place addition, then storage restores [N, 1].
+            self.transition.rewards += self.gamma * torch.squeeze(
+                self.transition.values * infos["time_outs"].unsqueeze(1).to(self.device), 1
+            )
         self.storage.add(self.transition)
-        self.transition = RolloutStorageB1Z1PACT.Transition()
+        self.transition.clear()
+        self.actor_critic.reset(dones)
 
     def spectral_normalization(
         self,
@@ -616,7 +627,7 @@ class PPO_B1Z1PACT:
         updates = 0
         diagnostics = {"lr_before_update": self.learning_rate}
         for batch in self.storage.mini_batches(self.mini_batches, self.epochs):
-            if updates == 0:
+            if updates == 0 and self.enable_additional_diagnostics:
                 diagnostics.update(self._pre_update_diagnostics(batch))
             ppo_loss, surrogate, value, film_identity, _, mean_actions, context, force_prediction = self._compute_rl_loss(batch)
             

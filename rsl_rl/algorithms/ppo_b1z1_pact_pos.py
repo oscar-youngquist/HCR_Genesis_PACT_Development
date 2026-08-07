@@ -17,6 +17,7 @@ from rsl_rl.storage.rollout_storage_b1z1_pact import RolloutStorageB1Z1PACT
 class PPO_B1Z1PACTPos:
     def __init__(self, actor_critic, privileged_decoder, cfg, device):
         self.actor_critic, self.privileged_decoder = actor_critic, privileged_decoder
+        self.enable_additional_diagnostics = True
         self.cfg, self.device = cfg, device
         self.clip_param, self.gamma, self.lam = cfg["clip_param"], cfg["gamma"], cfg["lam"]
         self.value_loss_coef, self.entropy_coef = cfg["value_loss_coef"], cfg["entropy_coef"]
@@ -172,7 +173,9 @@ class PPO_B1Z1PACTPos:
             mask_latent=False,
             explicit_blend_alpha=self.explicit_blend_alpha,
         ).detach()
-        self.transition.observations, self.transition.critic_observations, self.transition.histories = obs, critic_obs, history
+        self.transition.observations = obs.detach().clone()
+        self.transition.critic_observations = critic_obs.detach().clone()
+        self.transition.histories = history.detach().clone()
         self.transition.actions = actions
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
         self.transition.log_probs = self.actor_critic.get_actions_log_prob(actions).detach().unsqueeze(-1)
@@ -189,13 +192,19 @@ class PPO_B1Z1PACTPos:
         # ``dynamics_state`` is the post-step state collected by the runner.
         # Storing it beside this transition keeps action_t, v_t, and v_(t+1)
         # together until the shuffled PPO update.
-        self.transition.rewards, self.transition.dones = rewards.view(-1, 1), dones
+        self.transition.rewards =  rewards.clone()
+        self.transition.dones = dones
         self.transition.next_privileged = next_privileged
         self.transition.dynamics_state = dynamics_state
         if "time_outs" in infos:
-            self.transition.rewards += self.gamma * self.transition.values * infos["time_outs"].view(-1, 1).to(self.device)
+            # Match UniFP's [N] reward convention and squeeze the value
+            # bootstrap correction before adding it in place.
+            self.transition.rewards += self.gamma * torch.squeeze(
+                self.transition.values * infos["time_outs"].unsqueeze(1).to(self.device), 1
+            )
         self.storage.add(self.transition)
-        self.transition = RolloutStorageB1Z1PACT.Transition()
+        self.transition.clear()
+        self.actor_critic.reset(dones)
 
     def spectral_normalization(
         self,
@@ -384,7 +393,7 @@ class PPO_B1Z1PACTPos:
                 )
                 kl_mean = kl.mean()
                 if kl_mean > 2.0 * self.desired_kl:
-                    self.learning_rate = max(1.0e-6, self.learning_rate / 1.5)
+                    self.learning_rate = max(1.0e-5, self.learning_rate / 1.5)
                 elif 0.0 < kl_mean < self.desired_kl / 2.0:
                     self.learning_rate = min(1.0e-2, self.learning_rate * 1.5)
                 for group in self.actor_optimizer.optimizer.param_groups:
@@ -613,7 +622,8 @@ class PPO_B1Z1PACTPos:
         diagnostics = {"lr_before_update": self.learning_rate}
         for batch in self.storage.mini_batches(self.mini_batches, self.epochs):
             if updates == 0:
-                diagnostics.update(self._pre_update_diagnostics(batch))
+                if self.enable_additional_diagnostics:
+                    diagnostics.update(self._pre_update_diagnostics(batch))
                 # Keep one aligned representative batch until all optimizer
                 # steps finish; storage itself is not cleared until afterward.
                 explicit_diagnostic_batch = {

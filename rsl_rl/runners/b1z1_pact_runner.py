@@ -93,27 +93,36 @@ class B1Z1PACTRunner:
         )
 
         self.steps, self.save_interval = runner_cfg["num_steps_per_env"], runner_cfg["save_interval"]
+        self.enable_additional_diagnostics = runner_cfg.get("enable_additional_diagnostics", True)
+        self.alg.enable_additional_diagnostics = self.enable_additional_diagnostics
         self.use_adaptive_entropy = algorithm_cfg.get("use_adaptive_entropy", False)
 
         self.current_learning_iteration, self.total_timesteps, self.total_time = 0, 0, 0.0
 
-        self.writer = SummaryWriter(log_dir, flush_secs=10) if log_dir else None
+        self.writer = None
+        _, _ = self.env.reset()
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
+        if self.log_dir is not None and self.writer is None:
+            self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=self.env.max_episode_length)
-        self.env.reset()
         obs, history, privileged, explicit = self.env.get_observations()
         obs, history, privileged, explicit = (value.to(self.device) for value in (obs, history, privileged, explicit))
         rewards, lengths, ep_infos = deque(maxlen=100), deque(maxlen=100), []
         running_reward = torch.zeros(self.env.num_envs, 1, device=self.device)
         running_length = torch.zeros_like(running_reward)
+        self.actor_critic.train()
         final_iteration = self.current_learning_iteration + num_learning_iterations
         for iteration in range(self.current_learning_iteration, final_iteration):
             # Reward schedules use the true checkpoint-aware PPO iteration,
             # never an approximation based on environment transitions.
             if hasattr(self.env, "set_training_iteration"):
                 self.env.set_training_iteration(iteration)
+            if self.enable_additional_diagnostics and hasattr(self.actor_critic, "begin_rollout_diagnostics"):
+                self.actor_critic.begin_rollout_diagnostics()
+            if self.enable_additional_diagnostics and hasattr(self.env, "begin_rollout_diagnostics"):
+                self.env.begin_rollout_diagnostics()
             start = time.time()
             # Rollout collection never needs autograd. Cover simulation,
             # observation/reward construction, and storage copies as well as
@@ -121,6 +130,10 @@ class B1Z1PACTRunner:
             with torch.inference_mode():
                 for _ in range(self.steps):
                     actions = self.alg.act(obs, privileged, history, explicit)
+                    if self.enable_additional_diagnostics and hasattr(self.actor_critic, "record_rollout_diagnostics"):
+                        self.actor_critic.record_rollout_diagnostics(
+                            actions, self.env.cfg.normalization.clip_actions
+                        )
                     next_obs, next_privileged, next_history, next_explicit, reward, dones, infos, _ = self.env.step(actions)
                     next_obs, next_privileged, next_history, next_explicit, reward, dones = (
                         value.to(self.device) for value in (next_obs, next_privileged, next_history, next_explicit, reward, dones)
@@ -148,6 +161,14 @@ class B1Z1PACTRunner:
                 # Bootstrap values are rollout targets and the final privileged
                 # observation was assembled under this inference guard.
                 self.alg.compute_returns(privileged)
+                policy_diagnostics = (
+                    self.actor_critic.get_rollout_diagnostics()
+                    if self.enable_additional_diagnostics and hasattr(self.actor_critic, "get_rollout_diagnostics") else {}
+                )
+                environment_diagnostics = (
+                    self.env.get_rollout_diagnostics()
+                    if self.enable_additional_diagnostics and hasattr(self.env, "get_rollout_diagnostics") else {}
+                )
             update_start = time.time()
             metrics = self.alg.update(iteration)
             learning_time = time.time() - update_start
@@ -155,8 +176,15 @@ class B1Z1PACTRunner:
                 self.alg.update_adaptive_entropy_coef({
                     "lin_vel_tracking": self._episode_metric_max(ep_infos, "rew_tracking_lin_vel_force_world"),
                     "ang_vel_tracking": self._episode_metric_max(ep_infos, "rew_tracking_ang_vel"),
-                    "terrain_level": self._episode_metric_max(ep_infos, "terrain_level"),
+                    "terrain_level": self._episode_metric_max(ep_infos, "terrain_level", "terrain_level_mean"),
                 })
+            if getattr(self.env, "use_reward_curriculum", False):
+                self.env.step_reward_curriculum(iteration)
+            self._step_domain_randomization_curriculum(iteration, ep_infos)
+            metrics.update(policy_diagnostics)
+            metrics.update(environment_diagnostics)
+            if self.enable_additional_diagnostics:
+                self._validate_diagnostics(metrics)
             self._log(
                 iteration, self.current_learning_iteration + num_learning_iterations,
                 metrics, collection_time, learning_time, rewards, lengths, ep_infos,
@@ -167,15 +195,52 @@ class B1Z1PACTRunner:
                 self.save(os.path.join(self.log_dir, f"model_{iteration}.pt"), iteration=iteration + 1)
             ep_infos.clear()
         self.current_learning_iteration = final_iteration
+        if hasattr(self.env, "set_training_iteration"):
+            self.env.set_training_iteration(self.current_learning_iteration)
         if self.log_dir:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
         self.dynamics.close()
 
     @staticmethod
-    def _episode_metric_max(ep_infos, name):
+    def _episode_metric_max(ep_infos, *names):
         """Reduce vectorized episode summaries to the best completed episode."""
-        values = [torch.as_tensor(info[name]).float().mean().item() for info in ep_infos if name in info]
+        values = []
+        for info in ep_infos:
+            name = next((candidate for candidate in names if candidate in info), None)
+            if name is not None:
+                values.append(torch.as_tensor(info[name]).float().mean().item())
         return max(values, default=0.0)
+
+    def _step_domain_randomization_curriculum(self, iteration, ep_infos):
+        """Mirror UniFP's reward-driven simulator domain-randomization update."""
+        simulator = self.env.simulator
+        if not getattr(simulator, "use_domainrand_curriculum", False):
+            return
+        has_tracking = any("rew_tracking_lin_vel_force_world" in info for info in ep_infos)
+        tracking = self._episode_metric_max(ep_infos, "rew_tracking_lin_vel_force_world") if has_tracking else None
+        if tracking is not None:
+            simulator._step_domian_rand(iteration, tracking)
+        if self.writer is not None:
+            reward_ema = simulator.domain_rand_reward_ema
+            self.writer.add_scalar("Values/domain_rand_reward_ema", reward_ema if reward_ema is not None else 0.0, iteration)
+            self.writer.add_scalar("Values/required_reward", simulator.required_reward, iteration)
+            self.writer.add_scalar("Values/domain_rand_joint_dynamics_progress", simulator.domain_rand_joint_dynamics_progress, iteration)
+            self.writer.add_scalar("Values/domain_rand_mass_com_progress", simulator.domain_rand_mass_com_progress, iteration)
+            self.writer.add_scalar("Values/domain_rand_disturbance_progress", simulator.domain_rand_disturbance_progress, iteration)
+
+    @staticmethod
+    def _validate_diagnostics(metrics):
+        """Match UniFP's finite-value and bounded-fraction checks."""
+        bounded_tokens = (
+            "fraction", "contact_match", "contact_duty",
+            "clearance_success", "diagonal_contact_agreement",
+        )
+        for name, value in metrics.items():
+            value = float(value)
+            if not math.isfinite(value):
+                raise RuntimeError(f"nonfinite diagnostic {name}: {value}")
+            if any(token in name for token in bounded_tokens) and not 0.0 <= value <= 1.0:
+                raise RuntimeError(f"bounded diagnostic {name} outside [0, 1]: {value}")
 
     def _log(self, iteration, total_iterations, metrics, collection_time, learning_time, rewards, lengths, ep_infos):
         """Print the shared PACT/UniFP training panel plus B1Z1 diagnostics."""
@@ -190,21 +255,30 @@ class B1Z1PACTRunner:
 
         if self.writer:
             for name, value in metrics.items():
-                group = "PPO" if name.startswith(("pre_update_", "lr_")) else "Loss"
-                self.writer.add_scalar(f"{group}/{name}", value, iteration)
+                if "/" in name:
+                    self.writer.add_scalar(name, value, iteration)
+                else:
+                    group = "PPO" if name.startswith(("pre_update_", "lr_")) else "Loss"
+                    self.writer.add_scalar(f"{group}/{name}", value, iteration)
             self.writer.add_scalar("Policy/position_noise_std", position_std, iteration)
             self.writer.add_scalar("Policy/torque_noise_std", torque_std, iteration)
-            self.writer.add_scalar("Policy/entropy_coef", self.alg.current_entropy_coef, iteration)
-            self.writer.add_scalar("Perf/fps", fps, iteration)
-            self.writer.add_scalar("Perf/collection_time", collection_time, iteration)
+            self.writer.add_scalar("Policy/mean_noise_std", self.actor_critic.std.mean(), iteration)
+            self.writer.add_scalar("Values/entropy", self.alg.current_entropy_coef, iteration)
+            self.writer.add_scalar("Perf/total_fps", fps, iteration)
+            self.writer.add_scalar("Perf/collection time", collection_time, iteration)
             self.writer.add_scalar("Perf/learning_time", learning_time, iteration)
             if hasattr(self.env, "get_gait_guidance_multipliers"):
                 for name, multiplier in self.env.get_gait_guidance_multipliers().items():
-                    self.writer.add_scalar(f"Schedule/gait_guidance_{name}", multiplier, iteration)
+                    self.writer.add_scalar(f"Values/gait_guidance_{name}_multiplier", multiplier, iteration)
             if mean_reward is not None: self.writer.add_scalar("Train/mean_reward", mean_reward, iteration)
             if mean_length is not None: self.writer.add_scalar("Train/mean_episode_length", mean_length, iteration)
+            if mean_reward is not None: self.writer.add_scalar("Train/mean_reward/time", mean_reward, self.total_time)
+            if mean_length is not None: self.writer.add_scalar("Train/mean_episode_length/time", mean_length, self.total_time)
             if ep_infos:
-                for key, value in ep_infos[-1].items(): self.writer.add_scalar(f"Episode/{key}", float(value), iteration)
+                for key in ep_infos[0]:
+                    values = [torch.as_tensor(info[key], device=self.device).float().mean() for info in ep_infos if key in info]
+                    if values:
+                        self.writer.add_scalar(f"Episode/{key}", torch.stack(values).mean(), iteration)
 
         width, pad = 80, 35
         header = f" \033[1m Learning iteration {iteration}/{total_iterations} \033[0m "
@@ -233,8 +307,10 @@ class B1Z1PACTRunner:
         ]
         if mean_reward is not None:
             lines.extend((f"{'Mean reward:':>{pad}} {mean_reward:.2f}", f"{'Mean episode length:':>{pad}} {mean_length:.2f}"))
-        for key, value in (ep_infos[-1].items() if ep_infos else ()):
-            lines.append(f"{f'Mean episode {key}:':>{pad}} {float(value):.4f}")
+        for key in (ep_infos[0] if ep_infos else {}):
+            values = [torch.as_tensor(info[key], device=self.device).float().mean() for info in ep_infos if key in info]
+            if values:
+                lines.append(f"{f'Mean episode {key}:':>{pad}} {torch.stack(values).mean().item():.4f}")
         eta = self.total_time / max(iteration + 1, 1) * max(total_iterations - iteration, 0)
         lines.extend((
             "-" * width,

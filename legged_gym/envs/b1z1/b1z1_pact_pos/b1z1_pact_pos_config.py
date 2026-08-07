@@ -830,6 +830,8 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         adaptive_ent_softmax_temp = 2.0
 
     class runner:
+        # Disable expensive, non-training rollout and PPO-consistency diagnostics.
+        enable_additional_diagnostics = True
         policy_class_name = "ActorCriticB1Z1PACTPos"
         algorithm_class_name = "PPO_B1Z1PACTPos"
         num_steps_per_env = 24
