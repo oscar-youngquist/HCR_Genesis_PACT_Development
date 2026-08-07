@@ -695,7 +695,7 @@ class B1Z1PACTPos(LeggedRobot):
         # Context labels: command-space velocity and EE pose, base wrench, EE force, and
         # four binary foot-contact indicators for the estimator BCE objective.
         # They are privileged during training and predicted from history later.
-        base_command_velocity = torch.cat(
+        base_velocity = torch.cat(
             (self.simulator.base_lin_vel[:, :2], self.simulator.base_ang_vel[:, 2:3]), dim=-1
         )
         contact_mask = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0).float()
@@ -711,7 +711,7 @@ class B1Z1PACTPos(LeggedRobot):
         )
         self.explicit_labels_buf = torch.cat(
             (
-                base_command_velocity * self.obs_scales.lin_vel,
+                base_velocity * self.obs_scales.lin_vel,
                 self.ee_pos_sphe_arm * self.ee_sphere_scale,
                 base_wrench_local * self.base_wrench_scale,
                 ee_force_local * self.obs_scales.ee_force,
@@ -2155,6 +2155,12 @@ class B1Z1PACTPos(LeggedRobot):
 
     def _reward_torques(self):
         return torch.sum(torch.square(self.simulator.torques[:, :17]), dim=1)
+
+    def _reward_leg_torques(self):
+        return torch.sum(torch.square(self.simulator.torques[:, :12]), dim=1)
+
+    def _reward_arm_torques(self):
+        return torch.sum(torch.square(self.simulator.torques[:, 12:17]), dim=1)
 
     def _reward_dof_vel(self):
         return torch.sum(torch.square(self.simulator.dof_vel[:, :17]), dim=1)

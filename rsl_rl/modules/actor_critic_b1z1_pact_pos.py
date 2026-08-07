@@ -206,7 +206,7 @@ class ActorCriticB1Z1PACTPos(nn.Module):
         explicit_ground_truth: torch.Tensor,
         alpha: float | torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        """Blend normalized ground-truth and deterministic predicted context."""
+        """Blend normalized explicit context for FiLM conditioning only."""
         predicted = self.explicit_vector(context)
         alpha_tensor = torch.as_tensor(alpha, device=predicted.device, dtype=predicted.dtype)
         if alpha_tensor.ndim == 1:
@@ -257,30 +257,46 @@ class ActorCriticB1Z1PACTPos(nn.Module):
             masked["foot_height"] = explicit_labels[:, 19:23]
         return masked
 
-    def _actor_inputs(self, obs: torch.Tensor, context: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    def _actor_inputs(
+        self,
+        obs: torch.Tensor,
+        actor_context: dict[str, torch.Tensor],
+        film_context: dict[str, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build predicted actor input and independently conditioned FiLM input."""
+        film_context = actor_context if film_context is None else film_context
         # Actor observation ends with [vx, vy, yaw_rate, radius, pitch, yaw].
         command = obs[:, -6:]
-        base_error = command[:, :3] - context["base_velocity"]
+        base_error = command[:, :3] - film_context["base_velocity"]
         # Command and prediction share UniFP's scaled spherical representation.
-        ee_error = command[:, 3:6] - context["ee_position"]
+        ee_error = command[:, 3:6] - film_context["ee_position"]
         # Retain the six-dimensional tracking error used by FiLM so PPO can
         # regularize modulation strength as a function of tracking quality.
         self.last_tracking_error_sq = torch.cat((base_error, ee_error), dim=-1).square().mean(dim=-1)
-        contact_probability = torch.sigmoid(context["foot_contact_logits"])
+        contact_probability = torch.sigmoid(actor_context["foot_contact_logits"])
+        # As in UniFP, the actor always consumes deployment-time predictions.
+        # Ground-truth blending is restricted to the FiLM condition below.
         actor_input = torch.cat(
             (
-                obs, context["z"], context["base_velocity"], context["ee_position"],
-                context["base_wrench"], context["ee_force"],
-                contact_probability, context["foot_height"],
+                obs, actor_context["z"], actor_context["base_velocity"], actor_context["ee_position"],
+                actor_context["base_wrench"], actor_context["ee_force"],
+                contact_probability, actor_context["foot_height"],
             ),
             dim=-1,
         )
         # Contact state and foot height are excluded from FiLM by design.
-        film_condition = torch.cat((context["base_wrench"], context["ee_force"], base_error, ee_error), dim=-1)
+        film_condition = torch.cat((
+            film_context["base_wrench"], film_context["ee_force"], base_error, ee_error,
+        ), dim=-1)
         return actor_input, film_condition
 
-    def actor_forward(self, obs: torch.Tensor, context: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-        actor_input, film_condition = self._actor_inputs(obs, context)
+    def actor_forward(
+        self,
+        obs: torch.Tensor,
+        actor_context: dict[str, torch.Tensor],
+        film_context: dict[str, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        actor_input, film_condition = self._actor_inputs(obs, actor_context, film_context)
         features = self.actor_trunk(actor_input)
         features, magnitude, identity_deviation = self.film(features, film_condition)
         self.last_film_magnitude = magnitude
@@ -297,14 +313,15 @@ class ActorCriticB1Z1PACTPos(nn.Module):
         explicit_blend_alpha: float | torch.Tensor = 1.0,
     ) -> None:
         context = self.decode_context(self.context_encoder(history, sample=sample_context))
-        # Preserve the original latent bootstrap exactly; explicit context now
-        # follows a continuous curriculum instead of a Bernoulli switch.
+        # The actor always receives predicted explicit context. Alpha affects
+        # only FiLM, preserving UniFP-like estimator gradients through the actor.
         actor_context = self._bootmasked_context(context, None, mask_latent, False)
+        film_context = actor_context
         if explicit_labels is not None:
-            actor_context = self.blend_explicit_context(
+            film_context = self.blend_explicit_context(
                 actor_context, explicit_labels, explicit_blend_alpha,
             )
-        position, torque = self.actor_forward(obs, actor_context)
+        position, torque = self.actor_forward(obs, actor_context, film_context)
         self.last_position_mean = position
         self.last_torque_mean = torque
         mean = position
@@ -334,9 +351,10 @@ class ActorCriticB1Z1PACTPos(nn.Module):
         explicit_blend_alpha: float | torch.Tensor = 1.0,
     ) -> torch.Tensor:
         context = self.decode_context(self.context_encoder.forward_inf(history))
+        film_context = context
         if explicit_labels is not None:
-            context = self.blend_explicit_context(context, explicit_labels, explicit_blend_alpha)
-        position, _ = self.actor_forward(obs, context)
+            film_context = self.blend_explicit_context(context, explicit_labels, explicit_blend_alpha)
+        position, _ = self.actor_forward(obs, context, film_context)
         return position
 
     def evaluate(self, critic_obs: torch.Tensor) -> torch.Tensor:

@@ -769,7 +769,7 @@ class B1Z1UniFPCfgPPO:
         # Increase exploration within these bounds while command tracking or
         # terrain-curriculum progress remains below its configured target.
         entropy_coef = 0.01
-        use_adaptive_entropy = True
+        use_adaptive_entropy = False
         adaptive_ent_bounds = [0.001, 0.01]
         adaptive_ent_lin_threshold = 0.75
         adaptive_ent_ang_threshold = 0.35

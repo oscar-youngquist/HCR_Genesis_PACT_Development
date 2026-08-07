@@ -90,16 +90,13 @@ class PPO_B1Z1PACTPos:
         # The encoder receives PPO and representation-learning gradients;
         # reconstruction also owns
         # both decoder heads through the shared auxiliary optimizer below.
-        # UniFP lets PPO update the history encoder but not the explicit
-        # decoder; that decoder is owned solely by supervised adaptation.
-        explicit_ids = {id(parameter) for parameter in actor_critic.explicit_decoder.parameters()}
         ppo_enc_groups = [
             {
-                "params": [parameter for parameter in group["params"] if id(parameter) not in explicit_ids],
+                "params": list(group["params"]),
                 "weight_decay": group.get("weight_decay", 0.0),
                 "name": f"ppo_{group['name']}",
             }
-            for group in auxiliary_groups if any(id(parameter) not in explicit_ids for parameter in group["params"])
+            for group in auxiliary_groups
         ]
         auxiliary_enc_groups = [
             {
@@ -528,12 +525,18 @@ class PPO_B1Z1PACTPos:
             context, None, mask_latent=False, mask_explicit=False,
         )
         predicted = actor.explicit_vector(shared_context)
-        ground_truth_context = actor.context_with_explicit(
+        ground_truth_film_context = actor.context_with_explicit(
             shared_context, batch["actor_explicit_labels"],
         )
-        predicted_context = actor.context_with_explicit(shared_context, predicted)
-        mu_ground_truth, _ = actor.actor_forward(batch["observations"], ground_truth_context)
-        mu_predicted, _ = actor.actor_forward(batch["observations"], predicted_context)
+        predicted_film_context = actor.context_with_explicit(shared_context, predicted)
+        # Hold actor explicit input and latent fixed; only FiLM's explicit
+        # conditioning changes between the KL endpoints.
+        mu_ground_truth, _ = actor.actor_forward(
+            batch["observations"], shared_context, ground_truth_film_context,
+        )
+        mu_predicted, _ = actor.actor_forward(
+            batch["observations"], shared_context, predicted_film_context,
+        )
         sigma_ground_truth = actor.std.unsqueeze(0).expand_as(mu_ground_truth)
         sigma_predicted = actor.std.unsqueeze(0).expand_as(mu_predicted)
 

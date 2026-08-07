@@ -311,7 +311,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         # strength, then linearly reach their full ranges after this threshold.
         external_force_initial_scale = 0.25
         external_force_final_scale = 1.0
-        external_force_ramp_iterations = 2000
+        external_force_ramp_iterations = 5000
 
         push_gripper_stators = True
         apply_ee_external_forces = True
@@ -346,7 +346,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         # The impedance relation is a reward only. It never changes commands.
 
         class ranges:
-            lin_vel_x = [-0.8, 0.8]
+            lin_vel_x = [-0.5, 0.5]
             lin_vel_y = [-0.4, 0.4]
             ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
@@ -365,7 +365,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             ee_force = 0.01
             base_force = 0.01
         clip_observations = 100.0
-        clip_actions = 100.0
+        clip_actions = 50.0
 
     class domain_rand:
         use_domainrand_curriculum = True
@@ -556,7 +556,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             termination = 0.0
             collision = -1.0
             dof_pos_limits = -2.0
-            torque_limits = -0.001
+            torque_limits = -0.01
             dof_close_to_default = 0.0
 
             # Add in close to default reward
@@ -605,6 +605,8 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             action_smoothness = -0.02
             joint_power       = -2.e-5
             joint_power_dist  = -1.e-8
+            leg_torques       = -1.0e-5
+
 
             # Arm
             dof_acc_arm = -4.5e-7
@@ -612,6 +614,8 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             action_smoothness_arm = -0.02
             joint_power_arm = -2.e-5
             joint_power_dist_arm = -2.e-8
+            arm_torques = -1.0e-5
+
             # dof_acc_arm = 0.0
             # action_rate_arm = 0.0
             # action_smoothness_arm = 0.00
@@ -687,7 +691,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
 
         class reward_curriculum:
             curr_reward_keys = [
-                                "torque_limits",
+                                # "torque_limits",
                                 "dof_pos_limits",
                                 "feet_contact_forces",
                                 "lin_vel_z",
@@ -695,7 +699,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
                                 "torso_force_wrench_ellipsoid",
                                 ]
             curr_reward_bounds = {
-                "torque_limits":[-0.0001, -0.001],
+                # "torque_limits":[-0.0001, -0.001],
                 "dof_pos_limits":[-2.0, -10.0],
                 "feet_contact_forces":[-1.0e-5, -1.0e-4],
                 "lin_vel_z":[-1.00, -2.0],
@@ -799,7 +803,7 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         explicit_alpha_required_stable_updates = 20
 
         torque_clone_target_scale = 0.1
-        torque_clone_loss_weight = 1.0
+        torque_clone_loss_weight = 0.1
 
         force_gate_ema_alpha = 0.05
         force_gate_threshold = 0.05

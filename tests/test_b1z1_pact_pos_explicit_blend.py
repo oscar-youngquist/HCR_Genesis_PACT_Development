@@ -59,6 +59,15 @@ class ExplicitBlendTests(unittest.TestCase):
         )
         self.assertTrue(torch.equal(first, self.actor.action_mean))
 
+    def test_blend_changes_film_but_not_actor_explicit_input(self):
+        obs = torch.randn(5, 12)
+        ground_truth_film = self.actor.blend_explicit_context(self.context, self.labels, 0.0)
+        predicted_film = self.actor.blend_explicit_context(self.context, self.labels, 1.0)
+        actor_ground, film_ground = self.actor._actor_inputs(obs, self.context, ground_truth_film)
+        actor_predicted, film_predicted = self.actor._actor_inputs(obs, self.context, predicted_film)
+        self.assertTrue(torch.equal(actor_ground, actor_predicted))
+        self.assertFalse(torch.equal(film_ground, film_predicted))
+
     def test_endpoint_policy_kl_is_deterministic_and_changes_only_with_explicit(self):
         algorithm = PPO_B1Z1PACTPos.__new__(PPO_B1Z1PACTPos)
         algorithm.actor_critic = self.actor
@@ -73,6 +82,10 @@ class ExplicitBlendTests(unittest.TestCase):
         self.assertLess(identical["explicit_policy_kl"], 1.0e-7)
         self.assertTrue(torch.equal(torch_state, torch.random.get_rng_state()))
         self.assertEqual(python_state, random.getstate())
+        # FiLM is identity-initialized in production. Give this test a known
+        # nonzero modulation so a changed condition must alter the policy.
+        with torch.no_grad():
+            self.actor.film.network[-1].weight.fill_(0.01)
         perturbed = dict(batch)
         perturbed["actor_explicit_labels"] = labels + 0.5
         changed = algorithm._explicit_policy_diagnostics(perturbed)
