@@ -14,13 +14,17 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         num_observations = 62
         # Position-only PACT uses 213 state/randomization
         # values plus the same 187-point terrain grid used by UniFP.
-        num_critic_state_obs = 213 + 12
+        num_privileged_force_obs = 21
+        privileged_force_start = 23
+        # Replace the former 12-D GRF-only tail with the complete 21-D force block.
+        num_critic_state_obs = 213 + num_privileged_force_obs
         num_height_obs = 187
         num_privileged_obs = num_critic_state_obs + num_height_obs
         num_priv_stack = 3
         # Base velocity (3), spherical EE pose (3), base wrench (6), EE force
         # (3), foot contacts (4), and terrain-relative foot heights (4).
         num_explicit_recon_obs = 23
+        assert privileged_force_start == num_explicit_recon_obs
         num_pred_obs = 23
         num_actions = 17
         # Only position actions are executed; the torque head is auxiliary.
@@ -357,7 +361,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             ang_vel = 0.25
             dof_pos = 1.0
             dof_vel = 0.05
-            grf = 0.01
+            grf = 0.001
             height_measurements = 5.0
             ee_sphe_radius_cmd = 0.5
             ee_sphe_pitch_cmd = 1.0
@@ -767,9 +771,7 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         cenet_base_vel_dim = 3
         cenet_base_wrench_dim = 6
         cenet_ee_force_dim = 3
-        # Independent decoder widths allow force prediction and privileged
-        # reconstruction capacity to be tuned without changing model code.
-        force_decoder_layers = [128, 256, 128]
+        # The z-only privileged decoder also reconstructs the embedded force block.
         privileged_decoder_layers = [128, 256, 512]
         film_hidden_dim = 64
         # Encourage FiLM to be an identity transform near a well-tracked
@@ -785,7 +787,6 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         explicit_ee_force_weight = 1.0
         explicit_foot_contact_weight = 1.0
         explicit_foot_height_weight = 1.0
-        force_decoder_weight = 1.0
         privileged_decoder_weight = 1.0
         vae_kld_weight = 1.00
         adaptation_learning_rate = 1.0e-5
@@ -802,13 +803,9 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         explicit_alpha_warmup_updates = 100
         explicit_alpha_required_stable_updates = 20
 
-        torque_clone_target_scale = 0.1
+        torque_clone_target_scale = 0.01
         torque_clone_loss_weight = 0.1
 
-        force_gate_ema_alpha = 0.05
-        force_gate_threshold = 0.05
-        force_gate_hysteresis = 0.075
-        force_gate_patience = 10
 
     class algorithm:
         value_loss_coef = 1.0

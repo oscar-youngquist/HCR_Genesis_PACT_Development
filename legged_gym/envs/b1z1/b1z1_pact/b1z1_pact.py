@@ -154,8 +154,8 @@ class B1Z1PACT(LeggedRobot):
             simulator._base_com_bias, simulator._added_gripper_mass,
         ), dim=-1)
 
-    def get_force_decoder_target(self):
-        """Return normalized yaw-frame next-step force supervision."""
+    def get_privileged_force_observation(self):
+        """Return the normalized yaw-frame force block stored in privileged observations."""
         base_yaw_quat = self._get_base_yaw_quat()
         grfs_local = quat_rotate_inverse(
             base_yaw_quat[:, None, :].expand(-1, 4, -1).reshape(-1, 4),
@@ -172,7 +172,7 @@ class B1Z1PACT(LeggedRobot):
             base_wrench_local * self.base_wrench_scale,
         ), dim=-1)
         if target.shape != (self.num_envs, 21):
-            raise RuntimeError(f"PACT force target must be ({self.num_envs}, 21), got {tuple(target.shape)}")
+            raise RuntimeError(f"PACT privileged force block must be ({self.num_envs}, 21), got {tuple(target.shape)}")
         return target
 
     @property
@@ -720,6 +720,9 @@ class B1Z1PACT(LeggedRobot):
         # six commands, and its explicit base-wrench labels.
         critic_components = (
             ("explicit_labels", self.explicit_labels_buf),
+            # The next-frame privileged decoder learns this complete force
+            # block; coupled PACT later extracts its prediction for the PINN.
+            ("privileged_forces", self.get_privileged_force_observation()),
             ("reference_dof_error", self.simulator.dof_pos[:, :12] - self.ref_dof_pos),
             ("mass_com", mass_params),
             ("friction_offset", self.simulator._friction_values - self.friction_value_offset),

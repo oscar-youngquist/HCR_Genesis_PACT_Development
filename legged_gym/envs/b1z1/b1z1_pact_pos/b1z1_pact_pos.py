@@ -173,8 +173,8 @@ class B1Z1PACTPos(LeggedRobot):
             simulator.default_dof_pos.expand(self.num_envs, -1),
         ), dim=-1)
 
-    def get_force_decoder_target(self):
-        """Return normalized yaw-frame next-step force supervision."""
+    def get_privileged_force_observation(self):
+        """Return the normalized yaw-frame force block stored in privileged observations."""
         base_yaw_quat = self._get_base_yaw_quat()
         grfs_local = quat_rotate_inverse(
             base_yaw_quat[:, None, :].expand(-1, 4, -1).reshape(-1, 4),
@@ -191,7 +191,7 @@ class B1Z1PACTPos(LeggedRobot):
             base_wrench_local * self.base_wrench_scale,
         ), dim=-1)
         if target.shape != (self.num_envs, 21):
-            raise RuntimeError(f"PACT-pos force target must be ({self.num_envs}, 21), got {tuple(target.shape)}")
+            raise RuntimeError(f"PACT-pos privileged force block must be ({self.num_envs}, 21), got {tuple(target.shape)}")
         return target
 
     @property
@@ -737,6 +737,9 @@ class B1Z1PACTPos(LeggedRobot):
         # explicit base-wrench labels but has a 17-D executed action.
         critic_components = (
             ("explicit_labels", self.explicit_labels_buf),
+            # Share one target with the privileged reconstruction objective
+            # instead of maintaining a separate force-decoder data path.
+            ("privileged_forces", self.get_privileged_force_observation()),
             ("reference_dof_error", self.simulator.dof_pos[:, :12] - self.ref_dof_pos),
             ("mass_com", mass_params),
             ("friction_offset", self.simulator._friction_values - self.friction_value_offset),
@@ -760,7 +763,6 @@ class B1Z1PACTPos(LeggedRobot):
             ("joint_armature", self.simulator._joint_armature),
             ("joint_friction", self.simulator._joint_friction),
             ("joint_damping", self.simulator._joint_damping),
-            ("grfs", self.simulator._grfs_buf * self.obs_scales.grf)
         )
         critic_state = torch.cat([value for _, value in critic_components], dim=-1)
         if critic_state.shape[1] != self.cfg.env.num_critic_state_obs:

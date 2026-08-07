@@ -81,7 +81,7 @@ class FiLM(nn.Module):
 
 
 class B1Z1PACTDecoder(nn.Module):
-    """Independent decoder head used for force or privileged-state targets."""
+    """MLP decoder used for explicit or privileged-state reconstruction."""
 
     def __init__(self, input_dim: int, output_dim: int, hidden=(128, 256, 128), activation: str = "elu"):
         super().__init__()

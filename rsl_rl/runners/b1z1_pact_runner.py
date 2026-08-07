@@ -39,12 +39,6 @@ class B1Z1PACTRunner:
             max_noise_std=policy_cfg["max_noise_std"],
         ).to(device)
 
-        condition_dim = policy_cfg["cenet_latent_dim"] + 3 + 6 + 3
-
-        self.force_decoder = B1Z1PACTDecoder(
-            condition_dim, 21, hidden=policy_cfg["force_decoder_layers"],
-            activation=policy_cfg["activation"],
-        ).to(device)
         self.privileged_decoder = B1Z1PACTDecoder(
             # Match UniFP: next-state privileged reconstruction is decoded
             # from z alone, without explicit estimates as side information.
@@ -76,6 +70,8 @@ class B1Z1PACTRunner:
             "grf_scale": env.obs_scales.grf,
             "ee_force_scale": env.obs_scales.ee_force,
             "base_wrench_scale": env.base_wrench_scale.tolist(),
+            "privileged_force_start": env.cfg.env.privileged_force_start,
+            "privileged_force_dim": env.cfg.env.num_privileged_force_obs,
         })
 
         merged.update({key: policy_cfg[key] for key in (
@@ -85,15 +81,15 @@ class B1Z1PACTRunner:
             "force_gate_ema_alpha", "force_gate_threshold", "force_gate_hysteresis", "force_gate_patience",
             "explicit_base_vel_weight", "explicit_ee_position_weight", "explicit_base_wrench_weight", "explicit_ee_force_weight", "explicit_foot_contact_weight",
             "explicit_foot_height_weight",
-            "force_decoder_weight", "privileged_decoder_weight", "vae_kld_weight",
+            "privileged_decoder_weight", "vae_kld_weight",
             "adaptation_learning_rate",
         )})
 
-        self.alg = PPO_B1Z1PACT(self.actor_critic, self.force_decoder, self.privileged_decoder, self.dynamics, merged, device)
+        self.alg = PPO_B1Z1PACT(self.actor_critic, self.privileged_decoder, self.dynamics, merged, device)
 
         self.alg.init_storage(
             env.num_envs, runner_cfg["num_steps_per_env"], env.num_obs, critic_dim,
-            history_dim, 2 * env.num_actions, env.num_exp_labels, 21, env.num_privileged_obs, 180,
+            history_dim, 2 * env.num_actions, env.num_exp_labels, env.num_privileged_obs, 180,
         )
 
         self.steps, self.save_interval = runner_cfg["num_steps_per_env"], runner_cfg["save_interval"]
@@ -134,7 +130,6 @@ class B1Z1PACTRunner:
                         # unlike PACT-pos, the active PINN consumes its floating
                         # base, force, velocity, and inertial-randomization data.
                         reward, dones, infos,
-                        self.env.get_force_decoder_target().to(self.device),
                         next_privileged[:, -self.env.num_privileged_obs:],
                         self.env.get_pact_dynamics_state().to(self.device),
                     )
@@ -227,12 +222,12 @@ class B1Z1PACTRunner:
             f"{'Foot-contact BCE loss:':>{pad}} {metrics['foot_contact']:.4f}",
             f"{'Foot-height loss:':>{pad}} {metrics['foot_height']:.4f}",
             f"{'Privileged reconstruction loss:':>{pad}} {metrics['privileged_decoder']:.4f}",
-            f"{'Force decoder loss:':>{pad}} {metrics['force_decoder']:.4f}",
+            f"{'Privileged force loss:':>{pad}} {metrics['privileged_force']:.4f}",
             f"{'KL divergence loss:':>{pad}} {metrics['kl']:.4f}",
             f"{'Position action noise std:':>{pad}} {position_std:.2f}",
             f"{'Torque action noise std:':>{pad}} {torque_std:.2f}",
             f"{'Entropy coefficient:':>{pad}} {self.alg.current_entropy_coef:.6f}",
-            f"{'Force decoder gate:':>{pad}} {metrics['force_gate_active']:.0f}",
+            f"{'Privileged force gate:':>{pad}} {metrics['force_gate_active']:.0f}",
             f"{'Latent bootstrap probability:':>{pad}} {metrics['latent_boot_probability']:.4f}",
             f"{'Explicit bootstrap probability:':>{pad}} {metrics['explicit_boot_probability']:.4f}",
         ]
@@ -253,7 +248,7 @@ class B1Z1PACTRunner:
     def save(self, path, iteration=None):
         saved_iteration = self.current_learning_iteration if iteration is None else int(iteration)
         torch.save({
-            "model_state_dict": self.actor_critic.state_dict(), "force_decoder_state_dict": self.force_decoder.state_dict(),
+            "model_state_dict": self.actor_critic.state_dict(),
             "privileged_decoder_state_dict": self.privileged_decoder.state_dict(),
             "actor_optimizer": self.alg.actor_optimizer.optimizer.state_dict(),
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
@@ -265,10 +260,9 @@ class B1Z1PACTRunner:
         }, path)
 
     def load(self, path, load_optimizer=True):
-        """Restore all learned heads and the force-reliability gate state."""
+        """Restore learned heads and the privileged-force reliability gate."""
         checkpoint = torch.load(path, map_location=self.device)
         self.actor_critic.load_state_dict(checkpoint["model_state_dict"])
-        self.force_decoder.load_state_dict(checkpoint["force_decoder_state_dict"])
         self.privileged_decoder.load_state_dict(checkpoint["privileged_decoder_state_dict"])
         if load_optimizer:
             self.alg.actor_optimizer.optimizer.load_state_dict(checkpoint["actor_optimizer"])

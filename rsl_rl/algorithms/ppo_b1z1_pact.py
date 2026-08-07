@@ -14,8 +14,8 @@ from rsl_rl.storage.rollout_storage_b1z1_pact import RolloutStorageB1Z1PACT
 
 
 class PPO_B1Z1PACT:
-    def __init__(self, actor_critic, force_decoder, privileged_decoder, dynamics_backend, cfg, device):
-        self.actor_critic, self.force_decoder, self.privileged_decoder = actor_critic, force_decoder, privileged_decoder
+    def __init__(self, actor_critic, privileged_decoder, dynamics_backend, cfg, device):
+        self.actor_critic, self.privileged_decoder = actor_critic, privileged_decoder
         self.dynamics_backend, self.cfg, self.device = dynamics_backend, cfg, device
         self.clip_param, self.gamma, self.lam = cfg["clip_param"], cfg["gamma"], cfg["lam"]
         self.value_loss_coef, self.entropy_coef = cfg["value_loss_coef"], cfg["entropy_coef"]
@@ -59,11 +59,6 @@ class PPO_B1Z1PACT:
 
         encoder_weight_decay = context_groups[0].get("weight_decay", 0.0)
         auxiliary_groups = list(context_groups) + [
-            {
-                "params": list(force_decoder.parameters()),
-                "weight_decay": encoder_weight_decay,
-                "name": "force_decoder",
-            },
             {
                 "params": list(privileged_decoder.parameters()),
                 "weight_decay": encoder_weight_decay,
@@ -162,12 +157,12 @@ class PPO_B1Z1PACT:
         self.transition.explicit_targets = explicit_labels.detach().clone()
         return actions
 
-    def process_env_step(self, rewards, dones, infos, force_targets, next_privileged, dynamics_state):
+    def process_env_step(self, rewards, dones, infos, next_privileged, dynamics_state):
         # ``dynamics_state`` is the post-step state collected by the runner.
         # Storing it beside this transition keeps action_t, v_t, and v_(t+1)
         # together until the shuffled PPO update.
         self.transition.rewards, self.transition.dones = rewards.view(-1, 1), dones
-        self.transition.force_targets, self.transition.next_privileged = force_targets, next_privileged
+        self.transition.next_privileged = next_privileged
         self.transition.dynamics_state = dynamics_state
         if "time_outs" in infos:
             self.transition.rewards += self.gamma * self.transition.values * infos["time_outs"].view(-1, 1).to(self.device)
@@ -274,7 +269,7 @@ class PPO_B1Z1PACT:
 
         return torch.cat((controlled, uncontrolled), dim=-1)
 
-    def _pinn_loss(self, mean_actions, context, force_prediction, state, valid):
+    def _pinn_loss(self, mean_actions, context, privileged_force_prediction, state, valid):
         """Evaluate the observed-transition whole-body consistency loss.
 
         The residual has the 25 free-flyer/generalized coordinates of B1/Z1:
@@ -309,10 +304,10 @@ class PPO_B1Z1PACT:
             # than permanently relying on privileged force measurements.
             # Decoder outputs use observation-space normalization. Convert all
             # three predicted force blocks back to physical units for PINN.
-            grfs = force_prediction[:, :12] / self.cfg["grf_scale"]
-            ee_force = force_prediction[:, 12:15] / self.cfg["ee_force_scale"]
-            wrench_scale = force_prediction.new_tensor(self.cfg["base_wrench_scale"])
-            base_wrench = force_prediction[:, 15:21] / wrench_scale
+            grfs = privileged_force_prediction[:, :12] / self.cfg["grf_scale"]
+            ee_force = privileged_force_prediction[:, 12:15] / self.cfg["ee_force_scale"]
+            wrench_scale = privileged_force_prediction.new_tensor(self.cfg["base_wrench_scale"])
+            base_wrench = privileged_force_prediction[:, 15:21] / wrench_scale
             # Predictions are yaw-frame quantities, as in UniFP. Pinocchio's
             # LWA Jacobians require world-frame forces at this boundary.
             x, y, z, w = base_quat.unbind(dim=-1)
@@ -393,7 +388,7 @@ class PPO_B1Z1PACT:
         return torch.stack(block_losses).sum()
 
 
-    def _compute_vae_loss(self, obs_hist_batch, force_targets, obs_target, labels, valid):
+    def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid):
         # Recompute the auxiliary graph after the actor update. The PPO
         # graph was consumed by PCGrad and sharing it here would either
         # fail on a second backward pass or retain an unnecessarily large
@@ -401,14 +396,8 @@ class PPO_B1Z1PACT:
         aux_context = self.actor_critic.decode_context(
             self.actor_critic.context_encoder(obs_hist_batch, sample=True)
         )
-        aux_condition = torch.cat(
-            (aux_context["z"], aux_context["base_velocity"], aux_context["base_wrench"], aux_context["ee_force"]), dim=-1
-        )
-
-        # Predict the recon targets
-        aux_force_prediction = self.force_decoder(aux_condition)
-        # UniFP reconstructs the next single privileged frame from z alone.
-        # The force decoder intentionally retains the richer explicit condition.
+        # One z-only decoder reconstructs the complete next privileged frame,
+        # including its normalized GRF, EE-force, and base-wrench block.
         aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
 
         pred_velo_loss = F.mse_loss(aux_context["base_velocity"], labels[:, :3])
@@ -434,7 +423,6 @@ class PPO_B1Z1PACT:
         )
 
         # VAE recon + KL losses
-        aux_force_loss = F.mse_loss(aux_force_prediction * valid, force_targets * valid)
         privileged_error = (aux_privileged_prediction - obs_target).square() * valid
         aux_privileged_loss = privileged_error.sum() / (
             valid.sum().clamp_min(1.0) * aux_privileged_prediction.shape[-1]
@@ -447,7 +435,6 @@ class PPO_B1Z1PACT:
         # Total loss
         aux = (
             aux_explicit
-            + self.cfg["force_decoder_weight"] * aux_force_loss
             + self.cfg["privileged_decoder_weight"] * aux_privileged_loss
             + self.cfg["vae_kld_weight"] * aux_kl
         )
@@ -470,7 +457,7 @@ class PPO_B1Z1PACT:
             "ee_force": pred_ee_force_loss,
             "foot_contact": pred_foot_contact_loss,
             "foot_height": pred_foot_height_loss,
-            "force_decoder": aux_force_loss,
+            "privileged_force": self._masked_force_slice_mse(aux_privileged_prediction, obs_target, valid),
             "privileged_decoder": aux_privileged_loss,
             "kl": aux_kl,
             # Sigmoid probabilities provide a bounded contact prediction for
@@ -487,6 +474,13 @@ class PPO_B1Z1PACT:
             "privileged_target": obs_target.detach(),
             "valid": valid.detach(),
         }
+
+    def _masked_force_slice_mse(self, prediction, target, valid):
+        """Measure the force block inside the next privileged-frame reconstruction."""
+        start = self.cfg["privileged_force_start"]
+        end = start + self.cfg["privileged_force_dim"]
+        error = (prediction[:, start:end] - target[:, start:end]).square() * valid
+        return error.sum() / (valid.sum().clamp_min(1.0) * (end - start))
 
 
     def _compute_rl_loss(self, batch):
@@ -554,10 +548,12 @@ class PPO_B1Z1PACT:
         )
 
         context = self.actor_critic.last_context
-        condition = torch.cat((context["z"], context["base_velocity"], context["base_wrench"], context["ee_force"]), dim=-1)
+        privileged_prediction = self.privileged_decoder(context["z"])
+        force_start = self.cfg["privileged_force_start"]
+        force_end = force_start + self.cfg["privileged_force_dim"]
         return (
             ppo_loss, surrogate_loss, value_loss, film_identity_loss, kl_mean,
-            self.actor_critic.action_mean, context, self.force_decoder(condition),
+            self.actor_critic.action_mean, context, privileged_prediction[:, force_start:force_end],
         )
 
     @torch.no_grad()
@@ -611,7 +607,7 @@ class PPO_B1Z1PACT:
             self.pinn_updates += 1
         metrics = {name: 0.0 for name in (
             "value", "surrogate", "base_velo", "ee_position", "base_wrench", "ee_force", "foot_contact", "foot_height",
-            "force_decoder", "privileged_decoder", "kl", "pinn", "film_identity",
+            "privileged_force", "privileged_decoder", "kl", "pinn", "film_identity",
         )}
         # PPO_PACT's float64 sufficient statistics. Keep one set per maskable
         # signal: next-privileged reconstruction for z and explicit-state
@@ -627,7 +623,12 @@ class PPO_B1Z1PACT:
             valid = (~batch["dones"].squeeze(-1)).float().unsqueeze(-1)
             # Both decoder losses use the next simulator state stored with this
             # action transition. Multiplying by valid masks reset transitions.
-            force_loss = F.mse_loss(force_prediction * valid, batch["force_targets"] * valid)
+            force_start = self.cfg["privileged_force_start"]
+            force_end = force_start + self.cfg["privileged_force_dim"]
+            force_target = batch["next_privileged"][:, force_start:force_end]
+            force_loss = ((force_prediction - force_target).square() * valid).sum() / (
+                valid.sum().clamp_min(1.0) * self.cfg["privileged_force_dim"]
+            )
             force_measurement = force_loss.detach().item()
 
             # Reliability is deliberately temporal: a single lucky minibatch
@@ -661,7 +662,7 @@ class PPO_B1Z1PACT:
             # graph. The shared optimizer updates encoder and both decoders
             # exactly once from their combined objective.
             aux = self._compute_vae_loss(
-                obs_hist_batch=batch["histories"], force_targets=batch["force_targets"],
+                obs_hist_batch=batch["histories"],
                 obs_target=batch["next_privileged"], labels=batch["explicit_targets"], valid=valid,
             )
 
@@ -689,7 +690,7 @@ class PPO_B1Z1PACT:
                               ("base_wrench", aux["base_wrench"]), ("ee_force", aux["ee_force"]),
                               ("foot_contact", aux["foot_contact"]),
                               ("foot_height", aux["foot_height"]),
-                              ("force_decoder", aux["force_decoder"]), ("privileged_decoder", aux["privileged_decoder"]),
+                              ("privileged_force", aux["privileged_force"]), ("privileged_decoder", aux["privileged_decoder"]),
                               ("kl", aux["kl"]), ("pinn", pinn), ("film_identity", film_identity)):
                 metrics[name] += val.detach().item()
             updates += 1

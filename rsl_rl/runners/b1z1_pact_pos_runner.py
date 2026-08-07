@@ -37,12 +37,6 @@ class B1Z1PACTPosRunner:
             max_noise_std=policy_cfg["max_noise_std"],
         ).to(device)
 
-        condition_dim = policy_cfg["cenet_latent_dim"] + 3 + 6 + 3
-
-        self.force_decoder = B1Z1PACTDecoder(
-            condition_dim, 21, hidden=policy_cfg["force_decoder_layers"],
-            activation=policy_cfg["activation"],
-        ).to(device)
         self.privileged_decoder = B1Z1PACTDecoder(
             # Match UniFP: next-state privileged reconstruction is decoded
             # from z alone, without explicit estimates as side information.
@@ -57,15 +51,16 @@ class B1Z1PACTPosRunner:
             "torque_action_scale": env.cfg.control.torque_scale,
             "dof_pos_obs_scale": env.obs_scales.dof_pos,
             "dof_vel_obs_scale": env.obs_scales.dof_vel,
+            "privileged_force_start": env.cfg.env.privileged_force_start,
+            "privileged_force_dim": env.cfg.env.num_privileged_force_obs,
         })
 
         merged.update({key: policy_cfg[key] for key in (
             "film_identity_loss_weight", "film_identity_error_scale",
             "torque_clone_target_scale", "torque_clone_loss_weight",
-            "force_gate_ema_alpha", "force_gate_threshold", "force_gate_hysteresis", "force_gate_patience",
             "explicit_base_vel_weight", "explicit_ee_position_weight", "explicit_base_wrench_weight", "explicit_ee_force_weight", "explicit_foot_contact_weight",
             "explicit_foot_height_weight",
-            "force_decoder_weight", "privileged_decoder_weight", "vae_kld_weight",
+            "privileged_decoder_weight", "vae_kld_weight",
             "adaptation_learning_rate",
             "explicit_blend_initial_alpha", "explicit_blend_max_alpha",
             "explicit_kl_ema_decay", "explicit_kl_low_threshold", "explicit_kl_high_threshold",
@@ -74,12 +69,12 @@ class B1Z1PACTPosRunner:
         )})
 
         self.alg = PPO_B1Z1PACTPos(
-            self.actor_critic, self.force_decoder, self.privileged_decoder, merged, device
+            self.actor_critic, self.privileged_decoder, merged, device
         )
 
         self.alg.init_storage(
             env.num_envs, runner_cfg["num_steps_per_env"], env.num_obs, critic_dim,
-            history_dim, env.num_actions, env.num_exp_labels, 21, env.num_privileged_obs, 76,
+            history_dim, env.num_actions, env.num_exp_labels, env.num_privileged_obs, 76,
         )
 
         self.steps, self.save_interval = runner_cfg["num_steps_per_env"], runner_cfg["save_interval"]
@@ -116,7 +111,6 @@ class B1Z1PACTPosRunner:
                     )
                     self.alg.process_env_step(
                         reward, dones, infos,
-                        self.env.get_force_decoder_target().to(self.device),
                         next_privileged[:, -self.env.num_privileged_obs:],
                         self.env.get_pact_pos_torque_clone_state().to(self.device),
                     )
@@ -224,11 +218,10 @@ class B1Z1PACTPosRunner:
             f"{'Foot-contact BCE loss:':>{pad}} {metrics['foot_contact']:.4f}",
             f"{'Foot-height loss:':>{pad}} {metrics['foot_height']:.4f}",
             f"{'Privileged reconstruction loss:':>{pad}} {metrics['privileged_decoder']:.4f}",
-            f"{'Force decoder loss:':>{pad}} {metrics['force_decoder']:.4f}",
+            f"{'Privileged force loss:':>{pad}} {metrics['privileged_force']:.4f}",
             f"{'KL divergence loss:':>{pad}} {metrics['kl']:.4f}",
             f"{'Position action noise std:':>{pad}} {position_std:.2f}",
             f"{'Entropy coefficient:':>{pad}} {self.alg.current_entropy_coef:.6f}",
-            f"{'Force decoder gate:':>{pad}} {metrics['force_gate_active']:.0f}",
             f"{'Latent bootstrap probability:':>{pad}} {metrics['latent_boot_probability']:.4f}",
             f"{'Explicit blend alpha:':>{pad}} {metrics['explicit_blend_alpha']:.4f}",
             f"{'Explicit policy KL EMA:':>{pad}} {metrics['explicit_policy_kl_ema']:.6f}",
@@ -250,12 +243,11 @@ class B1Z1PACTPosRunner:
     def save(self, path, iteration=None):
         saved_iteration = self.current_learning_iteration if iteration is None else int(iteration)
         torch.save({
-            "model_state_dict": self.actor_critic.state_dict(), "force_decoder_state_dict": self.force_decoder.state_dict(),
+            "model_state_dict": self.actor_critic.state_dict(),
             "privileged_decoder_state_dict": self.privileged_decoder.state_dict(),
             "actor_optimizer": self.alg.actor_optimizer.optimizer.state_dict(),
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
-            "iteration": saved_iteration, "force_ema": self.alg.force_ema,
-            "force_gate_active": self.alg.force_gate_active, "force_gate_count": self.alg.force_gate_count,
+            "iteration": saved_iteration,
             "use_boot_latent": self.alg.use_boot_latent,
             "explicit_blend_alpha": self.alg.explicit_blend_alpha,
             "explicit_kl_ema": self.alg.explicit_kl_ema,
@@ -264,10 +256,9 @@ class B1Z1PACTPosRunner:
         }, path)
 
     def load(self, path, load_optimizer=True):
-        """Restore all learned heads and the force-reliability gate state."""
+        """Restore the policy, reconstruction decoder, and curriculum state."""
         checkpoint = torch.load(path, map_location=self.device)
         self.actor_critic.load_state_dict(checkpoint["model_state_dict"])
-        self.force_decoder.load_state_dict(checkpoint["force_decoder_state_dict"])
         self.privileged_decoder.load_state_dict(checkpoint["privileged_decoder_state_dict"])
         if load_optimizer:
             self.alg.actor_optimizer.optimizer.load_state_dict(checkpoint["actor_optimizer"])
@@ -275,9 +266,6 @@ class B1Z1PACTPosRunner:
         self.current_learning_iteration = checkpoint.get("iteration", 0)
         if hasattr(self.env, "set_training_iteration"):
             self.env.set_training_iteration(self.current_learning_iteration)
-        self.alg.force_ema = checkpoint.get("force_ema")
-        self.alg.force_gate_active = checkpoint.get("force_gate_active", False)
-        self.alg.force_gate_count = checkpoint.get("force_gate_count", 0)
         # Latent bootstrap masking is retired: resumed policies always consume
         # the encoder's history latent regardless of legacy checkpoint state.
         self.alg.use_boot_latent = True

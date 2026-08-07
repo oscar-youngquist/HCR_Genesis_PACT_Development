@@ -15,8 +15,8 @@ from rsl_rl.storage.rollout_storage_b1z1_pact import RolloutStorageB1Z1PACT
 
 
 class PPO_B1Z1PACTPos:
-    def __init__(self, actor_critic, force_decoder, privileged_decoder, cfg, device):
-        self.actor_critic, self.force_decoder, self.privileged_decoder = actor_critic, force_decoder, privileged_decoder
+    def __init__(self, actor_critic, privileged_decoder, cfg, device):
+        self.actor_critic, self.privileged_decoder = actor_critic, privileged_decoder
         self.cfg, self.device = cfg, device
         self.clip_param, self.gamma, self.lam = cfg["clip_param"], cfg["gamma"], cfg["lam"]
         self.value_loss_coef, self.entropy_coef = cfg["value_loss_coef"], cfg["entropy_coef"]
@@ -76,11 +76,6 @@ class PPO_B1Z1PACTPos:
         encoder_weight_decay = context_groups[0].get("weight_decay", 0.0)
         auxiliary_groups = list(context_groups) + [
             {
-                "params": list(force_decoder.parameters()),
-                "weight_decay": encoder_weight_decay,
-                "name": "force_decoder",
-            },
-            {
                 "params": list(privileged_decoder.parameters()),
                 "weight_decay": encoder_weight_decay,
                 "name": "privileged_decoder",
@@ -107,7 +102,7 @@ class PPO_B1Z1PACTPos:
             for group in auxiliary_groups
         ]
 
-        self.actor_optimizer = PCGrad(optim.AdamW([*actor_groups,*ppo_enc_groups], lr=cfg["learning_rate"]), reduction="sum")
+        self.actor_optimizer = PCGrad(optim.Adam([*actor_groups,*ppo_enc_groups], lr=cfg["learning_rate"]), reduction="sum")
         # Clip the same ownership boundary that is stepped by PPO, as UniFP
         # does, including all PACT-position PPO parameter groups.
         seen_ppo_parameters = set()
@@ -118,12 +113,12 @@ class PPO_B1Z1PACTPos:
                     seen_ppo_parameters.add(id(parameter))
                     self.ppo_parameters.append(parameter)
 
-        # # We want to reduce the LR of the critic
-        for param_group in self.actor_optimizer.optimizer.param_groups:
-            # specifically modifies the learning rate of the crtic specific parameters
-            if "name" in param_group.keys():
-                if "critic" in param_group["name"]:
-                    param_group['lr'] = (cfg["learning_rate"] / 3.0)
+        # # # We want to reduce the LR of the critic
+        # for param_group in self.actor_optimizer.optimizer.param_groups:
+        #     # specifically modifies the learning rate of the crtic specific parameters
+        #     if "name" in param_group.keys():
+        #         if "critic" in param_group["name"]:
+        #             param_group['lr'] = (cfg["learning_rate"] / 3.0)
 
         self.auxiliary_optimizer = optim.Adam(
             [parameter for group in auxiliary_enc_groups for parameter in group["params"]],
@@ -134,8 +129,6 @@ class PPO_B1Z1PACTPos:
         self.storage = None
         # The first decoder measurement initializes the EMA; starting at
         # infinity would keep the reliability gate permanently closed.
-        self.force_ema = None
-        self.force_gate_active, self.force_gate_count = False, 0
 
     def _validate_explicit_blend_config(self):
         if not 0.0 <= self.explicit_kl_ema_decay < 1.0:
@@ -192,12 +185,12 @@ class PPO_B1Z1PACTPos:
         )
         return actions
 
-    def process_env_step(self, rewards, dones, infos, force_targets, next_privileged, dynamics_state):
+    def process_env_step(self, rewards, dones, infos, next_privileged, dynamics_state):
         # ``dynamics_state`` is the post-step state collected by the runner.
         # Storing it beside this transition keeps action_t, v_t, and v_(t+1)
         # together until the shuffled PPO update.
         self.transition.rewards, self.transition.dones = rewards.view(-1, 1), dones
-        self.transition.force_targets, self.transition.next_privileged = force_targets, next_privileged
+        self.transition.next_privileged = next_privileged
         self.transition.dynamics_state = dynamics_state
         if "time_outs" in infos:
             self.transition.rewards += self.gamma * self.transition.values * infos["time_outs"].view(-1, 1).to(self.device)
@@ -270,7 +263,7 @@ class PPO_B1Z1PACTPos:
     def compute_returns(self, critic_obs):
         self.storage.compute_returns(self.actor_critic.evaluate(critic_obs).detach(), self.gamma, self.lam)
 
-    def _compute_vae_loss(self, obs_hist_batch, force_targets, obs_target, labels, valid):
+    def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid):
         # Recompute the auxiliary graph after the actor update. The PPO
         # graph was consumed by PCGrad and sharing it here would either
         # fail on a second backward pass or retain an unnecessarily large
@@ -278,14 +271,8 @@ class PPO_B1Z1PACTPos:
         aux_context = self.actor_critic.decode_context(
             self.actor_critic.context_encoder(obs_hist_batch, sample=True)
         )
-        aux_condition = torch.cat(
-            (aux_context["z"], aux_context["base_velocity"], aux_context["base_wrench"], aux_context["ee_force"]), dim=-1
-        )
-
-        # Predict the recon targets
-        aux_force_prediction = self.force_decoder(aux_condition)
-        # UniFP reconstructs the next single privileged frame from z alone.
-        # The force decoder intentionally retains the richer explicit condition.
+        # Match UniFP's z-only next-frame decoder. Its target now includes the
+        # normalized force block that previously had a dedicated decoder.
         aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
 
         pred_velo_loss = F.mse_loss(aux_context["base_velocity"], labels[:, :3])
@@ -311,7 +298,6 @@ class PPO_B1Z1PACTPos:
         )
 
         # VAE recon + KL losses
-        aux_force_loss = F.mse_loss(aux_force_prediction * valid, force_targets * valid)
         privileged_error = (aux_privileged_prediction - obs_target).square() * valid
         aux_privileged_loss = privileged_error.sum() / (
             valid.sum().clamp_min(1.0) * aux_privileged_prediction.shape[-1]
@@ -324,7 +310,6 @@ class PPO_B1Z1PACTPos:
         # Total loss
         aux = (
             aux_explicit
-            + self.cfg["force_decoder_weight"] * aux_force_loss
             + self.cfg["privileged_decoder_weight"] * aux_privileged_loss
             + self.cfg["vae_kld_weight"] * aux_kl
         )
@@ -347,7 +332,7 @@ class PPO_B1Z1PACTPos:
             "ee_force": pred_ee_force_loss,
             "foot_contact": pred_foot_contact_loss,
             "foot_height": pred_foot_height_loss,
-            "force_decoder": aux_force_loss,
+            "privileged_force": self._masked_force_slice_mse(aux_privileged_prediction, obs_target, valid),
             "privileged_decoder": aux_privileged_loss,
             "kl": aux_kl,
             # Sigmoid probabilities provide a bounded contact prediction for
@@ -364,6 +349,13 @@ class PPO_B1Z1PACTPos:
             "privileged_target": obs_target.detach(),
             "valid": valid.detach(),
         }
+
+    def _masked_force_slice_mse(self, prediction, target, valid):
+        """Report force accuracy from the shared privileged decoder."""
+        start = self.cfg["privileged_force_start"]
+        end = start + self.cfg["privileged_force_dim"]
+        error = (prediction[:, start:end] - target[:, start:end]).square() * valid
+        return error.sum() / (valid.sum().clamp_min(1.0) * (end - start))
 
 
     def _compute_rl_loss(self, batch):
@@ -430,11 +422,9 @@ class PPO_B1Z1PACTPos:
             + self.film_identity_loss_weight * film_identity_loss
         )
 
-        context = self.actor_critic.last_context
-        condition = torch.cat((context["z"], context["base_velocity"], context["base_wrench"], context["ee_force"]), dim=-1)
         return (
             ppo_loss, surrogate_loss, value_loss, film_identity_loss, kl_mean,
-            self.actor_critic.action_mean, context, self.force_decoder(condition),
+            self.actor_critic.action_mean, self.actor_critic.last_context,
         )
 
     @torch.no_grad()
@@ -612,7 +602,7 @@ class PPO_B1Z1PACTPos:
     def update(self, iteration):
         metrics = {name: 0.0 for name in (
             "value", "surrogate", "base_velo", "ee_position", "base_wrench", "ee_force", "foot_contact", "foot_height",
-            "force_decoder", "privileged_decoder", "kl", "torque_clone", "film_identity",
+            "privileged_force", "privileged_decoder", "kl", "torque_clone", "film_identity",
         )}
         # PPO_PACT's float64 sufficient statistics. Keep one set per maskable
         # signal: next-privileged reconstruction for z and explicit-state
@@ -630,25 +620,9 @@ class PPO_B1Z1PACTPos:
                     name: batch[name].detach().clone()
                     for name in ("observations", "histories", "actor_explicit_labels")
                 }
-            ppo_loss, surrogate, value, film_identity, _, mean_actions, context, force_prediction = self._compute_rl_loss(batch)
+            ppo_loss, surrogate, value, film_identity, _, mean_actions, context = self._compute_rl_loss(batch)
             
             valid = (~batch["dones"].squeeze(-1)).float().unsqueeze(-1)
-            # Both decoder losses use the next simulator state stored with this
-            # action transition. Multiplying by valid masks reset transitions.
-            force_loss = F.mse_loss(force_prediction * valid, batch["force_targets"] * valid)
-            force_measurement = force_loss.detach().item()
-
-            # Retain decoder reliability diagnostics for parity with PACT.
-            self.force_ema = force_measurement if self.force_ema is None else (
-                self.cfg["force_gate_ema_alpha"] * force_measurement
-                + (1 - self.cfg["force_gate_ema_alpha"]) * self.force_ema
-            )
-            # Hysteresis avoids rapid gate toggling near the reconstruction
-            # threshold after it has become active.
-            threshold = self.cfg["force_gate_threshold"] if not self.force_gate_active else self.cfg["force_gate_hysteresis"]
-            self.force_gate_count = self.force_gate_count + 1 if self.force_ema < threshold else 0
-            self.force_gate_active = self.force_gate_count >= self.cfg["force_gate_patience"]
-
             torque_clone = self._torque_clone_loss(batch["observations"], batch["dynamics_state"])
 
             self.actor_optimizer.zero_grad()
@@ -667,7 +641,7 @@ class PPO_B1Z1PACTPos:
             # graph. The shared optimizer updates encoder and both decoders
             # exactly once from their combined objective.
             aux = self._compute_vae_loss(
-                obs_hist_batch=batch["histories"], force_targets=batch["force_targets"],
+                obs_hist_batch=batch["histories"],
                 obs_target=batch["next_privileged"], labels=batch["explicit_targets"], valid=valid,
             )
 
@@ -695,7 +669,7 @@ class PPO_B1Z1PACTPos:
                               ("base_wrench", aux["base_wrench"]), ("ee_force", aux["ee_force"]),
                               ("foot_contact", aux["foot_contact"]),
                               ("foot_height", aux["foot_height"]),
-                              ("force_decoder", aux["force_decoder"]), ("privileged_decoder", aux["privileged_decoder"]),
+                              ("privileged_force", aux["privileged_force"]), ("privileged_decoder", aux["privileged_decoder"]),
                               ("kl", aux["kl"]), ("torque_clone", torque_clone),
                               ("film_identity", film_identity)):
                 metrics[name] += val.detach().item()
@@ -742,8 +716,6 @@ class PPO_B1Z1PACTPos:
         self.storage.clear()
         diagnostics["lr_after_update"] = self.learning_rate
         return {key: value / max(1, updates) for key, value in metrics.items()} | diagnostics | {
-            "force_gate_ema": self.force_ema or 0.0,
-            "force_gate_active": float(self.force_gate_active),
             "latent_boot_probability": latent_pboot,
             "latent_boot_active": float(self.use_boot_latent),
             "latent_recon_mse": latent_recon, "latent_naive_mse": latent_baseline,

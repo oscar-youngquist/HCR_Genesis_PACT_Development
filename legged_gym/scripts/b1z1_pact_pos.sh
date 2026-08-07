@@ -8,4 +8,4 @@ conda activate /home/oyoungquist/.conda/envs/genesis_lr
 
 export SIMULATOR=genesis_b1z1_pact_pos
 
-python train.py --task=b1z1_pact_pos --seed=1 --gpu=cuda:0 "$@"
+python train.py --task=b1z1_pact_pos --seed=1 --headless --gpu=cuda:0 "$@"
