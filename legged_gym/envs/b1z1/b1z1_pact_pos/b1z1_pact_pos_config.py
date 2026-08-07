@@ -759,7 +759,7 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
 
         cenet_enc_layers = [512, 256, 128]
         explicit_decoder_layers = [128, 64]
-        cenet_latent_dim = 16
+        cenet_latent_dim = 64
         cenet_base_vel_dim = 3
         cenet_base_wrench_dim = 6
         cenet_ee_force_dim = 3
@@ -783,7 +783,7 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         explicit_foot_height_weight = 1.0
         force_decoder_weight = 1.0
         privileged_decoder_weight = 1.0
-        vae_kld_weight = 0.01
+        vae_kld_weight = 1.00
         adaptation_learning_rate = 1.0e-5
 
         # Explicit-context deployment curriculum. Alpha is held fixed for one

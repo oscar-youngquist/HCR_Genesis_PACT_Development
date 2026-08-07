@@ -47,7 +47,10 @@ class PPO_B1Z1PACT:
         # reconstruction quality determines the probability of using the
         # learned encoder dynamics on the following rollout/update.
         self.boot_mult = 1.0
-        self.use_boot_latent = False
+        # UniFP always exposes the encoder's deterministic history latent to
+        # the actor. Keep the old flag for checkpoint/log compatibility, but
+        # latent masking is disabled at every policy call below.
+        self.use_boot_latent = True
         self.use_boot_explicit = False
 
         # ``get_optim_groups`` is the actor-critic's source of truth for
@@ -92,6 +95,15 @@ class PPO_B1Z1PACT:
         ]
 
         self.actor_optimizer = PCGrad(optim.AdamW([*actor_groups,*ppo_enc_groups], lr=cfg["learning_rate"]), reduction="sum")
+        # Clip the same ownership boundary that is stepped by PPO, as UniFP
+        # does, including any PACT decoder participating in the PINN graph.
+        seen_ppo_parameters = set()
+        self.ppo_parameters = []
+        for group in self.actor_optimizer.optimizer.param_groups:
+            for parameter in group["params"]:
+                if id(parameter) not in seen_ppo_parameters:
+                    seen_ppo_parameters.add(id(parameter))
+                    self.ppo_parameters.append(parameter)
 
         # # We want to reduce the LR of the critic
         for param_group in self.actor_optimizer.optimizer.param_groups:
@@ -138,7 +150,7 @@ class PPO_B1Z1PACT:
     def act(self, obs, critic_obs, history, explicit_labels):
         actions = self.actor_critic.act(
             obs, history, explicit_labels=explicit_labels,
-            mask_latent=not self.use_boot_latent,
+            mask_latent=False,
             mask_explicit=not self.use_boot_explicit,
         ).detach()
         self.transition.observations, self.transition.critic_observations, self.transition.histories = obs, critic_obs, history
@@ -395,7 +407,9 @@ class PPO_B1Z1PACT:
 
         # Predict the recon targets
         aux_force_prediction = self.force_decoder(aux_condition)
-        aux_privileged_prediction = self.privileged_decoder(aux_condition)
+        # UniFP reconstructs the next single privileged frame from z alone.
+        # The force decoder intentionally retains the richer explicit condition.
+        aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
 
         pred_velo_loss = F.mse_loss(aux_context["base_velocity"], labels[:, :3])
         pred_ee_position_loss = F.mse_loss(aux_context["ee_position"], labels[:, 3:6])
@@ -442,11 +456,8 @@ class PPO_B1Z1PACT:
 
         aux.backward()
 
-        nn.utils.clip_grad_norm_(
-            [parameter for group in self.auxiliary_optimizer.param_groups for parameter in group["params"]],
-            self.max_grad_norm,
-        )
-
+        # Match UniFP adaptation training: the auxiliary optimizer steps its
+        # raw reconstruction gradient without a separate clipping pass.
         self.auxiliary_optimizer.step()
 
         # Return unweighted predictions/targets for the reliability gate.  The
@@ -487,7 +498,7 @@ class PPO_B1Z1PACT:
         self.actor_critic.update_distribution(
             batch["observations"], batch["histories"], sample_context=False,
             explicit_labels=batch["actor_explicit_labels"],
-            mask_latent=not self.use_boot_latent,
+            mask_latent=False,
             mask_explicit=not self.use_boot_explicit,
         )
         actions_log_prob = self.actor_critic.get_actions_log_prob(batch["actions"])
@@ -555,7 +566,7 @@ class PPO_B1Z1PACT:
         self.actor_critic.update_distribution(
             batch["observations"], batch["histories"], sample_context=False,
             explicit_labels=batch["actor_explicit_labels"],
-            mask_latent=not self.use_boot_latent,
+            mask_latent=False,
             mask_explicit=not self.use_boot_explicit,
         )
         mu, sigma = self.actor_critic.action_mean, self.actor_critic.action_std
@@ -643,7 +654,7 @@ class PPO_B1Z1PACT:
             else:
                 self.actor_optimizer.pc_backward_pinn([ppo_loss, self.pinn_weight * pinn] if self.pinn_weight > 0 else [ppo_loss])
 
-            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
             self.actor_optimizer.step()
 
             # Recompute the auxiliary graph after PCGrad consumes the PPO
@@ -700,7 +711,11 @@ class PPO_B1Z1PACT:
             pboot = np.tanh(ratio)
             return random.random() < pboot, pboot, mean_pred_error, actual_pred_error
 
-        self.use_boot_latent, latent_pboot, latent_baseline, latent_recon = sample_boot_flag(boot_stats["latent"])
+        # Latent bootstrap quality remains diagnostic-only. Do not restore the
+        # old Bernoulli assignment: the actor always uses its encoded history z.
+        # self.use_boot_latent, latent_pboot, latent_baseline, latent_recon = sample_boot_flag(boot_stats["latent"])
+        _, latent_pboot, latent_baseline, latent_recon = sample_boot_flag(boot_stats["latent"])
+        self.use_boot_latent = True
         self.use_boot_explicit, explicit_pboot, explicit_baseline, explicit_recon = sample_boot_flag(boot_stats["explicit"])
         diagnostics["lr_after_update"] = self.learning_rate
         return {key: value / max(1, updates) for key, value in metrics.items()} | diagnostics | {

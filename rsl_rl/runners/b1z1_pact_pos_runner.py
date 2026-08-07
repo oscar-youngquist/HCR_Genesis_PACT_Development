@@ -44,7 +44,9 @@ class B1Z1PACTPosRunner:
             activation=policy_cfg["activation"],
         ).to(device)
         self.privileged_decoder = B1Z1PACTDecoder(
-            condition_dim, env.num_privileged_obs,
+            # Match UniFP: next-state privileged reconstruction is decoded
+            # from z alone, without explicit estimates as side information.
+            policy_cfg["cenet_latent_dim"], env.num_privileged_obs,
             hidden=policy_cfg["privileged_decoder_layers"],
             activation=policy_cfg["activation"],
         ).to(device)
@@ -276,7 +278,9 @@ class B1Z1PACTPosRunner:
         self.alg.force_ema = checkpoint.get("force_ema")
         self.alg.force_gate_active = checkpoint.get("force_gate_active", False)
         self.alg.force_gate_count = checkpoint.get("force_gate_count", 0)
-        self.alg.use_boot_latent = checkpoint.get("use_boot_latent", False)
+        # Latent bootstrap masking is retired: resumed policies always consume
+        # the encoder's history latent regardless of legacy checkpoint state.
+        self.alg.use_boot_latent = True
         explicit_state = (
             "explicit_blend_alpha", "explicit_kl_ema", "explicit_kl_stable_updates",
         )
