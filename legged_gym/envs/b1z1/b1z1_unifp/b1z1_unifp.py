@@ -126,8 +126,29 @@ class B1Z1UniFP(BaseTask):
 
     @property
     def force_command_randomization_active(self):
-        """Keep UniFP's force-command interface behind its original gate."""
-        return self.training_iteration >= self.cfg.commands.force_start_step
+        """Command-force profiles are active whenever their curriculum range is nonzero."""
+        return self.command_force_scale > 0.0
+
+    @property
+    def command_force_scale(self):
+        """Scale commanded base/EE force ranges after an initial hold period."""
+        commands = self.cfg.commands
+        if self.training_iteration < commands.command_force_hold_iterations:
+            return float(commands.command_force_initial_scale)
+        if commands.command_force_ramp_iterations == 0:
+            return float(commands.command_force_final_scale)
+        progress = min(
+            max(
+                (self.training_iteration - commands.command_force_hold_iterations)
+                / max(1, commands.command_force_ramp_iterations),
+                0.0,
+            ),
+            1.0,
+        )
+        return float(
+            commands.command_force_initial_scale
+            + progress * (commands.command_force_final_scale - commands.command_force_initial_scale)
+        )
 
     @property
     def external_force_scale(self):
@@ -509,6 +530,7 @@ class B1Z1UniFP(BaseTask):
         self.extras["episode"]["base_force_ext_norm"] = episode_base_force_ext_norm
         self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
         self.extras["episode"]["external_force_scale"] = self.external_force_scale
+        self.extras["episode"]["command_force_scale"] = self.command_force_scale
         self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -1441,6 +1463,7 @@ class B1Z1UniFP(BaseTask):
                 target=self.force_target_gripper_cmd,
                 output=self.current_Fxyz_gripper_cmd,
                 force_range=self.cfg.commands.max_push_force_xyz_gripper_cmd,
+                range_scale=self.command_force_scale,
             )
         else:
             self.current_Fxyz_gripper_cmd[env_ids_all] = 0.0
@@ -1490,6 +1513,7 @@ class B1Z1UniFP(BaseTask):
                 output=self.current_Fxyz_base_cmd,
                 force_range=self.cfg.commands.max_push_force_xyz_base_cmd,
                 zero_z=True,
+                range_scale=self.command_force_scale,
             )
         else:
             self.current_Fxyz_base_cmd[env_ids_all] = 0.0
@@ -2026,6 +2050,14 @@ class B1Z1UniFP(BaseTask):
             raise ValueError("external force curriculum scales must be nonnegative")
         if cfg.commands.external_force_final_scale < cfg.commands.external_force_initial_scale:
             raise ValueError("external_force_final_scale must be at least external_force_initial_scale")
+        if cfg.commands.command_force_hold_iterations < 0:
+            raise ValueError("commands.command_force_hold_iterations must be nonnegative")
+        if cfg.commands.command_force_ramp_iterations < 0:
+            raise ValueError("commands.command_force_ramp_iterations must be nonnegative")
+        if cfg.commands.command_force_initial_scale < 0.0 or cfg.commands.command_force_final_scale < 0.0:
+            raise ValueError("command force curriculum scales must be nonnegative")
+        if cfg.commands.command_force_final_scale < cfg.commands.command_force_initial_scale:
+            raise ValueError("command_force_final_scale must be at least command_force_initial_scale")
         for name in (
             "ref_dof_leg_initial_multiplier",
             "ref_dof_leg_final_multiplier",

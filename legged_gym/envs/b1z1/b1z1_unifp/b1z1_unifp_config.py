@@ -318,6 +318,12 @@ class B1Z1UniFPCfg:
         external_force_initial_scale = 0.25
         external_force_final_scale = 1.0
         external_force_ramp_iterations = 5000
+        # Commanded base/EE force profiles are present from iteration zero at
+        # reduced range, held there, then linearly expanded to their full ranges.
+        command_force_initial_scale = 0.25
+        command_force_final_scale = 1.0
+        command_force_hold_iterations = 8000
+        command_force_ramp_iterations = 5000
 
         push_gripper_stators = True
         apply_ee_external_forces = True
