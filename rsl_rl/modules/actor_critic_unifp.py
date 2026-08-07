@@ -55,7 +55,7 @@ class ActorCriticUniFP(nn.Module):
         self.num_privileged_obs = num_privileged_obs
         self.num_obs_pred = num_obs_pred
         # self.num_latent_dim = int(num_obs / num_single_obs) * 2
-        self.num_latent_dim = 16
+        self.num_latent_dim = 64
         self.num_obs_now = num_single_obs
         self.num_privileged_obs_single = num_privileged_obs_single or num_privileged_obs
 

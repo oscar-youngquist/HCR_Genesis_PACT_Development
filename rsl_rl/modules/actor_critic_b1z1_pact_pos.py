@@ -7,14 +7,7 @@ from typing import Iterable, Sequence
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
-
-def init_weights(m):
-    if isinstance(m, nn.Linear):
-        # Kaiming uniform initialization for weights
-        torch.nn.init.xavier_uniform_(m.weight)
-        # Initialize biases to zero if they exist
-        if m.bias is not None:
-            torch.nn.init.zeros_(m.bias)
+from .module_utils import init_weights
 
 def _activation(name: str) -> nn.Module:
     return {
@@ -49,10 +42,12 @@ class B1Z1PACTContextEncoder(nn.Module):
         self._initialize_weights()
 
     def _initialize_weights(self) -> None:
-        """Initialize all linear layers with Xavier uniform distribution."""
+        """Match UniFP's Xavier initialization order exactly."""
         self.trunk.apply(init_weights)
-        self.latent_mean.apply(init_weights)
         self.latent_logvar.apply(init_weights)
+        # UniFP initializes the mean projection after the log-variance head;
+        # retaining that order also aligns seeded random-number consumption.
+        self.latent_mean.apply(init_weights)
 
 
     def forward(self, history: torch.Tensor, sample: bool = True) -> dict[str, torch.Tensor]:
