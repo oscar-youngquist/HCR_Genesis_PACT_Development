@@ -189,31 +189,13 @@ class ActorCriticB1Z1PACT(nn.Module):
     def _bootmasked_context(
         self,
         context: dict[str, torch.Tensor],
-        explicit_labels: torch.Tensor | None,
         mask_latent: bool,
-        mask_explicit: bool,
     ) -> dict[str, torch.Tensor]:
-        """Apply independent PACT masks to latent and explicit context."""
-        if not mask_latent and not mask_explicit:
+        """Apply only the optional latent mask; explicit context is always predicted."""
+        if not mask_latent:
             return context
-        if mask_explicit and explicit_labels is None:
-            raise ValueError("B1Z1 PACT boot masking requires explicit labels")
-
         masked = {key: value for key, value in context.items()}
-        if mask_latent:
-            # No privileged target exists for z, so its masked replacement is zero.
-            masked["z"] = torch.zeros_like(context["z"])
-        if mask_explicit:
-            # Explicit state has privileged simulator labels during training.
-            masked["base_velocity"] = explicit_labels[:, :3]
-            masked["ee_position"] = explicit_labels[:, 3:6]
-            masked["base_wrench"] = explicit_labels[:, 6:12]
-            masked["ee_force"] = explicit_labels[:, 12:15]
-            # The actor consumes probabilities after sigmoid, so convert exact
-            # simulator labels into finite logits for the shared actor path.
-            contact = explicit_labels[:, 15:19].clamp(1.0e-4, 1.0 - 1.0e-4)
-            masked["foot_contact_logits"] = torch.logit(contact)
-            masked["foot_height"] = explicit_labels[:, 19:23]
+        masked["z"] = torch.zeros_like(context["z"])
         return masked
 
     def _actor_inputs(self, obs: torch.Tensor, context: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -251,12 +233,10 @@ class ActorCriticB1Z1PACT(nn.Module):
         obs: torch.Tensor,
         history: torch.Tensor,
         sample_context: bool = True,
-        explicit_labels: torch.Tensor | None = None,
         mask_latent: bool = False,
-        mask_explicit: bool = False,
     ) -> None:
         context = self.decode_context(self.context_encoder(history, sample=sample_context))
-        actor_context = self._bootmasked_context(context, explicit_labels, mask_latent, mask_explicit)
+        actor_context = self._bootmasked_context(context, mask_latent)
         position, torque = self.actor_forward(obs, actor_context)
         mean = torch.cat((position, torque), dim=-1)
         self.std.data.copy_(
@@ -267,14 +247,13 @@ class ActorCriticB1Z1PACT(nn.Module):
 
     def act(
         self, obs: torch.Tensor, history: torch.Tensor,
-        explicit_labels: torch.Tensor | None = None, mask_latent: bool = False, mask_explicit: bool = False,
+        mask_latent: bool = False,
     ) -> torch.Tensor:
         # Keep the rollout policy deterministic with respect to its latent
         # estimate. PPO's stored action distribution then remains comparable
         # during the update; exploration is supplied by the action Gaussian.
         self.update_distribution(
-            obs, history, sample_context=False, explicit_labels=explicit_labels,
-            mask_latent=mask_latent, mask_explicit=mask_explicit,
+            obs, history, sample_context=False, mask_latent=mask_latent,
         )
         return self.distribution.sample()
 

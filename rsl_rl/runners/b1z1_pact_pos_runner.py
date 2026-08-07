@@ -6,7 +6,6 @@ import os
 import math
 import time
 import statistics
-import warnings
 from collections import deque
 
 import torch
@@ -63,10 +62,6 @@ class B1Z1PACTPosRunner:
             "explicit_foot_height_weight",
             "privileged_decoder_weight", "vae_kld_weight",
             "adaptation_learning_rate",
-            "explicit_blend_initial_alpha", "explicit_blend_max_alpha",
-            "explicit_kl_ema_decay", "explicit_kl_low_threshold", "explicit_kl_high_threshold",
-            "explicit_alpha_increment", "explicit_alpha_decrement",
-            "explicit_alpha_warmup_updates", "explicit_alpha_required_stable_updates",
         )})
 
         self.alg = PPO_B1Z1PACTPos(
@@ -235,24 +230,8 @@ class B1Z1PACTPosRunner:
         mean_length = statistics.mean(lengths) if lengths else None
 
         if self.writer:
-            explicit_log_names = {
-                "explicit_blend_alpha": "blend_alpha",
-                "explicit_blend_alpha_next": "blend_alpha_next",
-                "explicit_policy_kl": "policy_kl",
-                "explicit_policy_kl_ema": "policy_kl_ema",
-                "explicit_kl_stable_updates": "kl_stable_updates",
-                "explicit_alpha_increased": "alpha_increased",
-                "explicit_alpha_decreased": "alpha_decreased",
-                "explicit_ground_truth_action_mean_rms": "ground_truth_action_mean_rms",
-                "explicit_predicted_action_mean_rms": "predicted_action_mean_rms",
-                "explicit_action_mean_difference_rms": "action_mean_difference_rms",
-                "explicit_action_mean_difference_abs_max": "action_mean_difference_abs_max",
-                "explicit_prediction_mse": "prediction_mse",
-            }
             for name, value in metrics.items():
-                if name in explicit_log_names:
-                    self.writer.add_scalar(f"ExplicitContext/{explicit_log_names[name]}", value, iteration)
-                elif "/" in name:
+                if "/" in name:
                     self.writer.add_scalar(name, value, iteration)
                 else:
                     group = "PPO" if name.startswith(("pre_update_", "lr_")) else "Loss"
@@ -297,8 +276,6 @@ class B1Z1PACTPosRunner:
             f"{'Position action noise std:':>{pad}} {position_std:.2f}",
             f"{'Entropy coefficient:':>{pad}} {self.alg.current_entropy_coef:.6f}",
             f"{'Latent bootstrap probability:':>{pad}} {metrics['latent_boot_probability']:.4f}",
-            f"{'Explicit blend alpha:':>{pad}} {metrics['explicit_blend_alpha']:.4f}",
-            f"{'Explicit policy KL EMA:':>{pad}} {metrics['explicit_policy_kl_ema']:.6f}",
         ]
         if mean_reward is not None:
             lines.extend((f"{'Mean reward:':>{pad}} {mean_reward:.2f}", f"{'Mean episode length:':>{pad}} {mean_length:.2f}"))
@@ -325,9 +302,6 @@ class B1Z1PACTPosRunner:
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
             "iteration": saved_iteration,
             "use_boot_latent": self.alg.use_boot_latent,
-            "explicit_blend_alpha": self.alg.explicit_blend_alpha,
-            "explicit_kl_ema": self.alg.explicit_kl_ema,
-            "explicit_kl_stable_updates": self.alg.explicit_kl_stable_updates,
             "entropy_coef": self.alg.current_entropy_coef,
         }, path)
 
@@ -345,18 +319,6 @@ class B1Z1PACTPosRunner:
         # Latent bootstrap masking is retired: resumed policies always consume
         # the encoder's history latent regardless of legacy checkpoint state.
         self.alg.use_boot_latent = True
-        explicit_state = (
-            "explicit_blend_alpha", "explicit_kl_ema", "explicit_kl_stable_updates",
-        )
-        if not all(name in checkpoint for name in explicit_state):
-            warnings.warn(
-                "Checkpoint predates explicit-context blending; using configured initial curriculum state.",
-                RuntimeWarning,
-            )
-        else:
-            self.alg.explicit_blend_alpha = float(checkpoint["explicit_blend_alpha"])
-            self.alg.explicit_kl_ema = checkpoint["explicit_kl_ema"]
-            self.alg.explicit_kl_stable_updates = int(checkpoint["explicit_kl_stable_updates"])
         self.alg.current_entropy_coef = checkpoint.get("entropy_coef", self.alg.current_entropy_coef)
         return checkpoint.get("iteration", 0)
 

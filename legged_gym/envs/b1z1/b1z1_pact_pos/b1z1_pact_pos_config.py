@@ -791,18 +791,6 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         vae_kld_weight = 1.00
         adaptation_learning_rate = 1.0e-5
 
-        # Explicit-context deployment curriculum. Alpha is held fixed for one
-        # rollout/update and advanced only after sustained low policy KL.
-        explicit_blend_initial_alpha = 0.0
-        explicit_blend_max_alpha = 1.0
-        explicit_kl_ema_decay = 0.95
-        explicit_kl_low_threshold = 0.005
-        explicit_kl_high_threshold = 0.015
-        explicit_alpha_increment = 0.01
-        explicit_alpha_decrement = 0.02
-        explicit_alpha_warmup_updates = 100
-        explicit_alpha_required_stable_updates = 20
-
         torque_clone_target_scale = 0.01
         torque_clone_loss_weight = 0.1
 
@@ -832,6 +820,7 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
     class runner:
         # Disable expensive, non-training rollout and PPO-consistency diagnostics.
         enable_additional_diagnostics = True
+
         policy_class_name = "ActorCriticB1Z1PACTPos"
         algorithm_class_name = "PPO_B1Z1PACTPos"
         num_steps_per_env = 24

@@ -52,7 +52,6 @@ class PPO_B1Z1PACT:
         # the actor. Keep the old flag for checkpoint/log compatibility, but
         # latent masking is disabled at every policy call below.
         self.use_boot_latent = True
-        self.use_boot_explicit = False
 
         # ``get_optim_groups`` is the actor-critic's source of truth for
         # actor/critic/context partitioning and its weight-decay conventions.
@@ -145,9 +144,8 @@ class PPO_B1Z1PACT:
 
     def act(self, obs, critic_obs, history, explicit_labels):
         actions = self.actor_critic.act(
-            obs, history, explicit_labels=explicit_labels,
+            obs, history,
             mask_latent=False,
-            mask_explicit=not self.use_boot_explicit,
         ).detach()
         self.transition.actions = actions
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
@@ -158,7 +156,6 @@ class PPO_B1Z1PACT:
         self.transition.observations = obs.detach().clone()
         self.transition.critic_observations = critic_obs.detach().clone()
         self.transition.histories = history.detach().clone()
-        self.transition.actor_explicit_labels = explicit_labels.detach().clone()
         self.transition.explicit_targets = explicit_labels.detach().clone()
         return actions
 
@@ -502,9 +499,7 @@ class PPO_B1Z1PACT:
         """
         self.actor_critic.update_distribution(
             batch["observations"], batch["histories"], sample_context=False,
-            explicit_labels=batch["actor_explicit_labels"],
             mask_latent=False,
-            mask_explicit=not self.use_boot_explicit,
         )
         actions_log_prob = self.actor_critic.get_actions_log_prob(batch["actions"])
         values = self.actor_critic.evaluate(batch["critic_observations"])
@@ -572,9 +567,7 @@ class PPO_B1Z1PACT:
         """Compare the untouched rollout policy with its stored distribution."""
         self.actor_critic.update_distribution(
             batch["observations"], batch["histories"], sample_context=False,
-            explicit_labels=batch["actor_explicit_labels"],
             mask_latent=False,
-            mask_explicit=not self.use_boot_explicit,
         )
         mu, sigma = self.actor_critic.action_mean, self.actor_critic.action_std
         old_mu, old_sigma = batch["mu"], batch["sigma"]
@@ -728,13 +721,13 @@ class PPO_B1Z1PACT:
         # self.use_boot_latent, latent_pboot, latent_baseline, latent_recon = sample_boot_flag(boot_stats["latent"])
         _, latent_pboot, latent_baseline, latent_recon = sample_boot_flag(boot_stats["latent"])
         self.use_boot_latent = True
-        self.use_boot_explicit, explicit_pboot, explicit_baseline, explicit_recon = sample_boot_flag(boot_stats["explicit"])
+        _, explicit_pboot, explicit_baseline, explicit_recon = sample_boot_flag(boot_stats["explicit"])
         diagnostics["lr_after_update"] = self.learning_rate
         return {key: value / max(1, updates) for key, value in metrics.items()} | diagnostics | {
             "force_gate_ema": self.force_ema or 0.0,
             "force_gate_active": float(self.force_gate_active),
-            "latent_boot_probability": latent_pboot, "explicit_boot_probability": explicit_pboot,
-            "latent_boot_active": float(self.use_boot_latent), "explicit_boot_active": float(self.use_boot_explicit),
+            "latent_boot_probability": latent_pboot,
+            "latent_boot_active": float(self.use_boot_latent),
             "latent_recon_mse": latent_recon, "latent_naive_mse": latent_baseline,
             "explicit_recon_mse": explicit_recon, "explicit_naive_mse": explicit_baseline,
         }

@@ -20,9 +20,7 @@ class RolloutStorageB1Z1PACT:
             self.log_probs = None
             self.mu = None
             self.sigma = None
-            self.actor_explicit_labels = None
             self.explicit_targets = None
-            self.explicit_blend_alpha = None
             self.next_privileged = None
             self.dynamics_state = None
 
@@ -36,13 +34,8 @@ class RolloutStorageB1Z1PACT:
         self.actions, self.mu, self.sigma = zeros(action_dim), zeros(action_dim), zeros(action_dim)
         self.values, self.rewards, self.returns, self.advantages = zeros(1), zeros(1), zeros(1), zeros(1)
         self.log_probs, self.dones = zeros(1), torch.zeros(steps, num_envs, 1, dtype=torch.bool, device=device)
-        # Both snapshots are explicit_t. Separate fields enforce their PPO
-        # reconstruction and current-state auxiliary roles.
-        self.actor_explicit_labels = zeros(explicit_dim)
+        # Ground-truth explicit_t is supervision only; policy conditioning is predicted.
         self.explicit_targets = zeros(explicit_dim)
-        # Alpha is frozen for a rollout and stored per transition so PPO always
-        # reconstructs the exact explicit blend that generated action_t.
-        self.explicit_blend_alpha = zeros(1)
         # Decoder supervision is one privileged frame, while the critic sees
         # a temporal stack. This frame now also owns force supervision.
         self.next_privileged = zeros(next_privileged_dim)
@@ -58,17 +51,11 @@ class RolloutStorageB1Z1PACT:
         # later, but every PINN field must remain paired with its own action_t.
         for name in (
             "observations", "critic_observations", "histories", "actions", "mu", "sigma", "values",
-            "log_probs", "actor_explicit_labels", "explicit_targets",
+            "log_probs", "explicit_targets",
             "next_privileged", "dynamics_state",
         ):
             getattr(self, name)[self.step].copy_(getattr(transition, name))
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
-        # The storage class is shared with coupled PACT, whose discrete
-        # explicit bootstrap does not populate this PACT-position-only field.
-        if transition.explicit_blend_alpha is not None:
-            self.explicit_blend_alpha[self.step].copy_(transition.explicit_blend_alpha)
-        else:
-            self.explicit_blend_alpha[self.step].zero_()
         self.dones[self.step].copy_(transition.dones.view(-1, 1).bool())
         self.step += 1
 
@@ -98,7 +85,7 @@ class RolloutStorageB1Z1PACT:
         # to actions, transition states, privileged labels, and terminal masks.
         flat = {name: getattr(self, name).flatten(0, 1) for name in (
             "observations", "critic_observations", "histories", "actions", "mu", "sigma", "values", "returns", "advantages",
-            "log_probs", "dones", "actor_explicit_labels", "explicit_targets", "explicit_blend_alpha",
+            "log_probs", "dones", "explicit_targets",
             "next_privileged", "dynamics_state",
         )}
         for _ in range(epochs):

@@ -5,7 +5,6 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from torch import nn, optim
-import math
 import numpy as np
 import random
 import warnings
@@ -53,22 +52,6 @@ class PPO_B1Z1PACTPos:
         # the actor. Keep the old flag for checkpoint/log compatibility, but
         # latent masking is disabled at every policy call below.
         self.use_boot_latent = True
-
-        # Explicit estimates replace their simulator labels gradually. Unlike
-        # latent bootstrapping, this curriculum is deterministic and fixed for
-        # every transition in a complete rollout/update.
-        self.explicit_blend_alpha = float(cfg.get("explicit_blend_initial_alpha", 0.0))
-        self.explicit_blend_max_alpha = float(cfg.get("explicit_blend_max_alpha", 1.0))
-        self.explicit_kl_ema_decay = float(cfg.get("explicit_kl_ema_decay", 0.95))
-        self.explicit_kl_low_threshold = float(cfg.get("explicit_kl_low_threshold", 0.005))
-        self.explicit_kl_high_threshold = float(cfg.get("explicit_kl_high_threshold", 0.015))
-        self.explicit_alpha_increment = float(cfg.get("explicit_alpha_increment", 0.01))
-        self.explicit_alpha_decrement = float(cfg.get("explicit_alpha_decrement", 0.02))
-        self.explicit_alpha_warmup_updates = int(cfg.get("explicit_alpha_warmup_updates", 100))
-        self.explicit_alpha_required_stable_updates = int(cfg.get("explicit_alpha_required_stable_updates", 20))
-        self.explicit_kl_ema = None
-        self.explicit_kl_stable_updates = 0
-        self._validate_explicit_blend_config()
 
         # ``get_optim_groups`` is the actor-critic's source of truth for
         # actor/critic/context partitioning and its weight-decay conventions.
@@ -131,20 +114,6 @@ class PPO_B1Z1PACTPos:
         # The first decoder measurement initializes the EMA; starting at
         # infinity would keep the reliability gate permanently closed.
 
-    def _validate_explicit_blend_config(self):
-        if not 0.0 <= self.explicit_kl_ema_decay < 1.0:
-            raise ValueError("explicit_kl_ema_decay must satisfy 0 <= decay < 1")
-        if not self.explicit_kl_low_threshold < self.explicit_kl_high_threshold:
-            raise ValueError("explicit KL low threshold must be below the high threshold")
-        if self.explicit_alpha_increment <= 0.0:
-            raise ValueError("explicit_alpha_increment must be positive")
-        if self.explicit_alpha_decrement < self.explicit_alpha_increment:
-            raise ValueError("explicit_alpha_decrement must be at least explicit_alpha_increment")
-        if self.explicit_alpha_required_stable_updates <= 0:
-            raise ValueError("explicit_alpha_required_stable_updates must be positive")
-        if not 0.0 <= self.explicit_blend_alpha <= self.explicit_blend_max_alpha <= 1.0:
-            raise ValueError("explicit blend alpha bounds must satisfy 0 <= initial <= max <= 1")
-
     def init_storage(self, *args):
         self.storage = RolloutStorageB1Z1PACT(*args, device=self.device)
 
@@ -169,9 +138,8 @@ class PPO_B1Z1PACTPos:
 
     def act(self, obs, critic_obs, history, explicit_labels):
         actions = self.actor_critic.act(
-            obs, history, explicit_labels=explicit_labels,
+            obs, history,
             mask_latent=False,
-            explicit_blend_alpha=self.explicit_blend_alpha,
         ).detach()
         self.transition.observations = obs.detach().clone()
         self.transition.critic_observations = critic_obs.detach().clone()
@@ -180,12 +148,7 @@ class PPO_B1Z1PACTPos:
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
         self.transition.log_probs = self.actor_critic.get_actions_log_prob(actions).detach().unsqueeze(-1)
         self.transition.mu, self.transition.sigma = self.actor_critic.action_mean.detach(), self.actor_critic.action_std.detach()
-        self.transition.actor_explicit_labels = explicit_labels.detach().clone()
         self.transition.explicit_targets = explicit_labels.detach().clone()
-        self.transition.explicit_blend_alpha = torch.full(
-            (obs.shape[0], 1), self.explicit_blend_alpha,
-            device=obs.device, dtype=obs.dtype,
-        )
         return actions
 
     def process_env_step(self, rewards, dones, infos, next_privileged, dynamics_state):
@@ -194,8 +157,8 @@ class PPO_B1Z1PACTPos:
         # together until the shuffled PPO update.
         self.transition.rewards =  rewards.clone()
         self.transition.dones = dones
-        self.transition.next_privileged = next_privileged
-        self.transition.dynamics_state = dynamics_state
+        self.transition.next_privileged = next_privileged.detach().clone()
+        self.transition.dynamics_state = dynamics_state.detach().clone()
         if "time_outs" in infos:
             # Match UniFP's [N] reward convention and squeeze the value
             # bootstrap correction before adding it in place.
@@ -370,14 +333,11 @@ class PPO_B1Z1PACTPos:
     def _compute_rl_loss(self, batch):
         """Compute the PPO objective with the same organization as PACT PPO.
 
-        Latent bootstrap remains unchanged; explicit context uses the alpha
-        stored with each transition so rollout and reconstruction stay aligned.
+        The deterministic predicted explicit context is used for both actor and FiLM.
         """
         self.actor_critic.update_distribution(
             batch["observations"], batch["histories"], sample_context=False,
-            explicit_labels=batch["actor_explicit_labels"],
             mask_latent=False,
-            explicit_blend_alpha=batch["explicit_blend_alpha"],
         )
         actions_log_prob = self.actor_critic.get_actions_log_prob(batch["actions"])
         values = self.actor_critic.evaluate(batch["critic_observations"])
@@ -441,9 +401,7 @@ class PPO_B1Z1PACTPos:
         """Compare the untouched rollout policy with its stored distribution."""
         self.actor_critic.update_distribution(
             batch["observations"], batch["histories"], sample_context=False,
-            explicit_labels=batch["actor_explicit_labels"],
             mask_latent=False,
-            explicit_blend_alpha=batch["explicit_blend_alpha"],
         )
         mu, sigma = self.actor_critic.action_mean, self.actor_critic.action_std
         old_mu, old_sigma = batch["mu"], batch["sigma"]
@@ -505,109 +463,6 @@ class PPO_B1Z1PACTPos:
             self.cfg["torque_clone_target_scale"] * pd_torque,
         )
 
-    @torch.no_grad()
-    def _explicit_policy_diagnostics(self, batch):
-        """Measure only the policy effect of replacing explicit ground truth.
-
-        Context is encoded once, then the same deterministic latent (including
-        the unchanged latent bootstrap mask) is reused for both policy means.
-        Calling ``actor_forward`` directly avoids sampling and preserves RNG.
-        """
-        actor = self.actor_critic
-        cached = (
-            actor.distribution, actor.last_context, actor.last_position_mean,
-            actor.last_torque_mean, actor.last_film_magnitude,
-            actor.last_film_identity_deviation, actor.last_tracking_error_sq,
-        )
-        context = actor.decode_context(actor.context_encoder(batch["histories"], sample=False))
-        shared_context = actor._bootmasked_context(
-            context, None, mask_latent=False, mask_explicit=False,
-        )
-        predicted = actor.explicit_vector(shared_context)
-        ground_truth_film_context = actor.context_with_explicit(
-            shared_context, batch["actor_explicit_labels"],
-        )
-        predicted_film_context = actor.context_with_explicit(shared_context, predicted)
-        # Hold actor explicit input and latent fixed; only FiLM's explicit
-        # conditioning changes between the KL endpoints.
-        mu_ground_truth, _ = actor.actor_forward(
-            batch["observations"], shared_context, ground_truth_film_context,
-        )
-        mu_predicted, _ = actor.actor_forward(
-            batch["observations"], shared_context, predicted_film_context,
-        )
-        sigma_ground_truth = actor.std.unsqueeze(0).expand_as(mu_ground_truth)
-        sigma_predicted = actor.std.unsqueeze(0).expand_as(mu_predicted)
-
-        eps = 1.0e-8
-        sigma_gt_safe = sigma_ground_truth.clamp_min(eps)
-        sigma_pred_safe = sigma_predicted.clamp_min(eps)
-        policy_kl = torch.sum(
-            torch.log(sigma_pred_safe / sigma_gt_safe)
-            + (sigma_gt_safe.square() + (mu_ground_truth - mu_predicted).square())
-            / (2.0 * sigma_pred_safe.square())
-            - 0.5,
-            dim=-1,
-        ).mean()
-        difference = mu_predicted - mu_ground_truth
-        result = {
-            "explicit_policy_kl": policy_kl.item(),
-            "explicit_ground_truth_action_mean_rms": mu_ground_truth.square().mean().sqrt().item(),
-            "explicit_predicted_action_mean_rms": mu_predicted.square().mean().sqrt().item(),
-            "explicit_action_mean_difference_rms": difference.square().mean().sqrt().item(),
-            "explicit_action_mean_difference_abs_max": difference.abs().max().item(),
-            "explicit_prediction_mse": F.mse_loss(
-                predicted, batch["actor_explicit_labels"],
-            ).item(),
-        }
-        (
-            actor.distribution, actor.last_context, actor.last_position_mean,
-            actor.last_torque_mean, actor.last_film_magnitude,
-            actor.last_film_identity_deviation, actor.last_tracking_error_sq,
-        ) = cached
-        return result
-
-    def _update_explicit_blend_curriculum(self, update_iteration, policy_kl):
-        """Update detached KL EMA and alpha using hysteresis after one update."""
-        if math.isfinite(policy_kl):
-            if self.explicit_kl_ema is None:
-                self.explicit_kl_ema = float(policy_kl)
-            else:
-                beta = self.explicit_kl_ema_decay
-                self.explicit_kl_ema = beta * self.explicit_kl_ema + (1.0 - beta) * float(policy_kl)
-        else:
-            self.explicit_kl_ema = float("nan")
-
-        current = self.explicit_blend_alpha
-        new_alpha = current
-        if update_iteration < self.explicit_alpha_warmup_updates:
-            self.explicit_kl_stable_updates = 0
-        elif not math.isfinite(self.explicit_kl_ema):
-            new_alpha -= self.explicit_alpha_decrement
-            self.explicit_kl_stable_updates = 0
-            warnings.warn("Non-finite explicit-context KL EMA; decreasing alpha.", RuntimeWarning)
-        elif self.explicit_kl_ema >= self.explicit_kl_high_threshold:
-            new_alpha -= self.explicit_alpha_decrement
-            self.explicit_kl_stable_updates = 0
-        elif self.explicit_kl_ema <= self.explicit_kl_low_threshold:
-            self.explicit_kl_stable_updates += 1
-            if self.explicit_kl_stable_updates >= self.explicit_alpha_required_stable_updates:
-                new_alpha += self.explicit_alpha_increment
-                self.explicit_kl_stable_updates = 0
-        else:
-            self.explicit_kl_stable_updates = 0
-
-        self.explicit_blend_alpha = min(max(new_alpha, 0.0), self.explicit_blend_max_alpha)
-        return {
-            "explicit_blend_alpha": current,
-            "explicit_blend_alpha_next": self.explicit_blend_alpha,
-            "explicit_policy_kl_ema": self.explicit_kl_ema,
-            "explicit_kl_stable_updates": float(self.explicit_kl_stable_updates),
-            "explicit_alpha_increased": float(self.explicit_blend_alpha > current),
-            "explicit_alpha_decreased": float(self.explicit_blend_alpha < current),
-        }
-
-
     def update(self, iteration):
         metrics = {name: 0.0 for name in (
             "value", "surrogate", "base_velo", "ee_position", "base_wrench", "ee_force", "foot_contact", "foot_height",
@@ -618,18 +473,11 @@ class PPO_B1Z1PACTPos:
         # reconstruction for the base/EE estimates.
         boot_stats = {"latent": [None, None, 0.0, 0], "explicit": [None, None, 0.0, 0]}
         updates = 0
-        explicit_diagnostic_batch = None
         diagnostics = {"lr_before_update": self.learning_rate}
         for batch in self.storage.mini_batches(self.mini_batches, self.epochs):
             if updates == 0:
                 if self.enable_additional_diagnostics:
                     diagnostics.update(self._pre_update_diagnostics(batch))
-                # Keep one aligned representative batch until all optimizer
-                # steps finish; storage itself is not cleared until afterward.
-                explicit_diagnostic_batch = {
-                    name: batch[name].detach().clone()
-                    for name in ("observations", "histories", "actor_explicit_labels")
-                }
             ppo_loss, surrogate, value, film_identity, _, mean_actions, context = self._compute_rl_loss(batch)
             
             valid = (~batch["dones"].squeeze(-1)).float().unsqueeze(-1)
@@ -710,13 +558,6 @@ class PPO_B1Z1PACTPos:
 
         explicit_baseline, explicit_recon = reconstruction_errors(boot_stats["explicit"])
 
-        # Compare endpoint policies only after all PPO/auxiliary updates. Alpha
-        # changes now and therefore applies first to the next complete rollout.
-        # The endpoint comparison still sees this rollout's latent boot flag.
-        explicit_diagnostics = self._explicit_policy_diagnostics(explicit_diagnostic_batch)
-        explicit_curriculum = self._update_explicit_blend_curriculum(
-            iteration, explicit_diagnostics["explicit_policy_kl"],
-        )
         # Preserve PPO_PACT's latent Bernoulli bootstrap and its RNG timing.
         # Latent bootstrap quality remains diagnostic-only. Do not restore the
         # old Bernoulli assignment: the actor always uses its encoded history z.
@@ -730,4 +571,4 @@ class PPO_B1Z1PACTPos:
             "latent_boot_active": float(self.use_boot_latent),
             "latent_recon_mse": latent_recon, "latent_naive_mse": latent_baseline,
             "explicit_recon_mse": explicit_recon, "explicit_naive_mse": explicit_baseline,
-        } | explicit_diagnostics | explicit_curriculum
+        }

@@ -303,7 +303,6 @@ class B1Z1PACTRunner:
             f"{'Entropy coefficient:':>{pad}} {self.alg.current_entropy_coef:.6f}",
             f"{'Privileged force gate:':>{pad}} {metrics['force_gate_active']:.0f}",
             f"{'Latent bootstrap probability:':>{pad}} {metrics['latent_boot_probability']:.4f}",
-            f"{'Explicit bootstrap probability:':>{pad}} {metrics['explicit_boot_probability']:.4f}",
         ]
         if mean_reward is not None:
             lines.extend((f"{'Mean reward:':>{pad}} {mean_reward:.2f}", f"{'Mean episode length:':>{pad}} {mean_length:.2f}"))
@@ -331,7 +330,6 @@ class B1Z1PACTRunner:
             "iteration": saved_iteration, "force_ema": self.alg.force_ema,
             "force_gate_active": self.alg.force_gate_active, "force_gate_count": self.alg.force_gate_count,
             "use_boot_latent": self.alg.use_boot_latent,
-            "use_boot_explicit": self.alg.use_boot_explicit,
             "entropy_coef": self.alg.current_entropy_coef,
         }, path)
 
@@ -352,7 +350,6 @@ class B1Z1PACTRunner:
         # Latent bootstrap masking is retired: resumed policies always consume
         # the encoder's history latent regardless of legacy checkpoint state.
         self.alg.use_boot_latent = True
-        self.alg.use_boot_explicit = checkpoint.get("use_boot_explicit", False)
         self.alg.current_entropy_coef = checkpoint.get("entropy_coef", self.alg.current_entropy_coef)
         return checkpoint.get("iteration", 0)
 
