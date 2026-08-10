@@ -198,7 +198,7 @@ class B1Z1UniFPCfg:
         restitution = 0.0
         border_size = 5.0
         border_height = 1.0
-        curriculum = True
+        curriculum = False
         obtain_terrain_info_around_feet = True
         measure_heights = True
         measured_points_x = [-0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
@@ -211,7 +211,7 @@ class B1Z1UniFPCfg:
         platform_size = 4.0
         num_rows = 10
         num_cols = 20
-        terrain_proportions = [0.30, 0.40, 0.00, 0.00, 0.30, 0.00, 0.0, 0.0, 0.0, 0.0]
+        terrain_proportions = [0.00, 1.00, 0.00, 0.00, 0.00, 0.00, 0.0, 0.0, 0.0, 0.0]
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.4",
             "step_height": "0.04 + 0.16 * difficulty",
@@ -299,7 +299,7 @@ class B1Z1UniFPCfg:
         
         resampling_time = 10.0
         
-        heading_command = True
+        heading_command = False
         
         curriculum_threshold = 0.8
         
@@ -367,7 +367,7 @@ class B1Z1UniFPCfg:
 
         class ranges:
             lin_vel_x = [-0.5, 0.5]
-            lin_vel_y = [-0.6, 0.6]
+            lin_vel_y = [-0.4, 0.4]
             ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
 
@@ -790,7 +790,14 @@ class B1Z1UniFPCfgPPO:
         # The shared UniFP adaptation path is variational for both B1 and
         # B1Z1: reconstruct one next privileged frame and regularize q(z|h).
         adaptation_privileged_weight = 1.0
-        adaptation_kl_weight = 1.00
+        adaptation_kl_weight = 2.00
+        kl_warmup_iters = 500
+        kl_warmup_beta_max = adaptation_kl_weight
+        kl_r_min = 0.50
+        kl_r_max = 1.00
+        kl_dual_lr = 1.0e-3
+        kl_aug_rho = 0.1
+        kl_ema_decay = 0.99
         # Full PPO minibatch passes used for each adaptation/encoder update.
         num_encoder_epochs = 1
         num_learning_epochs = 5

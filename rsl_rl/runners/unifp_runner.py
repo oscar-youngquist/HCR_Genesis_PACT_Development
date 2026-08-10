@@ -158,7 +158,7 @@ class OnPolicyRunnerUniFP:
                 mean_adaptation_module_loss,
                 mean_adaptation_losses,
                 ppo_diagnostics,
-            ) = self.alg.update()
+            ) = self.alg.update(it)
             subset_size = min(32, obs_history.shape[0])
             diagnostic_observations = obs_history[:subset_size]
             latent_resample_diagnostics = {}
@@ -368,6 +368,7 @@ class OnPolicyRunnerUniFP:
                 "optimizer_state_dict": self.alg.optimizer.state_dict(),
                 "iter": self.current_learning_iteration if iteration is None else iteration,
                 "entropy_coef": self.alg.current_entropy_coef,
+                "kl_controller_state": self.alg.kl_controller.state_dict(),
                 "infos": infos,
             },
             path,
@@ -382,6 +383,7 @@ class OnPolicyRunnerUniFP:
         self.alg.current_entropy_coef = loaded_dict.get(
             "entropy_coef", self.alg.current_entropy_coef
         )
+        self.alg.kl_controller.load_state_dict(loaded_dict.get("kl_controller_state"))
         if hasattr(self.env, "set_training_iteration"):
             self.env.set_training_iteration(self.current_learning_iteration)
         return loaded_dict["infos"]

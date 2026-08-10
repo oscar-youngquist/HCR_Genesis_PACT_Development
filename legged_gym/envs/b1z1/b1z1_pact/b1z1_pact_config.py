@@ -782,6 +782,13 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         explicit_foot_height_weight = 1.0
         privileged_decoder_weight = 1.0
         vae_kld_weight = 0.01
+        kl_warmup_iters = 500
+        kl_warmup_beta_max = vae_kld_weight
+        kl_r_min = 0.10
+        kl_r_max = 1.00
+        kl_dual_lr = 1.0e-3
+        kl_aug_rho = 0.1
+        kl_ema_decay = 0.99
         adaptation_learning_rate = 1.0e-5
 
         pinn_loss_weight = 1.00

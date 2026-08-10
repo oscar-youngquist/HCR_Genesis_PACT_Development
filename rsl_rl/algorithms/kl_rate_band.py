@@ -1,0 +1,120 @@
+"""Shared VAE KL warmup and primal-dual rate-band controller."""
+
+import math
+
+import torch
+
+
+class KLRateBandController:
+    """Build a differentiable KL penalty while keeping dual state detached."""
+
+    METRIC_NAMES = (
+        "kl_raw", "kl_ema", "kl_reg_loss", "kl_warmup_beta",
+        "kl_low_violation", "kl_high_violation", "kl_lambda_low",
+        "kl_lambda_high", "kl_dual_effective_beta", "kl_effective_coef",
+        "kl_band_active",
+    )
+
+    def __init__(
+        self, *, warmup_iters, warmup_beta_max, rate_min, rate_max,
+        dual_lr, augmented_rho, ema_decay,
+    ):
+        self.warmup_iters = int(warmup_iters)
+        self.warmup_beta_max = float(warmup_beta_max)
+        self.rate_min = float(rate_min)
+        self.rate_max = float(rate_max)
+        self.dual_lr = float(dual_lr)
+        self.augmented_rho = float(augmented_rho)
+        self.ema_decay = float(ema_decay)
+        if self.warmup_iters < 0 or self.warmup_beta_max < 0.0:
+            raise ValueError("KL warmup iterations and beta must be nonnegative")
+        if not 0.0 <= self.rate_min <= self.rate_max:
+            raise ValueError("KL rate bounds must satisfy 0 <= min <= max")
+        if self.dual_lr < 0.0 or self.augmented_rho < 0.0:
+            raise ValueError("KL dual learning rate and augmented rho must be nonnegative")
+        if not 0.0 <= self.ema_decay < 1.0:
+            raise ValueError("kl_ema_decay must lie in [0, 1)")
+
+        # Python scalars cannot enter optimizer parameter groups or acquire gradients.
+        self.lambda_low = 0.0
+        self.lambda_high = 0.0
+        self.kl_ema = None
+
+    def band_active(self, iteration):
+        return int(iteration) >= self.warmup_iters
+
+    def warmup_beta(self, iteration):
+        if self.warmup_iters == 0:
+            return self.warmup_beta_max
+        progress = min(max(float(iteration) / self.warmup_iters, 0.0), 1.0)
+        return 0.5 * self.warmup_beta_max * (1.0 - math.cos(math.pi * progress))
+
+    def loss(self, raw_kl, iteration):
+        """Return the scheduled differentiable KL-only regularizer."""
+        if not self.band_active(iteration):
+            return self.warmup_beta(iteration) * raw_kl
+        g_low = self.rate_min - raw_kl
+        g_high = raw_kl - self.rate_max
+        return (
+            self.lambda_low * g_low
+            + self.lambda_high * g_high
+            + 0.5 * self.augmented_rho * torch.relu(g_low).square()
+            + 0.5 * self.augmented_rho * torch.relu(g_high).square()
+        )
+
+    def update_duals(self, raw_kl, iteration):
+        """Update detached EMA/duals after the auxiliary optimizer step."""
+        with torch.no_grad():
+            rate = float(raw_kl.detach().item())
+            if math.isfinite(rate):
+                self.kl_ema = rate if self.kl_ema is None else (
+                    self.ema_decay * self.kl_ema + (1.0 - self.ema_decay) * rate
+                )
+                if self.band_active(iteration):
+                    self.lambda_low = max(
+                        0.0, self.lambda_low + self.dual_lr * (self.rate_min - self.kl_ema)
+                    )
+                    self.lambda_high = max(
+                        0.0, self.lambda_high + self.dual_lr * (self.kl_ema - self.rate_max)
+                    )
+
+    def metrics(self, raw_kl, reg_loss, iteration):
+        """Return detached tensors suitable for existing metric reducers."""
+        rate = float(raw_kl.detach().item())
+        low_violation = max(self.rate_min - rate, 0.0)
+        high_violation = max(rate - self.rate_max, 0.0)
+        active = self.band_active(iteration)
+        effective_coef = (
+            self.lambda_high - self.lambda_low
+            + self.augmented_rho * (high_violation - low_violation)
+            if active else self.warmup_beta(iteration)
+        )
+        values = {
+            "kl_raw": rate,
+            "kl_ema": rate if self.kl_ema is None else self.kl_ema,
+            "kl_reg_loss": float(reg_loss.detach().item()),
+            "kl_warmup_beta": self.warmup_beta(iteration),
+            "kl_low_violation": low_violation,
+            "kl_high_violation": high_violation,
+            "kl_lambda_low": self.lambda_low,
+            "kl_lambda_high": self.lambda_high,
+            "kl_dual_effective_beta": self.lambda_high - self.lambda_low,
+            "kl_effective_coef": effective_coef,
+            "kl_band_active": float(active),
+        }
+        return {name: raw_kl.new_tensor(value) for name, value in values.items()}
+
+    def state_dict(self):
+        return {
+            "lambda_low": self.lambda_low,
+            "lambda_high": self.lambda_high,
+            "kl_ema": self.kl_ema,
+        }
+
+    def load_state_dict(self, state):
+        if not state:
+            return
+        self.lambda_low = max(0.0, float(state.get("lambda_low", 0.0)))
+        self.lambda_high = max(0.0, float(state.get("lambda_high", 0.0)))
+        ema = state.get("kl_ema")
+        self.kl_ema = None if ema is None else float(ema)

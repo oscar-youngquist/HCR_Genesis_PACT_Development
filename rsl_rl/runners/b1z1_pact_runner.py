@@ -82,6 +82,8 @@ class B1Z1PACTRunner:
             "explicit_base_vel_weight", "explicit_ee_position_weight", "explicit_base_wrench_weight", "explicit_ee_force_weight", "explicit_foot_contact_weight",
             "explicit_foot_height_weight",
             "privileged_decoder_weight", "vae_kld_weight",
+            "kl_warmup_iters", "kl_warmup_beta_max", "kl_r_min", "kl_r_max",
+            "kl_dual_lr", "kl_aug_rho", "kl_ema_decay",
             "adaptation_learning_rate",
         )})
 
@@ -297,7 +299,7 @@ class B1Z1PACTRunner:
             f"{'Foot-height loss:':>{pad}} {metrics['foot_height']:.4f}",
             f"{'Privileged reconstruction loss:':>{pad}} {metrics['privileged_decoder']:.4f}",
             f"{'Privileged force loss:':>{pad}} {metrics['privileged_force']:.4f}",
-            f"{'KL divergence loss:':>{pad}} {metrics['kl']:.4f}",
+            f"{'Raw KL divergence:':>{pad}} {metrics['kl_raw']:.4f}",
             f"{'Position action noise std:':>{pad}} {position_std:.2f}",
             f"{'Torque action noise std:':>{pad}} {torque_std:.2f}",
             f"{'Entropy coefficient:':>{pad}} {self.alg.current_entropy_coef:.6f}",
@@ -331,6 +333,7 @@ class B1Z1PACTRunner:
             "force_gate_active": self.alg.force_gate_active, "force_gate_count": self.alg.force_gate_count,
             "use_boot_latent": self.alg.use_boot_latent,
             "entropy_coef": self.alg.current_entropy_coef,
+            "kl_controller_state": self.alg.kl_controller.state_dict(),
         }, path)
 
     def load(self, path, load_optimizer=True):
@@ -351,6 +354,7 @@ class B1Z1PACTRunner:
         # the encoder's history latent regardless of legacy checkpoint state.
         self.alg.use_boot_latent = True
         self.alg.current_entropy_coef = checkpoint.get("entropy_coef", self.alg.current_entropy_coef)
+        self.alg.kl_controller.load_state_dict(checkpoint.get("kl_controller_state"))
         return checkpoint.get("iteration", 0)
 
     def get_inference_policy(self, device=None):

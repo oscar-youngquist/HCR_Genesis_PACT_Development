@@ -10,6 +10,7 @@ import random
 import warnings
 
 from rsl_rl.algorithms.pc_grad import PCGrad
+from rsl_rl.algorithms.kl_rate_band import KLRateBandController
 from rsl_rl.storage.rollout_storage_b1z1_pact import RolloutStorageB1Z1PACT
 
 
@@ -110,6 +111,14 @@ class PPO_B1Z1PACT:
         self.auxiliary_optimizer = optim.Adam(
             [parameter for group in auxiliary_enc_groups for parameter in group["params"]],
             lr=cfg.get("adaptation_learning_rate", 1.0e-5),
+        )
+        self.kl_controller = KLRateBandController(
+            warmup_iters=cfg.get("kl_warmup_iters", 500),
+            warmup_beta_max=cfg.get("kl_warmup_beta_max", cfg["vae_kld_weight"]),
+            rate_min=cfg.get("kl_r_min", 0.10), rate_max=cfg.get("kl_r_max", 1.00),
+            dual_lr=cfg.get("kl_dual_lr", 1.0e-3),
+            augmented_rho=cfg.get("kl_aug_rho", 0.1),
+            ema_decay=cfg.get("kl_ema_decay", 0.99),
         )
 
         self.transition = RolloutStorageB1Z1PACT.Transition()
@@ -396,7 +405,7 @@ class PPO_B1Z1PACT:
         return torch.stack(block_losses).sum()
 
 
-    def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid):
+    def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid, iteration):
         # Recompute the auxiliary graph after the actor update. The PPO
         # graph was consumed by PCGrad and sharing it here would either
         # fail on a second backward pass or retain an unnecessarily large
@@ -439,12 +448,13 @@ class PPO_B1Z1PACT:
             1 + aux_context["logvar"] - aux_context["mean"].square() - aux_context["logvar"].exp()
         ).sum(dim=-1, keepdim=True)
         aux_kl = (kl_per_sample * valid).sum() / valid.sum().clamp_min(1.0)
+        kl_reg_loss = self.kl_controller.loss(aux_kl, iteration)
 
         # Total loss
         aux = (
             aux_explicit
             + self.cfg["privileged_decoder_weight"] * aux_privileged_loss
-            + self.cfg["vae_kld_weight"] * aux_kl
+            + kl_reg_loss
         )
 
         self.auxiliary_optimizer.zero_grad()
@@ -454,6 +464,7 @@ class PPO_B1Z1PACT:
         # Match UniFP adaptation training: the auxiliary optimizer steps its
         # raw reconstruction gradient without a separate clipping pass.
         self.auxiliary_optimizer.step()
+        self.kl_controller.update_duals(aux_kl, iteration)
 
         # Return unweighted predictions/targets for the reliability gate.  The
         # gate compares raw MSEs, not the task-specific loss weights above, to
@@ -467,7 +478,7 @@ class PPO_B1Z1PACT:
             "foot_height": pred_foot_height_loss,
             "privileged_force": self._masked_force_slice_mse(aux_privileged_prediction, obs_target, valid),
             "privileged_decoder": aux_privileged_loss,
-            "kl": aux_kl,
+            **self.kl_controller.metrics(aux_kl, kl_reg_loss, iteration),
             # Sigmoid probabilities provide a bounded contact prediction for
             # the original PACT MSE-based bootstrap statistic; BCE above is
             # still the optimization objective for these binary labels.
@@ -611,7 +622,8 @@ class PPO_B1Z1PACT:
             self.pinn_updates += 1
         metrics = {name: 0.0 for name in (
             "value", "surrogate", "base_velo", "ee_position", "base_wrench", "ee_force", "foot_contact", "foot_height",
-            "privileged_force", "privileged_decoder", "kl", "pinn", "film_identity",
+            "privileged_force", "privileged_decoder", "pinn", "film_identity",
+            *KLRateBandController.METRIC_NAMES,
         )}
         # PPO_PACT's float64 sufficient statistics. Keep one set per maskable
         # signal: next-privileged reconstruction for z and explicit-state
@@ -668,6 +680,7 @@ class PPO_B1Z1PACT:
             aux = self._compute_vae_loss(
                 obs_hist_batch=batch["histories"],
                 obs_target=batch["next_privileged"], labels=batch["explicit_targets"], valid=valid,
+                iteration=iteration,
             )
 
             # Exact PPO_PACT boot-stat accumulation, applied separately to the
@@ -695,7 +708,8 @@ class PPO_B1Z1PACT:
                               ("foot_contact", aux["foot_contact"]),
                               ("foot_height", aux["foot_height"]),
                               ("privileged_force", aux["privileged_force"]), ("privileged_decoder", aux["privileged_decoder"]),
-                              ("kl", aux["kl"]), ("pinn", pinn), ("film_identity", film_identity)):
+                              *((name, aux[name]) for name in KLRateBandController.METRIC_NAMES),
+                              ("pinn", pinn), ("film_identity", film_identity)):
                 metrics[name] += val.detach().item()
             updates += 1
 

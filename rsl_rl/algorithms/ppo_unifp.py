@@ -4,6 +4,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 
+from rsl_rl.algorithms.kl_rate_band import KLRateBandController
 from rsl_rl.modules.actor_critic_unifp import ActorCriticUniFP
 from rsl_rl.storage.rollout_storage_unifp import RolloutStorageUniFP
 
@@ -37,6 +38,13 @@ class PPO_UniFP:
                  adaptive_ent_softmax_temp=2.0,
                  adaptation_privileged_weight=1.0,
                  adaptation_kl_weight=1.0e-3,
+                 kl_warmup_iters=500,
+                 kl_warmup_beta_max=None,
+                 kl_r_min=0.10,
+                 kl_r_max=1.00,
+                 kl_dual_lr=1.0e-3,
+                 kl_aug_rho=0.1,
+                 kl_ema_decay=0.99,
                  num_encoder_epochs=1,
                  device='cpu',
                  **kwargs,
@@ -69,10 +77,21 @@ class PPO_UniFP:
         self.ent_softmax_temperature = float(adaptive_ent_softmax_temp)
         self.current_entropy_coef = float(entropy_coef)
         self.adaptation_privileged_weight = float(adaptation_privileged_weight)
-        self.adaptation_kl_weight = float(adaptation_kl_weight)
         self.num_enc_epochs = int(num_encoder_epochs)
         if self.num_enc_epochs < 1:
             raise ValueError("num_encoder_epochs must be at least 1")
+
+
+        self.adaptation_kl_weight = float(adaptation_kl_weight)
+        self.kl_controller = KLRateBandController(
+            warmup_iters=kl_warmup_iters,
+            warmup_beta_max=(
+                self.adaptation_kl_weight
+                if kl_warmup_beta_max is None else kl_warmup_beta_max
+            ),
+            rate_min=kl_r_min, rate_max=kl_r_max, dual_lr=kl_dual_lr,
+            augmented_rho=kl_aug_rho, ema_decay=kl_ema_decay,
+        )
 
         # PPO components
         self.actor_critic = actor_critic
@@ -306,7 +325,7 @@ class PPO_UniFP:
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
-    def update(self):
+    def update(self, iteration):
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_adaptation_module_loss = 0
@@ -319,7 +338,8 @@ class PPO_UniFP:
             si = si + length
             mean_adaptation_losses[label] = 0
         mean_adaptation_losses["next_privileged_loss"] = 0
-        mean_adaptation_losses["kl_loss"] = 0
+        for name in KLRateBandController.METRIC_NAMES:
+            mean_adaptation_losses[name] = 0
 
         # Rollout statistics are computed once from detached storage tensors.
         with torch.no_grad():
@@ -490,12 +510,14 @@ class PPO_UniFP:
                             1.0 + logvar - mean.square() - logvar.exp()
                         ).sum(dim=-1, keepdim=True)
                         kl_loss = (kl_loss * valid).sum() / valid.sum().clamp_min(1.0)
+
+                        kl_reg_loss = self.kl_controller.loss(kl_loss, iteration)
+
                         adaptation_loss += (
                             self.adaptation_privileged_weight * privileged_loss
-                            + self.adaptation_kl_weight * kl_loss
+                            + kl_reg_loss
                         )
                         mean_adaptation_losses["next_privileged_loss"] += privileged_loss.item()
-                        mean_adaptation_losses["kl_loss"] += kl_loss.item()
 
                         self.adaptation_module_optimizer.zero_grad()
                         adaptation_loss.backward()
@@ -504,6 +526,11 @@ class PPO_UniFP:
                         )
                         gradient_counts["encoder"] += 1
                         self.adaptation_module_optimizer.step()
+                        self.kl_controller.update_duals(kl_loss, iteration)
+                        for name, value in self.kl_controller.metrics(
+                            kl_loss, kl_reg_loss, iteration
+                        ).items():
+                            mean_adaptation_losses[name] += value.item()
 
                         mean_adaptation_module_loss += adaptation_loss.item()
 
