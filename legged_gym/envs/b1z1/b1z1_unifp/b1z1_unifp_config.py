@@ -467,7 +467,7 @@ class B1Z1UniFPCfg:
         recovery_ratio = 0.90
         step_interval = 10
         reward_ema_alpha = 0.05
-        min_reward_to_step = 0.60
+        min_reward_to_step = 1.20
         joint_dynamics_progress_delta = 0.002
         mass_com_progress_delta = 0.002
         disturbance_progress_delta = 0.01

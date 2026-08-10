@@ -9,10 +9,6 @@ from legged_gym.envs.b1z1.force_task_utils import (
     strict_standing_mask,
     zero_velocity_probability,
 )
-from legged_gym.envs.b1z1.training_diagnostics import (
-    additional_diagnostics_enabled,
-    should_log_episode_reward,
-)
 
 from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.utils.helpers import class_to_dict
@@ -445,14 +441,12 @@ class B1Z1UniFP(BaseTask):
         if self.cfg.commands.curriculum and self.common_step_counter % self.max_episode_length == 0:
             self._update_command_curriculum(env_ids)
 
-        collect_diagnostics = additional_diagnostics_enabled(self)
-        if collect_diagnostics:
-            episode_ee_goal_sphere = self.curr_ee_goal_sphere[env_ids].clone()
-            episode_ee_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_gripper_cmd[env_ids], dim=1))
-            episode_ee_force_ext_norm = torch.mean(torch.norm(self.ee_force_ext_world[env_ids], dim=1))
-            episode_base_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_base_cmd[env_ids], dim=1))
-            episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
-            episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
+        episode_ee_goal_sphere = self.curr_ee_goal_sphere[env_ids].clone()
+        episode_ee_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_gripper_cmd[env_ids], dim=1))
+        episode_ee_force_ext_norm = torch.mean(torch.norm(self.ee_force_ext_world[env_ids], dim=1))
+        episode_base_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_base_cmd[env_ids], dim=1))
+        episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
+        episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
 
         self._resample_commands(env_ids)
         self._resample_ee_goal(env_ids, is_init=True)
@@ -514,8 +508,7 @@ class B1Z1UniFP(BaseTask):
 
         self.extras["episode"] = {}
         for key in self.episode_sums.keys():
-            if should_log_episode_reward(self, key):
-                self.extras["episode"]["rew_" + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
+            self.extras["episode"]["rew_" + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
             self.episode_sums[key][env_ids] = 0.0
         if self.cfg.terrain.curriculum:
             self.extras["episode"]["terrain_level"] = torch.mean(self.simulator.terrain_levels.float())
@@ -541,18 +534,17 @@ class B1Z1UniFP(BaseTask):
             self.extras["episode"]["domain_rand_disturbance_progress"] = (
                 self.simulator.domain_rand_disturbance_progress
             )
-        if collect_diagnostics:
-            self.extras["episode"]["ee_goal_radius"] = torch.mean(episode_ee_goal_sphere[:, 0])
-            self.extras["episode"]["ee_goal_pitch"] = torch.mean(episode_ee_goal_sphere[:, 1])
-            self.extras["episode"]["ee_goal_yaw"] = torch.mean(episode_ee_goal_sphere[:, 2])
-            self.extras["episode"]["ee_force_cmd_norm"] = episode_ee_force_cmd_norm
-            self.extras["episode"]["ee_force_ext_norm"] = episode_ee_force_ext_norm
-            self.extras["episode"]["base_force_cmd_norm"] = episode_base_force_cmd_norm
-            self.extras["episode"]["base_force_ext_norm"] = episode_base_force_ext_norm
-            self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
-            self.extras["episode"]["external_force_scale"] = self.external_force_scale
-            self.extras["episode"]["command_force_scale"] = self.command_force_scale
-            self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
+        self.extras["episode"]["ee_goal_radius"] = torch.mean(episode_ee_goal_sphere[:, 0])
+        self.extras["episode"]["ee_goal_pitch"] = torch.mean(episode_ee_goal_sphere[:, 1])
+        self.extras["episode"]["ee_goal_yaw"] = torch.mean(episode_ee_goal_sphere[:, 2])
+        self.extras["episode"]["ee_force_cmd_norm"] = episode_ee_force_cmd_norm
+        self.extras["episode"]["ee_force_ext_norm"] = episode_ee_force_ext_norm
+        self.extras["episode"]["base_force_cmd_norm"] = episode_base_force_cmd_norm
+        self.extras["episode"]["base_force_ext_norm"] = episode_base_force_ext_norm
+        self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
+        self.extras["episode"]["external_force_scale"] = self.external_force_scale
+        self.extras["episode"]["command_force_scale"] = self.command_force_scale
+        self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
 

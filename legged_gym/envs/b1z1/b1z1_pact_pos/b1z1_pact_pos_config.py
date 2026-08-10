@@ -189,7 +189,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         restitution = 0.0
         border_size = 5.0
         border_height = 1.0
-        curriculum = False
+        curriculum = True
         obtain_terrain_info_around_feet = True
         measure_heights = True
         measured_points_x = [-0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
@@ -202,7 +202,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         platform_size = 4.0
         num_rows = 10
         num_cols = 20
-        terrain_proportions = [0.00, 1.00, 0.00, 0.00, 0.00, 0.00, 0.0, 0.0, 0.0, 0.0]
+        terrain_proportions = [0.30, 0.40, 0.00, 0.00, 0.30, 0.00, 0.0, 0.0, 0.0, 0.0]
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.4",
             "step_height": "0.04 + 0.16 * difficulty",
@@ -297,7 +297,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         
         resampling_time = 10.0
         
-        heading_command = False
+        heading_command = True
         
         curriculum_threshold = 0.8
         
@@ -491,7 +491,6 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             pass
 
     class rewards:
-        force_neutral_threshold = 1.0e-3
         only_positive_rewards = False
         use_reward_curriculum = True
         
@@ -789,10 +788,10 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         explicit_foot_contact_weight = 1.0
         explicit_foot_height_weight = 1.0
         privileged_decoder_weight = 1.0
-        vae_kld_weight = 2.00
+        vae_kld_weight = 1.00
         kl_warmup_iters = 500
         kl_warmup_beta_max = vae_kld_weight
-        kl_r_min = 0.50
+        kl_r_min = 0.10
         kl_r_max = 1.00
         kl_dual_lr = 1.0e-3
         kl_aug_rho = 0.1
