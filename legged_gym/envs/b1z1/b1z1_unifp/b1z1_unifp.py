@@ -4,6 +4,16 @@ import math
 import numpy as np
 import torch
 
+from legged_gym.envs.b1z1.force_task_utils import (
+    force_curriculum_active,
+    strict_standing_mask,
+    zero_velocity_probability,
+)
+from legged_gym.envs.b1z1.training_diagnostics import (
+    additional_diagnostics_enabled,
+    should_log_episode_reward,
+)
+
 from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.utils.helpers import class_to_dict
 from legged_gym.utils.math_utils import (
@@ -126,7 +136,15 @@ class B1Z1UniFP(BaseTask):
 
     @property
     def force_command_randomization_active(self):
-        """Command-force profiles are active whenever their curriculum range is nonzero."""
+        """Select the force-task command regime when the initial hold ends."""
+        return force_curriculum_active(
+            self.training_iteration,
+            self.cfg.commands.command_force_hold_iterations,
+        )
+
+    @property
+    def force_command_stream_enabled(self):
+        """Keep reduced-range force commands present during the initial hold."""
         return self.command_force_scale > 0.0
 
     @property
@@ -179,13 +197,13 @@ class B1Z1UniFP(BaseTask):
         self.simulator.post_physics_step()
         self._post_physics_step_callback()
 
-        # Leg main-ip update specific update
-        self.compute_all_leg_jacobians(
-            self.simulator.dof_pos[:, 0:12].view(-1, 4, 3),
-            out=self.leg_jacobians,
-        )
+        # # Leg main-ip update specific update
+        # self.compute_all_leg_jacobians(
+        #     self.simulator.dof_pos[:, 0:12].view(-1, 4, 3),
+        #     out=self.leg_jacobians,
+        # )
 
-        self._compute_z1_arm_jacobian_buffer()
+        # self._compute_z1_arm_jacobian_buffer()
 
         self.check_termination()
         self.compute_reward()
@@ -427,13 +445,14 @@ class B1Z1UniFP(BaseTask):
         if self.cfg.commands.curriculum and self.common_step_counter % self.max_episode_length == 0:
             self._update_command_curriculum(env_ids)
 
-        # Snapshot episode-level force/goal statistics before state is zeroed.
-        episode_ee_goal_sphere = self.curr_ee_goal_sphere[env_ids].clone()
-        episode_ee_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_gripper_cmd[env_ids], dim=1))
-        episode_ee_force_ext_norm = torch.mean(torch.norm(self.ee_force_ext_world[env_ids], dim=1))
-        episode_base_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_base_cmd[env_ids], dim=1))
-        episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
-        episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
+        collect_diagnostics = additional_diagnostics_enabled(self)
+        if collect_diagnostics:
+            episode_ee_goal_sphere = self.curr_ee_goal_sphere[env_ids].clone()
+            episode_ee_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_gripper_cmd[env_ids], dim=1))
+            episode_ee_force_ext_norm = torch.mean(torch.norm(self.ee_force_ext_world[env_ids], dim=1))
+            episode_base_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_base_cmd[env_ids], dim=1))
+            episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
+            episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
 
         self._resample_commands(env_ids)
         self._resample_ee_goal(env_ids, is_init=True)
@@ -495,7 +514,8 @@ class B1Z1UniFP(BaseTask):
 
         self.extras["episode"] = {}
         for key in self.episode_sums.keys():
-            self.extras["episode"]["rew_" + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
+            if should_log_episode_reward(self, key):
+                self.extras["episode"]["rew_" + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
             self.episode_sums[key][env_ids] = 0.0
         if self.cfg.terrain.curriculum:
             self.extras["episode"]["terrain_level"] = torch.mean(self.simulator.terrain_levels.float())
@@ -521,17 +541,18 @@ class B1Z1UniFP(BaseTask):
             self.extras["episode"]["domain_rand_disturbance_progress"] = (
                 self.simulator.domain_rand_disturbance_progress
             )
-        self.extras["episode"]["ee_goal_radius"] = torch.mean(episode_ee_goal_sphere[:, 0])
-        self.extras["episode"]["ee_goal_pitch"] = torch.mean(episode_ee_goal_sphere[:, 1])
-        self.extras["episode"]["ee_goal_yaw"] = torch.mean(episode_ee_goal_sphere[:, 2])
-        self.extras["episode"]["ee_force_cmd_norm"] = episode_ee_force_cmd_norm
-        self.extras["episode"]["ee_force_ext_norm"] = episode_ee_force_ext_norm
-        self.extras["episode"]["base_force_cmd_norm"] = episode_base_force_cmd_norm
-        self.extras["episode"]["base_force_ext_norm"] = episode_base_force_ext_norm
-        self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
-        self.extras["episode"]["external_force_scale"] = self.external_force_scale
-        self.extras["episode"]["command_force_scale"] = self.command_force_scale
-        self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
+        if collect_diagnostics:
+            self.extras["episode"]["ee_goal_radius"] = torch.mean(episode_ee_goal_sphere[:, 0])
+            self.extras["episode"]["ee_goal_pitch"] = torch.mean(episode_ee_goal_sphere[:, 1])
+            self.extras["episode"]["ee_goal_yaw"] = torch.mean(episode_ee_goal_sphere[:, 2])
+            self.extras["episode"]["ee_force_cmd_norm"] = episode_ee_force_cmd_norm
+            self.extras["episode"]["ee_force_ext_norm"] = episode_ee_force_ext_norm
+            self.extras["episode"]["base_force_cmd_norm"] = episode_base_force_cmd_norm
+            self.extras["episode"]["base_force_ext_norm"] = episode_base_force_ext_norm
+            self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
+            self.extras["episode"]["external_force_scale"] = self.external_force_scale
+            self.extras["episode"]["command_force_scale"] = self.command_force_scale
+            self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
 
@@ -927,10 +948,10 @@ class B1Z1UniFP(BaseTask):
         # UniFP samples many standing commands; after force randomization starts
         # that probability increases so the force policy sees static balancing
         # cases under disturbance.
-        zero_prob = (
-            self.cfg.commands.zero_vel_cmd_prob_after_force
-            if self.force_command_randomization_active
-            else self.cfg.commands.zero_vel_cmd_prob
+        zero_prob = zero_velocity_probability(
+            self.force_command_randomization_active,
+            self.cfg.commands.zero_vel_cmd_prob,
+            self.cfg.commands.zero_vel_cmd_prob_after_force,
         )
         zero_mask = torch.rand(len(env_ids), device=self.device) < zero_prob
         zero_env_ids = env_ids[zero_mask]
@@ -1447,7 +1468,7 @@ class B1Z1UniFP(BaseTask):
 
     def _push_gripper(self, env_ids_all):
         """Update EE commanded-force and external-force streams."""
-        if self.force_command_randomization_active:
+        if self.force_command_stream_enabled:
             self._update_force_stream(
                 env_ids_all,
                 interval=self.push_interval_gripper_cmd,
@@ -1496,7 +1517,7 @@ class B1Z1UniFP(BaseTask):
 
     def _push_robot_base(self, env_ids_all):
         """Update base commanded-force and external-force streams."""
-        if self.force_command_randomization_active:
+        if self.force_command_stream_enabled:
             self._update_force_stream(
                 env_ids_all,
                 interval=self.push_interval_base_cmd,
@@ -2828,8 +2849,8 @@ class B1Z1UniFP(BaseTask):
         return rew
 
     def _reward_stand_still(self):
-        moving = torch.norm(self.commands[:, :3], dim=1) > 0.1
-        return torch.sum(torch.square(self.simulator.dof_pos[:, :12] - self.simulator.default_dof_pos[:, :12]), dim=1) * (~moving)
+        standing = strict_standing_mask(self)
+        return torch.sum(torch.square(self.simulator.dof_pos[:, :12] - self.simulator.default_dof_pos[:, :12]), dim=1) * standing
 
     def _reward_dof_close_to_default(self):
         # Penalize dof position deviation from default
@@ -2839,7 +2860,7 @@ class B1Z1UniFP(BaseTask):
         # Encourage feet contact with the ground at zero commands
         contacts = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0
         full_contact = torch.sum(1.*contacts.float(), dim=1)==len(self.simulator.feet_indices)
-        return 1.0*full_contact * (torch.norm(self.commands[:, :3], dim=1) < 0.1)
+        return 1.0 * full_contact * strict_standing_mask(self)
 
     def _reward_ref_dof_leg(self):
         raw_reward = torch.exp(

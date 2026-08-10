@@ -491,6 +491,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             pass
 
     class rewards:
+        force_neutral_threshold = 1.0e-3
         only_positive_rewards = False
         use_reward_curriculum = True
         

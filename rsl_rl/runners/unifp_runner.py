@@ -28,6 +28,9 @@ class OnPolicyRunnerUniFP:
         self.device = device
         self.env = env
         self.use_adaptive_entropy = self.alg_cfg.get("use_adaptive_entropy", False)
+        self.enable_additional_diagnostics = self.cfg.get(
+            "enable_additional_diagnostics", True
+        )
 
         num_single_obs = self.env.num_obs
         num_actor_obs = self.env.num_obs * self.env.num_obs_hist
@@ -43,19 +46,29 @@ class OnPolicyRunnerUniFP:
             num_single_obs,
             self.env.num_actions,
             num_privileged_obs_single=self.env.num_privileged_obs,
+            enable_additional_diagnostics=self.enable_additional_diagnostics,
             **self.policy_cfg,
         ).to(self.device)
 
-        print("Created UniFP Actor-Critic Model")
-        pretty_print_module(actor_critic)
+        if self.enable_additional_diagnostics:
+            print("Created UniFP Actor-Critic Model")
+            pretty_print_module(actor_critic)
 
         alg_class = eval(self.cfg["algorithm_class_name"])
-        self.alg: PPO_UniFP = alg_class(actor_critic, device=self.device, **self.alg_cfg)
+        self.alg: PPO_UniFP = alg_class(
+            actor_critic,
+            device=self.device,
+            enable_additional_diagnostics=self.enable_additional_diagnostics,
+            **self.alg_cfg,
+        )
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
+        self.alg.enable_additional_diagnostics = self.enable_additional_diagnostics
+        self.alg.actor_critic.enable_additional_diagnostics = self.enable_additional_diagnostics
+        self.env.enable_additional_diagnostics = self.enable_additional_diagnostics
         self.enable_deterministic_diagnostics = self.cfg.get(
             "enable_deterministic_diagnostics", False
-        )
+        ) and self.enable_additional_diagnostics
         self.deterministic_diagnostics_interval = self.cfg.get(
             "deterministic_diagnostics_interval", 100
         )
@@ -108,16 +121,18 @@ class OnPolicyRunnerUniFP:
             # an approximation based on simulation steps or episode resets.
             if hasattr(self.env, "set_training_iteration"):
                 self.env.set_training_iteration(it)
-            self.alg.actor_critic.begin_rollout_diagnostics()
-            if hasattr(self.env, "begin_rollout_diagnostics"):
+            if self.enable_additional_diagnostics:
+                self.alg.actor_critic.begin_rollout_diagnostics()
+            if self.enable_additional_diagnostics and hasattr(self.env, "begin_rollout_diagnostics"):
                 self.env.begin_rollout_diagnostics()
             start = time.time()
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
                     actions = self.alg.act(obs_history, critic_obs, obs_pred)
-                    self.alg.actor_critic.record_rollout_diagnostics(
-                        actions, self.env.cfg.normalization.clip_actions
-                    )
+                    if self.enable_additional_diagnostics:
+                        self.alg.actor_critic.record_rollout_diagnostics(
+                            actions, self.env.cfg.normalization.clip_actions
+                        )
                     obs, privileged_obs, obs_history, obs_pred, rewards, dones, infos, _ = self.env.step(actions)
                     critic_obs = privileged_obs if privileged_obs is not None else obs
 
@@ -144,10 +159,13 @@ class OnPolicyRunnerUniFP:
                         cur_episode_length[new_ids] = 0
 
                 collection_time = time.time() - start
-                policy_diagnostics = self.alg.actor_critic.get_rollout_diagnostics()
+                policy_diagnostics = (
+                    self.alg.actor_critic.get_rollout_diagnostics()
+                    if self.enable_additional_diagnostics else {}
+                )
                 environment_diagnostics = (
                     self.env.get_rollout_diagnostics()
-                    if hasattr(self.env, "get_rollout_diagnostics") else {}
+                    if self.enable_additional_diagnostics and hasattr(self.env, "get_rollout_diagnostics") else {}
                 )
                 start = time.time()
                 self.alg.compute_returns(critic_obs)
@@ -159,26 +177,27 @@ class OnPolicyRunnerUniFP:
                 mean_adaptation_losses,
                 ppo_diagnostics,
             ) = self.alg.update(it)
-            subset_size = min(32, obs_history.shape[0])
-            diagnostic_observations = obs_history[:subset_size]
             latent_resample_diagnostics = {}
             deterministic_diagnostics = {}
-            if (
-                self.enable_deterministic_diagnostics
-                and it % self.deterministic_diagnostics_interval == 0
-            ):
-                deterministic_diagnostics = self.alg.actor_critic.deterministic_diagnostics(
-                    diagnostic_observations
-                )
-            else:
-                latent_resample_diagnostics = self.alg.actor_critic.latent_resample_diagnostics(
-                    diagnostic_observations
-                )
-            joint_names = self.env.cfg.asset.dof_names[:self.env.num_actions]
-            joint_std_diagnostics = {
-                f"PolicyStd/{joint_name}": self.alg.actor_critic.std[index].detach().item()
-                for index, joint_name in enumerate(joint_names)
-            }
+            joint_std_diagnostics = {}
+            if self.enable_additional_diagnostics:
+                diagnostic_observations = obs_history[:min(32, obs_history.shape[0])]
+                if (
+                    self.enable_deterministic_diagnostics
+                    and it % self.deterministic_diagnostics_interval == 0
+                ):
+                    deterministic_diagnostics = self.alg.actor_critic.deterministic_diagnostics(
+                        diagnostic_observations
+                    )
+                else:
+                    latent_resample_diagnostics = self.alg.actor_critic.latent_resample_diagnostics(
+                        diagnostic_observations
+                    )
+                joint_names = self.env.cfg.asset.dof_names[:self.env.num_actions]
+                joint_std_diagnostics = {
+                    f"PolicyStd/{joint_name}": self.alg.actor_critic.std[index].detach().item()
+                    for index, joint_name in enumerate(joint_names)
+                }
             diagnostic_metrics = {
                 **ppo_diagnostics,
                 **policy_diagnostics,
@@ -187,7 +206,8 @@ class OnPolicyRunnerUniFP:
                 **deterministic_diagnostics,
                 **joint_std_diagnostics,
             }
-            self._validate_diagnostics(diagnostic_metrics)
+            if self.enable_additional_diagnostics:
+                self._validate_diagnostics(diagnostic_metrics)
             learn_time = time.time() - start
 
             if ep_infos and self.use_adaptive_entropy:

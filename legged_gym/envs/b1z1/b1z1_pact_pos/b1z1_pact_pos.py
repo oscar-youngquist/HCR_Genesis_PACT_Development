@@ -4,6 +4,12 @@ import math
 import numpy as np
 import torch
 
+from legged_gym.envs.b1z1.force_task_utils import strict_standing_mask
+from legged_gym.envs.b1z1.training_diagnostics import (
+    additional_diagnostics_enabled,
+    should_log_episode_reward,
+)
+
 from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.utils.helpers import class_to_dict
@@ -504,12 +510,13 @@ class B1Z1PACTPos(LeggedRobot):
         if self.use_tradeoff:
             self.step_tradeoff_curriculum(env_ids)
 
-        # Snapshot episode-level force/goal statistics before state is zeroed.
-        episode_ee_goal_sphere = self.curr_ee_goal_sphere[env_ids].clone()
-        episode_ee_force_ext_norm = torch.mean(torch.norm(self.ee_force_ext_world[env_ids], dim=1))
-        episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
-        episode_base_torque_ext_norm = torch.mean(torch.norm(self.base_torque_ext_world[env_ids], dim=1))
-        episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
+        collect_diagnostics = additional_diagnostics_enabled(self)
+        if collect_diagnostics:
+            episode_ee_goal_sphere = self.curr_ee_goal_sphere[env_ids].clone()
+            episode_ee_force_ext_norm = torch.mean(torch.norm(self.ee_force_ext_world[env_ids], dim=1))
+            episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
+            episode_base_torque_ext_norm = torch.mean(torch.norm(self.base_torque_ext_world[env_ids], dim=1))
+            episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
 
         self._resample_commands(env_ids)
         self._resample_ee_goal(env_ids, is_init=True)
@@ -568,7 +575,8 @@ class B1Z1PACTPos(LeggedRobot):
 
         self.extras["episode"] = {}
         for key in self.episode_sums.keys():
-            self.extras["episode"]["rew_" + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
+            if should_log_episode_reward(self, key):
+                self.extras["episode"]["rew_" + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
             self.episode_sums[key][env_ids] = 0.0
         if self.cfg.terrain.curriculum:
             self.extras["episode"]["terrain_level"] = torch.mean(self.simulator.terrain_levels.float())
@@ -594,15 +602,16 @@ class B1Z1PACTPos(LeggedRobot):
             self.extras["episode"]["domain_rand_disturbance_progress"] = (
                 self.simulator.domain_rand_disturbance_progress
             )
-        self.extras["episode"]["ee_goal_radius"] = torch.mean(episode_ee_goal_sphere[:, 0])
-        self.extras["episode"]["ee_goal_pitch"] = torch.mean(episode_ee_goal_sphere[:, 1])
-        self.extras["episode"]["ee_goal_yaw"] = torch.mean(episode_ee_goal_sphere[:, 2])
-        self.extras["episode"]["ee_force_ext_norm"] = episode_ee_force_ext_norm
-        self.extras["episode"]["base_force_ext_norm"] = episode_base_force_ext_norm
-        self.extras["episode"]["base_torque_ext_norm"] = episode_base_torque_ext_norm
-        self.extras["episode"]["external_force_scale"] = self.external_force_scale
-        self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
-        self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
+        if collect_diagnostics:
+            self.extras["episode"]["ee_goal_radius"] = torch.mean(episode_ee_goal_sphere[:, 0])
+            self.extras["episode"]["ee_goal_pitch"] = torch.mean(episode_ee_goal_sphere[:, 1])
+            self.extras["episode"]["ee_goal_yaw"] = torch.mean(episode_ee_goal_sphere[:, 2])
+            self.extras["episode"]["ee_force_ext_norm"] = episode_ee_force_ext_norm
+            self.extras["episode"]["base_force_ext_norm"] = episode_base_force_ext_norm
+            self.extras["episode"]["base_torque_ext_norm"] = episode_base_torque_ext_norm
+            self.extras["episode"]["external_force_scale"] = self.external_force_scale
+            self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
+            self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
 
@@ -2636,8 +2645,8 @@ class B1Z1PACTPos(LeggedRobot):
         return rew
 
     def _reward_stand_still(self):
-        moving = torch.norm(self.commands[:, :3], dim=1) > 0.1
-        return torch.sum(torch.square(self.simulator.dof_pos[:, :12] - self.simulator.default_dof_pos[:, :12]), dim=1) * (~moving)
+        standing = strict_standing_mask(self)
+        return torch.sum(torch.square(self.simulator.dof_pos[:, :12] - self.simulator.default_dof_pos[:, :12]), dim=1) * standing
 
     def _reward_dof_close_to_default(self):
         # Penalize dof position deviation from default
@@ -2647,7 +2656,7 @@ class B1Z1PACTPos(LeggedRobot):
         # Encourage feet contact with the ground at zero commands
         contacts = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0
         full_contact = torch.sum(1.*contacts.float(), dim=1)==len(self.simulator.feet_indices)
-        return 1.0*full_contact * (torch.norm(self.commands[:, :3], dim=1) < 0.1)
+        return 1.0 * full_contact * strict_standing_mask(self)
 
     def _reward_ref_dof_leg(self):
         raw_reward = torch.exp(

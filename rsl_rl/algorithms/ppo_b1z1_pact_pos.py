@@ -10,7 +10,7 @@ import random
 import warnings
 
 from rsl_rl.algorithms.pc_grad import PCGrad
-from rsl_rl.algorithms.kl_rate_band import KLRateBandController
+from rsl_rl.algorithms.kl_rate_band import KLRateBandController, update_duals_from_mean
 from rsl_rl.storage.rollout_storage_b1z1_pact import RolloutStorageB1Z1PACT
 
 
@@ -303,7 +303,6 @@ class PPO_B1Z1PACTPos:
         # Match UniFP adaptation training: the auxiliary optimizer steps its
         # raw reconstruction gradient without a separate clipping pass.
         self.auxiliary_optimizer.step()
-        self.kl_controller.update_duals(aux_kl, iteration)
 
         # Return unweighted predictions/targets for the reliability gate.  The
         # gate compares raw MSEs, not the task-specific loss weights above, to
@@ -317,7 +316,8 @@ class PPO_B1Z1PACTPos:
             "foot_height": pred_foot_height_loss,
             "privileged_force": self._masked_force_slice_mse(aux_privileged_prediction, obs_target, valid),
             "privileged_decoder": aux_privileged_loss,
-            **self.kl_controller.metrics(aux_kl, kl_reg_loss, iteration),
+            "kl_raw": aux_kl,
+            "kl_reg_loss": kl_reg_loss,
             # Sigmoid probabilities provide a bounded contact prediction for
             # the original PACT MSE-based bootstrap statistic; BCE above is
             # still the optimization objective for these binary labels.
@@ -485,6 +485,7 @@ class PPO_B1Z1PACTPos:
         # reconstruction for the base/EE estimates.
         boot_stats = {"latent": [None, None, 0.0, 0], "explicit": [None, None, 0.0, 0]}
         updates = 0
+        raw_kl_sum = 0.0
         diagnostics = {"lr_before_update": self.learning_rate}
         for batch in self.storage.mini_batches(self.mini_batches, self.epochs):
             if updates == 0:
@@ -541,10 +542,11 @@ class PPO_B1Z1PACTPos:
                               ("foot_contact", aux["foot_contact"]),
                               ("foot_height", aux["foot_height"]),
                               ("privileged_force", aux["privileged_force"]), ("privileged_decoder", aux["privileged_decoder"]),
-                              *((name, aux[name]) for name in KLRateBandController.METRIC_NAMES),
+                              ("kl_raw", aux["kl_raw"]), ("kl_reg_loss", aux["kl_reg_loss"]),
                               ("torque_clone", torque_clone),
                               ("film_identity", film_identity)):
                 metrics[name] += val.detach().item()
+            raw_kl_sum += aux["kl_raw"].detach().item()
             updates += 1
 
             self.spectral_normalization(self.actor_critic, sigma_max=10.0)
@@ -579,8 +581,21 @@ class PPO_B1Z1PACTPos:
         _, latent_pboot, latent_baseline, latent_recon = sample_boot_flag(boot_stats["latent"])
         self.use_boot_latent = True
         self.storage.clear()
+        mean_metrics = {key: value / max(1, updates) for key, value in metrics.items()}
+        mean_raw_kl = update_duals_from_mean(
+            self.kl_controller, raw_kl_sum, updates, iteration, self.device
+        )
+        if mean_raw_kl is not None:
+            controller_metrics = self.kl_controller.metrics(
+                mean_raw_kl,
+                torch.tensor(mean_metrics["kl_reg_loss"], device=self.device),
+                iteration,
+            )
+            for name in KLRateBandController.METRIC_NAMES:
+                if name not in ("kl_raw", "kl_reg_loss"):
+                    mean_metrics[name] = controller_metrics[name].item()
         diagnostics["lr_after_update"] = self.learning_rate
-        return {key: value / max(1, updates) for key, value in metrics.items()} | diagnostics | {
+        return mean_metrics | diagnostics | {
             "latent_boot_probability": latent_pboot,
             "latent_boot_active": float(self.use_boot_latent),
             "latent_recon_mse": latent_recon, "latent_naive_mse": latent_baseline,

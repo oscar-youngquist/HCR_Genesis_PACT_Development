@@ -5,6 +5,15 @@ import math
 import torch
 
 
+def update_duals_from_mean(controller, raw_kl_sum, raw_kl_count, iteration, device):
+    """Apply one dual update to the detached mean KL from a PPO iteration."""
+    if raw_kl_count == 0:
+        return None
+    mean_raw_kl = torch.tensor(raw_kl_sum / raw_kl_count, device=device)
+    controller.update_duals(mean_raw_kl, iteration)
+    return mean_raw_kl
+
+
 class KLRateBandController:
     """Build a differentiable KL penalty while keeping dual state detached."""
 

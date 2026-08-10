@@ -38,10 +38,12 @@ class ActorCriticUniFP(nn.Module):
                         init_noise_std=1.0,
                         min_noise_std=1.0e-3,
                         max_noise_std=float("inf"),
+                        enable_additional_diagnostics=True,
                         **kwargs):
         if kwargs:
             print("ActorCritic.__init__ got unexpected arguments, which will be ignored: " + str([key for key in kwargs.keys()]))
         super().__init__()
+        self.enable_additional_diagnostics = bool(enable_additional_diagnostics)
         
         self.adaptation_labels = AC_Args.adaptation_labels
         self.adaptation_dims = AC_Args.adaptation_dims
@@ -152,13 +154,14 @@ class ActorCriticUniFP(nn.Module):
                 critic_layers.append(activation)
         self.critic_body = nn.Sequential(*critic_layers)
 
-        print(f"Adaptation Encoder Module: {self.adaptation_encoder_module}")
-        print(f"Adaptation Mean Module: {self.adaptation_mean_module}")
-        print(f"Adaptation Logvar Module: {self.adaptation_logvar_module}")
-        print(f"Adaptation Decoder Module: {self.adaptation_decoder_module}")
-        print(f"Privileged Decoder Module: {self.privileged_decoder_module}")
-        print(f"Actor MLP: {self.actor_body}")
-        print(f"Critic MLP: {self.critic_body}")
+        if self.enable_additional_diagnostics:
+            print(f"Adaptation Encoder Module: {self.adaptation_encoder_module}")
+            print(f"Adaptation Mean Module: {self.adaptation_mean_module}")
+            print(f"Adaptation Logvar Module: {self.adaptation_logvar_module}")
+            print(f"Adaptation Decoder Module: {self.adaptation_decoder_module}")
+            print(f"Privileged Decoder Module: {self.privileged_decoder_module}")
+            print(f"Actor MLP: {self.actor_body}")
+            print(f"Critic MLP: {self.critic_body}")
 
         # Action noise. Each setting accepts either one scalar shared by every
         # action or a flat sequence with one value per action dimension.
@@ -250,8 +253,9 @@ class ActorCriticUniFP(nn.Module):
 
     def update_distribution(self, observations):
         latent_mean, latent_logvar, latent = self.encode_context(observations, sample=False)
-        self._last_latent_mean = latent_mean.detach()
-        self._last_latent_logvar = latent_logvar.detach()
+        if self.enable_additional_diagnostics:
+            self._last_latent_mean = latent_mean.detach()
+            self._last_latent_logvar = latent_logvar.detach()
         actor_inputs = [
             observations[:, -self.num_obs_now:],
             latent,

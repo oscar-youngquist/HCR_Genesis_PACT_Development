@@ -97,6 +97,7 @@ class B1Z1PACTRunner:
         self.steps, self.save_interval = runner_cfg["num_steps_per_env"], runner_cfg["save_interval"]
         self.enable_additional_diagnostics = runner_cfg.get("enable_additional_diagnostics", True)
         self.alg.enable_additional_diagnostics = self.enable_additional_diagnostics
+        self.env.enable_additional_diagnostics = self.enable_additional_diagnostics
         self.use_adaptive_entropy = algorithm_cfg.get("use_adaptive_entropy", False)
 
         self.current_learning_iteration, self.total_timesteps, self.total_time = 0, 0, 0.0

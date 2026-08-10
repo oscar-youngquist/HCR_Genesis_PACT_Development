@@ -4,7 +4,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 
-from rsl_rl.algorithms.kl_rate_band import KLRateBandController
+from rsl_rl.algorithms.kl_rate_band import KLRateBandController, update_duals_from_mean
 from rsl_rl.modules.actor_critic_unifp import ActorCriticUniFP
 from rsl_rl.storage.rollout_storage_unifp import RolloutStorageUniFP
 
@@ -46,6 +46,7 @@ class PPO_UniFP:
                  kl_aug_rho=0.1,
                  kl_ema_decay=0.99,
                  num_encoder_epochs=1,
+                 enable_additional_diagnostics=True,
                  device='cpu',
                  **kwargs,
                  ):
@@ -56,9 +57,11 @@ class PPO_UniFP:
         self.schedule = schedule
         self.learning_rate = learning_rate
 
-        print("UniFP PPO - Learning Rate - ", self.learning_rate)
-        print("UniFP PPO - Desired KL - ", self.desired_kl)
-        print("UniFP PPO - LR Schedule - ", self.schedule)
+        self.enable_additional_diagnostics = bool(enable_additional_diagnostics)
+        if self.enable_additional_diagnostics:
+            print("UniFP PPO - Learning Rate - ", self.learning_rate)
+            print("UniFP PPO - Desired KL - ", self.desired_kl)
+            print("UniFP PPO - LR Schedule - ", self.schedule)
 
         # Adaptive entropy coefficient, ported from PPO_PACT. Bounds are
         # ordered [coefficient at target performance, coefficient at maximum
@@ -341,27 +344,30 @@ class PPO_UniFP:
         for name in KLRateBandController.METRIC_NAMES:
             mean_adaptation_losses[name] = 0
 
-        # Rollout statistics are computed once from detached storage tensors.
-        with torch.no_grad():
-            advantages = self.storage.advantages.detach().float()
-            returns = self.storage.returns.detach().float()
-            values = self.storage.values.detach().float()
-            return_variance = returns.var(unbiased=False)
-            explained_variance = (
-                1.0 - (returns - values).var(unbiased=False) / return_variance
-                if return_variance > 1.0e-12 else returns.new_zeros(())
-            )
-            ppo_diagnostics = {
-                "PPO/advantage_mean": advantages.mean().item(),
-                "PPO/advantage_std": advantages.std(unbiased=False).item(),
-                "PPO/return_mean": returns.mean().item(),
-                "PPO/value_mean": values.mean().item(),
-                "PPO/explained_variance": explained_variance.item(),
-            }
-            parameters_before = {
-                name: [parameter.detach().clone() for parameter in parameters]
-                for name, parameters in self.diagnostic_parameter_groups.items()
-            }
+        ppo_diagnostics = {}
+        parameters_before = {}
+        if self.enable_additional_diagnostics:
+            # Diagnostic rollout statistics and parameter snapshots are optional.
+            with torch.no_grad():
+                advantages = self.storage.advantages.detach().float()
+                returns = self.storage.returns.detach().float()
+                values = self.storage.values.detach().float()
+                return_variance = returns.var(unbiased=False)
+                explained_variance = (
+                    1.0 - (returns - values).var(unbiased=False) / return_variance
+                    if return_variance > 1.0e-12 else returns.new_zeros(())
+                )
+                ppo_diagnostics = {
+                    "PPO/advantage_mean": advantages.mean().item(),
+                    "PPO/advantage_std": advantages.std(unbiased=False).item(),
+                    "PPO/return_mean": returns.mean().item(),
+                    "PPO/value_mean": values.mean().item(),
+                    "PPO/explained_variance": explained_variance.item(),
+                }
+                parameters_before = {
+                    name: [parameter.detach().clone() for parameter in parameters]
+                    for name, parameters in self.diagnostic_parameter_groups.items()
+                }
 
         minibatch_sums = {
             "PPO/approx_kl": 0.0,
@@ -371,8 +377,11 @@ class PPO_UniFP:
         }
         gradient_sums = {name: 0.0 for name in self.diagnostic_parameter_groups}
         gradient_counts = {name: 0 for name in self.diagnostic_parameter_groups}
+        raw_kl_sum = 0.0
+        raw_kl_count = 0
 
-        ppo_diagnostics["PPO/lr_before_update"] = self.learning_rate
+        if self.enable_additional_diagnostics:
+            ppo_diagnostics["PPO/lr_before_update"] = self.learning_rate
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         first_epoch = True
@@ -388,7 +397,7 @@ class PPO_UniFP:
                 entropy_batch = self.actor_critic.entropy
 
 
-                if first_epoch:
+                if first_epoch and self.enable_additional_diagnostics:
                     mu_abs_diff = (mu_batch - old_mu_batch).abs()
                     sigma_abs_diff = (sigma_batch - old_sigma_batch).abs()
                     logprob_abs_diff = (
@@ -410,8 +419,9 @@ class PPO_UniFP:
 
                         approximate_kl = kl_mean
 
-                        if first_epoch:
+                        if first_epoch and self.enable_additional_diagnostics:
                             ppo_diagnostics["PPO/pre_update_kl"] = kl_mean.item()
+                        if first_epoch:
                             first_epoch = False
                         
                         if kl_mean > self.desired_kl * 2.0:
@@ -426,13 +436,14 @@ class PPO_UniFP:
 
                 # Surrogate loss
                 ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
-                with torch.no_grad():
-                    minibatch_sums["PPO/approx_kl"] += approximate_kl.item()
-                    minibatch_sums["PPO/ratio_mean"] += ratio.mean().item()
-                    minibatch_sums["PPO/ratio_std"] += ratio.std(unbiased=False).item()
-                    minibatch_sums["PPO/clip_fraction"] += (
-                        (ratio < 1.0 - self.clip_param) | (ratio > 1.0 + self.clip_param)
-                    ).float().mean().item()
+                if self.enable_additional_diagnostics:
+                    with torch.no_grad():
+                        minibatch_sums["PPO/approx_kl"] += approximate_kl.item()
+                        minibatch_sums["PPO/ratio_mean"] += ratio.mean().item()
+                        minibatch_sums["PPO/ratio_std"] += ratio.std(unbiased=False).item()
+                        minibatch_sums["PPO/clip_fraction"] += (
+                            (ratio < 1.0 - self.clip_param) | (ratio > 1.0 + self.clip_param)
+                        ).float().mean().item()
                 surrogate = -torch.squeeze(advantages_batch) * ratio
                 surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
                                                                                 1.0 + self.clip_param)
@@ -456,9 +467,10 @@ class PPO_UniFP:
                 # actor/critic/std update norm.
                 self.optimizer.zero_grad()
                 loss.backward()
-                for name, parameters in self.diagnostic_parameter_groups.items():
-                    gradient_sums[name] += self._gradient_norm(parameters)
-                    gradient_counts[name] += 1
+                if self.enable_additional_diagnostics:
+                    for name, parameters in self.diagnostic_parameter_groups.items():
+                        gradient_sums[name] += self._gradient_norm(parameters)
+                        gradient_counts[name] += 1
                 nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
                 self.optimizer.step()
                 # PPO backprop still traverses the adaptation encoder to build
@@ -521,16 +533,16 @@ class PPO_UniFP:
 
                         self.adaptation_module_optimizer.zero_grad()
                         adaptation_loss.backward()
-                        gradient_sums["encoder"] += self._gradient_norm(
-                            self.diagnostic_parameter_groups["encoder"]
-                        )
-                        gradient_counts["encoder"] += 1
+                        if self.enable_additional_diagnostics:
+                            gradient_sums["encoder"] += self._gradient_norm(
+                                self.diagnostic_parameter_groups["encoder"]
+                            )
+                            gradient_counts["encoder"] += 1
                         self.adaptation_module_optimizer.step()
-                        self.kl_controller.update_duals(kl_loss, iteration)
-                        for name, value in self.kl_controller.metrics(
-                            kl_loss, kl_reg_loss, iteration
-                        ).items():
-                            mean_adaptation_losses[name] += value.item()
+                        mean_adaptation_losses["kl_raw"] += kl_loss.detach().item()
+                        mean_adaptation_losses["kl_reg_loss"] += kl_reg_loss.detach().item()
+                        raw_kl_sum += kl_loss.detach().item()
+                        raw_kl_count += 1
 
                         mean_adaptation_module_loss += adaptation_loss.item()
 
@@ -538,7 +550,8 @@ class PPO_UniFP:
                 #     saturates the tanh activation function.
                 self.spectral_normalization(self.actor_critic, sigma_max=10.0)
 
-        ppo_diagnostics["PPO/lr_after_update"] = self.learning_rate
+        if self.enable_additional_diagnostics:
+            ppo_diagnostics["PPO/lr_after_update"] = self.learning_rate
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
@@ -547,18 +560,32 @@ class PPO_UniFP:
         for label in mean_adaptation_losses:
             mean_adaptation_losses[label] /= (num_updates * self.num_enc_epochs)
 
-        ppo_diagnostics["PPO/param_learning_rate"] = float(self.optimizer.param_groups[0]["lr"])
-        ppo_diagnostics["PPO/class_learning_rate"] = float(self.learning_rate)
-        for name, value in minibatch_sums.items():
-            ppo_diagnostics[name] = value / max(1, num_updates)
-        for name, parameters in self.diagnostic_parameter_groups.items():
-            ppo_diagnostics[f"PPO/{name}_grad_norm"] = (
-                gradient_sums[name] / max(1, gradient_counts[name])
+        mean_raw_kl = update_duals_from_mean(
+            self.kl_controller, raw_kl_sum, raw_kl_count, iteration, self.device
+        )
+        if mean_raw_kl is not None:
+            controller_metrics = self.kl_controller.metrics(
+                mean_raw_kl,
+                torch.tensor(mean_adaptation_losses["kl_reg_loss"], device=self.device),
+                iteration,
             )
-            ppo_diagnostics[f"PPO/{name}_relative_update_norm"] = self._relative_update_norm(
-                parameters, parameters_before[name]
-            )
-        ppo_diagnostics.update(self._shared_optimizer_metrics())
+            for name in KLRateBandController.METRIC_NAMES:
+                if name not in ("kl_raw", "kl_reg_loss"):
+                    mean_adaptation_losses[name] = controller_metrics[name].item()
+
+        if self.enable_additional_diagnostics:
+            ppo_diagnostics["PPO/param_learning_rate"] = float(self.optimizer.param_groups[0]["lr"])
+            ppo_diagnostics["PPO/class_learning_rate"] = float(self.learning_rate)
+            for name, value in minibatch_sums.items():
+                ppo_diagnostics[name] = value / max(1, num_updates)
+            for name, parameters in self.diagnostic_parameter_groups.items():
+                ppo_diagnostics[f"PPO/{name}_grad_norm"] = (
+                    gradient_sums[name] / max(1, gradient_counts[name])
+                )
+                ppo_diagnostics[f"PPO/{name}_relative_update_norm"] = self._relative_update_norm(
+                    parameters, parameters_before[name]
+                )
+            ppo_diagnostics.update(self._shared_optimizer_metrics())
         self.storage.clear()
 
         return (

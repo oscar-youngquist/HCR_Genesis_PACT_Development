@@ -1,0 +1,42 @@
+"""Shared force-task predicates for B1Z1 training environments."""
+
+import torch
+
+
+FORCE_TENSOR_NAMES = (
+    "current_Fxyz_gripper_cmd",
+    "current_Fxyz_base_cmd",
+    "ee_force_ext_world",
+    "base_force_ext_world",
+)
+
+
+def force_curriculum_active(training_iteration, ramp_start_iteration):
+    """Activate the force-task regime when its scale can leave the hold value."""
+    return int(training_iteration) >= int(ramp_start_iteration)
+
+
+def zero_velocity_probability(active, default_probability, force_probability):
+    """Select the unchanged command sampler probability for the active regime."""
+    return force_probability if active else default_probability
+
+
+def force_neutral_mask(env, threshold=None):
+    """Return environments with no available commanded or applied force task."""
+    if threshold is None:
+        threshold = getattr(env.cfg.rewards, "force_neutral_threshold", 1.0e-3)
+    threshold = float(threshold)
+    if threshold < 0.0:
+        raise ValueError("rewards.force_neutral_threshold must be nonnegative")
+
+    neutral = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    for name in FORCE_TENSOR_NAMES:
+        force = getattr(env, name, None)
+        if force is not None:
+            neutral &= torch.linalg.vector_norm(force, dim=-1) < threshold
+    return neutral
+
+
+def strict_standing_mask(env):
+    """Require both a stationary base command and a force-neutral task."""
+    return (~env.get_walking_cmd_mask()) & force_neutral_mask(env)

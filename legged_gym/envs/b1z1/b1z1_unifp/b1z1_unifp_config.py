@@ -309,18 +309,19 @@ class B1Z1UniFPCfg:
         lin_vel_x_clip = 0.05
         lin_vel_y_clip = 0.05
 
-        zero_vel_cmd_prob = 0.1
-        zero_vel_cmd_prob_after_force = 0.8
+        zero_vel_cmd_prob = 0.2
+        zero_vel_cmd_prob_after_force = 0.4
         
-        force_start_step = 8000
+        force_start_step = 15000
         # Apply external disturbances throughout training at quarter strength,
         # then linearly ramp to the original ranges after force_start_step.
         external_force_initial_scale = 0.25
         external_force_final_scale = 1.0
         external_force_ramp_iterations = 5000
+
         # Commanded base/EE force profiles are present from iteration zero at
         # reduced range, held there, then linearly expanded to their full ranges.
-        command_force_initial_scale = 0.25
+        command_force_initial_scale = 0.30
         command_force_final_scale = 1.0
         command_force_hold_iterations = 8000
         command_force_ramp_iterations = 5000
@@ -459,7 +460,7 @@ class B1Z1UniFPCfg:
         joint_damping_range_end = [0.00, 0.50]
         
         num_push_steps = 500
-        push_warmup = 20000
+        push_warmup = 30000
         
         best_reward_window = 200
         best_reward_quantile = 0.90
@@ -467,8 +468,8 @@ class B1Z1UniFPCfg:
         step_interval = 10
         reward_ema_alpha = 0.05
         min_reward_to_step = 0.60
-        joint_dynamics_progress_delta = 0.02
-        mass_com_progress_delta = 0.01
+        joint_dynamics_progress_delta = 0.002
+        mass_com_progress_delta = 0.002
         disturbance_progress_delta = 0.01
         use_joint_dynamics_curriculum = True
         use_mass_com_curriculum = True
@@ -503,6 +504,7 @@ class B1Z1UniFPCfg:
             pass
 
     class rewards:
+        force_neutral_threshold = 1.0e-3
         only_positive_rewards = False
         use_reward_curriculum = True
         
@@ -578,7 +580,7 @@ class B1Z1UniFPCfg:
             tracking_ee_orientation_default = 0.0
 
             # Style rewards encouraging using the arm
-            arm_progress_before_torso = 0.3
+            arm_progress_before_torso = 0.0
             early_torso_tilt = -0.2
             # feet_contact_number = 0.01
             # arm_progress_before_torso = 0.0
@@ -620,8 +622,8 @@ class B1Z1UniFPCfg:
             # joint_power_dist_arm = 0.0
 
             # I developed these
-            front_foot_overreach = -10.0
-            rear_foot_overreach = -10.0
+            front_foot_overreach = -1.0
+            rear_foot_overreach = -1.0
 
             # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
             support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
@@ -639,8 +641,8 @@ class B1Z1UniFPCfg:
             foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height
 
             # Leg and Arm Posture Conditioning
-            arm_ee_force_manipulability = 0.2
-            torso_force_wrench_ellipsoid = 0.2
+            arm_ee_force_manipulability = 0.0
+            torso_force_wrench_ellipsoid = 0.0
 
         class manip_rewards():
             # Leg Posture Conditioning
@@ -700,8 +702,8 @@ class B1Z1UniFPCfg:
                                 "feet_contact_forces",
                                 # "base_height",
                                 "lin_vel_z",
-                                "arm_ee_force_manipulability",
-                                "torso_force_wrench_ellipsoid",
+                                # "arm_ee_force_manipulability",
+                                # "torso_force_wrench_ellipsoid",
                                 ]
             curr_reward_bounds = {
                 # "collision": [-2.0, -10.0],
@@ -715,11 +717,11 @@ class B1Z1UniFPCfg:
                 "feet_contact_forces":[-1.0e-5, -1.0e-4],
                 # "base_height":[-2.0, -5.0],
                 "lin_vel_z":[-1.00, -2.0],
-                "arm_ee_force_manipulability":[0.2, 0.5],
-                "torso_force_wrench_ellipsoid":[0.2, 0.5],
+                # "arm_ee_force_manipulability":[0.2, 0.5],
+                # "torso_force_wrench_ellipsoid":[0.2, 0.5],
             }
             warmup_steps = 16000
-            curr_steps = 6000
+            curr_steps = 4000
 
     class viewer:
         ref_env = 0
@@ -764,8 +766,8 @@ class B1Z1UniFPCfgPPO:
         activation = "elu"
         # Preserve the successful B1 leg exploration while retaining the
         # previous 0.65 initialization for the five controlled arm joints.
-        init_noise_std = [0.40, 0.60, 0.60] * 4 + [0.65] * 5
-        min_noise_std = [0.05, 0.15, 0.15] * 4 + [0.05] * 5
+        init_noise_std = [0.80, 1.00, 1.00] * 4 + [0.85] * 5
+        min_noise_std = [0.15, 0.25, 0.25] * 4 + [0.15] * 5
         max_noise_std = 1.1
 
     class algorithm:
@@ -790,11 +792,11 @@ class B1Z1UniFPCfgPPO:
         # The shared UniFP adaptation path is variational for both B1 and
         # B1Z1: reconstruct one next privileged frame and regularize q(z|h).
         adaptation_privileged_weight = 1.0
-        adaptation_kl_weight = 2.00
+        adaptation_kl_weight = 0.10
         kl_warmup_iters = 500
         kl_warmup_beta_max = adaptation_kl_weight
         kl_r_min = 0.50
-        kl_r_max = 1.00
+        kl_r_max = 2.00
         kl_dual_lr = 1.0e-3
         kl_aug_rho = 0.1
         kl_ema_decay = 0.99
@@ -809,9 +811,13 @@ class B1Z1UniFPCfgPPO:
         algorithm_class_name = "PPO_UniFP"
         num_steps_per_env = 24
         
-        max_iterations = 30000
+        max_iterations = 50000
         
-        save_interval = 500
+        save_interval = 1000
+        
+        # Disable non-training rollout, PPO-consistency, and detailed episode diagnostics.
+        enable_additional_diagnostics = False
+        
         run_name = "unifp_baseline"
         experiment_name = "b1z1_unifp_genesis"
         sync_wandb = False
