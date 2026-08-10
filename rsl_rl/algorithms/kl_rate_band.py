@@ -21,7 +21,7 @@ class KLRateBandController:
         "kl_raw", "kl_ema", "kl_reg_loss", "kl_warmup_beta",
         "kl_low_violation", "kl_high_violation", "kl_lambda_low",
         "kl_lambda_high", "kl_dual_effective_beta", "kl_effective_coef",
-        "kl_band_active",
+        "kl_base_beta", "kl_band_active",
     )
 
     def __init__(
@@ -65,7 +65,8 @@ class KLRateBandController:
         g_low = self.rate_min - raw_kl
         g_high = raw_kl - self.rate_max
         return (
-            self.lambda_low * g_low
+            self.warmup_beta_max * raw_kl
+            + self.lambda_low * g_low
             + self.lambda_high * g_high
             + 0.5 * self.augmented_rho * torch.relu(g_low).square()
             + 0.5 * self.augmented_rho * torch.relu(g_high).square()
@@ -94,7 +95,7 @@ class KLRateBandController:
         high_violation = max(rate - self.rate_max, 0.0)
         active = self.band_active(iteration)
         effective_coef = (
-            self.lambda_high - self.lambda_low
+            self.warmup_beta_max + self.lambda_high - self.lambda_low
             + self.augmented_rho * (high_violation - low_violation)
             if active else self.warmup_beta(iteration)
         )
@@ -109,6 +110,7 @@ class KLRateBandController:
             "kl_lambda_high": self.lambda_high,
             "kl_dual_effective_beta": self.lambda_high - self.lambda_low,
             "kl_effective_coef": effective_coef,
+            "kl_base_beta": self.warmup_beta_max,
             "kl_band_active": float(active),
         }
         return {name: raw_kl.new_tensor(value) for name, value in values.items()}

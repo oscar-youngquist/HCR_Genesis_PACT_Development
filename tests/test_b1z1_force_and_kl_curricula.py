@@ -154,6 +154,15 @@ class KLIterationUpdateTests(unittest.TestCase):
         update_duals_from_mean(second, sum([0.25, 0.75, 1.25, 1.75]), 4, 3, "cpu")
         self.assertEqual(first.state_dict(), second.state_dict())
 
+    def test_baseline_kl_remains_active_after_warmup(self):
+        controller = self._controller()
+        raw_kl = torch.tensor(0.5)
+
+        self.assertAlmostEqual(controller.loss(raw_kl, iteration=1).item(), 0.5)
+        metrics = controller.metrics(raw_kl, controller.loss(raw_kl, 1), 1)
+        self.assertAlmostEqual(metrics["kl_base_beta"].item(), 1.0)
+        self.assertAlmostEqual(metrics["kl_effective_coef"].item(), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
