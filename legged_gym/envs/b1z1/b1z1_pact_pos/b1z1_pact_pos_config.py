@@ -47,7 +47,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
 
     class goal_ee:
         num_commands = 3
-        max_ee_force_offset = 0.10
+        max_ee_force_offset = 0.05
         traj_time = [1.0, 3.0]
         hold_time = [0.5, 2.0]
         command_mode = "sphere"
@@ -153,7 +153,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         penalize_contacts_on = ["trunk", "thigh", "hip", "calf"]
         terminate_after_contacts_on = []
         links_to_keep = ["FR_foot", "FL_foot", "RR_foot", "RL_foot", "ee_gripper_link"]
-        self_collisions = False
+        self_collisions = True
         flip_visual_attachments = False
         fix_base_link = False
         obtain_link_contact_states = True
@@ -180,7 +180,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         side_signs = [-1.0, 1.0, -1.0, 1.0]  # FR, FL, RR, RL
 
     class terrain:
-        mesh_type = "heightfield"
+        mesh_type = "trimesh"
         simplify_mesh = True
         plane_length = 200.0
         horizontal_scale = 0.1
@@ -190,7 +190,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         restitution = 0.0
         border_size = 5.0
         border_height = 1.0
-        curriculum = True
+        curriculum = False
         obtain_terrain_info_around_feet = True
         measure_heights = True
         measured_points_x = [-0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
@@ -203,7 +203,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         platform_size = 4.0
         num_rows = 10
         num_cols = 20
-        terrain_proportions = [0.30, 0.40, 0.00, 0.00, 0.30, 0.00, 0.0, 0.0, 0.0, 0.0]
+        terrain_proportions = [0.00, 1.00, 0.00, 0.00, 0.00, 0.00, 0.0, 0.0, 0.0, 0.0]
         terrain_curriculum_difficulty = {
             "slope": "difficulty * 0.4",
             "step_height": "0.04 + 0.16 * difficulty",
@@ -222,7 +222,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
 
     class sim:
         dt = 0.002
-        substeps = 1
+        substeps = 2
         max_collision_pairs = 100
         IK_max_targets = 2
         gravity = [0.0, 0.0, -9.81]
@@ -307,7 +307,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         
         resampling_time = 10.0
         
-        heading_command = True
+        heading_command = False
         
         curriculum_threshold = 0.8
         
@@ -317,15 +317,15 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         lin_vel_x_clip = 0.05
         lin_vel_y_clip = 0.05
 
-        zero_vel_cmd_prob = 0.1
-        zero_vel_cmd_prob_after_force = 0.8
+        zero_vel_cmd_prob = 0.2
+        zero_vel_cmd_prob_after_force = 0.4
         
         force_start_step = 18000
         # External disturbances are present from iteration zero at quarter
         # strength, then linearly reach their full ranges after this threshold.
-        external_force_initial_scale = 0.25
+        external_force_initial_scale = 0.50
         external_force_final_scale = 1.0
-        external_force_ramp_iterations = 5000
+        external_force_ramp_iterations = 10000
 
         push_gripper_stators = True
         apply_ee_external_forces = True
@@ -342,7 +342,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         
         push_robot_base = True
         apply_base_external_forces = True
-        push_base_interval_s_ext = [6.0, 12.0]
+        push_base_interval_s_ext = [3.5, 9.0]
         push_base_duration_s_ext = [1.0, 3.0]
         base_forced_prob_ext = 0.8
         max_push_force_xyz_base_ext = [-50.0, 50.0]
@@ -385,7 +385,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         use_domainrand_curriculum = True
         # Isaac Gym must choose immutable physical randomization ranges when
         # actors are built. False uses the curriculum starts; True uses ends.
-        isaacgym_use_final_domain_rand_ranges = False
+        isaacgym_use_final_domain_rand_ranges = True
         randomize_friction = True  
         friction_range = [0.3, 2.0]
 
@@ -413,7 +413,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
      
         # B1Z1 PACT uses only the UniFP-style physical base/EE force events.
         # Disable the generic velocity-push curriculum from the base pipeline.
-        push_robots = False
+        push_robots = True
         push_interval_s = 8.0
         
         push_interval_min = 5.0
@@ -432,9 +432,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         wrench_timeout_min = 5.0
         wrench_timeout_max = 15.0
      
-        # Disabled initially so the state transition and PPO/PINN action are
-        # exactly aligned. Re-enable only with delayed-action storage support.
-        randomize_ctrl_delay = False
+        randomize_ctrl_delay = True
         ctrl_delay_step_range = [0, 2]
      
         randomize_pd_gain = True
@@ -449,7 +447,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         
         randomize_joint_friction = True
         joint_friction_range_start = [0.0, 0.02]
-        joint_friction_range_end = [0.0, 0.04]
+        joint_friction_range_end = [0.0, 0.20]
         
         randomize_joint_stiffness = False
         joint_stiffness_range_start = [0.0, 0.0]
@@ -457,7 +455,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         
         randomize_joint_damping = True
         joint_damping_range_start = [0.30, 0.40]
-        joint_damping_range_end = [0.00, 0.50]
+        joint_damping_range_end = [0.00, 0.80]
         
         num_push_steps = 500
         push_warmup = 20000
@@ -510,10 +508,10 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         tracking_sigma = 0.25
         tracking_ee_sigma = 0.50
         
-        tracking_ee_orientation_sigma = 0.05
+        tracking_ee_orientation_sigma = 0.02
         impedance_virtual_mass = [1.0, 1.0, 1.0]
-        impedance_virtual_damping = [40.0, 40.0, 40.0]
-        impedance_virtual_stiffness = [200.0, 200.0, 200.0]
+        impedance_virtual_damping = [400.0, 400.0, 400.0]
+        impedance_virtual_stiffness = [40.0, 40.0, 40.0]
         impedance_residual_weights = [1.0, 1.0, 1.0]
         impedance_filter_alpha = 0.2
         impedance_sigma = 2500.0
@@ -526,7 +524,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         
         base_height_target = 0.55
         
-        max_contact_force = 400.0
+        max_contact_force = 600.0
         
         foot_clearance_target = 0.20 # desired foot clearance above ground [m]
         foot_height_offset = 0.02
@@ -587,14 +585,14 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             
             tracking_ee_force_world = 2.0
             tracking_ee_orientation_default = 0.0
-            impedance_consistency = 0.6
+            impedance_consistency = 0.5
 
             # Discourage the position-PD and direct-torque heads from wasting
             # authority by producing large opposing torques on the same joint.
             torque_cancellation = 0.0
 
             # Style rewards encouraging using the arm
-            arm_progress_before_torso = 0.3
+            arm_progress_before_torso = 0.0
             early_torso_tilt = -0.2
             # feet_contact_number = 0.01
             # arm_progress_before_torso = 0.0
@@ -620,7 +618,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             action_rate       = -0.02
             action_smoothness = -0.02
             joint_power       = -2.e-5
-            joint_power_dist  = -1.e-8
+            joint_power_dist  = -1.e-6
             leg_torques       = -1.0e-5
 
 
@@ -629,7 +627,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             action_rate_arm = -0.045
             action_smoothness_arm = -0.02
             joint_power_arm = -2.e-5
-            joint_power_dist_arm = -2.e-8
+            joint_power_dist_arm = -2.e-6
             arm_torques = -1.0e-5
 
             # dof_acc_arm = 0.0
@@ -639,8 +637,8 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             # joint_power_dist_arm = 0.0
 
             # I developed these
-            front_foot_overreach = -10.0
-            rear_foot_overreach = -10.0
+            front_foot_overreach = -1.0
+            rear_foot_overreach = -1.0
 
             # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
             support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM
@@ -657,8 +655,8 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height
 
             # Leg and Arm Posture Conditioning
-            arm_ee_force_manipulability = 0.2
-            torso_force_wrench_ellipsoid = 0.2
+            arm_ee_force_manipulability = 0.0
+            torso_force_wrench_ellipsoid = 0.0
 
         class manip_rewards():
             # Leg Posture Conditioning
@@ -711,16 +709,16 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
                                 "dof_pos_limits",
                                 "feet_contact_forces",
                                 "lin_vel_z",
-                                "arm_ee_force_manipulability",
-                                "torso_force_wrench_ellipsoid",
+                                # "arm_ee_force_manipulability",
+                                # "torso_force_wrench_ellipsoid",
                                 ]
             curr_reward_bounds = {
                 # "torque_limits":[-0.0001, -0.001],
                 "dof_pos_limits":[-2.0, -10.0],
                 "feet_contact_forces":[-1.0e-5, -1.0e-4],
                 "lin_vel_z":[-1.00, -2.0],
-                "arm_ee_force_manipulability":[0.2, 0.5],
-                "torso_force_wrench_ellipsoid":[0.2, 0.5],
+                # "arm_ee_force_manipulability":[0.2, 0.5],
+                # "torso_force_wrench_ellipsoid":[0.2, 0.5],
             }
             warmup_steps = 16000
             curr_steps = 6000
@@ -773,8 +771,8 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         activation = "elu"
 
         # Apply the UniFP per-joint exploration profile to position actions.
-        init_noise_std = [0.40, 0.60, 0.60] * 4 + [0.65] * 5
-        min_noise_std = [0.05, 0.15, 0.15] * 4 + [0.05] * 5
+        init_noise_std = [0.80, 1.00, 1.00] * 4 + [0.85] * 5
+        min_noise_std = [0.15, 0.25, 0.25] * 4 + [0.15] * 5
         max_noise_std = 1.1
 
         cenet_enc_layers = [512, 256, 128]
@@ -800,18 +798,19 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         explicit_foot_contact_weight = 1.0
         explicit_foot_height_weight = 1.0
         privileged_decoder_weight = 1.0
-        vae_kld_weight = 1.00
+
+        vae_kld_weight = 0.01
         kl_warmup_iters = 500
         kl_warmup_beta_max = vae_kld_weight
-        kl_r_min = 0.10
-        kl_r_max = 1.00
+        kl_r_min = 0.50
+        kl_r_max = 2.00
         kl_dual_lr = 1.0e-3
         kl_aug_rho = 0.1
         kl_ema_decay = 0.99
         adaptation_learning_rate = 1.0e-5
 
         torque_clone_target_scale = 0.01
-        torque_clone_loss_weight = 0.1
+        torque_clone_loss_weight = 1.0
 
 
     class algorithm:
@@ -838,7 +837,7 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
 
     class runner:
         # Disable expensive, non-training rollout and PPO-consistency diagnostics.
-        enable_additional_diagnostics = True
+        enable_additional_diagnostics = False
 
         policy_class_name = "ActorCriticB1Z1PACTPos"
         algorithm_class_name = "PPO_B1Z1PACTPos"
@@ -847,9 +846,9 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         
         max_iterations = 10000
         
-        save_interval = 500
+        save_interval = 1000
         run_name = "b1z1_pact_pos"
-        experiment_name = "b1z1_pact_pos_genesis"
+        experiment_name = "b1z1_pact_pos_gym"
         sync_wandb = False
         resume = False
         load_run = "Jul14_11-16-03_unifp_baseline"

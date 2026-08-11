@@ -13,7 +13,7 @@ class B1Z1UniFPCfg:
         # samples. Explicit labels include contacts, so contacts are not added
         # a second time. The domain parameters include all 19 simulator DOFs,
         # including the two passive gripper joints.
-        num_critic_state_obs = 219
+        num_critic_state_obs = 219 + 12
         num_height_obs = 187
         num_privileged_obs = num_critic_state_obs + num_height_obs
         num_priv_stack = 3
@@ -37,11 +37,11 @@ class B1Z1UniFPCfg:
         debug_draw_terrain_height_points = False
         render_ee_goal_debug = False
         render_ee_frame_debug = False
-        num_steps_per_env = 32
+        num_steps_per_env = 24
 
     class goal_ee:
         num_commands = 3
-        max_ee_force_offset = 0.10
+        max_ee_force_offset = 0.40
         traj_time = [1.0, 3.0]
         hold_time = [0.5, 2.0]
         command_mode = "sphere"
@@ -231,7 +231,7 @@ class B1Z1UniFPCfg:
 
     class sim:
         dt = 0.002
-        substeps = 1
+        substeps = 2
         max_collision_pairs = 100
         IK_max_targets = 2
         gravity = [0.0, 0.0, -9.81]
@@ -325,9 +325,9 @@ class B1Z1UniFPCfg:
         force_start_step = 15000
         # Apply external disturbances throughout training at quarter strength,
         # then linearly ramp to the original ranges after force_start_step.
-        external_force_initial_scale = 0.25
+        external_force_initial_scale = 0.50
         external_force_final_scale = 1.0
-        external_force_ramp_iterations = 5000
+        external_force_ramp_iterations = 10000
 
         # Commanded base/EE force profiles are present from iteration zero at
         # reduced range, held there, then linearly expanded to their full ranges.
@@ -388,7 +388,7 @@ class B1Z1UniFPCfg:
             ang_vel = 0.25
             dof_pos = 1.0
             dof_vel = 0.05
-            grf = 0.01
+            grf = 0.001
             height_measurements = 5.0
             ee_sphe_radius_cmd = 0.5
             ee_sphe_pitch_cmd = 1.0
@@ -399,7 +399,7 @@ class B1Z1UniFPCfg:
         clip_actions = 50.0
 
     class domain_rand:
-        use_domainrand_curriculum = True
+        use_domainrand_curriculum = False
         # Isaac Gym must choose immutable physical randomization ranges when
         # actors are built. False uses the curriculum starts; True uses ends.
         isaacgym_use_final_domain_rand_ranges = True
@@ -534,7 +534,7 @@ class B1Z1UniFPCfg:
         
         base_height_target = 0.55
         
-        max_contact_force = 400.0
+        max_contact_force = 600.0
         
         foot_clearance_target = 0.20 # desired foot clearance above ground [m]
         foot_height_offset = 0.02
@@ -804,7 +804,7 @@ class B1Z1UniFPCfgPPO:
         # The shared UniFP adaptation path is variational for both B1 and
         # B1Z1: reconstruct one next privileged frame and regularize q(z|h).
         adaptation_privileged_weight = 1.0
-        adaptation_kl_weight = 0.10
+        adaptation_kl_weight = 0.01
         kl_warmup_iters = 500
         kl_warmup_beta_max = adaptation_kl_weight
         kl_r_min = 0.50
@@ -830,8 +830,8 @@ class B1Z1UniFPCfgPPO:
         # Disable non-training rollout, PPO-consistency, and detailed episode diagnostics.
         enable_additional_diagnostics = False
         
-        run_name = "unifp_baseline"
-        experiment_name = "b1z1_unifp_genesis"
+        run_name = "faithful_unifp_baseline"
+        experiment_name = "b1z1_unifp_gym"
         sync_wandb = False
         resume = False
         load_run = "Aug10_13-42-18_unifp_baseline"

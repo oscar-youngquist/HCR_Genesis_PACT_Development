@@ -604,6 +604,12 @@ class B1Z1UniFP(BaseTask):
         ee_force_local = quat_rotate_inverse(base_yaw_quat, self.ee_force_ext_world)
         base_force_local = quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world)
 
+        grfs_local = quat_rotate_inverse(
+            base_yaw_quat[:, None, :].expand(-1, 4, -1).reshape(-1, 4),
+            self.simulator._grfs_buf.reshape(-1, 3),
+        ).reshape(self.num_envs, 12)
+
+
         # Commanded and external EE forces define one capped virtual-impedance
         # target shared by the critic observation, reward, and diagnostics.
         force_adjusted_target = get_force_adjusted_ee_target(self)
@@ -684,6 +690,7 @@ class B1Z1UniFP(BaseTask):
         # current robot state, commands, and force-shifted EE target.
         critic_components = (
             ("adaptation_labels", self.explicit_labels_buf),
+            ("grfs", grfs_local * self.obs_scales.grf),
             ("reference_dof_error", self.simulator.dof_pos[:, :12] - self.ref_dof_pos),
             ("mass_com", mass_params),
             ("friction_offset", self.simulator._friction_values - self.friction_value_offset),
@@ -2115,7 +2122,6 @@ class B1Z1UniFP(BaseTask):
             dim=1,
         )
         return torch.exp(-tilt_sq / 0.10)
-
 
     def _reward_tracking_ee_orientation_default(self):
         """Reward keeping the EE frame at its default yaw-aligned orientation."""

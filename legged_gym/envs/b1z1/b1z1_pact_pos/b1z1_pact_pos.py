@@ -233,13 +233,13 @@ class B1Z1PACTPos(LeggedRobot):
         self.simulator.post_physics_step()
         self._post_physics_step_callback()
 
-        # Leg main-ip update specific update
-        self.compute_all_leg_jacobians(
-            self.simulator.dof_pos[:, 0:12].view(-1, 4, 3),
-            out=self.leg_jacobians,
-        )
+        # # Leg main-ip update specific update
+        # self.compute_all_leg_jacobians(
+        #     self.simulator.dof_pos[:, 0:12].view(-1, 4, 3),
+        #     out=self.leg_jacobians,
+        # )
 
-        self._compute_z1_arm_jacobian_buffer()
+        # self._compute_z1_arm_jacobian_buffer()
 
         self.check_termination()
         self.compute_reward()
