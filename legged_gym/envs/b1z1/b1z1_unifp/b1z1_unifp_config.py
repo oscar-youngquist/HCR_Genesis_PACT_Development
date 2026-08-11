@@ -252,13 +252,6 @@ class B1Z1UniFPCfg:
             default_buffer_size_multiplier = 5
             contact_collection = 2
 
-        class foot_force_diagnostics:
-            enabled = False
-            enable_forward_dynamics_forces = False
-            enable_constraint_solver_forces = True
-            use_world_frame = True
-            contact_collection = None
-
     class control:
         control_type = "P"
         stiffness = {

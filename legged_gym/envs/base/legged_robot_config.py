@@ -289,16 +289,6 @@ class LeggedRobotCfg(BaseConfig):
             default_buffer_size_multiplier = 5
             contact_collection = 2 # 0: never, 1: last sub-step, 2: all sub-steps (default=2)
 
-        class foot_force_diagnostics:
-            # Disabled diagnostics preserve all production simulator behavior.
-            enabled = False
-            enable_forward_dynamics_forces = False
-            enable_constraint_solver_forces = True
-            use_world_frame = True
-            # None preserves physx.contact_collection. Diagnostics may set 1
-            # (last substep) or 2 (all substeps) before simulator creation.
-            contact_collection = None
-    
 class LeggedRobotCfgPPO(BaseConfig):
     seed = 1
     runner_class_name = 'OnPolicyRunner'

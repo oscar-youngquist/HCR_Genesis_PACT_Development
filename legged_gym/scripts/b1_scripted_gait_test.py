@@ -381,22 +381,6 @@ def main() -> None:
                 f"torque_sat_frac={(torque_ratio > 0.95).float().mean().item():.3f} "
                 f"resets={reset_count}"
             )
-            if "isaacgym" in SIMULATOR:
-                # Compare the raw net-contact tensor with the dedicated
-                # world-frame rigid-body force sensors in cfg foot order.
-                net_contact_foot_forces = env.simulator._link_contact_forces[
-                    0, env.simulator.feet_indices, :
-                ]
-                dedicated_sensor_foot_forces = env.simulator.foot_contact_forces[0]
-                print(
-                    "  isaacgym_foot_forces_xyz "
-                    f"order={env.cfg.asset.foot_name} "
-                    f"net_contact_force_tensor="
-                    f"{net_contact_foot_forces.tolist()} "
-                    f"dedicated_force_sensors="
-                    f"{dedicated_sensor_foot_forces.tolist()}"
-                )
-
     restore_reference_methods(env, original_reference_methods)
 
 
