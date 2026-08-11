@@ -20,11 +20,16 @@ The normal ``env.step(actions)`` path then calls the simulator's existing
 reference method is restored when the test finishes.
 """
 
+from __future__ import annotations
+
 import types
 
+# Import legged_gym first so its Isaac Gym initialization occurs before torch.
+from legged_gym import SIMULATOR
+if "genesis" in SIMULATOR:
+    from legged_gym import gs
 import torch
 
-from legged_gym import SIMULATOR, gs
 import legged_gym.envs  # noqa: F401 -- registers environments
 from legged_gym.utils import get_args, init_genesis, task_registry, quat_rotate_inverse
 
@@ -61,14 +66,29 @@ def disable_training_randomization(env_cfg) -> None:
     env_cfg.rewards.target_joint_pos_thd = TARGET_JOINT_POS_THD
     env_cfg.control.stiffness.update(STIFFNESS)
     env_cfg.control.damping.update(DAMPING)
-    # env_cfg.terrain.mesh_type = "plane"
-    # env_cfg.terrain.curriculum = False
-    # env_cfg.terrain.measure_heights = False
-    # env_cfg.terrain.obtain_terrain_info_around_feet = False
-    # env_cfg.commands.curriculum = False
-    # env_cfg.commands.push_robot_base = False
-    # env_cfg.commands.apply_base_external_forces = False
-    # env_cfg.noise.add_noise = False
+    env_cfg.terrain.mesh_type = "plane"
+    env_cfg.terrain.curriculum = False
+    env_cfg.terrain.measure_heights = False
+    # Allocate the terrain-aware reward buffer, but leave it at flat-plane
+    # zeros instead of invoking heightfield sampling.
+    env_cfg.terrain.obtain_terrain_info_around_feet = True
+    env_cfg.commands.curriculum = False
+    env_cfg.commands.push_robot_base = False
+    env_cfg.commands.apply_base_external_forces = False
+    # The shared UniFP environment evaluates both schedules while logging,
+    # even though this deterministic gait test disables their force streams.
+    env_cfg.commands.external_force_initial_scale = 0.0
+    env_cfg.commands.external_force_final_scale = 0.0
+    env_cfg.commands.external_force_ramp_iterations = 0
+    env_cfg.commands.command_force_initial_scale = 0.0
+    env_cfg.commands.command_force_final_scale = 0.0
+    env_cfg.commands.command_force_hold_iterations = 0
+    env_cfg.commands.command_force_ramp_iterations = 0
+    env_cfg.noise.add_noise = False
+    # This open-loop test does not evaluate the wrench-ellipsoid reward, whose
+    # implementation requires measured DOF-force sensors on Genesis.
+    if hasattr(env_cfg.rewards.scales, "torso_force_wrench_ellipsoid"):
+        env_cfg.rewards.scales.torso_force_wrench_ellipsoid = 0.0
 
     for name in (
         "randomize_friction",
@@ -312,7 +332,13 @@ def main() -> None:
 
         swing_dx = feet_pos_base[:, :, 0] - liftoff_foot_x
 
-        commanded_torque = env.simulator.unclipped_torques[:, :12]
+        # Genesis exposes the pre-clipping command separately. The generic
+        # Isaac Gym backend exposes its applied command through torques.
+        commanded_torque = getattr(
+            env.simulator,
+            "unclipped_torques",
+            env.simulator.torques,
+        )[:, :12]
 
         torque_ratio = (
             commanded_torque.abs()
@@ -355,6 +381,21 @@ def main() -> None:
                 f"torque_sat_frac={(torque_ratio > 0.95).float().mean().item():.3f} "
                 f"resets={reset_count}"
             )
+            if "isaacgym" in SIMULATOR:
+                # Compare the raw net-contact tensor with the dedicated
+                # world-frame rigid-body force sensors in cfg foot order.
+                net_contact_foot_forces = env.simulator._link_contact_forces[
+                    0, env.simulator.feet_indices, :
+                ]
+                dedicated_sensor_foot_forces = env.simulator.foot_contact_forces[0]
+                print(
+                    "  isaacgym_foot_forces_xyz "
+                    f"order={env.cfg.asset.foot_name} "
+                    f"net_contact_force_tensor="
+                    f"{net_contact_foot_forces.tolist()} "
+                    f"dedicated_force_sensors="
+                    f"{dedicated_sensor_foot_forces.tolist()}"
+                )
 
     restore_reference_methods(env, original_reference_methods)
 

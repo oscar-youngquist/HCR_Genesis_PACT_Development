@@ -2,6 +2,7 @@ from legged_gym import *
 from legged_gym.simulator.simulator import Simulator
 from PIL import Image as im
 import cv2 as cv
+import copy
 import torch
 import numpy as np
 import os
@@ -26,9 +27,55 @@ def reshape_foot_force_sensor_tensor(force_sensor_tensor, num_envs, num_feet):
     return force_sensor_tensor.reshape(num_envs, num_feet, 6)
 
 
+def summarize_substep_tensor(values):
+    """Return non-accumulating statistics over a leading substep dimension."""
+    assert values.ndim >= 1 and values.shape[0] > 0
+    assert torch.isfinite(values).all(), "Diagnostic substep tensor is nonfinite"
+    return {
+        "final": values[-1],
+        "mean": values.mean(dim=0),
+        "minimum": values.amin(dim=0),
+        "maximum": values.amax(dim=0),
+        "maximum_absolute": values.abs().amax(dim=0),
+    }
+
+
 """ ********** Isaac Gym Simulator ********** """
 class IsaacGymSimulator(Simulator):
     def __init__(self, cfg, sim_params: dict, sim_device: str = "cuda:0", headless: bool = False):
+        diagnostic_cfg = getattr(cfg.sim, "foot_force_diagnostics", None)
+        self._foot_force_diagnostics_enabled = bool(
+            getattr(diagnostic_cfg, "enabled", False)
+        )
+        # A diagnostic may compare PhysX contact-collection modes, but the
+        # override must be applied before create_sim(). None preserves the
+        # production value in cfg.sim.physx.contact_collection.
+        sim_params = copy.deepcopy(sim_params)
+        diagnostic_contact_collection = getattr(
+            diagnostic_cfg, "contact_collection", None
+        )
+        if (
+            self._foot_force_diagnostics_enabled
+            and diagnostic_contact_collection is not None
+        ):
+            sim_params["physx"]["contact_collection"] = int(
+                diagnostic_contact_collection
+            )
+        production_sensor_settings = {
+            "enable_forward_dynamics_forces": False,
+            "enable_constraint_solver_forces": True,
+            "use_world_frame": True,
+        }
+        self._foot_force_sensor_settings = dict(production_sensor_settings)
+        if self._foot_force_diagnostics_enabled:
+            self._foot_force_sensor_settings = {
+                name: bool(getattr(diagnostic_cfg, name, default))
+                for name, default in production_sensor_settings.items()
+            }
+        self._resolved_contact_collection = int(
+            sim_params["physx"].get("contact_collection", 2)
+        )
+        self._resolved_physics_substeps = int(sim_params.get("substeps", 1))
         self._gym = gymapi.acquire_gym()
         # Convert dict sim_params to gymapi.SimParams
         self._sim_params = gymapi.SimParams()
@@ -60,6 +107,7 @@ class IsaacGymSimulator(Simulator):
         self._last_base_ang_vel[:] = self._base_ang_vel[:]
         self._last_feet_vel[:] = self.feet_vel[:]
         self._last_dof_vel[:] = self.dof_vel[:]
+        self._begin_foot_force_diagnostic_step()
         for _ in range(self._cfg.control.decimation):
             self._torques = self._compute_torques(actions).view(self._torques.shape)
             self._gym.set_dof_actuation_force_tensor(self._sim, gymtorch.unwrap_tensor(self._torques))
@@ -68,6 +116,7 @@ class IsaacGymSimulator(Simulator):
             self._gym.refresh_dof_state_tensor(self._sim)
             # Force-sensor tensors are not refreshed implicitly by PhysX.
             self._gym.refresh_force_sensor_tensor(self._sim)
+            self._capture_foot_force_diagnostic_substep()
     
     def post_physics_step(self):
         self._gym.refresh_actor_root_state_tensor(self._sim)
@@ -89,15 +138,19 @@ class IsaacGymSimulator(Simulator):
             self._base_quat, self._global_gravity)
         self._feet_vel = self._rigid_body_states[:, self._feet_indices, 7:10]
         self._feet_pos = self._rigid_body_states[:, self._feet_indices, 0:3]
+        if hasattr(self, "_thigh_indices"):
+            self._thigh_pos = self._rigid_body_states[
+                :, self._thigh_indices, 0:3
+            ]
         assert torch.isfinite(self._foot_force_wrenches).all(), (
             "Foot force sensors produced nonfinite values"
         )
         # Preserve raw net contacts for collision-state logic, but expose
         # dedicated sensor measurements at every configured foot entry.
         self._measured_link_contact_forces.copy_(self._link_contact_forces)
-        self._measured_link_contact_forces[:, self._feet_indices, :].copy_(
-            self._foot_contact_forces
-        )
+        # self._measured_link_contact_forces[:, self._feet_indices, :].copy_(
+        #     self._foot_contact_forces
+        # )
         self._grfs_buf.copy_(
             self._foot_contact_forces.reshape(self._num_envs, -1)
         )
@@ -159,6 +212,15 @@ class IsaacGymSimulator(Simulator):
                                                       gymtorch.unwrap_tensor(self._root_states),
                                                       gymtorch.unwrap_tensor(env_ids_int32), 
                                                       len(env_ids_int32))
+
+    def apply_base_force(self, force_world):
+        """Store the B1 UniFP base-force command for API compatibility.
+
+        The generic Isaac Gym environments do not apply this buffer. B1's
+        deterministic scripted-gait diagnostic disables external base forces,
+        but its reset path still clears the command through this method.
+        """
+        self._base_force_world.copy_(force_world)
     
     def update_sensors(self):
         return super().update_sensors()
@@ -172,6 +234,13 @@ class IsaacGymSimulator(Simulator):
     def foot_force_wrenches(self):
         """World-frame foot force/torque readings in configured foot order."""
         return self._foot_force_wrenches
+
+    @property
+    def thigh_pos(self):
+        """World-frame thigh positions in configured thigh-name order."""
+        if not hasattr(self, "_thigh_pos"):
+            raise AttributeError("asset.thigh_name is not configured")
+        return self._thigh_pos
 
     @property
     def link_contact_forces(self):
@@ -398,6 +467,32 @@ class IsaacGymSimulator(Simulator):
         for i in range(len(self._feet_names)):
             self._feet_indices[i] = self._gym.find_actor_rigid_body_handle(self._envs[0], self._actor_handles[0], self._feet_names[i])
 
+        configured_thigh_names = getattr(self._cfg.asset, "thigh_name", None)
+        if configured_thigh_names is not None:
+            if isinstance(configured_thigh_names, str):
+                configured_thigh_names = [configured_thigh_names]
+            self._thigh_names = []
+            for pattern in configured_thigh_names:
+                self._thigh_names.extend(
+                    name for name in self._body_names if pattern in name
+                )
+            if len(self._thigh_names) != len(configured_thigh_names):
+                raise RuntimeError(
+                    "Could not resolve configured thigh bodies in order: "
+                    f"configured={configured_thigh_names}, "
+                    f"resolved={self._thigh_names}"
+                )
+            self._thigh_indices = torch.tensor(
+                [
+                    self._gym.find_actor_rigid_body_handle(
+                        self._envs[0], self._actor_handles[0], name
+                    )
+                    for name in self._thigh_names
+                ],
+                dtype=torch.long,
+                device=self._device,
+            )
+
         num_feet = len(self._feet_names)
         assert self._gym.get_actor_force_sensor_count(
             self._envs[0], self._actor_handles[0]
@@ -405,6 +500,11 @@ class IsaacGymSimulator(Simulator):
         assert self._gym.get_sim_force_sensor_count(self._sim) == (
             self._num_envs * num_feet
         ), "Isaac Gym force-sensor count does not match num_envs * num_feet"
+        if self._foot_force_diagnostics_enabled:
+            print(
+                "[FootForceDiagnostic] sensor counts: "
+                f"actor={num_feet}, sim={self._num_envs * num_feet}"
+            )
 
         self._penalized_contact_indices = torch.zeros(len(penalized_contact_names), dtype=torch.long, device=self._device, requires_grad=False)
         for i in range(len(penalized_contact_names)):
@@ -438,13 +538,13 @@ class IsaacGymSimulator(Simulator):
                 self._viewer, gymapi.KEY_V, "toggle_viewer_sync")
 
     def _create_asset_force_sensors(self, robot_asset):
-        """Attach contact-only, world-frame sensors to all configured feet.
+        """Attach rigid-body wrench sensors to all configured feet.
 
         Sensor order follows ``cfg.asset.foot_name`` after pattern resolution,
         exactly matching ``feet_indices``. Forward-dynamics/gravity terms are
-        disabled and PhysX constraint-solver forces are enabled. Thus positive
-        world Z is upward support force, matching the historical net-contact
-        GRF convention.
+        disabled and PhysX constraint-solver forces are enabled by production
+        default. Constraint forces may include articulation reactions as well
+        as plane contact; diagnostics compare them without assuming equality.
         """
         assert self._feet_names, "Isaac Gym legged assets must resolve at least one foot"
         assert len(set(self._feet_names)) == len(self._feet_names), (
@@ -452,16 +552,38 @@ class IsaacGymSimulator(Simulator):
         )
 
         sensor_props = gymapi.ForceSensorProperties()
-        sensor_props.enable_forward_dynamics_forces = False
-        sensor_props.enable_constraint_solver_forces = True
-        sensor_props.use_world_frame = True
+        sensor_props.enable_forward_dynamics_forces = self._foot_force_sensor_settings[
+            "enable_forward_dynamics_forces"
+        ]
+        sensor_props.enable_constraint_solver_forces = self._foot_force_sensor_settings[
+            "enable_constraint_solver_forces"
+        ]
+        sensor_props.use_world_frame = self._foot_force_sensor_settings[
+            "use_world_frame"
+        ]
         sensor_pose = gymapi.Transform()
 
         self._foot_force_sensor_names = tuple(self._feet_names)
         self._foot_force_sensor_indices = []
+        self._foot_force_sensor_body_indices = []
+        body_shape_ranges = self._gym.get_asset_rigid_body_shape_indices(robot_asset)
+        self._body_collision_shape_counts = tuple(
+            shape_range.count for shape_range in body_shape_ranges
+        )
+        self._collision_body_names = tuple(
+            name
+            for name, shape_range in zip(self._body_names, body_shape_ranges)
+            if shape_range.count > 0
+        )
         for expected_sensor_index, foot_name in enumerate(self._feet_names):
             body_index = self._gym.find_asset_rigid_body_index(robot_asset, foot_name)
             assert body_index >= 0, f"Could not find configured foot body '{foot_name}'"
+            if body_shape_ranges[body_index].count <= 0:
+                raise RuntimeError(
+                    f"Foot sensor body '{foot_name}' (index {body_index}) owns no "
+                    "collision geometry after asset import; collision owners are "
+                    f"{self._collision_body_names}. Check collapse_fixed_joints."
+                )
             sensor_index = self._gym.create_asset_force_sensor(
                 robot_asset, body_index, sensor_pose, sensor_props
             )
@@ -470,6 +592,48 @@ class IsaacGymSimulator(Simulator):
                 f"expected {expected_sensor_index}"
             )
             self._foot_force_sensor_indices.append(sensor_index)
+            self._foot_force_sensor_body_indices.append(body_index)
+
+        self._foot_collision_geometry = tuple(
+            {
+                "foot_name": foot_name,
+                "body_index": body_index,
+                "shape_start": body_shape_ranges[body_index].start,
+                "shape_count": body_shape_ranges[body_index].count,
+            }
+            for foot_name, body_index in zip(
+                self._foot_force_sensor_names,
+                self._foot_force_sensor_body_indices,
+            )
+        )
+
+        configured_foot_names = self._cfg.asset.foot_name
+        # A list is an explicit ordered body vector. Legacy string configs are
+        # substring patterns, so their resolved asset order is authoritative.
+        expected_names = (
+            tuple(self._feet_names)
+            if isinstance(configured_foot_names, str)
+            else tuple(configured_foot_names)
+        )
+        assert self._foot_force_sensor_names == expected_names, (
+            "Force sensors must follow cfg.asset.foot_name exactly: "
+            f"resolved={self._foot_force_sensor_names}, configured={expected_names}"
+        )
+        if self._foot_force_diagnostics_enabled:
+            print("[FootForceDiagnostic] sensor configuration")
+            print(f"  configured foot names: {expected_names}")
+            print(f"  resolved sensor names: {self._foot_force_sensor_names}")
+            print(f"  rigid-body names: {tuple(self._body_names)}")
+            print(f"  sensor body indices: {tuple(self._foot_force_sensor_body_indices)}")
+            print(f"  foot collision geometry: {self._foot_collision_geometry}")
+            print(f"  collision owners: {self._collision_body_names}")
+            print(
+                "  collapse_fixed_joints: "
+                f"{self._cfg.asset.collapse_fixed_joints}"
+            )
+            print(f"  sensor flags: {self._foot_force_sensor_settings}")
+            print(f"  contact_collection: {self._resolved_contact_collection}")
+            print(f"  physics substeps: {self._resolved_physics_substeps}")
     
     def _init_buffers(self):
         """ Initialize torch tensors which will contain simulation states and processed quantities
@@ -512,8 +676,36 @@ class IsaacGymSimulator(Simulator):
             dtype=self._foot_contact_forces.dtype,
             device=self._device,
         )
+        # Neutral buffers complete the simulator contract used by the arm-free
+        # B1 UniFP environment when its randomization/force paths are disabled.
+        self._base_force_world = torch.zeros(
+            self._num_envs, 3, dtype=torch.float, device=self._device
+        )
+        self._foot_force_diagnostic_substep_count = 0
+        if self._foot_force_diagnostics_enabled:
+            decimation = int(self._cfg.control.decimation)
+            self._foot_force_diagnostic_sensor_substeps = torch.empty(
+                decimation,
+                self._num_envs,
+                len(self._feet_names),
+                6,
+                dtype=self._foot_force_wrenches.dtype,
+                device=self._device,
+            )
+            self._foot_force_diagnostic_raw_substeps = torch.empty(
+                decimation,
+                self._num_envs,
+                len(self._feet_names),
+                3,
+                dtype=self._link_contact_forces.dtype,
+                device=self._device,
+            )
         self._feet_vel = self._rigid_body_states[:, self._feet_indices, 7:10]
         self._feet_pos = self._rigid_body_states[:, self._feet_indices, 0:3]
+        if hasattr(self, "_thigh_indices"):
+            self._thigh_pos = self._rigid_body_states[
+                :, self._thigh_indices, 0:3
+            ]
         self._last_feet_vel = torch.zeros_like(self._feet_vel)
 
         # initialize some data used later on
@@ -521,6 +713,7 @@ class IsaacGymSimulator(Simulator):
         # Torque tensors are simulator-facing and therefore span every
         # physical DOF, even when a policy controls only a subset.
         self._torques = torch.zeros(self._num_envs, self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
+        self.unclipped_torques = torch.zeros_like(self._torques)
         self._p_gains = torch.zeros(self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
         self._d_gains = torch.zeros(self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
         self._last_dof_vel = torch.zeros_like(self._dof_vel)
@@ -585,6 +778,82 @@ class IsaacGymSimulator(Simulator):
         
         self._init_height_points()
         self._measured_heights = torch.zeros(self._num_envs, self._num_height_points, device=self._device, requires_grad=False)
+
+    def _begin_foot_force_diagnostic_step(self):
+        """Start a fresh diagnostic capture without touching runtime forces."""
+        if self._foot_force_diagnostics_enabled:
+            self._foot_force_diagnostic_substep_count = 0
+
+    def _capture_foot_force_diagnostic_substep(self):
+        """Snapshot sensor and raw contacts after one PhysX/decimation step."""
+        if not self._foot_force_diagnostics_enabled:
+            return
+        index = self._foot_force_diagnostic_substep_count
+        if index >= self._foot_force_diagnostic_sensor_substeps.shape[0]:
+            raise RuntimeError("Too many foot-force diagnostic substeps captured")
+        # Raw contacts need their own explicit refresh. This copy is diagnostic
+        # only and does not replace link_contact_forces or _grfs_buf.
+        self._gym.refresh_net_contact_force_tensor(self._sim)
+        sensor = self._foot_force_wrenches
+        raw = self._link_contact_forces[:, self._feet_indices, :]
+        expected_sensor_shape = (
+            self._num_envs, len(self._feet_names), 6
+        )
+        expected_raw_shape = (
+            self._num_envs, len(self._feet_names), 3
+        )
+        assert tuple(sensor.shape) == expected_sensor_shape
+        assert tuple(raw.shape) == expected_raw_shape
+        assert torch.isfinite(sensor).all(), "Nonfinite diagnostic sensor wrench"
+        assert torch.isfinite(raw).all(), "Nonfinite diagnostic raw foot contact"
+        self._foot_force_diagnostic_sensor_substeps[index].copy_(sensor)
+        self._foot_force_diagnostic_raw_substeps[index].copy_(raw)
+        self._foot_force_diagnostic_substep_count += 1
+
+    def get_foot_force_diagnostic_snapshot(self):
+        """Return copies and substep statistics from the latest control step."""
+        if not self._foot_force_diagnostics_enabled:
+            raise RuntimeError("Foot-force diagnostics are not enabled")
+        count = self._foot_force_diagnostic_substep_count
+        expected = int(self._cfg.control.decimation)
+        if count != expected:
+            raise RuntimeError(
+                f"Captured {count} diagnostic substeps; expected {expected}"
+            )
+        sensor = self._foot_force_diagnostic_sensor_substeps[:count].clone()
+        raw = self._foot_force_diagnostic_raw_substeps[:count].clone()
+        return {
+            "sensor_substeps": sensor,
+            "raw_foot_substeps": raw,
+            "sensor_statistics": summarize_substep_tensor(sensor),
+            "raw_foot_statistics": summarize_substep_tensor(raw),
+        }
+
+    def get_foot_force_diagnostic_configuration(self):
+        """Describe the resolved asset and PhysX diagnostic configuration."""
+        configured_foot_names = self._cfg.asset.foot_name
+        if isinstance(configured_foot_names, str):
+            configured_foot_names = [configured_foot_names]
+        return {
+            "configured_foot_names": tuple(configured_foot_names),
+            "sensor_names": self._foot_force_sensor_names,
+            "sensor_indices": tuple(self._foot_force_sensor_indices),
+            "sensor_body_indices": tuple(self._foot_force_sensor_body_indices),
+            "rigid_body_names": tuple(self._body_names),
+            "collision_body_names": self._collision_body_names,
+            "body_collision_shape_counts": self._body_collision_shape_counts,
+            "foot_collision_geometry": self._foot_collision_geometry,
+            "sensor_count_per_actor": self._gym.get_actor_force_sensor_count(
+                self._envs[0], self._actor_handles[0]
+            ),
+            "sensor_count_in_sim": self._gym.get_sim_force_sensor_count(self._sim),
+            "collapse_fixed_joints": bool(self._cfg.asset.collapse_fixed_joints),
+            "sensor_flags": dict(self._foot_force_sensor_settings),
+            "contact_collection": self._resolved_contact_collection,
+            "physics_substeps": self._resolved_physics_substeps,
+            "force_frame": "world" if self._foot_force_sensor_settings["use_world_frame"] else "sensor-local",
+            "force_sign": "+Z is upward when use_world_frame=True",
+        }
     
     def _init_height_points(self):
         y = torch.tensor(self._cfg.terrain.measured_points_y,
@@ -735,6 +1004,7 @@ class IsaacGymSimulator(Simulator):
             torques = actions_scaled
         else:
             raise NameError(f"Unknown controller type: {control_type}")
+        self.unclipped_torques.copy_(torques)
         return torch.clip(torques, -self._torque_limits, self._torque_limits)
     
     def _init_domain_params(self):
@@ -745,6 +1015,7 @@ class IsaacGymSimulator(Simulator):
             self._num_envs, 1, dtype=torch.float, device=self._device, requires_grad=False)
         self._rand_push_vels = torch.zeros(
             self._num_envs, 3, dtype=torch.float, device=self._device, requires_grad=False)
+        self._rand_wrench_vels = torch.zeros_like(self._rand_push_vels)
         self._base_com_bias = torch.zeros(
             self._num_envs, 3, dtype=torch.float, device=self._device, requires_grad=False)
         self._joint_armature = torch.zeros(
@@ -753,10 +1024,12 @@ class IsaacGymSimulator(Simulator):
             self._num_envs, 1, dtype=torch.float, device=self._device, requires_grad=False)
         self._joint_damping = torch.zeros(
             self._num_envs, 1, dtype=torch.float, device=self._device, requires_grad=False)
+        self._joint_stiffness = torch.zeros_like(self._joint_damping)
         self._kp_scale = torch.ones(
             self._num_envs, self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
         self._kd_scale = torch.ones(
             self._num_envs, self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
+        self._motor_strength = torch.ones_like(self._kp_scale)
     
     def _randomize_friction(self, env_ids):
         return super()._randomize_friction(env_ids)
@@ -1142,6 +1415,9 @@ class IsaacGymSimulator(Simulator):
         #         print(f"Mass of body {i}: {p.mass} (before randomization)")
         #     print(f"Total mass {sum} (before randomization)")
         # randomize base mass
+        # Keep the privileged-domain value defined when deterministic tests
+        # disable base-mass randomization.
+        added_base_mass = 0.0
         if self._cfg.domain_rand.randomize_base_mass:
             rng = self._cfg.domain_rand.added_mass_range
             added_base_mass = np.random.uniform(rng[0], rng[1])

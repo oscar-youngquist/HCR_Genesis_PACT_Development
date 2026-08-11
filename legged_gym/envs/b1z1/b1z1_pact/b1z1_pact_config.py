@@ -241,6 +241,13 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             default_buffer_size_multiplier = 5
             contact_collection = 2
 
+        class foot_force_diagnostics:
+            enabled = False
+            enable_forward_dynamics_forces = False
+            enable_constraint_solver_forces = True
+            use_world_frame = True
+            contact_collection = None
+
     class control:
         # Coupled PACT control: the actor emits both position and feedforward
         # torque branches. The simulator combines them before clipping.

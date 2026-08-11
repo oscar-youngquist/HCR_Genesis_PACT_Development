@@ -339,6 +339,7 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
         self._last_feet_vel.copy_(self._feet_vel)
         self._last_dof_vel.copy_(self._dof_vel)
         self.first_loop = True
+        self._begin_foot_force_diagnostic_step()
 
         for _ in range(self._cfg.control.decimation):
             torques_cfg = self._compute_torques(actions)
@@ -357,6 +358,7 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
             # Isaac Gym force-sensor tensors require an explicit refresh after
             # every PhysX step, including each control-decimation substep.
             self._gym.refresh_force_sensor_tensor(self._sim)
+            self._capture_foot_force_diagnostic_substep()
 
     def post_physics_step(self):
         super().post_physics_step()
