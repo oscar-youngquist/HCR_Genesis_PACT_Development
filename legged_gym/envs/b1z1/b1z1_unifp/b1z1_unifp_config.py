@@ -237,6 +237,15 @@ class B1Z1UniFPCfg:
         up_axis = 1
         use_gpu_pipeline = True
 
+        class grf:
+            # Per-foot force conditioning in physical Newtons. The vertical
+            # component gates the whole XYZ vector before clipping and EMA.
+            deadband = 15.0
+            clip_min = -2000.0
+            clip_max = 2000.0
+            ema_alpha = 0.20
+            contact_threshold = 40.0
+
         class physx:
             use_gpu = True
             num_subscenes = 0
@@ -525,7 +534,6 @@ class B1Z1UniFPCfg:
         base_height_target = 0.55
         
         max_contact_force = 400.0
-        contact_force_threshold = 1.0
         
         foot_clearance_target = 0.20 # desired foot clearance above ground [m]
         foot_height_offset = 0.02

@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from torch import Tensor
 import numpy as np
+import torch
 
 """ ********** Base Simulator ********** """
 class Simulator(ABC):
@@ -16,6 +17,72 @@ class Simulator(ABC):
         self._create_sim()
         self._create_envs()
         self._init_buffers()
+
+    def _configure_grf_processing(self):
+        """Configure the shared foot-GRF conditioning pipeline.
+
+        Simulators without a GRF buffer are unaffected. Configurations that do
+        not yet define ``sim.grf`` retain the previous raw-force behavior.
+        """
+        if not hasattr(self, "_grfs_buf"):
+            return
+
+        grf_cfg = getattr(self._cfg.sim, "grf", None)
+        self._grf_deadband = float(getattr(grf_cfg, "deadband", 0.0))
+        self._grf_clip_min = float(getattr(grf_cfg, "clip_min", -float("inf")))
+        self._grf_clip_max = float(getattr(grf_cfg, "clip_max", float("inf")))
+        self._grf_ema_alpha = float(getattr(grf_cfg, "ema_alpha", 1.0))
+        self._foot_contact_force_threshold = float(
+            getattr(grf_cfg, "contact_threshold", 1.0)
+        )
+
+        if self._grf_deadband < 0.0:
+            raise ValueError("sim.grf.deadband must be nonnegative")
+        if self._grf_clip_min > self._grf_clip_max:
+            raise ValueError("sim.grf.clip_min must not exceed sim.grf.clip_max")
+        if not 0.0 <= self._grf_ema_alpha <= 1.0:
+            raise ValueError("sim.grf.ema_alpha must lie in [0, 1]")
+        if self._foot_contact_force_threshold < 0.0:
+            raise ValueError("sim.grf.contact_threshold must be nonnegative")
+        if self._grfs_buf.shape[-1] % 3 != 0:
+            raise ValueError("The flattened GRF dimension must be divisible by 3")
+
+        # Keep each processing stage available for diagnostics while retaining
+        # the established flattened _grfs_buf interface for training code.
+        self._grfs_deadband_buf = torch.zeros_like(self._grfs_buf)
+        self._grfs_clipped_buf = torch.zeros_like(self._grfs_buf)
+        self._grfs_smoothed_buf = torch.zeros_like(self._grfs_buf)
+
+    def _update_grf_buffer(self, measured_grfs):
+        """Deadband, clip, and EMA-filter measured per-foot force vectors."""
+        expected_shape = (self._num_envs, self._grfs_buf.shape[-1] // 3, 3)
+        if tuple(measured_grfs.shape) != expected_shape:
+            raise ValueError(
+                f"Expected measured GRFs with shape {expected_shape}, got "
+                f"{tuple(measured_grfs.shape)}"
+            )
+
+        # A foot is rejected as noise based on vertical force; when rejected,
+        # all three force components for that foot are zeroed together.
+        active_foot = measured_grfs[..., 2].abs() > self._grf_deadband
+        deadbanded = torch.where(
+            active_foot.unsqueeze(-1), measured_grfs, torch.zeros_like(measured_grfs)
+        ).reshape_as(self._grfs_buf)
+        self._grfs_deadband_buf.copy_(deadbanded)
+        self._grfs_clipped_buf.copy_(
+            torch.clamp(deadbanded, min=self._grf_clip_min, max=self._grf_clip_max)
+        )
+        self._grfs_smoothed_buf.mul_(1.0 - self._grf_ema_alpha).add_(
+            self._grfs_clipped_buf, alpha=self._grf_ema_alpha
+        )
+        self._grfs_buf.copy_(self._grfs_smoothed_buf)
+
+    def _reset_grf_buffer(self, env_ids):
+        """Clear all GRF filter state so EMA history cannot cross episodes."""
+        self._grfs_deadband_buf[env_ids] = 0.0
+        self._grfs_clipped_buf[env_ids] = 0.0
+        self._grfs_smoothed_buf[env_ids] = 0.0
+        self._grfs_buf[env_ids] = 0.0
 
     #----- Public methods -----#
     @abstractmethod
@@ -418,6 +485,12 @@ class Simulator(ABC):
     def foot_contact_forces(self):
         """Return foot forces in the simulator's configured foot order."""
         return self._link_contact_forces[:, self._feet_indices, :]
+
+    @property
+    def foot_contacts(self):
+        """Return binary foot contacts using the configured vertical threshold."""
+        threshold = getattr(self, "_foot_contact_force_threshold", 1.0)
+        return self.foot_contact_forces[..., 2] > threshold
 
     @property
     def ee_pos(self):

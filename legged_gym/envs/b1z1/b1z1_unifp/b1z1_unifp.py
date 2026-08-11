@@ -634,9 +634,7 @@ class B1Z1UniFP(BaseTask):
         if self.add_noise:
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
 
-        contact_mask = (
-            self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
-        ).float()
+        contact_mask = self.simulator.foot_contacts.float()
         # Match the B1 estimator's terrain-relative clearance target:
         # h_foot - mean(local terrain patch) - nominal sole offset.
         foot_heights = torch.clip(
@@ -2272,11 +2270,7 @@ class B1Z1UniFP(BaseTask):
         if self._feet_stats_update_step == current_step:
             return self._feet_stats
 
-        contact = (
-            self.simulator.link_contact_forces[
-                :, self.simulator.feet_indices, 2
-            ] > 1.0
-        )
+        contact = self.simulator.foot_contacts
 
         previous_contact = self.last_contacts.clone()
 
@@ -2338,7 +2332,7 @@ class B1Z1UniFP(BaseTask):
         return self._feet_stats
 
     # def _reward_feet_air_time(self):
-    #     contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0
+    #     contact = self.simulator.foot_contacts
     #     contact_filt = torch.logical_or(contact, self.last_contacts)
     #     # Preserve the buffer object and dtype so other rewards cannot inherit
     #     # accidental bool/float conversions through aliasing.
@@ -2353,7 +2347,9 @@ class B1Z1UniFP(BaseTask):
 
     def _reward_sparse_contacts(self):
         fz = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2]
-        contact_prob = torch.sigmoid(10.0*(fz - 10.0))
+        contact_prob = torch.sigmoid(
+            10.0 * (fz - self.cfg.sim.grf.contact_threshold)
+        )
         num_contacts = torch.sum(contact_prob, dim=-1)
 
         moving = self.get_walking_cmd_mask()
@@ -2433,7 +2429,7 @@ class B1Z1UniFP(BaseTask):
         return torch.mean((self.simulator.feet_pos[:, :, 2] - 0.18).clip(min=0.0), dim=1)
 
     def _reward_feet_drag(self):
-        contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0
+        contact = self.simulator.foot_contacts
         return torch.sum(torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1) * contact.float(), dim=1)
 
     def _reward_stumble(self):
@@ -2446,7 +2442,7 @@ class B1Z1UniFP(BaseTask):
         horizontal_force = torch.norm(contact_forces[:, :, :2], dim=2)
         vertical_force = torch.abs(contact_forces[:, :, 2])
 
-        contact = vertical_force > 1.0
+        contact = self.simulator.foot_contacts
         swing = (~contact).float()
 
         stumble = (horizontal_force > 4.0 * vertical_force) & (horizontal_force > 5.0)
@@ -2493,9 +2489,7 @@ class B1Z1UniFP(BaseTask):
         overreach = torch.relu(x_error - front_x_margin)
 
         # stance/contact gating
-        contact = (
-            self.simulator.link_contact_forces[:, self.simulator.feet_indices[:2], 2] > 1.0
-        ).float()
+        contact = self.simulator.foot_contacts[:, :2].float()
 
         penalty = torch.sum(contact * overreach ** 2, dim=1)
 
@@ -2539,9 +2533,7 @@ class B1Z1UniFP(BaseTask):
         overreach = torch.relu(x_error - rear_x_margin)
 
         # Contact gate rear feet only: feet_indices[2:4], not [:2]
-        contact = (
-            self.simulator.link_contact_forces[:, self.simulator.feet_indices[2:4], 2] > 5.0
-        ).float()  # (N,2)
+        contact = self.simulator.foot_contacts[:, 2:4].float()  # (N,2)
 
         penalty = torch.sum(contact * overreach ** 2, dim=1)
 
@@ -2561,15 +2553,12 @@ class B1Z1UniFP(BaseTask):
             self.simulator.feet_indices:        4 foot link ids
             self.cfg.rewards.support_polygon_sigma: float
         """
-        fz_thr = 5.0
         sigma = self.cfg.rewards.support_polygon_sigma
 
         base_xy = self.simulator.base_pos[:, :2]                      # (N,2)
         feet_xy = self.simulator.feet_pos[:, :, :2]                  # (N,4,2)
 
-        contact = (
-            self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > fz_thr
-        ).float()                                                    # (N,4)
+        contact = self.simulator.foot_contacts.float()               # (N,4)
 
         n_stance = torch.sum(contact, dim=1)                         # (N,)
 
@@ -2717,7 +2706,7 @@ class B1Z1UniFP(BaseTask):
         feet_z = self.simulator.feet_pos[:, :, 2]                       # (N,4)
         foot_vel_xy_norm = torch.norm(self.simulator.feet_vel[:, :, :2], dim=-1)  # (N,4)
 
-        contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
+        contact = self.simulator.foot_contacts
         swing = ~contact
 
         # desired_swing = 1.0 - self._get_gait_phase()
@@ -2796,7 +2785,7 @@ class B1Z1UniFP(BaseTask):
         This replaces the temporary "exactly two contacts" reward with the
         original UniFP phase-conditioned version.
         """
-        contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 5.0
+        contact = self.simulator.foot_contacts
         stance_mask = self._get_gait_phase().bool()
 
         # Reward values must be floating point even though contacts and stance
@@ -2850,7 +2839,7 @@ class B1Z1UniFP(BaseTask):
 
     def _reward_stand_still_contact(self):
         # Encourage feet contact with the ground at zero commands
-        contacts = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.0
+        contacts = self.simulator.foot_contacts
         full_contact = torch.sum(1.*contacts.float(), dim=1)==len(self.simulator.feet_indices)
         return 1.0 * full_contact * strict_standing_mask(self)
 
@@ -2900,7 +2889,7 @@ class B1Z1UniFP(BaseTask):
 
         # stance mask from normal contact force
         fn_meas = torch.sum(grf_w * normals_w, dim=-1)                          # (N,4)
-        stance_mask = fn_meas > self.cfg.rewards.contact_force_threshold
+        stance_mask = fn_meas > self.cfg.sim.grf.contact_threshold
         stance_f = stance_mask.to(dtype)
 
         # --------------------------------------------------
@@ -3329,11 +3318,7 @@ class B1Z1UniFP(BaseTask):
         engagement = engagement.square() * (3.0 - 2.0 * engagement)
 
         # Do not count falling, jumping, or unsupported motion as locomotion.
-        contact = (
-            self.simulator.link_contact_forces[
-                :, self.simulator.feet_indices, 2
-            ] > 5.0
-        )
+        contact = self.simulator.foot_contacts
         supported = contact.sum(dim=1) >= 2
 
         # Confirm the sign convention: Genesis commonly gives approximately -1 here
@@ -3471,11 +3456,7 @@ class B1Z1UniFP(BaseTask):
         )
 
         # Do not count falling or aerial motion as locomotion.
-        contact = (
-            self.simulator.link_contact_forces[
-                :, self.simulator.feet_indices, 2
-            ] > 5.0
-        )
+        contact = self.simulator.foot_contacts
         supported = contact.sum(dim=1) >= 2
         upright = self.simulator.projected_gravity[:, 2] < -0.8
 
@@ -3502,11 +3483,7 @@ class B1Z1UniFP(BaseTask):
             / command_mag.unsqueeze(1).clamp_min(1e-6)
         )
 
-        contact = (
-            self.simulator.link_contact_forces[
-                :, self.simulator.feet_indices, 2
-            ] > 5.0
-        )
+        contact = self.simulator.foot_contacts
         actual_swing = ~contact
 
         desired_swing = 1.0 - self._get_gait_phase()

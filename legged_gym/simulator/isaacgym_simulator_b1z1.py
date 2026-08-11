@@ -370,7 +370,6 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
         if self._cfg.domain_rand.randomize_motor_strength:
             self._randomize_motor_strength(env_ids)
         self._dof_tau[env_ids] = 0.0
-        self._grfs_buf[env_ids] = 0.0
         self._last_base_world_lin_vel[env_ids] = 0.0
         self._last_base_world_ang_vel[env_ids] = 0.0
 

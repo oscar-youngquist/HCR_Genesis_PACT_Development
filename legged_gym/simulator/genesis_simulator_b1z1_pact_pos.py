@@ -86,14 +86,17 @@ class GenesisSimulatorB1Z1PACTPos(Simulator):
         self._base_world_lin_vel[:] = self._robot.get_vel()
         self._base_world_ang_vel[:] = self._robot.get_ang()
         
-        # Ground reaction forces in the task's foot order.
-        self._grfs_buf[:] = self._robot.get_links_net_contact_force()[:, self._feet_indices, :].reshape(self._base_pos.shape[0], self._grf_dim)
+        # Condition raw forces while preserving physical units and foot order.
+        self._update_grf_buffer(
+            self._link_contact_forces[:, self._feet_indices, :]
+        )
         
         
         # Link contact state
         if self._cfg.asset.obtain_link_contact_states:
             self._link_contact_states = 1. * (torch.norm(
-                self._link_contact_forces[:, self._contact_state_link_indices, :], dim=-1) > 1.)
+                self._link_contact_forces[:, self._contact_state_link_indices, :], dim=-1
+            ) > self._foot_contact_force_threshold)
         
         # update terrain heights info
         if self._cfg.terrain.measure_heights:
@@ -131,7 +134,7 @@ class GenesisSimulatorB1Z1PACTPos(Simulator):
         
         self._dof_tau[env_ids] = 0.
         
-        self._grfs_buf[env_ids] = 0.
+        self._reset_grf_buffer(env_ids)
         self._base_world_lin_vel[env_ids] = 0.
         self._base_world_ang_vel[env_ids] = 0.
         self._last_base_world_lin_vel[env_ids] = 0.
@@ -1187,6 +1190,7 @@ class GenesisSimulatorB1Z1PACTPos(Simulator):
         )
 
         self._grfs_buf = torch.zeros((self._num_envs, self._grf_dim), device=self._device, dtype=torch.float)
+        self._configure_grf_processing()
         self._base_world_lin_vel = torch.zeros_like(self._base_lin_vel)
         self._base_world_ang_vel = torch.zeros_like(self._base_ang_vel)
 

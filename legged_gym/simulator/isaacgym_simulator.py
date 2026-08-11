@@ -75,15 +75,14 @@ class IsaacGymSimulator(Simulator):
             ]
         # Isaac Gym's net-contact tensor is the single source for foot GRFs,
         # contact-state checks, collision penalties, and termination checks.
-        self._grfs_buf.copy_(
-            self._link_contact_forces[:, self._feet_indices, :].reshape(
-                self._num_envs, -1
-            )
+        self._update_grf_buffer(
+            self._link_contact_forces[:, self._feet_indices, :]
         )
         # Link contact state
         if self._cfg.asset.obtain_link_contact_states:
             self._link_contact_states = 1. * (torch.norm(
-                self._link_contact_forces[:, self._contact_state_link_indices, :], dim=-1) > 1.)
+                self._link_contact_forces[:, self._contact_state_link_indices, :], dim=-1
+            ) > self._foot_contact_force_threshold)
         # update terrain heights info
         if self._cfg.terrain.measure_heights:
             self._update_surrounding_heights()
@@ -106,7 +105,7 @@ class IsaacGymSimulator(Simulator):
         self._last_feet_vel[env_ids] = 0.
         self._last_base_lin_vel[env_ids] = 0.
         self._last_base_ang_vel[env_ids] = 0.
-        self._grfs_buf[env_ids] = 0.0
+        self._reset_grf_buffer(env_ids)
         
         # update gravity projection
         self._base_quat[env_ids] = self._root_states[env_ids, 3:7]
@@ -471,6 +470,7 @@ class IsaacGymSimulator(Simulator):
             dtype=self._link_contact_forces.dtype,
             device=self._device,
         )
+        self._configure_grf_processing()
         # Neutral buffers complete the simulator contract used by the arm-free
         # B1 UniFP environment when its randomization/force paths are disabled.
         self._base_force_world = torch.zeros(
