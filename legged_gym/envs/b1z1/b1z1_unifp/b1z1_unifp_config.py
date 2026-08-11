@@ -231,7 +231,7 @@ class B1Z1UniFPCfg:
 
     class sim:
         dt = 0.002
-        substeps = 2
+        substeps = 1
         max_collision_pairs = 100
         IK_max_targets = 2
         gravity = [0.0, 0.0, -9.81]

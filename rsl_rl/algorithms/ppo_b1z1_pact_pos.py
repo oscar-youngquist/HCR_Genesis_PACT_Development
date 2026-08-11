@@ -595,7 +595,10 @@ class PPO_B1Z1PACTPos:
                 if name not in ("kl_raw", "kl_reg_loss"):
                     mean_metrics[name] = controller_metrics[name].item()
         diagnostics["lr_after_update"] = self.learning_rate
-        return mean_metrics | diagnostics | {
+        # Isaac Gym's Python 3.8 predates the dict-union operator.
+        return {
+            **mean_metrics,
+            **diagnostics,
             "latent_boot_probability": latent_pboot,
             "latent_boot_active": float(self.use_boot_latent),
             "latent_recon_mse": latent_recon, "latent_naive_mse": latent_baseline,
