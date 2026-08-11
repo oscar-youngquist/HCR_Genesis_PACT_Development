@@ -415,6 +415,11 @@ class Simulator(ABC):
         return self._feet_vel
 
     @property
+    def foot_contact_forces(self):
+        """Return foot forces in the simulator's configured foot order."""
+        return self._link_contact_forces[:, self._feet_indices, :]
+
+    @property
     def ee_pos(self):
         """Returns the end-effector position in the world frame, if available."""
         return self._ee_pos

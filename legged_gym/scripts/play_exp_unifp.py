@@ -11,6 +11,30 @@ import numpy as np
 import torch
 
 
+# Isaac Gym's Python 3.8 environment predates argparse.BooleanOptionalAction.
+# Keep the same --flag/--no-flag CLI used by the Genesis play environment.
+if not hasattr(argparse, "BooleanOptionalAction"):
+    class BooleanOptionalAction(argparse.Action):
+        def __init__(self, option_strings, dest, default=None, **kwargs):
+            expanded_options = []
+            for option in option_strings:
+                expanded_options.append(option)
+                if option.startswith("--"):
+                    expanded_options.append("--no-" + option[2:])
+            super().__init__(
+                option_strings=expanded_options,
+                dest=dest,
+                nargs=0,
+                default=default,
+                **kwargs,
+            )
+
+        def __call__(self, parser, namespace, values, option_string=None):
+            setattr(namespace, self.dest, not option_string.startswith("--no-"))
+
+    argparse.BooleanOptionalAction = BooleanOptionalAction
+
+
 def override_configs(env_cfg, train_cfg, args):
     env_cfg.env.num_envs = args.num_envs if args.num_envs is not None else 1
     env_cfg.viewer.rendered_envs_idx = list(range(env_cfg.env.num_envs))

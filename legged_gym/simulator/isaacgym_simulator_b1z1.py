@@ -290,11 +290,14 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
             self._num_envs, self._num_dof
         )
         self._dof_tau = torch.zeros_like(self._dof_force_raw)
+
         self._thigh_pos = self._rigid_body_states[:, self._thigh_indices, 0:3]
         self._ee_pos = self._rigid_body_states[:, self._gripper_index, 0:3]
         self._ee_quat = self._rigid_body_states[:, self._gripper_index, 3:7]
         self._ee_vel = self._rigid_body_states[:, self._gripper_index, 7:10]
-        self._grfs_buf = torch.zeros(self._num_envs, self._grf_dim, device=self._device)
+        assert self._grf_dim == len(self._feet_names) * 3
+        assert self._grfs_buf.shape == (self._num_envs, self._grf_dim)
+        assert self._grfs_buf.dtype == self._foot_contact_forces.dtype
         self._base_world_lin_vel = self._root_states[:, 7:10]
         self._base_world_ang_vel = self._root_states[:, 10:13]
         self._last_base_world_lin_vel = torch.zeros_like(self._base_world_lin_vel)
@@ -351,6 +354,9 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
             self._gym.simulate(self._sim)
             self._gym.fetch_results(self._sim, True)
             self._gym.refresh_dof_state_tensor(self._sim)
+            # Isaac Gym force-sensor tensors require an explicit refresh after
+            # every PhysX step, including each control-decimation substep.
+            self._gym.refresh_force_sensor_tensor(self._sim)
 
     def post_physics_step(self):
         super().post_physics_step()
@@ -361,9 +367,6 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
         self._ee_pos = self._rigid_body_states[:, self._gripper_index, 0:3]
         self._ee_quat = self._rigid_body_states[:, self._gripper_index, 3:7]
         self._ee_vel = self._rigid_body_states[:, self._gripper_index, 7:10]
-        self._grfs_buf.copy_(
-            self._link_contact_forces[:, self._feet_indices, :].reshape(self._num_envs, -1)
-        )
 
     def reset_idx(self, env_ids):
         super().reset_idx(env_ids)

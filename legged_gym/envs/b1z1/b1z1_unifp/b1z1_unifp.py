@@ -2642,7 +2642,7 @@ class B1Z1UniFP(BaseTask):
     def _compute_vhip_angle(self):
         com_pos = self.simulator.base_pos[:,0:3]  # B x 3
 
-        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]    # B, num_feet, 3
+        foot_contact_forces = self.simulator.foot_contact_forces    # B, num_feet, 3
         foot_positions = self.simulator.feet_pos
 
         normal_forces = foot_contact_forces[:,:,2:3]  # B. num_feet, 1
@@ -2663,7 +2663,7 @@ class B1Z1UniFP(BaseTask):
         
         com_pos = self.simulator.base_pos[:,0:3]  # B x 3
 
-        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]    # B, num_feet, 3
+        foot_contact_forces = self.simulator.foot_contact_forces    # B, num_feet, 3
         foot_positions = self.simulator.feet_pos
 
         normal_forces = foot_contact_forces[:,:,2:3]  # B. num_feet, 1

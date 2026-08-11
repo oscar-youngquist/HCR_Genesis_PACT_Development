@@ -1334,7 +1334,7 @@ class Go1ABL1(BaseTask):
 
     def _compute_vhip_angle(self):
         com_pos = self.simulator.base_pos[:, 0:3]
-        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]
+        foot_contact_forces = self.simulator.foot_contact_forces
         foot_positions = self.simulator.feet_pos
         normal_forces = foot_contact_forces[:, :, 2:3]
         total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)
@@ -1347,7 +1347,7 @@ class Go1ABL1(BaseTask):
     def _compute_vhip_acceleration(self):
         theta = self._compute_vhip_angle()
         com_pos = self.simulator.base_pos[:, 0:3]
-        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]
+        foot_contact_forces = self.simulator.foot_contact_forces
         foot_positions = self.simulator.feet_pos
         normal_forces = foot_contact_forces[:, :, 2:3]
         total_force = torch.sum(normal_forces, dim=1).clamp(min=1e-6)
