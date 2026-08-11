@@ -4,7 +4,11 @@ import math
 import numpy as np
 import torch
 
-from legged_gym.envs.b1z1.force_task_utils import strict_standing_mask
+from legged_gym.envs.b1z1.force_task_utils import (
+    get_force_adjusted_ee_target,
+    strict_standing_mask,
+    summarize_ee_force_offset,
+)
 
 from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.envs.base.legged_robot import LeggedRobot
@@ -511,6 +515,9 @@ class B1Z1PACTPos(LeggedRobot):
         episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
         episode_base_torque_ext_norm = torch.mean(torch.norm(self.base_torque_ext_world[env_ids], dim=1))
         episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
+        episode_ee_offset_diagnostics = summarize_ee_force_offset(
+            get_force_adjusted_ee_target(self, env_ids)
+        )
 
         self._resample_commands(env_ids)
         self._resample_ee_goal(env_ids, is_init=True)
@@ -604,6 +611,7 @@ class B1Z1PACTPos(LeggedRobot):
         self.extras["episode"]["external_force_scale"] = self.external_force_scale
         self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
         self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
+        self.extras["episode"].update(episode_ee_offset_diagnostics)
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
 
@@ -654,7 +662,12 @@ class B1Z1PACTPos(LeggedRobot):
         # Dynamics labels use the world/LWA force frame so predicted force can
         # enter the Pinocchio residual without an ambiguous extra transform.
         base_wrench_world = torch.cat((self.base_force_ext_world, self.base_torque_ext_world), dim=-1)
-        ee_goal_offset_sphere = self.curr_ee_goal_sphere
+        force_adjusted_target = get_force_adjusted_ee_target(self)
+        ee_goal_offset_local = quat_rotate_inverse(
+            base_yaw_quat,
+            force_adjusted_target.effective_target - ee_center,
+        )
+        ee_goal_offset_sphere = cart2sphere(ee_goal_offset_local)
 
         phase = self._get_phase()
         self.compute_ref_state()
@@ -859,10 +872,9 @@ class B1Z1PACTPos(LeggedRobot):
         base_yaw_quat = self._get_base_yaw_quat(env_ids)
         # ee_center = self.simulator.base_pos[env_ids] + quat_apply(base_yaw_quat, self.ee_goal_center_offset[env_ids])
         ee_center = self.get_ee_goal_spherical_center(base_yaw_quat, env_ids)
-        # This task never turns force into a shifted position command. The
-        # magenta marker is diagnostic only: the soft impedance equilibrium.
-        force_offset = self.ee_force_ext_world[env_ids] / self.gripper_force_kps[env_ids]
-        ee_goal_offset_world = self.curr_ee_goal_cart_world[env_ids] + force_offset
+        force_adjusted_target = get_force_adjusted_ee_target(self, env_ids)
+        force_offset = force_adjusted_target.applied_offset
+        ee_goal_offset_world = force_adjusted_target.effective_target
         ee_pos = self.simulator.ee_pos[env_ids]
 
         scene.clear_debug_objects()
@@ -3034,9 +3046,7 @@ class B1Z1PACTPos(LeggedRobot):
 
     def _reward_arm_progress_before_torso(self):
         """Reward reducing EE error while keeping torso upright."""
-        base_yaw_quat = self._get_base_yaw_quat()
-        force_offset = self.ee_force_ext_world / self.gripper_force_kps
-        target = self.curr_ee_goal_cart_world + force_offset
+        target = get_force_adjusted_ee_target(self).effective_target
         ee_error = torch.norm(target - self.simulator.ee_pos, dim=1)
 
         ee_progress = torch.clamp(
@@ -3056,9 +3066,7 @@ class B1Z1PACTPos(LeggedRobot):
 
     def _reward_early_torso_tilt(self):
         """Penalize torso tilt before the EE has reached the target."""
-        base_yaw_quat = self._get_base_yaw_quat()
-        force_offset = self.ee_force_ext_world / self.gripper_force_kps
-        target = self.curr_ee_goal_cart_world + force_offset
+        target = get_force_adjusted_ee_target(self).effective_target
         ee_error = torch.norm(target - self.simulator.ee_pos, dim=1)
 
         torso_tilt = torch.norm(self.simulator.projected_gravity[:, :2], dim=1)

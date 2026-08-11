@@ -47,6 +47,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
 
     class goal_ee:
         num_commands = 3
+        max_ee_force_offset = 0.10
         traj_time = [1.0, 3.0]
         hold_time = [0.5, 2.0]
         command_mode = "sphere"

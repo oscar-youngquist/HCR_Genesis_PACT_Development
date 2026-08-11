@@ -6,7 +6,9 @@ import torch
 
 from legged_gym.envs.b1z1.force_task_utils import (
     force_curriculum_active,
+    get_force_adjusted_ee_target,
     strict_standing_mask,
+    summarize_ee_force_offset,
     zero_velocity_probability,
 )
 
@@ -447,6 +449,9 @@ class B1Z1UniFP(BaseTask):
         episode_base_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_base_cmd[env_ids], dim=1))
         episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
         episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
+        episode_ee_offset_diagnostics = summarize_ee_force_offset(
+            get_force_adjusted_ee_target(self, env_ids)
+        )
 
         self._resample_commands(env_ids)
         self._resample_ee_goal(env_ids, is_init=True)
@@ -545,6 +550,7 @@ class B1Z1UniFP(BaseTask):
         self.extras["episode"]["external_force_scale"] = self.external_force_scale
         self.extras["episode"]["command_force_scale"] = self.command_force_scale
         self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
+        self.extras["episode"].update(episode_ee_offset_diagnostics)
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
 
@@ -598,12 +604,12 @@ class B1Z1UniFP(BaseTask):
         ee_force_local = quat_rotate_inverse(base_yaw_quat, self.ee_force_ext_world)
         base_force_local = quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world)
 
-        # The commanded EE force acts like an external impedance offset: the
-        # target position is shifted by force / virtual stiffness.
-        force_offset_world = self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)
+        # Commanded and external EE forces define one capped virtual-impedance
+        # target shared by the critic observation, reward, and diagnostics.
+        force_adjusted_target = get_force_adjusted_ee_target(self)
         ee_goal_offset_local = quat_rotate_inverse(
             base_yaw_quat,
-            self.curr_ee_goal_cart_world + force_offset_world / self.gripper_force_kps - ee_center,
+            force_adjusted_target.effective_target - ee_center,
         )
         ee_goal_offset_sphere = cart2sphere(ee_goal_offset_local)
 
@@ -795,9 +801,9 @@ class B1Z1UniFP(BaseTask):
         base_yaw_quat = self._get_base_yaw_quat(env_ids)
         # ee_center = self.simulator.base_pos[env_ids] + quat_apply(base_yaw_quat, self.ee_goal_center_offset[env_ids])
         ee_center = self.get_ee_goal_spherical_center(base_yaw_quat, env_ids)
-        forces_cmd_world = quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd[env_ids])
-        force_offset = (self.ee_force_ext_world[env_ids] + forces_cmd_world) / self.gripper_force_kps[env_ids]
-        ee_goal_offset_world = self.curr_ee_goal_cart_world[env_ids] + force_offset
+        force_adjusted_target = get_force_adjusted_ee_target(self, env_ids)
+        force_offset = force_adjusted_target.applied_offset
+        ee_goal_offset_world = force_adjusted_target.effective_target
         ee_pos = self.simulator.ee_pos[env_ids]
 
         scene.clear_debug_objects()
@@ -2092,43 +2098,16 @@ class B1Z1UniFP(BaseTask):
 
         return torch.exp(-error / self.cfg.rewards.tracking_sigma)
 
-        # # Remove the reward that comes from simply standing still IF the robot should be moving
-        # #     help remove the incentive to stand-still to accumulate positive reward
-        # target_mag = torch.norm(base_lin_vel_offset, dim=1)
-
-        # tracking = torch.exp(-error / self.cfg.rewards.tracking_sigma)
-        # standing_baseline = torch.exp(
-        #     -torch.sum(torch.square(base_lin_vel_offset), dim=1) / self.cfg.rewards.tracking_sigma
-        # )
-
-        # moving = target_mag > 0.1
-
-        # max_improvement = (1.0 - standing_baseline).clamp_min(1e-4)
-
-        # moving_reward = (
-        #     tracking - standing_baseline
-        # ) / max_improvement
-
-        # moving_reward = torch.clamp(moving_reward, -1.0, 1.0)
-
-        # reward = torch.where(
-        #     moving,
-        #     moving_reward,
-        #     tracking,
-        # )
-
-        # return reward.clamp_(min=0.0)
-
-
     def _reward_tracking_ang_vel(self):
         return torch.exp(-torch.square(self.commands[:, 2] - self.simulator.base_ang_vel[:, 2]) / self.cfg.rewards.tracking_sigma)
 
     def _reward_tracking_ee_force_world(self):
-        base_yaw_quat = self._get_base_yaw_quat()
-        force_offset = (self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)) / self.gripper_force_kps
-        target = self.curr_ee_goal_cart_world + force_offset
-        error = torch.sum(torch.abs(target - self.simulator.ee_pos), dim=1)
-        return torch.exp(-error / self.cfg.rewards.tracking_ee_sigma)
+        effective_target = get_force_adjusted_ee_target(self).effective_target
+        error = torch.sum(
+            torch.abs(self.simulator.ee_pos - effective_target),
+            dim=1,
+        )
+        return torch.exp(-error / self.cfg.rewards.tracking_ee_sigma * 2.0)
 
     def _reward_upright(self):
         tilt_sq = torch.sum(
@@ -3234,9 +3213,7 @@ class B1Z1UniFP(BaseTask):
 
     def _reward_arm_progress_before_torso(self):
         """Reward reducing EE error while keeping torso upright."""
-        base_yaw_quat = self._get_base_yaw_quat()
-        force_offset = (self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)) / self.gripper_force_kps
-        target = self.curr_ee_goal_cart_world + force_offset
+        target = get_force_adjusted_ee_target(self).effective_target
         ee_error = torch.norm(target - self.simulator.ee_pos, dim=1)
 
         ee_progress = torch.clamp(
@@ -3256,9 +3233,7 @@ class B1Z1UniFP(BaseTask):
 
     def _reward_early_torso_tilt(self):
         """Penalize torso tilt before the EE has reached the target."""
-        base_yaw_quat = self._get_base_yaw_quat()
-        force_offset = (self.ee_force_ext_world + quat_apply(base_yaw_quat, self.current_Fxyz_gripper_cmd)) / self.gripper_force_kps
-        target = self.curr_ee_goal_cart_world + force_offset
+        target = get_force_adjusted_ee_target(self).effective_target
         ee_error = torch.norm(target - self.simulator.ee_pos, dim=1)
 
         torso_tilt = torch.norm(self.simulator.projected_gravity[:, :2], dim=1)
