@@ -161,7 +161,7 @@ class B1Z1UniFPCfg:
         penalize_contacts_on = ["trunk", "thigh", "hip", "calf"]
         terminate_after_contacts_on = []
         links_to_keep = ["FR_foot", "FL_foot", "RR_foot", "RL_foot", "ee_gripper_link"]
-        self_collisions = False
+        self_collisions = True
         flip_visual_attachments = False
         fix_base_link = False
         obtain_link_contact_states = True
@@ -188,7 +188,7 @@ class B1Z1UniFPCfg:
         side_signs = [-1.0, 1.0, -1.0, 1.0]  # FR, FL, RR, RL
 
     class terrain:
-        mesh_type = "heightfield"
+        mesh_type = "trimesh"
         simplify_mesh = True
         plane_length = 200.0
         horizontal_scale = 0.1
@@ -390,6 +390,9 @@ class B1Z1UniFPCfg:
 
     class domain_rand:
         use_domainrand_curriculum = True
+        # Isaac Gym must choose immutable physical randomization ranges when
+        # actors are built. False uses the curriculum starts; True uses ends.
+        isaacgym_use_final_domain_rand_ranges = True
         randomize_friction = True  
         friction_range = [0.3, 2.0]
 
@@ -449,7 +452,7 @@ class B1Z1UniFPCfg:
         
         randomize_joint_friction = True
         joint_friction_range_start = [0.0, 0.02]
-        joint_friction_range_end = [0.0, 0.04]
+        joint_friction_range_end = [0.0, 0.20]
         
         randomize_joint_stiffness = False
         joint_stiffness_range_start = [0.0, 0.0]
@@ -457,7 +460,7 @@ class B1Z1UniFPCfg:
         
         randomize_joint_damping = True
         joint_damping_range_start = [0.30, 0.40]
-        joint_damping_range_end = [0.00, 0.50]
+        joint_damping_range_end = [0.00, 0.80]
         
         num_push_steps = 500
         push_warmup = 30000

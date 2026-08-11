@@ -40,7 +40,19 @@ if sys.version_info[1] >= 10: # >=3.10 for genesis and isaacsim
             "Unsupported SIMULATOR type. Expected a configured Genesis or IsaacLab simulator."
         )
 elif sys.version_info[1] <= 8 and sys.version_info[1] >= 6: # >=3.6 and <3.9 for isaacgym
-    SIMULATOR = "isaacgym"
+    # Isaac Gym runs in the legacy Python environment, but B1Z1 needs a
+    # method-specific adapter because its physical and learned action widths
+    # differ. Keep the historical generic backend as the default.
+    simulator_type = os.getenv("SIMULATOR", "isaacgym")
+    if simulator_type in (
+        "isaacgym",
+        "isaacgym_b1z1_unifp",
+        "isaacgym_b1z1_pact_pos",
+        "isaacgym_b1z1_pact",
+    ):
+        SIMULATOR = simulator_type
+    else:
+        raise ValueError(f"Unsupported Isaac Gym SIMULATOR type: {simulator_type}")
 
 if "genesis" in SIMULATOR:
     try: 
@@ -81,7 +93,7 @@ if "genesis" in SIMULATOR:
 #     except ImportError as e:
 #         print("Failed to import Genesis. Please ensure that the Genesis is properly installed and configured.")
 #         raise e
-elif SIMULATOR == "isaacgym":
+elif "isaacgym" in SIMULATOR:
     try:
         import isaacgym
     except ImportError as e:

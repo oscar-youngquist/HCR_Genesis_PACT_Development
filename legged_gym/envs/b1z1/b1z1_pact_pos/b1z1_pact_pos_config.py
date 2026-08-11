@@ -373,6 +373,9 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
 
     class domain_rand:
         use_domainrand_curriculum = True
+        # Isaac Gym must choose immutable physical randomization ranges when
+        # actors are built. False uses the curriculum starts; True uses ends.
+        isaacgym_use_final_domain_rand_ranges = False
         randomize_friction = True  
         friction_range = [0.3, 2.0]
 

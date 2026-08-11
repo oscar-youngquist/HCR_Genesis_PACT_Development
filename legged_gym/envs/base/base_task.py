@@ -2,16 +2,37 @@ import sys
 import numpy as np
 import torch
 import time
-from legged_gym.simulator import GenesisSimulator, IsaacGymSimulator, IsaacLabSimulator, GenesisSimulator_PACT, GenesisSimulator_PACT_Pos
-from legged_gym.simulator import GenesisSimulator_PACT_Water, GenesisSimulator_PACT_NoPINN, GenesisSimulator_PACT_PosTau, GenesisSimulator_PACT_RL2AC
-from legged_gym.simulator import GenesisSimulator_KITE, GenesisSimulator_KITE_Depth
-from legged_gym.simulator import GenesisSimulatorB1Z1UniFP, GenesisSimulatorB1Z1PACT, GenesisSimulatorB1Z1PACTPos
 from legged_gym import SIMULATOR
 
 # Base class for RL tasks
 class BaseTask():
 
     def __init__(self, cfg, sim_params, sim_device, headless):
+        # Import backend implementations only when a task is instantiated.
+        # Eager imports form a cycle through simulator -> terrain -> envs ->
+        # BaseTask when a simulator package is imported directly.
+        if "isaacgym" in SIMULATOR:
+            from legged_gym.simulator.isaacgym_simulator import IsaacGymSimulator
+            from legged_gym.simulator.isaacgym_simulator_b1z1 import (
+                IsaacGymSimulatorB1Z1UniFP,
+                IsaacGymSimulatorB1Z1PACT,
+                IsaacGymSimulatorB1Z1PACTPos,
+            )
+        elif "genesis" in SIMULATOR:
+            from legged_gym.simulator.genesis_simulator import GenesisSimulator
+            from legged_gym.simulator.genesis_simulator_pact import GenesisSimulator_PACT
+            from legged_gym.simulator.genesis_simulator_pact_pos import GenesisSimulator_PACT_Pos
+            from legged_gym.simulator.genesis_simulator_pact_water import GenesisSimulator_PACT_Water
+            from legged_gym.simulator.genesis_simulator_pact_nopinn import GenesisSimulator_PACT_NoPINN
+            from legged_gym.simulator.genesis_simulator_pact_postau import GenesisSimulator_PACT_PosTau
+            from legged_gym.simulator.genesis_simulator_pact_rl2ac import GenesisSimulator_PACT_RL2AC
+            from legged_gym.simulator.genesis_simulator_kite import GenesisSimulator_KITE
+            from legged_gym.simulator.genesis_simulator_kite_depth import GenesisSimulator_KITE_Depth
+            from legged_gym.simulator.genesis_simulator_b1z1_unifp import GenesisSimulatorB1Z1UniFP
+            from legged_gym.simulator.genesis_simulator_b1z1_pact import GenesisSimulatorB1Z1PACT
+            from legged_gym.simulator.genesis_simulator_b1z1_pact_pos import GenesisSimulatorB1Z1PACTPos
+        elif SIMULATOR == "isaaclab":
+            from legged_gym.simulator.isaaclab_simulator import IsaacLabSimulator
         
         self.render_fps = 50
         self.last_frame_time = 0
@@ -77,6 +98,18 @@ class BaseTask():
             )
         elif SIMULATOR == "genesis_b1z1_pact_pos":
             self.simulator = GenesisSimulatorB1Z1PACTPos(
+                cfg, sim_params, sim_device, self.headless
+            )
+        elif SIMULATOR == "isaacgym_b1z1_unifp":
+            self.simulator = IsaacGymSimulatorB1Z1UniFP(
+                cfg, sim_params, sim_device, self.headless
+            )
+        elif SIMULATOR == "isaacgym_b1z1_pact_pos":
+            self.simulator = IsaacGymSimulatorB1Z1PACTPos(
+                cfg, sim_params, sim_device, self.headless
+            )
+        elif SIMULATOR == "isaacgym_b1z1_pact":
+            self.simulator = IsaacGymSimulatorB1Z1PACT(
                 cfg, sim_params, sim_device, self.headless
             )
         

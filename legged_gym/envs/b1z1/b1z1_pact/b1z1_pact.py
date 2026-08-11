@@ -1996,8 +1996,11 @@ class B1Z1PACT(LeggedRobot):
         This is the existing PACT curriculum, retained here because it changes
         the actual torque composition observed by the whole-body loss.
         """
-        tracking = self.episode_sums["tracking_lin_vel"][env_ids] / self.max_episode_length
-        success = tracking > self.cfg.control.tradeoff_threshold * self.reward_scales["tracking_lin_vel"]
+        # This task names the retained PACT tracking term after its
+        # disturbance-aware implementation; use the registered reward key.
+        tracking_key = "tracking_lin_vel_force_world"
+        tracking = self.episode_sums[tracking_key][env_ids] / self.max_episode_length
+        success = tracking > self.cfg.control.tradeoff_threshold * self.reward_scales[tracking_key]
         self.tradeoff_step_ctr[env_ids[success]] = torch.clamp(
             self.tradeoff_step_ctr[env_ids[success]] + 1.0, max=float(self.tradeoff_num_steps)
         )

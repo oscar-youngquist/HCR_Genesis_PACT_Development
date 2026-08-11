@@ -5,13 +5,9 @@ import cv2 as cv
 import torch
 import numpy as np
 import os
-from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.math_utils import *
-if SIMULATOR == "isaacgym":
+if "isaacgym" in SIMULATOR:
     from isaacgym import gymtorch, gymapi, gymutil
-    import warp as wp
-    import trimesh
-    from legged_gym.warp.warp_cam import WarpCam
 
 """ ********** Isaac Gym Simulator ********** """
 class IsaacGymSimulator(Simulator):
@@ -29,6 +25,8 @@ class IsaacGymSimulator(Simulator):
         super().__init__(cfg, sim_params, sim_device, headless)
         # warp init
         if self._cfg.sensor.use_warp:
+            import warp as wp
+            from legged_gym.warp.warp_cam import WarpCam
             assert self._cfg.sensor.add_depth, "Depth sensor is required for warp"
             wp.init()
             self._create_warp_envs()
@@ -204,6 +202,10 @@ class IsaacGymSimulator(Simulator):
         self._sim = self._gym.create_sim(self._sim_device_id, self.graphics_device_id, self.physics_engine, self._sim_params)
         mesh_type = self._cfg.terrain.mesh_type
         if mesh_type in ['heightfield', 'trimesh']:
+            # Delay this import until simulator construction. terrain.py imports
+            # task configuration through legged_gym.envs, which otherwise forms
+            # a package-initialization cycle through BaseTask.
+            from legged_gym.utils.terrain import Terrain
             self._terrain = Terrain(self._cfg.terrain)
         if mesh_type=='plane':
             self._create_ground_plane()
@@ -265,11 +267,18 @@ class IsaacGymSimulator(Simulator):
         print(f"body_names: {self._body_names}")
         self._dof_names = self._gym.get_asset_dof_names(robot_asset)
         print(f"dof_names: {self._dof_names}")
-        self._dof_indices = [self._dof_names.index(name) for name in self._dof_names]
+        configured_dofs = getattr(self._cfg.asset, "dof_names", self._dof_names)
+        self._dof_indices = [self._dof_names.index(name) for name in configured_dofs]
         print(f"dof_indices: {self._dof_indices}")
         self._num_bodies = len(self._body_names)
         self._num_dof = len(self._dof_names)
-        self._feet_names = [s for s in self._body_names if self._cfg.asset.foot_name in s]
+        foot_patterns = self._cfg.asset.foot_name
+        if isinstance(foot_patterns, str):
+            foot_patterns = [foot_patterns]
+        # Preserve configured foot order; B1Z1 uses exact FR/FL/RR/RL names.
+        self._feet_names = []
+        for pattern in foot_patterns:
+            self._feet_names.extend([s for s in self._body_names if pattern in s])
         penalized_contact_names = []
         for name in self._cfg.asset.penalize_contacts_on:
             penalized_contact_names.extend([s for s in self._body_names if name in s])
@@ -285,12 +294,23 @@ class IsaacGymSimulator(Simulator):
         self._base_init_quat = torch.tensor(self._cfg.init_state.rot, dtype=torch.float, device=self._device, requires_grad=False)
         start_pose = gymapi.Transform()
         start_pose.p = gymapi.Vec3(*self._base_init_pos)
+        start_pose.r = gymapi.Quat(*self._cfg.init_state.rot)
 
         self._get_env_origins()
         env_lower = gymapi.Vec3(0., 0., 0.)
         env_upper = gymapi.Vec3(0., 0., 0.)
         self._actor_handles = []
         self._envs = []
+
+        self_collision_setting = self._cfg.asset.self_collisions
+        if isinstance(self_collision_setting, (bool, np.bool_)):
+            # Genesis-style configs express whether self-collisions are
+            # enabled. Isaac Gym instead expects a filter bit: 0 enables and
+            # 1 disables collisions within the articulation.
+            actor_collision_filter = 0 if self_collision_setting else 1
+        else:
+            # Preserve the legacy Isaac Gym integer bitmask convention.
+            actor_collision_filter = int(self_collision_setting)
         
         # privileged information
         self._init_domain_params()
@@ -304,7 +324,17 @@ class IsaacGymSimulator(Simulator):
                 
             rigid_shape_props = self._process_rigid_shape_props(rigid_shape_props_asset, i)
             self._gym.set_asset_rigid_shape_properties(robot_asset, rigid_shape_props)
-            actor_handle = self._gym.create_actor(env_handle, robot_asset, start_pose, self._cfg.asset.name, i, self._cfg.asset.self_collisions, 0)
+            actor_handle = self._gym.create_actor(
+                env_handle,
+                robot_asset,
+                start_pose,
+                self._cfg.asset.name,
+                i,
+                actor_collision_filter,
+                0,
+            )
+            if getattr(self, "_enable_dof_force_sensors", False):
+                self._gym.enable_actor_dof_force_sensors(env_handle, actor_handle)
             dof_props = self._process_dof_props(dof_props_asset, i)
             self._gym.set_actor_dof_properties(env_handle, actor_handle, dof_props)
             body_props = self._gym.get_actor_rigid_body_properties(env_handle, actor_handle)
@@ -377,9 +407,11 @@ class IsaacGymSimulator(Simulator):
 
         # initialize some data used later on
         self._global_gravity = torch.tensor([0.0, 0.0, -1.0], device=self._device, dtype=torch.float).repeat(self._num_envs, 1)
-        self._torques = torch.zeros(self._num_envs, self._num_actions, dtype=torch.float, device=self._device, requires_grad=False)
-        self._p_gains = torch.zeros(self._num_actions, dtype=torch.float, device=self._device, requires_grad=False)
-        self._d_gains = torch.zeros(self._num_actions, dtype=torch.float, device=self._device, requires_grad=False)
+        # Torque tensors are simulator-facing and therefore span every
+        # physical DOF, even when a policy controls only a subset.
+        self._torques = torch.zeros(self._num_envs, self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
+        self._p_gains = torch.zeros(self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
+        self._d_gains = torch.zeros(self._num_dof, dtype=torch.float, device=self._device, requires_grad=False)
         self._last_dof_vel = torch.zeros_like(self._dof_vel)
         self._base_lin_vel = quat_rotate_inverse(self._base_quat, self._root_states[:, 7:10])
         self._base_ang_vel = quat_rotate_inverse(self._base_quat, self._root_states[:, 10:13])
@@ -635,11 +667,13 @@ class IsaacGymSimulator(Simulator):
     
     def _randomize_pd_gain(self, env_ids):
         self._kp_scale[env_ids] = torch_rand_float(
-                self._cfg.domain_rand.kp_range[0], self._cfg.domain_rand.kp_range[1], (len(env_ids), self._num_actions), device=self._device)
+                self._cfg.domain_rand.kp_range[0], self._cfg.domain_rand.kp_range[1], (len(env_ids), self._num_dof), device=self._device)
         self._kd_scale[env_ids] = torch_rand_float(
-                self._cfg.domain_rand.kd_range[0], self._cfg.domain_rand.kd_range[1], (len(env_ids), self._num_actions), device=self._device)
+                self._cfg.domain_rand.kd_range[0], self._cfg.domain_rand.kd_range[1], (len(env_ids), self._num_dof), device=self._device)
     
     def _create_warp_envs(self):
+        import trimesh
+        import warp as wp
         terrain_mesh = trimesh.Trimesh(vertices=self._terrain.vertices, faces=self._terrain.triangles)
         
         #save terrain mesh
@@ -668,6 +702,7 @@ class IsaacGymSimulator(Simulator):
         self.mesh_ids = self.mesh_ids_array = wp.array([self.wp_meshes.id], dtype=wp.uint64)
     
     def _create_warp_tensors(self):
+        import warp as wp
         self.warp_tensor_dict={}
         pointcloud_dims = 3 * (self._cfg.sensor.depth_camera_config.return_pointcloud == True)
         if pointcloud_dims > 0:
@@ -1040,16 +1075,21 @@ class IsaacGymSimulator(Simulator):
         hf_params.column_scale = self._terrain.cfg.horizontal_scale
         hf_params.row_scale = self._terrain.cfg.horizontal_scale
         hf_params.vertical_scale = self._terrain.cfg.vertical_scale
-        hf_params.nbRows = self._terrain.tot_rows
-        hf_params.nbColumns = self._terrain.tot_cols 
+        # Isaac Gym's heightfield API names the dimensions opposite to the
+        # terrain generator's [row, column] NumPy layout.
+        hf_params.nbRows = self._terrain.tot_cols
+        hf_params.nbColumns = self._terrain.tot_rows
         hf_params.transform.p.x = -self._terrain.cfg.border_size 
         hf_params.transform.p.y = -self._terrain.cfg.border_size
         hf_params.transform.p.z = 0.0
         hf_params.static_friction = self._cfg.terrain.static_friction
         hf_params.dynamic_friction = self._cfg.terrain.dynamic_friction
         hf_params.restitution = self._cfg.terrain.restitution
-        self._gym.add_heightfield(self._sim, 
-                                  self._terrain.heightsamples.transpose(), # column first order
+        height_samples = np.ascontiguousarray(
+            self._terrain.heightsamples
+        ).reshape(-1)
+        self._gym.add_heightfield(self._sim,
+                                  height_samples, # This binding requires a flat contiguous array.
                                   hf_params)
         self._height_samples = torch.tensor(self._terrain.heightsamples).view(self._terrain.tot_rows, self._terrain.tot_cols).to(self._device)
 
