@@ -19,6 +19,7 @@ class KLRateBandController:
 
     METRIC_NAMES = (
         "kl_raw", "kl_ema", "kl_reg_loss", "kl_warmup_beta",
+        "kl_band_warmup_scale",
         "kl_low_violation", "kl_high_violation", "kl_lambda_low",
         "kl_lambda_high", "kl_dual_effective_beta", "kl_effective_coef",
         "kl_base_beta", "kl_band_active",
@@ -26,16 +27,17 @@ class KLRateBandController:
 
     def __init__(
         self, *, warmup_iters, warmup_beta_max, rate_min, rate_max,
-        dual_lr, augmented_rho, ema_decay,
+        dual_lr, augmented_rho, ema_decay, band_warmup_iters=0,
     ):
         self.warmup_iters = int(warmup_iters)
+        self.band_warmup_iters = int(band_warmup_iters)
         self.warmup_beta_max = float(warmup_beta_max)
         self.rate_min = float(rate_min)
         self.rate_max = float(rate_max)
         self.dual_lr = float(dual_lr)
         self.augmented_rho = float(augmented_rho)
         self.ema_decay = float(ema_decay)
-        if self.warmup_iters < 0 or self.warmup_beta_max < 0.0:
+        if self.warmup_iters < 0 or self.band_warmup_iters < 0 or self.warmup_beta_max < 0.0:
             raise ValueError("KL warmup iterations and beta must be nonnegative")
         if not 0.0 <= self.rate_min <= self.rate_max:
             raise ValueError("KL rate bounds must satisfy 0 <= min <= max")
@@ -58,19 +60,32 @@ class KLRateBandController:
         progress = min(max(float(iteration) / self.warmup_iters, 0.0), 1.0)
         return 0.5 * self.warmup_beta_max * (1.0 - math.cos(math.pi * progress))
 
+    def band_warmup_scale(self, iteration):
+        """Cosine-ramp rate-band pressure after the base KL warmup."""
+        if not self.band_active(iteration):
+            return 0.0
+        if self.band_warmup_iters == 0:
+            return 1.0
+        progress = min(
+            max(float(iteration - self.warmup_iters) / self.band_warmup_iters, 0.0),
+            1.0,
+        )
+        return 0.5 * (1.0 - math.cos(math.pi * progress))
+
     def loss(self, raw_kl, iteration):
         """Return the scheduled differentiable KL-only regularizer."""
         if not self.band_active(iteration):
             return self.warmup_beta(iteration) * raw_kl
         g_low = self.rate_min - raw_kl
         g_high = raw_kl - self.rate_max
-        return (
-            self.warmup_beta_max * raw_kl
-            + self.lambda_low * g_low
+        band_scale = self.band_warmup_scale(iteration)
+        band_penalty = (
+            self.lambda_low * g_low
             + self.lambda_high * g_high
             + 0.5 * self.augmented_rho * torch.relu(g_low).square()
             + 0.5 * self.augmented_rho * torch.relu(g_high).square()
         )
+        return self.warmup_beta_max * raw_kl + band_scale * band_penalty
 
     def update_duals(self, raw_kl, iteration):
         """Update detached EMA/duals after the auxiliary optimizer step."""
@@ -81,11 +96,12 @@ class KLRateBandController:
                     self.ema_decay * self.kl_ema + (1.0 - self.ema_decay) * rate
                 )
                 if self.band_active(iteration):
+                    dual_step = self.dual_lr * self.band_warmup_scale(iteration)
                     self.lambda_low = max(
-                        0.0, self.lambda_low + self.dual_lr * (self.rate_min - self.kl_ema)
+                        0.0, self.lambda_low + dual_step * (self.rate_min - self.kl_ema)
                     )
                     self.lambda_high = max(
-                        0.0, self.lambda_high + self.dual_lr * (self.kl_ema - self.rate_max)
+                        0.0, self.lambda_high + dual_step * (self.kl_ema - self.rate_max)
                     )
 
     def metrics(self, raw_kl, reg_loss, iteration):
@@ -94,9 +110,12 @@ class KLRateBandController:
         low_violation = max(self.rate_min - rate, 0.0)
         high_violation = max(rate - self.rate_max, 0.0)
         active = self.band_active(iteration)
+        band_scale = self.band_warmup_scale(iteration)
         effective_coef = (
-            self.warmup_beta_max + self.lambda_high - self.lambda_low
-            + self.augmented_rho * (high_violation - low_violation)
+            self.warmup_beta_max + band_scale * (
+                self.lambda_high - self.lambda_low
+                + self.augmented_rho * (high_violation - low_violation)
+            )
             if active else self.warmup_beta(iteration)
         )
         values = {
@@ -104,11 +123,12 @@ class KLRateBandController:
             "kl_ema": rate if self.kl_ema is None else self.kl_ema,
             "kl_reg_loss": float(reg_loss.detach().item()),
             "kl_warmup_beta": self.warmup_beta(iteration),
+            "kl_band_warmup_scale": band_scale,
             "kl_low_violation": low_violation,
             "kl_high_violation": high_violation,
             "kl_lambda_low": self.lambda_low,
             "kl_lambda_high": self.lambda_high,
-            "kl_dual_effective_beta": self.lambda_high - self.lambda_low,
+            "kl_dual_effective_beta": band_scale * (self.lambda_high - self.lambda_low),
             "kl_effective_coef": effective_coef,
             "kl_base_beta": self.warmup_beta_max,
             "kl_band_active": float(active),

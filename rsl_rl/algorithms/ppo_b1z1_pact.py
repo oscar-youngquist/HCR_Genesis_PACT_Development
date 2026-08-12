@@ -115,6 +115,7 @@ class PPO_B1Z1PACT:
         self.kl_controller = KLRateBandController(
             warmup_iters=cfg.get("kl_warmup_iters", 500),
             warmup_beta_max=cfg.get("kl_warmup_beta_max", cfg["vae_kld_weight"]),
+            band_warmup_iters=cfg.get("kl_band_warmup_iters", 500),
             rate_min=cfg.get("kl_r_min", 0.10), rate_max=cfg.get("kl_r_max", 1.00),
             dual_lr=cfg.get("kl_dual_lr", 1.0e-3),
             augmented_rho=cfg.get("kl_aug_rho", 0.1),

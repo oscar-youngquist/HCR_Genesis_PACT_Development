@@ -650,6 +650,7 @@ class B1UniFPCfgPPO:
         max_grad_norm = 1.0
         adaptation_privileged_weight = 1.0
         adaptation_kl_weight = 0.01
+        kl_band_warmup_iters = 500
 
         num_learning_epochs = 5
         num_mini_batches = 4

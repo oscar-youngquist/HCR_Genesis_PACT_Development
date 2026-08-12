@@ -107,6 +107,7 @@ class ForceTaskTests(unittest.TestCase):
             dof_pos=torch.ones(env.num_envs, 12),
             default_dof_pos=torch.zeros(env.num_envs, 12),
             feet_indices=torch.arange(4),
+            foot_contacts=torch.ones(env.num_envs, 4, dtype=torch.bool),
             link_contact_forces=torch.zeros(env.num_envs, 4, 3),
         )
         env.simulator.link_contact_forces[:, :, 2] = 2.0
@@ -162,6 +163,48 @@ class KLIterationUpdateTests(unittest.TestCase):
         metrics = controller.metrics(raw_kl, controller.loss(raw_kl, 1), 1)
         self.assertAlmostEqual(metrics["kl_base_beta"].item(), 1.0)
         self.assertAlmostEqual(metrics["kl_effective_coef"].item(), 1.0)
+
+    @staticmethod
+    def _cosine_band_controller(band_warmup_iters=20):
+        return KLRateBandController(
+            warmup_iters=10, warmup_beta_max=1.0,
+            band_warmup_iters=band_warmup_iters,
+            rate_min=0.1, rate_max=1.0, dual_lr=1.0,
+            augmented_rho=0.1, ema_decay=0.0,
+        )
+
+    def test_rate_band_uses_separate_cosine_warmup(self):
+        controller = self._cosine_band_controller()
+        self.assertEqual(controller.band_warmup_scale(9), 0.0)
+        self.assertEqual(controller.band_warmup_scale(10), 0.0)
+        self.assertAlmostEqual(controller.band_warmup_scale(20), 0.5)
+        self.assertEqual(controller.band_warmup_scale(30), 1.0)
+        self.assertEqual(controller.band_warmup_scale(40), 1.0)
+
+        # raw KL=2 has a unit upper-band violation. The augmented penalty is
+        # 0.05 at full scale and must enter continuously after base warmup.
+        raw_kl = torch.tensor(2.0)
+        self.assertAlmostEqual(controller.loss(raw_kl, 10).item(), 2.0)
+        self.assertAlmostEqual(controller.loss(raw_kl, 20).item(), 2.025, places=6)
+        self.assertAlmostEqual(controller.loss(raw_kl, 30).item(), 2.05, places=6)
+
+    def test_dual_updates_use_same_cosine_scale(self):
+        raw_kl = torch.tensor(2.0)
+        expected = ((10, 0.0), (20, 0.5), (30, 1.0))
+        for iteration, expected_increment in expected:
+            controller = self._cosine_band_controller()
+            controller.update_duals(raw_kl, iteration)
+            self.assertAlmostEqual(controller.lambda_high, expected_increment)
+            self.assertEqual(controller.lambda_low, 0.0)
+
+    def test_zero_band_warmup_preserves_immediate_activation(self):
+        controller = self._cosine_band_controller(band_warmup_iters=0)
+        self.assertEqual(controller.band_warmup_scale(9), 0.0)
+        self.assertEqual(controller.band_warmup_scale(10), 1.0)
+
+    def test_negative_band_warmup_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._cosine_band_controller(band_warmup_iters=-1)
 
 
 if __name__ == "__main__":

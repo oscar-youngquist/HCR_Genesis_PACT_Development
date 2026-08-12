@@ -462,7 +462,7 @@ class B1Z1UniFPCfg:
         
         randomize_joint_friction = True
         joint_friction_range_start = [0.0, 0.02]
-        joint_friction_range_end = [0.0, 0.20]
+        joint_friction_range_end = [0.0, 0.10]
         
         randomize_joint_stiffness = False
         joint_stiffness_range_start = [0.0, 0.0]
@@ -470,7 +470,7 @@ class B1Z1UniFPCfg:
         
         randomize_joint_damping = True
         joint_damping_range_start = [0.30, 0.40]
-        joint_damping_range_end = [0.00, 0.80]
+        joint_damping_range_end = [0.30, 0.60]
         
         num_push_steps = 500
         push_warmup = 30000
@@ -590,6 +590,8 @@ class B1Z1UniFPCfg:
             
             tracking_ee_force_world = 2.0
             tracking_ee_orientation_default = 0.0
+
+            no_physical_progress = -0.50
 
             # Style rewards encouraging using the arm
             arm_progress_before_torso = 0.0
@@ -804,11 +806,12 @@ class B1Z1UniFPCfgPPO:
         # The shared UniFP adaptation path is variational for both B1 and
         # B1Z1: reconstruct one next privileged frame and regularize q(z|h).
         adaptation_privileged_weight = 1.0
-        adaptation_kl_weight = 0.01
-        kl_warmup_iters = 500
+        adaptation_kl_weight = 0.1
+        kl_warmup_iters = 1000
         kl_warmup_beta_max = adaptation_kl_weight
-        kl_r_min = 0.50
-        kl_r_max = 2.00
+        kl_band_warmup_iters = 500
+        kl_r_min = 2.00
+        kl_r_max = 6.00
         kl_dual_lr = 1.0e-3
         kl_aug_rho = 0.1
         kl_ema_decay = 0.99

@@ -582,6 +582,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             # tracking
             tracking_lin_vel_force_world = 2.0    #
             tracking_ang_vel = 1.0                #
+
+            no_physical_progress = -0.50
             
             tracking_ee_force_world = 2.0
             tracking_ee_orientation_default = 0.0
@@ -797,6 +799,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         vae_kld_weight = 0.01
         kl_warmup_iters = 500
         kl_warmup_beta_max = vae_kld_weight
+        kl_band_warmup_iters = 500
         kl_r_min = 0.10
         kl_r_max = 1.00
         kl_dual_lr = 1.0e-3

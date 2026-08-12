@@ -532,6 +532,7 @@ class B1Z1PACT(LeggedRobot):
         self.prev_impedance_ee_vel[env_ids] = 0.0
         self.prev_impedance_target[env_ids] = self.curr_ee_goal_cart[env_ids]
         self.prev_impedance_target_vel[env_ids] = 0.0
+        self._reset_progress_statistics(env_ids)
         # Contact history is a boolean latch used by feet-air-time filtering.
         self.last_contacts[env_ids] = False
         
@@ -1003,6 +1004,7 @@ class B1Z1PACT(LeggedRobot):
         else:
             self.commands[stop_env_ids, 2] = 0.0
         self._resample_ee_goal(env_ids)
+        self._reset_progress_statistics(env_ids)
 
     def _update_heading_command(self):
         """PACT-style desired heading conversion without using UniFP command slot 3."""
@@ -1711,6 +1713,23 @@ class B1Z1PACT(LeggedRobot):
         # phase directly from episode time. The phase only advances while a
         # walking command is active and is reset to zero for standing commands.
         self.gait_indices = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+
+        # Rolling net displacement rejects stationary shuffling and alternating
+        # velocity that does not move the base along the commanded direction.
+        self.progress_window_s = 0.40
+        self.progress_window_steps = max(
+            1, int(round(self.progress_window_s / self.dt))
+        )
+        self.progress_delta_buffer = torch.zeros(
+            self.num_envs, self.progress_window_steps, 2, device=self.device
+        )
+        self.progress_desired_buffer = torch.zeros_like(self.progress_delta_buffer)
+        self.progress_valid_steps = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.progress_buffer_index = 0
+        self.last_progress_base_pos = self.simulator.base_pos[:, :2].clone()
+        self._progress_update_step = -1
 
         self.obs_history_slots = [
             torch.zeros(self.num_envs, self.cfg.env.num_observations, device=self.device)
@@ -3021,6 +3040,91 @@ class B1Z1PACT(LeggedRobot):
         reward = torch.clamp(_sanitize_tensor(reward), 0.0, 1.0)
 
         return reward
+
+    def _reset_progress_statistics(self, env_ids):
+        """Clear rolling progress history after a reset or command change."""
+        if len(env_ids) == 0:
+            return
+
+        self.progress_delta_buffer[env_ids] = 0.0
+        self.progress_desired_buffer[env_ids] = 0.0
+        self.progress_valid_steps[env_ids] = 0
+        self.last_progress_base_pos[env_ids] = self.simulator.base_pos[env_ids, :2]
+
+    def _update_progress_statistics(self):
+        """Update rolling actual and commanded world-frame displacement."""
+        current_step = int(self.common_step_counter)
+        if self._progress_update_step == current_step:
+            return
+
+        current_pos = self.simulator.base_pos[:, :2]
+        delta_pos = current_pos - self.last_progress_base_pos
+        self.last_progress_base_pos.copy_(current_pos)
+
+        # Ignore reset/teleportation jumps while retaining ordinary locomotion.
+        delta_pos = torch.where(
+            torch.norm(delta_pos, dim=1, keepdim=True) < 0.25,
+            delta_pos,
+            torch.zeros_like(delta_pos),
+        )
+
+        # Commands are yaw-frame velocities; compare them with world displacement.
+        command_local = torch.zeros(self.num_envs, 3, device=self.device)
+        command_local[:, :2] = self.commands[:, :2]
+        command_world = quat_apply(
+            self._get_base_yaw_quat(),
+            command_local,
+        )[:, :2]
+        desired_delta = command_world * self.dt
+
+        index = self.progress_buffer_index
+        self.progress_delta_buffer[:, index] = delta_pos
+        self.progress_desired_buffer[:, index] = desired_delta
+        self.progress_valid_steps.add_(1)
+        self.progress_valid_steps.clamp_(max=self.progress_window_steps)
+        self.progress_buffer_index = (index + 1) % self.progress_window_steps
+        self._progress_update_step = current_step
+
+    def _reward_no_physical_progress(self):
+        """Penalize failure to make supported, upright, command-aligned progress.
+
+        The result lies in [0, 1] and requires a negative reward scale. Net
+        displacement prevents shuffling from being mistaken for locomotion.
+        """
+        self._update_progress_statistics()
+
+        actual_displacement = self.progress_delta_buffer.sum(dim=1)
+        desired_displacement = self.progress_desired_buffer.sum(dim=1)
+        desired_distance = torch.norm(desired_displacement, dim=1)
+        desired_direction = (
+            desired_displacement
+            / desired_distance.unsqueeze(1).clamp_min(1.0e-6)
+        )
+        aligned_progress = torch.sum(
+            actual_displacement * desired_direction,
+            dim=1,
+        )
+
+        # Forty percent of commanded displacement counts as sufficient progress.
+        required_progress = 0.40 * desired_distance
+        progress_ratio = aligned_progress / required_progress.clamp_min(1.0e-6)
+        engagement = progress_ratio.clamp(0.0, 1.0)
+        engagement = engagement.square() * (3.0 - 2.0 * engagement)
+
+        minimum_history = max(1, int(round(0.20 / self.dt)))
+        history_ready = self.progress_valid_steps >= minimum_history
+        moving_command = torch.norm(self.commands[:, :2], dim=1) > 0.15
+
+        # Aerial motion and displacement while fallen are not valid locomotion.
+        supported = self.simulator.foot_contacts.sum(dim=1) >= 2
+        upright = self.simulator.projected_gravity[:, 2] < -0.8
+        engagement *= (supported & upright).float()
+
+        return (
+            (1.0 - engagement)
+            * moving_command.float()
+            * history_ready.float()
+        )
 
     def _reward_arm_progress_before_torso(self):
         """Reward reducing EE error while keeping torso upright."""

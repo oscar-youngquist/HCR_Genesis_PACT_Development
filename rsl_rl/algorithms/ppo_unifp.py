@@ -40,6 +40,7 @@ class PPO_UniFP:
                  adaptation_kl_weight=1.0e-3,
                  kl_warmup_iters=500,
                  kl_warmup_beta_max=None,
+                 kl_band_warmup_iters=500,
                  kl_r_min=0.10,
                  kl_r_max=1.00,
                  kl_dual_lr=1.0e-3,
@@ -92,6 +93,7 @@ class PPO_UniFP:
                 self.adaptation_kl_weight
                 if kl_warmup_beta_max is None else kl_warmup_beta_max
             ),
+            band_warmup_iters=kl_band_warmup_iters,
             rate_min=kl_r_min, rate_max=kl_r_max, dual_lr=kl_dual_lr,
             augmented_rho=kl_aug_rho, ema_decay=kl_ema_decay,
         )
