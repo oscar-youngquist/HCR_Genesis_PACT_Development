@@ -16,6 +16,9 @@ class B1Z1UniFPCfg:
         num_critic_state_obs = 219 + 12
         num_height_obs = 187
         num_privileged_obs = num_critic_state_obs + num_height_obs
+        # Terrain heights remain privileged critic inputs but are excluded
+        # from the encoder's next-frame reconstruction objective.
+        num_privileged_recon_obs = num_critic_state_obs
         num_priv_stack = 3
         # Base velocity (3), EE sphere (3), EE force (3), base force (3),
         # foot contacts (4), and terrain-relative foot heights (4).
@@ -303,7 +306,7 @@ class B1Z1UniFPCfg:
         tradeoff_threshold = 1.0
 
     class commands:
-        curriculum = True
+        curriculum = False
         max_curriculum = 0.8
         num_commands = 15
         
@@ -322,19 +325,19 @@ class B1Z1UniFPCfg:
         zero_vel_cmd_prob = 0.2
         zero_vel_cmd_prob_after_force = 0.4
         
-        force_start_step = 15000
+        force_start_step = 20000
         # Apply external disturbances throughout training at quarter strength,
         # then linearly ramp to the original ranges after force_start_step.
-        external_force_initial_scale = 0.50
+        external_force_initial_scale = 0.10
         external_force_final_scale = 1.0
         external_force_ramp_iterations = 10000
 
         # Commanded base/EE force profiles are present from iteration zero at
         # reduced range, held there, then linearly expanded to their full ranges.
-        command_force_initial_scale = 0.30
+        command_force_initial_scale = 0.10
         command_force_final_scale = 1.0
-        command_force_hold_iterations = 8000
-        command_force_ramp_iterations = 5000
+        command_force_hold_iterations = 10000
+        command_force_ramp_iterations = 8000
 
         push_gripper_stators = True
         apply_ee_external_forces = True
@@ -377,8 +380,8 @@ class B1Z1UniFPCfg:
         compensate_base_external_force = True
 
         class ranges:
-            lin_vel_x = [-0.5, 0.5]
-            lin_vel_y = [-0.4, 0.4]
+            lin_vel_x = [-0.8, 0.8]
+            lin_vel_y = [-0.6, 0.6]
             ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
 
@@ -462,7 +465,7 @@ class B1Z1UniFPCfg:
         
         randomize_joint_friction = True
         joint_friction_range_start = [0.0, 0.02]
-        joint_friction_range_end = [0.0, 0.10]
+        joint_friction_range_end = [0.0, 0.04]
         
         randomize_joint_stiffness = False
         joint_stiffness_range_start = [0.0, 0.0]

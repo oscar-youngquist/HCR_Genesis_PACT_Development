@@ -31,8 +31,9 @@ class B1Z1PACTContextEncoder(nn.Module):
     def __init__(self, input_dim: int, latent_dim: int, hidden: Sequence[int], activation: str):
         super().__init__()
         trunk_dim = hidden[-1]
-
-        self.trunk = _mlp(input_dim, hidden[:-1], trunk_dim, activation)
+        
+        self.trunk = nn.Sequential(_mlp(input_dim, hidden[:-1], trunk_dim, activation),
+                                   _activation(activation))
         # Match UniFP: independent linear mean/log-variance projections from
         # the shared 128-D history feature, with bounded log variance.
         self.latent_mean = nn.Linear(trunk_dim, latent_dim)
@@ -126,7 +127,9 @@ class ActorCriticB1Z1PACT(nn.Module):
         # The actor consumes estimated contact probabilities and foot heights;
         # FiLM intentionally receives neither terrain/contact signal.
         actor_input = num_actor_obs + latent_dim + 3 + 3 + 6 + 3 + 4 + 4
-        self.actor_trunk = _mlp(actor_input, actor_layers[:-1], actor_layers[-1], activation)
+        self.actor_trunk = nn.Sequential(_mlp(actor_input, actor_layers[:-1], actor_layers[-1], activation),
+                                         _activation(activation))
+
 
         # FiLM sees only predicted external disturbances and command errors.
         self.film = FiLM(6 + 3 + 3 + 3, actor_layers[-1], film_hidden_dim, activation)
@@ -201,6 +204,8 @@ class ActorCriticB1Z1PACT(nn.Module):
     def _actor_inputs(self, obs: torch.Tensor, context: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         # Actor observation ends with [vx, vy, yaw_rate, radius, pitch, yaw].
         command = obs[:, -6:]
+        # Both terms are component-wise normalized as [vx*lin, vy*lin,
+        # yaw_rate*ang], so FiLM never compares unlike physical scales.
         base_error = command[:, :3] - context["base_velocity"]
         # Command and prediction share UniFP's scaled spherical representation.
         ee_error = command[:, 3:6] - context["ee_position"]

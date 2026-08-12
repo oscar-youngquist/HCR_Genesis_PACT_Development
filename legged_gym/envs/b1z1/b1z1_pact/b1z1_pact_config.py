@@ -19,6 +19,9 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         num_critic_state_obs = 230 + num_privileged_force_obs
         num_height_obs = 187
         num_privileged_obs = num_critic_state_obs + num_height_obs
+        # Reconstruct only the non-terrain state. Height samples remain
+        # privileged critic inputs but are not an encoder/decoder objective.
+        num_privileged_recon_obs = num_critic_state_obs
         num_priv_stack = 3
         # Base velocity (3), spherical EE pose (3), base wrench (6), EE force
         # (3), foot contacts (4), and terrain-relative foot heights (4).

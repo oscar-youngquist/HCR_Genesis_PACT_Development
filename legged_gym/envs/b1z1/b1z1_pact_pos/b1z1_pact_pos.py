@@ -77,7 +77,7 @@ class B1Z1PACTPos(LeggedRobot):
         obs, privileged_obs, _, _, _, _, _, _ = self.step(
             torch.zeros(
                 self.num_envs,
-                self.num_actions,
+                self.cfg.env.num_policy_actions,
                 device=self.device,
                 requires_grad=False,
             )
@@ -679,8 +679,8 @@ class B1Z1PACTPos(LeggedRobot):
         dof_pos_err = (self.simulator.dof_pos[:, :17] - self.simulator.default_dof_pos[:, :17]) * self.obs_scales.dof_pos
         dof_vel = self.simulator.dof_vel[:, :17] * self.obs_scales.dof_vel
 
-        # Current single-frame actor observation includes only the previously
-        # executed 17-D position action; the auxiliary torque head is hidden.
+        # Keep both previous heads as actor context. The torque half remains
+        # auxiliary and is never forwarded to the position controller.
         self.obs_buf = torch.cat(
             (
                 body_orientation,
@@ -726,7 +726,9 @@ class B1Z1PACTPos(LeggedRobot):
         )
         self.explicit_labels_buf = torch.cat(
             (
-                base_velocity * self.obs_scales.lin_vel,
+                # Explicit velocity uses the same component-wise normalized
+                # representation as the [vx, vy, yaw-rate] command.
+                base_velocity * self.base_velocity_scale,
                 self.ee_pos_sphe_arm * self.ee_sphere_scale,
                 base_wrench_local * self.base_wrench_scale,
                 ee_force_local * self.obs_scales.ee_force,
@@ -767,6 +769,8 @@ class B1Z1PACTPos(LeggedRobot):
             ("base_angular_velocity", self.simulator.base_ang_vel * self.obs_scales.ang_vel),
             ("dof_position_error", dof_pos_err),
             ("dof_velocity", dof_vel),
+            # Retain both policy heads in privileged state, although only the
+            # position half is executed by the simulator.
             ("actions", self.actions),
             ("commands", self.commands * self.commands_scale),
             ("ee_goal", ee_goal_offset_sphere * self.ee_sphere_scale),
@@ -948,18 +952,24 @@ class B1Z1PACTPos(LeggedRobot):
         return link06_pos + quat_apply(link06_quat, tcp_offset)
 
     def _pre_sim_step(self, actions):
-        """Clip/store actor actions and optionally apply actuator delay."""
+        """Store both policy heads and return only executable position actions."""
+        if actions.shape[-1] != self.cfg.env.num_policy_actions:
+            raise RuntimeError(
+                f"B1Z1 PACT Pos expects {self.cfg.env.num_policy_actions} policy "
+                f"actions (position + torque), got {actions.shape[-1]}"
+            )
         actions = torch.clip(actions, -self.cfg.normalization.clip_actions, self.cfg.normalization.clip_actions).to(self.device)
         self.llast_actions[:] = self.last_actions[:]
         self.last_actions[:] = self.actions[:]
         self.actions[:] = actions[:]
+        position_actions = actions[:, :self.num_actions]
         if self.cfg.domain_rand.randomize_ctrl_delay:
             # Genesis port inherits the HCR delay queue: the policy sees the
-            # current observation but the simulator receives an older action.
+            # current observation but the simulator receives an older position action.
             self.action_queue[:, 1:] = self.action_queue[:, :-1].clone()
-            self.action_queue[:, 0] = actions.clone()
-            actions = self.action_queue[self.all_env_ids, self.action_delay].clone()
-        return actions
+            self.action_queue[:, 0] = position_actions
+            position_actions = self.action_queue[self.all_env_ids, self.action_delay].clone()
+        return position_actions
 
     def _post_physics_step_callback(self):
         """Periodic UniFP command updates after simulator state refresh."""
@@ -1473,14 +1483,14 @@ class B1Z1PACTPos(LeggedRobot):
                     (len(finished_env_ids),),
                 )
 
-        if torch.any(freed):
-            # Free envs are explicitly zeroed so old targets cannot leak across
-            # intervals or resets.
-            selected[freed] = False
-            target[freed] = 0.0
-            output[freed] = 0.0
-            self._force_push_end_time_for(output)[freed] = 0.0
-            duration[freed] = 0.0
+        # if torch.any(freed):
+        # Free envs are explicitly zeroed so old targets cannot leak across
+        # intervals or resets.
+        selected[freed] = False
+        target[freed] = 0.0
+        output[freed] = 0.0
+        self._force_push_end_time_for(output)[freed] = 0.0
+        duration[freed] = 0.0
 
     def _force_push_end_time_for(self, output):
         if output is self.ee_force_ext_world:
@@ -1629,8 +1639,8 @@ class B1Z1PACTPos(LeggedRobot):
         mean_tracking = torch.mean(self.episode_sums["tracking_lin_vel_force_world"][env_ids]) / self.max_episode_length
         if mean_tracking > self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel_force_world"]:
             for key in ["lin_vel_x", "lin_vel_y", "ang_vel_yaw"]:
-                self.command_ranges[key][0] = np.clip(self.command_ranges[key][0] - 0.5, -self.cfg.commands.max_curriculum, 0.0)
-                self.command_ranges[key][1] = np.clip(self.command_ranges[key][1] + 0.5, 0.0, self.cfg.commands.max_curriculum)
+                self.command_ranges[key][0] = np.clip(self.command_ranges[key][0] - 0.2, -self.cfg.commands.max_curriculum, 0.0)
+                self.command_ranges[key][1] = np.clip(self.command_ranges[key][1] + 0.2, 0.0, self.cfg.commands.max_curriculum)
 
     def step_reward_curriculum(self, num_iters):
         """Cosine-ramp selected reward scales during training."""
@@ -1693,17 +1703,23 @@ class B1Z1PACTPos(LeggedRobot):
         self.termination_contact_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, device=self.device)
         self.heading_commands = torch.zeros(self.num_envs, device=self.device)
-        self.commands_scale = torch.tensor(
-            [
-                self.obs_scales.lin_vel,
-                self.obs_scales.lin_vel,
-                self.obs_scales.ang_vel,
+        # The estimator, command observation, actor, and FiLM all share this
+        # [linear x, linear y, angular yaw] normalization contract.
+        self.base_velocity_scale = torch.tensor(
+            [self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel],
+            device=self.device,
+        )
+        self.commands_scale = torch.cat((
+            self.base_velocity_scale,
+            torch.tensor(
+                [
                 self.obs_scales.ee_sphe_radius_cmd,
                 self.obs_scales.ee_sphe_pitch_cmd,
                 self.obs_scales.ee_sphe_yaw_cmd,
-            ],
-            device=self.device,
-        )
+                ],
+                device=self.device,
+            ),
+        ))
         self.ee_sphere_scale = torch.tensor(
             [
                 self.obs_scales.ee_sphe_radius_cmd,
@@ -1716,7 +1732,10 @@ class B1Z1PACTPos(LeggedRobot):
             [self.obs_scales.base_force] * 3 + [self.obs_scales.base_force] * 3,
             device=self.device,
         )
-        self.actions = torch.zeros(self.num_envs, self.num_actions, device=self.device)
+        # Full autoregressive policy action: [position head, torque head].
+        self.actions = torch.zeros(
+            self.num_envs, self.cfg.env.num_policy_actions, device=self.device
+        )
         self.last_actions = torch.zeros_like(self.actions)
         self.llast_actions = torch.zeros_like(self.actions)
         self.feet_air_time = torch.zeros(self.num_envs, len(self.simulator.feet_indices), device=self.device)
@@ -2070,7 +2089,7 @@ class B1Z1PACTPos(LeggedRobot):
         # UniFP convention inside PACT training: keep its EE target trajectory,
         # but never turn external force into a shifted Cartesian target.
         error = torch.sum(torch.abs(self.curr_ee_goal_cart_world - self.simulator.ee_pos), dim=1)
-        return torch.exp(-error / self.cfg.rewards.tracking_ee_sigma)
+        return torch.exp(-error / self.cfg.rewards.tracking_ee_sigma * 2.0)
 
     def _reward_torque_cancellation(self):
         """Penalize substantial same-joint cancellation between action heads.

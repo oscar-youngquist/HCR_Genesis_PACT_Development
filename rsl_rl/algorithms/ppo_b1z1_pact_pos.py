@@ -147,16 +147,21 @@ class PPO_B1Z1PACTPos:
         return self.current_entropy_coef
 
     def act(self, obs, critic_obs, history, explicit_labels):
-        actions = self.actor_critic.act(
+        position_actions = self.actor_critic.act(
             obs, history,
             mask_latent=False,
         ).detach()
+        # The torque head remains deterministic and clone-supervised, but is
+        # carried in action_t so it becomes part of the next observation.
+        actions = torch.cat(
+            (position_actions, self.actor_critic.last_torque_mean.detach()), dim=-1
+        )
         self.transition.observations = obs.detach().clone()
         self.transition.critic_observations = critic_obs.detach().clone()
         self.transition.histories = history.detach().clone()
         self.transition.actions = actions
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
-        self.transition.log_probs = self.actor_critic.get_actions_log_prob(actions).detach().unsqueeze(-1)
+        self.transition.log_probs = self.actor_critic.get_actions_log_prob(position_actions).detach().unsqueeze(-1)
         self.transition.mu, self.transition.sigma = self.actor_critic.action_mean.detach(), self.actor_critic.action_std.detach()
         self.transition.explicit_targets = explicit_labels.detach().clone()
         return actions
@@ -253,8 +258,8 @@ class PPO_B1Z1PACTPos:
         aux_context = self.actor_critic.decode_context(
             self.actor_critic.context_encoder(obs_hist_batch, sample=True)
         )
-        # Match UniFP's z-only next-frame decoder. Its target now includes the
-        # normalized force block that previously had a dedicated decoder.
+        # The z-only decoder predicts the next non-terrain privileged state.
+        # Its target includes force state but excludes the critic's height tail.
         aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
 
         pred_velo_loss = F.mse_loss(aux_context["base_velocity"], labels[:, :3])
@@ -351,7 +356,8 @@ class PPO_B1Z1PACTPos:
             batch["observations"], batch["histories"], sample_context=False,
             mask_latent=False,
         )
-        actions_log_prob = self.actor_critic.get_actions_log_prob(batch["actions"])
+        position_actions = batch["actions"][:, :self.actor_critic.num_actions]
+        actions_log_prob = self.actor_critic.get_actions_log_prob(position_actions)
         values = self.actor_critic.evaluate(batch["critic_observations"])
         mu, sigma = self.actor_critic.action_mean, self.actor_critic.action_std
 
@@ -369,8 +375,7 @@ class PPO_B1Z1PACTPos:
                 elif 0.0 < kl_mean < self.desired_kl / 2.0:
                     self.learning_rate = min(1.0e-2, self.learning_rate * 1.5)
                 for group in self.actor_optimizer.optimizer.param_groups:
-                    if group.get("name") in ("actor", "film"):
-                        group["lr"] = self.learning_rate
+                    group["lr"] = self.learning_rate
 
         ratio = torch.exp(actions_log_prob - batch["log_probs"].squeeze(-1))
         advantage = batch["advantages"].squeeze(-1)
@@ -388,12 +393,12 @@ class PPO_B1Z1PACTPos:
         # constraint as base/EE tracking error grows, leaving FiLM free to
         # produce stronger corrective modulation. Detaching the gate prevents
         # the estimator from inflating its error merely to evade the penalty.
-        tracking_gate = torch.exp(
-            -self.actor_critic.last_tracking_error_sq.detach()
-            / self.film_identity_error_scale**2
-        )
+        # tracking_gate = torch.exp(
+        #     -self.actor_critic.last_tracking_error_sq.detach()
+        #     / self.film_identity_error_scale**2
+        # )
         film_identity_loss = (
-            tracking_gate * self.actor_critic.last_film_identity_deviation
+            self.actor_critic.last_film_identity_deviation
         ).mean()
         ppo_loss = (
             surrogate_loss
@@ -417,7 +422,8 @@ class PPO_B1Z1PACTPos:
         )
         mu, sigma = self.actor_critic.action_mean, self.actor_critic.action_std
         old_mu, old_sigma = batch["mu"], batch["sigma"]
-        new_logprob = self.actor_critic.get_actions_log_prob(batch["actions"])
+        position_actions = batch["actions"][:, :self.actor_critic.num_actions]
+        new_logprob = self.actor_critic.get_actions_log_prob(position_actions)
         old_logprob = batch["log_probs"].squeeze(-1)
         mu_error, sigma_error = mu - old_mu, sigma - old_sigma
         logprob_error = new_logprob - old_logprob

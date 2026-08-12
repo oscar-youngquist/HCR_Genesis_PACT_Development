@@ -40,9 +40,9 @@ class B1Z1PACTRunner:
         ).to(device)
 
         self.privileged_decoder = B1Z1PACTDecoder(
-            # Match UniFP: next-state privileged reconstruction is decoded
-            # from z alone, without explicit estimates as side information.
-            policy_cfg["cenet_latent_dim"], env.num_privileged_obs,
+            # Decode the next non-terrain privileged state from z. Terrain
+            # heights remain available to the critic but are not reconstructed.
+            policy_cfg["cenet_latent_dim"], env.cfg.env.num_privileged_recon_obs,
             hidden=policy_cfg["privileged_decoder_layers"],
             activation=policy_cfg["activation"],
         ).to(device)
@@ -69,6 +69,7 @@ class B1Z1PACTRunner:
             "torque_action_scale": env.cfg.control.torque_scale,
             "grf_scale": env.obs_scales.grf,
             "ee_force_scale": env.obs_scales.ee_force,
+            "base_velocity_scale": env.base_velocity_scale.tolist(),
             "base_wrench_scale": env.base_wrench_scale.tolist(),
             "privileged_force_start": env.cfg.env.privileged_force_start,
             "privileged_force_dim": env.cfg.env.num_privileged_force_obs,
@@ -91,7 +92,8 @@ class B1Z1PACTRunner:
 
         self.alg.init_storage(
             env.num_envs, runner_cfg["num_steps_per_env"], env.num_obs, critic_dim,
-            history_dim, 2 * env.num_actions, env.num_exp_labels, env.num_privileged_obs, 180,
+            history_dim, 2 * env.num_actions, env.num_exp_labels,
+            env.cfg.env.num_privileged_recon_obs, 180,
         )
 
         self.steps, self.save_interval = runner_cfg["num_steps_per_env"], runner_cfg["save_interval"]
@@ -146,7 +148,11 @@ class B1Z1PACTRunner:
                         # unlike PACT-pos, the active PINN consumes its floating
                         # base, force, velocity, and inertial-randomization data.
                         reward, dones, infos,
-                        next_privileged[:, -self.env.num_privileged_obs:],
+                        # The final stacked frame is [state, terrain heights].
+                        # Store only state as the next-frame decoder target.
+                        next_privileged[:, -self.env.num_privileged_obs:][
+                            :, :self.env.cfg.env.num_privileged_recon_obs
+                        ],
                         self.env.get_pact_dynamics_state().to(self.device),
                     )
                     running_reward += reward.view(-1, 1)

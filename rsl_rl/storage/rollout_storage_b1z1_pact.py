@@ -27,11 +27,20 @@ class RolloutStorageB1Z1PACT:
         def clear(self):
             self.__init__()
 
-    def __init__(self, num_envs, steps, obs_dim, critic_dim, history_dim, action_dim, explicit_dim, next_privileged_dim, state_dim, device):
+    def __init__(
+        self, num_envs, steps, obs_dim, critic_dim, history_dim, action_dim,
+        explicit_dim, next_privileged_dim, state_dim,
+        policy_distribution_dim=None, device="cpu",
+    ):
         self.device, self.num_envs, self.steps, self.step = device, num_envs, steps, 0
         def zeros(dim): return torch.zeros(steps, num_envs, dim, device=device)
         self.observations, self.critic_observations, self.histories = zeros(obs_dim), zeros(critic_dim), zeros(history_dim)
-        self.actions, self.mu, self.sigma = zeros(action_dim), zeros(action_dim), zeros(action_dim)
+        # Coupled policies normally use one width for stored actions and their
+        # Gaussian. PACT-Pos stores its deterministic torque head too, while
+        # PPO statistics remain defined only for the stochastic position half.
+        distribution_dim = action_dim if policy_distribution_dim is None else policy_distribution_dim
+        self.actions = zeros(action_dim)
+        self.mu, self.sigma = zeros(distribution_dim), zeros(distribution_dim)
         self.values, self.rewards, self.returns, self.advantages = zeros(1), zeros(1), zeros(1), zeros(1)
         self.log_probs, self.dones = zeros(1), torch.zeros(steps, num_envs, 1, dtype=torch.bool, device=device)
         # Ground-truth explicit_t is supervision only; policy conditioning is predicted.

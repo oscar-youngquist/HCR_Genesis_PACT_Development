@@ -107,8 +107,9 @@ class ActorCriticUniFP(nn.Module):
         # Initialize the state-estimator decoder
         self.adaptation_decoder_module.apply(init_weights)
 
-        # The same sampled z predicts the next single privileged frame. This
-        # decoder is training-only; no privileged state enters the actor.
+        # The same sampled z predicts the configured next-frame reconstruction
+        # target. B1Z1 omits the terrain-height tail, while the full privileged
+        # frame remains available to the critic. This decoder is training-only.
         privileged_decoder_layers = []
         privileged_decoder_layers.append(nn.Linear(self.num_latent_dim, AC_Args.adaptation_module_decoder_recon_hidden_dims[0]))
         privileged_decoder_layers.append(activation)

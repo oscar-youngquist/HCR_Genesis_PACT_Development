@@ -9,17 +9,20 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
     class env:
         num_envs = 4096
         # 2 body-orientation + 3 angular velocity + 17 joint positions +
-        # 17 joint velocities + 17 position actions + 6 commands. EE pose is
-        # estimated from history instead of exposed through an FK error.
-        num_observations = 62
+        # 17 joint velocities + 34 previous policy actions (position then
+        # auxiliary torque) + 6 commands. EE pose is estimated from history.
+        num_observations = 79
         # Position-only PACT uses 213 state/randomization
         # values plus the same 187-point terrain grid used by UniFP.
         num_privileged_force_obs = 21
         privileged_force_start = 23
         # Replace the former 12-D GRF-only tail with the complete 21-D force block.
-        num_critic_state_obs = 213 + num_privileged_force_obs
+        num_critic_state_obs = 213 + num_privileged_force_obs + 17
         num_height_obs = 187
         num_privileged_obs = num_critic_state_obs + num_height_obs
+        # Reconstruct only the non-terrain state. Height samples remain
+        # privileged critic inputs but are not an encoder/decoder objective.
+        num_privileged_recon_obs = num_critic_state_obs
         num_priv_stack = 3
         # Base velocity (3), spherical EE pose (3), base wrench (6), EE force
         # (3), foot contacts (4), and terrain-relative foot heights (4).
@@ -27,8 +30,9 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         assert privileged_force_start == num_explicit_recon_obs
         num_pred_obs = 23
         num_actions = 17
-        # Only position actions are executed; the torque head is auxiliary.
-        num_policy_actions = 17
+        # The complete policy action keeps both heads in temporal history;
+        # only the first 17 position values are executed by the simulator.
+        num_policy_actions = 2 * num_actions
         num_gripper_joints = 2
         num_obs_hist = 10
         env_spacing = 0.5
@@ -298,7 +302,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         tradeoff_threshold = 0.70
 
     class commands:
-        curriculum = True
+        curriculum = False
         max_curriculum = 0.8
         # UniFP convention inside PACT training: the last three slots retain
         # the yaw-aligned spherical EE target, but all force-command slots are
@@ -342,7 +346,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         
         push_robot_base = True
         apply_base_external_forces = True
-        push_base_interval_s_ext = [3.5, 9.0]
+        push_base_interval_s_ext = [6.0, 12.0]
         push_base_duration_s_ext = [1.0, 3.0]
         base_forced_prob_ext = 0.8
         max_push_force_xyz_base_ext = [-50.0, 50.0]
@@ -360,8 +364,8 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         # The impedance relation is a reward only. It never changes commands.
 
         class ranges:
-            lin_vel_x = [-0.5, 0.5]
-            lin_vel_y = [-0.4, 0.4]
+            lin_vel_x = [-0.8, 0.8]
+            lin_vel_y = [-0.6, 0.6]
             ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
 
@@ -447,7 +451,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         
         randomize_joint_friction = True
         joint_friction_range_start = [0.0, 0.02]
-        joint_friction_range_end = [0.0, 0.10]
+        joint_friction_range_end = [0.0, 0.04]
         
         randomize_joint_stiffness = False
         joint_stiffness_range_start = [0.0, 0.0]

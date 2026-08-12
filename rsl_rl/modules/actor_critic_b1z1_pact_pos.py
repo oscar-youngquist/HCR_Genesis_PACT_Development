@@ -32,7 +32,8 @@ class B1Z1PACTContextEncoder(nn.Module):
         super().__init__()
         trunk_dim = hidden[-1]
 
-        self.trunk = _mlp(input_dim, hidden[:-1], trunk_dim, activation)
+        self.trunk = nn.Sequential(_mlp(input_dim, hidden[:-1], trunk_dim, activation),
+                                   _activation(activation))
         # Match UniFP: independent linear mean/log-variance projections from
         # the shared 128-D history feature, with bounded log variance.
         self.latent_mean = nn.Linear(trunk_dim, latent_dim)
@@ -126,7 +127,8 @@ class ActorCriticB1Z1PACTPos(nn.Module):
         # The actor consumes estimated contact probabilities and foot heights;
         # FiLM intentionally receives neither terrain/contact signal.
         actor_input = num_actor_obs + latent_dim + 3 + 3 + 6 + 3 + 4 + 4
-        self.actor_trunk = _mlp(actor_input, actor_layers[:-1], actor_layers[-1], activation)
+        self.actor_trunk = nn.Sequential(_mlp(actor_input, actor_layers[:-1], actor_layers[-1], activation),
+                                         _activation(activation))
 
         # FiLM sees only predicted external disturbances and command errors.
         self.film = FiLM(6 + 3 + 3 + 3, actor_layers[-1], film_hidden_dim, activation)
@@ -219,6 +221,8 @@ class ActorCriticB1Z1PACTPos(nn.Module):
         film_context = actor_context if film_context is None else film_context
         # Actor observation ends with [vx, vy, yaw_rate, radius, pitch, yaw].
         command = obs[:, -6:]
+        # Both terms are component-wise normalized as [vx*lin, vy*lin,
+        # yaw_rate*ang], so FiLM never compares unlike physical scales.
         base_error = command[:, :3] - film_context["base_velocity"]
         # Command and prediction share UniFP's scaled spherical representation.
         ee_error = command[:, 3:6] - film_context["ee_position"]
@@ -292,8 +296,12 @@ class ActorCriticB1Z1PACTPos(nn.Module):
         self, obs: torch.Tensor, history: torch.Tensor,
     ) -> torch.Tensor:
         context = self.decode_context(self.context_encoder.forward_inf(history))
-        position, _ = self.actor_forward(obs, context, context)
-        return position
+        position, torque = self.actor_forward(obs, context, context)
+        self.last_position_mean = position
+        self.last_torque_mean = torque
+        # PACT-Pos executes the first half, but preserves both heads in the
+        # environment action history used by the next policy evaluation.
+        return torch.cat((position, torque), dim=-1)
 
     def evaluate(self, critic_obs: torch.Tensor) -> torch.Tensor:
         return self.critic(critic_obs)

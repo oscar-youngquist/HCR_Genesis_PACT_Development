@@ -308,6 +308,10 @@ class PPO_B1Z1PACT:
         products. A future differentiable backend can preserve this interface.
         """
         # State layout is documented by B1Z1PACT.get_pact_dynamics_state().
+        # Unlike context["base_velocity"], these velocities are physical SI
+        # values. The Pinocchio residual must not inherit observation scaling.
+        if len(self.cfg["base_velocity_scale"]) != 3:
+            raise RuntimeError("base_velocity_scale must describe [vx, vy, yaw_rate]")
         base_pos, base_quat, q = state[:, :3], state[:, 3:7], state[:, 7:26]
 
         v = state[:, 26:51]
@@ -414,8 +418,9 @@ class PPO_B1Z1PACT:
         aux_context = self.actor_critic.decode_context(
             self.actor_critic.context_encoder(obs_hist_batch, sample=True)
         )
-        # One z-only decoder reconstructs the complete next privileged frame,
-        # including its normalized GRF, EE-force, and base-wrench block.
+        # One z-only decoder reconstructs the next non-terrain privileged
+        # state, including normalized GRF, EE-force, and base-wrench values.
+        # The critic's terrain-height tail is intentionally absent here.
         aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
 
         pred_velo_loss = F.mse_loss(aux_context["base_velocity"], labels[:, :3])

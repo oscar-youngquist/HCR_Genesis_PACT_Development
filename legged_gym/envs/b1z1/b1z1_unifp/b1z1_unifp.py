@@ -1451,14 +1451,14 @@ class B1Z1UniFP(BaseTask):
                     (len(finished_env_ids),),
                 )
 
-        if torch.any(freed):
-            # Free envs are explicitly zeroed so old targets cannot leak across
-            # intervals or resets.
-            selected[freed] = False
-            target[freed] = 0.0
-            output[freed] = 0.0
-            self._force_push_end_time_for(output)[freed] = 0.0
-            duration[freed] = 0.0
+        # if torch.any(freed):
+        # Free envs are explicitly zeroed so old targets cannot leak across
+        # intervals or resets.
+        selected[freed] = False
+        target[freed] = 0.0
+        output[freed] = 0.0
+        self._force_push_end_time_for(output)[freed] = 0.0
+        duration[freed] = 0.0
 
     def _force_push_end_time_for(self, output):
         if output is self.current_Fxyz_gripper_cmd:
@@ -2316,18 +2316,18 @@ class B1Z1UniFP(BaseTask):
 
         return self._feet_stats
 
-    # def _reward_feet_air_time(self):
-    #     contact = self.simulator.foot_contacts
-    #     contact_filt = torch.logical_or(contact, self.last_contacts)
-    #     # Preserve the buffer object and dtype so other rewards cannot inherit
-    #     # accidental bool/float conversions through aliasing.
-    #     self.last_contacts.copy_(contact)
-    #     first_contact = (self.feet_air_time > 0.) * contact_filt
-    #     self.feet_air_time += self.dt
-    #     rew_airTime = torch.sum((self.feet_air_time - 0.12) * first_contact, dim=1)  # reward only on first contact with the ground
-    #     rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.1  # no reward for zero command
-    #     self.feet_air_time *= (~contact_filt).float()
-    #     return rew_airTime
+    def _reward_feet_air_time(self):
+        contact = self.simulator.foot_contacts
+        contact_filt = torch.logical_or(contact, self.last_contacts)
+        # Preserve the buffer object and dtype so other rewards cannot inherit
+        # accidental bool/float conversions through aliasing.
+        self.last_contacts.copy_(contact)
+        first_contact = (self.feet_air_time > 0.) * contact_filt
+        self.feet_air_time += self.dt
+        rew_airTime = torch.sum((self.feet_air_time - 0.12) * first_contact, dim=1)  # reward only on first contact with the ground
+        rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.1  # no reward for zero command
+        self.feet_air_time *= (~contact_filt).float()
+        return rew_airTime
 
 
     def _reward_sparse_contacts(self):
@@ -2341,23 +2341,23 @@ class B1Z1UniFP(BaseTask):
         
         return torch.exp(-torch.square(num_contacts - 2.0)) * moving.float()
 
-    def _reward_feet_air_time(self):
-        """
-        Reward sufficiently long swing periods when the foot touches down.
-        """
-        stats = self._update_feet_air_time_stats()
+    # def _reward_feet_air_time(self):
+    #     """
+    #     Reward sufficiently long swing periods when the foot touches down.
+    #     """
+    #     stats = self._update_feet_air_time_stats()
 
-        first_contact = stats["first_contact"]
-        touchdown_air_time = stats["touchdown_air_time"]
+    #     first_contact = stats["first_contact"]
+    #     touchdown_air_time = stats["touchdown_air_time"]
 
-        error = (touchdown_air_time - 0.30)
-        error[:,0:2] *= 2                 # give twice the weight to the front feet
+    #     error = (touchdown_air_time - 0.30)
+    #     error[:,0:2] *= 2                 # give twice the weight to the front feet
 
-        reward = torch.sum(error * first_contact.float(), dim=1)
+    #     reward = torch.sum(error * first_contact.float(), dim=1)
 
-        reward *= self.get_walking_cmd_mask().float()
+    #     reward *= self.get_walking_cmd_mask().float()
 
-        return reward
+    #     return reward
 
     def _reward_early_swing(self):
         """

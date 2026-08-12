@@ -35,6 +35,14 @@ class OnPolicyRunnerUniFP:
         num_single_obs = self.env.num_obs
         num_actor_obs = self.env.num_obs * self.env.num_obs_hist
         num_critic_obs = self.env.num_privileged_obs
+        # B1Z1 excludes the terrain-height tail from next-frame decoding.
+        # Other UniFP tasks remain backward compatible and reconstruct their
+        # complete single privileged frame when this field is not configured.
+        self.num_privileged_recon_obs = getattr(
+            self.env.cfg.env,
+            "num_privileged_recon_obs",
+            self.env.num_privileged_obs,
+        )
         if getattr(self.env, "num_crit_obs_stack", None) is not None:
             num_critic_obs *= self.env.num_crit_obs_stack
 
@@ -45,7 +53,7 @@ class OnPolicyRunnerUniFP:
             self.env.num_pred_obs,
             num_single_obs,
             self.env.num_actions,
-            num_privileged_obs_single=self.env.num_privileged_obs,
+            num_privileged_obs_single=self.num_privileged_recon_obs,
             enable_additional_diagnostics=self.enable_additional_diagnostics,
             **self.policy_cfg,
         ).to(self.device)
@@ -81,7 +89,7 @@ class OnPolicyRunnerUniFP:
             [num_actor_obs],
             [num_critic_obs],
             [self.env.num_pred_obs],
-            [self.env.num_privileged_obs],
+            [self.num_privileged_recon_obs],
             [self.env.num_actions],
         )
 
@@ -144,7 +152,9 @@ class OnPolicyRunnerUniFP:
 
                     # The final stack slot is the post-action, single-frame
                     # privileged target for one-step latent reconstruction.
-                    next_privileged = critic_obs[:, -self.env.num_privileged_obs:]
+                    next_privileged = critic_obs[:, -self.env.num_privileged_obs:][
+                        :, :self.num_privileged_recon_obs
+                    ]
                     self.alg.process_env_step(rewards, dones, infos, next_privileged)
 
                     if "episode" in infos:
@@ -153,10 +163,11 @@ class OnPolicyRunnerUniFP:
                         cur_reward_sum += rewards
                         cur_episode_length += 1
                         new_ids = (dones > 0).nonzero(as_tuple=False)
-                        rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                        lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
-                        cur_reward_sum[new_ids] = 0
-                        cur_episode_length[new_ids] = 0
+                        if len(new_ids):
+                            rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
+                            lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
+                            cur_reward_sum[new_ids] = 0
+                            cur_episode_length[new_ids] = 0
 
                 collection_time = time.time() - start
                 policy_diagnostics = (

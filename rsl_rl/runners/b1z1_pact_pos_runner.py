@@ -38,9 +38,9 @@ class B1Z1PACTPosRunner:
         ).to(device)
 
         self.privileged_decoder = B1Z1PACTDecoder(
-            # Match UniFP: next-state privileged reconstruction is decoded
-            # from z alone, without explicit estimates as side information.
-            policy_cfg["cenet_latent_dim"], env.num_privileged_obs,
+            # Decode the next non-terrain privileged state from z. Terrain
+            # heights remain available to the critic but are not reconstructed.
+            policy_cfg["cenet_latent_dim"], env.cfg.env.num_privileged_recon_obs,
             hidden=policy_cfg["privileged_decoder_layers"],
             activation=policy_cfg["activation"],
         ).to(device)
@@ -72,7 +72,8 @@ class B1Z1PACTPosRunner:
 
         self.alg.init_storage(
             env.num_envs, runner_cfg["num_steps_per_env"], env.num_obs, critic_dim,
-            history_dim, env.num_actions, env.num_exp_labels, env.num_privileged_obs, 76,
+            history_dim, env.cfg.env.num_policy_actions, env.num_exp_labels,
+            env.cfg.env.num_privileged_recon_obs, 76, env.num_actions,
         )
 
         self.steps, self.save_interval = runner_cfg["num_steps_per_env"], runner_cfg["save_interval"]
@@ -123,7 +124,11 @@ class B1Z1PACTPosRunner:
                     )
                     self.alg.process_env_step(
                         reward, dones, infos,
-                        next_privileged[:, -self.env.num_privileged_obs:],
+                        # The final stacked frame is [state, terrain heights].
+                        # Store only state as the next-frame decoder target.
+                        next_privileged[:, -self.env.num_privileged_obs:][
+                            :, :self.env.cfg.env.num_privileged_recon_obs
+                        ],
                         self.env.get_pact_pos_torque_clone_state().to(self.device),
                     )
                     running_reward += reward.view(-1, 1)

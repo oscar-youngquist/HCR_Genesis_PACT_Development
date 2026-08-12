@@ -707,7 +707,9 @@ class B1Z1PACT(LeggedRobot):
         )
         self.explicit_labels_buf = torch.cat(
             (
-                base_command_velocity * self.obs_scales.lin_vel,
+                # Explicit velocity uses the same component-wise normalized
+                # representation as the [vx, vy, yaw-rate] command.
+                base_command_velocity * self.base_velocity_scale,
                 self.ee_pos_sphe_arm * self.ee_sphere_scale,
                 base_wrench_local * self.base_wrench_scale,
                 ee_force_local * self.obs_scales.ee_force,
@@ -1454,14 +1456,14 @@ class B1Z1PACT(LeggedRobot):
                     (len(finished_env_ids),),
                 )
 
-        if torch.any(freed):
-            # Free envs are explicitly zeroed so old targets cannot leak across
-            # intervals or resets.
-            selected[freed] = False
-            target[freed] = 0.0
-            output[freed] = 0.0
-            self._force_push_end_time_for(output)[freed] = 0.0
-            duration[freed] = 0.0
+        # if torch.any(freed):
+        # Free envs are explicitly zeroed so old targets cannot leak across
+        # intervals or resets.
+        selected[freed] = False
+        target[freed] = 0.0
+        output[freed] = 0.0
+        self._force_push_end_time_for(output)[freed] = 0.0
+        duration[freed] = 0.0
 
     def _force_push_end_time_for(self, output):
         if output is self.ee_force_ext_world:
@@ -1674,17 +1676,23 @@ class B1Z1PACT(LeggedRobot):
         self.termination_contact_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, device=self.device)
         self.heading_commands = torch.zeros(self.num_envs, device=self.device)
-        self.commands_scale = torch.tensor(
-            [
-                self.obs_scales.lin_vel,
-                self.obs_scales.lin_vel,
-                self.obs_scales.ang_vel,
+        # The estimator, command observation, actor, and FiLM all share this
+        # [linear x, linear y, angular yaw] normalization contract.
+        self.base_velocity_scale = torch.tensor(
+            [self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel],
+            device=self.device,
+        )
+        self.commands_scale = torch.cat((
+            self.base_velocity_scale,
+            torch.tensor(
+                [
                 self.obs_scales.ee_sphe_radius_cmd,
                 self.obs_scales.ee_sphe_pitch_cmd,
                 self.obs_scales.ee_sphe_yaw_cmd,
-            ],
-            device=self.device,
-        )
+                ],
+                device=self.device,
+            ),
+        ))
         self.ee_sphere_scale = torch.tensor(
             [
                 self.obs_scales.ee_sphe_radius_cmd,
