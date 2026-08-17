@@ -121,6 +121,10 @@ class PPO_B1Z1PACT:
             augmented_rho=cfg.get("kl_aug_rho", 0.1),
             ema_decay=cfg.get("kl_ema_decay", 0.99),
         )
+        self.use_kl_rate_band = bool(cfg.get("use_kl_rate_band", True))
+        self.use_cosine_kl_warmup = bool(
+            cfg.get("use_cosine_kl_warmup", True)
+        )
 
         self.transition = RolloutStorageB1Z1PACT.Transition()
         self.storage = None
@@ -454,7 +458,10 @@ class PPO_B1Z1PACT:
             1 + aux_context["logvar"] - aux_context["mean"].square() - aux_context["logvar"].exp()
         ).sum(dim=-1, keepdim=True)
         aux_kl = (kl_per_sample * valid).sum() / valid.sum().clamp_min(1.0)
-        kl_reg_loss = self.kl_controller.loss(aux_kl, iteration)
+        kl_reg_loss = self.kl_controller.loss(
+            aux_kl, iteration, self.use_kl_rate_band,
+            self.use_cosine_kl_warmup,
+        )
 
         # Total loss
         aux = (
@@ -746,13 +753,16 @@ class PPO_B1Z1PACT:
         _, explicit_pboot, explicit_baseline, explicit_recon = sample_boot_flag(boot_stats["explicit"])
         mean_metrics = {key: value / max(1, updates) for key, value in metrics.items()}
         mean_raw_kl = update_duals_from_mean(
-            self.kl_controller, raw_kl_sum, updates, iteration, self.device
+            self.kl_controller, raw_kl_sum, updates, iteration, self.device,
+            enabled=self.use_kl_rate_band,
+            use_cosine_warmup=self.use_cosine_kl_warmup,
         )
         if mean_raw_kl is not None:
             controller_metrics = self.kl_controller.metrics(
                 mean_raw_kl,
                 torch.tensor(mean_metrics["kl_reg_loss"], device=self.device),
-                iteration,
+                iteration, self.use_kl_rate_band,
+                self.use_cosine_kl_warmup,
             )
             for name in KLRateBandController.METRIC_NAMES:
                 if name not in ("kl_raw", "kl_reg_loss"):

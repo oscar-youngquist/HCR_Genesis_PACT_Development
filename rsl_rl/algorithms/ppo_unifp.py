@@ -38,6 +38,8 @@ class PPO_UniFP:
                  adaptive_ent_softmax_temp=2.0,
                  adaptation_privileged_weight=1.0,
                  adaptation_kl_weight=1.0e-3,
+                 use_kl_rate_band=True,
+                 use_cosine_kl_warmup=True,
                  kl_warmup_iters=500,
                  kl_warmup_beta_max=None,
                  kl_band_warmup_iters=500,
@@ -87,6 +89,8 @@ class PPO_UniFP:
 
 
         self.adaptation_kl_weight = float(adaptation_kl_weight)
+        self.use_kl_rate_band = bool(use_kl_rate_band)
+        self.use_cosine_kl_warmup = bool(use_cosine_kl_warmup)
         self.kl_controller = KLRateBandController(
             warmup_iters=kl_warmup_iters,
             warmup_beta_max=(
@@ -525,7 +529,10 @@ class PPO_UniFP:
                         ).sum(dim=-1, keepdim=True)
                         kl_loss = (kl_loss * valid).sum() / valid.sum().clamp_min(1.0)
 
-                        kl_reg_loss = self.kl_controller.loss(kl_loss, iteration)
+                        kl_reg_loss = self.kl_controller.loss(
+                            kl_loss, iteration, self.use_kl_rate_band,
+                            self.use_cosine_kl_warmup,
+                        )
 
                         adaptation_loss += (
                             self.adaptation_privileged_weight * privileged_loss
@@ -563,13 +570,16 @@ class PPO_UniFP:
             mean_adaptation_losses[label] /= (num_updates * self.num_enc_epochs)
 
         mean_raw_kl = update_duals_from_mean(
-            self.kl_controller, raw_kl_sum, raw_kl_count, iteration, self.device
+            self.kl_controller, raw_kl_sum, raw_kl_count, iteration, self.device,
+            enabled=self.use_kl_rate_band,
+            use_cosine_warmup=self.use_cosine_kl_warmup,
         )
         if mean_raw_kl is not None:
             controller_metrics = self.kl_controller.metrics(
                 mean_raw_kl,
                 torch.tensor(mean_adaptation_losses["kl_reg_loss"], device=self.device),
-                iteration,
+                iteration, self.use_kl_rate_band,
+                self.use_cosine_kl_warmup,
             )
             for name in KLRateBandController.METRIC_NAMES:
                 if name not in ("kl_raw", "kl_reg_loss"):

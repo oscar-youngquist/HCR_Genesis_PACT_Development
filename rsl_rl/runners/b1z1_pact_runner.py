@@ -83,7 +83,7 @@ class B1Z1PACTRunner:
             "explicit_base_vel_weight", "explicit_ee_position_weight", "explicit_base_wrench_weight", "explicit_ee_force_weight", "explicit_foot_contact_weight",
             "explicit_foot_height_weight",
             "privileged_decoder_weight", "vae_kld_weight",
-            "kl_warmup_iters", "kl_warmup_beta_max", "kl_r_min", "kl_r_max",
+            "use_kl_rate_band", "use_cosine_kl_warmup", "kl_warmup_iters", "kl_warmup_beta_max", "kl_r_min", "kl_r_max",
             "kl_dual_lr", "kl_aug_rho", "kl_ema_decay",
             "adaptation_learning_rate",
         )})

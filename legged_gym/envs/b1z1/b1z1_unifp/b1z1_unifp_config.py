@@ -192,7 +192,8 @@ class B1Z1UniFPCfg:
         side_signs = [-1.0, 1.0, -1.0, 1.0]  # FR, FL, RR, RL
 
     class terrain:
-        mesh_type = "trimesh"
+        # mesh_type = "trimesh"
+        mesh_type = "heightfield"
         simplify_mesh = True
         plane_length = 200.0
         horizontal_scale = 0.1
@@ -810,6 +811,10 @@ class B1Z1UniFPCfgPPO:
         # B1Z1: reconstruct one next privileged frame and regularize q(z|h).
         adaptation_privileged_weight = 1.0
         adaptation_kl_weight = 0.1
+        # False selects fixed standard KL: kl_warmup_beta_max * raw_KL.
+        use_kl_rate_band = True
+        # Independently cosine-ramp the base KL coefficient to its maximum.
+        use_cosine_kl_warmup = True
         kl_warmup_iters = 1000
         kl_warmup_beta_max = adaptation_kl_weight
         kl_band_warmup_iters = 500
@@ -840,6 +845,6 @@ class B1Z1UniFPCfgPPO:
         experiment_name = "b1z1_unifp_gym"
         sync_wandb = False
         resume = False
-        load_run = "Aug10_13-42-18_unifp_baseline"
+        load_run = "Aug12_00-49-12_faithful_unifp_baseline"
         checkpoint = -1
         resume_path = None

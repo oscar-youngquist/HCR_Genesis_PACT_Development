@@ -806,6 +806,10 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         privileged_decoder_weight = 1.0
 
         vae_kld_weight = 0.10
+        # False selects fixed standard KL: kl_warmup_beta_max * raw_KL.
+        use_kl_rate_band = True
+        # Independently cosine-ramp the base KL coefficient to its maximum.
+        use_cosine_kl_warmup = True
         kl_warmup_iters = 1000
         kl_warmup_beta_max = vae_kld_weight
         kl_band_warmup_iters = 500

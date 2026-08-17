@@ -164,6 +164,76 @@ class KLIterationUpdateTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["kl_base_beta"].item(), 1.0)
         self.assertAlmostEqual(metrics["kl_effective_coef"].item(), 1.0)
 
+    def test_standard_kl_can_use_cosine_warmup(self):
+        controller = KLRateBandController(
+            warmup_iters=10, warmup_beta_max=0.25,
+            rate_min=0.1, rate_max=1.0, dual_lr=1.0,
+            augmented_rho=1.0, ema_decay=0.0,
+        )
+        raw_kl = torch.tensor(2.0)
+
+        expected_losses = ((0, 0.0), (5, 0.25), (10, 0.5), (100, 0.5))
+        for iteration, expected_loss in expected_losses:
+            loss = controller.loss(
+                raw_kl, iteration, use_rate_band=False,
+                use_cosine_warmup=True,
+            )
+            self.assertAlmostEqual(loss.item(), expected_loss)
+            metrics = controller.metrics(
+                raw_kl, loss, iteration, use_rate_band=False,
+                use_cosine_warmup=True,
+            )
+            self.assertEqual(metrics["kl_rate_band_enabled"].item(), 0.0)
+            self.assertEqual(metrics["kl_warmup_enabled"].item(), 1.0)
+
+    def test_standard_kl_can_disable_cosine_warmup(self):
+        controller = KLRateBandController(
+            warmup_iters=10, warmup_beta_max=0.25,
+            rate_min=0.1, rate_max=1.0, dual_lr=1.0,
+            augmented_rho=1.0, ema_decay=0.0,
+        )
+        raw_kl = torch.tensor(2.0)
+
+        for iteration in (0, 5, 10, 100):
+            loss = controller.loss(
+                raw_kl, iteration, use_rate_band=False,
+                use_cosine_warmup=False,
+            )
+            self.assertAlmostEqual(loss.item(), 0.5)
+            metrics = controller.metrics(
+                raw_kl, loss, iteration, use_rate_band=False,
+                use_cosine_warmup=False,
+            )
+            self.assertEqual(metrics["kl_rate_band_enabled"].item(), 0.0)
+            self.assertEqual(metrics["kl_warmup_enabled"].item(), 0.0)
+            self.assertEqual(metrics["kl_band_active"].item(), 0.0)
+            self.assertAlmostEqual(metrics["kl_effective_coef"].item(), 0.25)
+
+    def test_rate_band_without_base_warmup_starts_its_own_ramp_at_zero(self):
+        controller = self._cosine_band_controller()
+
+        self.assertTrue(controller.band_active(0, use_cosine_warmup=False))
+        self.assertEqual(
+            controller.band_warmup_scale(0, use_cosine_warmup=False), 0.0
+        )
+        self.assertAlmostEqual(
+            controller.band_warmup_scale(10, use_cosine_warmup=False), 0.5
+        )
+        self.assertEqual(
+            controller.band_warmup_scale(20, use_cosine_warmup=False), 1.0
+        )
+
+    def test_standard_kl_disables_dual_updates(self):
+        controller = self._controller()
+        mean = update_duals_from_mean(
+            controller, 4.0, 2, 20, "cpu", enabled=False
+        )
+
+        self.assertAlmostEqual(mean.item(), 2.0)
+        self.assertEqual(controller.lambda_low, 0.0)
+        self.assertEqual(controller.lambda_high, 0.0)
+        self.assertIsNone(controller.kl_ema)
+
     @staticmethod
     def _cosine_band_controller(band_warmup_iters=20):
         return KLRateBandController(
