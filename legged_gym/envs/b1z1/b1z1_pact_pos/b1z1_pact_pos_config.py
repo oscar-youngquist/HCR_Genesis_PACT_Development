@@ -510,7 +510,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         use_reward_curriculum = False
         
         tracking_sigma = 0.25
-        tracking_ee_sigma = 0.50
+        tracking_ee_sigma = 1.00
         
         tracking_ee_orientation_sigma = 0.02
         impedance_virtual_mass = [1.0, 1.0, 1.0]

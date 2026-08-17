@@ -203,6 +203,67 @@ class IsaacGymSimulator(Simulator):
         cam_pos = gymapi.Vec3(eye[0], eye[1], eye[2])
         cam_target = gymapi.Vec3(target[0], target[1], target[2])
         self._gym.viewer_camera_look_at(self._viewer, None, cam_pos, cam_target)
+
+    @staticmethod
+    def _debug_numpy(value):
+        """Convert the small viewer-only payload to a NumPy array."""
+        if torch.is_tensor(value):
+            value = value.detach().cpu().numpy()
+        return np.asarray(value, dtype=np.float32)
+
+    def clear_debug_objects(self):
+        """Clear transient Isaac Gym viewer lines without affecting simulation."""
+        if self._viewer is not None:
+            self._gym.clear_lines(self._viewer)
+
+    def draw_debug_spheres(self, positions, radius, color, env_id=0):
+        """Draw world-frame wireframe spheres for one rendered environment."""
+        if self._viewer is None:
+            return
+        positions = self._debug_numpy(positions).reshape(-1, 3)
+        sphere = gymutil.WireframeSphereGeometry(
+            radius, 8, 8, None, color=tuple(color[:3])
+        )
+        for position in positions:
+            pose = gymapi.Transform(gymapi.Vec3(*position), r=None)
+            gymutil.draw_lines(
+                sphere, self._gym, self._viewer, self._envs[env_id], pose
+            )
+
+    def draw_debug_arrow(self, origin, vector, color, env_id=0):
+        """Draw a world-frame arrow using three Isaac Gym viewer lines."""
+        if self._viewer is None:
+            return
+        origin = self._debug_numpy(origin).reshape(3)
+        vector = self._debug_numpy(vector).reshape(3)
+        length = float(np.linalg.norm(vector))
+        if length <= 1.0e-6:
+            return
+
+        direction = vector / length
+        reference = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        if abs(float(np.dot(direction, reference))) > 0.95:
+            reference = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        side = np.cross(direction, reference)
+        side /= max(float(np.linalg.norm(side)), 1.0e-6)
+        end = origin + vector
+        head_length = min(0.12, 0.3 * length)
+        head_base = end - head_length * direction
+        head_width = 0.4 * head_length
+        vertices = np.stack(
+            (
+                origin,
+                end,
+                end,
+                head_base + head_width * side,
+                end,
+                head_base - head_width * side,
+            )
+        ).astype(np.float32)
+        colors = np.tile(np.asarray(color[:3], dtype=np.float32), (3, 1))
+        self._gym.add_lines(
+            self._viewer, self._envs[env_id], 3, vertices, colors
+        )
     
     def get_height_at(self, pos_xy):
         """ Get height of the terrain at specific (x, y) location
@@ -276,7 +337,11 @@ class IsaacGymSimulator(Simulator):
                 2.3 create actor with these properties and add them to the env
              3. Store indices of different bodies of the robot
         """
-        asset_path = self._cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
+        # Some assets need backend-specific mesh-frame conventions. Keep the
+        # common ``file`` entry as the fallback for existing configurations.
+        asset_path = getattr(self._cfg.asset, "isaacgym_file", self._cfg.asset.file).format(
+            LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR
+        )
         asset_root = os.path.dirname(asset_path)
         asset_file = os.path.basename(asset_path)
 

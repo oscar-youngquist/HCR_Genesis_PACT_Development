@@ -135,6 +135,9 @@ class B1Z1UniFPCfg:
     class asset:
         name = "b1z1"
         file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/b1z1_current/urdf/b1z1_genesis.urdf"
+        # Isaac Gym's DAE importer needs the original pi/2 mesh-frame rotation;
+        # Genesis uses the backend-specific zero-rotation URDF above.
+        isaacgym_file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/b1z1_current/urdf/b1z1.urdf"
         base_name = "trunk"
         base_mass_name = "trunk"
         base_com_name = "trunk"
@@ -192,8 +195,8 @@ class B1Z1UniFPCfg:
         side_signs = [-1.0, 1.0, -1.0, 1.0]  # FR, FL, RR, RL
 
     class terrain:
-        # mesh_type = "trimesh"
-        mesh_type = "heightfield"
+        mesh_type = "trimesh"
+        # mesh_type = "heightfield"
         simplify_mesh = True
         plane_length = 200.0
         horizontal_scale = 0.1

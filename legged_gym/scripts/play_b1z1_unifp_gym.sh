@@ -9,4 +9,6 @@ conda activate /home/oyoungquist/.conda/envs/lr_gym
 export SIMULATOR=isaacgym_b1z1_unifp
 
 cd "$SCRIPT_DIR"
-python play_exp_unifp.py --task=b1z1_unifp --seed=1 --gpu=cuda:0 "$@"
+python play_exp_unifp.py --task=b1z1_unifp --seed=1 --gpu=cuda:0 \
+  --follow_robot --render_ee_goal_debug --render_ee_frame_debug \
+  --ee_eval_mode=random_sphere "$@"

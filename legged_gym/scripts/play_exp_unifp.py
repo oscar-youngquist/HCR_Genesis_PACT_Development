@@ -2,6 +2,7 @@ from legged_gym import *
 import argparse
 
 from legged_gym.envs import *
+from legged_gym.envs.b1z1.force_task_utils import get_force_adjusted_ee_target
 from legged_gym.scripts.joystick import Joystick
 from legged_gym.utils import *
 from legged_gym.utils.math_utils import quat_apply, quat_from_euler_xyz
@@ -310,17 +311,61 @@ class EvalVisualizer:
         scene = getattr(self.env.simulator, "_scene", None)
         if scene is not None and not self.args.render_ee_goal_debug:
             scene.clear_debug_objects()
+        elif scene is None:
+            # Isaac Gym represents all transient markers as viewer lines.
+            self.env.simulator.clear_debug_objects()
         if self.args.render_ee_goal_debug:
-            self.env.draw_ee_goal_debug_vis()
+            if scene is not None:
+                self.env.draw_ee_goal_debug_vis()
+            else:
+                self._draw_ee_goal_markers()
         if self.args.render_base_velocity_arrows:
             self._draw_base_velocity_arrows()
         if self.args.render_ee_trails:
             self._draw_ee_trails()
 
-    def _draw_base_velocity_arrows(self):
+    def _draw_spheres(self, positions, radius, color, env_id):
         scene = getattr(self.env.simulator, "_scene", None)
-        if scene is None:
-            return
+        if scene is not None:
+            scene.draw_debug_spheres(positions, radius=radius, color=color)
+        else:
+            self.env.simulator.draw_debug_spheres(
+                positions, radius=radius, color=color, env_id=env_id
+            )
+
+    def _draw_arrow(self, origin, vector, color, env_id):
+        scene = getattr(self.env.simulator, "_scene", None)
+        if scene is not None:
+            scene.draw_debug_arrow(
+                origin.detach().cpu().numpy(),
+                vec=vector.detach().cpu().numpy(),
+                radius=0.015,
+                color=color,
+            )
+        else:
+            self.env.simulator.draw_debug_arrow(
+                origin, vector, color=color, env_id=env_id
+            )
+
+    def _draw_ee_goal_markers(self):
+        """Mirror the Genesis UniFP target markers in the Isaac Gym viewer."""
+        env_id = int(self.args.debug_robot_id)
+        env_ids = torch.tensor([env_id], dtype=torch.long, device=self.env.device)
+        nominal, effective = get_ee_targets(self.env)
+        yaw_quat = self.env._get_base_yaw_quat(env_ids)
+        center = self.env.get_ee_goal_spherical_center(yaw_quat, env_ids)
+        self._draw_spheres(nominal[env_ids], 0.05, (1.0, 1.0, 0.0, 0.8), env_id)
+        self._draw_spheres(effective[env_ids], 0.05, (1.0, 0.0, 1.0, 0.8), env_id)
+        self._draw_spheres(self.env.simulator.ee_pos[env_ids], 0.05, (0.0, 0.0, 1.0, 0.8), env_id)
+        self._draw_spheres(center, 0.05, (0.0, 1.0, 1.0, 0.8), env_id)
+        self._draw_arrow(
+            nominal[env_id],
+            effective[env_id] - nominal[env_id],
+            (1.0, 0.0, 1.0, 0.8),
+            env_id,
+        )
+
+    def _draw_base_velocity_arrows(self):
         env_id = int(self.args.debug_robot_id)
         yaw_quat = quat_from_euler_xyz(
             torch.zeros(1, device=self.env.device),
@@ -334,43 +379,30 @@ class EvalVisualizer:
         vel_local[0, :2] = self.env.simulator.base_lin_vel[env_id, :2]
         cmd_world = quat_apply(yaw_quat, cmd_local)[0] * self.args.velocity_arrow_scale
         vel_world = quat_apply(yaw_quat, vel_local)[0] * self.args.velocity_arrow_scale
-        scene.draw_debug_arrow(
-            origin.detach().cpu().numpy(),
-            vec=cmd_world.detach().cpu().numpy(),
-            radius=0.015,
-            color=(0.0, 1.0, 0.0, 0.9),
-        )
-        scene.draw_debug_arrow(
-            (origin + torch.tensor([0.0, 0.0, 0.05], device=self.env.device)).detach().cpu().numpy(),
-            vec=vel_world.detach().cpu().numpy(),
-            radius=0.015,
-            color=(1.0, 0.0, 0.0, 0.9),
+        self._draw_arrow(origin, cmd_world, (0.0, 1.0, 0.0, 0.9), env_id)
+        self._draw_arrow(
+            origin + torch.tensor([0.0, 0.0, 0.05], device=self.env.device),
+            vel_world,
+            (1.0, 0.0, 0.0, 0.9),
+            env_id,
         )
 
     def _draw_ee_trails(self):
-        scene = getattr(self.env.simulator, "_scene", None)
-        if scene is None:
-            return
         env_id = int(self.args.debug_robot_id)
         nominal, effective = get_ee_targets(self.env)
         self.nominal_trail.append(nominal[env_id].detach().clone())
         self.effective_trail.append(effective[env_id].detach().clone())
         self.ee_trail.append(self.env.simulator.ee_pos[env_id].detach().clone())
         if len(self.nominal_trail) > 1:
-            scene.draw_debug_spheres(torch.stack(list(self.nominal_trail)), radius=0.015, color=(1.0, 1.0, 0.0, 0.45))
-            scene.draw_debug_spheres(torch.stack(list(self.effective_trail)), radius=0.015, color=(1.0, 0.0, 1.0, 0.45))
-            scene.draw_debug_spheres(torch.stack(list(self.ee_trail)), radius=0.015, color=(0.0, 0.0, 1.0, 0.45))
+            self._draw_spheres(torch.stack(list(self.nominal_trail)), 0.015, (1.0, 1.0, 0.0, 0.45), env_id)
+            self._draw_spheres(torch.stack(list(self.effective_trail)), 0.015, (1.0, 0.0, 1.0, 0.45), env_id)
+            self._draw_spheres(torch.stack(list(self.ee_trail)), 0.015, (0.0, 0.0, 1.0, 0.45), env_id)
 
 
 def get_ee_targets(env):
-    base_yaw_quat = quat_from_euler_xyz(
-        torch.zeros(env.num_envs, device=env.device),
-        torch.zeros(env.num_envs, device=env.device),
-        env.simulator.base_euler[:, 2],
-    )
-    force_offset = (env.ee_force_ext_world + quat_apply(base_yaw_quat, env.current_Fxyz_gripper_cmd)) / env.gripper_force_kps
     nominal = env.curr_ee_goal_cart_world
-    effective = nominal + force_offset
+    # Use the same clipped force-adjusted target as observations and rewards.
+    effective = get_force_adjusted_ee_target(env).effective_target
     return nominal, effective
 
 
