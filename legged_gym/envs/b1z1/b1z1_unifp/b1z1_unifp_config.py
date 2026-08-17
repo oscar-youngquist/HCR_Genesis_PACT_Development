@@ -422,9 +422,9 @@ class B1Z1UniFPCfg:
         max_added_mass_max = 15.0
   
         randomize_gripper_mass = True
-        gripper_mass_min = -0.1
+        gripper_mass_min = -0.01
         min_gripper_added_mass_max = 0.1
-        max_gripper_added_mass_max = 0.25
+        max_gripper_added_mass_max = 0.20
 
         randomize_com_displacement = True
         com_rand_z_positive = False

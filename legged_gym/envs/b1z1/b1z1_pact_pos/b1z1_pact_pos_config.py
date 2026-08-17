@@ -130,6 +130,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
     class asset:
         name = "b1z1"
         file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/b1z1_current/urdf/b1z1_genesis.urdf"
+        isaacgym_file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/b1z1_current/urdf/b1z1.urdf"
         base_name = "trunk"
         base_mass_name = "trunk"
         base_com_name = "trunk"
@@ -330,7 +331,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         force_start_step = 18000
         # External disturbances are present from iteration zero at quarter
         # strength, then linearly reach their full ranges after this threshold.
-        external_force_initial_scale = 0.50
+        external_force_initial_scale = 0.10
         external_force_final_scale = 1.0
         external_force_ramp_iterations = 10000
 
@@ -402,9 +403,9 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         max_added_mass_max = 15.0
   
         randomize_gripper_mass = True
-        gripper_mass_min = -0.1
+        gripper_mass_min = -0.01
         min_gripper_added_mass_max = 0.1
-        max_gripper_added_mass_max = 0.25
+        max_gripper_added_mass_max = 0.20
 
         randomize_com_displacement = True
         com_rand_z_positive = False
