@@ -308,6 +308,7 @@ class OnPolicyRunnerUniFP:
         self.writer.add_scalar("Loss/value_function", locs["mean_value_loss"], locs["it"])
         self.writer.add_scalar("Loss/surrogate", locs["mean_surrogate_loss"], locs["it"])
         self.writer.add_scalar("Loss/adaptation", locs["mean_adaptation_module_loss"], locs["it"])
+        self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
         for key, value in locs["mean_adaptation_losses"].items():
             self.writer.add_scalar("Loss/adaptation_" + key, value, locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])

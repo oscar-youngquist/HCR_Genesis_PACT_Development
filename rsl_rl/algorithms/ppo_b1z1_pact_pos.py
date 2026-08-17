@@ -5,8 +5,6 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from torch import nn, optim
-import numpy as np
-import random
 import warnings
 
 from rsl_rl.algorithms.pc_grad import PCGrad
@@ -44,15 +42,6 @@ class PPO_B1Z1PACTPos:
             raise ValueError("film_identity_loss_weight must be nonnegative")
         if self.film_identity_error_scale <= 0.0:
             raise ValueError("film_identity_error_scale must be positive")
-
-        # Match PPO_PACT's stochastic bootstrap gate. The decoder's
-        # reconstruction quality determines the probability of using the
-        # learned encoder dynamics on the following rollout/update.
-        self.boot_mult = 1.0
-        # UniFP always exposes the encoder's deterministic history latent to
-        # the actor. Keep the old flag for checkpoint/log compatibility, but
-        # latent masking is disabled at every policy call below.
-        self.use_boot_latent = True
 
         # ``get_optim_groups`` is the actor-critic's source of truth for
         # actor/critic/context partitioning and its weight-decay conventions.
@@ -151,10 +140,7 @@ class PPO_B1Z1PACTPos:
         return self.current_entropy_coef
 
     def act(self, obs, critic_obs, history, explicit_labels):
-        position_actions = self.actor_critic.act(
-            obs, history,
-            mask_latent=False,
-        ).detach()
+        position_actions = self.actor_critic.act(obs, history).detach()
         # The torque head remains deterministic and clone-supervised, but is
         # carried in action_t so it becomes part of the next observation.
         actions = torch.cat(
@@ -255,6 +241,8 @@ class PPO_B1Z1PACTPos:
         self.storage.compute_returns(self.actor_critic.evaluate(critic_obs).detach(), self.gamma, self.lam)
 
     def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid, iteration):
+        self.auxiliary_optimizer.zero_grad()
+
         # Recompute the auxiliary graph after the actor update. The PPO
         # graph was consumed by PCGrad and sharing it here would either
         # fail on a second backward pass or retain an unnecessarily large
@@ -266,16 +254,32 @@ class PPO_B1Z1PACTPos:
         # normalized force block that previously had a dedicated decoder.
         aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
 
-        pred_velo_loss = F.mse_loss(aux_context["base_velocity"], labels[:, :3])
-        pred_ee_position_loss = F.mse_loss(aux_context["ee_position"], labels[:, 3:6])
-        pred_base_wrench_loss = F.mse_loss(aux_context["base_wrench"], labels[:, 6:12])
-        pred_ee_force_loss = F.mse_loss(aux_context["ee_force"], labels[:, 12:15])
+        base_velo_label    = None
+        ee_pos_label       = None
+        base_wrench_label  = None
+        ee_force_label     = None
+        foot_contact_label = None
+        foot_height_labels = None
+        priv_recon_target  = None
+        with torch.no_grad():
+            base_velo_label    = labels[:, :3]
+            ee_pos_label       = labels[:, 3:6]
+            base_wrench_label  = labels[:, 6:12]
+            ee_force_label     = labels[:, 12:15]
+            foot_contact_label = labels[:, 15:19]
+            foot_height_labels = labels[:, 19:23]
+            priv_recon_target  = obs_target
+
+        pred_velo_loss = F.mse_loss(aux_context["base_velocity"], base_velo_label)
+        pred_ee_position_loss = F.mse_loss(aux_context["ee_position"], ee_pos_label)
+        pred_base_wrench_loss = F.mse_loss(aux_context["base_wrench"], base_wrench_label)
+        pred_ee_force_loss = F.mse_loss(aux_context["ee_force"], ee_force_label)
         # BCE-with-logits is the stable binary-state reconstruction loss.
         pred_foot_contact_loss = F.binary_cross_entropy_with_logits(
-            aux_context["foot_contact_logits"], labels[:, 15:19],
+            aux_context["foot_contact_logits"], foot_contact_label,
         )
         pred_foot_height_loss = F.mse_loss(
-            aux_context["foot_height"], labels[:, 19:23],
+            aux_context["foot_height"], foot_height_labels,
         )
 
         # Loss for explicit current-state-estimation
@@ -289,7 +293,7 @@ class PPO_B1Z1PACTPos:
         )
 
         # VAE recon + KL losses
-        privileged_error = (aux_privileged_prediction - obs_target).square() * valid
+        privileged_error = (aux_privileged_prediction - priv_recon_target).square() * valid
         aux_privileged_loss = privileged_error.sum() / (
             valid.sum().clamp_min(1.0) * aux_privileged_prediction.shape[-1]
         )
@@ -308,7 +312,6 @@ class PPO_B1Z1PACTPos:
             + self.cfg["privileged_decoder_weight"] * aux_privileged_loss
             + kl_reg_loss
         )
-
         self.auxiliary_optimizer.zero_grad()
 
         aux.backward()
@@ -360,8 +363,7 @@ class PPO_B1Z1PACTPos:
         The deterministic predicted explicit context is used for both actor and FiLM.
         """
         self.actor_critic.update_distribution(
-            batch["observations"], batch["histories"], sample_context=False,
-            mask_latent=False,
+            batch["observations"], batch["histories"], sample_context=False
         )
         position_actions = batch["actions"][:, :self.actor_critic.num_actions]
         actions_log_prob = self.actor_critic.get_actions_log_prob(position_actions)
@@ -424,8 +426,7 @@ class PPO_B1Z1PACTPos:
     def _pre_update_diagnostics(self, batch):
         """Compare the untouched rollout policy with its stored distribution."""
         self.actor_critic.update_distribution(
-            batch["observations"], batch["histories"], sample_context=False,
-            mask_latent=False,
+            batch["observations"], batch["histories"], sample_context=False
         )
         mu, sigma = self.actor_critic.action_mean, self.actor_critic.action_std
         old_mu, old_sigma = batch["mu"], batch["sigma"]
@@ -489,15 +490,13 @@ class PPO_B1Z1PACTPos:
         )
 
     def update(self, iteration):
+        self.actor_critic.train()
+        self.privileged_decoder.train()
         metrics = {name: 0.0 for name in (
             "value", "surrogate", "base_velo", "ee_position", "base_wrench", "ee_force", "foot_contact", "foot_height",
             "privileged_force", "privileged_decoder", "torque_clone", "film_identity",
             *KLRateBandController.METRIC_NAMES,
         )}
-        # PPO_PACT's float64 sufficient statistics. Keep one set per maskable
-        # signal: next-privileged reconstruction for z and explicit-state
-        # reconstruction for the base/EE estimates.
-        boot_stats = {"latent": [None, None, 0.0, 0], "explicit": [None, None, 0.0, 0]}
         updates = 0
         raw_kl_sum = 0.0
         diagnostics = {"lr_before_update": self.learning_rate}
@@ -531,24 +530,6 @@ class PPO_B1Z1PACTPos:
                 iteration=iteration,
             )
 
-            # Exact PPO_PACT boot-stat accumulation, applied separately to the
-            # latent decoder target and to the explicit estimator target.
-            for prefix, prediction_key, target_key in (
-                ("latent", "privileged_prediction", "privileged_target"),
-                ("explicit", "explicit_prediction", "explicit_target"),
-            ):
-                target, prediction = aux[target_key], aux[prediction_key]
-                x, r = target * aux["valid"], prediction * aux["valid"]
-                sum_x, sum_x2, sum_recon_sqerr, count = boot_stats[prefix]
-                if sum_x is None:
-                    sum_x = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
-                    sum_x2 = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
-                x64, r64 = x.to(torch.float64), r.to(torch.float64)
-                sum_x += x64.sum(dim=0)
-                sum_x2 += (x64 * x64).sum(dim=0)
-                sum_recon_sqerr += ((r64 - x64) ** 2).sum().item()
-                boot_stats[prefix] = [sum_x, sum_x2, sum_recon_sqerr, count + x.shape[0]]
-
             # Log metrics
             for name, val in (("value", value), ("surrogate", surrogate), ("base_velo", aux["base_velocity"]),
                               ("ee_position", aux["ee_position"]),
@@ -565,35 +546,6 @@ class PPO_B1Z1PACTPos:
 
             self.spectral_normalization(self.actor_critic, sigma_max=10.0)
 
-        def sample_boot_flag(stats):
-            """Verbatim PPO_PACT mean-baseline and Bernoulli calculation."""
-            boot_sum_x, boot_sum_x2, boot_sum_recon_sqerr, boot_count = stats
-            feat_dim = boot_sum_x.shape[0]
-            mean_pred = boot_sum_x / boot_count
-            ex2 = boot_sum_x2 / boot_count
-            var = torch.clamp(ex2 - mean_pred**2, min=0.0)
-            mean_pred_error = var.mean().item()
-            actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
-            ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
-            pboot = np.tanh(ratio)
-            return random.random() < pboot, pboot, mean_pred_error, actual_pred_error
-
-        def reconstruction_errors(stats):
-            """Return the same baseline/reconstruction MSE without RNG use."""
-            sum_x, sum_x2, sum_recon_sqerr, count = stats
-            feat_dim = sum_x.shape[0]
-            mean_pred = sum_x / count
-            variance = torch.clamp(sum_x2 / count - mean_pred.square(), min=0.0)
-            return variance.mean().item(), sum_recon_sqerr / (count * feat_dim)
-
-        explicit_baseline, explicit_recon = reconstruction_errors(boot_stats["explicit"])
-
-        # Preserve PPO_PACT's latent Bernoulli bootstrap and its RNG timing.
-        # Latent bootstrap quality remains diagnostic-only. Do not restore the
-        # old Bernoulli assignment: the actor always uses its encoded history z.
-        # self.use_boot_latent, latent_pboot, latent_baseline, latent_recon = sample_boot_flag(boot_stats["latent"])
-        _, latent_pboot, latent_baseline, latent_recon = sample_boot_flag(boot_stats["latent"])
-        self.use_boot_latent = True
         self.storage.clear()
         mean_metrics = {key: value / max(1, updates) for key, value in metrics.items()}
         mean_raw_kl = update_duals_from_mean(
@@ -616,8 +568,4 @@ class PPO_B1Z1PACTPos:
         return {
             **mean_metrics,
             **diagnostics,
-            "latent_boot_probability": latent_pboot,
-            "latent_boot_active": float(self.use_boot_latent),
-            "latent_recon_mse": latent_recon, "latent_naive_mse": latent_baseline,
-            "explicit_recon_mse": explicit_recon, "explicit_naive_mse": explicit_baseline,
         }

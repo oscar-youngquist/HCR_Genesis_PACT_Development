@@ -14,8 +14,8 @@ class AC_Args:
     adaptation_labels = [
         "base_velocity_loss",
         "gripper_pos_loss",
-        "force_ee_loss",
         "force_base_loss",
+        "force_ee_loss",
         "foot_contact_loss",
         "foot_height_loss",
     ]

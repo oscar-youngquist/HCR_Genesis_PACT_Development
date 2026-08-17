@@ -5,8 +5,6 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from torch import nn, optim
-import numpy as np
-import random
 import warnings
 
 from rsl_rl.algorithms.pc_grad import PCGrad
@@ -44,15 +42,6 @@ class PPO_B1Z1PACT:
             raise ValueError("film_identity_loss_weight must be nonnegative")
         if self.film_identity_error_scale <= 0.0:
             raise ValueError("film_identity_error_scale must be positive")
-
-        # Match PPO_PACT's stochastic bootstrap gate. The decoder's
-        # reconstruction quality determines the probability of using the
-        # learned encoder dynamics on the following rollout/update.
-        self.boot_mult = 1.0
-        # UniFP always exposes the encoder's deterministic history latent to
-        # the actor. Keep the old flag for checkpoint/log compatibility, but
-        # latent masking is disabled at every policy call below.
-        self.use_boot_latent = True
 
         # ``get_optim_groups`` is the actor-critic's source of truth for
         # actor/critic/context partitioning and its weight-decay conventions.
@@ -157,10 +146,7 @@ class PPO_B1Z1PACT:
         return self.current_entropy_coef
 
     def act(self, obs, critic_obs, history, explicit_labels):
-        actions = self.actor_critic.act(
-            obs, history,
-            mask_latent=False,
-        ).detach()
+        actions = self.actor_critic.act(obs, history).detach()
         self.transition.actions = actions
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
         self.transition.log_probs = self.actor_critic.get_actions_log_prob(actions).detach().unsqueeze(-1)
@@ -518,12 +504,10 @@ class PPO_B1Z1PACT:
     def _compute_rl_loss(self, batch):
         """Compute the PPO objective with the same organization as PACT PPO.
 
-        The two PACT bootstrap flags are independent: an unavailable latent is
-        zeroed, while unavailable explicit estimates use their simulator labels.
+        The actor always uses latent z and the decoder-predicted explicit context.
         """
         self.actor_critic.update_distribution(
-            batch["observations"], batch["histories"], sample_context=False,
-            mask_latent=False,
+            batch["observations"], batch["histories"], sample_context=False
         )
         actions_log_prob = self.actor_critic.get_actions_log_prob(batch["actions"])
         values = self.actor_critic.evaluate(batch["critic_observations"])
@@ -590,8 +574,7 @@ class PPO_B1Z1PACT:
     def _pre_update_diagnostics(self, batch):
         """Compare the untouched rollout policy with its stored distribution."""
         self.actor_critic.update_distribution(
-            batch["observations"], batch["histories"], sample_context=False,
-            mask_latent=False,
+            batch["observations"], batch["histories"], sample_context=False
         )
         mu, sigma = self.actor_critic.action_mean, self.actor_critic.action_std
         old_mu, old_sigma = batch["mu"], batch["sigma"]
@@ -638,10 +621,6 @@ class PPO_B1Z1PACT:
             "privileged_force", "privileged_decoder", "pinn", "film_identity",
             *KLRateBandController.METRIC_NAMES,
         )}
-        # PPO_PACT's float64 sufficient statistics. Keep one set per maskable
-        # signal: next-privileged reconstruction for z and explicit-state
-        # reconstruction for the base/EE estimates.
-        boot_stats = {"latent": [None, None, 0.0, 0], "explicit": [None, None, 0.0, 0]}
         updates = 0
         raw_kl_sum = 0.0
         diagnostics = {"lr_before_update": self.learning_rate}
@@ -697,24 +676,6 @@ class PPO_B1Z1PACT:
                 iteration=iteration,
             )
 
-            # Exact PPO_PACT boot-stat accumulation, applied separately to the
-            # latent decoder target and to the explicit estimator target.
-            for prefix, prediction_key, target_key in (
-                ("latent", "privileged_prediction", "privileged_target"),
-                ("explicit", "explicit_prediction", "explicit_target"),
-            ):
-                target, prediction = aux[target_key], aux[prediction_key]
-                x, r = target * aux["valid"], prediction * aux["valid"]
-                sum_x, sum_x2, sum_recon_sqerr, count = boot_stats[prefix]
-                if sum_x is None:
-                    sum_x = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
-                    sum_x2 = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
-                x64, r64 = x.to(torch.float64), r.to(torch.float64)
-                sum_x += x64.sum(dim=0)
-                sum_x2 += (x64 * x64).sum(dim=0)
-                sum_recon_sqerr += ((r64 - x64) ** 2).sum().item()
-                boot_stats[prefix] = [sum_x, sum_x2, sum_recon_sqerr, count + x.shape[0]]
-
             # Log metrics
             for name, val in (("value", value), ("surrogate", surrogate), ("base_velo", aux["base_velocity"]),
                               ("ee_position", aux["ee_position"]),
@@ -732,25 +693,6 @@ class PPO_B1Z1PACT:
 
         self.storage.clear()
 
-        def sample_boot_flag(stats):
-            """Verbatim PPO_PACT mean-baseline and Bernoulli calculation."""
-            boot_sum_x, boot_sum_x2, boot_sum_recon_sqerr, boot_count = stats
-            feat_dim = boot_sum_x.shape[0]
-            mean_pred = boot_sum_x / boot_count
-            ex2 = boot_sum_x2 / boot_count
-            var = torch.clamp(ex2 - mean_pred**2, min=0.0)
-            mean_pred_error = var.mean().item()
-            actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
-            ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
-            pboot = np.tanh(ratio)
-            return random.random() < pboot, pboot, mean_pred_error, actual_pred_error
-
-        # Latent bootstrap quality remains diagnostic-only. Do not restore the
-        # old Bernoulli assignment: the actor always uses its encoded history z.
-        # self.use_boot_latent, latent_pboot, latent_baseline, latent_recon = sample_boot_flag(boot_stats["latent"])
-        _, latent_pboot, latent_baseline, latent_recon = sample_boot_flag(boot_stats["latent"])
-        self.use_boot_latent = True
-        _, explicit_pboot, explicit_baseline, explicit_recon = sample_boot_flag(boot_stats["explicit"])
         mean_metrics = {key: value / max(1, updates) for key, value in metrics.items()}
         mean_raw_kl = update_duals_from_mean(
             self.kl_controller, raw_kl_sum, updates, iteration, self.device,
@@ -774,8 +716,4 @@ class PPO_B1Z1PACT:
             **diagnostics,
             "force_gate_ema": self.force_ema or 0.0,
             "force_gate_active": float(self.force_gate_active),
-            "latent_boot_probability": latent_pboot,
-            "latent_boot_active": float(self.use_boot_latent),
-            "latent_recon_mse": latent_recon, "latent_naive_mse": latent_baseline,
-            "explicit_recon_mse": explicit_recon, "explicit_naive_mse": explicit_baseline,
         }

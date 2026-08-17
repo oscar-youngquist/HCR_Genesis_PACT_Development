@@ -199,18 +199,6 @@ class ActorCriticB1Z1PACTPos(nn.Module):
             )
         return tensor.clone()
 
-    def _bootmasked_context(
-        self,
-        context: dict[str, torch.Tensor],
-        mask_latent: bool,
-    ) -> dict[str, torch.Tensor]:
-        """Apply only the optional latent mask; explicit context is always predicted."""
-        if not mask_latent:
-            return context
-        masked = {key: value for key, value in context.items()}
-        masked["z"] = torch.zeros_like(context["z"])
-        return masked
-
     def _actor_inputs(
         self,
         obs: torch.Tensor,
@@ -264,13 +252,11 @@ class ActorCriticB1Z1PACTPos(nn.Module):
         obs: torch.Tensor,
         history: torch.Tensor,
         sample_context: bool = True,
-        mask_latent: bool = False,
     ) -> None:
         context = self.decode_context(self.context_encoder(history, sample=sample_context))
-        # Deployment and training use the same decoder-predicted context for
-        # both the actor concatenation and FiLM conditioning.
-        actor_context = self._bootmasked_context(context, mask_latent)
-        position, torque = self.actor_forward(obs, actor_context, actor_context)
+        # Boot masking is intentionally disabled: deployment and training use
+        # latent z and all decoder predictions for actor and FiLM conditioning.
+        position, torque = self.actor_forward(obs, context, context)
         self.last_position_mean = position
         self.last_torque_mean = torque
         mean = position
@@ -282,14 +268,11 @@ class ActorCriticB1Z1PACTPos(nn.Module):
 
     def act(
         self, obs: torch.Tensor, history: torch.Tensor,
-        mask_latent: bool = False,
     ) -> torch.Tensor:
         # Keep the rollout policy deterministic with respect to its latent
         # estimate. PPO's stored action distribution then remains comparable
         # during the update; exploration is supplied by the action Gaussian.
-        self.update_distribution(
-            obs, history, sample_context=False, mask_latent=mask_latent,
-        )
+        self.update_distribution(obs, history, sample_context=False)
         return self.distribution.sample()
 
     def act_inference(
@@ -346,7 +329,7 @@ class ActorCriticB1Z1PACTPos(nn.Module):
             else:
                 owner = "actor"
             # Do not decay biases or the learned Gaussian exploration scale.
-            if name.endswith(".bias") or name == "std":
+            if name == "std":
                 groups[f"{owner}_no_decay"].append(parameter)
             elif name.startswith("film."):
                 groups["film"].append(parameter)
@@ -358,7 +341,7 @@ class ActorCriticB1Z1PACTPos(nn.Module):
 
         actor_groups = [
             group(groups["actor"], weight_decay, "actor"),
-            group(groups["film"], strong_decay, "film"),
+            group(groups["film"], weight_decay, "film"),
             group(groups["critic"], weight_decay, "critic"),
             group(groups["actor_no_decay"] + groups["critic_no_decay"], 0.0, "actor_critic_no_decay"),
         ]

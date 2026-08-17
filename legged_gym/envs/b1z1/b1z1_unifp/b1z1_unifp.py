@@ -5,10 +5,13 @@ import numpy as np
 import torch
 
 from legged_gym.envs.b1z1.force_task_utils import (
+    accumulate_ee_force_target_diagnostics,
     force_curriculum_active,
     get_force_adjusted_ee_target,
+    init_ee_force_target_diagnostics,
+    reset_ee_force_target_diagnostics,
     strict_standing_mask,
-    summarize_ee_force_offset,
+    summarize_accumulated_ee_force_target_diagnostics,
     zero_velocity_probability,
 )
 
@@ -194,6 +197,9 @@ class B1Z1UniFP(BaseTask):
         self.common_step_counter += 1
         self.simulator.post_physics_step()
         self._post_physics_step_callback()
+        # Record the projected target exactly once per control step. Rewards,
+        # observations, and debug calls remain stateless consumers.
+        accumulate_ee_force_target_diagnostics(self)
 
         # # Leg main-ip update specific update
         # self.compute_all_leg_jacobians(
@@ -391,6 +397,10 @@ class B1Z1UniFP(BaseTask):
     def check_termination(self):
         self.fail_buf[:] = 0
         self.contact_fail_buf[:] = 0
+        self.roll_fail_buf[:] = False
+        self.pitch_fail_buf[:] = False
+        self.height_min_fail_buf[:] = False
+        self.height_max_fail_buf[:] = False
         if len(self.simulator.termination_contact_indices) > 0:
             # Contact termination is based on net link contact force for the
             # configured termination links. A patience counter avoids resetting
@@ -419,13 +429,17 @@ class B1Z1UniFP(BaseTask):
             dim=1,
         )
         if "roll" in self.cfg.termination.termination_terms:
-            self.fail_buf |= torch.abs(wrap_to_pi(rpy[:, 0])) > self.cfg.termination.roll_threshold
+            self.roll_fail_buf |= torch.abs(wrap_to_pi(rpy[:, 0])) > self.cfg.termination.roll_threshold
+            self.fail_buf |= self.roll_fail_buf
         if "pitch" in self.cfg.termination.termination_terms:
-            self.fail_buf |= torch.abs(wrap_to_pi(rpy[:, 1])) > self.cfg.termination.pitch_threshold
+            self.pitch_fail_buf |= torch.abs(wrap_to_pi(rpy[:, 1])) > self.cfg.termination.pitch_threshold
+            self.fail_buf |= self.pitch_fail_buf
         if "height_min" in self.cfg.termination.termination_terms:
-            self.fail_buf |= base_height < self.cfg.termination.height_min
+            self.height_min_fail_buf |= base_height < self.cfg.termination.height_min
+            self.fail_buf |= self.height_min_fail_buf
         if "height_max" in self.cfg.termination.termination_terms:
-            self.fail_buf |= base_height > self.cfg.termination.height_max
+            self.height_max_fail_buf |= base_height > self.cfg.termination.height_max
+            self.fail_buf |= self.height_max_fail_buf
 
         self.time_out_buf = self.episode_length_buf > self.max_episode_length
         self.reset_buf = self.fail_buf | self.time_out_buf
@@ -449,9 +463,13 @@ class B1Z1UniFP(BaseTask):
         episode_base_force_cmd_norm = torch.mean(torch.norm(self.current_Fxyz_base_cmd[env_ids], dim=1))
         episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
         episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
-        episode_ee_offset_diagnostics = summarize_ee_force_offset(
-            get_force_adjusted_ee_target(self, env_ids)
+        episode_ee_offset_diagnostics = summarize_accumulated_ee_force_target_diagnostics(
+            self, env_ids
         )
+        episode_roll_fail_rate = self.roll_fail_buf[env_ids].float().mean()
+        episode_pitch_fail_rate = self.pitch_fail_buf[env_ids].float().mean()
+        episode_height_min_fail_rate = self.height_min_fail_buf[env_ids].float().mean()
+        episode_height_max_fail_rate = self.height_max_fail_buf[env_ids].float().mean()
 
         self._resample_commands(env_ids)
         self._resample_ee_goal(env_ids, is_init=True)
@@ -483,6 +501,10 @@ class B1Z1UniFP(BaseTask):
         self.reset_buf[env_ids] = 1
         self.fail_buf[env_ids] = 0
         self.contact_fail_buf[env_ids] = 0
+        self.roll_fail_buf[env_ids] = False
+        self.pitch_fail_buf[env_ids] = False
+        self.height_min_fail_buf[env_ids] = False
+        self.height_max_fail_buf[env_ids] = False
         self.termination_contact_counter[env_ids] = 0
         self.ee_force_ext_world[env_ids] = 0.0
         self.base_force_ext_world[env_ids] = 0.0
@@ -490,6 +512,7 @@ class B1Z1UniFP(BaseTask):
         self.current_Fxyz_base_cmd[env_ids] = 0.0
         self.estimated_ee_force_local[env_ids] = 0.0
         self.estimated_base_force_local[env_ids] = 0.0
+        reset_ee_force_target_diagnostics(self, env_ids)
         self.prev_ee_error[env_ids] = 0.0
         self.progress_vel_ema[env_ids] = 0.0
 
@@ -550,6 +573,10 @@ class B1Z1UniFP(BaseTask):
         self.extras["episode"]["external_force_scale"] = self.external_force_scale
         self.extras["episode"]["command_force_scale"] = self.command_force_scale
         self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
+        self.extras["episode"]["roll_termination_rate"] = episode_roll_fail_rate
+        self.extras["episode"]["pitch_termination_rate"] = episode_pitch_fail_rate
+        self.extras["episode"]["minimum_height_termination_rate"] = episode_height_min_fail_rate
+        self.extras["episode"]["maximum_height_termination_rate"] = episode_height_max_fail_rate
         self.extras["episode"].update(episode_ee_offset_diagnostics)
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -589,8 +616,6 @@ class B1Z1UniFP(BaseTask):
         self.llast_obs_buf.copy_(self.last_obs_buf)
         self.last_obs_buf.copy_(self.obs_buf)
 
-        base_quat = self.simulator.base_quat
-        base_rpy = self.simulator.base_euler
         base_yaw_quat = self._get_base_yaw_quat()
         ee_center = self.get_ee_goal_spherical_center(base_yaw_quat)
 
@@ -598,17 +623,6 @@ class B1Z1UniFP(BaseTask):
         # centered at the Z1 waist/workspace origin, not in raw world XYZ.
         ee_local_cart = quat_rotate_inverse(base_yaw_quat, self.simulator.ee_pos - ee_center)
         self.ee_pos_sphe_arm = cart2sphere(ee_local_cart)
-
-        # Force labels are also yaw-frame quantities. These are privileged during
-        # training and become estimator predictions at deployment/play time.
-        ee_force_local = quat_rotate_inverse(base_yaw_quat, self.ee_force_ext_world)
-        base_force_local = quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world)
-
-        grfs_local = quat_rotate_inverse(
-            base_yaw_quat[:, None, :].expand(-1, 4, -1).reshape(-1, 4),
-            self.simulator._grfs_buf.reshape(-1, 3),
-        ).reshape(self.num_envs, 12)
-
 
         # Commanded and external EE forces define one capped virtual-impedance
         # target shared by the critic observation, reward, and diagnostics.
@@ -619,11 +633,24 @@ class B1Z1UniFP(BaseTask):
         )
         ee_goal_offset_sphere = cart2sphere(ee_goal_offset_local)
 
+        phase = self._get_phase()
         self.compute_ref_state()
-        
+        sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
+        cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
+
         body_orientation = self.get_body_orientation()
         dof_pos_err = (self.simulator.dof_pos[:, :17] - self.simulator.default_dof_pos[:, :17]) * self.obs_scales.dof_pos
         dof_vel = self.simulator.dof_vel[:, :17] * self.obs_scales.dof_vel
+
+        # Force labels are also yaw-frame quantities. These are privileged during
+        # training and become estimator predictions at deployment/play time.
+        ee_force_local = quat_rotate_inverse(base_yaw_quat, self.ee_force_ext_world)
+        base_force_local = quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world)
+
+        grfs_local = quat_rotate_inverse(
+            base_yaw_quat[:, None, :].expand(-1, 4, -1).reshape(-1, 4),
+            self.simulator._grfs_buf.reshape(-1, 3),
+        ).reshape(self.num_envs, 12)
 
         # Current single-frame actor observation. The runner stacks this over
         # `num_obs_hist` frames before feeding the UniFP adaptation encoder.
@@ -647,6 +674,7 @@ class B1Z1UniFP(BaseTask):
             self.obs_buf += (2.0 * torch.rand_like(self.obs_buf) - 1.0) * self.noise_scale_vec
 
         contact_mask = self.simulator.foot_contacts.float()
+
         # Match the B1 estimator's terrain-relative clearance target:
         # h_foot - mean(local terrain patch) - nominal sole offset.
         foot_heights = torch.clip(
@@ -662,8 +690,8 @@ class B1Z1UniFP(BaseTask):
             (
                 self.simulator.base_lin_vel * self.obs_scales.lin_vel,
                 self.ee_pos_sphe_arm * self.ee_sphere_scale,
-                ee_force_local * self.obs_scales.ee_force,
                 base_force_local * self.obs_scales.base_force,
+                ee_force_local * self.obs_scales.ee_force,
                 contact_mask,
                 foot_heights,
             ),
@@ -681,16 +709,14 @@ class B1Z1UniFP(BaseTask):
         mass_params[:, 1:4] = self.simulator._base_com_bias
         stance_mask = self._get_gait_phase()
 
-        phase = self._get_phase()
-        sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
-        cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
-
         # Privileged critic observation mirrors the original UniFP ordering:
         # estimator labels first, then randomized dynamics and gait state,
         # current robot state, commands, and force-shifted EE target.
         critic_components = (
             ("adaptation_labels", self.explicit_labels_buf),
-            ("grfs", grfs_local * self.obs_scales.grf),
+            ("grfs_local", grfs_local * self.obs_scales.grf),
+            ("base_force_local", base_force_local * self.obs_scales.base_force),
+            ("ee_force_local", ee_force_local * self.obs_scales.ee_force),
             ("reference_dof_error", self.simulator.dof_pos[:, :12] - self.ref_dof_pos),
             ("mass_com", mass_params),
             ("friction_offset", self.simulator._friction_values - self.friction_value_offset),
@@ -710,7 +736,7 @@ class B1Z1UniFP(BaseTask):
             ("wrench_velocity", self.simulator._rand_wrench_vels),
             ("kp_scale", self.simulator._kp_scale - self.kp_scale_offset),
             ("kd_scale", self.simulator._kd_scale - self.kd_scale_offset),
-            ("motor_strength", self.simulator._motor_strength),
+            # ("motor_strength", self.simulator._motor_strength),
             ("joint_armature", self.simulator._joint_armature),
             ("joint_friction", self.simulator._joint_friction),
             ("joint_damping", self.simulator._joint_damping),
@@ -1079,7 +1105,9 @@ class B1Z1UniFP(BaseTask):
         done = self.goal_timer > self.traj_total_timesteps
         if torch.any(done):
             self._resample_ee_goal(done.nonzero(as_tuple=False).flatten())
-        ratio = (self.goal_timer / self.traj_timesteps).clamp(0.0, 1.0).unsqueeze(1)
+        # ratio = (self.goal_timer / self.traj_timesteps).clamp(0.0, 1.0).unsqueeze(1)
+        u = (self.goal_timer / self.traj_timesteps).clamp(0.0, 1.0)
+        ratio = (10.0 * u**3 - 15.0 * u**4 + 6.0 * u**5).unsqueeze(1)
         self.curr_ee_goal_sphere = self.ee_start_sphere + ratio * (self.ee_goal_sphere - self.ee_start_sphere)
         self.curr_ee_goal_cart = sphere2cart(self.curr_ee_goal_sphere)
         self._refresh_curr_ee_goal_world()
@@ -1688,6 +1716,10 @@ class B1Z1UniFP(BaseTask):
         self.forward_vec[:, 0] = 1.0
         self.fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.contact_fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.roll_fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.pitch_fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.height_min_fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.height_max_fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         # Counts consecutive control steps with termination contact.
         # Clearing this counter when contact disappears implements patience.
         self.termination_contact_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -1963,6 +1995,7 @@ class B1Z1UniFP(BaseTask):
             device=self.device,
             dtype=torch.float,
         )
+        init_ee_force_target_diagnostics(self)
 
         # Taken from b1z1 URDF, hardcoded for now...
         self.z1_link00_offset = torch.tensor(

@@ -189,18 +189,6 @@ class ActorCriticB1Z1PACT(nn.Module):
             )
         return tensor.clone()
 
-    def _bootmasked_context(
-        self,
-        context: dict[str, torch.Tensor],
-        mask_latent: bool,
-    ) -> dict[str, torch.Tensor]:
-        """Apply only the optional latent mask; explicit context is always predicted."""
-        if not mask_latent:
-            return context
-        masked = {key: value for key, value in context.items()}
-        masked["z"] = torch.zeros_like(context["z"])
-        return masked
-
     def _actor_inputs(self, obs: torch.Tensor, context: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         # Actor observation ends with [vx, vy, yaw_rate, radius, pitch, yaw].
         command = obs[:, -6:]
@@ -238,11 +226,11 @@ class ActorCriticB1Z1PACT(nn.Module):
         obs: torch.Tensor,
         history: torch.Tensor,
         sample_context: bool = True,
-        mask_latent: bool = False,
     ) -> None:
         context = self.decode_context(self.context_encoder(history, sample=sample_context))
-        actor_context = self._bootmasked_context(context, mask_latent)
-        position, torque = self.actor_forward(obs, actor_context)
+        # Boot masking is intentionally disabled: training and deployment
+        # always condition on latent z and every predicted explicit output.
+        position, torque = self.actor_forward(obs, context)
         mean = torch.cat((position, torque), dim=-1)
         self.std.data.copy_(
             torch.maximum(torch.minimum(self.std.data, self._std_clip_upr), self._std_clip_lwr)
@@ -252,14 +240,11 @@ class ActorCriticB1Z1PACT(nn.Module):
 
     def act(
         self, obs: torch.Tensor, history: torch.Tensor,
-        mask_latent: bool = False,
     ) -> torch.Tensor:
         # Keep the rollout policy deterministic with respect to its latent
         # estimate. PPO's stored action distribution then remains comparable
         # during the update; exploration is supplied by the action Gaussian.
-        self.update_distribution(
-            obs, history, sample_context=False, mask_latent=mask_latent,
-        )
+        self.update_distribution(obs, history, sample_context=False)
         return self.distribution.sample()
 
     def act_inference(self, obs: torch.Tensor, history: torch.Tensor) -> torch.Tensor:

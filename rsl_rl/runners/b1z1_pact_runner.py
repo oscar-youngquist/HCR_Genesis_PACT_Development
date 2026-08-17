@@ -272,6 +272,7 @@ class B1Z1PACTRunner:
             self.writer.add_scalar("Policy/position_noise_std", position_std, iteration)
             self.writer.add_scalar("Policy/torque_noise_std", torque_std, iteration)
             self.writer.add_scalar("Policy/mean_noise_std", self.actor_critic.std.mean(), iteration)
+            self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, iteration)
             self.writer.add_scalar("Values/entropy", self.alg.current_entropy_coef, iteration)
             self.writer.add_scalar("Perf/total_fps", fps, iteration)
             self.writer.add_scalar("Perf/collection time", collection_time, iteration)
@@ -311,7 +312,6 @@ class B1Z1PACTRunner:
             f"{'Torque action noise std:':>{pad}} {torque_std:.2f}",
             f"{'Entropy coefficient:':>{pad}} {self.alg.current_entropy_coef:.6f}",
             f"{'Privileged force gate:':>{pad}} {metrics['force_gate_active']:.0f}",
-            f"{'Latent bootstrap probability:':>{pad}} {metrics['latent_boot_probability']:.4f}",
         ]
         if mean_reward is not None:
             lines.extend((f"{'Mean reward:':>{pad}} {mean_reward:.2f}", f"{'Mean episode length:':>{pad}} {mean_length:.2f}"))
@@ -338,7 +338,6 @@ class B1Z1PACTRunner:
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
             "iteration": saved_iteration, "force_ema": self.alg.force_ema,
             "force_gate_active": self.alg.force_gate_active, "force_gate_count": self.alg.force_gate_count,
-            "use_boot_latent": self.alg.use_boot_latent,
             "entropy_coef": self.alg.current_entropy_coef,
             "kl_controller_state": self.alg.kl_controller.state_dict(),
         }, path)
@@ -357,9 +356,6 @@ class B1Z1PACTRunner:
         self.alg.force_ema = checkpoint.get("force_ema")
         self.alg.force_gate_active = checkpoint.get("force_gate_active", False)
         self.alg.force_gate_count = checkpoint.get("force_gate_count", 0)
-        # Latent bootstrap masking is retired: resumed policies always consume
-        # the encoder's history latent regardless of legacy checkpoint state.
-        self.alg.use_boot_latent = True
         self.alg.current_entropy_coef = checkpoint.get("entropy_coef", self.alg.current_entropy_coef)
         self.alg.kl_controller.load_state_dict(checkpoint.get("kl_controller_state"))
         return checkpoint.get("iteration", 0)

@@ -5,9 +5,12 @@ import numpy as np
 import torch
 
 from legged_gym.envs.b1z1.force_task_utils import (
+    accumulate_ee_force_target_diagnostics,
     get_force_adjusted_ee_target,
+    init_ee_force_target_diagnostics,
+    reset_ee_force_target_diagnostics,
     strict_standing_mask,
-    summarize_ee_force_offset,
+    summarize_accumulated_ee_force_target_diagnostics,
 )
 
 from legged_gym.envs.base.base_task import BaseTask
@@ -213,6 +216,8 @@ class B1Z1PACT(LeggedRobot):
         self.common_step_counter += 1
         self.simulator.post_physics_step()
         self._post_physics_step_callback()
+        # Accumulate target diagnostics once; all target consumers stay stateless.
+        accumulate_ee_force_target_diagnostics(self)
 
         # Leg main-ip update specific update
         self.compute_all_leg_jacobians(
@@ -437,6 +442,10 @@ class B1Z1PACT(LeggedRobot):
     def check_termination(self):
         self.fail_buf[:] = 0
         self.contact_fail_buf[:] = 0
+        self.roll_fail_buf[:] = False
+        self.pitch_fail_buf[:] = False
+        self.height_min_fail_buf[:] = False
+        self.height_max_fail_buf[:] = False
         if len(self.simulator.termination_contact_indices) > 0:
             # Contact termination is based on net link contact force for the
             # configured termination links. A patience counter avoids resetting
@@ -465,13 +474,17 @@ class B1Z1PACT(LeggedRobot):
             dim=1,
         )
         if "roll" in self.cfg.termination.termination_terms:
-            self.fail_buf |= torch.abs(wrap_to_pi(rpy[:, 0])) > self.cfg.termination.roll_threshold
+            self.roll_fail_buf |= torch.abs(wrap_to_pi(rpy[:, 0])) > self.cfg.termination.roll_threshold
+            self.fail_buf |= self.roll_fail_buf
         if "pitch" in self.cfg.termination.termination_terms:
-            self.fail_buf |= torch.abs(wrap_to_pi(rpy[:, 1])) > self.cfg.termination.pitch_threshold
+            self.pitch_fail_buf |= torch.abs(wrap_to_pi(rpy[:, 1])) > self.cfg.termination.pitch_threshold
+            self.fail_buf |= self.pitch_fail_buf
         if "height_min" in self.cfg.termination.termination_terms:
-            self.fail_buf |= base_height < self.cfg.termination.height_min
+            self.height_min_fail_buf |= base_height < self.cfg.termination.height_min
+            self.fail_buf |= self.height_min_fail_buf
         if "height_max" in self.cfg.termination.termination_terms:
-            self.fail_buf |= base_height > self.cfg.termination.height_max
+            self.height_max_fail_buf |= base_height > self.cfg.termination.height_max
+            self.fail_buf |= self.height_max_fail_buf
 
         self.time_out_buf = self.episode_length_buf > self.max_episode_length
         self.reset_buf = self.fail_buf | self.time_out_buf
@@ -496,9 +509,13 @@ class B1Z1PACT(LeggedRobot):
         episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
         episode_base_torque_ext_norm = torch.mean(torch.norm(self.base_torque_ext_world[env_ids], dim=1))
         episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
-        episode_ee_offset_diagnostics = summarize_ee_force_offset(
-            get_force_adjusted_ee_target(self, env_ids)
+        episode_ee_offset_diagnostics = summarize_accumulated_ee_force_target_diagnostics(
+            self, env_ids
         )
+        episode_roll_fail_rate = self.roll_fail_buf[env_ids].float().mean()
+        episode_pitch_fail_rate = self.pitch_fail_buf[env_ids].float().mean()
+        episode_height_min_fail_rate = self.height_min_fail_buf[env_ids].float().mean()
+        episode_height_max_fail_rate = self.height_max_fail_buf[env_ids].float().mean()
 
         self._resample_commands(env_ids)
         self._resample_ee_goal(env_ids, is_init=True)
@@ -523,10 +540,15 @@ class B1Z1PACT(LeggedRobot):
         self.reset_buf[env_ids] = 1
         self.fail_buf[env_ids] = 0
         self.contact_fail_buf[env_ids] = 0
+        self.roll_fail_buf[env_ids] = False
+        self.pitch_fail_buf[env_ids] = False
+        self.height_min_fail_buf[env_ids] = False
+        self.height_max_fail_buf[env_ids] = False
         self.termination_contact_counter[env_ids] = 0
         self.ee_force_ext_world[env_ids] = 0.0
         self.base_force_ext_world[env_ids] = 0.0
         self.base_torque_ext_world[env_ids] = 0.0
+        reset_ee_force_target_diagnostics(self, env_ids)
         self.prev_ee_error[env_ids] = 0.0
         self.prev_impedance_ee_pos[env_ids] = 0.0
         self.prev_impedance_ee_vel[env_ids] = 0.0
@@ -593,6 +615,10 @@ class B1Z1PACT(LeggedRobot):
         self.extras["episode"]["external_force_scale"] = self.external_force_scale
         self.extras["episode"]["force_randomization_active"] = float(self.force_randomization_active)
         self.extras["episode"]["contact_fail_rate"] = episode_contact_fail_rate
+        self.extras["episode"]["roll_termination_rate"] = episode_roll_fail_rate
+        self.extras["episode"]["pitch_termination_rate"] = episode_pitch_fail_rate
+        self.extras["episode"]["minimum_height_termination_rate"] = episode_height_min_fail_rate
+        self.extras["episode"]["maximum_height_termination_rate"] = episode_height_max_fail_rate
         self.extras["episode"].update(episode_ee_offset_diagnostics)
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -1100,7 +1126,9 @@ class B1Z1PACT(LeggedRobot):
         done = self.goal_timer > self.traj_total_timesteps
         if torch.any(done):
             self._resample_ee_goal(done.nonzero(as_tuple=False).flatten())
-        ratio = (self.goal_timer / self.traj_timesteps).clamp(0.0, 1.0).unsqueeze(1)
+        # ratio = (self.goal_timer / self.traj_timesteps).clamp(0.0, 1.0).unsqueeze(1)
+        u = (self.goal_timer / self.traj_timesteps).clamp(0.0, 1.0)
+        ratio = (10.0 * u**3 - 15.0 * u**4 + 6.0 * u**5).unsqueeze(1)
         self.curr_ee_goal_sphere = self.ee_start_sphere + ratio * (self.ee_goal_sphere - self.ee_start_sphere)
         self.curr_ee_goal_cart = sphere2cart(self.curr_ee_goal_sphere)
         self._refresh_curr_ee_goal_world()
@@ -1671,6 +1699,10 @@ class B1Z1PACT(LeggedRobot):
         self.forward_vec[:, 0] = 1.0
         self.fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.contact_fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.roll_fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.pitch_fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.height_min_fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.height_max_fail_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         # Counts consecutive control steps with termination contact.
         # Clearing this counter when contact disappears implements patience.
         self.termination_contact_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -1903,6 +1935,7 @@ class B1Z1PACT(LeggedRobot):
             device=self.device,
             dtype=torch.float,
         )
+        init_ee_force_target_diagnostics(self)
         self.prev_impedance_ee_pos = torch.zeros(self.num_envs, 3, device=self.device)
         self.prev_impedance_ee_vel = torch.zeros_like(self.prev_impedance_ee_pos)
         self.prev_impedance_target = self.curr_ee_goal_cart.clone()

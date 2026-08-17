@@ -13,20 +13,20 @@ class B1Z1UniFPCfg:
         # samples. Explicit labels include contacts, so contacts are not added
         # a second time. The domain parameters include all 19 simulator DOFs,
         # including the two passive gripper joints.
-        num_critic_state_obs = 219 + 12
+        num_critic_state_obs = 219 + 12 + 6 - 19
         num_height_obs = 187
         num_privileged_obs = num_critic_state_obs + num_height_obs
         # Terrain heights remain privileged critic inputs but are excluded
         # from the encoder's next-frame reconstruction objective.
         num_privileged_recon_obs = num_critic_state_obs
-        num_priv_stack = 3
+        num_priv_stack = 5
         # Base velocity (3), EE sphere (3), EE force (3), base force (3),
         # foot contacts (4), and terrain-relative foot heights (4).
         num_explicit_recon_obs = 20
         num_pred_obs = 20
         num_actions = 17
         num_gripper_joints = 2
-        num_obs_hist = 10
+        num_obs_hist = 25
         env_spacing = 0.5
         episode_length_s = 20
         grf_dim = 12
@@ -45,6 +45,9 @@ class B1Z1UniFPCfg:
     class goal_ee:
         num_commands = 3
         max_ee_force_offset = 0.40
+        project_force_adjusted_ee_target = True
+        force_target_radius_limits = [0.30, 0.90]
+        force_target_projection_samples = 21
         traj_time = [1.0, 3.0]
         hold_time = [0.5, 2.0]
         command_mode = "sphere"
@@ -66,7 +69,7 @@ class B1Z1UniFPCfg:
         class ranges:
             init_pos_start = [0.5, np.pi / 8, 0.0]
             init_pos_end = [0.7, 0.0, 0.0]
-            pos_l = [0.40, 0.95]
+            pos_l = [0.40, 0.90]
             pos_p = [-1.0 * np.pi / 2.5, np.pi / 3.0]
             pos_y = [-1.2, 1.2]
             delta_orn_r = [-0.5, 0.5]
@@ -327,7 +330,7 @@ class B1Z1UniFPCfg:
         lin_vel_y_clip = 0.05
 
         zero_vel_cmd_prob = 0.2
-        zero_vel_cmd_prob_after_force = 0.4
+        zero_vel_cmd_prob_after_force = 0.5
         
         force_start_step = 25000
         # Apply external disturbances throughout training at quarter strength,
@@ -371,8 +374,8 @@ class B1Z1UniFPCfg:
         push_base_duration_s_ext = [1.0, 3.0]
         base_forced_prob_ext = 0.8
         randomize_base_force_gains = True
-        max_push_force_xyz_base_cmd = [-50.0, 50.0]
-        max_push_force_xyz_base_ext = [-50.0, 50.0]
+        max_push_force_xyz_base_cmd = [-20.0, 20.0]
+        max_push_force_xyz_base_ext = [-20.0, 20.0]
         
         base_force_kp_range = [200.0, 200.0]
         base_force_kd_range = [200.0, 200.0]
@@ -455,7 +458,7 @@ class B1Z1UniFPCfg:
         wrench_timeout_max = 15.0
      
         randomize_ctrl_delay = True
-        ctrl_delay_step_range = [0, 2]
+        ctrl_delay_step_range = [0, 1]
      
         randomize_pd_gain = True
         kp_range = [0.8, 1.2]
@@ -529,7 +532,7 @@ class B1Z1UniFPCfg:
         use_reward_curriculum = False
         
         tracking_sigma = 0.25
-        tracking_ee_sigma = 0.50
+        tracking_ee_sigma = 1.00
         
         tracking_ee_orientation_sigma = 0.05
         
@@ -562,7 +565,6 @@ class B1Z1UniFPCfg:
         feet_contact_initial_multiplier = 1.0
         feet_contact_final_multiplier = 0.30
 
-        ee_tracking_sigma = 25.0 
         upright_gate_sigma = 10.0
 
         arm_before_torso_ee_thresh = 0.08
@@ -580,7 +582,7 @@ class B1Z1UniFPCfg:
         class scales:
             # Constraints
             termination = 0.0
-            collision = -1.0
+            collision = -5.0
             dof_pos_limits = -10.0
             torque_limits = -0.01
             dof_close_to_default = 0.0
@@ -589,7 +591,7 @@ class B1Z1UniFPCfg:
             stand_still         = -0.5            #
             stand_still_contact = 0.5             #
 
-            alive = 0.01
+            alive = 1.0
 
             # tracking
             tracking_lin_vel_force_world = 2.0    #
@@ -615,7 +617,7 @@ class B1Z1UniFPCfg:
             hip_pos = -0.30
 
             # Base
-            base_height = -2.0
+            base_height = -10.0
             lin_vel_z   = -1.0
             ang_vel_xy  = -0.02
             roll        = -0.2
@@ -631,8 +633,9 @@ class B1Z1UniFPCfg:
 
             # Arm
             dof_acc_arm = -4.5e-7
+            dof_vel_arm = -2e-4
             action_rate_arm = -0.045
-            action_smoothness_arm = -0.02
+            action_smoothness_arm = -0.045
             joint_power_arm = -2.e-5
             joint_power_dist_arm = -2.e-6
             arm_torques       = -1.0e-5
@@ -837,12 +840,12 @@ class B1Z1UniFPCfgPPO:
         algorithm_class_name = "PPO_UniFP"
         num_steps_per_env = 24
         
-        max_iterations = 50000
+        max_iterations = 60000
         
         save_interval = 1000
         
         # Disable non-training rollout, PPO-consistency, and detailed episode diagnostics.
-        enable_additional_diagnostics = False
+        enable_additional_diagnostics = True
         
         run_name = "faithful_unifp_baseline"
         experiment_name = "b1z1_unifp_gym"

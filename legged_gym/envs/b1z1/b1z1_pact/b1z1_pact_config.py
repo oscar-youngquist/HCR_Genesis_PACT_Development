@@ -49,6 +49,9 @@ class B1Z1PACTCfg(LeggedRobotCfg):
     class goal_ee:
         num_commands = 3
         max_ee_force_offset = 0.10
+        project_force_adjusted_ee_target = True
+        force_target_radius_limits = [0.30, 0.90]
+        force_target_projection_samples = 21
         traj_time = [1.0, 3.0]
         hold_time = [0.5, 2.0]
         command_mode = "sphere"
@@ -70,7 +73,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         class ranges:
             init_pos_start = [0.5, np.pi / 8, 0.0]
             init_pos_end = [0.7, 0.0, 0.0]
-            pos_l = [0.40, 0.95]
+            pos_l = [0.40, 0.90]
             pos_p = [-1.0 * np.pi / 2.5, np.pi / 3.0]
             pos_y = [-1.2, 1.2]
             delta_orn_r = [-0.5, 0.5]

@@ -92,12 +92,15 @@ class B1Z1PACTPosRunner:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=self.env.max_episode_length)
+
         obs, history, privileged, explicit = self.env.get_observations()
         obs, history, privileged, explicit = (value.to(self.device) for value in (obs, history, privileged, explicit))
         rewards, lengths, ep_infos = deque(maxlen=100), deque(maxlen=100), []
         running_reward = torch.zeros(self.env.num_envs, 1, device=self.device)
         running_length = torch.zeros_like(running_reward)
+
         self.actor_critic.train()
+
         final_iteration = self.current_learning_iteration + num_learning_iterations
         for iteration in range(self.current_learning_iteration, final_iteration):
             # Reward schedules use the true checkpoint-aware PPO iteration,
@@ -246,6 +249,7 @@ class B1Z1PACTPosRunner:
                     self.writer.add_scalar(f"{group}/{name}", value, iteration)
             self.writer.add_scalar("Policy/position_noise_std", position_std, iteration)
             self.writer.add_scalar("Policy/mean_noise_std", self.actor_critic.std.mean(), iteration)
+            self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, iteration)
             self.writer.add_scalar("Values/entropy", self.alg.current_entropy_coef, iteration)
             self.writer.add_scalar("Perf/total_fps", fps, iteration)
             self.writer.add_scalar("Perf/collection time", collection_time, iteration)
@@ -283,7 +287,6 @@ class B1Z1PACTPosRunner:
             f"{'Raw KL divergence:':>{pad}} {metrics['kl_raw']:.4f}",
             f"{'Position action noise std:':>{pad}} {position_std:.2f}",
             f"{'Entropy coefficient:':>{pad}} {self.alg.current_entropy_coef:.6f}",
-            f"{'Latent bootstrap probability:':>{pad}} {metrics['latent_boot_probability']:.4f}",
         ]
         if mean_reward is not None:
             lines.extend((f"{'Mean reward:':>{pad}} {mean_reward:.2f}", f"{'Mean episode length:':>{pad}} {mean_length:.2f}"))
@@ -309,7 +312,6 @@ class B1Z1PACTPosRunner:
             "actor_optimizer": self.alg.actor_optimizer.optimizer.state_dict(),
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
             "iteration": saved_iteration,
-            "use_boot_latent": self.alg.use_boot_latent,
             "entropy_coef": self.alg.current_entropy_coef,
             "kl_controller_state": self.alg.kl_controller.state_dict(),
         }, path)
@@ -325,9 +327,6 @@ class B1Z1PACTPosRunner:
         self.current_learning_iteration = checkpoint.get("iteration", 0)
         if hasattr(self.env, "set_training_iteration"):
             self.env.set_training_iteration(self.current_learning_iteration)
-        # Latent bootstrap masking is retired: resumed policies always consume
-        # the encoder's history latent regardless of legacy checkpoint state.
-        self.alg.use_boot_latent = True
         self.alg.current_entropy_coef = checkpoint.get("entropy_coef", self.alg.current_entropy_coef)
         self.alg.kl_controller.load_state_dict(checkpoint.get("kl_controller_state"))
         return checkpoint.get("iteration", 0)
