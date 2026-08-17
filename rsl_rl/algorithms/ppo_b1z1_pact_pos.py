@@ -258,8 +258,8 @@ class PPO_B1Z1PACTPos:
         aux_context = self.actor_critic.decode_context(
             self.actor_critic.context_encoder(obs_hist_batch, sample=True)
         )
-        # The z-only decoder predicts the next non-terrain privileged state.
-        # Its target includes force state but excludes the critic's height tail.
+        # Match UniFP's z-only next-frame decoder. Its target now includes the
+        # normalized force block that previously had a dedicated decoder.
         aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
 
         pred_velo_loss = F.mse_loss(aux_context["base_velocity"], labels[:, :3])
@@ -471,7 +471,7 @@ class PPO_B1Z1PACTPos:
         # action mean being supervised, unlike the post-step state packet.
         q = default[:, :17] + observations[:, 5:22] / self.cfg["dof_pos_obs_scale"]
         qd = observations[:, 22:39] / self.cfg["dof_vel_obs_scale"]
-        q_target = default[:, :17] + self.cfg["position_action_scale"] * self.actor_critic.last_position_mean
+        q_target = default[:, :17] + self.cfg["position_action_scale"] * self.actor_critic.last_position_mean.detach()
         pd_torque = (
             kp[:, :17] * (q_target - q[:, :17]) - kd[:, :17] * qd[:, :17]
         ) * motor[:, :17]

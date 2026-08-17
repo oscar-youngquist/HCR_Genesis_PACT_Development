@@ -800,8 +800,8 @@ class B1Z1PACTPos(LeggedRobot):
             heights = torch.clip(self.simulator.base_pos[:, 2].unsqueeze(1) - 0.5 \
                                  - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements
 
-            if self.add_noise:
-                heights *= self.height_noise_vec
+            # if self.add_noise:
+            #     heights *= self.height_noise_vec
             if heights.shape[1] != self.cfg.env.num_height_obs:
                 raise RuntimeError(
                     f"B1Z1 PACT terrain observation is {heights.shape[1]}D, expected "

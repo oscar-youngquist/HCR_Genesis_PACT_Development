@@ -223,13 +223,13 @@ class ActorCriticB1Z1PACTPos(nn.Module):
         command = obs[:, -6:]
         # Both terms are component-wise normalized as [vx*lin, vy*lin,
         # yaw_rate*ang], so FiLM never compares unlike physical scales.
-        base_error = command[:, :3] - film_context["base_velocity"]
+        base_error = command[:, :3] - film_context["base_velocity"].detach()
         # Command and prediction share UniFP's scaled spherical representation.
-        ee_error = command[:, 3:6] - film_context["ee_position"]
+        ee_error = command[:, 3:6] - film_context["ee_position"].detach()
         # Retain the six-dimensional tracking error used by FiLM so PPO can
         # regularize modulation strength as a function of tracking quality.
         self.last_tracking_error_sq = torch.cat((base_error, ee_error), dim=-1).square().mean(dim=-1)
-        contact_probability = torch.sigmoid(actor_context["foot_contact_logits"])
+        contact_probability = torch.sigmoid(actor_context["foot_contact_logits"]).detach()
         # As in UniFP, the actor always consumes deployment-time predictions.
         # Ground-truth blending is restricted to the FiLM condition below.
         actor_input = torch.cat(
@@ -242,7 +242,7 @@ class ActorCriticB1Z1PACTPos(nn.Module):
         )
         # Contact state and foot height are excluded from FiLM by design.
         film_condition = torch.cat((
-            film_context["base_wrench"], film_context["ee_force"], base_error, ee_error,
+            film_context["base_wrench"].detach(), film_context["ee_force"].detach(), base_error, ee_error,
         ), dim=-1)
         return actor_input, film_condition
 

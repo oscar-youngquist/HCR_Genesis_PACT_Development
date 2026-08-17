@@ -507,7 +507,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
 
     class rewards:
         only_positive_rewards = False
-        use_reward_curriculum = True
+        use_reward_curriculum = False
         
         tracking_sigma = 0.25
         tracking_ee_sigma = 0.50
@@ -711,18 +711,18 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
 
         class reward_curriculum:
             curr_reward_keys = [
-                                # "torque_limits",
-                                "dof_pos_limits",
-                                "feet_contact_forces",
-                                "lin_vel_z",
+                                "torque_limits",
+                                # "dof_pos_limits",
+                                # "feet_contact_forces",
+                                # "lin_vel_z",
                                 # "arm_ee_force_manipulability",
                                 # "torso_force_wrench_ellipsoid",
                                 ]
             curr_reward_bounds = {
-                # "torque_limits":[-0.0001, -0.001],
-                "dof_pos_limits":[-2.0, -10.0],
-                "feet_contact_forces":[-1.0e-5, -1.0e-4],
-                "lin_vel_z":[-1.00, -2.0],
+                "torque_limits":[-0.0001, -0.001],
+                # "dof_pos_limits":[-2.0, -10.0],
+                # "feet_contact_forces":[-1.0e-5, -1.0e-4],
+                # "lin_vel_z":[-1.00, -2.0],
                 # "arm_ee_force_manipulability":[0.2, 0.5],
                 # "torso_force_wrench_ellipsoid":[0.2, 0.5],
             }

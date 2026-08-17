@@ -325,7 +325,7 @@ class B1Z1UniFPCfg:
         zero_vel_cmd_prob = 0.2
         zero_vel_cmd_prob_after_force = 0.4
         
-        force_start_step = 20000
+        force_start_step = 25000
         # Apply external disturbances throughout training at quarter strength,
         # then linearly ramp to the original ranges after force_start_step.
         external_force_initial_scale = 0.10
@@ -337,7 +337,7 @@ class B1Z1UniFPCfg:
         command_force_initial_scale = 0.10
         command_force_final_scale = 1.0
         command_force_hold_iterations = 10000
-        command_force_ramp_iterations = 8000
+        command_force_ramp_iterations = 10000
 
         push_gripper_stators = True
         apply_ee_external_forces = True
@@ -522,7 +522,7 @@ class B1Z1UniFPCfg:
     class rewards:
         force_neutral_threshold = 1.0e-3
         only_positive_rewards = False
-        use_reward_curriculum = True
+        use_reward_curriculum = False
         
         tracking_sigma = 0.25
         tracking_ee_sigma = 0.50
