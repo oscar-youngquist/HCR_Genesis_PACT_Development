@@ -10,7 +10,12 @@ from torch.utils.tensorboard import SummaryWriter
 from rsl_rl.algorithms import PPO_UniFP
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import ActorCriticB1UniFP, ActorCriticUniFP
-from rsl_rl.utils import pretty_print_module
+from rsl_rl.utils import (
+    RolloutPhaseTimer,
+    log_startup_metadata,
+    pretty_print_module,
+    startup_metadata,
+)
 
 
 class OnPolicyRunnerUniFP:
@@ -98,6 +103,7 @@ class OnPolicyRunnerUniFP:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+        self._startup_metadata_logged = False
 
         _, _ = self.env.reset()
 
@@ -114,6 +120,17 @@ class OnPolicyRunnerUniFP:
         obs_history = obs_history.to(self.device)
         critic_obs = critic_obs.to(self.device)
         obs_pred = obs_pred.to(self.device)
+        if self.enable_additional_diagnostics and not self._startup_metadata_logged:
+            log_startup_metadata(
+                startup_metadata(
+                    self.env,
+                    self.device,
+                    (obs, obs_history, privileged_obs, obs_pred),
+                    self.alg.actor_critic,
+                ),
+                self.writer,
+            )
+            self._startup_metadata_logged = True
 
         self.alg.actor_critic.train()
 
@@ -133,15 +150,24 @@ class OnPolicyRunnerUniFP:
                 self.alg.actor_critic.begin_rollout_diagnostics()
             if self.enable_additional_diagnostics and hasattr(self.env, "begin_rollout_diagnostics"):
                 self.env.begin_rollout_diagnostics()
+            rollout_timer = (
+                RolloutPhaseTimer(self.device)
+                if self.enable_additional_diagnostics else None
+            )
+            self.env._rollout_phase_timer = rollout_timer
             start = time.time()
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
+                    policy_start = rollout_timer.start("policy") if rollout_timer is not None else None
                     actions = self.alg.act(obs_history, critic_obs, obs_pred)
+                    if rollout_timer is not None:
+                        rollout_timer.stop("policy", policy_start)
                     if self.enable_additional_diagnostics:
                         self.alg.actor_critic.record_rollout_diagnostics(
                             actions, self.env.cfg.normalization.clip_actions
                         )
                     obs, privileged_obs, obs_history, obs_pred, rewards, dones, infos, _ = self.env.step(actions)
+                    storage_start = rollout_timer.start("transition_storage") if rollout_timer is not None else None
                     critic_obs = privileged_obs if privileged_obs is not None else obs
 
                     obs_history = obs_history.to(self.device)
@@ -168,8 +194,15 @@ class OnPolicyRunnerUniFP:
                             lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
                             cur_reward_sum[new_ids] = 0
                             cur_episode_length[new_ids] = 0
+                    if rollout_timer is not None:
+                        rollout_timer.stop("transition_storage", storage_start)
 
-                collection_time = time.time() - start
+                rollout_timing_metrics = rollout_timer.finish() if rollout_timer is not None else {}
+                self.env._rollout_phase_timer = None
+                collection_time = (
+                    rollout_timing_metrics["Perf/Rollout/total_collection_ms"] / 1000.0
+                    if rollout_timer is not None else time.time() - start
+                )
                 policy_diagnostics = (
                     self.alg.actor_critic.get_rollout_diagnostics()
                     if self.enable_additional_diagnostics else {}
@@ -216,6 +249,7 @@ class OnPolicyRunnerUniFP:
                 **latent_resample_diagnostics,
                 **deterministic_diagnostics,
                 **joint_std_diagnostics,
+                **rollout_timing_metrics,
             }
             if self.enable_additional_diagnostics:
                 self._validate_diagnostics(diagnostic_metrics)

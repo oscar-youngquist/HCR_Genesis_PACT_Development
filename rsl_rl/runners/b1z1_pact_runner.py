@@ -15,6 +15,7 @@ from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.dynamics import PinocchioWholeBodyDynamics
 from rsl_rl.algorithms.ppo_b1z1_pact import PPO_B1Z1PACT
 from rsl_rl.modules.actor_critic_b1z1_pact import ActorCriticB1Z1PACT, B1Z1PACTDecoder
+from rsl_rl.utils import RolloutPhaseTimer, log_startup_metadata, startup_metadata
 
 
 class B1Z1PACTRunner:
@@ -103,6 +104,7 @@ class B1Z1PACTRunner:
         self.use_adaptive_entropy = algorithm_cfg.get("use_adaptive_entropy", False)
 
         self.current_learning_iteration, self.total_timesteps, self.total_time = 0, 0, 0.0
+        self._startup_metadata_logged = False
 
         self.writer = None
         _, _ = self.env.reset()
@@ -114,6 +116,14 @@ class B1Z1PACTRunner:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=self.env.max_episode_length)
         obs, history, privileged, explicit = self.env.get_observations()
         obs, history, privileged, explicit = (value.to(self.device) for value in (obs, history, privileged, explicit))
+        if self.enable_additional_diagnostics and not self._startup_metadata_logged:
+            log_startup_metadata(
+                startup_metadata(
+                    self.env, self.device, (obs, history, privileged, explicit), self.actor_critic
+                ),
+                self.writer,
+            )
+            self._startup_metadata_logged = True
         rewards, lengths, ep_infos = deque(maxlen=100), deque(maxlen=100), []
         running_reward = torch.zeros(self.env.num_envs, 1, device=self.device)
         running_length = torch.zeros_like(running_reward)
@@ -128,18 +138,27 @@ class B1Z1PACTRunner:
                 self.actor_critic.begin_rollout_diagnostics()
             if self.enable_additional_diagnostics and hasattr(self.env, "begin_rollout_diagnostics"):
                 self.env.begin_rollout_diagnostics()
+            rollout_timer = (
+                RolloutPhaseTimer(self.device)
+                if self.enable_additional_diagnostics else None
+            )
+            self.env._rollout_phase_timer = rollout_timer
             start = time.time()
             # Rollout collection never needs autograd. Cover simulation,
             # observation/reward construction, and storage copies as well as
             # policy inference, matching the optimized UniFP/Pact-pos path.
             with torch.inference_mode():
                 for _ in range(self.steps):
+                    policy_start = rollout_timer.start("policy") if rollout_timer is not None else None
                     actions = self.alg.act(obs, privileged, history, explicit)
+                    if rollout_timer is not None:
+                        rollout_timer.stop("policy", policy_start)
                     if self.enable_additional_diagnostics and hasattr(self.actor_critic, "record_rollout_diagnostics"):
                         self.actor_critic.record_rollout_diagnostics(
                             actions, self.env.cfg.normalization.clip_actions
                         )
                     next_obs, next_privileged, next_history, next_explicit, reward, dones, infos, _ = self.env.step(actions)
+                    storage_start = rollout_timer.start("transition_storage") if rollout_timer is not None else None
                     next_obs, next_privileged, next_history, next_explicit, reward, dones = (
                         value.to(self.device) for value in (next_obs, next_privileged, next_history, next_explicit, reward, dones)
                     )
@@ -166,7 +185,14 @@ class B1Z1PACTRunner:
                     if "episode" in infos:
                         ep_infos.append(infos["episode"])
                     obs, history, privileged, explicit = next_obs, next_history, next_privileged, next_explicit
-                collection_time = time.time() - start
+                    if rollout_timer is not None:
+                        rollout_timer.stop("transition_storage", storage_start)
+                rollout_timing_metrics = rollout_timer.finish() if rollout_timer is not None else {}
+                self.env._rollout_phase_timer = None
+                collection_time = (
+                    rollout_timing_metrics["Perf/Rollout/total_collection_ms"] / 1000.0
+                    if rollout_timer is not None else time.time() - start
+                )
                 # Bootstrap values are rollout targets and the final privileged
                 # observation was assembled under this inference guard.
                 self.alg.compute_returns(privileged)
@@ -192,6 +218,7 @@ class B1Z1PACTRunner:
             self._step_domain_randomization_curriculum(iteration, ep_infos)
             metrics.update(policy_diagnostics)
             metrics.update(environment_diagnostics)
+            metrics.update(rollout_timing_metrics)
             if self.enable_additional_diagnostics:
                 self._validate_diagnostics(metrics)
             self._log(

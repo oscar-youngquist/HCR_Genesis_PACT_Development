@@ -11,7 +11,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         # 2 body-orientation + 3 angular velocity + 17 joint positions +
         # 17 joint velocities + 34 previous policy actions (position then
         # auxiliary torque) + 6 commands. EE pose is estimated from history.
-        num_observations = 79
+        num_observations = 79 + 2
         # Position-only PACT uses 213 state/randomization
         # values plus the same 187-point terrain grid used by UniFP.
         num_privileged_force_obs = 21
@@ -498,8 +498,8 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
 
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
-        roll_threshold = 0.8
-        pitch_threshold = 1.0
+        roll_threshold = 1.0
+        pitch_threshold = 1.2
         height_min = 0.10
         height_max = 2.00
         contact_force_threshold = 1.0
@@ -853,7 +853,7 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
 
     class runner:
         # Disable expensive, non-training rollout and PPO-consistency diagnostics.
-        enable_additional_diagnostics = False
+        enable_additional_diagnostics = True
 
         policy_class_name = "ActorCriticB1Z1PACTPos"
         algorithm_class_name = "PPO_B1Z1PACTPos"

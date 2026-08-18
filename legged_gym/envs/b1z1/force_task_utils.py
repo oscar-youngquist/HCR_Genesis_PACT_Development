@@ -127,7 +127,7 @@ def _project_force_offset(env, nominal_target, limited_offset, base_yaw_quat, en
     )
 
 
-def get_force_adjusted_ee_target(env, env_ids=None):
+def _compute_force_adjusted_ee_target(env, env_ids=None):
     """Return the capped UniFP impedance-equilibrium EE target.
 
     UniFP contributes its yaw-frame commanded EE force. PACT and PACT-Pos do
@@ -202,6 +202,32 @@ def get_force_adjusted_ee_target(env, env_ids=None):
     )
 
 
+def invalidate_force_adjusted_ee_target_cache(env):
+    """Invalidate the full-environment target cached for the current control step."""
+    env._force_adjusted_ee_target_cache = None
+
+
+def get_force_adjusted_ee_target(env, env_ids=None, *, use_cache=True):
+    """Return one consistent force-adjusted target for the current control step.
+
+    Full-batch calls share one cached projection. Subset calls are deliberately
+    uncached because they are used while resetting selected environments and
+    must observe the newly written reset state without contaminating the normal
+    full-batch cache. ``use_cache=False`` is available for assertions and tools.
+    The underlying computation remains stateless.
+    """
+    if env_ids is not None or not use_cache:
+        return _compute_force_adjusted_ee_target(env, env_ids)
+    cached = getattr(env, "_force_adjusted_ee_target_cache", None)
+    if cached is None:
+        cached = _compute_force_adjusted_ee_target(env)
+        env._force_adjusted_ee_target_cache = cached
+        env._force_adjusted_ee_target_compute_count = (
+            getattr(env, "_force_adjusted_ee_target_compute_count", 0) + 1
+        )
+    return cached
+
+
 def _per_env_ee_force_offset_diagnostics(target):
     """Return stateless force-target diagnostics before batch reduction."""
     return {
@@ -246,6 +272,8 @@ def init_ee_force_target_diagnostics(env):
     env.previous_projected_ee_target_valid = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
     )
+    env._force_adjusted_ee_target_cache = None
+    env._force_adjusted_ee_target_compute_count = 0
 
 
 def accumulate_ee_force_target_diagnostics(env):

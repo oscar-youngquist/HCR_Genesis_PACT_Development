@@ -8,6 +8,7 @@ from legged_gym.envs.b1z1.force_task_utils import (
     accumulate_ee_force_target_diagnostics,
     get_force_adjusted_ee_target,
     init_ee_force_target_diagnostics,
+    invalidate_force_adjusted_ee_target_cache,
     reset_ee_force_target_diagnostics,
     strict_standing_mask,
     summarize_accumulated_ee_force_target_diagnostics,
@@ -89,20 +90,28 @@ class B1Z1PACT(LeggedRobot):
 
     def step(self, actions):
         """Apply actions, simulate, and return the PACT-style env tuple."""
+        invalidate_force_adjusted_ee_target_cache(self)
         actions = self._pre_sim_step(actions)
 
         if actions.shape[-1] != 2 * self.num_actions:
             raise RuntimeError(
                 f"B1Z1 PACT expects {2 * self.num_actions} coupled actions, got {actions.shape[-1]}"
             )
+        rollout_timer = getattr(self, "_rollout_phase_timer", None)
+        force_start = rollout_timer.start("force_events") if rollout_timer is not None else None
         # External events run from iteration zero. Their sampled range follows
         # the iteration-based curriculum returned by external_force_scale.
         if self.cfg.commands.push_gripper_stators:
             self._push_gripper(self.all_env_ids)
         if self.cfg.commands.push_robot_base:
             self._push_robot_base(self.all_env_ids)
+        if rollout_timer is not None:
+            rollout_timer.stop("force_events", force_start)
 
+        sim_start = rollout_timer.start("simulator") if rollout_timer is not None else None
         self.simulator.step(actions)
+        if rollout_timer is not None:
+            rollout_timer.stop("simulator", sim_start)
         self.post_physics_step()
 
         clip_obs = self.cfg.normalization.clip_observations
@@ -214,6 +223,8 @@ class B1Z1PACT(LeggedRobot):
         # commands/goals, terminate, reward, reset, then build next observations.
         self.episode_length_buf += 1
         self.common_step_counter += 1
+        rollout_timer = getattr(self, "_rollout_phase_timer", None)
+        post_start = rollout_timer.start("post_physics") if rollout_timer is not None else None
         self.simulator.post_physics_step()
         self._post_physics_step_callback()
         # Accumulate target diagnostics once; all target consumers stay stateless.
@@ -228,13 +239,24 @@ class B1Z1PACT(LeggedRobot):
         self._compute_z1_arm_jacobian_buffer()
 
         self.check_termination()
+        if rollout_timer is not None:
+            rollout_timer.stop("post_physics", post_start)
+        reward_start = rollout_timer.start("rewards") if rollout_timer is not None else None
         self.compute_reward()
+        if rollout_timer is not None:
+            rollout_timer.stop("rewards", reward_start)
 
+        reset_start = rollout_timer.start("resets") if rollout_timer is not None else None
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
+        if rollout_timer is not None:
+            rollout_timer.stop("resets", reset_start)
+        obs_start = rollout_timer.start("observations") if rollout_timer is not None else None
         if getattr(self.cfg, "sensor", None) is not None and self.cfg.sensor.add_depth:
             self.simulator.update_depth_images()
         self.compute_observations()
+        if rollout_timer is not None:
+            rollout_timer.stop("observations", obs_start)
         if self.debug:
             self.simulator.draw_debug_vis()
 
@@ -1139,6 +1161,7 @@ class B1Z1PACT(LeggedRobot):
 
     def _refresh_curr_ee_goal_world(self, env_ids=None):
         """Refresh cached world-frame EE target positions from spherical commands."""
+        invalidate_force_adjusted_ee_target_cache(self)
         if env_ids is None:
             env_ids = self.all_env_ids
         if len(env_ids) == 0:
@@ -1502,6 +1525,7 @@ class B1Z1PACT(LeggedRobot):
 
     def _push_gripper(self, env_ids_all):
         """Update the external end-effector disturbance stream."""
+        invalidate_force_adjusted_ee_target_cache(self)
         if self.cfg.commands.apply_ee_external_forces:
             self._update_force_stream(
                 env_ids_all,

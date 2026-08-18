@@ -7,6 +7,7 @@ from legged_gym.envs.b1z1.force_task_utils import (
     accumulate_ee_force_target_diagnostics,
     get_force_adjusted_ee_target,
     init_ee_force_target_diagnostics,
+    invalidate_force_adjusted_ee_target_cache,
     reset_ee_force_target_diagnostics,
 )
 import torch
@@ -142,6 +143,31 @@ class ForceTargetProjectionTests(unittest.TestCase):
         target = get_force_adjusted_ee_target(env)
         self.assertTrue(torch.allclose(target.raw_offset, torch.zeros(1, 3)))
         self.assertTrue(torch.equal(target.effective_target, env.curr_ee_goal_cart_world))
+
+    def test_full_batch_cache_matches_uncached_and_projects_once(self):
+        env = self._environment(
+            [[0.5, 0.0, 0.0], [0.8, 0.0, 0.0]],
+            [[0.1, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        )
+        init_ee_force_target_diagnostics(env)
+        cached = get_force_adjusted_ee_target(env)
+        self.assertIs(cached, get_force_adjusted_ee_target(env))
+        uncached = get_force_adjusted_ee_target(env, use_cache=False)
+        for cached_value, uncached_value in zip(cached, uncached):
+            self.assertTrue(torch.equal(cached_value, uncached_value))
+        self.assertEqual(env._force_adjusted_ee_target_compute_count, 1)
+
+    def test_invalidation_prevents_pre_reset_target_reuse(self):
+        env = self._environment([0.5, 0.0, 0.0], [0.1, 0.0, 0.0])
+        init_ee_force_target_diagnostics(env)
+        pre_reset = get_force_adjusted_ee_target(env).effective_target.clone()
+        env.curr_ee_goal_cart_world[0, 0] = 0.7
+        env.ee_force_ext_world.zero_()
+        invalidate_force_adjusted_ee_target_cache(env)
+        post_reset = get_force_adjusted_ee_target(env).effective_target
+        self.assertFalse(torch.equal(pre_reset, post_reset))
+        self.assertTrue(torch.equal(post_reset, env.curr_ee_goal_cart_world))
+        self.assertEqual(env._force_adjusted_ee_target_compute_count, 2)
 
     def test_reset_suppresses_target_velocity_spike(self):
         env = self._environment([0.5, 0.0, 0.0], [0.0, 0.0, 0.0])

@@ -29,3 +29,4 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 from .utils import split_and_pad_trajectories, unpad_trajectories, print_class_attributes, pretty_print_module
+from .rollout_timing import RolloutPhaseTimer, log_startup_metadata, startup_metadata

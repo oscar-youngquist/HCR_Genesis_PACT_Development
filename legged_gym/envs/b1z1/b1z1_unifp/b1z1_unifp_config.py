@@ -8,7 +8,7 @@ class B1Z1UniFPCfg:
         num_envs = 4096
         # Actor frame excludes gait sin/cos; phase remains internal to gait
         # reference, contact scheduling, and guidance rewards.
-        num_observations = 71
+        num_observations = 71 + 2
         # Critic frame is a 217-D state/randomization block plus 187 terrain
         # samples. Explicit labels include contacts, so contacts are not added
         # a second time. The domain parameters include all 19 simulator DOFs,
@@ -515,8 +515,8 @@ class B1Z1UniFPCfg:
 
     class termination:
         termination_terms = ["roll", "pitch", "height_min", "height_max"]
-        roll_threshold = 0.8
-        pitch_threshold = 1.0
+        roll_threshold = 1.0
+        pitch_threshold = 1.2
         height_min = 0.10
         height_max = 2.00
         contact_force_threshold = 1.0

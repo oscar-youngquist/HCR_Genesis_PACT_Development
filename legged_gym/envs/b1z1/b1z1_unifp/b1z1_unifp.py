@@ -9,6 +9,7 @@ from legged_gym.envs.b1z1.force_task_utils import (
     force_curriculum_active,
     get_force_adjusted_ee_target,
     init_ee_force_target_diagnostics,
+    invalidate_force_adjusted_ee_target_cache,
     reset_ee_force_target_diagnostics,
     strict_standing_mask,
     summarize_accumulated_ee_force_target_diagnostics,
@@ -94,8 +95,11 @@ class B1Z1UniFP(BaseTask):
 
     def step(self, actions):
         """Apply actions, simulate, and return the PACT-style env tuple."""
+        invalidate_force_adjusted_ee_target_cache(self)
         actions = self._pre_sim_step(actions)
 
+        rollout_timer = getattr(self, "_rollout_phase_timer", None)
+        force_start = rollout_timer.start("force_events") if rollout_timer is not None else None
         # Physical force events are active from iteration zero; only their
         # sampled external range changes with the training curriculum.
         if self.cfg.commands.push_gripper_stators:
@@ -107,8 +111,13 @@ class B1Z1UniFP(BaseTask):
         # It must use estimator outputs, not simulator ground-truth forces.
         if self.cfg.commands.use_external_impedance_compensation:
             self._apply_external_impedance_compensation()
+        if rollout_timer is not None:
+            rollout_timer.stop("force_events", force_start)
 
+        sim_start = rollout_timer.start("simulator") if rollout_timer is not None else None
         self.simulator.step(actions)
+        if rollout_timer is not None:
+            rollout_timer.stop("simulator", sim_start)
         self.post_physics_step()
 
         clip_obs = self.cfg.normalization.clip_observations
@@ -195,6 +204,8 @@ class B1Z1UniFP(BaseTask):
         # commands/goals, terminate, reward, reset, then build next observations.
         self.episode_length_buf += 1
         self.common_step_counter += 1
+        rollout_timer = getattr(self, "_rollout_phase_timer", None)
+        post_start = rollout_timer.start("post_physics") if rollout_timer is not None else None
         self.simulator.post_physics_step()
         self._post_physics_step_callback()
         # Record the projected target exactly once per control step. Rewards,
@@ -210,13 +221,24 @@ class B1Z1UniFP(BaseTask):
         # self._compute_z1_arm_jacobian_buffer()
 
         self.check_termination()
+        if rollout_timer is not None:
+            rollout_timer.stop("post_physics", post_start)
+        reward_start = rollout_timer.start("rewards") if rollout_timer is not None else None
         self.compute_reward()
+        if rollout_timer is not None:
+            rollout_timer.stop("rewards", reward_start)
 
+        reset_start = rollout_timer.start("resets") if rollout_timer is not None else None
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
+        if rollout_timer is not None:
+            rollout_timer.stop("resets", reset_start)
+        obs_start = rollout_timer.start("observations") if rollout_timer is not None else None
         if getattr(self.cfg, "sensor", None) is not None and self.cfg.sensor.add_depth:
             self.simulator.update_depth_images()
         self.compute_observations()
+        if rollout_timer is not None:
+            rollout_timer.stop("observations", obs_start)
         if self.debug:
             self.simulator.draw_debug_vis()
 
@@ -660,6 +682,8 @@ class B1Z1UniFP(BaseTask):
                 self.simulator.base_ang_vel * self.obs_scales.ang_vel,
                 dof_pos_err,
                 dof_vel,
+                sin_pos,
+                cos_pos,
                 self.actions,
                 self.commands * self.commands_scale,
             ),
@@ -1121,6 +1145,7 @@ class B1Z1UniFP(BaseTask):
 
     def _refresh_curr_ee_goal_world(self, env_ids=None):
         """Refresh cached world-frame EE target positions from spherical commands."""
+        invalidate_force_adjusted_ee_target_cache(self)
         if env_ids is None:
             env_ids = self.all_env_ids
         if len(env_ids) == 0:
@@ -1499,6 +1524,7 @@ class B1Z1UniFP(BaseTask):
 
     def _push_gripper(self, env_ids_all):
         """Update EE commanded-force and external-force streams."""
+        invalidate_force_adjusted_ee_target_cache(self)
         if self.force_command_stream_enabled:
             self._update_force_stream(
                 env_ids_all,
