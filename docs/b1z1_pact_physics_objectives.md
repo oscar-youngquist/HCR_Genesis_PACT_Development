@@ -114,134 +114,49 @@ L_{ID} = \frac{1}{B}\sum_{i=1}^{B}
 \left\|W_r r_{ID,i}\right\|_2^2,
 ```
 
-where `W_r` balances base, leg, and arm residual coordinates. The current B1/Z1
-implementation uses the blockwise minibatch normalization described below
-instead of dividing the complete residual by actuator-torque magnitude.
+where `W_r` is an optional conceptual weighting. The implementation instead
+uses the same whole-vector relative normalization as Go2-PACT.
 
-### Implemented Minibatch Block Normalization
+### Implemented Go2-PACT Relative Normalization
 
-The 25-dimensional residual is divided into four physically meaningful blocks:
-
-| Block | Coordinates | Units |
-| --- | ---: | --- |
-| Base linear | `0:3` | N |
-| Base angular | `3:6` | Nm |
-| B1 legs | `6:18` | Nm |
-| Z1 arm and passive joints | `18:25` | Nm |
-
-Write the dynamics terms as
+Let
 
 ```math
-i=M(q)\dot v^{obs}, \qquad b=h(q,v), \qquad
-c=J^T\hat F, \qquad u=S^T\tau_\pi,
+d=M(q)\dot v^{obs}+h(q,v), \qquad
+u=S^T\tau_\pi, \qquad
+f_{ext}=J_f^T\hat F_{grf}+J_{ee}^T\hat F_{ee}+J_b^T\hat W_b.
 ```
 
-so that
+The residual and per-transition relative error are
 
 ```math
-r_{ID}=i+b-c-u.
+r_{ID}=d-f_{ext}-u,
 ```
-
-For each block `k`, one scale is calculated from all valid samples in the
-current PPO minibatch:
 
 ```math
-s_k = \max\left(
-s_{k,min},
-\sqrt{
-\operatorname{mean}(i_k^2)
-+\operatorname{mean}(b_k^2)
-+\operatorname{mean}(c_k^2)
-+\operatorname{mean}(u_k^2)
-+\epsilon}
-\right).
+e_{rel}=\frac{\lVert r_{ID}\rVert_2}
+{\epsilon+\lVert u\rVert_2+\lVert f_{ext}\rVert_2},
+\qquad \epsilon=10^{-8}.
 ```
 
-Root-sum-squaring the individual physical terms is intentional. Using
-`||u + c||` as the scale could produce a small denominator when large actuator
-and contact forces oppose one another. The root-sum-square remains large when
-the underlying physical activity is large, even if its net generalized force
-is small.
+The complete loss is the mean of `e_rel` over valid, non-reset transitions.
+This is the direct B1/Z1 extension of Go2-PACT: the external-force term now
+contains all four foot GRFs, the EE force, and the base wrench after their
+Jacobians map them into the 25-dimensional generalized-force space.
 
-The scale is detached from autograd before it is used. It therefore
-preconditions the physics gradient but cannot reward an actor or force decoder
-for inflating a predicted force merely to enlarge the denominator. Invalid and
-reset transitions are excluded from both scale estimation and loss reduction.
+The actuator term is detached in the denominator, matching Go2-PACT, so the
+actor cannot reduce the objective merely by increasing commanded torque. It
+remains differentiable in the residual numerator. The external-force term is
+not explicitly detached by the loss. With a differentiable dynamics backend
+and appropriate optimizer ownership, the loss can therefore train the force
+decoder through both the residual and relative normalization. The current CPU
+Pinocchio backend returns detached model terms, so its PINN gradient reaches
+the policy through reconstructed torque.
 
-The normalized block loss is
-
-```math
-L_k = \operatorname{mean}_{valid}\left[
-\left(\frac{r_{ID,k}}{\operatorname{stopgrad}(s_k)}\right)^2
-\right],
-```
-
-and the complete loss is
-
-```math
-L_{ID}=\alpha_{base,lin}L_{base,lin}
-+\alpha_{base,ang}L_{base,ang}
-+\alpha_{leg}L_{leg}
-+\alpha_{arm}L_{arm}.
-```
-
-All four semantic weights currently default to `1.0`. Equal weights are neutral
-only after block averaging and physical normalization; assigning equal weight
-to every raw coordinate would favor the larger leg block and mix newtons with
-newton-meters.
-
-### Scale-Floor Defaults
-
-The current configuration is
-
-```python
-pinn_block_weights = [1.0, 1.0, 1.0, 1.0]
-pinn_block_scale_floors = [100.0, 50.0, 20.0, 10.0]
-pinn_normalization_epsilon = 1.0e-6
-```
-
-The floors are ordered as base linear force, base moment, leg torque, and arm
-torque. They are lower bounds on the normalization scale, not acceptable-error
-thresholds. They prevent nearly static minibatches from amplifying
-finite-difference and contact noise.
-
-The B1/Z1 URDF has approximately `57.99 kg` of nominal mass, giving a body
-weight of about `568.9 N`. The `100 N` base-linear floor is approximately 18%
-of body weight. It should normally be inactive during stance, while retaining
-a meaningful denominator during weakly excited transitions.
-
-The `50 Nm` base-angular floor corresponds to the base-force floor acting over
-an approximate `0.5 m` whole-body moment arm:
-
-```math
-100\;\mathrm{N}\times0.5\;\mathrm{m}=50\;\mathrm{Nm}.
-```
-
-The B1 leg effort limits are approximately `91`, `93`, and `140 Nm`. The
-`20 Nm` leg floor is therefore roughly 14-22% of leg actuator capacity. The Z1
-limits are predominantly `30 Nm`, with one `60 Nm` joint; the `10 Nm` arm floor
-is about 33% and 17% of those limits, respectively. These values suppress
-quiet-state gradient amplification while remaining below normal high-load
-dynamics.
-
-Because the block loss scales approximately as `1 / s_k^2`, reducing a floor
-substantially strengthens gradients when that floor is active. For example,
-changing the arm floor from `10` to `5 Nm` makes quiet-minibatch arm gradients
-approximately four times larger. That is a reasonable first adjustment if arm
-and EE physics learning is consistently too weak.
-
-These floors are physically motivated initialization values, not calibrated
-constants. Useful diagnostics are the raw scale, floor-activation fraction,
-raw residual RMS, normalized residual, and gradient norm for every block. A
-floor should activate during genuinely quiet behavior but rarely during normal
-dynamic locomotion or manipulation.
-
-One limitation is that a single base-linear scale covers all three axes. The
-vertical gravity term can dominate this scale during stance and reduce
-sensitivity to horizontal residuals. If logs show that behavior, split base XY
-from base Z or calculate per-coordinate minibatch scales before averaging them
-into semantic blocks. Per-joint torque-limit normalization is a similar future
-refinement for the unequal B1 and Z1 actuator limits.
+The previous base-linear, base-angular, leg, and arm block normalization,
+minibatch RMS scales, scale floors, and block weights have been removed. There
+are no PINN normalization configuration parameters beyond the fixed numerical
+epsilon used by the Go2 formulation.
 
 ### Gradient Meaning
 

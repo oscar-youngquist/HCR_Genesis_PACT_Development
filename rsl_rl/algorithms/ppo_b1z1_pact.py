@@ -12,6 +12,18 @@ from rsl_rl.algorithms.kl_rate_band import KLRateBandController, update_duals_fr
 from rsl_rl.storage.rollout_storage_b1z1_pact import RolloutStorageB1Z1PACT
 
 
+def _go2_relative_pinn_loss(residual, generalized_tau, generalized_external, valid):
+    """Return Go2-PACT's relative residual over valid transitions."""
+    denominator = (
+        1.0e-8
+        + torch.linalg.vector_norm(generalized_tau.detach(), dim=1)
+        + torch.linalg.vector_norm(generalized_external, dim=1)
+    )
+    relative_error = torch.linalg.vector_norm(residual, dim=1) / denominator
+    valid_rows = valid.squeeze(-1).to(relative_error.dtype)
+    return (relative_error * valid_rows).sum() / valid_rows.sum().clamp_min(1.0)
+
+
 class PPO_B1Z1PACT:
     def __init__(self, actor_critic, privileged_decoder, dynamics_backend, cfg, device):
         self.actor_critic, self.privileged_decoder = actor_critic, privileged_decoder
@@ -389,36 +401,15 @@ class PPO_B1Z1PACT:
         inertial = torch.bmm(terms.mass_matrix, acceleration.unsqueeze(-1)).squeeze(-1)
         residual = inertial + terms.bias - terms.generalized_contacts - generalized_tau
 
-        # Give the floating-base force, floating-base moment, leg-torque, and
-        # arm-torque equations equal semantic footing after physical scaling.
-        # For each block, use one minibatch RMS scale built from the individual
-        # equation terms. Root-sum-squaring before normalization avoids the
-        # unstable small denominator produced when large physical terms cancel.
-        block_slices = (slice(0, 3), slice(3, 6), slice(6, 18), slice(18, 25))
-        block_weights = self.cfg["pinn_block_weights"]
-        block_floors = self.cfg["pinn_block_scale_floors"]
-        valid_rows = valid.squeeze(-1)
-        epsilon = self.cfg["pinn_normalization_epsilon"]
-        block_losses = []
-        for block, weight, floor in zip(block_slices, block_weights, block_floors):
-            block_valid = valid_rows[:, None]
-            valid_values = valid_rows.sum().clamp_min(1.0) * residual[:, block].shape[-1]
-
-            # The detached scale preconditions the gradient but cannot be
-            # inflated by the actor or force decoder to reduce the PINN loss.
-            scale_sq = sum(
-                (component[:, block].detach().square() * block_valid).sum() / valid_values
-                for component in (inertial, terms.bias, terms.generalized_contacts, generalized_tau)
-            )
-            scale = torch.sqrt(scale_sq + epsilon).clamp_min(floor)
-
-            normalized_error = residual[:, block] / scale
-            block_loss = (normalized_error.square() * block_valid).sum() / valid_values
-            block_losses.append(weight * block_loss)
-
-        # Terminal/reset samples were excluded from both scale estimation and
-        # residual reduction, so no reset state can bias the minibatch loss.
-        return torch.stack(block_losses).sum()
+        # Match Go2-PACT's relative whole-body residual. Each transition is
+        # normalized by the magnitude of the generalized actuator force and
+        # the generalized external force (feet + EE + base wrench). Detaching
+        # actuator torque matches Go2 and prevents its denominator from being
+        # an actor-controlled route for reducing the loss.
+        # Terminal/reset transitions remain excluded from the reduction.
+        return _go2_relative_pinn_loss(
+            residual, generalized_tau, terms.generalized_contacts, valid
+        )
 
 
     def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid, iteration):

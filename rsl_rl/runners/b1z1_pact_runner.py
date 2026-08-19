@@ -79,7 +79,6 @@ class B1Z1PACTRunner:
         merged.update({key: policy_cfg[key] for key in (
             "film_identity_loss_weight", "film_identity_error_scale",
             "pinn_loss_weight", "pinn_warmup", "pinn_init_steps", "predicted_force_detach",
-            "pinn_block_weights", "pinn_block_scale_floors", "pinn_normalization_epsilon",
             "force_gate_ema_alpha", "force_gate_threshold", "force_gate_hysteresis", "force_gate_patience",
             "force_blend_min_alpha",
             "explicit_base_vel_weight", "explicit_ee_position_weight", "explicit_base_wrench_weight", "explicit_ee_force_weight", "explicit_foot_contact_weight",

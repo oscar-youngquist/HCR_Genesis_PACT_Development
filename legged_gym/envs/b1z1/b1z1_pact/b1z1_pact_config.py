@@ -865,15 +865,6 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         pinn_warmup = 100
         pinn_init_steps = 100
 
-        # Minibatch-normalized inverse-dynamics blocks, ordered as base linear
-        # force, base moment, leg torque, and arm torque. Equal weights are the
-        # neutral default after each block receives its own physical scale.
-        pinn_block_weights = [1.0, 1.0, 1.0, 1.0]
-        # Floors retain useful physical units while preventing nearly static
-        # minibatches from amplifying finite-difference and contact noise.
-        pinn_block_scale_floors = [100.0, 50.0, 20.0, 10.0]
-        pinn_normalization_epsilon = 1.0e-6
-
         predicted_force_detach = False
         force_gate_ema_alpha = 0.05
         force_gate_threshold = 0.10
