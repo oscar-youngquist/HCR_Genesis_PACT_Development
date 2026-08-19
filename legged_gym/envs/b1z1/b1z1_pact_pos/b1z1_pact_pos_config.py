@@ -421,7 +421,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
      
         # B1Z1 PACT uses only the UniFP-style physical base/EE force events.
         # Disable the generic velocity-push curriculum from the base pipeline.
-        push_robots = True
+        push_robots = False
         push_interval_s = 8.0
         
         push_interval_min = 5.0
@@ -510,6 +510,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             pass
 
     class rewards:
+        force_neutral_threshold = 1.0e-3
         only_positive_rewards = False
         use_reward_curriculum = False
         

@@ -155,6 +155,8 @@ class ActorCriticB1Z1PACT(nn.Module):
         self.distribution: Normal | None = None
 
         self.last_context: dict[str, torch.Tensor] | None = None
+        self.last_position_mean: torch.Tensor | None = None
+        self.last_torque_mean: torch.Tensor | None = None
 
         self.last_film_magnitude: torch.Tensor | None = None
         self.last_film_identity_deviation: torch.Tensor | None = None
@@ -177,6 +179,15 @@ class ActorCriticB1Z1PACT(nn.Module):
         }
 
     @staticmethod
+    def explicit_vector(context: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Assemble the normalized semantic explicit state consumed by the actor."""
+        return torch.cat((
+            context["base_velocity"], context["ee_position"],
+            context["base_wrench"], context["ee_force"],
+            torch.sigmoid(context["foot_contact_logits"]), context["foot_height"],
+        ), dim=-1)
+
+    @staticmethod
     def _std_config_tensor(value, action_dim: int, name: str) -> torch.Tensor:
         """Expand a scalar or validate a per-action exploration profile."""
         tensor = torch.as_tensor(value, dtype=torch.float)
@@ -189,32 +200,47 @@ class ActorCriticB1Z1PACT(nn.Module):
             )
         return tensor.clone()
 
-    def _actor_inputs(self, obs: torch.Tensor, context: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    def _actor_inputs(
+        self,
+        obs: torch.Tensor,
+        actor_context: dict[str, torch.Tensor],
+        film_context: dict[str, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build predicted actor input and independently conditioned FiLM input."""
+        film_context = actor_context if film_context is None else film_context
         # Actor observation ends with [vx, vy, yaw_rate, radius, pitch, yaw].
         command = obs[:, -6:]
         # Both terms are component-wise normalized as [vx*lin, vy*lin,
         # yaw_rate*ang], so FiLM never compares unlike physical scales.
-        base_error = command[:, :3] - context["base_velocity"]
+        base_error = command[:, :3] - film_context["base_velocity"].detach()
         # Command and prediction share UniFP's scaled spherical representation.
-        ee_error = command[:, 3:6] - context["ee_position"]
+        ee_error = command[:, 3:6] - film_context["ee_position"].detach()
         # Retain the six-dimensional tracking error used by FiLM so PPO can
         # regularize modulation strength as a function of tracking quality.
         self.last_tracking_error_sq = torch.cat((base_error, ee_error), dim=-1).square().mean(dim=-1)
-        contact_probability = torch.sigmoid(context["foot_contact_logits"])
+        contact_probability = torch.sigmoid(actor_context["foot_contact_logits"]).detach()
         actor_input = torch.cat(
             (
-                obs, context["z"], context["base_velocity"], context["ee_position"],
-                context["base_wrench"], context["ee_force"],
-                contact_probability, context["foot_height"],
+                obs, actor_context["z"], actor_context["base_velocity"], actor_context["ee_position"],
+                actor_context["base_wrench"], actor_context["ee_force"],
+                contact_probability, actor_context["foot_height"],
             ),
             dim=-1,
         )
         # Contact state and foot height are excluded from FiLM by design.
-        film_condition = torch.cat((context["base_wrench"], context["ee_force"], base_error, ee_error), dim=-1)
+        film_condition = torch.cat((
+            film_context["base_wrench"].detach(), film_context["ee_force"].detach(),
+            base_error, ee_error,
+        ), dim=-1)
         return actor_input, film_condition
 
-    def actor_forward(self, obs: torch.Tensor, context: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-        actor_input, film_condition = self._actor_inputs(obs, context)
+    def actor_forward(
+        self,
+        obs: torch.Tensor,
+        actor_context: dict[str, torch.Tensor],
+        film_context: dict[str, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        actor_input, film_condition = self._actor_inputs(obs, actor_context, film_context)
         features = self.actor_trunk(actor_input)
         features, magnitude, identity_deviation = self.film(features, film_condition)
         self.last_film_magnitude = magnitude
@@ -230,7 +256,9 @@ class ActorCriticB1Z1PACT(nn.Module):
         context = self.decode_context(self.context_encoder(history, sample=sample_context))
         # Boot masking is intentionally disabled: training and deployment
         # always condition on latent z and every predicted explicit output.
-        position, torque = self.actor_forward(obs, context)
+        position, torque = self.actor_forward(obs, context, context)
+        self.last_position_mean = position
+        self.last_torque_mean = torque
         mean = torch.cat((position, torque), dim=-1)
         self.std.data.copy_(
             torch.maximum(torch.minimum(self.std.data, self._std_clip_upr), self._std_clip_lwr)
@@ -249,7 +277,9 @@ class ActorCriticB1Z1PACT(nn.Module):
 
     def act_inference(self, obs: torch.Tensor, history: torch.Tensor) -> torch.Tensor:
         context = self.decode_context(self.context_encoder.forward_inf(history))
-        position, torque = self.actor_forward(obs, context)
+        position, torque = self.actor_forward(obs, context, context)
+        self.last_position_mean = position
+        self.last_torque_mean = torque
         actions = torch.cat((position, torque), dim=-1)
         return actions
 
@@ -296,7 +326,7 @@ class ActorCriticB1Z1PACT(nn.Module):
             else:
                 owner = "actor"
             # Do not decay biases or the learned Gaussian exploration scale.
-            if name.endswith(".bias") or name == "std":
+            if name == "std":
                 groups[f"{owner}_no_decay"].append(parameter)
             elif name.startswith("film."):
                 groups["film"].append(parameter)
@@ -308,7 +338,7 @@ class ActorCriticB1Z1PACT(nn.Module):
 
         actor_groups = [
             group(groups["actor"], weight_decay, "actor"),
-            group(groups["film"], strong_decay, "film"),
+            group(groups["film"], weight_decay, "film"),
             group(groups["critic"], weight_decay, "critic"),
             group(groups["actor_no_decay"] + groups["critic_no_decay"], 0.0, "actor_critic_no_decay"),
         ]

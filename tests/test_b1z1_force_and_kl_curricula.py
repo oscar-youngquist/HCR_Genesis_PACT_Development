@@ -15,6 +15,7 @@ from rsl_rl.algorithms.kl_rate_band import (
     KLRateBandController,
     update_duals_from_mean,
 )
+from rsl_rl.algorithms.ppo_b1z1_pact import PPO_B1Z1PACT
 
 
 class ForceTaskTests(unittest.TestCase):
@@ -123,6 +124,36 @@ class ForceTaskTests(unittest.TestCase):
             getattr(env, name).zero_()
         self.assertTrue(torch.equal(env._reward_stand_still(), torch.full((5,), 12.0)))
         self.assertTrue(torch.equal(env._reward_stand_still_contact(), torch.ones(5)))
+
+
+class PACTForceBlendTests(unittest.TestCase):
+    @staticmethod
+    def _ppo(start_ema=1.0, current_ema=1.0, active=False):
+        ppo = object.__new__(PPO_B1Z1PACT)
+        ppo.cfg = {"force_gate_threshold": 0.10}
+        ppo.force_blend_min_alpha = 0.01
+        ppo.force_blend_start_ema = start_ema
+        ppo.force_ema = current_ema
+        ppo.force_gate_active = active
+        return ppo
+
+    def test_blend_starts_at_configured_minimum(self):
+        self.assertAlmostEqual(self._ppo()._force_prediction_blend_alpha(), 0.01)
+
+    def test_blend_is_linear_in_reconstruction_ema(self):
+        # Halfway from EMA 1.0 to threshold 0.1 gives halfway authority.
+        ppo = self._ppo(current_ema=0.55)
+        self.assertAlmostEqual(ppo._force_prediction_blend_alpha(), 0.505)
+        ppo.force_ema = 0.10
+        self.assertAlmostEqual(ppo._force_prediction_blend_alpha(), 1.0)
+
+    def test_blend_is_bounded_and_gate_forces_full_prediction(self):
+        self.assertAlmostEqual(
+            self._ppo(current_ema=2.0)._force_prediction_blend_alpha(), 0.01
+        )
+        self.assertAlmostEqual(
+            self._ppo(current_ema=2.0, active=True)._force_prediction_blend_alpha(), 1.0
+        )
 
 
 class KLIterationUpdateTests(unittest.TestCase):

@@ -241,8 +241,6 @@ class PPO_B1Z1PACTPos:
         self.storage.compute_returns(self.actor_critic.evaluate(critic_obs).detach(), self.gamma, self.lam)
 
     def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid, iteration):
-        self.auxiliary_optimizer.zero_grad()
-
         # Recompute the auxiliary graph after the actor update. The PPO
         # graph was consumed by PCGrad and sharing it here would either
         # fail on a second backward pass or retain an unnecessarily large

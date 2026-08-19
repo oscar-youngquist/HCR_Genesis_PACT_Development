@@ -249,13 +249,15 @@ class B1Z1PACTPos(LeggedRobot):
         # Accumulate target diagnostics once; all target consumers stay stateless.
         accumulate_ee_force_target_diagnostics(self)
 
-        # # Leg main-ip update specific update
-        # self.compute_all_leg_jacobians(
-        #     self.simulator.dof_pos[:, 0:12].view(-1, 4, 3),
-        #     out=self.leg_jacobians,
-        # )
-
-        # self._compute_z1_arm_jacobian_buffer()
+        # These Jacobians only support optional manipulability rewards; avoid
+        # their per-step cost when the corresponding reward is disabled.
+        if "torso_force_wrench_ellipsoid" in self.reward_names:
+            self.compute_all_leg_jacobians(
+                self.simulator.dof_pos[:, 0:12].view(-1, 4, 3),
+                out=self.leg_jacobians,
+            )
+        if "arm_ee_force_manipulability" in self.reward_names:
+            self._compute_z1_arm_jacobian_buffer()
 
         self.check_termination()
         if rollout_timer is not None:
@@ -2124,8 +2126,9 @@ class B1Z1PACTPos(LeggedRobot):
         This is the existing PACT curriculum, retained here because it changes
         the actual torque composition observed by the whole-body loss.
         """
-        tracking = self.episode_sums["tracking_lin_vel"][env_ids] / self.max_episode_length
-        success = tracking > self.cfg.control.tradeoff_threshold * self.reward_scales["tracking_lin_vel"]
+        tracking_key = "tracking_lin_vel_force_world"
+        tracking = self.episode_sums[tracking_key][env_ids] / self.max_episode_length
+        success = tracking > self.cfg.control.tradeoff_threshold * self.reward_scales[tracking_key]
         self.tradeoff_step_ctr[env_ids[success]] = torch.clamp(
             self.tradeoff_step_ctr[env_ids[success]] + 1.0, max=float(self.tradeoff_num_steps)
         )
@@ -2145,9 +2148,8 @@ class B1Z1PACTPos(LeggedRobot):
         return torch.exp(-torch.square(self.commands[:, 2] - self.simulator.base_ang_vel[:, 2]) / self.cfg.rewards.tracking_sigma)
 
     def _reward_tracking_ee_force_world(self):
-        # UniFP convention inside PACT training: keep its EE target trajectory,
-        # but never turn external force into a shifted Cartesian target.
-        error = torch.sum(torch.abs(self.curr_ee_goal_cart_world - self.simulator.ee_pos), dim=1)
+        target = get_force_adjusted_ee_target(self).effective_target
+        error = torch.sum(torch.abs(target - self.simulator.ee_pos), dim=1)
         return torch.exp(-error / self.cfg.rewards.tracking_ee_sigma * 2.0)
 
     def _reward_torque_cancellation(self):

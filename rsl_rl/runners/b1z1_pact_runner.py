@@ -81,6 +81,7 @@ class B1Z1PACTRunner:
             "pinn_loss_weight", "pinn_warmup", "pinn_init_steps", "predicted_force_detach",
             "pinn_block_weights", "pinn_block_scale_floors", "pinn_normalization_epsilon",
             "force_gate_ema_alpha", "force_gate_threshold", "force_gate_hysteresis", "force_gate_patience",
+            "force_blend_min_alpha",
             "explicit_base_vel_weight", "explicit_ee_position_weight", "explicit_base_wrench_weight", "explicit_ee_force_weight", "explicit_foot_contact_weight",
             "explicit_foot_height_weight",
             "privileged_decoder_weight", "vae_kld_weight",
@@ -91,9 +92,15 @@ class B1Z1PACTRunner:
 
         self.alg = PPO_B1Z1PACT(self.actor_critic, self.privileged_decoder, self.dynamics, merged, device)
 
+        # Match the original Go2 PACT bootstrap path: initialize model weights
+        # from a converted PACT-Pos checkpoint while keeping fresh optimizers,
+        # schedules, reliability-gate state, and training iteration counters.
+        if policy_cfg.get("pretrained_path"):
+            self._load_pretrained_model(policy_cfg["pretrained_path"])
+
         self.alg.init_storage(
             env.num_envs, runner_cfg["num_steps_per_env"], env.num_obs, critic_dim,
-            history_dim, 2 * env.num_actions, env.num_exp_labels,
+            history_dim, env.cfg.env.num_policy_actions, env.num_exp_labels,
             env.cfg.env.num_privileged_recon_obs, 180,
         )
 
@@ -108,6 +115,24 @@ class B1Z1PACTRunner:
 
         self.writer = None
         _, _ = self.env.reset()
+
+    def _load_pretrained_model(self, pretrained_path):
+        """Load a weights-only PACT hot start produced by the conversion notebook."""
+        pretrained_path = os.path.expanduser(pretrained_path)
+        if not os.path.isabs(pretrained_path):
+            pretrained_path = os.path.join(LEGGED_GYM_ROOT_DIR, pretrained_path)
+        print(f"Loading PACT-Pos hot-start weights from: {pretrained_path}")
+        checkpoint = torch.load(
+            pretrained_path, map_location=self.device, weights_only=True
+        )
+        required = {"model_state_dict", "privileged_decoder_state_dict"}
+        missing = required.difference(checkpoint)
+        if missing:
+            raise KeyError(f"Hot-start checkpoint is missing keys: {sorted(missing)}")
+        self.actor_critic.load_state_dict(checkpoint["model_state_dict"], strict=True)
+        self.privileged_decoder.load_state_dict(
+            checkpoint["privileged_decoder_state_dict"], strict=True
+        )
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         if self.log_dir is not None and self.writer is None:
@@ -365,6 +390,7 @@ class B1Z1PACTRunner:
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
             "iteration": saved_iteration, "force_ema": self.alg.force_ema,
             "force_gate_active": self.alg.force_gate_active, "force_gate_count": self.alg.force_gate_count,
+            "force_blend_start_ema": self.alg.force_blend_start_ema,
             "entropy_coef": self.alg.current_entropy_coef,
             "kl_controller_state": self.alg.kl_controller.state_dict(),
         }, path)
@@ -383,6 +409,9 @@ class B1Z1PACTRunner:
         self.alg.force_ema = checkpoint.get("force_ema")
         self.alg.force_gate_active = checkpoint.get("force_gate_active", False)
         self.alg.force_gate_count = checkpoint.get("force_gate_count", 0)
+        self.alg.force_blend_start_ema = checkpoint.get(
+            "force_blend_start_ema", self.alg.force_ema
+        )
         self.alg.current_entropy_coef = checkpoint.get("entropy_coef", self.alg.current_entropy_coef)
         self.alg.kl_controller.load_state_dict(checkpoint.get("kl_controller_state"))
         return checkpoint.get("iteration", 0)

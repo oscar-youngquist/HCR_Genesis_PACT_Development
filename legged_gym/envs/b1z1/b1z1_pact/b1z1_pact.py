@@ -81,7 +81,7 @@ class B1Z1PACT(LeggedRobot):
         obs, privileged_obs, _, _, _, _, _, _ = self.step(
             torch.zeros(
                 self.num_envs,
-                2 * self.num_actions,
+                self.cfg.env.num_policy_actions,
                 device=self.device,
                 requires_grad=False,
             )
@@ -230,13 +230,15 @@ class B1Z1PACT(LeggedRobot):
         # Accumulate target diagnostics once; all target consumers stay stateless.
         accumulate_ee_force_target_diagnostics(self)
 
-        # Leg main-ip update specific update
-        self.compute_all_leg_jacobians(
-            self.simulator.dof_pos[:, 0:12].view(-1, 4, 3),
-            out=self.leg_jacobians,
-        )
-
-        self._compute_z1_arm_jacobian_buffer()
+        # These Jacobians only support optional manipulability rewards; avoid
+        # their per-step cost when the corresponding reward is disabled.
+        if "torso_force_wrench_ellipsoid" in self.reward_names:
+            self.compute_all_leg_jacobians(
+                self.simulator.dof_pos[:, 0:12].view(-1, 4, 3),
+                out=self.leg_jacobians,
+            )
+        if "arm_ee_force_manipulability" in self.reward_names:
+            self._compute_z1_arm_jacobian_buffer()
 
         self.check_termination()
         if rollout_timer is not None:
@@ -680,7 +682,6 @@ class B1Z1PACT(LeggedRobot):
         self.llast_obs_buf.copy_(self.last_obs_buf)
         self.last_obs_buf.copy_(self.obs_buf)
 
-        base_rpy = self.simulator.base_euler
         base_yaw_quat = self._get_base_yaw_quat()
         ee_center = self.get_ee_goal_spherical_center(base_yaw_quat)
 
@@ -689,9 +690,6 @@ class B1Z1PACT(LeggedRobot):
         ee_local_cart = quat_rotate_inverse(base_yaw_quat, self.simulator.ee_pos - ee_center)
         self.ee_pos_sphe_arm = cart2sphere(ee_local_cart)
 
-        # Dynamics labels use the world/LWA force frame so predicted force can
-        # enter the Pinocchio residual without an ambiguous extra transform.
-        base_wrench_world = torch.cat((self.base_force_ext_world, self.base_torque_ext_world), dim=-1)
         force_adjusted_target = get_force_adjusted_ee_target(self)
         ee_goal_offset_local = quat_rotate_inverse(
             base_yaw_quat,
@@ -716,6 +714,8 @@ class B1Z1PACT(LeggedRobot):
                 self.simulator.base_ang_vel * self.obs_scales.ang_vel,
                 dof_pos_err,
                 dof_vel,
+                sin_pos,
+                cos_pos,
                 self.actions,
                 self.commands * self.commands_scale,
             ),
@@ -805,7 +805,6 @@ class B1Z1PACT(LeggedRobot):
             ("wrench_velocity", self.simulator._rand_wrench_vels),
             ("kp_scale", self.simulator._kp_scale - self.kp_scale_offset),
             ("kd_scale", self.simulator._kd_scale - self.kd_scale_offset),
-            ("motor_strength", self.simulator._motor_strength),
             ("joint_armature", self.simulator._joint_armature),
             ("joint_friction", self.simulator._joint_friction),
             ("joint_damping", self.simulator._joint_damping),
@@ -827,8 +826,6 @@ class B1Z1PACT(LeggedRobot):
             heights = torch.clip(self.simulator.base_pos[:, 2].unsqueeze(1) - 0.5 \
                                  - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements
 
-            if self.add_noise:
-                heights *= self.height_noise_vec
             if heights.shape[1] != self.cfg.env.num_height_obs:
                 raise RuntimeError(
                     f"B1Z1 PACT terrain observation is {heights.shape[1]}D, expected "
@@ -1664,8 +1661,8 @@ class B1Z1PACT(LeggedRobot):
         mean_tracking = torch.mean(self.episode_sums["tracking_lin_vel_force_world"][env_ids]) / self.max_episode_length
         if mean_tracking > self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel_force_world"]:
             for key in ["lin_vel_x", "lin_vel_y", "ang_vel_yaw"]:
-                self.command_ranges[key][0] = np.clip(self.command_ranges[key][0] - 0.5, -self.cfg.commands.max_curriculum, 0.0)
-                self.command_ranges[key][1] = np.clip(self.command_ranges[key][1] + 0.5, 0.0, self.cfg.commands.max_curriculum)
+                self.command_ranges[key][0] = np.clip(self.command_ranges[key][0] - 0.2, -self.cfg.commands.max_curriculum, 0.0)
+                self.command_ranges[key][1] = np.clip(self.command_ranges[key][1] + 0.2, 0.0, self.cfg.commands.max_curriculum)
 
     def step_reward_curriculum(self, num_iters):
         """Cosine-ramp selected reward scales during training."""
@@ -1761,7 +1758,9 @@ class B1Z1PACT(LeggedRobot):
             [self.obs_scales.base_force] * 3 + [self.obs_scales.base_force] * 3,
             device=self.device,
         )
-        self.actions = torch.zeros(self.num_envs, 2 * self.num_actions, device=self.device)
+        self.actions = torch.zeros(
+            self.num_envs, self.cfg.env.num_policy_actions, device=self.device
+        )
         self.last_actions = torch.zeros_like(self.actions)
         self.llast_actions = torch.zeros_like(self.actions)
         self.feet_air_time = torch.zeros(self.num_envs, len(self.simulator.feet_indices), device=self.device)
@@ -2116,10 +2115,9 @@ class B1Z1PACT(LeggedRobot):
         return torch.exp(-torch.square(self.commands[:, 2] - self.simulator.base_ang_vel[:, 2]) / self.cfg.rewards.tracking_sigma)
 
     def _reward_tracking_ee_force_world(self):
-        # UniFP convention inside PACT training: keep its EE target trajectory,
-        # but never turn external force into a shifted Cartesian target.
-        error = torch.sum(torch.abs(self.curr_ee_goal_cart_world - self.simulator.ee_pos), dim=1)
-        return torch.exp(-error / self.cfg.rewards.tracking_ee_sigma)
+        target = get_force_adjusted_ee_target(self).effective_target
+        error = torch.sum(torch.abs(target - self.simulator.ee_pos), dim=1)
+        return torch.exp(-error / self.cfg.rewards.tracking_ee_sigma * 2.0)
 
     def _reward_torque_cancellation(self):
         """Penalize substantial same-joint cancellation between action heads.
@@ -2239,6 +2237,30 @@ class B1Z1PACT(LeggedRobot):
     def _reward_torques(self):
         return torch.sum(torch.square(self.simulator.torques[:, :17]), dim=1)
 
+    def _reward_leg_feedback_torques(self):
+        """Penalize the applied position-PD torque contribution on the legs."""
+        return torch.sum(
+            torch.square(self.simulator.combined_feedback_torques[:, :12]), dim=1
+        )
+
+    def _reward_arm_feedback_torques(self):
+        """Penalize the applied position-PD torque contribution on the arm."""
+        return torch.sum(
+            torch.square(self.simulator.combined_feedback_torques[:, 12:17]), dim=1
+        )
+
+    def _reward_leg_feedforward_torques(self):
+        """Penalize the applied direct-torque contribution on the legs."""
+        return torch.sum(
+            torch.square(self.simulator.combined_feedforward_torques[:, :12]), dim=1
+        )
+
+    def _reward_arm_feedforward_torques(self):
+        """Penalize the applied direct-torque contribution on the arm."""
+        return torch.sum(
+            torch.square(self.simulator.combined_feedforward_torques[:, 12:17]), dim=1
+        )
+
     def _reward_dof_vel(self):
         return torch.sum(torch.square(self.simulator.dof_vel[:, :17]), dim=1)
 
@@ -2251,23 +2273,45 @@ class B1Z1PACT(LeggedRobot):
     def _reward_dof_acc_arm(self):
         return torch.sum(torch.square((self.simulator.last_dof_vel[:, 12:17] - self.simulator.dof_vel[:, 12:17]) / self.dt), dim=1)
 
-    def _reward_action_rate(self):
-        return torch.sum(torch.square(self.last_actions[:, :12] - self.actions[:, :12]), dim=1)
+    def _action_rate(self, start, end):
+        """Squared first difference over a selected raw-action slice."""
+        return torch.sum(
+            torch.square(self.actions[:, start:end] - self.last_actions[:, start:end]),
+            dim=1,
+        )
 
-    def _reward_action_smoothness(self):
-        '''Penalize action smoothness'''
-        action_smoothness_cost = torch.sum(torch.square(
-            self.actions[:,:12] - 2*self.last_actions[:,:12] + self.llast_actions[:,:12]), dim=-1)
-        return action_smoothness_cost
+    def _action_smoothness(self, start, end):
+        """Squared second difference over a selected raw-action slice."""
+        second_difference = (
+            self.actions[:, start:end]
+            - 2.0 * self.last_actions[:, start:end]
+            + self.llast_actions[:, start:end]
+        )
+        return torch.sum(torch.square(second_difference), dim=1)
 
-    def _reward_action_rate_arm(self):
-        return torch.sum(torch.square(self.last_actions[:, 12:17] - self.actions[:, 12:17]), dim=1)
-    
-    def _reward_action_smoothness_arm(self):
-        '''Penalize action smoothness'''
-        action_smoothness_cost = torch.sum(torch.square(
-            self.actions[:,12:17] - 2*self.last_actions[:,12:17] + self.llast_actions[:,12:17]), dim=-1)
-        return action_smoothness_cost
+    def _reward_leg_feedback_action_rate(self):
+        return self._action_rate(0, 12)
+
+    def _reward_leg_feedback_action_smoothness(self):
+        return self._action_smoothness(0, 12)
+
+    def _reward_arm_feedback_action_rate(self):
+        return self._action_rate(12, self.num_actions)
+
+    def _reward_arm_feedback_action_smoothness(self):
+        return self._action_smoothness(12, self.num_actions)
+
+    def _reward_leg_feedforward_action_rate(self):
+        return self._action_rate(self.num_actions, self.num_actions + 12)
+
+    def _reward_leg_feedforward_action_smoothness(self):
+        return self._action_smoothness(self.num_actions, self.num_actions + 12)
+
+    def _reward_arm_feedforward_action_rate(self):
+        return self._action_rate(self.num_actions + 12, 2 * self.num_actions)
+
+    def _reward_arm_feedforward_action_smoothness(self):
+        return self._action_smoothness(self.num_actions + 12, 2 * self.num_actions)
 
     def _reward_joint_power(self):
         # penalize large amounts of motor power

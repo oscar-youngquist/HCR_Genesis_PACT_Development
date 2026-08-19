@@ -56,19 +56,16 @@ class PPO_B1Z1PACT:
             },
         ]
 
-        # We want the encoder to get updates from both (1) PPO/PINN training and (2) Encoder-specific representation training
-        # PPO/PINN update only the history encoder; reconstruction also owns
-        # both decoder heads through the shared auxiliary optimizer below.
-        # UniFP lets PPO update the history encoder but not the explicit
-        # decoder; that decoder is owned solely by supervised adaptation.
-        explicit_ids = {id(parameter) for parameter in actor_critic.explicit_decoder.parameters()}
+        # PPO updates the complete context pathway. Coupled PACT additionally
+        # owns the privileged decoder here because its predicted force block is
+        # part of the differentiable PINN graph.
         ppo_enc_groups = [
             {
-                "params": [parameter for parameter in group["params"] if id(parameter) not in explicit_ids],
+                "params": list(group["params"]),
                 "weight_decay": group.get("weight_decay", 0.0),
                 "name": f"ppo_{group['name']}",
             }
-            for group in auxiliary_groups if any(id(parameter) not in explicit_ids for parameter in group["params"])
+            for group in auxiliary_groups
         ]
         auxiliary_enc_groups = [
             {
@@ -79,7 +76,10 @@ class PPO_B1Z1PACT:
             for group in auxiliary_groups
         ]
 
-        self.actor_optimizer = PCGrad(optim.AdamW([*actor_groups,*ppo_enc_groups], lr=cfg["learning_rate"]), reduction="sum")
+        self.actor_optimizer = PCGrad(
+            optim.Adam([*actor_groups, *ppo_enc_groups], lr=cfg["learning_rate"]),
+            reduction="sum",
+        )
         # Clip the same ownership boundary that is stepped by PPO, as UniFP
         # does, including any PACT decoder participating in the PINN graph.
         seen_ppo_parameters = set()
@@ -89,13 +89,6 @@ class PPO_B1Z1PACT:
                 if id(parameter) not in seen_ppo_parameters:
                     seen_ppo_parameters.add(id(parameter))
                     self.ppo_parameters.append(parameter)
-
-        # # We want to reduce the LR of the critic
-        for param_group in self.actor_optimizer.optimizer.param_groups:
-            # specifically modifies the learning rate of the crtic specific parameters
-            if "name" in param_group.keys():
-                if "critic" in param_group["name"]:
-                    param_group['lr'] = (cfg["learning_rate"] / 3.0)
 
         self.auxiliary_optimizer = optim.Adam(
             [parameter for group in auxiliary_enc_groups for parameter in group["params"]],
@@ -122,6 +115,13 @@ class PPO_B1Z1PACT:
         # infinity would keep the reliability gate permanently closed.
         self.force_ema = None
         self.force_gate_active, self.force_gate_count = False, 0
+        self.force_blend_min_alpha = float(cfg.get("force_blend_min_alpha", 0.01))
+        if not 0.0 <= self.force_blend_min_alpha <= 1.0:
+            raise ValueError("force_blend_min_alpha must lie in [0, 1]")
+        # The first reconstruction EMA defines alpha_min. As reconstruction
+        # improves toward the gate threshold, predicted-force authority ramps
+        # linearly to one. Persist this reference across checkpoint resumes.
+        self.force_blend_start_ema = None
 
     def init_storage(self, *args):
         self.storage = RolloutStorageB1Z1PACT(*args, device=self.device)
@@ -165,8 +165,8 @@ class PPO_B1Z1PACT:
         # together until the shuffled PPO update.
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
-        self.transition.next_privileged = next_privileged
-        self.transition.dynamics_state = dynamics_state
+        self.transition.next_privileged = next_privileged.detach().clone()
+        self.transition.dynamics_state = dynamics_state.detach().clone()
         if "time_outs" in infos:
             # Rewards are [N], matching UniFP. Squeeze the [N, 1] bootstrap
             # correction before in-place addition, then storage restores [N, 1].
@@ -277,6 +277,25 @@ class PPO_B1Z1PACT:
 
         return torch.cat((controlled, uncontrolled), dim=-1)
 
+    def _force_prediction_blend_alpha(self):
+        """Return predicted-force authority before the reliability gate opens."""
+        if self.force_gate_active:
+            return 1.0
+        if self.force_ema is None or self.force_blend_start_ema is None:
+            return self.force_blend_min_alpha
+
+        threshold = float(self.cfg["force_gate_threshold"])
+        start = float(self.force_blend_start_ema)
+        current = float(self.force_ema)
+        if start <= threshold:
+            # Reconstruction already met the target on its first measurement;
+            # patience may still hold the Boolean gate closed.
+            return 1.0 if current <= threshold else self.force_blend_min_alpha
+
+        progress = (start - current) / (start - threshold)
+        progress = min(max(progress, 0.0), 1.0)
+        return self.force_blend_min_alpha + (1.0 - self.force_blend_min_alpha) * progress
+
     def _pinn_loss(self, mean_actions, context, privileged_force_prediction, state, valid):
         """Evaluate the observed-transition whole-body consistency loss.
 
@@ -309,43 +328,45 @@ class PPO_B1Z1PACT:
 
         measured_grfs, measured_ee, measured_base = state[:, 76:88], state[:, 88:91], state[:, 91:97]
 
-        if self.force_gate_active:
-            # Once the decoder consistently reconstructs measured forces, use
-            # its next-step predictions inside r. This trains consistency under
-            # the disturbance estimate available to the context pathway rather
-            # than permanently relying on privileged force measurements.
-            # Decoder outputs use observation-space normalization. Convert all
-            # three predicted force blocks back to physical units for PINN.
-            grfs = privileged_force_prediction[:, :12] / self.cfg["grf_scale"]
-            ee_force = privileged_force_prediction[:, 12:15] / self.cfg["ee_force_scale"]
-            wrench_scale = privileged_force_prediction.new_tensor(self.cfg["base_wrench_scale"])
-            base_wrench = privileged_force_prediction[:, 15:21] / wrench_scale
-            # Predictions are yaw-frame quantities, as in UniFP. Pinocchio's
-            # LWA Jacobians require world-frame forces at this boundary.
-            x, y, z, w = base_quat.unbind(dim=-1)
-            yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y.square() + z.square()))
-            c, s = torch.cos(yaw), torch.sin(yaw)
+        # Decoder outputs use observation-space normalization and a yaw-aligned
+        # frame. Convert predictions to world/SI before mixing them with the
+        # measured forces consumed by Pinocchio's LWA Jacobians.
+        predicted_grfs = privileged_force_prediction[:, :12] / self.cfg["grf_scale"]
+        predicted_ee = privileged_force_prediction[:, 12:15] / self.cfg["ee_force_scale"]
+        wrench_scale = privileged_force_prediction.new_tensor(self.cfg["base_wrench_scale"])
+        predicted_base = privileged_force_prediction[:, 15:21] / wrench_scale
+        x, y, z, w = base_quat.unbind(dim=-1)
+        yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y.square() + z.square()))
+        c, s = torch.cos(yaw), torch.sin(yaw)
 
-            def yaw_to_world(vectors):
-                shape = vectors.shape
-                vectors = vectors.reshape(vectors.shape[0], -1, 3)
-                world = torch.stack((
-                    c[:, None] * vectors[..., 0] - s[:, None] * vectors[..., 1],
-                    s[:, None] * vectors[..., 0] + c[:, None] * vectors[..., 1],
-                    vectors[..., 2],
-                ), dim=-1)
-                return world.reshape(shape)
-
-            grfs = yaw_to_world(grfs)
-            ee_force = yaw_to_world(ee_force)
-            base_wrench = torch.cat((
-                yaw_to_world(base_wrench[:, :3]),
-                yaw_to_world(base_wrench[:, 3:6]),
+        def yaw_to_world(vectors):
+            shape = vectors.shape
+            vectors = vectors.reshape(vectors.shape[0], -1, 3)
+            world = torch.stack((
+                c[:, None] * vectors[..., 0] - s[:, None] * vectors[..., 1],
+                s[:, None] * vectors[..., 0] + c[:, None] * vectors[..., 1],
+                vectors[..., 2],
             ), dim=-1)
-            if self.cfg["predicted_force_detach"]:
-                grfs, ee_force, base_wrench = grfs.detach(), ee_force.detach(), base_wrench.detach()
-        else:
-            grfs, ee_force, base_wrench = measured_grfs, measured_ee, measured_base
+            return world.reshape(shape)
+
+        predicted_grfs = yaw_to_world(predicted_grfs)
+        predicted_ee = yaw_to_world(predicted_ee)
+        predicted_base = torch.cat((
+            yaw_to_world(predicted_base[:, :3]),
+            yaw_to_world(predicted_base[:, 3:6]),
+        ), dim=-1)
+        if self.cfg["predicted_force_detach"]:
+            predicted_grfs, predicted_ee, predicted_base = (
+                predicted_grfs.detach(), predicted_ee.detach(), predicted_base.detach()
+            )
+
+        # Before the reliability gate opens, gradually expose inverse dynamics
+        # to decoder predictions instead of making an abrupt measured/predicted
+        # switch. Once active, alpha remains exactly one.
+        alpha = self._force_prediction_blend_alpha()
+        grfs = torch.lerp(measured_grfs, predicted_grfs, alpha)
+        ee_force = torch.lerp(measured_ee, predicted_ee, alpha)
+        base_wrench = torch.lerp(measured_base, predicted_base, alpha)
 
         # The backend reproduces the simulator's mass/COM randomization before
         # computing M, h, and J^T F, so inertial mismatch is not mislabeled as
@@ -413,16 +434,25 @@ class PPO_B1Z1PACT:
         # The critic's terrain-height tail is intentionally absent here.
         aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
 
-        pred_velo_loss = F.mse_loss(aux_context["base_velocity"], labels[:, :3])
-        pred_ee_position_loss = F.mse_loss(aux_context["ee_position"], labels[:, 3:6])
-        pred_base_wrench_loss = F.mse_loss(aux_context["base_wrench"], labels[:, 6:12])
-        pred_ee_force_loss = F.mse_loss(aux_context["ee_force"], labels[:, 12:15])
+        with torch.no_grad():
+            base_velo_label = labels[:, :3]
+            ee_pos_label = labels[:, 3:6]
+            base_wrench_label = labels[:, 6:12]
+            ee_force_label = labels[:, 12:15]
+            foot_contact_label = labels[:, 15:19]
+            foot_height_label = labels[:, 19:23]
+            privileged_target = obs_target
+
+        pred_velo_loss = F.mse_loss(aux_context["base_velocity"], base_velo_label)
+        pred_ee_position_loss = F.mse_loss(aux_context["ee_position"], ee_pos_label)
+        pred_base_wrench_loss = F.mse_loss(aux_context["base_wrench"], base_wrench_label)
+        pred_ee_force_loss = F.mse_loss(aux_context["ee_force"], ee_force_label)
         # BCE-with-logits is the stable binary-state reconstruction loss.
         pred_foot_contact_loss = F.binary_cross_entropy_with_logits(
-            aux_context["foot_contact_logits"], labels[:, 15:19],
+            aux_context["foot_contact_logits"], foot_contact_label,
         )
         pred_foot_height_loss = F.mse_loss(
-            aux_context["foot_height"], labels[:, 19:23],
+            aux_context["foot_height"], foot_height_label,
         )
 
         # Loss for explicit current-state-estimation
@@ -436,7 +466,7 @@ class PPO_B1Z1PACT:
         )
 
         # VAE recon + KL losses
-        privileged_error = (aux_privileged_prediction - obs_target).square() * valid
+        privileged_error = (aux_privileged_prediction - privileged_target).square() * valid
         aux_privileged_loss = privileged_error.sum() / (
             valid.sum().clamp_min(1.0) * aux_privileged_prediction.shape[-1]
         )
@@ -523,12 +553,11 @@ class PPO_B1Z1PACT:
                 )
                 kl_mean = kl.mean()
                 if kl_mean > 2.0 * self.desired_kl:
-                    self.learning_rate = max(1.0e-6, self.learning_rate / 1.5)
+                    self.learning_rate = max(1.0e-5, self.learning_rate / 1.5)
                 elif 0.0 < kl_mean < self.desired_kl / 2.0:
                     self.learning_rate = min(1.0e-2, self.learning_rate * 1.5)
                 for group in self.actor_optimizer.optimizer.param_groups:
-                    if group.get("name") in ("actor", "film"):
-                        group["lr"] = self.learning_rate
+                    group["lr"] = self.learning_rate
 
         ratio = torch.exp(actions_log_prob - batch["log_probs"].squeeze(-1))
         advantage = batch["advantages"].squeeze(-1)
@@ -546,13 +575,7 @@ class PPO_B1Z1PACT:
         # constraint as base/EE tracking error grows, leaving FiLM free to
         # produce stronger corrective modulation. Detaching the gate prevents
         # the estimator from inflating its error merely to evade the penalty.
-        tracking_gate = torch.exp(
-            -self.actor_critic.last_tracking_error_sq.detach()
-            / self.film_identity_error_scale**2
-        )
-        film_identity_loss = (
-            tracking_gate * self.actor_critic.last_film_identity_deviation
-        ).mean()
+        film_identity_loss = self.actor_critic.last_film_identity_deviation.mean()
         ppo_loss = (
             surrogate_loss
             + self.value_loss_coef * value_loss
@@ -610,6 +633,8 @@ class PPO_B1Z1PACT:
 
 
     def update(self, iteration):
+        self.actor_critic.train()
+        self.privileged_decoder.train()
         # Delay and then ramp the physical constraint. PPO first learns a
         # minimally viable behavior before the residual competes with reward.
         if iteration >= self.cfg["pinn_init_steps"]:
@@ -646,6 +671,8 @@ class PPO_B1Z1PACT:
                 self.cfg["force_gate_ema_alpha"] * force_measurement
                 + (1 - self.cfg["force_gate_ema_alpha"]) * self.force_ema
             )
+            if self.force_blend_start_ema is None:
+                self.force_blend_start_ema = self.force_ema
             # Hysteresis avoids rapid gate toggling near the reconstruction
             # threshold after it has become active.
             threshold = self.cfg["force_gate_threshold"] if not self.force_gate_active else self.cfg["force_gate_hysteresis"]
@@ -658,11 +685,18 @@ class PPO_B1Z1PACT:
             self.actor_optimizer.zero_grad()
 
             # PCGrad resolves conflicts between reward optimization and the
-            # physical-consistency gradient before updating policy parameters.
-            if self.pinn_weight >= self.cfg["pinn_loss_weight"]:
-                self.actor_optimizer.pc_backward_ppgrad([ppo_loss, self.pinn_weight * pinn] if self.pinn_weight > 0 else [ppo_loss])
+            # physical-consistency gradient once PINN warmup gives that loss a
+            # nonzero weight. Its projectors require exactly two objectives.
+            if self.pinn_weight <= 0.0:
+                ppo_loss.backward()
+            elif self.pinn_weight >= self.cfg["pinn_loss_weight"]:
+                self.actor_optimizer.pc_backward_ppgrad(
+                    [ppo_loss, self.pinn_weight * pinn]
+                )
             else:
-                self.actor_optimizer.pc_backward_pinn([ppo_loss, self.pinn_weight * pinn] if self.pinn_weight > 0 else [ppo_loss])
+                self.actor_optimizer.pc_backward_pinn(
+                    [ppo_loss, self.pinn_weight * pinn]
+                )
 
             nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
             self.actor_optimizer.step()
@@ -716,4 +750,5 @@ class PPO_B1Z1PACT:
             **diagnostics,
             "force_gate_ema": self.force_ema or 0.0,
             "force_gate_active": float(self.force_gate_active),
+            "force_prediction_alpha": self._force_prediction_blend_alpha(),
         }
