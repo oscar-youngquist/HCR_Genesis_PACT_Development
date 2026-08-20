@@ -941,9 +941,9 @@ class B1Z1UniFP(BaseTask):
         if obs_pred.shape[1] < 12:
             raise RuntimeError(f"Expected at least 12 predicted UniFP labels, got {obs_pred.shape[1]}")
 
-        # Decoder target layout: [base_vel(3), ee_sphere(3), ee_force(3), base_force(3)].
-        self.estimated_ee_force_local[:] = obs_pred[:, 6:9] / self.obs_scales.ee_force
-        self.estimated_base_force_local[:] = obs_pred[:, 9:12] / self.obs_scales.base_force
+        # Decoder target layout: [base_vel(3), ee_sphere(3), base_force(3), ee_force(3)].
+        self.estimated_ee_force_local[:] = obs_pred[:, 9:12] / self.obs_scales.ee_force
+        self.estimated_base_force_local[:] = obs_pred[:, 6:9] / self.obs_scales.base_force
 
     def _apply_external_impedance_compensation(self):
         """Cancel force offsets using estimator-predicted local forces, not simulator force buffers."""

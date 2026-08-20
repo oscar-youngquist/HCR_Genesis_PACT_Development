@@ -547,6 +547,7 @@ class PPO_UniFP:
                                 self.diagnostic_parameter_groups["encoder"]
                             )
                             gradient_counts["encoder"] += 1
+                        torch.nn.utils.clip_grad_norm_(self.adaptation_module_parameters, self.max_grad_norm)
                         self.adaptation_module_optimizer.step()
                         mean_adaptation_losses["kl_raw"] += kl_loss.detach().item()
                         mean_adaptation_losses["kl_reg_loss"] += kl_reg_loss.detach().item()

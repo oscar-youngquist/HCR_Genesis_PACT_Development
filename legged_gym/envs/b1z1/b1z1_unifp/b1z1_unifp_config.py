@@ -48,7 +48,7 @@ class B1Z1UniFPCfg:
         project_force_adjusted_ee_target = True
         force_target_radius_limits = [0.30, 0.90]
         force_target_projection_samples = 21
-        traj_time = [1.0, 3.0]
+        traj_time = [1.5, 4.5]
         hold_time = [0.5, 2.0]
         command_mode = "sphere"
         collision_upper_limits = [0.1, 0.2, -0.05]
@@ -332,19 +332,19 @@ class B1Z1UniFPCfg:
         zero_vel_cmd_prob = 0.2
         zero_vel_cmd_prob_after_force = 0.5
         
-        force_start_step = 25000
+        force_start_step = 10000
         # Apply external disturbances throughout training at quarter strength,
         # then linearly ramp to the original ranges after force_start_step.
-        external_force_initial_scale = 0.10
+        external_force_initial_scale = 0.00
         external_force_final_scale = 1.0
-        external_force_ramp_iterations = 10000
+        external_force_ramp_iterations = 1000
 
         # Commanded base/EE force profiles are present from iteration zero at
         # reduced range, held there, then linearly expanded to their full ranges.
-        command_force_initial_scale = 0.10
+        command_force_initial_scale = 0.00
         command_force_final_scale = 1.0
         command_force_hold_iterations = 10000
-        command_force_ramp_iterations = 10000
+        command_force_ramp_iterations = 1000
 
         push_gripper_stators = True
         apply_ee_external_forces = True
@@ -357,8 +357,8 @@ class B1Z1UniFPCfg:
         gripper_forced_prob_ext = 0.8
         
         randomize_gripper_force_gains = True
-        max_push_force_xyz_gripper_cmd = [-60.0, 60.0]
-        max_push_force_xyz_gripper_ext = [-60.0, 60.0]
+        max_push_force_xyz_gripper_cmd = [-50.0, 50.0]
+        max_push_force_xyz_gripper_ext = [-50.0, 50.0]
 
         gripper_force_kp_range = [200.0, 200.0]
         gripper_force_kd_range = [3.0, 3.0]
@@ -374,7 +374,7 @@ class B1Z1UniFPCfg:
         push_base_duration_s_ext = [1.0, 3.0]
         base_forced_prob_ext = 0.8
         randomize_base_force_gains = True
-        max_push_force_xyz_base_cmd = [-20.0, 20.0]
+        max_push_force_xyz_base_cmd = [-00.0, 00.0]
         max_push_force_xyz_base_ext = [-20.0, 20.0]
         
         base_force_kp_range = [200.0, 200.0]
@@ -387,9 +387,9 @@ class B1Z1UniFPCfg:
         compensate_base_external_force = True
 
         class ranges:
-            lin_vel_x = [-0.8, 0.8]
-            lin_vel_y = [-0.6, 0.6]
-            ang_vel_yaw = [-1.0, 1.0]
+            lin_vel_x = [-0.6, 0.6]
+            lin_vel_y = [-0.4, 0.4]
+            ang_vel_yaw = [-0.6, 0.6]
             heading = [-3.14, 3.14]
 
     class normalization:
@@ -584,14 +584,14 @@ class B1Z1UniFPCfg:
             termination = 0.0
             collision = -5.0
             dof_pos_limits = -10.0
-            torque_limits = -0.01
+            torque_limits = -0.005
             dof_close_to_default = 0.0
 
             # Add in close to default reward
             stand_still         = -0.5            #
             stand_still_contact = 0.5             #
 
-            alive = 1.0
+            alive = 1.5
 
             # tracking
             tracking_lin_vel_force_world = 2.0    #
@@ -617,7 +617,7 @@ class B1Z1UniFPCfg:
             hip_pos = -0.30
 
             # Base
-            base_height = -10.0
+            base_height = -2.0
             lin_vel_z   = -1.0
             ang_vel_xy  = -0.02
             roll        = -0.2
@@ -626,7 +626,7 @@ class B1Z1UniFPCfg:
             # Legs
             dof_acc           = -2.5e-7
             action_rate       = -0.02
-            action_smoothness = -0.02
+            action_smoothness = -0.00
             joint_power       = -2.e-5
             joint_power_dist  = -1.e-6
             leg_torques       = -1.0e-5
@@ -635,7 +635,7 @@ class B1Z1UniFPCfg:
             dof_acc_arm = -4.5e-7
             dof_vel_arm = -2e-4
             action_rate_arm = -0.045
-            action_smoothness_arm = -0.045
+            action_smoothness_arm = -0.00
             joint_power_arm = -2.e-5
             joint_power_dist_arm = -2.e-6
             arm_torques       = -1.0e-5
@@ -845,7 +845,7 @@ class B1Z1UniFPCfgPPO:
         save_interval = 1000
         
         # Disable non-training rollout, PPO-consistency, and detailed episode diagnostics.
-        enable_additional_diagnostics = True
+        enable_additional_diagnostics = False
         
         run_name = "faithful_unifp_baseline"
         experiment_name = "b1z1_unifp_gym"

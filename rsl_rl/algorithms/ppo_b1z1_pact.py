@@ -106,6 +106,15 @@ class PPO_B1Z1PACT:
             [parameter for group in auxiliary_enc_groups for parameter in group["params"]],
             lr=cfg.get("adaptation_learning_rate", 1.0e-5),
         )
+
+        seen_enc_parameters = set()
+        self.enc_parameters = []
+        for group in self.auxiliary_optimizer.param_groups:
+            for parameter in group["params"]:
+                if id(parameter) not in seen_enc_parameters:
+                    seen_enc_parameters.add(id(parameter))
+                    self.enc_parameters.append(parameter)
+
         self.kl_controller = KLRateBandController(
             warmup_iters=cfg.get("kl_warmup_iters", 500),
             warmup_beta_max=cfg.get("kl_warmup_beta_max", cfg["vae_kld_weight"]),
@@ -480,6 +489,8 @@ class PPO_B1Z1PACT:
         self.auxiliary_optimizer.zero_grad()
 
         aux.backward()
+
+        torch.nn.utils.clip_grad_norm_(self.enc_parameters, self.max_grad_norm)
 
         # Match UniFP adaptation training: the auxiliary optimizer steps its
         # raw reconstruction gradient without a separate clipping pass.
