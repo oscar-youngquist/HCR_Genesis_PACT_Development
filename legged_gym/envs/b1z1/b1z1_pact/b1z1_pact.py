@@ -173,7 +173,7 @@ class B1Z1PACT(LeggedRobot):
         ), dim=-1)
 
     def get_privileged_force_observation(self):
-        """Return the normalized yaw-frame force block stored in privileged observations."""
+        """Return [GRFs, base wrench, EE force], matching PACT-Pos pretraining."""
         base_yaw_quat = self._get_base_yaw_quat()
         grfs_local = quat_rotate_inverse(
             base_yaw_quat[:, None, :].expand(-1, 4, -1).reshape(-1, 4),
@@ -186,8 +186,8 @@ class B1Z1PACT(LeggedRobot):
         ), dim=-1)
         target = torch.cat((
             grfs_local * self.obs_scales.grf,
-            ee_force_local * self.obs_scales.ee_force,
             base_wrench_local * self.base_wrench_scale,
+            ee_force_local * self.obs_scales.ee_force,
         ), dim=-1)
         if target.shape != (self.num_envs, 21):
             raise RuntimeError(f"PACT privileged force block must be ({self.num_envs}, 21), got {tuple(target.shape)}")
@@ -548,6 +548,8 @@ class B1Z1PACT(LeggedRobot):
         # Simulator reset applies Genesis-side domain randomization and writes
         # root/DOF state into the Genesis entity.
         self.simulator.reset_idx(env_ids)
+        if self.cfg.control.randomize_pact_weights:
+            self._randomize_pact_torque_weights(env_ids)
         # The reset EE command starts from init_pos_start; refresh the world
         # cache after Genesis has accepted the randomized root pose/yaw.
         self.curr_ee_goal_cart[env_ids] = sphere2cart(self.curr_ee_goal_sphere[env_ids])
@@ -739,7 +741,7 @@ class B1Z1PACT(LeggedRobot):
         # Context labels: command-space velocity and EE pose, base wrench, EE force, and
         # four binary foot-contact indicators for the estimator BCE objective.
         # They are privileged during training and predicted from history later.
-        base_command_velocity = torch.cat(
+        base_velocity = torch.cat(
             (self.simulator.base_lin_vel[:, :2], self.simulator.base_ang_vel[:, 2:3]), dim=-1
         )
         contact_mask = self.simulator.foot_contacts.float()
@@ -757,7 +759,7 @@ class B1Z1PACT(LeggedRobot):
             (
                 # Explicit velocity uses the same component-wise normalized
                 # representation as the [vx, vy, yaw-rate] command.
-                base_command_velocity * self.base_velocity_scale,
+                base_velocity * self.base_velocity_scale,
                 self.ee_pos_sphe_arm * self.ee_sphere_scale,
                 base_wrench_local * self.base_wrench_scale,
                 ee_force_local * self.obs_scales.ee_force,
@@ -1763,6 +1765,15 @@ class B1Z1PACT(LeggedRobot):
         )
         self.last_actions = torch.zeros_like(self.actions)
         self.llast_actions = torch.zeros_like(self.actions)
+        # Random branch biases are always sampled from these clean weights,
+        # never from a previously biased reset. The tradeoff curriculum, when
+        # enabled, updates the clean baseline before randomization.
+        self.simulator.feedforward_tau_weight_clean = torch.ones_like(
+            self.simulator.feedforward_tau_weight
+        )
+        self.simulator.feedback_tau_weight_clean = torch.ones_like(
+            self.simulator.feedback_tau_weight
+        )
         self.feet_air_time = torch.zeros(self.num_envs, len(self.simulator.feet_indices), device=self.device)
         # Boolean previous-step foot-contact latch. Keeping this bool avoids
         # ambiguous reward dtype changes when contact rewards reuse the buffer.
@@ -2070,6 +2081,10 @@ class B1Z1PACT(LeggedRobot):
             raise ValueError("external force curriculum scales must be nonnegative")
         if cfg.commands.external_force_final_scale < cfg.commands.external_force_initial_scale:
             raise ValueError("external_force_final_scale must be at least external_force_initial_scale")
+        if not 0.0 <= cfg.control.pact_weight_bias_min <= cfg.control.pact_weight_bias_max:
+            raise ValueError("control PACT weight biases must satisfy 0 <= min <= max")
+        if not 0.0 <= cfg.control.pact_balanced_prob <= 1.0:
+            raise ValueError("control.pact_balanced_prob must be in [0, 1]")
         for name in (
             "ref_dof_leg_initial_multiplier",
             "ref_dof_leg_final_multiplier",
@@ -2101,8 +2116,41 @@ class B1Z1PACT(LeggedRobot):
         )
         fraction = self.tradeoff_step_ctr[env_ids] / float(self.tradeoff_num_steps)
         weights = self.tradeoff_lowerbounds + fraction * self.tradeoff_bound_diff
+        self.simulator.feedforward_tau_weight_clean[env_ids] = weights[:, :1]
+        self.simulator.feedback_tau_weight_clean[env_ids] = weights[:, 1:2]
         self.simulator.feedforward_tau_weight[env_ids] = weights[:, :1]
         self.simulator.feedback_tau_weight[env_ids] = weights[:, 1:2]
+
+    def _randomize_pact_torque_weights(self, env_ids):
+        """Apply Go2-PACT's reset-time bias to coupled output contributions.
+
+        Non-balanced environments receive an equal-and-opposite bias around
+        their clean branch weights, preserving the total contribution while
+        favoring either feedforward or feedback torque.
+        """
+        if len(env_ids) == 0:
+            return
+
+        control = self.cfg.control
+        device = self.simulator.feedforward_tau_weight.device
+        count = len(env_ids)
+        balanced = torch.rand(count, device=device) < control.pact_balanced_prob
+        bias_feedforward = torch.rand(count, device=device) <= 0.5
+        bias = torch.empty(count, device=device).uniform_(
+            control.pact_weight_bias_min, control.pact_weight_bias_max
+        )
+
+        feedforward = self.simulator.feedforward_tau_weight_clean[env_ids].squeeze(-1)
+        feedback = self.simulator.feedback_tau_weight_clean[env_ids].squeeze(-1)
+        signed_bias = torch.where(bias_feedforward, bias, -bias)
+        signed_bias = torch.where(balanced, torch.zeros_like(signed_bias), signed_bias)
+
+        self.simulator.feedforward_tau_weight[env_ids] = (
+            feedforward + signed_bias
+        ).unsqueeze(-1)
+        self.simulator.feedback_tau_weight[env_ids] = (
+            feedback - signed_bias
+        ).unsqueeze(-1)
 
     # Rewards
     def _reward_tracking_lin_vel_force_world(self):

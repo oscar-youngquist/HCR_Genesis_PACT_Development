@@ -24,6 +24,15 @@ def _go2_relative_pinn_loss(residual, generalized_tau, generalized_external, val
     return (relative_error * valid_rows).sum() / valid_rows.sum().clamp_min(1.0)
 
 
+def _split_privileged_force_prediction(privileged_force_prediction):
+    """Split the PACT-Pos-compatible [GRFs, base wrench, EE force] block."""
+    return (
+        privileged_force_prediction[:, :12],
+        privileged_force_prediction[:, 12:18],
+        privileged_force_prediction[:, 18:21],
+    )
+
+
 class PPO_B1Z1PACT:
     def __init__(self, actor_critic, privileged_decoder, dynamics_backend, cfg, device):
         self.actor_critic, self.privileged_decoder = actor_critic, privileged_decoder
@@ -352,10 +361,13 @@ class PPO_B1Z1PACT:
         # Decoder outputs use observation-space normalization and a yaw-aligned
         # frame. Convert predictions to world/SI before mixing them with the
         # measured forces consumed by Pinocchio's LWA Jacobians.
-        predicted_grfs = privileged_force_prediction[:, :12] / self.cfg["grf_scale"]
-        predicted_ee = privileged_force_prediction[:, 12:15] / self.cfg["ee_force_scale"]
+        predicted_grfs, predicted_base, predicted_ee = (
+            _split_privileged_force_prediction(privileged_force_prediction)
+        )
+        predicted_grfs = predicted_grfs / self.cfg["grf_scale"]
         wrench_scale = privileged_force_prediction.new_tensor(self.cfg["base_wrench_scale"])
-        predicted_base = privileged_force_prediction[:, 15:21] / wrench_scale
+        predicted_base = predicted_base / wrench_scale
+        predicted_ee = predicted_ee / self.cfg["ee_force_scale"]
         x, y, z, w = base_quat.unbind(dim=-1)
         yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y.square() + z.square()))
         c, s = torch.cos(yaw), torch.sin(yaw)
@@ -430,7 +442,8 @@ class PPO_B1Z1PACT:
             self.actor_critic.context_encoder(obs_hist_batch, sample=True)
         )
         # One z-only decoder reconstructs the next non-terrain privileged
-        # state, including normalized GRF, EE-force, and base-wrench values.
+        # state, including normalized GRF, base-wrench, and EE-force values in
+        # the same order used by PACT-Pos pretraining.
         # The critic's terrain-height tail is intentionally absent here.
         aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
 
@@ -691,10 +704,10 @@ class PPO_B1Z1PACT:
             # nonzero weight. Its projectors require exactly two objectives.
             if self.pinn_weight <= 0.0:
                 ppo_loss.backward()
-            elif self.pinn_weight >= self.cfg["pinn_loss_weight"]:
-                self.actor_optimizer.pc_backward_ppgrad(
-                    [ppo_loss, self.pinn_weight * pinn]
-                )
+            # elif self.pinn_weight >= self.cfg["pinn_loss_weight"]:
+            #     self.actor_optimizer.pc_backward_ppgrad(
+            #         [ppo_loss, self.pinn_weight * pinn]
+            #     )
             else:
                 self.actor_optimizer.pc_backward_pinn(
                     [ppo_loss, self.pinn_weight * pinn]

@@ -826,7 +826,7 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         kl_ema_decay = 0.99
         adaptation_learning_rate = 1.0e-5
 
-        torque_clone_target_scale = 0.01
+        torque_clone_target_scale = 0.1
         torque_clone_loss_weight = 1.0
 
 

@@ -301,6 +301,14 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         tradeoff_steps = 10
         tradeoff_threshold = 0.70
 
+        # This is not a curriculum: each reset slightly biases the coupled
+        # output toward either feedback or feedforward torque. A subset stays
+        # at the clean 1:1 contribution used by PACT-Pos pretraining.
+        randomize_pact_weights = True
+        pact_weight_bias_min = 0.0
+        pact_weight_bias_max = 0.20
+        pact_balanced_prob = 0.25
+
     class commands:
         curriculum = False
         max_curriculum = 0.8
@@ -861,7 +869,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         kl_ema_decay = 0.99
         adaptation_learning_rate = 1.0e-5
 
-        pinn_loss_weight = 1.00
+        pinn_loss_weight = 0.01
         pinn_warmup = 100
         pinn_init_steps = 100
 

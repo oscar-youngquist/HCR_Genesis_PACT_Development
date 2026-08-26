@@ -851,6 +851,6 @@ class B1Z1UniFPCfgPPO:
         experiment_name = "b1z1_unifp_gym"
         sync_wandb = False
         resume = False
-        load_run = "Aug12_00-49-12_faithful_unifp_baseline"
+        load_run = "Aug19_14-34-51_faithful_unifp_baseline"
         checkpoint = -1
         resume_path = None
