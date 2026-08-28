@@ -13,6 +13,9 @@ class WholeBodyTerms:
     mass_matrix: torch.Tensor
     bias: torch.Tensor
     generalized_contacts: torch.Tensor
+    foot_jacobians: torch.Tensor | None = None
+    ee_jacobian: torch.Tensor | None = None
+    base_jacobian: torch.Tensor | None = None
 
 
 class WholeBodyDynamicsBackend(ABC):
@@ -32,3 +35,9 @@ class WholeBodyDynamicsBackend(ABC):
 
     def close(self) -> None:
         """Release backend resources. Async backends override this method."""
+
+    def forward_dynamics(self, *args, **kwargs) -> torch.Tensor:
+        """Return generalized acceleration for a backend that supports ABA."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not provide differentiable forward dynamics"
+        )

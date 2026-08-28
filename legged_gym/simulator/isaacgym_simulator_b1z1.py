@@ -648,8 +648,7 @@ class IsaacGymSimulatorB1Z1UniFP(_IsaacGymSimulatorB1Z1):
         d_gains = self._d_gains[self._dof_indices_tensor]
         target_offset = torch.zeros_like(q)
         target_offset[:, :self._num_learned_actions] = (
-            self._motor_strength[:, :self._num_learned_actions]
-            * actions
+            actions
             * self._cfg.control.action_scale
         )
         self.feedback_torques = (
@@ -660,7 +659,7 @@ class IsaacGymSimulatorB1Z1UniFP(_IsaacGymSimulatorB1Z1):
             self.first_loop = False
             self.first_loop_feedback = self.feedback_torques.clone()
         self.unclipped_torques = self.feedback_torques.clone()
-        return self.feedback_torques
+        return self.feedback_torques * self._motor_strength
 
 
 class IsaacGymSimulatorB1Z1PACTPos(_IsaacGymSimulatorB1Z1):
@@ -680,10 +679,10 @@ class IsaacGymSimulatorB1Z1PACTPos(_IsaacGymSimulatorB1Z1):
             - self._kd_scale * d_gains * qd
         )
         self.feedforward_torques.zero_()
-        self.combined_feedback_torques = self._motor_strength * self.feedback_torques
+        self.combined_feedback_torques = self.feedback_torques
         self.combined_feedforward_torques.zero_()
         self.unclipped_torques = self.combined_feedback_torques.clone()
-        return self.combined_feedback_torques
+        return self.combined_feedback_torques * self._motor_strength
 
 
 class IsaacGymSimulatorB1Z1PACT(_IsaacGymSimulatorB1Z1):
@@ -707,12 +706,11 @@ class IsaacGymSimulatorB1Z1PACT(_IsaacGymSimulatorB1Z1):
         )
         self.feedforward_torques.zero_()
         self.feedforward_torques[:, :self._num_learned_actions] = (
-            self._motor_strength[:, :self._num_learned_actions]
-            * torque_actions
+            torque_actions
             * self._cfg.control.torque_scale
         )
         self.combined_feedback_torques = self.feedback_tau_weight * self.feedback_torques
         self.combined_feedforward_torques = self.feedforward_tau_weight * self.feedforward_torques
         torques = self.combined_feedback_torques + self.combined_feedforward_torques
         self.unclipped_torques = torques.clone()
-        return torques
+        return torques * self._motor_strength

@@ -48,7 +48,7 @@ class B1Z1UniFPCfg:
         project_force_adjusted_ee_target = True
         force_target_radius_limits = [0.30, 0.90]
         force_target_projection_samples = 21
-        traj_time = [1.5, 4.5]
+        traj_time = [1.875, 5.625]
         hold_time = [0.5, 2.0]
         command_mode = "sphere"
         collision_upper_limits = [0.1, 0.2, -0.05]
@@ -89,36 +89,36 @@ class B1Z1UniFPCfg:
         pitch_random_scale = 0.0
         yaw_random_scale = 0.0
         default_joint_angles = {
-            # "FR_hip_joint": -0.2,
-            # "FR_thigh_joint": 0.8,
-            # "FR_calf_joint": -1.5,
+            "FR_hip_joint": -0.2,
+            "FR_thigh_joint": 0.8,
+            "FR_calf_joint": -1.5,
          
-            # "FL_hip_joint": 0.2,
-            # "FL_thigh_joint": 0.8,
-            # "FL_calf_joint": -1.5,
+            "FL_hip_joint": 0.2,
+            "FL_thigh_joint": 0.8,
+            "FL_calf_joint": -1.5,
          
-            # "RR_hip_joint": -0.2,
-            # "RR_thigh_joint": 0.8,
-            # "RR_calf_joint": -1.5,
+            "RR_hip_joint": -0.2,
+            "RR_thigh_joint": 0.8,
+            "RR_calf_joint": -1.5,
          
-            # "RL_hip_joint": 0.2,
-            # "RL_thigh_joint": 0.8,
-            # "RL_calf_joint": -1.5,
-            'FR_hip_joint': -0.15,  # [rad]
-            'FR_thigh_joint': 0.67,     # [rad]
-            'FR_calf_joint': -1.32,  # [rad]
+            "RL_hip_joint": 0.2,
+            "RL_thigh_joint": 0.8,
+            "RL_calf_joint": -1.5,
+            # 'FR_hip_joint': -0.15,  # [rad]
+            # 'FR_thigh_joint': 0.67,     # [rad]
+            # 'FR_calf_joint': -1.32,  # [rad]
 
-            'FL_hip_joint': 0.15,   # [rad]
-            'FL_thigh_joint': 0.67,     # [rad]
-            'FL_calf_joint': -1.32,   # [rad]
+            # 'FL_hip_joint': 0.15,   # [rad]
+            # 'FL_thigh_joint': 0.67,     # [rad]
+            # 'FL_calf_joint': -1.32,   # [rad]
 
-            'RR_hip_joint': -0.15,   # [rad]
-            'RR_thigh_joint': 0.9,   # [rad]
-            'RR_calf_joint': -1.32,    # [rad]
+            # 'RR_hip_joint': -0.15,   # [rad]
+            # 'RR_thigh_joint': 0.9,   # [rad]
+            # 'RR_calf_joint': -1.32,    # [rad]
 
-            'RL_hip_joint': 0.15,   # [rad]
-            'RL_thigh_joint': 0.9,   # [rad]
-            'RL_calf_joint': -1.32,    # [rad]
+            # 'RL_hip_joint': 0.15,   # [rad]
+            # 'RL_thigh_joint': 0.9,   # [rad]
+            # 'RL_calf_joint': -1.32,    # [rad]
 
             "z1_waist": 0.0,
             "z1_shoulder": 1.48,
@@ -332,19 +332,22 @@ class B1Z1UniFPCfg:
         zero_vel_cmd_prob = 0.2
         zero_vel_cmd_prob_after_force = 0.5
         
-        force_start_step = 10000
-        # Apply external disturbances throughout training at quarter strength,
-        # then linearly ramp to the original ranges after force_start_step.
-        external_force_initial_scale = 0.00
-        external_force_final_scale = 1.0
-        external_force_ramp_iterations = 1000
-
-        # Commanded base/EE force profiles are present from iteration zero at
-        # reduced range, held there, then linearly expanded to their full ranges.
-        command_force_initial_scale = 0.00
-        command_force_final_scale = 1.0
-        command_force_hold_iterations = 10000
-        command_force_ramp_iterations = 1000
+        # Shared B1Z1 schedule: learn nominal motion, introduce force commands,
+        # then admit physical disturbances after sustained task competence.
+        force_curriculum_command_start_iteration = 8000
+        force_curriculum_command_ramp_iterations = 4000
+        
+        force_curriculum_gate_start_iteration = 12000     # depreciated
+        force_curriculum_external_ramp_iterations = 4000
+        
+        force_curriculum_ee_l1_threshold = 0.25
+        force_curriculum_roll_termination_threshold = 0.05
+        force_curriculum_episode_length_threshold = 950.0
+        
+        force_curriculum_gate_patience = 400
+        force_curriculum_metric_ema_alpha = 0.05
+        force_curriculum_use_latest_start_fallback = True
+        force_curriculum_latest_start_iteration = 20000
 
         push_gripper_stators = True
         apply_ee_external_forces = True
@@ -385,6 +388,8 @@ class B1Z1UniFPCfg:
         use_external_impedance_compensation = False
         compensate_ee_external_force = True
         compensate_base_external_force = True
+        ee_impedance_force_filter_tau = 0.3
+        base_impedance_force_filter_tau = 0.3
 
         class ranges:
             lin_vel_x = [-0.6, 0.6]
@@ -546,17 +551,24 @@ class B1Z1UniFPCfg:
         
         max_contact_force = 600.0
         
-        foot_clearance_target = 0.20 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.10 # desired foot clearance above ground [m]
         foot_height_offset = 0.02
         foot_clearance_tracking_sigma = 0.01
         
         # Gait-phase guidance settings
-        cycle_time = 0.48
-        sweep_phase_lead = 0.175
-        sweep_velocity_gain = 0.28
-        max_sweep_amplitude = 0.18
-        target_joint_pos_scale = 0.29
-        target_joint_pos_thd = 0.35
+        # cycle_time = 0.48
+        # sweep_phase_lead = 0.175
+        # sweep_velocity_gain = 0.28
+        # max_sweep_amplitude = 0.18
+        # target_joint_pos_scale = 0.29
+        # target_joint_pos_thd = 0.35
+        
+        cycle_time = 0.64               # currently 0.48
+        target_joint_pos_scale = 0.17   # currently 0.29
+        target_joint_pos_thd = 0.50     # currently 0.35
+        max_sweep_amplitude = 0.0
+        sweep_phase_lead = 0.0
+        sweep_velocity_gain = 0.0       # disable the B1-only fore-aft sweep initially
 
         gait_guidance_decay_enabled = False
         gait_guidance_decay_iterations = 10000
@@ -617,7 +629,7 @@ class B1Z1UniFPCfg:
             hip_pos = -0.30
 
             # Base
-            base_height = -2.0
+            base_height = -5.0
             lin_vel_z   = -1.0
             ang_vel_xy  = -0.02
             roll        = -0.2
@@ -635,7 +647,7 @@ class B1Z1UniFPCfg:
             dof_acc_arm = -4.5e-7
             dof_vel_arm = -2e-4
             action_rate_arm = -0.045
-            action_smoothness_arm = -0.00
+            action_smoothness_arm = -0.01
             joint_power_arm = -2.e-5
             joint_power_dist_arm = -2.e-6
             arm_torques       = -1.0e-5
@@ -840,7 +852,7 @@ class B1Z1UniFPCfgPPO:
         algorithm_class_name = "PPO_UniFP"
         num_steps_per_env = 24
         
-        max_iterations = 60000
+        max_iterations = 70000
         
         save_interval = 1000
         

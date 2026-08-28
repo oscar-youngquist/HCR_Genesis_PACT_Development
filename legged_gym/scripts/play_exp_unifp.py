@@ -61,6 +61,9 @@ def override_configs(env_cfg, train_cfg, args):
     env_cfg.env.render_ee_frame_debug = args.render_ee_frame_debug
 
     env_cfg.commands.heading_command = False
+    # The evaluator owns command timing; prevent the environment callback from
+    # replacing scheduled base or EE targets during a rollout.
+    env_cfg.commands.resampling_time = 1.0e9
     env_cfg.commands.ranges.lin_vel_x = [-args.max_lin_vel_x, args.max_lin_vel_x]
     env_cfg.commands.ranges.lin_vel_y = [-args.max_lin_vel_y, args.max_lin_vel_y]
     env_cfg.commands.ranges.ang_vel_yaw = [-args.max_yaw_vel, args.max_yaw_vel]
@@ -69,28 +72,69 @@ def override_configs(env_cfg, train_cfg, args):
     env_cfg.commands.force_start_step = args.force_start_step
     env_cfg.commands.apply_ee_external_forces = args.apply_ee_external_forces
     env_cfg.commands.apply_base_external_forces = args.apply_base_external_forces
+    env_cfg.commands.push_gripper_stators = (
+        args.enable_commanded_force_profiles or args.apply_ee_external_forces
+    )
+    env_cfg.commands.push_robot_base = (
+        args.enable_commanded_force_profiles or args.apply_base_external_forces
+    )
+    if args.enable_commanded_force_profiles:
+        env_cfg.commands.command_force_initial_scale = 1.0
+        env_cfg.commands.command_force_final_scale = 1.0
+        env_cfg.commands.command_force_hold_iterations = 0
+        env_cfg.commands.command_force_ramp_iterations = 0
+    else:
+        env_cfg.commands.command_force_initial_scale = 0.0
+        env_cfg.commands.command_force_final_scale = 0.0
+    if args.apply_ee_external_forces or args.apply_base_external_forces:
+        env_cfg.commands.external_force_initial_scale = 1.0
+        env_cfg.commands.external_force_final_scale = 1.0
+        env_cfg.commands.external_force_ramp_iterations = 0
     env_cfg.commands.use_external_impedance_compensation = args.use_unifp_impedance_controller
     env_cfg.commands.compensate_ee_external_force = args.compensate_ee_external_force
     env_cfg.commands.compensate_base_external_force = args.compensate_base_external_force
+    env_cfg.commands.ee_impedance_force_filter_tau = args.ee_impedance_force_filter_tau
+    env_cfg.commands.base_impedance_force_filter_tau = args.base_impedance_force_filter_tau
 
-    env_cfg.domain_rand.push_robots = False
+    env_cfg.noise.add_noise = args.add_noise
+    dr = env_cfg.domain_rand
+    # Compact joint-dynamics ranges remain centered within the training ranges
+    # for explicitly requested robustness evaluation.
+    dr.kp_range = [0.90, 1.10]
+    dr.kd_range = [0.90, 1.10]
+    dr.motor_strength_range = [0.925, 1.075]
+    dr.joint_armature_range = [0.01, 0.02]
+    dr.joint_friction_range_start = [0.01, 0.03]
+    dr.joint_friction_range_end = [0.01, 0.03]
+    dr.joint_damping_range_start = [0.40, 0.50]
+    dr.joint_damping_range_end = [0.40, 0.50]
+
+    if not args.enable_domain_randomization:
+        for name in (
+            "use_domainrand_curriculum",
+            "use_joint_dynamics_curriculum",
+            "use_mass_com_curriculum",
+            "use_disturbance_curriculum",
+            "randomize_friction",
+            "randomize_base_mass",
+            "randomize_gripper_mass",
+            "randomize_com_displacement",
+            "randomize_ctrl_delay",
+            "randomize_pd_gain",
+            "randomize_motor_strength",
+            "randomize_joint_armature",
+            "randomize_joint_friction",
+            "randomize_joint_stiffness",
+            "randomize_joint_damping",
+            "push_robots",
+        ):
+            if hasattr(dr, name):
+                setattr(dr, name, False)
+        env_cfg.commands.randomize_gripper_force_gains = False
+        env_cfg.commands.randomize_base_force_gains = False
 
     if args.record_frames or args.follow_robot or args.camera_preset != "none":
         env_cfg.viewer.add_camera = True
-
-
-def sphere_to_cart(sphere_coords):
-    radius = sphere_coords[:, 0]
-    pitch = sphere_coords[:, 1]
-    yaw = sphere_coords[:, 2]
-    return torch.stack(
-        (
-            radius * torch.cos(pitch) * torch.cos(yaw),
-            radius * torch.cos(pitch) * torch.sin(yaw),
-            radius * torch.sin(pitch),
-        ),
-        dim=-1,
-    )
 
 
 def _clip_command(value, command_range):
@@ -151,7 +195,7 @@ class CommandScheduler:
 
         if self.ee_mode == "env_sampled":
             return
-        if self.ee_mode == "fixed_sphere":
+        if self.ee_mode == "fixed_sphere" and step == 0:
             self.ee_sphere = torch.tensor(self.args.fixed_ee_sphere, device=self.env.device, dtype=torch.float)
             self._apply_ee_sphere()
         elif self.ee_mode == "random_sphere" and step % self.ee_hold_steps == 0:
@@ -172,13 +216,11 @@ class CommandScheduler:
             self.ee_sphere = torch.tensor(self.ee_sequence[self.ee_idx], device=self.env.device, dtype=torch.float)
             self._apply_ee_sphere()
             self._print_ee_command(step)
-        elif self.ee_mode in ["random_sphere", "scripted_sphere"]:
-            self._apply_ee_sphere()
 
-    def reapply(self):
+    def reapply(self, reset_env_ids=None):
         self._apply_base_command()
-        if self.ee_mode != "env_sampled":
-            self._apply_ee_sphere()
+        if self.ee_mode != "env_sampled" and reset_env_ids is not None:
+            self._apply_ee_sphere(reset_env_ids)
 
     def _update_joystick_base(self, joystick):
         if joystick is None:
@@ -200,25 +242,19 @@ class CommandScheduler:
         self.env.commands[:, 2] = cmd_yaw
         self.base_cmd = (cmd_x, cmd_y, cmd_yaw)
 
-    def _apply_ee_sphere(self):
-        sphere = self.ee_sphere.unsqueeze(0).repeat(self.env.num_envs, 1)
-        self.env.ee_goal_sphere[:] = sphere
-        self.env.ee_start_sphere[:] = sphere
-        self.env.curr_ee_goal_sphere[:] = sphere
-        self.env.goal_timer[:] = 0.0
-        self.env.traj_timesteps[:] = max(1.0, self.args.ee_command_hold_s / self.env.dt)
-        self.env.traj_total_timesteps[:] = self.env.traj_timesteps
-        self.env.curr_ee_goal_cart[:] = sphere_to_cart(sphere)
-        base_yaw_quat = quat_from_euler_xyz(
-            torch.zeros(self.env.num_envs, device=self.env.device),
-            torch.zeros(self.env.num_envs, device=self.env.device),
-            self.env.simulator.base_euler[:, 2],
-        )
-        self.env.curr_ee_goal_cart_world[:] = self.env.get_ee_goal_spherical_center(base_yaw_quat) + quat_apply(
-            base_yaw_quat,
-            self.env.curr_ee_goal_cart,
-        )
-        self.env.commands[:, 3:6] = sphere
+    def _apply_ee_sphere(self, env_ids=None):
+        """Start a minimum-jerk trajectory without teleporting the EE command."""
+        if env_ids is None:
+            env_ids = self.env.all_env_ids
+        target = self.ee_sphere.unsqueeze(0).expand(env_ids.shape[0], -1)
+        self.env.ee_start_sphere[env_ids] = self.env.curr_ee_goal_sphere[env_ids]
+        self.env.ee_goal_sphere[env_ids] = target
+        self.env.goal_timer[env_ids] = 0.0
+
+        transition_steps = max(1.0, self.args.ee_transition_s / self.env.dt)
+        hold_steps = max(transition_steps + 1.0, self.args.ee_command_hold_s / self.env.dt)
+        self.env.traj_timesteps[env_ids] = transition_steps
+        self.env.traj_total_timesteps[env_ids] = hold_steps
 
     def _print_base_command(self, step):
         print(
@@ -455,6 +491,9 @@ def interaction_loop(env, policy, args):
         f"ee_external_forces={args.apply_ee_external_forces}, "
         f"base_external_forces={args.apply_base_external_forces}, "
         f"impedance_compensation={args.use_unifp_impedance_controller}, "
+        f"commanded_force_profiles={args.enable_commanded_force_profiles}, "
+        f"domain_randomization={args.enable_domain_randomization}, "
+        f"observation_noise={args.add_noise}, "
         f"base_mode={base_mode}, "
         f"ee_mode={args.ee_eval_mode}, "
         f"camera={args.camera_preset}, "
@@ -478,7 +517,7 @@ def interaction_loop(env, policy, args):
         if args.use_unifp_impedance_controller:
             env.set_impedance_force_estimates(policy_info["latents"])
         obs_buf, privileged_obs_buf, obs_history, explicit_labels, rews, dones, infos, grfs = env.step(actions.detach())
-        scheduler.reapply()
+        scheduler.reapply(dones.nonzero(as_tuple=False).flatten())
         metrics.update(env)
         if args.metrics_interval_steps > 0 and step % args.metrics_interval_steps == 0:
             metrics.print_window(step)
@@ -540,8 +579,9 @@ if __name__ == "__main__":
         default="env_sampled",
         choices=["env_sampled", "fixed_sphere", "random_sphere", "scripted_sphere"],
     )
-    parser.add_argument("--base_command_hold_s", type=float, default=3.0)
+    parser.add_argument("--base_command_hold_s", type=float, default=10.0)
     parser.add_argument("--ee_command_hold_s", type=float, default=3.0)
+    parser.add_argument("--ee_transition_s", type=float, default=2.0)
     parser.add_argument("--fixed_ee_sphere", type=float, nargs=3, default=[0.55, 0.0, 0.0])
 
     parser.add_argument("--cmd_x", type=float, default=0.0)
@@ -552,11 +592,16 @@ if __name__ == "__main__":
     parser.add_argument("--max_yaw_vel", type=float, default=0.6)
 
     parser.add_argument("--force_start_step", type=int, default=0)
-    parser.add_argument("--apply_ee_external_forces", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--apply_base_external_forces", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--use_unifp_impedance_controller", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--compensate_ee_external_force", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--compensate_base_external_force", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--enable_commanded_force_profiles", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--apply_ee_external_forces", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--apply_base_external_forces", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--use_unifp_impedance_controller", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--compensate_ee_external_force", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--compensate_base_external_force", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--ee_impedance_force_filter_tau", type=float, default=0.3)
+    parser.add_argument("--base_impedance_force_filter_tau", type=float, default=0.3)
+    parser.add_argument("--enable_domain_randomization", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--add_noise", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--render_ee_goal_debug", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--render_ee_frame_debug", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--render_base_velocity_arrows", action=argparse.BooleanOptionalAction, default=True)

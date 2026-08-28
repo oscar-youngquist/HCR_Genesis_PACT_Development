@@ -23,6 +23,7 @@ class RolloutStorageB1Z1PACT:
             self.explicit_targets = None
             self.next_privileged = None
             self.dynamics_state = None
+            self.rollout_initial_state = None
 
         def clear(self):
             self.__init__()
@@ -30,7 +31,7 @@ class RolloutStorageB1Z1PACT:
     def __init__(
         self, num_envs, steps, obs_dim, critic_dim, history_dim, action_dim,
         explicit_dim, next_privileged_dim, state_dim,
-        policy_distribution_dim=None, device="cpu",
+        policy_distribution_dim=None, rollout_state_dim=0, device="cpu",
     ):
         self.device, self.num_envs, self.steps, self.step = device, num_envs, steps, 0
         def zeros(dim): return torch.zeros(steps, num_envs, dim, device=device)
@@ -52,6 +53,10 @@ class RolloutStorageB1Z1PACT:
         # v_(t+1) lets PPO construct a transition-aligned acceleration instead
         # of differentiating a policy action sequence in isolation.
         self.dynamics_state = zeros(state_dim)
+        # Optional q_t,v_t packet used only by the BARD one-step rollout.
+        self.rollout_initial_state = (
+            zeros(rollout_state_dim) if rollout_state_dim else None
+        )
 
     def add(self, transition):
         if self.step >= self.steps:
@@ -64,6 +69,10 @@ class RolloutStorageB1Z1PACT:
             "next_privileged", "dynamics_state",
         ):
             getattr(self, name)[self.step].copy_(getattr(transition, name))
+        if self.rollout_initial_state is not None:
+            self.rollout_initial_state[self.step].copy_(
+                transition.rollout_initial_state
+            )
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1).bool())
         self.step += 1
@@ -97,6 +106,8 @@ class RolloutStorageB1Z1PACT:
             "log_probs", "dones", "explicit_targets",
             "next_privileged", "dynamics_state",
         )}
+        if self.rollout_initial_state is not None:
+            flat["rollout_initial_state"] = self.rollout_initial_state.flatten(0, 1)
         for _ in range(epochs):
             for mini_batch in range(mini_batches):
                 start = mini_batch * batch_size

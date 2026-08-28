@@ -7,6 +7,11 @@ from collections import deque
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+from legged_gym.envs.b1z1.force_task_utils import (
+    load_staged_force_curriculum_state_dict,
+    staged_force_curriculum_state_dict,
+    update_force_curriculum_from_rollout,
+)
 from rsl_rl.algorithms import PPO_UniFP
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import ActorCriticB1UniFP, ActorCriticUniFP
@@ -221,6 +226,12 @@ class OnPolicyRunnerUniFP:
                 mean_adaptation_losses,
                 ppo_diagnostics,
             ) = self.alg.update(it)
+            force_curriculum_metrics = update_force_curriculum_from_rollout(
+                self.env,
+                it,
+                ep_infos,
+                statistics.mean(lenbuffer) if lenbuffer else None,
+            )
             latent_resample_diagnostics = {}
             deterministic_diagnostics = {}
             joint_std_diagnostics = {}
@@ -250,6 +261,7 @@ class OnPolicyRunnerUniFP:
                 **deterministic_diagnostics,
                 **joint_std_diagnostics,
                 **rollout_timing_metrics,
+                **force_curriculum_metrics,
             }
             if self.enable_additional_diagnostics:
                 self._validate_diagnostics(diagnostic_metrics)
@@ -435,6 +447,10 @@ class OnPolicyRunnerUniFP:
                 "iter": self.current_learning_iteration if iteration is None else iteration,
                 "entropy_coef": self.alg.current_entropy_coef,
                 "kl_controller_state": self.alg.kl_controller.state_dict(),
+                "force_curriculum_state": (
+                    staged_force_curriculum_state_dict(self.env)
+                    if hasattr(self.env, "_staged_force_curriculum") else None
+                ),
                 "infos": infos,
             },
             path,
@@ -452,6 +468,10 @@ class OnPolicyRunnerUniFP:
         self.alg.kl_controller.load_state_dict(loaded_dict.get("kl_controller_state"))
         if hasattr(self.env, "set_training_iteration"):
             self.env.set_training_iteration(self.current_learning_iteration)
+        if hasattr(self.env, "_staged_force_curriculum"):
+            load_staged_force_curriculum_state_dict(
+                self.env, loaded_dict.get("force_curriculum_state")
+            )
         return loaded_dict["infos"]
 
     def get_inference_policy(self, device=None):

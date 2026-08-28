@@ -12,7 +12,15 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
-from legged_gym.dynamics import PinocchioWholeBodyDynamics
+from legged_gym.dynamics import (
+    BardB1Z1DynamicsBackend,
+    PinocchioWholeBodyDynamics,
+)
+from legged_gym.envs.b1z1.force_task_utils import (
+    load_staged_force_curriculum_state_dict,
+    staged_force_curriculum_state_dict,
+    update_force_curriculum_from_rollout,
+)
 from rsl_rl.algorithms.ppo_b1z1_pact import PPO_B1Z1PACT
 from rsl_rl.modules.actor_critic_b1z1_pact import ActorCriticB1Z1PACT, B1Z1PACTDecoder
 from rsl_rl.utils import RolloutPhaseTimer, log_startup_metadata, startup_metadata
@@ -53,16 +61,33 @@ class B1Z1PACTRunner:
         rollout_samples = env.num_envs * runner_cfg["num_steps_per_env"]
         default_pino_capacity = math.ceil(rollout_samples / algorithm_cfg["num_mini_batches"])
         pino_capacity = algorithm_cfg.get("pino_batch_capacity", 0) or default_pino_capacity
-        self.dynamics = PinocchioWholeBodyDynamics(
-            urdf,
-            env.cfg.asset.dof_names,
-            env.cfg.asset.foot_name,
-            env.cfg.asset.gripper_name,
-            env.cfg.asset.base_name,
-            num_workers=algorithm_cfg.get("pino_num_workers", 0),
-            batch_capacity=pino_capacity,
-            worker_start_method=algorithm_cfg.get("pino_worker_start_method", "spawn"),
+        backend_name = algorithm_cfg.get("dynamics_backend", "pinocchio").lower()
+        backend_args = (
+            urdf, env.cfg.asset.dof_names, env.cfg.asset.foot_name,
+            env.cfg.asset.gripper_name, env.cfg.asset.base_name,
         )
+        if backend_name == "bard":
+            bard_capacity = (
+                algorithm_cfg.get("bard_batch_capacity", 0)
+                or default_pino_capacity
+            )
+            self.dynamics = BardB1Z1DynamicsBackend(
+                *backend_args, device=device, batch_capacity=bard_capacity
+            )
+        elif backend_name == "pinocchio":
+            self.dynamics = PinocchioWholeBodyDynamics(
+                *backend_args,
+                num_workers=algorithm_cfg.get("pino_num_workers", 0),
+                batch_capacity=pino_capacity,
+                worker_start_method=algorithm_cfg.get(
+                    "pino_worker_start_method", "spawn"
+                ),
+            )
+        else:
+            raise ValueError(
+                f"Unknown B1Z1 dynamics_backend={backend_name!r}; "
+                "expected 'bard' or 'pinocchio'"
+            )
 
         merged = dict(algorithm_cfg)
         merged.update({
@@ -79,7 +104,21 @@ class B1Z1PACTRunner:
         merged.update({key: policy_cfg[key] for key in (
             "film_identity_loss_weight", "film_identity_error_scale",
             "pinn_loss_weight", "pinn_warmup", "pinn_init_steps", "predicted_force_detach",
+            "use_pinn_rollout_loss", "pinn_rollout_weight",
+            "pinn_rollout_base_linear_scale",
+            "pinn_rollout_base_angular_scale",
+            "pinn_rollout_leg_velocity_scale",
+            "pinn_rollout_arm_velocity_scale",
             "force_gate_ema_alpha", "force_gate_threshold", "force_gate_hysteresis", "force_gate_patience",
+            "force_gate_ee_event_norm_threshold", "force_gate_base_event_norm_threshold",
+            "force_gate_grf_threshold", "force_gate_ee_active_threshold",
+            "force_gate_ee_neutral_threshold", "force_gate_base_active_threshold",
+            "force_gate_base_neutral_threshold", "force_gate_grf_hysteresis",
+            "force_gate_ee_active_hysteresis", "force_gate_ee_neutral_hysteresis",
+            "force_gate_base_active_hysteresis", "force_gate_base_neutral_hysteresis",
+            "force_gate_grf_min_samples", "force_gate_ee_active_min_samples",
+            "force_gate_ee_neutral_min_samples", "force_gate_base_active_min_samples",
+            "force_gate_base_neutral_min_samples",
             "force_blend_min_alpha",
             "explicit_base_vel_weight", "explicit_ee_position_weight", "explicit_base_wrench_weight", "explicit_ee_force_weight", "explicit_foot_contact_weight",
             "explicit_foot_height_weight",
@@ -101,6 +140,7 @@ class B1Z1PACTRunner:
             env.num_envs, runner_cfg["num_steps_per_env"], env.num_obs, critic_dim,
             history_dim, env.cfg.env.num_policy_actions, env.num_exp_labels,
             env.cfg.env.num_privileged_recon_obs, 180,
+            rollout_state_dim=51,
         )
 
         self.steps, self.save_interval = runner_cfg["num_steps_per_env"], runner_cfg["save_interval"]
@@ -175,6 +215,11 @@ class B1Z1PACTRunner:
                 for _ in range(self.steps):
                     policy_start = rollout_timer.start("policy") if rollout_timer is not None else None
                     actions = self.alg.act(obs, privileged, history, explicit)
+                    # Capture x_t after policy inference but before simulator
+                    # integration. The tensor is copied into rollout storage.
+                    rollout_initial_state = (
+                        self.env.get_pact_rollout_initial_state().to(self.device)
+                    )
                     if rollout_timer is not None:
                         rollout_timer.stop("policy", policy_start)
                     if self.enable_additional_diagnostics and hasattr(self.actor_critic, "record_rollout_diagnostics"):
@@ -197,6 +242,7 @@ class B1Z1PACTRunner:
                             :, :self.env.cfg.env.num_privileged_recon_obs
                         ],
                         self.env.get_pact_dynamics_state().to(self.device),
+                        rollout_initial_state,
                     )
                     running_reward += reward.view(-1, 1)
                     running_length += 1
@@ -240,6 +286,12 @@ class B1Z1PACTRunner:
             if getattr(self.env, "use_reward_curriculum", False):
                 self.env.step_reward_curriculum(iteration)
             self._step_domain_randomization_curriculum(iteration, ep_infos)
+            metrics.update(update_force_curriculum_from_rollout(
+                self.env,
+                iteration,
+                ep_infos,
+                statistics.mean(lengths) if lengths else None,
+            ))
             metrics.update(policy_diagnostics)
             metrics.update(environment_diagnostics)
             metrics.update(rollout_timing_metrics)
@@ -347,6 +399,8 @@ class B1Z1PACTRunner:
             "#" * width, header.center(width), "",
             f"{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {collection_time:.3f}s, learning {learning_time:.3f}s)",
             f"{'PINN loss:':>{pad}} {metrics['pinn']:.4f}",
+            f"{'Inverse-dynamics PINN:':>{pad}} {metrics['pinn_inverse_dynamics']:.4f}",
+            f"{'BARD rollout PINN:':>{pad}} {metrics['pinn_rollout']:.4f}",
             f"{'Value function loss:':>{pad}} {metrics['value']:.4f}",
             f"{'Surrogate loss:':>{pad}} {metrics['surrogate']:.4f}",
             f"{'FiLM identity loss:':>{pad}} {metrics['film_identity']:.4f}",
@@ -389,9 +443,11 @@ class B1Z1PACTRunner:
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
             "iteration": saved_iteration, "force_ema": self.alg.force_ema,
             "force_gate_active": self.alg.force_gate_active, "force_gate_count": self.alg.force_gate_count,
+            "force_metric_emas": self.alg.force_metric_emas,
             "force_blend_start_ema": self.alg.force_blend_start_ema,
             "entropy_coef": self.alg.current_entropy_coef,
             "kl_controller_state": self.alg.kl_controller.state_dict(),
+            "force_curriculum_state": staged_force_curriculum_state_dict(self.env),
         }, path)
 
     def load(self, path, load_optimizer=True):
@@ -405,9 +461,13 @@ class B1Z1PACTRunner:
         self.current_learning_iteration = checkpoint.get("iteration", 0)
         if hasattr(self.env, "set_training_iteration"):
             self.env.set_training_iteration(self.current_learning_iteration)
+        load_staged_force_curriculum_state_dict(
+            self.env, checkpoint.get("force_curriculum_state")
+        )
         self.alg.force_ema = checkpoint.get("force_ema")
         self.alg.force_gate_active = checkpoint.get("force_gate_active", False)
         self.alg.force_gate_count = checkpoint.get("force_gate_count", 0)
+        self.alg.force_metric_emas.update(checkpoint.get("force_metric_emas", {}))
         self.alg.force_blend_start_ema = checkpoint.get(
             "force_blend_start_ema", self.alg.force_ema
         )

@@ -1,5 +1,6 @@
 """Shared force-task utilities for B1Z1 training environments."""
 
+import math
 from typing import NamedTuple
 
 import torch
@@ -44,6 +45,200 @@ EE_FORCE_TARGET_DIAGNOSTIC_NAMES = (
     "EE/tracking_l2_mean",
     "EE/relative_velocity_error_mean",
 )
+
+
+FORCE_CURRICULUM_LOG_NAMES = (
+    "ForceCurriculum/command_scale",
+    "ForceCurriculum/external_scale",
+    "ForceCurriculum/stage",
+    "ForceCurriculum/ee_l1_ema",
+    "ForceCurriculum/roll_termination_ema",
+    "ForceCurriculum/episode_length_ema",
+    "ForceCurriculum/gate_patience",
+    "ForceCurriculum/gate_latched",
+    "ForceCurriculum/trigger_iteration",
+)
+
+
+class B1Z1StagedForceCurriculum:
+    """Iteration-level command ramp followed by a performance-gated force ramp."""
+
+    def __init__(self, cfg):
+        self.command_start = int(cfg.force_curriculum_command_start_iteration)
+        self.command_ramp = int(cfg.force_curriculum_command_ramp_iterations)
+        self.gate_start = int(cfg.force_curriculum_gate_start_iteration)
+        self.external_ramp = int(cfg.force_curriculum_external_ramp_iterations)
+        self.ee_l1_threshold = float(cfg.force_curriculum_ee_l1_threshold)
+        self.roll_threshold = float(cfg.force_curriculum_roll_termination_threshold)
+        self.episode_length_threshold = float(cfg.force_curriculum_episode_length_threshold)
+        self.required_patience = int(cfg.force_curriculum_gate_patience)
+        self.ema_alpha = float(cfg.force_curriculum_metric_ema_alpha)
+        self.use_latest_start = bool(cfg.force_curriculum_use_latest_start_fallback)
+        self.latest_start = int(cfg.force_curriculum_latest_start_iteration)
+        if min(self.command_start, self.command_ramp, self.gate_start, self.external_ramp) < 0:
+            raise ValueError("force curriculum iteration values must be nonnegative")
+        if self.gate_start < self.command_start + self.command_ramp:
+            raise ValueError("force gate cannot start before the commanded-force ramp finishes")
+        if self.required_patience < 1:
+            raise ValueError("force_curriculum_gate_patience must be positive")
+        if not 0.0 < self.ema_alpha <= 1.0:
+            raise ValueError("force_curriculum_metric_ema_alpha must be in (0, 1]")
+        if min(self.ee_l1_threshold, self.roll_threshold, self.episode_length_threshold) < 0.0:
+            raise ValueError("force curriculum metric thresholds must be nonnegative")
+        if self.use_latest_start and self.latest_start < self.gate_start:
+            raise ValueError("force curriculum latest-start fallback must follow the gate start")
+
+        self.ee_l1_ema = None
+        self.roll_termination_ema = None
+        self.episode_length_ema = None
+        self.gate_patience = 0
+        self.gate_latched = False
+        self.trigger_iteration = -1
+        self.last_update_iteration = -1
+
+    @staticmethod
+    def _linear_ramp(iteration, start, duration):
+        if iteration < start:
+            return 0.0
+        if duration == 0:
+            return 1.0
+        return min(max((iteration - start) / duration, 0.0), 1.0)
+
+    def command_scale(self, iteration):
+        return self._linear_ramp(int(iteration), self.command_start, self.command_ramp)
+
+    def external_scale(self, iteration):
+        if not self.gate_latched:
+            return 0.0
+        return self._linear_ramp(int(iteration), self.trigger_iteration, self.external_ramp)
+
+    def _update_ema(self, current, sample):
+        if sample is None or not math.isfinite(float(sample)):
+            return current
+        sample = float(sample)
+        return sample if current is None else (1.0 - self.ema_alpha) * current + self.ema_alpha * sample
+
+    def update(self, iteration, ee_l1=None, roll_termination_rate=None, mean_episode_length=None):
+        """Consume at most one aggregate metric sample for each PPO iteration."""
+        iteration = int(iteration)
+        if iteration == self.last_update_iteration:
+            return
+        if iteration < self.last_update_iteration:
+            raise ValueError("force curriculum iterations must be monotonically increasing")
+        self.last_update_iteration = iteration
+        self.ee_l1_ema = self._update_ema(self.ee_l1_ema, ee_l1)
+        self.roll_termination_ema = self._update_ema(
+            self.roll_termination_ema, roll_termination_rate
+        )
+        self.episode_length_ema = self._update_ema(
+            self.episode_length_ema, mean_episode_length
+        )
+
+        complete_sample = all(
+            value is not None and math.isfinite(float(value))
+            for value in (ee_l1, roll_termination_rate, mean_episode_length)
+        )
+        criteria_met = (
+            complete_sample
+            and self.ee_l1_ema is not None
+            and self.roll_termination_ema is not None
+            and self.episode_length_ema is not None
+            and self.ee_l1_ema < self.ee_l1_threshold
+            and self.roll_termination_ema < self.roll_threshold
+            and self.episode_length_ema > self.episode_length_threshold
+        )
+        if not self.gate_latched and iteration >= self.gate_start:
+            self.gate_patience = self.gate_patience + 1 if criteria_met else 0
+            fallback = self.use_latest_start and iteration >= self.latest_start
+            if self.gate_patience >= self.required_patience or fallback:
+                self.gate_latched = True
+                self.trigger_iteration = iteration
+
+    def metrics(self, iteration):
+        command_scale = self.command_scale(iteration)
+        external_scale = self.external_scale(iteration)
+        if int(iteration) < self.command_start:
+            stage = 0
+        elif int(iteration) < self.gate_start:
+            stage = 1
+        elif not self.gate_latched:
+            stage = 2
+        elif external_scale < 1.0:
+            stage = 3
+        else:
+            stage = 4
+        return {
+            "ForceCurriculum/command_scale": command_scale,
+            "ForceCurriculum/external_scale": external_scale,
+            "ForceCurriculum/stage": float(stage),
+            "ForceCurriculum/ee_l1_ema": float(self.ee_l1_ema or 0.0),
+            "ForceCurriculum/roll_termination_ema": float(self.roll_termination_ema or 0.0),
+            "ForceCurriculum/episode_length_ema": float(self.episode_length_ema or 0.0),
+            "ForceCurriculum/gate_patience": float(self.gate_patience),
+            "ForceCurriculum/gate_latched": float(self.gate_latched),
+            "ForceCurriculum/trigger_iteration": float(self.trigger_iteration),
+        }
+
+    def state_dict(self):
+        return {
+            "ee_l1_ema": self.ee_l1_ema,
+            "roll_termination_ema": self.roll_termination_ema,
+            "episode_length_ema": self.episode_length_ema,
+            "gate_patience": self.gate_patience,
+            "gate_latched": self.gate_latched,
+            "trigger_iteration": self.trigger_iteration,
+            "last_update_iteration": self.last_update_iteration,
+        }
+
+    def load_state_dict(self, state):
+        if not state:
+            return
+        self.ee_l1_ema = state.get("ee_l1_ema")
+        self.roll_termination_ema = state.get("roll_termination_ema")
+        self.episode_length_ema = state.get("episode_length_ema")
+        self.gate_patience = int(state.get("gate_patience", 0))
+        self.gate_latched = bool(state.get("gate_latched", False))
+        self.trigger_iteration = int(state.get("trigger_iteration", -1))
+        self.last_update_iteration = int(state.get("last_update_iteration", -1))
+
+
+def init_staged_force_curriculum(env):
+    env._staged_force_curriculum = B1Z1StagedForceCurriculum(env.cfg.commands)
+
+
+def update_staged_force_curriculum(env, iteration, ee_l1, roll_rate, episode_length):
+    env._staged_force_curriculum.update(iteration, ee_l1, roll_rate, episode_length)
+    return env._staged_force_curriculum.metrics(iteration)
+
+
+def staged_force_curriculum_state_dict(env):
+    return env._staged_force_curriculum.state_dict()
+
+
+def load_staged_force_curriculum_state_dict(env, state):
+    env._staged_force_curriculum.load_state_dict(state)
+
+
+def _mean_episode_metric(ep_infos, name):
+    values = [
+        torch.as_tensor(info[name]).detach().float().mean()
+        for info in ep_infos
+        if name in info
+    ]
+    return torch.stack(values).mean().item() if values else None
+
+
+def update_force_curriculum_from_rollout(env, iteration, ep_infos, mean_episode_length):
+    """Reduce the logged episode metrics once and advance the shared gate."""
+    if not hasattr(env, "_staged_force_curriculum"):
+        return {}
+    return update_staged_force_curriculum(
+        env,
+        iteration,
+        _mean_episode_metric(ep_infos, "EE/tracking_l1_mean"),
+        _mean_episode_metric(ep_infos, "roll_termination_rate"),
+        mean_episode_length,
+    )
 
 
 def _workspace_coordinates(env, targets, base_yaw_quat, env_ids):

@@ -8,6 +8,7 @@ from legged_gym.envs.b1z1.force_task_utils import (
     accumulate_ee_force_target_diagnostics,
     get_force_adjusted_ee_target,
     init_ee_force_target_diagnostics,
+    init_staged_force_curriculum,
     invalidate_force_adjusted_ee_target_cache,
     reset_ee_force_target_diagnostics,
     strict_standing_mask,
@@ -218,24 +219,8 @@ class B1Z1PACTPos(LeggedRobot):
 
     @property
     def external_force_scale(self):
-        """Current linear curriculum scale for all physical disturbances."""
-        commands = self.cfg.commands
-        if self.training_iteration < commands.force_start_step:
-            return float(commands.external_force_initial_scale)
-        if commands.external_force_ramp_iterations == 0:
-            return float(commands.external_force_final_scale)
-        progress = min(
-            max(
-                (self.training_iteration - commands.force_start_step)
-                / max(1, commands.external_force_ramp_iterations),
-                0.0,
-            ),
-            1.0,
-        )
-        return float(
-            commands.external_force_initial_scale
-            + progress * (commands.external_force_final_scale - commands.external_force_initial_scale)
-        )
+        """Scale all physical disturbances after the performance gate latches."""
+        return self._staged_force_curriculum.external_scale(self.training_iteration)
 
     def post_physics_step(self):
         # Match the Isaac-Gym UniFP order: refresh simulator state, resample
@@ -1877,6 +1862,7 @@ class B1Z1PACTPos(LeggedRobot):
         # Evaluation defaults to iteration zero until the runner supplies the
         # restored/current PPO iteration.
         self.training_iteration = 0
+        init_staged_force_curriculum(self)
 
         self.leg_dof_indices = {
             name: self.cfg.asset.dof_names.index(name)
@@ -2100,12 +2086,6 @@ class B1Z1PACTPos(LeggedRobot):
             raise ValueError("rewards.max_sweep_amplitude must be nonnegative")
         if cfg.rewards.gait_guidance_decay_iterations <= 0:
             raise ValueError("rewards.gait_guidance_decay_iterations must be positive")
-        if cfg.commands.external_force_ramp_iterations < 0:
-            raise ValueError("commands.external_force_ramp_iterations must be nonnegative")
-        if cfg.commands.external_force_initial_scale < 0.0 or cfg.commands.external_force_final_scale < 0.0:
-            raise ValueError("external force curriculum scales must be nonnegative")
-        if cfg.commands.external_force_final_scale < cfg.commands.external_force_initial_scale:
-            raise ValueError("external_force_final_scale must be at least external_force_initial_scale")
         for name in (
             "ref_dof_leg_initial_multiplier",
             "ref_dof_leg_final_multiplier",
@@ -2345,8 +2325,16 @@ class B1Z1PACTPos(LeggedRobot):
             limits = limits[0]
         return torch.sum((torch.abs(self.simulator.unclipped_torques[:, :17]) - limits[:17] * self.cfg.rewards.soft_torque_limit).clip(min=0.0), dim=1)
 
+    # def _reward_hip_pos(self):
+    #     return torch.sum(torch.square(self.simulator.dof_pos[:, [0, 3, 6, 9]]), dim=1)
     def _reward_hip_pos(self):
-        return torch.sum(torch.square(self.simulator.dof_pos[:, [0, 3, 6, 9]]), dim=1)
+        idx = [0, 3, 6, 9]
+        return torch.sum(
+            (self.simulator.dof_pos[:, idx]
+            - self.simulator.default_dof_pos[:, idx]) ** 2,
+            dim=1,
+        )
+
 
     def _reward_feet_contact_forces(self):
         return torch.sum((torch.norm(self.simulator.link_contact_forces[:, self.simulator.feet_indices, :], dim=-1) - self.cfg.rewards.max_contact_force).clip(min=0.0), dim=1)

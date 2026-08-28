@@ -6,6 +6,7 @@ import unittest
 import torch
 
 from legged_gym.envs.b1z1.force_task_utils import (
+    B1Z1StagedForceCurriculum,
     force_curriculum_active,
     force_neutral_mask,
     zero_velocity_probability,
@@ -15,10 +16,32 @@ from rsl_rl.algorithms.kl_rate_band import (
     KLRateBandController,
     update_duals_from_mean,
 )
-from rsl_rl.algorithms.ppo_b1z1_pact import PPO_B1Z1PACT
+from rsl_rl.algorithms.ppo_b1z1_pact import (
+    FORCE_GATE_METRIC_NAMES,
+    PPO_B1Z1PACT,
+    _event_conditioned_force_statistics,
+)
 
 
 class ForceTaskTests(unittest.TestCase):
+    @staticmethod
+    def _curriculum_config(**overrides):
+        values = {
+            "force_curriculum_command_start_iteration": 8000,
+            "force_curriculum_command_ramp_iterations": 4000,
+            "force_curriculum_gate_start_iteration": 12000,
+            "force_curriculum_external_ramp_iterations": 4000,
+            "force_curriculum_ee_l1_threshold": 0.25,
+            "force_curriculum_roll_termination_threshold": 0.05,
+            "force_curriculum_episode_length_threshold": 950.0,
+            "force_curriculum_gate_patience": 3,
+            "force_curriculum_metric_ema_alpha": 1.0,
+            "force_curriculum_use_latest_start_fallback": True,
+            "force_curriculum_latest_start_iteration": 20000,
+        }
+        values.update(overrides)
+        return types.SimpleNamespace(**values)
+
     def test_force_activation_boundary_selects_correct_zero_probability(self):
         hold = 8000
         before = force_curriculum_active(hold - 1, hold)
@@ -29,20 +52,53 @@ class ForceTaskTests(unittest.TestCase):
         self.assertEqual(zero_velocity_probability(at_boundary, 0.1, 0.8), 0.8)
 
         env = object.__new__(B1Z1UniFP)
-        env.cfg = types.SimpleNamespace(
-            commands=types.SimpleNamespace(
-                command_force_hold_iterations=hold,
-                command_force_ramp_iterations=5000,
-                command_force_initial_scale=0.25,
-                command_force_final_scale=1.0,
-            )
+        env._staged_force_curriculum = B1Z1StagedForceCurriculum(
+            self._curriculum_config()
         )
         env.training_iteration = hold - 1
         self.assertFalse(env.force_command_randomization_active)
-        self.assertTrue(env.force_command_stream_enabled)
-        self.assertEqual(env.command_force_scale, 0.25)
-        env.training_iteration = hold
+        self.assertFalse(env.force_command_stream_enabled)
+        self.assertEqual(env.command_force_scale, 0.0)
+        env.training_iteration = hold + 1
         self.assertTrue(env.force_command_randomization_active)
+
+    def test_staged_scales_and_per_iteration_gate(self):
+        curriculum = B1Z1StagedForceCurriculum(self._curriculum_config())
+        self.assertEqual(curriculum.command_scale(7999), 0.0)
+        self.assertEqual(curriculum.command_scale(8000), 0.0)
+        self.assertAlmostEqual(curriculum.command_scale(10000), 0.5)
+        self.assertEqual(curriculum.command_scale(12000), 1.0)
+        self.assertEqual(curriculum.external_scale(20000), 0.0)
+
+        for iteration in (12000, 12001, 12002):
+            curriculum.update(iteration, 0.20, 0.01, 1000.0)
+            # Repeated calls in one PPO iteration must not advance patience.
+            curriculum.update(iteration, 0.20, 0.01, 1000.0)
+        self.assertTrue(curriculum.gate_latched)
+        self.assertEqual(curriculum.trigger_iteration, 12002)
+        self.assertEqual(curriculum.gate_patience, 3)
+        self.assertEqual(curriculum.external_scale(12002), 0.0)
+        self.assertAlmostEqual(curriculum.external_scale(14002), 0.5)
+        self.assertEqual(curriculum.external_scale(16002), 1.0)
+
+    def test_gate_state_survives_resume(self):
+        original = B1Z1StagedForceCurriculum(self._curriculum_config())
+        original.update(12000, 0.20, 0.01, 1000.0)
+        original.update(12001, 0.20, 0.01, 1000.0)
+
+        restored = B1Z1StagedForceCurriculum(self._curriculum_config())
+        restored.load_state_dict(original.state_dict())
+        restored.update(12001, 0.20, 0.01, 1000.0)
+        self.assertEqual(restored.gate_patience, 2)
+        restored.update(12002, 0.20, 0.01, 1000.0)
+        self.assertTrue(restored.gate_latched)
+        self.assertEqual(restored.trigger_iteration, 12002)
+
+    def test_latest_start_fallback_latches_without_metrics(self):
+        curriculum = B1Z1StagedForceCurriculum(self._curriculum_config())
+        curriculum.update(20000)
+        self.assertTrue(curriculum.gate_latched)
+        self.assertEqual(curriculum.trigger_iteration, 20000)
 
     def _environment(self):
         env = types.SimpleNamespace()
@@ -145,7 +201,7 @@ class PACTForceBlendTests(unittest.TestCase):
         ppo = self._ppo(current_ema=0.55)
         self.assertAlmostEqual(ppo._force_prediction_blend_alpha(), 0.505)
         ppo.force_ema = 0.10
-        self.assertAlmostEqual(ppo._force_prediction_blend_alpha(), 1.0)
+        self.assertLess(ppo._force_prediction_blend_alpha(), 1.0)
 
     def test_blend_is_bounded_and_gate_forces_full_prediction(self):
         self.assertAlmostEqual(
@@ -154,6 +210,81 @@ class PACTForceBlendTests(unittest.TestCase):
         self.assertAlmostEqual(
             self._ppo(current_ema=2.0, active=True)._force_prediction_blend_alpha(), 1.0
         )
+
+
+class PACTEventConditionedForceGateTests(unittest.TestCase):
+    def test_active_neutral_masks_and_terminal_exclusion(self):
+        target = torch.zeros(4, 21)
+        prediction = torch.zeros_like(target)
+        # Stored force order remains [GRF, base wrench, EE force].
+        prediction[:3, :12] = 1.0
+        target[0, 18:21], prediction[0, 18:21] = 2.0, 1.0
+        prediction[1:3, 18:21] = 0.5
+        target[1, 12:18], prediction[1, 12:18] = 2.0, 1.0
+        prediction[[0, 2], 12:18] = 0.25
+        prediction[3] = 100.0
+        valid = torch.tensor([[1.0], [1.0], [1.0], [0.0]])
+
+        statistics = _event_conditioned_force_statistics(
+            prediction, target, valid, 0.1, 0.1
+        )
+        expected = {
+            "grf": (1.0, 3),
+            "ee_active": (1.0, 1),
+            "ee_neutral": (0.25, 2),
+            "base_active": (1.0, 1),
+            "base_neutral": (0.0625, 2),
+        }
+        for name, (expected_mse, expected_samples) in expected.items():
+            numerator, elements, samples = statistics[name]
+            self.assertAlmostEqual((numerator / elements).item(), expected_mse)
+            self.assertEqual(samples.item(), expected_samples)
+        for name in ("ee_event_fraction", "base_event_fraction"):
+            active, valid_count = statistics[name]
+            self.assertAlmostEqual((active / valid_count).item(), 1.0 / 3.0)
+
+    @staticmethod
+    def _ppo():
+        ppo = object.__new__(PPO_B1Z1PACT)
+        ppo.cfg = {
+            "force_gate_ema_alpha": 1.0,
+            "force_gate_patience": 2,
+        }
+        for name in FORCE_GATE_METRIC_NAMES:
+            ppo.cfg[f"force_gate_{name}_threshold"] = 0.1
+            ppo.cfg[f"force_gate_{name}_hysteresis"] = 0.2
+            ppo.cfg[f"force_gate_{name}_min_samples"] = 1
+        ppo.force_ema = None
+        ppo.force_blend_start_ema = None
+        ppo.force_metric_emas = {
+            name: None for name in FORCE_GATE_METRIC_NAMES
+        }
+        ppo.force_gate_count = 0
+        ppo.force_gate_active = False
+        return ppo
+
+    def test_patience_advances_once_per_iteration_statistic(self):
+        ppo = self._ppo()
+        errors = {name: 0.05 for name in FORCE_GATE_METRIC_NAMES}
+        samples = {name: 4 for name in FORCE_GATE_METRIC_NAMES}
+
+        ppo._update_event_conditioned_force_gate(errors, samples, 0.05)
+        self.assertEqual(ppo.force_gate_count, 1)
+        self.assertFalse(ppo.force_gate_active)
+        ppo._update_event_conditioned_force_gate(errors, samples, 0.05)
+        self.assertEqual(ppo.force_gate_count, 2)
+        self.assertTrue(ppo.force_gate_active)
+
+    def test_missing_active_event_cannot_advance_gate(self):
+        ppo = self._ppo()
+        errors = {name: 0.01 for name in FORCE_GATE_METRIC_NAMES}
+        samples = {name: 4 for name in FORCE_GATE_METRIC_NAMES}
+        samples["ee_active"] = 0
+
+        ppo._update_event_conditioned_force_gate(errors, samples, 0.01)
+        self.assertEqual(ppo.force_gate_count, 0)
+        self.assertFalse(ppo.force_gate_active)
+        self.assertIsNone(ppo.force_metric_emas["ee_active"])
 
 
 class KLIterationUpdateTests(unittest.TestCase):

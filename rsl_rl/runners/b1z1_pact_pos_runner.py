@@ -11,6 +11,11 @@ from collections import deque
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+from legged_gym.envs.b1z1.force_task_utils import (
+    load_staged_force_curriculum_state_dict,
+    staged_force_curriculum_state_dict,
+    update_force_curriculum_from_rollout,
+)
 from rsl_rl.algorithms.ppo_b1z1_pact_pos import PPO_B1Z1PACTPos
 from rsl_rl.modules.actor_critic_b1z1_pact_pos import ActorCriticB1Z1PACTPos, B1Z1PACTDecoder
 from rsl_rl.utils import RolloutPhaseTimer, log_startup_metadata, startup_metadata
@@ -196,6 +201,12 @@ class B1Z1PACTPosRunner:
             if getattr(self.env, "use_reward_curriculum", False):
                 self.env.step_reward_curriculum(iteration)
             self._step_domain_randomization_curriculum(iteration, ep_infos)
+            metrics.update(update_force_curriculum_from_rollout(
+                self.env,
+                iteration,
+                ep_infos,
+                statistics.mean(lengths) if lengths else None,
+            ))
             metrics.update(policy_diagnostics)
             metrics.update(environment_diagnostics)
             metrics.update(rollout_timing_metrics)
@@ -341,6 +352,7 @@ class B1Z1PACTPosRunner:
             "iteration": saved_iteration,
             "entropy_coef": self.alg.current_entropy_coef,
             "kl_controller_state": self.alg.kl_controller.state_dict(),
+            "force_curriculum_state": staged_force_curriculum_state_dict(self.env),
         }, path)
 
     def load(self, path, load_optimizer=True):
@@ -354,6 +366,9 @@ class B1Z1PACTPosRunner:
         self.current_learning_iteration = checkpoint.get("iteration", 0)
         if hasattr(self.env, "set_training_iteration"):
             self.env.set_training_iteration(self.current_learning_iteration)
+        load_staged_force_curriculum_state_dict(
+            self.env, checkpoint.get("force_curriculum_state")
+        )
         self.alg.current_entropy_coef = checkpoint.get("entropy_coef", self.alg.current_entropy_coef)
         self.alg.kl_controller.load_state_dict(checkpoint.get("kl_controller_state"))
         return checkpoint.get("iteration", 0)

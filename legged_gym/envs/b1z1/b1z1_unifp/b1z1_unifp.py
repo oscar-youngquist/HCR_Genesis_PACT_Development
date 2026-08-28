@@ -6,9 +6,9 @@ import torch
 
 from legged_gym.envs.b1z1.force_task_utils import (
     accumulate_ee_force_target_diagnostics,
-    force_curriculum_active,
     get_force_adjusted_ee_target,
     init_ee_force_target_diagnostics,
+    init_staged_force_curriculum,
     invalidate_force_adjusted_ee_target_cache,
     reset_ee_force_target_diagnostics,
     strict_standing_mask,
@@ -146,11 +146,8 @@ class B1Z1UniFP(BaseTask):
 
     @property
     def force_command_randomization_active(self):
-        """Select the force-task command regime when the initial hold ends."""
-        return force_curriculum_active(
-            self.training_iteration,
-            self.cfg.commands.command_force_hold_iterations,
-        )
+        """Select the force-task command regime once its staged ramp begins."""
+        return self.command_force_scale > 0.0
 
     @property
     def force_command_stream_enabled(self):
@@ -159,45 +156,13 @@ class B1Z1UniFP(BaseTask):
 
     @property
     def command_force_scale(self):
-        """Scale commanded base/EE force ranges after an initial hold period."""
-        commands = self.cfg.commands
-        if self.training_iteration < commands.command_force_hold_iterations:
-            return float(commands.command_force_initial_scale)
-        if commands.command_force_ramp_iterations == 0:
-            return float(commands.command_force_final_scale)
-        progress = min(
-            max(
-                (self.training_iteration - commands.command_force_hold_iterations)
-                / max(1, commands.command_force_ramp_iterations),
-                0.0,
-            ),
-            1.0,
-        )
-        return float(
-            commands.command_force_initial_scale
-            + progress * (commands.command_force_final_scale - commands.command_force_initial_scale)
-        )
+        """Scale both UniFP commanded-force streams with the shared schedule."""
+        return self._staged_force_curriculum.command_scale(self.training_iteration)
 
     @property
     def external_force_scale(self):
-        """Current linear curriculum scale for physically applied forces."""
-        commands = self.cfg.commands
-        if self.training_iteration < commands.force_start_step:
-            return float(commands.external_force_initial_scale)
-        if commands.external_force_ramp_iterations == 0:
-            return float(commands.external_force_final_scale)
-        progress = min(
-            max(
-                (self.training_iteration - commands.force_start_step)
-                / max(1, commands.external_force_ramp_iterations),
-                0.0,
-            ),
-            1.0,
-        )
-        return float(
-            commands.external_force_initial_scale
-            + progress * (commands.external_force_final_scale - commands.external_force_initial_scale)
-        )
+        """Scale all physical disturbances after the performance gate latches."""
+        return self._staged_force_curriculum.external_scale(self.training_iteration)
 
     def post_physics_step(self):
         # Match the Isaac-Gym UniFP order: refresh simulator state, resample
@@ -534,6 +499,7 @@ class B1Z1UniFP(BaseTask):
         self.current_Fxyz_base_cmd[env_ids] = 0.0
         self.estimated_ee_force_local[env_ids] = 0.0
         self.estimated_base_force_local[env_ids] = 0.0
+        self._reset_impedance_force_filters(env_ids)
         reset_ee_force_target_diagnostics(self, env_ids)
         self.prev_ee_error[env_ids] = 0.0
         self.progress_vel_ema[env_ids] = 0.0
@@ -947,12 +913,25 @@ class B1Z1UniFP(BaseTask):
 
     def _apply_external_impedance_compensation(self):
         """Cancel force offsets using estimator-predicted local forces, not simulator force buffers."""
+        ee_alpha = self.dt / (self.cfg.commands.ee_impedance_force_filter_tau + self.dt)
+        base_alpha = self.dt / (self.cfg.commands.base_impedance_force_filter_tau + self.dt)
+        self.filtered_ee_force_local.add_(
+            ee_alpha * (self.estimated_ee_force_local - self.filtered_ee_force_local)
+        )
+        self.filtered_base_force_local.add_(
+            base_alpha * (self.estimated_base_force_local - self.filtered_base_force_local)
+        )
         if self.cfg.commands.compensate_ee_external_force:
-            self.current_Fxyz_gripper_cmd[:] = -self.estimated_ee_force_local
+            self.current_Fxyz_gripper_cmd[:] = -self.filtered_ee_force_local
         if self.cfg.commands.compensate_base_external_force:
-            self.current_Fxyz_base_cmd[:] = -self.estimated_base_force_local
+            self.current_Fxyz_base_cmd[:] = -self.filtered_base_force_local
         self.commands[:, 9:12] = self.current_Fxyz_gripper_cmd
         self.commands[:, 12:15] = self.current_Fxyz_base_cmd
+
+    def _reset_impedance_force_filters(self, env_ids):
+        """Clear play-time estimator filter state for reset environments."""
+        self.filtered_ee_force_local[env_ids] = 0.0
+        self.filtered_base_force_local[env_ids] = 0.0
 
     def _pre_sim_step(self, actions):
         """Clip/store actor actions and optionally apply actuator delay."""
@@ -1889,6 +1868,7 @@ class B1Z1UniFP(BaseTask):
         # Evaluation defaults to iteration zero until the runner supplies the
         # restored/current PPO iteration.
         self.training_iteration = 0
+        init_staged_force_curriculum(self)
 
         self.leg_dof_indices = {
             name: self.cfg.asset.dof_names.index(name)
@@ -1955,6 +1935,8 @@ class B1Z1UniFP(BaseTask):
         self.current_Fxyz_base_cmd = torch.zeros(self.num_envs, 3, device=self.device)
         self.estimated_ee_force_local = torch.zeros(self.num_envs, 3, device=self.device)
         self.estimated_base_force_local = torch.zeros(self.num_envs, 3, device=self.device)
+        self.filtered_ee_force_local = torch.zeros(self.num_envs, 3, device=self.device)
+        self.filtered_base_force_local = torch.zeros(self.num_envs, 3, device=self.device)
         self.freed_envs_gripper_cmd = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.freed_envs_gripper_ext = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.selected_env_ids_gripper_cmd = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -2127,20 +2109,10 @@ class B1Z1UniFP(BaseTask):
             raise ValueError("rewards.max_sweep_amplitude must be nonnegative")
         if cfg.rewards.gait_guidance_decay_iterations <= 0:
             raise ValueError("rewards.gait_guidance_decay_iterations must be positive")
-        if cfg.commands.external_force_ramp_iterations < 0:
-            raise ValueError("commands.external_force_ramp_iterations must be nonnegative")
-        if cfg.commands.external_force_initial_scale < 0.0 or cfg.commands.external_force_final_scale < 0.0:
-            raise ValueError("external force curriculum scales must be nonnegative")
-        if cfg.commands.external_force_final_scale < cfg.commands.external_force_initial_scale:
-            raise ValueError("external_force_final_scale must be at least external_force_initial_scale")
-        if cfg.commands.command_force_hold_iterations < 0:
-            raise ValueError("commands.command_force_hold_iterations must be nonnegative")
-        if cfg.commands.command_force_ramp_iterations < 0:
-            raise ValueError("commands.command_force_ramp_iterations must be nonnegative")
-        if cfg.commands.command_force_initial_scale < 0.0 or cfg.commands.command_force_final_scale < 0.0:
-            raise ValueError("command force curriculum scales must be nonnegative")
-        if cfg.commands.command_force_final_scale < cfg.commands.command_force_initial_scale:
-            raise ValueError("command_force_final_scale must be at least command_force_initial_scale")
+        if cfg.commands.ee_impedance_force_filter_tau < 0.0:
+            raise ValueError("commands.ee_impedance_force_filter_tau must be nonnegative")
+        if cfg.commands.base_impedance_force_filter_tau < 0.0:
+            raise ValueError("commands.base_impedance_force_filter_tau must be nonnegative")
         for name in (
             "ref_dof_leg_initial_multiplier",
             "ref_dof_leg_final_multiplier",
@@ -2296,9 +2268,16 @@ class B1Z1UniFP(BaseTask):
             limits = limits[0]
         return torch.sum((torch.abs(self.simulator.unclipped_torques[:, :17]) - limits[:17] * self.cfg.rewards.soft_torque_limit).clip(min=0.0), dim=1)
 
+    # def _reward_hip_pos(self):
+    #     return torch.sum(torch.square(self.simulator.dof_pos[:, [0, 3, 6, 9]]), dim=1)
     def _reward_hip_pos(self):
-        return torch.sum(torch.square(self.simulator.dof_pos[:, [0, 3, 6, 9]]), dim=1)
-
+        idx = [0, 3, 6, 9]
+        return torch.sum(
+            (self.simulator.dof_pos[:, idx]
+            - self.simulator.default_dof_pos[:, idx]) ** 2,
+            dim=1,
+        )
+        
     def _reward_feet_contact_forces(self):
         return torch.sum((torch.norm(self.simulator.link_contact_forces[:, self.simulator.feet_indices, :], dim=-1) - self.cfg.rewards.max_contact_force).clip(min=0.0), dim=1)
 

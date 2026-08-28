@@ -55,7 +55,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         project_force_adjusted_ee_target = True
         force_target_radius_limits = [0.30, 0.90]
         force_target_projection_samples = 21
-        traj_time = [1.0, 3.0]
+        traj_time = [1.875, 5.625]
         hold_time = [0.5, 2.0]
         command_mode = "sphere"
         collision_upper_limits = [0.1, 0.2, -0.05]
@@ -96,21 +96,36 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         pitch_random_scale = 0.0
         yaw_random_scale = 0.0
         default_joint_angles = {
-            "FR_hip_joint": -0.15,
-            "FR_thigh_joint": 0.67,
-            "FR_calf_joint": -1.32,
+            "FR_hip_joint": -0.2,
+            "FR_thigh_joint": 0.8,
+            "FR_calf_joint": -1.5,
          
-            "FL_hip_joint": 0.15,
-            "FL_thigh_joint": 0.67,
-            "FL_calf_joint": -1.32,
+            "FL_hip_joint": 0.2,
+            "FL_thigh_joint": 0.8,
+            "FL_calf_joint": -1.5,
          
-            "RR_hip_joint": -0.15,
-            "RR_thigh_joint": 0.9,
-            "RR_calf_joint": -1.32,
+            "RR_hip_joint": -0.2,
+            "RR_thigh_joint": 0.8,
+            "RR_calf_joint": -1.5,
          
-            "RL_hip_joint": 0.15,
-            "RL_thigh_joint": 0.9,
-            "RL_calf_joint": -1.32,
+            "RL_hip_joint": 0.2,
+            "RL_thigh_joint": 0.8,
+            "RL_calf_joint": -1.5,
+            # "FR_hip_joint": -0.15,
+            # "FR_thigh_joint": 0.67,
+            # "FR_calf_joint": -1.32,
+         
+            # "FL_hip_joint": 0.15,
+            # "FL_thigh_joint": 0.67,
+            # "FL_calf_joint": -1.32,
+         
+            # "RR_hip_joint": -0.15,
+            # "RR_thigh_joint": 0.9,
+            # "RR_calf_joint": -1.32,
+         
+            # "RL_hip_joint": 0.15,
+            # "RL_thigh_joint": 0.9,
+            # "RL_calf_joint": -1.32,
          
             "z1_waist": 0.0,
             "z1_shoulder": 1.48,
@@ -294,7 +309,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         # damping = {"joint": 5.0,"z1": 0.70,}
 
         action_scale = 0.25
-        torque_scale = 10.0
+        torque_scale = 100.0
         dt = 0.02
         decimation = 4
         
@@ -328,12 +343,19 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         zero_vel_cmd_prob = 0.2
         zero_vel_cmd_prob_after_force = 0.5
         
-        force_start_step = 18000
-        # External disturbances are present from iteration zero at quarter
-        # strength, then linearly reach their full ranges after this threshold.
-        external_force_initial_scale = 0.10
-        external_force_final_scale = 1.0
-        external_force_ramp_iterations = 10000
+        # Shared B1Z1 schedule. PACT-Pos has no force-command observation
+        # channel, but retains the common command stage before disturbances.
+        force_curriculum_command_start_iteration = 12000
+        force_curriculum_command_ramp_iterations = 4000
+        force_curriculum_gate_start_iteration = 20000
+        force_curriculum_external_ramp_iterations = 4000
+        force_curriculum_ee_l1_threshold = 0.25
+        force_curriculum_roll_termination_threshold = 0.05
+        force_curriculum_episode_length_threshold = 950.0
+        force_curriculum_gate_patience = 400
+        force_curriculum_metric_ema_alpha = 0.05
+        force_curriculum_use_latest_start_fallback = True
+        force_curriculum_latest_start_iteration = 20000
 
         push_gripper_stators = True
         apply_ee_external_forces = True
@@ -535,17 +557,23 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         
         max_contact_force = 600.0
         
-        foot_clearance_target = 0.20 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.10 # desired foot clearance above ground [m]
         foot_height_offset = 0.02
         foot_clearance_tracking_sigma = 0.01
         
         # Gait-phase guidance settings
-        cycle_time = 0.48
-        sweep_phase_lead = 0.175
-        sweep_velocity_gain = 0.28
-        max_sweep_amplitude = 0.18
-        target_joint_pos_scale = 0.29
-        target_joint_pos_thd = 0.35
+        # cycle_time = 0.48
+        # sweep_phase_lead = 0.175
+        # sweep_velocity_gain = 0.28
+        # max_sweep_amplitude = 0.18
+        # target_joint_pos_scale = 0.29
+        # target_joint_pos_thd = 0.35
+        cycle_time = 0.64               # currently 0.48
+        target_joint_pos_scale = 0.17   # currently 0.29
+        target_joint_pos_thd = 0.50     # currently 0.35
+        sweep_phase_lead = 0.0
+        max_sweep_amplitude = 0.0
+        sweep_velocity_gain = 0.0       # disable the B1-only fore-aft sweep initially
 
         gait_guidance_decay_enabled = False
         gait_guidance_decay_iterations = 10000
@@ -617,7 +645,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             hip_pos = -0.30
 
             # Base
-            base_height = -10.0
+            base_height = -5.0
             lin_vel_z   = -1.0
             ang_vel_xy  = -0.02
             roll        = -0.2
@@ -636,7 +664,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
             dof_acc_arm = -4.5e-7
             dof_vel_arm = -2e-4
             action_rate_arm = -0.045
-            action_smoothness_arm = -0.045
+            action_smoothness_arm = -0.01
             joint_power_arm = -2.e-5
             joint_power_dist_arm = -2.e-6
             arm_torques = -1.0e-5

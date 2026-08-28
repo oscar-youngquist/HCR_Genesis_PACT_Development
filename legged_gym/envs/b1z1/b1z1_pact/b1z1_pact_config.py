@@ -52,7 +52,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         project_force_adjusted_ee_target = True
         force_target_radius_limits = [0.30, 0.90]
         force_target_projection_samples = 21
-        traj_time = [1.0, 3.0]
+        traj_time = [1.875, 5.625]
         hold_time = [0.5, 2.0]
         command_mode = "sphere"
         collision_upper_limits = [0.1, 0.2, -0.05]
@@ -291,7 +291,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # damping = {"joint": 5.0,"z1": 0.70,}
 
         action_scale = 0.25
-        torque_scale = 10.0
+        torque_scale = 100.0
         dt = 0.02
         decimation = 4
         
@@ -332,12 +332,19 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         zero_vel_cmd_prob = 0.2
         zero_vel_cmd_prob_after_force = 0.5
         
-        force_start_step = 15000
-        # External disturbances are present from iteration zero at quarter
-        # strength, then linearly reach their full ranges after this threshold.
-        external_force_initial_scale = 0.10
-        external_force_final_scale = 1.0
-        external_force_ramp_iterations = 10000
+        # Shared B1Z1 schedule. PACT has no force-command observation channel,
+        # but retains the common command stage before disturbances are enabled.
+        force_curriculum_command_start_iteration = 8000
+        force_curriculum_command_ramp_iterations = 4000
+        force_curriculum_gate_start_iteration = 12000
+        force_curriculum_external_ramp_iterations = 4000
+        force_curriculum_ee_l1_threshold = 0.25
+        force_curriculum_roll_termination_threshold = 0.05
+        force_curriculum_episode_length_threshold = 950.0
+        force_curriculum_gate_patience = 400
+        force_curriculum_metric_ema_alpha = 0.05
+        force_curriculum_use_latest_start_fallback = True
+        force_curriculum_latest_start_iteration = 20000
 
         push_gripper_stators = True
         apply_ee_external_forces = True
@@ -541,17 +548,24 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         
         max_contact_force = 600.0
         
-        foot_clearance_target = 0.20 # desired foot clearance above ground [m]
+        foot_clearance_target = 0.10 # desired foot clearance above ground [m]
         foot_height_offset = 0.02
         foot_clearance_tracking_sigma = 0.01
         
         # Gait-phase guidance settings
-        cycle_time = 0.48
-        sweep_phase_lead = 0.175
-        sweep_velocity_gain = 0.28
-        max_sweep_amplitude = 0.18
-        target_joint_pos_scale = 0.29
-        target_joint_pos_thd = 0.35
+        # cycle_time = 0.48
+        # sweep_phase_lead = 0.175
+        # sweep_velocity_gain = 0.28
+        # max_sweep_amplitude = 0.18
+        # target_joint_pos_scale = 0.29
+        # target_joint_pos_thd = 0.35
+        
+        cycle_time = 0.64               # currently 0.48
+        target_joint_pos_scale = 0.17   # currently 0.29
+        target_joint_pos_thd = 0.50     # currently 0.35
+        sweep_phase_lead = 0.0
+        max_sweep_amplitude = 0.0
+        sweep_velocity_gain = 0.0       # disable the B1-only fore-aft sweep initially
 
         gait_guidance_decay_enabled = False
         gait_guidance_decay_iterations = 10000
@@ -623,7 +637,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             hip_pos = -0.30
 
             # Base
-            base_height = -10.0
+            base_height = -5.0
             lin_vel_z   = -1.0
             ang_vel_xy  = -0.02
             roll        = -0.2
@@ -643,13 +657,16 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             # Raw-action temporal penalties are split by coupled head and by
             # leg/arm coordinates while retaining the previous coefficients.
             leg_feedback_action_rate = -0.02
-            leg_feedback_action_smoothness = -0.02
-            arm_feedback_action_rate = -0.02
-            arm_feedback_action_smoothness = -0.02
-            leg_feedforward_action_rate = -0.045
-            leg_feedforward_action_smoothness = -0.045
+            leg_feedback_action_smoothness = -0.01
+            
+            arm_feedback_action_rate = -0.045
+            arm_feedback_action_smoothness = -0.01
+            
+            leg_feedforward_action_rate = -0.02
+            leg_feedforward_action_smoothness = -0.01
+            
             arm_feedforward_action_rate = -0.045
-            arm_feedforward_action_smoothness = -0.045
+            arm_feedforward_action_smoothness = -0.01
 
             # Penalize the two applied torque branches independently so their
             # costs remain visible for leg and arm actuation in TensorBoard.
@@ -872,12 +889,38 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         pinn_loss_weight = 0.01
         pinn_warmup = 100
         pinn_init_steps = 100
+        use_pinn_rollout_loss = False
+        pinn_rollout_weight = 1.0
+        # SI normalization scales keep the four velocity blocks comparable.
+        pinn_rollout_base_linear_scale = 1.0
+        pinn_rollout_base_angular_scale = 1.0
+        pinn_rollout_leg_velocity_scale = 10.0
+        pinn_rollout_arm_velocity_scale = 5.0
 
         predicted_force_detach = False
         force_gate_ema_alpha = 0.05
-        force_gate_threshold = 0.10
-        force_gate_hysteresis = 0.075
+        force_gate_threshold = 0.075
+        force_gate_hysteresis = 0.10
         force_gate_patience = 10
+        # No event mask is stored in the rollout, so normalized target norms
+        # identify physical EE/base disturbance events for reliability gating.
+        force_gate_ee_event_norm_threshold = 0.05
+        force_gate_base_event_norm_threshold = 0.05
+        force_gate_grf_threshold = 0.075
+        force_gate_ee_active_threshold = 0.075
+        force_gate_ee_neutral_threshold = 0.075
+        force_gate_base_active_threshold = 0.075
+        force_gate_base_neutral_threshold = 0.075
+        force_gate_grf_hysteresis = 0.10
+        force_gate_ee_active_hysteresis = 0.10
+        force_gate_ee_neutral_hysteresis = 0.10
+        force_gate_base_active_hysteresis = 0.10
+        force_gate_base_neutral_hysteresis = 0.10
+        force_gate_grf_min_samples = 32
+        force_gate_ee_active_min_samples = 32
+        force_gate_ee_neutral_min_samples = 32
+        force_gate_base_active_min_samples = 32
+        force_gate_base_neutral_min_samples = 32
         # Minimum predicted-force contribution before reconstruction reaches
         # the reliability threshold; the remainder comes from measurements.
         force_blend_min_alpha = 0.01
@@ -895,6 +938,10 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         max_grad_norm = 1.0
         num_learning_epochs = 5
         num_mini_batches = 4
+        # BARD is the differentiable GPU backend; Pinocchio remains available
+        # as the numerical reference/fallback.
+        dynamics_backend = "bard"
+        bard_batch_capacity = 0
         # Persistent CPU workers evaluate the Pinocchio observed-state terms.
         # A zero capacity selects the rollout/minibatch-derived capacity.
         pino_num_workers = 8
@@ -920,7 +967,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         
         save_interval = 1000
         run_name = "b1z1_pact_initial"
-        experiment_name = "b1z1_pact_genesis"
+        experiment_name = "b1z1_pact_gym"
         sync_wandb = False
         resume = False
         load_run = "Jul14_11-16-03_unifp_baseline"
