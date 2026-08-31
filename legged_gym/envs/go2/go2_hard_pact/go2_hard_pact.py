@@ -468,14 +468,8 @@ class Go2HardPACTCore(Go2PACT):
         )
         return dynamics_parameters, encoded, nominal, references
 
-    def recompute_training_objectives(self, batch, actor):
-        """Rebuild BARD and QP losses from the stored executed action."""
-        from rsl_rl.algorithms.ppo_go2_hard_pact import (
-            combine_physics_losses,
-            inverse_dynamics_loss,
-            rollout_loss,
-            supervised_physics_head_losses,
-        )
+    def recompute_training_outputs(self, batch, actor):
+        """Rebuild differentiable model/QP outputs without calculating losses."""
         dynamics_parameters, encoded, nominal, references = (
             self._recompute_policy_outputs(batch, actor)
         )
@@ -497,234 +491,59 @@ class Go2HardPACTCore(Go2PACT):
             qp_result = self.qp.solve(
                 self._build_qp_inputs(qp_state, dynamics_parameters, nominal)
             )
-            safe = qp_result.safe_torque
-            if (
-                not bool(self.cfg.features.differentiate_qp)
-                or bool(self.cfg.features.stop_gradient_qp)
-            ):
-                safe = safe.detach()
         else:
             qp_result = self._projection_only_result(
                 nominal,
                 batch["previous_safe_torque"].detach(),
                 fallback_code=2 if bool(self.cfg.features.use_qp) else 0,
             )
-            safe = qp_result.safe_torque
-
-        supervised = supervised_physics_head_losses(
-            references.grf_yaw_n,
-            batch["interval_grf_yaw"],
-            references.base_wrench_yaw,
-            batch["interval_wrench_yaw"],
-            batch["sustained_wrench_active_mask"],
-        )
-        clone_loss = nominal.new_zeros(())
-        if self.position_pretraining:
-            clone_target = batch["executed_torque"].detach() / float(self.cfg.control.torque_scale)
-            clone_loss = actor.clone_feedforward_loss(
-                batch["observation"], batch["history"], clone_target
-            )
-
-        # Keep disabled physics objectives connected to shared estimator
-        # parameters so baseline PCGrad remains a valid zero objective.
-        zero = (
-            references.grf_yaw_n.sum() + references.base_wrench_yaw.sum()
-        ) * 0.0
-        inverse = zero
-        rollout = zero
-        metrics = {}
-        if self._bard is not None and (
-            bool(self.cfg.features.use_bard_inverse_loss)
-            or bool(self.cfg.features.use_bard_rollout_loss)
-        ):
-            actual_parameters = dynamics_parameters.bard_parameters()
-            # Yaw local -> world uses the transpose of the QP rotation.
-            rotation = self._yaw_rotation(batch["pre_q"][:, 3:7])
-            grf_world = torch.einsum(
-                "bij,bfj->bfi", rotation, references.grf_yaw_n.reshape(-1, 4, 3)
-            )
-            wrench_world = torch.cat((
-                torch.einsum("bij,bj->bi", rotation, references.base_wrench_yaw[:, :3]),
-                torch.einsum("bij,bj->bi", rotation, references.base_wrench_yaw[:, 3:]),
-            ), dim=-1)
-            if bool(self.cfg.features.use_bard_inverse_loss):
-                inverse, inverse_metrics = inverse_dynamics_loss(
-                    self._bard,
-                    batch["pre_q"], batch["pre_v"], batch["post_v"],
-                    batch["average_torque"], grf_world.flatten(1), wrench_world,
-                    batch["physics_valid_mask"], self.dt,
-                    parameters=actual_parameters,
-                )
-                metrics.update({f"inverse/{key}": value for key, value in inverse_metrics.items()})
-            if bool(self.cfg.features.use_bard_rollout_loss):
-                rollout, rollout_metrics = rollout_loss(
-                    self._bard,
-                    batch["pre_q"], batch["pre_v"], batch["post_v"],
-                    safe, grf_world.flatten(1), wrench_world,
-                    batch["physics_valid_mask"], self.dt,
-                    parameters=actual_parameters,
-                )
-                metrics.update({f"rollout/{key}": value for key, value in rollout_metrics.items()})
-        if (
-            not bool(self.cfg.features.differentiate_qp)
-            or bool(self.cfg.features.stop_gradient_qp)
-        ):
-            projection_correction = qp_result.safe_torque.detach() - nominal
-        else:
-            projection_correction = qp_result.correction
-        projection = projection_correction.square().mean()
-        if not bool(self.cfg.features.use_qp) and not bool(
-            self.cfg.features.use_soft_projection_penalty
-        ):
-            projection = zero
-        physics = combine_physics_losses(
-            inverse, rollout, projection,
-            float(self.cfg.bard.lambda_inverse),
-            float(self.cfg.bard.lambda_rollout),
-            float(self.cfg.bard.lambda_projection),
-            metrics,
-        )
-        metrics.update({
-            "supervised/grf": supervised["grf"],
-            "supervised/wrench_active": supervised["wrench_active"],
-            "supervised/wrench_neutral": supervised["wrench_neutral"],
-            "clone": clone_loss,
-            "grf_mae_n": (references.grf_yaw_n - batch["interval_grf_yaw"]).abs().mean(),
-            "wrench_mae": (references.base_wrench_yaw - batch["interval_wrench_yaw"]).abs().mean(),
-            "qp/correction_l2_nm": qp_result.correction.norm(dim=-1).mean(),
-            "qp/correction_max_nm": qp_result.correction.abs().amax(dim=-1).mean(),
-            "qp/contact_slack_l2": qp_result.contact_slack.norm(dim=-1).mean(),
-            "qp/contact_slack_max": qp_result.contact_slack.abs().amax(dim=-1).mean(),
-            "qp/equality_residual_max": torch.nan_to_num(
-                qp_result.equality_residual, nan=0.0
-            ).mean(),
-            "qp/inequality_violation_max": torch.nan_to_num(
-                qp_result.inequality_violation, nan=0.0
-            ).mean(),
-            "qp/minimum_margin": torch.nan_to_num(
-                qp_result.minimum_margin, nan=0.0
-            ).mean(),
-            "qp/active_constraints": qp_result.active_constraints.float().mean(),
-            "qp/fallback": (qp_result.fallback > 0).float().mean(),
-            "qp/actuator_projection_fallback": (qp_result.fallback == 2).float().mean(),
-            "qp/infeasible": (qp_result.status > 0).float().mean(),
-            "qp/forward_time_ms": qp_result.forward_time_ms.mean(),
-            "transition/physics_valid_fraction": batch["physics_valid_mask"].float().mean(),
-            "transition/push_fraction": batch["instantaneous_push_mask"].float().mean(),
-            "transition/wrench_active_fraction": batch["sustained_wrench_active_mask"].float().mean(),
-            "transition/reset_fraction": batch["reset_mask"].float().mean(),
-            "transition/timeout_fraction": batch["timeout_mask"].float().mean(),
-            "transition/teleport_fraction": batch["teleport_mask"].float().mean(),
-        })
-        grf_error = (
-            references.grf_yaw_n - batch["interval_grf_yaw"]
-        ).abs().reshape(-1, 4, 3)
-        for foot_index, foot_name in enumerate(CANONICAL.foot_names):
-            for axis_index, axis in enumerate(("x", "y", "z")):
-                metrics[f"grf/{foot_name}_{axis}_mae_n"] = grf_error[
-                    :, foot_index, axis_index
-                ].mean()
-        wrench_error = (
-            references.base_wrench_yaw - batch["interval_wrench_yaw"]
-        ).abs()
-        for axis_index, axis in enumerate(("fx", "fy", "fz", "tx", "ty", "tz")):
-            units = "n" if axis_index < 3 else "nm"
-            metrics[f"wrench/{axis}_mae_{units}"] = wrench_error[:, axis_index].mean()
-
-        intervention = qp_result.correction.norm(dim=-1) > 1.0e-5
-        metrics["qp/intervention_fraction"] = intervention.float().mean()
-        for label, mask in (("intervened", intervention), ("not_intervened", ~intervention)):
-            denominator = mask.float().sum().clamp_min(1.0)
-            metrics[f"qp_conditioned/{label}_grf_mae_n"] = (
-                grf_error.mean(dim=(1, 2)) * mask.float()
-            ).sum() / denominator
-            metrics[f"qp_conditioned/{label}_wrench_mae"] = (
-                wrench_error.mean(dim=-1) * mask.float()
-            ).sum() / denominator
-        for status_code in range(3):
-            metrics[f"qp/status_{status_code}_fraction"] = (
-                qp_result.status == status_code
-            ).float().mean()
-        actor_auxiliary = physics.total + float(
-            self.cfg.features.feedforward_clone_weight
-        ) * clone_loss
+        rotation = self._yaw_rotation(batch["pre_q"][:, 3:7])
+        grf_world = torch.einsum(
+            "bij,bfj->bfi", rotation,
+            references.grf_yaw_n.reshape(-1, 4, 3),
+        ).flatten(1)
+        wrench_world = torch.cat((
+            torch.einsum(
+                "bij,bj->bi", rotation, references.base_wrench_yaw[:, :3]
+            ),
+            torch.einsum(
+                "bij,bj->bi", rotation, references.base_wrench_yaw[:, 3:]
+            ),
+        ), dim=-1)
         return {
-            "physics": physics,
-            "actor_auxiliary": actor_auxiliary,
-            "safe_torque": safe,
+            "encoded": encoded,
+            "references": references,
             "nominal_torque": nominal,
-            "metrics": metrics,
             "qp_result": qp_result,
+            "grf_world": grf_world,
+            "wrench_world": wrench_world,
+            "dynamics": self._bard,
+            "dynamics_parameters": dynamics_parameters.bard_parameters(),
+            "dt": float(self.dt),
+            "feedforward_prediction": (
+                actor.feedforward_mean
+                if self.position_pretraining else nominal.new_zeros(nominal.shape)
+            ),
+            "feedforward_target": (
+                batch["executed_torque"].detach()
+                / float(self.cfg.control.torque_scale)
+            ),
         }
 
-    def recompute_auxiliary_objective(self, batch, actor):
-        """Rebuild the B1Z1-style encoder/decoder/estimator update."""
-        from rsl_rl.algorithms.ppo_go2_hard_pact import (
-            supervised_physics_head_losses,
-        )
-
+    def recompute_auxiliary_outputs(self, batch, actor):
+        """Rebuild auxiliary predictions without calculating losses."""
         _, _, _, references = self._recompute_policy_outputs(
             batch, actor, differentiate_action=False
-        )
-        supervised = supervised_physics_head_losses(
-            references.grf_yaw_n,
-            batch["interval_grf_yaw"],
-            references.base_wrench_yaw,
-            batch["interval_wrench_yaw"],
-            batch["sustained_wrench_active_mask"],
         )
         reconstruction, encoded = actor.reconstruct_privileged(
             batch["history"], sample_for_auxiliary=True
         )
-        reconstruction_loss = torch.nn.functional.smooth_l1_loss(
-            reconstruction, batch["reconstruction_target"]
-        )
-        explicit_loss = torch.nn.functional.smooth_l1_loss(
-            encoded.explicit, batch["explicit_estimator_target"]
-        )
-        kl = -0.5 * torch.mean(
-            1.0 + encoded.latent_log_variance
-            - encoded.latent_mean.square()
-            - encoded.latent_log_variance.exp()
-        )
-        loss = reconstruction_loss + explicit_loss + 1.0e-3 * kl
-        if bool(self.cfg.features.supervised_physics_head_pretraining):
-            loss = (
-                loss
-                + float(self.cfg.features.grf_supervision_weight)
-                * supervised["grf"]
-                + float(self.cfg.features.active_wrench_supervision_weight)
-                * supervised["wrench_active"]
-                + float(self.cfg.features.neutral_wrench_supervision_weight)
-                * supervised["wrench_neutral"]
-            )
-
-        physical = RECONSTRUCTION_SCHEMA.unpack(
-            batch["reconstruction_target"], normalized=True
-        )
-        reconstructed_physical = RECONSTRUCTION_SCHEMA.unpack(
-            reconstruction, normalized=True
-        )
-        metrics = {
-            "supervised/grf": supervised["grf"],
-            "supervised/wrench_active": supervised["wrench_active"],
-            "supervised/wrench_neutral": supervised["wrench_neutral"],
-            "reconstruction": reconstruction_loss,
-            "explicit": explicit_loss,
-            "kl": kl,
+        return {
+            "references": references,
+            "reconstruction": reconstruction,
+            "encoded": encoded,
+            "reconstruction_schema": RECONSTRUCTION_SCHEMA,
         }
-        for field in RECONSTRUCTION_SCHEMA.fields:
-            field_slice = RECONSTRUCTION_SCHEMA.slices[field.name]
-            metrics[f"reconstruction/{field.name}_huber_normalized"] = (
-                torch.nn.functional.smooth_l1_loss(
-                    reconstruction[:, field_slice],
-                    batch["reconstruction_target"][:, field_slice],
-                )
-            )
-            metrics[f"reconstruction/{field.name}_mae_physical"] = (
-                reconstructed_physical[field.name] - physical[field.name]
-            ).abs().mean()
-        return {"loss": loss, "metrics": metrics}
 
     def step(self, actions, physics_estimator=None, *, allow_missing_physics_references=False):
         self.teleport_mask.zero_()

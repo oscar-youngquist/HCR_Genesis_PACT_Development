@@ -40,6 +40,7 @@ def main():
     observation, critic = env.reset()
     estimator = None
     if physics_smoke:
+        from rsl_rl.algorithms import PPOGo2HardPACT
         from rsl_rl.modules import ActorCriticGo2HardPACT
 
         estimator = ActorCriticGo2HardPACT(
@@ -66,8 +67,26 @@ def main():
             "observation": env.obs_buf.clone(),
             "history": env.obs_history.clone(),
         })
-        recomputed = env.recompute_training_objectives(update_batch, estimator)
-        auxiliary = env.recompute_auxiliary_objective(update_batch, estimator)
+        algorithm = PPOGo2HardPACT(
+            estimator,
+            use_bard_inverse_loss=cfg.features.use_bard_inverse_loss,
+            use_bard_rollout_loss=cfg.features.use_bard_rollout_loss,
+            use_qp=cfg.features.use_qp,
+            differentiate_qp=cfg.features.differentiate_qp,
+            stop_gradient_qp=cfg.features.stop_gradient_qp,
+            lambda_inverse=cfg.bard.lambda_inverse,
+            lambda_rollout=cfg.bard.lambda_rollout,
+            lambda_projection=cfg.bard.lambda_projection,
+            device=env.device,
+        )
+        outputs = env.recompute_training_outputs(update_batch, estimator)
+        recomputed = algorithm._compute_physics_objective(update_batch, outputs)
+        auxiliary_outputs = env.recompute_auxiliary_outputs(
+            update_batch, estimator
+        )
+        auxiliary = algorithm._compute_auxiliary_objective(
+            update_batch, auxiliary_outputs
+        )
         update_loss = recomputed["actor_auxiliary"] + auxiliary["loss"]
         assert torch.isfinite(update_loss)
         estimator.zero_grad(set_to_none=True)

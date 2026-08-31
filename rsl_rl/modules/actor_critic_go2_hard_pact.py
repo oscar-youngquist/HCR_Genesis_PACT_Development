@@ -170,6 +170,7 @@ class ActorCriticGo2HardPACT(nn.Module):
         self.std = nn.Parameter(torch.full((self.action_dim,), float(init_noise_std)))
         self.distribution = None
         self._last_encoder_output = None
+        self._last_feedforward_mean = None
         self._physics_evaluations = 0
         nn.init.uniform_(self.position_head.weight, -3.0e-2, 3.0e-2)
         nn.init.uniform_(self.feedforward_head.weight, -3.0e-6, 3.0e-6)
@@ -188,6 +189,10 @@ class ActorCriticGo2HardPACT(nn.Module):
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
 
+    @property
+    def feedforward_mean(self):
+        return self._last_feedforward_mean
+
     def encode_policy_history(self, history):
         return self.history_encoder(history, sample_for_auxiliary=False)
 
@@ -204,6 +209,7 @@ class ActorCriticGo2HardPACT(nn.Module):
     def update_distribution(self, observation, history):
         encoded = self.encode_policy_history(history)
         position, feedforward = self.actor_outputs(observation, encoded)
+        self._last_feedforward_mean = feedforward
         mean = position if self.position_pretraining else torch.cat((position, feedforward), dim=-1)
         std = self.std.clamp_min(1.0e-4).expand_as(mean)
         self.distribution = Normal(mean, std)
@@ -241,13 +247,6 @@ class ActorCriticGo2HardPACT(nn.Module):
             encoded.latent, encoded.explicit
         ), dim=-1))
         return prediction, encoded
-
-    def clone_feedforward_loss(self, observation, history, target_pre_motor):
-        if target_pre_motor.shape[-1] != 12:
-            raise ValueError("feedforward clone target must be 12-D pre-motor torque")
-        encoded = self.encode_policy_history(history)
-        _, prediction = self.actor_outputs(observation, encoded)
-        return torch.nn.functional.smooth_l1_loss(prediction, target_pre_motor)
 
     def get_auxiliary_optim_groups(self):
         """B1Z1-style adaptation ownership for the second optimizer."""

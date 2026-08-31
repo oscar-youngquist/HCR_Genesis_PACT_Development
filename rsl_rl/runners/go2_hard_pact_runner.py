@@ -40,8 +40,36 @@ class Go2HardPACTRunner:
             num_actions=env.num_actions,
             **policy_cfg,
         )
+        algorithm_cfg = dict(train_cfg["algorithm"])
+        features = env.cfg.features
+        algorithm_cfg.update({
+            "supervised_physics_head_pretraining": bool(
+                features.supervised_physics_head_pretraining
+            ),
+            "use_bard_inverse_loss": bool(features.use_bard_inverse_loss),
+            "use_bard_rollout_loss": bool(features.use_bard_rollout_loss),
+            "use_qp": bool(features.use_qp),
+            "differentiate_qp": bool(features.differentiate_qp),
+            "stop_gradient_qp": bool(features.stop_gradient_qp),
+            "use_soft_projection_penalty": bool(
+                features.use_soft_projection_penalty
+            ),
+            "lambda_inverse": float(env.cfg.bard.lambda_inverse),
+            "lambda_rollout": float(env.cfg.bard.lambda_rollout),
+            "lambda_projection": float(env.cfg.bard.lambda_projection),
+            "grf_loss_weight": float(features.grf_supervision_weight),
+            "active_wrench_loss_weight": float(
+                features.active_wrench_supervision_weight
+            ),
+            "neutral_wrench_loss_weight": float(
+                features.neutral_wrench_supervision_weight
+            ),
+            "feedforward_clone_weight": float(
+                features.feedforward_clone_weight
+            ),
+        })
         self.alg = PPOGo2HardPACT(
-            self.actor_critic, device=device, **train_cfg["algorithm"]
+            self.actor_critic, device=device, **algorithm_cfg
         )
         self.num_steps_per_env = int(train_cfg["runner"]["num_steps_per_env"])
         self.alg.init_storage(
@@ -157,8 +185,8 @@ class Go2HardPACTRunner:
                     reward_buffer.extend(reward[done.bool()].detach().cpu().tolist())
             self.alg.compute_returns(critic_obs)
             metrics = self.alg.update(
-                self.env.recompute_training_objectives,
-                self.env.recompute_auxiliary_objective,
+                self.env.recompute_training_outputs,
+                self.env.recompute_auxiliary_outputs,
                 iteration,
             )
             elapsed = time.perf_counter() - start

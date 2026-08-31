@@ -3,8 +3,8 @@ import unittest
 import torch
 
 from rsl_rl.algorithms.ppo_go2_hard_pact import (
+    PhysicsLosses,
     PPOGo2HardPACT,
-    combine_physics_losses,
 )
 from rsl_rl.algorithms.pc_grad import PCGrad
 from rsl_rl.go2_hard_pact_schema import TRANSITION_FIELD_DIMS
@@ -42,31 +42,40 @@ class LegacyPACTTrainingLifecycleTests(unittest.TestCase):
             )
         algorithm.compute_returns(torch.randn(2, 198))
 
-        def objectives(batch, actor):
+        def outputs(batch, actor):
+            return {}
+
+        def physics_objective(batch, outputs):
             physics_scalar = (
-                actor.position_head.weight.square().mean()
-                + actor.feedforward_head.weight.square().mean()
+                policy.position_head.weight.square().mean()
+                + policy.feedforward_head.weight.square().mean()
             )
             zeros = physics_scalar * 0.0
             return {
-                "physics": combine_physics_losses(
-                    zeros, zeros, physics_scalar, 0.0, 0.0, 1.0
+                "physics": PhysicsLosses(
+                    physics_scalar, zeros, zeros, physics_scalar, {}
                 ),
+                "actor_auxiliary": physics_scalar,
                 "metrics": {},
             }
+        algorithm._compute_physics_objective = physics_objective
 
         actor_updated_before_auxiliary = []
 
-        def auxiliary(batch, actor):
+        def auxiliary_outputs(batch, actor):
             actor_updated_before_auxiliary.append(
                 not torch.equal(actor.position_head.weight, initial_position)
             )
+            return {}
+
+        def auxiliary_objective(batch, outputs):
             return {
-                "loss": actor.privileged_decoder[0].weight.square().mean(),
+                "loss": policy.privileged_decoder[0].weight.square().mean(),
                 "metrics": {},
             }
+        algorithm._compute_auxiliary_objective = auxiliary_objective
 
-        metrics = algorithm.update(objectives, auxiliary, iteration=0)
+        metrics = algorithm.update(outputs, auxiliary_outputs, iteration=0)
         self.assertIn("loss/ppo", metrics)
         self.assertEqual(algorithm.storage.step, 0)
         self.assertTrue(all(actor_updated_before_auxiliary))

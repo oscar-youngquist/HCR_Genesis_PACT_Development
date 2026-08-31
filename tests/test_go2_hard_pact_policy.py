@@ -3,13 +3,14 @@ import unittest
 import torch
 
 from rsl_rl.algorithms.ppo_go2_hard_pact import (
+    PPOGo2HardPACT,
     ReliabilityEMA,
-    supervised_physics_head_losses,
 )
 from rsl_rl.algorithms.pc_grad import PCGrad
 from rsl_rl.modules.actor_critic_go2_hard_pact import (
     ActorCriticGo2HardPACT,
     ActorCriticGo2HardPACTPos,
+    PhysicsReferences,
     migrate_hard_pact_pos_checkpoint,
 )
 
@@ -67,8 +68,18 @@ class LossTests(unittest.TestCase):
         predicted_wrench = torch.ones(4, 6)
         target_wrench = torch.zeros_like(predicted_wrench)
         active = torch.tensor([[1], [0], [1], [0]], dtype=torch.bool)
-        losses = supervised_physics_head_losses(
-            predicted_grf, zeros_grf, predicted_wrench, target_wrench, active
+        policy = ActorCriticGo2HardPACT(
+            actor_layers=(16,), critic_layers=(16,), encoder_layers=(16,),
+            physics_head_layers=(16,),
+        )
+        algorithm = PPOGo2HardPACT(policy)
+        losses = algorithm._supervised_physics_losses(
+            {
+                "interval_grf_yaw": zeros_grf,
+                "interval_wrench_yaw": target_wrench,
+                "sustained_wrench_active_mask": active,
+            },
+            PhysicsReferences(predicted_grf, predicted_wrench),
         )
         self.assertGreater(losses["grf"].item(), 0.0)
         self.assertGreater(losses["wrench_active"].item(), 0.0)
