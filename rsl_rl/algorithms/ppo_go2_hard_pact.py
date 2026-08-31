@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Dict, Iterable, Mapping, Sequence
+from typing import Dict, Mapping
 
 import torch
 import torch.nn.functional as F
+
+from .pc_grad import PCGrad
 
 
 def normalized_huber(prediction, target, scale, mask=None, delta=1.0):
@@ -189,50 +191,14 @@ class PCGradDiagnostics:
     module_metrics: Dict[str, float]
 
 
-def pcgrad_backward_two_objectives(
-    primary_loss: torch.Tensor,
-    auxiliary_loss: torch.Tensor,
-    parameters: Iterable[torch.nn.Parameter],
-    parameter_names: Sequence[str] | None = None,
-):
-    """Backpropagate ``[L_PPO,L_physics]`` and project only negative dots."""
-    parameters = [parameter for parameter in parameters if parameter.requires_grad]
-    if parameter_names is None:
-        parameter_names = ["all"] * len(parameters)
-    else:
-        parameter_names = list(parameter_names)
-        if len(parameter_names) != len(parameters):
-            raise ValueError("parameter_names must align with trainable parameters")
-    primary = torch.autograd.grad(
-        primary_loss, parameters, retain_graph=True, allow_unused=True
-    )
-    auxiliary = torch.autograd.grad(
-        auxiliary_loss, parameters, retain_graph=True, allow_unused=True
-    )
-    primary_flat = torch.cat([
-        torch.zeros_like(parameter).flatten() if grad is None else grad.flatten()
-        for parameter, grad in zip(parameters, primary)
-    ])
-    auxiliary_flat = torch.cat([
-        torch.zeros_like(parameter).flatten() if grad is None else grad.flatten()
-        for parameter, grad in zip(parameters, auxiliary)
-    ])
-    finite = torch.isfinite(primary_flat) & torch.isfinite(auxiliary_flat)
-    p = torch.where(finite, primary_flat, torch.zeros_like(primary_flat))
-    a = torch.where(finite, auxiliary_flat, torch.zeros_like(auxiliary_flat))
-    unprojected_a = a.clone()
-    dot = torch.dot(p, a)
-    conflict = bool(dot.detach().item() < 0.0)
-    if conflict:
-        a = a - dot * p / p.square().sum().clamp_min(1.0e-12)
-    merged = p + a
-    index = 0
-    for parameter in parameters:
-        count = parameter.numel()
-        parameter.grad = merged[index:index + count].view_as(parameter).clone()
-        index += count
-    denom = p.norm() * unprojected_a.norm()
-    cosine = 0.0 if denom.item() == 0.0 else float((dot / denom).detach().item())
+def _diagnostics_from_pcgrad(pcgrad, parameters, parameter_names):
+    primary, auxiliary = pcgrad.last_objective_grads
+    merged = pcgrad.last_merged_grad
+    finite = torch.isfinite(primary) & torch.isfinite(auxiliary)
+    primary = torch.where(finite, primary, torch.zeros_like(primary))
+    auxiliary = torch.where(finite, auxiliary, torch.zeros_like(auxiliary))
+    dot = torch.dot(primary, auxiliary)
+    denominator = primary.norm() * auxiliary.norm()
     module_metrics: Dict[str, float] = {}
     groups: Dict[str, list[int]] = {}
     for index, name in enumerate(parameter_names):
@@ -242,47 +208,44 @@ def pcgrad_backward_two_objectives(
         offsets.append(offsets[-1] + parameter.numel())
     for module, indices in groups.items():
         slices = [slice(offsets[index], offsets[index + 1]) for index in indices]
-        module_p = torch.cat([p[item] for item in slices])
-        module_a = torch.cat([unprojected_a[item] for item in slices])
+        module_primary = torch.cat([primary[item] for item in slices])
+        module_auxiliary = torch.cat([auxiliary[item] for item in slices])
         module_merged = torch.cat([merged[item] for item in slices])
         module_finite = torch.cat([finite[item] for item in slices])
-        module_dot = torch.dot(module_p, module_a)
-        module_denom = module_p.norm() * module_a.norm()
+        module_dot = torch.dot(module_primary, module_auxiliary)
+        module_denominator = module_primary.norm() * module_auxiliary.norm()
         prefix = f"gradient/module/{module}"
-        module_metrics[f"{prefix}/ppo_norm"] = float(module_p.norm().detach().item())
+        module_metrics[f"{prefix}/ppo_norm"] = float(module_primary.norm().item())
         module_metrics[f"{prefix}/physics_norm"] = float(
-            module_a.norm().detach().item()
+            module_auxiliary.norm().item()
         )
         module_metrics[f"{prefix}/cosine"] = (
-            0.0 if module_denom.item() == 0.0
-            else float((module_dot / module_denom).detach().item())
+            0.0 if module_denominator.item() == 0.0
+            else float((module_dot / module_denominator).item())
         )
-        module_metrics[f"{prefix}/conflict"] = float(module_dot.detach().item() < 0.0)
+        module_metrics[f"{prefix}/conflict"] = float(module_dot.item() < 0.0)
         module_metrics[f"{prefix}/zero_fraction"] = float(
-            (module_merged == 0).float().mean().detach().item()
+            (module_merged == 0).float().mean().item()
         )
         module_metrics[f"{prefix}/nonfinite_fraction"] = float(
-            (~module_finite).float().mean().detach().item()
+            (~module_finite).float().mean().item()
         )
     return PCGradDiagnostics(
-        primary_norm=float(p.norm().detach().item()),
-        auxiliary_norm=float(unprojected_a.norm().detach().item()),
-        cosine=cosine,
-        conflict=conflict,
-        zero_fraction=float((merged == 0).float().mean().detach().item()),
-        nonfinite_fraction=float((~finite).float().mean().detach().item()),
+        primary_norm=float(primary.norm().item()),
+        auxiliary_norm=float(auxiliary.norm().item()),
+        cosine=(
+            0.0 if denominator.item() == 0.0
+            else float((dot / denominator).item())
+        ),
+        conflict=bool(dot.item() < 0.0),
+        zero_fraction=float((merged == 0).float().mean().item()),
+        nonfinite_fraction=float((~finite).float().mean().item()),
         module_metrics=module_metrics,
     )
 
 
-def delayed_action_for_update(raw_sampled_action, stored_delayed_action, delay_steps):
-    """Use sampled actions for zero-delay QPs and the executed replay otherwise."""
-    no_delay = delay_steps.reshape(-1, 1) == 0
-    return torch.where(no_delay, raw_sampled_action, stored_delayed_action.detach())
-
-
 class PPOGo2HardPACT:
-    """PPO with one optimizer step and two-objective corrected PCGrad."""
+    """B1Z1-style PCGrad actor update followed by an auxiliary update."""
 
     def __init__(
         self,
@@ -297,12 +260,30 @@ class PPOGo2HardPACT:
         num_learning_epochs=5,
         num_mini_batches=4,
         reliability_ema_alpha=0.05,
+        adaptation_learning_rate=1.0e-5,
+        desired_kl=None,
+        schedule="fixed",
+        use_clipped_value_loss=True,
         device="cpu",
         **unused,
     ):
         self.actor_critic = actor_critic.to(device)
         self.device = torch.device(device)
-        self.optimizer = torch.optim.AdamW(actor_critic.parameters(), lr=learning_rate)
+        self.learning_rate = float(learning_rate)
+        self.actor_optimizer = PCGrad(
+            torch.optim.Adam(actor_critic.parameters(), lr=self.learning_rate),
+            reduction="sum",
+        )
+        self.ppo_parameters = list(actor_critic.parameters())
+        auxiliary_groups = actor_critic.get_auxiliary_optim_groups()
+        self.auxiliary_optimizer = torch.optim.Adam(
+            auxiliary_groups, lr=float(adaptation_learning_rate)
+        )
+        self.auxiliary_parameters = [
+            parameter
+            for group in self.auxiliary_optimizer.param_groups
+            for parameter in group["params"]
+        ]
         self.clip_param = float(clip_param)
         self.gamma = float(gamma)
         self.lam = float(lam)
@@ -311,11 +292,17 @@ class PPOGo2HardPACT:
         self.max_grad_norm = float(max_grad_norm)
         self.num_learning_epochs = int(num_learning_epochs)
         self.num_mini_batches = int(num_mini_batches)
+        self.desired_kl = desired_kl
+        self.schedule = str(schedule)
+        self.use_clipped_value_loss = bool(use_clipped_value_loss)
         self.reliability = ReliabilityEMA(reliability_ema_alpha)
         self.storage = None
-        self._pending_core = None
+        from rsl_rl.storage import RolloutStorageGo2HardPACT
+        self.transition = RolloutStorageGo2HardPACT.Transition()
 
-    def init_storage(self, num_envs, num_steps, observation_dim, critic_dim, history_dim):
+    def init_storage(
+        self, num_envs, num_steps, observation_dim, critic_dim, history_dim,
+    ):
         from rsl_rl.storage import RolloutStorageGo2HardPACT
 
         self.storage = RolloutStorageGo2HardPACT(
@@ -335,32 +322,91 @@ class PPOGo2HardPACT:
             log_probability = self.actor_critic.get_actions_log_prob(action)
             mean = self.actor_critic.action_mean
             std = self.actor_critic.action_std
-        self._pending_core = {
-            "observation": observation,
-            "critic_observation": critic_observation,
-            "history": history,
-            "value": value,
-            "raw_action_log_probability": log_probability,
-            "action_mean": mean,
-            "action_std": std,
-        }
-        return action, action - mean
+        self.transition.observations = observation
+        self.transition.critic_observations = critic_observation
+        self.transition.observation_history = history
+        self.transition.actions = action
+        self.transition.values = value
+        self.transition.actions_log_prob = log_probability
+        self.transition.action_mean = mean
+        self.transition.action_sigma = std
+        return action
 
-    def process_env_step(self, reward, done, transition):
-        if self._pending_core is None:
+    def process_env_step(self, reward, done, infos, transition):
+        if self.transition.actions is None:
             raise RuntimeError("act must be called before process_env_step")
-        core = dict(self._pending_core)
-        core["reward"] = reward
-        core["done"] = done
-        self.storage.add(core, transition)
-        self._pending_core = None
+        self.transition.rewards = reward.clone()
+        self.transition.dones = done
+        if "time_outs" in infos:
+            self.transition.rewards += self.gamma * torch.squeeze(
+                self.transition.values
+                * infos["time_outs"].unsqueeze(1).to(self.device),
+                1,
+            )
+        self.transition.hard_pact = transition
+        self.storage.add_transitions(self.transition)
+        self.transition.clear()
+        self.actor_critic.reset(done)
 
     def compute_returns(self, last_critic_observation):
         with torch.no_grad():
             last_value = self.actor_critic.evaluate(last_critic_observation)
         self.storage.compute_returns(last_value, self.gamma, self.lam)
 
-    def update(self, recompute_objectives, iteration):
+    def _compute_ppo_loss(self, batch):
+        """Legacy PACT PPO objective evaluated on the exact raw sample."""
+        log_probability, entropy = self.actor_critic.evaluate_actions(
+            batch["observation"], batch["history"], batch["raw_action"]
+        )
+        value = self.actor_critic.evaluate(batch["critic_observation"])
+        if self.desired_kl is not None and self.schedule == "adaptive":
+            with torch.inference_mode():
+                mean, std = (
+                    self.actor_critic.action_mean,
+                    self.actor_critic.action_std,
+                )
+                old_mean, old_std = batch["action_mean"], batch["action_std"]
+                kl = torch.sum(
+                    torch.log(std / old_std + 1.0e-5)
+                    + (old_std.square() + (old_mean - mean).square())
+                    / (2.0 * std.square())
+                    - 0.5,
+                    dim=-1,
+                ).mean()
+                if kl > 2.0 * self.desired_kl:
+                    self.learning_rate = max(1.0e-5, self.learning_rate / 1.5)
+                elif 0.0 < kl < self.desired_kl / 2.0:
+                    self.learning_rate = min(1.0e-2, self.learning_rate * 1.5)
+                for group in self.actor_optimizer.optimizer.param_groups:
+                    group["lr"] = self.learning_rate
+        ratio = torch.exp(
+            log_probability - batch["raw_action_log_probability"].squeeze(-1)
+        )
+        advantage = batch["advantage"].squeeze(-1)
+        surrogate = torch.maximum(
+            -advantage * ratio,
+            -advantage * ratio.clamp(
+                1.0 - self.clip_param, 1.0 + self.clip_param
+            ),
+        ).mean()
+        if self.use_clipped_value_loss:
+            old_value = batch["value"]
+            clipped = old_value + (value - old_value).clamp(
+                -self.clip_param, self.clip_param
+            )
+            value_loss = torch.maximum(
+                (value - batch["return"]).square(),
+                (clipped - batch["return"]).square(),
+            ).mean()
+        else:
+            value_loss = (value - batch["return"]).square().mean()
+        total = (
+            surrogate + self.value_loss_coef * value_loss
+            - self.entropy_coef * entropy.mean()
+        )
+        return total, surrogate, value_loss
+
+    def update(self, recompute_objectives, recompute_auxiliary, iteration):
         totals: Dict[str, float] = {}
         updates = 0
         named_parameters = [
@@ -373,58 +419,45 @@ class PPOGo2HardPACT:
         for batch in self.storage.mini_batches(
             self.num_mini_batches, self.num_learning_epochs
         ):
-            log_probability, entropy = self.actor_critic.evaluate_actions(
-                batch["observation"], batch["history"], batch["raw_action"]
-            )
-            value = self.actor_critic.evaluate(batch["critic_observation"])
-            ratio = torch.exp(
-                log_probability - batch["raw_action_log_probability"].squeeze(-1)
-            )
-            advantage = batch["advantage"].squeeze(-1)
-            surrogate = torch.maximum(
-                -advantage * ratio,
-                -advantage * ratio.clamp(1.0 - self.clip_param, 1.0 + self.clip_param),
-            ).mean()
-            value_loss = (value - batch["return"]).square().mean()
-            ppo_loss = (
-                surrogate + self.value_loss_coef * value_loss
-                - self.entropy_coef * entropy.mean()
-            )
+            ppo_loss, surrogate, value_loss = self._compute_ppo_loss(batch)
             recompute_wall_start = perf_counter()
             recompute_start = torch.cuda.Event(enable_timing=True) if self.device.type == "cuda" else None
             recompute_end = torch.cuda.Event(enable_timing=True) if self.device.type == "cuda" else None
             if recompute_start is not None:
                 recompute_start.record()
-            recomputed = recompute_objectives(
-                batch, batch["raw_action"], self.actor_critic
-            )
+            recomputed = recompute_objectives(batch, self.actor_critic)
             if recompute_end is not None:
                 recompute_end.record()
             physics_loss = recomputed["physics"].total
-            auxiliary_loss = recomputed["auxiliary"]
-            self.optimizer.zero_grad(set_to_none=True)
+            actor_auxiliary_loss = recomputed.get("actor_auxiliary", physics_loss)
+            self.actor_optimizer.zero_grad()
             backward_wall_start = perf_counter()
             backward_start = torch.cuda.Event(enable_timing=True) if self.device.type == "cuda" else None
             backward_end = torch.cuda.Event(enable_timing=True) if self.device.type == "cuda" else None
             if backward_start is not None:
                 backward_start.record()
-            diagnostics = pcgrad_backward_two_objectives(
-                ppo_loss, physics_loss, parameters, parameter_names
+            self.actor_optimizer.pc_backward_pinn(
+                [ppo_loss, actor_auxiliary_loss]
             )
-            auxiliary_grads = torch.autograd.grad(
-                auxiliary_loss, parameters, allow_unused=True
+            diagnostics = _diagnostics_from_pcgrad(
+                self.actor_optimizer, parameters, parameter_names
             )
-            for parameter, gradient in zip(parameters, auxiliary_grads):
-                if gradient is not None:
-                    if parameter.grad is None:
-                        parameter.grad = gradient
-                    else:
-                        parameter.grad.add_(gradient)
             if backward_end is not None:
                 backward_end.record()
             backward_wall_ms = (perf_counter() - backward_wall_start) * 1000.0
-            torch.nn.utils.clip_grad_norm_(parameters, self.max_grad_norm)
-            self.optimizer.step()
+            torch.nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
+            self.actor_optimizer.step()
+
+            # Match B1Z1 PACT: rebuild the auxiliary graph after the complete
+            # actor update, then step only encoder/decoder/estimators.
+            auxiliary = recompute_auxiliary(batch, self.actor_critic)
+            auxiliary_loss = auxiliary["loss"]
+            self.auxiliary_optimizer.zero_grad(set_to_none=True)
+            auxiliary_loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                self.auxiliary_parameters, self.max_grad_norm
+            )
+            self.auxiliary_optimizer.step()
 
             metrics = {
                 "loss/ppo": ppo_loss,
@@ -442,7 +475,9 @@ class PPOGo2HardPACT:
                 "gradient/zero_fraction": diagnostics.zero_fraction,
                 "gradient/nonfinite_fraction": diagnostics.nonfinite_fraction,
             }
+            metrics.update(recomputed["metrics"])
             metrics.update(diagnostics.module_metrics)
+            metrics.update(auxiliary.get("metrics", {}))
             if recompute_end is not None:
                 recompute_end.synchronize()
                 metrics["qp/recompute_forward_ms"] = recompute_start.elapsed_time(recompute_end)
@@ -455,7 +490,6 @@ class PPOGo2HardPACT:
                     backward_wall_start - recompute_wall_start
                 ) * 1000.0
                 metrics["qp/recompute_backward_ms"] = backward_wall_ms
-            metrics.update(recomputed["metrics"])
             for name, value in metrics.items():
                 scalar = float(value.detach().item()) if torch.is_tensor(value) else float(value)
                 totals[name] = totals.get(name, 0.0) + scalar

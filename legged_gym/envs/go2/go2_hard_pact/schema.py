@@ -220,6 +220,161 @@ class Go2ReconstructionSchema:
 RECONSTRUCTION_SCHEMA = Go2ReconstructionSchema()
 
 
+@dataclass(frozen=True)
+class RandomizedDynamicsParameters:
+    """Exact realized plant constants associated with one transition.
+
+    These values are detached simulator metadata, never decoder outputs.  The
+    packed representation is only a storage format; users consume named
+    tensors through :meth:`unpack` or :meth:`bard_parameters`.
+    """
+
+    added_base_mass: torch.Tensor
+    base_com_shift: torch.Tensor
+    kp_scale: torch.Tensor
+    kd_scale: torch.Tensor
+    motor_strength_scale: torch.Tensor
+    joint_armature: torch.Tensor
+    joint_friction: torch.Tensor
+    joint_stiffness: torch.Tensor
+    joint_damping: torch.Tensor
+    ground_friction: torch.Tensor
+    control_delay_steps: torch.Tensor
+
+    FIELD_WIDTHS = (
+        ("added_base_mass", 1), ("base_com_shift", 3),
+        ("kp_scale", 12), ("kd_scale", 12),
+        ("motor_strength_scale", 12), ("joint_armature", 1),
+        ("joint_friction", 1), ("joint_stiffness", 1),
+        ("joint_damping", 1), ("ground_friction", 1),
+        ("control_delay_steps", 1),
+    )
+    width = 46
+
+    def __post_init__(self):
+        batch = self.added_base_mass.shape[0]
+        for name, width in self.FIELD_WIDTHS:
+            value = getattr(self, name)
+            if value.ndim != 2 or value.shape != (batch, width):
+                raise ValueError(
+                    f"{name} must be ({batch},{width}), got {tuple(value.shape)}"
+                )
+
+    def detached(self) -> "RandomizedDynamicsParameters":
+        return RandomizedDynamicsParameters(**{
+            name: getattr(self, name).detach()
+            for name, _ in self.FIELD_WIDTHS
+        })
+
+    def pack(self) -> torch.Tensor:
+        return torch.cat([getattr(self, name) for name, _ in self.FIELD_WIDTHS], dim=-1)
+
+    @classmethod
+    def unpack(cls, packed: torch.Tensor) -> "RandomizedDynamicsParameters":
+        if packed.ndim != 2 or packed.shape[-1] != cls.width:
+            raise ValueError(f"realized parameters must be (batch,{cls.width})")
+        values = {}
+        start = 0
+        for name, width in cls.FIELD_WIDTHS:
+            values[name] = packed[:, start:start + width]
+            start += width
+        return cls(**values)
+
+    def bard_parameters(self) -> Dict[str, torch.Tensor]:
+        return {
+            name: getattr(self, name).detach()
+            for name in (
+                "added_base_mass", "base_com_shift", "joint_armature",
+                "joint_friction", "joint_stiffness", "joint_damping",
+            )
+        }
+
+
+@dataclass(frozen=True)
+class QPStateEstimate:
+    """Deployment-state boundary accepted by the QP/BARD builder."""
+
+    base_linear_velocity_body: torch.Tensor
+    base_quaternion_xyzw: torch.Tensor
+    base_angular_velocity_world: torch.Tensor
+    joint_position: torch.Tensor
+    joint_velocity: torch.Tensor
+    previous_safe_torque: torch.Tensor
+    contact_probability: torch.Tensor
+    predicted_grf_yaw: torch.Tensor
+    predicted_base_wrench_yaw: torch.Tensor
+
+    def __post_init__(self):
+        batch = self.base_linear_velocity_body.shape[0]
+        widths = {
+            "base_linear_velocity_body": 3, "base_quaternion_xyzw": 4,
+            "base_angular_velocity_world": 3, "joint_position": 12,
+            "joint_velocity": 12, "previous_safe_torque": 12,
+            "contact_probability": 4, "predicted_grf_yaw": 12,
+            "predicted_base_wrench_yaw": 6,
+        }
+        for name, width in widths.items():
+            value = getattr(self, name)
+            if value.ndim != 2 or value.shape != (batch, width):
+                raise ValueError(f"{name} must be ({batch},{width})")
+
+    @property
+    def local_q_xyzw(self) -> torch.Tensor:
+        # Floating-base dynamics are translation invariant.  Absolute simulator
+        # position is intentionally unavailable at this interface.
+        return torch.cat((
+            torch.zeros_like(self.base_linear_velocity_body),
+            self.base_quaternion_xyzw,
+            self.joint_position,
+        ), dim=-1)
+
+    @property
+    def velocity_world(self) -> torch.Tensor:
+        return torch.cat((
+            body_to_world(
+                self.base_linear_velocity_body, self.base_quaternion_xyzw
+            ),
+            self.base_angular_velocity_world,
+            self.joint_velocity,
+        ), dim=-1)
+
+
+def reconstruct_coupled_nominal_torque(
+    coupled_action: torch.Tensor,
+    joint_position: torch.Tensor,
+    joint_velocity: torch.Tensor,
+    default_joint_position: torch.Tensor,
+    base_kp: torch.Tensor,
+    base_kd: torch.Tensor,
+    parameters: RandomizedDynamicsParameters,
+    feedback_weight: torch.Tensor,
+    feedforward_weight: torch.Tensor,
+    position_scale: float,
+    torque_scale: float,
+    *,
+    position_pretraining: bool = False,
+):
+    """Reconstruct the exact realized coupled PACT actuator command."""
+    desired = default_joint_position + float(position_scale) * coupled_action[:, :12]
+    feedback = (
+        base_kp * parameters.kp_scale.detach() * (desired - joint_position)
+        - base_kd * parameters.kd_scale.detach() * joint_velocity
+    )
+    feedforward = float(torque_scale) * coupled_action[:, 12:]
+    if position_pretraining:
+        feedforward = torch.zeros_like(feedforward)
+    motor = parameters.motor_strength_scale.detach()
+    weighted_feedback = motor * feedback_weight.detach() * feedback
+    weighted_feedforward = motor * feedforward_weight.detach() * feedforward
+    return (
+        weighted_feedback + weighted_feedforward,
+        feedback,
+        feedforward,
+        weighted_feedback,
+        weighted_feedforward,
+    )
+
+
 @dataclass
 class CanonicalState:
     base_position_world: torch.Tensor

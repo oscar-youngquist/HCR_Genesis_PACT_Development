@@ -28,9 +28,11 @@ from .qp import (
 )
 from .schema import (
     CANONICAL,
+    QPStateEstimate,
     RECONSTRUCTION_SCHEMA,
+    RandomizedDynamicsParameters,
     fixed_gravity_normal,
-    reorder_named,
+    reconstruct_coupled_nominal_torque,
     validate_transition,
     world_to_body,
     world_to_yaw_local,
@@ -74,6 +76,9 @@ class Go2HardPACTCore(Go2PACT):
         super().__init__(cfg, sim_params, sim_device, headless)
         self.extras["backend_contract"] = self.backend.metadata()
         self.extras["domain_randomization"] = self.domain_randomization_report
+        self.extras["physics_parameter_source"] = str(
+            self.cfg.features.physics_parameter_source
+        )
         self._initialize_bard()
 
     @property
@@ -95,9 +100,6 @@ class Go2HardPACTCore(Go2PACT):
             int(self.cfg.domain_rand.ctrl_delay_step_range[0]), max_delay + 1,
             (self.num_envs,), device=self.device,
         )
-        self.raw_sampled_action = torch.zeros(
-            self.num_envs, self.policy_action_dim, device=self.device
-        )
         self.delayed_nominal_action = torch.zeros(
             self.num_envs, 24, device=self.device
         )
@@ -107,7 +109,6 @@ class Go2HardPACTCore(Go2PACT):
         self.previous_safe_torque = torch.zeros_like(self.nominal_torque)
         self.torque_average = torch.zeros_like(self.nominal_torque)
         self.torque_peak = torch.zeros_like(self.nominal_torque)
-        self.pending_exploration_noise = torch.zeros_like(self.raw_sampled_action)
         self.teleport_mask = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
         self.reconstruction_target = torch.zeros(self.num_envs, 79, device=self.device)
         self.explicit_labels_buf = torch.zeros(self.num_envs, 11, device=self.device)
@@ -210,27 +211,23 @@ class Go2HardPACTCore(Go2PACT):
         result = self.step(zeros, allow_missing_physics_references=True)
         return result[0], result[1]
 
-    def set_exploration_noise(self, noise: torch.Tensor):
-        if noise.shape != self.pending_exploration_noise.shape:
-            raise ValueError("exploration-noise shape does not match sampled action")
-        self.pending_exploration_noise.copy_(noise)
-
     def _delay_action(self, raw_action):
         clip = float(self.cfg.normalization.clip_actions)
-        raw_action = raw_action.to(self.device).clamp(-clip, clip)
-        if raw_action.shape != self.raw_sampled_action.shape:
+        raw_action = raw_action.to(self.device)
+        expected_shape = (self.num_envs, self.policy_action_dim)
+        if raw_action.shape != expected_shape:
             raise ValueError(
-                f"expected sampled action {tuple(self.raw_sampled_action.shape)}, got {tuple(raw_action.shape)}"
+                f"expected sampled action {expected_shape}, got {tuple(raw_action.shape)}"
             )
-        self.raw_sampled_action.copy_(raw_action)
+        execution_clipped = raw_action.clamp(-clip, clip)
         self.action_queue[:, 1:] = self.action_queue[:, :-1].clone()
-        self.action_queue[:, 0] = raw_action
+        self.action_queue[:, 0] = execution_clipped
         if self.cfg.domain_rand.randomize_ctrl_delay:
             delayed = self.action_queue[
                 torch.arange(self.num_envs, device=self.device), self.action_delay
             ]
         else:
-            delayed = raw_action
+            delayed = execution_clipped
         if self.position_pretraining:
             coupled = torch.cat((delayed, torch.zeros_like(delayed)), dim=-1)
         else:
@@ -238,21 +235,59 @@ class Go2HardPACTCore(Go2PACT):
         self.delayed_nominal_action.copy_(coupled)
         return coupled
 
-    def _gains(self):
+    def _base_gains(self, batch=None, like=None):
         p = self.backend.ordered_backend_joint_values(self.simulator._p_gains)
         d = self.backend.ordered_backend_joint_values(self.simulator._d_gains)
         if p.ndim == 1:
-            p = p.unsqueeze(0).expand(self.num_envs, -1)
-            d = d.unsqueeze(0).expand(self.num_envs, -1)
-        p = p[:, :12]
-        d = d[:, :12]
-        kp_scale = self.backend.ordered_backend_joint_values(
-            self.simulator._kp_scale
-        )[:, :12]
-        kd_scale = self.backend.ordered_backend_joint_values(
-            self.simulator._kd_scale
-        )[:, :12]
-        return p * kp_scale, d * kd_scale
+            count = self.num_envs if batch is None else int(batch)
+            p = p.unsqueeze(0).expand(count, -1)
+            d = d.unsqueeze(0).expand(count, -1)
+        elif batch is not None and p.shape[0] != batch:
+            p = p[:1].expand(batch, -1)
+            d = d[:1].expand(batch, -1)
+        p, d = p[:, :12], d[:, :12]
+        return (p.to(like), d.to(like)) if like is not None else (p, d)
+
+    def _capture_randomized_parameters(self):
+        sim = self.simulator
+        joints = lambda value: self.backend.ordered_backend_joint_values(value)[:, :12]
+        params = RandomizedDynamicsParameters(
+            added_base_mass=sim._added_base_mass.detach().clone(),
+            base_com_shift=sim._base_com_bias.detach().clone(),
+            kp_scale=joints(sim._kp_scale).detach().clone(),
+            kd_scale=joints(sim._kd_scale).detach().clone(),
+            motor_strength_scale=joints(sim._motor_strength).detach().clone(),
+            joint_armature=sim._joint_armature.detach().clone(),
+            joint_friction=sim._joint_friction.detach().clone(),
+            joint_stiffness=sim._joint_stiffness.detach().clone(),
+            joint_damping=sim._joint_damping.detach().clone(),
+            ground_friction=sim._friction_values.detach().clone(),
+            control_delay_steps=self.action_delay.detach().float().unsqueeze(-1).clone(),
+        )
+        return params.detached()
+
+    def _nominal_dynamics_parameters(self, like, batch):
+        zeros = like.new_zeros(batch, 1)
+        ones = like.new_ones(batch, 12)
+        return RandomizedDynamicsParameters(
+            added_base_mass=zeros, base_com_shift=like.new_zeros(batch, 3),
+            kp_scale=ones, kd_scale=ones.clone(),
+            motor_strength_scale=ones.clone(), joint_armature=zeros.clone(),
+            joint_friction=zeros.clone(), joint_stiffness=zeros.clone(),
+            joint_damping=zeros.clone(),
+            ground_friction=like.new_full((batch, 1), float(self.cfg.qp.friction)),
+            control_delay_steps=zeros.clone(),
+        )
+
+    def _select_dynamics_parameters(self, realized):
+        source = str(self.cfg.features.physics_parameter_source)
+        if source == "realized_randomized":
+            return realized.detached()
+        if source == "nominal":
+            return self._nominal_dynamics_parameters(
+                realized.added_base_mass, realized.added_base_mass.shape[0]
+            )
+        raise ValueError(f"unsupported physics_parameter_source {source!r}")
 
     def _default_joint_position(self):
         default = self.backend.ordered_backend_joint_values(
@@ -262,24 +297,29 @@ class Go2HardPACTCore(Go2PACT):
             default = default.unsqueeze(0)
         return default[:, :12]
 
-    def _nominal_torque(self, coupled_action):
+    def _nominal_torque_from_state(
+        self, coupled_action, q, qd, parameters,
+        feedback_weight, feedforward_weight,
+    ):
+        default = self._default_joint_position()[0].to(q).expand(q.shape[0], -1)
+        base_kp, base_kd = self._base_gains(q.shape[0], q)
+        return reconstruct_coupled_nominal_torque(
+            coupled_action, q, qd, default, base_kp, base_kd, parameters,
+            feedback_weight, feedforward_weight,
+            float(self.cfg.control.action_scale),
+            float(self.cfg.control.torque_scale),
+            position_pretraining=self.position_pretraining,
+        )
+
+    def _nominal_torque(self, coupled_action, parameters):
         q = self.simulator.dof_pos[:, :12]
         qd = self.simulator.dof_vel[:, :12]
-        default = self._default_joint_position()
-        kp, kd = self._gains()
-        desired = default + float(self.cfg.control.action_scale) * coupled_action[:, :12]
-        feedback = kp * (desired - q) - kd * qd
-        motor = self.backend.ordered_backend_joint_values(
-            self.simulator._motor_strength
-        )[:, :12]
-        feedforward = float(self.cfg.control.torque_scale) * coupled_action[:, 12:]
-        if self.position_pretraining:
-            feedforward.zero_()
-        feedback_weight = self.simulator.feedback_tau_weight
-        feedforward_weight = self.simulator.feedforward_tau_weight
-        weighted_feedback = motor * feedback_weight * feedback
-        weighted_feedforward = motor * feedforward_weight * feedforward
-        nominal = weighted_feedback + weighted_feedforward
+        result = self._nominal_torque_from_state(
+            coupled_action, q, qd, parameters,
+            self.simulator.feedback_tau_weight,
+            self.simulator.feedforward_tau_weight,
+        )
+        nominal, feedback, feedforward, weighted_feedback, weighted_feedforward = result
         sim = self.simulator
         sim.feedback_torques = feedback
         sim.feedforward_torques = feedforward
@@ -336,29 +376,25 @@ class Go2HardPACTCore(Go2PACT):
             torch.zeros_like(w), torch.zeros_like(w), torch.ones_like(w),
         ), dim=-1).reshape(-1, 3, 3)
 
-    def _solve_qp(self, state, predicted_grf, predicted_wrench, contact_probability):
-        if not bool(self.cfg.features.use_qp):
-            return self._projection_only_result(
-                self.nominal_torque, fallback_code=0
-            )
-        if self._bard is None:
-            return self._projection_only_result(self.nominal_torque)
-        q = torch.cat((
-            state.base_position_world, state.base_quaternion_xyzw, state.joint_position
-        ), dim=-1)
-        terms = self._bard.terms(q.detach(), state.velocity_world.detach(), parameters=None)
+    def _build_qp_inputs(self, state: QPStateEstimate, parameters, nominal):
+        """Single deployment-state QP builder shared by collection and PPO."""
+        q = state.local_q_xyzw
+        velocity = state.velocity_world
+        terms = self._bard.terms(
+            q.detach(), velocity.detach(), parameters=parameters.bard_parameters()
+        )
         rotation = self._yaw_rotation(state.base_quaternion_xyzw)
         rotation_t = rotation.transpose(1, 2)
         foot_j = torch.einsum("bij,bfjn->bfin", rotation_t, terms.foot_jacobians)
         base_rotation = torch.zeros(
-            self.num_envs, 6, 6, device=self.device, dtype=rotation.dtype
+            q.shape[0], 6, 6, device=q.device, dtype=rotation.dtype
         )
         base_rotation[:, :3, :3] = rotation_t
         base_rotation[:, 3:, 3:] = rotation_t
         base_j = base_rotation @ terms.base_jacobian
         limits = self.simulator.dof_pos_limits[:12]
         velocity_limit = self.simulator.dof_vel_limits[:12]
-        gravity_world = self.nominal_torque.new_tensor([0.0, 0.0, -9.81]).expand(self.num_envs, -1)
+        gravity_world = nominal.new_tensor([0.0, 0.0, -9.81]).expand(q.shape[0], -1)
         normal = fixed_gravity_normal(
             gravity_world,
             yaw_quaternion_xyzw(state.base_quaternion_xyzw),
@@ -371,122 +407,96 @@ class Go2HardPACTCore(Go2PACT):
                 terms.foot_jdot_v.detach(), state.base_quaternion_xyzw
             ),
             base_jacobian=base_j.detach(),
-            predicted_grf=predicted_grf,
-            predicted_base_wrench=predicted_wrench,
-            contact_probability=contact_probability.clamp(0.0, 1.0),
-            nominal_torque=self.nominal_torque,
-            previous_torque=self.previous_safe_torque,
+            predicted_grf=state.predicted_grf_yaw,
+            predicted_base_wrench=state.predicted_base_wrench_yaw,
+            contact_probability=state.contact_probability.clamp(0.0, 1.0),
+            nominal_torque=nominal,
+            previous_torque=state.previous_safe_torque,
             torque_limit=self.simulator.torque_limits[:12],
-            torque_rate_limit=self.nominal_torque.new_full((12,), float(self.cfg.control.torque_rate_limit)),
+            torque_rate_limit=nominal.new_full((12,), float(self.cfg.control.torque_rate_limit)),
             joint_position=state.joint_position,
-            joint_velocity=state.velocity_world[:, 6:],
+            joint_velocity=state.joint_velocity,
             joint_position_lower=limits[:, 0],
             joint_position_upper=limits[:, 1],
             joint_velocity_limit=velocity_limit,
             gravity_normal_force_frame=normal,
             dt=float(self.dt),
+            friction=parameters.ground_friction.detach(),
         )
-        return self.qp.solve(qp_inputs)
+        return qp_inputs
 
-    def recompute_training_objectives(self, batch, raw_sampled_action, actor):
-        """Rebuild estimator and differentiable QP outputs from sampled actions."""
+    def _solve_qp(self, state: QPStateEstimate, parameters):
+        if not bool(self.cfg.features.use_qp):
+            return self._projection_only_result(
+                self.nominal_torque, fallback_code=0
+            )
+        if self._bard is None:
+            return self._projection_only_result(self.nominal_torque)
+        return self.qp.solve(
+            self._build_qp_inputs(state, parameters, self.nominal_torque)
+        )
+
+    def _recompute_policy_outputs(
+        self, batch, actor, *, differentiate_action=True
+    ):
+        realized = RandomizedDynamicsParameters.unpack(
+            batch["realized_randomized_parameters"].detach()
+        )
+        dynamics_parameters = self._select_dynamics_parameters(realized)
+        stored_delayed = batch["delayed_nominal_action"]
+        encoded = actor.update_distribution(batch["observation"], batch["history"])
+        policy_action = actor.action_mean
+        if self.position_pretraining:
+            delayed_position = stored_delayed[:, :12].detach()
+            if differentiate_action:
+                delayed_position = (
+                    delayed_position + policy_action - policy_action.detach()
+                )
+            coupled = torch.cat((delayed_position, torch.zeros_like(delayed_position)), dim=-1)
+        else:
+            coupled = stored_delayed.detach()
+            if differentiate_action:
+                coupled = coupled + policy_action - policy_action.detach()
+        q_joint = batch["qp_joint_position"]
+        qd_joint = batch["qp_joint_velocity"]
+        nominal, _, _, _, _ = self._nominal_torque_from_state(
+            coupled, q_joint, qd_joint, dynamics_parameters,
+            batch["feedback_branch_weight"], batch["feedforward_branch_weight"],
+        )
+        references = actor.physics_references(
+            batch["history"], nominal, encoded=encoded
+        )
+        return dynamics_parameters, encoded, nominal, references
+
+    def recompute_training_objectives(self, batch, actor):
+        """Rebuild BARD and QP losses from the stored executed action."""
         from rsl_rl.algorithms.ppo_go2_hard_pact import (
             combine_physics_losses,
-            delayed_action_for_update,
             inverse_dynamics_loss,
             rollout_loss,
             supervised_physics_head_losses,
         )
-        physical = RECONSTRUCTION_SCHEMA.unpack(
-            batch["reconstruction_target"], normalized=True
+        dynamics_parameters, encoded, nominal, references = (
+            self._recompute_policy_outputs(batch, actor)
         )
-        delay_steps = torch.round(
-            physical["control_delay"] / float(self.dt)
-        ).long()
-        stored_delayed = batch["delayed_nominal_action"]
-        if self.position_pretraining:
-            replay_position = delayed_action_for_update(
-                raw_sampled_action, stored_delayed[:, :12], delay_steps
-            )
-            coupled = torch.cat((replay_position, torch.zeros_like(replay_position)), dim=-1)
-        else:
-            coupled = delayed_action_for_update(
-                raw_sampled_action, stored_delayed, delay_steps
-            )
-        q_joint = batch["pre_q"][:, 7:]
-        qd_joint = batch["pre_v"][:, 6:]
-        base_p = self.backend.ordered_backend_joint_values(
-            self.simulator._p_gains
-        )
-        base_d = self.backend.ordered_backend_joint_values(
-            self.simulator._d_gains
-        )
-        if base_p.ndim == 2:
-            base_p = base_p[0]
-            base_d = base_d[0]
-        base_p = base_p[:12].to(q_joint)
-        base_d = base_d[:12].to(q_joint)
-        desired = self._default_joint_position()[0].to(q_joint) + float(
-            self.cfg.control.action_scale
-        ) * coupled[:, :12]
-        feedback = (
-            physical["kp_scale"] * base_p * (desired - q_joint)
-            - physical["kd_scale"] * base_d * qd_joint
-        )
-        feedforward = (
-            float(self.cfg.control.torque_scale) * coupled[:, 12:]
-        )
-        nominal = physical["motor_strength_scale"] * (
-            batch["feedback_branch_weight"] * feedback
-            + batch["feedforward_branch_weight"] * feedforward
-        )
-        encoded = actor.encode_policy_history(batch["history"])
-        references = actor.physics_references(
-            batch["history"], nominal, encoded=encoded
-        )
+        q_joint = batch["qp_joint_position"]
+        qd_joint = batch["qp_joint_velocity"]
 
         if bool(self.cfg.features.use_qp) and self._bard is not None:
-            q = batch["pre_q"]
-            v = batch["pre_v"]
-            terms = self._bard.terms(q.detach(), v.detach(), parameters=None)
-            rotation = self._yaw_rotation(q[:, 3:7])
-            rotation_t = rotation.transpose(1, 2)
-            foot_j = torch.einsum("bij,bfjn->bfin", rotation_t, terms.foot_jacobians)
-            base_rotation = torch.zeros(
-                q.shape[0], 6, 6, device=q.device, dtype=q.dtype
-            )
-            base_rotation[:, :3, :3] = rotation_t
-            base_rotation[:, 3:, 3:] = rotation_t
-            base_j = base_rotation @ terms.base_jacobian
-            limits = self.simulator.dof_pos_limits[:12].to(q)
-            velocity_limit = self.simulator.dof_vel_limits[:12].to(q)
-            qp_inputs = HardPACTQPInputs(
-                mass=terms.mass.detach(),
-                bias=terms.bias.detach(),
-                foot_jacobian=foot_j.detach(),
-                foot_jdot_v=world_to_yaw_local(
-                    terms.foot_jdot_v.detach(), q[:, 3:7]
-                ),
-                base_jacobian=base_j.detach(),
-                predicted_grf=references.grf_yaw_n,
-                predicted_base_wrench=references.base_wrench_yaw,
-                contact_probability=encoded.explicit[:, 3:7],
-                nominal_torque=nominal,
-                previous_torque=batch["previous_safe_torque"].detach(),
-                torque_limit=self.simulator.torque_limits[:12].to(q),
-                torque_rate_limit=q.new_full((12,), float(self.cfg.control.torque_rate_limit)),
+            qp_state = QPStateEstimate(
+                base_linear_velocity_body=encoded.explicit[:, :3],
+                base_quaternion_xyzw=batch["qp_base_quaternion_xyzw"],
+                base_angular_velocity_world=batch["qp_base_angular_velocity_world"],
                 joint_position=q_joint,
                 joint_velocity=qd_joint,
-                joint_position_lower=limits[:, 0],
-                joint_position_upper=limits[:, 1],
-                joint_velocity_limit=velocity_limit,
-                gravity_normal_force_frame=fixed_gravity_normal(
-                    q.new_tensor([0.0, 0.0, -9.81]).expand(q.shape[0], -1),
-                    yaw_quaternion_xyzw(q[:, 3:7]),
-                ),
-                dt=float(self.dt),
+                previous_safe_torque=batch["previous_safe_torque"].detach(),
+                contact_probability=encoded.explicit[:, 3:7],
+                predicted_grf_yaw=references.grf_yaw_n,
+                predicted_base_wrench_yaw=references.base_wrench_yaw,
             )
-            qp_result = self.qp.solve(qp_inputs)
+            qp_result = self.qp.solve(
+                self._build_qp_inputs(qp_state, dynamics_parameters, nominal)
+            )
             safe = qp_result.safe_torque
             if (
                 not bool(self.cfg.features.differentiate_qp)
@@ -508,56 +518,12 @@ class Go2HardPACTCore(Go2PACT):
             batch["interval_wrench_yaw"],
             batch["sustained_wrench_active_mask"],
         )
-        reconstruction, auxiliary_encoded = actor.reconstruct_privileged(
-            batch["history"], sample_for_auxiliary=True
-        )
-        reconstruction_loss = torch.nn.functional.smooth_l1_loss(
-            reconstruction, batch["reconstruction_target"]
-        )
-        reconstructed_physical = RECONSTRUCTION_SCHEMA.unpack(
-            reconstruction, normalized=True
-        )
-        reconstruction_metrics = {}
-        for field in RECONSTRUCTION_SCHEMA.fields:
-            field_slice = RECONSTRUCTION_SCHEMA.slices[field.name]
-            reconstruction_metrics[
-                f"reconstruction/{field.name}_huber_normalized"
-            ] = torch.nn.functional.smooth_l1_loss(
-                reconstruction[:, field_slice],
-                batch["reconstruction_target"][:, field_slice],
-            )
-            reconstruction_metrics[
-                f"reconstruction/{field.name}_mae_physical"
-            ] = (
-                reconstructed_physical[field.name] - physical[field.name]
-            ).abs().mean()
-        explicit_loss = torch.nn.functional.smooth_l1_loss(
-            auxiliary_encoded.explicit, batch["explicit_estimator_target"]
-        )
-        kl = -0.5 * torch.mean(
-            1.0 + auxiliary_encoded.latent_log_variance
-            - auxiliary_encoded.latent_mean.square()
-            - auxiliary_encoded.latent_log_variance.exp()
-        )
-        auxiliary = reconstruction_loss + explicit_loss + 1.0e-3 * kl
-        if bool(self.cfg.features.supervised_physics_head_pretraining):
-            auxiliary = (
-                auxiliary
-                + float(self.cfg.features.grf_supervision_weight) * supervised["grf"]
-                + float(self.cfg.features.active_wrench_supervision_weight)
-                * supervised["wrench_active"]
-                + float(self.cfg.features.neutral_wrench_supervision_weight)
-                * supervised["wrench_neutral"]
-            )
         clone_loss = nominal.new_zeros(())
         if self.position_pretraining:
             clone_target = batch["executed_torque"].detach() / float(self.cfg.control.torque_scale)
             clone_loss = actor.clone_feedforward_loss(
                 batch["observation"], batch["history"], clone_target
             )
-            auxiliary = auxiliary + float(
-                self.cfg.features.feedforward_clone_weight
-            ) * clone_loss
 
         # Keep disabled physics objectives connected to shared estimator
         # parameters so baseline PCGrad remains a valid zero objective.
@@ -566,18 +532,12 @@ class Go2HardPACTCore(Go2PACT):
         ) * 0.0
         inverse = zero
         rollout = zero
-        metrics = dict(reconstruction_metrics)
+        metrics = {}
         if self._bard is not None and (
             bool(self.cfg.features.use_bard_inverse_loss)
             or bool(self.cfg.features.use_bard_rollout_loss)
         ):
-            actual_parameters = {
-                name: physical[name]
-                for name in (
-                    "added_base_mass", "base_com_shift", "joint_armature",
-                    "joint_friction", "joint_stiffness", "joint_damping",
-                )
-            }
+            actual_parameters = dynamics_parameters.bard_parameters()
             # Yaw local -> world uses the transpose of the QP rotation.
             rotation = self._yaw_rotation(batch["pre_q"][:, 3:7])
             grf_world = torch.einsum(
@@ -628,9 +588,6 @@ class Go2HardPACTCore(Go2PACT):
             "supervised/grf": supervised["grf"],
             "supervised/wrench_active": supervised["wrench_active"],
             "supervised/wrench_neutral": supervised["wrench_neutral"],
-            "reconstruction": reconstruction_loss,
-            "explicit": explicit_loss,
-            "kl": kl,
             "clone": clone_loss,
             "grf_mae_n": (references.grf_yaw_n - batch["interval_grf_yaw"]).abs().mean(),
             "wrench_mae": (references.base_wrench_yaw - batch["interval_wrench_yaw"]).abs().mean(),
@@ -688,14 +645,86 @@ class Go2HardPACTCore(Go2PACT):
             metrics[f"qp/status_{status_code}_fraction"] = (
                 qp_result.status == status_code
             ).float().mean()
+        actor_auxiliary = physics.total + float(
+            self.cfg.features.feedforward_clone_weight
+        ) * clone_loss
         return {
             "physics": physics,
-            "auxiliary": auxiliary,
+            "actor_auxiliary": actor_auxiliary,
             "safe_torque": safe,
             "nominal_torque": nominal,
             "metrics": metrics,
             "qp_result": qp_result,
         }
+
+    def recompute_auxiliary_objective(self, batch, actor):
+        """Rebuild the B1Z1-style encoder/decoder/estimator update."""
+        from rsl_rl.algorithms.ppo_go2_hard_pact import (
+            supervised_physics_head_losses,
+        )
+
+        _, _, _, references = self._recompute_policy_outputs(
+            batch, actor, differentiate_action=False
+        )
+        supervised = supervised_physics_head_losses(
+            references.grf_yaw_n,
+            batch["interval_grf_yaw"],
+            references.base_wrench_yaw,
+            batch["interval_wrench_yaw"],
+            batch["sustained_wrench_active_mask"],
+        )
+        reconstruction, encoded = actor.reconstruct_privileged(
+            batch["history"], sample_for_auxiliary=True
+        )
+        reconstruction_loss = torch.nn.functional.smooth_l1_loss(
+            reconstruction, batch["reconstruction_target"]
+        )
+        explicit_loss = torch.nn.functional.smooth_l1_loss(
+            encoded.explicit, batch["explicit_estimator_target"]
+        )
+        kl = -0.5 * torch.mean(
+            1.0 + encoded.latent_log_variance
+            - encoded.latent_mean.square()
+            - encoded.latent_log_variance.exp()
+        )
+        loss = reconstruction_loss + explicit_loss + 1.0e-3 * kl
+        if bool(self.cfg.features.supervised_physics_head_pretraining):
+            loss = (
+                loss
+                + float(self.cfg.features.grf_supervision_weight)
+                * supervised["grf"]
+                + float(self.cfg.features.active_wrench_supervision_weight)
+                * supervised["wrench_active"]
+                + float(self.cfg.features.neutral_wrench_supervision_weight)
+                * supervised["wrench_neutral"]
+            )
+
+        physical = RECONSTRUCTION_SCHEMA.unpack(
+            batch["reconstruction_target"], normalized=True
+        )
+        reconstructed_physical = RECONSTRUCTION_SCHEMA.unpack(
+            reconstruction, normalized=True
+        )
+        metrics = {
+            "supervised/grf": supervised["grf"],
+            "supervised/wrench_active": supervised["wrench_active"],
+            "supervised/wrench_neutral": supervised["wrench_neutral"],
+            "reconstruction": reconstruction_loss,
+            "explicit": explicit_loss,
+            "kl": kl,
+        }
+        for field in RECONSTRUCTION_SCHEMA.fields:
+            field_slice = RECONSTRUCTION_SCHEMA.slices[field.name]
+            metrics[f"reconstruction/{field.name}_huber_normalized"] = (
+                torch.nn.functional.smooth_l1_loss(
+                    reconstruction[:, field_slice],
+                    batch["reconstruction_target"][:, field_slice],
+                )
+            )
+            metrics[f"reconstruction/{field.name}_mae_physical"] = (
+                reconstructed_physical[field.name] - physical[field.name]
+            ).abs().mean()
+        return {"loss": loss, "metrics": metrics}
 
     def step(self, actions, physics_estimator=None, *, allow_missing_physics_references=False):
         self.teleport_mask.zero_()
@@ -705,11 +734,11 @@ class Go2HardPACTCore(Go2PACT):
             pre_state.joint_position,
         ), dim=-1).clone()
         pre_v = pre_state.velocity_world.clone()
+        realized_parameters = self._capture_randomized_parameters()
+        dynamics_parameters = self._select_dynamics_parameters(realized_parameters)
         coupled = self._delay_action(actions)
-        nominal = self._nominal_torque(coupled)
-        raw_action_applied = self.raw_sampled_action.clone()
+        nominal = self._nominal_torque(coupled, dynamics_parameters)
         delayed_action_applied = self.delayed_nominal_action.clone()
-        exploration_noise_applied = self.pending_exploration_noise.clone()
         previous_safe_torque_applied = self.previous_safe_torque.clone()
         feedback_branch_weight_applied = self.simulator.feedback_tau_weight.clone()
         feedforward_branch_weight_applied = self.simulator.feedforward_tau_weight.clone()
@@ -735,6 +764,7 @@ class Go2HardPACTCore(Go2PACT):
             predicted_grf = references.grf_yaw_n
             predicted_wrench = references.base_wrench_yaw
             contact_probability = encoded.explicit[:, 3:7]
+            estimated_base_linear_velocity_body = encoded.explicit[:, :3]
             self._physics_reference_serial += 1
         else:
             if bool(self.cfg.features.use_qp) and self.init_done and not allow_missing_physics_references:
@@ -744,9 +774,21 @@ class Go2HardPACTCore(Go2PACT):
             predicted_grf = nominal.new_zeros(self.num_envs, 12)
             predicted_wrench = nominal.new_zeros(self.num_envs, 6)
             contact_probability = nominal.new_zeros(self.num_envs, 4)
+            estimated_base_linear_velocity_body = nominal.new_zeros(self.num_envs, 3)
 
+        qp_state = QPStateEstimate(
+            base_linear_velocity_body=estimated_base_linear_velocity_body,
+            base_quaternion_xyzw=pre_state.base_quaternion_xyzw,
+            base_angular_velocity_world=pre_state.velocity_world[:, 3:6],
+            joint_position=pre_state.joint_position,
+            joint_velocity=pre_state.velocity_world[:, 6:],
+            previous_safe_torque=self.previous_safe_torque,
+            contact_probability=contact_probability,
+            predicted_grf_yaw=predicted_grf,
+            predicted_base_wrench_yaw=predicted_wrench,
+        )
         qp_result = self._solve_qp(
-            pre_state, predicted_grf, predicted_wrench, contact_probability
+            qp_state, dynamics_parameters
         )
         self.last_qp_result = qp_result
         self.safe_torque.copy_(qp_result.safe_torque)
@@ -790,11 +832,7 @@ class Go2HardPACTCore(Go2PACT):
         timeout_mask = self.time_out_buf.bool().unsqueeze(-1)
         teleport_mask = self.teleport_mask.clone()
         valid = physics_transition_mask(reset_mask, timeout_mask, teleport_mask, push_mask_applied)
-        randomized = RECONSTRUCTION_SCHEMA.system_identification_vector(
-            self.reconstruction_target
-        ).clone()
         self.last_transition = {
-            "raw_action": raw_action_applied,
             "delayed_nominal_action": delayed_action_applied,
             "nominal_torque": nominal.clone(),
             "feedback_branch_weight": feedback_branch_weight_applied,
@@ -802,7 +840,14 @@ class Go2HardPACTCore(Go2PACT):
             "previous_safe_torque": previous_safe_torque_applied,
             "safe_torque": safe_torque_applied,
             "executed_torque": executed_torque_applied,
-            "exploration_noise": exploration_noise_applied,
+            "qp_base_linear_velocity_body": estimated_base_linear_velocity_body.detach().clone(),
+            "qp_base_quaternion_xyzw": qp_state.base_quaternion_xyzw.detach().clone(),
+            "qp_base_angular_velocity_world": qp_state.base_angular_velocity_world.detach().clone(),
+            "qp_joint_position": qp_state.joint_position.detach().clone(),
+            "qp_joint_velocity": qp_state.joint_velocity.detach().clone(),
+            "predicted_contact_probability": contact_probability.detach().clone(),
+            "predicted_grf_yaw": predicted_grf.detach().clone(),
+            "predicted_base_wrench_yaw": predicted_wrench.detach().clone(),
             "pre_q": pre_q,
             "pre_v": pre_v,
             "post_q": post_q,
@@ -822,7 +867,7 @@ class Go2HardPACTCore(Go2PACT):
             "physics_valid_mask": valid.float(),
             "explicit_estimator_target": self.explicit_labels_buf.clone(),
             "reconstruction_target": self.reconstruction_target.clone(),
-            "randomized_parameters": randomized,
+            "realized_randomized_parameters": realized_parameters.pack().clone(),
             "qp_correction": qp_result.correction.clone(),
             "qp_contact_slack": qp_result.contact_slack.clone(),
             "qp_residuals": torch.cat((
@@ -835,11 +880,8 @@ class Go2HardPACTCore(Go2PACT):
             "qp_status": qp_result.status.clone(),
             "qp_forward_time_ms": qp_result.forward_time_ms.clone(),
         }
-        validate_transition(
-            self.last_transition, position_pretraining=self.position_pretraining
-        )
+        validate_transition(self.last_transition)
         self.previous_safe_torque.copy_(self.safe_torque)
-        self.pending_exploration_noise.zero_()
         clip_obs = float(self.cfg.normalization.clip_observations)
         self.obs_buf.clamp_(-clip_obs, clip_obs)
         self.privileged_obs_buf.clamp_(-clip_obs, clip_obs)
@@ -982,9 +1024,7 @@ class Go2HardPACTCore(Go2PACT):
         self.executed_torque[env_ids] = 0.0
         self.torque_average[env_ids] = 0.0
         self.torque_peak[env_ids] = 0.0
-        self.raw_sampled_action[env_ids] = 0.0
         self.delayed_nominal_action[env_ids] = 0.0
-        self.pending_exploration_noise[env_ids] = 0.0
         self.teleport_mask[env_ids] = self.non_failure_reset_buf[env_ids].unsqueeze(-1)
         self.action_queue[env_ids] = 0.0
         if self.cfg.domain_rand.randomize_ctrl_delay:

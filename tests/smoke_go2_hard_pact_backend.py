@@ -66,10 +66,9 @@ def main():
             "observation": env.obs_buf.clone(),
             "history": env.obs_history.clone(),
         })
-        recomputed = env.recompute_training_objectives(
-            update_batch, update_batch["raw_action"], estimator
-        )
-        update_loss = recomputed["physics"].total + recomputed["auxiliary"]
+        recomputed = env.recompute_training_objectives(update_batch, estimator)
+        auxiliary = env.recompute_auxiliary_objective(update_batch, estimator)
+        update_loss = recomputed["actor_auxiliary"] + auxiliary["loss"]
         assert torch.isfinite(update_loss)
         estimator.zero_grad(set_to_none=True)
         update_loss.backward()

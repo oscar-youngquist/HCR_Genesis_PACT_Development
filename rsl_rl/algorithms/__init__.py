@@ -46,7 +46,6 @@ from .ppo_go2_hard_pact import (
     ReliabilityEMA,
     combine_physics_losses,
     inverse_dynamics_loss,
-    pcgrad_backward_two_objectives,
     rollout_loss,
     supervised_physics_head_losses,
 )

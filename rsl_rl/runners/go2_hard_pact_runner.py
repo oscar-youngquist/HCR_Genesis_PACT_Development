@@ -109,6 +109,9 @@ class Go2HardPACTRunner:
             "cpu_count": os.cpu_count(),
             "dependencies": dependency_versions,
             "solver_dtype": str(self.env.qp.config.solver_dtype),
+            "physics_parameter_source": str(
+                self.env.cfg.features.physics_parameter_source
+            ),
         }
         os.makedirs(self.log_dir, exist_ok=True)
         with open(os.path.join(self.log_dir, "hard_pact_metadata.json"), "w", encoding="utf-8") as stream:
@@ -136,13 +139,14 @@ class Go2HardPACTRunner:
             iteration_reward_sum = 0.0
             iteration_reward_count = 0
             for _ in range(self.num_steps_per_env):
-                action, noise = self.alg.act(obs, critic_obs, history)
-                self.env.set_exploration_noise(noise)
+                action = self.alg.act(obs, critic_obs, history)
                 (
                     next_obs, next_critic, next_history, _, reward, done,
                     infos, _,
                 ) = self.env.step(action, physics_estimator=self.actor_critic)
-                self.alg.process_env_step(reward, done, self.env.last_transition)
+                self.alg.process_env_step(
+                    reward, done, infos, self.env.last_transition
+                )
                 iteration_reward_sum += float(reward.float().sum().item())
                 iteration_reward_count += reward.numel()
                 obs = next_obs.to(self.device)
@@ -152,7 +156,11 @@ class Go2HardPACTRunner:
                     episode_infos.append(infos["episode"])
                     reward_buffer.extend(reward[done.bool()].detach().cpu().tolist())
             self.alg.compute_returns(critic_obs)
-            metrics = self.alg.update(self.env.recompute_training_objectives, iteration)
+            metrics = self.alg.update(
+                self.env.recompute_training_objectives,
+                self.env.recompute_auxiliary_objective,
+                iteration,
+            )
             elapsed = time.perf_counter() - start
             self.tot_time += elapsed
             self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
@@ -271,7 +279,8 @@ class Go2HardPACTRunner:
     def save(self, path, infos=None):
         torch.save({
             "model_state_dict": self.actor_critic.state_dict(),
-            "optimizer_state_dict": self.alg.optimizer.state_dict(),
+            "actor_optimizer": self.alg.actor_optimizer.optimizer.state_dict(),
+            "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
             "iteration": self.current_learning_iteration,
             "reliability_ema": self.alg.reliability.values,
             "infos": infos,
@@ -294,8 +303,25 @@ class Go2HardPACTRunner:
             self.actor_critic.load_state_dict(source_state, strict=True)
         # Position-stage optimizer moments have 12-D distribution tensors and
         # are not part of the documented model-only migration contract.
-        if load_optimizer and not migrated and "optimizer_state_dict" in checkpoint:
-            self.alg.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if load_optimizer and not migrated:
+            if "actor_optimizer" in checkpoint:
+                self.alg.actor_optimizer.optimizer.load_state_dict(
+                    checkpoint["actor_optimizer"]
+                )
+                if "auxiliary_optimizer" not in checkpoint:
+                    raise KeyError(
+                        "two-optimizer HardPACT checkpoint is missing "
+                        "auxiliary_optimizer"
+                    )
+                self.alg.auxiliary_optimizer.load_state_dict(
+                    checkpoint["auxiliary_optimizer"]
+                )
+            elif "optimizer_state_dict" in checkpoint:
+                # Documented migration for checkpoints produced before the
+                # B1Z1 two-optimizer alignment. Auxiliary moments restart.
+                self.alg.actor_optimizer.optimizer.load_state_dict(
+                    checkpoint["optimizer_state_dict"]
+                )
         self.current_learning_iteration = int(checkpoint.get("iteration", 0))
         return checkpoint.get("infos")
 

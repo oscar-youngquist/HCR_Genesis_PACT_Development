@@ -129,6 +129,7 @@ class GO2HardPACTCfg(GO2PACTCfg):
             torque_normalizer_nm = 12.0
 
     class features:
+        physics_parameter_source = "realized_randomized"
         supervised_physics_head_pretraining = True
         grf_supervision_weight = 1.0
         active_wrench_supervision_weight = 1.0
@@ -212,6 +213,7 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         active_wrench_loss_weight = 1.0
         neutral_wrench_loss_weight = 0.25
         reliability_ema_alpha = 0.05
+        adaptation_learning_rate = 1.0e-5
 
     class runner(GO2PACTCfgPPO.runner):
         policy_class_name = "ActorCriticGo2HardPACT"

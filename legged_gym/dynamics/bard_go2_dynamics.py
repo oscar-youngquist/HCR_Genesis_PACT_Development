@@ -275,21 +275,16 @@ class BardGo2Dynamics:
         official_bias = self._to_canonical_v(self.bard.rnea(
             self.model, self.data, torch.zeros_like(a_bard), gravity=self.gravity
         ))
-        return dynamic + (terms.bias - official_bias)
+        result = dynamic + (terms.bias - official_bias)
+        if self._armature is not None:
+            result[:, 6:] += self._armature.expand(-1, 12) * acceleration[:, 6:]
+        return result
 
     def aba(self, q_xyzw, v, generalized_force, *, parameters=None):
         self._check(generalized_force, 18)
         terms = self.terms(q_xyzw, v, parameters=parameters)
-        # BARD ABA receives active force. Subtract extra passive terms not in
-        # the URDF before calling the official differentiable implementation.
-        q_bard = self._pack_q(q_xyzw)
-        v_bard = self._to_bard_v(v)
-        self.bard.update_kinematics(self.model, self.data, q_bard, v_bard)
-        official_bias = self._to_canonical_v(self.bard.rnea(
-            self.model, self.data, torch.zeros_like(v_bard), gravity=self.gravity
-        ))
-        adjusted = generalized_force - (terms.bias - official_bias)
-        acceleration = self.bard.aba(
-            self.model, self.data, self._to_bard_v(adjusted), gravity=self.gravity
-        )
-        return self._to_canonical_v(acceleration)
+        # Solve the randomized CRBA system so armature and passive terms are
+        # identical in CRBA, inverse dynamics, and differentiable forward
+        # dynamics.  Official BARD supplies the differentiable M and bias.
+        rhs = generalized_force - terms.bias
+        return torch.linalg.solve(terms.mass, rhs.unsqueeze(-1)).squeeze(-1)

@@ -249,6 +249,29 @@ class ActorCriticGo2HardPACT(nn.Module):
         _, prediction = self.actor_outputs(observation, encoded)
         return torch.nn.functional.smooth_l1_loss(prediction, target_pre_motor)
 
+    def get_auxiliary_optim_groups(self):
+        """B1Z1-style adaptation ownership for the second optimizer."""
+        encoder_parameters = [
+            parameter
+            for name, parameter in self.history_encoder.named_parameters()
+            if not name.startswith("explicit_head.")
+        ]
+        return [
+            {"params": encoder_parameters, "name": "encoder"},
+            {
+                "params": list(self.privileged_decoder.parameters()),
+                "name": "decoder",
+            },
+            {
+                "params": list(self.history_encoder.explicit_head.parameters()),
+                "name": "estimator",
+            },
+            {
+                "params": list(self.physics_estimator.parameters()),
+                "name": "force_estimator",
+            },
+        ]
+
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
@@ -314,4 +337,3 @@ def migrate_hard_pact_pos_checkpoint(
         raise RuntimeError(f"undocumented extra HardPACTPos checkpoint keys: {sorted(undocumented)}")
     target.load_state_dict(migrated, strict=True)
     return MigrationReport(tuple(loaded), tuple(reinitialized), ignored)
-

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Optional
-
 import torch
 
 
@@ -45,6 +43,7 @@ class HardPACTQPInputs:
     joint_velocity_limit: torch.Tensor
     gravity_normal_force_frame: torch.Tensor
     dt: float
+    friction: torch.Tensor | None = None
 
 
 @dataclass
@@ -192,7 +191,11 @@ class Go2HardPACTQP:
         tangent_1, tangent_2 = self._tangent_basis(normal)
         friction_rows = mass.new_zeros(batch, 20, self.nvar)
         friction_bounds = mass.new_zeros(batch, 20)
-        mu = self.config.friction
+        mu = inputs.friction
+        if mu is None:
+            mu = mass.new_full((batch, 1), self.config.friction)
+        else:
+            mu = self._expand_batch(mu, batch, 1, mass)
         for foot in range(4):
             force_start = self.force_slice.start + 3 * foot
             vectors = torch.stack((

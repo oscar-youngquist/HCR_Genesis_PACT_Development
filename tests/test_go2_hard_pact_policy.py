@@ -4,9 +4,9 @@ import torch
 
 from rsl_rl.algorithms.ppo_go2_hard_pact import (
     ReliabilityEMA,
-    pcgrad_backward_two_objectives,
     supervised_physics_head_losses,
 )
+from rsl_rl.algorithms.pc_grad import PCGrad
 from rsl_rl.modules.actor_critic_go2_hard_pact import (
     ActorCriticGo2HardPACT,
     ActorCriticGo2HardPACTPos,
@@ -74,18 +74,14 @@ class LossTests(unittest.TestCase):
         self.assertGreater(losses["wrench_active"].item(), 0.0)
         self.assertGreater(losses["wrench_neutral"].item(), 0.0)
 
-    def test_pcgrad_projects_only_a_conflict(self):
-        parameter = torch.nn.Parameter(torch.tensor([1.0]))
-        conflict = pcgrad_backward_two_objectives(
-            parameter.square().sum(), -parameter.sum(), [parameter]
-        )
-        self.assertTrue(conflict.conflict)
-        torch.testing.assert_close(parameter.grad, torch.tensor([2.0]))
-        compatible = pcgrad_backward_two_objectives(
-            parameter.square().sum(), parameter.sum(), [parameter]
-        )
-        self.assertFalse(compatible.conflict)
-        torch.testing.assert_close(parameter.grad, torch.tensor([3.0]))
+    def test_pcgrad_uses_b1z1_prioritized_projection(self):
+        parameter = torch.nn.Parameter(torch.tensor([1.0, 1.0]))
+        optimizer = PCGrad(torch.optim.Adam([parameter]), reduction="sum")
+        optimizer.pc_backward_pinn([
+            parameter[0].square(),
+            parameter.sum(),
+        ])
+        torch.testing.assert_close(parameter.grad, torch.tensor([2.0, 1.0]))
 
     def test_reliability_updates_once_per_iteration(self):
         ema = ReliabilityEMA(alpha=0.5)

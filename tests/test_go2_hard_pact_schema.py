@@ -9,10 +9,13 @@ from legged_gym.envs.go2.go2_hard_pact.backend import (
 )
 from legged_gym.envs.go2.go2_hard_pact.schema import (
     CANONICAL,
+    QPStateEstimate,
     RECONSTRUCTION_SCHEMA,
+    RandomizedDynamicsParameters,
     fixed_gravity_normal,
     permutation_by_name,
     quat_wxyz_to_xyzw,
+    reconstruct_coupled_nominal_torque,
     world_to_body,
     world_to_yaw_local,
     yaw_local_to_world,
@@ -44,8 +47,60 @@ class ReconstructionSchemaTests(unittest.TestCase):
         for name, expected in fields.items():
             torch.testing.assert_close(decoded[name], expected)
 
+    def test_realized_parameter_schema_round_trip_is_named(self):
+        values = {
+            name: torch.randn(2, width)
+            for name, width in RandomizedDynamicsParameters.FIELD_WIDTHS
+        }
+        parameters = RandomizedDynamicsParameters(**values)
+        restored = RandomizedDynamicsParameters.unpack(parameters.pack())
+        for name, _ in RandomizedDynamicsParameters.FIELD_WIDTHS:
+            torch.testing.assert_close(getattr(restored, name), values[name])
+        self.assertEqual(parameters.pack().shape[-1], 46)
+
+    def test_realized_gains_and_motor_change_reconstructed_torque(self):
+        values = {}
+        for name, width in RandomizedDynamicsParameters.FIELD_WIDTHS:
+            values[name] = torch.zeros(1, width)
+        values["kp_scale"].fill_(1.0)
+        values["kd_scale"].fill_(1.0)
+        values["motor_strength_scale"].fill_(1.0)
+        nominal = RandomizedDynamicsParameters(**values)
+        action = torch.ones(1, 24) * 0.1
+
+        def torque(parameters):
+            return reconstruct_coupled_nominal_torque(
+                action, torch.zeros(1, 12), torch.ones(1, 12) * 0.2,
+                torch.zeros(1, 12), torch.ones(1, 12) * 20.0,
+                torch.ones(1, 12), parameters,
+                torch.ones(1, 1), torch.ones(1, 1), 0.25, 5.0,
+            )[0]
+
+        reference = torque(nominal)
+        for field in ("kp_scale", "kd_scale", "motor_strength_scale"):
+            changed = RandomizedDynamicsParameters.unpack(nominal.pack().clone())
+            getattr(changed, field).mul_(1.2)
+            self.assertGreater((torque(changed) - reference).abs().max().item(), 0.0)
+
 
 class CanonicalConversionTests(unittest.TestCase):
+    def test_qp_state_has_no_absolute_position_and_uses_estimated_velocity(self):
+        state = QPStateEstimate(
+            base_linear_velocity_body=torch.tensor([[1.0, 2.0, 3.0]]),
+            base_quaternion_xyzw=torch.tensor([[0.0, 0.0, 0.0, 1.0]]),
+            base_angular_velocity_world=torch.tensor([[4.0, 5.0, 6.0]]),
+            joint_position=torch.zeros(1, 12), joint_velocity=torch.ones(1, 12),
+            previous_safe_torque=torch.zeros(1, 12),
+            contact_probability=torch.zeros(1, 4),
+            predicted_grf_yaw=torch.zeros(1, 12),
+            predicted_base_wrench_yaw=torch.zeros(1, 6),
+        )
+        torch.testing.assert_close(state.local_q_xyzw[:, :3], torch.zeros(1, 3))
+        torch.testing.assert_close(
+            state.velocity_world[:, :6],
+            torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]]),
+        )
+
     def test_joint_names_are_verified_and_reordered(self):
         source = tuple(reversed(CANONICAL.joint_names))
         permutation = permutation_by_name(source, CANONICAL.joint_names, "joint")

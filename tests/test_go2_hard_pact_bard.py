@@ -80,6 +80,34 @@ class Go2BARDIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(force.grad)
         self.assertTrue(torch.isfinite(force.grad).all())
 
+    def test_armature_is_consistent_in_crba_rnea_and_aba(self):
+        q, v = self.state()
+        acceleration = torch.randn(2, 18) * 0.1
+        nominal = self.parameters()
+        armored = self.parameters()
+        armored["joint_armature"].fill_(0.03)
+        mass_nominal = self.dynamics.terms(q, v, parameters=nominal).mass
+        mass_armored = self.dynamics.terms(q, v, parameters=armored).mass
+        diagonal_delta = torch.diagonal(
+            mass_armored - mass_nominal, dim1=-2, dim2=-1
+        )[:, 6:]
+        torch.testing.assert_close(diagonal_delta, torch.full_like(diagonal_delta, 0.03))
+        force = self.dynamics.rnea(q, v, acceleration, parameters=armored)
+        recovered = self.dynamics.aba(q, v, force, parameters=armored)
+        torch.testing.assert_close(recovered, acceleration, atol=2e-4, rtol=2e-4)
+
+    def test_passive_parameters_change_bias(self):
+        q, v = self.state()
+        q[:, 7:] += 0.05
+        v[:, 6:] = 0.2
+        nominal = self.dynamics.terms(q, v, parameters=self.parameters()).bias
+        passive = self.parameters()
+        passive["joint_friction"].fill_(0.1)
+        passive["joint_stiffness"].fill_(0.02)
+        passive["joint_damping"].fill_(0.5)
+        randomized = self.dynamics.terms(q, v, parameters=passive).bias
+        self.assertGreater((randomized - nominal).abs().max().item(), 1.0e-4)
+
 
 if __name__ == "__main__":
     unittest.main()

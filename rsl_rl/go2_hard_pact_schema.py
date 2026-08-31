@@ -8,7 +8,6 @@ import torch
 
 
 TRANSITION_FIELD_DIMS: Dict[str, int] = {
-    "raw_action": 24,
     "delayed_nominal_action": 24,
     "nominal_torque": 12,
     "feedback_branch_weight": 1,
@@ -16,7 +15,14 @@ TRANSITION_FIELD_DIMS: Dict[str, int] = {
     "previous_safe_torque": 12,
     "safe_torque": 12,
     "executed_torque": 12,
-    "exploration_noise": 24,
+    "qp_base_linear_velocity_body": 3,
+    "qp_base_quaternion_xyzw": 4,
+    "qp_base_angular_velocity_world": 3,
+    "qp_joint_position": 12,
+    "qp_joint_velocity": 12,
+    "predicted_contact_probability": 4,
+    "predicted_grf_yaw": 12,
+    "predicted_base_wrench_yaw": 6,
     "pre_q": 19,
     "pre_v": 18,
     "post_q": 19,
@@ -36,7 +42,7 @@ TRANSITION_FIELD_DIMS: Dict[str, int] = {
     "physics_valid_mask": 1,
     "explicit_estimator_target": 11,
     "reconstruction_target": 79,
-    "randomized_parameters": 46,
+    "realized_randomized_parameters": 46,
     "qp_correction": 12,
     "qp_contact_slack": 12,
     "qp_residuals": 3,
@@ -47,19 +53,15 @@ TRANSITION_FIELD_DIMS: Dict[str, int] = {
 }
 
 
-def validate_transition(
-    transition: Mapping[str, torch.Tensor], *, position_pretraining: bool = False
-) -> None:
-    """Validate required fields while permitting 12-D PACTPos sampled actions."""
+def validate_transition(transition: Mapping[str, torch.Tensor]) -> None:
+    """Validate the additional HardPACT physics fields."""
     missing = sorted(set(TRANSITION_FIELD_DIMS) - set(transition))
     if missing:
         raise KeyError(f"missing HardPACT transition fields: {missing}")
     batch = None
     for name, width in TRANSITION_FIELD_DIMS.items():
         value = transition[name]
-        expected_width = 12 if position_pretraining and name in {
-            "raw_action", "exploration_noise"
-        } else width
+        expected_width = width
         if value.ndim != 2 or value.shape[-1] != expected_width:
             raise ValueError(
                 f"{name} must be (batch,{expected_width}), got {tuple(value.shape)}"

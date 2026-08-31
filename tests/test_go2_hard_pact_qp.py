@@ -8,6 +8,7 @@ from legged_gym.envs.go2.go2_hard_pact.qp import (
     HardPACTQPConfig,
     HardPACTQPInputs,
 )
+from rsl_rl.modules.actor_critic_go2_hard_pact import ActorCriticGo2HardPACT
 
 
 def qp_inputs(batch=3, *, nominal=None):
@@ -93,6 +94,39 @@ class QPTests(unittest.TestCase):
         result = qp.solve(inputs)
         self.assertTrue((result.fallback == 2).all())
         torch.testing.assert_close(result.safe_torque, torch.full((1, 12), 2.0, dtype=torch.float64))
+
+    def test_realized_ground_friction_changes_friction_constraints(self):
+        qp = Go2HardPACTQP(HardPACTQPConfig(solver="equality"))
+        low = qp_inputs(1)
+        high = qp_inputs(1)
+        low.friction = torch.tensor([[0.2]], dtype=torch.float64)
+        high.friction = torch.tensor([[0.9]], dtype=torch.float64)
+        low_g = qp.build(low)[2]
+        high_g = qp.build(high)[2]
+        # Torque/joint-limit rows are unchanged; the final 20 rows are the
+        # four realized-friction pyramids.
+        self.assertGreater((low_g[:, -20:] - high_g[:, -20:]).abs().max().item(), 0.0)
+
+    def test_qp_gradient_reaches_both_coupled_action_heads(self):
+        torch.manual_seed(13)
+        policy = ActorCriticGo2HardPACT(
+            actor_layers=(16,), critic_layers=(16,), encoder_layers=(16,),
+            physics_head_layers=(16,),
+        ).double()
+        observation = torch.randn(2, 57, dtype=torch.float64)
+        history = torch.randn(2, 57 * 20, dtype=torch.float64)
+        policy.update_distribution(observation, history)
+        source = policy.action_mean
+        delayed = torch.full_like(source, 0.1) + source - source.detach()
+        nominal = delayed[:, :12] + delayed[:, 12:]
+        result = Go2HardPACTQP(HardPACTQPConfig(solver="equality")).solve(
+            qp_inputs(2, nominal=nominal)
+        )
+        result.safe_torque.sum().backward()
+        for head in (policy.position_head, policy.feedforward_head):
+            self.assertIsNotNone(head.weight.grad)
+            self.assertTrue(torch.isfinite(head.weight.grad).all())
+            self.assertGreater(head.weight.grad.abs().sum().item(), 0.0)
 
 
 if __name__ == "__main__":
