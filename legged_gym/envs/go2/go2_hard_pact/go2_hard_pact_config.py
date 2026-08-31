@@ -44,6 +44,7 @@ class GO2HardPACTCfg(GO2PACTCfg):
         backend = SIMULATOR
 
         class grf:
+            prediction_scale_n = [120.0, 120.0, 250.0]
             vertical_deadband_n = 3.0
             clip_min_n = -250.0
             clip_max_n = 250.0
@@ -64,9 +65,10 @@ class GO2HardPACTCfg(GO2PACTCfg):
     class domain_rand(GO2PACTCfg.domain_rand):
         # Preserve the current Go2 Genesis request in a backend-neutral schema.
         friction_range = [0.20, 1.25]
-        added_mass_range = [-1.0, 8.0]
+        added_mass_range = [-1.0, 4.0]
         added_mass_min = -1.0
-        max_added_mass_max = 8.0
+        min_added_mass_max = 4.0
+        max_added_mass_max = 4.0
         com_pos_x_range = [-0.20, 0.20]
         com_pos_y_range = [-0.15, 0.15]
         com_pos_z_range = [-0.15, 0.15]
@@ -101,6 +103,12 @@ class GO2HardPACTCfg(GO2PACTCfg):
         randomize_pact_weights = False
         use_tradeoff_curriculum = False
         torque_rate_limit = 1000.0  # Nm/s, further capped by actuator limit
+
+    class normalization(GO2PACTCfg.normalization):
+        class obs_scales(GO2PACTCfg.normalization.obs_scales):
+            # All learned force references use observation-scaled units.
+            grf = 0.01
+            base_wrench = 0.01
 
     class disturbances:
         class instantaneous:
@@ -197,6 +205,10 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         explicit_dim = 11
         encoder_layers = [256, 128]
         physics_head_layers = [128, 128]
+        # Observation-scaled defaults. The runner derives both entries from
+        # the active physical ranges and normalization configuration.
+        grf_scale = [1.20, 1.20, 2.50] * 4
+        wrench_scale = [0.60, 0.60, 0.9924, 0.12, 0.12, 0.12]
         actor_layers = [512, 256, 128]
         critic_layers = [512, 256, 128]
         position_pretraining = False

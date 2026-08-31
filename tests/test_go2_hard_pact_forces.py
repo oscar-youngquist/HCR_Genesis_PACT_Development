@@ -7,7 +7,9 @@ from legged_gym.envs.go2.go2_hard_pact.disturbances import (
     InstantaneousPushes,
     SustainedBaseWrench,
     SustainedWrenchConfig,
+    added_mass_gravity_wrench_world,
     physics_transition_mask,
+    torso_wrench_scale_from_ranges,
 )
 from legged_gym.envs.go2.go2_hard_pact.grf import (
     GRFProcessingConfig,
@@ -47,6 +49,40 @@ class GRFProcessingTests(unittest.TestCase):
 
 
 class DisturbanceTests(unittest.TestCase):
+    def test_added_mass_wrench_is_signed_weight_at_torso_com(self):
+        added_mass = torch.tensor([[8.0], [-1.0], [0.0]])
+        wrench = added_mass_gravity_wrench_world(
+            added_mass, torch.tensor([0.0, 0.0, -9.81])
+        )
+        torch.testing.assert_close(
+            wrench[:, :3],
+            torch.tensor([
+                [0.0, 0.0, -78.48],
+                [0.0, 0.0, 9.81],
+                [0.0, 0.0, 0.0],
+            ]),
+        )
+        self.assertEqual(torch.count_nonzero(wrench[:, 3:]), 0)
+
+    def test_torso_wrench_scale_tracks_configured_ranges(self):
+        scale = torso_wrench_scale_from_ranges(
+            (-20.0, 30.0),
+            (-2.0, 3.0),
+            (-2.0, 5.0),
+            (1.0, -2.0, -10.0),
+        )
+        self.assertEqual(scale, (35.0, 40.0, 80.0, 3.0, 3.0, 3.0))
+        no_disturbances = torso_wrench_scale_from_ranges(
+            (-20.0, 30.0),
+            (-2.0, 3.0),
+            (-2.0, 5.0),
+            (1.0, -2.0, -10.0),
+            include_sustained_force=False,
+            include_sustained_torque=False,
+            include_added_mass=False,
+        )
+        self.assertEqual(no_disturbances, (0.0,) * 6)
+
     def test_instantaneous_push_is_atomic_and_zero_between_events(self):
         torch.manual_seed(4)
         pushes = InstantaneousPushes(

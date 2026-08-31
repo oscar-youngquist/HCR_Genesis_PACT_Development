@@ -149,6 +149,10 @@ class PPOGo2HardPACT:
         grf_loss_weight=1.0,
         active_wrench_loss_weight=1.0,
         neutral_wrench_loss_weight=0.25,
+        grf_observation_scale=0.01,
+        base_wrench_observation_scale=0.01,
+        grf_normalization_scale=(1.2, 1.2, 2.5) * 4,
+        wrench_normalization_scale=(0.6, 0.6, 0.9924, 0.12, 0.12, 0.12),
         feedforward_clone_weight=1.0,
         reconstruction_loss_weight=1.0,
         explicit_loss_weight=1.0,
@@ -214,6 +218,25 @@ class PPOGo2HardPACT:
         self.grf_loss_weight = float(grf_loss_weight)
         self.active_wrench_loss_weight = float(active_wrench_loss_weight)
         self.neutral_wrench_loss_weight = float(neutral_wrench_loss_weight)
+        self.grf_observation_scale = float(grf_observation_scale)
+        self.base_wrench_observation_scale = float(
+            base_wrench_observation_scale
+        )
+        if (
+            self.grf_observation_scale <= 0.0
+            or self.base_wrench_observation_scale <= 0.0
+        ):
+            raise ValueError("HardPACT force observation scales must be positive")
+        self.grf_normalization_scale = tuple(
+            float(value) for value in grf_normalization_scale
+        )
+        if len(self.grf_normalization_scale) != 12:
+            raise ValueError("grf_normalization_scale must contain twelve values")
+        self.wrench_normalization_scale = tuple(
+            float(value) for value in wrench_normalization_scale
+        )
+        if len(self.wrench_normalization_scale) != 6:
+            raise ValueError("wrench_normalization_scale must contain six values")
         self.feedforward_clone_weight = float(feedforward_clone_weight)
         self.reconstruction_loss_weight = float(reconstruction_loss_weight)
         self.explicit_loss_weight = float(explicit_loss_weight)
@@ -382,26 +405,30 @@ class PPOGo2HardPACT:
 
     def _supervised_physics_losses(self, batch, references):
         wrench_active = batch["sustained_wrench_active_mask"].bool().reshape(-1)
+        grf_scale = references.grf_yaw_scaled.new_tensor(
+            self.grf_normalization_scale
+        )
+        wrench_scale = references.base_wrench_yaw_scaled.new_tensor(
+            self.wrench_normalization_scale
+        )
         return {
             "grf": self._normalized_huber(
-                references.grf_yaw_n,
-                batch["interval_grf_yaw"],
-                references.grf_yaw_n.new_tensor([120.0, 120.0, 250.0] * 4),
+                references.grf_yaw_scaled,
+                batch["interval_grf_yaw"] * self.grf_observation_scale,
+                grf_scale,
             ),
             "wrench_active": self._normalized_huber(
-                references.base_wrench_yaw,
-                batch["interval_wrench_yaw"],
-                references.base_wrench_yaw.new_tensor(
-                    [60.0, 60.0, 60.0, 12.0, 12.0, 12.0]
-                ),
+                references.base_wrench_yaw_scaled,
+                batch["interval_wrench_yaw"]
+                * self.base_wrench_observation_scale,
+                wrench_scale,
                 wrench_active,
             ),
             "wrench_neutral": self._normalized_huber(
-                references.base_wrench_yaw,
-                batch["interval_wrench_yaw"],
-                references.base_wrench_yaw.new_tensor(
-                    [60.0, 60.0, 60.0, 12.0, 12.0, 12.0]
-                ),
+                references.base_wrench_yaw_scaled,
+                batch["interval_wrench_yaw"]
+                * self.base_wrench_observation_scale,
+                wrench_scale,
                 ~wrench_active,
             ),
         }
@@ -496,7 +523,8 @@ class PPOGo2HardPACT:
         qp_result = outputs["qp_result"]
         nominal = outputs["nominal_torque"]
         zero = (
-            references.grf_yaw_n.sum() + references.base_wrench_yaw.sum()
+            references.grf_yaw_scaled.sum()
+            + references.base_wrench_yaw_scaled.sum()
         ) * 0.0
         safe_torque = qp_result.safe_torque
         if not self.differentiate_qp or self.stop_gradient_qp:
@@ -544,10 +572,11 @@ class PPOGo2HardPACT:
         actor_auxiliary = physics.total + self.feedforward_clone_weight * clone
 
         grf_error = (
-            references.grf_yaw_n - batch["interval_grf_yaw"]
+            outputs["physical_grf_yaw_n"] - batch["interval_grf_yaw"]
         ).abs().reshape(-1, 4, 3)
         wrench_error = (
-            references.base_wrench_yaw - batch["interval_wrench_yaw"]
+            outputs["physical_base_wrench_yaw"]
+            - batch["interval_wrench_yaw"]
         ).abs()
         metrics.update({
             "clone": clone,

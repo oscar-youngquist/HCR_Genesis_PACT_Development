@@ -45,8 +45,8 @@ class EncoderOutput:
 
 @dataclass
 class PhysicsReferences:
-    grf_yaw_n: torch.Tensor
-    base_wrench_yaw: torch.Tensor
+    grf_yaw_scaled: torch.Tensor
+    base_wrench_yaw_scaled: torch.Tensor
 
 
 class Go2HistoryEncoder(nn.Module):
@@ -90,16 +90,28 @@ class Go2HistoryEncoder(nn.Module):
 class DeploymentPhysicsEstimator(nn.Module):
     """Non-privileged GRF/wrench heads evaluated before the QP."""
 
-    def __init__(self, latent_dim=16, explicit_dim=11, hidden=(128, 128), activation="elu"):
+    def __init__(
+        self,
+        latent_dim=16,
+        explicit_dim=11,
+        hidden=(128, 128),
+        activation="elu",
+        grf_scale=(1.2, 1.2, 2.5) * 4,
+        wrench_scale=(0.6, 0.6, 0.9924, 0.12, 0.12, 0.12),
+    ):
         super().__init__()
         self.grf_head = _mlp(latent_dim + explicit_dim + 12, hidden, 12, activation)
         self.wrench_head = _mlp(latent_dim + explicit_dim, hidden, 6, activation)
         self.register_buffer("grf_scale", torch.tensor(
-            [120.0, 120.0, 250.0] * 4, dtype=torch.float32
+            grf_scale, dtype=torch.float32
         ))
         self.register_buffer("wrench_scale", torch.tensor(
-            [60.0, 60.0, 60.0, 12.0, 12.0, 12.0], dtype=torch.float32
+            wrench_scale, dtype=torch.float32
         ))
+        if self.grf_scale.shape != (12,):
+            raise ValueError("grf_scale must contain twelve scaled GRF limits")
+        if self.wrench_scale.shape != (6,):
+            raise ValueError("wrench_scale must contain six force/torque scales")
 
     def forward(self, latent, explicit, nominal_torque) -> PhysicsReferences:
         if nominal_torque.shape[-1] != 12:
@@ -108,8 +120,8 @@ class DeploymentPhysicsEstimator(nn.Module):
         grf = self.grf_head(torch.cat((latent, stopped_explicit, nominal_torque), dim=-1))
         wrench = self.wrench_head(torch.cat((latent, stopped_explicit), dim=-1))
         return PhysicsReferences(
-            grf_yaw_n=torch.tanh(grf) * self.grf_scale,
-            base_wrench_yaw=torch.tanh(wrench) * self.wrench_scale,
+            grf_yaw_scaled=grf * self.grf_scale,
+            base_wrench_yaw_scaled=wrench * self.wrench_scale,
         )
 
 
@@ -135,6 +147,8 @@ class ActorCriticGo2HardPACT(nn.Module):
         critic_layers=(512, 256, 128),
         encoder_layers=(256, 128),
         physics_head_layers=(128, 128),
+        grf_scale=(1.2, 1.2, 2.5) * 4,
+        wrench_scale=(0.6, 0.6, 0.9924, 0.12, 0.12, 0.12),
         activation="elu",
         init_noise_std=1.0,
         position_pretraining=False,
@@ -162,7 +176,9 @@ class ActorCriticGo2HardPACT(nn.Module):
         self.feedforward_head = nn.Linear(last, 12)
         self.critic = _mlp(num_critic_obs, critic_layers, 1, activation)
         self.physics_estimator = DeploymentPhysicsEstimator(
-            latent_dim, explicit_dim, physics_head_layers, activation
+            latent_dim, explicit_dim, physics_head_layers, activation,
+            grf_scale=grf_scale,
+            wrench_scale=wrench_scale,
         )
         self.privileged_decoder = _mlp(
             latent_dim + explicit_dim, (128, 256, 512), 79, activation
@@ -310,13 +326,27 @@ def migrate_hard_pact_pos_checkpoint(
     migrated = {}
     loaded = []
     reinitialized = []
+    configured_buffers = {
+        "physics_estimator.grf_scale",
+        "physics_estimator.wrench_scale",
+    }
     for key, target_value in target_state.items():
         if key not in source:
             raise RuntimeError(f"undocumented missing HardPACTPos key: {key}")
         source_value = source[key]
         if not torch.is_tensor(source_value):
             raise TypeError(f"checkpoint value {key} is not a tensor")
-        if source_value.shape == target_value.shape:
+        if key in configured_buffers and source_value.shape == target_value.shape:
+            # Force/wrench output units and ranges are part of the current
+            # task contract, not learned checkpoint state.  This documented
+            # migration lets pre-payload position checkpoints initialize the
+            # expanded vertical torso-force range safely.
+            migrated[key] = target_value
+            if torch.equal(source_value.to(target_value), target_value):
+                loaded.append(key)
+            else:
+                reinitialized.append(key)
+        elif source_value.shape == target_value.shape:
             migrated[key] = source_value
             loaded.append(key)
         elif key == "std" and source_value.shape == (12,) and target_value.shape == (24,):

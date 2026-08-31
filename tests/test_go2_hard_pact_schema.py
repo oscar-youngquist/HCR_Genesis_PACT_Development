@@ -7,6 +7,7 @@ from legged_gym.envs.go2.go2_hard_pact.backend import (
     ISAACLAB_CAPABILITIES,
     domain_randomization_report,
 )
+from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACTCore
 from legged_gym.envs.go2.go2_hard_pact.schema import (
     CANONICAL,
     QPStateEstimate,
@@ -20,6 +21,7 @@ from legged_gym.envs.go2.go2_hard_pact.schema import (
     world_to_yaw_local,
     yaw_local_to_world,
 )
+from rsl_rl.modules.actor_critic_go2_hard_pact import PhysicsReferences
 
 
 class ReconstructionSchemaTests(unittest.TestCase):
@@ -84,6 +86,17 @@ class ReconstructionSchemaTests(unittest.TestCase):
 
 
 class CanonicalConversionTests(unittest.TestCase):
+    def test_learned_force_references_are_unscaled_at_physics_boundary(self):
+        core = object.__new__(Go2HardPACTCore)
+        core.obs_scales = types.SimpleNamespace(grf=0.01, base_wrench=0.02)
+        grf_scaled = torch.full((2, 12), 1.25)
+        wrench_scaled = torch.full((2, 6), 0.8)
+        grf_n, wrench_si = core._physics_references_si(
+            PhysicsReferences(grf_scaled, wrench_scaled)
+        )
+        torch.testing.assert_close(grf_n, torch.full((2, 12), 125.0))
+        torch.testing.assert_close(wrench_si, torch.full((2, 6), 40.0))
+
     def test_qp_state_has_no_absolute_position_and_uses_estimated_velocity(self):
         state = QPStateEstimate(
             base_linear_velocity_body=torch.tensor([[1.0, 2.0, 3.0]]),

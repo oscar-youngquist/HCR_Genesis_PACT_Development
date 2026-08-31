@@ -13,6 +13,66 @@ def _uniform(shape, low: float, high: float, *, device, dtype):
     return torch.rand(shape, device=device, dtype=dtype) * (high - low) + low
 
 
+def added_mass_gravity_wrench_world(
+    added_mass: torch.Tensor,
+    gravity_world: torch.Tensor,
+) -> torch.Tensor:
+    """Equivalent persistent torso wrench relative to the nominal mass.
+
+    The Genesis and Isaac Lab mass randomizers store a signed mass delta and
+    apply it to the base link.  Its persistent external-force equivalent is
+    ``delta_mass * gravity``.  The wrench is expressed at the torso COM, so
+    this contribution has no torque component; COM displacement remains a
+    separate dynamics randomization.
+    """
+    if added_mass.ndim != 2 or added_mass.shape[-1] != 1:
+        raise ValueError("added_mass must be (batch,1)")
+    gravity_world = torch.as_tensor(
+        gravity_world, device=added_mass.device, dtype=added_mass.dtype
+    )
+    if gravity_world.ndim == 1:
+        gravity_world = gravity_world.unsqueeze(0).expand(added_mass.shape[0], -1)
+    if gravity_world.shape != (added_mass.shape[0], 3):
+        raise ValueError("gravity_world must be (3,) or (batch,3)")
+    force_world = added_mass * gravity_world
+    return torch.cat((force_world, torch.zeros_like(force_world)), dim=-1)
+
+
+def torso_wrench_scale_from_ranges(
+    force_bounds_n,
+    torque_bounds_nm,
+    added_mass_range,
+    gravity_world,
+    *,
+    include_sustained_force=True,
+    include_sustained_torque=True,
+    include_added_mass=True,
+) -> tuple[float, ...]:
+    """Compute component-wise head/loss scales from effective DR ranges."""
+    if len(force_bounds_n) != 2 or len(torque_bounds_nm) != 2:
+        raise ValueError("force and torque bounds must each contain two values")
+    if len(added_mass_range) != 2:
+        raise ValueError("added_mass_range must contain two values")
+    gravity = torch.as_tensor(gravity_world, dtype=torch.float64)
+    if gravity.shape != (3,):
+        raise ValueError("gravity_world must contain three values")
+    sustained_force = (
+        max(abs(float(value)) for value in force_bounds_n)
+        if include_sustained_force else 0.0
+    )
+    sustained_torque = (
+        max(abs(float(value)) for value in torque_bounds_nm)
+        if include_sustained_torque else 0.0
+    )
+    force_scale = torch.full((3,), sustained_force, dtype=torch.float64)
+    if include_added_mass:
+        maximum_mass_delta = max(
+            abs(float(value)) for value in added_mass_range
+        )
+        force_scale += maximum_mass_delta * gravity.abs()
+    return tuple(force_scale.tolist()) + (sustained_torque,) * 3
+
+
 @dataclass(frozen=True)
 class InstantaneousPushConfig:
     enabled: bool = True
@@ -203,12 +263,16 @@ class SustainedBaseWrench:
         self.active_mask.copy_(running_components.any(dim=-1, keepdim=True))
         return self.current_world, self.active_mask
 
-    def yaw_local_normalized(self, base_quat_xyzw: torch.Tensor) -> torch.Tensor:
+    def yaw_local(self, base_quat_xyzw: torch.Tensor) -> torch.Tensor:
         force = world_to_yaw_local(self.current_world[:, :3], base_quat_xyzw)
         torque = world_to_yaw_local(self.current_world[:, 3:], base_quat_xyzw)
+        return torch.cat((force, torque), dim=-1)
+
+    def yaw_local_normalized(self, base_quat_xyzw: torch.Tensor) -> torch.Tensor:
+        local = self.yaw_local(base_quat_xyzw)
         return torch.cat((
-            force / max(float(self.config.force_normalizer_n), 1.0e-8),
-            torque / max(float(self.config.torque_normalizer_nm), 1.0e-8),
+            local[:, :3] / max(float(self.config.force_normalizer_n), 1.0e-8),
+            local[:, 3:] / max(float(self.config.torque_normalizer_nm), 1.0e-8),
         ), dim=-1)
 
     def reset(self, env_ids: torch.Tensor, current_step: int = 0) -> None:

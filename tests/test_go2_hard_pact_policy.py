@@ -43,8 +43,8 @@ class PolicyTests(unittest.TestCase):
         references = policy.physics_references(
             self.history, torch.zeros(3, 12), encoded=deterministic
         )
-        self.assertEqual(references.grf_yaw_n.shape, (3, 12))
-        self.assertEqual(references.base_wrench_yaw.shape, (3, 6))
+        self.assertEqual(references.grf_yaw_scaled.shape, (3, 12))
+        self.assertEqual(references.base_wrench_yaw_scaled.shape, (3, 6))
         self.assertEqual(policy._physics_evaluations, 1)
 
     def test_strict_position_checkpoint_migration(self):
@@ -54,6 +54,21 @@ class PolicyTests(unittest.TestCase):
         report = migrate_hard_pact_pos_checkpoint(coupled, {"model_state_dict": source})
         self.assertEqual(report.reinitialized, ("std[12:24]",))
         torch.testing.assert_close(coupled.std[:12], position.std)
+        legacy_scale = dict(source)
+        legacy_scale["physics_estimator.grf_scale"] = torch.tensor(
+            [120.0, 120.0, 250.0] * 4
+        )
+        legacy_scale["physics_estimator.wrench_scale"] = torch.tensor(
+            [60.0, 60.0, 60.0, 12.0, 12.0, 12.0]
+        )
+        report = migrate_hard_pact_pos_checkpoint(
+            coupled, {"model_state_dict": legacy_scale}
+        )
+        self.assertIn("physics_estimator.grf_scale", report.reinitialized)
+        self.assertIn("physics_estimator.wrench_scale", report.reinitialized)
+        torch.testing.assert_close(
+            coupled.physics_estimator.wrench_scale[2], torch.tensor(0.9924)
+        )
         bad = dict(source)
         bad.pop("feedforward_head.weight")
         with self.assertRaisesRegex(RuntimeError, "undocumented missing"):
@@ -64,7 +79,7 @@ class LossTests(unittest.TestCase):
     def test_grf_uses_all_transitions_and_wrench_events_are_split(self):
         zeros_grf = torch.zeros(4, 12)
         predicted_grf = zeros_grf.clone()
-        predicted_grf[0, 0] = 120.0
+        predicted_grf[0, 0] = 1.2
         predicted_wrench = torch.ones(4, 6)
         target_wrench = torch.zeros_like(predicted_wrench)
         active = torch.tensor([[1], [0], [1], [0]], dtype=torch.bool)
@@ -84,6 +99,35 @@ class LossTests(unittest.TestCase):
         self.assertGreater(losses["grf"].item(), 0.0)
         self.assertGreater(losses["wrench_active"].item(), 0.0)
         self.assertGreater(losses["wrench_neutral"].item(), 0.0)
+
+    def test_force_supervision_converts_physical_labels_to_observation_scale(self):
+        policy = ActorCriticGo2HardPACT(
+            actor_layers=(16,), critic_layers=(16,), encoder_layers=(16,),
+            physics_head_layers=(16,),
+        )
+        algorithm = PPOGo2HardPACT(
+            policy,
+            grf_observation_scale=0.01,
+            base_wrench_observation_scale=0.02,
+            grf_normalization_scale=(1.2, 1.2, 2.5) * 4,
+            wrench_normalization_scale=(1.2, 1.2, 2.0, 0.24, 0.24, 0.24),
+        )
+        physical_grf = torch.tensor([[120.0, 0.0, 250.0] * 4])
+        physical_wrench = torch.tensor([[60.0, 0.0, -50.0, 12.0, 0.0, -12.0]])
+        references = PhysicsReferences(
+            physical_grf * 0.01,
+            physical_wrench * 0.02,
+        )
+        losses = algorithm._supervised_physics_losses(
+            {
+                "interval_grf_yaw": physical_grf,
+                "interval_wrench_yaw": physical_wrench,
+                "sustained_wrench_active_mask": torch.ones(1, 1),
+            },
+            references,
+        )
+        self.assertEqual(losses["grf"], 0.0)
+        self.assertEqual(losses["wrench_active"], 0.0)
 
     def test_pcgrad_uses_b1z1_prioritized_projection(self):
         parameter = torch.nn.Parameter(torch.tensor([1.0, 1.0]))

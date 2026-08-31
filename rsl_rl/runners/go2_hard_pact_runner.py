@@ -14,6 +14,9 @@ from collections import deque
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+from legged_gym.envs.go2.go2_hard_pact.disturbances import (
+    torso_wrench_scale_from_ranges,
+)
 from rsl_rl.algorithms import PPOGo2HardPACT
 from rsl_rl.modules import (
     ActorCriticGo2HardPACT,
@@ -29,6 +32,57 @@ class Go2HardPACTRunner:
         self.device = torch.device(device)
         self.log_dir = log_dir
         policy_cfg = dict(train_cfg["policy"])
+        wrench_cfg = env.cfg.disturbances.sustained_wrench
+        mass_report = env.domain_randomization_report["base_mass"]
+        effective_mass_ranges = mass_report.get("effective_ranges") or {}
+        added_mass_range = effective_mass_ranges.get(
+            "added_mass_range", (0.0, 0.0)
+        )
+        # Cover the complete configured curriculum envelope as well as the
+        # currently effective reset-time range; the head scale must remain
+        # stable while Genesis expands its randomization range.
+        if mass_report["active"]:
+            added_mass_candidates = [float(value) for value in added_mass_range]
+            for name in ("added_mass_min", "max_added_mass_max"):
+                if hasattr(env.cfg.domain_rand, name):
+                    added_mass_candidates.append(
+                        float(getattr(env.cfg.domain_rand, name))
+                    )
+            added_mass_range = (
+                min(added_mass_candidates), max(added_mass_candidates)
+            )
+        gravity_world = (
+            (0.0, 0.0, 0.0)
+            if bool(getattr(env.cfg.asset, "disable_gravity", False))
+            else getattr(env.cfg.sim, "gravity", (0.0, 0.0, -9.81))
+        )
+        grf_observation_scale = float(env.obs_scales.grf)
+        base_wrench_observation_scale = float(env.obs_scales.base_wrench)
+        if grf_observation_scale <= 0.0 or base_wrench_observation_scale <= 0.0:
+            raise ValueError("HardPACT force observation scales must be positive")
+        physical_grf_scale = tuple(float(value) for value in env.cfg.sim.grf.prediction_scale_n) * 4
+        physical_wrench_scale = torso_wrench_scale_from_ranges(
+            wrench_cfg.force_bounds_n,
+            wrench_cfg.torque_bounds_nm,
+            added_mass_range,
+            gravity_world,
+            include_sustained_force=(
+                bool(wrench_cfg.enabled)
+                and float(wrench_cfg.force_probability) > 0.0
+            ),
+            include_sustained_torque=(
+                bool(wrench_cfg.enabled)
+                and float(wrench_cfg.torque_probability) > 0.0
+            ),
+            include_added_mass=bool(mass_report["active"]),
+        )
+        policy_cfg["grf_scale"] = tuple(
+            value * grf_observation_scale for value in physical_grf_scale
+        )
+        policy_cfg["wrench_scale"] = tuple(
+            value * base_wrench_observation_scale
+            for value in physical_wrench_scale
+        )
         policy_class = (
             ActorCriticGo2HardPACTPos
             if policy_cfg.get("position_pretraining", False)
@@ -63,6 +117,14 @@ class Go2HardPACTRunner:
             ),
             "neutral_wrench_loss_weight": float(
                 features.neutral_wrench_supervision_weight
+            ),
+            "grf_observation_scale": grf_observation_scale,
+            "base_wrench_observation_scale": base_wrench_observation_scale,
+            "grf_normalization_scale": tuple(
+                self.actor_critic.physics_estimator.grf_scale.tolist()
+            ),
+            "wrench_normalization_scale": tuple(
+                self.actor_critic.physics_estimator.wrench_scale.tolist()
             ),
             "feedforward_clone_weight": float(
                 features.feedforward_clone_weight
@@ -137,6 +199,16 @@ class Go2HardPACTRunner:
             "cpu_count": os.cpu_count(),
             "dependencies": dependency_versions,
             "solver_dtype": str(self.env.qp.config.solver_dtype),
+            "torso_wrench_scale": (
+                self.actor_critic.physics_estimator.wrench_scale.tolist()
+            ),
+            "grf_prediction_scale": (
+                self.actor_critic.physics_estimator.grf_scale.tolist()
+            ),
+            "force_observation_scales": {
+                "grf": float(self.env.obs_scales.grf),
+                "base_wrench": float(self.env.obs_scales.base_wrench),
+            },
             "physics_parameter_source": str(
                 self.env.cfg.features.physics_parameter_source
             ),
@@ -265,6 +337,11 @@ class Go2HardPACTRunner:
                     (
                         "disturbance/wrench_world",
                         "sustained_wrench_world",
+                        ("force_x", "force_y", "force_z", "torque_x", "torque_y", "torque_z"),
+                    ),
+                    (
+                        "disturbance/added_mass_wrench_world",
+                        "added_mass_wrench_world",
                         ("force_x", "force_y", "force_z", "torque_x", "torque_y", "torque_z"),
                     ),
                 ):

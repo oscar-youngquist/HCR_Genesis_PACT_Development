@@ -17,6 +17,7 @@ from .disturbances import (
     InstantaneousPushes,
     SustainedBaseWrench,
     SustainedWrenchConfig,
+    added_mass_gravity_wrench_world,
     physics_transition_mask,
 )
 from .grf import GRFProcessingConfig, IntervalGRFProcessor
@@ -89,6 +90,11 @@ class Go2HardPACTCore(Go2PACT):
         self.backend = ADAPTERS[self.backend_name](self.simulator, self.cfg)
         self.backend.augment_simulator_buffers()
         super()._init_buffers()
+        if (
+            float(self.obs_scales.grf) <= 0.0
+            or float(self.obs_scales.base_wrench) <= 0.0
+        ):
+            raise ValueError("HardPACT force observation scales must be positive")
         # The legacy initializer allocates coupled actions. PACTPos still keeps
         # a 24-D observation history, but only queues a 12-D sampled action.
         max_delay = int(self.cfg.domain_rand.ctrl_delay_step_range[1])
@@ -265,6 +271,31 @@ class Go2HardPACTCore(Go2PACT):
             control_delay_steps=self.action_delay.detach().float().unsqueeze(-1).clone(),
         )
         return params.detached()
+
+    def _added_mass_wrench_world(self, parameters):
+        """Return the persistent payload-weight correction to nominal mass."""
+        base_mass_randomization = self.domain_randomization_report["base_mass"]
+        if (
+            not base_mass_randomization["active"]
+            or bool(getattr(self.cfg.asset, "disable_gravity", False))
+        ):
+            return parameters.added_base_mass.new_zeros(
+                parameters.added_base_mass.shape[0], 6
+            )
+        gravity_world = parameters.added_base_mass.new_tensor(
+            getattr(self.cfg.sim, "gravity", (0.0, 0.0, -9.81))
+        )
+        return added_mass_gravity_wrench_world(
+            parameters.added_base_mass, gravity_world
+        )
+
+    def _physics_references_si(self, references):
+        """Convert observation-scaled learned references to N and N·m."""
+        return (
+            references.grf_yaw_scaled / float(self.obs_scales.grf),
+            references.base_wrench_yaw_scaled
+            / float(self.obs_scales.base_wrench),
+        )
 
     def _nominal_dynamics_parameters(self, like, batch):
         zeros = like.new_zeros(batch, 1)
@@ -473,6 +504,9 @@ class Go2HardPACTCore(Go2PACT):
         dynamics_parameters, encoded, nominal, references = (
             self._recompute_policy_outputs(batch, actor)
         )
+        physical_grf_yaw_n, physical_base_wrench_yaw = (
+            self._physics_references_si(references)
+        )
         q_joint = batch["qp_joint_position"]
         qd_joint = batch["qp_joint_velocity"]
 
@@ -485,8 +519,8 @@ class Go2HardPACTCore(Go2PACT):
                 joint_velocity=qd_joint,
                 previous_safe_torque=batch["previous_safe_torque"].detach(),
                 contact_probability=encoded.explicit[:, 3:7],
-                predicted_grf_yaw=references.grf_yaw_n,
-                predicted_base_wrench_yaw=references.base_wrench_yaw,
+                predicted_grf_yaw=physical_grf_yaw_n,
+                predicted_base_wrench_yaw=physical_base_wrench_yaw,
             )
             qp_result = self.qp.solve(
                 self._build_qp_inputs(qp_state, dynamics_parameters, nominal)
@@ -500,19 +534,21 @@ class Go2HardPACTCore(Go2PACT):
         rotation = self._yaw_rotation(batch["pre_q"][:, 3:7])
         grf_world = torch.einsum(
             "bij,bfj->bfi", rotation,
-            references.grf_yaw_n.reshape(-1, 4, 3),
+            physical_grf_yaw_n.reshape(-1, 4, 3),
         ).flatten(1)
         wrench_world = torch.cat((
             torch.einsum(
-                "bij,bj->bi", rotation, references.base_wrench_yaw[:, :3]
+                "bij,bj->bi", rotation, physical_base_wrench_yaw[:, :3]
             ),
             torch.einsum(
-                "bij,bj->bi", rotation, references.base_wrench_yaw[:, 3:]
+                "bij,bj->bi", rotation, physical_base_wrench_yaw[:, 3:]
             ),
         ), dim=-1)
         return {
             "encoded": encoded,
             "references": references,
+            "physical_grf_yaw_n": physical_grf_yaw_n,
+            "physical_base_wrench_yaw": physical_base_wrench_yaw,
             "nominal_torque": nominal,
             "qp_result": qp_result,
             "grf_world": grf_world,
@@ -572,6 +608,12 @@ class Go2HardPACTCore(Go2PACT):
         wrench_world, wrench_active = self.sustained_wrench.step(self.common_step_counter)
         wrench_world_applied = wrench_world.clone()
         wrench_active_applied = wrench_active.clone()
+        added_mass_wrench_world = self._added_mass_wrench_world(
+            realized_parameters
+        )
+        torso_wrench_label_world = (
+            wrench_world_applied + added_mass_wrench_world
+        )
 
         if physics_estimator is not None:
             encoded = getattr(physics_estimator, "_last_encoder_output", None)
@@ -580,8 +622,11 @@ class Go2HardPACTCore(Go2PACT):
             references = physics_estimator.physics_references(
                 self.obs_history, nominal, encoded=encoded
             )
-            predicted_grf = references.grf_yaw_n
-            predicted_wrench = references.base_wrench_yaw
+            predicted_grf_scaled = references.grf_yaw_scaled
+            predicted_wrench_scaled = references.base_wrench_yaw_scaled
+            predicted_grf, predicted_wrench = self._physics_references_si(
+                references
+            )
             contact_probability = encoded.explicit[:, 3:7]
             estimated_base_linear_velocity_body = encoded.explicit[:, :3]
             self._physics_reference_serial += 1
@@ -590,8 +635,10 @@ class Go2HardPACTCore(Go2PACT):
                 raise RuntimeError(
                     "HardPACT QP requires the deployment physics estimator before env.step"
                 )
-            predicted_grf = nominal.new_zeros(self.num_envs, 12)
-            predicted_wrench = nominal.new_zeros(self.num_envs, 6)
+            predicted_grf_scaled = nominal.new_zeros(self.num_envs, 12)
+            predicted_wrench_scaled = nominal.new_zeros(self.num_envs, 6)
+            predicted_grf = predicted_grf_scaled
+            predicted_wrench = predicted_wrench_scaled
             contact_probability = nominal.new_zeros(self.num_envs, 4)
             estimated_base_linear_velocity_body = nominal.new_zeros(self.num_envs, 3)
 
@@ -641,11 +688,18 @@ class Go2HardPACTCore(Go2PACT):
             interval_grf_world, pre_state.base_quaternion_xyzw
         ).flatten(1)
         interval_wrench_yaw = torch.cat((
-            world_to_yaw_local(wrench_world_applied[:, :3], pre_state.base_quaternion_xyzw),
-            world_to_yaw_local(wrench_world_applied[:, 3:], pre_state.base_quaternion_xyzw),
+            world_to_yaw_local(
+                torso_wrench_label_world[:, :3],
+                pre_state.base_quaternion_xyzw,
+            ),
+            world_to_yaw_local(
+                torso_wrench_label_world[:, 3:],
+                pre_state.base_quaternion_xyzw,
+            ),
         ), dim=-1)
-        sustained_wrench_yaw_normalized = self.sustained_wrench.yaw_local_normalized(
-            pre_state.base_quaternion_xyzw
+        sustained_wrench_yaw_scaled = (
+            self.sustained_wrench.yaw_local(pre_state.base_quaternion_xyzw)
+            * float(self.obs_scales.base_wrench)
         ).clone()
         reset_mask = self.reset_buf.bool().unsqueeze(-1)
         timeout_mask = self.time_out_buf.bool().unsqueeze(-1)
@@ -665,8 +719,8 @@ class Go2HardPACTCore(Go2PACT):
             "qp_joint_position": qp_state.joint_position.detach().clone(),
             "qp_joint_velocity": qp_state.joint_velocity.detach().clone(),
             "predicted_contact_probability": contact_probability.detach().clone(),
-            "predicted_grf_yaw": predicted_grf.detach().clone(),
-            "predicted_base_wrench_yaw": predicted_wrench.detach().clone(),
+            "predicted_grf_yaw_scaled": predicted_grf_scaled.detach().clone(),
+            "predicted_base_wrench_yaw_scaled": predicted_wrench_scaled.detach().clone(),
             "pre_q": pre_q,
             "pre_v": pre_v,
             "post_q": post_q,
@@ -678,7 +732,8 @@ class Go2HardPACTCore(Go2PACT):
             "instantaneous_push_delta_world": push_delta_applied,
             "instantaneous_push_mask": push_mask_applied.float(),
             "sustained_wrench_world": wrench_world_applied,
-            "sustained_wrench_yaw_normalized": sustained_wrench_yaw_normalized,
+            "added_mass_wrench_world": added_mass_wrench_world,
+            "sustained_wrench_yaw_scaled": sustained_wrench_yaw_scaled,
             "sustained_wrench_active_mask": wrench_active_applied.float(),
             "reset_mask": reset_mask.float(),
             "timeout_mask": timeout_mask.float(),
@@ -688,6 +743,9 @@ class Go2HardPACTCore(Go2PACT):
             "reconstruction_target": self.reconstruction_target.clone(),
             "realized_randomized_parameters": realized_parameters.pack().clone(),
             "qp_correction": qp_result.correction.clone(),
+            "qp_grf_yaw_scaled": (
+                qp_result.grf * float(self.obs_scales.grf)
+            ).clone(),
             "qp_contact_slack": qp_result.contact_slack.clone(),
             "qp_residuals": torch.cat((
                 qp_result.equality_residual,
@@ -795,7 +853,10 @@ class Go2HardPACTCore(Go2PACT):
             self.instantaneous_pushes.actual_delta_world,
             self.instantaneous_pushes.event_mask.float(),
         ), dim=-1)
-        wrench_local = self.sustained_wrench.yaw_local_normalized(self.simulator.base_quat)
+        wrench_local = (
+            self.sustained_wrench.yaw_local(self.simulator.base_quat)
+            * float(self.obs_scales.base_wrench)
+        )
         wrench = torch.cat((wrench_local, self.sustained_wrench.active_mask.float()), dim=-1)
         masks = torch.cat((
             self.reset_buf.float().unsqueeze(-1),

@@ -292,7 +292,11 @@ class RandomizedDynamicsParameters:
 
 @dataclass(frozen=True)
 class QPStateEstimate:
-    """Deployment-state boundary accepted by the QP/BARD builder."""
+    """Deployment-state boundary accepted by the QP/BARD builder.
+
+    Predicted GRFs and base wrenches have already been inverse-scaled to
+    physical N/Nm before entering this boundary.
+    """
 
     base_linear_velocity_body: torch.Tensor
     base_quaternion_xyzw: torch.Tensor

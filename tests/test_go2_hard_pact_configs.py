@@ -20,6 +20,14 @@ from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import (
 
 
 class HardPACTConfigTests(unittest.TestCase):
+    def test_main_payload_is_capped_at_four_kilograms(self):
+        cfg = GO2HardPACTCfg()
+        domain_rand = cfg.domain_rand
+        self.assertEqual(domain_rand.added_mass_range, [-1.0, 4.0])
+        self.assertEqual(domain_rand.max_added_mass_max, 4.0)
+        self.assertEqual(cfg.normalization.obs_scales.grf, 0.01)
+        self.assertEqual(cfg.normalization.obs_scales.base_wrench, 0.01)
+
     def test_backend_selects_terrain_representation_without_task_subclass(self):
         self.assertEqual(hard_pact_terrain_mesh_type("genesis"), "heightfield")
         self.assertEqual(hard_pact_terrain_mesh_type("isaaclab"), "trimesh")
