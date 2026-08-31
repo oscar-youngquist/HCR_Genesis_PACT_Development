@@ -1,0 +1,2 @@
+from .go2_hard_pact_soft_only import Go2HardPACTSoftOnly
+from .go2_hard_pact_soft_only_config import GO2HardPACTSoftOnlyCfg, GO2HardPACTSoftOnlyCfgPPO

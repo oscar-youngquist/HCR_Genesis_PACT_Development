@@ -155,6 +155,49 @@ class Terrain:
         stone_distance = 0.05 if difficulty==0 else 0.1
         gap_size = 1. * difficulty
         pit_depth = 0.3 * difficulty
+        if getattr(self.cfg, "hard_pact_terrain_suite", False):
+            # The paper tasks use the same six branches in every simulator.
+            # The actor/QP never receives the resulting map or its normals.
+            if len(self.proportions) != 6:
+                raise ValueError("HardPACT terrain suite requires six proportions")
+            if choice < self.proportions[0]:
+                pass  # explicit flat branch
+            elif choice < self.proportions[1]:
+                terrain_utils.pyramid_sloped_terrain(
+                    terrain,
+                    slope=slope * (-1.0 if choice % 0.02 < 0.01 else 1.0),
+                    platform_size=self.platform_size,
+                    terrain_type=self.type,
+                )
+            elif choice < self.proportions[2]:
+                terrain_utils.random_uniform_terrain(
+                    terrain,
+                    min_height=-rough_height,
+                    max_height=rough_height,
+                    step=0.005,
+                    downsampled_scale=0.2,
+                    terrain_type=self.type,
+                )
+            elif choice < self.proportions[4]:
+                signed_height = -step_height if choice < self.proportions[3] else step_height
+                terrain_utils.pyramid_stairs_terrain(
+                    terrain,
+                    step_width=0.4,
+                    step_height=signed_height,
+                    platform_size=self.platform_size,
+                    terrain_type=self.type,
+                )
+            else:
+                terrain_utils.discrete_obstacles_terrain(
+                    terrain,
+                    discrete_obstacles_height,
+                    min_size=1.0,
+                    max_size=2.0,
+                    num_rects=20,
+                    platform_size=self.platform_size,
+                    terrain_type=self.type,
+                )
+            return terrain
         if choice < self.proportions[0]:
             if choice < self.proportions[0]/ 2: # slope
                 slope *= -1

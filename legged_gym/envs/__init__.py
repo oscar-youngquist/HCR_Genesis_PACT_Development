@@ -111,6 +111,17 @@ from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos import Go2PACTPos
 
 from legged_gym.envs.go2.go2_pact.go2_pact_config import GO2PACTCfg, GO2PACTCfgPPO
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
+if SIMULATOR in ("genesis", "isaaclab"):
+    from legged_gym.envs.go2.go2_hard_pact import Go2HardPACT, GO2HardPACTCfg, GO2HardPACTCfgPPO
+    from legged_gym.envs.go2.go2_hard_pact_pos import Go2HardPACTPos, GO2HardPACTPosCfg, GO2HardPACTPosCfgPPO
+    from legged_gym.envs.go2.go2_hard_pact_baseline import Go2HardPACTBaseline, GO2HardPACTBaselineCfg, GO2HardPACTBaselineCfgPPO
+    from legged_gym.envs.go2.go2_hard_pact_soft_only import Go2HardPACTSoftOnly, GO2HardPACTSoftOnlyCfg, GO2HardPACTSoftOnlyCfgPPO
+    from legged_gym.envs.go2.go2_hard_pact_hard_only import Go2HardPACTHardOnly, GO2HardPACTHardOnlyCfg, GO2HardPACTHardOnlyCfgPPO
+    from legged_gym.envs.go2.go2_hard_pact_full import Go2HardPACTFull, GO2HardPACTFullCfg, GO2HardPACTFullCfgPPO
+    from legged_gym.envs.go2.go2_hard_pact_stop_gradient_qp import Go2HardPACTStopGradientQP, GO2HardPACTStopGradientQPCfg, GO2HardPACTStopGradientQPCfgPPO
+    from legged_gym.envs.go2.go2_hard_pact_soft_penalty import Go2HardPACTSoftPenalty, GO2HardPACTSoftPenaltyCfg, GO2HardPACTSoftPenaltyCfgPPO
+    from legged_gym.envs.go2.go2_hard_pact_inverse_only import Go2HardPACTInverseOnly, GO2HardPACTInverseOnlyCfg, GO2HardPACTInverseOnlyCfgPPO
+    from legged_gym.envs.go2.go2_hard_pact_rollout_only import Go2HardPACTRolloutOnly, GO2HardPACTRolloutOnlyCfg, GO2HardPACTRolloutOnlyCfgPPO
 
 from legged_gym.envs.go2.go2_kite.go2_kite_config import GO2KITECfg, GO2KITECfgPPO
 from legged_gym.envs.go2.go2_kite.go2_kite import Go2KITE
@@ -149,6 +160,19 @@ task_registry.register("go1_abl3", Go1ABL3, GO1ABL3Cfg(), GO1ABL3CfgPPO())
 
 task_registry.register("go2_pact_pos", Go2PACTPos, GO2PACTPosCfg(), GO2PACTPosCfgPPO())
 task_registry.register("go2_pact", Go2PACT, GO2PACTCfg(), GO2PACTCfgPPO())
+if SIMULATOR in ("genesis", "isaaclab"):
+    task_registry.register("go2_hard_pact", Go2HardPACT, GO2HardPACTCfg(), GO2HardPACTCfgPPO())
+    task_registry.register("Go2HardPACT", Go2HardPACT, GO2HardPACTCfg(), GO2HardPACTCfgPPO())
+    task_registry.register("go2_hard_pact_pos", Go2HardPACTPos, GO2HardPACTPosCfg(), GO2HardPACTPosCfgPPO())
+    task_registry.register("Go2HardPACTPos", Go2HardPACTPos, GO2HardPACTPosCfg(), GO2HardPACTPosCfgPPO())
+    task_registry.register("go2_hard_pact_baseline", Go2HardPACTBaseline, GO2HardPACTBaselineCfg(), GO2HardPACTBaselineCfgPPO())
+    task_registry.register("go2_hard_pact_soft_only", Go2HardPACTSoftOnly, GO2HardPACTSoftOnlyCfg(), GO2HardPACTSoftOnlyCfgPPO())
+    task_registry.register("go2_hard_pact_hard_only", Go2HardPACTHardOnly, GO2HardPACTHardOnlyCfg(), GO2HardPACTHardOnlyCfgPPO())
+    task_registry.register("go2_hard_pact_full", Go2HardPACTFull, GO2HardPACTFullCfg(), GO2HardPACTFullCfgPPO())
+    task_registry.register("go2_hard_pact_stop_gradient_qp", Go2HardPACTStopGradientQP, GO2HardPACTStopGradientQPCfg(), GO2HardPACTStopGradientQPCfgPPO())
+    task_registry.register("go2_hard_pact_soft_penalty", Go2HardPACTSoftPenalty, GO2HardPACTSoftPenaltyCfg(), GO2HardPACTSoftPenaltyCfgPPO())
+    task_registry.register("go2_hard_pact_inverse_only", Go2HardPACTInverseOnly, GO2HardPACTInverseOnlyCfg(), GO2HardPACTInverseOnlyCfgPPO())
+    task_registry.register("go2_hard_pact_rollout_only", Go2HardPACTRolloutOnly, GO2HardPACTRolloutOnlyCfg(), GO2HardPACTRolloutOnlyCfgPPO())
 
 task_registry.register("go2_kite", Go2KITE, GO2KITECfg(), GO2KITECfgPPO())
 task_registry.register("go2_kite_baseline", Go2KITEBaseline, GO2KITEBaselineCfg(), GO2KITEBaselineCfgPPO())

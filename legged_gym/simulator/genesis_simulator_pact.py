@@ -116,6 +116,24 @@ class GenesisSimulator_PACT(Simulator):
         #     extract the values used to calculate the dynamics consitentcy reward separately.
         self._grfs_buf[:] = self._robot.get_links_net_contact_force()[:, self._feet_indices, :].reshape(self._base_pos.shape[0], self._grf_dim)
 
+        # HardPACT uses the GPU-native BARD contract owned by the task core.
+        # Do not invoke the legacy runner-created CPU Pinocchio worker in this
+        # mode; retain every simulator state/contact/terrain update above and
+        # below. Legacy Go2 PACT continues through the original path.
+        if getattr(self._cfg.sim, "use_hard_pact_simulator", False):
+            if self._cfg.asset.obtain_link_contact_states:
+                self._link_contact_states = 1.0 * (
+                    torch.norm(
+                        self._link_contact_forces[:, self._contact_state_link_indices, :],
+                        dim=-1,
+                    ) > 1.0
+                )
+            if self._cfg.terrain.measure_heights:
+                self._update_surrounding_heights()
+                if self._cfg.terrain.obtain_terrain_info_around_feet:
+                    self._calc_terrain_info_around_feet()
+            return
+
         # All the below is done in the pinocchio indexing scheme [FL, FR, RL, RR]
         # Use the Pinocchio library to calculate the (1) contact forces and (2) whole-body dynamics of the robot for use
         #     in the dynamic consistency reward and PINN loss. All done in WORLD FRAME!
@@ -1099,7 +1117,24 @@ class GenesisSimulator_PACT(Simulator):
         #     link.name for link in self._robot.links if self._cfg.asset.foot_name in link.name]
 
         self._feet_names = self._cfg.asset.foot_name
-        self._feet_indices = find_link_indices(self._feet_names)
+        if getattr(self._cfg.sim, "use_hard_pact_simulator", False):
+            # HardPACT's canonical force contract is FR, FL, RR, RL.  The
+            # legacy substring helper returns URDF traversal order instead of
+            # caller order, so resolve each configured foot independently.
+            self._feet_indices = []
+            for foot_name in self._feet_names:
+                matches = [
+                    link.idx - self._robot.link_start
+                    for link in self._robot.links
+                    if foot_name == link.name
+                ]
+                if len(matches) != 1:
+                    raise RuntimeError(
+                        f"expected one Genesis link named {foot_name!r}, got {matches}"
+                    )
+                self._feet_indices.append(matches[0])
+        else:
+            self._feet_indices = find_link_indices(self._feet_names)
         
         print(f"feet names: {self._feet_names}, feet link indices: {self._feet_indices}")
         assert len(self._feet_indices) > 0

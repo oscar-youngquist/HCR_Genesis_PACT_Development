@@ -1,0 +1,1 @@
+from legged_gym.envs.go2.go2_hard_pact.ablation_configs import GO2HardPACTFullCfg, GO2HardPACTFullCfgPPO

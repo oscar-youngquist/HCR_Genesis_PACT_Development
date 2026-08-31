@@ -40,3 +40,9 @@ from .actor_critic_kite import ActorCritic_KITE, ContextDecoderKITE
 from .actor_critic_pact_pos import ActorCritic_PACT_Pos
 from .actor_critic_postau import ActorCritic_PosTau
 from .actor_critic_rl2ac import ActorCritic_RL2AC
+from .actor_critic_go2_hard_pact import (
+    ActorCriticGo2HardPACT,
+    ActorCriticGo2HardPACTPos,
+    DeploymentPhysicsEstimator,
+    migrate_hard_pact_pos_checkpoint,
+)

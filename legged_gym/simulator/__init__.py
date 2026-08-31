@@ -1,10 +1,4 @@
 from .simulator import Simulator
-from .genesis_simulator import GenesisSimulator
-from .isaacgym_simulator import IsaacGymSimulator
-from .isaaclab_simulator import IsaacLabSimulator
-from .genesis_simulator_pact import GenesisSimulator_PACT
-from .genesis_simulator_pact_pos import GenesisSimulator_PACT_Pos
-from .genesis_simulator_pact_water import GenesisSimulator_PACT_Water
-from .genesis_simulator_pact_nopinn import GenesisSimulator_PACT_NoPINN
-from .genesis_simulator_pact_postau import GenesisSimulator_PACT_PosTau
-from .genesis_simulator_pact_rl2ac import GenesisSimulator_PACT_RL2AC
+
+# Backends are imported lazily by BaseTask. Eager imports violate Isaac Gym's
+# required import order and pull Genesis-only modules into other runtimes.

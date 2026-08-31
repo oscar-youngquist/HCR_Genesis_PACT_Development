@@ -1,7 +1,13 @@
 import numpy as np
 import torch
-import genesis.utils.mesh as mu  # adjust if your import path differs
 import trimesh
+
+from legged_gym import SIMULATOR
+
+if "genesis" in SIMULATOR:
+    import genesis.utils.mesh as mu
+else:
+    mu = None
 
 
 def _build_surface_frame_from_normal(center, normal):
@@ -120,4 +126,6 @@ def _create_sample_point_mesh(radius=0.008, color=(1.0, 0.0, 0.0, 1.0)):
     """
     Create a small sphere mesh for visualizing sampled terrain points.
     """
+    if mu is None:
+        raise RuntimeError("Genesis sample-point meshes are unavailable on this backend")
     return mu.create_sphere(radius=radius, color=color)

@@ -40,4 +40,13 @@ from .ppo_kite import PPO_KITE
 from .ppo_postau import PPO_PosTau
 from .ppo_rl2ac import PPO_RL2AC
 from .ppo_abl1 import PPO_ABL1
-from .ppo_abl3 import PPO_ABL3 
+from .ppo_abl3 import PPO_ABL3
+from .ppo_go2_hard_pact import (
+    PPOGo2HardPACT,
+    ReliabilityEMA,
+    combine_physics_losses,
+    inverse_dynamics_loss,
+    pcgrad_backward_two_objectives,
+    rollout_loss,
+    supervised_physics_head_losses,
+)

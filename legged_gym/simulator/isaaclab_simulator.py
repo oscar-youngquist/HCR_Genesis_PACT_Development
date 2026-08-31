@@ -24,6 +24,11 @@ class IsaacLabSimulator(Simulator):
     def __init__(self, cfg, sim_params: dict, device, headless):
         self._sim_params = sim_params
         super().__init__(cfg, sim_params, device, headless)
+
+    @property
+    def feet_indices(self):
+        """Contact-sensor indices used by the legacy reward contract."""
+        return self._feet_contact_indices
     
     #----- Public methods -----#
     def step(self, actions):
@@ -299,7 +304,14 @@ class IsaacLabSimulator(Simulator):
         # Add contact sensors
         contact_sensor_cfg = ContactSensorCfg(
             prim_path="/World/envs/env_.*/" + self._cfg.asset.name + "/.*", # track all links of the robot, but only the ones specified in cfg will be used for termination and penalty
-            update_period=self._control_dt,                      # update every control step
+            # HardPACT supervises the conditioned interval average and must
+            # observe every physics-decimation substep, not a held control-rate
+            # sample. Legacy tasks retain their original control-rate sensor.
+            update_period=(
+                self._sim_params["dt"]
+                if getattr(self._cfg.sim, "use_hard_pact_simulator", False)
+                else self._control_dt
+            ),
             history_length=1,                       # keep contact history of last 2 steps
             debug_vis=not self._headless,           # visualize contact points if not headless
         )
@@ -383,12 +395,37 @@ class IsaacLabSimulator(Simulator):
         self._penalized_contact_indices = find_link_contact_indices(
             self._cfg.asset.penalize_contacts_on)
         print(f"Penalized contact link indices: {self._penalized_contact_indices}")
-        self._feet_names = [
-            link for link in self._robot.body_names if self._cfg.asset.foot_name in link
-        ]
+        configured_feet = self._cfg.asset.foot_name
+        if isinstance(configured_feet, str):
+            self._feet_names = [
+                link for link in self._robot.body_names if configured_feet in link
+            ]
+        else:
+            missing_feet = [name for name in configured_feet if name not in self._robot.body_names]
+            if missing_feet:
+                raise ValueError(f"configured foot links are missing: {missing_feet}")
+            self._feet_names = list(configured_feet)
         # the order of bodies in contact sensors is different from the order of bodies in the robot articulation, so we need to find indices separately
-        self._feet_contact_indices = find_link_contact_indices(self._feet_names)
-        self._feet_indices = find_link_indices(self._feet_names)
+        def ordered_indices(all_names, requested_names):
+            result = []
+            for requested in requested_names:
+                matches = [
+                    index for index, actual in enumerate(all_names)
+                    if actual == requested or requested in actual
+                ]
+                if len(matches) != 1:
+                    raise ValueError(
+                        f"foot {requested!r} resolved to {matches} in backend names"
+                    )
+                result.append(matches[0])
+            return result
+
+        self._feet_contact_indices = ordered_indices(
+            self._contact_sensors.body_names, self._feet_names
+        )
+        self._feet_indices = ordered_indices(
+            self._robot.body_names, self._feet_names
+        )
         print(f"feet names: {self._feet_names}")
         assert len(self._feet_indices) > 0
         # get base link index in the robot articulation
@@ -614,6 +651,8 @@ class IsaacLabSimulator(Simulator):
         #     z_out_of_bound = base_pos[:, 2] <= min_height
         #     y_out_of_bound = y_out_of_bound | z_out_of_bound
         out_of_bound_buf = x_out_of_bound | y_out_of_bound
+        if getattr(self._cfg.sim, "use_hard_pact_simulator", False):
+            self._base_pos_out_of_bounds_buf.copy_(out_of_bound_buf)
         env_ids = out_of_bound_buf.nonzero(as_tuple=False).flatten()
         if len(env_ids) == 0:
             return

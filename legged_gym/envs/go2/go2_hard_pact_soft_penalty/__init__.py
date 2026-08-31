@@ -1,0 +1,2 @@
+from .go2_hard_pact_soft_penalty import Go2HardPACTSoftPenalty
+from .go2_hard_pact_soft_penalty_config import GO2HardPACTSoftPenaltyCfg, GO2HardPACTSoftPenaltyCfgPPO
