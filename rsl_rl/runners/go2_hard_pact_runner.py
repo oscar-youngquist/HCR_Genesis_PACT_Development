@@ -189,6 +189,30 @@ class Go2HardPACTRunner:
                 self.env.recompute_auxiliary_outputs,
                 iteration,
             )
+            if episode_infos and self.alg.use_adaptive_entropy:
+                performance_metrics = {
+                    "lin_vel_tracking": 0.0,
+                    "ang_vel_tracking": 0.0,
+                    "terrain_level": 0.0,
+                }
+                episode_keys = {
+                    "rew_tracking_lin_vel": "lin_vel_tracking",
+                    "rew_tracking_ang_vel": "ang_vel_tracking",
+                    "terrain_level": "terrain_level",
+                }
+                for episode in episode_infos:
+                    for episode_key, metric_key in episode_keys.items():
+                        if episode_key not in episode:
+                            continue
+                        value = episode[episode_key]
+                        if torch.is_tensor(value):
+                            value = value.float().mean().item()
+                        performance_metrics[metric_key] = max(
+                            performance_metrics[metric_key], float(value)
+                        )
+                metrics["policy/entropy_coefficient"] = (
+                    self.alg.update_adaptive_entropy_coef(performance_metrics)
+                )
             elapsed = time.perf_counter() - start
             self.tot_time += elapsed
             self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
@@ -311,6 +335,7 @@ class Go2HardPACTRunner:
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
             "iteration": self.current_learning_iteration,
             "reliability_ema": self.alg.reliability.values,
+            "current_entropy_coef": self.alg.current_entropy_coef,
             "infos": infos,
         }, path)
 
@@ -351,6 +376,10 @@ class Go2HardPACTRunner:
                     checkpoint["optimizer_state_dict"]
                 )
         self.current_learning_iteration = int(checkpoint.get("iteration", 0))
+        if "current_entropy_coef" in checkpoint:
+            self.alg.current_entropy_coef = float(
+                checkpoint["current_entropy_coef"]
+            )
         return checkpoint.get("infos")
 
     def get_inference_policy(self, device=None):

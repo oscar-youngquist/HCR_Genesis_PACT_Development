@@ -12,6 +12,71 @@ from rsl_rl.modules.actor_critic_go2_hard_pact import ActorCriticGo2HardPACT
 
 
 class LegacyPACTTrainingLifecycleTests(unittest.TestCase):
+    def test_adaptive_entropy_matches_go2_pact_schedule(self):
+        policy = ActorCriticGo2HardPACT(
+            actor_layers=(16,), critic_layers=(16,), encoder_layers=(16,),
+            physics_head_layers=(16,),
+        )
+        algorithm = PPOGo2HardPACT(
+            policy,
+            entropy_coef=0.01,
+            use_adaptive_entropy=True,
+            adaptive_ent_bounds=(0.005, 0.01),
+            adaptive_ent_lin_threshold=0.75,
+            adaptive_ent_ang_threshold=0.35,
+            adaptive_ent_ter_threshold=6.0,
+            adaptive_ent_softmax_temp=2.0,
+        )
+        self.assertAlmostEqual(
+            algorithm.update_adaptive_entropy_coef({
+                "lin_vel_tracking": 0.75,
+                "ang_vel_tracking": 0.35,
+                "terrain_level": 6.0,
+            }),
+            0.005,
+        )
+        self.assertAlmostEqual(
+            algorithm.update_adaptive_entropy_coef({
+                "lin_vel_tracking": 0.0,
+                "ang_vel_tracking": 0.0,
+                "terrain_level": 0.0,
+            }),
+            0.01,
+        )
+        algorithm.set_entropy_coef(0.007)
+        self.assertEqual(algorithm.current_entropy_coef, 0.007)
+
+    def test_ppo_loss_uses_current_adaptive_entropy_coefficient(self):
+        torch.manual_seed(7)
+        policy = ActorCriticGo2HardPACT(
+            actor_layers=(16,), critic_layers=(16,), encoder_layers=(16,),
+            physics_head_layers=(16,),
+        )
+        algorithm = PPOGo2HardPACT(
+            policy, use_adaptive_entropy=True, entropy_coef=0.0
+        )
+        batch = {
+            "observation": torch.randn(2, 57),
+            "history": torch.randn(2, 57 * 20),
+            "critic_observation": torch.randn(2, 198),
+            "raw_action": torch.randn(2, 24),
+            "raw_action_log_probability": torch.zeros(2, 1),
+            "action_mean": torch.zeros(2, 24),
+            "action_std": torch.ones(2, 24),
+            "advantage": torch.randn(2, 1),
+            "value": torch.randn(2, 1),
+            "return": torch.randn(2, 1),
+        }
+        algorithm.set_entropy_coef(0.0)
+        zero_entropy_loss = algorithm._compute_ppo_loss(batch)[0]
+        entropy = policy.entropy.mean().detach()
+        algorithm.set_entropy_coef(0.2)
+        adaptive_entropy_loss = algorithm._compute_ppo_loss(batch)[0]
+        torch.testing.assert_close(
+            adaptive_entropy_loss,
+            zero_entropy_loss - 0.2 * entropy,
+        )
+
     def test_act_process_storage_update_lifecycle(self):
         torch.manual_seed(19)
         policy = ActorCriticGo2HardPACT(

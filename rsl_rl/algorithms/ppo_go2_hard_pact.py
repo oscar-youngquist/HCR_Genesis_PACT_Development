@@ -125,6 +125,12 @@ class PPOGo2HardPACT:
         lam=0.95,
         value_loss_coef=1.0,
         entropy_coef=0.01,
+        use_adaptive_entropy=True,
+        adaptive_ent_bounds=(0.01, 0.001),
+        adaptive_ent_lin_threshold=0.75,
+        adaptive_ent_ang_threshold=0.35,
+        adaptive_ent_ter_threshold=5.0,
+        adaptive_ent_softmax_temp=2.0,
         max_grad_norm=1.0,
         num_learning_epochs=5,
         num_mini_batches=4,
@@ -175,6 +181,17 @@ class PPOGo2HardPACT:
         self.lam = float(lam)
         self.value_loss_coef = float(value_loss_coef)
         self.entropy_coef = float(entropy_coef)
+        self.use_adaptive_entropy = bool(use_adaptive_entropy)
+        self.entropy_coef_bounds = tuple(float(value) for value in adaptive_ent_bounds)
+        if len(self.entropy_coef_bounds) != 2:
+            raise ValueError("adaptive_ent_bounds must contain exactly two values")
+        self.ent_linvelo_threshold = float(adaptive_ent_lin_threshold)
+        self.ent_angvelo_threshold = float(adaptive_ent_ang_threshold)
+        self.ent_terrain_threshold = float(adaptive_ent_ter_threshold)
+        self.ent_softmax_temperature = float(adaptive_ent_softmax_temp)
+        if self.ent_softmax_temperature <= 0.0:
+            raise ValueError("adaptive_ent_softmax_temp must be positive")
+        self.current_entropy_coef = float(entropy_coef)
         self.max_grad_norm = float(max_grad_norm)
         self.num_learning_epochs = int(num_learning_epochs)
         self.num_mini_batches = int(num_mini_batches)
@@ -258,6 +275,40 @@ class PPOGo2HardPACT:
             last_value = self.actor_critic.evaluate(last_critic_observation)
         self.storage.compute_returns(last_value, self.gamma, self.lam)
 
+    def set_entropy_coef(self, coef=1.0e-3):
+        if self.use_adaptive_entropy:
+            self.current_entropy_coef = float(coef)
+        else:
+            self.entropy_coef = float(coef)
+
+    def update_adaptive_entropy_coef(self, performance_metrics):
+        """Match Go2 PACT's performance-conditioned entropy schedule."""
+        lin_vel_tracking = float(performance_metrics.get("lin_vel_tracking", 0.0))
+        ang_vel_tracking = float(performance_metrics.get("ang_vel_tracking", 0.0))
+        terrain_level = float(performance_metrics.get("terrain_level", 0.0))
+
+        lin_vel_gap = max(0.0, self.ent_linvelo_threshold - lin_vel_tracking)
+        ang_vel_gap = max(0.0, self.ent_angvelo_threshold - ang_vel_tracking)
+        terrain_gap = max(0.0, self.ent_terrain_threshold - terrain_level)
+        normalized_gaps = torch.tensor(
+            [
+                lin_vel_gap / self.ent_linvelo_threshold
+                if self.ent_linvelo_threshold > 0.0 else 0.0,
+                ang_vel_gap / self.ent_angvelo_threshold
+                if self.ent_angvelo_threshold > 0.0 else 0.0,
+                terrain_gap / self.ent_terrain_threshold
+                if self.ent_terrain_threshold > 0.0 else 0.0,
+            ],
+            dtype=torch.float32,
+        )
+        weights = F.softmax(
+            normalized_gaps / self.ent_softmax_temperature, dim=0
+        )
+        weighted_gap = torch.sum(weights * normalized_gaps).item()
+        lower, upper = self.entropy_coef_bounds
+        self.current_entropy_coef = lower + weighted_gap * (upper - lower)
+        return self.current_entropy_coef
+
     def _compute_ppo_loss(self, batch):
         """Legacy PACT PPO objective evaluated on the exact raw sample."""
         log_probability, entropy = self.actor_critic.evaluate_actions(
@@ -305,9 +356,13 @@ class PPOGo2HardPACT:
             ).mean()
         else:
             value_loss = (value - batch["return"]).square().mean()
+        entropy_coefficient = (
+            self.current_entropy_coef
+            if self.use_adaptive_entropy else self.entropy_coef
+        )
         total = (
             surrogate + self.value_loss_coef * value_loss
-            - self.entropy_coef * entropy.mean()
+            - entropy_coefficient * entropy.mean()
         )
         return total, surrogate, value_loss
 
@@ -674,6 +729,10 @@ class PPOGo2HardPACT:
                 "loss/rollout": recomputed["physics"].rollout,
                 "loss/projection": recomputed["physics"].projection,
                 "loss/auxiliary": auxiliary_loss,
+                "policy/entropy_coefficient": (
+                    self.current_entropy_coef
+                    if self.use_adaptive_entropy else self.entropy_coef
+                ),
                 "gradient/ppo_norm": diagnostics.primary_norm,
                 "gradient/physics_norm": diagnostics.auxiliary_norm,
                 "gradient/cosine": diagnostics.cosine,
