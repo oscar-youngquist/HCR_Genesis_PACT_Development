@@ -205,10 +205,18 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         explicit_dim = 11
         encoder_layers = [256, 128]
         physics_head_layers = [128, 128]
-        # Observation-scaled defaults. The runner derives both entries from
-        # the active physical ranges and normalization configuration.
+        # Observation-scaled physics-head output gains for the main profile.
+        # The corresponding physical wrench envelope is approximately
+        # [60, 60, 99.24] N and [23.4403, 23.4403, 23.4403] Nm. The latter is
+        # 12 Nm of sustained disturbance plus the conservative 4 kg payload
+        # moment at the configured [0.20, 0.15, 0.15] m COM envelope. The
+        # runner recomputes these values from the effective DR ranges so edits
+        # to mass, COM, gravity, or normalization remain authoritative.
         grf_scale = [1.20, 1.20, 2.50] * 4
-        wrench_scale = [0.60, 0.60, 0.9924, 0.12, 0.12, 0.12]
+        wrench_scale = [
+            0.60, 0.60, 0.9924,
+            0.234403276, 0.234403276, 0.234403276,
+        ]
         actor_layers = [512, 256, 128]
         critic_layers = [512, 256, 128]
         position_pretraining = False

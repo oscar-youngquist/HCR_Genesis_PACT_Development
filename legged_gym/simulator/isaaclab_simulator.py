@@ -37,11 +37,16 @@ class IsaacLabSimulator(Simulator):
         self._last_feet_vel[:] = self._robot.data.body_link_vel_w[:, self.feet_indices, :3]
         self._last_dof_vel[:] = self._robot.data.joint_vel[:]
         for _ in range(self._cfg.control.decimation):
-            self._compute_torques(actions)
+            if getattr(self._cfg.sim, "use_hard_pact_simulator", False):
+                self._hard_pact_pre_physics_substep(actions)
+            else:
+                self._compute_torques(actions)
             self._robot.write_data_to_sim()
             self._sim.step(render=False)
             self._robot.update(self._sim_params["dt"])
             self._contact_sensors.update(self._sim_params["dt"])
+            if getattr(self._cfg.sim, "use_hard_pact_simulator", False):
+                self._hard_pact_post_physics_substep()
         if not self._headless:
             self._sim.render()
 

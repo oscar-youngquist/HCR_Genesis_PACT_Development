@@ -34,6 +34,7 @@ class Go2HardPACTRunner:
         policy_cfg = dict(train_cfg["policy"])
         wrench_cfg = env.cfg.disturbances.sustained_wrench
         mass_report = env.domain_randomization_report["base_mass"]
+        com_report = env.domain_randomization_report["base_com"]
         effective_mass_ranges = mass_report.get("effective_ranges") or {}
         added_mass_range = effective_mass_ranges.get(
             "added_mass_range", (0.0, 0.0)
@@ -51,6 +52,12 @@ class Go2HardPACTRunner:
             added_mass_range = (
                 min(added_mass_candidates), max(added_mass_candidates)
             )
+        effective_com_ranges = com_report.get("effective_ranges") or {}
+        com_offset_ranges = (
+            effective_com_ranges.get("com_pos_x_range", (0.0, 0.0)),
+            effective_com_ranges.get("com_pos_y_range", (0.0, 0.0)),
+            effective_com_ranges.get("com_pos_z_range", (0.0, 0.0)),
+        )
         gravity_world = (
             (0.0, 0.0, 0.0)
             if bool(getattr(env.cfg.asset, "disable_gravity", False))
@@ -66,6 +73,7 @@ class Go2HardPACTRunner:
             wrench_cfg.torque_bounds_nm,
             added_mass_range,
             gravity_world,
+            com_offset_ranges=com_offset_ranges,
             include_sustained_force=(
                 bool(wrench_cfg.enabled)
                 and float(wrench_cfg.force_probability) > 0.0
@@ -146,8 +154,64 @@ class Go2HardPACTRunner:
         self.tot_time = 0.0
         self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
         self.last_migration_report = None
+        self.deployment_contract = self._deployment_contract()
         if log_dir:
             self._write_metadata()
+
+    def _deployment_contract(self):
+        """Return the exact force-unit contract carried by this policy."""
+        grf_observation_scale = float(self.env.obs_scales.grf)
+        wrench_observation_scale = float(self.env.obs_scales.base_wrench)
+        grf_scaled = (
+            self.actor_critic.physics_estimator.grf_scale.detach().cpu().tolist()
+        )
+        wrench_scaled = (
+            self.actor_critic.physics_estimator.wrench_scale.detach().cpu().tolist()
+        )
+        return {
+            "version": 1,
+            "force_frame": "yaw_local",
+            "grf_order": [
+                "FR_fx", "FR_fy", "FR_fz",
+                "FL_fx", "FL_fy", "FL_fz",
+                "RR_fx", "RR_fy", "RR_fz",
+                "RL_fx", "RL_fy", "RL_fz",
+            ],
+            "base_wrench_order": ["fx", "fy", "fz", "tx", "ty", "tz"],
+            "observation_scales": {
+                "grf": grf_observation_scale,
+                "base_wrench": wrench_observation_scale,
+            },
+            "head_output_scales_observation_units": {
+                "grf": grf_scaled,
+                "base_wrench": wrench_scaled,
+            },
+            "head_output_scales_physical_units": {
+                "grf_n": [
+                    value / grf_observation_scale for value in grf_scaled
+                ],
+                "base_wrench_n_nm": [
+                    value / wrench_observation_scale
+                    for value in wrench_scaled
+                ],
+            },
+            "conversion": {
+                "model_to_physical": "prediction_scaled / observation_scale",
+                "physical_to_model": "value_physical * observation_scale",
+            },
+            "checkpoint_buffer_keys": {
+                "grf": "physics_estimator.grf_scale",
+                "base_wrench": "physics_estimator.wrench_scale",
+            },
+        }
+
+    def _write_deployment_contract(self):
+        self.deployment_contract = self._deployment_contract()
+        path = os.path.join(
+            self.log_dir, "hard_pact_deployment_contract.json"
+        )
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(self.deployment_contract, stream, indent=2)
 
     def _write_metadata(self):
         try:
@@ -162,7 +226,7 @@ class Go2HardPACTRunner:
                 dependency_versions[package] = importlib.metadata.version(package)
             except importlib.metadata.PackageNotFoundError:
                 dependency_versions[package] = None
-        backend_name = self.env.backend.capabilities.name
+        backend_name = self.env.backend_capabilities.name
         try:
             backend_module = importlib.import_module(
                 {"genesis": "genesis", "isaaclab": "isaaclab"}[
@@ -184,7 +248,7 @@ class Go2HardPACTRunner:
             "config": self.cfg,
             "seed": self.cfg.get("seed"),
             "git_sha": git_sha,
-            "backend_contract": self.env.backend.metadata(),
+            "backend_contract": self.env.backend_metadata(),
             "backend_version": backend_version,
             "domain_randomization": self.env.domain_randomization_report,
             "python": platform.python_version(),
@@ -212,10 +276,12 @@ class Go2HardPACTRunner:
             "physics_parameter_source": str(
                 self.env.cfg.features.physics_parameter_source
             ),
+            "deployment_contract_file": "hard_pact_deployment_contract.json",
         }
         os.makedirs(self.log_dir, exist_ok=True)
         with open(os.path.join(self.log_dir, "hard_pact_metadata.json"), "w", encoding="utf-8") as stream:
             json.dump(metadata, stream, indent=2, default=str)
+        self._write_deployment_contract()
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         self.alg.train_mode()
@@ -431,6 +497,15 @@ class Go2HardPACTRunner:
             migrated = True
         else:
             self.actor_critic.load_state_dict(source_state, strict=True)
+        # The checkpoint model buffers are authoritative. Keep PPO's loss
+        # normalizers synchronized when training is resumed.
+        self.alg.grf_normalization_scale = tuple(
+            self.actor_critic.physics_estimator.grf_scale.detach().cpu().tolist()
+        )
+        self.alg.wrench_normalization_scale = tuple(
+            self.actor_critic.physics_estimator.wrench_scale.detach().cpu().tolist()
+        )
+        self.deployment_contract = self._deployment_contract()
         # Position-stage optimizer moments have 12-D distribution tensors and
         # are not part of the documented model-only migration contract.
         if load_optimizer and not migrated:

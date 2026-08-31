@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .schema import world_to_yaw_local
+from .schema import body_to_world, world_to_yaw_local
 
 
 def _uniform(shape, low: float, high: float, *, device, dtype):
@@ -16,14 +16,20 @@ def _uniform(shape, low: float, high: float, *, device, dtype):
 def added_mass_gravity_wrench_world(
     added_mass: torch.Tensor,
     gravity_world: torch.Tensor,
+    com_offset_body: torch.Tensor,
+    base_quaternion_xyzw: torch.Tensor,
 ) -> torch.Tensor:
     """Equivalent persistent torso wrench relative to the nominal mass.
 
     The Genesis and Isaac Lab mass randomizers store a signed mass delta and
     apply it to the base link.  Its persistent external-force equivalent is
-    ``delta_mass * gravity``.  The wrench is expressed at the torso COM, so
-    this contribution has no torque component; COM displacement remains a
-    separate dynamics randomization.
+    ``delta_mass * gravity``.  ``com_offset_body`` is the known randomized COM
+    displacement from the nominal torso wrench origin.  It is rotated into
+    the world frame and contributes the moment ``r_world x force_world``.
+
+    The returned linear force and moment are both expressed in world axes at
+    the nominal torso origin.  A zero COM displacement recovers the previous
+    force-only label.
     """
     if added_mass.ndim != 2 or added_mass.shape[-1] != 1:
         raise ValueError("added_mass must be (batch,1)")
@@ -34,8 +40,24 @@ def added_mass_gravity_wrench_world(
         gravity_world = gravity_world.unsqueeze(0).expand(added_mass.shape[0], -1)
     if gravity_world.shape != (added_mass.shape[0], 3):
         raise ValueError("gravity_world must be (3,) or (batch,3)")
+    com_offset_body = torch.as_tensor(
+        com_offset_body, device=added_mass.device, dtype=added_mass.dtype
+    )
+    if com_offset_body.shape != (added_mass.shape[0], 3):
+        raise ValueError("com_offset_body must be (batch,3)")
+    base_quaternion_xyzw = torch.as_tensor(
+        base_quaternion_xyzw,
+        device=added_mass.device,
+        dtype=added_mass.dtype,
+    )
+    if base_quaternion_xyzw.shape != (added_mass.shape[0], 4):
+        raise ValueError("base_quaternion_xyzw must be (batch,4)")
     force_world = added_mass * gravity_world
-    return torch.cat((force_world, torch.zeros_like(force_world)), dim=-1)
+    com_offset_world = body_to_world(
+        com_offset_body, base_quaternion_xyzw
+    )
+    moment_world = torch.cross(com_offset_world, force_world, dim=-1)
+    return torch.cat((force_world, moment_world), dim=-1)
 
 
 def torso_wrench_scale_from_ranges(
@@ -44,6 +66,7 @@ def torso_wrench_scale_from_ranges(
     added_mass_range,
     gravity_world,
     *,
+    com_offset_ranges=None,
     include_sustained_force=True,
     include_sustained_torque=True,
     include_added_mass=True,
@@ -65,12 +88,36 @@ def torso_wrench_scale_from_ranges(
         if include_sustained_torque else 0.0
     )
     force_scale = torch.full((3,), sustained_force, dtype=torch.float64)
+    torque_scale = torch.full((3,), sustained_torque, dtype=torch.float64)
     if include_added_mass:
         maximum_mass_delta = max(
             abs(float(value)) for value in added_mass_range
         )
         force_scale += maximum_mass_delta * gravity.abs()
-    return tuple(force_scale.tolist()) + (sustained_torque,) * 3
+        if com_offset_ranges is not None:
+            if len(com_offset_ranges) != 3 or any(
+                len(axis_range) != 2 for axis_range in com_offset_ranges
+            ):
+                raise ValueError(
+                    "com_offset_ranges must contain three two-value ranges"
+                )
+            maximum_offset = torch.tensor(
+                [
+                    max(abs(float(value)) for value in axis_range)
+                    for axis_range in com_offset_ranges
+                ],
+                dtype=torch.float64,
+            )
+            # The COM offset is body-local, so its world direction changes
+            # with torso orientation. Use a rotation-invariant conservative
+            # bound for every world moment component.
+            maximum_moment = (
+                maximum_mass_delta
+                * torch.linalg.vector_norm(gravity)
+                * torch.linalg.vector_norm(maximum_offset)
+            )
+            torque_scale += maximum_moment
+    return tuple(force_scale.tolist()) + tuple(torque_scale.tolist())
 
 
 @dataclass(frozen=True)

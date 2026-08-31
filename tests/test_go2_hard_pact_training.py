@@ -1,4 +1,7 @@
 import unittest
+import json
+import tempfile
+import types
 
 import torch
 
@@ -9,9 +12,71 @@ from rsl_rl.algorithms.ppo_go2_hard_pact import (
 from rsl_rl.algorithms.pc_grad import PCGrad
 from rsl_rl.go2_hard_pact_schema import TRANSITION_FIELD_DIMS
 from rsl_rl.modules.actor_critic_go2_hard_pact import ActorCriticGo2HardPACT
+from rsl_rl.runners.go2_hard_pact_runner import Go2HardPACTRunner
 
 
 class LegacyPACTTrainingLifecycleTests(unittest.TestCase):
+    @staticmethod
+    def _runner_with_policy(policy):
+        runner = object.__new__(Go2HardPACTRunner)
+        runner.actor_critic = policy
+        runner.env = types.SimpleNamespace(
+            obs_scales=types.SimpleNamespace(grf=0.01, base_wrench=0.01)
+        )
+        return runner
+
+    def test_deployment_contract_records_scaled_and_physical_head_gains(self):
+        policy = ActorCriticGo2HardPACT(
+            actor_layers=(16,), critic_layers=(16,), encoder_layers=(16,),
+            physics_head_layers=(16,),
+            grf_scale=(1.0,) * 12,
+            wrench_scale=(0.6, 0.6, 0.9924, 0.2344, 0.2344, 0.2344),
+        )
+        runner = self._runner_with_policy(policy)
+
+        contract = runner._deployment_contract()
+
+        self.assertEqual(contract["observation_scales"]["base_wrench"], 0.01)
+        self.assertEqual(
+            contract["head_output_scales_observation_units"]["base_wrench"],
+            policy.physics_estimator.wrench_scale.tolist(),
+        )
+        physical = contract["head_output_scales_physical_units"][
+            "base_wrench_n_nm"
+        ]
+        self.assertAlmostEqual(physical[0], 60.0, places=5)
+        self.assertAlmostEqual(physical[3], 23.44, places=5)
+
+    def test_deployment_contract_is_json_not_checkpoint_duplication(self):
+        policy = ActorCriticGo2HardPACT(
+            actor_layers=(16,), critic_layers=(16,), encoder_layers=(16,),
+            physics_head_layers=(16,),
+        )
+        runner = self._runner_with_policy(policy)
+        runner.alg = PPOGo2HardPACT(policy)
+        runner.current_learning_iteration = 7
+        with tempfile.TemporaryDirectory() as directory:
+            runner.log_dir = directory
+            runner._write_deployment_contract()
+            path = f"{directory}/model.pt"
+            runner.save(path)
+            checkpoint = torch.load(path, map_location="cpu")
+            with open(
+                f"{directory}/hard_pact_deployment_contract.json",
+                encoding="utf-8",
+            ) as stream:
+                contract = json.load(stream)
+
+        self.assertNotIn("deployment_contract", checkpoint)
+        self.assertEqual(
+            contract["checkpoint_buffer_keys"]["base_wrench"],
+            "physics_estimator.wrench_scale",
+        )
+        torch.testing.assert_close(
+            checkpoint["model_state_dict"]["physics_estimator.wrench_scale"],
+            policy.physics_estimator.wrench_scale,
+        )
+
     def test_adaptive_entropy_matches_go2_pact_schedule(self):
         policy = ActorCriticGo2HardPACT(
             actor_layers=(16,), critic_layers=(16,), encoder_layers=(16,),

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from typing import Dict
+from dataclasses import asdict, dataclass
+from typing import Dict, Mapping
 
 import torch
 
@@ -11,7 +12,6 @@ from legged_gym import LEGGED_GYM_ROOT_DIR, SIMULATOR
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
 from legged_gym.utils.math_utils import quat_apply, wrap_to_pi
 
-from .backend import ADAPTERS, disable_unsupported_randomizations
 from .disturbances import (
     InstantaneousPushConfig,
     InstantaneousPushes,
@@ -29,16 +29,163 @@ from .qp import (
 )
 from .schema import (
     CANONICAL,
+    CanonicalState,
     QPStateEstimate,
     RECONSTRUCTION_SCHEMA,
     RandomizedDynamicsParameters,
+    body_to_world,
     fixed_gravity_normal,
+    permutation_by_name,
     reconstruct_coupled_nominal_torque,
+    reorder_named,
     validate_transition,
     world_to_body,
     world_to_yaw_local,
     yaw_quaternion_xyzw,
 )
+
+
+@dataclass(frozen=True)
+class BackendCapabilities:
+    name: str
+    supports_ideal_torque: bool
+    supports_interval_grf: bool
+    supports_sustained_wrench: bool
+    supports_reset_domain_rand: bool
+    supports_domain_rand_curriculum: bool
+    supports_friction: bool
+    supports_base_mass: bool
+    supports_base_com: bool
+    supports_control_delay: bool
+    supports_pd_gain: bool
+    supports_motor_strength: bool
+    supports_armature: bool
+    supports_joint_friction: bool
+    supports_joint_stiffness: bool
+    supports_joint_damping: bool
+    supports_instantaneous_disturbance: bool
+
+
+GENESIS_CAPABILITIES = BackendCapabilities(
+    name="genesis", supports_ideal_torque=True, supports_interval_grf=True,
+    supports_sustained_wrench=True, supports_reset_domain_rand=True,
+    supports_domain_rand_curriculum=True, supports_friction=True,
+    supports_base_mass=True, supports_base_com=True, supports_control_delay=True,
+    supports_pd_gain=True, supports_motor_strength=True, supports_armature=True,
+    supports_joint_friction=True, supports_joint_stiffness=True,
+    supports_joint_damping=True, supports_instantaneous_disturbance=True,
+)
+ISAACLAB_CAPABILITIES = BackendCapabilities(
+    name="isaaclab", supports_ideal_torque=True, supports_interval_grf=True,
+    supports_sustained_wrench=True, supports_reset_domain_rand=True,
+    supports_domain_rand_curriculum=False, supports_friction=True,
+    supports_base_mass=True, supports_base_com=True, supports_control_delay=True,
+    supports_pd_gain=True, supports_motor_strength=False, supports_armature=True,
+    supports_joint_friction=True, supports_joint_stiffness=False,
+    supports_joint_damping=True, supports_instantaneous_disturbance=True,
+)
+BACKEND_CAPABILITIES = {
+    "genesis": GENESIS_CAPABILITIES,
+    "isaaclab": ISAACLAB_CAPABILITIES,
+}
+
+
+@dataclass(frozen=True)
+class RandomizationRequest:
+    config_flag: str
+    range_names: tuple[str, ...]
+    capability: str
+
+
+RANDOMIZATION_SCHEMA: Mapping[str, RandomizationRequest] = {
+    "friction": RandomizationRequest(
+        "randomize_friction", ("friction_range",), "supports_friction"
+    ),
+    "base_mass": RandomizationRequest(
+        "randomize_base_mass", ("added_mass_range",), "supports_base_mass"
+    ),
+    "base_com": RandomizationRequest(
+        "randomize_com_displacement",
+        ("com_pos_x_range", "com_pos_y_range", "com_pos_z_range"),
+        "supports_base_com",
+    ),
+    "control_delay": RandomizationRequest(
+        "randomize_ctrl_delay", ("ctrl_delay_step_range",), "supports_control_delay"
+    ),
+    "kp_kd": RandomizationRequest(
+        "randomize_pd_gain", ("kp_range", "kd_range"), "supports_pd_gain"
+    ),
+    "motor_strength": RandomizationRequest(
+        "randomize_motor_strength", ("motor_strength_range",), "supports_motor_strength"
+    ),
+    "armature": RandomizationRequest(
+        "randomize_joint_armature", ("joint_armature_range",), "supports_armature"
+    ),
+    "joint_friction": RandomizationRequest(
+        "randomize_joint_friction", ("joint_friction_range",), "supports_joint_friction"
+    ),
+    "joint_stiffness": RandomizationRequest(
+        "randomize_joint_stiffness", ("joint_stiffness_range",), "supports_joint_stiffness"
+    ),
+    "joint_damping": RandomizationRequest(
+        "randomize_joint_damping", ("joint_damping_range",), "supports_joint_damping"
+    ),
+    "instantaneous_disturbance": RandomizationRequest(
+        "randomize_instantaneous_disturbances",
+        (
+            "instantaneous_planar_delta_v_range",
+            "instantaneous_downward_delta_vz_range",
+            "instantaneous_angular_delta_v_range",
+        ),
+        "supports_instantaneous_disturbance",
+    ),
+}
+
+
+def domain_randomization_report(domain_cfg, capabilities: BackendCapabilities) -> Dict[str, dict]:
+    """Report requested and effective randomizations for the selected simulator."""
+    report: Dict[str, dict] = {}
+    for name, item in RANDOMIZATION_SCHEMA.items():
+        requested = bool(getattr(domain_cfg, item.config_flag, False))
+        supported = bool(getattr(capabilities, item.capability))
+        ranges = {key: getattr(domain_cfg, key, None) for key in item.range_names}
+        report[name] = {
+            "requested": requested,
+            "supported": supported,
+            "active": requested and supported,
+            "requested_ranges": ranges,
+            "effective_ranges": ranges if requested and supported else None,
+            "application": (
+                "runtime_curriculum"
+                if requested and supported and capabilities.supports_domain_rand_curriculum
+                else "reset_or_static" if requested and supported else None
+            ),
+            "reason": None if not requested or supported else f"unsupported by {capabilities.name}",
+        }
+    curriculum_requested = bool(getattr(domain_cfg, "use_domainrand_curriculum", False))
+    report["domain_rand_curriculum"] = {
+        "requested": curriculum_requested,
+        "supported": capabilities.supports_domain_rand_curriculum,
+        "active": curriculum_requested and capabilities.supports_domain_rand_curriculum,
+        "requested_ranges": None,
+        "effective_ranges": None,
+        "reason": (
+            None
+            if capabilities.supports_domain_rand_curriculum
+            else f"runtime curriculum is not supported by {capabilities.name}; reset-time DR remains active"
+        ),
+    }
+    return report
+
+
+def disable_unsupported_randomizations(domain_cfg, capabilities: BackendCapabilities) -> Dict[str, dict]:
+    report = domain_randomization_report(domain_cfg, capabilities)
+    for name, item in RANDOMIZATION_SCHEMA.items():
+        if report[name]["requested"] and not report[name]["supported"]:
+            setattr(domain_cfg, item.config_flag, False)
+    if not capabilities.supports_domain_rand_curriculum:
+        domain_cfg.use_domainrand_curriculum = False
+    return report
 
 
 def _backend_name(value: str) -> str:
@@ -54,28 +201,28 @@ def _class_dict(instance) -> dict:
 
 
 class Go2HardPACTCore(Go2PACT):
-    """One task implementation shared verbatim by all simulator adapters."""
+    """One task implementation shared by the supported simulators."""
 
     position_pretraining = False
     expected_backend = None
 
     def __init__(self, cfg, sim_params, sim_device, headless):
         backend_name = _backend_name(SIMULATOR)
-        if backend_name not in ADAPTERS:
+        if backend_name not in BACKEND_CAPABILITIES:
             raise ValueError(f"Go2 HardPACT does not support simulator {SIMULATOR!r}")
         if self.expected_backend is not None and backend_name != self.expected_backend:
             raise ValueError(
                 f"task registration requires {self.expected_backend}, but SIMULATOR={SIMULATOR}"
             )
         self.backend_name = backend_name
-        self.backend_capabilities = ADAPTERS[backend_name].capabilities
+        self.backend_capabilities = BACKEND_CAPABILITIES[backend_name]
         self.domain_randomization_report = disable_unsupported_randomizations(
             cfg.domain_rand, self.backend_capabilities
         )
         self._bard = None
         self._physics_reference_serial = 0
         super().__init__(cfg, sim_params, sim_device, headless)
-        self.extras["backend_contract"] = self.backend.metadata()
+        self.extras["backend_contract"] = self.backend_metadata()
         self.extras["domain_randomization"] = self.domain_randomization_report
         self.extras["physics_parameter_source"] = str(
             self.cfg.features.physics_parameter_source
@@ -87,8 +234,8 @@ class Go2HardPACTCore(Go2PACT):
         return 12 if self.position_pretraining else 24
 
     def _init_buffers(self):
-        self.backend = ADAPTERS[self.backend_name](self.simulator, self.cfg)
-        self.backend.augment_simulator_buffers()
+        self._verify_backend_contract()
+        self._augment_simulator_buffers()
         super()._init_buffers()
         if (
             float(self.obs_scales.grf) <= 0.0
@@ -188,6 +335,203 @@ class Go2HardPACTCore(Go2PACT):
             fallback_code=2 if bool(self.cfg.features.use_qp) else 0,
         )
         self.last_transition: Dict[str, torch.Tensor] = {}
+        # The normal simulator.step(actions) loop owns physics stepping. These
+        # callbacks only supply HardPACT's ideal torque/wrench and collect the
+        # force sample after each physics substep.
+        self.simulator._hard_pact_pre_physics_substep = (
+            self._hard_pact_pre_physics_substep
+        )
+        self.simulator._hard_pact_post_physics_substep = (
+            self._hard_pact_post_physics_substep
+        )
+
+    def _verify_backend_contract(self):
+        requested_joints = tuple(self.cfg.asset.dof_names)
+        requested_feet = tuple(self.cfg.asset.foot_name)
+        permutation_by_name(requested_joints, CANONICAL.joint_names, "Go2 joint")
+        permutation_by_name(requested_feet, CANONICAL.foot_names, "Go2 foot")
+
+        actual_joints = tuple(
+            getattr(self.simulator, "_dof_names", requested_joints)
+        )
+        if set(CANONICAL.joint_names).issubset(actual_joints):
+            permutation_by_name(
+                tuple(name for name in actual_joints if name in CANONICAL.joint_names),
+                CANONICAL.joint_names,
+                "simulator Go2 joint",
+            )
+        actual_feet = tuple(
+            getattr(self.simulator, "_feet_names", requested_feet)
+        )
+        permutation_by_name(actual_feet, CANONICAL.foot_names, "simulator Go2 foot")
+
+        physics_dt = float(self.cfg.sim.dt)
+        control_dt = float(self.cfg.control.dt)
+        expected_control_dt = physics_dt * int(self.cfg.control.decimation)
+        if abs(control_dt - expected_control_dt) > max(
+            1.0e-9, 1.0e-6 * expected_control_dt
+        ):
+            raise ValueError(
+                f"control dt {control_dt} does not equal physics dt {physics_dt} * "
+                f"decimation {self.cfg.control.decimation} = {expected_control_dt}"
+            )
+        self.physics_dt = physics_dt
+        self.control_dt = control_dt
+
+    def _augment_simulator_buffers(self):
+        sim = self.simulator
+        n = sim._num_envs
+        device = sim._device
+        dtype = sim.dof_pos.dtype
+
+        def ensure(name, shape, fill=0.0):
+            if not hasattr(sim, name):
+                setattr(
+                    sim, name,
+                    torch.full(shape, fill, device=device, dtype=dtype),
+                )
+
+        ensure("_grfs_buf", (n, 12))
+        ensure("_rand_wrench_vels", (n, 3))
+        ensure("_motor_strength", (n, 12), 1.0)
+        ensure("_kp_scale", (n, 12), 1.0)
+        ensure("_kd_scale", (n, 12), 1.0)
+        ensure("_added_base_mass", (n, 1))
+        ensure("_base_com_bias", (n, 3))
+        ensure("_joint_armature", (n, 1))
+        ensure("_joint_friction", (n, 1))
+        ensure("_joint_stiffness", (n, 1))
+        ensure("_joint_damping", (n, 1))
+        ensure("_friction_values", (n, 1), float(self.cfg.terrain.static_friction))
+        ensure("feedback_torques", (n, 12))
+        ensure("feedforward_torques", (n, 12))
+        ensure("combined_feedback_torques", (n, 12))
+        ensure("combined_feedforward_torques", (n, 12))
+        ensure("first_loop_feedback", (n, 12))
+        ensure("feedforward_tau_weight", (n, 1), 1.0)
+        ensure("feedback_tau_weight", (n, 1), 1.0)
+        ensure("feedforward_tau_weight_clean", (n, 1), 1.0)
+        ensure("feedback_tau_weight_clean", (n, 1), 1.0)
+        if not hasattr(sim, "_base_pos_out_of_bounds_buf"):
+            sim._base_pos_out_of_bounds_buf = torch.zeros(
+                n, device=device, dtype=torch.bool
+            )
+        if not hasattr(sim, "_robot_mass"):
+            sim._robot_mass = torch.full(
+                (n, 1), 15.0, device=device, dtype=dtype
+            )
+
+    def _ordered_backend_joint_values(self, value):
+        source = tuple(
+            getattr(self.simulator, "_dof_names", self.cfg.asset.dof_names)
+        )
+        return reorder_named(
+            value, source, CANONICAL.joint_names, "backend Go2 joint"
+        )
+
+    def _ordered_feet(self, value):
+        source = tuple(
+            getattr(self.simulator, "_feet_names", self.cfg.asset.foot_name)
+        )
+        return reorder_named(value, source, CANONICAL.foot_names, "Go2 foot")
+
+    def _canonical_state(self):
+        sim = self.simulator
+        linear_world = getattr(sim, "_base_world_lin_vel", None)
+        angular_world = getattr(sim, "_base_world_ang_vel", None)
+        if linear_world is None:
+            linear_world = body_to_world(sim.base_lin_vel, sim.base_quat)
+        if angular_world is None:
+            angular_world = body_to_world(sim.base_ang_vel, sim.base_quat)
+        state = CanonicalState(
+            base_position_world=sim.base_pos,
+            base_quaternion_xyzw=sim.base_quat,
+            velocity_world=torch.cat((
+                linear_world,
+                angular_world,
+                self._ordered_backend_joint_values(sim.dof_vel),
+            ), dim=-1),
+            joint_position=self._ordered_backend_joint_values(sim.dof_pos),
+        )
+        state.validate()
+        return state
+
+    def _add_root_velocity_delta_world(self, delta_world, event_mask):
+        env_ids = event_mask.squeeze(-1).nonzero(as_tuple=False).flatten()
+        if env_ids.numel() == 0:
+            return
+        if self.backend_name == "genesis":
+            velocity = self.simulator._robot.get_dofs_velocity().clone()
+            velocity[env_ids, :6] += delta_world[env_ids]
+            self.simulator._robot.set_dofs_velocity(
+                velocity[env_ids], envs_idx=env_ids
+            )
+            return
+        velocity = self.simulator._robot.data.root_link_vel_w[env_ids].clone()
+        velocity += delta_world[env_ids]
+        self.simulator._robot.write_root_link_velocity_to_sim(
+            velocity, env_ids=env_ids
+        )
+
+    def _hard_pact_pre_physics_substep(self, torque):
+        """Apply fixed QP torque and Genesis's per-substep torso wrench."""
+        sim = self.simulator
+        if self.backend_name == "genesis":
+            wrench = self._step_wrench_world
+            link = torch.as_tensor(
+                [sim._base_link_index], device=self.device, dtype=torch.long
+            )
+            solver = sim._robot._solver
+            solver.apply_links_external_force(
+                force=wrench[:, :3].unsqueeze(1), links_idx=link,
+                envs_idx=None, ref="link_com", local=False,
+            )
+            solver.apply_links_external_torque(
+                torque=wrench[:, 3:].unsqueeze(1), links_idx=link,
+                envs_idx=None, ref="link_com", local=False,
+            )
+            sim._robot.control_dofs_force(torque, sim._dof_indices)
+            return
+        sim._robot.set_joint_effort_target(torque, joint_ids=sim._dof_indices)
+
+    def _write_isaaclab_step_wrench(self):
+        """Write once per control step; PhysX retains it through decimation."""
+        if self.backend_name != "isaaclab":
+            return
+        sim = self.simulator
+        body_ids = torch.as_tensor(
+            [sim._base_link_index], device=self.device, dtype=torch.long
+        )
+        wrench = self._step_wrench_world
+        sim._robot.set_external_force_and_torque(
+            wrench[:, :3].unsqueeze(1), wrench[:, 3:].unsqueeze(1),
+            body_ids=body_ids, is_global=True,
+        )
+
+    def _hard_pact_post_physics_substep(self):
+        sim = self.simulator
+        if self.backend_name == "genesis":
+            raw = sim._robot.get_links_net_contact_force()[
+                :, sim._feet_indices, :
+            ]
+        else:
+            raw = sim._contact_sensors.data.net_forces_w[
+                :, sim._feet_contact_indices, :
+            ]
+        self.grf_processor.update_substep(self._ordered_feet(raw))
+
+    def backend_metadata(self):
+        return {
+            "backend": self.backend_capabilities.name,
+            "capabilities": asdict(self.backend_capabilities),
+            "physics_dt": self.physics_dt,
+            "control_dt": self.control_dt,
+            "joint_order": CANONICAL.joint_names,
+            "foot_order": CANONICAL.foot_names,
+            "quaternion_order": CANONICAL.quaternion,
+            "twist_order": CANONICAL.base_twist,
+            "force_frame": CANONICAL.force_frame,
+        }
 
     def _initialize_bard(self):
         if not bool(self.cfg.bard.enabled):
@@ -242,8 +586,8 @@ class Go2HardPACTCore(Go2PACT):
         return coupled
 
     def _base_gains(self, batch=None, like=None):
-        p = self.backend.ordered_backend_joint_values(self.simulator._p_gains)
-        d = self.backend.ordered_backend_joint_values(self.simulator._d_gains)
+        p = self._ordered_backend_joint_values(self.simulator._p_gains)
+        d = self._ordered_backend_joint_values(self.simulator._d_gains)
         if p.ndim == 1:
             count = self.num_envs if batch is None else int(batch)
             p = p.unsqueeze(0).expand(count, -1)
@@ -256,7 +600,7 @@ class Go2HardPACTCore(Go2PACT):
 
     def _capture_randomized_parameters(self):
         sim = self.simulator
-        joints = lambda value: self.backend.ordered_backend_joint_values(value)[:, :12]
+        joints = lambda value: self._ordered_backend_joint_values(value)[:, :12]
         params = RandomizedDynamicsParameters(
             added_base_mass=sim._added_base_mass.detach().clone(),
             base_com_shift=sim._base_com_bias.detach().clone(),
@@ -272,7 +616,7 @@ class Go2HardPACTCore(Go2PACT):
         )
         return params.detached()
 
-    def _added_mass_wrench_world(self, parameters):
+    def _added_mass_wrench_world(self, parameters, base_quaternion_xyzw):
         """Return the persistent payload-weight correction to nominal mass."""
         base_mass_randomization = self.domain_randomization_report["base_mass"]
         if (
@@ -286,7 +630,10 @@ class Go2HardPACTCore(Go2PACT):
             getattr(self.cfg.sim, "gravity", (0.0, 0.0, -9.81))
         )
         return added_mass_gravity_wrench_world(
-            parameters.added_base_mass, gravity_world
+            parameters.added_base_mass,
+            gravity_world,
+            parameters.base_com_shift,
+            base_quaternion_xyzw,
         )
 
     def _physics_references_si(self, references):
@@ -321,7 +668,7 @@ class Go2HardPACTCore(Go2PACT):
         raise ValueError(f"unsupported physics_parameter_source {source!r}")
 
     def _default_joint_position(self):
-        default = self.backend.ordered_backend_joint_values(
+        default = self._ordered_backend_joint_values(
             self.simulator._default_dof_pos
         )
         if default.ndim == 1:
@@ -582,8 +929,28 @@ class Go2HardPACTCore(Go2PACT):
         }
 
     def step(self, actions, physics_estimator=None, *, allow_missing_physics_references=False):
+        """Apply actions using the same lifecycle as the legacy PACT tasks."""
         self.teleport_mask.zero_()
-        pre_state = self.backend.canonical_state()
+        actions = self._pre_sim_step(
+            actions,
+            physics_estimator=physics_estimator,
+            allow_missing_physics_references=allow_missing_physics_references,
+        )
+
+        self.simulator.step(actions)
+
+        interval_grf_world = self.grf_processor.end_interval().clone()
+        self.simulator._grfs_buf.copy_(self.grf_processor.ema.flatten(1))
+        self.post_physics_step()
+
+        return self._finish_hard_pact_step(interval_grf_world)
+
+    def _pre_sim_step(
+        self, actions, physics_estimator=None, *,
+        allow_missing_physics_references=False,
+    ):
+        """Delay the sampled action, run the QP, and prepare simulator inputs."""
+        pre_state = self._canonical_state()
         pre_q = torch.cat((
             pre_state.base_position_world, pre_state.base_quaternion_xyzw,
             pre_state.joint_position,
@@ -604,12 +971,12 @@ class Go2HardPACTCore(Go2PACT):
         push_delta, push_mask = self.instantaneous_pushes.sample(self.common_step_counter)
         push_delta_applied = push_delta.clone()
         push_mask_applied = push_mask.clone()
-        self.backend.add_root_velocity_delta_world(push_delta, push_mask)
+        self._add_root_velocity_delta_world(push_delta, push_mask)
         wrench_world, wrench_active = self.sustained_wrench.step(self.common_step_counter)
         wrench_world_applied = wrench_world.clone()
         wrench_active_applied = wrench_active.clone()
         added_mass_wrench_world = self._added_mass_wrench_world(
-            realized_parameters
+            realized_parameters, pre_state.base_quaternion_xyzw
         )
         torso_wrench_label_world = (
             wrench_world_applied + added_mass_wrench_world
@@ -666,19 +1033,50 @@ class Go2HardPACTCore(Go2PACT):
         torque_average_applied = self.torque_average.clone()
         torque_peak_applied = self.torque_peak.clone()
         self.grf_processor.begin_interval()
-        self.backend.step_safe_torque(
-            self.safe_torque, wrench_world, self.grf_processor.update_substep
-        )
-        interval_grf_world = self.grf_processor.end_interval().clone()
-        self.simulator._grfs_buf.copy_(self.grf_processor.ema.flatten(1))
-        self.post_physics_step()
+        self._step_wrench_world = wrench_world
+        self._write_isaaclab_step_wrench()
+        self._pending_transition = {
+            "pre_state": pre_state,
+            "pre_q": pre_q,
+            "pre_v": pre_v,
+            "realized_parameters": realized_parameters,
+            "nominal": nominal,
+            "delayed_action_applied": delayed_action_applied,
+            "previous_safe_torque_applied": previous_safe_torque_applied,
+            "feedback_branch_weight_applied": feedback_branch_weight_applied,
+            "feedforward_branch_weight_applied": feedforward_branch_weight_applied,
+            "push_delta_applied": push_delta_applied,
+            "push_mask_applied": push_mask_applied,
+            "wrench_world_applied": wrench_world_applied,
+            "wrench_active_applied": wrench_active_applied,
+            "added_mass_wrench_world": added_mass_wrench_world,
+            "torso_wrench_label_world": torso_wrench_label_world,
+            "predicted_grf_scaled": predicted_grf_scaled,
+            "predicted_wrench_scaled": predicted_wrench_scaled,
+            "contact_probability": contact_probability,
+            "estimated_base_linear_velocity_body": estimated_base_linear_velocity_body,
+            "qp_state": qp_state,
+            "qp_result": qp_result,
+            "safe_torque_applied": safe_torque_applied,
+            "executed_torque_applied": executed_torque_applied,
+            "torque_average_applied": torque_average_applied,
+            "torque_peak_applied": torque_peak_applied,
+        }
+        return self.safe_torque
+
+    def _finish_hard_pact_step(self, interval_grf_world):
+        """Capture the transition after the normal post-physics callback."""
+        pending = self._pending_transition
+        pre_state = pending["pre_state"]
+        qp_state = pending["qp_state"]
+        qp_result = pending["qp_result"]
         out_of_bounds = getattr(
             self.simulator, "_base_pos_out_of_bounds_buf", None
         )
         if out_of_bounds is not None:
             self.teleport_mask |= out_of_bounds.bool().unsqueeze(-1)
 
-        post_state = self.backend.canonical_state()
+        post_state = self._canonical_state()
         post_q = torch.cat((
             post_state.base_position_world, post_state.base_quaternion_xyzw,
             post_state.joint_position,
@@ -689,11 +1087,11 @@ class Go2HardPACTCore(Go2PACT):
         ).flatten(1)
         interval_wrench_yaw = torch.cat((
             world_to_yaw_local(
-                torso_wrench_label_world[:, :3],
+                pending["torso_wrench_label_world"][:, :3],
                 pre_state.base_quaternion_xyzw,
             ),
             world_to_yaw_local(
-                torso_wrench_label_world[:, 3:],
+                pending["torso_wrench_label_world"][:, 3:],
                 pre_state.base_quaternion_xyzw,
             ),
         ), dim=-1)
@@ -704,44 +1102,47 @@ class Go2HardPACTCore(Go2PACT):
         reset_mask = self.reset_buf.bool().unsqueeze(-1)
         timeout_mask = self.time_out_buf.bool().unsqueeze(-1)
         teleport_mask = self.teleport_mask.clone()
-        valid = physics_transition_mask(reset_mask, timeout_mask, teleport_mask, push_mask_applied)
+        valid = physics_transition_mask(
+            reset_mask, timeout_mask, teleport_mask,
+            pending["push_mask_applied"],
+        )
         self.last_transition = {
-            "delayed_nominal_action": delayed_action_applied,
-            "nominal_torque": nominal.clone(),
-            "feedback_branch_weight": feedback_branch_weight_applied,
-            "feedforward_branch_weight": feedforward_branch_weight_applied,
-            "previous_safe_torque": previous_safe_torque_applied,
-            "safe_torque": safe_torque_applied,
-            "executed_torque": executed_torque_applied,
-            "qp_base_linear_velocity_body": estimated_base_linear_velocity_body.detach().clone(),
+            "delayed_nominal_action": pending["delayed_action_applied"],
+            "nominal_torque": pending["nominal"].clone(),
+            "feedback_branch_weight": pending["feedback_branch_weight_applied"],
+            "feedforward_branch_weight": pending["feedforward_branch_weight_applied"],
+            "previous_safe_torque": pending["previous_safe_torque_applied"],
+            "safe_torque": pending["safe_torque_applied"],
+            "executed_torque": pending["executed_torque_applied"],
+            "qp_base_linear_velocity_body": pending["estimated_base_linear_velocity_body"].detach().clone(),
             "qp_base_quaternion_xyzw": qp_state.base_quaternion_xyzw.detach().clone(),
             "qp_base_angular_velocity_world": qp_state.base_angular_velocity_world.detach().clone(),
             "qp_joint_position": qp_state.joint_position.detach().clone(),
             "qp_joint_velocity": qp_state.joint_velocity.detach().clone(),
-            "predicted_contact_probability": contact_probability.detach().clone(),
-            "predicted_grf_yaw_scaled": predicted_grf_scaled.detach().clone(),
-            "predicted_base_wrench_yaw_scaled": predicted_wrench_scaled.detach().clone(),
-            "pre_q": pre_q,
-            "pre_v": pre_v,
+            "predicted_contact_probability": pending["contact_probability"].detach().clone(),
+            "predicted_grf_yaw_scaled": pending["predicted_grf_scaled"].detach().clone(),
+            "predicted_base_wrench_yaw_scaled": pending["predicted_wrench_scaled"].detach().clone(),
+            "pre_q": pending["pre_q"],
+            "pre_v": pending["pre_v"],
             "post_q": post_q,
             "post_v": post_v,
-            "average_torque": torque_average_applied,
-            "peak_torque": torque_peak_applied,
+            "average_torque": pending["torque_average_applied"],
+            "peak_torque": pending["torque_peak_applied"],
             "interval_grf_yaw": interval_grf_yaw,
             "interval_wrench_yaw": interval_wrench_yaw,
-            "instantaneous_push_delta_world": push_delta_applied,
-            "instantaneous_push_mask": push_mask_applied.float(),
-            "sustained_wrench_world": wrench_world_applied,
-            "added_mass_wrench_world": added_mass_wrench_world,
+            "instantaneous_push_delta_world": pending["push_delta_applied"],
+            "instantaneous_push_mask": pending["push_mask_applied"].float(),
+            "sustained_wrench_world": pending["wrench_world_applied"],
+            "added_mass_wrench_world": pending["added_mass_wrench_world"],
             "sustained_wrench_yaw_scaled": sustained_wrench_yaw_scaled,
-            "sustained_wrench_active_mask": wrench_active_applied.float(),
+            "sustained_wrench_active_mask": pending["wrench_active_applied"].float(),
             "reset_mask": reset_mask.float(),
             "timeout_mask": timeout_mask.float(),
             "teleport_mask": teleport_mask.float(),
             "physics_valid_mask": valid.float(),
             "explicit_estimator_target": self.explicit_labels_buf.clone(),
             "reconstruction_target": self.reconstruction_target.clone(),
-            "realized_randomized_parameters": realized_parameters.pack().clone(),
+            "realized_randomized_parameters": pending["realized_parameters"].pack().clone(),
             "qp_correction": qp_result.correction.clone(),
             "qp_grf_yaw_scaled": (
                 qp_result.grf * float(self.obs_scales.grf)
@@ -778,7 +1179,7 @@ class Go2HardPACTCore(Go2PACT):
     def _system_identification_fields(self):
         sim = self.simulator
         def joints(value):
-            return self.backend.ordered_backend_joint_values(value)[:, :12]
+            return self._ordered_backend_joint_values(value)[:, :12]
 
         friction = sim._friction_values[:, :1]
         delay = self.action_delay.float().unsqueeze(-1) * float(self.dt)

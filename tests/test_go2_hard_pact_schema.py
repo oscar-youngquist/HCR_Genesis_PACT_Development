@@ -3,11 +3,11 @@ import unittest
 
 import torch
 
-from legged_gym.envs.go2.go2_hard_pact.backend import (
+from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import (
     ISAACLAB_CAPABILITIES,
     domain_randomization_report,
+    Go2HardPACTCore,
 )
-from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACTCore
 from legged_gym.envs.go2.go2_hard_pact.schema import (
     CANONICAL,
     QPStateEstimate,
@@ -150,6 +150,99 @@ class CapabilityTests(unittest.TestCase):
         self.assertFalse(report["domain_rand_curriculum"]["active"])
         self.assertIn("reset-time", report["domain_rand_curriculum"]["reason"])
         self.assertEqual(report["friction"]["effective_ranges"]["friction_range"], [0.2, 1.25])
+
+
+class StepLifecycleTests(unittest.TestCase):
+    def test_step_matches_legacy_pact_lifecycle(self):
+        events = []
+        core = object.__new__(Go2HardPACTCore)
+        core.teleport_mask = torch.ones(1, 1, dtype=torch.bool)
+        safe_torque = torch.ones(1, 12)
+        core._pre_sim_step = lambda *args, **kwargs: (
+            events.append("pre_sim_step") or safe_torque
+        )
+        core.simulator = types.SimpleNamespace(
+            step=lambda actions: events.append(("simulator.step", actions)),
+            _grfs_buf=torch.zeros(1, 12),
+        )
+        core.grf_processor = types.SimpleNamespace(
+            end_interval=lambda: (
+                events.append("end_interval") or torch.zeros(1, 4, 3)
+            ),
+            ema=torch.zeros(1, 4, 3),
+        )
+        core.post_physics_step = lambda: events.append("post_physics_step")
+        core._finish_hard_pact_step = lambda grf: (
+            events.append("finish_transition") or "result"
+        )
+
+        result = Go2HardPACTCore.step(core, torch.zeros(1, 24))
+
+        self.assertEqual(result, "result")
+        self.assertEqual(
+            [event if isinstance(event, str) else event[0] for event in events],
+            [
+                "pre_sim_step", "simulator.step", "end_interval",
+                "post_physics_step", "finish_transition",
+            ],
+        )
+        self.assertIs(events[1][1], safe_torque)
+
+    def test_isaaclab_wrench_is_written_once_not_per_substep(self):
+        calls = {"wrench": 0, "torque": 0}
+
+        class Robot:
+            def set_external_force_and_torque(self, *args, **kwargs):
+                calls["wrench"] += 1
+
+            def set_joint_effort_target(self, *args, **kwargs):
+                calls["torque"] += 1
+
+        core = object.__new__(Go2HardPACTCore)
+        core.backend_name = "isaaclab"
+        core.device = torch.device("cpu")
+        core._step_wrench_world = torch.zeros(2, 6)
+        core.simulator = types.SimpleNamespace(
+            _robot=Robot(), _base_link_index=0, _dof_indices=list(range(12))
+        )
+
+        core._write_isaaclab_step_wrench()
+        for _ in range(4):
+            core._hard_pact_pre_physics_substep(torch.zeros(2, 12))
+
+        self.assertEqual(calls, {"wrench": 1, "torque": 4})
+
+    def test_genesis_wrench_is_applied_every_substep(self):
+        calls = {"force": 0, "wrench_torque": 0, "joint_torque": 0}
+
+        class Solver:
+            def apply_links_external_force(self, *args, **kwargs):
+                calls["force"] += 1
+
+            def apply_links_external_torque(self, *args, **kwargs):
+                calls["wrench_torque"] += 1
+
+
+        class Robot:
+            _solver = Solver()
+
+            def control_dofs_force(self, *args, **kwargs):
+                calls["joint_torque"] += 1
+
+        core = object.__new__(Go2HardPACTCore)
+        core.backend_name = "genesis"
+        core.device = torch.device("cpu")
+        core._step_wrench_world = torch.zeros(2, 6)
+        core.simulator = types.SimpleNamespace(
+            _robot=Robot(), _base_link_index=0, _dof_indices=list(range(12))
+        )
+
+        for _ in range(4):
+            core._hard_pact_pre_physics_substep(torch.zeros(2, 12))
+
+        self.assertEqual(
+            calls, {"force": 4, "wrench_torque": 4, "joint_torque": 4}
+        )
 
 
 if __name__ == "__main__":

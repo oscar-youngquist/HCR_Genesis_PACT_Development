@@ -12,6 +12,7 @@ from legged_gym.envs.go2.go2_hard_pact.ablation_configs import (
 )
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import (
     GO2HardPACTCfg,
+    GO2HardPACTCfgPPO,
     hard_pact_terrain_mesh_type,
 )
 from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import (
@@ -27,6 +28,17 @@ class HardPACTConfigTests(unittest.TestCase):
         self.assertEqual(domain_rand.max_added_mass_max, 4.0)
         self.assertEqual(cfg.normalization.obs_scales.grf, 0.01)
         self.assertEqual(cfg.normalization.obs_scales.base_wrench, 0.01)
+
+    def test_main_config_documents_observation_scaled_head_gains(self):
+        policy = GO2HardPACTCfgPPO.policy
+        self.assertEqual(policy.grf_scale, [1.20, 1.20, 2.50] * 4)
+        self.assertEqual(
+            policy.wrench_scale,
+            [
+                0.60, 0.60, 0.9924,
+                0.234403276, 0.234403276, 0.234403276,
+            ],
+        )
 
     def test_backend_selects_terrain_representation_without_task_subclass(self):
         self.assertEqual(hard_pact_terrain_mesh_type("genesis"), "heightfield")

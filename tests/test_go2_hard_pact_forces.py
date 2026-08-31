@@ -49,10 +49,13 @@ class GRFProcessingTests(unittest.TestCase):
 
 
 class DisturbanceTests(unittest.TestCase):
-    def test_added_mass_wrench_is_signed_weight_at_torso_com(self):
+    def test_added_mass_wrench_is_signed_weight_with_zero_com_offset(self):
         added_mass = torch.tensor([[8.0], [-1.0], [0.0]])
         wrench = added_mass_gravity_wrench_world(
-            added_mass, torch.tensor([0.0, 0.0, -9.81])
+            added_mass,
+            torch.tensor([0.0, 0.0, -9.81]),
+            torch.zeros(3, 3),
+            torch.tensor([[0.0, 0.0, 0.0, 1.0]]).expand(3, -1),
         )
         torch.testing.assert_close(
             wrench[:, :3],
@@ -63,6 +66,26 @@ class DisturbanceTests(unittest.TestCase):
             ]),
         )
         self.assertEqual(torch.count_nonzero(wrench[:, 3:]), 0)
+
+    def test_added_mass_com_offset_produces_world_moment(self):
+        half_yaw = torch.tensor(torch.pi / 4.0)
+        quaternion = torch.tensor([[
+            0.0, 0.0, torch.sin(half_yaw), torch.cos(half_yaw)
+        ]])
+        wrench = added_mass_gravity_wrench_world(
+            torch.tensor([[2.0]]),
+            torch.tensor([0.0, 0.0, -10.0]),
+            torch.tensor([[0.2, 0.0, 0.0]]),
+            quaternion,
+        )
+        # A 90-degree yaw rotates the +x body offset onto +y world. Thus
+        # [0, 0.2, 0] x [0, 0, -20] = [-4, 0, 0] Nm.
+        torch.testing.assert_close(
+            wrench,
+            torch.tensor([[0.0, 0.0, -20.0, -4.0, 0.0, 0.0]]),
+            atol=1.0e-6,
+            rtol=0.0,
+        )
 
     def test_torso_wrench_scale_tracks_configured_ranges(self):
         scale = torso_wrench_scale_from_ranges(
@@ -82,6 +105,20 @@ class DisturbanceTests(unittest.TestCase):
             include_added_mass=False,
         )
         self.assertEqual(no_disturbances, (0.0,) * 6)
+
+    def test_torso_wrench_scale_includes_com_moment_envelope(self):
+        scale = torso_wrench_scale_from_ranges(
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (-2.0, 5.0),
+            (0.0, 0.0, -10.0),
+            com_offset_ranges=((-0.2, 0.2), (-0.1, 0.1), (0.0, 0.0)),
+        )
+        maximum_moment = 5.0 * 10.0 * (0.2 ** 2 + 0.1 ** 2) ** 0.5
+        torch.testing.assert_close(
+            torch.tensor(scale),
+            torch.tensor((0.0, 0.0, 50.0) + (maximum_moment,) * 3),
+        )
 
     def test_instantaneous_push_is_atomic_and_zero_between_events(self):
         torch.manual_seed(4)

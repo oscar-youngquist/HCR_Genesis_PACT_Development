@@ -57,7 +57,7 @@ def main():
     assert result[0].shape == (2, 57)
     assert result[1].shape == (2, 198)
     assert env.last_transition["interval_grf_yaw"].shape == (2, 12)
-    assert env.backend.capabilities.name == SIMULATOR
+    assert env.backend_capabilities.name == SIMULATOR
     if physics_smoke:
         assert env._bard is not None
         assert torch.isfinite(env.last_transition["safe_torque"]).all()
@@ -96,7 +96,7 @@ def main():
             estimator.physics_estimator.grf_head[-1].weight.grad
         ).all()
     print(
-        f"SMOKE_OK backend={env.backend.capabilities.name} "
+        f"SMOKE_OK backend={env.backend_capabilities.name} "
         f"task={args.task} device={env.device} obs=57 critic=198 "
         f"transition_fields={len(env.last_transition)} physics={physics_smoke}"
     )

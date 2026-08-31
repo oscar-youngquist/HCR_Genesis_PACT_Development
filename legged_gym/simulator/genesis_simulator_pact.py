@@ -64,10 +64,13 @@ class GenesisSimulator_PACT(Simulator):
         self.first_loop = True
 
         for _ in range(self._cfg.control.decimation):
-            self._torques = self._compute_torques(actions)
-            
-            self._robot.control_dofs_force(
-                self._torques, self._dof_indices)
+            if getattr(self._cfg.sim, "use_hard_pact_simulator", False):
+                self._torques = actions
+                self._hard_pact_pre_physics_substep(self._torques)
+            else:
+                self._torques = self._compute_torques(actions)
+                self._robot.control_dofs_force(
+                    self._torques, self._dof_indices)
             
             self._scene.step()
             
@@ -75,6 +78,8 @@ class GenesisSimulator_PACT(Simulator):
                 self._dof_indices)
             self._dof_vel[:] = self._robot.get_dofs_velocity(
                 self._dof_indices)
+            if getattr(self._cfg.sim, "use_hard_pact_simulator", False):
+                self._hard_pact_post_physics_substep()
 
     def _get_pinn_wb_dynamics(self):
         #           total GT forces  ,  generalized mass mat, bias vector
