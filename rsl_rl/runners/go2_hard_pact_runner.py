@@ -7,6 +7,7 @@ import importlib
 import importlib.metadata
 import os
 import platform
+import statistics
 import subprocess
 import time
 from collections import deque
@@ -25,13 +26,28 @@ from rsl_rl.modules import (
 )
 
 
+# Match the legacy Go2 PACT CUDA settings.
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
+torch.backends.cudnn.benchmark = True
+
+
 class Go2HardPACTRunner:
     def __init__(self, env, train_cfg, log_dir=None, device="cpu"):
-        self.env = env
-        self.cfg = train_cfg
-        self.device = torch.device(device)
-        self.log_dir = log_dir
+        self.env, self.cfg, self.device, self.log_dir = (
+            env, train_cfg, torch.device(device), log_dir
+        )
+
         policy_cfg = dict(train_cfg["policy"])
+        algorithm_cfg = dict(train_cfg["algorithm"])
+        runner_cfg = train_cfg["runner"]
+
+        critic_dim = env.num_privileged_obs
+        if env.num_crit_obs_stack is not None:
+            critic_dim *= env.num_crit_obs_stack
+        history_dim = env.num_obs * env.num_obs_hist
+
         wrench_cfg = env.cfg.disturbances.sustained_wrench
         mass_report = env.domain_randomization_report["base_mass"]
         com_report = env.domain_randomization_report["base_com"]
@@ -91,18 +107,13 @@ class Go2HardPACTRunner:
             value * base_wrench_observation_scale
             for value in physical_wrench_scale
         )
-        policy_class = (
-            ActorCriticGo2HardPACTPos
-            if policy_cfg.get("position_pretraining", False)
-            else ActorCriticGo2HardPACT
-        )
+        policy_class = eval(runner_cfg["policy_class_name"])
         self.actor_critic = policy_class(
             num_actor_obs=env.num_obs,
-            num_critic_obs=env.num_privileged_obs,
+            num_critic_obs=critic_dim,
             num_actions=env.num_actions,
             **policy_cfg,
         )
-        algorithm_cfg = dict(train_cfg["algorithm"])
         features = env.cfg.features
         algorithm_cfg.update({
             "supervised_physics_head_pretraining": bool(
@@ -138,25 +149,34 @@ class Go2HardPACTRunner:
                 features.feedforward_clone_weight
             ),
         })
-        self.alg = PPOGo2HardPACT(
-            self.actor_critic, device=device, **algorithm_cfg
+        algorithm_class = eval(runner_cfg["algorithm_class_name"])
+        self.alg = algorithm_class(
+            self.actor_critic, device=self.device, **algorithm_cfg
         )
-        self.num_steps_per_env = int(train_cfg["runner"]["num_steps_per_env"])
         self.alg.init_storage(
             env.num_envs,
-            self.num_steps_per_env,
+            runner_cfg["num_steps_per_env"],
             env.num_obs,
-            env.num_privileged_obs,
-            env.num_obs * env.num_obs_hist,
+            critic_dim,
+            history_dim,
         )
+
+        self.num_steps_per_env = runner_cfg["num_steps_per_env"]
+        self.save_interval = runner_cfg["save_interval"]
+        self.use_adaptive_entropy = algorithm_cfg.get(
+            "use_adaptive_entropy", False
+        )
+
         self.current_learning_iteration = 0
         self.tot_timesteps = 0
         self.tot_time = 0.0
-        self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
+        self.writer = None
         self.last_migration_report = None
         self.deployment_contract = self._deployment_contract()
         if log_dir:
             self._write_metadata()
+
+        _, _ = self.env.reset()
 
     def _deployment_contract(self):
         """Return the exact force-unit contract carried by this policy."""
@@ -284,200 +304,368 @@ class Go2HardPACTRunner:
         self._write_deployment_contract()
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
-        self.alg.train_mode()
-        obs, critic_obs = self.env.reset()
-        obs, history, critic_obs, _ = self.env.get_observations()
+        # Initialize the writer lazily, as in the legacy PACT runners.
+        if self.log_dir is not None and self.writer is None:
+            self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(
                 self.env.episode_length_buf,
                 high=int(self.env.max_episode_length),
             )
-        obs = obs.to(self.device)
-        history = history.to(self.device)
-        critic_obs = critic_obs.to(self.device)
-        reward_buffer = deque(maxlen=100)
-        for iteration in range(
-            self.current_learning_iteration,
-            self.current_learning_iteration + int(num_learning_iterations),
-        ):
-            start = time.perf_counter()
-            episode_infos = []
-            iteration_reward_sum = 0.0
-            iteration_reward_count = 0
-            for _ in range(self.num_steps_per_env):
-                action = self.alg.act(obs, critic_obs, history)
-                (
-                    next_obs, next_critic, next_history, _, reward, done,
-                    infos, _,
-                ) = self.env.step(action, physics_estimator=self.actor_critic)
-                self.alg.process_env_step(
-                    reward, done, infos, self.env.last_transition
-                )
-                iteration_reward_sum += float(reward.float().sum().item())
-                iteration_reward_count += reward.numel()
-                obs = next_obs.to(self.device)
-                critic_obs = next_critic.to(self.device)
-                history = next_history.to(self.device)
-                if "episode" in infos:
-                    episode_infos.append(infos["episode"])
-                    reward_buffer.extend(reward[done.bool()].detach().cpu().tolist())
-            self.alg.compute_returns(critic_obs)
+        obs, history, privileged_obs, _ = self.env.get_observations()
+        critic_obs = privileged_obs if privileged_obs is not None else obs
+        obs, critic_obs, history = (
+            obs.to(self.device), critic_obs.to(self.device),
+            history.to(self.device),
+        )
+        self.alg.train_mode()
+
+        ep_infos = []
+        rewbuffer = deque(maxlen=100)
+        lenbuffer = deque(maxlen=100)
+        cur_reward_sum = torch.zeros(
+            self.env.num_envs, dtype=torch.float, device=self.device
+        )
+        cur_episode_length = torch.zeros_like(cur_reward_sum)
+
+        tot_iter = self.current_learning_iteration + int(num_learning_iterations)
+        for it in range(self.current_learning_iteration, tot_iter):
+            start = time.time()
+            # Rollout collection follows legacy PACT. HardPACT's only extra
+            # step input is the deployment-available force estimator used once
+            # before the QP; the resulting named transition is stored directly.
+            with torch.inference_mode():
+                for _ in range(self.num_steps_per_env):
+                    actions = self.alg.act(obs, critic_obs, history)
+                    (
+                        obs, privileged_obs, history, _, rewards, dones,
+                        infos, _,
+                    ) = self.env.step(
+                        actions, physics_estimator=self.actor_critic
+                    )
+                    critic_obs = (
+                        privileged_obs
+                        if privileged_obs is not None else obs
+                    )
+                    obs, critic_obs, history, rewards, dones = (
+                        obs.to(self.device), critic_obs.to(self.device),
+                        history.to(self.device), rewards.to(self.device),
+                        dones.to(self.device),
+                    )
+                    self.alg.process_env_step(
+                        rewards, dones, infos, self.env.last_transition
+                    )
+
+                    if self.log_dir is not None:
+                        if "episode" in infos:
+                            ep_infos.append(infos["episode"])
+                        cur_reward_sum += rewards
+                        cur_episode_length += 1
+                        new_ids = (dones > 0).nonzero(
+                            as_tuple=False
+                        ).view(-1)
+                        rewbuffer.extend(
+                            cur_reward_sum[new_ids].cpu().tolist()
+                        )
+                        lenbuffer.extend(
+                            cur_episode_length[new_ids].cpu().tolist()
+                        )
+                        cur_reward_sum[new_ids] = 0
+                        cur_episode_length[new_ids] = 0
+
+                collection_time = time.time() - start
+                self.alg.compute_returns(critic_obs)
+
+            start = time.time()
+            # The PPO implementation recomputes the delayed-action-conditioned
+            # force heads and differentiable QP from the stored sampled action.
             metrics = self.alg.update(
                 self.env.recompute_training_outputs,
                 self.env.recompute_auxiliary_outputs,
-                iteration,
+                it,
             )
-            if episode_infos and self.alg.use_adaptive_entropy:
-                performance_metrics = {
-                    "lin_vel_tracking": 0.0,
-                    "ang_vel_tracking": 0.0,
-                    "terrain_level": 0.0,
-                }
-                episode_keys = {
-                    "rew_tracking_lin_vel": "lin_vel_tracking",
-                    "rew_tracking_ang_vel": "ang_vel_tracking",
-                    "terrain_level": "terrain_level",
-                }
-                for episode in episode_infos:
-                    for episode_key, metric_key in episode_keys.items():
-                        if episode_key not in episode:
-                            continue
-                        value = episode[episode_key]
-                        if torch.is_tensor(value):
-                            value = value.float().mean().item()
-                        performance_metrics[metric_key] = max(
-                            performance_metrics[metric_key], float(value)
-                        )
+            learn_time = time.time() - start
+
+            if getattr(self.env, "use_reward_curriculum", False):
+                self.env.step_reward_curriculum(it)
+            self._step_domain_randomization_curriculum(it, ep_infos)
+
+            if ep_infos and self.use_adaptive_entropy:
                 metrics["policy/entropy_coefficient"] = (
-                    self.alg.update_adaptive_entropy_coef(performance_metrics)
+                    self.alg.update_adaptive_entropy_coef({
+                        "lin_vel_tracking": self._episode_metric_max(
+                            ep_infos, "rew_tracking_lin_vel",
+                            "rew_tracking_lin_vel_force_world",
+                        ),
+                        "ang_vel_tracking": self._episode_metric_max(
+                            ep_infos, "rew_tracking_ang_vel"
+                        ),
+                        "terrain_level": self._episode_metric_max(
+                            ep_infos, "terrain_level", "terrain_level_mean"
+                        ),
+                    })
                 )
-            elapsed = time.perf_counter() - start
-            self.tot_time += elapsed
-            self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
-            if self.writer:
-                for name, value in metrics.items():
-                    self.writer.add_scalar(name, value, iteration)
-                self.writer.add_scalar("performance/wall_time_iteration", elapsed, iteration)
-                self.writer.add_scalar("performance/total_timesteps", self.tot_timesteps, iteration)
-                self.writer.add_scalar(
-                    "return/mean_step_reward",
-                    iteration_reward_sum / max(iteration_reward_count, 1),
-                    iteration,
+
+            metrics.update(self._hard_pact_rollout_metrics())
+            if self.log_dir is not None:
+                self.log(locals())
+            if self.log_dir and it % self.save_interval == 0:
+                self.save(
+                    os.path.join(self.log_dir, f"model_{it}.pt"),
+                    iteration=it + 1,
                 )
-                for episode in episode_infos:
-                    for name, value in episode.items():
-                        if torch.is_tensor(value):
-                            value = value.float().mean().item()
-                        if isinstance(value, (int, float)):
-                            self.writer.add_scalar(f"episode/{name}", value, iteration)
-                for name, value in self.env.grf_processor.flattened_stages().items():
-                    self.writer.add_scalar(f"grf/{name}_magnitude_n", value.norm(dim=-1).mean(), iteration)
-                    reshaped = value.reshape(-1, 4, 3)
-                    for foot_index, foot_name in enumerate(("FR", "FL", "RR", "RL")):
-                        for axis_index, axis in enumerate(("x", "y", "z")):
-                            self.writer.add_scalar(
-                                f"grf/{name}/{foot_name}_{axis}_mean_n",
-                                reshaped[:, foot_index, axis_index].mean(),
-                                iteration,
-                            )
-                self.writer.add_scalar(
-                    "grf/contact_fraction",
-                    self.env.grf_processor.contacts.float().mean(),
-                    iteration,
-                )
-                self.writer.add_scalar(
-                    "disturbance/push_magnitude",
-                    self.env.instantaneous_pushes.actual_delta_world.norm(dim=-1).mean(), iteration,
-                )
-                self.writer.add_scalar(
-                    "disturbance/wrench_magnitude",
-                    self.env.sustained_wrench.current_world.norm(dim=-1).mean(), iteration,
-                )
-                transition = self.env.last_transition
-                for prefix, field, labels in (
-                    (
-                        "disturbance/push_world",
-                        "instantaneous_push_delta_world",
-                        ("dv_x", "dv_y", "dv_z", "domega_roll", "domega_pitch", "domega_yaw"),
-                    ),
-                    (
-                        "disturbance/wrench_world",
-                        "sustained_wrench_world",
-                        ("force_x", "force_y", "force_z", "torque_x", "torque_y", "torque_z"),
-                    ),
-                    (
-                        "disturbance/added_mass_wrench_world",
-                        "added_mass_wrench_world",
-                        ("force_x", "force_y", "force_z", "torque_x", "torque_y", "torque_z"),
-                    ),
-                ):
-                    for index, label in enumerate(labels):
-                        self.writer.add_scalar(
-                            f"{prefix}/{label}_mean",
-                            transition[field][:, index].mean(),
-                            iteration,
-                        )
-                        self.writer.add_scalar(
-                            f"{prefix}/{label}_abs_mean",
-                            transition[field][:, index].abs().mean(),
-                            iteration,
-                        )
-                for field in (
-                    "instantaneous_push_mask", "sustained_wrench_active_mask",
-                    "reset_mask", "timeout_mask", "teleport_mask", "physics_valid_mask",
-                ):
-                    self.writer.add_scalar(
-                        f"transition/{field}_fraction",
-                        transition[field].float().mean(),
-                        iteration,
-                    )
-                linear_error = (
-                    self.env.commands[:, :2]
-                    - self.env.simulator.base_lin_vel[:, :2]
-                ).norm(dim=-1)
-                yaw_error = (
-                    self.env.commands[:, 2]
-                    - self.env.simulator.base_ang_vel[:, 2]
-                ).abs()
-                self.writer.add_scalar("tracking/linear_velocity_error", linear_error.mean(), iteration)
-                self.writer.add_scalar("tracking/yaw_velocity_error", yaw_error.mean(), iteration)
-                self.writer.add_scalar(
-                    "success/fraction",
-                    ((linear_error < 0.5) & (yaw_error < 0.5) & ~self.env.reset_buf.bool())
-                    .float().mean(),
-                    iteration,
-                )
-                terrain_levels = getattr(self.env.simulator, "_terrain_levels", None)
-                if terrain_levels is not None:
-                    self.writer.add_scalar("terrain/level_mean", terrain_levels.float().mean(), iteration)
-                for randomization, report in self.env.domain_randomization_report.items():
-                    if not report.get("active") or not report.get("effective_ranges"):
-                        continue
-                    for range_name, bounds in report["effective_ranges"].items():
-                        if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
-                            self.writer.add_scalar(
-                                f"domain_rand/{randomization}/{range_name}_min",
-                                float(bounds[0]), iteration,
-                            )
-                            self.writer.add_scalar(
-                                f"domain_rand/{randomization}/{range_name}_max",
-                                float(bounds[1]), iteration,
-                            )
-            self.current_learning_iteration = iteration + 1
-            save_interval = int(self.cfg["runner"].get("save_interval", 500))
-            if self.log_dir and iteration % save_interval == 0:
-                self.save(os.path.join(self.log_dir, f"model_{iteration}.pt"))
+            ep_infos.clear()
+
+        self.current_learning_iteration = tot_iter
+        if self.log_dir:
+            self.save(os.path.join(self.log_dir, f"model_{tot_iter}.pt"))
         if self.writer:
             self.writer.flush()
-        return list(reward_buffer)
+        return list(rewbuffer)
 
-    def save(self, path, infos=None):
+    @staticmethod
+    def _episode_metric_max(ep_infos, *names):
+        values = []
+        for info in ep_infos:
+            name = next((name for name in names if name in info), None)
+            if name is not None:
+                values.append(
+                    torch.as_tensor(info[name]).float().mean().item()
+                )
+        return max(values, default=0.0)
+
+    def _step_domain_randomization_curriculum(self, iteration, ep_infos):
+        report = self.env.domain_randomization_report[
+            "domain_rand_curriculum"
+        ]
+        simulator = self.env.simulator
+        if not report["active"] or not getattr(
+            simulator, "use_domainrand_curriculum", False
+        ):
+            return
+        tracking = None
+        if ep_infos:
+            tracking = self._episode_metric_max(
+                ep_infos, "rew_tracking_lin_vel",
+                "rew_tracking_lin_vel_force_world",
+            )
+        simulator._step_domian_rand(iteration, tracking)
+
+    def _hard_pact_rollout_metrics(self):
+        """Return only diagnostics specific to the HardPACT transition."""
+        metrics = {}
+        for name, value in self.env.grf_processor.flattened_stages().items():
+            metrics[f"grf/{name}_magnitude_n"] = value.norm(dim=-1).mean()
+            reshaped = value.reshape(-1, 4, 3)
+            for foot_index, foot_name in enumerate(("FR", "FL", "RR", "RL")):
+                for axis_index, axis in enumerate(("x", "y", "z")):
+                    metrics[f"grf/{name}/{foot_name}_{axis}_mean_n"] = (
+                        reshaped[:, foot_index, axis_index].mean()
+                    )
+        metrics["grf/contact_fraction"] = (
+            self.env.grf_processor.contacts.float().mean()
+        )
+        metrics["disturbance/push_magnitude"] = (
+            self.env.instantaneous_pushes.actual_delta_world.norm(
+                dim=-1
+            ).mean()
+        )
+        metrics["disturbance/wrench_magnitude"] = (
+            self.env.sustained_wrench.current_world.norm(dim=-1).mean()
+        )
+
+        transition = self.env.last_transition
+        for prefix, field, labels in (
+            (
+                "disturbance/push_world",
+                "instantaneous_push_delta_world",
+                (
+                    "dv_x", "dv_y", "dv_z", "domega_roll",
+                    "domega_pitch", "domega_yaw",
+                ),
+            ),
+            (
+                "disturbance/wrench_world",
+                "sustained_wrench_world",
+                (
+                    "force_x", "force_y", "force_z", "torque_x",
+                    "torque_y", "torque_z",
+                ),
+            ),
+            (
+                "disturbance/added_mass_wrench_world",
+                "added_mass_wrench_world",
+                (
+                    "force_x", "force_y", "force_z", "torque_x",
+                    "torque_y", "torque_z",
+                ),
+            ),
+        ):
+            for index, label in enumerate(labels):
+                metrics[f"{prefix}/{label}_mean"] = (
+                    transition[field][:, index].mean()
+                )
+                metrics[f"{prefix}/{label}_abs_mean"] = (
+                    transition[field][:, index].abs().mean()
+                )
+        for field in (
+            "instantaneous_push_mask", "sustained_wrench_active_mask",
+            "reset_mask", "timeout_mask", "teleport_mask",
+            "physics_valid_mask",
+        ):
+            metrics[f"transition/{field}_fraction"] = (
+                transition[field].float().mean()
+            )
+
+        linear_error = (
+            self.env.commands[:, :2]
+            - self.env.simulator.base_lin_vel[:, :2]
+        ).norm(dim=-1)
+        yaw_error = (
+            self.env.commands[:, 2]
+            - self.env.simulator.base_ang_vel[:, 2]
+        ).abs()
+        metrics["tracking/linear_velocity_error"] = linear_error.mean()
+        metrics["tracking/yaw_velocity_error"] = yaw_error.mean()
+        metrics["success/fraction"] = (
+            (linear_error < 0.5)
+            & (yaw_error < 0.5)
+            & ~self.env.reset_buf.bool()
+        ).float().mean()
+        terrain_levels = getattr(self.env.simulator, "_terrain_levels", None)
+        if terrain_levels is None:
+            terrain_levels = getattr(self.env.simulator, "terrain_levels", None)
+        if terrain_levels is not None:
+            metrics["terrain/level_mean"] = terrain_levels.float().mean()
+        for randomization, report in self.env.domain_randomization_report.items():
+            if not report.get("active") or not report.get("effective_ranges"):
+                continue
+            for range_name, bounds in report["effective_ranges"].items():
+                if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+                    metrics[f"domain_rand/{randomization}/{range_name}_min"] = (
+                        float(bounds[0])
+                    )
+                    metrics[f"domain_rand/{randomization}/{range_name}_max"] = (
+                        float(bounds[1])
+                    )
+        return metrics
+
+    def log(self, locs, width=80, pad=35):
+        self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
+        iteration_time = locs["collection_time"] + locs["learn_time"]
+        self.tot_time += iteration_time
+        fps = int(
+            self.num_steps_per_env * self.env.num_envs
+            / max(iteration_time, 1.0e-6)
+        )
+        metrics = locs["metrics"]
+
+        ep_string = ""
+        if locs["ep_infos"]:
+            for key in locs["ep_infos"][0]:
+                values = [
+                    torch.as_tensor(info[key], device=self.device).float().mean()
+                    for info in locs["ep_infos"] if key in info
+                ]
+                if values:
+                    value = torch.stack(values).mean()
+                    self.writer.add_scalar(f"Episode/{key}", value, locs["it"])
+                    ep_string += (
+                        f"{f'Mean episode {key}:':>{pad}} {value:.4f}\n"
+                    )
+
+        mean_std = self.alg.actor_critic.std.mean()
+        for name, value in metrics.items():
+            self.writer.add_scalar(name, value, locs["it"])
+        self.writer.add_scalar(
+            "Loss/learning_rate", self.alg.learning_rate, locs["it"]
+        )
+        self.writer.add_scalar(
+            "Policy/mean_noise_std", mean_std.item(), locs["it"]
+        )
+        self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
+        self.writer.add_scalar(
+            "Perf/collection time", locs["collection_time"], locs["it"]
+        )
+        self.writer.add_scalar(
+            "Perf/learning_time", locs["learn_time"], locs["it"]
+        )
+        if locs["rewbuffer"]:
+            self.writer.add_scalar(
+                "Train/mean_reward", statistics.mean(locs["rewbuffer"]),
+                locs["it"],
+            )
+            self.writer.add_scalar(
+                "Train/mean_episode_length",
+                statistics.mean(locs["lenbuffer"]), locs["it"],
+            )
+            self.writer.add_scalar(
+                "Train/mean_reward/time",
+                statistics.mean(locs["rewbuffer"]), self.tot_time,
+            )
+            self.writer.add_scalar(
+                "Train/mean_episode_length/time",
+                statistics.mean(locs["lenbuffer"]), self.tot_time,
+            )
+
+        header = (
+            f" \033[1m Learning iteration {locs['it']}/"
+            f"{locs['tot_iter']}"
+            " \033[0m "
+        )
+        lines = [
+            "#" * width,
+            header.center(width),
+            "",
+            f"{'Computation:':>{pad}} {fps:.0f} steps/s "
+            f"(collection: {locs['collection_time']:.3f}s, "
+            f"learning {locs['learn_time']:.3f}s)",
+            f"{'Physics loss:':>{pad}} {metrics['loss/physics']:.4f}",
+            f"{'Inverse-dynamics PINN:':>{pad}} {metrics['loss/inverse']:.4f}",
+            f"{'BARD rollout PINN:':>{pad}} {metrics['loss/rollout']:.4f}",
+            f"{'QP projection loss:':>{pad}} {metrics['loss/projection']:.4f}",
+            f"{'Value function loss:':>{pad}} {metrics['loss/value']:.4f}",
+            f"{'Surrogate loss:':>{pad}} {metrics['loss/surrogate']:.4f}",
+            f"{'Auxiliary loss:':>{pad}} {metrics['loss/auxiliary']:.4f}",
+            f"{'Mean action noise std:':>{pad}} {mean_std.item():.2f}",
+            f"{'Entropy coefficient:':>{pad}} "
+            f"{self.alg.current_entropy_coef:.6f}",
+        ]
+        if locs["rewbuffer"]:
+            lines.extend((
+                f"{'Mean reward:':>{pad}} "
+                f"{statistics.mean(locs['rewbuffer']):.2f}",
+                f"{'Mean episode length:':>{pad}} "
+                f"{statistics.mean(locs['lenbuffer']):.2f}",
+            ))
+        if ep_string:
+            lines.append(ep_string.rstrip())
+        eta = (
+            self.tot_time / max(locs["it"] + 1, 1)
+            * max(locs["tot_iter"] - locs["it"], 0)
+        )
+        lines.extend((
+            "-" * width,
+            f"{'Total timesteps:':>{pad}} {self.tot_timesteps}",
+            f"{'Iteration time:':>{pad}} {iteration_time:.2f}s",
+            f"{'Total time:':>{pad}} {self.tot_time:.2f}s",
+            f"{'ETA:':>{pad}} {eta:.1f}s",
+        ))
+        print("\n".join(lines))
+
+    def save(self, path, iteration=None, infos=None):
+        saved_iteration = (
+            self.current_learning_iteration
+            if iteration is None else int(iteration)
+        )
         torch.save({
             "model_state_dict": self.actor_critic.state_dict(),
             "actor_optimizer": self.alg.actor_optimizer.optimizer.state_dict(),
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
-            "iteration": self.current_learning_iteration,
+            "iteration": saved_iteration,
             "reliability_ema": self.alg.reliability.values,
+            "reliability_iteration": self.alg.reliability.last_iteration,
             "current_entropy_coef": self.alg.current_entropy_coef,
             "infos": infos,
         }, path)
@@ -528,6 +716,15 @@ class Go2HardPACTRunner:
                     checkpoint["optimizer_state_dict"]
                 )
         self.current_learning_iteration = int(checkpoint.get("iteration", 0))
+        self.alg.reliability.values.update(
+            checkpoint.get("reliability_ema", {})
+        )
+        self.alg.reliability.last_iteration = int(
+            checkpoint.get(
+                "reliability_iteration",
+                self.current_learning_iteration - 1,
+            )
+        )
         if "current_entropy_coef" in checkpoint:
             self.alg.current_entropy_coef = float(
                 checkpoint["current_entropy_coef"]
