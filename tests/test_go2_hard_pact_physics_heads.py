@@ -124,6 +124,8 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
                 self.assertEqual(train.policy.cenet_enc_latent_dim, 16)
                 self.assertEqual(train.policy.cenet_velo_dim, 11)
                 self.assertEqual(train.policy.cenet_explicit_layers, [128, 128])
+                self.assertEqual(train.policy.grf_decoder_layers, [128, 128])
+                self.assertEqual(train.policy.wrench_decoder_layers, [128, 128])
                 self.assertEqual(train.policy.cenet_dec_input_dim, 27)
                 self.assertEqual(train.policy.cenet_dec_out_dim, 133)
                 self.assertEqual(env.env.num_privileged_obs, GO2PACTCfg.env.num_privileged_obs)
@@ -143,6 +145,29 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         self.assertIsNone(explicit.grad)
         self.assertGreater(latent.grad.abs().sum().item(), 0.0)
         self.assertGreater(nominal.grad.abs().sum().item(), 0.0)
+
+    def test_physics_decoder_hidden_layers_are_independently_configurable(self):
+        heads = DeploymentPhysicsHeads(
+            (1.0,) * 12,
+            (1.0,) * 6,
+            grf_hidden_layers=(31, 17),
+            wrench_hidden_layers=(23, 19, 13),
+        )
+        grf_linears = [
+            module for module in heads.grf_head if isinstance(module, torch.nn.Linear)
+        ]
+        wrench_linears = [
+            module for module in heads.wrench_head
+            if isinstance(module, torch.nn.Linear)
+        ]
+        self.assertEqual(
+            [(layer.in_features, layer.out_features) for layer in grf_linears],
+            [(39, 31), (31, 17), (17, 12)],
+        )
+        self.assertEqual(
+            [(layer.in_features, layer.out_features) for layer in wrench_linears],
+            [(27, 23), (23, 19), (19, 13), (13, 6)],
+        )
 
     def test_actor_preserves_policy_shape_and_uses_deterministic_latent(self):
         torch.manual_seed(5)
@@ -342,7 +367,13 @@ class DeploymentContractTests(unittest.TestCase):
             loaded["explicit_estimator"]["input"], "deterministic_latent_mean"
         )
         self.assertEqual(loaded["explicit_estimator"]["hidden_layers"], [128, 128])
-        self.assertEqual(loaded["deployment_heads"]["hidden_layers"], [128, 128])
+        self.assertEqual(
+            loaded["deployment_heads"]["grf"]["hidden_layers"], [128, 128]
+        )
+        self.assertEqual(
+            loaded["deployment_heads"]["base_wrench"]["hidden_layers"],
+            [128, 128],
+        )
         self.assertEqual(loaded["frames_and_units"]["grf"]["foot_order"], list(FOOT_ORDER))
         self.assertTrue(loaded["reconstruction_target"]["critic_input_unchanged"])
         state = actor.state_dict()

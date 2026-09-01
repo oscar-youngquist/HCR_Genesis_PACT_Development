@@ -102,6 +102,13 @@ def calculate_physics_head_gains(cfg):
     )
 
 
+def _hidden_linear_widths(network):
+    widths = [
+        layer.out_features for layer in network if hasattr(layer, "out_features")
+    ]
+    return widths[:-1]
+
+
 def build_deployment_contract(cfg, actor, gain_spec):
     """Build the human- and machine-readable frozen deployment contract."""
     grf_buffer = actor.physics_estimator.grf_scale.detach().cpu().tolist()
@@ -127,10 +134,9 @@ def build_deployment_contract(cfg, actor, gain_spec):
         "latent_dimension": 16,
         "history": {"observation_dimension": 57, "steps": 20},
         "deployment_heads": {
-            "hidden_layers": [128, 128],
             "activation": "ELU",
-            "grf": {"input_order": ["z_t", "stopgrad(explicit_t)", "tau_nom"], "input_dimension": 39, "output_dimension": 12},
-            "base_wrench": {"input_order": ["z_t", "stopgrad(explicit_t)"], "input_dimension": 27, "output_dimension": 6},
+            "grf": {"input_order": ["z_t", "stopgrad(explicit_t)", "tau_nom"], "input_dimension": 39, "hidden_layers": _hidden_linear_widths(actor.physics_estimator.grf_head), "output_dimension": 12},
+            "base_wrench": {"input_order": ["z_t", "stopgrad(explicit_t)"], "input_dimension": 27, "hidden_layers": _hidden_linear_widths(actor.physics_estimator.wrench_head), "output_dimension": 6},
         },
         "frames_and_units": {
             "grf": {"frame": "yaw_local", "units": "N", "foot_order": list(FOOT_ORDER), "component_order": ["Fx", "Fy", "Fz"], "target": "deadbanded_clipped_control_interval_average"},
