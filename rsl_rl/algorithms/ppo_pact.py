@@ -626,7 +626,7 @@ class PPO_PACT:
                           obs_target, explicit_labels_batch, terminated_batch):
         vae_loss = None
 
-        mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.context_encoder(obs_hist_batch)
+        mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.cenet_enc_forward(obs_hist_batch)
         
         dec_input = torch.cat((cenet_latent, cenet_torso_velo), dim=-1)
         enc_update_obs_decode = self.decoder(dec_input)

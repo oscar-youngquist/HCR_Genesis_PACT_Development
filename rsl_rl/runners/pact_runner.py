@@ -90,6 +90,9 @@ class OnPolicyRunnerPACT:
         if actor_critic_class is ActorCritic_HardPACT:
             gain_spec = calculate_physics_head_gains(self.env.cfg)
             actor_extra_kwargs = {
+                "cenet_explicit_layers": self.policy_cfg["cenet_explicit_layers"],
+                "grf_decoder_layers": self.policy_cfg["grf_decoder_layers"],
+                "wrench_decoder_layers": self.policy_cfg["wrench_decoder_layers"],
                 "grf_scale": gain_spec.model_grf,
                 "wrench_scale": gain_spec.model_wrench,
             }

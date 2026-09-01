@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 from .hard_pact_physics import (
     DeploymentPhysicsHeads,
-    transform_explicit_estimator_output,
+    ExplicitEstimatorDecoder,
 )
 
 
@@ -29,10 +29,10 @@ def init_weights(m):
 #
 ###
 class ContextEncoder(nn.Module):
-    """VAE-style encoder for processing context information with velocity prediction.
+    """VAE-style shared history trunk and latent distribution encoder.
 
-    Encodes high-dimensional context into a latent distribution while simultaneously
-    predicting torso velocity. Uses ELU activations and Xavier initialization.
+    The explicit estimate is intentionally decoded outside this module from the
+    deterministic latent mean.
 
     Args:
         context_input_dim (int): Dimension of input context features. Default: 230.
@@ -65,20 +65,11 @@ class ContextEncoder(nn.Module):
         self.ce_latmean_h = nn.Linear(output_hdim, output_hdim)
         self.ce_latvar_h  = nn.Linear(output_hdim, output_hdim)
 
-        self.ce_velomean_h = nn.Linear(output_hdim, output_hdim)
-        self.ce_velovar_h  = nn.Linear(output_hdim, output_hdim)
-
         self.ce_out_mean = nn.Linear(output_hdim, context_latent_size)
         self.ce_out_var = nn.Sequential(
             nn.Linear(output_hdim, context_latent_size),
             nn.Hardtanh(min_val=-5., max_val=5.))
 
-        self.ce_velo_mean = nn.Linear(output_hdim, context_torso_velo_size)
-        self.ce_velo_var  = nn.Sequential(
-            nn.Linear(output_hdim, context_torso_velo_size), 
-            nn.Hardtanh(min_val=-5., max_val=5.))
-
-        
         self.activation = get_activation(activation)
 
         # self.ce_timestep = nn.Linear(context_layer_sizes[2], 1)
@@ -88,8 +79,7 @@ class ContextEncoder(nn.Module):
     def _initialize_weights(self) -> None:
         """Initialize all linear layers with Xavier uniform distribution."""
         for layer in [self.ce_in, self.ce_h1,
-                     self.ce_out_mean, self.ce_velo_mean,
-                     self.ce_h2, self.ce_velovar_h, self.ce_velovar_h,
+                     self.ce_out_mean, self.ce_h2,
                      self.ce_latmean_h, self.ce_latvar_h]:
             
             nn.init.xavier_uniform_(layer.weight)
@@ -98,9 +88,8 @@ class ContextEncoder(nn.Module):
                 nn.init.zeros_(layer.bias)
 
         self.ce_out_var.apply(init_weights)
-        self.ce_velo_var.apply(init_weights)
 
-    def encode(self, X_C: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def encode(self, X_C: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # Forward pass through encoder
         x = self.activation(self.ce_in(X_C))
         # x = self.drop_1(x)
@@ -111,10 +100,7 @@ class ContextEncoder(nn.Module):
         lat_mean = self.activation(self.ce_latmean_h(x))
         lat_var  = self.activation(self.ce_latvar_h(x))
 
-        velo_mean = self.activation(self.ce_velomean_h(x))
-        velo_var  = self.activation(self.ce_velovar_h(x))
-
-        return self.ce_out_mean(lat_mean), self.ce_out_var(lat_var), self.ce_velo_mean(velo_mean), self.ce_velo_var(velo_var)
+        return self.ce_out_mean(lat_mean), self.ce_out_var(lat_var)
 
     def reparameterization_trick(
         self,
@@ -146,12 +132,11 @@ class ContextEncoder(nn.Module):
                 - z: Sampled latent vector
                 - torso_velo: Predicted velocity
         """
-        mean, logvar, v_mean, v_logvar = self.encode(X_C)
-        return mean, logvar, mean, transform_explicit_estimator_output(v_mean)
+        return self.encode(X_C)
     
     def forward_inference(self, X_C: torch.Tensor):
-        mean, logvar, v_mean, v_logvar = self.encode(X_C)
-        return mean, transform_explicit_estimator_output(v_mean)
+        mean, _ = self.encode(X_C)
+        return mean
 
 class ContextDecoder(nn.Module):
     """Decoder network for reconstructing next state from latent representation and velocity.
@@ -210,6 +195,9 @@ class ActorCritic_HardPACT_Pos(nn.Module):
                  cenet_enc_layers=[256,128,64],
                  activation="tanh", 
                  init_noise_std=1.0,
+                 cenet_explicit_layers=(128, 128),
+                 grf_decoder_layers=(128, 128),
+                 wrench_decoder_layers=(128, 128),
                  grf_scale=(1.2, 1.2, 2.5) * 4,
                  wrench_scale=(0.6, 0.6, 0.9924, 0.234403, 0.234403, 0.234403)):
         super().__init__()
@@ -223,8 +211,16 @@ class ActorCritic_HardPACT_Pos(nn.Module):
                                               context_latent_size=cenet_latent_dim,
                                               context_torso_velo_size=cenet_velo_dim,
                                               activation=activation)
+        self.explicit_estimator = ExplicitEstimatorDecoder(
+            cenet_latent_dim, cenet_explicit_layers, cenet_velo_dim
+        )
         self.physics_estimator = DeploymentPhysicsHeads(
-            grf_scale, wrench_scale, cenet_latent_dim, cenet_velo_dim
+            grf_scale,
+            wrench_scale,
+            cenet_latent_dim,
+            cenet_velo_dim,
+            grf_decoder_layers,
+            wrench_decoder_layers,
         )
         
         # Get the activation function used by the actor and critic networks
@@ -338,7 +334,8 @@ class ActorCritic_HardPACT_Pos(nn.Module):
                 if isinstance(m, blacklist):
                     no_decay.add(fpn)
                 elif isinstance(m, whitelist):
-                    if "context_encoder" in fpn or "physics_estimator" in fpn:
+                    if ("context_encoder" in fpn or "explicit_estimator" in fpn
+                            or "physics_estimator" in fpn):
                         encoder.add(fpn)
                     elif "critic" in fpn:
                         critic_set.add(fpn)
@@ -371,6 +368,10 @@ class ActorCritic_HardPACT_Pos(nn.Module):
         return params_act, params_enc
 
     def physics_heads(self, latent, explicit, nominal_torque):
+        return self.physics_estimator(latent, explicit, nominal_torque)
+
+    def physics_heads_from_history(self, obs_history, nominal_torque):
+        _, _, latent, explicit = self.cenet_enc_forward(obs_history)
         return self.physics_estimator(latent, explicit, nominal_torque)
 
     def configure_optimizers(self,
@@ -423,12 +424,13 @@ class ActorCritic_HardPACT_Pos(nn.Module):
     
     # forward methods for the histroical context VAE
     def cenet_enc_forward(self, obs_history):
-        mean, logvar, z, torso_velo = self.context_encoder(obs_history)
-        return mean, logvar, z, torso_velo
+        mean, logvar = self.context_encoder(obs_history)
+        explicit = self.explicit_estimator(mean)
+        return mean, logvar, mean, explicit
     
     def cenet_enc_inference(self, obs_history):
-        mean_z, mean_v = self.context_encoder.forward_inference(obs_history)
-        return mean_z, mean_v
+        mean = self.context_encoder.forward_inference(obs_history)
+        return mean, self.explicit_estimator(mean)
 
     # Method for the forward method of the actor network, used mostly as an internal method
     def actor_forward(self, current_obs):

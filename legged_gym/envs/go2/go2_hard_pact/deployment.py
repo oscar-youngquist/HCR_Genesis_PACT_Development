@@ -110,6 +110,14 @@ def build_deployment_contract(cfg, actor, gain_spec):
         "schema_version": 1,
         "explicit_estimator": {
             "dimension": 11,
+            "input": "deterministic_latent_mean",
+            "input_dimension": 16,
+            "hidden_layers": [
+                layer.out_features
+                for layer in actor.explicit_estimator.network
+                if hasattr(layer, "out_features")
+            ][:-1],
+            "activation": "ELU",
             "fields": [
                 {"name": "base_linear_velocity_body", "dimension": 3, "units": "observation_scaled_m_per_s", "scaling": "obs_scales.lin_vel", "clipping": None},
                 {"name": "foot_contact_probability", "dimension": 4, "order": list(FOOT_ORDER), "units": "probability", "scaling": 1.0, "clipping": [0.0, 1.0]},

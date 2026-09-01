@@ -83,23 +83,60 @@ def transform_explicit_estimator_output(raw):
     )
 
 
-def _physics_head(input_dim, output_dim):
-    return nn.Sequential(
-        nn.Linear(input_dim, 128),
-        nn.ELU(),
-        nn.Linear(128, 128),
-        nn.ELU(),
-        nn.Linear(128, output_dim),
-    )
+class ExplicitEstimatorDecoder(nn.Module):
+    """Decode the deterministic history-latent mean into the 11-D estimate."""
+
+    def __init__(self, latent_dim=16, hidden_layers=(128, 128), output_dim=11):
+        super().__init__()
+        if latent_dim != 16 or output_dim != 11:
+            raise ValueError("HardPACT explicit decoding requires dimensions 16 -> 11")
+        if not hidden_layers:
+            raise ValueError("explicit estimator requires at least one hidden layer")
+        layers = []
+        input_dim = latent_dim
+        for hidden_dim in hidden_layers:
+            layers.extend((nn.Linear(input_dim, int(hidden_dim)), nn.ELU()))
+            input_dim = int(hidden_dim)
+        layers.append(nn.Linear(input_dim, output_dim))
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, latent_mean):
+        if latent_mean.shape[-1] != 16:
+            raise ValueError("explicit estimator input must be a 16-D latent mean")
+        return transform_explicit_estimator_output(self.network(latent_mean))
+
+
+def _physics_head(input_dim, hidden_layers, output_dim):
+    if not hidden_layers:
+        raise ValueError("physics decoder requires at least one hidden layer")
+    layers = []
+    for hidden_dim in hidden_layers:
+        hidden_dim = int(hidden_dim)
+        layers.extend((nn.Linear(input_dim, hidden_dim), nn.ELU()))
+        input_dim = hidden_dim
+    layers.append(nn.Linear(input_dim, output_dim))
+    return nn.Sequential(*layers)
 
 
 class DeploymentPhysicsHeads(nn.Module):
     """Yaw-local interval-GRF and sustained-base-wrench predictors."""
 
-    def __init__(self, grf_scale, wrench_scale, latent_dim=16, explicit_dim=11):
+    def __init__(
+        self,
+        grf_scale,
+        wrench_scale,
+        latent_dim=16,
+        explicit_dim=11,
+        grf_hidden_layers=(128, 128),
+        wrench_hidden_layers=(128, 128),
+    ):
         super().__init__()
-        self.grf_head = _physics_head(latent_dim + explicit_dim + 12, 12)
-        self.wrench_head = _physics_head(latent_dim + explicit_dim, 6)
+        self.grf_head = _physics_head(
+            latent_dim + explicit_dim + 12, grf_hidden_layers, 12
+        )
+        self.wrench_head = _physics_head(
+            latent_dim + explicit_dim, wrench_hidden_layers, 6
+        )
         self.register_buffer("grf_scale", torch.as_tensor(grf_scale, dtype=torch.float32))
         self.register_buffer(
             "wrench_scale", torch.as_tensor(wrench_scale, dtype=torch.float32)

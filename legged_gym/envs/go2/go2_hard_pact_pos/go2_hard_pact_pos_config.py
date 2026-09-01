@@ -37,6 +37,9 @@ class GO2HardPACTPosCfgPPO(GO2PACTPosCfgPPO):
 
     class policy(GO2PACTPosCfgPPO.policy):
         cenet_velo_dim = 11
+        cenet_explicit_layers = [128, 128]
+        grf_decoder_layers = [128, 128]
+        wrench_decoder_layers = [128, 128]
         cenet_dec_input_dim = 16 + 11
         cenet_dec_out_dim = 133
 

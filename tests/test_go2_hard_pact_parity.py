@@ -178,7 +178,7 @@ class TestHardPACTAliases(unittest.TestCase):
 
                 alias_train_dict = class_to_dict(alias_train_cls())
                 legacy_train_dict = class_to_dict(legacy_train_cls())
-                for field in ("cenet_velo_dim", "cenet_dec_input_dim", "cenet_dec_out_dim", "pretrained_path"):
+                for field in ("cenet_velo_dim", "cenet_explicit_layers", "cenet_dec_input_dim", "cenet_dec_out_dim", "pretrained_path"):
                     if field in legacy_train_dict["policy"]:
                         alias_train_dict["policy"][field] = legacy_train_dict["policy"][field]
                     else:
