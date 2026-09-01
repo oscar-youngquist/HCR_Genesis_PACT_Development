@@ -79,7 +79,7 @@ def compose_explicit_estimator_target(
 
 def transform_explicit_estimator_output(raw):
     return compose_explicit_estimator_target(
-        raw[:, :3], raw[:, 3:7].sigmoid(), raw[:, 7:11]
+        raw[:, :3], raw[:, 3:7].sigmoid(), raw[:, 7:11].clamp(-1.0, 1.0)
     )
 
 

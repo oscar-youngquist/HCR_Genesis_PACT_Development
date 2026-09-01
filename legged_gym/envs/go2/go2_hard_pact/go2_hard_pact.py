@@ -113,6 +113,15 @@ class Go2HardPACT(Go2PACT):
         )
         self._pending_disturbance_transition = None
         self.last_transition = {}
+        self._interval_executed_torque_sum = torch.zeros(
+            self.num_envs, 12, device=self.device
+        )
+        self._interval_executed_torque_count = torch.zeros(
+            self.num_envs, 1, device=self.device
+        )
+        self._hard_pact_push_event_mask = torch.zeros(
+            self.num_envs, 1, device=self.device, dtype=torch.bool
+        )
         self.simulator._hard_pact_pre_physics_substep = (
             self._hard_pact_pre_physics_substep
         )
@@ -304,6 +313,12 @@ class Go2HardPACT(Go2PACT):
         )
         self._disturbance_interval_sum_yaw_scaled.add_(yaw_scaled)
         self._disturbance_interval_count.add_(1.0)
+        # _torques is the exact command sent to Genesis in this decimation
+        # substep. Accumulating here produces the requested control-interval
+        # executed torque without altering the legacy torque computation.
+        if hasattr(self, "_interval_executed_torque_sum"):
+            self._interval_executed_torque_sum.add_(self.simulator._torques)
+            self._interval_executed_torque_count.add_(1.0)
         # The equivalent inertial wrench is deliberately label-only: Genesis
         # already realizes the randomized mass and CoM in its dynamics.
         self._apply_sustained_world_wrench(self._current_sustained_wrench_world)
@@ -319,6 +334,39 @@ class Go2HardPACT(Go2PACT):
             self._disturbance_interval_count,
         ):
             value.zero_()
+        if hasattr(self, "_interval_executed_torque_sum"):
+            self._interval_executed_torque_sum.zero_()
+            self._interval_executed_torque_count.zero_()
+
+    def _capture_bard_pre_state(self):
+        simulator = self.simulator
+        self._bard_pre_q_simulator = torch.cat((
+            simulator._base_pos,
+            simulator._base_quat,
+            simulator._dof_pos,
+        ), dim=-1).clone()
+        self._bard_pre_v_world_simulator = torch.cat((
+            simulator._robot.get_vel(),
+            simulator._robot.get_ang(),
+            simulator._dof_vel,
+        ), dim=-1).clone()
+
+    def _capture_bard_post_state(self):
+        simulator = self.simulator
+        self._bard_post_v_world_simulator = torch.cat((
+            simulator._robot.get_vel(),
+            simulator._robot.get_ang(),
+            simulator._robot.get_dofs_velocity(simulator._dof_indices),
+        ), dim=-1).clone()
+
+    def _post_physics_step_callback(self):
+        """Observe legacy push events without changing legacy push logic."""
+        velocity_before = self.simulator._robot.get_dofs_velocity()[:, :6].clone()
+        self._legacy_task_class._post_physics_step_callback(self)
+        velocity_after = self.simulator._robot.get_dofs_velocity()[:, :6]
+        self._hard_pact_push_event_mask.copy_(
+            (velocity_after != velocity_before).any(dim=-1, keepdim=True)
+        )
 
     def _end_disturbance_interval(self):
         divisor = self._disturbance_interval_count.clamp_min(1.0)
@@ -363,6 +411,8 @@ class Go2HardPACT(Go2PACT):
         reset = self.reset_buf.bool().reshape(-1, 1)
         timeout = self.time_out_buf.bool().reshape(-1, 1)
         teleport = self.non_failure_reset_buf.bool().reshape(-1, 1)
+        push_event = self._hard_pact_push_event_mask.clone()
+        torque_divisor = self._interval_executed_torque_count.clamp_min(1.0)
         fields = {
             "applied_sustained_wrench_world": pending["applied_sustained_wrench_world"],
             "sustained_wrench_active_mask": pending["sustained_wrench_active_mask"],
@@ -371,10 +421,27 @@ class Go2HardPACT(Go2PACT):
             "total_external_wrench_label_yaw_scaled": pending["total_external_wrench_label_yaw_scaled"],
             "realized_added_mass": pending["realized_added_mass"],
             "realized_com_shift_body": pending["realized_com_shift_body"],
+            "pre_q": self._bard_pre_q_simulator.clone(),
+            "pre_v": self._bard_pre_v_world_simulator.clone(),
+            "post_v": self._bard_post_v_world_simulator.clone(),
+            "control_dt": torch.full(
+                (self.num_envs, 1), float(self.dt),
+                device=self.device, dtype=torch.float32,
+            ),
+            "interval_executed_torque": (
+                self._interval_executed_torque_sum / torque_divisor
+            ).clone(),
+            "joint_armature": self.simulator._joint_armature.clone(),
+            "joint_friction": self.simulator._joint_friction.clone(),
+            "joint_stiffness": self.simulator._joint_stiffness.clone(),
+            "joint_damping": self.simulator._joint_damping.clone(),
+            "push_event_mask": push_event,
             "reset_mask": reset,
             "timeout_mask": timeout,
             "teleport_mask": teleport,
-            "physics_valid_mask": physics_transition_mask(reset, timeout, teleport),
+            "physics_valid_mask": physics_transition_mask(
+                reset, timeout, teleport, push_event
+            ),
         }
         # These deployment-facing views are named transition values but are
         # intentionally not duplicated in the critic: its required input is
@@ -432,12 +499,15 @@ class Go2HardPACT(Go2PACT):
         pre_step_base_quat = self.simulator.base_quat.clone()
         disturbances_initialized = hasattr(self, "_persistent_component_active")
         if disturbances_initialized:
+            self._hard_pact_push_event_mask.zero_()
+            self._capture_bard_pre_state()
             self._update_persistent_wrench(self.common_step_counter)
             self._capture_realized_inertial_randomization()
             self._begin_disturbance_interval()
         self.grf_processor.begin_interval()
         self.simulator.step(actions)
         if disturbances_initialized:
+            self._capture_bard_post_state()
             self._pending_disturbance_transition = self._end_disturbance_interval()
         interval_grf = world_to_yaw_local(
             self.grf_processor.end_interval(), pre_step_base_quat
@@ -482,6 +552,9 @@ class Go2HardPACT(Go2PACT):
                 self._disturbance_interval_sum_mass_com_yaw_scaled,
                 self._disturbance_interval_sum_yaw_scaled,
                 self._disturbance_interval_count,
+                self._interval_executed_torque_sum,
+                self._interval_executed_torque_count,
+                self._hard_pact_push_event_mask,
                 self._realized_added_mass,
                 self._realized_com_shift_body,
             ):

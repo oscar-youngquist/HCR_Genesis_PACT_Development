@@ -397,6 +397,12 @@ class OnPolicyRunnerPACT:
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
         self.writer.add_scalar('Loss/pinn_loss', locs['mean_pinn_loss'], locs['it'])
+        for name, value in getattr(
+            self.alg, "last_inverse_dynamics_metrics", {}
+        ).items():
+            self.writer.add_scalar(name, value.item(), locs['it'])
+        for name, value in getattr(self.alg, "last_auxiliary_metrics", {}).items():
+            self.writer.add_scalar(f"Loss/auxiliary_{name}", value.item(), locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])

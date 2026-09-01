@@ -197,6 +197,18 @@ class TestHardPACTAliases(unittest.TestCase):
                     else:
                         alias_train_dict["policy"].pop(field, None)
                 alias_train_dict["runner"]["policy_class_name"] = legacy_train_dict["runner"]["policy_class_name"]
+                if name == "go2_hard_pact":
+                    alias_train_dict["runner"]["algorithm_class_name"] = legacy_train_dict["runner"]["algorithm_class_name"]
+                    for field in (
+                        "bard_enabled", "bard_randomize_base_inertia",
+                        "bard_scale_rotational_inertia", "bard_batch_capacity",
+                        "grf_observation_scale",
+                        "base_wrench_observation_scale",
+                        "auxiliary_learning_rate", "privileged_loss_weight",
+                        "explicit_loss_weight", "grf_loss_weight",
+                        "active_wrench_loss_weight", "neutral_wrench_loss_weight",
+                    ):
+                        alias_train_dict["algorithm"].pop(field)
                 self.assertEqual(alias_train_dict, legacy_train_dict)
 
                 legacy_train = legacy_train_cls()
@@ -205,7 +217,11 @@ class TestHardPACTAliases(unittest.TestCase):
                                  legacy_train.runner.runner_class_name if hasattr(legacy_train.runner, "runner_class_name") else legacy_train.runner_class_name)
                 self.assertEqual(alias_train.runner.policy_class_name,
                                  "ActorCritic_HardPACT" if name == "go2_hard_pact" else "ActorCritic_HardPACT_Pos")
-                self.assertEqual(alias_train.runner.algorithm_class_name, legacy_train.runner.algorithm_class_name)
+                self.assertEqual(
+                    alias_train.runner.algorithm_class_name,
+                    "PPO_HardPACT" if name == "go2_hard_pact"
+                    else legacy_train.runner.algorithm_class_name,
+                )
 
     def test_observation_critic_and_action_dimensions(self):
         for name, _, _, legacy_cfg_cls, alias_cfg_cls, _, _, _, expected_action_dim in CASES:

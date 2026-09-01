@@ -65,3 +65,20 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
 
     class runner(GO2PACTCfgPPO.runner):
         policy_class_name = "ActorCritic_HardPACT"
+        algorithm_class_name = "PPO_HardPACT"
+
+    class algorithm(GO2PACTCfgPPO.algorithm):
+        auxiliary_learning_rate = 2.0e-4
+        privileged_loss_weight = 1.0
+        explicit_loss_weight = 1.0
+        grf_loss_weight = 1.0
+        active_wrench_loss_weight = 1.0
+        neutral_wrench_loss_weight = 0.25
+        bard_enabled = True
+        bard_randomize_base_inertia = True
+        bard_scale_rotational_inertia = True
+        bard_batch_capacity = 4096
+        grf_observation_scale = GO2HardPACTCfg.normalization.obs_scales.grf
+        base_wrench_observation_scale = (
+            GO2HardPACTCfg.normalization.obs_scales.base_wrench
+        )

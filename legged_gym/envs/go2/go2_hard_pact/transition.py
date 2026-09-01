@@ -45,8 +45,12 @@ def wrench_world_to_scaled_yaw_local(wrench_world, base_quat_xyzw, scale):
     return local * float(scale)
 
 
-def physics_transition_mask(reset, timeout, teleport):
-    return ~(reset.bool() | timeout.bool() | teleport.bool())
+def physics_transition_mask(reset, timeout, teleport, push_event=None):
+    if push_event is None:
+        push_event = torch.zeros_like(reset, dtype=torch.bool)
+    return ~(
+        push_event.bool() | reset.bool() | timeout.bool() | teleport.bool()
+    )
 
 
 DISTURBANCE_FIELD_DIMS = (

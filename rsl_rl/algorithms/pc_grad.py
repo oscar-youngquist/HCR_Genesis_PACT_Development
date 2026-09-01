@@ -1,296 +1,163 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-import numpy as np
+"""Gradient projection wrapper used by PACT and B1Z1-style physics losses."""
+
 import copy
 import random
 
+import numpy as np
+import torch
 
-class PCGrad():
-    def __init__(self, optimizer, reduction='mean'):
-        self._optim, self._reduction = optimizer, reduction
-        return
+
+class PCGrad:
+    """Wrap an optimizer and merge gradients from multiple objectives.
+
+    The two PINN entry points preserve the legacy B1Z1 projection rules. The
+    packing code additionally records which parameters each objective touched;
+    parameters untouched by every objective receive ``grad=None`` so AdamW
+    cannot change them through momentum or weight decay.
+    """
+
+    def __init__(self, optimizer, reduction="mean"):
+        if reduction not in ("mean", "sum"):
+            raise ValueError("reduction must be 'mean' or 'sum'")
+        self._optim = optimizer
+        self._reduction = reduction
+        self.last_objective_grads = None
+        self.last_merged_grad = None
+        self.last_has_grads = None
 
     @property
     def optimizer(self):
         return self._optim
 
     def zero_grad(self):
-        '''
-        clear the gradient of the parameters
-        '''
-
         return self._optim.zero_grad(set_to_none=True)
 
     def step(self):
-        '''
-        update the parameters with the gradient
-        '''
-
         return self._optim.step()
 
     def pc_backward(self, objectives):
-        '''
-        calculate the gradient of the parameters
+        """Apply ordinary symmetric PCGrad to one or more objectives."""
+        self._backward(objectives, self._project_conflicting)
 
-        input:
-        - objectives: a list of objectives
-        '''
-
-        grads, shapes, has_grads = self._pack_grad(objectives)
-        pc_grad = self._project_conflicting(grads, has_grads)
-        pc_grad = self._unflatten_grad(pc_grad, shapes[0])
-        self._set_grad(pc_grad)
-        return
-    
     def pc_backward_pinn(self, objectives):
-        '''
-        calculate the gradient of the parameters
+        """Apply B1Z1's PPO-primary, orthogonal-PINN projection."""
+        self._backward(objectives, self._project_conflicting_pinn)
 
-        input:
-        - objectives: a list of objectives
-        '''
-
-        grads, shapes, has_grads = self._pack_grad(objectives)
-        pc_grad = self._project_conflicting_pinn(grads, has_grads)
-        pc_grad = self._unflatten_grad(pc_grad, shapes[0])
-        self._set_grad(pc_grad)
-        return
-    
     def pc_backward_ppgrad(self, objectives):
-        '''
-        calculate the gradient of the parameters
+        """Apply the norm-balanced form of B1Z1's PINN projection."""
+        self._backward(objectives, self._project_conflicting_pinn_balanced)
 
-        input:
-        - objectives: a list of objectives
-        '''
+    def _backward(self, objectives, projector):
+        if not objectives:
+            raise ValueError("PCGrad requires at least one objective")
+        grads, shapes, has_grads, has_any_grad = self._pack_grad(objectives)
+        merged = projector(grads, has_grads)
+        self._record_backward(grads, merged, has_grads)
+        self._set_grad(self._unflatten_grad(merged, shapes[0]), has_any_grad)
 
-        grads, shapes, has_grads = self._pack_grad(objectives)
-        pc_grad = self._project_conflicting_pinn_balanced(grads, has_grads)
-        pc_grad = self._unflatten_grad(pc_grad, shapes[0])
-        self._set_grad(pc_grad)
-        return
+    def _merge(self, projected, shared):
+        merged = torch.zeros_like(projected[0])
+        shared_values = torch.stack([gradient[shared] for gradient in projected])
+        if self._reduction == "mean":
+            merged[shared] = shared_values.mean(dim=0)
+        else:
+            merged[shared] = shared_values.sum(dim=0)
+        # A parameter used by only a subset of objectives is not a conflict;
+        # sum its available task gradients exactly as upstream PCGrad does.
+        merged[~shared] = torch.stack(
+            [gradient[~shared] for gradient in projected]
+        ).sum(dim=0)
+        return merged
 
     def _project_conflicting(self, grads, has_grads, shapes=None):
         shared = torch.stack(has_grads).prod(0).bool()
-        pc_grad, num_task = copy.deepcopy(grads), len(grads)
-        # First, de-conflict all of the 
-        for g_i in pc_grad:
-            random.shuffle(grads)
-            for g_j in grads:
-                g_i_g_j = torch.dot(g_i, g_j)
-                if g_i_g_j < 0:
-                    g_i -= (g_i_g_j) * g_j / (g_j.norm()**2)
-
-        merged_grad = torch.zeros_like(grads[0]).to(grads[0].device)
-
-        if self._reduction:
-            merged_grad[shared] = torch.stack([g[shared]
-                                           for g in pc_grad]).mean(dim=0)
-        elif self._reduction == 'sum':
-            merged_grad[shared] = torch.stack([g[shared]
-                                           for g in pc_grad]).sum(dim=0)
-        else: exit('invalid reduction method')
-
-        merged_grad[~shared] = torch.stack([g[~shared]
-                                            for g in pc_grad]).sum(dim=0)
-        return merged_grad
-
-
-    # # Prioritized modification assuming the first gradient is from the "prime" task and the second is "auxilliary"
-    # def _project_conflicting(self, grads, has_grads, shapes=None):
-    #     shared = torch.stack(has_grads).prod(0).bool()
-    #     pc_grad, num_task = copy.deepcopy(grads), len(grads)
-    #     if len(pc_grad) > 1:
-    #         g_prime = pc_grad[0]
-    #         g_sub   = pc_grad[1]
-    #         # We want to check if the sub-objective conflicts with the primairy, and needs to be projected
-    #         g_s_g_p = torch.dot(g_sub, g_prime)
-
-    #         if g_s_g_p < 0:
-    #             g_sub -= (g_s_g_p) * g_prime / (g_prime.norm()**2)
-    #             g_sub *= 0.5
-
-    #     merged_grad = torch.zeros_like(grads[0]).to(grads[0].device)
-
-    #     if self._reduction:
-    #         merged_grad[shared] = torch.stack([g[shared]
-    #                                        for g in pc_grad]).mean(dim=0)
-    #     elif self._reduction == 'sum':
-    #         merged_grad[shared] = torch.stack([g[shared]
-    #                                        for g in pc_grad]).sum(dim=0)
-    #     else: exit('invalid reduction method')
-
-    #     merged_grad[~shared] = torch.stack([g[~shared]
-    #                                         for g in pc_grad]).sum(dim=0)
-    #     return merged_grad
-    
-
-    # # Prioritized modification assuming the first gradient is from the "prime" task and the second is "auxilliary"
-    # def _project_conflicting_pinn(self, grads, has_grads, shapes=None):
-    #     shared = torch.stack(has_grads).prod(0).bool()
-    #     pc_grad, num_task = copy.deepcopy(grads), len(grads)
-
-    #     # First, de-conflict all of the PINN-specific gradients
-    #     pinn_grads = grads[1:]
-    #     for g_i in pc_grad[1:]:
-    #         random.shuffle(pinn_grads)
-    #         for g_j in pinn_grads:
-    #             g_i_g_j = torch.dot(g_i, g_j)
-    #             if g_i_g_j < 0:
-    #                 g_i -= (g_i_g_j) * g_j / (g_j.norm()**2)
-
-    #     # Now project each pinn gradient onto the prime-objective, the PPO loss
-    #     if len(pc_grad) > 1:
-    #         g_prime = pc_grad[0]
-            
-    #         for g_sub in pinn_grads:
-    #             g_s_g_p = torch.dot(g_sub, g_prime)
-    #             if g_s_g_p < 0:
-    #                 g_sub -= (g_s_g_p) * g_prime / (g_prime.norm()**2)
-            
-    #     merged_grad = torch.zeros_like(grads[0]).to(grads[0].device)
-
-    #     if self._reduction:
-    #         merged_grad[shared] = torch.stack([g[shared]
-    #                                        for g in pc_grad]).mean(dim=0)
-    #     elif self._reduction == 'sum':
-    #         merged_grad[shared] = torch.stack([g[shared]
-    #                                        for g in pc_grad]).sum(dim=0)
-    #     else: exit('invalid reduction method')
-
-    #     merged_grad[~shared] = torch.stack([g[~shared]
-    #                                         for g in pc_grad]).sum(dim=0)
-    #     return merged_grad
-    
+        projected = copy.deepcopy(grads)
+        for gradient in projected:
+            comparison_order = list(range(len(grads)))
+            random.shuffle(comparison_order)
+            for index in comparison_order:
+                other = grads[index]
+                dot = torch.dot(gradient, other)
+                if dot < 0:
+                    gradient -= dot * other / other.square().sum().clamp_min(1.0e-12)
+        return self._merge(projected, shared)
 
     def _project_conflicting_pinn(self, grads, has_grads, shapes=None):
-        assert len(grads) == 2
+        if len(grads) != 2:
+            raise ValueError("B1Z1 PINN projection requires [PPO, physics]")
+        reward, physics = copy.deepcopy(grads)
+        coefficient = torch.dot(reward, physics) / reward.square().sum().clamp_min(1.0e-12)
+        physics_orthogonal = physics - coefficient * reward
         shared = torch.stack(has_grads).prod(0).bool()
-        grads_ = copy.deepcopy(grads)
-
-        g_R = grads_[0]   # task gradient
-        g_P = grads_[1]   # PINN gradient
-
-        proj_coeff = torch.dot(g_R, g_P) / (g_R.norm() ** 2)
-
-        g_P_orth = (g_P - proj_coeff * g_R)   # orthogonal component of the PINN loss gradient
-
-        pp_grad = [grads[0], g_P_orth]   # Modified PINN loss gradient
-
-        merged_grad = torch.zeros_like(grads[0]).to(grads[0].device)
-
-        if self._reduction:
-            merged_grad[shared] = torch.stack([g[shared] for g in pp_grad]).mean(dim=0)
-        elif self._reduction == "sum":
-            merged_grad[shared] = torch.stack([g[shared] for g in pp_grad]).sum(dim=0)
-        else:
-            exit("invalid reduction method")
-
-        merged_grad[~shared] = torch.stack([g[~shared] for g in pp_grad]).sum(dim=0)
-        return merged_grad
-    
+        return self._merge([grads[0], physics_orthogonal], shared)
 
     def _project_conflicting_pinn_balanced(self, grads, has_grads, shapes=None):
-        assert len(grads) == 2
-        # print("PCGrad with balanced scaling of PINN gradient")
+        if len(grads) != 2:
+            raise ValueError("balanced B1Z1 projection requires [PPO, physics]")
+        reward, physics = copy.deepcopy(grads)
+        coefficient = torch.dot(reward, physics) / reward.square().sum().clamp_min(1.0e-12)
+        physics_orthogonal = physics - coefficient * reward
+        reward_norm = reward.norm()
+        physics_norm = physics_orthogonal.norm()
+        beta = (
+            reward_norm / physics_norm.clamp_min(1.0e-12)
+            if physics_norm > reward_norm else 1.0
+        )
         shared = torch.stack(has_grads).prod(0).bool()
-        grads_ = copy.deepcopy(grads)
+        return self._merge([grads[0], beta * physics_orthogonal], shared)
 
-        g_R = grads_[0]   # task gradient
-        g_P = grads_[1]   # PINN gradient
+    def _record_backward(self, objective_grads, merged_grad, has_grads):
+        self.last_objective_grads = tuple(
+            gradient.detach().clone() for gradient in objective_grads
+        )
+        self.last_merged_grad = merged_grad.detach().clone()
+        self.last_has_grads = tuple(mask.detach().clone() for mask in has_grads)
 
-        proj_coeff = torch.dot(g_R, g_P) / (g_R.norm() ** 2)
-
-        g_P_orth = (g_P - proj_coeff * g_R)   # orthogonal component of the PINN loss gradient
-
-        # Adaptive \beta scaling to ensure the norm of projected PINN gradient
-        #     is not greater than the norm of the task reward gradient
-        beta = g_R.norm() / g_P_orth.norm() if g_P_orth.norm() > g_R.norm() else 1.0
-        g_P_scaled = beta * g_P_orth
-
-        pp_grad = [grads[0], g_P_scaled]   # Modified and scaled PINN loss gradient
-
-        merged_grad = torch.zeros_like(grads[0]).to(grads[0].device)
-
-        if self._reduction:
-            merged_grad[shared] = torch.stack([g[shared] for g in pp_grad]).mean(dim=0)
-        elif self._reduction == "sum":
-            merged_grad[shared] = torch.stack([g[shared] for g in pp_grad]).sum(dim=0)
-        else:
-            exit("invalid reduction method")
-
-        merged_grad[~shared] = torch.stack([g[~shared] for g in pp_grad]).sum(dim=0)
-        return merged_grad
-
-    def _set_grad(self, grads):
-        '''
-        set the modified gradients to the network
-        '''
-
-        idx = 0
+    def _set_grad(self, grads, has_any_grad):
+        index = 0
         for group in self._optim.param_groups:
-            for p in group['params']:
-                # if p.grad is None: continue
-                p.grad = grads[idx]
-                idx += 1
-        return
+            for parameter in group["params"]:
+                parameter.grad = grads[index] if has_any_grad[index] else None
+                index += 1
 
     def _pack_grad(self, objectives):
-        '''
-        pack the gradient of the parameters of the network for each objective
-        
-        output:
-        - grad: a list of the gradient of the parameters
-        - shape: a list of the shape of the parameters
-        - has_grad: a list of mask represent whether the parameter has gradient
-        '''
-
-        grads, shapes, has_grads = [], [], []
-        for obj in objectives:
+        grads, shapes, has_grads, parameter_masks = [], [], [], []
+        for objective in objectives:
             self._optim.zero_grad(set_to_none=True)
-            obj.backward(retain_graph=True)
-            grad, shape, has_grad = self._retrieve_grad()
-            grads.append(self._flatten_grad(grad, shape))
-            has_grads.append(self._flatten_grad(has_grad, shape))
+            objective.backward(retain_graph=True)
+            grad, shape, has_grad, parameter_has_grad = self._retrieve_grad()
+            grads.append(self._flatten_grad(grad))
             shapes.append(shape)
-        return grads, shapes, has_grads
+            has_grads.append(self._flatten_grad(has_grad))
+            parameter_masks.append(parameter_has_grad)
+        has_any_grad = [any(flags) for flags in zip(*parameter_masks)]
+        return grads, shapes, has_grads, has_any_grad
 
-    def _unflatten_grad(self, grads, shapes):
-        unflatten_grad, idx = [], 0
+    @staticmethod
+    def _unflatten_grad(flat_grad, shapes):
+        gradients, index = [], 0
         for shape in shapes:
-            length = np.prod(shape)
-            unflatten_grad.append(grads[idx:idx + length].view(shape).clone())
-            idx += length
-        return unflatten_grad
+            # np.prod(Size([])) is floating-point for scalar parameters.
+            length = int(np.prod(shape))
+            gradients.append(flat_grad[index:index + length].view(shape).clone())
+            index += length
+        return gradients
 
-    def _flatten_grad(self, grads, shapes):
-        flatten_grad = torch.cat([g.flatten() for g in grads])
-        return flatten_grad
+    @staticmethod
+    def _flatten_grad(grads):
+        return torch.cat([gradient.flatten() for gradient in grads])
 
     def _retrieve_grad(self):
-        '''
-        get the gradient of the parameters of the network with specific 
-        objective
-        
-        output:
-        - grad: a list of the gradient of the parameters
-        - shape: a list of the shape of the parameters
-        - has_grad: a list of mask represent whether the parameter has gradient
-        '''
-
-        grad, shape, has_grad = [], [], []
+        grads, shapes, has_grads, parameter_has_grad = [], [], [], []
         for group in self._optim.param_groups:
-            for p in group['params']:
-                # if p.grad is None: continue
-                # tackle the multi-head scenario
-                if p.grad is None:
-                    shape.append(p.shape)
-                    grad.append(torch.zeros_like(p).to(p.device))
-                    has_grad.append(torch.zeros_like(p).to(p.device))
-                    continue
-                shape.append(p.grad.shape)
-                grad.append(p.grad.clone())
-                has_grad.append(torch.ones_like(p).to(p.device))
-        return grad, shape, has_grad
+            for parameter in group["params"]:
+                active = parameter.grad is not None
+                parameter_has_grad.append(active)
+                shapes.append(parameter.shape)
+                if active:
+                    grads.append(parameter.grad.detach().clone())
+                    has_grads.append(torch.ones_like(parameter))
+                else:
+                    grads.append(torch.zeros_like(parameter))
+                    has_grads.append(torch.zeros_like(parameter))
+        return grads, shapes, has_grads, parameter_has_grad

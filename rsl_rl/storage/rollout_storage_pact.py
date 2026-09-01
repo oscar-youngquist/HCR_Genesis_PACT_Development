@@ -120,6 +120,10 @@ class RolloutStoragePACT:
         self.saved_hidden_states_c = None
 
         self.step = 0
+        # HardPACT adds named physics fields lazily. Legacy PACT never creates
+        # these tensors and therefore retains its exact storage behavior.
+        self.hard_pact_fields = None
+        self.current_hard_pact_batch = None
 
     def add_transitions(self, transition: Transition):
         
@@ -156,6 +160,22 @@ class RolloutStoragePACT:
         self.wb_mass_mats[self.step].copy_(transition.wb_mass_mat)
         self.wb_bias_vecs[self.step].copy_(transition.wb_bias_vec)
         self.torso_accelerations[self.step].copy_(transition.torso_acc)
+
+        hard_pact = getattr(transition, "hard_pact", None)
+        if hard_pact is not None:
+            if self.hard_pact_fields is None:
+                self.hard_pact_fields = {
+                    name: torch.zeros(
+                        self.num_transitions_per_env,
+                        self.num_envs,
+                        *value.shape[1:],
+                        device=self.device,
+                        dtype=value.dtype,
+                    )
+                    for name, value in hard_pact.items()
+                }
+            for name, value in hard_pact.items():
+                self.hard_pact_fields[name][self.step].copy_(value)
         
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
@@ -178,6 +198,7 @@ class RolloutStoragePACT:
 
     def clear(self):
         self.step = 0
+        self.current_hard_pact_batch = None
 
     def compute_returns(self, last_values, gamma, lam):
         advantage = 0
@@ -276,6 +297,12 @@ class RolloutStoragePACT:
 
                 pprev_obs_batch = pprev_obs[batch_idx]
                 pprev_obs_hist_batch = pprev_obs_hist[batch_idx]
+
+                if self.hard_pact_fields is not None:
+                    self.current_hard_pact_batch = {
+                        name: value.flatten(0, 1)[batch_idx]
+                        for name, value in self.hard_pact_fields.items()
+                    }
 
                 
                 yield terminated_batch, obs_batch, critic_observations_batch, obs_hist_batch, explicit_labels_batch, \
