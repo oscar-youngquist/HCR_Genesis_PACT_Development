@@ -75,6 +75,11 @@ class GenesisSimulator_PACT(Simulator):
                 self._dof_indices)
             self._dof_vel[:] = self._robot.get_dofs_velocity(
                 self._dof_indices)
+            grf_callback = getattr(
+                self, "_hard_pact_grf_post_physics_substep", None
+            )
+            if grf_callback is not None:
+                grf_callback()
 
     def _get_pinn_wb_dynamics(self):
         #           total GT forces  ,  generalized mass mat, bias vector

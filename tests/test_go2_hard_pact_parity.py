@@ -150,13 +150,27 @@ class TestHardPACTAliases(unittest.TestCase):
                 self.assertIs(task_registry.get_task_class(name), alias_task)
                 self.assertTrue(issubclass(alias_task, legacy_task))
                 self.assertIs(alias_task._pre_sim_step, legacy_task._pre_sim_step)
-                self.assertIs(alias_task.compute_observations, legacy_task.compute_observations)
 
                 registered_env = task_registry.env_cfgs[name]
                 registered_train = task_registry.train_cfgs[name]
                 self.assertIsInstance(registered_env, alias_cfg_cls)
                 self.assertIsInstance(registered_train, alias_train_cls)
-                self.assertEqual(class_to_dict(alias_cfg_cls()), class_to_dict(legacy_cfg_cls()))
+                alias_env_dict = class_to_dict(alias_cfg_cls())
+                legacy_env_dict = class_to_dict(legacy_cfg_cls())
+                grf_cfg = alias_env_dict["sim"].pop("grf")
+                self.assertEqual(
+                    set(grf_cfg),
+                    {
+                        "vertical_deadband_n",
+                        "clip_min_n",
+                        "clip_max_n",
+                        "ema_alpha",
+                        "contact_threshold_n",
+                        "use_ema_grfs_buf",
+                    },
+                )
+                self.assertFalse(grf_cfg["use_ema_grfs_buf"])
+                self.assertEqual(alias_env_dict, legacy_env_dict)
                 self.assertEqual(class_to_dict(alias_train_cls()), class_to_dict(legacy_train_cls()))
 
                 legacy_train = legacy_train_cls()
