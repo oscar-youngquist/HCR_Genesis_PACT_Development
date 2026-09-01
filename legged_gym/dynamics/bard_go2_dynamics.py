@@ -9,6 +9,7 @@ rows are LOCAL_WORLD_ALIGNED so they multiply world-frame forces directly.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -450,12 +451,30 @@ class BardGo2Dynamics:
             context.parameters.get("joint_armature"), applied, batch
         )
 
+        # BARD's differentiable ABA allocates its articulated-body work arrays,
+        # but its autograd graph still references the kinematic tensors stored
+        # in ``Data`` (Xup, S, v, ...).  HardPACT subsequently builds the
+        # sampled-substep QP context before PCGrad calls backward; reusing
+        # ``self.data`` there would overwrite those saved tensors in place and
+        # invalidate the ABA graph.  Snapshot only the detached kinematic
+        # arrays ABA reads, at the active minibatch size.  This avoids a second
+        # update_kinematics call and is substantially smaller than duplicating
+        # BARD's full batch-capacity workspace on GPU.
+        aba_data = copy.copy(self.data)
+        for name in (
+            "_q", "T_pc", "Xup", "Xup_T", "S", "T_world", "v", "vJ"
+        ):
+            value = getattr(self.data, name)
+            if torch.is_tensor(value):
+                setattr(aba_data, name, value[:batch].detach().clone())
+        aba_data.batch_size = batch
+
         def official_aba(force):
             # BARD consumes its URDF joint order; callers of this adapter use
             # canonical simulator order.  The returned acceleration is mapped
             # back immediately so the linear solver has one consistent basis.
             return self._canonical(self.bard.aba(
-                self.model, self.data, self._bard_order(force),
+                self.model, aba_data, self._bard_order(force),
                 gravity=context.gravity,
             ))
 

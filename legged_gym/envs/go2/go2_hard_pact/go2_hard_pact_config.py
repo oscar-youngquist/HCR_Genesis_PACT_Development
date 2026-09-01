@@ -10,11 +10,28 @@ from .transition import DISTURBANCE_CRITIC_DIM
 class GO2HardPACTCfg(GO2PACTCfg):
     """Legacy PACT configuration plus calibrated Go2 GRF conditioning."""
 
+    class asset(GO2PACTCfg.asset):
+        # Genesis cannot query joint velocity limits from the URDF.  Use the
+        # repository's calibrated Go2 limits (FR, FL, RR, RL; hip, thigh,
+        # calf) so the QP's hard one-step velocity constraints are physical.
+        dof_vel_limits = [
+            30.1, 30.1, 15.7,
+            30.1, 30.1, 15.7,
+            30.1, 30.1, 15.7,
+            30.1, 30.1, 15.7,
+        ]
+
     class env(GO2PACTCfg.env):
         num_explicit_recon_obs = 11
         num_privileged_obs = GO2PACTCfg.env.num_privileged_obs + DISTURBANCE_CRITIC_DIM
 
     class sim(GO2PACTCfg.sim):
+        # PACT's legacy ``sim`` class shadows the base config field even
+        # though Genesis still runs with standard Earth gravity.  HardPACT
+        # needs the physical vector explicitly for its label-only equivalent
+        # added-mass/CoM wrench and deployment contract.
+        gravity = [0.0, 0.0, -9.81]
+
         class grf:
             prediction_scale_n = [120.0, 120.0, 250.0]
             vertical_deadband_n = 3.0

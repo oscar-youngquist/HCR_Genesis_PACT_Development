@@ -966,13 +966,15 @@ class Go2HardPACT(Go2PACT):
             )
         if getattr(self, "_hard_pact_rollout_qp_enabled", False):
             actor = self._hard_pact_actor_critic
-            if actor.cenet_z is None or actor.cenet_torso_velo is None:
-                raise RuntimeError(
-                    "HardPACT substep QP requires a policy inference before env.step"
+            # Runner construction performs one legacy zero-action reset before
+            # the policy has produced a history latent.  That boundary step is
+            # deliberately unprojected; it creates the initial observation and
+            # is never stored as a PPO transition.  Every subsequent training
+            # step has a policy context and therefore executes the substep QP.
+            if actor.cenet_z is not None and actor.cenet_torso_velo is not None:
+                self.set_hard_pact_policy_context(
+                    actor.cenet_z, actor.cenet_torso_velo
                 )
-            self.set_hard_pact_policy_context(
-                actor.cenet_z, actor.cenet_torso_velo
-            )
 
         # Shift in lockstep with the legacy action queue. A false entry means
         # the selected action is a reset/boundary zero rather than a policy

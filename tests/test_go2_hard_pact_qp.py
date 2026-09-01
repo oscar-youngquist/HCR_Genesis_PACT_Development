@@ -158,6 +158,21 @@ class HardPACTQPTests(unittest.TestCase):
         self.assertEqual(result.tau_safe.shape, (2, 12))
         self.assertTrue(torch.isfinite(result.tau_safe).all())
 
+    def test_qpth_warning_is_quiet_by_default_and_debug_verbosity_is_preserved(self):
+        # qpth prints its inaccurate-iterate banner even at verbose=0. The
+        # adapter uses -1 for the public quiet setting because HardPACT's own
+        # residual certification and fallback remain authoritative.
+        for configured, forwarded in ((0, -1), (2, 2)):
+            qp = make_qp(verbose=configured)
+            with mock.patch(
+                "rsl_rl.algorithms.hard_pact_qp.QPFunction"
+            ) as qp_function:
+                qp_function.return_value.return_value = torch.zeros(
+                    1, 54, dtype=torch.float64
+                )
+                qp._solve_stage(qp_data(1), relaxed_contact=False)
+            self.assertEqual(qp_function.call_args.kwargs["verbose"], forwarded)
+
     def test_sampled_projection_is_unbiased_without_decimation_multiplier(self):
         nominal = torch.zeros(4, 12, dtype=torch.float64)
         safe = torch.arange(1, 5, dtype=torch.float64)[:, None].expand(-1, 12)

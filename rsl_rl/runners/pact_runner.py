@@ -38,7 +38,7 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import torch
 
-from rsl_rl.algorithms import PPO_PACT
+from rsl_rl.algorithms import PPO_PACT, PPO_HardPACT
 from rsl_rl.modules import ActorCritic_PACT, ActorCritic_HardPACT, ContextDecoder
 from rsl_rl.env import VecEnv
 from rsl_rl.utils import pretty_print_module

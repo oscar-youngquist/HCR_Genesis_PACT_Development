@@ -278,8 +278,19 @@ class PPO_HardPACT:
         self.last_auxiliary_metrics = {}
         self.bard_dynamics = None
         if self.bard_enabled:
+            # Configuration paths are repository-relative, while launchers run
+            # from legged_gym/scripts. Resolve relative URDFs against the repo
+            # root derived from this source file so training is cwd-independent.
+            resolved_bard_urdf_path = bard_urdf_path
+            if not os.path.isabs(resolved_bard_urdf_path):
+                repository_root = os.path.abspath(os.path.join(
+                    os.path.dirname(__file__), "..", ".."
+                ))
+                resolved_bard_urdf_path = os.path.join(
+                    repository_root, resolved_bard_urdf_path
+                )
             self.bard_dynamics = BardGo2Dynamics(
-                os.path.abspath(bard_urdf_path),
+                os.path.abspath(resolved_bard_urdf_path),
                 device=self.device,
                 batch_capacity=bard_batch_capacity,
                 randomize_base_inertia=bard_randomize_base_inertia,
@@ -303,6 +314,18 @@ class PPO_HardPACT:
     ):
         """Bind backend hard limits once without copying them per transition."""
         position_limits = torch.as_tensor(position_limits)
+        # Genesis returns [num_envs, 2, 12], whereas Isaac-style backends use
+        # [12, 2]. Limits are identical across environments, so retain one
+        # table and normalize both layouts to canonical [12, lower/upper].
+        if position_limits.ndim == 3:
+            position_limits = position_limits[0]
+        if position_limits.shape == (2, 12):
+            position_limits = position_limits.transpose(0, 1)
+        if position_limits.shape != (12, 2):
+            raise ValueError(
+                "HardPACT position limits must resolve to [12,2], got "
+                f"{tuple(position_limits.shape)}"
+            )
         self.hard_pact_qp = HardPACTDifferentiableQP(
             self.qp_config,
             torch.as_tensor(torque_limits).reshape(-1)[:12],

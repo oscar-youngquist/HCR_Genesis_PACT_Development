@@ -80,7 +80,10 @@ class HardPACTQPConfig:
     # "auto" uses float32 on CUDA to halve the retained KKT graph and float64
     # on CPU for reference tests; either concrete dtype can be forced.
     solver_dtype: str = "auto"
-    verbose: int = 0  # qpth diagnostic verbosity.
+    # User-facing verbosity: 0 is quiet; positive values expose qpth's solver
+    # diagnostics. qpth itself treats verbose=0 as permission to print its
+    # large inaccurate-solution warning, so the call adapter maps 0 to -1.
+    verbose: int = 0
     chunk_size: int = 128  # Maximum simultaneous retained KKT systems.
 
 
@@ -643,7 +646,13 @@ class HardPACTDifferentiableQP:
             # equations; no hand-written derivative or dense inverse is used.
             solution_scaled = QPFunction(
                 eps=self.cfg.eps,
-                verbose=self.cfg.verbose,
+                # qpth gates its unconditional inaccurate-solution banner on
+                # ``verbose >= 0``.  Our own finite/SPD/rank, primal, and KKT
+                # checks below already classify that iterate and drive the
+                # relaxed/analytic fallback, so printing the same multi-line
+                # banner at every physics substep adds no diagnostic value.
+                # Preserve positive verbosity for explicit solver debugging.
+                verbose=(-1 if self.cfg.verbose == 0 else self.cfg.verbose),
                 notImprovedLim=self.cfg.not_improved_limit,
                 maxIter=self.cfg.max_iter,
                 check_Q_spd=self.cfg.check_q_spd,
