@@ -80,8 +80,43 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         bard_batch_capacity = 4096
         bard_inverse_enabled = True
         bard_rollout_enabled = True
-        lambda_inverse = 1.0
-        lambda_rollout = 1.0
+        lambda_inverse = 0.01
+        lambda_rollout = 0.01
+        lambda_projection = 1.0e-3
+
+        # qpth/OptNet safety projection.  The decision vector is always
+        # [qdd_18, world_grf_12, tau_safe_12, contact_slack_12]. CPU references
+        # use float64 while CUDA uses float32 to halve retained
+        # KKT VRAM; either can be forced. Chunking bounds peak graph size.
+        hard_pact_qp = {
+            "enabled": True,
+            "friction_coefficient": 0.6,
+            "torque_rate_limit_nm_s": 1000.0,
+            "contact_acceleration_limit_m_s2": 0.0,
+            "interior_margin": 1.0e-5,
+            "qdd_scale": 50.0,
+            "force_scale_n": 250.0,
+            "torque_scale_nm": 40.0,
+            "slack_scale_m_s2": 50.0,
+            "torque_tracking_weight": 20.0,
+            "force_tracking_weight": 5.0,
+            "slack_weight": 2000.0,
+            "qdd_regularization": 1.0e-3,
+            "force_regularization": 1.0e-4,
+            "torque_regularization": 1.0e-4,
+            "q_regularization": 1.0e-7,
+            "feasibility_tolerance": 2.0e-4,
+            "kkt_tolerance": 1.0e-1,
+            "active_tolerance": 1.0e-1,
+            "eps": 1.0e-12,
+            "max_iter": 20,
+            "not_improved_limit": 3,
+            "check_q_spd": True,
+            "check_equality_rank": True,
+            "solver_dtype": "auto",
+            "verbose": 0,
+            "chunk_size": 128,
+        }
         grf_observation_scale = GO2HardPACTCfg.normalization.obs_scales.grf
         base_wrench_observation_scale = (
             GO2HardPACTCfg.normalization.obs_scales.base_wrench

@@ -423,6 +423,36 @@ class BARDPinocchioParityTests(unittest.TestCase):
         self.assertEqual(rnea.call_count, 1)
         self.assertEqual(aba.call_count, 1)
 
+    def test_qp_terms_share_the_single_bard_context(self):
+        q, v, _ = self.simulator_state(rotated=True)
+        bard = self.dynamics.bard
+        with (
+            mock.patch.object(
+                bard, "update_kinematics", wraps=bard.update_kinematics
+            ) as update,
+            mock.patch.object(bard, "crba", wraps=bard.crba) as crba,
+            mock.patch.object(
+                bard, "spatial_acceleration", wraps=bard.spatial_acceleration
+            ) as acceleration,
+            mock.patch.object(bard, "rnea", wraps=bard.rnea) as rnea,
+        ):
+            context = self.dynamics.build_context(
+                q, v,
+                parameters={"joint_armature": torch.full((1, 1), 0.02)},
+                need_qp=True,
+            )
+        self.assertEqual(update.call_count, 1)
+        self.assertEqual(crba.call_count, 1)
+        self.assertEqual(acceleration.call_count, 4)
+        self.assertEqual(rnea.call_count, 1)
+        self.assertEqual(context.mass_matrix.shape, (1, 18, 18))
+        self.assertEqual(context.bias.shape, (1, 18))
+        self.assertEqual(context.foot_acceleration_bias.shape, (1, 4, 3))
+        torch.testing.assert_close(
+            context.mass_matrix, context.mass_matrix.transpose(-1, -2)
+        )
+        self.assertTrue(torch.linalg.cholesky_ex(context.mass_matrix).info.eq(0).all())
+
     def test_official_aba_routes_finite_gradients_to_all_force_inputs(self):
         q, v, _ = self.simulator_state(rotated=True)
         post_v = v + 0.03

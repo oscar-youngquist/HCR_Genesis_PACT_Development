@@ -205,6 +205,7 @@ class TestHardPACTAliases(unittest.TestCase):
                         "bard_scale_rotational_inertia", "bard_batch_capacity",
                         "bard_inverse_enabled", "bard_rollout_enabled",
                         "lambda_inverse", "lambda_rollout",
+                        "lambda_projection", "hard_pact_qp",
                         "action_clip",
                         "grf_observation_scale",
                         "base_wrench_observation_scale",

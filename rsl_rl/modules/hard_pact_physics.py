@@ -151,12 +151,32 @@ class DeploymentPhysicsHeads(nn.Module):
             raise ValueError("HardPACT physics heads require z=16 and explicit=11")
         if nominal_torque.shape[-1] != 12:
             raise ValueError("nominal torque must be 12-D")
+        grf = self.predict_grf(latent, explicit, nominal_torque)
+        wrench = self.predict_wrench(latent, explicit)
+        return PhysicsHeadOutput(
+            grf, wrench,
+        )
+
+    def predict_grf(self, latent, explicit, nominal_torque):
+        """Evaluate only the torque-conditioned head.
+
+        Rollout calls this once per physics substep, so keeping it separate
+        avoids redundantly evaluating the control-rate wrench head.
+        """
+        if latent.shape[-1] != 16 or explicit.shape[-1] != 11:
+            raise ValueError("HardPACT physics heads require z=16 and explicit=11")
+        if nominal_torque.shape[-1] != 12:
+            raise ValueError("nominal torque must be 12-D")
         stopped_explicit = explicit.detach()
-        grf = self.grf_head(
+        value = self.grf_head(
             torch.cat((latent, stopped_explicit, nominal_torque), dim=-1)
         )
-        wrench = self.wrench_head(torch.cat((latent, stopped_explicit), dim=-1))
-        return PhysicsHeadOutput(
-            scale_head_output(grf, self.grf_scale),
-            scale_head_output(wrench, self.wrench_scale),
-        )
+        return scale_head_output(value, self.grf_scale)
+
+    def predict_wrench(self, latent, explicit):
+        """Evaluate the control-rate base-wrench prediction."""
+        if latent.shape[-1] != 16 or explicit.shape[-1] != 11:
+            raise ValueError("HardPACT physics heads require z=16 and explicit=11")
+        stopped_explicit = explicit.detach()
+        value = self.wrench_head(torch.cat((latent, stopped_explicit), dim=-1))
+        return scale_head_output(value, self.wrench_scale)

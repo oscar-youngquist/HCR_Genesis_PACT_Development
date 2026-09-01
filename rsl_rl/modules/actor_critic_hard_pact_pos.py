@@ -544,6 +544,8 @@ class ActorCritic_HardPACT_Pos(nn.Module):
     def act_inference(self,obs,obs_history):
         # Call the forward method of the context encoder
         z, torso_velo = self.cenet_enc_inference(obs_history)
+        self.cenet_z = z
+        self.cenet_torso_velo = torso_velo
         
         # create the actors observation
         current_obs = torch.cat((obs,z,torso_velo), dim=-1)   

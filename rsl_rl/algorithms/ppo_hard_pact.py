@@ -51,6 +51,11 @@ from legged_gym.dynamics import (
 from .pc_grad import PCGrad
 from .hard_pact_bard import corrected_bard_inverse_dynamics_loss
 from .hard_pact_bard import differentiable_bard_rollout_loss
+from .hard_pact_qp import (
+    HardPACTDifferentiableQP,
+    HardPACTQPConfig,
+    projection_loss,
+)
 
 def _yaw_local_to_world(values, quaternion_xyzw):
     """Rotate batched ``[..., xyz]`` vectors by base yaw only."""
@@ -145,6 +150,8 @@ class PPO_HardPACT:
                  bard_rollout_enabled=True,
                  lambda_inverse=1.0,
                  lambda_rollout=1.0,
+                 lambda_projection=1.0e-3,
+                 hard_pact_qp=None,
                  grf_observation_scale=0.01,
                  base_wrench_observation_scale=0.01,
                  action_clip=100.0,
@@ -250,10 +257,16 @@ class PPO_HardPACT:
         self.bard_rollout_enabled = bool(bard_rollout_enabled)
         self.lambda_inverse = float(lambda_inverse)
         self.lambda_rollout = float(lambda_rollout)
-        if self.lambda_inverse < 0.0 or self.lambda_rollout < 0.0:
+        self.lambda_projection = float(lambda_projection)
+        if min(
+            self.lambda_inverse, self.lambda_rollout, self.lambda_projection
+        ) < 0.0:
             raise ValueError(
-                "lambda_inverse and lambda_rollout must be nonnegative"
+                "physics loss weights must be nonnegative"
             )
+        self.qp_config = HardPACTQPConfig(**(hard_pact_qp or {}))
+        self.hard_pact_qp = None
+        self.last_qp_metrics = {}
         self.grf_observation_scale = float(grf_observation_scale)
         self.base_wrench_observation_scale = float(base_wrench_observation_scale)
         self.action_clip = float(action_clip)
@@ -284,6 +297,19 @@ class PPO_HardPACT:
         self.use_clipped_value_loss = use_clipped_value_loss
 
         print_class_attributes(self)
+
+    def configure_hard_pact_qp(
+        self, torque_limits, position_limits, velocity_limits
+    ):
+        """Bind backend hard limits once without copying them per transition."""
+        position_limits = torch.as_tensor(position_limits)
+        self.hard_pact_qp = HardPACTDifferentiableQP(
+            self.qp_config,
+            torch.as_tensor(torque_limits).reshape(-1)[:12],
+            position_limits[:12, 0],
+            position_limits[:12, 1],
+            torch.as_tensor(velocity_limits).reshape(-1)[:12],
+        )
         
         
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
@@ -519,6 +545,8 @@ class PPO_HardPACT:
                 pinn_loss = self._compute_bard_loss(
                     replay["nominal_torque"], obs_batch, obs_hist_batch,
                     gt_forces_batch, default_pose,
+                    replay["desired_position"], replay["feedforward_torque"],
+                    fb_func,
                 )
                 
             if self.pinn_weight > 0.0 and self.pinn_weight_final > 0:
@@ -805,11 +833,16 @@ class PPO_HardPACT:
             desired_position, joint_position, joint_velocity
         )
 
-    def _combine_bard_losses(self, inverse_loss, rollout_loss):
-        """Apply the independent PINN weights before the PCGrad objective."""
+    def _combine_bard_losses(
+        self, inverse_loss, rollout_loss, projection_loss_value=None
+    ):
+        """Apply independent physics weights before the PCGrad objective."""
+        if projection_loss_value is None:
+            projection_loss_value = inverse_loss * 0.0
         return (
             self.lambda_inverse * inverse_loss
             + self.lambda_rollout * rollout_loss
+            + self.lambda_projection * projection_loss_value
         )
 
     def _policy_raw_action_from_noise(self, observation, history, noise):
@@ -861,22 +894,29 @@ class PPO_HardPACT:
             source_valid, source_transformed,
             torch.zeros_like(source_transformed),
         )
-        nominal_torque = self._nominal_torque(
-            delayed_action, observation.detach(), action_func, fb_func,
-            default_pose, qvel_scale,
+        desired_position, feedforward_torque = action_func(delayed_action)
+        if feedforward_torque.shape[-1] == 0:
+            feedforward_torque = torch.zeros_like(desired_position)
+        joint_position = observation.detach()[:, 9:21] + default_pose
+        joint_velocity = observation.detach()[:, 21:33] / qvel_scale
+        nominal_torque = feedforward_torque + fb_func(
+            desired_position, joint_position, joint_velocity
         )
         return {
             "raw_action": current_raw,
             "transformed_action": current_transformed,
             "delayed_action": delayed_action,
+            "desired_position": desired_position,
+            "feedforward_torque": feedforward_torque,
             "nominal_torque": nominal_torque,
         }
 
     def _compute_bard_loss(
         self, nominal_torque, obs_batch, obs_hist_batch,
         measured_generalized_contact_force, default_pose,
+        desired_position=None, feedforward_torque=None, fb_func=None,
     ):
-        r"""Build one cached BARD state and evaluate enabled physics losses.
+        r"""Evaluate interval BARD losses and one sampled substep projection.
 
         Simulator states are first mapped to canonical BARD coordinates.  The
         same context installs realized randomized dynamics, updates kinematics,
@@ -908,14 +948,17 @@ class PPO_HardPACT:
         because that block is wider.
 
         It retains gradients through ``tau_control``, both physics heads, and
-        official BARD ABA.  The two losses share conversions, randomized
-        spatial inertias, passive parameters, kinematics, and Jacobians; RNEA
-        is evaluated only when the inverse term is enabled, while ABA is
-        evaluated only when the rollout term is enabled.
+        official BARD ABA.  The inverse and rollout losses share their one
+        control-rate context.  A second context is unavoidable for projection:
+        it represents the sampled physics-substep state, not ``pre_q/pre_v``.
+        Only that sampled context builds CRBA/QP terms; no per-decimation
+        matrices are stored. RNEA is evaluated only for the inverse term, ABA
+        only for rollout, and qpth exactly once per minibatch transition.
         """
         if not self.bard_enabled:
             return nominal_torque.sum() * 0.0
-        if not (self.bard_inverse_enabled or self.bard_rollout_enabled):
+        qp_ready = self.qp_config.enabled and self.hard_pact_qp is not None
+        if not (self.bard_inverse_enabled or self.bard_rollout_enabled or qp_ready):
             return nominal_torque.sum() * 0.0
         batch = self.storage.current_hard_pact_batch
         if batch is None:
@@ -934,53 +977,47 @@ class PPO_HardPACT:
             "joint_damping": batch["joint_damping"].detach(),
         }
         mass_wrench = batch["equivalent_mass_com_wrench_world"].detach()
-        # This is the sole per-minibatch state conversion / kinematic update.
-        # All quantities installed in the context are measured labels and are
-        # detached by `build_context`; the learned force paths are computed
-        # below and never stored in the context.
-        context = self.bard_dynamics.build_context(
-            batch["pre_q"], batch["pre_v"], parameters=parameters,
-            post_v_world=batch["post_v"],
-            mass_com_wrench_world=mass_wrench,
-            need_jacobians=(
-                self.bard_inverse_enabled or self.bard_rollout_enabled
-            ),
-        )
-        # tau_nom is the differentiable replay of the exact stochastic,
-        # clipped, delayed action selected during rollout.
-        # The force targets cover the same control interval as action_t, so
-        # their conditioning is the current history h_t—not h_{t-1}.
+        zero = nominal_torque.sum() * 0.0
         _, _, latent, explicit = self.actor_critic.cenet_enc_forward(obs_hist_batch)
-        heads = self.actor_critic.physics_heads(
+        grf_yaw = self.actor_critic.physics_estimator.predict_grf(
             latent, explicit, nominal_torque
-        )
-        grf_yaw = heads.grf_yaw_scaled.reshape(-1, 4, 3)
+        ).reshape(-1, 4, 3)
+        wrench_yaw = self.actor_critic.physics_estimator.predict_wrench(
+            latent, explicit
+        ) / self.base_wrench_observation_scale
+
+        def world_wrench(q, label_mass_wrench):
+            total = torch.cat((
+                _yaw_local_to_world(wrench_yaw[:, :3].unsqueeze(1), q[:, 3:7]).squeeze(1),
+                _yaw_local_to_world(wrench_yaw[:, 3:].unsqueeze(1), q[:, 3:7]).squeeze(1),
+            ), dim=-1)
+            base = q[:, :3].detach()
+            com = base + _body_point_to_world(
+                batch["realized_com_shift_body"].detach(), q.detach()
+            )
+            applied = wrench_at_point(total - label_mass_wrench, com, base)
+            return applied, applied + label_mass_wrench
+
         grf_world = _yaw_local_to_world(
             grf_yaw / self.grf_observation_scale, batch["pre_q"][:, 3:7]
         )
-        total_wrench_yaw = (
-            heads.base_wrench_yaw_scaled / self.base_wrench_observation_scale
+        applied_at_base, total_at_base = world_wrench(
+            batch["pre_q"], mass_wrench
         )
-        total_wrench_world = torch.cat((
-            _yaw_local_to_world(
-                total_wrench_yaw[:, :3].unsqueeze(1), batch["pre_q"][:, 3:7]
-            ).squeeze(1),
-            _yaw_local_to_world(
-                total_wrench_yaw[:, 3:].unsqueeze(1), batch["pre_q"][:, 3:7]
-            ).squeeze(1),
-        ), dim=-1)
-        base_point_world = batch["pre_q"][:, :3].detach()
-        com_world = base_point_world + _body_point_to_world(
-            batch["realized_com_shift_body"].detach(), batch["pre_q"].detach()
-        )
-        # Move the learned applied wrench from the realized CoM to the base
-        # frame point used by J_b, then restore the label-only mass term so the
-        # reducer's mandatory subtraction still occurs exactly once.
-        applied_at_base = wrench_at_point(
-            total_wrench_world - mass_wrench, com_world, base_point_world
-        )
-        total_at_base = applied_at_base + mass_wrench
-        zero = nominal_torque.sum() * 0.0
+
+        # BARD's interval objectives intentionally retain their control-rate
+        # state and logged interval-average executed torque.  A straight-
+        # through value preserves the earlier rollout gradient contract while
+        # making the ABA forward value exactly the torque Genesis executed.
+        context = None
+        if self.bard_inverse_enabled or self.bard_rollout_enabled:
+            context = self.bard_dynamics.build_context(
+                batch["pre_q"], batch["pre_v"], parameters=parameters,
+                post_v_world=batch["post_v"],
+                mass_com_wrench_world=mass_wrench,
+                need_jacobians=True, need_qp=False,
+            )
+
         inverse_loss = zero
         if self.bard_inverse_enabled:
             observed_acceleration = (
@@ -1007,34 +1044,16 @@ class PPO_HardPACT:
 
         rollout_loss = zero
         if self.bard_rollout_enabled:
-            # The dynamics command is tau_safe only on transitions where a
-            # hard safety projection was active; otherwise it is tau_nom.
-            # Projects that expose only a stored value use a straight-through
-            # estimator so the commanded value is physically correct while
-            # the gradient still reaches the actor-generated nominal torque.
-            control_torque = nominal_torque
-            safe_torque = batch.get("safe_control_torque")
-            projection_active = batch.get("hard_projection_active_mask")
-            if safe_torque is not None and projection_active is not None:
-                # Stored safe values determine the forward value. The
-                # straight-through form preserves the policy gradient when a
-                # hard projection backend does not expose its own autograd.
-                safe_straight_through = (
-                    nominal_torque
-                    + safe_torque.detach()
-                    - nominal_torque.detach()
-                )
-                control_torque = torch.where(
-                    projection_active.bool(), safe_straight_through,
-                    nominal_torque,
-                )
             # W_hat_applied is the total wrench-head prediction with the
             # label-only mass/CoM gravity wrench removed and shifted to J_b's
             # base-frame reference point.  Randomized inertia is already in
             # BARD, so this prevents counting its gravitational effect twice.
             rollout = differentiable_bard_rollout_loss(
                 context=context,
-                control_torque=control_torque,
+                control_torque=(
+                    nominal_torque + batch["interval_executed_torque"].detach()
+                    - nominal_torque.detach()
+                ),
                 interval_grf_world=grf_world,
                 applied_wrench_world=applied_at_base,
                 control_dt=control_dt,
@@ -1047,7 +1066,126 @@ class PPO_HardPACT:
             self.last_rollout_dynamics_metrics = rollout.metrics
         else:
             self.last_rollout_dynamics_metrics = {}
-        # Both weighted physics terms enter the existing physics PCGrad
-        # objective. No new optimizer owns shared actor/trunk/head parameters:
-        # L_physics = lambda_inverse L_ID + lambda_rollout L_rollout.
-        return self._combine_bard_losses(inverse_loss, rollout_loss)
+
+        # ---------------- sampled differentiable substep QP ---------------
+        # Rollout solved every substep under no_grad.  PPO stores one compact
+        # stratified-uniform sample per environment and rebuilds only that
+        # sample's detached BARD matrices.  No [T,D,M,J] tensors are retained,
+        # which is the principal VRAM saving.  Since P(k)=1/D, its normalized
+        # correction-plus-slack value directly estimates mean_k L_proj,k.
+        qp_loss = zero
+        if qp_ready:
+            # q_K and v_K are rollout measurements at the selected substep K;
+            # detaching makes them constants in the implicit QP derivative.
+            sample_q = batch.get("sampled_qp_q", batch["pre_q"]).detach()
+            sample_v = batch.get("sampled_qp_v", batch["pre_v"]).detach()
+            # All hard rate/integration constraints use physics Delta t.
+            sample_dt = batch.get("physics_dt", control_dt).detach()
+            if desired_position is not None and fb_func is not None:
+                # Replay the current stochastic/delayed policy into held q_d
+                # and tau_ff, then evaluate the sampled-state PD law:
+                # tau_nom,K=Kp(q_d-q_K)-Kd*qdot_K+tau_ff.
+                sampled_nominal = feedforward_torque + fb_func(
+                    desired_position, sample_q[:, 7:], sample_v[:, 6:]
+                )
+            else:
+                # Compatibility path for direct legacy unit/integration calls.
+                sampled_nominal = nominal_torque
+            # Recompute only the GRF head at K because its input includes
+            # tau_nom,K. z_t and e_t remain the current policy-step features.
+            sample_grf_yaw = self.actor_critic.physics_estimator.predict_grf(
+                latent, explicit, sampled_nominal
+            ).reshape(-1, 4, 3)
+            # Undo observation scaling and rotate yaw-local Newtons to the
+            # world-axis convention of the reconstructed sampled J_f.
+            sample_grf_world = _yaw_local_to_world(
+                sample_grf_yaw / self.grf_observation_scale,
+                sample_q[:, 3:7],
+            )
+            # This detached label removes the inertial gravity contribution
+            # already represented by sampled randomized BARD inertia.
+            sample_mass_wrench = batch.get(
+                "sampled_qp_mass_com_wrench_world", mass_wrench
+            ).detach()
+            # Reuse the current wrench-head output, rotate it with sampled yaw,
+            # subtract W_mass/CoM once, and shift it to J_b's reference point.
+            sample_applied, _ = world_wrench(sample_q, sample_mass_wrench)
+            # Reconstruct M_K,b_K,J_f,K,J_b,K,Jdot_f,K*v_K from compact state
+            # and realized parameters. These mechanics are detached by BARD.
+            sample_context = self.bard_dynamics.build_context(
+                sample_q, sample_v, parameters=parameters, need_qp=True
+            )
+            # qpth solves
+            #   min_x 1/2*x^TQx+p^Tx,  Gx<=h, Ax=b,
+            #   x=[qdd_18,f_12,tau_safe_12,s_12].
+            # Gradients enter through sampled_nominal, sample_grf_world, and
+            # sample_applied; all state/mechanics/rate-center tensors detach.
+            qp_result = self.hard_pact_qp.solve(
+                # Equality coefficient M_K.
+                mass_matrix=sample_context.mass_matrix,
+                # Equality RHS contribution -b_K.
+                bias=sample_context.bias,
+                # Dynamics -J_f,K^T and contact-acceleration J_f,K blocks.
+                foot_jacobians=sample_context.foot_jacobians,
+                # Wrench generalized force J_b,K^T*W_hat_applied.
+                base_jacobian=sample_context.base_jacobian,
+                # Known affine contact acceleration Jdot_f,K*v_K.
+                foot_acceleration_bias=sample_context.foot_acceleration_bias,
+                # Differentiable torque tracking center.
+                tau_nom=sampled_nominal,
+                # Differentiable force tracking center in world Newtons.
+                force_pred_world=sample_grf_world,
+                # Differentiable world [force,moment] equality input.
+                wrench_pred_world=sample_applied,
+                # Contact gates shape constraints but are not a physics-head
+                # supervision route into the explicit decoder.  This matches
+                # the deployment heads' established stop-gradient contract.
+                contact_probability=explicit[:, 3:7].detach(),
+                # Exact rollout tau_safe,K-1 reproduces the sampled rate box.
+                previous_torque=batch.get(
+                    "sampled_qp_previous_torque",
+                    batch.get("previous_executed_torque", batch["interval_executed_torque"]),
+                ),
+                # Sampled joint state defines hard one-step q/qdot boxes.
+                joint_position=sample_q[:, 7:], joint_velocity=sample_v[:, 6:],
+                dt=sample_dt,
+            )
+            # m_physics=not(push or reset or timeout or teleport). Sustained
+            # wrench and randomized-mass transitions deliberately remain valid.
+            valid = ~(
+                batch["push_event_mask"].bool() | batch["reset_mask"].bool()
+                | batch["timeout_mask"].bool() | batch["teleport_mask"].bool()
+            )
+            # Normalize correction by the same backend torque limits used by G.
+            torque_limits = self.hard_pact_qp.torque_limits.to(
+                sampled_nominal.device, sampled_nominal.dtype
+            )
+            # For K~Uniform{0,...,D-1}, this direct sampled loss satisfies
+            # E[L_K]=(1/D)sum_k L_k. There is no decimation multiplier.
+            # Stage-2 rows are excluded because they have no qpth KKT graph.
+            qp_loss = projection_loss(
+                qp_result.tau_safe, sampled_nominal, torque_limits, valid,
+                qp_result.differentiated_mask,
+                contact_slack=qp_result.contact_slack,
+                slack_scale=self.qp_config.slack_scale_m_s2,
+            )
+            # Log only the newly recomputed sampled solve, whose status can
+            # differ from rollout after policy/head parameters update.
+            diagnostics = qp_result.diagnostics
+            self.last_qp_metrics = {
+                "projection_loss": qp_loss.detach(),
+                "full_fraction": (qp_result.stage == 0).float().mean(),
+                "relaxed_fraction": (qp_result.stage == 1).float().mean(),
+                "actuator_fallback_fraction": (qp_result.stage == 2).float().mean(),
+                "equality_residual_max": diagnostics["selected/equality_max"].nan_to_num().max(),
+                "inequality_violation_max": diagnostics["selected/inequality_max"].nan_to_num().max(),
+                "kkt_stationarity_max": diagnostics["selected/stationarity_max"].nan_to_num().max(),
+            }
+        else:
+            self.last_qp_metrics = {}
+        # All three weighted physics terms enter the existing PCGrad objective;
+        # no extra optimizer owns actor/trunk/head parameters:
+        # L_phys=lambda_ID*L_ID+lambda_roll*L_roll+lambda_proj*L_proj.
+        return self._combine_bard_losses(
+            inverse_loss, rollout_loss, qp_loss
+        )

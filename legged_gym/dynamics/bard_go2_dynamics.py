@@ -150,6 +150,12 @@ class Go2BardContext:
     base_jacobian: torch.Tensor | None = None
     post_v_bard: torch.Tensor | None = None
     mass_com_wrench_world: torch.Tensor | None = None
+    # QP-only quantities are populated lazily by ``build_context(need_qp=True)``.
+    # Keeping them on the shared context prevents a second state conversion or
+    # kinematics update when inverse, rollout, and projection losses coexist.
+    mass_matrix: torch.Tensor | None = None
+    bias: torch.Tensor | None = None
+    foot_acceleration_bias: torch.Tensor | None = None
 
     def rnea(self, acceleration_bard):
         """Return canonical generalized force without another kinematic update."""
@@ -271,7 +277,7 @@ class BardGo2Dynamics:
         )
         self.model.I_spatial = _BatchedSpatialInertia(inertias)
 
-    def _world_jacobian(self, frame_id):
+    def _world_jacobian(self, frame_id, *, return_rotation=False):
         # Pinocchio's legacy PINN uses LOCAL_WORLD_ALIGNED: world-aligned axes
         # at the frame origin, without WORLD's translation-to-world-origin
         # adjoint term. Rotate BARD's LOCAL row blocks without translating.
@@ -283,13 +289,16 @@ class BardGo2Dynamics:
         jacobian = torch.cat((
             rotation @ local[:, :3], rotation @ local[:, 3:]
         ), dim=1)
-        return jacobian.index_select(-1, self._canonical_from_bard)
+        jacobian = jacobian.index_select(-1, self._canonical_from_bard)
+        return (jacobian, rotation) if return_rotation else jacobian
 
     def build_context(
         self, pre_q_simulator, pre_v_world, *, parameters=None,
         post_v_world=None, mass_com_wrench_world=None, need_jacobians=True,
+        need_qp=False,
     ):
         """Convert/install/update once for all physics losses in a minibatch."""
+        need_jacobians = bool(need_jacobians or need_qp)
         parameters = {} if parameters is None else {
             name: value.detach() for name, value in parameters.items()
         }
@@ -303,11 +312,17 @@ class BardGo2Dynamics:
         self._install_inertias(batch, parameters)
         self.bard.update_kinematics(self.model, self.data, q_bard, v_bard)
         foot, base = None, None
+        foot_rotations = None
         if need_jacobians:
-            foot = torch.stack([
-                self._world_jacobian(frame_id)[:, :3]
-                for frame_id in self.foot_frame_ids
-            ], dim=1).detach()
+            foot_values, rotation_values = [], []
+            for frame_id in self.foot_frame_ids:
+                jacobian, rotation = self._world_jacobian(
+                    frame_id, return_rotation=True
+                )
+                foot_values.append(jacobian[:, :3])
+                rotation_values.append(rotation)
+            foot = torch.stack(foot_values, dim=1).detach()
+            foot_rotations = torch.stack(rotation_values, dim=1).detach()
             base = self._world_jacobian(self.base_frame_id).detach()
         post_v_bard = None
         if post_v_world is not None:
@@ -315,13 +330,48 @@ class BardGo2Dynamics:
                 pre_q_simulator.detach(), post_v_world.detach(),
                 self.simulator_joint_names, self.bard_joint_names,
             )
-        return Go2BardContext(
+        context = Go2BardContext(
             self, q_bard.detach(), v_bard.detach(), parameters,
             q_bard.new_tensor([0.0, 0.0, -9.81]), foot, base,
             None if post_v_bard is None else post_v_bard.detach(),
             None if mass_com_wrench_world is None
             else mass_com_wrench_world.detach(),
         )
+        if need_qp:
+            # CRBA returns BARD/URDF generalized order.  The QP consistently
+            # uses canonical [base linear, base angular, FR,FL,RR,RL joints],
+            # so both matrix axes receive the same permutation.  Realized
+            # armature is a diagonal addition to M; passive friction/spring/
+            # damping instead belongs in the zero-acceleration bias below.
+            mass_bard = self.bard.crba(self.model, self.data)
+            mass = mass_bard.index_select(
+                -2, self._canonical_from_bard
+            ).index_select(-1, self._canonical_from_bard)
+            armature = self._expanded_parameter(
+                parameters.get("joint_armature"), q_bard, batch
+            )
+            mass = mass.clone()
+            mass[:, 6:, 6:] += torch.diag_embed(armature)
+            context.mass_matrix = mass.detach()
+            context.bias = context.rnea(torch.zeros_like(v_bard)).detach()
+
+            # a_foot = J_foot*qdd + Jdot*v.  Evaluating official BARD spatial
+            # acceleration at qdd=0 gives the affine Jdot*v term directly in
+            # the same LOCAL_WORLD_ALIGNED/world-axis convention as J_foot.
+            zero_qdd = torch.zeros_like(v_bard)
+            local_acceleration = torch.stack([
+                self.bard.spatial_acceleration(
+                    self.model, self.data, zero_qdd, frame_id,
+                    reference_frame="local",
+                )[:, :3]
+                for frame_id in self.foot_frame_ids
+            ], dim=1)
+            # Match LOCAL_WORLD_ALIGNED Jacobians: rotate axes at each foot
+            # origin, without WORLD's translation-to-world-origin adjoint.
+            context.foot_acceleration_bias = torch.einsum(
+                "bfij,bfj->bfi", foot_rotations, local_acceleration
+            ).detach()
+        return context
 
     def _passive_generalized_force(self, context):
         batch = context.q_bard.shape[0]

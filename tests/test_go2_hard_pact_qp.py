@@ -1,0 +1,459 @@
+import unittest
+from unittest import mock
+from types import SimpleNamespace
+
+import torch
+from qpth.qp import QPFunction
+
+from rsl_rl.algorithms.hard_pact_qp import (
+    HardPACTDifferentiableQP,
+    HardPACTQPConfig,
+    balanced_substep_indices,
+    projection_loss,
+)
+from rsl_rl.modules.actor_critic_hard_pact import ActorCritic_HardPACT
+from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
+
+
+def qp_data(batch=2, dtype=torch.float64):
+    zeros = lambda *shape: torch.zeros(*shape, dtype=dtype)
+    data = {
+        "mass_matrix": torch.eye(18, dtype=dtype).expand(batch, -1, -1).clone(),
+        "bias": zeros(batch, 18),
+        "foot_jacobians": zeros(batch, 4, 3, 18),
+        "base_jacobian": zeros(batch, 6, 18),
+        "foot_acceleration_bias": zeros(batch, 4, 3),
+        "tau_nom": zeros(batch, 12),
+        "force_pred_world": zeros(batch, 4, 3),
+        "wrench_pred_world": zeros(batch, 6),
+        "contact_probability": zeros(batch, 4),
+        "previous_torque": zeros(batch, 12),
+        "joint_position": zeros(batch, 12),
+        "joint_velocity": zeros(batch, 12),
+        "dt": torch.full((batch, 1), 0.02, dtype=dtype),
+    }
+    data["force_pred_world"][:, :, 2] = 20.0
+    return data
+
+
+def make_qp(**overrides):
+    config = HardPACTQPConfig(max_iter=50, not_improved_limit=10, **overrides)
+    return HardPACTDifferentiableQP(
+        config,
+        torch.full((12,), 23.5),
+        torch.full((12,), -2.0),
+        torch.full((12,), 2.0),
+        torch.full((12,), 30.0),
+    )
+
+
+class HardPACTQPTests(unittest.TestCase):
+    def test_substep_pd_refresh_rate_propagation_and_interval_aggregation(self):
+        batch = 4
+
+        class Robot:
+            def __init__(self):
+                self.q = torch.zeros(batch, 12)
+                self.v = torch.zeros(batch, 12)
+            def get_dofs_position(self, _): return self.q
+            def get_dofs_velocity(self, _): return self.v
+            def get_pos(self): return torch.zeros(batch, 3)
+            def get_vel(self): return torch.zeros(batch, 3)
+            def get_ang(self): return torch.zeros(batch, 3)
+
+        class Heads:
+            def predict_grf(self, _z, _e, torque): return torque
+
+        class Dynamics:
+            def build_context(self, *_args, **_kwargs):
+                return SimpleNamespace(
+                    mass_matrix=torch.eye(18).expand(batch, -1, -1),
+                    bias=torch.zeros(batch, 18),
+                    foot_jacobians=torch.zeros(batch, 4, 3, 18),
+                    base_jacobian=torch.zeros(batch, 6, 18),
+                    foot_acceleration_bias=torch.zeros(batch, 4, 3),
+                )
+
+        class QP:
+            def __init__(self): self.previous = []; self.nominal = []
+            def solve(self, **values):
+                self.previous.append(values["previous_torque"].clone())
+                self.nominal.append(values["tau_nom"].clone())
+                safe = values["tau_nom"].clamp(-2.0, 2.0)
+                zeros = torch.zeros(batch)
+                diagnostics = {
+                    "selected/equality_max": zeros,
+                    "selected/inequality_max": zeros,
+                    "selected/stationarity_max": zeros,
+                    "selected/complementarity_max": zeros,
+                }
+                return SimpleNamespace(
+                    qdd=torch.zeros(batch, 18), force_world=values["force_pred_world"],
+                    tau_safe=safe, contact_slack=torch.zeros(batch, 4, 3),
+                    stage=torch.zeros(batch, dtype=torch.long),
+                    differentiated_mask=torch.ones(batch, dtype=torch.bool),
+                    diagnostics=diagnostics,
+                )
+
+        task = Go2HardPACT.__new__(Go2HardPACT)
+        task.num_envs, task.device = batch, torch.device("cpu")
+        task.cfg = SimpleNamespace(
+            sim=SimpleNamespace(dt=0.002), control=SimpleNamespace(decimation=2)
+        )
+        task.obs_scales = SimpleNamespace(grf=1.0, base_wrench=1.0)
+        robot = Robot()
+        task.simulator = SimpleNamespace(
+            _robot=robot, _dof_indices=torch.arange(12),
+            _joint_armature=torch.zeros(batch, 12),
+            _joint_friction=torch.zeros(batch, 12),
+            _joint_stiffness=torch.zeros(batch, 12),
+            _joint_damping=torch.zeros(batch, 12), _torques=torch.zeros(batch, 12),
+        )
+        task._hard_pact_actor_critic = SimpleNamespace(
+            physics_estimator=Heads()
+        )
+        task._hard_pact_bard_dynamics = Dynamics()
+        qp = QP()
+        task._hard_pact_rollout_qp = qp
+        task._hard_pact_q_d = torch.ones(batch, 12)
+        task._hard_pact_tau_ff = torch.zeros(batch, 12)
+        task._hard_pact_previous_substep_torque = torch.zeros(batch, 12)
+        task._hard_pact_policy_latent = torch.zeros(batch, 16)
+        task._hard_pact_policy_explicit = torch.zeros(batch, 11)
+        task._hard_pact_wrench_yaw_scaled = torch.zeros(batch, 6)
+        task._realized_added_mass = torch.zeros(batch, 1)
+        task._realized_com_shift_body = torch.zeros(batch, 3)
+        task._get_pinn_feedback = lambda desired, q, qdot: 4 * (desired - q) - qdot
+        task._begin_qp_interval()
+        quat = torch.tensor([[0.0, 0.0, 0.0, 1.0]]).expand(batch, -1)
+        mass_wrench = torch.zeros(batch, 6)
+        task._solve_hard_pact_rollout_qp_substep(quat, mass_wrench)
+        first_safe = task.simulator._torques.clone()
+        robot.q.fill_(0.5)
+        robot.v.fill_(0.25)
+        task._solve_hard_pact_rollout_qp_substep(quat, mass_wrench)
+        self.assertFalse(torch.equal(qp.nominal[0], qp.nominal[1]))
+        self.assertTrue(torch.equal(qp.previous[1], first_safe))
+        expected_average = (first_safe + task.simulator._torques) / 2
+        self.assertTrue(torch.allclose(task._qp_interval_safe_sum / 2, expected_average))
+        self.assertTrue(torch.equal(task._qp_interval_stage_counts[:, 0], torch.full((batch,), 2.0)))
+
+    def test_balanced_stratified_substep_sampling(self):
+        generator = torch.Generator().manual_seed(17)
+        indices = balanced_substep_indices(
+            103, 4, torch.device("cpu"), generator=generator
+        )
+        counts = torch.bincount(indices.long(), minlength=4)
+        self.assertLessEqual(int(counts.max() - counts.min()), 1)
+        self.assertTrue(torch.all((indices >= 0) & (indices < 4)))
+        self.assertEqual(indices.dtype, torch.int16)
+
+    def test_decimation_one_sampling_is_exact(self):
+        indices = balanced_substep_indices(31, 1, torch.device("cpu"))
+        self.assertTrue(torch.equal(indices, torch.zeros_like(indices)))
+
+    def test_rollout_qp_runs_under_inference_mode(self):
+        with torch.inference_mode():
+            result = make_qp().solve(**qp_data(2))
+        self.assertEqual(result.tau_safe.shape, (2, 12))
+        self.assertTrue(torch.isfinite(result.tau_safe).all())
+
+    def test_sampled_projection_is_unbiased_without_decimation_multiplier(self):
+        nominal = torch.zeros(4, 12, dtype=torch.float64)
+        safe = torch.arange(1, 5, dtype=torch.float64)[:, None].expand(-1, 12)
+        slack = torch.arange(4, dtype=torch.float64)[:, None].expand(-1, 12)
+        limits = torch.full((12,), 10.0, dtype=torch.float64)
+        valid = torch.ones(4, 1, dtype=torch.bool)
+        differentiated = torch.ones_like(valid)
+        full = projection_loss(
+            safe, nominal, limits, valid, differentiated,
+            contact_slack=slack, slack_scale=5.0,
+        )
+        sampled = [projection_loss(
+            safe[k:k + 1], nominal[:1], limits, valid[:1], differentiated[:1],
+            contact_slack=slack[k:k + 1], slack_scale=5.0,
+        ) for k in range(4)]
+        self.assertTrue(torch.allclose(torch.stack(sampled).mean(), full))
+
+    def test_projection_slack_and_torque_gradients_are_finite_nonzero(self):
+        nominal = torch.randn(3, 12, dtype=torch.float64, requires_grad=True)
+        safe = 0.7 * nominal + 0.2
+        slack = torch.full(
+            (3, 4, 3), 0.5, dtype=torch.float64, requires_grad=True
+        )
+        loss = projection_loss(
+            safe, nominal, torch.ones(12, dtype=torch.float64),
+            torch.ones(3, 1, dtype=torch.bool),
+            torch.ones(3, 1, dtype=torch.bool),
+            contact_slack=slack, slack_scale=2.0,
+        )
+        grad_nominal, grad_slack = torch.autograd.grad(loss, (nominal, slack))
+        self.assertTrue(torch.isfinite(grad_nominal).all())
+        self.assertTrue(torch.isfinite(grad_slack).all())
+        self.assertGreater(float(grad_nominal.abs().sum()), 0.0)
+        self.assertGreater(float(grad_slack.abs().sum()), 0.0)
+    def test_qpth_analytic_solution_and_gradient(self):
+        # min x^2-4x with an inactive x>=-100 constraint has x*=2 and
+        # dx*/dp=-Q^-1=-1/2. This directly checks qpth independently of Go2.
+        p = torch.tensor([[-4.0]], dtype=torch.float64, requires_grad=True)
+        solution = QPFunction(eps=1e-12, maxIter=50)(
+            torch.tensor([[[2.0]]], dtype=torch.float64), p,
+            torch.tensor([[[-1.0]]], dtype=torch.float64),
+            torch.tensor([[100.0]], dtype=torch.float64),
+            torch.empty(1, 0, 1, dtype=torch.float64),
+            torch.empty(1, 0, dtype=torch.float64),
+        )
+        torch.testing.assert_close(solution, torch.tensor([[2.0]], dtype=torch.float64))
+        solution.sum().backward()
+        torch.testing.assert_close(p.grad, torch.tensor([[-0.5]], dtype=torch.float64))
+
+    def test_fixed_shape_spd_rank_and_invalid_detection(self):
+        qp = make_qp()
+        matrices = qp._build(qp_data(2), relaxed_contact=False)
+        q, p, g, h, a, b, scale = matrices
+        self.assertEqual(q.shape, (2, 54, 54))
+        self.assertEqual(a.shape, (2, 18, 54))
+        self.assertEqual(g.shape[-1], 54)
+        valid, finite, rank, spd = qp._validate_inputs(matrices)
+        self.assertTrue(valid.all() and finite.all() and rank.all() and spd.all())
+
+        bad_q = q.clone()
+        bad_q[0, 0, 0] = -1.0
+        bad_a = a.clone()
+        bad_a[1, 0] = bad_a[1, 1]
+        valid, _, rank, spd = qp._validate_inputs(
+            (bad_q, p, g, h, bad_a, b, scale)
+        )
+        self.assertFalse(spd[0])
+        self.assertFalse(rank[1])
+        self.assertFalse(valid.any())
+        relaxed = qp._build(qp_data(1), relaxed_contact=True)
+        self.assertEqual(relaxed[4].shape, (1, 30, 54))
+        self.assertEqual(torch.linalg.matrix_rank(relaxed[4]).item(), 30)
+
+    def test_feasibility_residuals_and_fixed_order_outputs(self):
+        result = make_qp().solve(**qp_data(2))
+        self.assertTrue((result.stage == 0).all())
+        self.assertEqual(result.qdd.shape, (2, 18))
+        self.assertEqual(result.force_world.shape, (2, 4, 3))
+        self.assertEqual(result.tau_safe.shape, (2, 12))
+        self.assertEqual(result.contact_slack.shape, (2, 4, 3))
+        self.assertLess(result.diagnostics["full/equality_max"].max().item(), 1e-7)
+        self.assertLess(result.diagnostics["full/inequality_max"].max().item(), 1e-7)
+        self.assertTrue(torch.isfinite(result.diagnostics["full/stationarity_max"]).all())
+
+    def test_torque_rate_position_and_velocity_limits(self):
+        data = qp_data(1)
+        data["tau_nom"].fill_(50.0)
+        data["previous_torque"].fill_(1.0)
+        data["dt"].fill_(0.01)
+        qp = make_qp(torque_rate_limit_nm_s=100.0)
+        result = qp.solve(**data)
+        self.assertTrue((result.tau_safe <= 2.0 + 2e-4).all())
+        self.assertTrue((result.tau_safe >= -23.5 - 2e-4).all())
+
+        actuator = qp_data(1)
+        actuator["tau_nom"].fill_(50.0)
+        actuator_result = make_qp(
+            torque_rate_limit_nm_s=1.0e6
+        ).solve(**actuator)
+        self.assertTrue((actuator_result.tau_safe <= 23.5 + 2e-4).all())
+        self.assertTrue((actuator_result.tau_safe >= -23.5 - 2e-4).all())
+
+        constrained = qp_data(1)
+        constrained["tau_nom"].fill_(10.0)
+        constrained["previous_torque"].fill_(-5.0)
+        constrained["joint_position"].fill_(1.999)
+        constrained["joint_velocity"].fill_(0.1)
+        solved = qp.solve(**constrained)
+        next_velocity = constrained["joint_velocity"] + constrained["dt"] * solved.qdd[:, 6:]
+        next_position = (
+            constrained["joint_position"]
+            + constrained["dt"] * constrained["joint_velocity"]
+            + 0.5 * constrained["dt"].square() * solved.qdd[:, 6:]
+        )
+        self.assertTrue((next_velocity <= 30.0 + 2e-4).all())
+        self.assertTrue((next_position <= 2.0 + 2e-4).all())
+
+        velocity_constrained = qp_data(1)
+        velocity_constrained["tau_nom"].fill_(10.0)
+        velocity_constrained["joint_velocity"].fill_(29.9)
+        velocity_result = qp.solve(**velocity_constrained)
+        next_velocity = (
+            velocity_constrained["joint_velocity"]
+            + velocity_constrained["dt"] * velocity_result.qdd[:, 6:]
+        )
+        self.assertTrue((next_velocity <= 30.0 + 2e-4).all())
+
+    def test_friction_pyramid_and_contact_slacks(self):
+        data = qp_data(1)
+        data["force_pred_world"][0, 0] = torch.tensor([100.0, -80.0, 10.0])
+        data["contact_probability"][0, 0] = 1.0
+        data["foot_acceleration_bias"][0, 0] = torch.tensor([2.0, -3.0, 4.0])
+        data["foot_jacobians"][0, 0, :, :3] = torch.eye(3, dtype=torch.float64)
+        result = make_qp(friction_coefficient=0.5).solve(**data)
+        force = result.force_world[0, 0]
+        self.assertGreaterEqual(force[2].item(), -2e-4)
+        self.assertLessEqual(abs(force[0].item()), 0.5 * force[2].item() + 2e-4)
+        self.assertLessEqual(abs(force[1].item()), 0.5 * force[2].item() + 2e-4)
+        acceleration = torch.einsum(
+            "fkn,n->fk", data["foot_jacobians"][0], result.qdd[0]
+        ) + data["foot_acceleration_bias"][0]
+        self.assertTrue((acceleration.abs() <= result.contact_slack[0] + 3e-4).all())
+        self.assertTrue((result.contact_slack >= -2e-4).all())
+
+    def test_relaxed_then_projection_fallback(self):
+        qp = make_qp(torque_rate_limit_nm_s=100.0)
+        data = qp_data(1)
+        data["tau_nom"].fill_(0.5)
+        data["previous_torque"].fill_(1.0)
+        data["dt"].fill_(0.01)
+
+        original = qp._solve_stage
+        calls = []
+        def fail_full(values, relaxed):
+            calls.append(relaxed)
+            if not relaxed:
+                solution, success, diagnostics = original(values, relaxed)
+                return solution, torch.zeros_like(success), diagnostics
+            return original(values, relaxed)
+        with mock.patch.object(qp, "_solve_stage", side_effect=fail_full):
+            relaxed = qp.solve(**data)
+        self.assertEqual(calls, [False, True])
+        self.assertEqual(relaxed.stage.item(), 1)
+
+        data["tau_nom"].fill_(50.0)
+        def fail_both(values, relaxed):
+            solution, success, diagnostics = original(values, relaxed)
+            return solution, torch.zeros_like(success), diagnostics
+        with mock.patch.object(qp, "_solve_stage", side_effect=fail_both):
+            projected = qp.solve(**data)
+        self.assertEqual(projected.stage.item(), 2)
+        torch.testing.assert_close(
+            projected.tau_safe,
+            torch.full((1, 12), 2.0, dtype=torch.float64),
+        )
+
+    def test_dtype_and_chunk_parity(self):
+        data = qp_data(3, dtype=torch.float32)
+        chunked = make_qp(solver_dtype="float64", chunk_size=1).solve(**data)
+        whole = make_qp(solver_dtype="float64", chunk_size=8).solve(**data)
+        torch.testing.assert_close(chunked.tau_safe, whole.tau_safe, atol=2e-5, rtol=2e-5)
+        torch.testing.assert_close(chunked.force_world, whole.force_world, atol=2e-5, rtol=2e-5)
+        single = make_qp(solver_dtype="float32", chunk_size=8).solve(**data)
+        torch.testing.assert_close(single.tau_safe, whole.tau_safe, atol=3e-3, rtol=3e-3)
+
+    def test_gradients_and_finite_difference_to_learned_references(self):
+        qp = make_qp()
+        data = qp_data(1)
+        data["tau_nom"].fill_(0.5).requires_grad_()
+        data["force_pred_world"].requires_grad_()
+        result = qp.solve(**data)
+        objective = result.tau_safe.sum() + 0.01 * result.force_world.sum()
+        objective.backward()
+        self.assertTrue(torch.isfinite(data["tau_nom"].grad).all())
+        self.assertTrue(torch.isfinite(data["force_pred_world"].grad).all())
+        self.assertGreater(data["tau_nom"].grad.abs().sum().item(), 0.0)
+        self.assertGreater(data["force_pred_world"].grad.abs().sum().item(), 0.0)
+
+        epsilon = 1e-4
+        plus, minus = qp_data(1), qp_data(1)
+        plus["tau_nom"].fill_(0.5)
+        minus["tau_nom"].fill_(0.5)
+        plus["tau_nom"][0, 0] += epsilon
+        minus["tau_nom"][0, 0] -= epsilon
+        fd = (
+            qp.solve(**plus).tau_safe.sum()
+            - qp.solve(**minus).tau_safe.sum()
+        ) / (2 * epsilon)
+        self.assertAlmostEqual(data["tau_nom"].grad[0, 0].item(), fd.item(), delta=2e-2)
+
+        plus_force, minus_force = qp_data(1), qp_data(1)
+        plus_force["tau_nom"].fill_(0.5)
+        minus_force["tau_nom"].fill_(0.5)
+        plus_force["force_pred_world"][0, 0, 2] += epsilon
+        minus_force["force_pred_world"][0, 0, 2] -= epsilon
+        fd_force = 0.01 * (
+            qp.solve(**plus_force).force_world.sum()
+            - qp.solve(**minus_force).force_world.sum()
+        ) / (2 * epsilon)
+        self.assertAlmostEqual(
+            data["force_pred_world"].grad[0, 0, 2].item(),
+            fd_force.item(), delta=2e-2,
+        )
+
+    def test_projection_loss_exact_mask_and_graph_zero(self):
+        nominal = torch.zeros(3, 12, requires_grad=True)
+        safe = nominal + torch.tensor([[1.0] * 12, [2.0] * 12, [3.0] * 12])
+        loss = projection_loss(
+            safe, nominal, torch.full((12,), 2.0),
+            torch.tensor([True, False, True]),
+            torch.tensor([True, True, False]),
+        )
+        self.assertAlmostEqual(loss.item(), 3.0)
+        zero = projection_loss(
+            safe, nominal, torch.ones(12),
+            torch.zeros(3, dtype=torch.bool), torch.ones(3, dtype=torch.bool),
+        )
+        zero.backward()
+        self.assertTrue(torch.equal(nominal.grad, torch.zeros_like(nominal)))
+
+    def test_qpth_graph_reaches_policy_encoder_and_force_heads(self):
+        torch.manual_seed(31)
+        actor = ActorCritic_HardPACT(
+            num_actor_obs=57, num_critic_obs=95, num_actions=12,
+            actor_layers=[32, 16], critic_layers=[32, 16],
+            cenet_in_dim=57 * 20, cenet_enc_layers=[32, 16],
+            cenet_explicit_layers=[16, 16],
+            grf_decoder_layers=[16, 16], wrench_decoder_layers=[16, 16],
+        ).double()
+        observation = torch.randn(1, 57, dtype=torch.float64)
+        history = torch.randn(1, 57 * 20, dtype=torch.float64)
+        _, _, latent, explicit = actor.cenet_enc_forward(history)
+        position, feedforward = actor.actor_forward(torch.cat(
+            (observation, latent, explicit), dim=-1
+        ))
+        nominal = position + feedforward
+        heads = actor.physics_heads(latent, explicit, nominal)
+
+        data = qp_data(1)
+        data["tau_nom"] = nominal
+        data["force_pred_world"] = heads.grf_yaw_scaled.reshape(1, 4, 3)
+        data["wrench_pred_world"] = heads.base_wrench_yaw_scaled
+        data["contact_probability"] = explicit[:, 3:7]
+        data["foot_acceleration_bias"].fill_(0.2)
+        # Couple learned force/wrench references into floating-base dynamics.
+        data["base_jacobian"][0, :, :6] = torch.eye(6, dtype=torch.float64)
+        for foot in range(4):
+            data["foot_jacobians"][0, foot, :, :3] = torch.eye(
+                3, dtype=torch.float64
+            )
+        result = make_qp().solve(**data)
+        loss = (
+            result.tau_safe.square().mean()
+            + result.force_world.square().mean()
+            + result.qdd.square().mean()
+            + result.contact_slack.square().mean()
+        )
+        loss.backward()
+        groups = {
+            "policy": (actor.act_trunk, actor.act_pos_out, actor.act_tau_out),
+            "encoder": (actor.context_encoder,),
+            "grf": (actor.physics_estimator.grf_head,),
+            "wrench": (actor.physics_estimator.wrench_head,),
+        }
+        for name, modules in groups.items():
+            gradients = [
+                parameter.grad for module in modules
+                for parameter in module.parameters()
+                if parameter.grad is not None
+            ]
+            self.assertTrue(gradients, name)
+            self.assertTrue(all(torch.isfinite(value).all() for value in gradients), name)
+            self.assertGreater(
+                sum(value.abs().sum().item() for value in gradients), 0.0, name
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

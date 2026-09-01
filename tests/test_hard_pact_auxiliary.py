@@ -57,14 +57,19 @@ def make_batch(batch=5):
 
 class HardPACTAuxiliaryTests(unittest.TestCase):
     def test_independent_physics_loss_weights_are_configurable(self):
-        algorithm = make_algorithm(lambda_inverse=0.25, lambda_rollout=1.75)
+        algorithm = make_algorithm(
+            lambda_inverse=0.25, lambda_rollout=1.75,
+            lambda_projection=0.5,
+        )
         self.assertEqual(algorithm.lambda_inverse, 0.25)
         self.assertEqual(algorithm.lambda_rollout, 1.75)
+        self.assertEqual(algorithm.lambda_projection, 0.5)
         inverse = torch.tensor(4.0)
         rollout = torch.tensor(2.0)
-        weighted = algorithm._combine_bard_losses(inverse, rollout)
-        torch.testing.assert_close(weighted, torch.tensor(4.5))
-        for name in ("lambda_inverse", "lambda_rollout"):
+        projection = torch.tensor(3.0)
+        weighted = algorithm._combine_bard_losses(inverse, rollout, projection)
+        torch.testing.assert_close(weighted, torch.tensor(6.0))
+        for name in ("lambda_inverse", "lambda_rollout", "lambda_projection"):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(ValueError, "must be nonnegative"):
                     make_algorithm(**{name: -1.0})

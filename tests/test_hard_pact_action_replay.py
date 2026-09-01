@@ -188,6 +188,23 @@ class StochasticActionReplayTests(unittest.TestCase):
         self.assertIsNotNone(algorithm.actor_critic.std.grad)
         self.assertGreater(algorithm.actor_critic.std.grad.abs().sum().item(), 0.0)
 
+    def test_frozen_policy_sampled_substep_nominal_torque_matches_rollout_formula(self):
+        algorithm = make_algorithm(action_clip=1.0)
+        observation, _, mean, _, transition = self.replay_inputs(algorithm)
+        replay = algorithm._replay_action_path(
+            mean, observation, transition, action_transform, feedback,
+            torch.zeros(12), 1.0,
+        )
+        sampled_q = torch.randn(3, 12)
+        sampled_qdot = torch.randn(3, 12)
+        replayed = replay["feedforward_torque"] + feedback(
+            replay["desired_position"], sampled_q, sampled_qdot
+        )
+        rollout = replay["feedforward_torque"].detach() + feedback(
+            replay["desired_position"].detach(), sampled_q, sampled_qdot
+        )
+        torch.testing.assert_close(replayed, rollout)
+
 
 class EnvironmentActionCaptureTests(unittest.TestCase):
     def test_legacy_queue_delay_boundaries_and_nominal_torque_are_captured(self):
@@ -206,6 +223,7 @@ class EnvironmentActionCaptureTests(unittest.TestCase):
             default_dof_pos=torch.linspace(-0.2, 0.2, 12),
             _dof_pos=torch.linspace(-0.1, 0.1, 12).repeat(2, 1),
             _dof_vel=torch.linspace(-0.3, 0.3, 12).repeat(2, 1),
+            _torques=torch.linspace(-2.0, 2.0, 12).repeat(2, 1),
         )
         task._get_pinn_feedback = feedback
 
@@ -219,6 +237,12 @@ class EnvironmentActionCaptureTests(unittest.TestCase):
         ][1])
         torch.testing.assert_close(first_delayed[0], first[0])
         torch.testing.assert_close(first_delayed[1], torch.zeros(24))
+        torch.testing.assert_close(
+            task._pending_action_replay_transition[
+                "previous_executed_torque"
+            ],
+            task.simulator._torques,
+        )
 
         task._pre_sim_step(first + 0.1)
         third_delayed = task._pre_sim_step(first + 0.2)

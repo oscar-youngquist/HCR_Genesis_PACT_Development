@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections import deque
+import time
 
 import torch
 
 from rsl_rl.modules.hard_pact_physics import compose_explicit_estimator_target
+from rsl_rl.algorithms.hard_pact_qp import balanced_substep_indices
+from legged_gym.dynamics import wrench_at_point
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
 
 from .grf import GRFProcessingConfig, IntervalGRFProcessor, world_to_yaw_local
@@ -119,6 +122,14 @@ class Go2HardPACT(Go2PACT):
         self._interval_executed_torque_count = torch.zeros(
             self.num_envs, 1, device=self.device
         )
+        self._interval_executed_torque_peak = torch.zeros(
+            self.num_envs, 12, device=self.device
+        )
+        # The runner binds the already-created BARD/QP modules after policy
+        # construction.  Until then (and when the QP is disabled), this alias
+        # follows the byte-for-byte legacy torque path.
+        self._hard_pact_rollout_qp_enabled = False
+        self._hard_pact_policy_context_ready = False
         self._hard_pact_push_event_mask = torch.zeros(
             self.num_envs, 1, device=self.device, dtype=torch.bool
         )
@@ -140,6 +151,50 @@ class Go2HardPACT(Go2PACT):
         self._reset_persistent_wrench_state(
             torch.arange(self.num_envs, device=self.device)
         )
+
+    def configure_hard_pact_substep_qp(self, actor_critic, bard_dynamics, qp):
+        """Bind shared inference objects without duplicating model memory."""
+        self._hard_pact_actor_critic = actor_critic
+        self._hard_pact_bard_dynamics = bard_dynamics
+        self._hard_pact_rollout_qp = qp
+        self._hard_pact_rollout_qp_enabled = bard_dynamics is not None and qp is not None
+
+    def set_hard_pact_policy_context(self, latent, explicit):
+        """Hold policy-rate features and wrench prediction for one interval."""
+        if not self._hard_pact_rollout_qp_enabled:
+            return
+        # Rollout is inference-only.  Explicitly detach and use float32 so no
+        # graph or autocast activation survives across simulator substeps.
+        self._hard_pact_policy_latent = latent.detach().float()
+        self._hard_pact_policy_explicit = explicit.detach().float()
+        with torch.no_grad():
+            self._hard_pact_wrench_yaw_scaled = (
+                self._hard_pact_actor_critic.physics_estimator.predict_wrench(
+                    self._hard_pact_policy_latent,
+                    self._hard_pact_policy_explicit,
+                ).detach()
+            )
+        self._hard_pact_policy_context_ready = True
+
+    @staticmethod
+    def _yaw_local_to_world(values, quaternion_xyzw):
+        x, y, z, w = quaternion_xyzw.unbind(-1)
+        yaw = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y.square() + z.square()))
+        cosine, sine = torch.cos(yaw), torch.sin(yaw)
+        result = values.clone()
+        result[..., 0] = cosine[:, None] * values[..., 0] - sine[:, None] * values[..., 1]
+        result[..., 1] = sine[:, None] * values[..., 0] + cosine[:, None] * values[..., 1]
+        return result
+
+    @staticmethod
+    def _body_point_to_world(point_body, quaternion_xyzw):
+        x, y, z, w = quaternion_xyzw.unbind(-1)
+        rotation = torch.stack((
+            1 - 2 * (y*y + z*z), 2 * (x*y - w*z), 2 * (x*z + w*y),
+            2 * (x*y + w*z), 1 - 2 * (x*x + z*z), 2 * (y*z - w*x),
+            2 * (x*z - w*y), 2 * (y*z + w*x), 1 - 2 * (x*x + y*y),
+        ), dim=-1).reshape(-1, 3, 3)
+        return torch.einsum("bij,bj->bi", rotation, point_body)
 
     def _hard_pact_grf_post_physics_substep(self):
         raw = self.simulator._robot.get_links_net_contact_force()[
@@ -325,15 +380,257 @@ class Go2HardPACT(Go2PACT):
         )
         self._disturbance_interval_sum_yaw_scaled.add_(yaw_scaled)
         self._disturbance_interval_count.add_(1.0)
-        # _torques is the exact command sent to Genesis in this decimation
-        # substep. Accumulating here produces the requested control-interval
-        # executed torque without altering the legacy torque computation.
+        if (
+            getattr(self, "_hard_pact_rollout_qp_enabled", False)
+            and getattr(self, "_hard_pact_policy_context_ready", False)
+        ):
+            self._solve_hard_pact_rollout_qp_substep(quat, mass_com_wrench)
+        # `_torques` is now the exact safe command about to be sent to
+        # Genesis.  The interval value remains the authoritative BARD torque.
         if hasattr(self, "_interval_executed_torque_sum"):
             self._interval_executed_torque_sum.add_(self.simulator._torques)
             self._interval_executed_torque_count.add_(1.0)
+            self._interval_executed_torque_peak.copy_(torch.maximum(
+                self._interval_executed_torque_peak,
+                self.simulator._torques.abs(),
+            ))
         # The equivalent inertial wrench is deliberately label-only: Genesis
         # already realizes the randomized mass and CoM in its dynamics.
         self._apply_sustained_world_wrench(self._current_sustained_wrench_world)
+
+    def _solve_hard_pact_rollout_qp_substep(self, quat, mass_com_wrench):
+        r"""Refresh and solve one inference-only QP immediately before actuation.
+
+        Only ``q_d`` and ``tau_ff`` are held across decimation.  Everything
+        state-dependent below is reconstructed from the current Genesis state,
+        including PD torque, BARD dynamics/Jacobians, yaw transforms, and the
+        torque-rate box relative to the preceding *physics* substep.
+
+        At substep ``k`` this path computes
+
+        .. math::
+
+           \tau_{nom,k}=K_p(q_d-q_k)-K_d\dot q_k+\tau_{ff},
+
+           \hat f_k=D_F(z_t,\operatorname{sg}(e_t),\tau_{nom,k}),
+
+        then solves ``x_k*=QP(q_k,v_k,tau_{nom,k},f_hat_k,W_hat_t,
+        tau_safe,k-1)`` and sends only ``tau_safe,k`` to Genesis. The outer
+        ``no_grad`` is intentional: rollout needs numeric safety decisions,
+        whereas PPO later rebuilds one selected substep with autograd enabled.
+        """
+        # Never retain qpth/BARD/head graphs for D rollout substeps.
+        with torch.no_grad():
+            # Local alias shortens all live-state reads below.
+            simulator = self.simulator
+            # Refresh actuated q_k directly from Genesis immediately before
+            # actuation; the control-rate cached state may be one substep old.
+            joint_position = simulator._robot.get_dofs_position(
+                simulator._dof_indices
+            )
+            # Refresh qdot_k for the same reason and timestamp.
+            joint_velocity = simulator._robot.get_dofs_velocity(
+                simulator._dof_indices
+            )
+            # Simulator configuration q_sim=[p_WB(3),quat_xyzw(4),q_joints(12)].
+            q_simulator = torch.cat((
+                simulator._robot.get_pos(), quat, joint_position,
+            ), dim=-1)
+            # Simulator velocity v_sim=[v_WB^W(3),omega_WB^W(3),qdot(12)].
+            v_world = torch.cat((
+                simulator._robot.get_vel(), simulator._robot.get_ang(),
+                joint_velocity,
+            ), dim=-1)
+
+            # tau_nom,k = Kp(q_d-q_k)-Kd*qdot_k+tau_ff.  The legacy feedback
+            # helper supplies the task's exact gains/default-pose convention.
+            tau_nom = self._hard_pact_tau_ff + self._get_pinn_feedback(
+                self._hard_pact_q_d, joint_position, joint_velocity
+            )
+            # z_t and e_t remain policy-rate values. Only tau_nom,k changes,
+            # so the torque-conditioned GRF decoder is evaluated exactly once.
+            grf_yaw_scaled = (
+                self._hard_pact_actor_critic.physics_estimator.predict_grf(
+                    self._hard_pact_policy_latent,
+                    self._hard_pact_policy_explicit,
+                    tau_nom,
+                )
+            )
+            # Decoder output is observation-scaled and yaw-local. Divide by
+            # obs scale to recover Newtons, reshape FR/FL/RR/RL XYZ, and rotate
+            # yaw-local axes into the world axes used by J_f.
+            grf_world = self._yaw_local_to_world(
+                (grf_yaw_scaled / float(self.obs_scales.grf)).reshape(-1, 4, 3),
+                quat,
+            )
+            # The wrench head is policy-rate and was evaluated once when the
+            # action was chosen. Recover physical [F,T] units here.
+            wrench_yaw = self._hard_pact_wrench_yaw_scaled / float(
+                self.obs_scales.base_wrench
+            )
+            # Rotate both force and moment from yaw-local to world axes while
+            # preserving ordering [Fx,Fy,Fz,Tx,Ty,Tz].
+            total_wrench_world = torch.cat((
+                self._yaw_local_to_world(wrench_yaw[:, :3].unsqueeze(1), quat).squeeze(1),
+                self._yaw_local_to_world(wrench_yaw[:, 3:].unsqueeze(1), quat).squeeze(1),
+            ), dim=-1)
+            # J_b is expressed about the BARD base-frame origin p_WB.
+            base_point = q_simulator[:, :3]
+            # The learned total-wrench label is defined about the realized
+            # base CoM: p_com=p_WB+R_WB*Delta_c_body.
+            com_point = base_point + self._body_point_to_world(
+                self._realized_com_shift_body, quat
+            )
+            # Randomized mass/CoM is already installed in BARD. Subtract its
+            # label-only gravity wrench once, then shift the remaining applied
+            # wrench from p_com to the J_b point using
+            # T_base=T_com+(p_com-p_base)xF.
+            applied_wrench = wrench_at_point(
+                total_wrench_world - mass_com_wrench, com_point, base_point
+            )
+            # All realized dynamics parameters are measured/detached by the
+            # BARD adapter; they alter M/b/J but are never learned QP inputs.
+            parameters = {
+                "added_base_mass": self._realized_added_mass,
+                "base_com_shift": self._realized_com_shift_body,
+                "joint_armature": simulator._joint_armature,
+                "joint_friction": simulator._joint_friction,
+                "joint_stiffness": simulator._joint_stiffness,
+                "joint_damping": simulator._joint_damping,
+            }
+            # One kinematic update builds M(q_k), b(q_k,v_k), J_f(q_k),
+            # J_b(q_k), and Jdot_f(q_k,v_k)*v_k for this substep.
+            context = self._hard_pact_bard_dynamics.build_context(
+                q_simulator, v_world, parameters=parameters, need_qp=True
+            )
+            # Wall-clock measurement encloses matrix assembly inside solve and
+            # qpth/fallback execution, but excludes state/head preprocessing.
+            start = time.perf_counter()
+            # The solver constructs min 1/2*x'Qx+p'x subject to Gx<=h, Ax=b,
+            # where x=[qdd,f,tau_safe,s]. Every argument below maps directly
+            # to a documented physical block in hard_pact_qp.py.
+            result = self._hard_pact_rollout_qp.solve(
+                # M multiplies generalized acceleration in A[:,QDD].
+                mass_matrix=context.mass_matrix,
+                # b_dyn moves to the equality RHS as J_b^T*W-b_dyn.
+                bias=context.bias,
+                # J_f supplies -J_f^T in dynamics and J_f in contact rows.
+                foot_jacobians=context.foot_jacobians,
+                # J_b maps the predicted applied wrench into generalized force.
+                base_jacobian=context.base_jacobian,
+                # Jdot_f*v is the affine foot-acceleration contribution.
+                foot_acceleration_bias=context.foot_acceleration_bias,
+                # Tracking center for tau_safe and source of actor gradients in PPO.
+                tau_nom=tau_nom,
+                # Tracking center for the QP force decision, in world Newtons.
+                force_pred_world=grf_world,
+                # Fixed generalized-force RHS input, world [N,Nm] at J_b point.
+                wrench_pred_world=applied_wrench,
+                # e_t[3:7] gates contact acceleration continuously in [0,1].
+                contact_probability=self._hard_pact_policy_explicit[:, 3:7],
+                # tau_safe,k-1 centers the hard rate box for this substep.
+                previous_torque=self._hard_pact_previous_substep_torque,
+                # q_k/qdot_k form one-step joint position/velocity constraints.
+                joint_position=joint_position,
+                joint_velocity=joint_velocity,
+                # Hard rate and one-step integration limits use physics dt,
+                # never the D-times-larger policy/control interval.
+                dt=torch.full(
+                    (self.num_envs, 1), float(self.cfg.sim.dt),
+                    device=self.device, dtype=tau_nom.dtype,
+                ),
+            )
+            # Record elapsed milliseconds for interval diagnostics.
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            # This is the only torque command sent to Genesis for substep k.
+            simulator._torques = result.tau_safe
+            # Delta_tau_k is the projection correction used by L_proj/logging.
+            correction = result.tau_safe - tau_nom
+            # Flatten [foot,XYZ] slack to its fixed 12-D transition ordering.
+            slack = result.contact_slack.reshape(self.num_envs, -1)
+            # Pack certified infinity-norm residuals as [eq,ineq,dual,comp].
+            residual = torch.stack((
+                result.diagnostics["selected/equality_max"],
+                result.diagnostics["selected/inequality_max"],
+                result.diagnostics["selected/stationarity_max"],
+                result.diagnostics["selected/complementarity_max"],
+            ), dim=-1).nan_to_num()
+            # Accumulate sum/absolute peak of executed safe torque.
+            self._qp_interval_safe_sum.add_(result.tau_safe)
+            self._qp_interval_safe_peak.copy_(torch.maximum(
+                self._qp_interval_safe_peak, result.tau_safe.abs()
+            ))
+            # Accumulate signed mean correction and absolute peak correction.
+            self._qp_interval_correction_sum.add_(correction)
+            self._qp_interval_correction_peak.copy_(torch.maximum(
+                self._qp_interval_correction_peak, correction.abs()
+            ))
+            # QP-selected physical GRFs are averaged over the interval.
+            self._qp_interval_grf_sum.add_(result.force_world.flatten(1))
+            # Slack is nonnegative, so ordinary max is its physical peak.
+            self._qp_interval_slack_sum.add_(slack)
+            self._qp_interval_slack_peak.copy_(torch.maximum(
+                self._qp_interval_slack_peak, slack
+            ))
+            # Residual means and peaks summarize numerical solve quality.
+            self._qp_interval_residual_sum.add_(residual)
+            self._qp_interval_residual_peak.copy_(torch.maximum(
+                self._qp_interval_residual_peak, residual
+            ))
+            # stage in {0,1,2}; scatter_add forms per-env fallback counts.
+            self._qp_interval_stage_counts.scatter_add_(
+                1, result.stage[:, None],
+                torch.ones(self.num_envs, 1, device=self.device),
+            )
+            # Each env shares this batched wall time; averaging later reports
+            # milliseconds per batched substep solve.
+            self._qp_interval_timing_ms.add_(elapsed_ms)
+
+            # Each environment stores exactly one preselected k in [0,D).
+            selected = self._qp_sampled_substep_index.long() == self._qp_substep
+            if selected.any():
+                # Store compact vectors only. M/J/A/G/Q are rebuilt during PPO
+                # and never occupy [rollout_length,decimation] GPU storage.
+                sample = self._qp_sampled_transition
+                # State required to reconstruct BARD mechanics at sampled k.
+                sample["sampled_qp_q"][selected] = q_simulator[selected]
+                sample["sampled_qp_v"][selected] = v_world[selected]
+                # Exact rate-box center tau_safe,k-1.
+                sample["sampled_qp_previous_torque"][selected] = (
+                    self._hard_pact_previous_substep_torque[selected]
+                )
+                # Rollout references permit frozen-policy equality diagnostics.
+                sample["sampled_qp_rollout_nominal_torque"][selected] = tau_nom[selected]
+                sample["sampled_qp_rollout_grf_world"][selected] = (
+                    grf_world[selected].flatten(1)
+                )
+                # Label-only term must be subtracted once during PPO replay.
+                sample["sampled_qp_mass_com_wrench_world"][selected] = (
+                    mass_com_wrench[selected]
+                )
+                sample["sampled_qp_rollout_applied_wrench_world"][selected] = (
+                    applied_wrench[selected]
+                )
+                sample["sampled_qp_rollout_contact_probability"][selected] = (
+                    self._hard_pact_policy_explicit[selected, 3:7]
+                )
+                # Store all primal blocks and solver certification metadata.
+                sample["sampled_qp_qdd"][selected] = result.qdd[selected]
+                sample["sampled_qp_force_world"][selected] = result.force_world[selected].flatten(1)
+                sample["sampled_qp_safe_torque"][selected] = result.tau_safe[selected]
+                sample["sampled_qp_contact_slack"][selected] = slack[selected]
+                sample["sampled_qp_stage"][selected] = (
+                    result.stage[selected, None].to(torch.int16)
+                )
+                sample["sampled_qp_differentiated"][selected] = (
+                    result.differentiated_mask[selected, None]
+                )
+                sample["sampled_qp_residuals"][selected] = residual[selected]
+                sample["sampled_qp_timing_ms"][selected] = elapsed_ms
+            # Advance the rate constraint: next substep uses this exact command.
+            self._hard_pact_previous_substep_torque.copy_(result.tau_safe)
+            # Advance k after sampling so the first callback is k=0.
+            self._qp_substep += 1
 
     def _begin_disturbance_interval(self):
         for value in (
@@ -349,6 +646,81 @@ class Go2HardPACT(Go2PACT):
         if hasattr(self, "_interval_executed_torque_sum"):
             self._interval_executed_torque_sum.zero_()
             self._interval_executed_torque_count.zero_()
+            self._interval_executed_torque_peak.zero_()
+        if (
+            getattr(self, "_hard_pact_rollout_qp_enabled", False)
+            and getattr(self, "_hard_pact_policy_context_ready", False)
+        ):
+            self._begin_qp_interval()
+
+    def _begin_qp_interval(self):
+        r"""Allocate interval statistics and one sampled replay row.
+
+        For decimation ``D``, sums become ``(1/D)sum_k value_k`` at interval
+        finalization and peaks become ``max_k |value_k|``. For each environment
+        a single ``K~Uniform({0,...,D-1})`` is chosen with balanced strata.
+        """
+        # All physical/diagnostic values use float32 on the simulation device.
+        shape = lambda width: torch.zeros(
+            self.num_envs, width, device=self.device, dtype=torch.float32
+        )
+        # Executed safe torque sum and absolute componentwise peak [Nm].
+        self._qp_interval_safe_sum = shape(12)
+        self._qp_interval_safe_peak = shape(12)
+        # Signed correction sum and absolute peak, tau_safe-tau_nom [Nm].
+        self._qp_interval_correction_sum = shape(12)
+        self._qp_interval_correction_peak = shape(12)
+        # QP primal force sum in FR/FL/RR/RL world XYZ [N].
+        self._qp_interval_grf_sum = shape(12)
+        # Contact-acceleration slack sum and componentwise peak [m/s^2].
+        self._qp_interval_slack_sum = shape(12)
+        self._qp_interval_slack_peak = shape(12)
+        # [equality, inequality, stationarity, complementarity] residuals.
+        self._qp_interval_residual_sum = shape(4)
+        self._qp_interval_residual_peak = shape(4)
+        # Counts for stage 0/full, stage 1/relaxed, stage 2/projection.
+        self._qp_interval_stage_counts = shape(3)
+        # Sum of batched QP wall-clock milliseconds across substeps.
+        self._qp_interval_timing_ms = shape(1)
+        # First callback in the interval is physics substep k=0.
+        self._qp_substep = 0
+        # D is the number of Genesis physics steps per policy action.
+        decimation = int(self.cfg.control.decimation)
+        # One int16 index per env is the only decimation-dependent replay key.
+        self._qp_sampled_substep_index = balanced_substep_indices(
+            self.num_envs, decimation, self.device
+        )
+        # Preallocate exactly one compact sampled row per env. Dynamics/QP
+        # matrices are intentionally absent and reconstructed during PPO.
+        self._qp_sampled_transition = {
+            # Which k generated every stored field below.
+            "sampled_qp_substep_index": self._qp_sampled_substep_index[:, None],
+            # Canonical simulator configuration and world/base twist state.
+            "sampled_qp_q": shape(19), "sampled_qp_v": shape(18),
+            # Hard rate-box center and rollout learned references.
+            "sampled_qp_previous_torque": shape(12),
+            "sampled_qp_rollout_nominal_torque": shape(12),
+            "sampled_qp_rollout_grf_world": shape(12),
+            # Label-only mass wrench and resulting applied-wrench QP input.
+            "sampled_qp_mass_com_wrench_world": shape(6),
+            "sampled_qp_rollout_applied_wrench_world": shape(6),
+            # Held explicit-estimator contact probabilities c_i.
+            "sampled_qp_rollout_contact_probability": shape(4),
+            # Complete rollout primal x*=[qdd,f,tau_safe,s].
+            "sampled_qp_qdd": shape(18), "sampled_qp_force_world": shape(12),
+            "sampled_qp_safe_torque": shape(12),
+            "sampled_qp_contact_slack": shape(12),
+            # Compact fallback stage and whether qpth supplied its KKT graph.
+            "sampled_qp_stage": torch.zeros(
+                self.num_envs, 1, device=self.device, dtype=torch.int16
+            ),
+            "sampled_qp_differentiated": torch.zeros(
+                self.num_envs, 1, device=self.device, dtype=torch.bool
+            ),
+            # Numeric certification vector and elapsed batched solve time.
+            "sampled_qp_residuals": shape(4),
+            "sampled_qp_timing_ms": shape(1),
+        }
 
     def _capture_bard_pre_state(self):
         simulator = self.simulator
@@ -440,6 +812,10 @@ class Go2HardPACT(Go2PACT):
                 (self.num_envs, 1), float(self.dt),
                 device=self.device, dtype=torch.float32,
             ),
+            "physics_dt": torch.full(
+                (self.num_envs, 1), float(self.cfg.sim.dt),
+                device=self.device, dtype=torch.float32,
+            ),
             "interval_executed_torque": (
                 self._interval_executed_torque_sum / torque_divisor
             ).clone(),
@@ -457,6 +833,29 @@ class Go2HardPACT(Go2PACT):
         }
         if self._pending_action_replay_transition is not None:
             fields.update(self._pending_action_replay_transition)
+        if (
+            getattr(self, "_hard_pact_rollout_qp_enabled", False)
+            and getattr(self, "_hard_pact_policy_context_ready", False)
+        ):
+            qp_divisor = self._interval_executed_torque_count.clamp_min(1.0)
+            fields.update(self._qp_sampled_transition)
+            # Interval diagnostics are exposed to logging but deliberately not
+            # inserted into `fields`: RolloutStorage persists every named
+            # field for T steps, and PPO only needs the single sampled row.
+            self.extras["hard_pact_qp_interval"] = {
+                "interval_qp_safe_torque": self._qp_interval_safe_sum / qp_divisor,
+                "interval_peak_executed_torque": self._interval_executed_torque_peak,
+                "interval_qp_peak_safe_torque": self._qp_interval_safe_peak,
+                "interval_qp_correction": self._qp_interval_correction_sum / qp_divisor,
+                "interval_qp_peak_correction": self._qp_interval_correction_peak,
+                "interval_qp_grf_world": self._qp_interval_grf_sum / qp_divisor,
+                "interval_qp_contact_slack": self._qp_interval_slack_sum / qp_divisor,
+                "interval_qp_peak_contact_slack": self._qp_interval_slack_peak,
+                "interval_qp_residuals": self._qp_interval_residual_sum / qp_divisor,
+                "interval_qp_peak_residuals": self._qp_interval_residual_peak,
+                "interval_qp_stage_fractions": self._qp_interval_stage_counts / qp_divisor,
+                "interval_qp_timing_ms": self._qp_interval_timing_ms / qp_divisor,
+            }
         # These deployment-facing views are named transition values but are
         # intentionally not duplicated in the critic: its required input is
         # the scaled yaw-local total label above.
@@ -547,11 +946,33 @@ class Go2HardPACT(Go2PACT):
 
     def _pre_sim_step(self, actions):
         """Capture the exact legacy clip/delay/nominal-torque action path."""
+        # The QP rate box is relative to the torque actually present at the
+        # end of the preceding control interval.  Capture it before the legacy
+        # action path updates simulator control buffers.  This is one compact
+        # 12-float transition field and avoids storing any QP matrices.
+        previous_torque_buffer = getattr(self.simulator, "_torques", None)
+        previous_executed_torque = (
+            previous_torque_buffer.detach().clone()
+            if previous_torque_buffer is not None else None
+        )
         delayed_action = self._legacy_task_class._pre_sim_step(self, actions)
         # Lightweight parity-test fixtures intentionally omit HardPACT-only
         # buffers; in that case the inherited action behavior is still exact.
         if not hasattr(self, "_action_replay_valid_queue"):
             return delayed_action
+        if previous_executed_torque is None:
+            previous_executed_torque = torch.zeros(
+                self.num_envs, 12, device=self.device, dtype=actions.dtype
+            )
+        if getattr(self, "_hard_pact_rollout_qp_enabled", False):
+            actor = self._hard_pact_actor_critic
+            if actor.cenet_z is None or actor.cenet_torso_velo is None:
+                raise RuntimeError(
+                    "HardPACT substep QP requires a policy inference before env.step"
+                )
+            self.set_hard_pact_policy_context(
+                actor.cenet_z, actor.cenet_torso_velo
+            )
 
         # Shift in lockstep with the legacy action queue. A false entry means
         # the selected action is a reset/boundary zero rather than a policy
@@ -589,7 +1010,14 @@ class Go2HardPACT(Go2PACT):
             "delayed_action": delayed_action.detach().clone(),
             "delayed_action_source_valid": selected_valid.clone(),
             "nominal_torque": nominal_torque.detach().clone(),
+            "previous_executed_torque": previous_executed_torque,
         }
+        # Hold the action-space command across decimation.  PD feedback is
+        # intentionally *not* held: it is reevaluated from q_k,qdot_k in the
+        # callback immediately before every physics actuation.
+        self._hard_pact_q_d = desired_position.detach().clone()
+        self._hard_pact_tau_ff = feedforward_torque.detach().clone()
+        self._hard_pact_previous_substep_torque = previous_executed_torque.clone()
         return delayed_action
 
     def reset_idx(self, env_ids):
@@ -621,6 +1049,26 @@ class Go2HardPACT(Go2PACT):
             ):
                 value[env_ids] = 0
             self._action_replay_valid_queue[env_ids] = False
+            for name in (
+                "_hard_pact_previous_substep_torque",
+                "_hard_pact_q_d", "_hard_pact_tau_ff",
+            ):
+                value = getattr(self, name, None)
+                if value is not None:
+                    value[env_ids] = 0
+            # These are current-interval diagnostics, not PPO targets. Clear
+            # reset rows so no stale pre-reset peak/status leaks into logging.
+            for name in (
+                "_qp_interval_safe_sum", "_qp_interval_safe_peak",
+                "_qp_interval_correction_sum", "_qp_interval_correction_peak",
+                "_qp_interval_grf_sum", "_qp_interval_slack_sum",
+                "_qp_interval_slack_peak", "_qp_interval_residual_sum",
+                "_qp_interval_residual_peak", "_qp_interval_stage_counts",
+                "_qp_interval_timing_ms",
+            ):
+                value = getattr(self, name, None)
+                if value is not None:
+                    value[env_ids] = 0
             for frame in self.disturbance_critic_deque:
                 frame[env_ids] = 0
 

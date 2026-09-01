@@ -156,6 +156,23 @@ class OnPolicyRunnerPACT:
         if actor_critic_class is ActorCritic_HardPACT:
             delay_range = self.env.cfg.domain_rand.ctrl_delay_step_range
             self.alg.storage.configure_action_replay(int(delay_range[1]))
+            # Limits are backend properties, not learned transition data.
+            # Bind them once so PPO minibatches carry only the previous torque
+            # needed by the rate constraint, minimizing persistent GPU memory.
+            if self.alg.qp_config.enabled:
+                simulator = self.env.simulator
+                self.alg.configure_hard_pact_qp(
+                    simulator._torque_limits,
+                    simulator.dof_pos_limits_hard,
+                    simulator._dof_vel_limits,
+                )
+                # Reuse the same BARD model and qpth layer for rollout and PPO;
+                # duplicating either would waste substantial GPU memory.
+                self.env.configure_hard_pact_substep_qp(
+                    self.alg.actor_critic,
+                    self.alg.bard_dynamics,
+                    self.alg.hard_pact_qp,
+                )
 
         if self.policy_cfg.get("pretrained_path"):
             self._load_pretrained_model()

@@ -545,6 +545,10 @@ class ActorCritic_HardPACT(nn.Module):
     def act_inference(self,obs,obs_history):
         # Call the forward method of the context encoder
         z, torso_velo = self.cenet_enc_inference(obs_history)
+        # The environment reuses these policy-rate features for every
+        # decimation-substep QP; no second history-encoder pass is required.
+        self.cenet_z = z
+        self.cenet_torso_velo = torso_velo
         
         # create the actors observation
         current_obs = torch.cat((obs,z,torso_velo), dim=-1)   
