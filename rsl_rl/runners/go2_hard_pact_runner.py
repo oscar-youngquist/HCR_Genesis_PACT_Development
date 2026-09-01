@@ -517,22 +517,6 @@ class Go2HardPACTRunner:
             metrics[f"transition/{field}_fraction"] = (
                 transition[field].float().mean()
             )
-
-        linear_error = (
-            self.env.commands[:, :2]
-            - self.env.simulator.base_lin_vel[:, :2]
-        ).norm(dim=-1)
-        yaw_error = (
-            self.env.commands[:, 2]
-            - self.env.simulator.base_ang_vel[:, 2]
-        ).abs()
-        metrics["tracking/linear_velocity_error"] = linear_error.mean()
-        metrics["tracking/yaw_velocity_error"] = yaw_error.mean()
-        metrics["success/fraction"] = (
-            (linear_error < 0.5)
-            & (yaw_error < 0.5)
-            & ~self.env.reset_buf.bool()
-        ).float().mean()
         terrain_levels = getattr(self.env.simulator, "_terrain_levels", None)
         if terrain_levels is None:
             terrain_levels = getattr(self.env.simulator, "terrain_levels", None)
