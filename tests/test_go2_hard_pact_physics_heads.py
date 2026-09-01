@@ -14,6 +14,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib_hard_pact_tests")
 
 import torch
 
+from legged_gym.envs.go2.go2_hard_pact.transition import DISTURBANCE_CRITIC_DIM
 from legged_gym.envs.go2.go2_hard_pact.deployment import (
     FOOT_ORDER,
     RECONSTRUCTION_DIM,
@@ -128,7 +129,10 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
                 self.assertEqual(train.policy.wrench_decoder_layers, [128, 128])
                 self.assertEqual(train.policy.cenet_dec_input_dim, 27)
                 self.assertEqual(train.policy.cenet_dec_out_dim, 133)
-                self.assertEqual(env.env.num_privileged_obs, GO2PACTCfg.env.num_privileged_obs)
+                self.assertEqual(
+                    env.env.num_privileged_obs,
+                    GO2PACTCfg.env.num_privileged_obs + DISTURBANCE_CRITIC_DIM,
+                )
         self.assertEqual(RECONSTRUCTION_DIM, 133)
         self.assertTrue(set(range(61, 73)).isdisjoint(RECONSTRUCTION_INDICES))
         self.assertTrue(set(range(145, 288)).isdisjoint(RECONSTRUCTION_INDICES))

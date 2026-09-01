@@ -219,12 +219,17 @@ class GRFIntegrationTests(unittest.TestCase):
         ):
             with self.subTest(simulator=sim_cls.__name__):
                 sim, processor = _synthetic_simulator(samples, sim_cls=sim_cls)
+                pre_substep_scene_counts = []
+                sim._hard_pact_pre_physics_substep = (
+                    lambda: pre_substep_scene_counts.append(sim._scene.steps)
+                )
                 processor.begin_interval()
                 actions = torch.arange(action_width, dtype=torch.float32).reshape(1, -1)
                 sim.step(actions)
                 average = processor.end_interval()
 
                 self.assertEqual(sim._scene.steps, 3)
+                self.assertEqual(pre_substep_scene_counts, [0, 1, 2])
                 self.assertEqual(len(sim._robot.controlled), 3)
                 torch.testing.assert_close(
                     processor.interval_count, torch.tensor([[[3.0]]])

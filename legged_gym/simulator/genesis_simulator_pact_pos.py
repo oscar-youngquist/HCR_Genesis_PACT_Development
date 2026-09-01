@@ -49,6 +49,12 @@ class GenesisSimulator_PACT_Pos(Simulator):
 
         for _ in range(self._cfg.control.decimation):
             self._torques = self._compute_torques(actions)
+
+            hard_pact_pre_callback = getattr(
+                self, "_hard_pact_pre_physics_substep", None
+            )
+            if hard_pact_pre_callback is not None:
+                hard_pact_pre_callback()
             
             self._robot.control_dofs_force(
                 self._torques, self._dof_indices)
@@ -302,8 +308,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
         # Apply angular wrench
         if num_wrench_reset > 0:
             ang_push = torch_rand_float(
-                -self.wrench_value,
-                self.wrench_value,
+                -self.angular_push_value,
+                self.angular_push_value,
                 (num_wrench_reset, 3),
                 self._device,
             )
@@ -422,7 +428,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
         
     #     elif num_iters <= self.push_warmup_step:
     #         print("Push Value: ", self.push_value)
-    #         print("Wrench Value: ", self.wrench_value)
+    #         print("Angular Push Value: ", self.angular_push_value)
     #         print("Vertical Push Value: ", self.vert_value)
     #         print("Mass Max Value: ", self.mass_max_value)
     #         print("COM Delta X Value: ", self.com_delta_x_value)
@@ -438,7 +444,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
     #     # Safety catch, hopefully isn't needed really
     #     if adjusted_step == 0:
     #         print("Push Value: ", self.push_value)
-    #         print("Wrench Value: ", self.wrench_value)
+    #         print("Angular Push Value: ", self.angular_push_value)
     #         print("Vertical Push Value: ", self.vert_value)
     #         print("Mass Max Value: ", self.mass_max_value)
     #         print("COM Delta X Value: ", self.com_delta_x_value)
@@ -450,7 +456,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
     #         return
 
     #     self.push_value      = (adjusted_step / self.num_push_steps) * self.push_diff + self.push_bounds[0]
-    #     self.wrench_value    = (adjusted_step / self.num_push_steps) * self.wrench_diff + self.wrench_bounds[0]
+    #     self.angular_push_value = (adjusted_step / self.num_push_steps) * self.angular_push_diff + self.angular_push_bounds[0]
     #     self.vert_value      = (adjusted_step / self.num_push_steps) * self.vert_diff + self.vert_bounds[0]
     #     self.mass_max_value  = (adjusted_step / self.num_push_steps) * self.mass_bounds_diff + self.max_mass_bounds[0]
     #     self.com_delta_x_value = (adjusted_step / self.num_push_steps) * self.com_delta_x_diff + self.com_delta_x_bounds[0]
@@ -469,7 +475,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
     #     # self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
 
     #     print("Push Value: ", self.push_value)
-    #     print("Wrench Value: ", self.wrench_value)
+    #     print("Angular Push Value: ", self.angular_push_value)
     #     print("Vertical Push Value: ", self.vert_value)
     #     print("Mass Max Value: ", self.mass_max_value)
     #     print("COM Delta X Value: ", self.com_delta_x_value)
@@ -486,7 +492,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
         print("Mass/COM Progress: ", self.domain_rand_mass_com_progress)
         print("Disturbance Progress: ", self.domain_rand_disturbance_progress)
         print("Push Value: ", self.push_value)
-        print("Wrench Value: ", self.wrench_value)
+        print("Angular Push Value: ", self.angular_push_value)
         print("Vertical Push Value: ", self.vert_value)
         print("Mass Max Value: ", self.mass_max_value)
         print("COM Delta X Value: ", self.com_delta_x_value)
@@ -633,8 +639,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
         self.push_value = _interp(
             p_dist, self.push_bounds[0], self.push_diff
         )
-        self.wrench_value = _interp(
-            p_dist, self.wrench_bounds[0], self.wrench_diff
+        self.angular_push_value = _interp(
+            p_dist, self.angular_push_bounds[0], self.angular_push_diff
         )
         self.vert_value = _interp(
             p_dist, self.vert_bounds[0], self.vert_diff
@@ -713,10 +719,12 @@ class GenesisSimulator_PACT_Pos(Simulator):
         self.vert_diff = self.vert_bounds[1] - self.vert_bounds[0]
         self.vert_value = self.vert_bounds[0]
         
-        self.wrench_bounds = [self._cfg.domain_rand.min_push_torque,
-                              self._cfg.domain_rand.max_push_torque]
-        self.wrench_diff = self.wrench_bounds[1] - self.wrench_bounds[0]
-        self.wrench_value = self.wrench_bounds[0]
+        self.angular_push_bounds = [self._cfg.domain_rand.min_push_torque,
+                                    self._cfg.domain_rand.max_push_torque]
+        self.angular_push_diff = (
+            self.angular_push_bounds[1] - self.angular_push_bounds[0]
+        )
+        self.angular_push_value = self.angular_push_bounds[0]
 
         self.max_mass_bounds = [self._cfg.domain_rand.min_added_mass_max,
                                 self._cfg.domain_rand.max_added_mass_max]

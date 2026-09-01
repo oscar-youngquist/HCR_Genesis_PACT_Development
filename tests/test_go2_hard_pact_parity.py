@@ -17,6 +17,7 @@ import torch
 
 import legged_gym.envs  # noqa: F401 - populates the task registry
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
+from legged_gym.envs.go2.go2_hard_pact.transition import DISTURBANCE_CRITIC_DIM
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import (
     GO2HardPACTCfg,
     GO2HardPACTCfgPPO,
@@ -130,7 +131,7 @@ def _synthetic_domain_sim(sim_cls, cfg):
     sim.com_delta_y_bounds, sim.com_delta_y_diff = [0.02, 0.12], 0.10
     sim.com_delta_z_bounds, sim.com_delta_z_diff = [0.03, 0.13], 0.10
     sim.push_bounds, sim.push_diff = [0.1, 1.1], 1.0
-    sim.wrench_bounds, sim.wrench_diff = [0.2, 1.2], 1.0
+    sim.angular_push_bounds, sim.angular_push_diff = [0.2, 1.2], 1.0
     sim.vert_bounds, sim.vert_diff = [0.3, 1.3], 1.0
     sim.joint_stiffness_bounds_start = torch.tensor([0.0, 0.01])
     sim.joint_stiffness_range = torch.tensor([0.1, 0.1])
@@ -173,7 +174,19 @@ class TestHardPACTAliases(unittest.TestCase):
                 self.assertFalse(grf_cfg["use_ema_grfs_buf"])
                 alias_env_dict.pop("deployment_physics")
                 alias_env_dict["env"]["num_explicit_recon_obs"] = legacy_env_dict["env"]["num_explicit_recon_obs"]
+                alias_env_dict["env"]["num_privileged_obs"] = legacy_env_dict["env"]["num_privileged_obs"]
                 alias_env_dict["normalization"]["obs_scales"].pop("base_wrench")
+                persistent_fields = {
+                    key for key in alias_env_dict["domain_rand"]
+                    if key.startswith("persistent_")
+                }
+                self.assertTrue(persistent_fields)
+                for field in persistent_fields:
+                    alias_env_dict["domain_rand"].pop(field)
+                self.assertEqual(
+                    alias_env_dict["domain_rand"]["push_robots"],
+                    legacy_env_dict["domain_rand"]["push_robots"],
+                )
                 self.assertEqual(alias_env_dict, legacy_env_dict)
 
                 alias_train_dict = class_to_dict(alias_train_cls())
@@ -199,12 +212,18 @@ class TestHardPACTAliases(unittest.TestCase):
             with self.subTest(name=name):
                 legacy, alias = legacy_cfg_cls(), alias_cfg_cls()
                 self.assertEqual(alias.env.num_observations, legacy.env.num_observations)
-                self.assertEqual(alias.env.num_privileged_obs, legacy.env.num_privileged_obs)
+                self.assertEqual(
+                    alias.env.num_privileged_obs,
+                    legacy.env.num_privileged_obs + DISTURBANCE_CRITIC_DIM,
+                )
                 self.assertEqual(alias.env.num_priv_stack, legacy.env.num_priv_stack)
                 self.assertEqual(alias.env.num_obs_hist, legacy.env.num_obs_hist)
                 self.assertEqual(alias.env.num_actions, legacy.env.num_actions)
-                self.assertEqual(alias.env.num_privileged_obs * alias.env.num_priv_stack,
-                                 legacy.env.num_privileged_obs * legacy.env.num_priv_stack)
+                self.assertEqual(
+                    alias.env.num_privileged_obs * alias.env.num_priv_stack,
+                    legacy.env.num_privileged_obs * legacy.env.num_priv_stack
+                    + DISTURBANCE_CRITIC_DIM * alias.env.num_priv_stack,
+                )
                 multiplier = 2 if name == "go2_hard_pact" else 1
                 self.assertEqual(multiplier * alias.env.num_actions, expected_action_dim)
 
@@ -345,7 +364,7 @@ class TestHardPACTAliases(unittest.TestCase):
                     "domain_rand_phase", "domain_rand_joint_dynamics_progress",
                     "domain_rand_mass_com_progress", "domain_rand_disturbance_progress",
                     "domain_rand_reward_ema", "domain_rand_best_reward_ema",
-                    "mass_max_value", "push_value", "wrench_value", "vert_value",
+                    "mass_max_value", "push_value", "angular_push_value", "vert_value",
                 ):
                     self.assertEqual(getattr(alias_sim, attr), getattr(legacy_sim, attr))
                 torch.testing.assert_close(alias_sim.joint_stiffness_bound_current,

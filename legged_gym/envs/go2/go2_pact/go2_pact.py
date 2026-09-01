@@ -409,8 +409,8 @@ class Go2PACT(BaseTask):
             heights = torch.clip(self.simulator.base_pos[:, 2].unsqueeze(1) - 0.5 \
                                  - self.simulator.measured_heights, -1, 1.) * self.obs_scales.height_measurements # 81
 
-            if self.add_noise:
-                heights *= self.height_noise_vec
+            # if self.add_noise:
+            #     heights *= self.height_noise_vec
 
             critic_obs = torch.cat((critic_obs, heights), dim=-1) # 207
 

@@ -4,6 +4,7 @@ from legged_gym.envs.go2.go2_pact.go2_pact_config import (
     GO2PACTCfg,
     GO2PACTCfgPPO,
 )
+from .transition import DISTURBANCE_CRITIC_DIM
 
 
 class GO2HardPACTCfg(GO2PACTCfg):
@@ -11,6 +12,7 @@ class GO2HardPACTCfg(GO2PACTCfg):
 
     class env(GO2PACTCfg.env):
         num_explicit_recon_obs = 11
+        num_privileged_obs = GO2PACTCfg.env.num_privileged_obs + DISTURBANCE_CRITIC_DIM
 
     class sim(GO2PACTCfg.sim):
         class grf:
@@ -26,13 +28,28 @@ class GO2HardPACTCfg(GO2PACTCfg):
         class obs_scales(GO2PACTCfg.normalization.obs_scales):
             base_wrench = 0.01
 
+    class domain_rand(GO2PACTCfg.domain_rand):
+        # Instantaneous pushes use the legacy PACT curriculum and callback.
+        # Persistent external wrenches share its disturbance progress scalar.
+        persistent_disturbance = True
+        persistent_force_probability = 0.30
+        persistent_torque_probability = 0.30
+        persistent_force_interval_range_s = [5.0, 15.0]
+        persistent_torque_interval_range_s = [5.0, 15.0]
+        persistent_force_duration_range_s = [2.0, 6.0]
+        persistent_torque_duration_range_s = [2.0, 6.0]
+        persistent_ramp_fraction = 0.25
+        persistent_force_min_n = 0.0
+        persistent_force_max_n = 60.0
+        persistent_torque_min_nm = 0.0
+        persistent_torque_max_nm = 12.0
+
     class deployment_physics:
         sustained_force_bounds_n = [-60.0, 60.0]
         sustained_torque_bounds_nm = [-12.0, 12.0]
         # Stable planned envelope used for the entire run. It intentionally
         # does not follow the simulator's instantaneous curriculum progress.
         planned_added_mass_range_kg = [-1.0, 4.0]
-
 
 class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
     """Legacy PACT architecture with the reduced explicit estimator."""
