@@ -6,6 +6,9 @@ from dataclasses import dataclass
 
 import torch
 
+from legged_gym.utils.math_utils import quat_rotate_inverse
+from rsl_rl.modules.hard_pact_physics import compose_explicit_estimator_target
+
 
 @dataclass(frozen=True)
 class GRFProcessingConfig:
@@ -104,6 +107,28 @@ class IntervalGRFProcessor:
         }
 
 
+def world_to_yaw_local(vector_world, base_quat_xyzw):
+    """Rotate world-frame vectors into the roll/pitch-free base-yaw frame."""
+    x, y, z, w = base_quat_xyzw.unbind(-1)
+    yaw = torch.atan2(
+        2.0 * (w * z + x * y),
+        1.0 - 2.0 * (y.square() + z.square()),
+    )
+    half_yaw = 0.5 * yaw
+    yaw_quat = torch.stack(
+        (
+            torch.zeros_like(half_yaw),
+            torch.zeros_like(half_yaw),
+            torch.sin(half_yaw),
+            torch.cos(half_yaw),
+        ),
+        dim=-1,
+    )
+    if vector_world.ndim == yaw_quat.ndim + 1:
+        yaw_quat = yaw_quat.unsqueeze(-2).expand(*vector_world.shape[:-1], 4)
+    return quat_rotate_inverse(yaw_quat, vector_world)
+
+
 class HardPACTGRFMixin:
     """Add interval GRF targets without altering legacy task tensors or logic."""
 
@@ -143,14 +168,28 @@ class HardPACTGRFMixin:
         # this method, making this the precise opt-in boundary for legacy
         # critic/decoder observation construction.
         self._update_legacy_grfs_buf_input()
-        return super().compute_observations()
+        result = super().compute_observations()
+        clearance = (
+            self.simulator.feet_pos[:, :, 2]
+            - torch.mean(self.simulator.height_around_feet, dim=-1)
+            - self.cfg.rewards.foot_height_offset
+        )
+        self.explicit_labels_buf = compose_explicit_estimator_target(
+            self.simulator.base_lin_vel * self.obs_scales.lin_vel,
+            self.grf_processor.contacts.float(),
+            clearance,
+        )
+        return result
 
     def step(self, actions):
         """Run the legacy lifecycle with a control-interval GRF target."""
         actions = self._pre_sim_step(actions)
+        pre_step_base_quat = self.simulator.base_quat.clone()
         self.grf_processor.begin_interval()
         self.simulator.step(actions)
-        interval_grf = self.grf_processor.end_interval().clone().flatten(1)
+        interval_grf = world_to_yaw_local(
+            self.grf_processor.end_interval(), pre_step_base_quat
+        ).clone().flatten(1)
         self.post_physics_step()
 
         clip_obs = self.cfg.normalization.clip_observations

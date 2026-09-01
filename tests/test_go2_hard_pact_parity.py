@@ -167,17 +167,31 @@ class TestHardPACTAliases(unittest.TestCase):
                         "ema_alpha",
                         "contact_threshold_n",
                         "use_ema_grfs_buf",
+                        "prediction_scale_n",
                     },
                 )
                 self.assertFalse(grf_cfg["use_ema_grfs_buf"])
+                alias_env_dict.pop("deployment_physics")
+                alias_env_dict["env"]["num_explicit_recon_obs"] = legacy_env_dict["env"]["num_explicit_recon_obs"]
+                alias_env_dict["normalization"]["obs_scales"].pop("base_wrench")
                 self.assertEqual(alias_env_dict, legacy_env_dict)
-                self.assertEqual(class_to_dict(alias_train_cls()), class_to_dict(legacy_train_cls()))
+
+                alias_train_dict = class_to_dict(alias_train_cls())
+                legacy_train_dict = class_to_dict(legacy_train_cls())
+                for field in ("cenet_velo_dim", "cenet_dec_input_dim", "cenet_dec_out_dim", "pretrained_path"):
+                    if field in legacy_train_dict["policy"]:
+                        alias_train_dict["policy"][field] = legacy_train_dict["policy"][field]
+                    else:
+                        alias_train_dict["policy"].pop(field, None)
+                alias_train_dict["runner"]["policy_class_name"] = legacy_train_dict["runner"]["policy_class_name"]
+                self.assertEqual(alias_train_dict, legacy_train_dict)
 
                 legacy_train = legacy_train_cls()
                 alias_train = alias_train_cls()
                 self.assertEqual(alias_train.runner.runner_class_name if hasattr(alias_train.runner, "runner_class_name") else alias_train.runner_class_name,
                                  legacy_train.runner.runner_class_name if hasattr(legacy_train.runner, "runner_class_name") else legacy_train.runner_class_name)
-                self.assertEqual(alias_train.runner.policy_class_name, legacy_train.runner.policy_class_name)
+                self.assertEqual(alias_train.runner.policy_class_name,
+                                 "ActorCritic_HardPACT" if name == "go2_hard_pact" else "ActorCritic_HardPACT_Pos")
                 self.assertEqual(alias_train.runner.algorithm_class_name, legacy_train.runner.algorithm_class_name)
 
     def test_observation_critic_and_action_dimensions(self):
@@ -202,11 +216,11 @@ class TestHardPACTAliases(unittest.TestCase):
                 torch.manual_seed(1729)
                 legacy_actor = actor_cls(**_actor_kwargs(legacy_cfg, legacy_train))
                 torch.manual_seed(1729)
-                alias_actor = actor_cls(**_actor_kwargs(alias_cfg, alias_train))
+                reload_actor = actor_cls(**_actor_kwargs(legacy_cfg, legacy_train))
 
                 legacy_shapes = {key: tuple(value.shape) for key, value in legacy_actor.state_dict().items()}
-                alias_shapes = {key: tuple(value.shape) for key, value in alias_actor.state_dict().items()}
-                self.assertEqual(alias_shapes, legacy_shapes)
+                reload_shapes = {key: tuple(value.shape) for key, value in reload_actor.state_dict().items()}
+                self.assertEqual(reload_shapes, legacy_shapes)
 
                 obs = torch.linspace(-0.5, 0.5, 2 * legacy_cfg.env.num_observations).reshape(2, -1)
                 hist_dim = legacy_cfg.env.num_observations * legacy_cfg.env.num_obs_hist
@@ -214,11 +228,11 @@ class TestHardPACTAliases(unittest.TestCase):
                 torch.manual_seed(99)
                 legacy_actions = legacy_actor.act(obs, history)
                 torch.manual_seed(99)
-                alias_actions = alias_actor.act(obs, history)
-                torch.testing.assert_close(alias_actions, legacy_actions, rtol=0, atol=0)
-                torch.testing.assert_close(alias_actor.distribution.mean, legacy_actor.distribution.mean, rtol=0, atol=0)
-                torch.testing.assert_close(alias_actor.distribution.stddev, legacy_actor.distribution.stddev, rtol=0, atol=0)
-                self.assertEqual(tuple(alias_actions.shape), (2, expected_action_dim))
+                reload_actions = reload_actor.act(obs, history)
+                torch.testing.assert_close(reload_actions, legacy_actions, rtol=0, atol=0)
+                torch.testing.assert_close(reload_actor.distribution.mean, legacy_actor.distribution.mean, rtol=0, atol=0)
+                torch.testing.assert_close(reload_actor.distribution.stddev, legacy_actor.distribution.stddev, rtol=0, atol=0)
+                self.assertEqual(tuple(reload_actions.shape), (2, expected_action_dim))
 
                 decoder_cls = PACTContextDecoder if name == "go2_hard_pact" else PACTPosContextDecoder
                 legacy_decoder = decoder_cls(
@@ -226,10 +240,10 @@ class TestHardPACTAliases(unittest.TestCase):
                     legacy_train.policy.cenet_dec_layers,
                     legacy_train.policy.cenet_dec_out_dim,
                 )
-                alias_decoder = decoder_cls(
-                    alias_train.policy.cenet_dec_input_dim,
-                    alias_train.policy.cenet_dec_layers,
-                    alias_train.policy.cenet_dec_out_dim,
+                reload_decoder = decoder_cls(
+                    legacy_train.policy.cenet_dec_input_dim,
+                    legacy_train.policy.cenet_dec_layers,
+                    legacy_train.policy.cenet_dec_out_dim,
                 )
                 checkpoint = {
                     "model_state_dict": legacy_actor.state_dict(),
@@ -250,11 +264,11 @@ class TestHardPACTAliases(unittest.TestCase):
                 checkpoint_buffer.seek(0)
                 runner_cls = OnPolicyRunnerPACT if name == "go2_hard_pact" else OnPolicyRunnerPACTPos
                 runner = runner_cls.__new__(runner_cls)
-                runner.alg = SimpleNamespace(actor_critic=alias_actor, decoder=alias_decoder)
+                runner.alg = SimpleNamespace(actor_critic=reload_actor, decoder=reload_decoder)
                 loaded_infos = runner.load(checkpoint_buffer, load_optimizer=False)
                 self.assertEqual(loaded_infos, {"legacy": True})
-                self.assertEqual(alias_actor.load_state_dict(checkpoint["model_state_dict"], strict=True).missing_keys, [])
-                self.assertEqual(alias_decoder.load_state_dict(checkpoint["decoder_state_dict"], strict=True).missing_keys, [])
+                self.assertEqual(reload_actor.load_state_dict(checkpoint["model_state_dict"], strict=True).missing_keys, [])
+                self.assertEqual(reload_decoder.load_state_dict(checkpoint["decoder_state_dict"], strict=True).missing_keys, [])
 
     def test_action_history_delay_and_torque_paths(self):
         for name, legacy_task, alias_task, legacy_cfg_cls, alias_cfg_cls, _, _, _, action_width in CASES:

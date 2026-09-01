@@ -17,6 +17,7 @@ from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCf
 from legged_gym.envs.go2.go2_hard_pact.grf import (
     GRFProcessingConfig,
     IntervalGRFProcessor,
+    world_to_yaw_local,
 )
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
 from legged_gym.envs.go2.go2_pact.go2_pact_config import GO2PACTCfg
@@ -89,6 +90,7 @@ def _synthetic_simulator(samples, install_callback=True, sim_cls=GenesisSimulato
     sim._base_world_lin_vel = torch.zeros(1, 3)
     sim._last_base_world_ang_vel = torch.zeros(1, 3)
     sim._base_world_ang_vel = torch.zeros(1, 3)
+    sim._base_quat = torch.tensor([[0.0, 0.0, 0.0, 1.0]])
     sim._compute_torques = lambda actions: actions[:, :12]
     sim.first_loop = True
     processor = _processor(num_envs=1, num_feet=4)
@@ -100,6 +102,15 @@ def _synthetic_simulator(samples, install_callback=True, sim_cls=GenesisSimulato
 
 
 class GRFProcessorTests(unittest.TestCase):
+    def test_world_force_is_rotated_into_pre_step_yaw_frame(self):
+        half = torch.tensor(torch.pi / 4.0)
+        quaternion = torch.tensor([[0.0, 0.0, half.sin(), half.cos()]])
+        world = torch.tensor([[[1.0, 0.0, 2.0]]])
+        expected = torch.tensor([[[0.0, -1.0, 2.0]]])
+        torch.testing.assert_close(
+            world_to_yaw_local(world, quaternion), expected, atol=1.0e-6, rtol=0.0
+        )
+
     def test_whole_vector_deadband_clipping_ema_and_contacts(self):
         processor = _processor()
         raw = torch.tensor([[[9.0, -8.0, 2.0], [20.0, -20.0, 8.0]]])

@@ -39,9 +39,16 @@ from torch.utils.tensorboard import SummaryWriter
 import torch
 
 from rsl_rl.algorithms import PPO_PACT_Pos
-from rsl_rl.modules import ActorCritic_PACT_Pos, ContextDecoder
+from rsl_rl.modules import ActorCritic_PACT_Pos, ActorCritic_HardPACT_Pos, ContextDecoder
 from rsl_rl.env import VecEnv
 from rsl_rl.utils import pretty_print_module
+from legged_gym.envs.go2.go2_hard_pact.deployment import (
+    RECONSTRUCTION_DIM,
+    RECONSTRUCTION_INDICES,
+    build_deployment_contract,
+    calculate_physics_head_gains,
+    write_deployment_contract_once,
+)
 
 
 # ---------------- 4090 / Ada Lovelace performance knobs ----------------
@@ -75,6 +82,18 @@ class OnPolicyRunnerPACTPos:
             num_critic_obs *= self.env.num_crit_obs_stack
 
         actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
+        gain_spec = None
+        actor_extra_kwargs = {}
+        reconstruction_indices = None
+        reconstruction_dim = self.env.num_privileged_obs
+        if actor_critic_class is ActorCritic_HardPACT_Pos:
+            gain_spec = calculate_physics_head_gains(self.env.cfg)
+            actor_extra_kwargs = {
+                "grf_scale": gain_spec.model_grf,
+                "wrench_scale": gain_spec.model_wrench,
+            }
+            reconstruction_indices = RECONSTRUCTION_INDICES
+            reconstruction_dim = RECONSTRUCTION_DIM
         
         cenet_input_dim = self.env.num_obs * self.env.num_obs_hist
 
@@ -88,7 +107,8 @@ class OnPolicyRunnerPACTPos:
                                                                 self.policy_cfg["cenet_velo_dim"],
                                                                 self.policy_cfg["cenet_enc_layers"],
                                                                 self.policy_cfg["activation"],
-                                                                self.policy_cfg["init_noise_std"]).to(self.device)
+                                                                self.policy_cfg["init_noise_std"],
+                                                                **actor_extra_kwargs).to(self.device)
                         
         decoder = ContextDecoder(self.policy_cfg["cenet_dec_input_dim"],
                                  self.policy_cfg["cenet_dec_layers"],
@@ -110,6 +130,7 @@ class OnPolicyRunnerPACTPos:
         self.alg: PPO_PACT_Pos = alg_class(actor_critic, 
                                            decoder, 
                                            self.env.num_privileged_obs,
+                                           reconstruction_indices=reconstruction_indices,
                                            device=self.device, 
                                            **self.alg_cfg)
         
@@ -118,10 +139,10 @@ class OnPolicyRunnerPACTPos:
 
         # init storage and model
         self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], \
-                              [self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
+                              [reconstruction_dim], [self.env.num_obs_hist*self.env.num_obs], \
                               [self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]])
 
-        if "pretrained_path" in self.policy_cfg.keys():
+        if self.policy_cfg.get("pretrained_path"):
             self._load_pretrained_model()
 
         # Log
@@ -130,6 +151,12 @@ class OnPolicyRunnerPACTPos:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+
+        if gain_spec is not None:
+            self.deployment_contract = build_deployment_contract(
+                self.env.cfg, self.alg.actor_critic, gain_spec
+            )
+            write_deployment_contract_once(self.log_dir, self.deployment_contract)
 
         # self.env.create_async_pino_workers()
 

@@ -1,0 +1,125 @@
+"""Deployment physics heads and shared force-scaling helpers for HardPACT."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+@dataclass
+class PhysicsHeadOutput:
+    grf_yaw_scaled: torch.Tensor
+    base_wrench_yaw_scaled: torch.Tensor
+
+
+def scale_head_output(normalized_output, model_gain):
+    """Map a normalized head output into model/observation-scaled units."""
+    return normalized_output * torch.as_tensor(
+        model_gain, device=normalized_output.device, dtype=normalized_output.dtype
+    )
+
+
+def scale_physical_target(physical_target, observation_scale):
+    """Map a physical N/Nm target into model-space observation units."""
+    return physical_target * float(observation_scale)
+
+
+def model_output_to_physical(model_output, observation_scale):
+    """Invert observation scaling, returning physical N/Nm values."""
+    return model_output / float(observation_scale)
+
+
+def normalized_huber_loss(prediction, target, model_gain, mask=None, delta=1.0):
+    """Huber loss normalized componentwise by the frozen head gain."""
+    gain = torch.as_tensor(
+        model_gain, device=prediction.device, dtype=prediction.dtype
+    ).clamp_min(1.0e-8)
+    error = (prediction - target) / gain
+    loss = F.huber_loss(
+        error, torch.zeros_like(error), delta=delta, reduction="none"
+    ).mean(dim=-1)
+    if mask is None:
+        return loss.mean()
+    mask = mask.reshape(-1).to(loss.dtype)
+    return (loss * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+def physical_unit_mae(prediction, target, observation_scale, mask=None):
+    """Mean absolute error after converting model outputs to N/Nm."""
+    error = model_output_to_physical(
+        (prediction - target).abs(), observation_scale
+    ).mean(dim=-1)
+    if mask is None:
+        return error.mean()
+    mask = mask.reshape(-1).to(error.dtype)
+    return (error * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+def compose_explicit_estimator_target(
+    scaled_body_linear_velocity, contact_probabilities, clipped_foot_clearances
+):
+    """Compose the ordered 11-D HardPACT explicit-estimator target."""
+    if scaled_body_linear_velocity.shape[-1] != 3:
+        raise ValueError("body linear velocity must be 3-D")
+    if contact_probabilities.shape[-1] != 4:
+        raise ValueError("contact probabilities must be 4-D")
+    if clipped_foot_clearances.shape[-1] != 4:
+        raise ValueError("foot clearances must be 4-D")
+    return torch.cat(
+        (
+            scaled_body_linear_velocity,
+            contact_probabilities.clamp(0.0, 1.0),
+            clipped_foot_clearances.clamp(-1.0, 1.0),
+        ),
+        dim=-1,
+    )
+
+
+def transform_explicit_estimator_output(raw):
+    return compose_explicit_estimator_target(
+        raw[:, :3], raw[:, 3:7].sigmoid(), raw[:, 7:11]
+    )
+
+
+def _physics_head(input_dim, output_dim):
+    return nn.Sequential(
+        nn.Linear(input_dim, 128),
+        nn.ELU(),
+        nn.Linear(128, 128),
+        nn.ELU(),
+        nn.Linear(128, output_dim),
+    )
+
+
+class DeploymentPhysicsHeads(nn.Module):
+    """Yaw-local interval-GRF and sustained-base-wrench predictors."""
+
+    def __init__(self, grf_scale, wrench_scale, latent_dim=16, explicit_dim=11):
+        super().__init__()
+        self.grf_head = _physics_head(latent_dim + explicit_dim + 12, 12)
+        self.wrench_head = _physics_head(latent_dim + explicit_dim, 6)
+        self.register_buffer("grf_scale", torch.as_tensor(grf_scale, dtype=torch.float32))
+        self.register_buffer(
+            "wrench_scale", torch.as_tensor(wrench_scale, dtype=torch.float32)
+        )
+        if self.grf_scale.shape != (12,):
+            raise ValueError("grf_scale must contain 12 values")
+        if self.wrench_scale.shape != (6,):
+            raise ValueError("wrench_scale must contain 6 values")
+
+    def forward(self, latent, explicit, nominal_torque):
+        if latent.shape[-1] != 16 or explicit.shape[-1] != 11:
+            raise ValueError("HardPACT physics heads require z=16 and explicit=11")
+        if nominal_torque.shape[-1] != 12:
+            raise ValueError("nominal torque must be 12-D")
+        stopped_explicit = explicit.detach()
+        grf = self.grf_head(
+            torch.cat((latent, stopped_explicit, nominal_torque), dim=-1)
+        )
+        wrench = self.wrench_head(torch.cat((latent, stopped_explicit), dim=-1))
+        return PhysicsHeadOutput(
+            scale_head_output(grf, self.grf_scale),
+            scale_head_output(wrench, self.wrench_scale),
+        )

@@ -85,11 +85,13 @@ class PPO_PACT:
                  adaptive_ent_ang_threshold=0.35,
                  adaptive_ent_ter_threshold=5.0,
                  adaptive_ent_softmax_temp=2.0,
+                 reconstruction_indices=None,
                  ):
         
         self.device = device
 
         self.num_priv_obs = num_priv_obs
+        self.reconstruction_indices = reconstruction_indices
 
         self.desired_kl = desired_kl
         self.schedule = schedule
@@ -236,7 +238,10 @@ class PPO_PACT:
         self.transition.grf_targets = grf_labels
 
         # This is now the stack of critic observations, we want to prune off the last one
-        self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
+        reconstruction_target = obs_labels[:, -self.num_priv_obs:]
+        if self.reconstruction_indices is not None:
+            reconstruction_target = reconstruction_target[:, self.reconstruction_indices]
+        self.transition.obs_targets = reconstruction_target
         # self.transition.obs_targets = obs_labels
 
         self.transition.explicit_labels = explicit_labels
