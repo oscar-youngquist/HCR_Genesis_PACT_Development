@@ -385,6 +385,17 @@ class OnPolicyRunnerPACT:
         # Learning is done, shutdown the async. pinocchio workers
         self.env.shutdown_asynic_pino_workers()
 
+    def _log_qp_metrics(self, iteration):
+        """Transfer only aggregated QP scalars to TensorBoard."""
+        for name, value in getattr(self.alg, "last_qp_metrics", {}).items():
+            if not name.startswith(("qp/minimal/", "qp/physical/", "qp/full/")):
+                continue
+            if not isinstance(value, torch.Tensor) or value.numel() != 1:
+                raise ValueError(
+                    f"QP runner metric {name!r} must be one scalar tensor"
+                )
+            self.writer.add_scalar(name, value.item(), iteration)
+
     def log(self, locs, width=80, pad=35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
         self.tot_time += locs['collection_time'] + locs['learn_time']
@@ -429,6 +440,10 @@ class OnPolicyRunnerPACT:
             self.alg, "last_physics_gradient_metrics", {}
         ).items():
             self.writer.add_scalar(name, value.item(), locs['it'])
+        # HardPACT QP exposes only already-aggregated device scalars. The
+        # runner never receives per-environment residuals or solver matrices;
+        # this is the sole device-to-host transfer for QP diagnostics.
+        self._log_qp_metrics(locs['it'])
         for name, value in getattr(self.alg, "last_auxiliary_metrics", {}).items():
             self.writer.add_scalar(f"Loss/auxiliary_{name}", value.item(), locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        

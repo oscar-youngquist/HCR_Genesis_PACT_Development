@@ -351,7 +351,7 @@ class Go2HardPACT(Go2PACT):
         quat = self._current_base_quat_xyzw()
         mass_com_wrench = added_mass_gravity_wrench_world(
             self._realized_added_mass,
-            self.cfg.sim.gravity,
+            getattr(self.cfg.sim, "gravity", (0.0, 0.0, -9.81)),
             self._realized_com_shift_body,
             quat,
         )
@@ -510,6 +510,7 @@ class Go2HardPACT(Go2PACT):
             # where x=[qdd,f,tau_safe,s]. Every argument below maps directly
             # to a documented physical block in hard_pact_qp.py.
             result = self._hard_pact_rollout_qp.solve(
+                differentiable=False,
                 # M multiplies generalized acceleration in A[:,QDD].
                 mass_matrix=context.mass_matrix,
                 # b_dyn moves to the equality RHS as J_b^T*W-b_dyn.
@@ -549,11 +550,20 @@ class Go2HardPACT(Go2PACT):
             # Flatten [foot,XYZ] slack to its fixed 12-D transition ordering.
             slack = result.contact_slack.reshape(self.num_envs, -1)
             # Pack certified infinity-norm residuals as [eq,ineq,dual,comp].
+            # Dual/complementarity values exist only on periodic full audits;
+            # zero is the neutral interval-aggregation placeholder otherwise.
+            optional_zero = torch.zeros_like(
+                result.diagnostics["selected/equality_max"]
+            )
             residual = torch.stack((
                 result.diagnostics["selected/equality_max"],
                 result.diagnostics["selected/inequality_max"],
-                result.diagnostics["selected/stationarity_max"],
-                result.diagnostics["selected/complementarity_max"],
+                result.diagnostics.get(
+                    "selected/stationarity_max", optional_zero
+                ),
+                result.diagnostics.get(
+                    "selected/complementarity_max", optional_zero
+                ),
             ), dim=-1).nan_to_num()
             # Accumulate sum/absolute peak of executed safe torque.
             self._qp_interval_safe_sum.add_(result.tau_safe)
@@ -955,6 +965,13 @@ class Go2HardPACT(Go2PACT):
             previous_torque_buffer.detach().clone()
             if previous_torque_buffer is not None else None
         )
+        if previous_executed_torque is not None:
+            # A reset starts a new actuator-rate trajectory. Simulator torque
+            # buffers can still contain the terminal command until the first
+            # post-reset physics callback, so initialize those rows at zero.
+            episode_length = getattr(self, "episode_length_buf", None)
+            if episode_length is not None:
+                previous_executed_torque[episode_length == 0] = 0.0
         delayed_action = self._legacy_task_class._pre_sim_step(self, actions)
         # Lightweight parity-test fixtures intentionally omit HardPACT-only
         # buffers; in that case the inherited action behavior is still exact.

@@ -29,6 +29,7 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 import os
+import time
 
 import torch
 import torch.nn as nn
@@ -267,6 +268,7 @@ class PPO_HardPACT:
         self.qp_config = HardPACTQPConfig(**(hard_pact_qp or {}))
         self.hard_pact_qp = None
         self.last_qp_metrics = {}
+        self._qp_full_audit_inputs = None
         self.grf_observation_scale = float(grf_observation_scale)
         self.base_wrench_observation_scale = float(base_wrench_observation_scale)
         self.action_clip = float(action_clip)
@@ -326,12 +328,23 @@ class PPO_HardPACT:
                 "HardPACT position limits must resolve to [12,2], got "
                 f"{tuple(position_limits.shape)}"
             )
+        velocity_limits = torch.as_tensor(velocity_limits).reshape(-1)
+        if velocity_limits.numel() == 0:
+            # Genesis has no velocity-limit query and legacy PACT intentionally
+            # leaves its asset list empty. Keep the alias configuration exact
+            # and bind the repository's calibrated Go2 URDF limits only to the
+            # HardPACT QP backend object.
+            velocity_limits = position_limits.new_tensor(
+                [30.1, 30.1, 15.7] * 4
+            )
+        if velocity_limits.numel() < 12:
+            raise ValueError("HardPACT requires 12 joint velocity limits")
         self.hard_pact_qp = HardPACTDifferentiableQP(
             self.qp_config,
             torch.as_tensor(torque_limits).reshape(-1)[:12],
             position_limits[:12, 0],
             position_limits[:12, 1],
-            torch.as_tensor(velocity_limits).reshape(-1)[:12],
+            velocity_limits[:12],
         )
         
         
@@ -578,6 +591,23 @@ class PPO_HardPACT:
                 ppo_losses = [ppo_loss, pinn_loss]
             else:
                 ppo_losses = [ppo_loss]
+            # Full diagnostics measure the real PCGrad backward containing
+            # qpth's implicit KKT derivative. qpth does not expose a timer for
+            # its backward alone, so this metric is named accordingly. No
+            # synchronization or memory reset occurs at other levels.
+            qp_audit_inputs = self._qp_full_audit_inputs
+            qp_backward_start = None
+            qp_backward_memory_start = None
+            if qp_audit_inputs is not None:
+                audit_device = next(iter(qp_audit_inputs.values())).device
+                if audit_device.type == "cuda":
+                    torch.cuda.synchronize(audit_device)
+                    torch.cuda.reset_peak_memory_stats(audit_device)
+                    qp_backward_memory_start = torch.cuda.memory_allocated(
+                        audit_device
+                    )
+                qp_backward_start = time.perf_counter()
+
             # PCGrad treats reward learning as the primary objective and
             # removes the reward-parallel component of the BARD gradient.
             if self.pinn_weight > 0 and self.pinn_weight_final > 0 and pinn_loss is not None:    # just being extra cautious
@@ -586,6 +616,42 @@ class PPO_HardPACT:
                 self.act_optimizer.pc_backward_ppgrad(ppo_losses)
             else:
                 self.act_optimizer.pc_backward(ppo_losses)
+            if qp_audit_inputs is not None:
+                audit_device = next(iter(qp_audit_inputs.values())).device
+                if audit_device.type == "cuda":
+                    torch.cuda.synchronize(audit_device)
+                self.last_qp_metrics["qp/full/pcgrad_backward_time_ms"] = (
+                    torch.tensor(
+                        (time.perf_counter() - qp_backward_start) * 1000.0,
+                        device=audit_device, dtype=torch.float32,
+                    )
+                )
+                if audit_device.type == "cuda":
+                    peak = (
+                        torch.cuda.max_memory_allocated(audit_device)
+                        - qp_backward_memory_start
+                    ) / (1024.0 ** 2)
+                    self.last_qp_metrics[
+                        "qp/full/pcgrad_backward_peak_cuda_mib"
+                    ] = torch.tensor(
+                        peak, device=audit_device, dtype=torch.float32
+                    )
+                for name, value in qp_audit_inputs.items():
+                    gradient = value.grad
+                    if gradient is None:
+                        norm = value.new_zeros((), dtype=torch.float32)
+                        finite_fraction = value.new_ones((), dtype=torch.float32)
+                    else:
+                        finite = torch.isfinite(gradient)
+                        norm = torch.linalg.vector_norm(
+                            torch.where(finite, gradient, torch.zeros_like(gradient))
+                        ).detach().float()
+                        finite_fraction = finite.float().mean().detach()
+                    self.last_qp_metrics[f"qp/full/gradient_norm/{name}"] = norm
+                    self.last_qp_metrics[
+                        f"qp/full/gradient_finite_fraction/{name}"
+                    ] = finite_fraction
+                self._qp_full_audit_inputs = None
             if len(ppo_losses) == 2:
                 physics_gradient = self.act_optimizer.last_objective_grads[1]
                 finite = torch.isfinite(physics_gradient)
@@ -1143,7 +1209,9 @@ class PPO_HardPACT:
             #   x=[qdd_18,f_12,tau_safe_12,s_12].
             # Gradients enter through sampled_nominal, sample_grf_world, and
             # sample_applied; all state/mechanics/rate-center tensors detach.
+            sample_contact_probability = explicit[:, 3:7]
             qp_result = self.hard_pact_qp.solve(
+                differentiable=True,
                 # Equality coefficient M_K.
                 mass_matrix=sample_context.mass_matrix,
                 # Equality RHS contribution -b_K.
@@ -1160,10 +1228,9 @@ class PPO_HardPACT:
                 force_pred_world=sample_grf_world,
                 # Differentiable world [force,moment] equality input.
                 wrench_pred_world=sample_applied,
-                # Contact gates shape constraints but are not a physics-head
-                # supervision route into the explicit decoder.  This matches
-                # the deployment heads' established stop-gradient contract.
-                contact_probability=explicit[:, 3:7].detach(),
+                # c_eff keeps every row nondegenerate while retaining the
+                # differentiable contact-probability path into the estimator.
+                contact_probability=sample_contact_probability,
                 # Exact rollout tau_safe,K-1 reproduces the sampled rate box.
                 previous_torque=batch.get(
                     "sampled_qp_previous_torque",
@@ -1194,16 +1261,21 @@ class PPO_HardPACT:
             )
             # Log only the newly recomputed sampled solve, whose status can
             # differ from rollout after policy/head parameters update.
-            diagnostics = qp_result.diagnostics
-            self.last_qp_metrics = {
-                "projection_loss": qp_loss.detach(),
-                "full_fraction": (qp_result.stage == 0).float().mean(),
-                "relaxed_fraction": (qp_result.stage == 1).float().mean(),
-                "actuator_fallback_fraction": (qp_result.stage == 2).float().mean(),
-                "equality_residual_max": diagnostics["selected/equality_max"].nan_to_num().max(),
-                "inequality_violation_max": diagnostics["selected/inequality_max"].nan_to_num().max(),
-                "kkt_stationarity_max": diagnostics["selected/stationarity_max"].nan_to_num().max(),
-            }
+            self.last_qp_metrics = dict(qp_result.metrics or {})
+            self.last_qp_metrics["qp/minimal/projection_loss"] = qp_loss.detach()
+            audit_ran = self.last_qp_metrics.get("qp/full/audit_ran")
+            if audit_ran is not None and bool(audit_ran.detach().item()):
+                # Retain only four compact learned QP inputs, and only on a
+                # periodic full audit. This exposes actual autograd routing
+                # without retaining additional matrices during normal runs.
+                self._qp_full_audit_inputs = {
+                    "tau_nom": sampled_nominal,
+                    "grf": sample_grf_world,
+                    "wrench": sample_applied,
+                    "contact": sample_contact_probability,
+                }
+                for value in self._qp_full_audit_inputs.values():
+                    value.retain_grad()
         else:
             self.last_qp_metrics = {}
         # All three weighted physics terms enter the existing PCGrad objective;

@@ -10,28 +10,11 @@ from .transition import DISTURBANCE_CRITIC_DIM
 class GO2HardPACTCfg(GO2PACTCfg):
     """Legacy PACT configuration plus calibrated Go2 GRF conditioning."""
 
-    class asset(GO2PACTCfg.asset):
-        # Genesis cannot query joint velocity limits from the URDF.  Use the
-        # repository's calibrated Go2 limits (FR, FL, RR, RL; hip, thigh,
-        # calf) so the QP's hard one-step velocity constraints are physical.
-        dof_vel_limits = [
-            30.1, 30.1, 15.7,
-            30.1, 30.1, 15.7,
-            30.1, 30.1, 15.7,
-            30.1, 30.1, 15.7,
-        ]
-
     class env(GO2PACTCfg.env):
         num_explicit_recon_obs = 11
         num_privileged_obs = GO2PACTCfg.env.num_privileged_obs + DISTURBANCE_CRITIC_DIM
 
     class sim(GO2PACTCfg.sim):
-        # PACT's legacy ``sim`` class shadows the base config field even
-        # though Genesis still runs with standard Earth gravity.  HardPACT
-        # needs the physical vector explicitly for its label-only equivalent
-        # added-mass/CoM wrench and deployment contract.
-        gravity = [0.0, 0.0, -9.81]
-
         class grf:
             prediction_scale_n = [120.0, 120.0, 250.0]
             vertical_deadband_n = 3.0
@@ -110,29 +93,43 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
             "friction_coefficient": 0.6,
             "torque_rate_limit_nm_s": 1000.0,
             "contact_acceleration_limit_m_s2": 0.0,
-            "interior_margin": 1.0e-5,
+            "interior_margin": 1.0e-3,
+            "contact_probability_floor": 1.0e-2,
             "qdd_scale": 50.0,
             "force_scale_n": 250.0,
             "torque_scale_nm": 40.0,
             "slack_scale_m_s2": 50.0,
             "torque_tracking_weight": 20.0,
             "force_tracking_weight": 5.0,
-            "slack_weight": 2000.0,
+            "slack_weight": 200.0,
             "qdd_regularization": 1.0e-3,
             "force_regularization": 1.0e-4,
             "torque_regularization": 1.0e-4,
             "q_regularization": 1.0e-7,
-            "feasibility_tolerance": 2.0e-4,
+            "normalized_feasibility_tolerance_float32": 1.0e-3,
+            "normalized_feasibility_tolerance_float64": 1.0e-6,
             "kkt_tolerance": 1.0e-1,
             "active_tolerance": 1.0e-1,
-            "eps": 1.0e-12,
-            "max_iter": 20,
-            "not_improved_limit": 3,
+            "eps_float32": 1.0e-5,
+            "eps_float64": 1.0e-9,
+            "max_iter": 30,
+            "not_improved_limit": 6,
             "check_q_spd": True,
             "check_equality_rank": True,
             "solver_dtype": "auto",
             "verbose": 0,
-            "chunk_size": 128,
+            # Production logging computes only mandatory normalized primal
+            # certification and compact fallback summaries. Use "physical"
+            # for physical-unit constraint statistics or "full" for periodic
+            # sampled matrix/KKT/timing/memory/gradient audits.
+            "diagnostics_level": "minimal",
+            "full_audit_period": 1000,
+            "full_audit_sample_size": 8,
+            "rollout_chunk_size": 512,
+            "ppo_chunk_size": 128,
+            # Genesis and both PhysX backends advance position with the new
+            # velocity (semi-implicit Euler), hence q+=dt*v+dt^2*qdd.
+            "position_integration_coefficient": 1.0,
         }
         grf_observation_scale = GO2HardPACTCfg.normalization.obs_scales.grf
         base_wrench_observation_scale = (
