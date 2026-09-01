@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest import mock
 
 os.environ.setdefault("SIMULATOR", "genesis_pact")
 os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_hard_pact_bard_tests")
@@ -17,9 +18,12 @@ from legged_gym.dynamics import (
     wrench_at_point,
 )
 from rsl_rl.algorithms.hard_pact_bard import (
+    BARD_ROLLOUT_INCREMENT_RATE_SCALES,
     corrected_bard_inverse_dynamics_loss,
+    differentiable_bard_rollout_loss,
     physics_valid_mask,
 )
+from rsl_rl.modules.actor_critic_hard_pact import ActorCritic_HardPACT
 from rsl_rl.modules.hard_pact_physics import DeploymentPhysicsHeads
 
 
@@ -203,6 +207,9 @@ class BARDPinocchioParityTests(unittest.TestCase):
             np.asarray(nominal.lever) + np.asarray(shift),
             np.asarray(nominal.inertia) * (mass / nominal.mass),
         )
+        # Other tests exercise Pinocchio ABA with realized armature on this
+        # shared model; RNEA adds armature explicitly below, so reset it here.
+        model.armature[:] = 0.0
         data = model.createData()
         q_pin = q_bard.numpy().copy()
         q_pin[3:7] = q_pin[[4, 5, 6, 3]]  # BARD WXYZ -> Pinocchio XYZW
@@ -216,6 +223,42 @@ class BARDPinocchioParityTests(unittest.TestCase):
         result_sim[6:] += friction * np.tanh(v_sim / 0.01)
         result_sim[6:] += stiffness * q_sim + damping * v_sim
         return torch.tensor(result_sim, dtype=torch.float32)
+
+    def pin_acceleration(self, context, generalized_force):
+        pin, model = self.pin, self.pin_model
+        parameters = context.parameters
+        added = float(parameters.get("added_base_mass", torch.zeros(1)).reshape(-1)[0])
+        shift = parameters.get("base_com_shift", torch.zeros(1, 3))[0].numpy()
+        nominal = self.nominal_inertia
+        mass = nominal.mass + added
+        model.inertias[1] = pin.Inertia(
+            mass, np.asarray(nominal.lever) + shift,
+            np.asarray(nominal.inertia) * (mass / nominal.mass),
+        )
+        armature = parameters.get("joint_armature", torch.zeros(1, 1))
+        armature = armature.expand(-1, 12)[0].numpy()
+        model.armature[:] = 0.0
+        model.armature[6:] = armature
+        q = context.q_bard[0].numpy().copy()
+        q[3:7] = q[[4, 5, 6, 3]]
+        v = context.v_bard[0].numpy()
+        canonical_to_bard = self.dynamics._bard_from_canonical.cpu().numpy()
+        tau = generalized_force[0].detach().numpy()[canonical_to_bard]
+        q_sim = context.q_bard[0, 7:].numpy()[SIM_FROM_BARD]
+        v_sim = self.dynamics._canonical(context.v_bard)[0, 6:].numpy()
+        def expanded(name):
+            value = parameters.get(name, torch.zeros(1, 1)).expand(-1, 12)
+            return value[0].numpy()
+        passive_sim = (
+            expanded("joint_friction") * np.tanh(v_sim / 0.01)
+            + expanded("joint_stiffness") * q_sim
+            + expanded("joint_damping") * v_sim
+        )
+        passive_bard = passive_sim[np.argsort(SIM_FROM_BARD)]
+        tau[6:] -= passive_bard
+        acceleration = pin.aba(model, model.createData(), q, v, tau)
+        order = [0, 1, 2, 3, 4, 5] + [6 + i for i in SIM_FROM_BARD]
+        return torch.tensor(acceleration[order], dtype=torch.float32)
 
     def test_quaternion_joint_and_world_to_body_twist_conversion(self):
         q, v, _ = self.simulator_state(rotated=True)
@@ -321,6 +364,257 @@ class BARDPinocchioParityTests(unittest.TestCase):
         terms = dynamics.evaluate(q_bard, v_bard, a_bard)
         self.assertEqual(terms.rnea.shape, (2, 18))
         torch.testing.assert_close(terms.rnea[0], terms.rnea[1])
+
+    def test_aba_acceleration_and_velocity_pinocchio_parity(self):
+        cases = (
+            (False, {}),
+            (True, {
+                "added_base_mass": torch.tensor([[2.5]]),
+                "base_com_shift": torch.tensor([[0.07, -0.03, 0.02]]),
+                "joint_armature": torch.tensor([[0.015]]),
+                "joint_friction": torch.tensor([[0.08]]),
+                "joint_stiffness": torch.tensor([[0.02]]),
+                "joint_damping": torch.tensor([[0.35]]),
+            }),
+        )
+        for rotated, parameters in cases:
+            q, v, _ = self.simulator_state(rotated=rotated)
+            context = self.dynamics.build_context(
+                q, v, parameters=parameters, post_v_world=v,
+                need_jacobians=True,
+            )
+            torque = torch.linspace(-8.0, 9.0, 12).unsqueeze(0)
+            grf = torch.tensor([[[10., -4., 70.], [2., 3., 65.],
+                                 [-5., 2., 75.], [4., -1., 68.]]])
+            wrench = torch.tensor([[7., -3., 9., 1., 2., -1.]])
+            generalized = torch.cat((torch.zeros(1, 6), torque), dim=-1)
+            generalized += torch.einsum("bfkn,bfk->bn", context.foot_jacobians, grf)
+            generalized += torch.einsum("bkn,bk->bn", context.base_jacobian, wrench)
+            actual = context.aba(generalized)
+            expected = self.pin_acceleration(context, generalized)
+            torch.testing.assert_close(actual[0], expected, atol=2e-3, rtol=2e-3)
+            dt = 0.02
+            actual_v = self.dynamics._canonical(context.v_bard) + dt * actual
+            expected_v = self.dynamics._canonical(context.v_bard) + dt * expected
+            torch.testing.assert_close(actual_v, expected_v, atol=4e-5, rtol=2e-3)
+
+    def test_context_reuses_conversion_kinematics_and_jacobians(self):
+        q, v, _ = self.simulator_state()
+        bard = self.dynamics.bard
+        with (
+            mock.patch.object(
+                bard, "update_kinematics", wraps=bard.update_kinematics
+            ) as update,
+            mock.patch.object(
+                self.dynamics, "_world_jacobian",
+                wraps=self.dynamics._world_jacobian,
+            ) as jacobian,
+            mock.patch.object(bard, "rnea", wraps=bard.rnea) as rnea,
+            mock.patch.object(bard, "aba", wraps=bard.aba) as aba,
+        ):
+            context = self.dynamics.build_context(
+                q, v, post_v_world=v, need_jacobians=True
+            )
+            context.rnea(torch.zeros_like(context.v_bard))
+            context.aba(torch.zeros(1, 18))
+        self.assertEqual(update.call_count, 1)
+        self.assertEqual(jacobian.call_count, 5)  # four feet plus base
+        self.assertEqual(rnea.call_count, 1)
+        self.assertEqual(aba.call_count, 1)
+
+    def test_official_aba_routes_finite_gradients_to_all_force_inputs(self):
+        q, v, _ = self.simulator_state(rotated=True)
+        post_v = v + 0.03
+        context = self.dynamics.build_context(
+            q, v,
+            parameters={
+                "joint_armature": torch.tensor([[0.015]]),
+                "joint_friction": torch.tensor([[0.02]]),
+                "joint_stiffness": torch.tensor([[0.01]]),
+                "joint_damping": torch.tensor([[0.04]]),
+            },
+            post_v_world=post_v,
+            need_jacobians=True,
+        )
+        torque = torch.linspace(-2.0, 2.0, 12).unsqueeze(0).requires_grad_()
+        grf = torch.tensor(
+            [[[3., -2., 45.], [1., 2., 40.], [-2., 1., 43.], [2., -1., 41.]]],
+            requires_grad=True,
+        )
+        wrench = torch.tensor(
+            [[4., -3., 5., 0.5, -0.2, 0.3]], requires_grad=True
+        )
+        result = differentiable_bard_rollout_loss(
+            context=context,
+            control_torque=torque,
+            interval_grf_world=grf,
+            applied_wrench_world=wrench,
+            control_dt=torch.tensor([[0.02]]),
+            push_event_mask=torch.zeros(1, 1, dtype=torch.bool),
+            reset_mask=torch.zeros(1, 1, dtype=torch.bool),
+            timeout_mask=torch.zeros(1, 1, dtype=torch.bool),
+            teleport_mask=torch.zeros(1, 1, dtype=torch.bool),
+        )
+        result.loss.backward()
+        for value in (torque, grf, wrench):
+            self.assertTrue(torch.isfinite(value.grad).all())
+            self.assertGreater(value.grad.abs().sum().item(), 0.0)
+
+
+class RolloutLossTests(unittest.TestCase):
+    class Context:
+        def __init__(self, batch=3, post_value=0.0):
+            self.foot_jacobians = torch.zeros(batch, 4, 3, 18)
+            self.base_jacobian = torch.zeros(batch, 6, 18)
+            self.base_jacobian[:, :, :6] = torch.eye(6)
+            self.v_bard = torch.zeros(batch, 18)
+            self.post_v_bard = torch.full((batch, 18), post_value)
+            self.dynamics = self
+
+        @staticmethod
+        def _canonical(value):
+            return value
+
+        @staticmethod
+        def aba(generalized_force):
+            return generalized_force
+
+    def arguments(self, batch=3):
+        return dict(
+            context=self.Context(batch),
+            control_torque=torch.ones(batch, 12, requires_grad=True),
+            interval_grf_world=torch.zeros(batch, 4, 3, requires_grad=True),
+            applied_wrench_world=torch.zeros(batch, 6, requires_grad=True),
+            control_dt=torch.ones(batch, 1),
+            push_event_mask=torch.zeros(batch, 1, dtype=torch.bool),
+            reset_mask=torch.zeros(batch, 1, dtype=torch.bool),
+            timeout_mask=torch.zeros(batch, 1, dtype=torch.bool),
+            teleport_mask=torch.zeros(batch, 1, dtype=torch.bool),
+        )
+
+    def test_exact_masking_reduction_and_metrics(self):
+        data = self.arguments(3)
+        data["control_torque"].data.fill_(100.0)
+        data["applied_wrench_world"].data[:, :3] = 10.0
+        data["applied_wrench_world"].data[:, 3:] = 20.0
+        data["reset_mask"][1] = True
+        data["push_event_mask"][2] = True
+        result = differentiable_bard_rollout_loss(**data)
+        # Each block is exactly one normalized RMS unit; invalid samples do
+        # not alter the valid sample's three-block mean.
+        torch.testing.assert_close(result.loss, torch.tensor(1.0))
+        self.assertEqual(len(result.metrics), 8)
+
+    def test_increment_scaling_is_dt_invariant_and_blocks_are_balanced(self):
+        self.assertEqual(BARD_ROLLOUT_INCREMENT_RATE_SCALES, (10.0, 20.0, 100.0))
+        losses = []
+        for dt in (0.01, 0.04):
+            data = self.arguments(1)
+            data["control_dt"].fill_(dt)
+            data["control_torque"].data.fill_(100.0)
+            data["applied_wrench_world"].data[:, :3] = 10.0
+            data["applied_wrench_world"].data[:, 3:] = 20.0
+            losses.append(differentiable_bard_rollout_loss(**data).loss)
+        torch.testing.assert_close(losses[0], torch.tensor(1.0))
+        torch.testing.assert_close(losses[1], torch.tensor(1.0))
+
+        # A unit normalized residual in only one block contributes exactly
+        # one third, despite the joint block containing four times more axes.
+        data = self.arguments(1)
+        data["control_torque"].data.fill_(100.0)
+        result = differentiable_bard_rollout_loss(**data)
+        torch.testing.assert_close(result.loss, torch.tensor(1.0 / 3.0))
+
+    def test_observed_motion_softens_relative_increment_error(self):
+        data = self.arguments(1)
+        data["control_torque"].data.zero_()
+        data["context"].post_v_bard[:, :3] = 10.0
+        # Predicted base-linear increment is zero, so normalized residual and
+        # normalized observed-motion RMS are both one at dt=1, rate=10.
+        result = differentiable_bard_rollout_loss(**data)
+        torch.testing.assert_close(result.loss, torch.tensor((1.0 / 2.0) / 3.0))
+
+    def test_zero_motion_has_exact_zero_loss_and_finite_zero_gradients(self):
+        data = self.arguments(1)
+        data["control_torque"].data.zero_()
+        result = differentiable_bard_rollout_loss(**data)
+        torch.testing.assert_close(result.loss, torch.tensor(0.0))
+        result.loss.backward()
+        for name in ("control_torque", "interval_grf_world", "applied_wrench_world"):
+            gradient = data[name].grad
+            self.assertTrue(torch.isfinite(gradient).all())
+            torch.testing.assert_close(gradient, torch.zeros_like(gradient))
+
+    def test_all_invalid_is_graph_connected_zero(self):
+        data = self.arguments(2)
+        data["reset_mask"].fill_(True)
+        result = differentiable_bard_rollout_loss(**data)
+        self.assertEqual(result.loss.item(), 0.0)
+        result.loss.backward()
+        torch.testing.assert_close(
+            data["control_torque"].grad,
+            torch.zeros_like(data["control_torque"]),
+        )
+
+
+class RolloutEndToEndGradientTests(unittest.TestCase):
+    def test_aba_rollout_reaches_policy_encoder_and_force_decoders(self):
+        torch.manual_seed(23)
+        dynamics = BardGo2Dynamics(URDF, device="cpu", batch_capacity=1)
+        q = torch.zeros(1, 19)
+        q[:, 2] = 0.42
+        q[:, 6] = 1.0  # simulator XYZW identity quaternion
+        q[:, 7:] = torch.linspace(-0.25, 0.35, 12)
+        pre_v = torch.linspace(-0.1, 0.15, 18).unsqueeze(0)
+        post_v = pre_v + torch.linspace(0.01, -0.02, 18).unsqueeze(0)
+        context = dynamics.build_context(
+            q, pre_v, post_v_world=post_v, need_jacobians=True
+        )
+        actor = ActorCritic_HardPACT(
+            num_actor_obs=57, num_critic_obs=95, num_actions=12,
+            actor_layers=[32, 16], critic_layers=[32, 16],
+            cenet_in_dim=57 * 20, cenet_enc_layers=[32, 16],
+            cenet_explicit_layers=[16, 16],
+            grf_decoder_layers=[16, 16], wrench_decoder_layers=[16, 16],
+        )
+        observation = torch.randn(1, 57)
+        history = torch.randn(1, 57 * 20)
+        _, _, latent, explicit = actor.cenet_enc_forward(history)
+        policy_input = torch.cat((observation, latent, explicit), dim=-1)
+        position_action, torque_action = actor.actor_forward(policy_input)
+        # A compact differentiable stand-in for the legacy action/PD mapping;
+        # both policy heads contribute to the torque sent through ABA.
+        control_torque = position_action + torque_action
+        heads = actor.physics_heads(latent, explicit, control_torque)
+        result = differentiable_bard_rollout_loss(
+            context=context,
+            control_torque=control_torque,
+            interval_grf_world=heads.grf_yaw_scaled.reshape(1, 4, 3),
+            applied_wrench_world=heads.base_wrench_yaw_scaled,
+            control_dt=torch.tensor([[0.02]]),
+            push_event_mask=torch.zeros(1, 1, dtype=torch.bool),
+            reset_mask=torch.zeros(1, 1, dtype=torch.bool),
+            timeout_mask=torch.zeros(1, 1, dtype=torch.bool),
+            teleport_mask=torch.zeros(1, 1, dtype=torch.bool),
+        )
+        result.loss.backward()
+
+        modules = {
+            "policy": [actor.act_trunk, actor.act_pos_out, actor.act_tau_out],
+            "encoder": [actor.context_encoder],
+            "grf_decoder": [actor.physics_estimator.grf_head],
+            "wrench_decoder": [actor.physics_estimator.wrench_head],
+        }
+        for name, group in modules.items():
+            gradients = [
+                parameter.grad
+                for module in group
+                for parameter in module.parameters()
+                if parameter.grad is not None
+            ]
+            self.assertTrue(gradients, name)
+            self.assertTrue(all(torch.isfinite(value).all() for value in gradients), name)
+            self.assertGreater(sum(value.abs().sum().item() for value in gradients), 0.0, name)
 
 
 if __name__ == "__main__":

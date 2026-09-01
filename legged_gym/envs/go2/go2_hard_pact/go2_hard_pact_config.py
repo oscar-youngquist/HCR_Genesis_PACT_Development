@@ -78,6 +78,10 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         bard_randomize_base_inertia = True
         bard_scale_rotational_inertia = True
         bard_batch_capacity = 4096
+        bard_inverse_enabled = True
+        bard_rollout_enabled = True
+        lambda_inverse = 1.0
+        lambda_rollout = 1.0
         grf_observation_scale = GO2HardPACTCfg.normalization.obs_scales.grf
         base_wrench_observation_scale = (
             GO2HardPACTCfg.normalization.obs_scales.base_wrench

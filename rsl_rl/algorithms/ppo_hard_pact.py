@@ -45,12 +45,12 @@ from rsl_rl.modules.hard_pact_physics import normalized_huber_loss
 
 from legged_gym.dynamics import (
     BardGo2Dynamics,
-    simulator_state_to_bard,
     wrench_at_point,
 )
 
 from .pc_grad import PCGrad
 from .hard_pact_bard import corrected_bard_inverse_dynamics_loss
+from .hard_pact_bard import differentiable_bard_rollout_loss
 
 def _yaw_local_to_world(values, quaternion_xyzw):
     """Rotate batched ``[..., xyz]`` vectors by base yaw only."""
@@ -141,6 +141,10 @@ class PPO_HardPACT:
                  bard_scale_rotational_inertia=True,
                  bard_urdf_path="resources/robots/go2/urdf/go2.urdf",
                  bard_batch_capacity=4096,
+                 bard_inverse_enabled=True,
+                 bard_rollout_enabled=True,
+                 lambda_inverse=1.0,
+                 lambda_rollout=1.0,
                  grf_observation_scale=0.01,
                  base_wrench_observation_scale=0.01,
                  ):
@@ -241,9 +245,19 @@ class PPO_HardPACT:
         self.num_pinn_updates = 0
 
         self.bard_enabled = bool(bard_enabled)
+        self.bard_inverse_enabled = bool(bard_inverse_enabled)
+        self.bard_rollout_enabled = bool(bard_rollout_enabled)
+        self.lambda_inverse = float(lambda_inverse)
+        self.lambda_rollout = float(lambda_rollout)
+        if self.lambda_inverse < 0.0 or self.lambda_rollout < 0.0:
+            raise ValueError(
+                "lambda_inverse and lambda_rollout must be nonnegative"
+            )
         self.grf_observation_scale = float(grf_observation_scale)
         self.base_wrench_observation_scale = float(base_wrench_observation_scale)
         self.last_inverse_dynamics_metrics = {}
+        self.last_rollout_dynamics_metrics = {}
+        self.last_physics_gradient_metrics = {}
         self.last_auxiliary_metrics = {}
         self.bard_dynamics = None
         if self.bard_enabled:
@@ -500,6 +514,16 @@ class PPO_HardPACT:
                 self.act_optimizer.pc_backward_ppgrad(ppo_losses)
             else:
                 self.act_optimizer.pc_backward(ppo_losses)
+            if len(ppo_losses) == 2:
+                physics_gradient = self.act_optimizer.last_objective_grads[1]
+                finite = torch.isfinite(physics_gradient)
+                self.last_physics_gradient_metrics = {
+                    "physics_gradient/finite_fraction": finite.float().mean().detach(),
+                    "physics_gradient/nonfinite_count": (~finite).sum().detach(),
+                    "physics_gradient/finite_norm": torch.linalg.vector_norm(
+                        torch.where(finite, physics_gradient, torch.zeros_like(physics_gradient))
+                    ).detach(),
+                }
             
             nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
             self.act_optimizer.step()
@@ -764,15 +788,24 @@ class PPO_HardPACT:
             desired_position, joint_position, joint_velocity
         )
 
+    def _combine_bard_losses(self, inverse_loss, rollout_loss):
+        """Apply the independent PINN weights before the PCGrad objective."""
+        return (
+            self.lambda_inverse * inverse_loss
+            + self.lambda_rollout * rollout_loss
+        )
+
     def _compute_bard_loss(
         self, current_actions, obs_batch, obs_hist_batch,
         measured_generalized_contact_force,
         action_func, fb_func, default_pose, qvel_scale,
     ):
-        r"""Evaluate the corrected BARD inverse-dynamics objective.
+        r"""Build one cached BARD state and evaluate enabled physics losses.
 
-        Simulator states are first mapped to canonical BARD coordinates. The
-        observed acceleration is
+        Simulator states are first mapped to canonical BARD coordinates.  The
+        same context installs realized randomized dynamics, updates kinematics,
+        and computes Jacobians exactly once for both PINN objectives.  The
+        inverse objective observes
 
             vdot_obs = (v_{t+1}^BARD - v_t^BARD) / Delta t.
 
@@ -785,22 +818,36 @@ class PPO_HardPACT:
 
         Measured quantities and BARD terms are detached; gradients reach only
         the learned GRF and total-wrench outputs.
+
+        The rollout objective instead forms
+
+            g = S^T tau_control + J_f^T F_hat + J_b^T W_hat_applied,
+            Delta v_hat = Delta t * ABA(q_t,v_t,g;theta_rand),
+            Delta v_obs = v_{t+1} - v_t.
+
+        Its base-linear, base-angular, and joint residual blocks are normalized
+        by ``Delta t * [10,20,100]``. Each block contributes its residual RMS
+        divided by ``1 + stopgrad(observed-motion RMS)``, and the three block
+        scores are averaged so the 12 joint coordinates cannot dominate only
+        because that block is wider.
+
+        It retains gradients through ``tau_control``, both physics heads, and
+        official BARD ABA.  The two losses share conversions, randomized
+        spatial inertias, passive parameters, kinematics, and Jacobians; RNEA
+        is evaluated only when the inverse term is enabled, while ABA is
+        evaluated only when the rollout term is enabled.
         """
         if not self.bard_enabled:
+            return current_actions.sum() * 0.0
+        if not (self.bard_inverse_enabled or self.bard_rollout_enabled):
             return current_actions.sum() * 0.0
         batch = self.storage.current_hard_pact_batch
         if batch is None:
             raise RuntimeError("HardPACT BARD loss requires named transition fields")
-        pre_q, pre_v = simulator_state_to_bard(
-            batch["pre_q"].detach(), batch["pre_v"].detach()
-        )
-        _, post_v = simulator_state_to_bard(
-            batch["pre_q"].detach(), batch["post_v"].detach()
-        )
         control_dt = batch["control_dt"].detach().clamp_min(1.0e-8)
-        acceleration = (post_v - pre_v) / control_dt
         self.bard_dynamics.default_joint_position = torch.as_tensor(
-            default_pose, device=pre_q.device, dtype=pre_q.dtype
+            default_pose, device=batch["pre_q"].device,
+            dtype=batch["pre_q"].dtype,
         ).detach()
         parameters = {
             "added_base_mass": batch["realized_added_mass"].detach(),
@@ -810,10 +857,21 @@ class PPO_HardPACT:
             "joint_stiffness": batch["joint_stiffness"].detach(),
             "joint_damping": batch["joint_damping"].detach(),
         }
-        terms = self.bard_dynamics.evaluate(
-            pre_q.detach(), pre_v.detach(), acceleration.detach(),
-            parameters=parameters,
+        mass_wrench = batch["equivalent_mass_com_wrench_world"].detach()
+        # This is the sole per-minibatch state conversion / kinematic update.
+        # All quantities installed in the context are measured labels and are
+        # detached by `build_context`; the learned force paths are computed
+        # below and never stored in the context.
+        context = self.bard_dynamics.build_context(
+            batch["pre_q"], batch["pre_v"], parameters=parameters,
+            post_v_world=batch["post_v"],
+            mass_com_wrench_world=mass_wrench,
+            need_jacobians=(
+                self.bard_inverse_enabled or self.bard_rollout_enabled
+            ),
         )
+        # tau_nom remains differentiable with respect to the sampled/current
+        # action so rollout gradients can reach the actor policy parameters.
         nominal_torque = self._nominal_torque(
             current_actions, obs_batch.detach(), action_func, fb_func,
             default_pose, qvel_scale,
@@ -839,7 +897,6 @@ class PPO_HardPACT:
                 total_wrench_yaw[:, 3:].unsqueeze(1), batch["pre_q"][:, 3:7]
             ).squeeze(1),
         ), dim=-1)
-        mass_wrench = batch["equivalent_mass_com_wrench_world"].detach()
         base_point_world = batch["pre_q"][:, :3].detach()
         com_world = base_point_world + _body_point_to_world(
             batch["realized_com_shift_body"].detach(), batch["pre_q"].detach()
@@ -851,19 +908,74 @@ class PPO_HardPACT:
             total_wrench_world - mass_wrench, com_world, base_point_world
         )
         total_at_base = applied_at_base + mass_wrench
-        result = corrected_bard_inverse_dynamics_loss(
-            required_generalized_force=terms.rnea,
-            foot_jacobians=terms.foot_jacobians,
-            base_jacobian=terms.base_jacobian,
-            interval_executed_torque=batch["interval_executed_torque"],
-            interval_grf_world=grf_world,
-            total_wrench_world=total_at_base,
-            mass_com_wrench_world=mass_wrench,
-            measured_generalized_contact_force=measured_generalized_contact_force,
-            push_event_mask=batch["push_event_mask"],
-            reset_mask=batch["reset_mask"],
-            timeout_mask=batch["timeout_mask"],
-            teleport_mask=batch["teleport_mask"],
-        )
-        self.last_inverse_dynamics_metrics = result.metrics
-        return result.loss
+        zero = current_actions.sum() * 0.0
+        inverse_loss = zero
+        if self.bard_inverse_enabled:
+            observed_acceleration = (
+                context.post_v_bard - context.v_bard
+            ) / control_dt
+            inverse = corrected_bard_inverse_dynamics_loss(
+                required_generalized_force=context.rnea(observed_acceleration),
+                foot_jacobians=context.foot_jacobians,
+                base_jacobian=context.base_jacobian,
+                interval_executed_torque=batch["interval_executed_torque"],
+                interval_grf_world=grf_world,
+                total_wrench_world=total_at_base,
+                mass_com_wrench_world=context.mass_com_wrench_world,
+                measured_generalized_contact_force=measured_generalized_contact_force,
+                push_event_mask=batch["push_event_mask"],
+                reset_mask=batch["reset_mask"],
+                timeout_mask=batch["timeout_mask"],
+                teleport_mask=batch["teleport_mask"],
+            )
+            inverse_loss = inverse.loss
+            self.last_inverse_dynamics_metrics = inverse.metrics
+        else:
+            self.last_inverse_dynamics_metrics = {}
+
+        rollout_loss = zero
+        if self.bard_rollout_enabled:
+            # The dynamics command is tau_safe only on transitions where a
+            # hard safety projection was active; otherwise it is tau_nom.
+            # Projects that expose only a stored value use a straight-through
+            # estimator so the commanded value is physically correct while
+            # the gradient still reaches the actor-generated nominal torque.
+            control_torque = nominal_torque
+            safe_torque = batch.get("safe_control_torque")
+            projection_active = batch.get("hard_projection_active_mask")
+            if safe_torque is not None and projection_active is not None:
+                # Stored safe values determine the forward value. The
+                # straight-through form preserves the policy gradient when a
+                # hard projection backend does not expose its own autograd.
+                safe_straight_through = (
+                    nominal_torque
+                    + safe_torque.detach()
+                    - nominal_torque.detach()
+                )
+                control_torque = torch.where(
+                    projection_active.bool(), safe_straight_through,
+                    nominal_torque,
+                )
+            # W_hat_applied is the total wrench-head prediction with the
+            # label-only mass/CoM gravity wrench removed and shifted to J_b's
+            # base-frame reference point.  Randomized inertia is already in
+            # BARD, so this prevents counting its gravitational effect twice.
+            rollout = differentiable_bard_rollout_loss(
+                context=context,
+                control_torque=control_torque,
+                interval_grf_world=grf_world,
+                applied_wrench_world=applied_at_base,
+                control_dt=control_dt,
+                push_event_mask=batch["push_event_mask"],
+                reset_mask=batch["reset_mask"],
+                timeout_mask=batch["timeout_mask"],
+                teleport_mask=batch["teleport_mask"],
+            )
+            rollout_loss = rollout.loss
+            self.last_rollout_dynamics_metrics = rollout.metrics
+        else:
+            self.last_rollout_dynamics_metrics = {}
+        # Both weighted physics terms enter the existing physics PCGrad
+        # objective. No new optimizer owns shared actor/trunk/head parameters:
+        # L_physics = lambda_inverse L_ID + lambda_rollout L_rollout.
+        return self._combine_bard_losses(inverse_loss, rollout_loss)

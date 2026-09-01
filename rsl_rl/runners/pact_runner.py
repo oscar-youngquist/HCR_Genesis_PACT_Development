@@ -401,6 +401,14 @@ class OnPolicyRunnerPACT:
             self.alg, "last_inverse_dynamics_metrics", {}
         ).items():
             self.writer.add_scalar(name, value.item(), locs['it'])
+        for name, value in getattr(
+            self.alg, "last_rollout_dynamics_metrics", {}
+        ).items():
+            self.writer.add_scalar(name, value.item(), locs['it'])
+        for name, value in getattr(
+            self.alg, "last_physics_gradient_metrics", {}
+        ).items():
+            self.writer.add_scalar(name, value.item(), locs['it'])
         for name, value in getattr(self.alg, "last_auxiliary_metrics", {}).items():
             self.writer.add_scalar(f"Loss/auxiliary_{name}", value.item(), locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        

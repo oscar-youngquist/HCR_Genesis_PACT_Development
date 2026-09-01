@@ -202,6 +202,8 @@ class TestHardPACTAliases(unittest.TestCase):
                     for field in (
                         "bard_enabled", "bard_randomize_base_inertia",
                         "bard_scale_rotational_inertia", "bard_batch_capacity",
+                        "bard_inverse_enabled", "bard_rollout_enabled",
+                        "lambda_inverse", "lambda_rollout",
                         "grf_observation_scale",
                         "base_wrench_observation_scale",
                         "auxiliary_learning_rate", "privileged_loss_weight",

@@ -137,6 +137,29 @@ class Go2DynamicsTerms:
     base_jacobian: torch.Tensor
 
 
+@dataclass
+class Go2BardContext:
+    """One updated BARD state shared by inverse and rollout objectives."""
+
+    dynamics: "BardGo2Dynamics"
+    q_bard: torch.Tensor
+    v_bard: torch.Tensor
+    parameters: Mapping[str, torch.Tensor]
+    gravity: torch.Tensor
+    foot_jacobians: torch.Tensor | None = None
+    base_jacobian: torch.Tensor | None = None
+    post_v_bard: torch.Tensor | None = None
+    mass_com_wrench_world: torch.Tensor | None = None
+
+    def rnea(self, acceleration_bard):
+        """Return canonical generalized force without another kinematic update."""
+        return self.dynamics._rnea_cached(self, acceleration_bard)
+
+    def aba(self, generalized_force):
+        """Return canonical acceleration from differentiable official BARD ABA."""
+        return self.dynamics._aba_cached(self, generalized_force)
+
+
 class BardGo2Dynamics:
     """Batched BARD RNEA and world-aligned Jacobians for canonical Go2."""
 
@@ -179,6 +202,7 @@ class BardGo2Dynamics:
         self._canonical_from_bard = torch.cat((
             torch.arange(6, device=self.device), self._sim_from_bard_joint + 6
         ))
+        self._bard_from_canonical = torch.argsort(self._canonical_from_bard)
         self.foot_frame_ids = [self.model.get_frame_id(name) for name in foot_frames]
         self.base_frame_id = self.model.get_frame_id(base_frame)
         self.base_inertia_node = int(self.model.urdf_root_idx)
@@ -217,6 +241,15 @@ class BardGo2Dynamics:
     def _canonical(self, value):
         return value.index_select(-1, self._canonical_from_bard)
 
+    def _bard_order(self, value):
+        return value.index_select(-1, self._bard_from_canonical)
+
+    @staticmethod
+    def _expanded_parameter(value, reference, batch):
+        if value is None:
+            return reference.new_zeros(batch, 12)
+        return value.expand(-1, 12) if value.shape[-1] == 1 else value
+
     def _install_inertias(self, batch, parameters):
         inertias = self._nominal_inertias.unsqueeze(0).expand(batch, -1, -1, -1).clone()
         added = parameters.get("added_base_mass", inertias.new_zeros(batch, 1)).reshape(-1)
@@ -252,6 +285,188 @@ class BardGo2Dynamics:
         ), dim=1)
         return jacobian.index_select(-1, self._canonical_from_bard)
 
+    def build_context(
+        self, pre_q_simulator, pre_v_world, *, parameters=None,
+        post_v_world=None, mass_com_wrench_world=None, need_jacobians=True,
+    ):
+        """Convert/install/update once for all physics losses in a minibatch."""
+        parameters = {} if parameters is None else {
+            name: value.detach() for name, value in parameters.items()
+        }
+        q_bard, v_bard = simulator_state_to_bard(
+            pre_q_simulator.detach(), pre_v_world.detach(),
+            self.simulator_joint_names, self.bard_joint_names,
+        )
+        batch = q_bard.shape[0]
+        if batch > self.batch_capacity:
+            raise ValueError("BARD minibatch exceeds configured context capacity")
+        self._install_inertias(batch, parameters)
+        self.bard.update_kinematics(self.model, self.data, q_bard, v_bard)
+        foot, base = None, None
+        if need_jacobians:
+            foot = torch.stack([
+                self._world_jacobian(frame_id)[:, :3]
+                for frame_id in self.foot_frame_ids
+            ], dim=1).detach()
+            base = self._world_jacobian(self.base_frame_id).detach()
+        post_v_bard = None
+        if post_v_world is not None:
+            _, post_v_bard = simulator_state_to_bard(
+                pre_q_simulator.detach(), post_v_world.detach(),
+                self.simulator_joint_names, self.bard_joint_names,
+            )
+        return Go2BardContext(
+            self, q_bard.detach(), v_bard.detach(), parameters,
+            q_bard.new_tensor([0.0, 0.0, -9.81]), foot, base,
+            None if post_v_bard is None else post_v_bard.detach(),
+            None if mass_com_wrench_world is None
+            else mass_com_wrench_world.detach(),
+        )
+
+    def _passive_generalized_force(self, context):
+        batch = context.q_bard.shape[0]
+        q_joint = context.q_bard[:, 7:].index_select(1, self._sim_from_bard_joint)
+        v_joint = self._canonical(context.v_bard)[:, 6:]
+        parameters = context.parameters
+        friction = self._expanded_parameter(
+            parameters.get("joint_friction"), context.q_bard, batch
+        )
+        stiffness = self._expanded_parameter(
+            parameters.get("joint_stiffness"), context.q_bard, batch
+        )
+        damping = self._expanded_parameter(
+            parameters.get("joint_damping"), context.q_bard, batch
+        )
+        joint = (
+            friction * torch.tanh(v_joint / 0.01)
+            + stiffness * (q_joint - self.default_joint_position)
+            + damping * v_joint
+        )
+        return torch.cat((context.q_bard.new_zeros(batch, 6), joint), dim=-1)
+
+    def _rnea_cached(self, context, acceleration_bard):
+        result = self._canonical(self.bard.rnea(
+            self.model, self.data, acceleration_bard.detach(),
+            gravity=context.gravity,
+        ))
+        batch = result.shape[0]
+        armature = self._expanded_parameter(
+            context.parameters.get("joint_armature"), result, batch
+        )
+        result[:, 6:] += armature * self._canonical(acceleration_bard)[:, 6:]
+        return result + self._passive_generalized_force(context)
+
+    def _aba_cached(self, context, generalized_force):
+        r"""Solve randomized forward dynamics without a dense mass inverse.
+
+        The desired equation, in canonical ``[base; simulator joints]`` order,
+        is
+
+        .. math::
+
+            (M(q;\theta)+D_a)\dot v
+              = g - h(q,v;\theta) - \tau_{\rm passive},
+
+        where ``generalized_force`` is :math:`g`, :math:`D_a` is the realized
+        diagonal joint armature, and :math:`h` contains gravity/Coriolis terms.
+        Randomized spatial inertias are already installed in the batched BARD
+        model, so official :func:`bard.aba` supplies the affine map
+
+        .. math::
+
+            A_{\rm ABA}(\tau)=M^{-1}(\tau-h).
+
+        BARD currently has no armature argument.  For nonzero armature we
+        therefore solve
+
+        .. math::
+
+            [I+M^{-1}D_a]\dot v
+              = A_{\rm ABA}(g-\tau_{\rm passive})
+
+        with batched BiCGSTAB.  Every matrix-vector product uses differences
+        of official ABA calls,
+
+        .. math::
+
+            M^{-1}x=A_{\rm ABA}(x)-A_{\rm ABA}(0),
+
+        which cancels the affine bias exactly.  This remains matrix-free,
+        differentiable, and never constructs either ``M`` or ``M^{-1}``.
+        """
+        applied = generalized_force - self._passive_generalized_force(context)
+        batch = applied.shape[0]
+        armature = self._expanded_parameter(
+            context.parameters.get("joint_armature"), applied, batch
+        )
+
+        def official_aba(force):
+            # BARD consumes its URDF joint order; callers of this adapter use
+            # canonical simulator order.  The returned acceleration is mapped
+            # back immediately so the linear solver has one consistent basis.
+            return self._canonical(self.bard.aba(
+                self.model, self.data, self._bard_order(force),
+                gravity=context.gravity,
+            ))
+
+        # The overwhelmingly common nominal path requires exactly one ABA.
+        if not torch.any(armature):
+            return official_aba(applied)
+
+        # ABA is affine because of h(q,v).  Subtracting ABA(0) gives the
+        # linear action M^{-1}x needed by the armature operator.
+        zero_force = torch.zeros_like(applied)
+        aba_zero = official_aba(zero_force)
+        right_hand_side = official_aba(applied)
+
+        def armature_operator(acceleration):
+            armature_force = torch.cat((
+                acceleration.new_zeros(batch, 6),
+                armature * acceleration[:, 6:],
+            ), dim=-1)
+            return acceleration + official_aba(armature_force) - aba_zero
+
+        # Batched BiCGSTAB solves A x=b without assuming that M^{-1}D_a is
+        # symmetric.  A fixed nv-step budget avoids data-dependent autograd
+        # control flow; safe denominators also make converged rows remain
+        # finite while other rows continue iterating.
+        def safe_denominator(value, epsilon=1.0e-12):
+            replacement = torch.where(
+                value < 0, -torch.ones_like(value), torch.ones_like(value)
+            ) * epsilon
+            return torch.where(value.abs() < epsilon, replacement, value)
+
+        solution = torch.zeros_like(right_hand_side)
+        residual = right_hand_side.clone()  # A(0)=0.
+        shadow = residual.clone()
+        search = torch.zeros_like(residual)
+        operator_search = torch.zeros_like(residual)
+        rho_previous = torch.ones(batch, 1, device=applied.device, dtype=applied.dtype)
+        alpha = torch.ones_like(rho_previous)
+        omega = torch.ones_like(rho_previous)
+        for _ in range(self.nv):
+            rho = (shadow * residual).sum(dim=-1, keepdim=True)
+            beta = (rho / safe_denominator(rho_previous)) * (
+                alpha / safe_denominator(omega)
+            )
+            search = residual + beta * (search - omega * operator_search)
+            operator_search = armature_operator(search)
+            alpha = rho / safe_denominator(
+                (shadow * operator_search).sum(dim=-1, keepdim=True)
+            )
+            intermediate = residual - alpha * operator_search
+            operator_intermediate = armature_operator(intermediate)
+            omega = (
+                (operator_intermediate * intermediate).sum(dim=-1, keepdim=True)
+                / safe_denominator(
+                    operator_intermediate.square().sum(dim=-1, keepdim=True)
+                )
+            )
+            solution = solution + alpha * search + omega * intermediate
+            residual = intermediate - omega * operator_intermediate
+            rho_previous = rho
+        return solution
+
     def evaluate(self, q_bard, v_bard, acceleration_bard, *, parameters=None):
         parameters = {} if parameters is None else {
             name: value.detach() for name, value in parameters.items()
@@ -274,27 +489,14 @@ class BardGo2Dynamics:
                 torch.cat([chunk.foot_jacobians for chunk in chunks]),
                 torch.cat([chunk.base_jacobian for chunk in chunks]),
             )
+        # Compatibility path for existing direct BARD/Pinocchio parity tests.
         self._install_inertias(batch, parameters)
         self.bard.update_kinematics(self.model, self.data, q_bard, v_bard)
-        gravity = q_bard.new_tensor([0.0, 0.0, -9.81])
-        result = self._canonical(self.bard.rnea(
-            self.model, self.data, acceleration_bard, gravity=gravity
-        ))
-        armature = parameters.get("joint_armature")
-        friction = parameters.get("joint_friction")
-        stiffness = parameters.get("joint_stiffness")
-        damping = parameters.get("joint_damping")
-        q_joint = q_bard[:, 7:].index_select(1, self._sim_from_bard_joint)
-        v_joint = self._canonical(v_bard)[:, 6:]
-        a_joint = self._canonical(acceleration_bard)[:, 6:]
-        def expanded(value):
-            if value is None:
-                return result.new_zeros(batch, 12)
-            return value.expand(-1, 12) if value.shape[-1] == 1 else value
-        result[:, 6:] += expanded(armature) * a_joint
-        result[:, 6:] += expanded(friction) * torch.tanh(v_joint / 0.01)
-        result[:, 6:] += expanded(stiffness) * (q_joint - self.default_joint_position)
-        result[:, 6:] += expanded(damping) * v_joint
+        context = Go2BardContext(
+            self, q_bard.detach(), v_bard.detach(), parameters,
+            q_bard.new_tensor([0.0, 0.0, -9.81]),
+        )
+        result = context.rnea(acceleration_bard)
         foot = torch.stack([self._world_jacobian(fid)[:, :3] for fid in self.foot_frame_ids], dim=1)
         base = self._world_jacobian(self.base_frame_id)
         return Go2DynamicsTerms(result, foot, base)

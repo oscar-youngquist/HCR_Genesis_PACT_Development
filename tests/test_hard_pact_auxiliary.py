@@ -30,12 +30,13 @@ def make_modules():
     return actor, decoder
 
 
-def make_algorithm():
+def make_algorithm(**kwargs):
     actor, decoder = make_modules()
     with redirect_stdout(io.StringIO()):
         return PPO_HardPACT(
             actor, decoder, 181, bard_enabled=False,
             use_adaptive_entropy=False, num_encoder_epochs=1,
+            **kwargs,
         )
 
 
@@ -55,6 +56,19 @@ def make_batch(batch=5):
 
 
 class HardPACTAuxiliaryTests(unittest.TestCase):
+    def test_independent_physics_loss_weights_are_configurable(self):
+        algorithm = make_algorithm(lambda_inverse=0.25, lambda_rollout=1.75)
+        self.assertEqual(algorithm.lambda_inverse, 0.25)
+        self.assertEqual(algorithm.lambda_rollout, 1.75)
+        inverse = torch.tensor(4.0)
+        rollout = torch.tensor(2.0)
+        weighted = algorithm._combine_bard_losses(inverse, rollout)
+        torch.testing.assert_close(weighted, torch.tensor(4.5))
+        for name in ("lambda_inverse", "lambda_rollout"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "must be nonnegative"):
+                    make_algorithm(**{name: -1.0})
+
     def test_hard_pact_ppo_is_self_contained(self):
         self.assertNotIn(PPO_PACT, PPO_HardPACT.__mro__)
 
