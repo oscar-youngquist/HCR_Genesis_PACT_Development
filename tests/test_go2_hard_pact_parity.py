@@ -150,7 +150,8 @@ class TestHardPACTAliases(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIs(task_registry.get_task_class(name), alias_task)
                 self.assertTrue(issubclass(alias_task, legacy_task))
-                self.assertIs(alias_task._pre_sim_step, legacy_task._pre_sim_step)
+                # HardPACT wraps this one legacy callback solely to record the
+                # already-selected clip/delay/torque path for exact replay.
 
                 registered_env = task_registry.env_cfgs[name]
                 registered_train = task_registry.train_cfgs[name]
@@ -204,6 +205,7 @@ class TestHardPACTAliases(unittest.TestCase):
                         "bard_scale_rotational_inertia", "bard_batch_capacity",
                         "bard_inverse_enabled", "bard_rollout_enabled",
                         "lambda_inverse", "lambda_rollout",
+                        "action_clip",
                         "grf_observation_scale",
                         "base_wrench_observation_scale",
                         "auxiliary_learning_rate", "privileged_loss_weight",

@@ -122,6 +122,18 @@ class Go2HardPACT(Go2PACT):
         self._hard_pact_push_event_mask = torch.zeros(
             self.num_envs, 1, device=self.device, dtype=torch.bool
         )
+        # Mirror only the validity of the legacy action queue. The actions
+        # themselves remain owned by the unchanged legacy queue, so exact
+        # delayed-action replay adds just one boolean per queue slot here.
+        action_queue_length = (
+            self.action_queue.shape[1]
+            if hasattr(self, "action_queue") else 1
+        )
+        self._action_replay_valid_queue = torch.zeros(
+            self.num_envs, action_queue_length,
+            device=self.device, dtype=torch.bool,
+        )
+        self._pending_action_replay_transition = None
         self.simulator._hard_pact_pre_physics_substep = (
             self._hard_pact_pre_physics_substep
         )
@@ -443,6 +455,8 @@ class Go2HardPACT(Go2PACT):
                 reset, timeout, teleport, push_event
             ),
         }
+        if self._pending_action_replay_transition is not None:
+            fields.update(self._pending_action_replay_transition)
         # These deployment-facing views are named transition values but are
         # intentionally not duplicated in the critic: its required input is
         # the scaled yaw-local total label above.
@@ -531,6 +545,53 @@ class Go2HardPACT(Go2PACT):
             interval_grf * self.obs_scales.grf,
         )
 
+    def _pre_sim_step(self, actions):
+        """Capture the exact legacy clip/delay/nominal-torque action path."""
+        delayed_action = self._legacy_task_class._pre_sim_step(self, actions)
+        # Lightweight parity-test fixtures intentionally omit HardPACT-only
+        # buffers; in that case the inherited action behavior is still exact.
+        if not hasattr(self, "_action_replay_valid_queue"):
+            return delayed_action
+
+        # Shift in lockstep with the legacy action queue. A false entry means
+        # the selected action is a reset/boundary zero rather than a policy
+        # sample, so PPO must replay it as an exact constant zero.
+        valid_queue = self._action_replay_valid_queue
+        if valid_queue.shape[1] > 1:
+            valid_queue[:, 1:] = valid_queue[:, :-1].clone()
+        valid_queue[:, 0] = True
+        if bool(self.cfg.domain_rand.randomize_ctrl_delay):
+            delay = self.action_delay.clone()
+        else:
+            delay = torch.zeros(
+                self.num_envs, device=self.device, dtype=torch.long
+            )
+        selected_valid = valid_queue[
+            torch.arange(self.num_envs, device=self.device), delay
+        ].unsqueeze(-1)
+
+        # Match the legacy PINN torque convention exactly, evaluated at the
+        # pre-step joint state on the action actually selected by the queue.
+        desired_position, feedforward_torque = self._get_pinn_actions(
+            delayed_action
+        )
+        if feedforward_torque.shape[-1] == 0:
+            # The PACTPos alias has no feedforward half; retain its legacy
+            # feedback-only torque convention without widening its actions.
+            feedforward_torque = torch.zeros_like(desired_position)
+        nominal_torque = feedforward_torque + self._get_pinn_feedback(
+            desired_position,
+            self.simulator._dof_pos,
+            self.simulator._dof_vel,
+        )
+        self._pending_action_replay_transition = {
+            "sampled_action_delay": delay.to(torch.int16).unsqueeze(-1),
+            "delayed_action": delayed_action.detach().clone(),
+            "delayed_action_source_valid": selected_valid.clone(),
+            "nominal_torque": nominal_torque.detach().clone(),
+        }
+        return delayed_action
+
     def reset_idx(self, env_ids):
         self._legacy_task_class.reset_idx(self, env_ids)
         if hasattr(self, "grf_processor") and env_ids.numel() > 0:
@@ -559,6 +620,7 @@ class Go2HardPACT(Go2PACT):
                 self._realized_com_shift_body,
             ):
                 value[env_ids] = 0
+            self._action_replay_valid_queue[env_ids] = False
             for frame in self.disturbance_critic_deque:
                 frame[env_ids] = 0
 

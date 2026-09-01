@@ -147,6 +147,7 @@ class PPO_HardPACT:
                  lambda_rollout=1.0,
                  grf_observation_scale=0.01,
                  base_wrench_observation_scale=0.01,
+                 action_clip=100.0,
                  ):
         
         self.device = device
@@ -255,6 +256,9 @@ class PPO_HardPACT:
             )
         self.grf_observation_scale = float(grf_observation_scale)
         self.base_wrench_observation_scale = float(base_wrench_observation_scale)
+        self.action_clip = float(action_clip)
+        if self.action_clip <= 0.0:
+            raise ValueError("action_clip must be positive")
         self.last_inverse_dynamics_metrics = {}
         self.last_rollout_dynamics_metrics = {}
         self.last_physics_gradient_metrics = {}
@@ -337,6 +341,14 @@ class PPO_HardPACT:
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
+        # Save the standardized draw, not a reparameterized tensor. During
+        # PPO, a_current = mu_current + sigma_current * epsilon_stored gives a
+        # differentiable stochastic replay while log probability continues to
+        # use the original raw sample in `transition.actions`.
+        self.transition.action_noise = (
+            (all_actions - self.transition.action_mean)
+            / self.transition.action_sigma.clamp_min(1.0e-8)
+        ).detach()
         
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
@@ -491,13 +503,22 @@ class PPO_HardPACT:
                                                                                           old_actions_log_prob_batch,
                                                                                           advantages_batch, target_values_batch, returns_batch)
 
+            # Rebuild the same stochastic action path under the current
+            # policy, then select the source chosen by the rollout's exact
+            # delay. This is the only nominal torque used by HardPACT physics.
+            replay = self._replay_action_path(
+                current_actions, obs_batch,
+                self.storage.current_hard_pact_batch,
+                action_func, fb_func, default_pose, qvel_scale,
+            )
+
             
             # BARD is warmed up using the same schedule as the legacy PINN.
             pinn_loss = None
             if self.pinn_weight > 0.0:
                 pinn_loss = self._compute_bard_loss(
-                    current_actions, obs_batch, obs_hist_batch, gt_forces_batch,
-                    action_func, fb_func, default_pose, qvel_scale,
+                    replay["nominal_torque"], obs_batch, obs_hist_batch,
+                    gt_forces_batch, default_pose,
                 )
                 
             if self.pinn_weight > 0.0 and self.pinn_weight_final > 0:
@@ -543,13 +564,9 @@ class PPO_HardPACT:
                 self.actor_critic.train()
                 self.decoder.train()
 
-                nominal_torque = self._nominal_torque(
-                    current_actions.detach(), obs_batch, action_func, fb_func,
-                    default_pose, qvel_scale,
-                )
                 aux = self._compute_auxiliary_loss(
                     obs_hist_batch, obs_target, explicit_labels_batch, grf_target,
-                    terminated_batch, nominal_torque,
+                    terminated_batch, replay["nominal_torque"].detach(),
                     self.storage.current_hard_pact_batch,
                 )
                 self.auxiliary_optimizer.zero_grad(set_to_none=True)
@@ -795,10 +812,69 @@ class PPO_HardPACT:
             + self.lambda_rollout * rollout_loss
         )
 
-    def _compute_bard_loss(
-        self, current_actions, obs_batch, obs_hist_batch,
-        measured_generalized_contact_force,
+    def _policy_raw_action_from_noise(self, observation, history, noise):
+        """Reparameterize one stored policy draw under current parameters."""
+        _, _, latent, explicit = self.actor_critic.cenet_enc_forward(history)
+        if self.use_boot:
+            conditioning = torch.cat((observation, latent, explicit), dim=-1)
+        else:
+            conditioning = torch.cat((
+                observation,
+                torch.zeros_like(torch.cat((latent, explicit), dim=-1)),
+            ), dim=-1)
+        mean_position, mean_torque = self.actor_critic.actor_forward(conditioning)
+        mean = torch.cat((mean_position, mean_torque), dim=-1)
+        return mean + self.actor_critic.std.unsqueeze(0) * noise.detach()
+
+    def _replay_action_path(
+        self, current_mean, observation, transition,
         action_func, fb_func, default_pose, qvel_scale,
+    ):
+        r"""Replay sampling, clipping, discrete delay, and nominal torque.
+
+        The raw current draw is ``mu_current + sigma_current * epsilon_t``.
+        The delayed source is reconstructed from the source observation/history
+        resolved by rollout storage and its own stored noise. Both are clipped
+        exactly as in the environment before the stored delay choice is
+        applied. Invalid reset/boundary queue entries replay as constant zeros.
+        """
+        if transition is None:
+            raise RuntimeError("HardPACT action replay requires named fields")
+        current_raw = (
+            current_mean
+            + self.actor_critic.std.unsqueeze(0)
+            * transition["standardized_action_noise"].detach()
+        )
+        source_raw = self._policy_raw_action_from_noise(
+            transition["delayed_source_observation"].detach(),
+            transition["delayed_source_history"].detach(),
+            transition["delayed_source_noise"],
+        )
+        current_transformed = torch.clamp(
+            current_raw, -self.action_clip, self.action_clip
+        )
+        source_transformed = torch.clamp(
+            source_raw, -self.action_clip, self.action_clip
+        )
+        source_valid = transition["delayed_action_source_valid"].bool()
+        delayed_action = torch.where(
+            source_valid, source_transformed,
+            torch.zeros_like(source_transformed),
+        )
+        nominal_torque = self._nominal_torque(
+            delayed_action, observation.detach(), action_func, fb_func,
+            default_pose, qvel_scale,
+        )
+        return {
+            "raw_action": current_raw,
+            "transformed_action": current_transformed,
+            "delayed_action": delayed_action,
+            "nominal_torque": nominal_torque,
+        }
+
+    def _compute_bard_loss(
+        self, nominal_torque, obs_batch, obs_hist_batch,
+        measured_generalized_contact_force, default_pose,
     ):
         r"""Build one cached BARD state and evaluate enabled physics losses.
 
@@ -838,9 +914,9 @@ class PPO_HardPACT:
         evaluated only when the rollout term is enabled.
         """
         if not self.bard_enabled:
-            return current_actions.sum() * 0.0
+            return nominal_torque.sum() * 0.0
         if not (self.bard_inverse_enabled or self.bard_rollout_enabled):
-            return current_actions.sum() * 0.0
+            return nominal_torque.sum() * 0.0
         batch = self.storage.current_hard_pact_batch
         if batch is None:
             raise RuntimeError("HardPACT BARD loss requires named transition fields")
@@ -870,12 +946,8 @@ class PPO_HardPACT:
                 self.bard_inverse_enabled or self.bard_rollout_enabled
             ),
         )
-        # tau_nom remains differentiable with respect to the sampled/current
-        # action so rollout gradients can reach the actor policy parameters.
-        nominal_torque = self._nominal_torque(
-            current_actions, obs_batch.detach(), action_func, fb_func,
-            default_pose, qvel_scale,
-        )
+        # tau_nom is the differentiable replay of the exact stochastic,
+        # clipped, delayed action selected during rollout.
         # The force targets cover the same control interval as action_t, so
         # their conditioning is the current history h_t—not h_{t-1}.
         _, _, latent, explicit = self.actor_critic.cenet_enc_forward(obs_hist_batch)
@@ -908,7 +980,7 @@ class PPO_HardPACT:
             total_wrench_world - mass_wrench, com_world, base_point_world
         )
         total_at_base = applied_at_base + mass_wrench
-        zero = current_actions.sum() * 0.0
+        zero = nominal_torque.sum() * 0.0
         inverse_loss = zero
         if self.bard_inverse_enabled:
             observed_acceleration = (

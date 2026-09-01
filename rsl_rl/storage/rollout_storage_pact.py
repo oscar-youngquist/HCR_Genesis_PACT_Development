@@ -51,6 +51,10 @@ class RolloutStoragePACT:
             self.actions_log_prob = None
             self.action_mean = None
             self.action_sigma = None
+            # HardPACT stores epsilon=(a-mu)/sigma once. Raw actions, policy
+            # observations, and histories already have canonical storage
+            # above and are deliberately not duplicated for replay.
+            self.action_noise = None
 
             #  PINN stuff
             self.prev_obs      = None
@@ -124,6 +128,34 @@ class RolloutStoragePACT:
         # these tensors and therefore retains its exact storage behavior.
         self.hard_pact_fields = None
         self.current_hard_pact_batch = None
+        self.action_noise = None
+        self.max_action_delay = None
+        self._action_replay_boundary_observations = None
+        self._action_replay_boundary_history = None
+        self._action_replay_boundary_noise = None
+
+    def configure_action_replay(self, max_action_delay):
+        """Allocate compact GPU-only stochastic-delay replay metadata."""
+        maximum = int(max_action_delay)
+        if maximum < 0 or maximum >= self.num_transitions_per_env:
+            raise ValueError(
+                "max_action_delay must be nonnegative and shorter than a rollout"
+            )
+        self.max_action_delay = maximum
+        self.action_noise = torch.zeros_like(self.actions)
+        # Only sources crossing a rollout boundary need extra observation
+        # storage. All in-rollout sources are gathered from the existing core
+        # observation/history tensors by index.
+        self._action_replay_boundary_observations = torch.zeros(
+            maximum, self.num_envs, *self.obs_shape, device=self.device
+        )
+        self._action_replay_boundary_history = torch.zeros(
+            maximum, self.num_envs, *self.observation_history.shape[2:],
+            device=self.device,
+        )
+        self._action_replay_boundary_noise = torch.zeros(
+            maximum, self.num_envs, *self.actions_shape, device=self.device
+        )
 
     def add_transitions(self, transition: Transition):
         
@@ -148,6 +180,10 @@ class RolloutStoragePACT:
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
         self.mu[self.step].copy_(transition.action_mean)
         self.sigma[self.step].copy_(transition.action_sigma)
+        if self.action_noise is not None:
+            if transition.action_noise is None:
+                raise RuntimeError("HardPACT action replay requires stored noise")
+            self.action_noise[self.step].copy_(transition.action_noise)
 
         #  - PINN stuff
         self.prev_obs[self.step].copy_(transition.prev_obs)
@@ -197,8 +233,50 @@ class RolloutStoragePACT:
             self.saved_hidden_states_c[i][self.step].copy_(hid_c[i])
 
     def clear(self):
+        if self.max_action_delay:
+            delay = self.max_action_delay
+            self._action_replay_boundary_observations.copy_(
+                self.observations[-delay:]
+            )
+            self._action_replay_boundary_history.copy_(
+                self.observation_history[-delay:]
+            )
+            self._action_replay_boundary_noise.copy_(self.action_noise[-delay:])
         self.step = 0
         self.current_hard_pact_batch = None
+
+    def _action_replay_sources(self, batch_idx, delay):
+        """Resolve delayed sources on GPU without duplicating rollout history."""
+        timestep = torch.div(
+            batch_idx, self.num_envs, rounding_mode="floor"
+        )
+        environment = batch_idx.remainder(self.num_envs)
+        source_timestep = timestep - delay
+        source_observation = self.observations.new_empty(
+            batch_idx.shape[0], *self.obs_shape
+        )
+        source_history = self.observation_history.new_empty(
+            batch_idx.shape[0], *self.observation_history.shape[2:]
+        )
+        source_noise = self.action_noise.new_empty(
+            batch_idx.shape[0], *self.actions_shape
+        )
+        current = source_timestep >= 0
+        t, e = source_timestep[current], environment[current]
+        source_observation[current] = self.observations[t, e]
+        source_history[current] = self.observation_history[t, e]
+        source_noise[current] = self.action_noise[t, e]
+        boundary = ~current
+        index = self.max_action_delay + source_timestep[boundary]
+        e = environment[boundary]
+        source_observation[boundary] = (
+            self._action_replay_boundary_observations[index, e]
+        )
+        source_history[boundary] = (
+            self._action_replay_boundary_history[index, e]
+        )
+        source_noise[boundary] = self._action_replay_boundary_noise[index, e]
+        return source_observation, source_history, source_noise
 
     def compute_returns(self, last_values, gamma, lam):
         advantage = 0
@@ -303,6 +381,28 @@ class RolloutStoragePACT:
                         name: value.flatten(0, 1)[batch_idx]
                         for name, value in self.hard_pact_fields.items()
                     }
+                    if self.action_noise is not None:
+                        delay = self.current_hard_pact_batch[
+                            "sampled_action_delay"
+                        ].reshape(-1).long()
+                        source_obs, source_history, source_noise = (
+                            self._action_replay_sources(batch_idx, delay)
+                        )
+                        # Raw actions and their source observations already
+                        # live in core rollout tensors; these aliases expose
+                        # them to the named HardPACT replay interface without
+                        # allocating duplicate persistent buffers.
+                        self.current_hard_pact_batch.update({
+                            "raw_sampled_action": actions_batch,
+                            "standardized_action_noise": self.action_noise.flatten(
+                                0, 1
+                            )[batch_idx],
+                            "action_source_observation": obs_batch,
+                            "action_source_history": obs_hist_batch,
+                            "delayed_source_observation": source_obs,
+                            "delayed_source_history": source_history,
+                            "delayed_source_noise": source_noise,
+                        })
 
                 
                 yield terminated_batch, obs_batch, critic_observations_batch, obs_hist_batch, explicit_labels_batch, \

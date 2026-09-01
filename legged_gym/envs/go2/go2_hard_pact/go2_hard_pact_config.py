@@ -86,3 +86,4 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         base_wrench_observation_scale = (
             GO2HardPACTCfg.normalization.obs_scales.base_wrench
         )
+        action_clip = GO2HardPACTCfg.normalization.clip_actions

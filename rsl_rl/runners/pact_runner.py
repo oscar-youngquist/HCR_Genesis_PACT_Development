@@ -153,6 +153,9 @@ class OnPolicyRunnerPACT:
         self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], \
                               [reconstruction_dim], [self.env.num_obs_hist*self.env.num_obs], \
                               [2*self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]], [self.env.wb_dim])
+        if actor_critic_class is ActorCritic_HardPACT:
+            delay_range = self.env.cfg.domain_rand.ctrl_delay_step_range
+            self.alg.storage.configure_action_replay(int(delay_range[1]))
 
         if self.policy_cfg.get("pretrained_path"):
             self._load_pretrained_model()

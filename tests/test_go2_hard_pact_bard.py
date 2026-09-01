@@ -23,6 +23,7 @@ from rsl_rl.algorithms.hard_pact_bard import (
     differentiable_bard_rollout_loss,
     physics_valid_mask,
 )
+from rsl_rl.algorithms.ppo_hard_pact import PPO_HardPACT
 from rsl_rl.modules.actor_critic_hard_pact import ActorCritic_HardPACT
 from rsl_rl.modules.hard_pact_physics import DeploymentPhysicsHeads
 
@@ -459,6 +460,71 @@ class BARDPinocchioParityTests(unittest.TestCase):
         for value in (torque, grf, wrench):
             self.assertTrue(torch.isfinite(value.grad).all())
             self.assertGreater(value.grad.abs().sum().item(), 0.0)
+
+    def test_aba_and_rnea_pinocchio_parity_with_replayed_stochastic_torque(self):
+        torch.manual_seed(29)
+        actor = ActorCritic_HardPACT(
+            num_actor_obs=57, num_critic_obs=95, num_actions=12,
+            actor_layers=[32, 16], critic_layers=[32, 16],
+            cenet_in_dim=57 * 20, cenet_enc_layers=[32, 16],
+            cenet_explicit_layers=[16, 16],
+            grf_decoder_layers=[16, 16], wrench_decoder_layers=[16, 16],
+        )
+        algorithm = PPO_HardPACT.__new__(PPO_HardPACT)
+        algorithm.actor_critic = actor
+        algorithm.use_boot = True
+        algorithm.action_clip = 2.0
+        observation = torch.randn(1, 57)
+        history = torch.randn(1, 57 * 20)
+        _, _, latent, explicit = actor.cenet_enc_forward(history)
+        mean_pos, mean_tau = actor.actor_forward(torch.cat((
+            observation, latent, explicit
+        ), dim=-1))
+        mean = torch.cat((mean_pos, mean_tau), dim=-1)
+        noise = torch.randn(1, 24)
+        transition = {
+            "standardized_action_noise": noise,
+            "delayed_source_observation": observation,
+            "delayed_source_history": history,
+            "delayed_source_noise": noise,
+            "delayed_action_source_valid": torch.ones(1, 1, dtype=torch.bool),
+        }
+
+        def transform(action):
+            return action[:, :12], 1.5 * action[:, 12:]
+
+        def feedback_fn(desired, position, velocity):
+            return 2.0 * (desired - position) - 0.1 * velocity
+
+        replay = algorithm._replay_action_path(
+            mean, observation, transition, transform, feedback_fn,
+            torch.zeros(12), 1.0,
+        )
+        torque = replay["nominal_torque"].detach()
+        q, v_world, a_world = self.simulator_state(rotated=True)
+        context = self.dynamics.build_context(
+            q, v_world, post_v_world=v_world, need_jacobians=True
+        )
+        generalized = torch.cat((torch.zeros(1, 6), torque), dim=-1)
+        bard_acceleration = context.aba(generalized)
+        pin_acceleration = self.pin_acceleration(
+            context, generalized
+        ).unsqueeze(0)
+        torch.testing.assert_close(
+            bard_acceleration, pin_acceleration, atol=2e-3, rtol=2e-3
+        )
+
+        _, acceleration_bard = simulator_state_to_bard(
+            q, a_world, bard_joint_names=self.dynamics.bard_joint_names
+        )
+        actuation = torch.cat((torch.zeros(1, 6), torque), dim=-1)
+        bard_residual = context.rnea(acceleration_bard) - actuation
+        pin_required = self.pin_result(
+            context.q_bard[0], context.v_bard[0], acceleration_bard[0]
+        ).unsqueeze(0)
+        torch.testing.assert_close(
+            bard_residual, pin_required - actuation, atol=3e-4, rtol=3e-4
+        )
 
 
 class RolloutLossTests(unittest.TestCase):
