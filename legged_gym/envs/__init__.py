@@ -114,6 +114,12 @@ from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
 
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCfg, GO2HardPACTCfgPPO
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
+from legged_gym.envs.go2.go2_hard_pact.ablations import (
+    HARD_PACT_BACKENDS, HARD_PACT_VARIANTS,
+)
+from legged_gym.envs.go2.go2_hard_pact.ablation_configs import (
+    make_hard_pact_variant_configs,
+)
 
 from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import GO2HardPACTPosCfg, GO2HardPACTPosCfgPPO
 from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos import Go2HardPACTPos
@@ -157,6 +163,25 @@ task_registry.register("go2_pact_pos", Go2PACTPos, GO2PACTPosCfg(), GO2PACTPosCf
 task_registry.register("go2_pact", Go2PACT, GO2PACTCfg(), GO2PACTCfgPPO())
 task_registry.register("go2_hard_pact", Go2HardPACT, GO2HardPACTCfg(), GO2HardPACTCfgPPO())
 task_registry.register("go2_hard_pact_pos", Go2HardPACTPos, GO2HardPACTPosCfg(), GO2HardPACTPosCfgPPO())
+
+# All ablations share the exact environment class. Backend suffixes are
+# experiment identity/launcher selectors; backend construction remains in the
+# repository's existing BaseTask simulator dispatch.
+for _hard_variant in HARD_PACT_VARIANTS:
+    for _hard_backend in HARD_PACT_BACKENDS:
+        _env_cfg, _ppo_cfg = make_hard_pact_variant_configs(
+            _hard_variant, _hard_backend
+        )
+        task_registry.register(
+            f"go2_hard_pact_{_hard_variant}_{_hard_backend}",
+            Go2HardPACT, _env_cfg(), _ppo_cfg(),
+        )
+for _hard_backend in HARD_PACT_BACKENDS:
+    _env_cfg, _ppo_cfg = make_hard_pact_variant_configs("full", _hard_backend)
+    task_registry.register(
+        f"go2_hard_pact_{_hard_backend}",
+        Go2HardPACT, _env_cfg(), _ppo_cfg(),
+    )
 
 task_registry.register("go2_kite", Go2KITE, GO2KITECfg(), GO2KITECfgPPO())
 task_registry.register("go2_kite_baseline", Go2KITEBaseline, GO2KITEBaselineCfg(), GO2KITEBaselineCfgPPO())

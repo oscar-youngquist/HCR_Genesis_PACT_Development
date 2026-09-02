@@ -13,6 +13,7 @@ from legged_gym.dynamics import wrench_at_point
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
 
 from .grf import GRFProcessingConfig, IntervalGRFProcessor, world_to_yaw_local
+from .ablations import resolve_hard_pact_features
 
 from .transition import (
     DISTURBANCE_CRITIC_DIM,
@@ -30,6 +31,9 @@ class Go2HardPACT(Go2PACT):
 
     def _init_buffers(self):
         self._legacy_task_class._init_buffers(self)
+        self.hard_pact_features = resolve_hard_pact_features(
+            getattr(self.cfg, "ablation_variant", "full")
+        )
         # The legacy task builds one 288-D critic frame. Keep that deque at its
         # original width, then append a separately managed named disturbance
         # frame below. This prevents any legacy field from moving.
@@ -157,7 +161,10 @@ class Go2HardPACT(Go2PACT):
         self._hard_pact_actor_critic = actor_critic
         self._hard_pact_bard_dynamics = bard_dynamics
         self._hard_pact_rollout_qp = qp
-        self._hard_pact_rollout_qp_enabled = bard_dynamics is not None and qp is not None
+        self._hard_pact_rollout_qp_enabled = (
+            self.hard_pact_features.execution_qp
+            and bard_dynamics is not None and qp is not None
+        )
 
     def set_hard_pact_policy_context(self, latent, explicit):
         """Hold policy-rate features and wrench prediction for one interval."""

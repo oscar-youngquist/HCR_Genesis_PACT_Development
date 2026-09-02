@@ -16,7 +16,12 @@ def train(args):
     log_dir = ppo_runner.log_dir
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
-    if env_cfg.asset.name == args.task:
+    if args.task.startswith("go2_hard_pact_"):
+        # Ablation task names intentionally have no copied environment files;
+        # archive the one shared implementation/config instead.
+        robot_file_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", "go2", "go2_hard_pact", "go2_hard_pact.py")
+        robot_config_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", "go2", "go2_hard_pact", "go2_hard_pact_config.py")
+    elif env_cfg.asset.name == args.task:
         robot_file_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task+".py")
         robot_config_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task+"_config.py")
     else:

@@ -33,6 +33,10 @@ import time
 import os
 from collections import deque
 import statistics
+import platform
+import subprocess
+import json
+from importlib import metadata as importlib_metadata
 import numpy as np
 
 from torch.utils.tensorboard import SummaryWriter
@@ -49,6 +53,8 @@ from legged_gym.envs.go2.go2_hard_pact.deployment import (
     calculate_physics_head_gains,
     write_deployment_contract_once,
 )
+from legged_gym.envs.go2.go2_hard_pact.ablations import resolve_hard_pact_features
+from rsl_rl.hard_pact_logging import collect_hard_pact_scalars
 
 
 
@@ -67,6 +73,7 @@ class OnPolicyRunnerPACT:
                  device='cpu'):
         torch.autograd.set_detect_anomaly(True)
         self.cfg=train_cfg["runner"]
+        self.train_cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
         
@@ -88,6 +95,9 @@ class OnPolicyRunnerPACT:
         reconstruction_indices = None
         reconstruction_dim = self.env.num_privileged_obs
         if actor_critic_class is ActorCritic_HardPACT:
+            self.hard_pact_features = resolve_hard_pact_features(
+                self.alg_cfg.get("ablation_variant", "full")
+            )
             gain_spec = calculate_physics_head_gains(self.env.cfg)
             actor_extra_kwargs = {
                 "cenet_explicit_layers": self.policy_cfg["cenet_explicit_layers"],
@@ -95,6 +105,7 @@ class OnPolicyRunnerPACT:
                 "wrench_decoder_layers": self.policy_cfg["wrench_decoder_layers"],
                 "grf_scale": gain_spec.model_grf,
                 "wrench_scale": gain_spec.model_wrench,
+                "ablation_features": self.hard_pact_features,
             }
             reconstruction_indices = RECONSTRUCTION_INDICES
             reconstruction_dim = RECONSTRUCTION_DIM
@@ -159,7 +170,7 @@ class OnPolicyRunnerPACT:
             # Limits are backend properties, not learned transition data.
             # Bind them once so PPO minibatches carry only the previous torque
             # needed by the rate constraint, minimizing persistent GPU memory.
-            if self.alg.qp_config.enabled:
+            if self.hard_pact_features.execution_qp:
                 simulator = self.env.simulator
                 self.alg.configure_hard_pact_qp(
                     simulator._torque_limits,
@@ -209,6 +220,7 @@ class OnPolicyRunnerPACT:
         # initialize writer
         if self.log_dir is not None and self.writer is None:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+            self._log_hard_pact_run_metadata()
 
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
@@ -234,6 +246,12 @@ class OnPolicyRunnerPACT:
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
+            self._rollout_qp_metric_sums = {}
+            self._rollout_qp_metric_count = 0
+            self._rollout_disturbance_active_sum = torch.zeros(
+                (), device=self.device
+            )
+            self._rollout_disturbance_metric_count = 0
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
@@ -250,6 +268,7 @@ class OnPolicyRunnerPACT:
                          
                     # Submit the predicted action and extract the resulting state... 
                     obs, privileged_obs, obs_hist, exp_labels, rewards, dones, infos, grfs = self.env.step(actions)  # obs_t+1  (obs_t)
+                    self._accumulate_rollout_qp_metrics(infos)
                     
                     # Create privileged obs
                     critic_obs = privileged_obs if privileged_obs is not None else obs
@@ -396,12 +415,131 @@ class OnPolicyRunnerPACT:
                 )
             self.writer.add_scalar(name, value.item(), iteration)
 
+    def _accumulate_rollout_qp_metrics(self, infos):
+        """Reduce per-environment rollout QP diagnostics on the live device."""
+        transition = infos.get("hard_pact_transition") if isinstance(infos, dict) else None
+        if transition and "sustained_wrench_active_mask" in transition:
+            self._rollout_disturbance_active_sum += transition[
+                "sustained_wrench_active_mask"
+            ].float().mean()
+            self._rollout_disturbance_metric_count += 1
+        interval = infos.get("hard_pact_qp_interval") if isinstance(infos, dict) else None
+        if not interval:
+            return
+        stage = interval["interval_qp_stage_fractions"]
+        correction = interval["interval_qp_correction"].abs().reshape(-1)
+        slack = interval["interval_qp_contact_slack"].abs().reshape(-1)
+        residual = interval["interval_qp_residuals"].abs()
+        timing = interval["interval_qp_timing_ms"]
+        metrics = {
+            "qp/minimal/full_fraction": stage[:, 0].mean(),
+            "qp/minimal/relaxed_fraction": stage[:, 1].mean(),
+            "qp/minimal/fallback_fraction": stage[:, 2].mean(),
+            "qp/minimal/normalized_equality_residual_max": residual[:, 0].max(),
+            "qp/minimal/normalized_inequality_violation_max": residual[:, 1].max(),
+            "qp/minimal/rollout_timing_ms": timing.mean(),
+            "qp/minimal/rollout_correction_mean": correction.mean(),
+            "qp/minimal/rollout_correction_p95": torch.quantile(correction, 0.95),
+            "qp/minimal/rollout_correction_max": correction.max(),
+            "qp/minimal/rollout_slack_mean": slack.mean(),
+            "qp/minimal/rollout_slack_p95": torch.quantile(slack, 0.95),
+            "qp/minimal/rollout_slack_max": slack.max(),
+        }
+        for key, value in metrics.items():
+            self._rollout_qp_metric_sums[key] = (
+                self._rollout_qp_metric_sums.get(key, torch.zeros_like(value)) + value
+            )
+        self._rollout_qp_metric_count += 1
+
+    @staticmethod
+    def _scalar(value):
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                raise ValueError("HardPACT logging accepts aggregated scalars only")
+            return value.item()
+        return float(value)
+
+    def _log_hard_pact_run_metadata(self):
+        """Write immutable provenance once; no per-iteration synchronization."""
+        if not hasattr(self, "hard_pact_features"):
+            return
+        try:
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=os.path.dirname(__file__),
+                text=True, stderr=subprocess.DEVNULL,
+            ).strip()
+        except Exception:
+            sha = "unknown"
+        metadata = {
+            "variant": self.hard_pact_features.variant_id,
+            "backend": self.cfg.get("task_backend", "unknown"),
+            "seed": str(self.train_cfg.get("seed", "configured-by-task")),
+            "git_sha": sha,
+            "torch_version": torch.__version__,
+            "python_version": platform.python_version(),
+            "dtype": str(next(self.alg.actor_critic.parameters()).dtype),
+            "hardware": torch.cuda.get_device_name(self.device)
+            if str(self.device).startswith("cuda") and torch.cuda.is_available()
+            else platform.processor() or "cpu",
+        }
+        backend = metadata["backend"]
+        distribution = {
+            "genesis": "genesis-world", "isaacgym": "isaacgym",
+            "isaaclab": "isaaclab",
+        }.get(backend, backend)
+        try:
+            metadata["backend_version"] = importlib_metadata.version(distribution)
+        except importlib_metadata.PackageNotFoundError:
+            metadata["backend_version"] = "unknown"
+        for key, value in metadata.items():
+            self.writer.add_text(f"system/{key}", str(value), 0)
+        self.writer.add_text(
+            "system/config", json.dumps(self.train_cfg, sort_keys=True, default=str), 0
+        )
+
+    def _log_stable_hard_pact_metrics(self, locs):
+        if not hasattr(self, "hard_pact_features"):
+            return
+        metrics = collect_hard_pact_scalars(self.alg, self.hard_pact_features)
+        count = getattr(self, "_rollout_qp_metric_count", 0)
+        if count:
+            metrics.update({
+                key: value / count
+                for key, value in self._rollout_qp_metric_sums.items()
+            })
+        disturbance_count = getattr(self, "_rollout_disturbance_metric_count", 0)
+        if disturbance_count:
+            metrics["disturbance/persistent_active_fraction"] = (
+                self._rollout_disturbance_active_sum / disturbance_count
+            )
+        simulator = self.env.simulator
+        for attr, key in (
+            ("domain_rand_joint_dynamics_progress", "domain_rand/joint_dynamics_progress"),
+            ("domain_rand_mass_com_progress", "domain_rand/mass_com_progress"),
+            ("domain_rand_disturbance_progress", "domain_rand/disturbance_progress"),
+        ):
+            if hasattr(simulator, attr):
+                value = getattr(simulator, attr)
+                metrics[key] = value.float().mean() if isinstance(
+                    value, torch.Tensor
+                ) and value.numel() != 1 else value
+        metrics["system/timesteps"] = float(self.tot_timesteps)
+        metrics["system/wall_time_s"] = float(self.tot_time)
+        metrics["system/iteration_time_s"] = float(
+            locs["collection_time"] + locs["learn_time"]
+        )
+        for name, enabled in self.hard_pact_features.scalar_flags().items():
+            metrics[f"system/features/{name}"] = enabled
+        for name, value in metrics.items():
+            self.writer.add_scalar(name, self._scalar(value), locs["it"])
+
     def log(self, locs, width=80, pad=35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
         self.tot_time += locs['collection_time'] + locs['learn_time']
         iteration_time = locs['collection_time'] + locs['learn_time']
 
         ep_string = f''
+        stable_episode_values = {}
         if locs['ep_infos']:
             for key in locs['ep_infos'][0]:
                 infotensor = torch.tensor([], device=self.device)
@@ -413,8 +551,30 @@ class OnPolicyRunnerPACT:
                         ep_info[key] = ep_info[key].unsqueeze(0)
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 value = torch.mean(infotensor)
+                stable_episode_values[key] = value
                 self.writer.add_scalar('Episode/' + key, value, locs['it'])
+                # Stable reward/tracking namespaces coexist with legacy keys.
+                stable_prefix = "tracking" if "tracking" in key else "reward"
+                self.writer.add_scalar(f"{stable_prefix}/{key}", value, locs['it'])
+                if "success" in key:
+                    self.writer.add_scalar("train/success", value, locs['it'])
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+        # These keys never disappear when an episode boundary is absent.
+        canonical_episode = {
+            "train/success": ("success",),
+            "tracking/linear_velocity": ("rew_tracking_lin_vel", "tracking_lin_vel"),
+            "tracking/angular_velocity": ("rew_tracking_ang_vel", "tracking_ang_vel"),
+            "tracking/terrain_level": ("terrain_level",),
+        }
+        for output_key, candidates in canonical_episode.items():
+            value = next((stable_episode_values[name] for name in candidates
+                          if name in stable_episode_values), float("nan"))
+            self.writer.add_scalar(output_key, value, locs['it'])
+        # Reward-scale names are configuration-stable across all variants.
+        for reward_name in getattr(self.env, "reward_scales", {}):
+            episode_key = f"rew_{reward_name}"
+            value = stable_episode_values.get(episode_key, float("nan"))
+            self.writer.add_scalar(f"reward/{reward_name}", value, locs['it'])
         
         mean_std = self.alg.actor_critic.std.mean()
         
@@ -444,6 +604,7 @@ class OnPolicyRunnerPACT:
         # runner never receives per-environment residuals or solver matrices;
         # this is the sole device-to-host transfer for QP diagnostics.
         self._log_qp_metrics(locs['it'])
+        self._log_stable_hard_pact_metrics(locs)
         for name, value in getattr(self.alg, "last_auxiliary_metrics", {}).items():
             self.writer.add_scalar(f"Loss/auxiliary_{name}", value.item(), locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        
@@ -456,6 +617,11 @@ class OnPolicyRunnerPACT:
             self.writer.add_scalar('Train/mean_episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
             self.writer.add_scalar('Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
             self.writer.add_scalar('Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
+            self.writer.add_scalar('train/return', statistics.mean(locs['rewbuffer']), locs['it'])
+            self.writer.add_scalar('train/episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
+        else:
+            self.writer.add_scalar('train/return', float("nan"), locs['it'])
+            self.writer.add_scalar('train/episode_length', float("nan"), locs['it'])
 
         str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
 

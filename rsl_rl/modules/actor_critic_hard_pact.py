@@ -198,8 +198,14 @@ class ActorCritic_HardPACT(nn.Module):
                  grf_decoder_layers=(128, 128),
                  wrench_decoder_layers=(128, 128),
                  grf_scale=(1.2, 1.2, 2.5) * 4,
-                 wrench_scale=(0.6, 0.6, 0.9924, 0.234403, 0.234403, 0.234403)):
+                 wrench_scale=(0.6, 0.6, 0.9924, 0.234403, 0.234403, 0.234403),
+                 ablation_features="full"):
         super().__init__()
+
+        # Metadata only: every ablation deliberately constructs the identical
+        # module graph and therefore identical state-dict keys.
+        from rsl_rl.hard_pact_ablations import resolve_hard_pact_features
+        self.hard_pact_features = resolve_hard_pact_features(ablation_features)
 
         if cenet_latent_dim != 16 or cenet_velo_dim != 11:
             raise ValueError("HardPACT requires a 16-D latent and 11-D estimator")

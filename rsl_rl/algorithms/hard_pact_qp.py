@@ -1377,6 +1377,12 @@ class HardPACTDifferentiableQP:
             outputs.append((chosen, stage, differentiated_mask, diagnostics))
 
         solution = torch.cat([item[0] for item in outputs]).to(original_dtype)
+        # ``differentiable=False`` is an explicit API guarantee, not merely a
+        # chunk-size hint. This is used by the stop-gradient ablation outside
+        # rollout inference mode, so sever every accidental construction path
+        # (including the exact post-clamp) before returning.
+        if not differentiable:
+            solution = solution.detach()
         stage = torch.cat([item[1] for item in outputs])
         differentiated_mask = torch.cat([item[2] for item in outputs])
         all_diagnostic_keys = set().union(*(item[3].keys() for item in outputs))

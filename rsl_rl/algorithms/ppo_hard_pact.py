@@ -30,6 +30,7 @@
 
 import os
 import time
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
@@ -48,6 +49,7 @@ from legged_gym.dynamics import (
     BardGo2Dynamics,
     wrench_at_point,
 )
+from rsl_rl.hard_pact_ablations import resolve_hard_pact_features
 
 from .pc_grad import PCGrad
 from .hard_pact_bard import corrected_bard_inverse_dynamics_loss
@@ -152,6 +154,8 @@ class PPO_HardPACT:
                  lambda_inverse=1.0,
                  lambda_rollout=1.0,
                  lambda_projection=1.0e-3,
+                 lambda_soft_constraint=1.0e-3,
+                 ablation_variant="full",
                  hard_pact_qp=None,
                  grf_observation_scale=0.01,
                  base_wrench_observation_scale=0.01,
@@ -253,19 +257,28 @@ class PPO_HardPACT:
 
         self.num_pinn_updates = 0
 
-        self.bard_enabled = bool(bard_enabled)
-        self.bard_inverse_enabled = bool(bard_inverse_enabled)
-        self.bard_rollout_enabled = bool(bard_rollout_enabled)
+        self.hard_pact_features = resolve_hard_pact_features(ablation_variant)
+        # The single canonical profile is authoritative. Constructor booleans
+        # remain accepted only for strict compatibility with old checkpoints
+        # and launch configs.
+        self.bard_enabled = self.hard_pact_features.needs_bard
+        self.bard_inverse_enabled = self.hard_pact_features.inverse_loss
+        self.bard_rollout_enabled = self.hard_pact_features.rollout_loss
         self.lambda_inverse = float(lambda_inverse)
         self.lambda_rollout = float(lambda_rollout)
         self.lambda_projection = float(lambda_projection)
+        self.lambda_soft_constraint = float(lambda_soft_constraint)
         if min(
-            self.lambda_inverse, self.lambda_rollout, self.lambda_projection
+            self.lambda_inverse, self.lambda_rollout, self.lambda_projection,
+            self.lambda_soft_constraint,
         ) < 0.0:
             raise ValueError(
                 "physics loss weights must be nonnegative"
             )
-        self.qp_config = HardPACTQPConfig(**(hard_pact_qp or {}))
+        self.qp_config = replace(
+            HardPACTQPConfig(**(hard_pact_qp or {})),
+            enabled=self.hard_pact_features.execution_qp,
+        )
         self.hard_pact_qp = None
         self.last_qp_metrics = {}
         self._qp_full_audit_inputs = None
@@ -278,6 +291,7 @@ class PPO_HardPACT:
         self.last_rollout_dynamics_metrics = {}
         self.last_physics_gradient_metrics = {}
         self.last_auxiliary_metrics = {}
+        self.last_physics_loss_metrics = {}
         self.bard_dynamics = None
         if self.bard_enabled:
             # Configuration paths are repository-relative, while launchers run
@@ -653,15 +667,55 @@ class PPO_HardPACT:
                     ] = finite_fraction
                 self._qp_full_audit_inputs = None
             if len(ppo_losses) == 2:
-                physics_gradient = self.act_optimizer.last_objective_grads[1]
+                reward_gradient, physics_gradient = (
+                    self.act_optimizer.last_objective_grads
+                )
                 finite = torch.isfinite(physics_gradient)
+                reward_finite = torch.isfinite(reward_gradient)
+                safe_reward = torch.where(
+                    reward_finite, reward_gradient, torch.zeros_like(reward_gradient)
+                )
+                safe_physics = torch.where(
+                    finite, physics_gradient, torch.zeros_like(physics_gradient)
+                )
+                cosine = torch.dot(safe_reward, safe_physics) / (
+                    safe_reward.norm() * safe_physics.norm()
+                ).clamp_min(1.0e-12)
                 self.last_physics_gradient_metrics = {
                     "physics_gradient/finite_fraction": finite.float().mean().detach(),
                     "physics_gradient/nonfinite_count": (~finite).sum().detach(),
-                    "physics_gradient/finite_norm": torch.linalg.vector_norm(
-                        torch.where(finite, physics_gradient, torch.zeros_like(physics_gradient))
-                    ).detach(),
+                    "physics_gradient/finite_norm": safe_physics.norm().detach(),
+                    "grad/objective/ppo_norm": safe_reward.norm().detach(),
+                    "grad/objective/physics_norm": safe_physics.norm().detach(),
+                    "grad/objective/physics_zero_fraction": (
+                        safe_physics == 0
+                    ).float().mean().detach(),
+                    "grad/pcgrad/cosine": cosine.detach(),
+                    "grad/pcgrad/conflict_fraction": (
+                        cosine < 0
+                    ).float().detach(),
                 }
+            else:
+                self.last_physics_gradient_metrics = {}
+
+            # Module/group norms are computed from the merged gradients that
+            # will actually be stepped. They are reductions on-device; only
+            # the scalar norms reach TensorBoard.
+            for group in self.act_optimizer.optimizer.param_groups:
+                gradients = [
+                    parameter.grad.reshape(-1) for parameter in group["params"]
+                    if parameter.grad is not None
+                ]
+                if gradients:
+                    flat = torch.cat(gradients)
+                    finite = torch.isfinite(flat)
+                    name = group.get("name", "unnamed").replace("/", "_")
+                    self.last_physics_gradient_metrics[
+                        f"grad/module/{name}_norm"
+                    ] = torch.where(finite, flat, torch.zeros_like(flat)).norm().detach()
+                    self.last_physics_gradient_metrics[
+                        f"grad/module/{name}_nonfinite_fraction"
+                    ] = (~finite).float().mean().detach()
             
             nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
             self.act_optimizer.step()
@@ -923,16 +977,36 @@ class PPO_HardPACT:
         )
 
     def _combine_bard_losses(
-        self, inverse_loss, rollout_loss, projection_loss_value=None
+        self, inverse_loss, rollout_loss, projection_loss_value=None,
+        soft_constraint_loss=None,
     ):
         """Apply independent physics weights before the PCGrad objective."""
         if projection_loss_value is None:
             projection_loss_value = inverse_loss * 0.0
+        if soft_constraint_loss is None:
+            soft_constraint_loss = inverse_loss * 0.0
         return (
             self.lambda_inverse * inverse_loss
             + self.lambda_rollout * rollout_loss
             + self.lambda_projection * projection_loss_value
+            + self.lambda_soft_constraint * soft_constraint_loss
         )
+
+    def _soft_constraint_loss(self, grf_world):
+        """Cheap differentiable force-cone penalty used only by its ablation.
+
+        This path intentionally does not build BARD state or a QP.  It softly
+        enforces ``fz >= 0`` and the same fixed-normal friction pyramid
+        ``|fx|,|fy| <= mu*fz`` used by the hard projection.
+        """
+        mu = float(self.qp_config.friction_coefficient)
+        normal = grf_world[..., 2]
+        violations = torch.stack((
+            F.relu(-normal),
+            F.relu(grf_world[..., 0].abs() - mu * normal),
+            F.relu(grf_world[..., 1].abs() - mu * normal),
+        ), dim=-1)
+        return (violations / float(self.qp_config.force_scale_n)).square().mean()
 
     def _policy_raw_action_from_noise(self, observation, history, noise):
         """Reparameterize one stored policy draw under current parameters."""
@@ -1044,10 +1118,11 @@ class PPO_HardPACT:
         matrices are stored. RNEA is evaluated only for the inverse term, ABA
         only for rollout, and qpth exactly once per minibatch transition.
         """
-        if not self.bard_enabled:
+        if not (self.bard_enabled or self.hard_pact_features.soft_constraint_penalty):
             return nominal_torque.sum() * 0.0
-        qp_ready = self.qp_config.enabled and self.hard_pact_qp is not None
-        if not (self.bard_inverse_enabled or self.bard_rollout_enabled or qp_ready):
+        qp_ready = self.hard_pact_features.execution_qp and self.hard_pact_qp is not None
+        if not (self.bard_inverse_enabled or self.bard_rollout_enabled or qp_ready
+                or self.hard_pact_features.soft_constraint_penalty):
             return nominal_torque.sum() * 0.0
         batch = self.storage.current_hard_pact_batch
         if batch is None:
@@ -1156,6 +1231,10 @@ class PPO_HardPACT:
         else:
             self.last_rollout_dynamics_metrics = {}
 
+        soft_constraint_loss = zero
+        if self.hard_pact_features.soft_constraint_penalty:
+            soft_constraint_loss = self._soft_constraint_loss(grf_world)
+
         # ---------------- sampled differentiable substep QP ---------------
         # Rollout solved every substep under no_grad.  PPO stores one compact
         # stratified-uniform sample per environment and rebuilds only that
@@ -1210,8 +1289,8 @@ class PPO_HardPACT:
             # Gradients enter through sampled_nominal, sample_grf_world, and
             # sample_applied; all state/mechanics/rate-center tensors detach.
             sample_contact_probability = explicit[:, 3:7]
-            qp_result = self.hard_pact_qp.solve(
-                differentiable=True,
+            differentiate_qp = self.hard_pact_features.differentiable_qp
+            qp_arguments = dict(
                 # Equality coefficient M_K.
                 mass_matrix=sample_context.mass_matrix,
                 # Equality RHS contribution -b_K.
@@ -1223,14 +1302,14 @@ class PPO_HardPACT:
                 # Known affine contact acceleration Jdot_f,K*v_K.
                 foot_acceleration_bias=sample_context.foot_acceleration_bias,
                 # Differentiable torque tracking center.
-                tau_nom=sampled_nominal,
+                tau_nom=(sampled_nominal if differentiate_qp else sampled_nominal.detach()),
                 # Differentiable force tracking center in world Newtons.
-                force_pred_world=sample_grf_world,
+                force_pred_world=(sample_grf_world if differentiate_qp else sample_grf_world.detach()),
                 # Differentiable world [force,moment] equality input.
-                wrench_pred_world=sample_applied,
+                wrench_pred_world=(sample_applied if differentiate_qp else sample_applied.detach()),
                 # c_eff keeps every row nondegenerate while retaining the
                 # differentiable contact-probability path into the estimator.
-                contact_probability=sample_contact_probability,
+                contact_probability=(sample_contact_probability if differentiate_qp else sample_contact_probability.detach()),
                 # Exact rollout tau_safe,K-1 reproduces the sampled rate box.
                 previous_torque=batch.get(
                     "sampled_qp_previous_torque",
@@ -1240,6 +1319,17 @@ class PPO_HardPACT:
                 joint_position=sample_q[:, 7:], joint_velocity=sample_v[:, 6:],
                 dt=sample_dt,
             )
+            if differentiate_qp:
+                qp_result = self.hard_pact_qp.solve(
+                    differentiable=True, **qp_arguments
+                )
+            else:
+                # stopgrad pays only for the required forward metric. It does
+                # not retain qpth's KKT graph or any physics-head activation.
+                with torch.no_grad():
+                    qp_result = self.hard_pact_qp.solve(
+                        differentiable=False, **qp_arguments
+                    )
             # m_physics=not(push or reset or timeout or teleport). Sustained
             # wrench and randomized-mass transitions deliberately remain valid.
             valid = ~(
@@ -1259,10 +1349,27 @@ class PPO_HardPACT:
                 contact_slack=qp_result.contact_slack,
                 slack_scale=self.qp_config.slack_scale_m_s2,
             )
+            # stopgrad deliberately computes and reports exactly this metric,
+            # but neither it nor any QP output participates in optimization.
+            if not self.hard_pact_features.projection_loss:
+                qp_loss = qp_loss.detach()
             # Log only the newly recomputed sampled solve, whose status can
             # differ from rollout after policy/head parameters update.
             self.last_qp_metrics = dict(qp_result.metrics or {})
             self.last_qp_metrics["qp/minimal/projection_loss"] = qp_loss.detach()
+            correction = (qp_result.tau_safe - sampled_nominal).detach()
+            intervention = correction.abs().amax(dim=-1) > 1.0e-6
+            self.last_qp_metrics["qp/minimal/intervention_fraction"] = (
+                intervention.float().mean()
+            )
+            if intervention.any():
+                self.last_qp_metrics[
+                    "qp/minimal/intervention_torque_correction_rms"
+                ] = correction[intervention].square().mean().sqrt()
+            else:
+                self.last_qp_metrics[
+                    "qp/minimal/intervention_torque_correction_rms"
+                ] = correction.new_zeros(())
             audit_ran = self.last_qp_metrics.get("qp/full/audit_ran")
             if audit_ran is not None and bool(audit_ran.detach().item()):
                 # Retain only four compact learned QP inputs, and only on a
@@ -1281,6 +1388,13 @@ class PPO_HardPACT:
         # All three weighted physics terms enter the existing PCGrad objective;
         # no extra optimizer owns actor/trunk/head parameters:
         # L_phys=lambda_ID*L_ID+lambda_roll*L_roll+lambda_proj*L_proj.
+        self.last_physics_loss_metrics = {
+            "physics/loss/inverse": inverse_loss.detach(),
+            "physics/loss/rollout": rollout_loss.detach(),
+            "physics/loss/soft_constraint": soft_constraint_loss.detach(),
+        }
         return self._combine_bard_losses(
-            inverse_loss, rollout_loss, qp_loss
+            inverse_loss, rollout_loss,
+            qp_loss if self.hard_pact_features.projection_loss else zero,
+            soft_constraint_loss,
         )
