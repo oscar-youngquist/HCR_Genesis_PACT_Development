@@ -28,6 +28,52 @@ class GenesisSimulator_PACT(Simulator):
         self.first_loop = True
         self.first_loop_feedback = None
 
+    # Canonical HardPACT API. Genesis exposes the floating-base and joint
+    # state separately and returns its quaternion as wxyz.
+    def hard_pact_joint_state(self):
+        return (
+            self._robot.get_dofs_position(self._dof_indices),
+            self._robot.get_dofs_velocity(self._dof_indices),
+        )
+
+    def hard_pact_base_quat_xyzw(self):
+        return self._robot.get_quat()[:, (1, 2, 3, 0)]
+
+    def hard_pact_configuration(self):
+        q, _ = self.hard_pact_joint_state()
+        return torch.cat((self._robot.get_pos(), self.hard_pact_base_quat_xyzw(), q), -1)
+
+    def hard_pact_velocity_world(self):
+        _, qd = self.hard_pact_joint_state()
+        return torch.cat((self._robot.get_vel(), self._robot.get_ang(), qd), -1)
+
+    def hard_pact_foot_forces_world(self):
+        return self._robot.get_links_net_contact_force()[:, self._feet_indices, :]
+
+    def hard_pact_apply_base_wrench_world(self, wrench):
+        base = torch.as_tensor([self._base_link_index], device=self._device)
+        self._robot._solver.apply_links_external_force(
+            force=wrench[:, :3].unsqueeze(1), links_idx=base,
+            envs_idx=None, ref="link_com", local=False,
+        )
+        self._robot._solver.apply_links_external_torque(
+            torque=wrench[:, 3:].unsqueeze(1), links_idx=base,
+            envs_idx=None, ref="link_com", local=False,
+        )
+
+    def hard_pact_capabilities(self):
+        features = {
+            name: True for name in (
+                "ground_friction", "added_base_mass", "base_com_x",
+                "base_com_y", "base_com_z", "control_delay", "kp_scale",
+                "kd_scale", "motor_strength", "armature", "joint_friction",
+                "joint_stiffness", "joint_damping", "push_xy", "push_z",
+                "push_angular", "persistent_force", "persistent_torque",
+            )
+        }
+        return {"backend": "genesis", "supports_domain_rand_curriculum": False,
+                "features": features}
+
     def _create_async_pino_workers(self):
         wb_correct_pino_2_model_ordering = [0,1,2,3,4,5]
         wb_correct_pino_2_model_ordering.extend(self.pino_2_model_joint_act_map)

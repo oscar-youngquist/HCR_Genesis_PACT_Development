@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from torch import Tensor
+import torch
 import numpy as np
 
 """ ********** Base Simulator ********** """
@@ -16,6 +17,71 @@ class Simulator(ABC):
         self._create_sim()
         self._create_envs()
         self._init_buffers()
+
+    # ------------------------------------------------------------------
+    # HardPACT canonical backend boundary
+    # ------------------------------------------------------------------
+    # These small accessors are intentionally simulator-facing.  Everything
+    # above this boundary uses one contract: xyzw quaternions, world-aligned
+    # floating-base twists, configured Go2 joint order, FR/FL/RR/RL feet, SI
+    # forces/wrenches, and actuator torques in Nm.  Backends override only the
+    # calls whose native API differs.
+    def hard_pact_joint_state(self):
+        return self.dof_pos, self.dof_vel
+
+    def hard_pact_base_quat_xyzw(self):
+        return self.base_quat
+
+    def hard_pact_configuration(self):
+        q, _ = self.hard_pact_joint_state()
+        return torch.cat((self.base_pos, self.hard_pact_base_quat_xyzw(), q), -1)
+
+    def hard_pact_velocity_world(self):
+        _, qd = self.hard_pact_joint_state()
+        return torch.cat((self._base_world_lin_vel, self._base_world_ang_vel, qd), -1)
+
+    def hard_pact_root_velocity_world(self):
+        return self.hard_pact_velocity_world()[:, :6]
+
+    def hard_pact_foot_forces_world(self):
+        return self.link_contact_forces[:, self.feet_contact_indices, :]
+
+    def hard_pact_set_executed_torque(self, torque):
+        self._torques = torque
+
+    def hard_pact_executed_torque(self):
+        return self._torques
+
+    def hard_pact_apply_base_wrench_world(self, wrench):
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement world-frame base wrenches"
+        )
+
+    def hard_pact_randomized_parameters(self):
+        """Return realized physical parameters in canonical joint order."""
+        zeros = torch.zeros(
+            self._num_envs, self._num_actions, device=self._device
+        )
+        def expanded(name):
+            value = getattr(self, name, zeros)
+            if value.shape[-1] == 1:
+                value = value.expand(-1, self._num_actions)
+            return value
+        return {
+            "added_base_mass": self._added_base_mass,
+            "base_com_shift": self._base_com_bias,
+            "joint_armature": expanded("_joint_armature"),
+            "joint_friction": expanded("_joint_friction"),
+            "joint_stiffness": expanded("_joint_stiffness"),
+            "joint_damping": expanded("_joint_damping"),
+        }
+
+    def hard_pact_capabilities(self):
+        return {
+            "backend": type(self).__name__,
+            "supports_domain_rand_curriculum": False,
+            "features": {},
+        }
 
     #----- Public methods -----#
     @abstractmethod
@@ -314,7 +380,7 @@ class Simulator(ABC):
             Tensor((num_dof,)): DOF velocity limits of the robot.
         """
         return self._dof_vel_limits
-    
+
     @property
     def base_init_pos(self):
         """Returns the initial base position of the robot.

@@ -145,6 +145,26 @@ def _synthetic_domain_sim(sim_cls, cfg):
 
 
 class TestHardPACTAliases(unittest.TestCase):
+    def test_pact_sim_dt_is_derived_from_control_interval(self):
+        config_classes = (
+            GO2PACTCfg, GO2PACTPosCfg, GO2HardPACTCfg, GO2HardPACTPosCfg,
+        )
+        for config_class in config_classes:
+            with self.subTest(config=config_class.__name__):
+                self.assertEqual(
+                    config_class.sim.dt,
+                    config_class.control.dt / config_class.control.decimation,
+                )
+
+        for task_name, registered in task_registry.env_cfgs.items():
+            if not task_name.startswith("go2_hard_pact"):
+                continue
+            with self.subTest(task=task_name):
+                self.assertEqual(
+                    registered.sim.dt,
+                    registered.control.dt / registered.control.decimation,
+                )
+
     def test_task_registration_and_resolved_configuration_parity(self):
         for name, legacy_task, alias_task, legacy_cfg_cls, alias_cfg_cls, legacy_train_cls, alias_train_cls, _, _ in CASES:
             with self.subTest(name=name):

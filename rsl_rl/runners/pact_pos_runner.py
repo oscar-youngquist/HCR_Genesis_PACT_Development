@@ -82,6 +82,7 @@ class OnPolicyRunnerPACTPos:
             num_critic_obs *= self.env.num_crit_obs_stack
 
         actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
+        self.is_hard_pact_pos = actor_critic_class is ActorCritic_HardPACT_Pos
         gain_spec = None
         actor_extra_kwargs = {}
         reconstruction_indices = None
@@ -270,8 +271,18 @@ class OnPolicyRunnerPACTPos:
                         vals.append(v.float().mean().to(self.device))
 
                 # mean_reward = statistics.mean(rewbuffer) if len(rewbuffer) > 0 else None
-                mean_tracking_lin_vel = torch.stack(vals).mean().item()
-                self.env.simulator._step_domian_rand(it, mean_tracking_lin_vel)
+                if len(ep_infos) > 0 and "rew_tracking_lin_vel" in ep_infos[0] and vals:
+                    mean_tracking_lin_vel = torch.stack(vals).mean().item()
+                if self.is_hard_pact_pos and hasattr(
+                    self.env, "step_domain_rand_curriculum"
+                ):
+                    self.env.step_domain_rand_curriculum(
+                        it, mean_tracking_lin_vel
+                    )
+                else:
+                    self.env.simulator._step_domian_rand(
+                        it, mean_tracking_lin_vel
+                    )
 
                 if self.env.simulator.domain_rand_reward_ema is not None:
                     self.writer.add_scalar('Values/domain_rand_reward_ema',self.env.simulator.domain_rand_reward_ema,it) 
@@ -430,7 +441,7 @@ class OnPolicyRunnerPACTPos:
         print(log_string)
 
     def save(self, path, infos=None):
-        torch.save({
+        checkpoint = {
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'act_optimizer_state_dict': self.alg.act_optimizer.optimizer.state_dict(),
             'enc_optimizer_state_dict': self.alg.enc_optimizer.state_dict(),
@@ -438,7 +449,14 @@ class OnPolicyRunnerPACTPos:
             'decoder_opt_state_dict': self.alg.decoder_optimizer.state_dict(),
             'iter': self.current_learning_iteration,
             'infos': infos,
-            }, path)
+        }
+        if self.is_hard_pact_pos and hasattr(
+            self.env, "domain_rand_curriculum_state_dict"
+        ):
+            checkpoint["hard_pact_domain_rand_curriculum"] = (
+                self.env.domain_rand_curriculum_state_dict()
+            )
+        torch.save(checkpoint, path)
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
@@ -452,7 +470,13 @@ class OnPolicyRunnerPACTPos:
         # Load the VAE decoder model...
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']
-        self.current_learning_iteration = 0
+        curriculum = loaded_dict.get("hard_pact_domain_rand_curriculum")
+        if curriculum is not None and hasattr(
+            self.env, "load_domain_rand_curriculum_state_dict"
+        ):
+            self.env.load_domain_rand_curriculum_state_dict(curriculum)
+        else:
+            self.current_learning_iteration = 0
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):

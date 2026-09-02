@@ -14,6 +14,7 @@ from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
 
 from .grf import GRFProcessingConfig, IntervalGRFProcessor, world_to_yaw_local
 from .ablations import resolve_hard_pact_features
+from .domain_rand_curriculum import HardPACTDomainRandCurriculum
 
 from .transition import (
     DISTURBANCE_CRITIC_DIM,
@@ -31,6 +32,11 @@ class Go2HardPACT(Go2PACT):
 
     def _init_buffers(self):
         self._legacy_task_class._init_buffers(self)
+        self.domain_rand_curriculum = HardPACTDomainRandCurriculum(
+            self.cfg, seed=int(getattr(self.cfg, "seed", 0))
+        )
+        self._apply_domain_rand_curriculum_state()
+        self._refresh_domain_rand_capability_report()
         self.hard_pact_features = resolve_hard_pact_features(
             getattr(self.cfg, "ablation_variant", "full")
         )
@@ -156,6 +162,62 @@ class Go2HardPACT(Go2PACT):
             torch.arange(self.num_envs, device=self.device)
         )
 
+    def _apply_domain_rand_curriculum_state(self):
+        """Publish neutral effective ranges to the backend's reset samplers."""
+        ranges = self.domain_rand_curriculum.effective_ranges()
+        sim = self.simulator
+        sim.domain_rand_joint_dynamics_progress = self.domain_rand_curriculum.progress["joint_dynamics"]
+        sim.domain_rand_mass_com_progress = self.domain_rand_curriculum.progress["mass_com"]
+        sim.domain_rand_disturbance_progress = self.domain_rand_curriculum.progress["disturbance"]
+        # Keep the legacy reporting attributes populated for the inherited
+        # reset/logging code; progression itself remains owned by the neutral
+        # controller above.
+        sim.domain_rand_phase = self.domain_rand_curriculum.phase
+        sim.domain_rand_reward_ema = self.domain_rand_curriculum.reward_ema
+        sim.required_reward = self.domain_rand_curriculum.required_reward
+        sim.mass_max_value = ranges["added_base_mass"][1]
+        sim.com_delta_x_value = max(abs(v) for v in ranges["base_com_x"])
+        sim.com_delta_y_value = max(abs(v) for v in ranges["base_com_y"])
+        sim.com_delta_z_value = max(abs(v) for v in ranges["base_com_z"])
+        sim.com_delta_z_val_bounds = list(ranges["base_com_z"])
+        sim.joint_friction_bound_current = list(ranges["joint_friction"])
+        sim.joint_stiffness_bound_current = list(ranges["joint_stiffness"])
+        sim.joint_damping_bound_current = list(ranges["joint_damping"])
+        sim.push_value = max(abs(v) for v in ranges["push_xy"])
+        sim.vert_value = abs(ranges["push_z"][0])
+        sim.angular_push_value = max(abs(v) for v in ranges["push_angular"])
+
+    def _refresh_domain_rand_capability_report(self):
+        """Expose requested/effective ranges without overstating a backend.
+
+        A backend may report individual implemented APIs while keeping the
+        aggregate support flag false until its real GPU curriculum smoke has
+        passed.  This makes unsupported/reset-only behavior visible instead of
+        silently treating a requested range as effective.
+        """
+        capabilities = self.simulator.hard_pact_capabilities()
+        self.supports_domain_rand_curriculum = bool(
+            capabilities.get("supports_domain_rand_curriculum", False)
+        )
+        self.domain_rand_capability_report = self.domain_rand_curriculum.report(
+            capabilities.get("features", {})
+        )
+
+    def step_domain_rand_curriculum(self, iteration, mean_reward=None):
+        """Advance once per PPO iteration and update backend reset ranges."""
+        changed = self.domain_rand_curriculum.advance(iteration, mean_reward)
+        self._apply_domain_rand_curriculum_state()
+        self._refresh_domain_rand_capability_report()
+        return changed
+
+    def domain_rand_curriculum_state_dict(self):
+        return self.domain_rand_curriculum.state_dict()
+
+    def load_domain_rand_curriculum_state_dict(self, state):
+        self.domain_rand_curriculum.load_state_dict(state)
+        self._apply_domain_rand_curriculum_state()
+        self._refresh_domain_rand_capability_report()
+
     def configure_hard_pact_substep_qp(self, actor_critic, bard_dynamics, qp):
         """Bind shared inference objects without duplicating model memory."""
         self._hard_pact_actor_critic = actor_critic
@@ -204,10 +266,9 @@ class Go2HardPACT(Go2PACT):
         return torch.einsum("bij,bj->bi", rotation, point_body)
 
     def _hard_pact_grf_post_physics_substep(self):
-        raw = self.simulator._robot.get_links_net_contact_force()[
-            :, self.simulator.feet_indices, :
-        ]
-        self.grf_processor.update_substep(raw)
+        self.grf_processor.update_substep(
+            self.simulator.hard_pact_foot_forces_world()
+        )
 
     def _persistent_component_settings(self, component):
         cfg = self.cfg.domain_rand
@@ -332,25 +393,76 @@ class Go2HardPACT(Go2PACT):
             )
 
     def _current_base_quat_xyzw(self):
+        accessor = getattr(self.simulator, "hard_pact_base_quat_xyzw", None)
+        if accessor is not None:
+            return accessor()
         robot = self.simulator._robot
-        if hasattr(robot, "get_quat"):
-            quat_wxyz = robot.get_quat()
-            return quat_wxyz[:, (1, 2, 3, 0)]
-        return self.simulator.base_quat
+        return robot.get_quat()[:, (1, 2, 3, 0)]
+
+    def _canonical_joint_state(self):
+        accessor = getattr(self.simulator, "hard_pact_joint_state", None)
+        if accessor is not None:
+            return accessor()
+        # Retain compatibility with the lightweight legacy simulator mocks.
+        if hasattr(self.simulator, "_dof_pos"):
+            return self.simulator._dof_pos, self.simulator._dof_vel
+        robot = self.simulator._robot
+        return (robot.get_dofs_position(self.simulator._dof_indices),
+                robot.get_dofs_velocity(self.simulator._dof_indices))
+
+    def _canonical_configuration(self, quat_override=None):
+        accessor = getattr(self.simulator, "hard_pact_configuration", None)
+        if accessor is not None:
+            configuration = accessor()
+            if quat_override is None:
+                return configuration
+            return torch.cat((configuration[:, :3], quat_override,
+                              configuration[:, 7:]), -1)
+        q, _ = self._canonical_joint_state()
+        quaternion = (
+            self._current_base_quat_xyzw()
+            if quat_override is None else quat_override
+        )
+        return torch.cat((self.simulator._robot.get_pos(),
+                          quaternion, q), -1)
+
+    def _canonical_velocity_world(self):
+        accessor = getattr(self.simulator, "hard_pact_velocity_world", None)
+        if accessor is not None:
+            return accessor()
+        _, qd = self._canonical_joint_state()
+        robot = self.simulator._robot
+        return torch.cat((robot.get_vel(), robot.get_ang(), qd), -1)
+
+    def _canonical_randomized_parameters(self):
+        accessor = getattr(self.simulator, "hard_pact_randomized_parameters", None)
+        if accessor is not None:
+            return accessor()
+        sim = self.simulator
+        return {
+            "added_base_mass": self._realized_added_mass,
+            "base_com_shift": self._realized_com_shift_body,
+            "joint_armature": sim._joint_armature,
+            "joint_friction": sim._joint_friction,
+            "joint_stiffness": sim._joint_stiffness,
+            "joint_damping": sim._joint_damping,
+        }
 
     def _apply_sustained_world_wrench(self, wrench_world):
         """The only simulator external-wrench call made by HardPACT."""
-        simulator = self.simulator
-        base_link = torch.as_tensor(
-            [simulator._base_link_index], device=self.device, dtype=torch.long
-        )
-        solver = simulator._robot._solver
+        apply = getattr(self.simulator, "hard_pact_apply_base_wrench_world", None)
+        if apply is not None:
+            apply(wrench_world)
+            return
+        # Compatibility for the tiny legacy unit-test simulator mock.
+        base = torch.as_tensor([self.simulator._base_link_index], device=self.device)
+        solver = self.simulator._robot._solver
         solver.apply_links_external_force(
-            force=wrench_world[:, :3].unsqueeze(1), links_idx=base_link,
+            force=wrench_world[:, :3].unsqueeze(1), links_idx=base,
             envs_idx=None, ref="link_com", local=False,
         )
         solver.apply_links_external_torque(
-            torque=wrench_world[:, 3:].unsqueeze(1), links_idx=base_link,
+            torque=wrench_world[:, 3:].unsqueeze(1), links_idx=base,
             envs_idx=None, ref="link_com", local=False,
         )
 
@@ -395,11 +507,13 @@ class Go2HardPACT(Go2PACT):
         # `_torques` is now the exact safe command about to be sent to
         # Genesis.  The interval value remains the authoritative BARD torque.
         if hasattr(self, "_interval_executed_torque_sum"):
-            self._interval_executed_torque_sum.add_(self.simulator._torques)
+            getter = getattr(self.simulator, "hard_pact_executed_torque", None)
+            executed = getter() if getter is not None else self.simulator._torques
+            self._interval_executed_torque_sum.add_(executed)
             self._interval_executed_torque_count.add_(1.0)
             self._interval_executed_torque_peak.copy_(torch.maximum(
                 self._interval_executed_torque_peak,
-                self.simulator._torques.abs(),
+                executed.abs(),
             ))
         # The equivalent inertial wrench is deliberately label-only: Genesis
         # already realizes the randomized mass and CoM in its dynamics.
@@ -432,22 +546,12 @@ class Go2HardPACT(Go2PACT):
             simulator = self.simulator
             # Refresh actuated q_k directly from Genesis immediately before
             # actuation; the control-rate cached state may be one substep old.
-            joint_position = simulator._robot.get_dofs_position(
-                simulator._dof_indices
-            )
+            joint_position, joint_velocity = self._canonical_joint_state()
             # Refresh qdot_k for the same reason and timestamp.
-            joint_velocity = simulator._robot.get_dofs_velocity(
-                simulator._dof_indices
-            )
             # Simulator configuration q_sim=[p_WB(3),quat_xyzw(4),q_joints(12)].
-            q_simulator = torch.cat((
-                simulator._robot.get_pos(), quat, joint_position,
-            ), dim=-1)
+            q_simulator = self._canonical_configuration(quat)
             # Simulator velocity v_sim=[v_WB^W(3),omega_WB^W(3),qdot(12)].
-            v_world = torch.cat((
-                simulator._robot.get_vel(), simulator._robot.get_ang(),
-                joint_velocity,
-            ), dim=-1)
+            v_world = self._canonical_velocity_world()
 
             # tau_nom,k = Kp(q_d-q_k)-Kd*qdot_k+tau_ff.  The legacy feedback
             # helper supplies the task's exact gains/default-pose convention.
@@ -497,14 +601,7 @@ class Go2HardPACT(Go2PACT):
             )
             # All realized dynamics parameters are measured/detached by the
             # BARD adapter; they alter M/b/J but are never learned QP inputs.
-            parameters = {
-                "added_base_mass": self._realized_added_mass,
-                "base_com_shift": self._realized_com_shift_body,
-                "joint_armature": simulator._joint_armature,
-                "joint_friction": simulator._joint_friction,
-                "joint_stiffness": simulator._joint_stiffness,
-                "joint_damping": simulator._joint_damping,
-            }
+            parameters = self._canonical_randomized_parameters()
             # One kinematic update builds M(q_k), b(q_k,v_k), J_f(q_k),
             # J_b(q_k), and Jdot_f(q_k,v_k)*v_k for this substep.
             context = self._hard_pact_bard_dynamics.build_context(
@@ -551,7 +648,11 @@ class Go2HardPACT(Go2PACT):
             # Record elapsed milliseconds for interval diagnostics.
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             # This is the only torque command sent to Genesis for substep k.
-            simulator._torques = result.tau_safe
+            setter = getattr(simulator, "hard_pact_set_executed_torque", None)
+            if setter is None:
+                simulator._torques = result.tau_safe
+            else:
+                setter(result.tau_safe)
             # Delta_tau_k is the projection correction used by L_proj/logging.
             correction = result.tau_safe - tau_nom
             # Flatten [foot,XYZ] slack to its fixed 12-D transition ordering.
@@ -741,30 +842,27 @@ class Go2HardPACT(Go2PACT):
 
     def _capture_bard_pre_state(self):
         simulator = self.simulator
-        self._bard_pre_q_simulator = torch.cat((
-            simulator._base_pos,
-            simulator._base_quat,
-            simulator._dof_pos,
-        ), dim=-1).clone()
-        self._bard_pre_v_world_simulator = torch.cat((
-            simulator._robot.get_vel(),
-            simulator._robot.get_ang(),
-            simulator._dof_vel,
-        ), dim=-1).clone()
+        self._bard_pre_q_simulator = self._canonical_configuration().clone()
+        self._bard_pre_v_world_simulator = self._canonical_velocity_world().clone()
 
     def _capture_bard_post_state(self):
         simulator = self.simulator
-        self._bard_post_v_world_simulator = torch.cat((
-            simulator._robot.get_vel(),
-            simulator._robot.get_ang(),
-            simulator._robot.get_dofs_velocity(simulator._dof_indices),
-        ), dim=-1).clone()
+        self._bard_post_v_world_simulator = self._canonical_velocity_world().clone()
 
     def _post_physics_step_callback(self):
         """Observe legacy push events without changing legacy push logic."""
-        velocity_before = self.simulator._robot.get_dofs_velocity()[:, :6].clone()
+        root_velocity = getattr(
+            self.simulator, "hard_pact_root_velocity_world", None
+        )
+        velocity_before = (
+            root_velocity() if root_velocity is not None
+            else self.simulator._robot.get_dofs_velocity()[:, :6]
+        ).clone()
         self._legacy_task_class._post_physics_step_callback(self)
-        velocity_after = self.simulator._robot.get_dofs_velocity()[:, :6]
+        velocity_after = (
+            root_velocity() if root_velocity is not None
+            else self.simulator._robot.get_dofs_velocity()[:, :6]
+        )
         self._hard_pact_push_event_mask.copy_(
             (velocity_after != velocity_before).any(dim=-1, keepdim=True)
         )
@@ -798,12 +896,13 @@ class Go2HardPACT(Go2PACT):
         }
 
     def _capture_realized_inertial_randomization(self):
+        parameters = self._canonical_randomized_parameters()
         if bool(self.cfg.domain_rand.randomize_base_mass):
-            self._realized_added_mass.copy_(self.simulator._added_base_mass)
+            self._realized_added_mass.copy_(parameters["added_base_mass"])
         else:
             self._realized_added_mass.zero_()
         if bool(self.cfg.domain_rand.randomize_com_displacement):
-            self._realized_com_shift_body.copy_(self.simulator._base_com_bias)
+            self._realized_com_shift_body.copy_(parameters["base_com_shift"])
         else:
             self._realized_com_shift_body.zero_()
 
@@ -811,7 +910,10 @@ class Go2HardPACT(Go2PACT):
         pending = self._pending_disturbance_transition
         reset = self.reset_buf.bool().reshape(-1, 1)
         timeout = self.time_out_buf.bool().reshape(-1, 1)
-        teleport = self.non_failure_reset_buf.bool().reshape(-1, 1)
+        non_failure_reset = getattr(
+            self, "non_failure_reset_buf", torch.zeros_like(self.reset_buf)
+        )
+        teleport = non_failure_reset.bool().reshape(-1, 1)
         push_event = self._hard_pact_push_event_mask.clone()
         torque_divisor = self._interval_executed_torque_count.clamp_min(1.0)
         fields = {
@@ -836,10 +938,10 @@ class Go2HardPACT(Go2PACT):
             "interval_executed_torque": (
                 self._interval_executed_torque_sum / torque_divisor
             ).clone(),
-            "joint_armature": self.simulator._joint_armature.clone(),
-            "joint_friction": self.simulator._joint_friction.clone(),
-            "joint_stiffness": self.simulator._joint_stiffness.clone(),
-            "joint_damping": self.simulator._joint_damping.clone(),
+            "joint_armature": self._canonical_randomized_parameters()["joint_armature"].clone(),
+            "joint_friction": self._canonical_randomized_parameters()["joint_friction"].clone(),
+            "joint_stiffness": self._canonical_randomized_parameters()["joint_stiffness"].clone(),
+            "joint_damping": self._canonical_randomized_parameters()["joint_damping"].clone(),
             "push_event_mask": push_event,
             "reset_mask": reset,
             "timeout_mask": timeout,
@@ -1026,10 +1128,11 @@ class Go2HardPACT(Go2PACT):
             # The PACTPos alias has no feedforward half; retain its legacy
             # feedback-only torque convention without widening its actions.
             feedforward_torque = torch.zeros_like(desired_position)
+        joint_position, joint_velocity = self._canonical_joint_state()
         nominal_torque = feedforward_torque + self._get_pinn_feedback(
             desired_position,
-            self.simulator._dof_pos,
-            self.simulator._dof_vel,
+            joint_position,
+            joint_velocity,
         )
         self._pending_action_replay_transition = {
             "sampled_action_delay": delay.to(torch.int16).unsqueeze(-1),

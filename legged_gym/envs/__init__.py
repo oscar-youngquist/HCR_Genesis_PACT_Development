@@ -118,7 +118,7 @@ from legged_gym.envs.go2.go2_hard_pact.ablations import (
     HARD_PACT_BACKENDS, HARD_PACT_VARIANTS,
 )
 from legged_gym.envs.go2.go2_hard_pact.ablation_configs import (
-    make_hard_pact_variant_configs,
+    make_hard_pact_variant_configs, make_hard_pact_pos_backend_configs,
 )
 
 from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import GO2HardPACTPosCfg, GO2HardPACTPosCfgPPO
@@ -182,6 +182,14 @@ for _hard_backend in HARD_PACT_BACKENDS:
         f"go2_hard_pact_{_hard_backend}",
         Go2HardPACT, _env_cfg(), _ppo_cfg(),
     )
+    if _hard_backend in ("genesis", "isaaclab"):
+        _pos_env_cfg, _pos_ppo_cfg = make_hard_pact_pos_backend_configs(
+            _hard_backend
+        )
+        task_registry.register(
+            f"go2_hard_pact_pos_{_hard_backend}", Go2HardPACTPos,
+            _pos_env_cfg(), _pos_ppo_cfg(),
+        )
 
 task_registry.register("go2_kite", Go2KITE, GO2KITECfg(), GO2KITECfgPPO())
 task_registry.register("go2_kite_baseline", Go2KITEBaseline, GO2KITEBaselineCfg(), GO2KITEBaselineCfgPPO())

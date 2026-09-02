@@ -299,8 +299,8 @@ class IsaacLabSimulator(Simulator):
         # Add contact sensors
         contact_sensor_cfg = ContactSensorCfg(
             prim_path="/World/envs/env_.*/" + self._cfg.asset.name + "/.*", # track all links of the robot, but only the ones specified in cfg will be used for termination and penalty
-            update_period=self._control_dt,                      # update every control step
-            history_length=1,                       # keep contact history of last 2 steps
+            update_period=self._contact_sensor_update_period(),
+            history_length=self._contact_sensor_history_length(),
             debug_vis=not self._headless,           # visualize contact points if not headless
         )
         
@@ -383,12 +383,11 @@ class IsaacLabSimulator(Simulator):
         self._penalized_contact_indices = find_link_contact_indices(
             self._cfg.asset.penalize_contacts_on)
         print(f"Penalized contact link indices: {self._penalized_contact_indices}")
-        self._feet_names = [
-            link for link in self._robot.body_names if self._cfg.asset.foot_name in link
-        ]
+        self._feet_names = self._resolve_feet_names()
         # the order of bodies in contact sensors is different from the order of bodies in the robot articulation, so we need to find indices separately
-        self._feet_contact_indices = find_link_contact_indices(self._feet_names)
-        self._feet_indices = find_link_indices(self._feet_names)
+        self._feet_contact_indices, self._feet_indices = self._resolve_feet_indices(
+            find_link_contact_indices, find_link_indices
+        )
         print(f"feet names: {self._feet_names}")
         assert len(self._feet_indices) > 0
         # get base link index in the robot articulation
@@ -421,6 +420,24 @@ class IsaacLabSimulator(Simulator):
         # randomize pd gain
         if self._cfg.domain_rand.randomize_pd_gain:
             self._randomize_pd_gain(torch.arange(self._num_envs))
+
+    def _contact_sensor_update_period(self):
+        return self._control_dt
+
+    def _contact_sensor_history_length(self):
+        return 1
+
+    def _resolve_feet_names(self):
+        return [
+            link for link in self._robot.body_names
+            if self._cfg.asset.foot_name in link
+        ]
+
+    def _resolve_feet_indices(self, find_contact_indices, find_body_indices):
+        return (
+            find_contact_indices(self._feet_names),
+            find_body_indices(self._feet_names),
+        )
     
     def _init_buffers(self):
         self._base_pos = torch.zeros_like(self._robot.data.root_link_pos_w)
@@ -653,7 +670,7 @@ class IsaacLabSimulator(Simulator):
             torques = actions_scaled
         else:
             raise NameError(f"Unknown controller type: {control_type}")
-        
+
         self._robot.set_joint_effort_target(
                 torch.clip(torques, -self.torque_limits, self.torque_limits),
                 self._dof_indices
@@ -790,7 +807,7 @@ class IsaacLabSimulator(Simulator):
         damping = damping.repeat(1, self._num_actions)
         # refer to https://isaac-sim.github.io/IsaacLab/main/source/api/lab/isaaclab.assets.html#isaaclab.assets.Articulation.write_joint_damping_to_sim
         self._robot.write_joint_damping_to_sim(damping, self._dof_indices, env_ids)
-        
+
     def _randomize_pd_gain(self, env_ids):
         self._kp_scale[env_ids] = torch_rand_float(
                 self._cfg.domain_rand.kp_range[0], self._cfg.domain_rand.kp_range[1], (len(env_ids), self._num_actions), device=self._device)
@@ -872,7 +889,7 @@ class IsaacLabSimulator(Simulator):
             Tensor ((num_dof, 2)): DOF position limits of the robot.
         """
         return self._robot.data.soft_joint_pos_limits[0, self._dof_indices, :]
-    
+
     @property
     def dof_vel_limits(self):
         """Returns the DOF velocity limits of the robot.
@@ -927,7 +944,7 @@ class IsaacLabSimulator(Simulator):
         """
         # return self._contact_sensors.data.force_matrix_w.sum(dim=-2)
         return self._contact_sensors.data.net_forces_w
-    
+
     @property
     def torques(self):
         """Returns the torques applied to the robot's joints.

@@ -90,11 +90,12 @@ class OnPolicyRunnerPACT:
             num_critic_obs *= self.env.num_crit_obs_stack
 
         actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
+        self.is_hard_pact = actor_critic_class is ActorCritic_HardPACT
         gain_spec = None
         actor_extra_kwargs = {}
         reconstruction_indices = None
         reconstruction_dim = self.env.num_privileged_obs
-        if actor_critic_class is ActorCritic_HardPACT:
+        if self.is_hard_pact:
             self.hard_pact_features = resolve_hard_pact_features(
                 self.alg_cfg.get("ablation_variant", "full")
             )
@@ -164,7 +165,7 @@ class OnPolicyRunnerPACT:
         self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], \
                               [reconstruction_dim], [self.env.num_obs_hist*self.env.num_obs], \
                               [2*self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]], [self.env.wb_dim])
-        if actor_critic_class is ActorCritic_HardPACT:
+        if self.is_hard_pact:
             delay_range = self.env.cfg.domain_rand.ctrl_delay_step_range
             self.alg.storage.configure_action_replay(int(delay_range[1]))
             # Limits are backend properties, not learned transition data.
@@ -173,9 +174,9 @@ class OnPolicyRunnerPACT:
             if self.hard_pact_features.execution_qp:
                 simulator = self.env.simulator
                 self.alg.configure_hard_pact_qp(
-                    simulator._torque_limits,
+                    simulator.torque_limits,
                     simulator.dof_pos_limits_hard,
-                    simulator._dof_vel_limits,
+                    simulator.dof_vel_limits,
                 )
                 # Reuse the same BARD model and qpth layer for rollout and PPO;
                 # duplicating either would waste substantial GPU memory.
@@ -335,8 +336,18 @@ class OnPolicyRunnerPACT:
                         vals.append(v.float().mean().to(self.device))
 
                 # mean_reward = statistics.mean(rewbuffer) if len(rewbuffer) > 0 else None
-                mean_tracking_lin_vel = torch.stack(vals).mean().item()
-                self.env.simulator._step_domian_rand(it, mean_tracking_lin_vel)
+                if len(ep_infos) > 0 and "rew_tracking_lin_vel" in ep_infos[0] and vals:
+                    mean_tracking_lin_vel = torch.stack(vals).mean().item()
+                if self.is_hard_pact and hasattr(
+                    self.env, "step_domain_rand_curriculum"
+                ):
+                    self.env.step_domain_rand_curriculum(
+                        it, mean_tracking_lin_vel
+                    )
+                else:
+                    self.env.simulator._step_domian_rand(
+                        it, mean_tracking_lin_vel
+                    )
 
                 if self.env.simulator.domain_rand_reward_ema is not None:
                     self.writer.add_scalar('Values/domain_rand_reward_ema',self.env.simulator.domain_rand_reward_ema,it) 
@@ -668,7 +679,7 @@ class OnPolicyRunnerPACT:
         print(log_string)
 
     def save(self, path, infos=None):
-        torch.save({
+        checkpoint = {
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'act_optimizer_state_dict': self.alg.act_optimizer.optimizer.state_dict(),
             'enc_optimizer_state_dict': self.alg.enc_optimizer.state_dict(),
@@ -676,7 +687,14 @@ class OnPolicyRunnerPACT:
             'decoder_opt_state_dict': self.alg.decoder_optimizer.state_dict(),
             'iter': self.current_learning_iteration,
             'infos': infos,
-            }, path)
+        }
+        if self.is_hard_pact and hasattr(
+            self.env, "domain_rand_curriculum_state_dict"
+        ):
+            checkpoint["hard_pact_domain_rand_curriculum"] = (
+                self.env.domain_rand_curriculum_state_dict()
+            )
+        torch.save(checkpoint, path)
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
@@ -690,7 +708,14 @@ class OnPolicyRunnerPACT:
         # Load the VAE decoder model...
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']
-        self.current_learning_iteration = 0
+        curriculum = loaded_dict.get("hard_pact_domain_rand_curriculum")
+        if curriculum is not None and hasattr(
+            self.env, "load_domain_rand_curriculum_state_dict"
+        ):
+            self.env.load_domain_rand_curriculum_state_dict(curriculum)
+        else:
+            # Preserve the historical PACT resume behavior for legacy tasks.
+            self.current_learning_iteration = 0
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):

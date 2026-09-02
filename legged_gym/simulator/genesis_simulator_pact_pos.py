@@ -19,6 +19,37 @@ if SIMULATOR == "genesis":
 
 """ ********** Genesis Simulator ********** """
 class GenesisSimulator_PACT_Pos(Simulator):
+    # Match Genesis PACT's canonical HardPACT adapter for position pretraining.
+    def hard_pact_joint_state(self):
+        return (
+            self._robot.get_dofs_position(self._dof_indices),
+            self._robot.get_dofs_velocity(self._dof_indices),
+        )
+
+    def hard_pact_base_quat_xyzw(self):
+        return self._robot.get_quat()[:, (1, 2, 3, 0)]
+
+    def hard_pact_configuration(self):
+        q, _ = self.hard_pact_joint_state()
+        return torch.cat((self._robot.get_pos(), self.hard_pact_base_quat_xyzw(), q), -1)
+
+    def hard_pact_velocity_world(self):
+        _, qd = self.hard_pact_joint_state()
+        return torch.cat((self._robot.get_vel(), self._robot.get_ang(), qd), -1)
+
+    def hard_pact_foot_forces_world(self):
+        return self._robot.get_links_net_contact_force()[:, self._feet_indices, :]
+
+    def hard_pact_apply_base_wrench_world(self, wrench):
+        base = torch.as_tensor([self._base_link_index], device=self._device)
+        self._robot._solver.apply_links_external_force(
+            force=wrench[:, :3].unsqueeze(1), links_idx=base,
+            envs_idx=None, ref="link_com", local=False,
+        )
+        self._robot._solver.apply_links_external_torque(
+            torque=wrench[:, 3:].unsqueeze(1), links_idx=base,
+            envs_idx=None, ref="link_com", local=False,
+        )
     def __init__(self, cfg, sim_params: dict, device, headless):
         self._sim_params = sim_params
         super().__init__(cfg, sim_params, device, headless)

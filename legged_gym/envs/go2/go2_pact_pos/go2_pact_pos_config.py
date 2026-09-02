@@ -66,7 +66,9 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
 
     class sim:
         # Common
-        dt = 0.002                 # 500 Hz
+        # Assigned from control.dt / control.decimation after the complete
+        # environment config class is defined. Keep one timing source of truth.
+        dt = None
         substeps = 1
         # For Genesis
         max_collision_pairs = 100  # More collision pairs will occupy more GPU memory and slow down the simulation
@@ -462,6 +464,13 @@ class GO2PACTPosCfg( LeggedRobotCfg ):
             lin_vel_y = [-1.0, 1.0]   # min max [m/s]
             ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
             heading = [-3.14, 3.14]
+
+# A nested ``sim`` class is declared before ``control`` above, so derive its
+# physics timestep only after Python has finished constructing GO2PACTPosCfg.
+GO2PACTPosCfg.sim.dt = (
+    GO2PACTPosCfg.control.dt / GO2PACTPosCfg.control.decimation
+)
+
 
 class GO2PACTPosCfgPPO( LeggedRobotCfgPPO ):
     seed = 1
