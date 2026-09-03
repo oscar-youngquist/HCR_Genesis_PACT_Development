@@ -53,7 +53,7 @@ def compose_generalized_force(
     control_torque, foot_jacobians, interval_grf_world,
     base_jacobian, applied_wrench_world,
 ):
-    r"""Compose the 18-D force passed to BARD ABA.
+    r"""Compose the 18-D generalized force used by forward dynamics.
 
     All inputs are already expressed at the cached transition state and in
     canonical ``[base linear, base angular, FR, FL, RR, RL joints]`` order:
@@ -66,7 +66,7 @@ def compose_generalized_force(
 
     The Jacobians are measured geometry, not learned quantities, so they are
     detached.  Predicted force/wrench and control torque deliberately are not:
-    their gradients must pass through this composition and through ABA.
+    their gradients pass through this composition and the custom linear solve.
     """
     # A floating base is unactuated: S^T tau = [0_6, tau_control].
     actuation = torch.cat((
@@ -89,7 +89,7 @@ def differentiable_bard_rollout_loss(
     control_dt, push_event_mask, reset_mask, timeout_mask, teleport_mask,
     increment_rate_scales=BARD_ROLLOUT_INCREMENT_RATE_SCALES,
 ):
-    r"""Integrate one differentiable BARD ABA step and score its velocity.
+    r"""Integrate one differentiable fixed-mechanics step and score velocity.
 
     This is the HardPACT rollout/PINN objective.  The reusable ``context`` has
     already converted and detached the measured state, installed each
@@ -104,13 +104,24 @@ def differentiable_bard_rollout_loss(
 
         g=S^T\tau_{\rm control}+J_f^T\hat F+J_b^T\hat W_{\rm applied}.
 
-    ``context.aba`` evaluates the official articulated-body algorithm with
-    the realized inertias, armature, and passive-force convention shared by
-    the corrected inverse loss:
+    The context caches detached fixed mechanics
 
     .. math::
 
-        \hat{\dot v}_t=\operatorname{ABA}(q_t,v_t,g;\theta_{\rm rand}).
+        M_{\rm eff}=\operatorname{CRBA}(q_t;\theta_{\rm rand})+D_{\rm armature},
+        \qquad b=\operatorname{RNEA}(q_t,v_t,0;\theta_{\rm rand}),
+
+    where the existing ``context.rnea(0)`` convention already includes joint
+    friction, stiffness, and damping. Forward dynamics is the equivalent
+
+    .. math::
+
+        \hat{\dot v}_t=M_{\rm eff}^{-1}(g-b).
+
+    A custom solve differentiates only its right-hand side,
+    :math:`\bar g=M_{\rm eff}^{-T}\bar{\dot v}`, avoiding BARD's large
+    ABA/BiCGSTAB autograd graph. Official ``context.aba`` remains available
+    as a reference path in parity tests.
 
     Compare velocity *increments*, rather than absolute endpoint velocities:
 
@@ -150,7 +161,7 @@ def differentiable_bard_rollout_loss(
     Sustained-wrench and randomized mass/CoM samples therefore remain valid.
     Measured state, targets, timestep, randomized parameters, and Jacobians
     are detached; gradients remain connected to control torque, predicted GRF,
-    and predicted applied wrench through the official ABA computation.
+    and predicted applied wrench through the fixed-mechanics solve.
     """
     if context.foot_jacobians is None or context.base_jacobian is None:
         raise ValueError("rollout context requires cached force Jacobians")
@@ -158,12 +169,12 @@ def differentiable_bard_rollout_loss(
         raise ValueError("rollout context requires a cached post-step velocity")
     # g = S^T tau_control + J_f^T F_hat + J_b^T W_hat_applied.
     generalized_force = compose_generalized_force(
-        control_torque, context.foot_jacobians, interval_grf_world,
-        context.base_jacobian, applied_wrench_world,
+        control_torque, context.foot_jacobians.detach(), interval_grf_world,
+        context.base_jacobian.detach(), applied_wrench_world,
     )
-    # q_t, v_t, theta_rand, passive terms, and armature live in the cached
-    # context.  Only g is differentiable at this call boundary.
-    acceleration = context.aba(generalized_force)
+    # M_eff and b are detached cached mechanics. Only g is differentiable at
+    # this boundary; context.rnea(0) already contributed passive forces to b.
+    acceleration = context.forward_dynamics(generalized_force)
 
     # Work in velocity increments. BARD stores URDF joint order; `_canonical`
     # maps both measured endpoints to simulator FR/FL/RR/RL joint order.

@@ -1156,7 +1156,9 @@ class PPO_HardPACT:
         The rollout objective instead forms
 
             g = S^T tau_control + J_f^T F_hat + J_b^T W_hat_applied,
-            Delta v_hat = Delta t * ABA(q_t,v_t,g;theta_rand),
+            M_eff = CRBA(q_t;theta_rand) + D_armature,
+            b = RNEA(q_t,v_t,0;theta_rand),
+            Delta v_hat = Delta t * M_eff^{-1}(g-b),
             Delta v_obs = v_{t+1} - v_t.
 
         Its base-linear, base-angular, and joint residual blocks are normalized
@@ -1165,13 +1167,15 @@ class PPO_HardPACT:
         scores are averaged so the 12 joint coordinates cannot dominate only
         because that block is wider.
 
-        It retains gradients through ``tau_control``, both physics heads, and
-        official BARD ABA.  The inverse and rollout losses share their one
+        It retains gradients through ``tau_control`` and both physics heads.
+        The detached 18x18 solve uses an RHS-only custom VJP; official BARD
+        ABA remains a test/reference path. The inverse and rollout losses share their one
         control-rate context.  A second context is unavoidable for projection:
         it represents the sampled physics-substep state, not ``pre_q/pre_v``.
         Only that sampled context builds CRBA/QP terms; no per-decimation
-        matrices are stored. RNEA is evaluated only for the inverse term, ABA
-        only for rollout, and qpth exactly once per minibatch transition.
+        matrices are stored. RNEA is evaluated once for each enabled inverse
+        or rollout bias term, CRBA once for rollout, and qpth exactly once per
+        minibatch transition.
         """
         if not (self.bard_enabled or self.hard_pact_features.soft_constraint_penalty):
             return nominal_torque.sum() * 0.0
@@ -1228,7 +1232,7 @@ class PPO_HardPACT:
         # BARD's interval objectives intentionally retain their control-rate
         # state and logged interval-average executed torque.  A straight-
         # through value preserves the earlier rollout gradient contract while
-        # making the ABA forward value exactly the torque Genesis executed.
+        # making the forward-dynamics value exactly the torque Genesis executed.
         inverse_loss = zero
         rollout_loss = zero
         self.last_inverse_dynamics_metrics = {}
@@ -1261,6 +1265,7 @@ class PPO_HardPACT:
                     post_v_world=batch["post_v"][sl],
                     mass_com_wrench_world=mass_wrench[sl],
                     need_jacobians=True, need_qp=False,
+                    need_forward_dynamics=self.bard_rollout_enabled,
                 )
                 count = valid_all[sl].reshape(-1).sum().to(control_dt.dtype)
                 if self.bard_inverse_enabled:

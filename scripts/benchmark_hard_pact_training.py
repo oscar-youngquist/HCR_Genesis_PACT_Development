@@ -291,7 +291,7 @@ def write_results(rows, output_dir):
         "## Experiment", "",
         "- Script: `scripts/benchmark_hard_pact_training.py`.",
         f"- Training command: `{command}`.",
-        "- Conditions: registered full HardPACT task, real simulator, 4096 environments by default, five PPO iterations, per-substep QP execution, differentiable QP replay, and both BARD PINN objectives when requested. GPU memory is sampled externally.",
+        "- Conditions: registered full HardPACT task, real simulator, the requested environment/iteration counts shown in the command, per-substep QP execution, differentiable QP replay, and both BARD PINN objectives when requested. GPU memory is sampled externally.",
         "- Purpose: measure end-to-end suitability for the intended training workload. Unlike the standalone benchmark, this includes simulation, rollout QPs, BARD dynamics, PPO, PCGrad, and optimizer work.",
         "", "## Results", "",
         "| Solver | Rollout chunk | PPO chunk | Status | Iteration mean s | Iteration std s | Steps/s | BARD inverse ms/update | BARD rollout ms/update |",

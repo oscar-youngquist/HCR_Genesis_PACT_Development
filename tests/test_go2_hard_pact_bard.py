@@ -14,6 +14,7 @@ from legged_gym.dynamics import (
     SIMULATOR_JOINT_ORDER,
     BardGo2Dynamics,
     build_linear_first_spatial_inertia,
+    fixed_mechanics_forward_dynamics,
     simulator_state_to_bard,
     wrench_at_point,
 )
@@ -30,6 +31,73 @@ from rsl_rl.modules.hard_pact_physics import DeploymentPhysicsHeads
 
 URDF = "resources/robots/go2/urdf/go2.urdf"
 SIM_FROM_BARD = [BARD_JOINT_ORDER.index(name) for name in SIMULATOR_JOINT_ORDER]
+
+
+class FixedMechanicsSolveTests(unittest.TestCase):
+    def test_dtype_forward_residual_vjp_and_detachment(self):
+        for dtype, tolerance in ((torch.float32, 2e-5), (torch.float64, 1e-11)):
+            torch.manual_seed(3)
+            root = torch.randn(4, 18, 18, dtype=dtype)
+            matrix = (root @ root.transpose(-1, -2) + 0.5 * torch.eye(18, dtype=dtype))
+            matrix.requires_grad_()
+            bias = torch.randn(4, 18, dtype=dtype, requires_grad=True)
+            force = torch.randn(4, 18, dtype=dtype, requires_grad=True)
+            output = fixed_mechanics_forward_dynamics(matrix, bias, force)
+            expected = torch.linalg.solve(matrix.detach(), (force - bias.detach()).unsqueeze(-1)).squeeze(-1)
+            torch.testing.assert_close(output, expected, atol=tolerance, rtol=tolerance)
+            residual = torch.einsum("bij,bj->bi", matrix.detach(), output) + bias.detach() - force
+            self.assertLess(residual.abs().max().item(), tolerance * 20)
+            seed = torch.randn_like(output)
+            (output * seed).sum().backward()
+            expected_vjp = torch.linalg.solve(
+                matrix.detach().transpose(-1, -2), seed.unsqueeze(-1)
+            ).squeeze(-1)
+            torch.testing.assert_close(force.grad, expected_vjp, atol=tolerance, rtol=tolerance)
+            self.assertIsNone(matrix.grad)
+            self.assertIsNone(bias.grad)
+
+    def test_deterministic_factorization_fallback(self):
+        # Invertible but indefinite: Cholesky must reject it and solve_ex must
+        # produce the certified result used by both forward and transpose VJP.
+        matrix = torch.tensor([[[0.0, 1.0], [1.0, 0.0]]], dtype=torch.float64)
+        force = torch.tensor([[2.0, -3.0]], dtype=torch.float64, requires_grad=True)
+        output = fixed_mechanics_forward_dynamics(
+            matrix, torch.zeros_like(force), force
+        )
+        torch.testing.assert_close(output, torch.tensor([[-3.0, 2.0]], dtype=torch.float64))
+        output.sum().backward()
+        torch.testing.assert_close(force.grad, torch.ones_like(force))
+
+    @unittest.skipUnless(
+        torch.cuda.is_available() and os.environ.get("RUN_BARD_CUDA_4096") == "1",
+        "explicit CUDA-4096 benchmark test",
+    )
+    def test_cuda_4096_real_bard_context_forward_and_backward(self):
+        batch = 4096
+        dynamics = BardGo2Dynamics(
+            URDF, device="cuda:0", batch_capacity=batch
+        )
+        q = torch.zeros(batch, 19, device="cuda:0")
+        q[:, 2], q[:, 6] = 0.42, 1.0
+        q[:, 7:] = torch.linspace(-0.25, 0.35, 12, device="cuda:0")
+        v = torch.linspace(-0.15, 0.2, 18, device="cuda:0").expand(batch, -1)
+        context = dynamics.build_context(
+            q, v,
+            parameters={
+                "added_base_mass": torch.ones(batch, 1, device="cuda:0"),
+                "base_com_shift": torch.full((batch, 3), 0.01, device="cuda:0"),
+                "joint_armature": torch.full((batch, 1), 0.015, device="cuda:0"),
+                "joint_friction": torch.full((batch, 1), 0.03, device="cuda:0"),
+                "joint_stiffness": torch.full((batch, 1), 0.02, device="cuda:0"),
+                "joint_damping": torch.full((batch, 1), 0.12, device="cuda:0"),
+            },
+            need_forward_dynamics=True,
+        )
+        force = torch.randn(batch, 18, device="cuda:0", requires_grad=True)
+        acceleration = context.forward_dynamics(force)
+        acceleration.square().mean().backward()
+        self.assertTrue(torch.isfinite(acceleration).all())
+        self.assertTrue(torch.isfinite(force.grad).all())
 
 
 class CorrectedInverseLossTests(unittest.TestCase):
@@ -453,7 +521,154 @@ class BARDPinocchioParityTests(unittest.TestCase):
         )
         self.assertTrue(torch.linalg.cholesky_ex(context.mass_matrix).info.eq(0).all())
 
-    def test_official_aba_routes_finite_gradients_to_all_force_inputs(self):
+    def test_forward_dynamics_context_skips_qp_only_acceleration_terms(self):
+        q, v, _ = self.simulator_state(rotated=True)
+        bard = self.dynamics.bard
+        with (
+            mock.patch.object(bard, "crba", wraps=bard.crba) as crba,
+            mock.patch.object(bard, "rnea", wraps=bard.rnea) as rnea,
+            mock.patch.object(
+                bard, "spatial_acceleration", wraps=bard.spatial_acceleration
+            ) as spatial_acceleration,
+        ):
+            context = self.dynamics.build_context(
+                q, v, need_forward_dynamics=True
+            )
+        self.assertEqual(crba.call_count, 1)
+        self.assertEqual(rnea.call_count, 1)
+        self.assertEqual(spatial_acceleration.call_count, 0)
+        self.assertIsNotNone(context.mass_matrix)
+        self.assertIsNotNone(context.bias)
+        self.assertIsNone(context.foot_acceleration_bias)
+
+    def test_crba_rnea_solve_matches_official_aba_randomization_cases(self):
+        cases = (
+            {},
+            {"added_base_mass": torch.tensor([[1.7]])},
+            {"base_com_shift": torch.tensor([[0.05, -0.02, 0.03]])},
+            {"joint_armature": torch.tensor([[0.018]])},
+            {"joint_friction": torch.tensor([[0.04]])},
+            {"joint_stiffness": torch.tensor([[0.03]])},
+            {"joint_damping": torch.tensor([[0.2]])},
+            {
+                "added_base_mass": torch.tensor([[1.7]]),
+                "base_com_shift": torch.tensor([[0.05, -0.02, 0.03]]),
+                "joint_armature": torch.tensor([[0.018]]),
+                "joint_friction": torch.tensor([[0.04]]),
+                "joint_stiffness": torch.tensor([[0.03]]),
+                "joint_damping": torch.tensor([[0.2]]),
+            },
+        )
+        q, v, _ = self.simulator_state(rotated=True)
+        generalized = torch.linspace(-7.0, 8.0, 18).unsqueeze(0)
+        for parameters in cases:
+            with self.subTest(parameters=tuple(parameters)):
+                context = self.dynamics.build_context(
+                    q, v, parameters=parameters,
+                    need_forward_dynamics=True,
+                )
+                actual = context.forward_dynamics(generalized)
+                reference = context.aba(generalized)
+                torch.testing.assert_close(actual, reference, atol=2e-3, rtol=2e-3)
+                residual = (
+                    torch.einsum("bij,bj->bi", context.mass_matrix, actual)
+                    + context.bias - generalized
+                )
+                self.assertLess(residual.abs().max().item(), 2e-4)
+
+    def test_fixed_solve_and_aba_generalized_force_vjp_parity(self):
+        q, v, _ = self.simulator_state(rotated=True)
+        parameters = {
+            "added_base_mass": torch.tensor([[1.2]]),
+            "base_com_shift": torch.tensor([[0.03, -0.01, 0.02]]),
+            "joint_armature": torch.tensor([[0.012]]),
+            "joint_friction": torch.tensor([[0.02]]),
+            "joint_stiffness": torch.tensor([[0.01]]),
+            "joint_damping": torch.tensor([[0.08]]),
+        }
+        context = self.dynamics.build_context(
+            q, v, parameters=parameters, need_forward_dynamics=True
+        )
+        force_fixed = torch.linspace(-2.0, 3.0, 18).unsqueeze(0).requires_grad_()
+        force_aba = force_fixed.detach().clone().requires_grad_()
+        seed = torch.linspace(0.3, 1.1, 18).unsqueeze(0)
+        fixed = context.forward_dynamics(force_fixed)
+        reference = context.aba(force_aba)
+        fixed_vjp = torch.autograd.grad((fixed * seed).sum(), force_fixed)[0]
+        aba_vjp = torch.autograd.grad((reference * seed).sum(), force_aba)[0]
+        torch.testing.assert_close(fixed, reference, atol=2e-3, rtol=2e-3)
+        torch.testing.assert_close(fixed_vjp, aba_vjp, atol=3e-3, rtol=3e-3)
+
+    def test_rollout_loss_and_force_gradients_match_official_aba(self):
+        q, v, _ = self.simulator_state(rotated=True)
+        post_v = v + torch.linspace(-0.01, 0.02, 18).unsqueeze(0)
+        context = self.dynamics.build_context(
+            q, v, post_v_world=post_v, need_forward_dynamics=True,
+        )
+
+        class ABAReferenceContext:
+            def __init__(self, source):
+                self.source = source
+
+            def __getattr__(self, name):
+                return getattr(self.source, name)
+
+            def forward_dynamics(self, generalized_force):
+                return self.source.aba(generalized_force)
+
+        common = dict(
+            control_dt=torch.tensor([[0.02]]),
+            push_event_mask=torch.zeros(1, 1, dtype=torch.bool),
+            reset_mask=torch.zeros(1, 1, dtype=torch.bool),
+            timeout_mask=torch.zeros(1, 1, dtype=torch.bool),
+            teleport_mask=torch.zeros(1, 1, dtype=torch.bool),
+        )
+        fixed_inputs = (
+            torch.linspace(-3.0, 4.0, 12).unsqueeze(0).requires_grad_(),
+            torch.linspace(-5.0, 60.0, 12).reshape(1, 4, 3).requires_grad_(),
+            torch.linspace(-2.0, 3.0, 6).unsqueeze(0).requires_grad_(),
+        )
+        aba_inputs = tuple(value.detach().clone().requires_grad_() for value in fixed_inputs)
+        fixed = differentiable_bard_rollout_loss(
+            context=context, control_torque=fixed_inputs[0],
+            interval_grf_world=fixed_inputs[1], applied_wrench_world=fixed_inputs[2],
+            **common,
+        )
+        reference = differentiable_bard_rollout_loss(
+            context=ABAReferenceContext(context), control_torque=aba_inputs[0],
+            interval_grf_world=aba_inputs[1], applied_wrench_world=aba_inputs[2],
+            **common,
+        )
+        fixed_gradients = torch.autograd.grad(fixed.loss, fixed_inputs)
+        aba_gradients = torch.autograd.grad(reference.loss, aba_inputs)
+        torch.testing.assert_close(fixed.loss, reference.loss, atol=2e-4, rtol=2e-3)
+        for actual, expected in zip(fixed_gradients, aba_gradients):
+            torch.testing.assert_close(actual, expected, atol=3e-4, rtol=4e-3)
+
+    def test_forward_dynamics_detaches_state_and_randomized_mechanics(self):
+        q, v, _ = self.simulator_state(rotated=True)
+        q.requires_grad_()
+        v.requires_grad_()
+        added_mass = torch.tensor([[1.1]], requires_grad=True)
+        com_shift = torch.tensor([[0.03, -0.02, 0.01]], requires_grad=True)
+        armature = torch.tensor([[0.015]], requires_grad=True)
+        context = self.dynamics.build_context(
+            q, v,
+            parameters={
+                "added_base_mass": added_mass,
+                "base_com_shift": com_shift,
+                "joint_armature": armature,
+            },
+            need_forward_dynamics=True,
+        )
+        force = torch.randn(1, 18, requires_grad=True)
+        context.forward_dynamics(force).square().mean().backward()
+        self.assertIsNotNone(force.grad)
+        self.assertGreater(force.grad.abs().sum().item(), 0.0)
+        for detached in (q, v, added_mass, com_shift, armature):
+            self.assertIsNone(detached.grad)
+
+    def test_fixed_mechanics_routes_finite_gradients_to_all_force_inputs(self):
         q, v, _ = self.simulator_state(rotated=True)
         post_v = v + 0.03
         context = self.dynamics.build_context(
@@ -465,7 +680,7 @@ class BARDPinocchioParityTests(unittest.TestCase):
                 "joint_damping": torch.tensor([[0.04]]),
             },
             post_v_world=post_v,
-            need_jacobians=True,
+            need_jacobians=True, need_forward_dynamics=True,
         )
         torque = torch.linspace(-2.0, 2.0, 12).unsqueeze(0).requires_grad_()
         grf = torch.tensor(
@@ -575,6 +790,10 @@ class RolloutLossTests(unittest.TestCase):
         def aba(generalized_force):
             return generalized_force
 
+        @staticmethod
+        def forward_dynamics(generalized_force):
+            return generalized_force
+
     def arguments(self, batch=3):
         return dict(
             context=self.Context(batch),
@@ -652,9 +871,24 @@ class RolloutLossTests(unittest.TestCase):
             torch.zeros_like(data["control_torque"]),
         )
 
+    def test_measured_targets_timestep_and_jacobians_are_detached(self):
+        data = self.arguments(1)
+        context = data["context"]
+        context.foot_jacobians.requires_grad_()
+        context.base_jacobian.requires_grad_()
+        context.v_bard.requires_grad_()
+        context.post_v_bard.requires_grad_()
+        data["control_dt"].requires_grad_()
+        differentiable_bard_rollout_loss(**data).loss.backward()
+        for measured in (
+            context.foot_jacobians, context.base_jacobian, context.v_bard,
+            context.post_v_bard, data["control_dt"],
+        ):
+            self.assertIsNone(measured.grad)
+
 
 class RolloutEndToEndGradientTests(unittest.TestCase):
-    def test_aba_rollout_reaches_policy_encoder_and_force_decoders(self):
+    def test_fixed_rollout_reaches_policy_encoder_and_force_decoders(self):
         torch.manual_seed(23)
         dynamics = BardGo2Dynamics(URDF, device="cpu", batch_capacity=1)
         q = torch.zeros(1, 19)
@@ -664,7 +898,8 @@ class RolloutEndToEndGradientTests(unittest.TestCase):
         pre_v = torch.linspace(-0.1, 0.15, 18).unsqueeze(0)
         post_v = pre_v + torch.linspace(0.01, -0.02, 18).unsqueeze(0)
         context = dynamics.build_context(
-            q, pre_v, post_v_world=post_v, need_jacobians=True
+            q, pre_v, post_v_world=post_v, need_jacobians=True,
+            need_forward_dynamics=True,
         )
         actor = ActorCritic_HardPACT(
             num_actor_obs=57, num_critic_obs=95, num_actions=12,
@@ -679,7 +914,7 @@ class RolloutEndToEndGradientTests(unittest.TestCase):
         policy_input = torch.cat((observation, latent, explicit), dim=-1)
         position_action, torque_action = actor.actor_forward(policy_input)
         # A compact differentiable stand-in for the legacy action/PD mapping;
-        # both policy heads contribute to the torque sent through ABA.
+        # both policy heads contribute to the torque sent through the solve.
         control_torque = position_action + torque_action
         heads = actor.physics_heads(latent, explicit, control_torque)
         result = differentiable_bard_rollout_loss(

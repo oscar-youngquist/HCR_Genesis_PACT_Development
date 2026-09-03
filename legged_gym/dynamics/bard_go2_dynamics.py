@@ -16,6 +16,72 @@ from typing import Mapping, Sequence
 import torch
 
 
+class _FixedMechanicsSolve(torch.autograd.Function):
+    r"""Solve ``M a = r`` while differentiating only with respect to ``r``.
+
+    ``M`` is detached realized mechanics. Forward uses a batched Cholesky
+    factorization and deterministically retries failed/uncertified rows with
+    ``torch.linalg.solve_ex``. Backward implements exactly
+    ``bar(r)=M^{-T} bar(a)``; no matrix gradient is constructed or retained.
+    """
+
+    @staticmethod
+    def forward(ctx, matrix, right_hand_side):
+        matrix = matrix.detach()
+        factor, info = torch.linalg.cholesky_ex(matrix)
+        good = info.eq(0)
+        solution = torch.empty_like(right_hand_side)
+        if bool(good.any()):
+            solution[good] = torch.cholesky_solve(
+                right_hand_side[good].unsqueeze(-1), factor[good]
+            ).squeeze(-1)
+        if bool((~good).any()):
+            fallback, fallback_info = torch.linalg.solve_ex(
+                matrix[~good], right_hand_side[~good].unsqueeze(-1)
+            )
+            if bool(fallback_info.ne(0).any()):
+                raise RuntimeError("BARD CRBA forward-dynamics matrix is singular")
+            solution[~good] = fallback.squeeze(-1)
+
+        residual = torch.einsum("bij,bj->bi", matrix, solution) - right_hand_side
+        scale = (
+            torch.linalg.vector_norm(matrix, dim=(-2, -1))
+            * torch.linalg.vector_norm(solution, dim=-1)
+            + torch.linalg.vector_norm(right_hand_side, dim=-1)
+        ).clamp_min(1.0)
+        tolerance = 2.0e-4 if matrix.dtype == torch.float32 else 1.0e-10
+        certified = (
+            torch.isfinite(solution).all(dim=-1)
+            & (torch.linalg.vector_norm(residual, dim=-1) <= tolerance * scale)
+        )
+        if not bool(certified.all()):
+            raise RuntimeError("BARD CRBA forward-dynamics solve failed certification")
+        ctx.save_for_backward(matrix, factor, good)
+        return solution
+
+    @staticmethod
+    def backward(ctx, acceleration_gradient):
+        matrix, factor, good = ctx.saved_tensors
+        force_gradient = torch.empty_like(acceleration_gradient)
+        if bool(good.any()):
+            force_gradient[good] = torch.cholesky_solve(
+                acceleration_gradient[good].unsqueeze(-1), factor[good]
+            ).squeeze(-1)
+        if bool((~good).any()):
+            force_gradient[~good] = torch.linalg.solve(
+                matrix[~good].transpose(-1, -2),
+                acceleration_gradient[~good].unsqueeze(-1),
+            ).squeeze(-1)
+        return None, force_gradient
+
+
+def fixed_mechanics_forward_dynamics(mass_matrix, bias, generalized_force):
+    r"""Return ``M_eff^{-1}(g-b)`` with an RHS-only custom VJP."""
+    return _FixedMechanicsSolve.apply(
+        mass_matrix.detach(), generalized_force - bias.detach()
+    )
+
+
 SIMULATOR_FOOT_ORDER = ("FR", "FL", "RR", "RL")
 BARD_FOOT_ORDER = ("FR", "FL", "RR", "RL")
 SIMULATOR_JOINT_ORDER = tuple(
@@ -166,6 +232,16 @@ class Go2BardContext:
         """Return canonical acceleration from differentiable official BARD ABA."""
         return self.dynamics._aba_cached(self, generalized_force)
 
+    def forward_dynamics(self, generalized_force):
+        """Memory-efficient CRBA/RNEA solve used by rollout training."""
+        if self.mass_matrix is None or self.bias is None:
+            raise ValueError(
+                "context requires build_context(need_forward_dynamics=True)"
+            )
+        return fixed_mechanics_forward_dynamics(
+            self.mass_matrix, self.bias, generalized_force
+        )
+
 
 class BardGo2Dynamics:
     """Batched BARD RNEA and world-aligned Jacobians for canonical Go2."""
@@ -296,10 +372,12 @@ class BardGo2Dynamics:
     def build_context(
         self, pre_q_simulator, pre_v_world, *, parameters=None,
         post_v_world=None, mass_com_wrench_world=None, need_jacobians=True,
-        need_qp=False,
+        need_qp=False, need_forward_dynamics=False,
     ):
         """Convert/install/update once for all physics losses in a minibatch."""
-        need_jacobians = bool(need_jacobians or need_qp)
+        need_jacobians = bool(
+            need_jacobians or need_qp or need_forward_dynamics
+        )
         parameters = {} if parameters is None else {
             name: value.detach() for name, value in parameters.items()
         }
@@ -341,7 +419,7 @@ class BardGo2Dynamics:
             None if mass_com_wrench_world is None
             else mass_com_wrench_world.detach(),
         )
-        if need_qp:
+        if need_qp or need_forward_dynamics:
             # CRBA returns BARD/URDF generalized order.  The QP consistently
             # uses canonical [base linear, base angular, FR,FL,RR,RL joints],
             # so both matrix axes receive the same permutation.  Realized
@@ -359,6 +437,7 @@ class BardGo2Dynamics:
             context.mass_matrix = mass.detach()
             context.bias = context.rnea(torch.zeros_like(v_bard)).detach()
 
+        if need_qp:
             # a_foot = J_foot*qdd + Jdot*v.  Evaluating official BARD spatial
             # acceleration at qdd=0 gives the affine Jdot*v term directly in
             # the same LOCAL_WORLD_ALIGNED/world-axis convention as J_foot.

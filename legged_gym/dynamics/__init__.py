@@ -9,6 +9,7 @@ from .bard_go2_dynamics import (
     Go2BardContext,
     Go2DynamicsTerms,
     build_linear_first_spatial_inertia,
+    fixed_mechanics_forward_dynamics,
     simulator_state_to_bard,
     wrench_at_point,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "Go2BardContext",
     "Go2DynamicsTerms",
     "build_linear_first_spatial_inertia",
+    "fixed_mechanics_forward_dynamics",
     "simulator_state_to_bard",
     "wrench_at_point",
 ]
