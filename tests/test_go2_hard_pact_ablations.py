@@ -323,7 +323,8 @@ class HardPACTAblationTests(unittest.TestCase):
             entry["class"] for entry in document["environment"]["inheritance"]
         }
         self.assertTrue(any(name.endswith("GO2HardPACTCfg") for name in classes))
-        self.assertTrue(any(name.endswith("GO2PACTCfg") for name in classes))
+        self.assertTrue(any(name.endswith("LeggedRobotCfg") for name in classes))
+        self.assertFalse(any(name.endswith("GO2PACTCfg") for name in classes))
         overrides = document["environment"]["inheritance"][0]["declared_values"]
         self.assertEqual(overrides["ablation_variant"], "soft_penalty")
         self.assertEqual(overrides["task_backend"], "isaaclab")

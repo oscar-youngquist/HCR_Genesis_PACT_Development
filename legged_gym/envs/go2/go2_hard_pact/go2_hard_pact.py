@@ -33,6 +33,79 @@ class Go2HardPACT(Go2PACT):
 
     _legacy_task_class = Go2PACT
 
+    def _reward_torque_cancellation(self):
+        r"""Penalize opposing effective PD/feed-forward joint torques.
+
+        This is the B1Z1 PACT torque-conflict reward. For each joint,
+
+        ``c_j = |tau_fb| + |tau_ff| - |tau_fb + tau_ff|``
+
+        is zero for aligned contributions and twice the smaller magnitude for
+        opposing contributions.  Normalizing by the actuator limit makes the
+        configured deadband comparable across Go2 joints.
+        """
+        simulator = self.simulator
+        feedback = (
+            simulator.feedback_tau_weight * simulator.feedback_torques
+        )
+        feedforward = (
+            simulator.feedforward_tau_weight * simulator.feedforward_torques
+        )
+        # Go2 PACT applies motor-strength scaling after combining the two
+        # weighted branches, so include it in both effective contributions.
+        motor_strength = getattr(simulator, "_motor_strength", None)
+        if motor_strength is not None:
+            feedback = feedback * motor_strength
+            feedforward = feedforward * motor_strength
+        limits = simulator.torque_limits[:feedback.shape[-1]].clamp_min(1.0e-6)
+        cancellation = (
+            feedback.abs() + feedforward.abs()
+            - (feedback + feedforward).abs()
+        ).clamp_min(0.0)
+        excess = torch.relu(
+            cancellation / limits
+            - float(self.cfg.rewards.torque_cancellation_deadband)
+        )
+        return excess.square().mean(dim=-1)
+
+    def _reward_foot_clearance_terrain_aware(self):
+        """Track local-terrain clearance on swing feet, as in B1Z1 PACT."""
+        feet_z = self.simulator.feet_pos[:, :, 2]
+        # HardPACT's conditioned contact state is backend-neutral and already
+        # uses the configured GRF deadband/threshold at every physics substep.
+        contacts = self.grf_processor.contacts
+        swing = ~contacts
+
+        height_patch = self.simulator._height_around_feet
+        if height_patch.ndim == 4:
+            height_patch = height_patch.reshape(
+                height_patch.shape[0], height_patch.shape[1], -1
+            )
+        local_terrain_height = height_patch.amax(dim=-1)
+        desired_height = (
+            float(self.cfg.rewards.foot_clearance_target)
+            + float(self.cfg.rewards.foot_height_offset)
+            + local_terrain_height
+        )
+        tracking_error = (feet_z - desired_height).square()
+        excess = torch.relu(
+            feet_z
+            - desired_height
+            - float(self.cfg.rewards.foot_clearance_excess_margin)
+        )
+        total_error = (
+            swing
+            * (
+                tracking_error
+                + float(self.cfg.rewards.foot_clearance_excess_weight)
+                * excess.square()
+            )
+        ).sum(dim=-1)
+        return torch.exp(
+            -total_error
+            / float(self.cfg.rewards.foot_clearance_tracking_sigma)
+        )
+
     def _init_buffers(self):
         self._legacy_task_class._init_buffers(self)
         self.domain_rand_curriculum = HardPACTDomainRandCurriculum(

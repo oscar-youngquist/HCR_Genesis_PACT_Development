@@ -145,6 +145,19 @@ def _synthetic_domain_sim(sim_cls, cfg):
 
 
 class TestHardPACTAliases(unittest.TestCase):
+    def test_configs_are_standalone_legged_robot_configs(self):
+        """HardPACT config modules must not depend on either legacy config."""
+        self.assertIs(GO2HardPACTCfg.__bases__[0], GO2PACTCfg.__bases__[0])
+        self.assertIs(GO2HardPACTCfgPPO.__bases__[0], GO2PACTCfgPPO.__bases__[0])
+        self.assertIs(GO2HardPACTPosCfg.__bases__[0], GO2PACTPosCfg.__bases__[0])
+        self.assertIs(
+            GO2HardPACTPosCfgPPO.__bases__[0], GO2PACTPosCfgPPO.__bases__[0]
+        )
+        self.assertNotIn(GO2PACTCfg, GO2HardPACTCfg.__mro__)
+        self.assertNotIn(GO2PACTCfgPPO, GO2HardPACTCfgPPO.__mro__)
+        self.assertNotIn(GO2PACTPosCfg, GO2HardPACTPosCfg.__mro__)
+        self.assertNotIn(GO2PACTPosCfgPPO, GO2HardPACTPosCfgPPO.__mro__)
+
     def test_pact_sim_dt_is_derived_from_control_interval(self):
         config_classes = (
             GO2PACTCfg, GO2PACTPosCfg, GO2HardPACTCfg, GO2HardPACTPosCfg,
@@ -212,6 +225,22 @@ class TestHardPACTAliases(unittest.TestCase):
                 self.assertTrue(persistent_fields)
                 for field in persistent_fields:
                     alias_env_dict["domain_rand"].pop(field)
+                if name == "go2_hard_pact":
+                    # These are intentional HardPACT-only B1Z1 reward ports.
+                    for field in (
+                        "torque_cancellation_deadband",
+                        "foot_clearance_excess_margin",
+                        "foot_clearance_excess_weight",
+                    ):
+                        alias_env_dict["rewards"].pop(field)
+                    alias_env_dict["rewards"]["scales"][
+                        "torque_conflict_symmetric"
+                    ] = legacy_env_dict["rewards"]["scales"][
+                        "torque_conflict_symmetric"
+                    ]
+                    alias_env_dict["rewards"]["scales"].pop(
+                        "torque_cancellation"
+                    )
                 self.assertEqual(
                     alias_env_dict["domain_rand"]["push_robots"],
                     legacy_env_dict["domain_rand"]["push_robots"],
@@ -256,6 +285,12 @@ class TestHardPACTAliases(unittest.TestCase):
                         "pcgrad_diagnostics_start_iteration",
                         "pcgrad_diagnostics_interval",
                         "cache_rollout_mechanics",
+                        "ppo_qp_sampling",
+                        "ppo_qp_passes_per_iteration",
+                        "ppo_qp_shard_percentage",
+                        "ppo_qp_stratify_by_anchor",
+                        "ppo_qp_sampling_seed",
+                        "ppo_qp_sampling_logging_enabled",
                     ):
                         alias_train_dict["algorithm"].pop(field)
                 self.assertEqual(alias_train_dict, legacy_train_dict)
