@@ -83,7 +83,10 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         sampled = torch.empty(
             self._num_envs, 2, device=self._device
         ).uniform_(-maximum, maximum)
-        if self._cfg.env.lateral_push_only:
+        # Older standalone PACT/PActPos configurations predate this optional
+        # restriction.  Treat a missing flag as the legacy two-axis behavior
+        # instead of making the shared Isaac Lab adapter configuration-fragile.
+        if bool(getattr(self._cfg.env, "lateral_push_only", False)):
             sampled[:, 0].zero_()
         self._rand_push_vels.zero_()
         self._rand_push_vels[event, :2] = sampled[event]

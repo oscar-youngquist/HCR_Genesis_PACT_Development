@@ -8,6 +8,9 @@ from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import (
     GO2HardPACTCfg,
 )
+from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import (
+    GO2HardPACTPosCfg,
+)
 from legged_gym.envs.go2.go2_pact.go2_pact_config import GO2PACTCfg
 
 
@@ -16,6 +19,8 @@ def test_b1z1_torque_cancellation_and_swing_clearance_port():
     assert GO2PACTCfg.rewards.scales.torque_conflict_symmetric == -0.1
     assert GO2HardPACTCfg.rewards.scales.torque_conflict_symmetric == 0.0
     assert GO2HardPACTCfg.rewards.scales.torque_cancellation == -0.10
+    assert GO2HardPACTPosCfg.rewards.foot_clearance_excess_margin == 0.04
+    assert GO2HardPACTPosCfg.rewards.foot_clearance_excess_weight == 0.25
 
     env = Go2HardPACT.__new__(Go2HardPACT)
     feedback = torch.zeros(2, 12)

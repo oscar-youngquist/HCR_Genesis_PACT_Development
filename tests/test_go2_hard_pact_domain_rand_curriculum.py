@@ -116,6 +116,9 @@ def test_isaaclab_pact_adapter_is_an_explicit_thin_subclass():
     assert task_registry.env_cfgs[
         "go2_hard_pact_pos_isaaclab"
     ].sim.use_pact_adapter
+    assert task_registry.env_cfgs[
+        "go2_hard_pact_pos_isaaclab"
+    ].env.lateral_push_only is False
     assert not hasattr(
         task_registry.env_cfgs["go2_hard_pact_full_genesis"].sim,
         "use_pact_adapter",
@@ -143,7 +146,9 @@ def test_isaaclab_push_writes_root_velocity_only_at_event():
     simulator.push_timeouts = torch.ones(2, 1)
     simulator._rand_push_vels = torch.zeros(2, 3)
     simulator._cfg = SimpleNamespace(
-        env=SimpleNamespace(lateral_push_only=False),
+        # Exercise backward compatibility with legacy configs that do not
+        # declare the optional lateral-only restriction.
+        env=SimpleNamespace(),
         domain_rand=SimpleNamespace(max_push_vel_xy=1.0),
     )
     simulator._robot = Robot()

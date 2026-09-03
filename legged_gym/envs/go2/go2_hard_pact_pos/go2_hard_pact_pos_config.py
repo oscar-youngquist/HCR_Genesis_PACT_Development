@@ -13,11 +13,14 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         num_explicit_recon_obs = 11
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 20
+        num_obs_hist = 10
         grf_dim = 12
         whole_body_dim = 18
         debug = False
         debug_viz = False
+        # Match HardPACT's disturbance contract.  False preserves the legacy
+        # PACT/PactPos planar push sampling (both world x and y components).
+        lateral_push_only = False
 
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = 'heightfield'
@@ -47,6 +50,8 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         substeps = 1
         max_collision_pairs = 100
         IK_max_targets = 2
+        console_debug = False
+        suppress_backend_warnings = True
 
         class grf:
             prediction_scale_n = [120.0, 120.0, 250.0]
@@ -282,6 +287,13 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         swing_collision_max_normal_z = 0.85
         swing_collision_min_speed = 0.05
 
+        # Parameters consumed by the shared HardPACT implementations of the
+        # B1Z1 torque-conflict and terrain-aware foot-clearance rewards.  The
+        # clearance values retain HardPACTPos's former in-function constants.
+        torque_cancellation_deadband = 0.03
+        foot_clearance_excess_margin = 0.04
+        foot_clearance_excess_weight = 0.25
+
         class scales(LeggedRobotCfg.rewards.scales):
             termination = 0.0
             collision = -1.0
@@ -356,7 +368,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
                                   'dof_close_to_default': [-0.05, -0.1], 
                                   'torque_limits': [-0.0001, -0.01]}
             curr_steps = 1
-            warmup_steps = 4000
+            warmup_steps = 2000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -413,6 +425,7 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         lam = 0.95
         desired_kl = 0.01
         max_grad_norm = 1.0
+
         entropy_coef = 0.02
         use_adaptive_entropy = True
         adaptive_ent_bounds = [0.01, 0.02]
@@ -425,7 +438,7 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         policy_class_name = 'ActorCritic_HardPACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
         num_steps_per_env = 24
-        max_iterations = 5000
+        max_iterations = 3000
         grf_dim = 12
         run_name = 'pact_posboot_100hz_grf'
         experiment_name = 'go2_pact_pos_rough'
@@ -436,3 +449,11 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         exp_data_path = 'exp_data/pact_pos_tests/spec_0_01_4-6kg_stairs.csv'
         export_hard_pact_start = True
         hard_pact_start_filename = 'hard_pact_start_model_{iteration}.pt'
+        # Match HardPACT's concise console policy while retaining reward
+        # summaries. These flags do not affect TensorBoard logging.
+        console_iteration = True
+        console_model_summary = False
+        console_reward_terms = True
+        console_detailed_losses = False
+        console_pinn_timing = True
+        console_qp_timing = True

@@ -1230,7 +1230,51 @@ class Go2HardPACT(Go2PACT):
                  )],
                 dim=-1,
             )
+        self._validate_hard_pact_observation_dimensions()
         return result
+
+    def _validate_hard_pact_observation_dimensions(self):
+        """Validate the shared HardPACT/HardPACTPos observation contract once.
+
+        Both tasks intentionally differ in the meaning of the final 12 actor
+        inputs (feed-forward action versus executed PD torque), but their
+        actor, history, explicit-label, and stacked-critic widths must match.
+        Keeping this check in the shared environment path catches backend or
+        observation-builder drift at the first reset without adding per-step
+        training overhead.
+        """
+        if getattr(self, "_hard_pact_observation_schema_validated", False):
+            return
+        expected = {
+            "actor observation": int(self.cfg.env.num_observations),
+            "observation history": int(
+                self.cfg.env.num_observations * self.cfg.env.num_obs_hist
+            ),
+            "explicit labels": int(self.cfg.env.num_explicit_recon_obs),
+            "stacked critic observation": int(
+                self.cfg.env.num_privileged_obs * self.cfg.env.num_priv_stack
+            ),
+        }
+        actual = {
+            "actor observation": int(self.obs_buf.shape[-1]),
+            "observation history": int(self.obs_history.shape[-1]),
+            "explicit labels": int(self.explicit_labels_buf.shape[-1]),
+            "stacked critic observation": int(
+                self.privileged_obs_buf.shape[-1]
+            ),
+        }
+        mismatches = {
+            name: (actual[name], width)
+            for name, width in expected.items()
+            if actual[name] != width
+        }
+        if mismatches:
+            details = ", ".join(
+                f"{name}: got {got}, expected {wanted}"
+                for name, (got, wanted) in mismatches.items()
+            )
+            raise RuntimeError(f"HardPACT observation schema mismatch: {details}")
+        self._hard_pact_observation_schema_validated = True
 
     def step(self, actions):
         """Run the legacy lifecycle with a control-interval GRF target."""

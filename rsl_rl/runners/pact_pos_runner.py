@@ -109,10 +109,17 @@ class OnPolicyRunnerPACTPos:
                  train_cfg,
                  log_dir=None,
                  device='cpu'):
-        torch.autograd.set_detect_anomaly(True)
         self.cfg=train_cfg["runner"]
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
+        # Keep legacy PACTPos diagnostics intact, but give HardPACTPos the
+        # same throughput-safe anomaly/debug defaults as HardPACT.
+        torch.autograd.set_detect_anomaly(bool(
+            self.alg_cfg.get(
+                "detect_anomaly",
+                self.cfg.get("policy_class_name") != "ActorCritic_HardPACT_Pos",
+            )
+        ))
         
         self.device = device
         self.env = env
@@ -128,6 +135,17 @@ class OnPolicyRunnerPACTPos:
 
         actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
         self.is_hard_pact_pos = actor_critic_class is ActorCritic_HardPACT_Pos
+        self.console_debug = bool(self.cfg.get("console_debug", False))
+        self.console_iteration = bool(self.cfg.get("console_iteration", True))
+        self.console_model_summary = bool(
+            self.cfg.get("console_model_summary", not self.is_hard_pact_pos)
+        )
+        self.console_reward_terms = bool(
+            self.cfg.get("console_reward_terms", not self.is_hard_pact_pos)
+        )
+        self.console_detailed_losses = bool(
+            self.cfg.get("console_detailed_losses", not self.is_hard_pact_pos)
+        )
         gain_spec = None
         actor_extra_kwargs = {}
         reconstruction_indices = None
@@ -171,9 +189,10 @@ class OnPolicyRunnerPACTPos:
                                  ).to(self.device)
         
 
-        print("Created Parallel Actor-Critic Model")
-        pretty_print_module(actor_critic)
-        pretty_print_module(decoder)
+        if self.console_model_summary:
+            print("Created Parallel Actor-Critic Model")
+            pretty_print_module(actor_critic)
+            pretty_print_module(decoder)
 
         self._init_entropy_coef = self.alg_cfg["entropy_coef"]
         self.use_adaptive_entropy = self.alg_cfg["use_adaptive_entropy"]
@@ -222,7 +241,8 @@ class OnPolicyRunnerPACTPos:
     def _load_pretrained_model(self):
         pretrained_path = self.policy_cfg["pretrained_path"]
         pretrained_std = self.policy_cfg["pretrained_std"]
-        print(pretrained_path)
+        if self.console_model_summary:
+            print(pretrained_path)
         loaded_dict = torch.load(pretrained_path)
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
@@ -365,7 +385,8 @@ class OnPolicyRunnerPACTPos:
                 }
             
                 entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
-                print(entropy)
+                if self.console_debug:
+                    print(entropy)
                 self.writer.add_scalar('Values/entropy',entropy,it)
             
             # entropy_coef = 0.01
@@ -433,7 +454,8 @@ class OnPolicyRunnerPACTPos:
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 value = torch.mean(infotensor)
                 self.writer.add_scalar('Episode/' + key, value, locs['it'])
-                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+                if self.console_reward_terms:
+                    ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         
         mean_std = self.alg.actor_critic.std.mean()
         
@@ -452,6 +474,16 @@ class OnPolicyRunnerPACTPos:
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
         self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
         
+        detailed = ""
+        if self.console_detailed_losses:
+            detailed = (
+                f"{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"
+                f"{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"
+                f"{'Reconstruction loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"
+                f"{'KL Divergence loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"
+                f"{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"
+            )
+
         if len(locs['rewbuffer']) > 0:
             self.writer.add_scalar('Train/mean_reward', statistics.mean(locs['rewbuffer']), locs['it'])
             self.writer.add_scalar('Train/mean_episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
@@ -466,11 +498,7 @@ class OnPolicyRunnerPACTPos:
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                           f"""{'Tau loss:':>{pad}} {locs['mean_tau_loss']:.4f}\n"""
-                          f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
-                          f"""{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"""
-                          f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
-                          f"""{'KL Divergence    loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"""
-                          f"""{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"""
+                          f"""{detailed}"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
@@ -484,11 +512,7 @@ class OnPolicyRunnerPACTPos:
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                           f"""{'Tau loss:':>{pad}} {locs['mean_tau_loss']:.4f}\n"""
-                          f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
-                          f"""{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"""
-                          f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
-                          f"""{'KL Divergence    loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"""
-                          f"""{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"""
+                          f"""{detailed}"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean pos action noise std:':>{pad}} {mean_std.item():.2f}\n""")
@@ -500,7 +524,8 @@ class OnPolicyRunnerPACTPos:
                        f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
                        f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
-        print(log_string)
+        if self.console_iteration:
+            print(log_string)
 
     def save(self, path, infos=None):
         checkpoint = {

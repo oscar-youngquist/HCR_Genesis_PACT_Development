@@ -153,6 +153,55 @@ def _synthetic_domain_sim(sim_cls, cfg):
 
 
 class TestHardPACTAliases(unittest.TestCase):
+    def test_hard_pact_and_pos_observation_contracts_align(self):
+        hard = GO2HardPACTCfg()
+        pos = GO2HardPACTPosCfg()
+        for field in (
+            "num_observations",
+            "num_privileged_obs",
+            "num_priv_stack",
+            "num_obs_hist",
+            "num_explicit_recon_obs",
+        ):
+            self.assertEqual(getattr(hard.env, field), getattr(pos.env, field))
+
+        task = Go2HardPACTPos.__new__(Go2HardPACTPos)
+        task.cfg = pos
+        task.obs_buf = torch.zeros(2, pos.env.num_observations)
+        task.obs_history = torch.zeros(
+            2, pos.env.num_observations * pos.env.num_obs_hist
+        )
+        task.explicit_labels_buf = torch.zeros(
+            2, pos.env.num_explicit_recon_obs
+        )
+        task.privileged_obs_buf = torch.zeros(
+            2, pos.env.num_privileged_obs * pos.env.num_priv_stack
+        )
+        task._validate_hard_pact_observation_dimensions()
+        self.assertTrue(task._hard_pact_observation_schema_validated)
+
+        task._hard_pact_observation_schema_validated = False
+        task.obs_buf = torch.zeros(2, pos.env.num_observations - 1)
+        with self.assertRaisesRegex(RuntimeError, "actor observation"):
+            task._validate_hard_pact_observation_dimensions()
+
+    def test_hard_pact_and_pos_console_policies_align(self):
+        hard = GO2HardPACTCfgPPO.runner
+        pos = GO2HardPACTPosCfgPPO.runner
+        for field in (
+            "console_iteration",
+            "console_model_summary",
+            "console_reward_terms",
+            "console_detailed_losses",
+            "console_pinn_timing",
+            "console_qp_timing",
+        ):
+            self.assertEqual(getattr(hard, field), getattr(pos, field))
+        self.assertFalse(GO2HardPACTCfg.sim.console_debug)
+        self.assertFalse(GO2HardPACTPosCfg.sim.console_debug)
+        self.assertTrue(GO2HardPACTCfg.sim.suppress_backend_warnings)
+        self.assertTrue(GO2HardPACTPosCfg.sim.suppress_backend_warnings)
+
     def test_hard_pact_pos_exports_strict_hard_pact_start_weights(self):
         torch.manual_seed(2027)
         pos_actor = ActorCritic_HardPACT_Pos(
@@ -302,6 +351,15 @@ class TestHardPACTAliases(unittest.TestCase):
                     alias_train_dict["runner"].pop(
                         "hard_pact_start_filename"
                     )
+                    for field in (
+                        "console_iteration",
+                        "console_model_summary",
+                        "console_reward_terms",
+                        "console_detailed_losses",
+                        "console_pinn_timing",
+                        "console_qp_timing",
+                    ):
+                        alias_train_dict["runner"].pop(field)
                 if name == "go2_hard_pact":
                     alias_train_dict["runner"]["algorithm_class_name"] = legacy_train_dict["runner"]["algorithm_class_name"]
                     for field in (
