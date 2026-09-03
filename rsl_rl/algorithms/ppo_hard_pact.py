@@ -30,7 +30,7 @@
 
 import os
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import torch
 import torch.nn as nn
@@ -47,6 +47,7 @@ from rsl_rl.modules.hard_pact_physics import normalized_huber_loss
 
 from legged_gym.dynamics import (
     create_go2_dynamics,
+    fixed_mechanics_forward_dynamics,
     wrench_at_point,
 )
 from rsl_rl.hard_pact_ablations import resolve_hard_pact_features
@@ -59,6 +60,66 @@ from .hard_pact_qp import (
     HardPACTQPConfig,
     projection_loss,
 )
+
+
+@dataclass(frozen=True)
+class _DetachedMechanicsCache:
+    """Flat, rollout-indexed mechanics with no autograd ownership.
+
+    ``actual`` caches realized randomized mechanics for PINN supervision.
+    ``deployment`` caches nominal mechanics at the selected QP substep.  The
+    two instances are deliberately distinct so a projection can never obtain
+    privileged mass, CoM, armature, or passive parameters by accident.
+    """
+
+    kind: str
+    mass_matrix: torch.Tensor
+    bias: torch.Tensor
+    foot_jacobians: torch.Tensor
+    base_jacobian: torch.Tensor
+    pre_v_canonical: torch.Tensor | None = None
+    post_v_canonical: torch.Tensor | None = None
+    mass_com_wrench_world: torch.Tensor | None = None
+    foot_acceleration_bias: torch.Tensor | None = None
+
+    def index(self, indices):
+        return _DetachedMechanicsCache(
+            kind=self.kind,
+            mass_matrix=self.mass_matrix[indices],
+            bias=self.bias[indices],
+            foot_jacobians=self.foot_jacobians[indices],
+            base_jacobian=self.base_jacobian[indices],
+            pre_v_canonical=(None if self.pre_v_canonical is None
+                             else self.pre_v_canonical[indices]),
+            post_v_canonical=(None if self.post_v_canonical is None
+                              else self.post_v_canonical[indices]),
+            mass_com_wrench_world=(
+                None if self.mass_com_wrench_world is None
+                else self.mass_com_wrench_world[indices]
+            ),
+            foot_acceleration_bias=(
+                None if self.foot_acceleration_bias is None
+                else self.foot_acceleration_bias[indices]
+            ),
+        )
+
+    def as_context(self, dynamics):
+        """Expose the small interface consumed by the rollout loss."""
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            dynamics=dynamics,
+            mass_matrix=self.mass_matrix,
+            bias=self.bias,
+            foot_jacobians=self.foot_jacobians,
+            base_jacobian=self.base_jacobian,
+            pre_v_canonical=self.pre_v_canonical,
+            post_v_canonical=self.post_v_canonical,
+            mass_com_wrench_world=self.mass_com_wrench_world,
+            forward_dynamics=lambda generalized_force:
+                fixed_mechanics_forward_dynamics(
+                    self.mass_matrix, self.bias, generalized_force
+                ),
+        )
 
 def _yaw_local_to_world(values, quaternion_xyzw):
     """Rotate batched ``[..., xyz]`` vectors by base yaw only."""
@@ -159,6 +220,10 @@ class PPO_HardPACT:
                  lambda_soft_constraint=1.0e-3,
                  profile_bard_timing=False,
                  console_debug=False,
+                 pcgrad_diagnostics_enabled=False,
+                 pcgrad_diagnostics_start_iteration=0,
+                 pcgrad_diagnostics_interval=50,
+                 cache_rollout_mechanics=True,
                  ablation_variant="full",
                  hard_pact_qp=None,
                  grf_observation_scale=0.01,
@@ -277,8 +342,20 @@ class PPO_HardPACT:
         # synchronization at the end of update materializes all durations.
         self.profile_bard_timing = bool(profile_bard_timing)
         self.console_debug = bool(console_debug)
+        self.pcgrad_diagnostics_enabled = bool(pcgrad_diagnostics_enabled)
+        self.pcgrad_diagnostics_start_iteration = int(
+            pcgrad_diagnostics_start_iteration
+        )
+        self.pcgrad_diagnostics_interval = int(pcgrad_diagnostics_interval)
+        self.cache_rollout_mechanics = bool(cache_rollout_mechanics)
+        if self.pcgrad_diagnostics_interval < 1:
+            raise ValueError("pcgrad_diagnostics_interval must be positive")
+        self._rollout_actual_mechanics = None
+        self._rollout_deployment_qp_mechanics = None
+        self._pcgrad_audit_ran = False
         self._bard_timing_records = {
-            "inverse": [], "rollout": [], "dynamics": []
+            "inverse": [], "rollout": [], "dynamics": [],
+            "auxiliary": [], "pcgrad": [],
         }
         if min(
             self.lambda_inverse, self.lambda_rollout, self.lambda_projection,
@@ -391,7 +468,8 @@ class PPO_HardPACT:
         
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
         self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
-                                              action_shape, torso_velo_shape, grf_shape, wb_shape, self.device)
+                                              action_shape, torso_velo_shape, grf_shape, wb_shape, self.device,
+                                              store_legacy_pinn_dynamics=False)
 
     def test_mode(self):
         self.actor_critic.test()
@@ -565,23 +643,142 @@ class PPO_HardPACT:
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)  
 
+    @staticmethod
+    def _flat_fields(fields):
+        return {
+            name: value.flatten(0, 1) for name, value in fields.items()
+        }
+
+    def _materialize_mechanics_cache(
+        self, *, kind, q, v, parameters, post_v=None,
+        mass_com_wrench_world=None, need_qp=False,
+    ):
+        """Evaluate detached backend mechanics once in bounded chunks."""
+        names = ["mass_matrix", "bias", "foot_jacobians", "base_jacobian"]
+        if need_qp:
+            names.append("foot_acceleration_bias")
+        values = {name: [] for name in names}
+        pre_velocity, post_velocity = [], []
+        capacity = self.physics_dynamics.batch_capacity
+        for start in range(0, q.shape[0], capacity):
+            stop = min(start + capacity, q.shape[0])
+            sl = slice(start, stop)
+            context = self.physics_dynamics.build_context(
+                q[sl], v[sl],
+                parameters={name: value[sl] for name, value in parameters.items()},
+                post_v_world=None if post_v is None else post_v[sl],
+                mass_com_wrench_world=(
+                    None if mass_com_wrench_world is None
+                    else mass_com_wrench_world[sl]
+                ),
+                need_jacobians=True,
+                need_qp=need_qp,
+                need_forward_dynamics=not need_qp,
+            )
+            for name in names:
+                values[name].append(getattr(context, name).detach())
+            if not need_qp:
+                pre_velocity.append(context.pre_v_canonical.detach())
+                post_velocity.append(context.post_v_canonical.detach())
+        merged = {
+            name: torch.cat(chunks, dim=0) for name, chunks in values.items()
+        }
+        return _DetachedMechanicsCache(
+            kind=kind,
+            **merged,
+            pre_v_canonical=(
+                None if need_qp else torch.cat(pre_velocity, dim=0)
+            ),
+            post_v_canonical=(
+                None if need_qp else torch.cat(post_velocity, dim=0)
+            ),
+            mass_com_wrench_world=(
+                None if mass_com_wrench_world is None
+                else mass_com_wrench_world.detach()
+            ),
+        )
+
+    def _prepare_rollout_mechanics_cache(self, default_pose):
+        """Create actual and deployment caches for exactly one PPO update."""
+        self._rollout_actual_mechanics = None
+        self._rollout_deployment_qp_mechanics = None
+        fields = self.storage.hard_pact_fields
+        if fields is None or self.physics_dynamics is None:
+            return
+        flat = self._flat_fields(fields)
+        self.physics_dynamics.default_joint_position = torch.as_tensor(
+            default_pose, device=flat["pre_q"].device,
+            dtype=flat["pre_q"].dtype,
+        ).detach()
+        if self.bard_inverse_enabled or self.bard_rollout_enabled:
+            actual = {
+                "added_base_mass": flat["realized_added_mass"].detach(),
+                "base_com_shift": flat["realized_com_shift_body"].detach(),
+                "joint_armature": flat["joint_armature"].detach(),
+                "joint_friction": flat["joint_friction"].detach(),
+                "joint_stiffness": flat["joint_stiffness"].detach(),
+                "joint_damping": flat["joint_damping"].detach(),
+            }
+            self._rollout_actual_mechanics = self._materialize_mechanics_cache(
+                kind="actual",
+                q=flat["pre_q"], v=flat["pre_v"], parameters=actual,
+                post_v=flat["post_v"],
+                mass_com_wrench_world=flat[
+                    "equivalent_mass_com_wrench_world"
+                ],
+            )
+        qp_ready = (
+            self.hard_pact_features.execution_qp
+            and self.hard_pact_qp is not None
+        )
+        if qp_ready:
+            sample_q = flat.get("sampled_qp_q", flat["pre_q"])
+            sample_v = flat.get("sampled_qp_v", flat["pre_v"])
+            # The deployed projection has no access to realized randomization.
+            # Empty parameters mean nominal URDF inertia and zero passive
+            # deltas in both BARD and Pinocchio adapters.
+            self._rollout_deployment_qp_mechanics = (
+                self._materialize_mechanics_cache(
+                    kind="deployment", q=sample_q, v=sample_v,
+                    parameters={}, need_qp=True,
+                )
+            )
+
+    def _clear_rollout_mechanics_cache(self):
+        self._rollout_actual_mechanics = None
+        self._rollout_deployment_qp_mechanics = None
+
+    def _pcgrad_diagnostics_due(self, iteration):
+        return (
+            self.pcgrad_diagnostics_enabled
+            and iteration >= self.pcgrad_diagnostics_start_iteration
+            and (
+                (iteration - self.pcgrad_diagnostics_start_iteration)
+                % self.pcgrad_diagnostics_interval == 0
+            )
+        )
+
     def update(self, action_func, fb_func, dt, itr, default_pose, qvel_scale):
-        mean_value_loss = 0
-        mean_surrogate_loss = 0
-        mean_autoenc_loss = 0
-        mean_vel_loss = 0
-        mean_recon_loss = 0
-        mean_kld_loss = 0
-        mean_decoder_loss = 0
-        mean_pinn_loss = 0
+        metric_zero = torch.zeros((), device=self.device)
+        mean_value_loss = metric_zero.clone()
+        mean_surrogate_loss = metric_zero.clone()
+        mean_autoenc_loss = metric_zero.clone()
+        mean_vel_loss = metric_zero.clone()
+        mean_recon_loss = metric_zero.clone()
+        mean_kld_loss = metric_zero.clone()
+        mean_decoder_loss = metric_zero.clone()
+        mean_pinn_loss = metric_zero.clone()
         self._bard_timing_records = {
-            "inverse": [], "rollout": [], "dynamics": []
+            "inverse": [], "rollout": [], "dynamics": [],
+            "auxiliary": [], "pcgrad": [],
         }
 
         boot_count = 0
         boot_sum_x = None
         boot_sum_x2 = None
-        boot_sum_recon_sqerr = 0.0
+        boot_sum_recon_sqerr = torch.zeros(
+            (), device=self.device, dtype=torch.float64
+        )
 
         if itr > self.pinn_init and self.num_pinn_updates < (self.pinn_warmup_steps+1):
             if self.pinn_weight_final < 0:
@@ -591,6 +788,15 @@ class PPO_HardPACT:
 
             if self.console_debug:
                 print(self.pinn_weight)
+
+        if self.pinn_weight > 0.0 and self.cache_rollout_mechanics:
+            dynamics_timing = self._start_bard_timing(
+                "dynamics", self.storage.observations
+            )
+            self._prepare_rollout_mechanics_cache(default_pose)
+            self._stop_bard_timing("dynamics", dynamics_timing)
+
+        self._pcgrad_audit_ran = self._pcgrad_diagnostics_due(itr)
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
@@ -605,7 +811,7 @@ class PPO_HardPACT:
             # Phase 1: reproduce the legacy PPO objective and retain its mean
             # action, which supplies the differentiable nominal-torque input
             # to the BARD force prediction path.
-            ppo_loss, surrogate_loss, value_loss, current_actions = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
+            ppo_loss, surrogate_loss, value_loss, current_actions, policy_features = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
                                                                                           advantages_batch, target_values_batch, returns_batch)
@@ -627,7 +833,7 @@ class PPO_HardPACT:
                     replay["nominal_torque"], obs_batch, obs_hist_batch,
                     gt_forces_batch, default_pose,
                     replay["desired_position"], replay["feedforward_torque"],
-                    fb_func,
+                    fb_func, policy_features=policy_features,
                 )
                 
             if self.pinn_weight > 0.0 and self.pinn_weight_final > 0:
@@ -655,12 +861,20 @@ class PPO_HardPACT:
 
             # PCGrad treats reward learning as the primary objective and
             # removes the reward-parallel component of the BARD gradient.
+            pcgrad_timing = self._start_bard_timing("pcgrad", obs_batch)
             if self.pinn_weight > 0 and self.pinn_weight_final > 0 and pinn_loss is not None:    # just being extra cautious
-                self.act_optimizer.pc_backward_pinn(ppo_losses)
+                self.act_optimizer.pc_backward_pinn(
+                    ppo_losses, record_diagnostics=self._pcgrad_audit_ran
+                )
             elif self.pinn_weight_final < 0 and pinn_loss is not None:
-                self.act_optimizer.pc_backward_ppgrad(ppo_losses)
+                self.act_optimizer.pc_backward_ppgrad(
+                    ppo_losses, record_diagnostics=self._pcgrad_audit_ran
+                )
             else:
-                self.act_optimizer.pc_backward(ppo_losses)
+                self.act_optimizer.pc_backward(
+                    ppo_losses, record_diagnostics=self._pcgrad_audit_ran
+                )
+            self._stop_bard_timing("pcgrad", pcgrad_timing)
             if qp_audit_inputs is not None:
                 audit_device = next(iter(qp_audit_inputs.values())).device
                 if audit_device.type == "cuda":
@@ -697,7 +911,7 @@ class PPO_HardPACT:
                         f"qp/full/gradient_finite_fraction/{name}"
                     ] = finite_fraction
                 self._qp_full_audit_inputs = None
-            if len(ppo_losses) == 2:
+            if len(ppo_losses) == 2 and self._pcgrad_audit_ran:
                 reward_gradient, physics_gradient = (
                     self.act_optimizer.last_objective_grads
                 )
@@ -727,12 +941,22 @@ class PPO_HardPACT:
                     ).float().detach(),
                 }
             else:
-                self.last_physics_gradient_metrics = {}
+                nan = torch.full((), float("nan"), device=obs_batch.device)
+                self.last_physics_gradient_metrics = {
+                    "grad/pcgrad/audit_ran": torch.zeros(
+                        (), device=obs_batch.device
+                    ),
+                    "grad/pcgrad/cosine": nan,
+                    "grad/pcgrad/conflict_fraction": nan,
+                }
 
             # Module/group norms are computed from the merged gradients that
             # will actually be stepped. They are reductions on-device; only
             # the scalar norms reach TensorBoard.
-            for group in self.act_optimizer.optimizer.param_groups:
+            for group in (
+                self.act_optimizer.optimizer.param_groups
+                if self._pcgrad_audit_ran else ()
+            ):
                 gradients = [
                     parameter.grad.reshape(-1) for parameter in group["params"]
                     if parameter.grad is not None
@@ -747,17 +971,19 @@ class PPO_HardPACT:
                     self.last_physics_gradient_metrics[
                         f"grad/module/{name}_nonfinite_fraction"
                     ] = (~finite).float().mean().detach()
+            if self._pcgrad_audit_ran:
+                self.last_physics_gradient_metrics[
+                    "grad/pcgrad/audit_ran"
+                ] = torch.ones((), device=obs_batch.device)
             
             nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
             self.act_optimizer.step()
 
             # Perform some logging
-            mean_value_loss += value_loss.item()
-            mean_surrogate_loss += surrogate_loss.item()
+            mean_value_loss += value_loss.detach()
+            mean_surrogate_loss += surrogate_loss.detach()
             if self.pinn_weight > 0.0:
-                mean_pinn_loss += pinn_loss.item()
-            else:
-                mean_pinn_loss += 0.0
+                mean_pinn_loss += pinn_loss.detach()
 
 
             # Phase 2: recompute and aggregate every auxiliary term before a
@@ -766,6 +992,9 @@ class PPO_HardPACT:
                 self.actor_critic.train()
                 self.decoder.train()
 
+                auxiliary_timing = self._start_bard_timing(
+                    "auxiliary", obs_batch
+                )
                 aux = self._compute_auxiliary_loss(
                     obs_hist_batch, obs_target, explicit_labels_batch, grf_target,
                     terminated_batch, replay["nominal_torque"].detach(),
@@ -775,6 +1004,7 @@ class PPO_HardPACT:
                 aux["loss"].backward()
                 nn.utils.clip_grad_norm_(self.auxiliary_parameters, self.max_grad_norm)
                 self.auxiliary_optimizer.step()
+                self._stop_bard_timing("auxiliary", auxiliary_timing)
                 vae_loss, kl_div = aux["loss"], aux["kl"]
                 recon_error, vel_pred_error = aux["privileged"], aux["explicit"]
                 dec_loss = aux["privileged"]
@@ -802,16 +1032,16 @@ class PPO_HardPACT:
                     boot_sum_x2 += (x64 * x64).sum(dim=0)
 
                     # scalar sum over all elements
-                    boot_sum_recon_sqerr += ((r64 - x64) ** 2).sum().item()
+                    boot_sum_recon_sqerr += ((r64 - x64) ** 2).sum()
 
                     boot_count += x.shape[0]
 
                 # Log losses
-                mean_autoenc_loss += vae_loss.item()
-                mean_vel_loss += vel_pred_error.item()
-                mean_recon_loss += recon_error.item()
-                mean_kld_loss += kl_div.item()
-                mean_decoder_loss += dec_loss.item()
+                mean_autoenc_loss += vae_loss.detach()
+                mean_vel_loss += vel_pred_error.detach()
+                mean_recon_loss += recon_error.detach()
+                mean_kld_loss += kl_div.detach()
+                mean_decoder_loss += dec_loss.detach()
 
             # Keeps the interaction of incoming data with layer wieghts below the threashold that 
             #     saturates the tanh activation function.
@@ -841,10 +1071,12 @@ class PPO_HardPACT:
         mean_pred = boot_sum_x / boot_count                     # [D]
         ex2 = boot_sum_x2 / boot_count                          # [D]
         var = torch.clamp(ex2 - mean_pred**2, min=0.0)          # [D]
-        mean_pred_error = var.mean().item()
+        mean_pred_error = var.mean()
         actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
         ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
-        pboot = np.tanh(ratio)
+        # This is the update's single mandatory scalar synchronization. All
+        # minibatch losses and diagnostics stayed on-device until now.
+        pboot = float(torch.tanh(ratio).detach().cpu())
 
         # Use the (scaled) ratio of mean-prediction performance to actual prediction performance
         #     to determine if encoder bootstrapping is performed.
@@ -852,10 +1084,14 @@ class PPO_HardPACT:
         if self.console_debug:
             print("Use bootstrapped Encoder Dynamics: ", self.use_boot)
 
+        self._clear_rollout_mechanics_cache()
         self.storage.clear()
-
-        return mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, \
-               mean_vel_loss, mean_recon_loss, mean_kld_loss, mean_pinn_loss
+        results = torch.stack((
+            mean_value_loss, mean_surrogate_loss, mean_autoenc_loss,
+            mean_decoder_loss, mean_vel_loss, mean_recon_loss,
+            mean_kld_loss, mean_pinn_loss,
+        )).detach().cpu().tolist()
+        return tuple(results)
 
     def _compute_rl_loss(self, obs_batch, obs_hist_batch,
                          actions_batch, critic_obs_batch,
@@ -918,7 +1154,14 @@ class PPO_HardPACT:
         else:
             ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()        
 
-        return ppo_loss, surrogate_loss, value_loss, current_actions
+        policy_features = (
+            self.actor_critic.cenet_z,
+            self.actor_critic.cenet_torso_velo,
+        )
+        return (
+            ppo_loss, surrogate_loss, value_loss, current_actions,
+            policy_features,
+        )
 
     @staticmethod
     def _masked_mse(prediction, target, mask):
@@ -1147,11 +1390,29 @@ class PPO_HardPACT:
             + self.actor_critic.std.unsqueeze(0)
             * transition["standardized_action_noise"].detach()
         )
-        source_raw = self._policy_raw_action_from_noise(
-            transition["delayed_source_observation"].detach(),
-            transition["delayed_source_history"].detach(),
-            transition["delayed_source_noise"],
+        # Delay zero points at the policy evaluation already performed for
+        # PPO, so reuse that exact graph. Only delayed rows require a second
+        # history/actor evaluation; the max-delay-zero task avoids it wholly.
+        configured_delay = getattr(
+            getattr(self, "storage", None), "max_action_delay", None
         )
+        if configured_delay == 0:
+            source_raw = current_raw
+        else:
+            sampled_delay = transition.get("sampled_action_delay")
+            delayed_rows = (
+                torch.ones(
+                    current_raw.shape[0], device=current_raw.device,
+                    dtype=torch.bool,
+                )
+                if sampled_delay is None else sampled_delay.reshape(-1).ne(0)
+            )
+            source_raw = current_raw.clone()
+            source_raw[delayed_rows] = self._policy_raw_action_from_noise(
+                transition["delayed_source_observation"][delayed_rows].detach(),
+                transition["delayed_source_history"][delayed_rows].detach(),
+                transition["delayed_source_noise"][delayed_rows],
+            )
         current_transformed = torch.clamp(
             current_raw, -self.action_clip, self.action_clip
         )
@@ -1184,6 +1445,7 @@ class PPO_HardPACT:
         self, nominal_torque, obs_batch, obs_hist_batch,
         measured_generalized_contact_force, default_pose,
         desired_position=None, feedforward_torque=None, fb_func=None,
+        policy_features=None,
     ):
         r"""Evaluate interval BARD losses and one sampled substep projection.
 
@@ -1220,13 +1482,12 @@ class PPO_HardPACT:
 
         It retains gradients through ``tau_control`` and both physics heads.
         The detached 18x18 solve uses an RHS-only custom VJP; official BARD
-        ABA remains a test/reference path. The inverse and rollout losses share their one
-        control-rate context.  A second context is unavoidable for projection:
-        it represents the sampled physics-substep state, not ``pre_q/pre_v``.
-        Only that sampled context builds CRBA/QP terms; no per-decimation
-        matrices are stored. RNEA is evaluated once for each enabled inverse
-        or rollout bias term, CRBA once for rollout, and qpth exactly once per
-        minibatch transition.
+        ABA remains a test/reference path. Before minibatch iteration, one
+        detached actual-mechanics cache materializes ``M,h,J_f,J_b`` at every
+        control transition. A distinct nominal/deployment cache materializes
+        the selected substep QP mechanics. Shuffled PPO epochs only index these
+        tensors; no BARD/Pinocchio work or autograd graph is repeated. The QP
+        itself is still solved exactly once per sampled minibatch transition.
         """
         if not (self.bard_enabled or self.hard_pact_features.soft_constraint_penalty):
             return nominal_torque.sum() * 0.0
@@ -1238,21 +1499,14 @@ class PPO_HardPACT:
         if batch is None:
             raise RuntimeError("HardPACT BARD loss requires named transition fields")
         control_dt = batch["control_dt"].detach().clamp_min(1.0e-8)
-        self.physics_dynamics.default_joint_position = torch.as_tensor(
-            default_pose, device=batch["pre_q"].device,
-            dtype=batch["pre_q"].dtype,
-        ).detach()
-        parameters = {
-            "added_base_mass": batch["realized_added_mass"].detach(),
-            "base_com_shift": batch["realized_com_shift_body"].detach(),
-            "joint_armature": batch["joint_armature"].detach(),
-            "joint_friction": batch["joint_friction"].detach(),
-            "joint_stiffness": batch["joint_stiffness"].detach(),
-            "joint_damping": batch["joint_damping"].detach(),
-        }
         mass_wrench = batch["equivalent_mass_com_wrench_world"].detach()
         zero = nominal_torque.sum() * 0.0
-        _, _, latent, explicit = self.actor_critic.cenet_enc_forward(obs_hist_batch)
+        if policy_features is None:
+            _, _, latent, explicit = self.actor_critic.cenet_enc_forward(
+                obs_hist_batch
+            )
+        else:
+            latent, explicit = policy_features
         grf_yaw = self.actor_critic.physics_estimator.predict_grf(
             latent, explicit, nominal_torque
         ).reshape(-1, 4, 3)
@@ -1289,11 +1543,31 @@ class PPO_HardPACT:
         self.last_inverse_dynamics_metrics = {}
         self.last_rollout_dynamics_metrics = {}
         if self.bard_inverse_enabled or self.bard_rollout_enabled:
-            # A PPO minibatch is often much larger than the fixed BARD Data
-            # workspace (4096 envs x 64 steps / 4 minibatches = 65536 rows).
-            # Stream detached mechanics through that reusable GPU workspace.
-            # Losses are reweighted by their exact valid-row counts, so this
-            # is mathematically identical to one monolithic masked reduction.
+            flat_indices = self.storage.current_batch_indices
+            if self._rollout_actual_mechanics is None:
+                # Direct unit-test/compatibility calls may bypass update().
+                # Production update() always materializes the full cache once.
+                actual_parameters = {
+                    "added_base_mass": batch["realized_added_mass"].detach(),
+                    "base_com_shift": batch["realized_com_shift_body"].detach(),
+                    "joint_armature": batch["joint_armature"].detach(),
+                    "joint_friction": batch["joint_friction"].detach(),
+                    "joint_stiffness": batch["joint_stiffness"].detach(),
+                    "joint_damping": batch["joint_damping"].detach(),
+                }
+                dynamics_timing = self._start_bard_timing(
+                    "dynamics", nominal_torque
+                )
+                mechanics_root = self._materialize_mechanics_cache(
+                    kind="actual", q=batch["pre_q"], v=batch["pre_v"],
+                    parameters=actual_parameters, post_v=batch["post_v"],
+                    mass_com_wrench_world=mass_wrench,
+                )
+                self._stop_bard_timing("dynamics", dynamics_timing)
+                mechanics_indices = None
+            else:
+                mechanics_root = self._rollout_actual_mechanics
+                mechanics_indices = flat_indices
             valid_all = ~(
                 batch["push_event_mask"].bool() | batch["reset_mask"].bool()
                 | batch["timeout_mask"].bool() | batch["teleport_mask"].bool()
@@ -1307,35 +1581,33 @@ class PPO_HardPACT:
             for start in range(0, nominal_torque.shape[0], capacity):
                 stop = min(start + capacity, nominal_torque.shape[0])
                 sl = slice(start, stop)
-                chunk_parameters = {
-                    name: value[sl] for name, value in parameters.items()
-                }
-                dynamics_timing = self._start_bard_timing(
-                    "dynamics", nominal_torque
+                chunk = mechanics_root.index(
+                    sl if mechanics_indices is None else mechanics_indices[sl]
                 )
-                context = self.physics_dynamics.build_context(
-                    batch["pre_q"][sl], batch["pre_v"][sl],
-                    parameters=chunk_parameters,
-                    post_v_world=batch["post_v"][sl],
-                    mass_com_wrench_world=mass_wrench[sl],
-                    need_jacobians=True, need_qp=False,
-                    need_forward_dynamics=self.bard_rollout_enabled,
-                )
-                self._stop_bard_timing("dynamics", dynamics_timing)
+                context = chunk.as_context(self.physics_dynamics)
                 count = valid_all[sl].reshape(-1).sum().to(control_dt.dtype)
                 if self.bard_inverse_enabled:
                     observed_acceleration = (
-                        context.post_v_bard - context.v_bard
+                        chunk.post_v_canonical - chunk.pre_v_canonical
                     ) / control_dt[sl]
                     timing = self._start_bard_timing("inverse", nominal_torque)
+                    # RNEA(q,v,a)=M_eff(q)*a+h(q,v) for fixed realized
+                    # mechanics. M_eff already includes armature and h already
+                    # includes the configured passive joint forces.
+                    required_force = (
+                        torch.einsum(
+                            "bij,bj->bi", chunk.mass_matrix,
+                            observed_acceleration,
+                        ) + chunk.bias
+                    )
                     inverse = corrected_bard_inverse_dynamics_loss(
-                        required_generalized_force=context.rnea(observed_acceleration),
+                        required_generalized_force=required_force,
                         foot_jacobians=context.foot_jacobians,
                         base_jacobian=context.base_jacobian,
                         interval_executed_torque=batch["interval_executed_torque"][sl],
                         interval_grf_world=grf_world[sl],
                         total_wrench_world=total_at_base[sl],
-                        mass_com_wrench_world=context.mass_com_wrench_world,
+                        mass_com_wrench_world=chunk.mass_com_wrench_world,
                         measured_generalized_contact_force=measured_generalized_contact_force[sl],
                         push_event_mask=batch["push_event_mask"][sl],
                         reset_mask=batch["reset_mask"][sl],
@@ -1424,46 +1696,28 @@ class PPO_HardPACT:
                 sample_grf_yaw / self.grf_observation_scale,
                 sample_q[:, 3:7],
             )
-            # This detached label removes the inertial gravity contribution
-            # already represented by sampled randomized BARD inertia.
-            sample_mass_wrench = batch.get(
-                "sampled_qp_mass_com_wrench_world", mass_wrench
-            ).detach()
-            # Reuse the current wrench-head output, rotate it with sampled yaw,
-            # subtract W_mass/CoM once, and shift it to J_b's reference point.
-            sample_applied, _ = world_wrench(
-                sample_q, sample_mass_wrench, wrench_yaw,
-                batch["realized_com_shift_body"],
-            )
-            # Reconstruct M_K,b_K,J_f,K,J_b,K,Jdot_f,K*v_K from compact state
-            # and realized parameters. These mechanics are detached by BARD.
-            # Reuse the same fixed-capacity BARD workspace instead of asking
-            # it to allocate for the flattened PPO minibatch. The resulting
-            # detached terms are concatenated once; HardPACTQP subsequently
-            # consumes them in its independently configured PPO chunks.
-            sampled_terms = {
-                name: [] for name in (
-                    "mass_matrix", "bias", "foot_jacobians",
-                    "base_jacobian", "foot_acceleration_bias",
+            # Projection is a deployment operation: nominal mechanics and the
+            # total predicted wrench are the only quantities available on the
+            # robot. In particular, neither realized randomization nor its
+            # label-only mass/CoM wrench enters this path.
+            sample_applied = torch.cat((
+                _yaw_local_to_world(
+                    wrench_yaw[:, :3].unsqueeze(1), sample_q[:, 3:7]
+                ).squeeze(1),
+                _yaw_local_to_world(
+                    wrench_yaw[:, 3:].unsqueeze(1), sample_q[:, 3:7]
+                ).squeeze(1),
+            ), dim=-1)
+            flat_indices = self.storage.current_batch_indices
+            if self._rollout_deployment_qp_mechanics is None:
+                sampled_mechanics = self._materialize_mechanics_cache(
+                    kind="deployment", q=sample_q, v=sample_v,
+                    parameters={}, need_qp=True,
                 )
-            }
-            capacity = self.physics_dynamics.batch_capacity
-            for start in range(0, sample_q.shape[0], capacity):
-                stop = min(start + capacity, sample_q.shape[0])
-                sl = slice(start, stop)
-                sample_context = self.physics_dynamics.build_context(
-                    sample_q[sl], sample_v[sl],
-                    parameters={
-                        name: value[sl] for name, value in parameters.items()
-                    },
-                    need_qp=True,
+            else:
+                sampled_mechanics = (
+                    self._rollout_deployment_qp_mechanics.index(flat_indices)
                 )
-                for name in sampled_terms:
-                    sampled_terms[name].append(getattr(sample_context, name))
-            sampled_terms = {
-                name: torch.cat(values, dim=0)
-                for name, values in sampled_terms.items()
-            }
             # qpth solves
             #   min_x 1/2*x^TQx+p^Tx,  Gx<=h, Ax=b,
             #   x=[qdd_18,f_12,tau_safe_12,s_12].
@@ -1473,15 +1727,15 @@ class PPO_HardPACT:
             differentiate_qp = self.hard_pact_features.differentiable_qp
             qp_arguments = dict(
                 # Equality coefficient M_K.
-                mass_matrix=sampled_terms["mass_matrix"],
+                mass_matrix=sampled_mechanics.mass_matrix,
                 # Equality RHS contribution -b_K.
-                bias=sampled_terms["bias"],
+                bias=sampled_mechanics.bias,
                 # Dynamics -J_f,K^T and contact-acceleration J_f,K blocks.
-                foot_jacobians=sampled_terms["foot_jacobians"],
+                foot_jacobians=sampled_mechanics.foot_jacobians,
                 # Wrench generalized force J_b,K^T*W_hat_applied.
-                base_jacobian=sampled_terms["base_jacobian"],
+                base_jacobian=sampled_mechanics.base_jacobian,
                 # Known affine contact acceleration Jdot_f,K*v_K.
-                foot_acceleration_bias=sampled_terms["foot_acceleration_bias"],
+                foot_acceleration_bias=sampled_mechanics.foot_acceleration_bias,
                 # Differentiable torque tracking center.
                 tau_nom=(sampled_nominal if differentiate_qp else sampled_nominal.detach()),
                 # Differentiable force tracking center in world Newtons.
@@ -1543,16 +1797,15 @@ class PPO_HardPACT:
             self.last_qp_metrics["qp/minimal/intervention_fraction"] = (
                 intervention.float().mean()
             )
-            if intervention.any():
-                self.last_qp_metrics[
-                    "qp/minimal/intervention_torque_correction_rms"
-                ] = correction[intervention].square().mean().sqrt()
-            else:
-                self.last_qp_metrics[
-                    "qp/minimal/intervention_torque_correction_rms"
-                ] = correction.new_zeros(())
-            audit_ran = self.last_qp_metrics.get("qp/full/audit_ran")
-            if audit_ran is not None and bool(audit_ran.detach().item()):
+            intervention_weights = intervention.to(correction.dtype)
+            self.last_qp_metrics[
+                "qp/minimal/intervention_torque_correction_rms"
+            ] = (
+                correction.square().mean(dim=-1).mul(intervention_weights).sum()
+                / intervention_weights.sum().clamp_min(1.0)
+            ).sqrt()
+            audit_ran = self.hard_pact_qp._full_audit_due(differentiate_qp)
+            if audit_ran:
                 # Retain only four compact learned QP inputs, and only on a
                 # periodic full audit. This exposes actual autograd routing
                 # without retaining additional matrices during normal runs.

@@ -585,23 +585,13 @@ class Go2HardPACT(Go2PACT):
                 self._yaw_local_to_world(wrench_yaw[:, :3].unsqueeze(1), quat).squeeze(1),
                 self._yaw_local_to_world(wrench_yaw[:, 3:].unsqueeze(1), quat).squeeze(1),
             ), dim=-1)
-            # J_b is expressed about the BARD base-frame origin p_WB.
-            base_point = q_simulator[:, :3]
-            # The learned total-wrench label is defined about the realized
-            # base CoM: p_com=p_WB+R_WB*Delta_c_body.
-            com_point = base_point + self._body_point_to_world(
-                self._realized_com_shift_body, quat
-            )
-            # Randomized mass/CoM is already installed in BARD. Subtract its
-            # label-only gravity wrench once, then shift the remaining applied
-            # wrench from p_com to the J_b point using
-            # T_base=T_com+(p_com-p_base)xF.
-            applied_wrench = wrench_at_point(
-                total_wrench_world - mass_com_wrench, com_point, base_point
-            )
-            # All realized dynamics parameters are measured/detached by the
-            # BARD adapter; they alter M/b/J but are never learned QP inputs.
-            parameters = self._canonical_randomized_parameters()
+            # Projection is deployment-facing. It therefore uses the total
+            # predicted wrench about the nominal base reference directly and
+            # never reads the privileged realized mass/CoM label.
+            applied_wrench = total_wrench_world
+            # Empty parameters select URDF/nominal mechanics. Actual realized
+            # randomization is reserved for the PINN-target mechanics cache.
+            parameters = {}
             # One kinematic update builds M(q_k), b(q_k,v_k), J_f(q_k),
             # J_b(q_k), and Jdot_f(q_k,v_k)*v_k for this substep.
             context = self._hard_pact_bard_dynamics.build_context(

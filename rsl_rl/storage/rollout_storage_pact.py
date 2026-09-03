@@ -73,7 +73,7 @@ class RolloutStoragePACT:
             self.__init__()
 
     # We want all of the actions and associated data formatted in the Model kinematic definition - [FR, FL, RR, RL]
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, wb_shape, device="cpu"):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, wb_shape, device="cpu", *, store_legacy_pinn_dynamics=True):
 
         self.device = device
 
@@ -114,10 +114,29 @@ class RolloutStoragePACT:
         self.pprev_obs      = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
         self.pprev_obs_hist = torch.zeros(num_transitions_per_env, num_envs, *obs_hist_shape, device=self.device)
 
-        self.wb_contact_forces   = torch.zeros(num_transitions_per_env, num_envs, *wb_shape, device=self.device)
-        self.wb_mass_mats        = torch.zeros(num_transitions_per_env, num_envs, *wb_shape, *wb_shape, device=self.device)
-        self.wb_bias_vecs        = torch.zeros(num_transitions_per_env, num_envs, *wb_shape, device=self.device)
-        self.torso_accelerations = torch.zeros(num_transitions_per_env, num_envs, 6, device=self.device)
+        self.wb_contact_forces = torch.zeros(
+            num_transitions_per_env, num_envs, *wb_shape, device=self.device
+        )
+        # Legacy PACT consumes these Pinocchio tensors directly. HardPACT
+        # reconstructs detached mechanics once per rollout update, so keeping
+        # T x N copies would waste both VRAM and gather bandwidth.
+        self.store_legacy_pinn_dynamics = bool(store_legacy_pinn_dynamics)
+        if self.store_legacy_pinn_dynamics:
+            self.wb_mass_mats = torch.zeros(
+                num_transitions_per_env, num_envs, *wb_shape, *wb_shape,
+                device=self.device,
+            )
+            self.wb_bias_vecs = torch.zeros(
+                num_transitions_per_env, num_envs, *wb_shape,
+                device=self.device,
+            )
+            self.torso_accelerations = torch.zeros(
+                num_transitions_per_env, num_envs, 6, device=self.device
+            )
+        else:
+            self.wb_mass_mats = None
+            self.wb_bias_vecs = None
+            self.torso_accelerations = None
 
         # rnn
         self.saved_hidden_states_a = None
@@ -128,6 +147,7 @@ class RolloutStoragePACT:
         # these tensors and therefore retains its exact storage behavior.
         self.hard_pact_fields = None
         self.current_hard_pact_batch = None
+        self.current_batch_indices = None
         self.action_noise = None
         self.max_action_delay = None
         self._action_replay_boundary_observations = None
@@ -193,9 +213,10 @@ class RolloutStoragePACT:
         self.pprev_obs_hist[self.step].copy_(transition.pprev_obs_hist)
         
         self.wb_contact_forces[self.step].copy_(transition.wb_contact_forces)
-        self.wb_mass_mats[self.step].copy_(transition.wb_mass_mat)
-        self.wb_bias_vecs[self.step].copy_(transition.wb_bias_vec)
-        self.torso_accelerations[self.step].copy_(transition.torso_acc)
+        if self.store_legacy_pinn_dynamics:
+            self.wb_mass_mats[self.step].copy_(transition.wb_mass_mat)
+            self.wb_bias_vecs[self.step].copy_(transition.wb_bias_vec)
+            self.torso_accelerations[self.step].copy_(transition.torso_acc)
 
         hard_pact = getattr(transition, "hard_pact", None)
         if hard_pact is not None:
@@ -244,6 +265,7 @@ class RolloutStoragePACT:
             self._action_replay_boundary_noise.copy_(self.action_noise[-delay:])
         self.step = 0
         self.current_hard_pact_batch = None
+        self.current_batch_indices = None
 
     def _action_replay_sources(self, batch_idx, delay):
         """Resolve delayed sources on GPU without duplicating rollout history."""
@@ -332,9 +354,18 @@ class RolloutStoragePACT:
         pprev_obs_hist = self.pprev_obs_hist.flatten(0, 1)
 
         gt_forces     = self.wb_contact_forces.flatten(0,1)
-        wb_mass_mats  = self.wb_mass_mats.flatten(0,1)
-        wb_bias_vecs  = self.wb_bias_vecs.flatten(0,1)
-        torso_accs    = self.torso_accelerations.flatten(0,1)
+        wb_mass_mats = (
+            self.wb_mass_mats.flatten(0, 1)
+            if self.wb_mass_mats is not None else None
+        )
+        wb_bias_vecs = (
+            self.wb_bias_vecs.flatten(0, 1)
+            if self.wb_bias_vecs is not None else None
+        )
+        torso_accs = (
+            self.torso_accelerations.flatten(0, 1)
+            if self.torso_accelerations is not None else None
+        )
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -342,6 +373,7 @@ class RolloutStoragePACT:
                 start = i*mini_batch_size
                 end = (i+1)*mini_batch_size
                 batch_idx = indices[start:end]
+                self.current_batch_indices = batch_idx
 
                 # Baseline PPO stuff
                 obs_batch = observations[batch_idx]
@@ -369,9 +401,15 @@ class RolloutStoragePACT:
                 prev_obs_batch      = prev_obs[batch_idx]
                 prev_obs_hist_batch = prev_obs_hist[batch_idx]
                 gt_forces_batch     = gt_forces[batch_idx]
-                mass_mat_batch      = wb_mass_mats[batch_idx]
-                bias_vec_batch      = wb_bias_vecs[batch_idx]
-                torso_accs_batch    = torso_accs[batch_idx]
+                mass_mat_batch = (
+                    wb_mass_mats[batch_idx] if wb_mass_mats is not None else None
+                )
+                bias_vec_batch = (
+                    wb_bias_vecs[batch_idx] if wb_bias_vecs is not None else None
+                )
+                torso_accs_batch = (
+                    torso_accs[batch_idx] if torso_accs is not None else None
+                )
 
                 pprev_obs_batch = pprev_obs[batch_idx]
                 pprev_obs_hist_batch = pprev_obs_hist[batch_idx]

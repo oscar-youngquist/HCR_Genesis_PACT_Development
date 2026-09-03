@@ -165,7 +165,8 @@ def differentiable_bard_rollout_loss(
     """
     if context.foot_jacobians is None or context.base_jacobian is None:
         raise ValueError("rollout context requires cached force Jacobians")
-    if context.post_v_bard is None:
+    if (getattr(context, "post_v_canonical", None) is None
+            and getattr(context, "post_v_bard", None) is None):
         raise ValueError("rollout context requires a cached post-step velocity")
     # g = S^T tau_control + J_f^T F_hat + J_b^T W_hat_applied.
     generalized_force = compose_generalized_force(
@@ -179,8 +180,14 @@ def differentiable_bard_rollout_loss(
     # Work in velocity increments. BARD stores URDF joint order; `_canonical`
     # maps both measured endpoints to simulator FR/FL/RR/RL joint order.
     dt = control_dt.detach().reshape(-1, 1).clamp_min(1.0e-8)
-    pre_velocity = context.dynamics._canonical(context.v_bard).detach()
-    target_velocity = context.dynamics._canonical(context.post_v_bard).detach()
+    pre_velocity = getattr(context, "pre_v_canonical", None)
+    target_velocity = getattr(context, "post_v_canonical", None)
+    if pre_velocity is None:
+        pre_velocity = context.dynamics._canonical(context.v_bard)
+    if target_velocity is None:
+        target_velocity = context.dynamics._canonical(context.post_v_bard)
+    pre_velocity = pre_velocity.detach()
+    target_velocity = target_velocity.detach()
     predicted_increment = dt * acceleration
     observed_increment = target_velocity - pre_velocity
     increment_residual = predicted_increment - observed_increment

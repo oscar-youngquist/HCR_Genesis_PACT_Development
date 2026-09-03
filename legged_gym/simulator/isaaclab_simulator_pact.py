@@ -41,11 +41,66 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         ]
 
     def hard_pact_apply_base_wrench_world(self, wrench):
-        # Isaac Lab retains these world-frame values until write_data_to_sim.
-        self._robot.set_external_force_and_torque(
-            wrench[:, :3].unsqueeze(1), wrench[:, 3:].unsqueeze(1),
-            body_ids=[self._base_link_index],
+        """Set the current persistent world-frame wrench without warnings."""
+        force = wrench[:, :3].unsqueeze(1)
+        torque = wrench[:, 3:].unsqueeze(1)
+        composer = getattr(self._robot, "permanent_wrench_composer", None)
+        if composer is not None:
+            # Isaac Lab 5.1's composer is the replacement for the deprecated
+            # Articulation wrapper. ``set`` (rather than ``add``) guarantees
+            # that one HardPACT substep cannot accumulate the previous value.
+            composer.set_forces_and_torques(
+                forces=force, torques=torque,
+                body_ids=[self._base_link_index], is_global=True,
+            )
+        else:
+            # Compatibility for older Isaac Lab releases; the explicit frame
+            # flag also fixes the former accidental body-frame application.
+            self._robot.set_external_force_and_torque(
+                force, torque, body_ids=[self._base_link_index],
+                is_global=True,
+            )
+
+    def push_robots(self):
+        """Apply one planar root-velocity impulse only at sampled events.
+
+        The legacy task invokes this hook each control step. Genesis uses that
+        call merely to *check* a per-environment interval; the old Isaac Lab
+        adapter instead changed velocity on every call. This implementation
+        restores the Genesis event semantics while retaining Isaac Lab's
+        supported planar-only disturbance capability.
+        """
+        push_steps = torch.clamp(
+            (self.push_timeouts / self._control_dt).to(torch.long).reshape(-1),
+            min=1,
         )
+        self._push_call_counter += 1
+        event = torch.remainder(self._push_call_counter, push_steps).eq(0)
+        env_ids = event.nonzero(as_tuple=False).flatten()
+        maximum = float(getattr(
+            self, "push_value", self._cfg.domain_rand.max_push_vel_xy
+        ))
+        sampled = torch.empty(
+            self._num_envs, 2, device=self._device
+        ).uniform_(-maximum, maximum)
+        if self._cfg.env.lateral_push_only:
+            sampled[:, 0].zero_()
+        self._rand_push_vels.zero_()
+        self._rand_push_vels[event, :2] = sampled[event]
+        # Only event rows are written. Calling this method on an inactive step
+        # therefore does not re-apply or overwrite any root velocity.
+        if env_ids.numel() > 0:
+            root_velocity = self._robot.data.root_link_vel_w[env_ids, :6].clone()
+            root_velocity[:, :2].add_(sampled[event])
+            self._robot.write_root_link_velocity_to_sim(
+                root_velocity, env_ids=env_ids
+            )
+        replacement = torch.empty_like(self.push_timeouts).uniform_(
+            self.push_interval_min, self.push_interval_max
+        )
+        self.push_timeouts.copy_(torch.where(
+            event[:, None], replacement, self.push_timeouts
+        ))
 
     def hard_pact_capabilities(self):
         features = {
@@ -87,6 +142,12 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
     # ------------------------------------------------------------------
     def _parse_cfg(self):
         super()._parse_cfg()
+        self.push_interval_min = float(
+            self._cfg.domain_rand.push_interval_min
+        )
+        self.push_interval_max = float(
+            self._cfg.domain_rand.push_interval_max
+        )
         self.use_domainrand_curriculum = bool(
             getattr(self._cfg.domain_rand, "use_domainrand_curriculum", False)
         )
@@ -136,6 +197,10 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
 
     def _init_buffers(self):
         super()._init_buffers()
+        self.push_timeouts = torch.empty(
+            self._num_envs, 1, device=self._device
+        ).uniform_(self.push_interval_min, self.push_interval_max)
+        self._push_call_counter = 0
         self._base_world_lin_vel = torch.zeros_like(
             self._robot.data.root_link_lin_vel_w
         )

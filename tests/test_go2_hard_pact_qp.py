@@ -107,7 +107,14 @@ class HardPACTQPTests(unittest.TestCase):
         self.assertEqual(len(qp._constant_cache), 1)
         for actual, expected in zip(first, second):
             self.assertIs(actual, expected)
-            self.assertEqual(actual.data_ptr(), expected.data_ptr())
+            if isinstance(actual, dict):
+                for name in actual:
+                    self.assertIs(actual[name], expected[name])
+                    self.assertEqual(
+                        actual[name].data_ptr(), expected[name].data_ptr()
+                    )
+            else:
+                self.assertEqual(actual.data_ptr(), expected.data_ptr())
 
         data["base_jacobian"][:, :, :6] = torch.eye(6, dtype=torch.float64)
         data["foot_jacobians"][:, 0, :, :3] = torch.eye(3, dtype=torch.float64)

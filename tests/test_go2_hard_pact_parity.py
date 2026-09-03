@@ -245,6 +245,10 @@ class TestHardPACTAliases(unittest.TestCase):
                         "active_wrench_loss_weight", "neutral_wrench_loss_weight",
                         "profile_bard_timing", "console_debug",
                         "dynamics_backend", "pinocchio_num_workers",
+                        "pcgrad_diagnostics_enabled",
+                        "pcgrad_diagnostics_start_iteration",
+                        "pcgrad_diagnostics_interval",
+                        "cache_rollout_mechanics",
                     ):
                         alias_train_dict["algorithm"].pop(field)
                 self.assertEqual(alias_train_dict, legacy_train_dict)

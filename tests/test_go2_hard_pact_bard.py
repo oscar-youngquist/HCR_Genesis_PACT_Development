@@ -576,6 +576,28 @@ class BARDPinocchioParityTests(unittest.TestCase):
                 )
                 self.assertLess(residual.abs().max().item(), 2e-4)
 
+    def test_cached_mass_times_acceleration_plus_bias_matches_rnea(self):
+        """The optimized inverse target preserves armature/passive semantics."""
+        q, v, _ = self.simulator_state(rotated=True)
+        parameters = {
+            "added_base_mass": torch.tensor([[1.2]]),
+            "base_com_shift": torch.tensor([[0.03, -0.02, 0.01]]),
+            "joint_armature": torch.full((1, 12), 0.015),
+            "joint_friction": torch.full((1, 12), 0.02),
+            "joint_stiffness": torch.full((1, 12), 0.04),
+            "joint_damping": torch.full((1, 12), 0.1),
+        }
+        context = self.dynamics.build_context(
+            q, v, parameters=parameters, need_forward_dynamics=True
+        )
+        acceleration = torch.linspace(-2.0, 3.0, 18).unsqueeze(0)
+        cached = (
+            torch.einsum("bij,bj->bi", context.mass_matrix, acceleration)
+            + context.bias
+        )
+        direct = context.rnea(self.dynamics._bard_order(acceleration))
+        torch.testing.assert_close(cached, direct, atol=3e-4, rtol=2e-5)
+
     def test_fixed_solve_and_aba_generalized_force_vjp_parity(self):
         q, v, _ = self.simulator_state(rotated=True)
         parameters = {

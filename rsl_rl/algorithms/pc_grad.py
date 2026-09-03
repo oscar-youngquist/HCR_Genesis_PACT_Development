@@ -35,24 +35,35 @@ class PCGrad:
     def step(self):
         return self._optim.step()
 
-    def pc_backward(self, objectives):
+    def pc_backward(self, objectives, *, record_diagnostics=True):
         """Apply ordinary symmetric PCGrad to one or more objectives."""
-        self._backward(objectives, self._project_conflicting)
+        self._backward(objectives, self._project_conflicting, record_diagnostics)
 
-    def pc_backward_pinn(self, objectives):
+    def pc_backward_pinn(self, objectives, *, record_diagnostics=True):
         """Apply B1Z1's PPO-primary, orthogonal-PINN projection."""
-        self._backward(objectives, self._project_conflicting_pinn)
+        self._backward(
+            objectives, self._project_conflicting_pinn, record_diagnostics
+        )
 
-    def pc_backward_ppgrad(self, objectives):
+    def pc_backward_ppgrad(self, objectives, *, record_diagnostics=True):
         """Apply the norm-balanced form of B1Z1's PINN projection."""
-        self._backward(objectives, self._project_conflicting_pinn_balanced)
+        self._backward(
+            objectives, self._project_conflicting_pinn_balanced,
+            record_diagnostics,
+        )
 
-    def _backward(self, objectives, projector):
+    def _backward(self, objectives, projector, record_diagnostics):
         if not objectives:
             raise ValueError("PCGrad requires at least one objective")
         grads, shapes, has_grads, has_any_grad = self._pack_grad(objectives)
         merged = projector(grads, has_grads)
-        self._record_backward(grads, merged, has_grads)
+        if record_diagnostics:
+            self._record_backward(grads, merged, has_grads)
+        else:
+            # Avoid three additional full-model clones in the normal path.
+            self.last_objective_grads = None
+            self.last_merged_grad = None
+            self.last_has_grads = None
         self._set_grad(self._unflatten_grad(merged, shapes[0]), has_any_grad)
 
     def _merge(self, projected, shared):
@@ -99,9 +110,10 @@ class PCGrad:
         physics_orthogonal = physics - coefficient * reward
         reward_norm = reward.norm()
         physics_norm = physics_orthogonal.norm()
-        beta = (
-            reward_norm / physics_norm.clamp_min(1.0e-12)
-            if physics_norm > reward_norm else 1.0
+        beta = torch.where(
+            physics_norm > reward_norm,
+            reward_norm / physics_norm.clamp_min(1.0e-12),
+            torch.ones_like(physics_norm),
         )
         shared = torch.stack(has_grads).prod(0).bool()
         return self._merge([grads[0], beta * physics_orthogonal], shared)

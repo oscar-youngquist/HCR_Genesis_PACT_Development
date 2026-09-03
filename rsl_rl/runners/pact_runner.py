@@ -71,11 +71,19 @@ class OnPolicyRunnerPACT:
                  train_cfg,
                  log_dir=None,
                  device='cpu'):
-        torch.autograd.set_detect_anomaly(True)
         self.cfg=train_cfg["runner"]
         self.train_cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
+        # Preserve legacy PACT's historical anomaly checking. HardPACT opts
+        # out explicitly because it synchronizes every backward operation and
+        # is unsuitable for normal throughput measurements/training.
+        torch.autograd.set_detect_anomaly(bool(
+            self.alg_cfg.get(
+                "detect_anomaly",
+                self.cfg.get("algorithm_class_name") != "PPO_HardPACT",
+            )
+        ))
         
         self.device = device
         self.env = env
@@ -298,7 +306,16 @@ class OnPolicyRunnerPACT:
                     
                     # get the PINN specific data
                     gt_forces, mass_mats, bias_vecs, torso_acc = self.env.get_pinn_wb_dynamics()
-                    gt_forces, mass_mats, bias_vecs, torso_acc = gt_forces.to(self.device), mass_mats.to(self.device), bias_vecs.to(self.device), torso_acc.to(self.device)
+                    gt_forces = gt_forces.to(self.device)
+                    if not self.is_hard_pact:
+                        mass_mats = mass_mats.to(self.device)
+                        bias_vecs = bias_vecs.to(self.device)
+                        torso_acc = torso_acc.to(self.device)
+                    else:
+                        # HardPACT builds its own detached mechanics cache;
+                        # these legacy rollout tensors must not be copied or
+                        # transferred into storage.
+                        mass_mats = bias_vecs = torso_acc = None
 
                     # move everything to the correct device
                     obs, critic_obs, obs_hist, exp_labels, rewards, dones, grfs = obs.to(self.device), critic_obs.to(self.device), \
@@ -705,7 +722,7 @@ class OnPolicyRunnerPACT:
         if (self.console_pinn_timing
                 and getattr(self.alg, "profile_bard_timing", False)):
             timings = self.alg.last_physics_loss_metrics
-            for loss_name in ("inverse", "rollout"):
+            for loss_name in ("inverse", "rollout", "auxiliary", "pcgrad"):
                 total = timings.get(
                     f"physics/timing/{loss_name}_forward_ms_per_update"
                 )
@@ -713,8 +730,14 @@ class OnPolicyRunnerPACT:
                     f"physics/timing/{loss_name}_forward_ms_per_minibatch"
                 )
                 if total is not None and per_minibatch is not None:
+                    label = {
+                        "inverse": "Dynamics inverse forward:",
+                        "rollout": "Dynamics rollout forward:",
+                        "auxiliary": "Auxiliary update:",
+                        "pcgrad": "PCGrad backward:",
+                    }[loss_name]
                     log_string += (
-                        f"{f'Dynamics {loss_name} forward:':>{pad}} "
+                        f"{label:>{pad}} "
                         f"{total.item():.3f} ms/update "
                         f"({per_minibatch.item():.3f} ms/minibatch)\n"
                     )

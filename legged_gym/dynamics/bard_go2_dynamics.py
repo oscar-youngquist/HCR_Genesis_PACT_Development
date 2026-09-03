@@ -27,50 +27,52 @@ class _FixedMechanicsSolve(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, matrix, right_hand_side):
+        # CRBA is symmetric positive definite. Symmetrization removes the
+        # insignificant triangular round-off left by backend implementations;
+        # the diagonal term is at machine precision and only protects a nearly
+        # singular factorization without measurably changing rigid mechanics.
         matrix = matrix.detach()
-        factor, info = torch.linalg.cholesky_ex(matrix)
-        good = info.eq(0)
-        solution = torch.empty_like(right_hand_side)
-        if bool(good.any()):
-            solution[good] = torch.cholesky_solve(
-                right_hand_side[good].unsqueeze(-1), factor[good]
-            ).squeeze(-1)
-        if bool((~good).any()):
-            fallback, fallback_info = torch.linalg.solve_ex(
-                matrix[~good], right_hand_side[~good].unsqueeze(-1)
-            )
-            if bool(fallback_info.ne(0).any()):
-                raise RuntimeError("BARD CRBA forward-dynamics matrix is singular")
-            solution[~good] = fallback.squeeze(-1)
-
-        residual = torch.einsum("bij,bj->bi", matrix, solution) - right_hand_side
-        scale = (
-            torch.linalg.vector_norm(matrix, dim=(-2, -1))
-            * torch.linalg.vector_norm(solution, dim=-1)
-            + torch.linalg.vector_norm(right_hand_side, dim=-1)
+        matrix = 0.5 * (matrix + matrix.transpose(-1, -2))
+        diagonal_scale = matrix.diagonal(dim1=-2, dim2=-1).abs().mean(
+            dim=-1, keepdim=True
         ).clamp_min(1.0)
-        tolerance = 2.0e-4 if matrix.dtype == torch.float32 else 1.0e-10
-        certified = (
-            torch.isfinite(solution).all(dim=-1)
-            & (torch.linalg.vector_norm(residual, dim=-1) <= tolerance * scale)
+        regularization = (
+            torch.finfo(matrix.dtype).eps * 1.0e-3 * diagonal_scale
         )
-        if not bool(certified.all()):
-            raise RuntimeError("BARD CRBA forward-dynamics solve failed certification")
-        ctx.save_for_backward(matrix, factor, good)
+        matrix = matrix + torch.diag_embed(
+            regularization.expand(-1, matrix.shape[-1])
+        )
+        fallback = False
+        try:
+            # No cholesky_ex info tensor is inspected here: doing so forces a
+            # CUDA-to-host synchronization once per training chunk.
+            factor = torch.linalg.cholesky(matrix)
+            solution = torch.cholesky_solve(
+                right_hand_side.unsqueeze(-1), factor
+            ).squeeze(-1)
+        except RuntimeError:
+            # Deterministic checked fallback. This exceptional path may
+            # synchronize, while the normal SPD training path never does.
+            solution = torch.linalg.solve(
+                matrix, right_hand_side.unsqueeze(-1)
+            ).squeeze(-1)
+            factor = matrix.new_empty(0)
+            fallback = True
+        ctx.save_for_backward(matrix, factor)
+        ctx.fallback = fallback
         return solution
 
     @staticmethod
     def backward(ctx, acceleration_gradient):
-        matrix, factor, good = ctx.saved_tensors
-        force_gradient = torch.empty_like(acceleration_gradient)
-        if bool(good.any()):
-            force_gradient[good] = torch.cholesky_solve(
-                acceleration_gradient[good].unsqueeze(-1), factor[good]
+        matrix, factor = ctx.saved_tensors
+        if ctx.fallback:
+            force_gradient = torch.linalg.solve(
+                matrix.transpose(-1, -2),
+                acceleration_gradient.unsqueeze(-1),
             ).squeeze(-1)
-        if bool((~good).any()):
-            force_gradient[~good] = torch.linalg.solve(
-                matrix[~good].transpose(-1, -2),
-                acceleration_gradient[~good].unsqueeze(-1),
+        else:
+            force_gradient = torch.cholesky_solve(
+                acceleration_gradient.unsqueeze(-1), factor
             ).squeeze(-1)
         return None, force_gradient
 
@@ -223,6 +225,10 @@ class Go2BardContext:
     mass_matrix: torch.Tensor | None = None
     bias: torch.Tensor | None = None
     foot_acceleration_bias: torch.Tensor | None = None
+    # Canonical endpoint velocities allow an iteration cache to discard the
+    # backend-specific q/v representation after mechanics are materialized.
+    pre_v_canonical: torch.Tensor | None = None
+    post_v_canonical: torch.Tensor | None = None
 
     def rnea(self, acceleration_bard):
         """Return canonical generalized force without another kinematic update."""
@@ -418,6 +424,11 @@ class BardGo2Dynamics:
             None if post_v_bard is None else post_v_bard.detach(),
             None if mass_com_wrench_world is None
             else mass_com_wrench_world.detach(),
+        )
+        context.pre_v_canonical = self._canonical(v_bard).detach()
+        context.post_v_canonical = (
+            None if post_v_bard is None
+            else self._canonical(post_v_bard).detach()
         )
         if need_qp or need_forward_dynamics:
             # CRBA returns BARD/URDF generalized order.  The QP consistently

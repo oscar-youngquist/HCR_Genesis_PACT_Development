@@ -101,6 +101,12 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         # runner.console_pinn_timing.
         profile_bard_timing = True
         console_debug = False
+        # PCGrad itself remains active every minibatch. These flags only gate
+        # expensive cloned-gradient/module-cosine diagnostics.
+        pcgrad_diagnostics_enabled = False
+        pcgrad_diagnostics_start_iteration = 0
+        pcgrad_diagnostics_interval = 50
+        cache_rollout_mechanics = True
 
         # qpth/OptNet safety projection.  The decision vector is always
         # [qdd_18, world_grf_12, tau_safe_12, contact_slack_12]. CPU references

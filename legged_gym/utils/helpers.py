@@ -230,6 +230,8 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
                 # iteration zero at full weight without changing defaults.
                 cfg_train.policy.pinn_init_steps = -1
                 cfg_train.policy.pinn_loss_weight = -1.0
+            if getattr(args, "disable_rollout_mechanics_cache", False):
+                cfg_train.algorithm.cache_rollout_mechanics = False
             if getattr(args, "qp_solver", None) is not None:
                 qp_cfg["qp_solver"] = args.qp_solver
                 qp_cfg["rollout_qp_solver"] = None
@@ -294,6 +296,10 @@ def get_args():
     parser.add_argument(
         '--benchmark_bard_active', action='store_true', default=False,
         help='HardPACT benchmark-only: activate BARD losses from iteration zero',
+    )
+    parser.add_argument(
+        '--disable_rollout_mechanics_cache', action='store_true', default=False,
+        help='benchmark HardPACT with per-minibatch uncached mechanics',
     )
     parser.add_argument(
         '--bard_batch_capacity', type=int, default=None,
