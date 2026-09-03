@@ -669,6 +669,22 @@ class OnPolicyRunnerPACT:
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean pos action noise std:':>{pad}} {mean_std.item():.2f}\n""")
 
+        if getattr(self.alg, "profile_bard_timing", False):
+            timings = self.alg.last_physics_loss_metrics
+            for loss_name in ("inverse", "rollout"):
+                total = timings.get(
+                    f"physics/timing/{loss_name}_forward_ms_per_update"
+                )
+                per_minibatch = timings.get(
+                    f"physics/timing/{loss_name}_forward_ms_per_minibatch"
+                )
+                if total is not None and per_minibatch is not None:
+                    log_string += (
+                        f"{f'BARD {loss_name} forward:':>{pad}} "
+                        f"{total.item():.3f} ms/update "
+                        f"({per_minibatch.item():.3f} ms/minibatch)\n"
+                    )
+
         log_string += ep_string
         log_string += (f"""{'-' * width}\n"""
                        f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""

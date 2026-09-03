@@ -90,6 +90,23 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         # KKT VRAM; either can be forced. Chunking bounds peak graph size.
         hard_pact_qp = {
             "enabled": True,
+            # qpth remains the verified default. Optional GPU-native solvers
+            # are selected explicitly and never trigger a hidden CPU/backend
+            # fallback when their dependency is unavailable.
+            "qp_solver": "qpth",
+            "rollout_qp_solver": None,
+            "ppo_qp_solver": None,
+            "allow_solver_mismatch": False,
+            "cupiqp_mode": "dense",
+            "cupiqp_cuda_graph": False,
+            # Opt-in because measured warm-start speed depends on the contact
+            # regime. False preserves exact legacy cold-qpth execution; the
+            # converged/certified QP is identical when enabled.
+            # Real per-substep robot states are strongly temporally coherent;
+            # repository-local qpth warm starts reduce rollout time markedly.
+            # The generic solver default remains cold and this can still be
+            # disabled for exact legacy/cold-reference experiments.
+            "qpth_warm_start": True,
             "friction_coefficient": 0.6,
             "torque_rate_limit_nm_s": 1000.0,
             "contact_acceleration_limit_m_s2": 0.0,

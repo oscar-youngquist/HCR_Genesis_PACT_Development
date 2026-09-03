@@ -1151,6 +1151,9 @@ class Go2HardPACT(Go2PACT):
 
     def reset_idx(self, env_ids):
         self._legacy_task_class.reset_idx(self, env_ids)
+        rollout_qp = getattr(self, "_hard_pact_rollout_qp", None)
+        if rollout_qp is not None and hasattr(rollout_qp, "clear_warm_start"):
+            rollout_qp.clear_warm_start(env_ids)
         if hasattr(self, "grf_processor") and env_ids.numel() > 0:
             self.grf_processor.reset(env_ids)
         if hasattr(self, "_persistent_component_active") and env_ids.numel() > 0:

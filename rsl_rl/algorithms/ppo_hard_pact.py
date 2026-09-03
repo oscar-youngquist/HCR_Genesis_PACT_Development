@@ -155,6 +155,7 @@ class PPO_HardPACT:
                  lambda_rollout=1.0,
                  lambda_projection=1.0e-3,
                  lambda_soft_constraint=1.0e-3,
+                 profile_bard_timing=False,
                  ablation_variant="full",
                  hard_pact_qp=None,
                  grf_observation_scale=0.01,
@@ -268,6 +269,11 @@ class PPO_HardPACT:
         self.lambda_rollout = float(lambda_rollout)
         self.lambda_projection = float(lambda_projection)
         self.lambda_soft_constraint = float(lambda_soft_constraint)
+        # Opt-in benchmark instrumentation. CUDA events avoid synchronizing
+        # between the shared-context inverse and rollout calculations; one
+        # synchronization at the end of update materializes all durations.
+        self.profile_bard_timing = bool(profile_bard_timing)
+        self._bard_timing_records = {"inverse": [], "rollout": []}
         if min(
             self.lambda_inverse, self.lambda_rollout, self.lambda_projection,
             self.lambda_soft_constraint,
@@ -547,6 +553,7 @@ class PPO_HardPACT:
         mean_kld_loss = 0
         mean_decoder_loss = 0
         mean_pinn_loss = 0
+        self._bard_timing_records = {"inverse": [], "rollout": []}
 
         boot_count = 0
         boot_sum_x = None
@@ -800,6 +807,9 @@ class PPO_HardPACT:
         mean_vel_loss /= (num_updates * self.num_enc_epochs)
         mean_recon_loss /= (num_updates * self.num_enc_epochs)
 
+        if self.profile_bard_timing:
+            self._finalize_bard_timing(num_updates)
+
         # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
         #      total number of scalar elements per sample vector
         feat_dim = boot_sum_x.shape[0]
@@ -890,6 +900,51 @@ class PPO_HardPACT:
         per_sample = (prediction - target).square().mean(dim=-1)
         weights = mask.reshape(-1).to(per_sample.dtype)
         return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
+
+    def _start_bard_timing(self, name, reference):
+        """Start one asynchronous forward-only PINN-loss measurement."""
+        if not self.profile_bard_timing:
+            return None
+        if reference.device.type == "cuda":
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            return start, end
+        return time.perf_counter()
+
+    def _stop_bard_timing(self, name, token):
+        if token is None:
+            return
+        if isinstance(token, tuple):
+            token[1].record()
+        else:
+            token = (time.perf_counter() - token) * 1000.0
+        self._bard_timing_records[name].append(token)
+
+    def _finalize_bard_timing(self, num_updates):
+        """Publish summed and per-minibatch timings after one synchronization."""
+        device = torch.device(self.device)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        for name, records in self._bard_timing_records.items():
+            total_ms = 0.0
+            for token in records:
+                if isinstance(token, tuple):
+                    total_ms += token[0].elapsed_time(token[1])
+                else:
+                    total_ms += token
+            value = torch.tensor(total_ms, device=self.device, dtype=torch.float32)
+            self.last_physics_loss_metrics[
+                f"physics/timing/{name}_forward_ms_per_update"
+            ] = value
+            self.last_physics_loss_metrics[
+                f"physics/timing/{name}_forward_ms_per_minibatch"
+            ] = value / max(int(num_updates), 1)
+            self.last_physics_loss_metrics[
+                f"physics/timing/{name}_chunk_count"
+            ] = torch.tensor(
+                len(records), device=self.device, dtype=torch.float32
+            )
 
     def _compute_auxiliary_loss(
         self, history, privileged_target, explicit_target, grf_target,
@@ -1150,14 +1205,14 @@ class PPO_HardPACT:
             latent, explicit
         ) / self.base_wrench_observation_scale
 
-        def world_wrench(q, label_mass_wrench):
+        def world_wrench(q, label_mass_wrench, wrench_prediction, com_shift):
             total = torch.cat((
-                _yaw_local_to_world(wrench_yaw[:, :3].unsqueeze(1), q[:, 3:7]).squeeze(1),
-                _yaw_local_to_world(wrench_yaw[:, 3:].unsqueeze(1), q[:, 3:7]).squeeze(1),
+                _yaw_local_to_world(wrench_prediction[:, :3].unsqueeze(1), q[:, 3:7]).squeeze(1),
+                _yaw_local_to_world(wrench_prediction[:, 3:].unsqueeze(1), q[:, 3:7]).squeeze(1),
             ), dim=-1)
             base = q[:, :3].detach()
             com = base + _body_point_to_world(
-                batch["realized_com_shift_body"].detach(), q.detach()
+                com_shift.detach(), q.detach()
             )
             applied = wrench_at_point(total - label_mass_wrench, com, base)
             return applied, applied + label_mass_wrench
@@ -1166,70 +1221,109 @@ class PPO_HardPACT:
             grf_yaw / self.grf_observation_scale, batch["pre_q"][:, 3:7]
         )
         applied_at_base, total_at_base = world_wrench(
-            batch["pre_q"], mass_wrench
+            batch["pre_q"], mass_wrench, wrench_yaw,
+            batch["realized_com_shift_body"],
         )
 
         # BARD's interval objectives intentionally retain their control-rate
         # state and logged interval-average executed torque.  A straight-
         # through value preserves the earlier rollout gradient contract while
         # making the ABA forward value exactly the torque Genesis executed.
-        context = None
-        if self.bard_inverse_enabled or self.bard_rollout_enabled:
-            context = self.bard_dynamics.build_context(
-                batch["pre_q"], batch["pre_v"], parameters=parameters,
-                post_v_world=batch["post_v"],
-                mass_com_wrench_world=mass_wrench,
-                need_jacobians=True, need_qp=False,
-            )
-
         inverse_loss = zero
-        if self.bard_inverse_enabled:
-            observed_acceleration = (
-                context.post_v_bard - context.v_bard
-            ) / control_dt
-            inverse = corrected_bard_inverse_dynamics_loss(
-                required_generalized_force=context.rnea(observed_acceleration),
-                foot_jacobians=context.foot_jacobians,
-                base_jacobian=context.base_jacobian,
-                interval_executed_torque=batch["interval_executed_torque"],
-                interval_grf_world=grf_world,
-                total_wrench_world=total_at_base,
-                mass_com_wrench_world=context.mass_com_wrench_world,
-                measured_generalized_contact_force=measured_generalized_contact_force,
-                push_event_mask=batch["push_event_mask"],
-                reset_mask=batch["reset_mask"],
-                timeout_mask=batch["timeout_mask"],
-                teleport_mask=batch["teleport_mask"],
-            )
-            inverse_loss = inverse.loss
-            self.last_inverse_dynamics_metrics = inverse.metrics
-        else:
-            self.last_inverse_dynamics_metrics = {}
-
         rollout_loss = zero
-        if self.bard_rollout_enabled:
-            # W_hat_applied is the total wrench-head prediction with the
-            # label-only mass/CoM gravity wrench removed and shifted to J_b's
-            # base-frame reference point.  Randomized inertia is already in
-            # BARD, so this prevents counting its gravitational effect twice.
-            rollout = differentiable_bard_rollout_loss(
-                context=context,
-                control_torque=(
-                    nominal_torque + batch["interval_executed_torque"].detach()
-                    - nominal_torque.detach()
-                ),
-                interval_grf_world=grf_world,
-                applied_wrench_world=applied_at_base,
-                control_dt=control_dt,
-                push_event_mask=batch["push_event_mask"],
-                reset_mask=batch["reset_mask"],
-                timeout_mask=batch["timeout_mask"],
-                teleport_mask=batch["teleport_mask"],
+        self.last_inverse_dynamics_metrics = {}
+        self.last_rollout_dynamics_metrics = {}
+        if self.bard_inverse_enabled or self.bard_rollout_enabled:
+            # A PPO minibatch is often much larger than the fixed BARD Data
+            # workspace (4096 envs x 64 steps / 4 minibatches = 65536 rows).
+            # Stream detached mechanics through that reusable GPU workspace.
+            # Losses are reweighted by their exact valid-row counts, so this
+            # is mathematically identical to one monolithic masked reduction.
+            valid_all = ~(
+                batch["push_event_mask"].bool() | batch["reset_mask"].bool()
+                | batch["timeout_mask"].bool() | batch["teleport_mask"].bool()
             )
-            rollout_loss = rollout.loss
-            self.last_rollout_dynamics_metrics = rollout.metrics
-        else:
-            self.last_rollout_dynamics_metrics = {}
+            valid_total = valid_all.reshape(-1).sum().to(control_dt.dtype)
+            inverse_numerator = zero
+            rollout_numerator = zero
+            inverse_metric_sums = {}
+            rollout_metric_sums = {}
+            capacity = self.bard_dynamics.batch_capacity
+            for start in range(0, nominal_torque.shape[0], capacity):
+                stop = min(start + capacity, nominal_torque.shape[0])
+                sl = slice(start, stop)
+                chunk_parameters = {
+                    name: value[sl] for name, value in parameters.items()
+                }
+                context = self.bard_dynamics.build_context(
+                    batch["pre_q"][sl], batch["pre_v"][sl],
+                    parameters=chunk_parameters,
+                    post_v_world=batch["post_v"][sl],
+                    mass_com_wrench_world=mass_wrench[sl],
+                    need_jacobians=True, need_qp=False,
+                )
+                count = valid_all[sl].reshape(-1).sum().to(control_dt.dtype)
+                if self.bard_inverse_enabled:
+                    observed_acceleration = (
+                        context.post_v_bard - context.v_bard
+                    ) / control_dt[sl]
+                    timing = self._start_bard_timing("inverse", nominal_torque)
+                    inverse = corrected_bard_inverse_dynamics_loss(
+                        required_generalized_force=context.rnea(observed_acceleration),
+                        foot_jacobians=context.foot_jacobians,
+                        base_jacobian=context.base_jacobian,
+                        interval_executed_torque=batch["interval_executed_torque"][sl],
+                        interval_grf_world=grf_world[sl],
+                        total_wrench_world=total_at_base[sl],
+                        mass_com_wrench_world=context.mass_com_wrench_world,
+                        measured_generalized_contact_force=measured_generalized_contact_force[sl],
+                        push_event_mask=batch["push_event_mask"][sl],
+                        reset_mask=batch["reset_mask"][sl],
+                        timeout_mask=batch["timeout_mask"][sl],
+                        teleport_mask=batch["teleport_mask"][sl],
+                    )
+                    self._stop_bard_timing("inverse", timing)
+                    inverse_numerator = inverse_numerator + inverse.loss * count
+                    for name, value in inverse.metrics.items():
+                        inverse_metric_sums[name] = (
+                            inverse_metric_sums.get(name, zero) + value * count
+                        )
+                if self.bard_rollout_enabled:
+                    timing = self._start_bard_timing("rollout", nominal_torque)
+                    rollout = differentiable_bard_rollout_loss(
+                        context=context,
+                        control_torque=(
+                            nominal_torque[sl]
+                            + batch["interval_executed_torque"][sl].detach()
+                            - nominal_torque[sl].detach()
+                        ),
+                        interval_grf_world=grf_world[sl],
+                        applied_wrench_world=applied_at_base[sl],
+                        control_dt=control_dt[sl],
+                        push_event_mask=batch["push_event_mask"][sl],
+                        reset_mask=batch["reset_mask"][sl],
+                        timeout_mask=batch["timeout_mask"][sl],
+                        teleport_mask=batch["teleport_mask"][sl],
+                    )
+                    self._stop_bard_timing("rollout", timing)
+                    rollout_numerator = rollout_numerator + rollout.loss * count
+                    for name, value in rollout.metrics.items():
+                        rollout_metric_sums[name] = (
+                            rollout_metric_sums.get(name, zero) + value * count
+                        )
+            denominator = valid_total.clamp_min(1.0)
+            if self.bard_inverse_enabled:
+                inverse_loss = inverse_numerator / denominator
+                self.last_inverse_dynamics_metrics = {
+                    name: value / denominator
+                    for name, value in inverse_metric_sums.items()
+                }
+            if self.bard_rollout_enabled:
+                rollout_loss = rollout_numerator / denominator
+                self.last_rollout_dynamics_metrics = {
+                    name: value / denominator
+                    for name, value in rollout_metric_sums.items()
+                }
 
         soft_constraint_loss = zero
         if self.hard_pact_features.soft_constraint_penalty:
@@ -1277,12 +1371,39 @@ class PPO_HardPACT:
             ).detach()
             # Reuse the current wrench-head output, rotate it with sampled yaw,
             # subtract W_mass/CoM once, and shift it to J_b's reference point.
-            sample_applied, _ = world_wrench(sample_q, sample_mass_wrench)
+            sample_applied, _ = world_wrench(
+                sample_q, sample_mass_wrench, wrench_yaw,
+                batch["realized_com_shift_body"],
+            )
             # Reconstruct M_K,b_K,J_f,K,J_b,K,Jdot_f,K*v_K from compact state
             # and realized parameters. These mechanics are detached by BARD.
-            sample_context = self.bard_dynamics.build_context(
-                sample_q, sample_v, parameters=parameters, need_qp=True
-            )
+            # Reuse the same fixed-capacity BARD workspace instead of asking
+            # it to allocate for the flattened PPO minibatch. The resulting
+            # detached terms are concatenated once; HardPACTQP subsequently
+            # consumes them in its independently configured PPO chunks.
+            sampled_terms = {
+                name: [] for name in (
+                    "mass_matrix", "bias", "foot_jacobians",
+                    "base_jacobian", "foot_acceleration_bias",
+                )
+            }
+            capacity = self.bard_dynamics.batch_capacity
+            for start in range(0, sample_q.shape[0], capacity):
+                stop = min(start + capacity, sample_q.shape[0])
+                sl = slice(start, stop)
+                sample_context = self.bard_dynamics.build_context(
+                    sample_q[sl], sample_v[sl],
+                    parameters={
+                        name: value[sl] for name, value in parameters.items()
+                    },
+                    need_qp=True,
+                )
+                for name in sampled_terms:
+                    sampled_terms[name].append(getattr(sample_context, name))
+            sampled_terms = {
+                name: torch.cat(values, dim=0)
+                for name, values in sampled_terms.items()
+            }
             # qpth solves
             #   min_x 1/2*x^TQx+p^Tx,  Gx<=h, Ax=b,
             #   x=[qdd_18,f_12,tau_safe_12,s_12].
@@ -1292,15 +1413,15 @@ class PPO_HardPACT:
             differentiate_qp = self.hard_pact_features.differentiable_qp
             qp_arguments = dict(
                 # Equality coefficient M_K.
-                mass_matrix=sample_context.mass_matrix,
+                mass_matrix=sampled_terms["mass_matrix"],
                 # Equality RHS contribution -b_K.
-                bias=sample_context.bias,
+                bias=sampled_terms["bias"],
                 # Dynamics -J_f,K^T and contact-acceleration J_f,K blocks.
-                foot_jacobians=sample_context.foot_jacobians,
+                foot_jacobians=sampled_terms["foot_jacobians"],
                 # Wrench generalized force J_b,K^T*W_hat_applied.
-                base_jacobian=sample_context.base_jacobian,
+                base_jacobian=sampled_terms["base_jacobian"],
                 # Known affine contact acceleration Jdot_f,K*v_K.
-                foot_acceleration_bias=sample_context.foot_acceleration_bias,
+                foot_acceleration_bias=sampled_terms["foot_acceleration_bias"],
                 # Differentiable torque tracking center.
                 tau_nom=(sampled_nominal if differentiate_qp else sampled_nominal.detach()),
                 # Differentiable force tracking center in world Newtons.

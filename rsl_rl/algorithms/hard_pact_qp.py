@@ -32,6 +32,13 @@ import time
 
 import torch
 from qpth.qp import QPFunction
+from .hard_pact_qp_backends import (
+    QPBackendUnavailable,
+    backend_capability,
+    create_backend,
+    require_backend,
+)
+from .qpth_warm_start import solve_qpth_warm
 
 
 # Fixed slices make every Q/P/G/A block visibly correspond to one physical
@@ -53,6 +60,19 @@ class HardPACTQPConfig:
     """
 
     enabled: bool = True  # Master rollout/PPO projection switch.
+    # One canonical QP and fallback cascade can be solved by any registered
+    # numerical backend. Overrides are diagnostics-only and require an
+    # explicit mismatch opt-in so rollout/training cannot diverge silently.
+    qp_solver: str = "qpth"
+    rollout_qp_solver: str | None = None
+    ppo_qp_solver: str | None = None
+    allow_solver_mismatch: bool = False
+    cupiqp_mode: str = "dense"  # dense | sparse
+    # cuPIQP 0.1's CUDA graph is not safe when a cached rollout solver is
+    # interleaved with short-lived implicit-backward solvers. Keep the stable
+    # path as default; users may benchmark graph capture explicitly.
+    cupiqp_cuda_graph: bool = False
+    qpth_warm_start: bool = False
     friction_coefficient: float = 0.6  # mu in |fx|,|fy|<=mu*fz.
     torque_rate_limit_nm_s: float = 1000.0  # dot(tau)_lim [Nm/s].
     contact_acceleration_limit_m_s2: float = 0.0  # a_tol [m/s^2].
@@ -287,6 +307,20 @@ class HardPACTDifferentiableQP:
             raise ValueError(
                 "QP diagnostics_level must be minimal, physical, or full"
             )
+        solvers = {
+            config.qp_solver,
+            config.rollout_qp_solver or config.qp_solver,
+            config.ppo_qp_solver or config.qp_solver,
+        }
+        if not solvers <= {"qpth", "cupiqp", "moreau"}:
+            raise ValueError("QP solver must be qpth, cupiqp, or moreau")
+        if config.cupiqp_mode not in ("dense", "sparse"):
+            raise ValueError("cupiqp_mode must be dense or sparse")
+        if len(solvers) > 1 and not config.allow_solver_mismatch:
+            raise ValueError(
+                "different rollout/PPO QP solvers require "
+                "allow_solver_mismatch=True"
+            )
         if self._full_audit_period(config) < 0:
             raise ValueError("QP full_audit_period must be nonnegative")
         if self._full_audit_sample_size(config) <= 0:
@@ -294,6 +328,54 @@ class HardPACTDifferentiableQP:
         self._constant_cache = {}
         self._solve_count = 0
         self._solve_count_by_mode = {False: 0, True: 0}
+        self._backend_instances = {
+            name: create_backend(name, config) for name in solvers
+            if name != "qpth"
+        }
+        self._active_solver = config.qp_solver
+        self._active_differentiable = False
+        # Rollout-only qpth terminal (primal, equality dual, inequality dual,
+        # slack) states plus a validity bit for every environment row. Keys
+        # identify stable chunks, while the mask prevents a reset in one row
+        # from discarding or contaminating any other environment's state.
+        # PPO remains cold so no rollout iterate enters an unrelated minibatch.
+        self._qpth_warm_states = {}
+
+    def clear_warm_start(self, env_ids=None):
+        """Clear qpth rollout state globally or for chunks touching env_ids."""
+        if env_ids is None:
+            self._qpth_warm_states.clear()
+            return
+        # Keep reset ownership updates on the warm-state device. A reset is a
+        # hot rollout path and must not introduce GPU->CPU->GPU synchronization.
+        ids = torch.as_tensor(env_ids).detach()
+        for key in list(self._qpth_warm_states):
+            start, stop, _ = key
+            state, valid = self._qpth_warm_states[key]
+            device_ids = ids.to(valid.device)
+            local = device_ids[
+                (device_ids >= start) & (device_ids < stop)
+            ] - start
+            if local.numel():
+                valid = valid.clone()
+                valid[local] = False
+                self._qpth_warm_states[key] = (state, valid)
+
+    def solver_for_mode(self, differentiable):
+        """Return the explicitly configured rollout or PPO backend."""
+        override = (
+            self.cfg.ppo_qp_solver if differentiable
+            else self.cfg.rollout_qp_solver
+        )
+        return override or self.cfg.qp_solver
+
+    def solver_capabilities(self, reference):
+        """Report all registered paths without importing unavailable solvers."""
+        dtype = self._solve_dtype(reference)
+        return {
+            name: backend_capability(name, device=reference.device, dtype=dtype)
+            for name in ("qpth", "cupiqp", "moreau")
+        }
 
     @staticmethod
     def _full_audit_period(config):
@@ -874,7 +956,7 @@ class HardPACTDifferentiableQP:
                 )
         return result
 
-    def _solve_stage(self, data, relaxed_contact, audit_count=0):
+    def _solve_stage(self, data, relaxed_contact, audit_count=0, warm_key=None):
         r"""Build, validate, solve, and certify one QP fallback stage.
 
         qpth returns ``z*`` and its backward differentiates the KKT system;
@@ -914,23 +996,55 @@ class HardPACTDifferentiableQP:
         # This bit is separate from coefficient validity: qpth can reject an
         # otherwise valid numerical factorization at runtime.
         solver_exception = torch.zeros_like(valid)
+        warm_hit_mask = torch.zeros_like(valid)
+        terminal_state = None
         try:
-            # Solve min_z 1/2*z^TQz+p^Tz s.t. Gz<=h, Az=b. QPFunction's
-            # autograd backward implicitly solves the differentiated KKT
-            # equations; no hand-written derivative or dense inverse is used.
-            solution_scaled = QPFunction(
-                eps=self._eps(Q.dtype),
-                # qpth gates its unconditional inaccurate-solution banner on
-                # ``verbose >= 0``.  Our own finite/SPD/rank, primal, and KKT
-                # checks below already classify that iterate and drive the
-                # relaxed/analytic fallback, so printing the same multi-line
-                # banner at every physics substep adds no diagnostic value.
-                # Preserve positive verbosity for explicit solver debugging.
-                verbose=(-1 if self.cfg.verbose == 0 else self.cfg.verbose),
-                notImprovedLim=self.cfg.not_improved_limit,
-                maxIter=self.cfg.max_iter,
-                check_Q_spd=self.cfg.check_q_spd,
-            )(Q, p, G, h, A, b)
+            # Every backend consumes these exact canonical scaled matrices.
+            # QP construction, certification, and fallback never live in an
+            # adapter, so changing solvers cannot change physical semantics.
+            if (
+                self._active_solver == "qpth"
+                and self.cfg.qpth_warm_start
+                and not self._active_differentiable
+                and warm_key is not None
+            ):
+                warm_entry = self._qpth_warm_states.get(warm_key)
+                if warm_entry is None:
+                    warm_state, warm_mask = None, None
+                else:
+                    warm_state, warm_mask = warm_entry
+                    warm_hit_mask = warm_mask.to(valid.device).clone()
+                solution_scaled, terminal_state = solve_qpth_warm(
+                    Q, p, G, h, A, b, warm_start=warm_state,
+                    warm_mask=warm_mask,
+                    eps=self._eps(Q.dtype),
+                    verbose=(-1 if self.cfg.verbose == 0 else self.cfg.verbose),
+                    not_improved_limit=self.cfg.not_improved_limit,
+                    max_iter=self.cfg.max_iter,
+                    check_q_spd=self.cfg.check_q_spd,
+                )
+            elif self._active_solver == "qpth":
+                solution_scaled = QPFunction(
+                    eps=self._eps(Q.dtype),
+                    # qpth gates its inaccurate-solution banner on verbose>=0.
+                    # Our mandatory primal checks classify the candidate, so
+                    # public quiet mode maps to -1 without weakening safety.
+                    verbose=(-1 if self.cfg.verbose == 0 else self.cfg.verbose),
+                    notImprovedLim=self.cfg.not_improved_limit,
+                    maxIter=self.cfg.max_iter,
+                    check_Q_spd=self.cfg.check_q_spd,
+                )(Q, p, G, h, A, b)
+            else:
+                solution_scaled = self._backend_instances[
+                    self._active_solver
+                ].solve(
+                    Q, p, G, h, A, b,
+                    differentiable=self._active_differentiable,
+                )
+        except QPBackendUnavailable:
+            # An explicitly selected unavailable GPU solver is a configuration
+            # error, never a reason to execute another backend or CPU path.
+            raise
         except (RuntimeError, ValueError):
             # qpth factorizes a complete batch. A numerical failure therefore
             # rejects this stage for the chunk; solve() proceeds to the less
@@ -962,6 +1076,41 @@ class HardPACTDifferentiableQP:
             & (diagnostics["equality_max"] <= self._normalized_tolerance(Q.dtype))
             & (diagnostics["inequality_max"] <= self._normalized_tolerance(Q.dtype))
         )
+        if warm_key is not None and terminal_state is not None:
+            # Install only certified terminal rows. Reset/failed rows remain
+            # cold next substep, while every unaffected environment keeps its
+            # own primal/dual/slack iterate.
+            self._qpth_warm_states[warm_key] = (
+                terminal_state, success.detach().clone()
+            )
+        elif warm_key is not None and warm_key in self._qpth_warm_states:
+            # No terminal state means the batched warm call raised before a
+            # candidate existed; every row is cold-retried below, so discard
+            # the structurally bad cached entry and let the next solve seed it.
+            self._qpth_warm_states.pop(warm_key, None)
+        if warm_key is not None and not success.all():
+            # Any failed warm candidate must be cold-resolved before entering
+            # the relaxed-contact stage. Successful rows retain their states;
+            # failed rows stay invalid even if this one-off cold retry passes.
+            failed = ~success
+            cold_data = {name: value[failed] for name, value in data.items()}
+            cold_solution, cold_ok, cold_diag = self._solve_stage(
+                cold_data, relaxed_contact, audit_count=0, warm_key=None,
+            )
+            solution_scaled = solution_scaled.clone()
+            solution_scaled[failed] = (
+                cold_solution / variable_scale
+            )
+            success = success.clone()
+            success[failed] = cold_ok
+            for name, values in cold_diag.items():
+                if name in diagnostics and diagnostics[name].shape == success.shape:
+                    diagnostics[name] = diagnostics[name].clone()
+                    diagnostics[name][failed] = values
+            diagnostics["warm_residual_cold_retry"] = failed
+        else:
+            diagnostics["warm_residual_cold_retry"] = torch.zeros_like(success)
+        diagnostics["warm_start_hit"] = warm_hit_mask
         diagnostics.update({"input_finite": finite, "equality_rank": rank_ok,
                             "q_spd": spd,
                             "solver_exception": solver_exception})
@@ -1038,6 +1187,19 @@ class HardPACTDifferentiableQP:
             f"{prefix}/pre_clamp_torque_violation_max": diagnostics[
                 "pre_clamp_torque_violation_max"
             ].max(),
+            f"{prefix}/solver_qpth": stage.new_tensor(
+                float(self._active_solver == "qpth"), dtype=torch.float32
+            ),
+            f"{prefix}/solver_cupiqp": stage.new_tensor(
+                float(self._active_solver == "cupiqp"), dtype=torch.float32
+            ),
+            f"{prefix}/solver_moreau": stage.new_tensor(
+                float(self._active_solver == "moreau"), dtype=torch.float32
+            ),
+            f"{prefix}/rollout_ppo_solver_mismatch": stage.new_tensor(
+                float(self.solver_for_mode(False) != self.solver_for_mode(True)),
+                dtype=torch.float32,
+            ),
         }
         for source, name in (
             ("selected/equality_max", "normalized_equality_residual_max"),
@@ -1057,6 +1219,12 @@ class HardPACTDifferentiableQP:
                     metrics[f"{prefix}/{key}_fraction"] = (
                         diagnostics[key].float().mean()
                     )
+        for name in ("warm_start_hit", "warm_residual_cold_retry"):
+            key = f"full/{name}"
+            metrics[f"{prefix}/{name}_fraction"] = (
+                diagnostics[key].float().mean()
+                if key in diagnostics else stage.new_tensor(0.0, dtype=torch.float32)
+            )
         return metrics
 
     def _physical_summary(self, solution, data):
@@ -1220,6 +1388,15 @@ class HardPACTDifferentiableQP:
                     "contact_probability",
                 )
             )
+        solver_name = self.solver_for_mode(bool(differentiable))
+        # Fail before constructing/falling back if a requested optional
+        # backend is unavailable. This prevents a missing package from being
+        # misreported as an ordinary numerical stage-2 fallback.
+        require_backend(
+            solver_name, device=reference.device, dtype=solver_dtype
+        )
+        self._active_solver = solver_name
+        self._active_differentiable = bool(differentiable)
         chunk_size = self._chunk_size(bool(differentiable))
         self._solve_count += 1
         self._solve_count_by_mode[bool(differentiable)] += 1
@@ -1235,8 +1412,13 @@ class HardPACTDifferentiableQP:
         if audit_solve:
             if reference.device.type == "cuda":
                 torch.cuda.synchronize(reference.device)
-                torch.cuda.reset_peak_memory_stats(reference.device)
-                cuda_memory_start = torch.cuda.memory_allocated(reference.device)
+                # Torch 2.8's reset API rejects ``torch.device`` even though
+                # synchronize accepts it; use the live tensor's ordinal.
+                cuda_ordinal = reference.device.index
+                if cuda_ordinal is None:
+                    cuda_ordinal = torch.cuda.current_device()
+                torch.cuda.reset_peak_memory_stats(cuda_ordinal)
+                cuda_memory_start = torch.cuda.memory_allocated(cuda_ordinal)
             forward_start = time.perf_counter()
         outputs = []
 
@@ -1269,8 +1451,25 @@ class HardPACTDifferentiableQP:
                 # covers every environment below.
                 audit_count = min(int(valid.sum()), audit_remaining)
                 audit_remaining -= audit_count
+                warm_key = None
+                if (
+                    self.cfg.qpth_warm_start
+                    and solver_name == "qpth"
+                    and not differentiable
+                    and bool(valid.all())
+                ):
+                    warm_key = (start, stop, False)
+                elif self.cfg.qpth_warm_start:
+                    # Invalid coefficients/bounds clear only their owning
+                    # environments. Other rows must retain independent warm
+                    # iterates even though this compact solve cannot use the
+                    # fixed full-chunk structure on this call.
+                    invalid_ids = torch.arange(
+                        start, stop, device=valid.device
+                    )[~valid]
+                    self.clear_warm_start(invalid_ids)
                 full, full_ok, full_diag = self._solve_stage(
-                    compact, False, audit_count=audit_count
+                    compact, False, audit_count=audit_count, warm_key=warm_key,
                 )
                 failed = ~full_ok
                 relaxed = torch.zeros_like(full)
@@ -1440,7 +1639,7 @@ class HardPACTDifferentiableQP:
             )
             if reference.device.type == "cuda":
                 peak = (
-                    torch.cuda.max_memory_allocated(reference.device)
+                    torch.cuda.max_memory_allocated(cuda_ordinal)
                     - cuda_memory_start
                 ) / (1024.0 ** 2)
                 forward_metrics["qp/full/forward_peak_cuda_mib"] = (

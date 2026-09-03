@@ -212,6 +212,30 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
         #     cfg_train.runner.checkpoint = args.ckpt
         if args.load_run is not None:
             cfg_train.runner.load_run = args.load_run
+        # Optional HardPACT benchmark overrides are deliberately applied only
+        # when the selected algorithm exposes the shared QP dictionary. They
+        # therefore have no effect on legacy tasks or their configuration.
+        qp_cfg = getattr(cfg_train.algorithm, "hard_pact_qp", None)
+        if qp_cfg is not None:
+            if getattr(args, "profile_bard_timing", False):
+                cfg_train.algorithm.profile_bard_timing = True
+            if getattr(args, "bard_batch_capacity", None) is not None:
+                cfg_train.algorithm.bard_batch_capacity = args.bard_batch_capacity
+            if getattr(args, "benchmark_bard_active", False):
+                # Benchmark-only: execute both configured BARD losses from
+                # iteration zero at full weight without changing defaults.
+                cfg_train.policy.pinn_init_steps = -1
+                cfg_train.policy.pinn_loss_weight = -1.0
+            if getattr(args, "qp_solver", None) is not None:
+                qp_cfg["qp_solver"] = args.qp_solver
+                qp_cfg["rollout_qp_solver"] = None
+                qp_cfg["ppo_qp_solver"] = None
+            if getattr(args, "qp_solver_dtype", None) is not None:
+                qp_cfg["solver_dtype"] = args.qp_solver_dtype
+            if getattr(args, "qp_rollout_chunk_size", None) is not None:
+                qp_cfg["rollout_chunk_size"] = args.qp_rollout_chunk_size
+            if getattr(args, "qp_ppo_chunk_size", None) is not None:
+                qp_cfg["ppo_chunk_size"] = args.qp_ppo_chunk_size
 
     return env_cfg, cfg_train
 
@@ -243,6 +267,34 @@ def get_args():
 
     # PACT PINN specific thing.
     parser.add_argument('--pinn_loss_weight',       type=float, default=0.01, help="float for weight of PINN loss (default 0.01)")
+    parser.add_argument(
+        '--qp_solver', choices=('qpth', 'cupiqp', 'moreau'), default=None,
+        help='HardPACT-only QP backend override (legacy tasks ignore it)',
+    )
+    parser.add_argument(
+        '--qp_solver_dtype', choices=('auto', 'float32', 'float64'), default=None,
+        help='HardPACT-only solver precision override',
+    )
+    parser.add_argument(
+        '--qp_rollout_chunk_size', type=int, default=None,
+        help='HardPACT-only rollout QP chunk size override',
+    )
+    parser.add_argument(
+        '--qp_ppo_chunk_size', type=int, default=None,
+        help='HardPACT-only differentiable PPO QP chunk size override',
+    )
+    parser.add_argument(
+        '--profile_bard_timing', action='store_true', default=False,
+        help='HardPACT-only CUDA-event timing for inverse/rollout PINN losses',
+    )
+    parser.add_argument(
+        '--benchmark_bard_active', action='store_true', default=False,
+        help='HardPACT benchmark-only: activate BARD losses from iteration zero',
+    )
+    parser.add_argument(
+        '--bard_batch_capacity', type=int, default=None,
+        help='HardPACT-only BARD streaming workspace capacity',
+    )
 
     return configure_runtime_device(parser.parse_args())
 

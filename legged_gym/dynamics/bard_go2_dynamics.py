@@ -309,7 +309,10 @@ class BardGo2Dynamics:
         )
         batch = q_bard.shape[0]
         if batch > self.batch_capacity:
-            raise ValueError("BARD minibatch exceeds configured context capacity")
+            raise ValueError(
+                "BARD minibatch exceeds configured context capacity; the "
+                "PPO caller must stream it in capacity-sized GPU chunks"
+            )
         self._install_inertias(batch, parameters)
         self.bard.update_kinematics(self.model, self.data, q_bard, v_bard)
         foot, base = None, None

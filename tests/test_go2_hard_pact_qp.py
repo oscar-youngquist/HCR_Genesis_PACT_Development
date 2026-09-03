@@ -12,6 +12,9 @@ from rsl_rl.algorithms.hard_pact_qp import (
     balanced_substep_indices,
     projection_loss,
 )
+from rsl_rl.algorithms.hard_pact_qp_backends import (
+    QPBackendUnavailable, backend_capability, moreau_conic_mapping,
+)
 from rsl_rl.modules.actor_critic_hard_pact import ActorCritic_HardPACT
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
 from rsl_rl.runners.pact_runner import OnPolicyRunnerPACT
@@ -50,6 +53,40 @@ def make_qp(**overrides):
 
 
 class HardPACTQPTests(unittest.TestCase):
+    def test_solver_registration_validation_and_capabilities(self):
+        for name in ("qpth", "cupiqp", "moreau"):
+            qp = make_qp(qp_solver=name)
+            self.assertEqual(qp.solver_for_mode(False), name)
+            self.assertEqual(qp.solver_for_mode(True), name)
+        with self.assertRaisesRegex(ValueError, "allow_solver_mismatch"):
+            make_qp(qp_solver="qpth", ppo_qp_solver="cupiqp")
+        mixed = make_qp(
+            qp_solver="qpth", ppo_qp_solver="cupiqp",
+            allow_solver_mismatch=True,
+        )
+        self.assertEqual(mixed.solver_for_mode(False), "qpth")
+        self.assertEqual(mixed.solver_for_mode(True), "cupiqp")
+        self.assertTrue(backend_capability("qpth").available)
+
+    def test_moreau_zero_and_nonnegative_cone_sign_mapping(self):
+        A = torch.tensor([[[1.0, 2.0]]])
+        b = torch.tensor([[3.0]])
+        G = torch.tensor([[[1.0, 0.0], [0.0, -1.0]]])
+        h = torch.tensor([[4.0, 5.0]])
+        C, rhs, zero_count, nonnegative_count = moreau_conic_mapping(A, b, G, h)
+        self.assertEqual((zero_count, nonnegative_count), (1, 2))
+        x = torch.tensor([[1.0, 1.0]])
+        slack = rhs - torch.einsum("bij,bj->bi", C, x)
+        self.assertEqual(slack[0, 0].item(), 0.0)
+        self.assertTrue((slack[0, 1:] >= 0).all())
+
+    def test_unavailable_backend_raises_without_analytic_fallback(self):
+        for name in ("cupiqp", "moreau"):
+            if backend_capability(name).available:
+                continue
+            with self.subTest(name=name), self.assertRaises(QPBackendUnavailable):
+                make_qp(qp_solver=name).solve(**qp_data(1))
+
     def test_dtype_aware_defaults_and_live_device_resolution(self):
         qp = make_qp(solver_dtype="auto")
         self.assertEqual(qp._solve_dtype(torch.zeros(1)), torch.float64)
@@ -61,6 +98,42 @@ class HardPACTQPTests(unittest.TestCase):
         self.assertEqual(qp._chunk_size(True), 128)
         if torch.cuda.is_available():
             self.assertEqual(qp._solve_dtype(torch.zeros(1, device="cuda")), torch.float32)
+
+    def test_constant_templates_are_reused_without_detaching_learned_entries(self):
+        qp = make_qp()
+        data = qp_data(1)
+        first = qp._constants(data["tau_nom"])
+        second = qp._constants(data["tau_nom"])
+        self.assertEqual(len(qp._constant_cache), 1)
+        for actual, expected in zip(first, second):
+            self.assertIs(actual, expected)
+            self.assertEqual(actual.data_ptr(), expected.data_ptr())
+
+        data["base_jacobian"][:, :, :6] = torch.eye(6, dtype=torch.float64)
+        data["foot_jacobians"][:, 0, :, :3] = torch.eye(3, dtype=torch.float64)
+        data["tau_nom"].fill_(0.5)
+        data["wrench_pred_world"].fill_(0.25)
+        for name in (
+            "tau_nom", "force_pred_world", "wrench_pred_world",
+            "contact_probability",
+        ):
+            data[name].requires_grad_(True)
+        built = qp._build(data)
+        # Cached tensors supply only immutable structure. Learned references
+        # are composed functionally into fresh matrix entries and must retain
+        # their graph despite template reuse.
+        objective = (
+            built.p.square().sum() + built.b.square().sum()
+            + built.G[:, -24:].square().sum()
+        )
+        objective.backward()
+        for name in (
+            "tau_nom", "force_pred_world", "wrench_pred_world",
+            "contact_probability",
+        ):
+            self.assertIsNotNone(data[name].grad)
+            self.assertTrue(torch.isfinite(data[name].grad).all())
+            self.assertGreater(data[name].grad.abs().sum().item(), 0.0)
 
     def test_rhs_aware_row_scaling_preserves_constraints(self):
         matrix = torch.tensor([[[3.0, 4.0], [0.0, 0.5], [2.0, 0.0]]])
@@ -553,6 +626,84 @@ class HardPACTQPTests(unittest.TestCase):
                 )
                 qp._solve_stage(qp_data(1), relaxed_contact=False)
             self.assertEqual(qp_function.call_args.kwargs["verbose"], forwarded)
+
+    def test_qpth_warm_start_cold_parity_retry_and_reset(self):
+        source = qp_data(3)
+        source["force_pred_world"].zero_()
+        source["tau_nom"].fill_(0.5)
+        cold = make_qp(qpth_warm_start=False).solve(
+            differentiable=False, **source
+        )
+        warm_qp = make_qp(qpth_warm_start=True)
+        first = warm_qp.solve(differentiable=False, **source)
+        second = warm_qp.solve(differentiable=False, **source)
+        torch.testing.assert_close(first.tau_safe, cold.tau_safe, atol=1e-10, rtol=1e-10)
+        torch.testing.assert_close(second.tau_safe, cold.tau_safe, atol=1e-10, rtol=1e-10)
+        self.assertFalse(first.diagnostics["full/warm_start_hit"].any())
+        self.assertTrue(second.diagnostics["full/warm_start_hit"].all())
+
+        invalid_row = {name: value.clone() for name, value in source.items()}
+        invalid_row["joint_position"][1].fill_(10.0)
+        invalid_row["joint_velocity"][1].fill_(100.0)
+        warm_qp.solve(differentiable=False, **invalid_row)
+        key = next(iter(warm_qp._qpth_warm_states))
+        _, row_valid = warm_qp._qpth_warm_states[key]
+        self.assertEqual(row_valid.tolist(), [True, False, True])
+        # Re-seed all rows for the incompatible-state retry below.
+        warm_qp.solve(differentiable=False, **source)
+
+        # A deliberately incompatible terminal state is rejected, affected
+        # rows are cold-resolved, and its bad state is not retained.
+        key = next(iter(warm_qp._qpth_warm_states))
+        warm_qp._qpth_warm_states[key] = (
+            tuple(torch.full((1, 1), float("nan")) for _ in range(4)),
+            torch.ones(3, dtype=torch.bool),
+        )
+        retried = warm_qp.solve(differentiable=False, **source)
+        self.assertEqual(retried.stage.tolist(), [0, 0, 0])
+        self.assertTrue(
+            retried.diagnostics["full/warm_residual_cold_retry"].all()
+        )
+        torch.testing.assert_close(retried.tau_safe, cold.tau_safe, atol=1e-10, rtol=1e-10)
+
+        # A failed warm state is deliberately discarded.  A subsequent clean
+        # solve may seed a new terminal state, which reset must then remove.
+        self.assertFalse(warm_qp._qpth_warm_states)
+        warm_qp.solve(differentiable=False, **source)
+        self.assertTrue(warm_qp._qpth_warm_states)
+        warm_qp.clear_warm_start(torch.tensor([1]))
+        self.assertTrue(warm_qp._qpth_warm_states)
+        _, valid = warm_qp._qpth_warm_states[key]
+        self.assertEqual(valid.tolist(), [True, False, True])
+        warm_qp.clear_warm_start(torch.tensor([0, 2]))
+        self.assertFalse(next(iter(warm_qp._qpth_warm_states.values()))[1].any())
+
+    def test_qpth_warm_flag_preserves_ppo_gradient_parity(self):
+        gradients = []
+        outputs = []
+        for enabled in (False, True):
+            source = qp_data(2)
+            source["force_pred_world"].zero_()
+            source["tau_nom"].fill_(0.5).requires_grad_()
+            result = make_qp(qpth_warm_start=enabled).solve(
+                differentiable=True, **source
+            )
+            result.tau_safe.square().mean().backward()
+            outputs.append(result.tau_safe.detach())
+            gradients.append(source["tau_nom"].grad.detach())
+        torch.testing.assert_close(outputs[0], outputs[1], atol=0.0, rtol=0.0)
+        torch.testing.assert_close(gradients[0], gradients[1], atol=0.0, rtol=0.0)
+
+    def test_qpth_warm_rollout_remains_inference_only(self):
+        solver = make_qp(qpth_warm_start=True)
+        source = qp_data(2)
+        source["force_pred_world"].zero_()
+        with torch.inference_mode():
+            first = solver.solve(differentiable=False, **source)
+            second = solver.solve(differentiable=False, **source)
+        self.assertFalse(first.tau_safe.requires_grad)
+        self.assertFalse(second.tau_safe.requires_grad)
+        self.assertTrue(second.diagnostics["full/warm_start_hit"].all())
 
     def test_sampled_projection_is_unbiased_without_decimation_multiplier(self):
         nominal = torch.zeros(4, 12, dtype=torch.float64)
