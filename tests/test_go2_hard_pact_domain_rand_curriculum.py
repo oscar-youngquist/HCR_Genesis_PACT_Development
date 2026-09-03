@@ -122,7 +122,8 @@ def test_isaaclab_pact_adapter_is_an_explicit_thin_subclass():
 
 
 def test_launcher_rejects_invalid_task_without_starting_training():
-    launcher = Path(__file__).parents[1] / "scripts" / "go2_hard_pact.sh"
+    launcher = (Path(__file__).parents[1] / "legged_gym" / "scripts" /
+                "go2_hard_pact.sh")
     result = subprocess.run(
         [str(launcher), "--task", "not_hard_pact", "--headless"],
         text=True, capture_output=True, check=False,

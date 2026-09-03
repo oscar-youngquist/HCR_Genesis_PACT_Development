@@ -141,9 +141,27 @@ class OnPolicyRunnerPACT:
         # print(actor_critic)
         # print(decoder)
 
-        print("Created Parallel Actor-Critic Model")
-        pretty_print_module(actor_critic)
-        pretty_print_module(decoder)
+        self.console_debug = bool(self.cfg.get("console_debug", False))
+        self.console_iteration = bool(self.cfg.get("console_iteration", True))
+        self.console_model_summary = bool(
+            self.cfg.get("console_model_summary", not self.is_hard_pact)
+        )
+        self.console_reward_terms = bool(
+            self.cfg.get("console_reward_terms", not self.is_hard_pact)
+        )
+        self.console_detailed_losses = bool(
+            self.cfg.get("console_detailed_losses", not self.is_hard_pact)
+        )
+        self.console_pinn_timing = bool(
+            self.cfg.get("console_pinn_timing", True)
+        )
+        self.console_qp_timing = bool(
+            self.cfg.get("console_qp_timing", True)
+        )
+        if self.console_model_summary:
+            print("Created Parallel Actor-Critic Model")
+            pretty_print_module(actor_critic)
+            pretty_print_module(decoder)
 
         self._init_entropy_coef = self.alg_cfg["entropy_coef"]
         self.use_adaptive_entropy = self.alg_cfg["use_adaptive_entropy"]
@@ -182,7 +200,7 @@ class OnPolicyRunnerPACT:
                 # duplicating either would waste substantial GPU memory.
                 self.env.configure_hard_pact_substep_qp(
                     self.alg.actor_critic,
-                    self.alg.bard_dynamics,
+                    self.alg.physics_dynamics,
                     self.alg.hard_pact_qp,
                 )
 
@@ -246,6 +264,8 @@ class OnPolicyRunnerPACT:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
+            if self.is_hard_pact and self.alg.profile_bard_timing and torch.cuda.is_available():
+                torch.cuda.synchronize(self.device)
             start = time.time()
             self._rollout_qp_metric_sums = {}
             self._rollout_qp_metric_count = 0
@@ -264,7 +284,9 @@ class OnPolicyRunnerPACT:
                     pprev_obs, pprev_obs_hist = pprev_obs.to(self.device), pprev_obs_hist.to(self.device)
 
                     # Call the algorithms act() method to store current transition data and predict actions
-                    with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                    with torch.inference_mode(), torch.amp.autocast(
+                        device_type="cuda", dtype=torch.bfloat16
+                    ):
                         actions = self.alg.act(obs, critic_obs, obs_hist, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist) # obs_t, (obs_t-1)
                          
                     # Submit the predicted action and extract the resulting state... 
@@ -298,6 +320,8 @@ class OnPolicyRunnerPACT:
                         cur_reward_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
 
+                if self.is_hard_pact and self.alg.profile_bard_timing and torch.cuda.is_available():
+                    torch.cuda.synchronize(self.device)
                 stop = time.time()
                 collection_time = stop - start
 
@@ -310,13 +334,14 @@ class OnPolicyRunnerPACT:
                     = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, it, self.env.simulator.default_dof_pos, self.env.obs_scales.dof_vel)
 
             # self.env.step_tradeoff_curriculum()
-            print("Avg - Curriculum Step: ", torch.mean(self.env.tradeoff_step_ctr).item())
-            print("Max - self.feedforward_tau_weight: ", torch.max(self.env.simulator.feedforward_tau_weight).item())
-            print("Min - self.feedforward_tau_weight: ", torch.min(self.env.simulator.feedforward_tau_weight).item())
-            print("Avg - self.feedforward_tau_weight: ", torch.mean(self.env.simulator.feedforward_tau_weight).item())
-            print("Max - self.feedback_tau_weight: ", torch.max(self.env.simulator.feedback_tau_weight).item())
-            print("Min - self.feedback_tau_weight: ", torch.min(self.env.simulator.feedback_tau_weight).item())
-            print("Avg - self.feedback_tau_weight: ", torch.mean(self.env.simulator.feedback_tau_weight).item())
+            if self.console_debug:
+                print("Avg - Curriculum Step: ", torch.mean(self.env.tradeoff_step_ctr).item())
+                print("Max - self.feedforward_tau_weight: ", torch.max(self.env.simulator.feedforward_tau_weight).item())
+                print("Min - self.feedforward_tau_weight: ", torch.min(self.env.simulator.feedforward_tau_weight).item())
+                print("Avg - self.feedforward_tau_weight: ", torch.mean(self.env.simulator.feedforward_tau_weight).item())
+                print("Max - self.feedback_tau_weight: ", torch.max(self.env.simulator.feedback_tau_weight).item())
+                print("Min - self.feedback_tau_weight: ", torch.min(self.env.simulator.feedback_tau_weight).item())
+                print("Avg - self.feedback_tau_weight: ", torch.mean(self.env.simulator.feedback_tau_weight).item())
             
             # Step the reward curriculum if we are doing that
             if self.env.use_reward_curriculum:
@@ -380,7 +405,8 @@ class OnPolicyRunnerPACT:
                 }
             
                 entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
-                print(entropy)
+                if self.console_debug:
+                    print(entropy)
                 self.writer.add_scalar('Values/entropy',entropy,it)
 
             # entropy_coef = self._init_entropy_coef
@@ -401,6 +427,8 @@ class OnPolicyRunnerPACT:
             # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
             #     self.env.cfg.rewards.only_positive_rewards = False
             
+            if self.is_hard_pact and self.alg.profile_bard_timing and torch.cuda.is_available():
+                torch.cuda.synchronize(self.device)
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:
@@ -414,6 +442,8 @@ class OnPolicyRunnerPACT:
 
         # Learning is done, shutdown the async. pinocchio workers
         self.env.shutdown_asynic_pino_workers()
+        if self.is_hard_pact and hasattr(self.alg.physics_dynamics, "shutdown"):
+            self.alg.physics_dynamics.shutdown()
 
     def _log_qp_metrics(self, iteration):
         """Transfer only aggregated QP scalars to TensorBoard."""
@@ -569,7 +599,8 @@ class OnPolicyRunnerPACT:
                 self.writer.add_scalar(f"{stable_prefix}/{key}", value, locs['it'])
                 if "success" in key:
                     self.writer.add_scalar("train/success", value, locs['it'])
-                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+                if self.console_reward_terms:
+                    ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         # These keys never disappear when an episode boundary is absent.
         canonical_episode = {
             "train/success": ("success",),
@@ -636,17 +667,23 @@ class OnPolicyRunnerPACT:
 
         str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
 
+        detailed = ""
+        if self.console_detailed_losses:
+            detailed = (
+                f"{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"
+                f"{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"
+                f"{'Reconstruction loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"
+                f"{'KL Divergence loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"
+                f"{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"
+            )
+
         if len(locs['rewbuffer']) > 0:
             log_string = (f"""{'#' * width}\n"""
                           f"""{str.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                           f"""{'PINN loss:':>{pad}} {locs['mean_pinn_loss']:.4f}\n"""
-                          f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
-                          f"""{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"""
-                          f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
-                          f"""{'KL Divergence    loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"""
-                          f"""{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"""
+                          f"""{detailed}"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
@@ -660,16 +697,13 @@ class OnPolicyRunnerPACT:
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                           f"""{'PINN loss:':>{pad}} {locs['mean_pinn_loss']:.4f}\n"""
-                          f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
-                          f"""{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"""
-                          f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
-                          f"""{'KL Divergence    loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"""
-                          f"""{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"""
+                          f"""{detailed}"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean pos action noise std:':>{pad}} {mean_std.item():.2f}\n""")
 
-        if getattr(self.alg, "profile_bard_timing", False):
+        if (self.console_pinn_timing
+                and getattr(self.alg, "profile_bard_timing", False)):
             timings = self.alg.last_physics_loss_metrics
             for loss_name in ("inverse", "rollout"):
                 total = timings.get(
@@ -680,10 +714,35 @@ class OnPolicyRunnerPACT:
                 )
                 if total is not None and per_minibatch is not None:
                     log_string += (
-                        f"{f'BARD {loss_name} forward:':>{pad}} "
+                        f"{f'Dynamics {loss_name} forward:':>{pad}} "
                         f"{total.item():.3f} ms/update "
                         f"({per_minibatch.item():.3f} ms/minibatch)\n"
                     )
+            dynamics_total = timings.get(
+                "physics/timing/dynamics_total_ms_per_update"
+            )
+            transfer = timings.get(
+                "physics/timing/pinocchio_transfer_ms_per_update"
+            )
+            if dynamics_total is not None:
+                log_string += (
+                    f"{'Dynamics total:':>{pad}} {dynamics_total.item():.3f} ms/update\n"
+                )
+            if transfer is not None:
+                log_string += (
+                    f"{'Pinocchio transfer:':>{pad}} {transfer.item():.3f} ms/update\n"
+                )
+
+        if self.console_qp_timing and hasattr(self, "hard_pact_features"):
+            qp_count = getattr(self, "_rollout_qp_metric_count", 0)
+            qp_sum = getattr(self, "_rollout_qp_metric_sums", {}).get(
+                "qp/minimal/rollout_timing_ms"
+            )
+            if qp_count and qp_sum is not None:
+                log_string += (
+                    f"{'QP solver rollout:':>{pad}} "
+                    f"{(qp_sum / qp_count).item():.3f} ms/substep\n"
+                )
 
         log_string += ep_string
         log_string += (f"""{'-' * width}\n"""
@@ -692,7 +751,8 @@ class OnPolicyRunnerPACT:
                        f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
                        f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
-        print(log_string)
+        if self.console_iteration:
+            print(log_string)
 
     def save(self, path, infos=None):
         checkpoint = {

@@ -180,6 +180,11 @@ class TestHardPACTAliases(unittest.TestCase):
                 alias_env_dict = class_to_dict(alias_cfg_cls())
                 legacy_env_dict = class_to_dict(legacy_cfg_cls())
                 grf_cfg = alias_env_dict["sim"].pop("grf")
+                if name == "go2_hard_pact":
+                    self.assertFalse(alias_env_dict["sim"].pop("console_debug"))
+                    self.assertTrue(
+                        alias_env_dict["sim"].pop("suppress_backend_warnings")
+                    )
                 self.assertEqual(
                     set(grf_cfg),
                     {
@@ -221,6 +226,12 @@ class TestHardPACTAliases(unittest.TestCase):
                 if name == "go2_hard_pact":
                     alias_train_dict["runner"]["algorithm_class_name"] = legacy_train_dict["runner"]["algorithm_class_name"]
                     for field in (
+                        "console_iteration", "console_model_summary",
+                        "console_reward_terms", "console_detailed_losses",
+                        "console_pinn_timing", "console_qp_timing",
+                    ):
+                        alias_train_dict["runner"].pop(field)
+                    for field in (
                         "bard_enabled", "bard_randomize_base_inertia",
                         "bard_scale_rotational_inertia", "bard_batch_capacity",
                         "bard_inverse_enabled", "bard_rollout_enabled",
@@ -232,6 +243,8 @@ class TestHardPACTAliases(unittest.TestCase):
                         "auxiliary_learning_rate", "privileged_loss_weight",
                         "explicit_loss_weight", "grf_loss_weight",
                         "active_wrench_loss_weight", "neutral_wrench_loss_weight",
+                        "profile_bard_timing", "console_debug",
+                        "dynamics_backend", "pinocchio_num_workers",
                     ):
                         alias_train_dict["algorithm"].pop(field)
                 self.assertEqual(alias_train_dict, legacy_train_dict)

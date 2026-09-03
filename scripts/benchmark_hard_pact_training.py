@@ -39,7 +39,8 @@ BARD_ROLLOUT_RE = re.compile(
 
 
 def command_for(args, solver, rollout_chunk, ppo_chunk):
-    launcher = Path(__file__).resolve().parent / "go2_hard_pact.sh"
+    launcher = (Path(__file__).resolve().parents[1]
+                / "legged_gym" / "scripts" / "go2_hard_pact.sh")
     command = [
         str(launcher), "--task", args.task, "--headless",
         "--num_envs", str(args.num_envs),

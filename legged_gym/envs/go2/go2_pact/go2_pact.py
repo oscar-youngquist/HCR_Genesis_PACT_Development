@@ -729,7 +729,8 @@ class Go2PACT(BaseTask):
                     # print("Before stepping - Reward - ", key, " scale - ", self.reward_scales[key]/self.dt)
         # Gradually increase the regularization strength via cosine annealing schedule
         elif num_iters >= self.reward_warmup_steps and (num_iters - self.reward_warmup_steps) < self.reward_curr_steps:
-            print("Stepping Reward Curriculum")
+            if bool(getattr(self.cfg.sim, "console_debug", True)):
+                print("Stepping Reward Curriculum")
             adjusted_iter = num_iters - self.reward_warmup_steps
             for key in self.reward_curr_keys:
                 if key in self.reward_scales.keys():
@@ -737,7 +738,8 @@ class Go2PACT(BaseTask):
 
                     alpha = adjusted_iter / self.reward_curr_steps
                     alpha = np.clip(alpha, 0.0, 1.0)
-                    print(alpha)
+                    if bool(getattr(self.cfg.sim, "console_debug", True)):
+                        print(alpha)
                     ramp = 0.5 * (1.0 - np.cos(np.pi * alpha))
 
                     self.reward_scales[key] = (low + (high - low) * ramp) * self.dt
@@ -815,7 +817,8 @@ class Go2PACT(BaseTask):
         self.dt = self.cfg.control.dt
         self.debug_viz = self.cfg.env.debug_viz
 
-        print("++ self.debug_viz - ", self.debug_viz)
+        if bool(getattr(self.cfg.sim, "console_debug", True)):
+            print("++ self.debug_viz - ", self.debug_viz)
         
         self.num_exp_labels = self.cfg.env.num_explicit_recon_obs
         self.num_crit_obs_stack = self.cfg.env.num_priv_stack
@@ -869,7 +872,8 @@ class Go2PACT(BaseTask):
         self.bound_diff = self.tradeoff_upperbounds - self.tradeoff_lowerbounds 
         self.use_tradeoff = self.cfg.control.use_tradeoff_curriculum
         
-        print("self.use_tradeoff - ", self.use_tradeoff)
+        if bool(getattr(self.cfg.sim, "console_debug", True)):
+            print("self.use_tradeoff - ", self.use_tradeoff)
 
         # We want to be at the full bounds right away, but we want to skip back sometimes for exploration
         self.tradeoff_step_ctr = torch.zeros((self.cfg.env.num_envs, 1), device=sim_device, dtype=torch.float)

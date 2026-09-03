@@ -15,6 +15,11 @@ class GO2HardPACTCfg(GO2PACTCfg):
         num_privileged_obs = GO2PACTCfg.env.num_privileged_obs + DISTURBANCE_CRITIC_DIM
 
     class sim(GO2PACTCfg.sim):
+        # Console controls are scoped to HardPACT. Legacy PACT configurations
+        # do not define them and retain their existing output unchanged.
+        console_debug = False
+        suppress_backend_warnings = True
+
         class grf:
             prediction_scale_n = [120.0, 120.0, 250.0]
             vertical_deadband_n = 3.0
@@ -66,6 +71,12 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
     class runner(GO2PACTCfgPPO.runner):
         policy_class_name = "ActorCritic_HardPACT"
         algorithm_class_name = "PPO_HardPACT"
+        console_iteration = True
+        console_model_summary = False
+        console_reward_terms = True
+        console_detailed_losses = False
+        console_pinn_timing = True
+        console_qp_timing = True
 
     class algorithm(GO2PACTCfgPPO.algorithm):
         auxiliary_learning_rate = 2.0e-4
@@ -75,6 +86,8 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         active_wrench_loss_weight = 1.0
         neutral_wrench_loss_weight = 0.25
         bard_enabled = True
+        dynamics_backend = "bard"
+        pinocchio_num_workers = None
         bard_randomize_base_inertia = True
         bard_scale_rotational_inertia = True
         bard_batch_capacity = 4096
@@ -83,6 +96,11 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         lambda_inverse = 0.01
         lambda_rollout = 0.01
         lambda_projection = 1.0e-3
+        # Keep lightweight CUDA-event timing enabled for the requested
+        # training profile. Console presentation is controlled separately by
+        # runner.console_pinn_timing.
+        profile_bard_timing = True
+        console_debug = False
 
         # qpth/OptNet safety projection.  The decision vector is always
         # [qdd_18, world_grf_12, tau_safe_12, contact_slack_12]. CPU references
@@ -142,8 +160,8 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
             "diagnostics_level": "minimal",
             "full_audit_period": 1000,
             "full_audit_sample_size": 8,
-            "rollout_chunk_size": 512,
-            "ppo_chunk_size": 128,
+            "rollout_chunk_size": 4096,
+            "ppo_chunk_size": 4096,
             # Genesis and both PhysX backends advance position with the new
             # velocity (semi-implicit Euler), hence q+=dt*v+dt^2*qdd.
             "position_integration_coefficient": 1.0,

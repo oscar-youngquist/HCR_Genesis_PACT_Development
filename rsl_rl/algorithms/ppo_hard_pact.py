@@ -46,7 +46,7 @@ from rsl_rl.storage import RolloutStoragePACT
 from rsl_rl.modules.hard_pact_physics import normalized_huber_loss
 
 from legged_gym.dynamics import (
-    BardGo2Dynamics,
+    create_go2_dynamics,
     wrench_at_point,
 )
 from rsl_rl.hard_pact_ablations import resolve_hard_pact_features
@@ -149,6 +149,8 @@ class PPO_HardPACT:
                  bard_scale_rotational_inertia=True,
                  bard_urdf_path="resources/robots/go2/urdf/go2.urdf",
                  bard_batch_capacity=4096,
+                 dynamics_backend="bard",
+                 pinocchio_num_workers=None,
                  bard_inverse_enabled=True,
                  bard_rollout_enabled=True,
                  lambda_inverse=1.0,
@@ -156,6 +158,7 @@ class PPO_HardPACT:
                  lambda_projection=1.0e-3,
                  lambda_soft_constraint=1.0e-3,
                  profile_bard_timing=False,
+                 console_debug=False,
                  ablation_variant="full",
                  hard_pact_qp=None,
                  grf_observation_scale=0.01,
@@ -273,7 +276,10 @@ class PPO_HardPACT:
         # between the shared-context inverse and rollout calculations; one
         # synchronization at the end of update materializes all durations.
         self.profile_bard_timing = bool(profile_bard_timing)
-        self._bard_timing_records = {"inverse": [], "rollout": []}
+        self.console_debug = bool(console_debug)
+        self._bard_timing_records = {
+            "inverse": [], "rollout": [], "dynamics": []
+        }
         if min(
             self.lambda_inverse, self.lambda_rollout, self.lambda_projection,
             self.lambda_soft_constraint,
@@ -298,7 +304,10 @@ class PPO_HardPACT:
         self.last_physics_gradient_metrics = {}
         self.last_auxiliary_metrics = {}
         self.last_physics_loss_metrics = {}
-        self.bard_dynamics = None
+        self.dynamics_backend = str(dynamics_backend).lower()
+        if self.dynamics_backend not in ("bard", "pinocchio"):
+            raise ValueError("dynamics_backend must be 'bard' or 'pinocchio'")
+        self.physics_dynamics = None
         if self.bard_enabled:
             # Configuration paths are repository-relative, while launchers run
             # from legged_gym/scripts. Resolve relative URDFs against the repo
@@ -311,13 +320,24 @@ class PPO_HardPACT:
                 resolved_bard_urdf_path = os.path.join(
                     repository_root, resolved_bard_urdf_path
                 )
-            self.bard_dynamics = BardGo2Dynamics(
+            backend_kwargs = {}
+            if self.dynamics_backend == "pinocchio":
+                backend_kwargs.update(
+                    num_workers=pinocchio_num_workers,
+                    profile_timing=self.profile_bard_timing,
+                )
+            self.physics_dynamics = create_go2_dynamics(
+                self.dynamics_backend,
                 os.path.abspath(resolved_bard_urdf_path),
                 device=self.device,
                 batch_capacity=bard_batch_capacity,
                 randomize_base_inertia=bard_randomize_base_inertia,
                 scale_rotational_inertia=bard_scale_rotational_inertia,
+                **backend_kwargs,
             )
+        # Compatibility alias for older runners and test fixtures. It points
+        # to the selected implementation and never creates a second model.
+        self.bard_dynamics = self.physics_dynamics
 
         # PPO parameters
         self.clip_param = clip_param
@@ -329,7 +349,8 @@ class PPO_HardPACT:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
-        print_class_attributes(self)
+        if self.console_debug:
+            print_class_attributes(self)
 
     def configure_hard_pact_qp(
         self, torque_limits, position_limits, velocity_limits
@@ -553,7 +574,9 @@ class PPO_HardPACT:
         mean_kld_loss = 0
         mean_decoder_loss = 0
         mean_pinn_loss = 0
-        self._bard_timing_records = {"inverse": [], "rollout": []}
+        self._bard_timing_records = {
+            "inverse": [], "rollout": [], "dynamics": []
+        }
 
         boot_count = 0
         boot_sum_x = None
@@ -566,7 +589,8 @@ class PPO_HardPACT:
             else:
                 self.pinn_weight = (float(self.num_pinn_updates)/float(self.pinn_warmup_steps))*self.pinn_weight_final
 
-            print(self.pinn_weight)
+            if self.console_debug:
+                print(self.pinn_weight)
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
@@ -825,7 +849,8 @@ class PPO_HardPACT:
         # Use the (scaled) ratio of mean-prediction performance to actual prediction performance
         #     to determine if encoder bootstrapping is performed.
         self.use_boot = random.random() < pboot
-        print("Use bootstrapped Encoder Dynamics: ", self.use_boot)
+        if self.console_debug:
+            print("Use bootstrapped Encoder Dynamics: ", self.use_boot)
 
         self.storage.clear()
 
@@ -945,6 +970,32 @@ class PPO_HardPACT:
             ] = torch.tensor(
                 len(records), device=self.device, dtype=torch.float32
             )
+        dynamics_total = self.last_physics_loss_metrics.get(
+            "physics/timing/dynamics_forward_ms_per_update",
+            torch.zeros((), device=self.device),
+        )
+        transfer_total = 0.0
+        if self.physics_dynamics is not None and hasattr(
+            self.physics_dynamics, "timing_metrics"
+        ):
+            backend = self.physics_dynamics.timing_metrics(reset=True)
+            dynamics_total = backend["dynamics_ms"]
+            transfer_total = backend["transfer_ms"]
+            self.last_physics_loss_metrics[
+                "physics/timing/dynamics_call_count"
+            ] = torch.tensor(
+                backend["calls"], device=self.device, dtype=torch.float32
+            )
+        self.last_physics_loss_metrics[
+            "physics/timing/dynamics_total_ms_per_update"
+        ] = torch.as_tensor(
+            dynamics_total, device=self.device, dtype=torch.float32
+        )
+        self.last_physics_loss_metrics[
+            "physics/timing/pinocchio_transfer_ms_per_update"
+        ] = torch.as_tensor(
+            transfer_total, device=self.device, dtype=torch.float32
+        )
 
     def _compute_auxiliary_loss(
         self, history, privileged_target, explicit_target, grf_target,
@@ -1187,7 +1238,7 @@ class PPO_HardPACT:
         if batch is None:
             raise RuntimeError("HardPACT BARD loss requires named transition fields")
         control_dt = batch["control_dt"].detach().clamp_min(1.0e-8)
-        self.bard_dynamics.default_joint_position = torch.as_tensor(
+        self.physics_dynamics.default_joint_position = torch.as_tensor(
             default_pose, device=batch["pre_q"].device,
             dtype=batch["pre_q"].dtype,
         ).detach()
@@ -1252,14 +1303,17 @@ class PPO_HardPACT:
             rollout_numerator = zero
             inverse_metric_sums = {}
             rollout_metric_sums = {}
-            capacity = self.bard_dynamics.batch_capacity
+            capacity = self.physics_dynamics.batch_capacity
             for start in range(0, nominal_torque.shape[0], capacity):
                 stop = min(start + capacity, nominal_torque.shape[0])
                 sl = slice(start, stop)
                 chunk_parameters = {
                     name: value[sl] for name, value in parameters.items()
                 }
-                context = self.bard_dynamics.build_context(
+                dynamics_timing = self._start_bard_timing(
+                    "dynamics", nominal_torque
+                )
+                context = self.physics_dynamics.build_context(
                     batch["pre_q"][sl], batch["pre_v"][sl],
                     parameters=chunk_parameters,
                     post_v_world=batch["post_v"][sl],
@@ -1267,6 +1321,7 @@ class PPO_HardPACT:
                     need_jacobians=True, need_qp=False,
                     need_forward_dynamics=self.bard_rollout_enabled,
                 )
+                self._stop_bard_timing("dynamics", dynamics_timing)
                 count = valid_all[sl].reshape(-1).sum().to(control_dt.dtype)
                 if self.bard_inverse_enabled:
                     observed_acceleration = (
@@ -1392,11 +1447,11 @@ class PPO_HardPACT:
                     "base_jacobian", "foot_acceleration_bias",
                 )
             }
-            capacity = self.bard_dynamics.batch_capacity
+            capacity = self.physics_dynamics.batch_capacity
             for start in range(0, sample_q.shape[0], capacity):
                 stop = min(start + capacity, sample_q.shape[0])
                 sl = slice(start, stop)
-                sample_context = self.bard_dynamics.build_context(
+                sample_context = self.physics_dynamics.build_context(
                     sample_q[sl], sample_v[sl],
                     parameters={
                         name: value[sl] for name, value in parameters.items()
@@ -1518,6 +1573,13 @@ class PPO_HardPACT:
             "physics/loss/inverse": inverse_loss.detach(),
             "physics/loss/rollout": rollout_loss.detach(),
             "physics/loss/soft_constraint": soft_constraint_loss.detach(),
+            # This scalar makes it explicit whether the transition mask—not
+            # a disabled objective—is responsible for a zero physics loss.
+            "physics/valid_fraction": (
+                valid_all.float().mean().detach()
+                if (self.bard_inverse_enabled or self.bard_rollout_enabled)
+                else zero.detach()
+            ),
         }
         return self._combine_bard_losses(
             inverse_loss, rollout_loss,

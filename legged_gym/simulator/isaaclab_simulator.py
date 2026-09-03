@@ -162,7 +162,14 @@ class IsaacLabSimulator(Simulator):
             self._frame_count = 0
             
     def _create_sim(self):
-        self._app_launcher = AppLauncher({"headless": self._headless, "device": self._device})
+        launcher_args = {"headless": self._headless, "device": self._device}
+        if bool(getattr(self._cfg.sim, "suppress_backend_warnings", False)):
+            # Keep errors visible while preventing repeated per-clone USD and
+            # asset-import warnings from flooding long HardPACT runs.
+            launcher_args["kit_args"] = (
+                "--/log/level=error --/log/outputStreamLevel=error"
+            )
+        self._app_launcher = AppLauncher(launcher_args)
         
         import isaaclab.sim as sim_utils
         from isaacsim.core.utils.stage import get_current_stage
@@ -328,14 +335,17 @@ class IsaacLabSimulator(Simulator):
         # print info after reset the simulation, to make sure the sensors are initialized
         # links in contact sensors have different order from the body names in the robot articulation, 
         # so we need to print them to make sure we get the correct indices for termination and penalty
-        print(f"Created contact sensors: {self._contact_sensors}")
+        console_debug = bool(getattr(self._cfg.sim, "console_debug", True))
+        if console_debug:
+            print(f"Created contact sensors: {self._contact_sensors}")
         
         self._get_env_origins()
         
         self._dof_names = self._robot.joint_names
         # find the indices (in the robot's joint list) of joints specified in self._cfg.asset.dof_names
         self._dof_indices = [self._dof_names.index(name) for name in self._cfg.asset.dof_names]
-        print(f"dof indices: {self._dof_indices}")
+        if console_debug:
+            print(f"dof indices: {self._dof_indices}")
         self._num_dof = len(self._dof_names)
         self._num_bodies = len(self._robot.body_names)
         
@@ -378,17 +388,20 @@ class IsaacLabSimulator(Simulator):
 
         self._termination_contact_indices = find_link_contact_indices(
             self._cfg.asset.terminate_after_contacts_on)
-        print(f"All link names: {self._robot.body_names}")
-        print(f"Termination contact link indices: {self._termination_contact_indices}")
+        if console_debug:
+            print(f"All link names: {self._robot.body_names}")
+            print(f"Termination contact link indices: {self._termination_contact_indices}")
         self._penalized_contact_indices = find_link_contact_indices(
             self._cfg.asset.penalize_contacts_on)
-        print(f"Penalized contact link indices: {self._penalized_contact_indices}")
+        if console_debug:
+            print(f"Penalized contact link indices: {self._penalized_contact_indices}")
         self._feet_names = self._resolve_feet_names()
         # the order of bodies in contact sensors is different from the order of bodies in the robot articulation, so we need to find indices separately
         self._feet_contact_indices, self._feet_indices = self._resolve_feet_indices(
             find_link_contact_indices, find_link_indices
         )
-        print(f"feet names: {self._feet_names}")
+        if console_debug:
+            print(f"feet names: {self._feet_names}")
         assert len(self._feet_indices) > 0
         # get base link index in the robot articulation
         self._base_link_index = self._robot.body_names.index(self._cfg.asset.base_link_name)

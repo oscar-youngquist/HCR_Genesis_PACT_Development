@@ -217,6 +217,10 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
         # therefore have no effect on legacy tasks or their configuration.
         qp_cfg = getattr(cfg_train.algorithm, "hard_pact_qp", None)
         if qp_cfg is not None:
+            if getattr(args, "dynamics_backend", None) is not None:
+                cfg_train.algorithm.dynamics_backend = args.dynamics_backend
+            if getattr(args, "pinocchio_num_workers", None) is not None:
+                cfg_train.algorithm.pinocchio_num_workers = args.pinocchio_num_workers
             if getattr(args, "profile_bard_timing", False):
                 cfg_train.algorithm.profile_bard_timing = True
             if getattr(args, "bard_batch_capacity", None) is not None:
@@ -294,6 +298,14 @@ def get_args():
     parser.add_argument(
         '--bard_batch_capacity', type=int, default=None,
         help='HardPACT-only BARD streaming workspace capacity',
+    )
+    parser.add_argument(
+        '--dynamics_backend', choices=('bard', 'pinocchio'), default=None,
+        help='HardPACT-only rigid-body dynamics backend override',
+    )
+    parser.add_argument(
+        '--pinocchio_num_workers', type=int, default=None,
+        help='HardPACT-only persistent Pinocchio CPU worker count',
     )
 
     return configure_runtime_device(parser.parse_args())

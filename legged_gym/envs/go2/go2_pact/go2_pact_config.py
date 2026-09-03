@@ -336,8 +336,8 @@ class GO2PACTCfg( LeggedRobotCfg ):
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
         
         
-        dt =  0.01     # control frequency 200Hz
-        decimation = 5  # decimation: Number of control action updates @ sim DT per policy DT
+        dt =  0.02     # control frequency 200Hz
+        decimation = 4  # decimation: Number of control action updates @ sim DT per policy DT
 
         # Assumed order - tau_ff, tau_fb
         # tradeoff_init_weights  = [0.20, 1.16]

@@ -205,14 +205,16 @@ class HardPACTAblationTests(unittest.TestCase):
         )
 
     def test_launcher_validates_and_forwards_without_injected_defaults(self):
-        launcher = pathlib.Path(__file__).parents[1] / "scripts/train_go2_hard_pact.sh"
+        launcher = (pathlib.Path(__file__).parents[1] / "legged_gym" /
+                    "scripts" / "train_go2_hard_pact.sh")
         with tempfile.TemporaryDirectory() as directory:
             fake = pathlib.Path(directory) / "python"
             output = pathlib.Path(directory) / "args"
             fake.write_text('#!/bin/sh\nprintf "%s\\n" "$SIMULATOR" "$@" > "$HARDPACT_TEST_OUTPUT"\n')
             fake.chmod(0o755)
             env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"],
-                       HARDPACT_TEST_OUTPUT=str(output))
+                       HARDPACT_TEST_OUTPUT=str(output),
+                       HARD_PACT_SKIP_CONDA_ACTIVATE="1")
             result = subprocess.run(
                 [str(launcher), "--task", "go2_hard_pact_full_genesis",
                  "--seed", "19", "--num_envs=7"], env=env,
