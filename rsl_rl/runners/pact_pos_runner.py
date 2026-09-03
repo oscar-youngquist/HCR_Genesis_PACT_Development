@@ -57,6 +57,51 @@ torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 torch.backends.cudnn.benchmark = True
 
+
+def build_hard_pact_start_checkpoint(
+    pos_actor_state_dict,
+    decoder_state_dict,
+    iteration,
+    infos=None,
+):
+    """Convert HardPACTPos weights into a strict HardPACT bootstrap.
+
+    The actor, critic, encoder, estimators, and physics heads share identical
+    keys and shapes. HardPACT's only state-dict shape difference is ``std``:
+    position pretraining samples 12 actions, while HardPACT samples 12
+    position plus 12 feed-forward-torque actions. The HardPACT exploration
+    standard deviation is deliberately reset to a fresh 24-D vector of ones.
+
+    Optimizer states are intentionally omitted because this artifact starts a
+    new HardPACT run rather than resuming the HardPACTPos optimizer.
+    """
+    if "std" not in pos_actor_state_dict:
+        raise KeyError("HardPACTPos actor state dict is missing 'std'")
+    pos_std = pos_actor_state_dict["std"]
+    if pos_std.ndim != 1 or pos_std.numel() != 12:
+        raise ValueError(
+            "HardPACTPos exploration std must have shape (12,), got "
+            f"{tuple(pos_std.shape)}"
+        )
+
+    model_state = type(pos_actor_state_dict)(
+        (key, value.detach().clone())
+        for key, value in pos_actor_state_dict.items()
+    )
+    model_state["std"] = pos_std.new_ones(24)
+    decoder_state = type(decoder_state_dict)(
+        (key, value.detach().clone())
+        for key, value in decoder_state_dict.items()
+    )
+    return {
+        "model_state_dict": model_state,
+        "decoder_state_dict": decoder_state,
+        "iter": int(iteration),
+        "infos": infos,
+        "hard_pact_start": True,
+        "source_task": "go2_hard_pact_pos",
+    }
+
 class OnPolicyRunnerPACTPos:
 
     def __init__(self,
@@ -354,7 +399,18 @@ class OnPolicyRunnerPACTPos:
             ep_infos.clear()
         
         self.current_learning_iteration += num_learning_iterations
-        self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+        final_checkpoint = os.path.join(
+            self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)
+        )
+        self.save(final_checkpoint)
+        if self.is_hard_pact_pos and self.cfg.get(
+            "export_hard_pact_start", True
+        ):
+            filename = self.cfg.get(
+                "hard_pact_start_filename",
+                "hard_pact_start_model_{iteration}.pt",
+            ).format(iteration=self.current_learning_iteration)
+            self.save_hard_pact_start(os.path.join(self.log_dir, filename))
 
         # Learning is done, shutdown the async. pinocchio workers
         # self.env.shutdown_asynic_pino_workers()
@@ -463,6 +519,17 @@ class OnPolicyRunnerPACTPos:
                 self.env.domain_rand_curriculum_state_dict()
             )
         torch.save(checkpoint, path)
+
+    def save_hard_pact_start(self, path, infos=None):
+        """Write a strict-loadable HardPACT weight initialization checkpoint."""
+        checkpoint = build_hard_pact_start_checkpoint(
+            self.alg.actor_critic.state_dict(),
+            self.alg.decoder.state_dict(),
+            self.current_learning_iteration,
+            infos=infos,
+        )
+        torch.save(checkpoint, path)
+        return path
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)

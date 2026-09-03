@@ -38,11 +38,19 @@ from legged_gym.simulator.genesis_simulator_pact import GenesisSimulator_PACT
 from legged_gym.simulator.genesis_simulator_pact_pos import GenesisSimulator_PACT_Pos
 from legged_gym.utils.helpers import class_to_dict
 from legged_gym.utils.task_registry import task_registry
-from rsl_rl.modules import ActorCritic_PACT, ActorCritic_PACT_Pos
+from rsl_rl.modules import (
+    ActorCritic_HardPACT,
+    ActorCritic_HardPACT_Pos,
+    ActorCritic_PACT,
+    ActorCritic_PACT_Pos,
+)
 from rsl_rl.modules.actor_critic_pact import ContextDecoder as PACTContextDecoder
 from rsl_rl.modules.actor_critic_pact_pos import ContextDecoder as PACTPosContextDecoder
 from rsl_rl.runners.pact_runner import OnPolicyRunnerPACT
-from rsl_rl.runners.pact_pos_runner import OnPolicyRunnerPACTPos
+from rsl_rl.runners.pact_pos_runner import (
+    OnPolicyRunnerPACTPos,
+    build_hard_pact_start_checkpoint,
+)
 
 
 CASES = (
@@ -145,6 +153,40 @@ def _synthetic_domain_sim(sim_cls, cfg):
 
 
 class TestHardPACTAliases(unittest.TestCase):
+    def test_hard_pact_pos_exports_strict_hard_pact_start_weights(self):
+        torch.manual_seed(2027)
+        pos_actor = ActorCritic_HardPACT_Pos(
+            **_actor_kwargs(GO2HardPACTPosCfg(), GO2HardPACTPosCfgPPO())
+        )
+        hard_actor = ActorCritic_HardPACT(
+            **_actor_kwargs(GO2HardPACTCfg(), GO2HardPACTCfgPPO())
+        )
+        pos_state = pos_actor.state_dict()
+        decoder_state = {"probe": torch.arange(3.0)}
+        converted = build_hard_pact_start_checkpoint(
+            pos_state, decoder_state, iteration=123
+        )
+
+        incompatible = hard_actor.load_state_dict(
+            converted["model_state_dict"], strict=True
+        )
+        self.assertEqual(incompatible.missing_keys, [])
+        self.assertEqual(incompatible.unexpected_keys, [])
+        for key, value in pos_state.items():
+            if key != "std":
+                torch.testing.assert_close(
+                    converted["model_state_dict"][key], value
+                )
+        expected_std = torch.ones_like(converted["model_state_dict"]["std"])
+        torch.testing.assert_close(
+            converted["model_state_dict"]["std"], expected_std
+        )
+        self.assertEqual(converted["iter"], 123)
+        self.assertTrue(converted["hard_pact_start"])
+        self.assertEqual(converted["source_task"], "go2_hard_pact_pos")
+        torch.testing.assert_close(converted["decoder_state_dict"]["probe"],
+                                   decoder_state["probe"])
+
     def test_configs_are_standalone_legged_robot_configs(self):
         """HardPACT config modules must not depend on either legacy config."""
         self.assertIs(GO2HardPACTCfg.__bases__[0], GO2PACTCfg.__bases__[0])
@@ -255,6 +297,11 @@ class TestHardPACTAliases(unittest.TestCase):
                     else:
                         alias_train_dict["policy"].pop(field, None)
                 alias_train_dict["runner"]["policy_class_name"] = legacy_train_dict["runner"]["policy_class_name"]
+                if name == "go2_hard_pact_pos":
+                    alias_train_dict["runner"].pop("export_hard_pact_start")
+                    alias_train_dict["runner"].pop(
+                        "hard_pact_start_filename"
+                    )
                 if name == "go2_hard_pact":
                     alias_train_dict["runner"]["algorithm_class_name"] = legacy_train_dict["runner"]["algorithm_class_name"]
                     for field in (
