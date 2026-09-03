@@ -44,6 +44,7 @@ from rsl_rl.modules.hard_pact_physics import (
     physical_unit_mae,
     scale_head_output,
     scale_physical_target,
+    smooth_contact_probability,
 )
 from rsl_rl.algorithms.ppo_pact import PPO_PACT
 
@@ -312,6 +313,52 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
 
 
 class GainAndScalingTests(unittest.TestCase):
+    def test_smooth_contact_is_bounded_once_and_has_gradient(self):
+        logits = torch.tensor([-100.0, 0.0, 100.0], requires_grad=True)
+        probability = smooth_contact_probability(logits, 0.01)
+        torch.testing.assert_close(
+            probability.detach(), torch.tensor([0.01, 0.5, 0.99]),
+            atol=1e-6, rtol=0,
+        )
+        probability.sum().backward()
+        self.assertGreater(logits.grad[1].item(), 0.0)
+
+    def test_wrench_head_uses_saved_smooth_center_and_radius(self):
+        head = DeploymentPhysicsHeads(
+            torch.ones(12), torch.ones(6), grf_hidden_layers=(4,),
+            wrench_hidden_layers=(4,), wrench_center=torch.arange(6.0),
+            wrench_radius=torch.arange(1.0, 7.0),
+        )
+        latent = torch.randn(3, 16, requires_grad=True)
+        explicit = torch.randn(3, 11)
+        wrench = head.predict_wrench(latent, explicit)
+        center, radius = head.wrench_center, head.wrench_radius
+        self.assertTrue((wrench >= center - radius).all())
+        self.assertTrue((wrench <= center + radius).all())
+        wrench.sum().backward()
+        self.assertGreater(latent.grad.abs().sum().item(), 0.0)
+
+    def test_wrench_envelope_and_contract_are_fully_materialized(self):
+        cfg = GO2HardPACTCfg()
+        old_abs = cfg.deployment_physics.wrench_margin_absolute
+        old_rel = cfg.deployment_physics.wrench_margin_relative
+        cfg.deployment_physics.wrench_margin_absolute = 1.0
+        cfg.deployment_physics.wrench_margin_relative = 0.1
+        gains = calculate_physics_head_gains(cfg)
+        expected = torch.tensor(gains.physical_wrench) * 1.1 + 1.0
+        torch.testing.assert_close(torch.tensor(gains.wrench_physical_radius), expected)
+        actor = _small_actor(gains)
+        contract = build_deployment_contract(cfg, actor, gains)
+        smooth = contract["smooth_qp_inputs"]
+        self.assertEqual(len(smooth["source_configuration_sha256"]), 64)
+        self.assertEqual(smooth["curriculum_stage"], "final")
+        self.assertEqual(smooth["contact"]["epsilon"], 0.01)
+        self.assertEqual(
+            smooth["base_wrench"]["physical_radius"],
+            list(gains.wrench_physical_radius),
+        )
+        cfg.deployment_physics.wrench_margin_absolute = old_abs
+        cfg.deployment_physics.wrench_margin_relative = old_rel
     def test_default_expected_physical_and_model_gains(self):
         gains = calculate_physics_head_gains(GO2HardPACTCfg())
         expected_grf = (120.0, 120.0, 250.0) * 4
@@ -321,11 +368,13 @@ class GainAndScalingTests(unittest.TestCase):
         )
         torch.testing.assert_close(
             torch.tensor(gains.physical_wrench),
-            torch.tensor((60.0, 60.0, 99.24, 23.4403276, 23.4403276, 23.4403276)),
+            torch.tensor((60.0, 60.0, 138.48, 34.88066, 34.88066, 34.88066)),
+            atol=1e-4, rtol=1e-4,
         )
         torch.testing.assert_close(
             torch.tensor(gains.model_wrench),
-            torch.tensor((0.6, 0.6, 0.9924, 0.23440328, 0.23440328, 0.23440328)),
+            torch.tensor((0.6, 0.6, 1.3848, 0.3488066, 0.3488066, 0.3488066)),
+            atol=1e-5, rtol=1e-4,
         )
 
     def test_gains_follow_ranges_gravity_and_com_envelope(self):
@@ -365,7 +414,7 @@ class DeploymentContractTests(unittest.TestCase):
                 self.assertEqual(stream.read(), first_text)
             loaded = json.loads(first_text)
 
-        self.assertEqual(loaded["schema_version"], 1)
+        self.assertEqual(loaded["schema_version"], 2)
         self.assertEqual(loaded["explicit_estimator"]["dimension"], 11)
         self.assertEqual(
             loaded["explicit_estimator"]["input"], "deterministic_latent_mean"

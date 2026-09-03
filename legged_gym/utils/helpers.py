@@ -353,6 +353,8 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
                 qp_cfg["ppo_qp_solver"] = None
             if getattr(args, "qp_solver_dtype", None) is not None:
                 qp_cfg["solver_dtype"] = args.qp_solver_dtype
+            if getattr(args, "qp_update_mode", None) is not None:
+                qp_cfg["qp_update_mode"] = args.qp_update_mode
             if getattr(args, "qp_rollout_chunk_size", None) is not None:
                 qp_cfg["rollout_chunk_size"] = args.qp_rollout_chunk_size
             if getattr(args, "qp_ppo_chunk_size", None) is not None:
@@ -395,6 +397,12 @@ def get_args():
     parser.add_argument(
         '--qp_solver_dtype', choices=('auto', 'float32', 'float64'), default=None,
         help='HardPACT-only solver precision override',
+    )
+    parser.add_argument(
+        '--qp_update_mode',
+        choices=('every_substep', 'two_anchor_held_correction'),
+        default=None,
+        help='HardPACT-only QP update mode override',
     )
     parser.add_argument(
         '--qp_rollout_chunk_size', type=int, default=None,

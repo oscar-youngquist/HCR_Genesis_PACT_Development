@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import hashlib
 import math
 import os
 
@@ -21,6 +22,16 @@ class PhysicsGainSpec:
     physical_wrench: tuple[float, ...]
     model_wrench: tuple[float, ...]
     source: dict
+    wrench_unpadded_lower: tuple[float, ...] = ()
+    wrench_unpadded_upper: tuple[float, ...] = ()
+    wrench_lower: tuple[float, ...] = ()
+    wrench_upper: tuple[float, ...] = ()
+    wrench_physical_center: tuple[float, ...] = ()
+    wrench_physical_radius: tuple[float, ...] = ()
+    wrench_model_center: tuple[float, ...] = ()
+    wrench_model_radius: tuple[float, ...] = ()
+    wrench_learning_offset: tuple[float, ...] = ()
+    wrench_learning_scale: tuple[float, ...] = ()
 
 
 def _maximum_abs(bounds):
@@ -38,7 +49,16 @@ def calculate_physics_head_gains(cfg):
     deployment = cfg.deployment_physics
     sustained_force = _maximum_abs(deployment.sustained_force_bounds_n)
     sustained_torque = _maximum_abs(deployment.sustained_torque_bounds_nm)
-    planned_mass = tuple(float(v) for v in deployment.planned_added_mass_range_kg)
+    # The centralized curriculum's final effective range is authoritative.
+    # ``planned_added_mass_range_kg`` is retained only for old config loading;
+    # it must not silently under-bound a newer curriculum.
+    planned_mass = (
+        float(cfg.domain_rand.added_mass_min),
+        float(getattr(
+            cfg.domain_rand, "max_added_mass_max",
+            deployment.planned_added_mass_range_kg[1],
+        )),
+    )
     maximum_mass_delta = _maximum_abs(planned_mass)
     gravity = tuple(float(v) for v in getattr(cfg.sim, "gravity", (0.0, 0.0, -9.81)))
     com_envelope = (
@@ -61,6 +81,31 @@ def calculate_physics_head_gains(cfg):
         )
     physical_torque = (sustained_torque + com_moment,) * 3
     physical_wrench = physical_force + physical_torque
+    lower0 = tuple(-value for value in physical_wrench)
+    upper0 = tuple(physical_wrench)
+    absolute_margin = float(getattr(deployment, "wrench_margin_absolute", 0.0))
+    relative_margin = float(getattr(deployment, "wrench_margin_relative", 0.0))
+    margin = tuple(
+        absolute_margin + relative_margin * (hi - lo) / 2.0
+        for lo, hi in zip(lower0, upper0)
+    )
+    lower = tuple(value - pad for value, pad in zip(lower0, margin))
+    upper = tuple(value + pad for value, pad in zip(upper0, margin))
+    physical_center = tuple((lo + hi) / 2.0 for lo, hi in zip(lower, upper))
+    physical_radius = tuple((hi - lo) / 2.0 for lo, hi in zip(lower, upper))
+    learning_offset = tuple(float(v) for v in getattr(
+        deployment, "wrench_learning_offset", (0.0,) * 6
+    ))
+    # Existing HardPACT convention is model=physical*obs_scale, equivalently
+    # model=(physical-offset)/learning_scale with scale=1/obs_scale.
+    learning_scale = (1.0 / wrench_obs_scale,) * 6
+    model_center = tuple(
+        (value - offset) / scale for value, offset, scale
+        in zip(physical_center, learning_offset, learning_scale)
+    )
+    model_radius = tuple(
+        value / scale for value, scale in zip(physical_radius, learning_scale)
+    )
     source = {
         "backend": "genesis",
         "backend_supported": {
@@ -74,19 +119,26 @@ def calculate_physics_head_gains(cfg):
         "effective_randomization_ranges": {
             "added_mass_kg": [
                 float(cfg.domain_rand.added_mass_min),
-                float(cfg.domain_rand.min_added_mass_max),
+                float(getattr(
+                    cfg.domain_rand, "max_added_mass_max", planned_mass[1]
+                )),
             ],
             "com_xyz_m": [
-                [-float(cfg.domain_rand.com_displacement_x_min), float(cfg.domain_rand.com_displacement_x_min)],
-                [-float(cfg.domain_rand.com_displacement_y_min), float(cfg.domain_rand.com_displacement_y_min)],
-                [-float(cfg.domain_rand.com_displacement_z_min), float(cfg.domain_rand.com_displacement_z_min)],
+                [-float(cfg.domain_rand.com_displacement_x_max), float(cfg.domain_rand.com_displacement_x_max)],
+                [-float(cfg.domain_rand.com_displacement_y_max), float(cfg.domain_rand.com_displacement_y_max)],
+                [-float(cfg.domain_rand.com_displacement_z_max), float(cfg.domain_rand.com_displacement_z_max)],
             ],
         },
         "maximum_planned_curriculum_ranges": {
             "added_mass_kg": list(planned_mass),
             "com_envelope_xyz_m": list(com_envelope),
+            "persistent_force_n": list(deployment.sustained_force_bounds_n),
+            "persistent_torque_nm": list(deployment.sustained_torque_bounds_nm),
         },
         "gravity_m_s2": list(gravity),
+        "wrench_frame_transform": "world_to_yaw_local_rotation_about_base_origin",
+        "wrench_margin_absolute": absolute_margin,
+        "wrench_margin_relative": relative_margin,
         "formulas": {
             "force": "max_abs(sustained_force) + max_abs(delta_mass) * abs(gravity_component)",
             "moment": "max_abs(sustained_torque) + max_abs(delta_mass) * norm(gravity) * norm(com_envelope)",
@@ -99,6 +151,16 @@ def calculate_physics_head_gains(cfg):
         physical_wrench=physical_wrench,
         model_wrench=tuple(v * wrench_obs_scale for v in physical_wrench),
         source=source,
+        wrench_unpadded_lower=lower0,
+        wrench_unpadded_upper=upper0,
+        wrench_lower=lower,
+        wrench_upper=upper,
+        wrench_physical_center=physical_center,
+        wrench_physical_radius=physical_radius,
+        wrench_model_center=model_center,
+        wrench_model_radius=model_radius,
+        wrench_learning_offset=learning_offset,
+        wrench_learning_scale=learning_scale,
     )
 
 
@@ -113,8 +175,9 @@ def build_deployment_contract(cfg, actor, gain_spec):
     """Build the human- and machine-readable frozen deployment contract."""
     grf_buffer = actor.physics_estimator.grf_scale.detach().cpu().tolist()
     wrench_buffer = actor.physics_estimator.wrench_scale.detach().cpu().tolist()
-    return {
-        "schema_version": 1,
+    source_json = json.dumps(gain_spec.source, sort_keys=True, separators=(",", ":"))
+    contract = {
+        "schema_version": 2,
         "explicit_estimator": {
             "dimension": 11,
             "input": "deterministic_latent_mean",
@@ -148,6 +211,31 @@ def build_deployment_contract(cfg, actor, gain_spec):
         },
         "physical_gains": {"grf_n": list(gain_spec.physical_grf), "base_wrench_n_nm": list(gain_spec.physical_wrench)},
         "model_space_gains": {"grf": grf_buffer, "base_wrench": wrench_buffer},
+        "smooth_qp_inputs": {
+            "base_wrench": {
+                "unpadded_physical_lower": list(gain_spec.wrench_unpadded_lower),
+                "unpadded_physical_upper": list(gain_spec.wrench_unpadded_upper),
+                "margin_absolute": float(getattr(cfg.deployment_physics, "wrench_margin_absolute", 0.0)),
+                "margin_relative": float(getattr(cfg.deployment_physics, "wrench_margin_relative", 0.0)),
+                "physical_lower": list(gain_spec.wrench_lower),
+                "physical_upper": list(gain_spec.wrench_upper),
+                "physical_center": list(gain_spec.wrench_physical_center),
+                "physical_radius": list(gain_spec.wrench_physical_radius),
+                "normalized_center": list(gain_spec.wrench_model_center),
+                "normalized_radius": list(gain_spec.wrench_model_radius),
+                "learning_offset": list(gain_spec.wrench_learning_offset),
+                "learning_scale": list(gain_spec.wrench_learning_scale),
+                "parameterization": "normalized_center + normalized_radius * tanh(raw)",
+            },
+            "contact": {
+                "epsilon": float(getattr(cfg.deployment_physics, "contact_probability_epsilon", 1.0e-2)),
+                "observation_offset": float(getattr(cfg.deployment_physics, "contact_observation_offset", 0.0)),
+                "observation_scale": float(getattr(cfg.deployment_physics, "contact_observation_scale", 1.0)),
+                "parameterization": "epsilon + (1 - 2*epsilon) * sigmoid(logit)",
+            },
+            "source_configuration_sha256": hashlib.sha256(source_json.encode("utf-8")).hexdigest(),
+            "curriculum_stage": "final",
+        },
         "gain_sources": gain_spec.source,
         "reconstruction_target": {
             "dimension": RECONSTRUCTION_DIM,
@@ -163,6 +251,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
             "base_wrench": "physics_estimator.wrench_scale",
         },
     }
+    return contract
 
 
 def write_deployment_contract_once(log_dir, contract):

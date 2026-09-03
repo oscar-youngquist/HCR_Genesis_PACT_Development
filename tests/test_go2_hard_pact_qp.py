@@ -8,6 +8,8 @@ from qpth.qp import QPFunction
 from rsl_rl.algorithms.hard_pact_qp import (
     HardPACTDifferentiableQP,
     HardPACTQPConfig,
+    _CertifiedRows,
+    _ScaleClipRows,
     _row_scale,
     balanced_substep_indices,
     projection_loss,
@@ -42,6 +44,9 @@ def qp_data(batch=2, dtype=torch.float64):
 
 
 def make_qp(**overrides):
+    # Most historical tests exercise the original three-stage numbering;
+    # elastic recovery has focused opt-in coverage below.
+    overrides.setdefault("elastic_recovery_enabled", False)
     config = HardPACTQPConfig(max_iter=50, not_improved_limit=10, **overrides)
     return HardPACTDifferentiableQP(
         config,
@@ -53,6 +58,88 @@ def make_qp(**overrides):
 
 
 class HardPACTQPTests(unittest.TestCase):
+    def test_cupiqp_native_pack_removes_only_true_coordinate_rows(self):
+        qp = make_qp()
+        full = qp._build(qp_data(2), relaxed_contact=False)
+        g, h, lower, upper = qp._cupiqp_native_pack(full, False)
+        self.assertEqual(g.shape, (2, 44, 54))
+        self.assertEqual(h.shape, (2, 44))
+        torch.testing.assert_close(lower[:, 30:42], full.tau_lower / full.variable_scale[30:42])
+        torch.testing.assert_close(upper[:, 30:42], full.tau_upper / full.variable_scale[30:42])
+        torch.testing.assert_close(lower[:, 6:18], full.qdd_lower / full.variable_scale[6:18])
+        self.assertTrue(torch.isneginf(lower[:, 18:30]).all())
+        self.assertTrue(torch.isposinf(upper[:, 18:30]).all())
+        torch.testing.assert_close(lower[:, 42:54], torch.zeros_like(lower[:, 42:54]))
+        # Canonical matrices are retained verbatim for certification/qpth.
+        self.assertEqual(full.G.shape, (2, 104, 54))
+
+        relaxed = qp._build(qp_data(2), relaxed_contact=True)
+        relaxed_g, _, relaxed_lower, _ = qp._cupiqp_native_pack(relaxed, True)
+        self.assertEqual(relaxed_g.shape, (2, 20, 54))
+        self.assertTrue(torch.isneginf(relaxed_lower[:, 42:54]).all())
+
+    def test_proximal_objective_algebra_and_zero_parity(self):
+        source = qp_data(2)
+        source["previous_certified_qdd"] = torch.full((2, 18), 0.2)
+        zero = make_qp(proximal_rho=0.0)._build(source)
+        rho = 0.7
+        weights = (2.0, 3.0, 4.0, 5.0)
+        proximal = make_qp(
+            proximal_rho=rho, proximal_block_weights=weights
+        )._build(source)
+        d2 = torch.tensor(
+            [weights[0] ** 2] * 18 + [weights[1] ** 2] * 12
+            + [weights[2] ** 2] * 12 + [weights[3] ** 2] * 12,
+            dtype=torch.float64,
+        )
+        # Compare in physical coordinates before x=Dz.
+        scale2 = zero.variable_scale.square()
+        diagonal_delta = (
+            proximal.Q.diagonal(dim1=-2, dim2=-1)
+            - zero.Q.diagonal(dim1=-2, dim2=-1)
+        ) / scale2
+        torch.testing.assert_close(diagonal_delta, rho * d2.expand_as(diagonal_delta))
+        self.assertGreater(torch.linalg.eigvalsh(proximal.Q).min().item(), 0.0)
+        exact_zero = make_qp(proximal_rho=0.0).solve(**qp_data(1))
+        legacy = make_qp().solve(**qp_data(1))
+        torch.testing.assert_close(exact_zero.tau_safe, legacy.tau_safe)
+
+    def test_rollout_and_ppo_profiles_are_independent(self):
+        qp = make_qp(
+            rollout_eps_abs=1e-3, rollout_max_iter=7,
+            ppo_eps_abs=2e-6, ppo_max_iter=31,
+        )
+        self.assertEqual(qp._profile(False)["eps_abs"], 1e-3)
+        self.assertEqual(qp._profile(False)["max_iter"], 7)
+        self.assertEqual(qp._profile(True)["eps_abs"], 2e-6)
+        self.assertEqual(qp._profile(True)["max_iter"], 31)
+
+    def test_certification_mask_and_input_gradient_conditioning_are_row_local(self):
+        value = torch.ones(3, 4, dtype=torch.float64, requires_grad=True)
+        certified = torch.tensor([True, False, True])
+        _CertifiedRows.apply(value, certified).sum().backward()
+        torch.testing.assert_close(
+            value.grad,
+            torch.tensor([[1.0] * 4, [0.0] * 4, [1.0] * 4], dtype=torch.float64),
+        )
+        source = torch.ones(2, 3, dtype=torch.float64, requires_grad=True)
+        _ScaleClipRows.apply(source, 2.0, 1.0, None, "test").sum().backward()
+        torch.testing.assert_close(
+            source.grad.norm(dim=-1), torch.ones(2, dtype=torch.float64)
+        )
+
+    def test_elastic_recovery_problem_is_finite_and_keeps_actuator_bounds(self):
+        qp = make_qp(elastic_recovery_enabled=True)
+        source = qp_data(2)
+        source["tau_nom"].fill_(100.0)
+        solution, certified, diagnostics = qp._solve_stage(
+            source, True, elastic=True
+        )
+        self.assertTrue(certified.all())
+        self.assertTrue(torch.isfinite(solution).all())
+        self.assertTrue((solution[:, 30:42].abs() <= 20.0 + 1e-6).all())
+        self.assertTrue((diagnostics["equality_max"] == 0).all())
+
     def test_solver_registration_validation_and_capabilities(self):
         for name in ("qpth", "cupiqp", "moreau"):
             qp = make_qp(qp_solver=name)
@@ -120,6 +207,7 @@ class HardPACTQPTests(unittest.TestCase):
         data["foot_jacobians"][:, 0, :, :3] = torch.eye(3, dtype=torch.float64)
         data["tau_nom"].fill_(0.5)
         data["wrench_pred_world"].fill_(0.25)
+        data["contact_probability"].fill_(0.4)
         for name in (
             "tau_nom", "force_pred_world", "wrench_pred_world",
             "contact_probability",
@@ -197,15 +285,19 @@ class HardPACTQPTests(unittest.TestCase):
         data["foot_jacobians"][0, :, :, :3] = torch.eye(
             3, dtype=torch.float64
         ).unsqueeze(0).expand(4, -1, -1)
-        contact = torch.zeros(1, 4, dtype=torch.float64, requires_grad=True)
+        # Runtime probabilities have already passed through the estimator's
+        # eps-bounded sigmoid; the QP must not floor/sigmoid them again.
+        contact = torch.full(
+            (1, 4), 1.0e-2, dtype=torch.float64, requires_grad=True
+        )
         data["contact_probability"] = contact
         full = make_qp()._build(data, relaxed_contact=False)
         relaxed = make_qp()._build(data, relaxed_contact=True)
         self.assertEqual(full.G.shape[1], 104)
         self.assertEqual(relaxed.G.shape[1], 68)
         self.assertEqual(relaxed.A.shape[1], 18)
-        # Last 24 physical rows are +/- contact acceleration. Even at c=0,
-        # the qdd block is nonzero because c_eff=c_min.
+        # Last 24 physical rows are +/- contact acceleration and consume the
+        # supplied smooth probability directly.
         self.assertGreater(full.physical_G[:, -24:, :18].abs().sum().item(), 0.0)
         full.physical_G[:, -24:, :18].abs().sum().backward()
         self.assertTrue(torch.isfinite(contact.grad).all())

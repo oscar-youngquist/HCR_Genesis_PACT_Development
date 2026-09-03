@@ -104,6 +104,12 @@ class OnPolicyRunnerPACT:
         reconstruction_indices = None
         reconstruction_dim = self.env.num_privileged_obs
         if self.is_hard_pact:
+            if self.alg_cfg.get("ppo_qp_sampling_seed") is None:
+                # Stateless epoch partitioning derives from the run seed and
+                # iteration, so resumed runs need no additional RNG payload.
+                self.alg_cfg["ppo_qp_sampling_seed"] = int(
+                    self.train_cfg.get("seed", 1)
+                )
             self.hard_pact_features = resolve_hard_pact_features(
                 self.alg_cfg.get("ablation_variant", "full")
             )
@@ -114,6 +120,12 @@ class OnPolicyRunnerPACT:
                 "wrench_decoder_layers": self.policy_cfg["wrench_decoder_layers"],
                 "grf_scale": gain_spec.model_grf,
                 "wrench_scale": gain_spec.model_wrench,
+                "wrench_center": gain_spec.wrench_model_center,
+                "wrench_radius": gain_spec.wrench_model_radius,
+                "contact_epsilon": getattr(
+                    self.env.cfg.deployment_physics,
+                    "contact_probability_epsilon", 1.0e-2,
+                ),
                 "ablation_features": self.hard_pact_features,
             }
             reconstruction_indices = RECONSTRUCTION_INDICES
@@ -226,6 +238,14 @@ class OnPolicyRunnerPACT:
             self.deployment_contract = build_deployment_contract(
                 self.env.cfg, self.alg.actor_critic, gain_spec
             )
+            qp_mode = self.alg.qp_config.qp_update_mode
+            self.deployment_contract["qp_update"] = {
+                "mode": qp_mode,
+                "physics_substep_anchors": (
+                    [0, 2] if qp_mode == "two_anchor_held_correction"
+                    else list(range(int(self.env.cfg.control.decimation)))
+                ),
+            }
             write_deployment_contract_once(self.log_dir, self.deployment_contract)
 
         self.env.create_async_pino_workers()

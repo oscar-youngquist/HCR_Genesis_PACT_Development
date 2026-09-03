@@ -60,6 +60,7 @@ class HardPACTQPConfig:
     """
 
     enabled: bool = True  # Master rollout/PPO projection switch.
+    qp_update_mode: str = "every_substep"
     # One canonical QP and fallback cascade can be solved by any registered
     # numerical backend. Overrides are diagnostics-only and require an
     # explicit mismatch opt-in so rollout/training cannot diverge silently.
@@ -72,6 +73,24 @@ class HardPACTQPConfig:
     # interleaved with short-lived implicit-backward solvers. Keep the stable
     # path as default; users may benchmark graph capture explicitly.
     cupiqp_cuda_graph: bool = False
+    # Independent numerical policies. ``None`` preserves the legacy scalar
+    # setting, while the defaults below encode the measured training intent:
+    # rollout favours throughput and reports its gap; PPO is stricter and
+    # requires a trustworthy gap before retaining an implicit VJP.
+    rollout_eps_abs: float = 1.0e-4
+    rollout_eps_rel: float = 1.0e-4
+    rollout_max_iter: int = 20
+    rollout_feasibility_tolerance: float = 1.0e-3
+    rollout_duality_gap_abs: float = 1.0e-3
+    rollout_duality_gap_rel: float = 1.0e-3
+    rollout_duality_gap_policy: str = "report"
+    ppo_eps_abs: float = 3.0e-6
+    ppo_eps_rel: float = 3.0e-6
+    ppo_max_iter: int = 30
+    ppo_feasibility_tolerance: float = 1.0e-3
+    ppo_duality_gap_abs: float = 3.0e-6
+    ppo_duality_gap_rel: float = 3.0e-6
+    ppo_duality_gap_policy: str = "require"
     qpth_warm_start: bool = False
     friction_coefficient: float = 0.6  # mu in |fx|,|fy|<=mu*fz.
     torque_rate_limit_nm_s: float = 1000.0  # dot(tau)_lim [Nm/s].
@@ -130,21 +149,35 @@ class HardPACTQPConfig:
     # Genesis and PhysX use semi-implicit Euler: q+=dt*v+dt^2*qdd. A backend
     # with constant-acceleration position integration may configure 0.5.
     position_integration_coefficient: float = 1.0
+    # Optional deployment-compatible temporal proximal objective. Block
+    # weights correspond to [qdd, GRF, safe torque, contact slack].
+    proximal_rho: float = 0.0
+    proximal_block_weights: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
+    elastic_recovery_enabled: bool = True
+    elastic_dynamics_weight: float = 1.0e4
+    gradient_scale_tau: float = 1.0
+    gradient_scale_grf: float = 1.0
+    gradient_scale_wrench: float = 1.0
+    gradient_scale_contact: float = 1.0
+    gradient_clip_tau: float = 0.0
+    gradient_clip_grf: float = 0.0
+    gradient_clip_wrench: float = 0.0
+    gradient_clip_contact: float = 0.0
 
 
 @dataclass
 class HardPACTQPResult:
     """Physical-space primal result plus fallback/KKT metadata.
 
-    ``stage`` is 0 for the full QP, 1 for the relaxed-contact QP, and 2 for
-    analytic actuator/rate projection. ``differentiated_mask`` is true only
-    for stages 0/1, whose outputs came from qpth's implicit KKT backward.
+    ``stage`` is 0 for full, 1 for relaxed-contact, 2 for elastic recovery,
+    and 3 for analytic actuator/rate projection when elastic recovery is
+    enabled. ``differentiated_mask`` excludes only analytic projection.
     """
     qdd: torch.Tensor  # [B,18], canonical generalized acceleration.
     force_world: torch.Tensor  # [B,4,3], FR/FL/RR/RL world XYZ [N].
     tau_safe: torch.Tensor  # [B,12], actuator command [Nm].
     contact_slack: torch.Tensor  # [B,4,3], acceleration slack [m/s^2].
-    stage: torch.Tensor  # [B], 0=full, 1=relaxed, 2=analytic projection.
+    stage: torch.Tensor  # [B], 0=full, 1=relaxed, 2=elastic, 3=analytic.
     differentiated_mask: torch.Tensor  # [B], true exactly for stages 0/1.
     diagnostics: Mapping[str, torch.Tensor]  # Per-stage primal/KKT metrics.
     metrics: Mapping[str, torch.Tensor] | None = None  # Aggregated GPU scalars.
@@ -171,6 +204,8 @@ class _QPBuild:
     tau_upper: torch.Tensor
     qdd_lower: torch.Tensor
     qdd_upper: torch.Tensor
+    native_lower: torch.Tensor
+    native_upper: torch.Tensor
 
     def __iter__(self):
         # Preserve the legacy seven-value private test/debug unpacking API.
@@ -197,6 +232,54 @@ def _row_scale(matrix, rhs):
         matrix.detach().square().sum(dim=-1).sqrt(), rhs.detach().abs()
     ).clamp_min(1.0)
     return matrix / scale.unsqueeze(-1), rhs / scale, scale
+
+
+class _CertifiedRows(torch.autograd.Function):
+    """Identity in forward; prevent failed rows entering an implicit VJP."""
+
+    @staticmethod
+    def forward(ctx, value, certified):
+        ctx.save_for_backward(certified)
+        return value
+
+    @staticmethod
+    def backward(ctx, gradient):
+        (certified,) = ctx.saved_tensors
+        return gradient * certified.to(gradient.dtype).unsqueeze(-1), None
+
+
+class _ScaleClipRows(torch.autograd.Function):
+    """Value-preserving per-environment physical-input gradient conditioner."""
+
+    @staticmethod
+    def forward(ctx, value, scale, maximum_norm, sink=None, name="input"):
+        ctx.scale = float(scale)
+        ctx.maximum_norm = float(maximum_norm)
+        ctx.sink = sink
+        ctx.name = str(name)
+        return value
+
+    @staticmethod
+    def backward(ctx, gradient):
+        raw_norm = gradient.reshape(gradient.shape[0], -1).norm(dim=-1)
+        scaled = gradient * ctx.scale
+        scaled_norm = scaled.reshape(scaled.shape[0], -1).norm(dim=-1)
+        clipped_rows = torch.zeros_like(raw_norm, dtype=torch.bool)
+        if ctx.maximum_norm > 0.0:
+            flat = scaled.reshape(scaled.shape[0], -1)
+            factor = (ctx.maximum_norm / flat.norm(dim=-1).clamp_min(1.0e-12)).clamp_max(1.0)
+            clipped_rows = factor < 1.0
+            scaled = scaled * factor.reshape((-1,) + (1,) * (scaled.ndim - 1))
+        if ctx.sink is not None:
+            clipped_norm = scaled.reshape(scaled.shape[0], -1).norm(dim=-1)
+            prefix = f"qp/gradient/{ctx.name}"
+            ctx.sink._last_gradient_metrics.update({
+                f"{prefix}/raw_norm": raw_norm.detach().mean(),
+                f"{prefix}/scaled_norm": scaled_norm.detach().mean(),
+                f"{prefix}/clipped_norm": clipped_norm.detach().mean(),
+                f"{prefix}/clipped_fraction": clipped_rows.float().mean().detach(),
+            })
+        return scaled, None, None, None, None
 
 
 class HardPACTDifferentiableQP:
@@ -316,6 +399,20 @@ class HardPACTDifferentiableQP:
             raise ValueError("QP solver must be qpth, cupiqp, or moreau")
         if config.cupiqp_mode not in ("dense", "sparse"):
             raise ValueError("cupiqp_mode must be dense or sparse")
+        if config.qp_update_mode not in (
+            "every_substep", "two_anchor_held_correction"
+        ):
+            raise ValueError(
+                "qp_update_mode must be every_substep or "
+                "two_anchor_held_correction"
+            )
+        for policy in (
+            config.rollout_duality_gap_policy, config.ppo_duality_gap_policy,
+        ):
+            if policy not in ("ignore", "report", "require"):
+                raise ValueError("duality_gap_policy must be ignore, report, or require")
+        if config.proximal_rho < 0 or len(config.proximal_block_weights) != 4:
+            raise ValueError("proximal_rho must be nonnegative and needs four block weights")
         if len(solvers) > 1 and not config.allow_solver_mismatch:
             raise ValueError(
                 "different rollout/PPO QP solvers require "
@@ -340,6 +437,7 @@ class HardPACTDifferentiableQP:
         # from discarding or contaminating any other environment's state.
         # PPO remains cold so no rollout iterate enters an unrelated minibatch.
         self._qpth_warm_states = {}
+        self._last_gradient_metrics = {}
 
     def clear_warm_start(self, env_ids=None):
         """Clear qpth rollout state globally or for chunks touching env_ids."""
@@ -410,6 +508,21 @@ class HardPACTDifferentiableQP:
         return (self.cfg.normalized_feasibility_tolerance_float32
                 if dtype == torch.float32
                 else self.cfg.normalized_feasibility_tolerance_float64)
+
+    def _profile(self, differentiable):
+        """Return the immutable rollout/PPO numerical profile."""
+        prefix = "ppo" if differentiable else "rollout"
+        return {
+            "eps_abs": float(getattr(self.cfg, f"{prefix}_eps_abs")),
+            "eps_rel": float(getattr(self.cfg, f"{prefix}_eps_rel")),
+            "max_iter": int(getattr(self.cfg, f"{prefix}_max_iter")),
+            "feasibility": float(getattr(
+                self.cfg, f"{prefix}_feasibility_tolerance"
+            )),
+            "gap_abs": float(getattr(self.cfg, f"{prefix}_duality_gap_abs")),
+            "gap_rel": float(getattr(self.cfg, f"{prefix}_duality_gap_rel")),
+            "gap_policy": getattr(self.cfg, f"{prefix}_duality_gap_policy"),
+        }
 
     def _chunk_size(self, differentiable):
         if self.cfg.chunk_size is not None:
@@ -484,7 +597,7 @@ class HardPACTDifferentiableQP:
                      for value in (self.torque_limits, self.position_lower,
                                    self.position_upper, self.velocity_limits))
 
-    def _build(self, data, relaxed_contact=False):
+    def _build(self, data, relaxed_contact=False, elastic=False):
         r"""Build physical blocks, then apply ``x=D z`` and row scaling.
 
         Every inequality is written ``G x <= h``. The fixed-gravity-normal
@@ -506,11 +619,26 @@ class HardPACTDifferentiableQP:
         foot_bias = data["foot_acceleration_bias"].detach()
         # tau_nom, f_hat, and W_hat are learned QP inputs. In the equality,
         # W_hat enters b and therefore retains a qpth implicit-gradient path.
-        tau_nom = data["tau_nom"]
-        force_pred = data["force_pred_world"].reshape(-1, 12)
-        wrench_pred = data["wrench_pred_world"]
+        tau_nom = _ScaleClipRows.apply(
+            data["tau_nom"], self.cfg.gradient_scale_tau,
+            self.cfg.gradient_clip_tau, self, "tau_nom",
+        )
+        force_input = _ScaleClipRows.apply(
+            data["force_pred_world"], self.cfg.gradient_scale_grf,
+            self.cfg.gradient_clip_grf, self, "grf",
+        )
+        force_pred = force_input.reshape(-1, 12)
+        wrench_pred = _ScaleClipRows.apply(
+            data["wrench_pred_world"], self.cfg.gradient_scale_wrench,
+            self.cfg.gradient_clip_wrench, self, "wrench",
+        )
         # c_i in [0,1] continuously gates the contact-acceleration rows.
-        contact = data["contact_probability"].clamp(0.0, 1.0)
+        # The estimator already applies eps+(1-2eps)*sigmoid(logit) exactly
+        # once. The QP consumes that smooth probability directly.
+        contact = _ScaleClipRows.apply(
+            data["contact_probability"], self.cfg.gradient_scale_contact,
+            self.cfg.gradient_clip_contact, self, "contact",
+        )
         # Previous execution/state/dt define hard boxes and are measurements.
         previous_tau = data["previous_torque"].detach()
         joint_position = data["joint_position"].detach()
@@ -541,6 +669,30 @@ class HardPACTDifferentiableQP:
             torque_limit.square().unsqueeze(0)
         )
 
+        # rho/2 ||D_prox(x-x_ref)||^2 contributes rho*D^2 to Q and
+        # -rho*D^2*x_ref to p.  The reference is detached: it stabilizes
+        # consecutive solves without creating temporal autograd edges.
+        if self.cfg.proximal_rho:
+            weights = tau_nom.new_tensor(self.cfg.proximal_block_weights)
+            d2 = torch.cat((
+                weights[0].expand(18), weights[1].expand(12),
+                weights[2].expand(12), weights[3].expand(12),
+            )).square()
+            previous_qdd = data.get("previous_certified_qdd")
+            if previous_qdd is None:
+                previous_qdd = torch.zeros_like(mass[:, 0])
+            x_ref = data.get("proximal_reference")
+            if x_ref is None:
+                x_ref = torch.cat((
+                    previous_qdd, force_pred.detach(), tau_nom.detach(),
+                    torch.zeros_like(force_pred),
+                ), dim=-1)
+            else:
+                x_ref = x_ref.detach()
+            Q = Q.clone()
+            Q.diagonal(dim1=-2, dim2=-1).add_(self.cfg.proximal_rho * d2)
+            p = p - self.cfg.proximal_rho * d2 * x_ref
+
         # Dynamics equality A*x=b. M and all Jacobians use canonical
         # [base linear, base angular, FR,FL,RR,RL joints] generalized order.
         # Starting from M*qdd+b=S^T*tau+J_f^T*f+J_b^T*W, move all decision
@@ -555,6 +707,18 @@ class HardPACTDifferentiableQP:
         A[:, 6:, TORQUE] = -torch.eye(12, device=device, dtype=dtype)
         # einsum computes J_b^T W because base_jac is stored [B,6,18].
         b = torch.einsum("bkn,bk->bn", base_jac, wrench_pred) - bias
+        if elastic:
+            # Elastic recovery represents the dynamics violation e_dyn=A*x-b
+            # as an unconstrained slack and penalizes ||e_dyn||^2 rather than
+            # enforcing equality. This retains the fixed 54-D deployment
+            # vector while making an inconsistent mechanics row recoverable.
+            weight = self.cfg.elastic_dynamics_weight
+            Q = Q + 2.0 * weight * torch.bmm(A.transpose(1, 2), A)
+            p = p - 2.0 * weight * torch.bmm(
+                A.transpose(1, 2), b.unsqueeze(-1)
+            ).squeeze(-1)
+            A = A[:, :0]
+            b = b[:, :0]
 
         # Inequality blocks are collected independently, then concatenated
         # into one fixed G/h pair. `add(C,d)` always means C*x<=d.
@@ -616,25 +780,25 @@ class HardPACTDifferentiableQP:
         qdd_lower = torch.maximum(qdd_lower_position, qdd_lower_velocity)
         # Select generalized coordinates 6:18 because the floating base has
         # no actuator joint position/velocity box in this QP.
-        add(selector_qdd, qdd_upper)
-        add(-selector_qdd, -qdd_lower)
+        if not elastic:
+            add(selector_qdd, qdd_upper)
+            add(-selector_qdd, -qdd_lower)
 
         # World-Z unilateral/friction pyramid, five rows per foot.
         friction_rows = friction_template.unsqueeze(0).expand(batch, -1, -1)
         # All five pyramid bounds have a zero right-hand side.
         add(friction_rows, torch.zeros(batch, 20, device=device, dtype=dtype))
-        if not relaxed_contact:
+        if not relaxed_contact and not elastic:
             # -s<=0 <=> s>=0 for the full problem.
             add(-selector_slack, torch.zeros(
                 batch, 12, device=device, dtype=dtype
             ))
 
-        if not relaxed_contact:
+        if not relaxed_contact and not elastic:
             # c is scalar per foot and is repeated over XYZ. Scaling the whole
             # acceleration makes the constraint vanish continuously in swing.
             # Repeat each scalar c_i over its foot's XYZ acceleration axes.
-            c_min = self.cfg.contact_probability_floor
-            contact_effective = c_min + (1.0 - c_min) * contact
+            contact_effective = contact
             contact_xyz = contact_effective.unsqueeze(-1).expand(
                 -1, -1, 3
             ).reshape(batch, 12)
@@ -668,6 +832,19 @@ class HardPACTDifferentiableQP:
         G = torch.cat(rows, dim=1)
         h = torch.cat(bounds, dim=1)
 
+        # Native cuPIQP bounds are expressed in physical x here and converted
+        # to solver z below. Floating-base qdd and forces remain unbounded.
+        native_lower = torch.full(
+            (batch, NUM_VARIABLES), -torch.inf, device=device, dtype=dtype
+        )
+        native_upper = torch.full_like(native_lower, torch.inf)
+        native_lower[:, 6:18] = qdd_lower
+        native_upper[:, 6:18] = qdd_upper
+        native_lower[:, TORQUE] = tau_lower
+        native_upper[:, TORQUE] = tau_upper
+        if not relaxed_contact:
+            native_lower[:, SLACK] = 0.0
+
         # x=D*z makes all solver variables O(1). Constraint-row scaling then
         # balances Newton-system rows without changing equality/inequality sets.
         # D=diag([qdd_scale]*18,[force_scale]*12,[torque_scale]*12,
@@ -696,11 +873,34 @@ class HardPACTDifferentiableQP:
         # This solver-space ridge ensures lambda_min(Q)>0 after roundoff.
         Q = Q.clone()
         Q.diagonal(dim1=-2, dim2=-1).add_(self.cfg.q_regularization)
+        native_lower = native_lower / variable_scale
+        native_upper = native_upper / variable_scale
         return _QPBuild(
             Q, p, G, h, A, b, variable_scale,
             physical_G, physical_h, physical_A, physical_b,
             equality_row_scale, inequality_row_scale,
             tau_lower, tau_upper, qdd_lower, qdd_upper,
+            native_lower, native_upper,
+        )
+
+    @staticmethod
+    def _cupiqp_native_pack(matrices, relaxed_contact, elastic=False):
+        """Replace true coordinate rows by cuPIQP 0.1 native x_l/x_u.
+
+        Canonical matrices remain on ``matrices`` for backend-neutral
+        certification. Only the numerical packet drops redundant box rows.
+        """
+        keep = torch.ones(
+            matrices.G.shape[1], dtype=torch.bool, device=matrices.G.device
+        )
+        keep[:24] = False  # torque/rate intersection
+        if not elastic:
+            keep[24:48] = False  # actuated-qdd intersection
+        if not relaxed_contact and not elastic:
+            keep[68:80] = False  # s >= 0
+        return (
+            matrices.G[:, keep], matrices.h[:, keep],
+            matrices.native_lower, matrices.native_upper,
         )
 
     def _validate_inputs(self, matrices, audit_count=0):
@@ -767,11 +967,15 @@ class HardPACTDifferentiableQP:
             equality = torch.einsum("bij,bj->bi", A, x_scaled) - b
             inequality = torch.einsum("bij,bj->bi", G, x_scaled) - h
             finite_output = torch.isfinite(x_scaled).all(dim=-1)
+            equality_max = (
+                equality.abs().amax(dim=-1) if equality.shape[1]
+                else x_scaled.new_zeros(x_scaled.shape[0])
+            )
         result = {
             # Mandatory normalized primal certification. These values are
             # computed at every diagnostics level because they decide whether
             # qpth's candidate advances or enters the fallback cascade.
-            "equality_max": equality.detach().abs().amax(dim=-1),
+            "equality_max": equality_max.detach(),
             "inequality_max": inequality.detach().clamp_min(0.0).amax(dim=-1),
             "output_finite": finite_output,
         }
@@ -956,7 +1160,8 @@ class HardPACTDifferentiableQP:
                 )
         return result
 
-    def _solve_stage(self, data, relaxed_contact, audit_count=0, warm_key=None):
+    def _solve_stage(self, data, relaxed_contact, audit_count=0, warm_key=None,
+                     elastic=False):
         r"""Build, validate, solve, and certify one QP fallback stage.
 
         qpth returns ``z*`` and its backward differentiates the KKT system;
@@ -965,7 +1170,9 @@ class HardPACTDifferentiableQP:
         # Construct either the full contact-softened problem or stage one with
         # contact/slack inequalities removed. No ``s=0`` equality is added:
         # the strictly positive quadratic slack cost has its minimum at zero.
-        matrices = self._build(data, relaxed_contact=relaxed_contact)
+        matrices = self._build(
+            data, relaxed_contact=relaxed_contact, elastic=elastic
+        )
         # Validate coefficients before entering qpth's batched factorization.
         valid, finite, rank_ok, spd = self._validate_inputs(
             matrices, audit_count=audit_count
@@ -996,6 +1203,8 @@ class HardPACTDifferentiableQP:
         # This bit is separate from coefficient validity: qpth can reject an
         # otherwise valid numerical factorization at runtime.
         solver_exception = torch.zeros_like(valid)
+        duality_gap = p.new_full((p.shape[0],), float("nan"))
+        duality_gap_rel = duality_gap.clone()
         warm_hit_mask = torch.zeros_like(valid)
         terminal_state = None
         try:
@@ -1035,12 +1244,31 @@ class HardPACTDifferentiableQP:
                     check_Q_spd=self.cfg.check_q_spd,
                 )(Q, p, G, h, A, b)
             else:
-                solution_scaled = self._backend_instances[
+                backend_g = G
+                backend_h = h
+                native_lower = matrices.native_lower
+                native_upper = matrices.native_upper
+                if self._active_solver == "cupiqp":
+                    # Native box rows: tau[0:24], actuated qdd[24:48], and
+                    # (full stage only) slack nonnegativity[68:80]. Canonical
+                    # G/h remain untouched above for physical certification.
+                    backend_g, backend_h, native_lower, native_upper = (
+                        self._cupiqp_native_pack(
+                            matrices, relaxed_contact, elastic=elastic
+                        )
+                    )
+                backend_result = self._backend_instances[
                     self._active_solver
                 ].solve(
-                    Q, p, G, h, A, b,
+                    Q, p, backend_g, backend_h, A, b,
                     differentiable=self._active_differentiable,
+                    native_lower=native_lower,
+                    native_upper=native_upper,
                 )
+                solution_scaled = backend_result.solution
+                if backend_result.duality_gap is not None:
+                    duality_gap = backend_result.duality_gap
+                    duality_gap_rel = backend_result.duality_gap_rel
         except QPBackendUnavailable:
             # An explicitly selected unavailable GPU solver is a configuration
             # error, never a reason to execute another backend or CPU path.
@@ -1061,6 +1289,8 @@ class HardPACTDifferentiableQP:
             solution_scaled, matrices, audit_count=audit_count,
             relaxed_contact=relaxed_contact, data=data,
         )
+        diagnostics["duality_gap"] = duality_gap.detach()
+        diagnostics["duality_gap_rel"] = duality_gap_rel.detach()
         # Dual KKT validity requires both relative stationarity and
         # complementarity below their configured tolerance.
         if audit_count:
@@ -1070,12 +1300,24 @@ class HardPACTDifferentiableQP:
             )
         # A stage is accepted only if all input, solver, finite-output, primal,
         # and dual checks pass for that environment.
+        profile = self._profile(self._active_differentiable)
+        feasibility_tolerance = (
+            profile["feasibility"] if self._active_solver == "cupiqp"
+            else self._normalized_tolerance(Q.dtype)
+        )
         success = (
             valid & ~solver_exception
             & diagnostics["output_finite"]
-            & (diagnostics["equality_max"] <= self._normalized_tolerance(Q.dtype))
-            & (diagnostics["inequality_max"] <= self._normalized_tolerance(Q.dtype))
+            & (diagnostics["equality_max"] <= feasibility_tolerance)
+            & (diagnostics["inequality_max"] <= feasibility_tolerance)
         )
+        if self._active_solver == "cupiqp" and profile["gap_policy"] == "require":
+            gap_ok = torch.isfinite(duality_gap) & torch.isfinite(duality_gap_rel)
+            gap_ok &= (
+                (duality_gap <= profile["gap_abs"])
+                | (duality_gap_rel <= profile["gap_rel"])
+            )
+            success &= gap_ok
         if warm_key is not None and terminal_state is not None:
             # Install only certified terminal rows. Reset/failed rows remain
             # cold next substep, while every unaffected environment keeps its
@@ -1108,8 +1350,13 @@ class HardPACTDifferentiableQP:
                     diagnostics[name] = diagnostics[name].clone()
                     diagnostics[name][failed] = values
             diagnostics["warm_residual_cold_retry"] = failed
-        else:
+        if "warm_residual_cold_retry" not in diagnostics:
             diagnostics["warm_residual_cold_retry"] = torch.zeros_like(success)
+        if self._active_differentiable and solution_scaled.requires_grad:
+            # The mask sits immediately above the backend autograd Function,
+            # so an uncertified row contributes exactly zero to its batched
+            # implicit KKT VJP and cannot contaminate certified neighbours.
+            solution_scaled = _CertifiedRows.apply(solution_scaled, success.detach())
         diagnostics["warm_start_hit"] = warm_hit_mask
         diagnostics.update({"input_finite": finite, "equality_rank": rank_ok,
                             "q_spd": spd,
@@ -1176,14 +1423,18 @@ class HardPACTDifferentiableQP:
     def _minimal_summary(self, stage, differentiated, diagnostics):
         """Aggregate mandatory certification/fallback values on-device."""
         prefix = "qp/minimal"
+        analytic_stage = 3 if self.cfg.elastic_recovery_enabled else 2
         metrics = {
             f"{prefix}/full_count": (stage == 0).sum(),
             f"{prefix}/relaxed_count": (stage == 1).sum(),
-            f"{prefix}/fallback_count": (stage == 2).sum(),
+            f"{prefix}/elastic_count": (stage == 2).sum() if self.cfg.elastic_recovery_enabled else stage.new_zeros(()),
+            f"{prefix}/fallback_count": (stage == analytic_stage).sum(),
             f"{prefix}/full_fraction": (stage == 0).float().mean(),
             f"{prefix}/relaxed_fraction": (stage == 1).float().mean(),
-            f"{prefix}/fallback_fraction": (stage == 2).float().mean(),
+            f"{prefix}/elastic_fraction": (stage == 2).float().mean() if self.cfg.elastic_recovery_enabled else stage.new_zeros((), dtype=torch.float32),
+            f"{prefix}/fallback_fraction": (stage == analytic_stage).float().mean(),
             f"{prefix}/differentiated_fraction": differentiated.float().mean(),
+            f"{prefix}/gradient_masked_fraction": (~differentiated).float().mean(),
             f"{prefix}/pre_clamp_torque_violation_max": diagnostics[
                 "pre_clamp_torque_violation_max"
             ].max(),
@@ -1212,12 +1463,21 @@ class HardPACTDifferentiableQP:
             "failure/empty_qdd_intersection",
         ):
             metrics[f"{prefix}/{source}"] = diagnostics[source].float().mean()
-        for stage_name in ("full", "relaxed"):
+        stage_names = ["full", "relaxed"]
+        if self.cfg.elastic_recovery_enabled:
+            stage_names.append("elastic")
+        for stage_name in stage_names:
             for source in ("input_finite", "output_finite", "solver_exception"):
                 key = f"{stage_name}/{source}"
                 if key in diagnostics:
                     metrics[f"{prefix}/{key}_fraction"] = (
                         diagnostics[key].float().mean()
+                    )
+            for source in ("duality_gap", "duality_gap_rel"):
+                key = f"{stage_name}/{source}"
+                if key in diagnostics:
+                    metrics[f"{prefix}/{key}_mean"] = self._finite_mean(
+                        diagnostics[key]
                     )
         for name in ("warm_start_hit", "warm_residual_cold_retry"):
             key = f"full/{name}"
@@ -1270,10 +1530,7 @@ class HardPACTDifferentiableQP:
             joint_position + dt * joint_velocity
             + self.cfg.position_integration_coefficient * dt.square() * qdd[:, 6:]
         )
-        c = measured("contact_probability").clamp(0.0, 1.0)
-        c_eff = self.cfg.contact_probability_floor + (
-            1.0 - self.cfg.contact_probability_floor
-        ) * c
+        c_eff = measured("contact_probability")
         foot_acceleration = (
             torch.einsum("bfkn,bn->bfk", foot_jac, qdd)
             + measured("foot_acceleration_bias")
@@ -1318,6 +1575,7 @@ class HardPACTDifferentiableQP:
     def _full_summary(self, diagnostics, audit_solve, forward_metrics):
         """Aggregate sampled matrix/KKT values and full-stage causes."""
         prefix = "qp/full"
+        analytic_stage = 3 if self.cfg.elastic_recovery_enabled else 2
         metrics = {
             f"{prefix}/audit_ran": diagnostics["stage"].new_tensor(
                 float(audit_solve), dtype=torch.float32
@@ -1328,8 +1586,13 @@ class HardPACTDifferentiableQP:
             f"{prefix}/relaxed_solver_success_fraction": (
                 diagnostics["stage"] == 1
             ).float().mean(),
+            f"{prefix}/elastic_recovery_fraction": (
+                (diagnostics["stage"] == 2).float().mean()
+                if self.cfg.elastic_recovery_enabled
+                else diagnostics["stage"].new_zeros((), dtype=torch.float32)
+            ),
             f"{prefix}/analytic_fallback_fraction": (
-                diagnostics["stage"] == 2
+                diagnostics["stage"] == analytic_stage
             ).float().mean(),
         }
         precheck_failure = (
@@ -1338,10 +1601,10 @@ class HardPACTDifferentiableQP:
             | diagnostics["failure/empty_qdd_intersection"]
         )
         metrics[f"{prefix}/fallback_precheck_fraction"] = (
-            ((diagnostics["stage"] == 2) & precheck_failure).float().mean()
+            ((diagnostics["stage"] == analytic_stage) & precheck_failure).float().mean()
         )
         metrics[f"{prefix}/fallback_solver_fraction"] = (
-            ((diagnostics["stage"] == 2) & ~precheck_failure).float().mean()
+            ((diagnostics["stage"] == analytic_stage) & ~precheck_failure).float().mean()
         )
         for stage_name in ("full", "relaxed"):
             exception = diagnostics.get(f"{stage_name}/solver_exception")
@@ -1370,7 +1633,8 @@ class HardPACTDifferentiableQP:
         ``stage 0``: all dynamics/hard-limit/friction/contact-softening rows;
         ``stage 1``: remove contact/slack inequalities (the positive quadratic
         slack cost makes the unconstrained slack optimum exactly zero);
-        ``stage 2``: return
+        ``stage 2``: optional elastic dynamics/contact/joint recovery;
+        ``stage 3`` (or 2 when elastic is disabled): return
         ``clamp(tau_nom, max(-tau_lim,tau_prev-rate*dt),
         min(tau_lim,tau_prev+rate*dt))`` with other variables zero.
 
@@ -1388,6 +1652,8 @@ class HardPACTDifferentiableQP:
                     "contact_probability",
                 )
             )
+        if differentiable:
+            self._last_gradient_metrics = {}
         solver_name = self.solver_for_mode(bool(differentiable))
         # Fail before constructing/falling back if a requested optional
         # backend is unavailable. This prevents a missing package from being
@@ -1435,8 +1701,9 @@ class HardPACTDifferentiableQP:
             # Invalid rows never enter qpth. Initialize all rows as analytic
             # fallbacks, then scatter certified full/relaxed solutions back.
             chosen = chunk["tau_nom"].new_zeros(count, NUM_VARIABLES)
+            analytic_stage = 3 if self.cfg.elastic_recovery_enabled else 2
             stage = torch.full(
-                (count,), 2, device=reference.device, dtype=torch.long
+                (count,), analytic_stage, device=reference.device, dtype=torch.long
             )
             differentiated_mask = torch.zeros(
                 count, device=reference.device, dtype=torch.bool
@@ -1490,10 +1757,28 @@ class HardPACTDifferentiableQP:
                     relaxed_ok[failed] = failed_ok
                     for key, value in failed_diag.items():
                         relaxed_diag[key][failed] = value
+                elastic = torch.zeros_like(full)
+                elastic_ok = torch.zeros_like(full_ok)
+                elastic_diag = {
+                    key: torch.full_like(
+                        value, False if value.dtype == torch.bool else float("nan")
+                    ) for key, value in full_diag.items()
+                }
+                needs_elastic = failed & ~relaxed_ok
+                if self.cfg.elastic_recovery_enabled and needs_elastic.any():
+                    elastic_solution, recovered, recovered_diag = self._solve_stage(
+                        {name: value[needs_elastic] for name, value in compact.items()},
+                        True, audit_count=0, elastic=True,
+                    )
+                    elastic[needs_elastic] = elastic_solution
+                    elastic_ok[needs_elastic] = recovered
+                    for key, value in recovered_diag.items():
+                        elastic_diag[key][needs_elastic] = value
                 selected_compact = torch.where(
-                    (failed & relaxed_ok)[:, None], relaxed, full
+                    (needs_elastic & elastic_ok)[:, None], elastic,
+                    torch.where((failed & relaxed_ok)[:, None], relaxed, full),
                 )
-                differentiated_compact = full_ok | relaxed_ok
+                differentiated_compact = full_ok | relaxed_ok | elastic_ok
                 valid_indices = valid.nonzero(as_tuple=False).squeeze(-1)
                 chosen[valid_indices] = selected_compact
                 differentiated_mask[valid_indices] = differentiated_compact
@@ -1501,12 +1786,20 @@ class HardPACTDifferentiableQP:
                     full_ok, torch.zeros_like(full_ok, dtype=torch.long),
                     torch.where(relaxed_ok,
                                 torch.ones_like(full_ok, dtype=torch.long),
-                                torch.full_like(full_ok, 2, dtype=torch.long)),
+                                torch.where(
+                                    elastic_ok,
+                                    torch.full_like(full_ok, 2, dtype=torch.long),
+                                    torch.full_like(
+                                        full_ok, analytic_stage, dtype=torch.long
+                                    ),
+                                )),
                 )
                 stage_diagnostics = {
                     "full": (valid_indices, full_diag),
                     "relaxed": (valid_indices, relaxed_diag),
                 }
+                if self.cfg.elastic_recovery_enabled:
+                    stage_diagnostics["elastic"] = (valid_indices, elastic_diag)
 
             # An empty raw intersection can only arise from corrupted/reset
             # previous torque. Project that center into actuator limits first;
@@ -1554,7 +1847,10 @@ class HardPACTDifferentiableQP:
             diagnostic_keys = set()
             for _, (_, values) in stage_diagnostics.items():
                 diagnostic_keys.update(values)
-            for prefix in ("full", "relaxed"):
+            prefixes = ["full", "relaxed"]
+            if self.cfg.elastic_recovery_enabled:
+                prefixes.append("elastic")
+            for prefix in prefixes:
                 indices_values = stage_diagnostics.get(prefix)
                 for key in diagnostic_keys:
                     template = None
@@ -1697,7 +1993,8 @@ def projection_loss(tau_safe, tau_nom, torque_limit, physics_valid,
             contact_slack.reshape(contact_slack.shape[0], -1)
             / float(slack_scale)
         ).square().mean(dim=-1)
-    # m_e excludes discontinuous transitions and non-qpth stage-2 fallbacks.
+    # m_e excludes discontinuous transitions and analytic fallbacks; certified
+    # full, relaxed, and optional elastic solves retain their solver VJPs.
     valid = physics_valid.reshape(-1).bool() & differentiated.reshape(-1).bool()
     # Cast the boolean mask only at the final reduction.
     weights = valid.to(per_sample.dtype)
@@ -1735,3 +2032,14 @@ def balanced_substep_indices(num_samples, decimation, device, *, generator=None)
     result[assignment] = strata
     # int16 is sufficient for practical decimation and minimizes rollout VRAM.
     return result.to(torch.int16)
+
+
+def balanced_anchor_indices(num_samples, anchors, device, *, generator=None):
+    """Balanced uniform sampling over an explicit ordered anchor set."""
+    anchors = torch.as_tensor(anchors, device=device, dtype=torch.int16)
+    if anchors.ndim != 1 or anchors.numel() == 0:
+        raise ValueError("anchors must be a nonempty one-dimensional sequence")
+    bins = balanced_substep_indices(
+        num_samples, int(anchors.numel()), device, generator=generator
+    ).long()
+    return anchors[bins]

@@ -95,6 +95,12 @@ class OnPolicyRunnerPACTPos:
                 "wrench_decoder_layers": self.policy_cfg["wrench_decoder_layers"],
                 "grf_scale": gain_spec.model_grf,
                 "wrench_scale": gain_spec.model_wrench,
+                "wrench_center": gain_spec.wrench_model_center,
+                "wrench_radius": gain_spec.wrench_model_radius,
+                "contact_epsilon": getattr(
+                    self.env.cfg.deployment_physics,
+                    "contact_probability_epsilon", 1.0e-2,
+                ),
             }
             reconstruction_indices = RECONSTRUCTION_INDICES
             reconstruction_dim = RECONSTRUCTION_DIM

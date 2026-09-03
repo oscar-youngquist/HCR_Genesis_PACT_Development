@@ -77,16 +77,25 @@ def compose_explicit_estimator_target(
     )
 
 
-def transform_explicit_estimator_output(raw):
+def smooth_contact_probability(logit, epsilon=1.0e-2):
+    """Map logits once into the open deployment interval [eps, 1-eps]."""
+    if not 0.0 <= float(epsilon) < 0.5:
+        raise ValueError("contact epsilon must lie in [0, 0.5)")
+    return float(epsilon) + (1.0 - 2.0 * float(epsilon)) * logit.sigmoid()
+
+
+def transform_explicit_estimator_output(raw, contact_epsilon=1.0e-2):
     return compose_explicit_estimator_target(
-        raw[:, :3], raw[:, 3:7].sigmoid(), raw[:, 7:11].clamp(-1.0, 1.0)
+        raw[:, :3], smooth_contact_probability(raw[:, 3:7], contact_epsilon),
+        raw[:, 7:11].clamp(-1.0, 1.0)
     )
 
 
 class ExplicitEstimatorDecoder(nn.Module):
     """Decode the deterministic history-latent mean into the 11-D estimate."""
 
-    def __init__(self, latent_dim=16, hidden_layers=(128, 128), output_dim=11):
+    def __init__(self, latent_dim=16, hidden_layers=(128, 128), output_dim=11,
+                 contact_epsilon=1.0e-2):
         super().__init__()
         if latent_dim != 16 or output_dim != 11:
             raise ValueError("HardPACT explicit decoding requires dimensions 16 -> 11")
@@ -99,11 +108,14 @@ class ExplicitEstimatorDecoder(nn.Module):
             input_dim = int(hidden_dim)
         layers.append(nn.Linear(input_dim, output_dim))
         self.network = nn.Sequential(*layers)
+        self.contact_epsilon = float(contact_epsilon)
 
     def forward(self, latent_mean):
         if latent_mean.shape[-1] != 16:
             raise ValueError("explicit estimator input must be a 16-D latent mean")
-        return transform_explicit_estimator_output(self.network(latent_mean))
+        return transform_explicit_estimator_output(
+            self.network(latent_mean), self.contact_epsilon
+        )
 
 
 def _physics_head(input_dim, hidden_layers, output_dim):
@@ -129,6 +141,8 @@ class DeploymentPhysicsHeads(nn.Module):
         explicit_dim=11,
         grf_hidden_layers=(128, 128),
         wrench_hidden_layers=(128, 128),
+        wrench_center=None,
+        wrench_radius=None,
     ):
         super().__init__()
         self.grf_head = _physics_head(
@@ -141,6 +155,16 @@ class DeploymentPhysicsHeads(nn.Module):
         self.register_buffer(
             "wrench_scale", torch.as_tensor(wrench_scale, dtype=torch.float32)
         )
+        center = torch.zeros(6) if wrench_center is None else torch.as_tensor(
+            wrench_center, dtype=torch.float32
+        )
+        radius = self.wrench_scale.detach().clone() if wrench_radius is None else torch.as_tensor(
+            wrench_radius, dtype=torch.float32
+        )
+        # Nonpersistent deployment constants preserve strict legacy checkpoint
+        # keys; the JSON contract is their authoritative serialized form.
+        self.register_buffer("wrench_center", center, persistent=False)
+        self.register_buffer("wrench_radius", radius, persistent=False)
         if self.grf_scale.shape != (12,):
             raise ValueError("grf_scale must contain 12 values")
         if self.wrench_scale.shape != (6,):
@@ -178,5 +202,5 @@ class DeploymentPhysicsHeads(nn.Module):
         if latent.shape[-1] != 16 or explicit.shape[-1] != 11:
             raise ValueError("HardPACT physics heads require z=16 and explicit=11")
         stopped_explicit = explicit.detach()
-        value = self.wrench_head(torch.cat((latent, stopped_explicit), dim=-1))
-        return scale_head_output(value, self.wrench_scale)
+        raw = self.wrench_head(torch.cat((latent, stopped_explicit), dim=-1))
+        return self.wrench_center + self.wrench_radius * torch.tanh(raw)

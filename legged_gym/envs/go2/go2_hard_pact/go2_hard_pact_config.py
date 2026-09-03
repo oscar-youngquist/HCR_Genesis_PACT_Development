@@ -55,6 +55,12 @@ class GO2HardPACTCfg(GO2PACTCfg):
         # Stable planned envelope used for the entire run. It intentionally
         # does not follow the simulator's instantaneous curriculum progress.
         planned_added_mass_range_kg = [-1.0, 4.0]
+        wrench_margin_absolute = 0.0
+        wrench_margin_relative = 0.0
+        wrench_learning_offset = [0.0] * 6
+        contact_probability_epsilon = 1.0e-2
+        contact_observation_offset = 0.0
+        contact_observation_scale = 1.0
 
 class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
     """Legacy PACT architecture with the reduced explicit estimator."""
@@ -67,6 +73,11 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         cenet_dec_input_dim = 16 + 11
         cenet_dec_out_dim = 133
         pretrained_path = ""
+
+        pinn_loss_weight = 0.01
+        pinn_warmup = 10
+        pinn_init_steps = 0
+
 
     class runner(GO2PACTCfgPPO.runner):
         policy_class_name = "ActorCritic_HardPACT"
@@ -116,6 +127,16 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         pcgrad_diagnostics_start_iteration = 0
         pcgrad_diagnostics_interval = 50
         cache_rollout_mechanics = True
+        # Evaluate each transition's differentiable QP once across the five
+        # PPO epochs.  The percentage is explicit so memory can be tuned, but
+        # must equal 100 * passes / epochs to preserve exact coverage.
+        ppo_qp_sampling = "disjoint_epoch_partition"
+        ppo_qp_passes_per_iteration = 1
+        ppo_qp_shard_percentage = 20.0
+        ppo_qp_stratify_by_anchor = True
+        # None inherits the run seed in the HardPACT runner.
+        ppo_qp_sampling_seed = None
+        ppo_qp_sampling_logging_enabled = True
 
         # qpth/OptNet safety projection.  The decision vector is always
         # [qdd_18, world_grf_12, tau_safe_12, contact_slack_12]. CPU references
@@ -123,6 +144,7 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         # KKT VRAM; either can be forced. Chunking bounds peak graph size.
         hard_pact_qp = {
             "enabled": True,
+            "qp_update_mode": "two_anchor_held_correction",
             # qpth remains the verified default. Optional GPU-native solvers
             # are selected explicitly and never trigger a hidden CPU/backend
             # fallback when their dependency is unavailable.
@@ -132,6 +154,20 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
             "allow_solver_mismatch": False,
             "cupiqp_mode": "dense",
             "cupiqp_cuda_graph": False,
+            "rollout_eps_abs": 1.0e-4,
+            "rollout_eps_rel": 1.0e-4,
+            "rollout_max_iter": 20,
+            "rollout_feasibility_tolerance": 1.0e-3,
+            "rollout_duality_gap_abs": 1.0e-3,
+            "rollout_duality_gap_rel": 1.0e-3,
+            "rollout_duality_gap_policy": "report",
+            "ppo_eps_abs": 3.0e-6,
+            "ppo_eps_rel": 3.0e-6,
+            "ppo_max_iter": 30,
+            "ppo_feasibility_tolerance": 1.0e-3,
+            "ppo_duality_gap_abs": 3.0e-6,
+            "ppo_duality_gap_rel": 3.0e-6,
+            "ppo_duality_gap_policy": "require",
             # Opt-in because measured warm-start speed depends on the contact
             # regime. False preserves exact legacy cold-qpth execution; the
             # converged/certified QP is identical when enabled.
@@ -156,6 +192,18 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
             "force_regularization": 1.0e-4,
             "torque_regularization": 1.0e-4,
             "q_regularization": 1.0e-7,
+            "proximal_rho": 0.10,
+            "proximal_block_weights": (1.0, 1.0, 1.0, 1.0),
+            "elastic_recovery_enabled": True,
+            "elastic_dynamics_weight": 1.0e4,
+            "gradient_scale_tau": 1.0,
+            "gradient_scale_grf": 1.0,
+            "gradient_scale_wrench": 1.0,
+            "gradient_scale_contact": 1.0,
+            "gradient_clip_tau": 0.0,
+            "gradient_clip_grf": 0.0,
+            "gradient_clip_wrench": 0.0,
+            "gradient_clip_contact": 0.0,
             "normalized_feasibility_tolerance_float32": 1.0e-3,
             "normalized_feasibility_tolerance_float64": 1.0e-6,
             "kkt_tolerance": 1.0e-1,
@@ -176,7 +224,7 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
             "full_audit_period": 1000,
             "full_audit_sample_size": 8,
             "rollout_chunk_size": 4096,
-            "ppo_chunk_size": 4096,
+            "ppo_chunk_size": 8000,
             # Genesis and both PhysX backends advance position with the new
             # velocity (semi-implicit Euler), hence q+=dt*v+dt^2*qdd.
             "position_integration_coefficient": 1.0,

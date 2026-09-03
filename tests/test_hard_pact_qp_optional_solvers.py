@@ -138,7 +138,7 @@ def test_cupiqp_and_qpth_share_invalid_precheck_and_analytic_fallback():
     candidate = qp("cupiqp", "float32").solve(
         differentiable=False, **source32
     )
-    assert reference.stage.tolist() == candidate.stage.tolist() == [2, 2]
+    assert reference.stage.tolist() == candidate.stage.tolist() == [3, 3]
     torch.testing.assert_close(
         candidate.tau_safe.double(), reference.tau_safe,
         atol=2e-6, rtol=2e-6,

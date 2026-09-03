@@ -28,6 +28,13 @@ class QPBackendCapability:
     reason: str = ""
 
 
+@dataclass
+class QPBackendResult:
+    solution: torch.Tensor
+    duality_gap: torch.Tensor | None = None
+    duality_gap_rel: torch.Tensor | None = None
+
+
 def backend_capability(name: str, *, device=None, dtype=None):
     """Inspect a backend without importing optional CUDA libraries eagerly."""
     name = name.lower()
@@ -123,9 +130,11 @@ def _cupiqp_dtype(dtype):
 
 def _configure_cupiqp(solver, config, dtype, *, differentiable):
     """Apply the HardPACT numerical policy to a newly-created cuPIQP solver."""
-    eps = config.eps
-    if eps is None:
-        eps = config.eps_float32 if dtype == torch.float32 else config.eps_float64
+    prefix = "ppo" if differentiable else "rollout"
+    eps_abs = float(getattr(config, f"{prefix}_eps_abs"))
+    eps_rel = float(getattr(config, f"{prefix}_eps_rel"))
+    gap_abs = float(getattr(config, f"{prefix}_duality_gap_abs"))
+    gap_rel = float(getattr(config, f"{prefix}_duality_gap_rel"))
     # cuPIQP warns when HardPACT's configured tolerance is tighter than its
     # generic float32 recommendation. Honor QP verbosity: the shared primal
     # certification remains mandatory and is the actual acceptance gate.
@@ -133,11 +142,17 @@ def _configure_cupiqp(solver, config, dtype, *, differentiable):
     with warning_context:
         if not config.verbose:
             warnings.simplefilter("ignore", UserWarning)
-        solver.settings.eps_abs = float(eps)
-        solver.settings.eps_rel = float(eps)
-        solver.settings.eps_duality_gap_abs = float(eps)
-        solver.settings.eps_duality_gap_rel = float(eps)
-    solver.settings.max_iter = int(config.max_iter)
+        solver.settings.eps_abs = eps_abs
+        solver.settings.eps_rel = eps_rel
+        solver.settings.eps_duality_gap_abs = gap_abs
+        solver.settings.eps_duality_gap_rel = gap_rel
+    solver.settings.check_duality_gap = (
+        getattr(config, f"{prefix}_duality_gap_policy") != "ignore"
+    )
+    solver.settings.max_iter = int(getattr(config, f"{prefix}_max_iter"))
+    # Keep Ruiz/preconditioner state across rollout updates. Mechanics values
+    # are still updated below, so this cannot stale M/J-dependent matrices.
+    solver.settings.preconditioner_reuse_on_update = not differentiable
     solver.settings.enable_grad = bool(differentiable)
     solver.settings.verbose = bool(config.verbose)
     # cuPIQP 0.1 can capture stable standalone streams, but its captured
@@ -151,7 +166,7 @@ class CuPIQPFunction(torch.autograd.Function):
     """cuPIQP implicit VJP wrapper; one solver owns each outstanding graph."""
 
     @staticmethod
-    def forward(ctx, Q, p, G, h, A, b, dense, verbose, config):
+    def forward(ctx, Q, p, G, h, A, b, x_l, x_u, dense, verbose, config):
         from cupiqp import DenseSolver, SparseSolver
         if not dense:
             # Sparse values require a uniform CSR pack. Keep this explicit
@@ -168,22 +183,32 @@ class CuPIQPFunction(torch.autograd.Function):
         # public API explicitly requires dense CUDA arrays; contiguous() is a
         # GPU-to-GPU operation and custom backward returns gradients to the
         # corresponding original arguments in the same logical ordering.
-        packed = tuple(value.contiguous() for value in (Q, p, G, h, A, b))
-        Qc, pc, Gc, hc, Ac, bc = packed
-        Qc, pc, Gc, hc, Ac, bc = (
-            _as_cupy_zero_copy(value) for value in (Qc, pc, Gc, hc, Ac, bc)
+        packed = tuple(
+            value.contiguous() for value in (Q, p, G, h, A, b, x_l, x_u)
         )
-        solver.setup(P=Qc, c=pc, A=Ac, b=bc, G=Gc, h_u=hc)
+        Qc, pc, Gc, hc, Ac, bc, xlc, xuc = packed
+        Qc, pc, Gc, hc, Ac, bc, xlc, xuc = (
+            _as_cupy_zero_copy(value)
+            for value in (Qc, pc, Gc, hc, Ac, bc, xlc, xuc)
+        )
+        solver.setup(
+            P=Qc, c=pc, A=Ac, b=bc, G=Gc, h_u=hc,
+            x_l=xlc, x_u=xuc,
+        )
         solver.solve()
         solution = _as_torch_zero_copy(solver.result.x, Q)
+        gap = _as_torch_zero_copy(solver.result.info.duality_gap, p).clone()
+        gap_rel = _as_torch_zero_copy(
+            solver.result.info.duality_gap_rel, p
+        ).clone()
         # cuPIQP reuses backward buffers. Retaining a private solver per graph
         # prevents a later PPO solve from overwriting this factorization.
         ctx.solver = solver
         ctx.inputs = (Q, p, G, h, A, b)
-        return solution
+        return solution, gap, gap_rel
 
     @staticmethod
-    def backward(ctx, grad_x):
+    def backward(ctx, grad_x, _grad_gap, _grad_gap_rel):
         gradients = ctx.solver.backward(
             grad_x=_as_cupy_zero_copy(grad_x.contiguous())
         )
@@ -196,7 +221,9 @@ class CuPIQPFunction(torch.autograd.Function):
             _as_torch_zero_copy(gradients.A, A),
             _as_torch_zero_copy(gradients.b, b),
         )
-        return (*mapped, None, None, None)
+        # Native bounds contain measured state/limits only. Deliberately do
+        # not expose their cuPIQP data gradients to the learned graph.
+        return (*mapped, None, None, None, None, None)
 
 
 class SolverBackend:
@@ -207,7 +234,8 @@ class SolverBackend:
         self.setup_count = 0
         self.update_count = 0
 
-    def solve(self, Q, p, G, h, A, b, *, differentiable):
+    def solve(self, Q, p, G, h, A, b, *, differentiable,
+              native_lower=None, native_upper=None):
         require_backend(self.name, device=Q.device, dtype=Q.dtype)
         if self.name == "qpth":
             # Import at call time so tests and downstream users can replace the
@@ -217,13 +245,13 @@ class SolverBackend:
             if eps is None:
                 eps = (self.config.eps_float32 if Q.dtype == torch.float32
                        else self.config.eps_float64)
-            return QPFunction(
+            return QPBackendResult(QPFunction(
                 eps=eps,
                 verbose=self.config.verbose,
                 notImprovedLim=self.config.not_improved_limit,
                 maxIter=self.config.max_iter,
                 check_Q_spd=self.config.check_q_spd,
-            )(Q, p, G, h, A, b)
+            )(Q, p, G, h, A, b))
         if self.name == "cupiqp":
             if differentiable:
                 if self.config.cupiqp_mode == "sparse":
@@ -231,22 +259,32 @@ class SolverBackend:
                         "cuPIQP sparse implicit matrix-gradient unpacking is "
                         "not available; use dense for differentiable PPO"
                     )
-                return CuPIQPFunction.apply(
-                    Q, p, G, h, A, b,
+                solution, gap, gap_rel = CuPIQPFunction.apply(
+                    Q, p, G, h, A, b, native_lower, native_upper,
                     self.config.cupiqp_mode == "dense", self.config.verbose,
                     self.config,
                 )
-            return self._solve_cupiqp_rollout(Q, p, G, h, A, b)
-        return self._solve_moreau(
+                return QPBackendResult(solution, gap, gap_rel)
+            return self._solve_cupiqp_rollout(
+                Q, p, G, h, A, b, native_lower, native_upper
+            )
+        return QPBackendResult(self._solve_moreau(
             Q, p, G, h, A, b, differentiable=differentiable,
-        )
+        ))
 
-    def _solve_cupiqp_rollout(self, Q, p, G, h, A, b):
+    def _solve_cupiqp_rollout(self, Q, p, G, h, A, b, x_l, x_u):
         from cupiqp import DenseSolver, SparseSolver
         from cupiqp.sparse.batched_csr import UniformBatchedCsrMatrix
         sparse = self.config.cupiqp_mode == "sparse"
         key = (Q.device, Q.dtype, Q.shape[0], Q.shape[1], G.shape[1], A.shape[1])
-        key = (sparse,) + key
+        profile = (
+            self.config.rollout_eps_abs, self.config.rollout_eps_rel,
+            self.config.rollout_duality_gap_abs,
+            self.config.rollout_duality_gap_rel,
+            self.config.rollout_duality_gap_policy,
+            self.config.rollout_max_iter,
+        )
+        key = (sparse,) + key + profile
         solver = self._rollout_cache.get(key)
         packed = None
         if sparse:
@@ -279,7 +317,8 @@ class SolverBackend:
                 for value in (Q, A, G)
             )
         vector_packed = tuple(
-            _as_cupy_zero_copy(value.contiguous()) for value in (p, b, h)
+            _as_cupy_zero_copy(value.contiguous())
+            for value in (p, b, h, x_l, x_u)
         )
         if solver is None:
             solver = (SparseSolver if sparse else DenseSolver)(
@@ -289,17 +328,31 @@ class SolverBackend:
                 solver, self.config, Q.dtype, differentiable=False,
             )
             P, AA, GG = packed
-            pc, bc, hc = vector_packed
-            solver.setup(P=P, c=pc, A=AA, b=bc, G=GG, h_u=hc)
+            pc, bc, hc, xlc, xuc = vector_packed
+            solver.setup(
+                P=P, c=pc, A=AA, b=bc, G=GG, h_u=hc,
+                x_l=xlc, x_u=xuc,
+            )
             self._rollout_cache[key] = solver
             self.setup_count += 1
         else:
-            P, AA, GG = packed
-            pc, bc, hc = vector_packed
-            solver.update(P=P, c=pc, A=AA, b=bc, G=GG, h_u=hc)
+            _P, AA, GG = packed
+            pc, bc, hc, xlc, xuc = vector_packed
+            # Q and its sparsity are immutable for a fixed config/cache key.
+            # State-dependent A/G and every vector are refreshed each solve.
+            solver.update(
+                c=pc, A=AA, b=bc, G=GG, h_u=hc,
+                x_l=xlc, x_u=xuc,
+            )
             self.update_count += 1
         solver.solve()
-        return _as_torch_zero_copy(solver.result.x, Q)
+        return QPBackendResult(
+            _as_torch_zero_copy(solver.result.x, Q),
+            _as_torch_zero_copy(solver.result.info.duality_gap, p).clone(),
+            _as_torch_zero_copy(
+                solver.result.info.duality_gap_rel, p
+            ).clone(),
+        )
 
     def _solve_moreau(self, Q, p, G, h, A, b, *, differentiable):
         import moreau

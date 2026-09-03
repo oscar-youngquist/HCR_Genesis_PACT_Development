@@ -199,6 +199,9 @@ class ActorCritic_HardPACT(nn.Module):
                  wrench_decoder_layers=(128, 128),
                  grf_scale=(1.2, 1.2, 2.5) * 4,
                  wrench_scale=(0.6, 0.6, 0.9924, 0.234403, 0.234403, 0.234403),
+                 wrench_center=None,
+                 wrench_radius=None,
+                 contact_epsilon=1.0e-2,
                  ablation_features="full"):
         super().__init__()
 
@@ -217,7 +220,8 @@ class ActorCritic_HardPACT(nn.Module):
                                               context_torso_velo_size=cenet_velo_dim,
                                               activation=activation)
         self.explicit_estimator = ExplicitEstimatorDecoder(
-            cenet_latent_dim, cenet_explicit_layers, cenet_velo_dim
+            cenet_latent_dim, cenet_explicit_layers, cenet_velo_dim,
+            contact_epsilon=contact_epsilon,
         )
         self.physics_estimator = DeploymentPhysicsHeads(
             grf_scale,
@@ -226,6 +230,8 @@ class ActorCritic_HardPACT(nn.Module):
             cenet_velo_dim,
             grf_decoder_layers,
             wrench_decoder_layers,
+            wrench_center,
+            wrench_radius,
         )
         
         # Get the activation function used by the actor and critic networks

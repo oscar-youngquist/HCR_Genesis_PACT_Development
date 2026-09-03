@@ -142,6 +142,71 @@ def _body_point_to_world(point_body, q_xyzw):
     ), dim=-1).reshape(-1, 3, 3)
     return torch.einsum("bij,bj->bi", rotation, point_body)
 
+
+def disjoint_qp_epoch_mask(
+    rollout_indices,
+    anchor_indices,
+    *,
+    epoch,
+    num_epochs,
+    passes_per_iteration=1,
+    shard_percentage=None,
+    stratify_by_anchor=True,
+    seed=1,
+    iteration=0,
+):
+    """Return a deterministic, exactly covered PPO-QP shard.
+
+    Every row is assigned a reproducible base epoch from its flat rollout
+    index, run seed, and iteration.  Independent ranking within each stored
+    physics anchor keeps every epoch approximately balanced over anchors.
+    Selecting ``passes_per_iteration`` consecutive cyclic epochs gives every
+    row exactly that many evaluations; the default one pass is a true
+    disjoint partition.
+    """
+    if not 0 <= int(epoch) < int(num_epochs):
+        raise ValueError("epoch must lie in [0, num_epochs)")
+    if not 1 <= int(passes_per_iteration) <= int(num_epochs):
+        raise ValueError("passes_per_iteration must lie in [1, num_epochs]")
+    expected_percentage = 100.0 * int(passes_per_iteration) / int(num_epochs)
+    if (
+        shard_percentage is not None
+        and abs(float(shard_percentage) - expected_percentage) > 1.0e-6
+    ):
+        raise ValueError(
+            "exact disjoint QP coverage requires shard_percentage == "
+            "100 * passes_per_iteration / num_epochs"
+        )
+    rollout_indices = rollout_indices.reshape(-1).to(torch.int64)
+    anchors = anchor_indices.reshape(-1).to(
+        device=rollout_indices.device, dtype=torch.int64
+    )
+    if anchors.numel() != rollout_indices.numel():
+        raise ValueError("rollout and anchor index counts must match")
+    selected = torch.zeros_like(rollout_indices, dtype=torch.bool)
+    groups = (0, 1, 2, 3) if stratify_by_anchor else (None,)
+    # Fixed integer hashing avoids mutable RNG state, making resume at the
+    # same iteration exactly reproducible without enlarging checkpoints.
+    salt = int(seed) + 104729 * int(iteration)
+    for anchor in groups:
+        rows = torch.arange(
+            rollout_indices.numel(), device=rollout_indices.device
+        )
+        if anchor is not None:
+            rows = rows[anchors == anchor]
+        if rows.numel() == 0:
+            continue
+        keys = torch.remainder(
+            rollout_indices[rows] * 1103515245 + salt, 2147483647
+        )
+        order = torch.argsort(keys, stable=True)
+        rank = torch.empty_like(order)
+        rank[order] = torch.arange(order.numel(), device=order.device)
+        base_epoch = torch.remainder(rank, int(num_epochs))
+        cyclic_distance = torch.remainder(int(epoch) - base_epoch, int(num_epochs))
+        selected[rows] = cyclic_distance < int(passes_per_iteration)
+    return selected
+
 class PPO_HardPACT:
     r"""Self-contained PACT PPO for the HardPACT aliases.
 
@@ -224,6 +289,12 @@ class PPO_HardPACT:
                  pcgrad_diagnostics_start_iteration=0,
                  pcgrad_diagnostics_interval=50,
                  cache_rollout_mechanics=True,
+                 ppo_qp_sampling="disjoint_epoch_partition",
+                 ppo_qp_passes_per_iteration=1,
+                 ppo_qp_shard_percentage=None,
+                 ppo_qp_stratify_by_anchor=True,
+                 ppo_qp_sampling_seed=1,
+                 ppo_qp_sampling_logging_enabled=True,
                  ablation_variant="full",
                  hard_pact_qp=None,
                  grf_observation_scale=0.01,
@@ -348,6 +419,46 @@ class PPO_HardPACT:
         )
         self.pcgrad_diagnostics_interval = int(pcgrad_diagnostics_interval)
         self.cache_rollout_mechanics = bool(cache_rollout_mechanics)
+        self.ppo_qp_sampling = str(ppo_qp_sampling)
+        self.ppo_qp_passes_per_iteration = int(
+            ppo_qp_passes_per_iteration
+        )
+        self.ppo_qp_shard_percentage = (
+            None if ppo_qp_shard_percentage is None
+            else float(ppo_qp_shard_percentage)
+        )
+        self.ppo_qp_stratify_by_anchor = bool(ppo_qp_stratify_by_anchor)
+        self.ppo_qp_sampling_seed = int(
+            1 if ppo_qp_sampling_seed is None else ppo_qp_sampling_seed
+        )
+        self.ppo_qp_sampling_logging_enabled = bool(
+            ppo_qp_sampling_logging_enabled
+        )
+        if self.ppo_qp_sampling not in ("all", "disjoint_epoch_partition"):
+            raise ValueError(
+                "ppo_qp_sampling must be 'all' or "
+                "'disjoint_epoch_partition'"
+            )
+        configured_learning_epochs = int(num_learning_epochs)
+        if not 1 <= self.ppo_qp_passes_per_iteration <= configured_learning_epochs:
+            raise ValueError(
+                "ppo_qp_passes_per_iteration must be in [1, num_learning_epochs]"
+            )
+        expected_percentage = (
+            100.0 * self.ppo_qp_passes_per_iteration
+            / configured_learning_epochs
+        )
+        if self.ppo_qp_shard_percentage is None:
+            self.ppo_qp_shard_percentage = expected_percentage
+        if (
+            self.ppo_qp_sampling == "disjoint_epoch_partition"
+            and abs(self.ppo_qp_shard_percentage - expected_percentage) > 1.0e-6
+        ):
+            raise ValueError(
+                "exact disjoint QP coverage requires "
+                "ppo_qp_shard_percentage == "
+                "100 * ppo_qp_passes_per_iteration / num_learning_epochs"
+            )
         if self.pcgrad_diagnostics_interval < 1:
             raise ValueError("pcgrad_diagnostics_interval must be positive")
         self._rollout_actual_mechanics = None
@@ -698,7 +809,9 @@ class PPO_HardPACT:
             ),
         )
 
-    def _prepare_rollout_mechanics_cache(self, default_pose):
+    def _prepare_rollout_mechanics_cache(
+        self, default_pose, *, need_actual=True, need_qp=True
+    ):
         """Create actual and deployment caches for exactly one PPO update."""
         self._rollout_actual_mechanics = None
         self._rollout_deployment_qp_mechanics = None
@@ -710,7 +823,7 @@ class PPO_HardPACT:
             default_pose, device=flat["pre_q"].device,
             dtype=flat["pre_q"].dtype,
         ).detach()
-        if self.bard_inverse_enabled or self.bard_rollout_enabled:
+        if need_actual and (self.bard_inverse_enabled or self.bard_rollout_enabled):
             actual = {
                 "added_base_mass": flat["realized_added_mass"].detach(),
                 "base_com_shift": flat["realized_com_shift_body"].detach(),
@@ -731,7 +844,7 @@ class PPO_HardPACT:
             self.hard_pact_features.execution_qp
             and self.hard_pact_qp is not None
         )
-        if qp_ready:
+        if need_qp and qp_ready:
             sample_q = flat.get("sampled_qp_q", flat["pre_q"])
             sample_v = flat.get("sampled_qp_v", flat["pre_v"])
             # The deployed projection has no access to realized randomization.
@@ -747,6 +860,38 @@ class PPO_HardPACT:
     def _clear_rollout_mechanics_cache(self):
         self._rollout_actual_mechanics = None
         self._rollout_deployment_qp_mechanics = None
+
+    def _qp_rows_for_epoch(self, epoch, iteration):
+        """Select QP-only rows without changing the full PPO/BARD batch."""
+        batch = self.storage.current_hard_pact_batch
+        if (
+            not self.hard_pact_features.execution_qp
+            or self.hard_pact_qp is None
+            or batch is None
+        ):
+            return None
+        count = next(iter(batch.values())).shape[0]
+        if self.ppo_qp_sampling == "all":
+            return torch.arange(count, device=self.device)
+        anchors = batch["sampled_qp_substep_index"].reshape(-1)
+        mask = disjoint_qp_epoch_mask(
+            self.storage.current_batch_indices,
+            anchors,
+            epoch=epoch,
+            num_epochs=self.num_learning_epochs,
+            passes_per_iteration=self.ppo_qp_passes_per_iteration,
+            shard_percentage=self.ppo_qp_shard_percentage,
+            stratify_by_anchor=self.ppo_qp_stratify_by_anchor,
+            seed=self.ppo_qp_sampling_seed,
+            iteration=iteration,
+        )
+        rows = mask.nonzero(as_tuple=False).flatten()
+        if rows.numel() == 0:
+            raise RuntimeError(
+                "PPO QP shard is empty; increase minibatch size or disable "
+                "anchor stratification"
+            )
+        return rows
 
     def _pcgrad_diagnostics_due(self, iteration):
         return (
@@ -805,21 +950,52 @@ class PPO_HardPACT:
 
         self._update_pinn_weight_for_iteration(itr)
 
-        if self.pinn_weight > 0.0 and self.cache_rollout_mechanics:
+        qp_iteration_ready = (
+            self.hard_pact_features.execution_qp
+            and self.hard_pact_qp is not None
+        )
+        pinn_iteration_ready = self.pinn_weight > 0.0 and (
+            self.bard_inverse_enabled
+            or self.bard_rollout_enabled
+            or self.hard_pact_features.soft_constraint_penalty
+        )
+        if (
+            (pinn_iteration_ready or qp_iteration_ready)
+            and self.cache_rollout_mechanics
+        ):
             dynamics_timing = self._start_bard_timing(
                 "dynamics", self.storage.observations
             )
-            self._prepare_rollout_mechanics_cache(default_pose)
+            self._prepare_rollout_mechanics_cache(
+                default_pose,
+                need_actual=pinn_iteration_ready,
+                # Legacy "all" reuses every transition across epochs. The
+                # disjoint mode instead constructs mechanics only after its
+                # rows are sliced, so unsampled rows never enter QP work.
+                need_qp=(
+                    qp_iteration_ready and self.ppo_qp_sampling == "all"
+                ),
+            )
             self._stop_bard_timing("dynamics", dynamics_timing)
 
         self._pcgrad_audit_ran = self._pcgrad_diagnostics_due(itr)
 
+        qp_sampled_count = torch.zeros((), device=self.device)
+        qp_full_count = torch.zeros((), device=self.device)
+        qp_target_count = torch.zeros((), device=self.device)
+        qp_valid_count = torch.zeros((), device=self.device)
+        qp_anchor_zero_count = torch.zeros((), device=self.device)
+        qp_anchor_two_count = torch.zeros((), device=self.device)
+        qp_gradient_square_sum = torch.zeros((), device=self.device)
+        self._qp_sampling_gradient_inputs = None
+
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
+        for batch_number, (terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
             grf_target, obs_target, actions_batch, target_values_batch, \
             advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
             old_sigma_batch, _prev_obs_batch, _prev_obs_hist_batch, gt_forces_batch, _mass_mat_batch, \
-            _bias_vec_batch, _torso_accs_batch, _pprev_obs_batch, _pprev_obs_hist_batch in generator:
+            _bias_vec_batch, _torso_accs_batch, _pprev_obs_batch, _pprev_obs_hist_batch) in enumerate(generator):
+            ppo_epoch = batch_number // self.num_mini_batches
             
             self.actor_critic.train()
             self.act_optimizer.zero_grad()
@@ -842,22 +1018,53 @@ class PPO_HardPACT:
             )
 
             
-            # BARD is warmed up using the same schedule as the legacy PINN.
+            # BARD retains the legacy warmup, while projection is deliberately
+            # active from iteration zero and receives only this epoch's shard.
+            qp_rows = self._qp_rows_for_epoch(ppo_epoch, itr)
+            self._qp_sampling_gradient_inputs = None
+            if self.ppo_qp_sampling_logging_enabled and qp_rows is not None:
+                qp_batch = self.storage.current_hard_pact_batch
+                anchors = qp_batch["sampled_qp_substep_index"][qp_rows].reshape(-1)
+                valid_qp = ~(
+                    qp_batch["push_event_mask"][qp_rows].bool()
+                    | qp_batch["reset_mask"][qp_rows].bool()
+                    | qp_batch["timeout_mask"][qp_rows].bool()
+                    | qp_batch["teleport_mask"][qp_rows].bool()
+                )
+                qp_sampled_count.add_(float(qp_rows.numel()))
+                qp_valid_count.add_(valid_qp.float().sum())
+                qp_anchor_zero_count.add_((anchors == 0).float().sum())
+                qp_anchor_two_count.add_((anchors == 2).float().sum())
+                if ppo_epoch == 0:
+                    full = float(obs_batch.shape[0])
+                    qp_full_count.add_(full)
+                    expected = (
+                        self.num_learning_epochs
+                        if self.ppo_qp_sampling == "all"
+                        else self.ppo_qp_passes_per_iteration
+                    )
+                    qp_target_count.add_(full * expected)
             pinn_loss = None
-            if self.pinn_weight > 0.0:
+            if pinn_iteration_ready or qp_rows is not None:
                 pinn_loss = self._compute_bard_loss(
                     replay["nominal_torque"], obs_batch, obs_hist_batch,
                     gt_forces_batch, default_pose,
                     replay["desired_position"], replay["feedforward_torque"],
                     fb_func, policy_features=policy_features,
+                    qp_rows=qp_rows, compute_pinn=pinn_iteration_ready,
                 )
-                
-            if self.pinn_weight > 0.0 and self.pinn_weight_final > 0:
-                ppo_losses = [ppo_loss, self.pinn_weight * pinn_loss]
-            elif self.pinn_weight > 0.0 and self.pinn_weight_final < 0:
-                ppo_losses = [ppo_loss, pinn_loss]
-            else:
-                ppo_losses = [ppo_loss]
+            optimize_physics = (
+                pinn_iteration_ready
+                or (
+                    qp_rows is not None
+                    and self.hard_pact_features.projection_loss
+                )
+            )
+            ppo_losses = (
+                [ppo_loss, pinn_loss]
+                if optimize_physics and pinn_loss is not None
+                else [ppo_loss]
+            )
             # Full diagnostics measure the real PCGrad backward containing
             # qpth's implicit KKT derivative. qpth does not expose a timer for
             # its backward alone, so this metric is named accordingly. No
@@ -878,11 +1085,11 @@ class PPO_HardPACT:
             # PCGrad treats reward learning as the primary objective and
             # removes the reward-parallel component of the BARD gradient.
             pcgrad_timing = self._start_bard_timing("pcgrad", obs_batch)
-            if self.pinn_weight > 0 and self.pinn_weight_final > 0 and pinn_loss is not None:    # just being extra cautious
+            if optimize_physics and self.pinn_weight_final >= 0:
                 self.act_optimizer.pc_backward_pinn(
                     ppo_losses, record_diagnostics=self._pcgrad_audit_ran
                 )
-            elif self.pinn_weight_final < 0 and pinn_loss is not None:
+            elif optimize_physics and self.pinn_weight_final < 0:
                 self.act_optimizer.pc_backward_ppgrad(
                     ppo_losses, record_diagnostics=self._pcgrad_audit_ran
                 )
@@ -891,6 +1098,19 @@ class PPO_HardPACT:
                     ppo_losses, record_diagnostics=self._pcgrad_audit_ran
                 )
             self._stop_bard_timing("pcgrad", pcgrad_timing)
+            if (
+                self.ppo_qp_sampling_logging_enabled
+                and self._qp_sampling_gradient_inputs is not None
+            ):
+                for value in self._qp_sampling_gradient_inputs:
+                    if value.grad is not None:
+                        qp_gradient_square_sum.add_(
+                            value.grad.detach().float().square().sum()
+                        )
+            if self.hard_pact_qp is not None:
+                self.last_qp_metrics.update(
+                    self.hard_pact_qp._last_gradient_metrics
+                )
             if qp_audit_inputs is not None:
                 audit_device = next(iter(qp_audit_inputs.values())).device
                 if audit_device.type == "cuda":
@@ -998,7 +1218,7 @@ class PPO_HardPACT:
             # Perform some logging
             mean_value_loss += value_loss.detach()
             mean_surrogate_loss += surrogate_loss.detach()
-            if self.pinn_weight > 0.0:
+            if pinn_loss is not None:
                 mean_pinn_loss += pinn_loss.detach()
 
 
@@ -1079,6 +1299,40 @@ class PPO_HardPACT:
 
         if self.profile_bard_timing:
             self._finalize_bard_timing(num_updates)
+
+        if self.ppo_qp_sampling_logging_enabled:
+            sampled_denominator = qp_sampled_count.clamp_min(1.0)
+            self.last_qp_metrics.update({
+                "qp/minimal/sampling/mode_disjoint": metric_zero.new_tensor(
+                    float(self.ppo_qp_sampling == "disjoint_epoch_partition")
+                ),
+                "qp/minimal/sampling/mode_all": metric_zero.new_tensor(
+                    float(self.ppo_qp_sampling == "all")
+                ),
+                "qp/minimal/sampling/shard_percentage": metric_zero.new_tensor(
+                    self.ppo_qp_shard_percentage
+                ),
+                "qp/minimal/sampling/passes_per_iteration": metric_zero.new_tensor(
+                    float(self.ppo_qp_passes_per_iteration)
+                ),
+                "qp/minimal/sampling/sampled_count": qp_sampled_count,
+                "qp/minimal/sampling/full_count": qp_full_count,
+                "qp/minimal/sampling/coverage": (
+                    qp_sampled_count / qp_target_count.clamp_min(1.0)
+                ),
+                "qp/minimal/sampling/anchor_0_fraction": (
+                    qp_anchor_zero_count / sampled_denominator
+                ),
+                "qp/minimal/sampling/anchor_2_fraction": (
+                    qp_anchor_two_count / sampled_denominator
+                ),
+                "qp/minimal/sampling/valid_fraction": (
+                    qp_valid_count / sampled_denominator
+                ),
+                "qp/minimal/sampling/gradient_norm": (
+                    qp_gradient_square_sum.sqrt()
+                ),
+            })
 
         # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
         #      total number of scalar elements per sample vector
@@ -1343,18 +1597,26 @@ class PPO_HardPACT:
 
     def _combine_bard_losses(
         self, inverse_loss, rollout_loss, projection_loss_value=None,
-        soft_constraint_loss=None,
+        soft_constraint_loss=None, pinn_weight=1.0,
     ):
-        """Apply independent physics weights before the PCGrad objective."""
+        r"""Apply the PINN schedule only to soft dynamics objectives.
+
+        ``L_phys = w_PINN*(lambda_ID L_ID + lambda_roll L_roll
+        + lambda_soft L_soft) + lambda_proj L_proj``.  In particular, the
+        projection objective is active from iteration zero independently of
+        the legacy PINN warmup.
+        """
         if projection_loss_value is None:
             projection_loss_value = inverse_loss * 0.0
         if soft_constraint_loss is None:
             soft_constraint_loss = inverse_loss * 0.0
         return (
-            self.lambda_inverse * inverse_loss
-            + self.lambda_rollout * rollout_loss
+            float(pinn_weight) * (
+                self.lambda_inverse * inverse_loss
+                + self.lambda_rollout * rollout_loss
+                + self.lambda_soft_constraint * soft_constraint_loss
+            )
             + self.lambda_projection * projection_loss_value
-            + self.lambda_soft_constraint * soft_constraint_loss
         )
 
     def _soft_constraint_loss(self, grf_world):
@@ -1461,7 +1723,7 @@ class PPO_HardPACT:
         self, nominal_torque, obs_batch, obs_hist_batch,
         measured_generalized_contact_force, default_pose,
         desired_position=None, feedforward_torque=None, fb_func=None,
-        policy_features=None,
+        policy_features=None, qp_rows=None, compute_pinn=True,
     ):
         r"""Evaluate interval BARD losses and one sampled substep projection.
 
@@ -1507,8 +1769,13 @@ class PPO_HardPACT:
         """
         if not (self.bard_enabled or self.hard_pact_features.soft_constraint_penalty):
             return nominal_torque.sum() * 0.0
-        qp_ready = self.hard_pact_features.execution_qp and self.hard_pact_qp is not None
-        if not (self.bard_inverse_enabled or self.bard_rollout_enabled or qp_ready
+        qp_ready = (
+            self.hard_pact_features.execution_qp
+            and self.hard_pact_qp is not None
+            and qp_rows is not None
+        )
+        if not ((compute_pinn and (
+                self.bard_inverse_enabled or self.bard_rollout_enabled)) or qp_ready
                 or self.hard_pact_features.soft_constraint_penalty):
             return nominal_torque.sum() * 0.0
         batch = self.storage.current_hard_pact_batch
@@ -1523,12 +1790,10 @@ class PPO_HardPACT:
             )
         else:
             latent, explicit = policy_features
-        grf_yaw = self.actor_critic.physics_estimator.predict_grf(
-            latent, explicit, nominal_torque
-        ).reshape(-1, 4, 3)
-        wrench_yaw = self.actor_critic.physics_estimator.predict_wrench(
-            latent, explicit
-        ) / self.base_wrench_observation_scale
+        grf_world = None
+        applied_at_base = None
+        total_at_base = None
+        wrench_yaw = None
 
         def world_wrench(q, label_mass_wrench, wrench_prediction, com_shift):
             total = torch.cat((
@@ -1542,13 +1807,22 @@ class PPO_HardPACT:
             applied = wrench_at_point(total - label_mass_wrench, com, base)
             return applied, applied + label_mass_wrench
 
-        grf_world = _yaw_local_to_world(
-            grf_yaw / self.grf_observation_scale, batch["pre_q"][:, 3:7]
-        )
-        applied_at_base, total_at_base = world_wrench(
-            batch["pre_q"], mass_wrench, wrench_yaw,
-            batch["realized_com_shift_body"],
-        )
+        if compute_pinn:
+            grf_yaw = self.actor_critic.physics_estimator.predict_grf(
+                latent, explicit, nominal_torque
+            ).reshape(-1, 4, 3)
+            grf_world = _yaw_local_to_world(
+                grf_yaw / self.grf_observation_scale,
+                batch["pre_q"][:, 3:7],
+            )
+            if self.bard_inverse_enabled or self.bard_rollout_enabled:
+                wrench_yaw = self.actor_critic.physics_estimator.predict_wrench(
+                    latent, explicit
+                ) / self.base_wrench_observation_scale
+                applied_at_base, total_at_base = world_wrench(
+                    batch["pre_q"], mass_wrench, wrench_yaw,
+                    batch["realized_com_shift_body"],
+                )
 
         # BARD's interval objectives intentionally retain their control-rate
         # state and logged interval-average executed torque.  A straight-
@@ -1558,7 +1832,9 @@ class PPO_HardPACT:
         rollout_loss = zero
         self.last_inverse_dynamics_metrics = {}
         self.last_rollout_dynamics_metrics = {}
-        if self.bard_inverse_enabled or self.bard_rollout_enabled:
+        if compute_pinn and (
+            self.bard_inverse_enabled or self.bard_rollout_enabled
+        ):
             flat_indices = self.storage.current_batch_indices
             if self._rollout_actual_mechanics is None:
                 # Direct unit-test/compatibility calls may bypass update().
@@ -1674,7 +1950,7 @@ class PPO_HardPACT:
                 }
 
         soft_constraint_loss = zero
-        if self.hard_pact_features.soft_constraint_penalty:
+        if compute_pinn and self.hard_pact_features.soft_constraint_penalty:
             soft_constraint_loss = self._soft_constraint_loss(grf_world)
 
         # ---------------- sampled differentiable substep QP ---------------
@@ -1685,26 +1961,34 @@ class PPO_HardPACT:
         # correction-plus-slack value directly estimates mean_k L_proj,k.
         qp_loss = zero
         if qp_ready:
+            # Slice before every QP-only head/mechanics operation. PPO, BARD,
+            # and auxiliary objectives above continue to use the full batch.
+            qp_batch = {name: value[qp_rows] for name, value in batch.items()}
+            qp_latent = latent[qp_rows]
+            qp_explicit = explicit[qp_rows]
             # q_K and v_K are rollout measurements at the selected substep K;
             # detaching makes them constants in the implicit QP derivative.
-            sample_q = batch.get("sampled_qp_q", batch["pre_q"]).detach()
-            sample_v = batch.get("sampled_qp_v", batch["pre_v"]).detach()
+            sample_q = qp_batch.get("sampled_qp_q", qp_batch["pre_q"]).detach()
+            sample_v = qp_batch.get("sampled_qp_v", qp_batch["pre_v"]).detach()
             # All hard rate/integration constraints use physics Delta t.
-            sample_dt = batch.get("physics_dt", control_dt).detach()
+            sample_dt = qp_batch.get(
+                "physics_dt", control_dt[qp_rows]
+            ).detach()
             if desired_position is not None and fb_func is not None:
                 # Replay the current stochastic/delayed policy into held q_d
                 # and tau_ff, then evaluate the sampled-state PD law:
                 # tau_nom,K=Kp(q_d-q_K)-Kd*qdot_K+tau_ff.
-                sampled_nominal = feedforward_torque + fb_func(
-                    desired_position, sample_q[:, 7:], sample_v[:, 6:]
+                sampled_nominal = feedforward_torque[qp_rows] + fb_func(
+                    desired_position[qp_rows],
+                    sample_q[:, 7:], sample_v[:, 6:]
                 )
             else:
                 # Compatibility path for direct legacy unit/integration calls.
-                sampled_nominal = nominal_torque
+                sampled_nominal = nominal_torque[qp_rows]
             # Recompute only the GRF head at K because its input includes
             # tau_nom,K. z_t and e_t remain the current policy-step features.
             sample_grf_yaw = self.actor_critic.physics_estimator.predict_grf(
-                latent, explicit, sampled_nominal
+                qp_latent, qp_explicit, sampled_nominal
             ).reshape(-1, 4, 3)
             # Undo observation scaling and rotate yaw-local Newtons to the
             # world-axis convention of the reconstructed sampled J_f.
@@ -1716,15 +2000,22 @@ class PPO_HardPACT:
             # total predicted wrench are the only quantities available on the
             # robot. In particular, neither realized randomization nor its
             # label-only mass/CoM wrench enters this path.
+            qp_wrench_yaw = (
+                wrench_yaw[qp_rows]
+                if wrench_yaw is not None
+                else self.actor_critic.physics_estimator.predict_wrench(
+                    qp_latent, qp_explicit
+                ) / self.base_wrench_observation_scale
+            )
             sample_applied = torch.cat((
                 _yaw_local_to_world(
-                    wrench_yaw[:, :3].unsqueeze(1), sample_q[:, 3:7]
+                    qp_wrench_yaw[:, :3].unsqueeze(1), sample_q[:, 3:7]
                 ).squeeze(1),
                 _yaw_local_to_world(
-                    wrench_yaw[:, 3:].unsqueeze(1), sample_q[:, 3:7]
+                    qp_wrench_yaw[:, 3:].unsqueeze(1), sample_q[:, 3:7]
                 ).squeeze(1),
             ), dim=-1)
-            flat_indices = self.storage.current_batch_indices
+            flat_indices = self.storage.current_batch_indices[qp_rows]
             if self._rollout_deployment_qp_mechanics is None:
                 sampled_mechanics = self._materialize_mechanics_cache(
                     kind="deployment", q=sample_q, v=sample_v,
@@ -1739,7 +2030,7 @@ class PPO_HardPACT:
             #   x=[qdd_18,f_12,tau_safe_12,s_12].
             # Gradients enter through sampled_nominal, sample_grf_world, and
             # sample_applied; all state/mechanics/rate-center tensors detach.
-            sample_contact_probability = explicit[:, 3:7]
+            sample_contact_probability = qp_explicit[:, 3:7]
             differentiate_qp = self.hard_pact_features.differentiable_qp
             qp_arguments = dict(
                 # Equality coefficient M_K.
@@ -1758,18 +2049,24 @@ class PPO_HardPACT:
                 force_pred_world=(sample_grf_world if differentiate_qp else sample_grf_world.detach()),
                 # Differentiable world [force,moment] equality input.
                 wrench_pred_world=(sample_applied if differentiate_qp else sample_applied.detach()),
-                # c_eff keeps every row nondegenerate while retaining the
-                # differentiable contact-probability path into the estimator.
+                # The estimator's eps-bounded sigmoid was applied exactly
+                # once; the QP consumes that probability without clipping.
                 contact_probability=(sample_contact_probability if differentiate_qp else sample_contact_probability.detach()),
                 # Exact rollout tau_safe,K-1 reproduces the sampled rate box.
-                previous_torque=batch.get(
+                previous_torque=qp_batch.get(
                     "sampled_qp_previous_torque",
-                    batch.get("previous_executed_torque", batch["interval_executed_torque"]),
+                    qp_batch.get(
+                        "previous_executed_torque",
+                        qp_batch["interval_executed_torque"],
+                    ),
                 ),
                 # Sampled joint state defines hard one-step q/qdot boxes.
                 joint_position=sample_q[:, 7:], joint_velocity=sample_v[:, 6:],
                 dt=sample_dt,
+                proximal_reference=qp_batch.get("sampled_qp_proximal_reference"),
             )
+            if qp_arguments["proximal_reference"] is None:
+                qp_arguments.pop("proximal_reference")
             if differentiate_qp:
                 qp_result = self.hard_pact_qp.solve(
                     differentiable=True, **qp_arguments
@@ -1784,8 +2081,10 @@ class PPO_HardPACT:
             # m_physics=not(push or reset or timeout or teleport). Sustained
             # wrench and randomized-mass transitions deliberately remain valid.
             valid = ~(
-                batch["push_event_mask"].bool() | batch["reset_mask"].bool()
-                | batch["timeout_mask"].bool() | batch["teleport_mask"].bool()
+                qp_batch["push_event_mask"].bool()
+                | qp_batch["reset_mask"].bool()
+                | qp_batch["timeout_mask"].bool()
+                | qp_batch["teleport_mask"].bool()
             )
             # Normalize correction by the same backend torque limits used by G.
             torque_limits = self.hard_pact_qp.torque_limits.to(
@@ -1804,6 +2103,17 @@ class PPO_HardPACT:
             # but neither it nor any QP output participates in optimization.
             if not self.hard_pact_features.projection_loss:
                 qp_loss = qp_loss.detach()
+            if (
+                self.ppo_qp_sampling_logging_enabled
+                and differentiate_qp
+                and self.hard_pact_features.projection_loss
+            ):
+                self._qp_sampling_gradient_inputs = (
+                    sampled_nominal, sample_grf_world,
+                    sample_applied, sample_contact_probability,
+                )
+                for value in self._qp_sampling_gradient_inputs:
+                    value.retain_grad()
             # Log only the newly recomputed sampled solve, whose status can
             # differ from rollout after policy/head parameters update.
             self.last_qp_metrics = dict(qp_result.metrics or {})
@@ -1835,9 +2145,9 @@ class PPO_HardPACT:
                     value.retain_grad()
         else:
             self.last_qp_metrics = {}
-        # All three weighted physics terms enter the existing PCGrad objective;
-        # no extra optimizer owns actor/trunk/head parameters:
-        # L_phys=lambda_ID*L_ID+lambda_roll*L_roll+lambda_proj*L_proj.
+        # One weighted physics objective enters the existing PCGrad path:
+        # L_phys=w_PINN*(lambda_ID*L_ID+lambda_roll*L_roll)
+        #        +lambda_proj*L_proj (plus the existing soft ablation term).
         self.last_physics_loss_metrics = {
             "physics/loss/inverse": inverse_loss.detach(),
             "physics/loss/rollout": rollout_loss.detach(),
@@ -1846,7 +2156,9 @@ class PPO_HardPACT:
             # a disabled objective—is responsible for a zero physics loss.
             "physics/valid_fraction": (
                 valid_all.float().mean().detach()
-                if (self.bard_inverse_enabled or self.bard_rollout_enabled)
+                if compute_pinn and (
+                    self.bard_inverse_enabled or self.bard_rollout_enabled
+                )
                 else zero.detach()
             ),
         }
@@ -1854,4 +2166,5 @@ class PPO_HardPACT:
             inverse_loss, rollout_loss,
             qp_loss if self.hard_pact_features.projection_loss else zero,
             soft_constraint_loss,
+            pinn_weight=self.pinn_weight,
         )
