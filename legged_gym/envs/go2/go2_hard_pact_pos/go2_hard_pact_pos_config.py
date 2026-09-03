@@ -39,7 +39,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         num_rows = 10
         num_cols = 20
         num_subterrains = num_rows * num_cols
-        terrain_proportions = [0.1, 0.15, 0.25, 0.25, 0.2, 0.05]
+        terrain_proportions = [0.10, 0.20, 0.20, 0.20, 0.20, 0.10]
         slope_treshold = 0.75
 
     class sim:
@@ -55,12 +55,23 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             clip_max_n = 250.0
             ema_alpha = 0.2
             contact_threshold_n = 5.0
-            use_ema_grfs_buf = False
+            use_ema_grfs_buf = True
 
     class init_state(LeggedRobotCfg.init_state):
         leg_joint_limits = [[-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721], [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721], [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721], [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721]]
         pos = [0.0, 0.0, 0.44]
-        default_joint_angles = {'FL_hip_joint': 0.1, 'RL_hip_joint': 0.1, 'FR_hip_joint': -0.1, 'RR_hip_joint': -0.1, 'FL_thigh_joint': 0.8, 'RL_thigh_joint': 0.95, 'FR_thigh_joint': 0.8, 'RR_thigh_joint': 0.95, 'FL_calf_joint': -1.5, 'RL_calf_joint': -1.5, 'FR_calf_joint': -1.5, 'RR_calf_joint': -1.5}
+        default_joint_angles = {'FL_hip_joint': 0.1, 
+                                'RL_hip_joint': 0.1, 
+                                'FR_hip_joint': -0.1, 
+                                'RR_hip_joint': -0.1, 
+                                'FL_thigh_joint': 0.8, 
+                                'RL_thigh_joint': 0.8, 
+                                'FR_thigh_joint': 0.8, 
+                                'RR_thigh_joint': 0.8, 
+                                'FL_calf_joint': -1.5, 
+                                'RL_calf_joint': -1.5, 
+                                'FR_calf_joint': -1.5, 
+                                'RR_calf_joint': -1.5}
         default_joint_torques = {'FR_hip_joint': 0.0, 'FL_hip_joint': 0.0, 'RR_hip_joint': 0.0, 'RL_hip_joint': 0.0, 'FL_thigh_joint': 0.0, 'RL_thigh_joint': 0.0, 'FR_thigh_joint': 0.0, 'RR_thigh_joint': 0.0, 'FL_calf_joint': 0.0, 'RL_calf_joint': 0.0, 'FR_calf_joint': 0.0, 'RR_calf_joint': 0.0}
         yaw_angle_range = [0.0, 3.14]
 
@@ -79,55 +90,71 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         clip_actions = 50.0
 
     class domain_rand(LeggedRobotCfg.domain_rand):
-        use_domainrand_curriculum = True
+        use_domainrand_curriculum = False
         com_rand_z_positive = False
         num_push_steps = 500
         push_warmup = 3000
+
         randomize_friction = True
         friction_range = [0.2, 1.8]
-        push_interval_max = 15.0
+
+        push_interval_max = 10.0
         push_interval_min = 5.0
         max_push_vel_xy = 0.5
         min_push_vel_xy = 0.5
+
         max_vertical_push = 0.1
         min_vertical_push = 0.1
-        vert_interval_max = 15.0
+        vert_interval_max = 10.0
         vert_interval_min = 5.0
+
         max_push_torque = 0.5
         min_push_torque = 0.5
         wrench_timeout_min = 5.0
-        wrench_timeout_max = 15.0
+        wrench_timeout_max = 10.0
+
         randomize_base_mass = True
-        min_added_mass_max = 4.0
-        max_added_mass_max = 4.0
+        min_added_mass_max = 2.0
+        max_added_mass_max = 2.0
         added_mass_min = -1.0
+
         randomize_com_displacement = True
-        com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.075
-        com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.075
+        com_displacement_x_min = 0.05
+        com_displacement_x_max = 0.05
+
+        com_displacement_y_min = 0.05
+        com_displacement_y_max = 0.05
+
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.075
-        com_displacement_z_max = 0.075
+        com_displacement_z_min = 0.05
+        com_displacement_z_max = 0.05
+
         randomize_ctrl_delay = True
-        ctrl_delay_step_range = [0, 2]
+        ctrl_delay_step_range = [0, 1]
+
         randomize_pd_gain = True
         kp_range = [0.8, 1.2]
         kd_range = [0.8, 1.2]
         randomize_motor_strength = True
+
         motor_strength_range = [0.9, 1.1]
+
         randomize_joint_armature = True
         joint_armature_range = [0.0, 0.03]
+
         randomize_joint_friction = True
         joint_friction_range_end = [0.0, 0.04]
         joint_friction_range_start = [0.0, 0.02]
+
         randomize_joint_stiffness = False
         joint_stiffness_range_end = [0.0, 0.0]
         joint_stiffness_range_start = [0.0, 0.0]
+
         randomize_joint_damping = True
         joint_damping_range_end = [0.0, 0.5]
         joint_damping_range_start = [0.3, 0.4]
+
         best_reward_window = 200
         best_reward_quantile = 0.9
         recovery_ratio = 0.9
@@ -140,6 +167,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         use_joint_dynamics_curriculum = True
         use_mass_com_curriculum = False
         use_disturbance_curriculum = False
+
         persistent_disturbance = True
         persistent_force_probability = 0.3
         persistent_torque_probability = 0.3
@@ -148,10 +176,10 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         persistent_force_duration_range_s = [2.0, 6.0]
         persistent_torque_duration_range_s = [2.0, 6.0]
         persistent_ramp_fraction = 0.25
-        persistent_force_min_n = 0.0
-        persistent_force_max_n = 60.0
-        persistent_torque_min_nm = 0.0
-        persistent_torque_max_nm = 12.0
+        persistent_force_min_n = 10.0
+        persistent_force_max_n = 10.0
+        persistent_torque_min_nm = 3.0
+        persistent_torque_max_nm = 4.0
 
     class noise(LeggedRobotCfg.noise):
         add_noise = True
@@ -211,8 +239,8 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         damping = {'joint': 0.6}
         action_scale = 0.25
         torque_scale = 10.0
-        dt = 0.01
-        decimation = 5
+        dt = 0.02
+        decimation = 4
         tradeoff_init_weights = [1.0, 1.0]
         tradeoff_final_weights = [1.0, 1.0]
         tradeoff_steps = 10
@@ -229,8 +257,11 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
     class rewards(LeggedRobotCfg.rewards):
         soft_dof_pos_limit = 0.9
         soft_torque_limit = 0.9
+
         base_height_target = 0.38
+
         tracking_sigma = 0.25
+
         foot_clearance_target = 0.09
         foot_height_offset = 0.022
         overreach_x_max = 0.28
@@ -238,8 +269,10 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         rear_foot_x_nominal = -0.25
         rear_foot_x_margin = 0.08
         foot_clearance_tracking_sigma = 0.01
+
         only_positive_rewards = True
         use_reward_curriculum = True
+
         max_contact_force = 200.0
         contact_force_threshold = 5.0
         feet_edge_threshold = 0.05
@@ -255,53 +288,73 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             dof_pos_limits = -2.0
             dof_close_to_default = -0.01
             torque_limits = -0.0001
+
             alive_bonus = 0.001
+
             stand_still_contact = -0.5
             dof_pos_stand_still = -0.1
             dof_vel_stand_still = -0.0
+
             tracking_lin_vel = 1.0
             tracking_ang_vel = 0.5
-            dof_tracking = 0.0
+            dof_tracking = 0.05
+
             aligned_torques = 0.0
             sparse_contacts = 0.01
+
             lin_vel_z = -2.0
             base_height = -2.0
             ang_vel_xy = -0.05
             orientation = -0.2
+
             dof_acc = -2e-07
             joint_power = -2e-05
             joint_power_dist = -1e-05
             torques = -1e-05
             action_rate = -0.01
             action_smoothness = -0.01
+
             pos_action_rate = 0.0
             pos_action_smoothness = 0.0
+
             tau_action_rate = 0.0
             tau_action_smoothness = 0.0
+
             feedforward_torques = 0.0
             feedback_torques = 0.0
+
             dof_act_limits = 0.0
+
             pbrs_orientation = 10.0
             pbrs_height = 10.0
+
             support_polygon = 0.2
             vhip_angle = -0.1
             vhip_angular_acc = -0.001
-            front_foot_overreach = -10000.0
+
+            front_foot_overreach = -100.0
             rear_foot_overreach = -10.0
+
             feet_air_time = 0.7
-            foot_clearance_terrain_aware = 0.3
+            foot_clearance_terrain_aware = 0.5
             hip_pos = -0.05
             foot_slip = -0.01
             stumble = -0.2
             feet_contact_forces = -0.01
             feet_near_edge = -1.0
-            edge_swing_clearance = -2.0
+            edge_swing_clearance = -0.5
             swing_foot_collision_edge = -1.0
             feet_regulation = -0.1
 
         class reward_curriculum:
-            curr_reward_keys = ['orientation', 'ang_vel_xy', 'dof_close_to_default', 'torque_limits']
-            curr_reward_bounds = {'orientation': [-0.2, -1.0], 'ang_vel_xy': [-0.05, -0.1], 'dof_close_to_default': [-0.05, -0.1], 'torque_limits': [-0.0001, -0.01]}
+            curr_reward_keys = ['orientation',
+                                'ang_vel_xy', 
+                                'dof_close_to_default', 
+                                'torque_limits']
+            curr_reward_bounds = {'orientation': [-0.2, -1.0], 
+                                  'ang_vel_xy': [-0.05, -0.1], 
+                                  'dof_close_to_default': [-0.05, -0.1], 
+                                  'torque_limits': [-0.0001, -0.01]}
             curr_steps = 1
             warmup_steps = 4000
 
@@ -322,6 +375,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         sustained_force_bounds_n = [-60.0, 60.0]
         sustained_torque_bounds_nm = [-12.0, 12.0]
         planned_added_mass_range_kg = [-1.0, 4.0]
+
 GO2HardPACTPosCfg.sim.dt = GO2HardPACTPosCfg.control.dt / GO2HardPACTPosCfg.control.decimation
 
 class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
@@ -370,7 +424,7 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
     class runner(LeggedRobotCfgPPO.runner):
         policy_class_name = 'ActorCritic_HardPACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
-        num_steps_per_env = 32
+        num_steps_per_env = 24
         max_iterations = 5000
         grf_dim = 12
         run_name = 'pact_posboot_100hz_grf'

@@ -50,7 +50,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         num_rows = 10
         num_cols = 20
         num_subterrains = num_rows * num_cols
-        terrain_proportions = [0.1, 0.1, 0.25, 0.25, 0.2, 0.1]
+        terrain_proportions = [0.10, 0.20, 0.20, 0.20, 0.20, 0.1]
         slope_treshold = 0.75
         reset_out_of_bounds = False
 
@@ -74,7 +74,18 @@ class GO2HardPACTCfg(LeggedRobotCfg):
     class init_state(LeggedRobotCfg.init_state):
         leg_joint_limits = [[-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721], [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721], [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721], [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721]]
         pos = [0.0, 0.0, 0.44]
-        default_joint_angles = {'FL_hip_joint': 0.1, 'RL_hip_joint': 0.1, 'FR_hip_joint': -0.1, 'RR_hip_joint': -0.1, 'FL_thigh_joint': 0.8, 'RL_thigh_joint': 0.8, 'FR_thigh_joint': 0.8, 'RR_thigh_joint': 0.8, 'FL_calf_joint': -1.5, 'RL_calf_joint': -1.5, 'FR_calf_joint': -1.5, 'RR_calf_joint': -1.5}
+        default_joint_angles = {'FL_hip_joint': 0.1, 
+                                'RL_hip_joint': 0.1, 
+                                'FR_hip_joint': -0.1, 
+                                'RR_hip_joint': -0.1, 
+                                'FL_thigh_joint': 0.8, 
+                                'RL_thigh_joint': 0.8, 
+                                'FR_thigh_joint': 0.8, 
+                                'RR_thigh_joint': 0.8, 
+                                'FL_calf_joint': -1.5, 
+                                'RL_calf_joint': -1.5, 
+                                'FR_calf_joint': -1.5, 
+                                'RR_calf_joint': -1.5}
         default_joint_torques = {'FR_hip_joint': 0.0, 'FL_hip_joint': 0.0, 'RR_hip_joint': 0.0, 'RL_hip_joint': 0.0, 'FL_thigh_joint': 0.0, 'RL_thigh_joint': 0.0, 'FR_thigh_joint': 0.0, 'RR_thigh_joint': 0.0, 'FL_calf_joint': 0.0, 'RL_calf_joint': 0.0, 'FR_calf_joint': 0.0, 'RR_calf_joint': 0.0}
         yaw_angle_range = [0.0, 3.14]
 
@@ -98,52 +109,68 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         num_push_steps = 1000
         push_warmup = 2000
         num_jumps = 10
+
         randomize_friction = True
         friction_range = [0.2, 1.25]
+
         push_robots = True
-        push_interval_max = 15.0
+        push_interval_max = 10.0
         push_interval_min = 5.0
-        max_push_vel_xy = 1.2
+        max_push_vel_xy = 1.0
         min_push_vel_xy = 0.5
+
         max_vertical_push = 0.5
         min_vertical_push = 0.1
-        vert_interval_max = 15.0
+        vert_interval_max = 10.0
         vert_interval_min = 5.0
-        max_push_torque = 1.5
+
+        max_push_torque = 1.0
         min_push_torque = 0.5
-        wrench_timeout_max = 15.0
+        wrench_timeout_max = 10.0
         wrench_timeout_min = 5.0
+
         randomize_base_mass = True
-        min_added_mass_max = 4.0
-        max_added_mass_max = 8.0
+        min_added_mass_max = 2.0
+        max_added_mass_max = 4.0
         added_mass_min = -1.0
+
         randomize_com_displacement = True
-        com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.2
-        com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.15
+        com_displacement_x_min = 0.05
+        com_displacement_x_max = 0.1
+
+        com_displacement_y_min = 0.05
+        com_displacement_y_max = 0.1
+
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.075
-        com_displacement_z_max = 0.15
+        com_displacement_z_min = 0.05
+        com_displacement_z_max = 0.1
+
         randomize_ctrl_delay = True
-        ctrl_delay_step_range = [0, 2]
+        ctrl_delay_step_range = [0, 1]
+        
         randomize_pd_gain = True
         kp_range = [0.8, 1.2]
         kd_range = [0.8, 1.2]
+
         randomize_motor_strength = True
         motor_strength_range = [0.9, 1.1]
+
         randomize_joint_armature = True
         joint_armature_range = [0.0, 0.015]
+
         randomize_joint_friction = True
         joint_friction_range_end = [0.0, 0.2]
         joint_friction_range_start = [0.0, 0.05]
+
         randomize_joint_stiffness = True
         joint_stiffness_range_end = [0.0, 0.02]
         joint_stiffness_range_start = [0.0, 0.005]
+
         randomize_joint_damping = True
         joint_damping_range_end = [0.0, 0.8]
         joint_damping_range_start = [0.2, 0.6]
+
         best_reward_window = 400
         best_reward_quantile = 0.9
         recovery_ratio = 0.9
@@ -156,6 +183,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         use_joint_dynamics_curriculum = True
         use_mass_com_curriculum = True
         use_disturbance_curriculum = True
+
         persistent_disturbance = True
         persistent_force_probability = 0.3
         persistent_torque_probability = 0.3
@@ -249,8 +277,11 @@ class GO2HardPACTCfg(LeggedRobotCfg):
     class rewards(LeggedRobotCfg.rewards):
         soft_dof_pos_limit = 0.9
         soft_torque_limit = 0.9
+
         base_height_target = 0.38
+
         tracking_sigma = 0.25
+
         foot_clearance_target = 0.09
         foot_height_offset = 0.022
         overreach_x_max = 0.28
@@ -258,8 +289,10 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         rear_foot_x_margin = 0.08
         support_polygon_sigma = 0.01
         foot_clearance_tracking_sigma = 0.01
+
         only_positive_rewards = True
         use_reward_curriculum = True
+
         max_contact_force = 200.0
         contact_force_threshold = 5.0
         feet_edge_threshold = 0.05
@@ -271,6 +304,9 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         ff_ratio_target = 0.5
         ff_ratio_width = 0.2
 
+        torque_cancellation_deadband = 0.03
+        foot_clearance_excess_margin = 0.1
+        foot_clearance_excess_weight = 0.25
         class scales(LeggedRobotCfg.rewards.scales):
             termination = 0.0
             collision = -10.0
@@ -278,60 +314,87 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             dof_close_to_default = -0.01
             torque_limits = -0.01
             pd_target_torque_limit = 0.0
+
             alive_bonus = 0.001
+
             dof_vel_stand_still = 0.0
             stand_still_contact = 0.5
             dof_pos_stand_still = -0.1
+
             tracking_lin_vel = 1.0
             tracking_ang_vel = 0.5
             dof_tracking = 0.1
+
             torque_conflict_symmetric = 0.0
-            torque_alignment = 0.4
+            torque_alignment = 0.0
             ff_ratio = 0.0
+            torque_cancellation = -0.1
+
             lin_vel_z = -2.0
             base_height = -2.0
             ang_vel_xy = -0.05
             orientation = -0.2
+
             dof_acc = -2.5e-07
             joint_power = -2e-05
             joint_power_dist = -1e-05
             torques = 0.0
+
             action_rate = 0.0
             action_smoothness = 0.0
+
             pos_action_rate = -0.001
             pos_action_smoothness = -0.001
+
             tau_action_rate = -0.001
             tau_action_smoothness = -0.001
+
             feedforward_torques_scaled = -1e-05
             feedback_torques = -2e-05
+
             dof_act_limits = 0.0
+
             pbrs_orientation = 10.0
             pbrs_height = 10.0
+
             support_polygon = 0.2
             vhip_angle = -0.1
             vhip_angular_acc = -0.001
-            front_foot_overreach = -10000.0
+
+            front_foot_overreach = -100.0
             rear_foot_overreach = -10.0
+
             feet_air_time = 0.7
-            foot_clearance_terrain_aware = 0.7
+            foot_clearance_terrain_aware = 0.3
             hip_pos = -0.2
             foot_slip = -0.01
-            stumble = -4.0
+            stumble = -1.0
             feet_contact_forces = -0.01
             feet_near_edge = -0.5
-            edge_swing_clearance = -1.0
+            edge_swing_clearance = -0.5
             swing_foot_collision_edge = -1.0
             feet_regulation = -0.1
-            torque_cancellation = -0.1
 
         class reward_curriculum:
-            curr_reward_keys = ['ang_vel_xy', 'orientation', 'torque_limits', 'hip_pos', 'pos_action_rate', 'pos_action_smoothness', 'tau_action_rate', 'tau_action_smoothness']
-            curr_reward_bounds = {'ang_vel_xy': [-0.05, -0.2], 'orientation': [-0.2, -2.0], 'torque_limits': [-0.01, -1.0], 'hip_pos': [-0.2, -0.4], 'pos_action_rate': [-0.001, -0.01], 'pos_action_smoothness': [-0.001, -0.01], 'tau_action_rate': [-0.002, -0.02], 'tau_action_smoothness': [-0.002, -0.02]}
-            curr_steps = 500
-            warmup_steps = 6000
-        torque_cancellation_deadband = 0.03
-        foot_clearance_excess_margin = 0.1
-        foot_clearance_excess_weight = 0.25
+            curr_reward_keys = ['ang_vel_xy', 
+                                'orientation', 
+                                'torque_limits',
+                                'hip_pos',
+                                'pos_action_rate', 
+                                'pos_action_smoothness', 
+                                'tau_action_rate', 
+                                'tau_action_smoothness']
+            curr_reward_bounds = {'ang_vel_xy': [-0.05, -0.2], 
+                                  'orientation': [-0.2, -2.0], 
+                                  'torque_limits': [-0.01, -1.0], 
+                                  'hip_pos': [-0.2, -0.4], 
+                                  'pos_action_rate': [-0.001, -0.01], 
+                                  'pos_action_smoothness': [-0.001, -0.01], 
+                                  'tau_action_rate': [-0.002, -0.02], 
+                                  'tau_action_smoothness': [-0.002, -0.02]}
+            curr_steps = 1000
+            warmup_steps = 4000
+
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -393,6 +456,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         lam = 0.95
         desired_kl = 0.01
         max_grad_norm = 1.0
+
         entropy_coef = 0.01
         use_adaptive_entropy = True
         adaptive_ent_bounds = [0.005, 0.01]
@@ -400,12 +464,14 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         adaptive_ent_ang_threshold = 0.35
         adaptive_ent_ter_threshold = 6.0
         adaptive_ent_softmax_temp = 2.0
+
         auxiliary_learning_rate = 0.0002
         privileged_loss_weight = 1.0
         explicit_loss_weight = 1.0
         grf_loss_weight = 1.0
         active_wrench_loss_weight = 1.0
         neutral_wrench_loss_weight = 0.25
+
         bard_enabled = True
         dynamics_backend = 'bard'
         pinocchio_num_workers = None
@@ -414,22 +480,96 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         bard_batch_capacity = 4096
         bard_inverse_enabled = True
         bard_rollout_enabled = True
+
         lambda_inverse = 0.01
         lambda_rollout = 0.01
         lambda_projection = 0.001
-        profile_bard_timing = True
+
+        profile_bard_timing = False
         console_debug = False
+
         pcgrad_diagnostics_enabled = False
         pcgrad_diagnostics_start_iteration = 0
         pcgrad_diagnostics_interval = 50
         cache_rollout_mechanics = True
+
         ppo_qp_sampling = 'disjoint_epoch_partition'
         ppo_qp_passes_per_iteration = 1
         ppo_qp_shard_percentage = 20.0
         ppo_qp_stratify_by_anchor = True
         ppo_qp_sampling_seed = None
         ppo_qp_sampling_logging_enabled = True
-        hard_pact_qp = {'enabled': True, 'qp_update_mode': 'two_anchor_held_correction', 'qp_solver': 'qpth', 'rollout_qp_solver': None, 'ppo_qp_solver': None, 'allow_solver_mismatch': False, 'cupiqp_mode': 'dense', 'cupiqp_cuda_graph': False, 'rollout_eps_abs': 0.0001, 'rollout_eps_rel': 0.0001, 'rollout_max_iter': 20, 'rollout_feasibility_tolerance': 0.001, 'rollout_duality_gap_abs': 0.001, 'rollout_duality_gap_rel': 0.001, 'rollout_duality_gap_policy': 'report', 'ppo_eps_abs': 3e-06, 'ppo_eps_rel': 3e-06, 'ppo_max_iter': 30, 'ppo_feasibility_tolerance': 0.001, 'ppo_duality_gap_abs': 3e-06, 'ppo_duality_gap_rel': 3e-06, 'ppo_duality_gap_policy': 'require', 'qpth_warm_start': True, 'friction_coefficient': 0.6, 'torque_rate_limit_nm_s': 1000.0, 'contact_acceleration_limit_m_s2': 0.0, 'interior_margin': 0.001, 'contact_probability_floor': 0.01, 'qdd_scale': 50.0, 'force_scale_n': 250.0, 'torque_scale_nm': 40.0, 'slack_scale_m_s2': 50.0, 'torque_tracking_weight': 20.0, 'force_tracking_weight': 5.0, 'slack_weight': 200.0, 'qdd_regularization': 0.001, 'force_regularization': 0.0001, 'torque_regularization': 0.0001, 'q_regularization': 1e-07, 'proximal_rho': 0.1, 'proximal_block_weights': (1.0, 1.0, 1.0, 1.0), 'elastic_recovery_enabled': True, 'elastic_dynamics_weight': 10000.0, 'gradient_scale_tau': 1.0, 'gradient_scale_grf': 1.0, 'gradient_scale_wrench': 1.0, 'gradient_scale_contact': 1.0, 'gradient_clip_tau': 0.0, 'gradient_clip_grf': 0.0, 'gradient_clip_wrench': 0.0, 'gradient_clip_contact': 0.0, 'normalized_feasibility_tolerance_float32': 0.001, 'normalized_feasibility_tolerance_float64': 1e-06, 'kkt_tolerance': 0.1, 'active_tolerance': 0.1, 'eps_float32': 1e-05, 'eps_float64': 1e-09, 'max_iter': 30, 'not_improved_limit': 6, 'check_q_spd': True, 'check_equality_rank': True, 'solver_dtype': 'auto', 'verbose': 0, 'diagnostics_level': 'minimal', 'full_audit_period': 1000, 'full_audit_sample_size': 8, 'rollout_chunk_size': 4096, 'ppo_chunk_size': 8000, 'position_integration_coefficient': 1.0}
+
+        hard_pact_qp = {'enabled': True, 
+                        'qp_update_mode': 'two_anchor_held_correction', 
+                        'qp_solver': 'qpth', 
+                        'rollout_qp_solver': None, 
+                        'ppo_qp_solver': None, 
+                        'allow_solver_mismatch': False, 
+                        'cupiqp_mode': 'dense', 
+                        'cupiqp_cuda_graph': False, 
+                        'rollout_eps_abs': 0.0001, 
+                        'rollout_eps_rel': 0.0001, 
+                        'rollout_max_iter': 20, 
+                        'rollout_feasibility_tolerance': 0.001, 
+                        'rollout_duality_gap_abs': 0.001, 
+                        'rollout_duality_gap_rel': 0.001, 
+                        'rollout_duality_gap_policy': 'report', 
+                        'ppo_eps_abs': 3e-06, 
+                        'ppo_eps_rel': 3e-06, 
+                        'ppo_max_iter': 30, 
+                        'ppo_feasibility_tolerance': 0.001, 
+                        'ppo_duality_gap_abs': 3e-06, 
+                        'ppo_duality_gap_rel': 3e-06, 
+                        'ppo_duality_gap_policy': 'require', 
+                        'qpth_warm_start': True, 
+                        'friction_coefficient': 0.6, 
+                        'torque_rate_limit_nm_s': 1000.0, 
+                        'contact_acceleration_limit_m_s2': 0.0, 
+                        'interior_margin': 0.001, 
+                        'contact_probability_floor': 0.01, 
+                        'qdd_scale': 50.0, 
+                        'force_scale_n': 250.0, 
+                        'torque_scale_nm': 40.0, 
+                        'slack_scale_m_s2': 50.0, 
+                        'torque_tracking_weight': 20.0, 
+                        'force_tracking_weight': 5.0, 
+                        'slack_weight': 200.0, 
+                        'qdd_regularization': 0.001, 
+                        'force_regularization': 0.0001, 
+                        'torque_regularization': 0.0001, 
+                        'q_regularization': 1e-07, 
+                        'proximal_rho': 0.1, 
+                        'proximal_block_weights': (1.0, 1.0, 1.0, 1.0), 
+                        'elastic_recovery_enabled': True, 
+                        'elastic_dynamics_weight': 10000.0, 
+                        'gradient_scale_tau': 1.0, 
+                        'gradient_scale_grf': 1.0, 
+                        'gradient_scale_wrench': 1.0, 
+                        'gradient_scale_contact': 1.0, 
+                        'gradient_clip_tau': 0.0, 
+                        'gradient_clip_grf': 0.0, 
+                        'gradient_clip_wrench': 0.0, 
+                        'gradient_clip_contact': 0.0, 
+                        'normalized_feasibility_tolerance_float32': 0.001, 
+                        'normalized_feasibility_tolerance_float64': 1e-06, 
+                        'kkt_tolerance': 0.1, 
+                        'active_tolerance': 0.1, 
+                        'eps_float32': 1e-05, 
+                        'eps_float64': 1e-09, 
+                        'max_iter': 30, 
+                        'not_improved_limit': 6, 
+                        'check_q_spd': True, 
+                        'check_equality_rank': True, 
+                        'solver_dtype': 'auto', 
+                        'verbose': 0, 
+                        'diagnostics_level': 'minimal', 
+                        'full_audit_period': 1000, 
+                        'full_audit_sample_size': 8, 
+                        'rollout_chunk_size': 4096, 
+                        'ppo_chunk_size': 8000, 
+                        'position_integration_coefficient': 1.0}
+
         grf_observation_scale = GO2HardPACTCfg.normalization.obs_scales.grf
         base_wrench_observation_scale = GO2HardPACTCfg.normalization.obs_scales.base_wrench
         action_clip = GO2HardPACTCfg.normalization.clip_actions
@@ -438,7 +578,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         policy_class_name = 'ActorCritic_HardPACT'
         algorithm_class_name = 'PPO_HardPACT'
         num_steps_per_env = 24
-        max_iterations = 6000
+        max_iterations = 8000
         grf_dim = 12
         run_name = 'pact_100hz_spec_smartcurr_stricterer'
         experiment_name = 'go2_pact_rough'
