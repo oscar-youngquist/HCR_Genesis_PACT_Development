@@ -197,7 +197,10 @@ class TestHardPACTAliases(unittest.TestCase):
                         "prediction_scale_n",
                     },
                 )
-                self.assertFalse(grf_cfg["use_ema_grfs_buf"])
+                self.assertEqual(
+                    grf_cfg["use_ema_grfs_buf"],
+                    alias_cfg_cls.sim.grf.use_ema_grfs_buf,
+                )
                 alias_env_dict.pop("deployment_physics")
                 alias_env_dict["env"]["num_explicit_recon_obs"] = legacy_env_dict["env"]["num_explicit_recon_obs"]
                 alias_env_dict["env"]["num_privileged_obs"] = legacy_env_dict["env"]["num_privileged_obs"]
@@ -231,6 +234,10 @@ class TestHardPACTAliases(unittest.TestCase):
                         "console_pinn_timing", "console_qp_timing",
                     ):
                         alias_train_dict["runner"].pop(field)
+                    for field in ("num_steps_per_env", "max_iterations"):
+                        alias_train_dict["runner"][field] = (
+                            legacy_train_dict["runner"][field]
+                        )
                     for field in (
                         "bard_enabled", "bard_randomize_base_inertia",
                         "bard_scale_rotational_inertia", "bard_batch_capacity",

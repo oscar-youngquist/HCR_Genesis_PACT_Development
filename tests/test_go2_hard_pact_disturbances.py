@@ -61,11 +61,11 @@ class _WrenchSolver:
 class PersistentWrenchTests(unittest.TestCase):
     def test_curriculum_progress_scales_only_new_external_wrench(self):
         task = _persistent_task(progress=0.0)
-        self.assertEqual(task._persistent_component_settings(0)[3], 0.0)
-        self.assertEqual(task._persistent_component_settings(1)[3], 0.0)
+        self.assertEqual(task._persistent_component_settings(0)[3], 10.0)
+        self.assertEqual(task._persistent_component_settings(1)[3], 3.0)
         task.simulator.domain_rand_disturbance_progress = 0.5
-        self.assertEqual(task._persistent_component_settings(0)[3], 30.0)
-        self.assertEqual(task._persistent_component_settings(1)[3], 6.0)
+        self.assertEqual(task._persistent_component_settings(0)[3], 35.0)
+        self.assertEqual(task._persistent_component_settings(1)[3], 7.5)
         task.simulator.domain_rand_disturbance_progress = 1.0
         self.assertEqual(task._persistent_component_settings(0)[3], 60.0)
         self.assertEqual(task._persistent_component_settings(1)[3], 12.0)

@@ -2,7 +2,9 @@ import os
 
 from legged_gym import *
 from legged_gym.envs import *
-from legged_gym.utils import get_args, init_genesis, task_registry
+from legged_gym.utils import (
+    get_args, init_genesis, save_hard_pact_resolved_config, task_registry,
+)
 import shutil
 
 def train(args):
@@ -30,6 +32,14 @@ def train(args):
     
     shutil.copy(robot_file_path, log_dir)
     shutil.copy(robot_config_path, log_dir)
+    # HardPACT registrations use thin dynamic backend/ablation subclasses.
+    # Persist one authoritative resolved snapshot so inherited PACT values,
+    # command-line overrides, and the selected feature matrix are all present
+    # without copying a chain of partially overlapping Python source files.
+    save_hard_pact_resolved_config(
+        log_dir, args.task, env_cfg, train_cfg,
+        effective_train_cfg=getattr(ppo_runner, "train_cfg", None),
+    )
     
     # Start training session
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)

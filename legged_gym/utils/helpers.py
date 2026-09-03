@@ -1,5 +1,9 @@
 import os
 import copy
+import dataclasses
+import inspect
+import json
+from pathlib import Path
 import torch
 import numpy as np
 import random
@@ -103,6 +107,117 @@ def class_to_dict(obj) -> dict:
             element = class_to_dict(val)
         result[key] = element
     return result
+
+
+def _json_config_value(value):
+    """Convert resolved config values to stable JSON-compatible objects."""
+    if dataclasses.is_dataclass(value):
+        value = dataclasses.asdict(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _json_config_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_config_value(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu()
+        return value.item() if value.numel() == 1 else value.tolist()
+    if isinstance(value, (torch.dtype, torch.device, Path)):
+        return str(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _declared_config_values(config_class):
+    """Return only values declared by one class, excluding inherited values."""
+    declared = {}
+    for name, value in vars(config_class).items():
+        if name.startswith("_"):
+            continue
+        if isinstance(value, type):
+            nested = _declared_config_values(value)
+            if nested:
+                declared[name] = nested
+        elif not callable(value):
+            declared[name] = _json_config_value(value)
+    return declared
+
+
+def _config_inheritance(config):
+    """Describe every contributing config class and its local overrides."""
+    result = []
+    for config_class in type(config).__mro__:
+        if config_class is object:
+            continue
+        try:
+            source = inspect.getsourcefile(config_class)
+        except (TypeError, OSError):
+            source = None
+        result.append({
+            "class": f"{config_class.__module__}.{config_class.__qualname__}",
+            "source": source,
+            "declared_values": _declared_config_values(config_class),
+        })
+    return result
+
+
+def save_hard_pact_resolved_config(
+    log_dir, task_name, env_cfg, train_cfg, *, effective_train_cfg=None,
+):
+    """Write one complete, inheritance-aware HardPACT run configuration.
+
+    The dynamically-created backend/ablation classes are intentionally thin,
+    so copying only their source file cannot reproduce a run.  This snapshot
+    records the fully resolved values *after CLI overrides*, each parent class
+    that contributed values, and the canonical immutable ablation feature
+    selection.  Legacy task logging remains untouched.
+    """
+    if log_dir is None or not str(task_name).startswith("go2_hard_pact"):
+        return None
+    from rsl_rl.hard_pact_ablations import resolve_hard_pact_features
+
+    variant = getattr(
+        env_cfg, "ablation_variant",
+        getattr(getattr(train_cfg, "algorithm", object()),
+                "ablation_variant", "full"),
+    )
+    features = resolve_hard_pact_features(variant)
+    resolved_train = (
+        class_to_dict(train_cfg)
+        if effective_train_cfg is None else effective_train_cfg
+    )
+    document = {
+        "schema_version": 1,
+        "task": str(task_name),
+        "ablation": {
+            "variant_id": features.variant_id,
+            "features": dataclasses.asdict(features),
+        },
+        "environment": {
+            "resolved": class_to_dict(env_cfg),
+            "inheritance": _config_inheritance(env_cfg),
+        },
+        "training": {
+            "resolved": resolved_train,
+            "inheritance": _config_inheritance(train_cfg),
+        },
+    }
+    destination = Path(log_dir) / "hard_pact_resolved_config.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(_json_config_value(document), indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, destination)
+    return destination
 
 def update_class_from_dict(obj, dict):
     for key, val in dict.items():

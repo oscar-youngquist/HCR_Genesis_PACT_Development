@@ -1,6 +1,8 @@
 """Fast deterministic coverage for HardPACT ablation selection and logging."""
 
+import copy
 import dataclasses
+import json
 import os
 import pathlib
 import subprocess
@@ -16,6 +18,7 @@ import torch
 
 import legged_gym.envs  # noqa: F401
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
+from legged_gym.utils.helpers import class_to_dict, save_hard_pact_resolved_config
 from legged_gym.utils.task_registry import task_registry
 from rsl_rl.algorithms.hard_pact_qp import HardPACTDifferentiableQP, HardPACTQPConfig
 from rsl_rl.algorithms.ppo_hard_pact import PPO_HardPACT
@@ -93,6 +96,66 @@ class HardPACTAblationTests(unittest.TestCase):
         for backend in HARD_PACT_BACKENDS:
             alias = f"go2_hard_pact_{backend}"
             self.assertEqual(task_registry.env_cfgs[alias].ablation_variant, "full")
+
+    def test_isaaclab_configs_differ_only_by_ablation_selection(self):
+        """All Isaac Lab experiments must be controlled ablations."""
+        reference_env = class_to_dict(
+            task_registry.env_cfgs["go2_hard_pact_full_isaaclab"]
+        )
+        reference_train = class_to_dict(
+            task_registry.train_cfgs["go2_hard_pact_full_isaaclab"]
+        )
+
+        def normalize_env(value):
+            value = copy.deepcopy(value)
+            value.pop("ablation_variant")
+            return value
+
+        def normalize_train(value):
+            value = copy.deepcopy(value)
+            value.pop("ablation_variant")
+            value["algorithm"].pop("ablation_variant")
+            value["runner"].pop("run_name")
+            return value
+
+        for variant in HARD_PACT_VARIANTS:
+            env = class_to_dict(task_registry.env_cfgs[
+                f"go2_hard_pact_{variant}_isaaclab"
+            ])
+            train = class_to_dict(task_registry.train_cfgs[
+                f"go2_hard_pact_{variant}_isaaclab"
+            ])
+            with self.subTest(variant=variant):
+                self.assertEqual(normalize_env(env), normalize_env(reference_env))
+                self.assertEqual(
+                    normalize_train(train), normalize_train(reference_train)
+                )
+
+    def test_isaaclab_soft_and_full_share_pinn_activation_schedule(self):
+        traces = {}
+        for variant in ("soft", "full"):
+            cfg = task_registry.train_cfgs[
+                f"go2_hard_pact_{variant}_isaaclab"
+            ]
+            algorithm = PPO_HardPACT.__new__(PPO_HardPACT)
+            algorithm.pinn_weight_final = cfg.policy.pinn_loss_weight
+            algorithm.pinn_weight = 0.0
+            algorithm.pinn_warmup_steps = cfg.policy.pinn_warmup
+            algorithm.pinn_init = cfg.policy.pinn_init_steps
+            algorithm.num_pinn_updates = 0
+            algorithm.console_debug = False
+            trace = []
+            for iteration in range(5):
+                algorithm._update_pinn_weight_for_iteration(iteration)
+                trace.append((algorithm.pinn_weight,
+                              algorithm.pinn_weight > 0.0))
+                if iteration > algorithm.pinn_init:
+                    algorithm.num_pinn_updates += 1
+            traces[variant] = trace
+        self.assertEqual(traces["soft"], traces["full"])
+        self.assertTrue(HARD_PACT_ABLATIONS["soft"].inverse_loss)
+        self.assertTrue(HARD_PACT_ABLATIONS["soft"].rollout_loss)
+        self.assertFalse(HARD_PACT_ABLATIONS["soft"].execution_qp)
 
     def test_dimensions_architecture_and_state_dict_keys_match(self):
         reference_cfg = task_registry.env_cfgs["go2_hard_pact_full_genesis"]
@@ -229,6 +292,41 @@ class HardPACTAblationTests(unittest.TestCase):
                                  text=True, capture_output=True)
             self.assertEqual(bad.returncode, 2)
             self.assertIn("Available HardPACT tasks:", bad.stderr)
+
+    def test_resolved_config_logs_parents_and_ablation_overrides(self):
+        task = "go2_hard_pact_soft_penalty_isaaclab"
+        env_cfg = copy.deepcopy(task_registry.env_cfgs[task])
+        train_cfg = copy.deepcopy(task_registry.train_cfgs[task])
+        effective_train = class_to_dict(train_cfg)
+        effective_train["algorithm"]["dynamics_backend"] = "pinocchio"
+        with tempfile.TemporaryDirectory() as directory:
+            path = save_hard_pact_resolved_config(
+                directory, task, env_cfg, train_cfg,
+                effective_train_cfg=effective_train,
+            )
+            document = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(document["task"], task)
+        self.assertEqual(document["ablation"]["variant_id"], "soft_penalty")
+        features = document["ablation"]["features"]
+        self.assertTrue(features["soft_constraint_penalty"])
+        self.assertFalse(features["inverse_loss"])
+        self.assertEqual(
+            document["training"]["resolved"]["algorithm"]["dynamics_backend"],
+            "pinocchio",
+        )
+        # These are inherited rather than declared by the thin variant.
+        resolved_env = document["environment"]["resolved"]
+        self.assertEqual(resolved_env["env"]["num_observations"], 57)
+        self.assertIn("control", resolved_env)
+        classes = {
+            entry["class"] for entry in document["environment"]["inheritance"]
+        }
+        self.assertTrue(any(name.endswith("GO2HardPACTCfg") for name in classes))
+        self.assertTrue(any(name.endswith("GO2PACTCfg") for name in classes))
+        overrides = document["environment"]["inheritance"][0]["declared_values"]
+        self.assertEqual(overrides["ablation_variant"], "soft_penalty")
+        self.assertEqual(overrides["task_backend"], "isaaclab")
 
 
 if __name__ == "__main__":

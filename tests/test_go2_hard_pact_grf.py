@@ -192,7 +192,8 @@ class GRFIntegrationTests(unittest.TestCase):
                 legacy_raw = torch.full((1, 12), 123.0)
                 task.simulator = SimpleNamespace(_grfs_buf=legacy_raw.clone())
 
-                self.assertFalse(task.cfg.sim.grf.use_ema_grfs_buf)
+                configured_default = task.cfg.sim.grf.use_ema_grfs_buf
+                task.cfg.sim.grf.use_ema_grfs_buf = False
                 task._update_legacy_grfs_buf_input()
                 torch.testing.assert_close(task.simulator._grfs_buf, legacy_raw)
 
@@ -201,7 +202,7 @@ class GRFIntegrationTests(unittest.TestCase):
                 torch.testing.assert_close(
                     task.simulator._grfs_buf, task.grf_processor.ema.flatten(1)
                 )
-                task.cfg.sim.grf.use_ema_grfs_buf = False
+                task.cfg.sim.grf.use_ema_grfs_buf = configured_default
 
     def test_simulator_callback_samples_every_decimation_substep(self):
         samples = []

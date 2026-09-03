@@ -758,6 +758,29 @@ class PPO_HardPACT:
             )
         )
 
+    def _update_pinn_weight_for_iteration(self, iteration):
+        """Apply the one shared PINN warm-up schedule for every ablation.
+
+        Feature selection determines which terms are inside the physics
+        objective, never when that objective starts. Keeping this schedule in
+        one variant-independent helper prevents ``soft`` and ``full`` from
+        drifting when their expensive paths differ.
+        """
+        if (
+            iteration > self.pinn_init
+            and self.num_pinn_updates < self.pinn_warmup_steps + 1
+        ):
+            if self.pinn_weight_final < 0:
+                self.pinn_weight = 1.0
+            else:
+                self.pinn_weight = (
+                    float(self.num_pinn_updates)
+                    / float(self.pinn_warmup_steps)
+                ) * self.pinn_weight_final
+            if self.console_debug:
+                print(self.pinn_weight)
+        return self.pinn_weight
+
     def update(self, action_func, fb_func, dt, itr, default_pose, qvel_scale):
         metric_zero = torch.zeros((), device=self.device)
         mean_value_loss = metric_zero.clone()
@@ -780,14 +803,7 @@ class PPO_HardPACT:
             (), device=self.device, dtype=torch.float64
         )
 
-        if itr > self.pinn_init and self.num_pinn_updates < (self.pinn_warmup_steps+1):
-            if self.pinn_weight_final < 0:
-                self.pinn_weight = 1.0
-            else:
-                self.pinn_weight = (float(self.num_pinn_updates)/float(self.pinn_warmup_steps))*self.pinn_weight_final
-
-            if self.console_debug:
-                print(self.pinn_weight)
+        self._update_pinn_weight_for_iteration(itr)
 
         if self.pinn_weight > 0.0 and self.cache_rollout_mechanics:
             dynamics_timing = self._start_bard_timing(

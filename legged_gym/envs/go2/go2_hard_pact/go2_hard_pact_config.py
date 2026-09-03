@@ -27,7 +27,7 @@ class GO2HardPACTCfg(GO2PACTCfg):
             clip_max_n = 250.0
             ema_alpha = 0.30
             contact_threshold_n = 5.0
-            use_ema_grfs_buf = False
+            use_ema_grfs_buf = True
 
     class normalization(GO2PACTCfg.normalization):
         class obs_scales(GO2PACTCfg.normalization.obs_scales):
@@ -44,9 +44,9 @@ class GO2HardPACTCfg(GO2PACTCfg):
         persistent_force_duration_range_s = [2.0, 6.0]
         persistent_torque_duration_range_s = [2.0, 6.0]
         persistent_ramp_fraction = 0.25
-        persistent_force_min_n = 0.0
+        persistent_force_min_n = 10.0
         persistent_force_max_n = 60.0
-        persistent_torque_min_nm = 0.0
+        persistent_torque_min_nm = 3.0
         persistent_torque_max_nm = 12.0
 
     class deployment_physics:
@@ -77,6 +77,15 @@ class GO2HardPACTCfgPPO(GO2PACTCfgPPO):
         console_detailed_losses = False
         console_pinn_timing = True
         console_qp_timing = True
+
+        num_steps_per_env = 24 # per iteration
+        max_iterations = 6000 # number of policy updates
+        grf_dim = 12
+
+        # debug_warmpinn_wb
+        run_name = 'pact_100hz_spec_smartcurr_stricterer'
+        experiment_name = 'go2_pact_rough'
+        save_interval = 500
 
     class algorithm(GO2PACTCfgPPO.algorithm):
         auxiliary_learning_rate = 2.0e-4
