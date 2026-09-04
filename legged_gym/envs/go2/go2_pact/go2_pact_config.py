@@ -524,7 +524,13 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         # Context Decoder
         cenet_dec_input_dim = 16 + 3 + 4 + 4 + 1 + 1 + 3
         cenet_dec_layers = [128,256,512]
-        cenet_dec_out_dim = 57 + (50 + 38) + 143    # next obs (57) + grf_dim (12)
+        # The privileged decoder reconstructs everything except the 12 GRFs.
+        cenet_dec_out_dim = 57 + (50 + 38) + 143 - 12
+        privileged_grf_start_index = 61
+        separate_grf_decoder = True
+        grf_dec_input_dim = cenet_dec_input_dim
+        grf_dec_layers = [128,256,512]
+        grf_dec_out_dim = 12
 
         # Actor/critic
         actor_layers = [512,256,128]
@@ -540,6 +546,9 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/Jul31_16-57-38_pact_posboot_100hz_grf/model_3000_converted.pt"
 
     class algorithm( LeggedRobotCfgPPO.algorithm ):
+        grf_reconstruction_loss_weight = 1.0
+        # Observation-scaled GRF MSE below which PINN uses reconstructed GRFs.
+        pinn_grf_reconstruction_mse_threshold = 0.01
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0

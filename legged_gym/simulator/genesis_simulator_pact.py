@@ -31,6 +31,10 @@ class GenesisSimulator_PACT(Simulator):
     def _create_async_pino_workers(self):
         wb_correct_pino_2_model_ordering = [0,1,2,3,4,5]
         wb_correct_pino_2_model_ordering.extend(self.pino_2_model_joint_act_map)
+        model_to_pino = [self.pino_foot_names.index(name) for name in self._feet_names]
+        self._model_order_contact_columns = [
+            3 * foot + xyz for foot in model_to_pino for xyz in range(3)
+        ]
         
         # For safeties shake, use only 90% of available CPU's
         num_cpus = int(mp.cpu_count() * 0.98)
@@ -78,7 +82,8 @@ class GenesisSimulator_PACT(Simulator):
 
     def _get_pinn_wb_dynamics(self):
         #           total GT forces  ,  generalized mass mat, bias vector
-        return self._contact_forces_buff, self._wb_mass_mat_buff, self._wb_bias_vec_buff, self._torso_6dof_acceleration
+        return self._contact_forces_buff, self._wb_mass_mat_buff, self._wb_bias_vec_buff, \
+               self._torso_6dof_acceleration, self._contact_jacobian_buff
 
     def _get_pinn_feedback(self, pos_actions, dof_pos, dof_vel):
         feedback_torques = (
@@ -155,6 +160,11 @@ class GenesisSimulator_PACT(Simulator):
             self.async_pino_manager.shared.wb_dynamics).to(self._device) # num_envs x 18
         self._contact_forces_buff[:]     = torch.from_numpy(
             self.async_pino_manager.shared.wb_contacts).to(self._device) # num_envs x 18
+        # Workers expose columns in Pinocchio's foot order.  The decoder and
+        # simulator GRF labels use the configured model order (FR, FL, RR, RL).
+        self._contact_jacobian_buff[:] = torch.from_numpy(
+            self.async_pino_manager.shared.contact_jacobian[..., self._model_order_contact_columns]
+        ).to(self._device)
         self._wb_mass_mat_buff[:]        = torch.from_numpy(
             self.async_pino_manager.shared.mass_mat).to(self._device)    # num_envs x 18 x 18
         self._wb_bias_vec_buff[:]        = torch.from_numpy(
@@ -208,6 +218,7 @@ class GenesisSimulator_PACT(Simulator):
         # PINN stuff
         self._grfs_buf[env_ids] = 0.
         self._contact_forces_buff[env_ids] = 0.
+        self._contact_jacobian_buff[env_ids] = 0.
         self._wb_dynamics_buff[env_ids] = 0.
         self._wb_mass_mat_buff[env_ids] = 0.
         self._wb_bias_vec_buff[env_ids] = 0.
@@ -1260,6 +1271,9 @@ class GenesisSimulator_PACT(Simulator):
         self._grfs_buf = torch.zeros((self._num_envs, self._grf_dim), device=self._device, dtype=torch.float)
         
         self._contact_forces_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
+        self._contact_jacobian_buff = torch.zeros(
+            (self._num_envs, self._wb_dim, self._grf_dim), device=self._device, dtype=torch.float
+        )
         
         self._wb_dynamics_buff = torch.zeros((self._num_envs, self._wb_dim), device=self._device, dtype=torch.float)
         

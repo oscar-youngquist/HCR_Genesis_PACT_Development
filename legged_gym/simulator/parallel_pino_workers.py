@@ -63,6 +63,11 @@ class SharedTensors:
         # Outputs
         self.wb_dynamics = self.make("wb_dynamics", (self.num_envs, self.DOF))
         self.wb_contacts = self.make("wb_contacts", (self.num_envs, self.DOF))
+        # Linear map from the four world-frame foot forces to generalized
+        # contact force: tau_contact = contact_jacobian @ [F0, ..., F3].
+        self.contact_jacobian = self.make(
+            "contact_jacobian", (self.num_envs, self.DOF, int(np.prod(self.FOOT_DIM)))
+        )
         self.mass_mat    = self.make("mass_mat",    (self.num_envs, self.DOF, self.DOF))
         self.bias        = self.make("bias",        (self.num_envs, self.DOF))
         self.acc6d       = self.make("acc6d",       (self.num_envs, 6))
@@ -89,6 +94,7 @@ class SharedTensors:
             "dt",
             "wb_dynamics",
             "wb_contacts",
+            "contact_jacobian",
             "mass_mat",
             "bias",
             "acc6d",
@@ -218,6 +224,7 @@ def compute_single_env(i, shared, pino_model, pino_data,
 
     # Contact forces
     contact_tau.fill(0.0)
+    shared.contact_jacobian[i].fill(0.0)
     grf_flat = grf.reshape(-1)
     for foot_idx, fid in enumerate(pino_foot_frame_ids):
         J = pn.computeFrameJacobian(
@@ -228,6 +235,8 @@ def compute_single_env(i, shared, pino_model, pino_data,
             pn.ReferenceFrame.LOCAL_WORLD_ALIGNED,
         )[0:3, :]
         start = 3 * foot_idx
+        reduced_jacobian_transpose = J.T[correct_idxs, :]
+        shared.contact_jacobian[i, :, start:start + 3] = reduced_jacobian_transpose
         contact_tau += J.T @ grf_flat[start:start + 3]
 
     shared.wb_contacts[i] = contact_tau[correct_idxs]

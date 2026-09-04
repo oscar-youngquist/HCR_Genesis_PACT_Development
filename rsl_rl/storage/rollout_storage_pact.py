@@ -59,6 +59,7 @@ class RolloutStoragePACT:
             self.pprev_obs_hist = None
 
             self.wb_contact_forces = None
+            self.wb_contact_jacobian = None
             self.wb_mass_mat = None
             self.wb_bias_vec = None
             self.torso_acc = None
@@ -69,7 +70,7 @@ class RolloutStoragePACT:
             self.__init__()
 
     # We want all of the actions and associated data formatted in the Model kinematic definition - [FR, FL, RR, RL]
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, wb_shape, device="cpu"):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, wb_shape, device="cpu", store_contact_jacobian=False):
 
         self.device = device
 
@@ -111,6 +112,10 @@ class RolloutStoragePACT:
         self.pprev_obs_hist = torch.zeros(num_transitions_per_env, num_envs, *obs_hist_shape, device=self.device)
 
         self.wb_contact_forces   = torch.zeros(num_transitions_per_env, num_envs, *wb_shape, device=self.device)
+        self.wb_contact_jacobians = (
+            torch.zeros(num_transitions_per_env, num_envs, *wb_shape, *grf_shape, device=self.device)
+            if store_contact_jacobian else None
+        )
         self.wb_mass_mats        = torch.zeros(num_transitions_per_env, num_envs, *wb_shape, *wb_shape, device=self.device)
         self.wb_bias_vecs        = torch.zeros(num_transitions_per_env, num_envs, *wb_shape, device=self.device)
         self.torso_accelerations = torch.zeros(num_transitions_per_env, num_envs, 6, device=self.device)
@@ -153,6 +158,8 @@ class RolloutStoragePACT:
         self.pprev_obs_hist[self.step].copy_(transition.pprev_obs_hist)
         
         self.wb_contact_forces[self.step].copy_(transition.wb_contact_forces)
+        if self.wb_contact_jacobians is not None:
+            self.wb_contact_jacobians[self.step].copy_(transition.wb_contact_jacobian)
         self.wb_mass_mats[self.step].copy_(transition.wb_mass_mat)
         self.wb_bias_vecs[self.step].copy_(transition.wb_bias_vec)
         self.torso_accelerations[self.step].copy_(transition.torso_acc)
@@ -233,6 +240,10 @@ class RolloutStoragePACT:
         pprev_obs_hist = self.pprev_obs_hist.flatten(0, 1)
 
         gt_forces     = self.wb_contact_forces.flatten(0,1)
+        contact_jacobians = (
+            self.wb_contact_jacobians.flatten(0,1)
+            if self.wb_contact_jacobians is not None else None
+        )
         wb_mass_mats  = self.wb_mass_mats.flatten(0,1)
         wb_bias_vecs  = self.wb_bias_vecs.flatten(0,1)
         torso_accs    = self.torso_accelerations.flatten(0,1)
@@ -270,6 +281,7 @@ class RolloutStoragePACT:
                 prev_obs_batch      = prev_obs[batch_idx]
                 prev_obs_hist_batch = prev_obs_hist[batch_idx]
                 gt_forces_batch     = gt_forces[batch_idx]
+                contact_jacobian_batch = contact_jacobians[batch_idx] if contact_jacobians is not None else None
                 mass_mat_batch      = wb_mass_mats[batch_idx]
                 bias_vec_batch      = wb_bias_vecs[batch_idx]
                 torso_accs_batch    = torso_accs[batch_idx]
@@ -281,5 +293,5 @@ class RolloutStoragePACT:
                 yield terminated_batch, obs_batch, critic_observations_batch, obs_hist_batch, explicit_labels_batch, \
                         grf_labels_batch, obs_labels_batch, actions_batch, target_values_batch, \
                         advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
-                        old_sigma_batch, prev_obs_batch, prev_obs_hist_batch, gt_forces_batch, mass_mat_batch, \
+                        old_sigma_batch, prev_obs_batch, prev_obs_hist_batch, gt_forces_batch, contact_jacobian_batch, mass_mat_batch, \
                         bias_vec_batch, torso_accs_batch, pprev_obs_batch, pprev_obs_hist_batch

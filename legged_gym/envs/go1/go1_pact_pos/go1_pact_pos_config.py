@@ -468,7 +468,12 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # Context Decoder
         cenet_dec_input_dim = 16 + 3 + 4 + 4 + 1 + 1 + 3
         cenet_dec_layers = [128, 256, 512]
-        cenet_dec_out_dim = 57 + (50 + 38) + 143 # robot_state + privilged info + terrain_heights (187)
+        cenet_dec_out_dim = 57 + (50 + 38) + 143 - 12
+        privileged_grf_start_index = 61
+        separate_grf_decoder = True
+        grf_dec_input_dim = cenet_dec_input_dim
+        grf_dec_layers = [128,256,512]
+        grf_dec_out_dim = 12
 
         # cenet_dec_input_dim = 16 +  3 + 4 + 4
         # cenet_dec_layers = [64, 128, 64]
@@ -488,6 +493,7 @@ class GO1PACTPosCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretrained_models/rl_pos/Jan17_17-39-51_unimodel_grf_01_100hz_tanh_pos/model_1000.pt"
         
     class algorithm( LeggedRobotCfgPPO.algorithm ):
+        grf_reconstruction_loss_weight = 1.0
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0

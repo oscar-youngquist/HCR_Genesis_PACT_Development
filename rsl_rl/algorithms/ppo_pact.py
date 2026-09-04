@@ -59,6 +59,7 @@ class PPO_PACT:
                  actor_critic,
                  decoder_network,
                  num_priv_obs,
+                 grf_decoder_network=None,
                  num_learning_epochs=1,
                  num_mini_batches=1,
                  clip_param=0.2,
@@ -79,6 +80,10 @@ class PPO_PACT:
                  pinn_init_steps=500,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
                  vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
+                 privileged_grf_start_index=61,
+                 grf_reconstruction_loss_weight=1.0,
+                 pinn_grf_reconstruction_mse_threshold=0.01,
+                 grf_observation_scale=0.01,
                  use_adaptive_entropy=True,
                  adaptive_ent_bounds=[0.01, 0.001],
                  adaptive_ent_lin_threshold=0.75,
@@ -133,6 +138,17 @@ class PPO_PACT:
 
         self.decoder = decoder_network
         self.decoder_optimizer = optim.Adam(self.decoder.parameters(), lr=learning_rate)
+        self.grf_decoder = grf_decoder_network
+        self.grf_decoder_optimizer = (
+            optim.Adam(self.grf_decoder.parameters(), lr=learning_rate)
+            if self.grf_decoder is not None else None
+        )
+        self.privileged_grf_start_index = privileged_grf_start_index
+        self.grf_reconstruction_loss_weight = grf_reconstruction_loss_weight
+        self.pinn_grf_reconstruction_mse_threshold = pinn_grf_reconstruction_mse_threshold
+        self.grf_observation_scale = grf_observation_scale
+        self.last_pinn_grf_reconstruction_mse = float("nan")
+        self.last_pinn_grf_replacement_fraction = 0.0
 
         self.boot_mult = 1.0
         self.use_boot = False
@@ -159,7 +175,8 @@ class PPO_PACT:
         
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
         self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
-                                              action_shape, torso_velo_shape, grf_shape, wb_shape, self.device)
+                                              action_shape, torso_velo_shape, grf_shape, wb_shape, self.device,
+                                              store_contact_jacobian=self.grf_decoder is not None)
 
     def test_mode(self):
         self.actor_critic.test()
@@ -228,7 +245,8 @@ class PPO_PACT:
         
         return all_actions
     
-    def process_env_step(self, rewards, dones, infos, grf_labels, obs_labels, explicit_labels, gt_forces, mass_mats, bias_vecs, torso_acc):
+    def process_env_step(self, rewards, dones, infos, grf_labels, obs_labels, explicit_labels,
+                         gt_forces, contact_jacobians, mass_mats, bias_vecs, torso_acc):
         self.transition.rewards = rewards.clone()
         
         self.transition.dones = dones
@@ -247,6 +265,7 @@ class PPO_PACT:
 
         # PINN stuff
         self.transition.wb_contact_forces = gt_forces
+        self.transition.wb_contact_jacobian = contact_jacobians
         self.transition.wb_mass_mat = mass_mats
         self.transition.wb_bias_vec = bias_vecs
         self.transition.torso_acc = torso_acc
@@ -332,6 +351,7 @@ class PPO_PACT:
         mean_recon_loss = 0
         mean_kld_loss = 0
         mean_decoder_loss = 0
+        mean_grf_decoder_loss = 0
         mean_pinn_loss = 0
 
         boot_count = 0
@@ -351,7 +371,7 @@ class PPO_PACT:
         for terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
             grf_target, obs_target, actions_batch, target_values_batch, \
             advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
-            old_sigma_batch, prev_obs_batch, prev_obs_hist_batch, gt_forces_batch, mass_mat_batch, \
+            old_sigma_batch, prev_obs_batch, prev_obs_hist_batch, gt_forces_batch, contact_jacobian_batch, mass_mat_batch, \
             bias_vec_batch, torso_accs_batch,  pprev_obs_batch, pprev_obs_hist_batch  in generator:
             
             self.actor_critic.train()
@@ -369,9 +389,10 @@ class PPO_PACT:
             weighted_pinn_loss = None
             pinn_loss = None
             if self.pinn_weight > 0.0:
-                pinn_loss = self._compute_PINN_loss(current_actions, obs_batch, prev_obs_batch, prev_obs_hist_batch,
+                pinn_loss = self._compute_PINN_loss(current_actions, obs_batch, obs_hist_batch, prev_obs_batch, prev_obs_hist_batch,
                                                     pprev_obs_batch, pprev_obs_hist_batch, torso_accs_batch,
                                                     mass_mat_batch, bias_vec_batch, gt_forces_batch,
+                                                    contact_jacobian_batch, grf_target, terminated_batch,
                                                     action_func, fb_func, default_pose, dt, qvel_scale)
                 
             if self.pinn_weight > 0.0 and self.pinn_weight_final > 0:
@@ -441,9 +462,11 @@ class PPO_PACT:
                 ###
                 self.actor_critic.train()
                 self.decoder.eval()
+                if self.grf_decoder is not None:
+                    self.grf_decoder.eval()
 
                 # Calculate the DreamWaQ-style VAE update
-                vae_loss, kl_div, recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(obs_hist_batch, grf_target, 
+                vae_loss, kl_div, recon_error, grf_recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(obs_hist_batch, grf_target,
                                                                                                                           obs_target, explicit_labels_batch, terminated_batch)
                 
                 # Update paramaters of encoder
@@ -474,13 +497,26 @@ class PPO_PACT:
                 ###
                 self.actor_critic.eval()
                 self.decoder.train()
+                if self.grf_decoder is not None:
+                    self.grf_decoder.train()
                 self.decoder_optimizer.zero_grad()
+                if self.grf_decoder_optimizer is not None:
+                    self.grf_decoder_optimizer.zero_grad()
 
                 dec_recon = self.decoder(dec_input)
                 dec_loss = F.mse_loss(dec_recon, decode_targets)
-                dec_loss.backward()
+                if self.grf_decoder is not None:
+                    grf_dec_recon = self.grf_decoder(dec_input)
+                    grf_dec_loss = F.mse_loss(grf_dec_recon, grf_target)
+                else:
+                    grf_dec_loss = dec_loss.new_zeros(())
+                (dec_loss + self.grf_reconstruction_loss_weight * grf_dec_loss).backward()
                 nn.utils.clip_grad_norm_(self.decoder.parameters(), self.max_grad_norm)
+                if self.grf_decoder is not None:
+                    nn.utils.clip_grad_norm_(self.grf_decoder.parameters(), self.max_grad_norm)
                 self.decoder_optimizer.step()
+                if self.grf_decoder_optimizer is not None:
+                    self.grf_decoder_optimizer.step()
 
                 # Log the decode targets and recons for computing boot-probability
                 with torch.no_grad():
@@ -510,6 +546,7 @@ class PPO_PACT:
                 mean_recon_loss += recon_error.item()
                 mean_kld_loss += kl_div.item()
                 mean_decoder_loss += dec_loss.item()
+                mean_grf_decoder_loss += grf_dec_loss.item()
 
             # Keeps the interaction of incoming data with layer wieghts below the threashold that 
             #     saturates the tanh activation function.
@@ -525,6 +562,7 @@ class PPO_PACT:
 
         mean_autoenc_loss /= (num_updates * self.num_enc_epochs)
         mean_decoder_loss /= (num_updates * self.num_enc_epochs)
+        mean_grf_decoder_loss /= (num_updates * self.num_enc_epochs)
         mean_kld_loss /= (num_updates * self.num_enc_epochs)
         mean_vel_loss /= (num_updates * self.num_enc_epochs)
         mean_recon_loss /= (num_updates * self.num_enc_epochs)
@@ -549,7 +587,7 @@ class PPO_PACT:
         self.storage.clear()
 
         return mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, \
-               mean_vel_loss, mean_recon_loss, mean_kld_loss, mean_pinn_loss
+               mean_grf_decoder_loss, mean_vel_loss, mean_recon_loss, mean_kld_loss, mean_pinn_loss
 
     def _compute_rl_loss(self, obs_batch, obs_hist_batch,
                          actions_batch, critic_obs_batch,
@@ -625,26 +663,66 @@ class PPO_PACT:
         
         dec_input = torch.cat((cenet_latent, cenet_torso_velo), dim=-1)
         enc_update_obs_decode = self.decoder(dec_input)
+        enc_update_grf_decode = self.grf_decoder(dec_input) if self.grf_decoder is not None else None
         
         grf_target.requires_grad = False
         obs_target.requires_grad = False
         
         # decode_target = torch.cat((obs_target, grf_target), dim=-1)
-        decode_target = obs_target
+        decode_target = (
+            self._privileged_decode_target(obs_target, grf_target.shape[-1])
+            if self.grf_decoder is not None else obs_target
+        )
         explicit_labels_batch.requires_grad = False
 
         vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
         recon_error    = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
+        grf_recon_error = (
+            F.mse_loss(enc_update_grf_decode*terminated_batch, grf_target*terminated_batch)
+            if enc_update_grf_decode is not None else recon_error.new_zeros(())
+        )
         # kl_div         = (-0.5 * torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp()))
         kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
-        vae_loss = vel_pred_error + recon_error + self.vae_beta*kl_div
+        vae_loss = vel_pred_error + recon_error + self.grf_reconstruction_loss_weight*grf_recon_error + self.vae_beta*kl_div
         
-        return vae_loss, kl_div, recon_error, vel_pred_error, dec_input.clone().detach(), decode_target, enc_update_obs_decode
+        return vae_loss, kl_div, recon_error, grf_recon_error, vel_pred_error, dec_input.clone().detach(), decode_target, enc_update_obs_decode
 
-    def _compute_PINN_loss(self, current_actions, obs_batch,                                      # Current timestep
+    def _privileged_decode_target(self, obs_target, grf_dim):
+        """Remove only the GRF block; the critic still receives obs_target unchanged."""
+        grf_end = self.privileged_grf_start_index + grf_dim
+        return torch.cat(
+            (obs_target[:, :self.privileged_grf_start_index], obs_target[:, grf_end:]), dim=-1
+        )
+
+    def _select_pinn_contact_forces(
+        self, obs_hist_batch, grf_target, terminated_batch,
+        contact_jacobian_batch, simulator_generalized_force,
+    ):
+        """Select decoded or simulator contact generalized force for PINN."""
+        _, _, latent, explicit = self.actor_critic.context_encoder(obs_hist_batch)
+        predicted_grf_scaled = self.grf_decoder(torch.cat((latent, explicit), dim=-1))
+        active = terminated_batch.to(predicted_grf_scaled.dtype)
+        grf_mse = ((predicted_grf_scaled - grf_target.detach()).square() * active).sum() / (
+            active.sum().clamp_min(1.0) * predicted_grf_scaled.shape[-1]
+        )
+        use_reconstruction = grf_mse.detach() < self.pinn_grf_reconstruction_mse_threshold
+        predicted_generalized_force = torch.einsum(
+            "bnk,bk->bn",
+            contact_jacobian_batch.detach(),
+            predicted_grf_scaled / self.grf_observation_scale,
+        )
+        selected = torch.where(
+            use_reconstruction, predicted_generalized_force, simulator_generalized_force.detach()
+        )
+        self.last_pinn_grf_reconstruction_mse = grf_mse.detach().item()
+        self.last_pinn_grf_replacement_fraction = float(use_reconstruction.detach())
+        return selected, grf_mse, use_reconstruction
+
+    def _compute_PINN_loss(self, current_actions, obs_batch, obs_hist_batch,                       # Current timestep
                            prev_obs_batch, prev_obs_hist_batch,                                   # Previous timestep
                            pprev_obs_batch, pprev_obs_hist_batch,                                 # previous-previous timestep
                            torso_accs_batch, mass_mat_batch, bias_vec_batch, gt_forces_batch,     # PINN stuff
+                           contact_jacobian_batch, grf_target, terminated_batch,
                            action_func, fb_func, default_pose, dt, qvel_scale):                   # simulator functions/values passthrough
         # if self.use_boot:
         #     self.actor_critic.act(prev_obs_batch, prev_obs_hist_batch)
@@ -703,17 +781,30 @@ class PPO_PACT:
         # # Make the error relative, so that it is less senesitive to scale
         # rel_error = torch.norm(error, dim=1) / (1e-8 + torch.norm(wb_tau[:,6:].detach().clone(), dim=1) + torch.norm(gt_forces_batch[:,6:], dim=1))
         
-        error = model_wb_dynamics - gt_forces_batch - wb_tau
+        # The GRF decoder predicts the next-step force label in observation
+        # units.  Once its detached reconstruction MSE meets the configured
+        # quality threshold, use J_f^T F_hat in place of the cached simulator
+        # J_f^T F.  The tensor-valued gate keeps the selected prediction path
+        # differentiable without changing the simulator fallback.
+        if self.grf_decoder is not None:
+            pinn_contact_force, _, _ = self._select_pinn_contact_forces(
+                obs_hist_batch, grf_target, terminated_batch,
+                contact_jacobian_batch, gt_forces_batch,
+            )
+        else:
+            pinn_contact_force = gt_forces_batch
+
+        error = model_wb_dynamics - pinn_contact_force - wb_tau
 
         # softly weight by contact
         # Apply soft (to make this a continuous reward signal) contact weighting to avoid over-penalizing for leg movement
-        contact_magnitude = torch.clamp(gt_forces_batch, min=0.0)
+        contact_magnitude = torch.clamp(pinn_contact_force, min=0.0)
         contact_max = torch.max(contact_magnitude, dim=1, keepdim=True)[0]
         contact_weight = contact_magnitude / (contact_max + 1e-8)
         error *= contact_weight
 
         # Make the error relative, so that it is less senesitive to scale
-        rel_error = torch.norm(error, dim=1) / (1e-8 + torch.norm(wb_tau.detach().clone(), dim=1) + torch.norm(gt_forces_batch, dim=1))
+        rel_error = torch.norm(error, dim=1) / (1e-8 + torch.norm(wb_tau.detach().clone(), dim=1) + torch.norm(pinn_contact_force, dim=1))
         
         # rel_acc_error = torch.norm(dof_acc - dof_acc_target, dim=1) / (1e-8 + torch.norm(dof_acc_target, dim=1) +  torch.norm(dof_acc, dim=1))
 

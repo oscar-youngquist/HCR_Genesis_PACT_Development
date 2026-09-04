@@ -50,6 +50,13 @@ torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 torch.backends.cudnn.benchmark = True
 
+def _load_shape_compatible(module, state_dict):
+    """Load legacy decoder trunks while skipping resized output parameters."""
+    current = module.state_dict()
+    compatible = {key: value for key, value in state_dict.items()
+                  if key in current and current[key].shape == value.shape}
+    return module.load_state_dict(compatible, strict=False)
+
 class OnPolicyRunnerPACTPos:
 
     def __init__(self,
@@ -94,11 +101,19 @@ class OnPolicyRunnerPACTPos:
                                  self.policy_cfg["cenet_dec_layers"],
                                  self.policy_cfg["cenet_dec_out_dim"]
                                  ).to(self.device)
+        grf_decoder = None
+        if self.policy_cfg.get("separate_grf_decoder", False):
+            grf_decoder = ContextDecoder(self.policy_cfg["grf_dec_input_dim"],
+                                         self.policy_cfg["grf_dec_layers"],
+                                         self.policy_cfg["grf_dec_out_dim"]
+                                         ).to(self.device)
         
 
         print("Created Parallel Actor-Critic Model")
         pretty_print_module(actor_critic)
         pretty_print_module(decoder)
+        if grf_decoder is not None:
+            pretty_print_module(grf_decoder)
 
         self._init_entropy_coef = self.alg_cfg["entropy_coef"]
         self.use_adaptive_entropy = self.alg_cfg["use_adaptive_entropy"]
@@ -110,6 +125,8 @@ class OnPolicyRunnerPACTPos:
         self.alg: PPO_PACT_Pos = alg_class(actor_critic, 
                                            decoder, 
                                            self.env.num_privileged_obs,
+                                           grf_decoder_network=grf_decoder,
+                                           privileged_grf_start_index=self.policy_cfg.get("privileged_grf_start_index", 61),
                                            device=self.device, 
                                            **self.alg_cfg)
         
@@ -147,7 +164,9 @@ class OnPolicyRunnerPACTPos:
         # Reset the 
         self.alg.actor_critic._init_std(pretrained_std)
         # Load the pretrained decoder network
-        self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
+        _load_shape_compatible(self.alg.decoder, loaded_dict['decoder_state_dict'])
+        if self.alg.grf_decoder is not None and 'grf_decoder_state_dict' in loaded_dict:
+            self.alg.grf_decoder.load_state_dict(loaded_dict['grf_decoder_state_dict'])
 
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
@@ -218,7 +237,7 @@ class OnPolicyRunnerPACTPos:
                 start = stop
                 self.alg.compute_returns(critic_obs)
             
-            mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, mean_vel_loss, \
+            mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, mean_grf_decoder_loss, mean_vel_loss, \
                     mean_recon_loss, mean_kld_loss, mean_tau_loss \
                     = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, it, self.env.simulator.default_dof_pos, self.env.obs_scales.dof_vel)
             
@@ -340,6 +359,7 @@ class OnPolicyRunnerPACTPos:
         self.writer.add_scalar('Loss/recon', locs['mean_recon_loss'], locs['it'])
         self.writer.add_scalar('Loss/kl_div', locs['mean_kld_loss'], locs['it'])
         self.writer.add_scalar('Loss/decoder_function', locs['mean_decoder_loss'], locs['it'])
+        self.writer.add_scalar('Loss/grf_decoder_function', locs['mean_grf_decoder_loss'], locs['it'])
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
@@ -368,6 +388,7 @@ class OnPolicyRunnerPACTPos:
                           f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
                           f"""{'KL Divergence    loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"""
                           f"""{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"""
+                          f"""{'GRF decoder loss:':>{pad}} {locs['mean_grf_decoder_loss']:.4f}\n"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
@@ -386,6 +407,7 @@ class OnPolicyRunnerPACTPos:
                           f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
                           f"""{'KL Divergence    loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"""
                           f"""{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"""
+                          f"""{'GRF decoder loss:':>{pad}} {locs['mean_grf_decoder_loss']:.4f}\n"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean pos action noise std:':>{pad}} {mean_std.item():.2f}\n""")
@@ -400,7 +422,7 @@ class OnPolicyRunnerPACTPos:
         print(log_string)
 
     def save(self, path, infos=None):
-        torch.save({
+        checkpoint = {
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'act_optimizer_state_dict': self.alg.act_optimizer.optimizer.state_dict(),
             'enc_optimizer_state_dict': self.alg.enc_optimizer.state_dict(),
@@ -408,7 +430,11 @@ class OnPolicyRunnerPACTPos:
             'decoder_opt_state_dict': self.alg.decoder_optimizer.state_dict(),
             'iter': self.current_learning_iteration,
             'infos': infos,
-            }, path)
+        }
+        if self.alg.grf_decoder is not None:
+            checkpoint['grf_decoder_state_dict'] = self.alg.grf_decoder.state_dict()
+            checkpoint['grf_decoder_opt_state_dict'] = self.alg.grf_decoder_optimizer.state_dict()
+        torch.save(checkpoint, path)
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
@@ -418,9 +444,16 @@ class OnPolicyRunnerPACTPos:
         if load_optimizer:
             self.alg.act_optimizer.optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
             self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
-            self.alg.decoder_optimizer.load_state_dict(loaded_dict['decoder_opt_state_dict'])
+            # Legacy checkpoints predate the split and have a differently
+            # shaped privileged-decoder output/optimizer state.
+            if self.alg.grf_decoder is not None and loaded_dict.get('grf_decoder_state_dict') is not None:
+                self.alg.decoder_optimizer.load_state_dict(loaded_dict['decoder_opt_state_dict'])
+            if self.alg.grf_decoder_optimizer is not None and loaded_dict.get('grf_decoder_opt_state_dict') is not None:
+                self.alg.grf_decoder_optimizer.load_state_dict(loaded_dict['grf_decoder_opt_state_dict'])
         # Load the VAE decoder model...
-        self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
+        _load_shape_compatible(self.alg.decoder, loaded_dict['decoder_state_dict'])
+        if self.alg.grf_decoder is not None and loaded_dict.get('grf_decoder_state_dict') is not None:
+            self.alg.grf_decoder.load_state_dict(loaded_dict['grf_decoder_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']
         self.current_learning_iteration = 0
         return loaded_dict['infos']

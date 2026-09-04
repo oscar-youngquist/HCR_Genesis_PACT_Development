@@ -51,6 +51,7 @@ class PPO_PACT_Pos:
                  actor_critic,
                  decoder_network,
                  num_priv_obs,
+                 grf_decoder_network=None,
                  num_learning_epochs=1,
                  num_mini_batches=1,
                  clip_param=0.2,
@@ -67,6 +68,8 @@ class PPO_PACT_Pos:
                  use_spo=False,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
                  vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
+                 privileged_grf_start_index=61,
+                 grf_reconstruction_loss_weight=1.0,
                  use_adaptive_entropy=True,
                  adaptive_ent_bounds=[0.01, 0.001],
                  adaptive_ent_lin_threshold=0.75,
@@ -117,6 +120,13 @@ class PPO_PACT_Pos:
 
         self.decoder = decoder_network
         self.decoder_optimizer = optim.Adam(self.decoder.parameters(), lr=learning_rate)
+        self.grf_decoder = grf_decoder_network
+        self.grf_decoder_optimizer = (
+            optim.Adam(self.grf_decoder.parameters(), lr=learning_rate)
+            if self.grf_decoder is not None else None
+        )
+        self.privileged_grf_start_index = privileged_grf_start_index
+        self.grf_reconstruction_loss_weight = grf_reconstruction_loss_weight
 
         self.boot_mult = 1.0
         self.use_boot = False
@@ -294,6 +304,7 @@ class PPO_PACT_Pos:
         mean_recon_loss = 0
         mean_kld_loss = 0
         mean_decoder_loss = 0
+        mean_grf_decoder_loss = 0
         mean_tau_loss = 0
 
         timers = {
@@ -367,12 +378,14 @@ class PPO_PACT_Pos:
                 ###
                 self.actor_critic.train()
                 self.decoder.eval()
+                if self.grf_decoder is not None:
+                    self.grf_decoder.eval()
 
                 torch.cuda.synchronize()
                 t0 = time.perf_counter()
 
                 # Calculate the DreamWaQ-style VAE update
-                vae_loss, kl_div, recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(obs_hist_batch, grf_target, 
+                vae_loss, kl_div, recon_error, grf_recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(obs_hist_batch, grf_target,
                                                                                                                           obs_target, explicit_labels_batch, terminated_batch)
                 
                 timers["vae_loss"] += time.perf_counter() - t0
@@ -394,16 +407,29 @@ class PPO_PACT_Pos:
                 ###
                 self.actor_critic.eval()
                 self.decoder.train()
+                if self.grf_decoder is not None:
+                    self.grf_decoder.train()
                 self.decoder_optimizer.zero_grad()
+                if self.grf_decoder_optimizer is not None:
+                    self.grf_decoder_optimizer.zero_grad()
 
                 torch.cuda.synchronize()
                 t0 = time.perf_counter()
 
                 dec_recon = self.decoder(dec_input)
                 dec_loss = F.mse_loss(dec_recon, decode_targets)
-                dec_loss.backward()
+                if self.grf_decoder is not None:
+                    grf_dec_recon = self.grf_decoder(dec_input)
+                    grf_dec_loss = F.mse_loss(grf_dec_recon, grf_target)
+                else:
+                    grf_dec_loss = dec_loss.new_zeros(())
+                (dec_loss + self.grf_reconstruction_loss_weight * grf_dec_loss).backward()
                 nn.utils.clip_grad_norm_(self.decoder.parameters(), self.max_grad_norm)
+                if self.grf_decoder is not None:
+                    nn.utils.clip_grad_norm_(self.grf_decoder.parameters(), self.max_grad_norm)
                 self.decoder_optimizer.step()
+                if self.grf_decoder_optimizer is not None:
+                    self.grf_decoder_optimizer.step()
 
                 timers["dec_step"] += time.perf_counter() - t0
 
@@ -441,6 +467,7 @@ class PPO_PACT_Pos:
                 mean_recon_loss += recon_error.item()
                 mean_kld_loss += kl_div.item()
                 mean_decoder_loss += dec_loss.item()
+                mean_grf_decoder_loss += grf_dec_loss.item()
 
             # Keeps the interaction of incoming data with layer wieghts below the threashold that 
             #     saturates the tanh activation function.
@@ -455,6 +482,7 @@ class PPO_PACT_Pos:
 
         mean_autoenc_loss /= (num_updates * self.num_enc_epochs)
         mean_decoder_loss /= (num_updates * self.num_enc_epochs)
+        mean_grf_decoder_loss /= (num_updates * self.num_enc_epochs)
         mean_kld_loss /= (num_updates * self.num_enc_epochs)
         mean_vel_loss /= (num_updates * self.num_enc_epochs)
         mean_recon_loss /= (num_updates * self.num_enc_epochs)
@@ -503,7 +531,7 @@ class PPO_PACT_Pos:
         print("update timers:", {k: round(v, 4) for k, v in timers.items()})
 
         return mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, \
-               mean_vel_loss, mean_recon_loss, mean_kld_loss, mean_tau_loss
+               mean_grf_decoder_loss, mean_vel_loss, mean_recon_loss, mean_kld_loss, mean_tau_loss
 
     def _compute_rl_loss(self, obs_batch, obs_hist_batch,
                          actions_batch, critic_obs_batch,
@@ -597,18 +625,33 @@ class PPO_PACT_Pos:
         
         # with torch.no_grad():
         enc_update_obs_decode = self.decoder(dec_input)
+        enc_update_grf_decode = self.grf_decoder(dec_input) if self.grf_decoder is not None else None
         
         grf_target.requires_grad = False
         obs_target.requires_grad = False
         
         # decode_target = torch.cat((obs_target, grf_target), dim=-1)
-        decode_target = obs_target
+        decode_target = (
+            self._privileged_decode_target(obs_target, grf_target.shape[-1])
+            if self.grf_decoder is not None else obs_target
+        )
         explicit_labels_batch.requires_grad = False
 
         vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
         recon_error    = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
+        grf_recon_error = (
+            F.mse_loss(enc_update_grf_decode*terminated_batch,grf_target*terminated_batch)
+            if enc_update_grf_decode is not None else recon_error.new_zeros(())
+        )
         kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
         # kl_div         = -0.5*torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp())
-        vae_loss = vel_pred_error + recon_error + self.vae_beta*kl_div
+        vae_loss = vel_pred_error + recon_error + self.grf_reconstruction_loss_weight*grf_recon_error + self.vae_beta*kl_div
         
-        return vae_loss, kl_div, recon_error, vel_pred_error, dec_input.clone().detach(), decode_target.detach(), enc_update_obs_decode.detach()
+        return vae_loss, kl_div, recon_error, grf_recon_error, vel_pred_error, dec_input.clone().detach(), decode_target.detach(), enc_update_obs_decode.detach()
+
+    def _privileged_decode_target(self, obs_target, grf_dim):
+        """Remove only the GRF block; the critic still receives obs_target unchanged."""
+        grf_end = self.privileged_grf_start_index + grf_dim
+        return torch.cat(
+            (obs_target[:, :self.privileged_grf_start_index], obs_target[:, grf_end:]), dim=-1
+        )
