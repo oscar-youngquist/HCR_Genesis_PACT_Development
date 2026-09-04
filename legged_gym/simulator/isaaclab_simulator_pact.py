@@ -62,47 +62,95 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
             )
 
     def push_robots(self):
-        """Apply one planar root-velocity impulse only at sampled events.
+        """Apply independent planar, vertical, and angular velocity impulses.
 
         The legacy task invokes this hook each control step. Genesis uses that
-        call merely to *check* a per-environment interval; the old Isaac Lab
-        adapter instead changed velocity on every call. This implementation
-        restores the Genesis event semantics while retaining Isaac Lab's
-        supported planar-only disturbance capability.
+        call merely to *check* per-environment intervals; velocity is written
+        exactly once for the union of events that fire on this call.
         """
         push_steps = torch.clamp(
             (self.push_timeouts / self._control_dt).to(torch.long).reshape(-1),
             min=1,
         )
+        vert_steps = torch.clamp(
+            (self.vert_timeouts / self._control_dt).to(torch.long).reshape(-1),
+            min=1,
+        )
+        angular_steps = torch.clamp(
+            (self.wrench_timeouts / self._control_dt).to(torch.long).reshape(-1),
+            min=1,
+        )
         self._push_call_counter += 1
-        event = torch.remainder(self._push_call_counter, push_steps).eq(0)
+        planar_event = torch.remainder(
+            self._push_call_counter, push_steps
+        ).eq(0)
+        vertical_event = torch.remainder(
+            self._push_call_counter, vert_steps
+        ).eq(0)
+        angular_event = torch.remainder(
+            self._push_call_counter, angular_steps
+        ).eq(0)
+        event = planar_event | vertical_event | angular_event
         env_ids = event.nonzero(as_tuple=False).flatten()
-        maximum = float(getattr(
+
+        planar_maximum = float(getattr(
             self, "push_value", self._cfg.domain_rand.max_push_vel_xy
         ))
-        sampled = torch.empty(
+        planar = torch.empty(
             self._num_envs, 2, device=self._device
-        ).uniform_(-maximum, maximum)
+        ).uniform_(-planar_maximum, planar_maximum)
         # Older standalone PACT/PActPos configurations predate this optional
         # restriction.  Treat a missing flag as the legacy two-axis behavior
         # instead of making the shared Isaac Lab adapter configuration-fragile.
         if bool(getattr(self._cfg.env, "lateral_push_only", False)):
-            sampled[:, 0].zero_()
+            planar[:, 0].zero_()
+        vertical_maximum = float(getattr(
+            self, "vert_value", self._cfg.domain_rand.max_vertical_push
+        ))
+        vertical = torch.empty(
+            self._num_envs, 1, device=self._device
+        ).uniform_(-vertical_maximum, 0.0)
+        angular_maximum = float(getattr(
+            self, "angular_push_value", self._cfg.domain_rand.max_push_torque
+        ))
+        angular = torch.empty(
+            self._num_envs, 3, device=self._device
+        ).uniform_(-angular_maximum, angular_maximum)
+
+        # These buffers describe the impulse applied on *this* transition.
+        # Inactive values are zero rather than retaining the previous event.
         self._rand_push_vels.zero_()
-        self._rand_push_vels[event, :2] = sampled[event]
-        # Only event rows are written. Calling this method on an inactive step
-        # therefore does not re-apply or overwrite any root velocity.
+        self._rand_wrench_vels.zero_()
+        self._rand_push_vels[planar_event, :2] = planar[planar_event]
+        self._rand_push_vels[vertical_event, 2:3] = vertical[vertical_event]
+        self._rand_wrench_vels[angular_event] = angular[angular_event]
+
+        # Combine simultaneous events into a single atomic root-velocity write.
         if env_ids.numel() > 0:
             root_velocity = self._robot.data.root_link_vel_w[env_ids, :6].clone()
-            root_velocity[:, :2].add_(sampled[event])
+            root_velocity[:, :3].add_(self._rand_push_vels[env_ids])
+            root_velocity[:, 3:6].add_(self._rand_wrench_vels[env_ids])
             self._robot.write_root_link_velocity_to_sim(
                 root_velocity, env_ids=env_ids
             )
-        replacement = torch.empty_like(self.push_timeouts).uniform_(
+
+        planar_replacement = torch.empty_like(self.push_timeouts).uniform_(
             self.push_interval_min, self.push_interval_max
         )
         self.push_timeouts.copy_(torch.where(
-            event[:, None], replacement, self.push_timeouts
+            planar_event[:, None], planar_replacement, self.push_timeouts
+        ))
+        vertical_replacement = torch.empty_like(self.vert_timeouts).uniform_(
+            self.vert_interval_min, self.vert_interval_max
+        )
+        self.vert_timeouts.copy_(torch.where(
+            vertical_event[:, None], vertical_replacement, self.vert_timeouts
+        ))
+        angular_replacement = torch.empty_like(self.wrench_timeouts).uniform_(
+            self.wrench_timeout_min, self.wrench_timeout_max
+        )
+        self.wrench_timeouts.copy_(torch.where(
+            angular_event[:, None], angular_replacement, self.wrench_timeouts
         ))
 
     def hard_pact_capabilities(self):
@@ -115,11 +163,10 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
                 "persistent_torque",
             )
         }
-        # These capabilities remain false until real-backend parity is proven.
-        features.update(motor_strength=False, push_z=False, push_angular=False)
+        features.update(motor_strength=True, push_z=True, push_angular=True)
         return {
             "backend": "isaaclab",
-            "supports_domain_rand_curriculum": False,
+            "supports_domain_rand_curriculum": True,
             "features": features,
         }
 
@@ -145,14 +192,22 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
     # ------------------------------------------------------------------
     def _parse_cfg(self):
         super()._parse_cfg()
+        domain_rand = self._cfg.domain_rand
         self.push_interval_min = float(
-            self._cfg.domain_rand.push_interval_min
+            domain_rand.push_interval_min
         )
         self.push_interval_max = float(
-            self._cfg.domain_rand.push_interval_max
+            domain_rand.push_interval_max
         )
+        self.vert_interval_min = float(domain_rand.vert_interval_min)
+        self.vert_interval_max = float(domain_rand.vert_interval_max)
+        self.wrench_timeout_min = float(domain_rand.wrench_timeout_min)
+        self.wrench_timeout_max = float(domain_rand.wrench_timeout_max)
+        self.push_value = float(domain_rand.min_push_vel_xy)
+        self.vert_value = float(domain_rand.min_vertical_push)
+        self.angular_push_value = float(domain_rand.min_push_torque)
         self.use_domainrand_curriculum = bool(
-            getattr(self._cfg.domain_rand, "use_domainrand_curriculum", False)
+            getattr(domain_rand, "use_domainrand_curriculum", False)
         )
 
     def _contact_sensor_update_period(self):
@@ -195,14 +250,23 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
 
     def _create_envs(self):
         super()._create_envs()
+        all_envs = torch.arange(self._num_envs, device=self._device)
         if getattr(self._cfg.domain_rand, "randomize_joint_stiffness", False):
-            self._randomize_joint_stiffness(torch.arange(self._num_envs))
+            self._randomize_joint_stiffness(all_envs)
+        if getattr(self._cfg.domain_rand, "randomize_motor_strength", False):
+            self._randomize_motor_strength(all_envs)
 
     def _init_buffers(self):
         super()._init_buffers()
         self.push_timeouts = torch.empty(
             self._num_envs, 1, device=self._device
         ).uniform_(self.push_interval_min, self.push_interval_max)
+        self.vert_timeouts = torch.empty(
+            self._num_envs, 1, device=self._device
+        ).uniform_(self.vert_interval_min, self.vert_interval_max)
+        self.wrench_timeouts = torch.empty(
+            self._num_envs, 1, device=self._device
+        ).uniform_(self.wrench_timeout_min, self.wrench_timeout_max)
         self._push_call_counter = 0
         self._base_world_lin_vel = torch.zeros_like(
             self._robot.data.root_link_lin_vel_w
@@ -315,11 +379,15 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         # clone supervision even though it has no feed-forward action half.
         self.feedback_torques = torques
         self.feedforward_torques = torch.zeros_like(torques)
-        self._unweighted_torques = torques
+        self._unweighted_torques = self._motor_strength * torques
         if self.first_loop:
             self.first_loop = False
             self.first_loop_feedback = torques.clone()
-        return torch.clip(torques, -self.torque_limits, self.torque_limits)
+        return torch.clip(
+            self._motor_strength * torques,
+            -self.torque_limits,
+            self.torque_limits,
+        )
 
     def post_physics_step(self):
         super().post_physics_step()
@@ -337,6 +405,19 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         if getattr(self._cfg.domain_rand, "randomize_joint_stiffness", False):
             self._randomize_joint_stiffness(env_ids)
         super().reset_idx(env_ids)
+        if getattr(self._cfg.domain_rand, "randomize_motor_strength", False):
+            self._randomize_motor_strength(env_ids)
+        self._rand_push_vels[env_ids] = 0.0
+        self._rand_wrench_vels[env_ids] = 0.0
+        self.push_timeouts[env_ids] = torch.empty(
+            len(env_ids), 1, device=self._device
+        ).uniform_(self.push_interval_min, self.push_interval_max)
+        self.vert_timeouts[env_ids] = torch.empty(
+            len(env_ids), 1, device=self._device
+        ).uniform_(self.vert_interval_min, self.vert_interval_max)
+        self.wrench_timeouts[env_ids] = torch.empty(
+            len(env_ids), 1, device=self._device
+        ).uniform_(self.wrench_timeout_min, self.wrench_timeout_max)
         self._grfs_buf[env_ids] = 0.0
         self._last_base_world_lin_vel[env_ids] = 0.0
         self._last_base_world_ang_vel[env_ids] = 0.0
@@ -518,6 +599,15 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         self._robot.write_joint_stiffness_to_sim(
             stiffness.repeat(1, self._num_actions), self._dof_indices, env_ids
         )
+
+    def _randomize_motor_strength(self, env_ids):
+        """Sample the per-joint actuator multiplier used by both PACT paths."""
+        if len(env_ids) == 0:
+            return
+        minimum, maximum = self._cfg.domain_rand.motor_strength_range
+        self._motor_strength[env_ids] = torch.empty(
+            len(env_ids), self._num_actions, device=self._device
+        ).uniform_(float(minimum), float(maximum))
 
     @property
     def dof_pos_limits_hard(self):

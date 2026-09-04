@@ -469,6 +469,18 @@ class OnPolicyRunnerPACTPos:
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
         self.writer.add_scalar('Loss/tau_loss', locs['mean_tau_loss'], locs['it'])
+        if self.is_hard_pact_pos:
+            # Keep the legacy aggregate key above and add stable, descriptive
+            # component keys for the combined HardPACTPos auxiliary update.
+            self.writer.add_scalar(
+                'Loss/autoencoder_total', locs['mean_autoenc_loss'], locs['it']
+            )
+            for name, value in self.alg.last_auxiliary_metrics.items():
+                if name == "total":
+                    continue
+                self.writer.add_scalar(
+                    f'Loss/autoencoder_{name}', value, locs['it']
+                )
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
@@ -483,6 +495,11 @@ class OnPolicyRunnerPACTPos:
                 f"{'KL Divergence loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"
                 f"{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"
             )
+            if self.is_hard_pact_pos:
+                for name, value in self.alg.last_auxiliary_metrics.items():
+                    detailed += (
+                        f"{('Aux ' + name + ':'):>{pad}} {float(value):.4f}\n"
+                    )
 
         if len(locs['rewbuffer']) > 0:
             self.writer.add_scalar('Train/mean_reward', statistics.mean(locs['rewbuffer']), locs['it'])

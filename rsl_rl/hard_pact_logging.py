@@ -15,6 +15,7 @@ STABLE_HARD_PACT_SCALARS = {
     "physics/loss/inverse": math.nan,
     "physics/loss/rollout": math.nan,
     "physics/loss/soft_constraint": math.nan,
+    "physics/loss/pinn_unweighted": math.nan,
     "physics/timing/inverse_forward_ms_per_update": math.nan,
     "physics/timing/inverse_forward_ms_per_minibatch": math.nan,
     "physics/timing/inverse_chunk_count": 0.0,

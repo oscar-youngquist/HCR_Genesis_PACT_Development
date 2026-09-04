@@ -492,6 +492,10 @@ class PPO_HardPACT:
         self.last_physics_gradient_metrics = {}
         self.last_auxiliary_metrics = {}
         self.last_physics_loss_metrics = {}
+        # Reporting keeps the configured inverse/rollout/soft composition but
+        # intentionally excludes the outer PINN curriculum weight.  The
+        # optimization objective remains unchanged.
+        self.last_unweighted_pinn_loss = torch.zeros((), device=self.device)
         self.dynamics_backend = str(dynamics_backend).lower()
         if self.dynamics_backend not in ("bard", "pinocchio"):
             raise ValueError("dynamics_backend must be 'bard' or 'pinocchio'")
@@ -1219,7 +1223,11 @@ class PPO_HardPACT:
             mean_value_loss += value_loss.detach()
             mean_surrogate_loss += surrogate_loss.detach()
             if pinn_loss is not None:
-                mean_pinn_loss += pinn_loss.detach()
+                # ``pinn_loss`` is the optimization objective and therefore
+                # contains ``pinn_weight`` (and potentially the independent
+                # QP projection term).  Console/TensorBoard should expose the
+                # underlying PINN magnitude, not its scheduled contribution.
+                mean_pinn_loss += self.last_unweighted_pinn_loss
 
 
             # Phase 2: recompute and aggregate every auxiliary term before a
@@ -1595,6 +1603,18 @@ class PPO_HardPACT:
             desired_position, joint_position, joint_velocity
         )
 
+    def _unweighted_pinn_loss(
+        self, inverse_loss, rollout_loss, soft_constraint_loss=None,
+    ):
+        """Compose PINN terms without the outer curriculum/training weight."""
+        if soft_constraint_loss is None:
+            soft_constraint_loss = inverse_loss * 0.0
+        return (
+            self.lambda_inverse * inverse_loss
+            + self.lambda_rollout * rollout_loss
+            + self.lambda_soft_constraint * soft_constraint_loss
+        )
+
     def _combine_bard_losses(
         self, inverse_loss, rollout_loss, projection_loss_value=None,
         soft_constraint_loss=None, pinn_weight=1.0,
@@ -1611,10 +1631,8 @@ class PPO_HardPACT:
         if soft_constraint_loss is None:
             soft_constraint_loss = inverse_loss * 0.0
         return (
-            float(pinn_weight) * (
-                self.lambda_inverse * inverse_loss
-                + self.lambda_rollout * rollout_loss
-                + self.lambda_soft_constraint * soft_constraint_loss
+            float(pinn_weight) * self._unweighted_pinn_loss(
+                inverse_loss, rollout_loss, soft_constraint_loss
             )
             + self.lambda_projection * projection_loss_value
         )
@@ -1768,7 +1786,9 @@ class PPO_HardPACT:
         itself is still solved exactly once per sampled minibatch transition.
         """
         if not (self.bard_enabled or self.hard_pact_features.soft_constraint_penalty):
-            return nominal_torque.sum() * 0.0
+            zero = nominal_torque.sum() * 0.0
+            self.last_unweighted_pinn_loss = zero.detach()
+            return zero
         qp_ready = (
             self.hard_pact_features.execution_qp
             and self.hard_pact_qp is not None
@@ -1777,7 +1797,9 @@ class PPO_HardPACT:
         if not ((compute_pinn and (
                 self.bard_inverse_enabled or self.bard_rollout_enabled)) or qp_ready
                 or self.hard_pact_features.soft_constraint_penalty):
-            return nominal_torque.sum() * 0.0
+            zero = nominal_torque.sum() * 0.0
+            self.last_unweighted_pinn_loss = zero.detach()
+            return zero
         batch = self.storage.current_hard_pact_batch
         if batch is None:
             raise RuntimeError("HardPACT BARD loss requires named transition fields")
@@ -2148,10 +2170,15 @@ class PPO_HardPACT:
         # One weighted physics objective enters the existing PCGrad path:
         # L_phys=w_PINN*(lambda_ID*L_ID+lambda_roll*L_roll)
         #        +lambda_proj*L_proj (plus the existing soft ablation term).
+        unweighted_pinn_loss = self._unweighted_pinn_loss(
+            inverse_loss, rollout_loss, soft_constraint_loss
+        )
+        self.last_unweighted_pinn_loss = unweighted_pinn_loss.detach()
         self.last_physics_loss_metrics = {
             "physics/loss/inverse": inverse_loss.detach(),
             "physics/loss/rollout": rollout_loss.detach(),
             "physics/loss/soft_constraint": soft_constraint_loss.detach(),
+            "physics/loss/pinn_unweighted": self.last_unweighted_pinn_loss,
             # This scalar makes it explicit whether the transition mask—not
             # a disabled objective—is responsible for a zero physics loss.
             "physics/valid_fraction": (

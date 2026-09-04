@@ -44,6 +44,11 @@ class RolloutStoragePACTPos:
             self.explicit_labels = None  # same timestep as observations, used by encoder output
             self.grf_targets = None  # next time-step from observations, used by decoder output
             self.obs_targets = None  # next time-step from observations, used by decoder output
+            # HardPACTPos-only supervised deployment-head labels. Legacy
+            # PACTPos leaves these unset and allocates no additional storage.
+            self.executed_torque_targets = None
+            self.wrench_targets = None
+            self.wrench_active_masks = None
 
             self.actions = None
             self.rewards = None
@@ -58,7 +63,7 @@ class RolloutStoragePACTPos:
             self.__init__()
 
     # We want all of the actions and associated data formatted in the Model kinematic definition - [FR, FL, RR, RL]
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, device="cpu"):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, device="cpu", hard_pact_auxiliary=False):
 
         self.device = device
 
@@ -76,6 +81,22 @@ class RolloutStoragePACTPos:
         self.explicit_labels = torch.zeros(num_transitions_per_env, num_envs, *explicit_shape, device=self.device)
         self.grf_targets = torch.zeros(num_transitions_per_env, num_envs, *grf_shape, device=self.device)
         self.observation_targets = torch.zeros(num_transitions_per_env, num_envs, *sinle_critc_obs_shape, device=self.device)
+        self.hard_pact_auxiliary = bool(hard_pact_auxiliary)
+        if self.hard_pact_auxiliary:
+            self.executed_torque_targets = torch.zeros(
+                num_transitions_per_env, num_envs, 12, device=self.device
+            )
+            self.wrench_targets = torch.zeros(
+                num_transitions_per_env, num_envs, 6, device=self.device
+            )
+            self.wrench_active_masks = torch.zeros(
+                num_transitions_per_env, num_envs, 1,
+                device=self.device, dtype=torch.bool,
+            )
+        else:
+            self.executed_torque_targets = None
+            self.wrench_targets = None
+            self.wrench_active_masks = None
 
         
         # For PPO
@@ -113,6 +134,14 @@ class RolloutStoragePACTPos:
         self.explicit_labels[self.step].copy_(transition.explicit_labels)
         self.grf_targets[self.step].copy_(transition.grf_targets)
         self.observation_targets[self.step].copy_(transition.obs_targets)
+        if self.hard_pact_auxiliary:
+            self.executed_torque_targets[self.step].copy_(
+                transition.executed_torque_targets
+            )
+            self.wrench_targets[self.step].copy_(transition.wrench_targets)
+            self.wrench_active_masks[self.step].copy_(
+                transition.wrench_active_masks
+            )
         
         # Need a set for each "task"
         #  - Position Control
@@ -181,6 +210,18 @@ class RolloutStoragePACTPos:
         explicit_labels = self.explicit_labels.flatten(0,1)
         grf_labels = self.grf_targets.flatten(0,1)
         obs_targets = self.observation_targets.flatten(0,1)
+        executed_torque_targets = (
+            self.executed_torque_targets.flatten(0, 1)
+            if self.hard_pact_auxiliary else None
+        )
+        wrench_targets = (
+            self.wrench_targets.flatten(0, 1)
+            if self.hard_pact_auxiliary else None
+        )
+        wrench_active_masks = (
+            self.wrench_active_masks.flatten(0, 1)
+            if self.hard_pact_auxiliary else None
+        )
 
         actions = self.actions.flatten(0, 1)
         values = self.values.flatten(0, 1)
@@ -223,4 +264,7 @@ class RolloutStoragePACTPos:
                 yield terminated_batch, obs_batch, critic_observations_batch, obs_hist_batch, explicit_labels_batch, \
                         grf_labels_batch, obs_labels_batch, actions_batch, target_values_batch, \
                         advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
-                        old_sigma_batch
+                        old_sigma_batch, \
+                        (executed_torque_targets[batch_idx] if self.hard_pact_auxiliary else None), \
+                        (wrench_targets[batch_idx] if self.hard_pact_auxiliary else None), \
+                        (wrench_active_masks[batch_idx] if self.hard_pact_auxiliary else None)

@@ -69,6 +69,15 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
         projection = torch.tensor(3.0)
         weighted = algorithm._combine_bard_losses(inverse, rollout, projection)
         torch.testing.assert_close(weighted, torch.tensor(6.0))
+
+        # Reporting retains the per-objective lambda values but excludes both
+        # the outer PINN schedule and the separately weighted QP projection.
+        unweighted = algorithm._unweighted_pinn_loss(inverse, rollout)
+        torch.testing.assert_close(unweighted, torch.tensor(4.5))
+        optimized = algorithm._combine_bard_losses(
+            inverse, rollout, projection, pinn_weight=0.01
+        )
+        torch.testing.assert_close(optimized, torch.tensor(1.545))
         for name in ("lambda_inverse", "lambda_rollout", "lambda_projection"):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(ValueError, "must be nonnegative"):

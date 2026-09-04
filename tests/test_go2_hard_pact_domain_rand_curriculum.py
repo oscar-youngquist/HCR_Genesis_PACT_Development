@@ -110,6 +110,11 @@ def test_isaaclab_pact_adapter_is_an_explicit_thin_subclass():
     assert "hard_pact_configuration" in IsaacLabSimulator_PACT.__dict__
     assert "hard_pact_configuration" not in IsaacLabSimulator.__dict__
     assert "_compute_torques" in IsaacLabSimulator_PACT.__dict__
+    capabilities = IsaacLabSimulator_PACT.hard_pact_capabilities(None)
+    assert capabilities["supports_domain_rand_curriculum"]
+    assert capabilities["features"]["motor_strength"]
+    assert capabilities["features"]["push_z"]
+    assert capabilities["features"]["push_angular"]
     assert task_registry.env_cfgs[
         "go2_hard_pact_full_isaaclab"
     ].sim.use_pact_adapter
@@ -143,13 +148,24 @@ def test_isaaclab_push_writes_root_velocity_only_at_event():
     simulator._control_dt = 0.1
     simulator._push_call_counter = 0
     simulator.push_interval_min = simulator.push_interval_max = 1.0
+    simulator.vert_interval_min = simulator.vert_interval_max = 1.0
+    simulator.wrench_timeout_min = simulator.wrench_timeout_max = 1.0
     simulator.push_timeouts = torch.ones(2, 1)
+    simulator.vert_timeouts = torch.ones(2, 1)
+    simulator.wrench_timeouts = torch.ones(2, 1)
     simulator._rand_push_vels = torch.zeros(2, 3)
+    simulator._rand_wrench_vels = torch.zeros(2, 3)
+    simulator.vert_value = 0.25
+    simulator.angular_push_value = 0.5
     simulator._cfg = SimpleNamespace(
         # Exercise backward compatibility with legacy configs that do not
         # declare the optional lateral-only restriction.
         env=SimpleNamespace(),
-        domain_rand=SimpleNamespace(max_push_vel_xy=1.0),
+        domain_rand=SimpleNamespace(
+            max_push_vel_xy=1.0,
+            max_vertical_push=0.25,
+            max_push_torque=0.5,
+        ),
     )
     simulator._robot = Robot()
 
@@ -161,13 +177,66 @@ def test_isaaclab_push_writes_root_velocity_only_at_event():
     assert len(simulator._robot.writes) == 1
     written_velocity, written_envs = simulator._robot.writes[0]
     torch.testing.assert_close(written_envs, torch.tensor([0, 1]))
-    torch.testing.assert_close(written_velocity[:, :2], simulator._rand_push_vels[:, :2])
+    torch.testing.assert_close(written_velocity[:, :3], simulator._rand_push_vels)
+    torch.testing.assert_close(written_velocity[:, 3:6], simulator._rand_wrench_vels)
+    assert torch.all(simulator._rand_push_vels[:, 2] <= 0.0)
+    assert torch.all(simulator._rand_wrench_vels.abs() <= 0.5)
 
     velocity_after_event = simulator._robot.data.root_link_vel_w.clone()
     simulator.push_robots()
     assert len(simulator._robot.writes) == 1
     torch.testing.assert_close(simulator._robot.data.root_link_vel_w, velocity_after_event)
     assert torch.count_nonzero(simulator._rand_push_vels) == 0
+    assert torch.count_nonzero(simulator._rand_wrench_vels) == 0
+
+
+def test_isaaclab_motor_strength_randomizes_only_selected_environments():
+    from legged_gym.simulator.isaaclab_simulator_pact import IsaacLabSimulator_PACT
+
+    simulator = object.__new__(IsaacLabSimulator_PACT)
+    simulator._device = "cpu"
+    simulator._num_actions = 12
+    simulator._motor_strength = torch.ones(3, 12)
+    simulator._cfg = SimpleNamespace(
+        domain_rand=SimpleNamespace(motor_strength_range=(0.75, 0.75))
+    )
+
+    simulator._randomize_motor_strength(torch.tensor([0, 2]))
+
+    torch.testing.assert_close(
+        simulator._motor_strength[[0, 2]], torch.full((2, 12), 0.75)
+    )
+    torch.testing.assert_close(simulator._motor_strength[1], torch.ones(12))
+
+
+def test_isaaclab_hard_pact_pos_torque_uses_motor_strength():
+    from legged_gym.simulator.isaaclab_simulator_pact import IsaacLabSimulator_PACT
+
+    simulator = object.__new__(IsaacLabSimulator_PACT)
+    simulator._num_actions = 12
+    simulator._cfg = SimpleNamespace(
+        control=SimpleNamespace(action_scale=1.0, control_type="P")
+    )
+    simulator._kp_scale = torch.ones(1, 12)
+    simulator._kd_scale = torch.ones(1, 12)
+    simulator._p_gains = torch.full((1, 12), 2.0)
+    simulator._d_gains = torch.ones(1, 12)
+    simulator._dof_indices = list(range(12))
+    simulator._robot = SimpleNamespace(data=SimpleNamespace(
+        default_joint_pos=torch.zeros(1, 12),
+        joint_pos=torch.ones(1, 12),
+        joint_vel=torch.zeros(1, 12),
+        joint_effort_limits=torch.full((1, 12), 100.0),
+    ))
+    simulator._motor_strength = torch.full((1, 12), 0.5)
+    simulator.first_loop = True
+    simulator.first_loop_feedback = None
+
+    torque = simulator._compute_torques(torch.zeros(1, 12))
+
+    torch.testing.assert_close(simulator.feedback_torques, torch.full((1, 12), -2.0))
+    torch.testing.assert_close(simulator._unweighted_torques, torch.full((1, 12), -1.0))
+    torch.testing.assert_close(torque, torch.full((1, 12), -1.0))
 
 
 def test_isaaclab_persistent_wrench_uses_composer_api():

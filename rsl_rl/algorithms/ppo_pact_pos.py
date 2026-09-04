@@ -40,6 +40,7 @@ import random
 import gc
 
 from rsl_rl.modules import ActorCritic_PACT_Pos, ContextDecoder
+from rsl_rl.modules.hard_pact_physics import normalized_huber_loss
 from rsl_rl.storage import RolloutStoragePACTPos
 
 from .pc_grad import PCGrad
@@ -74,12 +75,24 @@ class PPO_PACT_Pos:
                  adaptive_ent_ter_threshold=5.0,
                  adaptive_ent_softmax_temp=2.0,
                  reconstruction_indices=None,
+                 privileged_loss_weight=1.0,
+                 explicit_loss_weight=1.0,
+                 grf_loss_weight=1.0,
+                 active_wrench_loss_weight=1.0,
+                 neutral_wrench_loss_weight=0.25,
                  ):
         
         self.device = device
 
         self.num_priv_obs = num_priv_obs
         self.reconstruction_indices = reconstruction_indices
+        self.is_hard_pact_pos = hasattr(actor_critic, "physics_estimator")
+        self.privileged_loss_weight = float(privileged_loss_weight)
+        self.explicit_loss_weight = float(explicit_loss_weight)
+        self.grf_loss_weight = float(grf_loss_weight)
+        self.active_wrench_loss_weight = float(active_wrench_loss_weight)
+        self.neutral_wrench_loss_weight = float(neutral_wrench_loss_weight)
+        self.last_auxiliary_metrics = {}
 
         self.desired_kl = desired_kl
         self.schedule = schedule
@@ -135,7 +148,8 @@ class PPO_PACT_Pos:
         
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape):
         self.storage = RolloutStoragePACTPos(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
-                                                               action_shape, torso_velo_shape, grf_shape, self.device)
+                                                               action_shape, torso_velo_shape, grf_shape, self.device,
+                                                               hard_pact_auxiliary=self.is_hard_pact_pos)
 
     def test_mode(self):
         self.actor_critic.test()
@@ -181,6 +195,21 @@ class PPO_PACT_Pos:
         # self.transition.obs_targets = obs_labels
 
         self.transition.explicit_labels = explicit_labels
+        if self.is_hard_pact_pos:
+            hard_pact = infos.get("hard_pact_transition")
+            if hard_pact is None:
+                raise RuntimeError(
+                    "HardPACTPos auxiliary heads require hard_pact_transition labels"
+                )
+            self.transition.executed_torque_targets = hard_pact[
+                "interval_executed_torque"
+            ]
+            self.transition.wrench_targets = hard_pact[
+                "total_external_wrench_label_yaw_scaled"
+            ]
+            self.transition.wrench_active_masks = hard_pact[
+                "sustained_wrench_active_mask"
+            ].bool()
         
         # Bootstrapping on time outs
         if 'time_outs' in infos:
@@ -300,6 +329,7 @@ class PPO_PACT_Pos:
         mean_kld_loss = 0
         mean_decoder_loss = 0
         mean_tau_loss = 0
+        auxiliary_metric_sums = {}
 
         timers = {
             "rl_loss": 0.0,
@@ -321,7 +351,8 @@ class PPO_PACT_Pos:
         for terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
             grf_target, obs_target, actions_batch, target_values_batch, \
             advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
-            old_sigma_batch in generator:
+            old_sigma_batch, executed_torque_target, wrench_target, \
+            wrench_active_mask in generator:
             
             self.actor_critic.train()
             self.act_optimizer.zero_grad()
@@ -377,8 +408,13 @@ class PPO_PACT_Pos:
                 t0 = time.perf_counter()
 
                 # Calculate the DreamWaQ-style VAE update
-                vae_loss, kl_div, recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(obs_hist_batch, grf_target, 
-                                                                                                                          obs_target, explicit_labels_batch, terminated_batch)
+                vae_loss, kl_div, recon_error, vel_pred_error, dec_input, \
+                    decode_targets, recons, auxiliary_metrics = self._compute_vae_loss(
+                        obs_hist_batch, grf_target, obs_target,
+                        explicit_labels_batch, terminated_batch,
+                        executed_torque_target, wrench_target,
+                        wrench_active_mask,
+                    )
                 
                 timers["vae_loss"] += time.perf_counter() - t0
                 
@@ -389,7 +425,18 @@ class PPO_PACT_Pos:
                 # Update paramaters of encoder
                 self.enc_optimizer.zero_grad()
                 vae_loss.backward()
-                nn.utils.clip_grad_norm_(self.actor_critic.context_encoder.parameters(), self.max_grad_norm)
+                auxiliary_parameters = self.actor_critic.context_encoder.parameters()
+                if self.is_hard_pact_pos:
+                    auxiliary_parameters = (
+                        parameter
+                        for module in (
+                            self.actor_critic.context_encoder,
+                            self.actor_critic.explicit_estimator,
+                            self.actor_critic.physics_estimator,
+                        )
+                        for parameter in module.parameters()
+                    )
+                nn.utils.clip_grad_norm_(auxiliary_parameters, self.max_grad_norm)
                 self.enc_optimizer.step()
                 
                 timers["enc_step"] += time.perf_counter() - t0
@@ -446,6 +493,12 @@ class PPO_PACT_Pos:
                 mean_recon_loss += recon_error.item()
                 mean_kld_loss += kl_div.item()
                 mean_decoder_loss += dec_loss.item()
+                for name, value in auxiliary_metrics.items():
+                    auxiliary_metric_sums[name] = (
+                        auxiliary_metric_sums.get(
+                            name, torch.zeros_like(value.detach())
+                        ) + value.detach()
+                    )
 
             # Keeps the interaction of incoming data with layer wieghts below the threashold that 
             #     saturates the tanh activation function.
@@ -463,6 +516,11 @@ class PPO_PACT_Pos:
         mean_kld_loss /= (num_updates * self.num_enc_epochs)
         mean_vel_loss /= (num_updates * self.num_enc_epochs)
         mean_recon_loss /= (num_updates * self.num_enc_epochs)
+        auxiliary_denominator = num_updates * self.num_enc_epochs
+        self.last_auxiliary_metrics = {
+            name: value / auxiliary_denominator
+            for name, value in auxiliary_metric_sums.items()
+        }
 
 
         torch.cuda.synchronize()
@@ -591,8 +649,16 @@ class PPO_PACT_Pos:
 
         return ppo_loss, surrogate_loss, value_loss, current_actions, tau_clone_loss
 
-    def _compute_vae_loss(self, obs_hist_batch, grf_target, 
-                          obs_target, explicit_labels_batch, terminated_batch):
+    @staticmethod
+    def _masked_mse(prediction, target, valid):
+        per_sample = (prediction - target).square().mean(dim=-1)
+        weights = valid.reshape(-1).to(per_sample.dtype)
+        return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
+
+    def _compute_vae_loss(self, obs_hist_batch, grf_target,
+                          obs_target, explicit_labels_batch, terminated_batch,
+                          executed_torque_target=None, wrench_target=None,
+                          wrench_active_mask=None):
         vae_loss = None
         
         mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.cenet_enc_forward(obs_hist_batch)
@@ -614,6 +680,68 @@ class PPO_PACT_Pos:
         recon_error    = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
         kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
         # kl_div         = -0.5*torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp())
-        vae_loss = vel_pred_error + recon_error + self.vae_beta*kl_div
+        auxiliary_metrics = {
+            "total": vel_pred_error + recon_error + self.vae_beta * kl_div,
+            "privileged_reconstruction": recon_error,
+            "kl": kl_div,
+            "explicit": vel_pred_error,
+        }
+
+        if self.is_hard_pact_pos:
+            if any(value is None for value in (
+                    executed_torque_target, wrench_target,
+                    wrench_active_mask)):
+                raise RuntimeError("HardPACTPos auxiliary physics labels are missing")
+            valid = terminated_batch.bool()
+            heads = self.actor_critic.physics_heads(
+                cenet_latent, cenet_torso_velo,
+                executed_torque_target.detach(),
+            )
+            grf_loss = normalized_huber_loss(
+                heads.grf_yaw_scaled, grf_target.detach(),
+                self.actor_critic.physics_estimator.grf_scale, valid,
+            )
+            active = valid & wrench_active_mask.bool()
+            neutral = valid & ~wrench_active_mask.bool()
+            wrench_active_loss = normalized_huber_loss(
+                heads.base_wrench_yaw_scaled, wrench_target.detach(),
+                self.actor_critic.physics_estimator.wrench_scale, active,
+            )
+            wrench_neutral_loss = normalized_huber_loss(
+                heads.base_wrench_yaw_scaled, wrench_target.detach(),
+                self.actor_critic.physics_estimator.wrench_scale, neutral,
+            )
+            explicit_linear = self._masked_mse(
+                cenet_torso_velo[:, :3], explicit_labels_batch[:, :3], valid
+            )
+            explicit_contact = self._masked_mse(
+                cenet_torso_velo[:, 3:7], explicit_labels_batch[:, 3:7], valid
+            )
+            explicit_clearance = self._masked_mse(
+                cenet_torso_velo[:, 7:11], explicit_labels_batch[:, 7:11], valid
+            )
+            vae_loss = (
+                self.privileged_loss_weight * recon_error
+                + self.vae_beta * kl_div
+                + self.explicit_loss_weight * vel_pred_error
+                + self.grf_loss_weight * grf_loss
+                + self.active_wrench_loss_weight * wrench_active_loss
+                + self.neutral_wrench_loss_weight * wrench_neutral_loss
+            )
+            auxiliary_metrics.update({
+                "total": vae_loss,
+                "grf": grf_loss,
+                "wrench_active": wrench_active_loss,
+                "wrench_neutral": wrench_neutral_loss,
+                "explicit_base_linear_velocity": explicit_linear,
+                "explicit_contact_probabilities": explicit_contact,
+                "explicit_foot_clearance": explicit_clearance,
+            })
+        else:
+            vae_loss = auxiliary_metrics["total"]
         
-        return vae_loss, kl_div, recon_error, vel_pred_error, dec_input.clone().detach(), decode_target.detach(), enc_update_obs_decode.detach()
+        return (
+            vae_loss, kl_div, recon_error, vel_pred_error,
+            dec_input.clone().detach(), decode_target.detach(),
+            enc_update_obs_decode.detach(), auxiliary_metrics,
+        )

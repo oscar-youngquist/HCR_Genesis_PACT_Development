@@ -174,12 +174,12 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         use_disturbance_curriculum = False
 
         persistent_disturbance = True
-        persistent_force_probability = 0.3
-        persistent_torque_probability = 0.3
-        persistent_force_interval_range_s = [5.0, 15.0]
-        persistent_torque_interval_range_s = [5.0, 15.0]
-        persistent_force_duration_range_s = [2.0, 6.0]
-        persistent_torque_duration_range_s = [2.0, 6.0]
+        persistent_force_probability = 0.1
+        persistent_torque_probability = 0.1
+        persistent_force_interval_range_s = [5.0, 10.0]
+        persistent_torque_interval_range_s = [5.0, 10.0]
+        persistent_force_duration_range_s = [2.0, 4.0]
+        persistent_torque_duration_range_s = [2.0, 4.0]
         persistent_ramp_fraction = 0.25
         persistent_force_min_n = 5.0
         persistent_force_max_n = 5.0
@@ -285,7 +285,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         overreach_x_max = 0.28
         support_polygon_sigma = 0.01
 
-        rear_foot_x_nominal = -0.25
+        rear_foot_x_nominal = -0.20
         rear_foot_x_margin = 0.08
 
         foot_clearance_tracking_sigma = 0.01
@@ -378,9 +378,9 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             stumble          = -0.2
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
 
-            feet_near_edge = -1.0
-            edge_swing_clearance = -2.0
-            swing_foot_collision_edge = -1.0
+            feet_near_edge = -0.1
+            edge_swing_clearance = -0.0
+            swing_foot_collision_edge = -0.1
             feet_regulation = -0.1
 
         class reward_curriculum:
@@ -445,6 +445,11 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         learning_rate = 0.0003
+        privileged_loss_weight = 1.0
+        explicit_loss_weight = 1.0
+        grf_loss_weight = 1.0
+        active_wrench_loss_weight = 1.0
+        neutral_wrench_loss_weight = 0.25
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -457,8 +462,8 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         max_grad_norm = 1.0
 
         # adaptive entropy coefficent algorithm parameters
-        entropy_coef = 0.02                      # initial entropy value
-        use_adaptive_entropy = True              # weather or not to use the adaptive entropy coef alg.
+        entropy_coef = 0.01                      # initial entropy value
+        use_adaptive_entropy = False              # weather or not to use the adaptive entropy coef alg.
         adaptive_ent_bounds = [0.01, 0.02]      # entropy coefficent bands
         adaptive_ent_lin_threshold = 0.75        # minimum linear velocity tracking target
         adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target
