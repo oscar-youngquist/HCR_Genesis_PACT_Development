@@ -175,13 +175,15 @@ def build_deployment_contract(cfg, actor, gain_spec):
     """Build the human- and machine-readable frozen deployment contract."""
     grf_buffer = actor.physics_estimator.grf_scale.detach().cpu().tolist()
     wrench_buffer = actor.physics_estimator.wrench_scale.detach().cpu().tolist()
+    latent_dim = actor.context_encoder.ce_out_mean.out_features
+    explicit_dim = actor.explicit_estimator.network[-1].out_features
     source_json = json.dumps(gain_spec.source, sort_keys=True, separators=(",", ":"))
     contract = {
         "schema_version": 2,
         "explicit_estimator": {
             "dimension": 11,
             "input": "deterministic_latent_mean",
-            "input_dimension": 16,
+            "input_dimension": latent_dim,
             "hidden_layers": [
                 layer.out_features
                 for layer in actor.explicit_estimator.network
@@ -194,12 +196,12 @@ def build_deployment_contract(cfg, actor, gain_spec):
                 {"name": "foot_clearance", "dimension": 4, "order": list(FOOT_ORDER), "units": "m", "scaling": 1.0, "clipping": [-1.0, 1.0]},
             ],
         },
-        "latent_dimension": 16,
+        "latent_dimension": latent_dim,
         "history": {"observation_dimension": 57, "steps": 20},
         "deployment_heads": {
             "activation": "ELU",
-            "grf": {"input_order": ["z_t", "stopgrad(explicit_t)", "tau_nom"], "input_dimension": 39, "hidden_layers": _hidden_linear_widths(actor.physics_estimator.grf_head), "output_dimension": 12},
-            "base_wrench": {"input_order": ["z_t", "stopgrad(explicit_t)"], "input_dimension": 27, "hidden_layers": _hidden_linear_widths(actor.physics_estimator.wrench_head), "output_dimension": 6},
+            "grf": {"input_order": ["z_t", "stopgrad(explicit_t)", "tau_nom"], "input_dimension": latent_dim + explicit_dim + 12, "hidden_layers": _hidden_linear_widths(actor.physics_estimator.grf_head), "output_dimension": 12},
+            "base_wrench": {"input_order": ["z_t", "stopgrad(explicit_t)"], "input_dimension": latent_dim + explicit_dim, "hidden_layers": _hidden_linear_widths(actor.physics_estimator.wrench_head), "output_dimension": 6},
         },
         "frames_and_units": {
             "grf": {"frame": "yaw_local", "units": "N", "foot_order": list(FOOT_ORDER), "component_order": ["Fx", "Fy", "Fz"], "target": "deadbanded_clipped_control_interval_average"},

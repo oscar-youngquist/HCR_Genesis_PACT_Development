@@ -205,7 +205,10 @@ class OnPolicyRunnerPACT:
                               [2*self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]], [self.env.wb_dim])
         if self.is_hard_pact:
             delay_range = self.env.cfg.domain_rand.ctrl_delay_step_range
-            self.alg.storage.configure_action_replay(int(delay_range[1]))
+            self.alg.storage.configure_action_replay(
+                int(delay_range[1]),
+                context_latent_dim=self.actor_critic.context_encoder.ce_out_mean.out_features,
+            )
             # Limits are backend properties, not learned transition data.
             # Bind them once so PPO minibatches carry only the previous torque
             # needed by the rate constraint, minimizing persistent GPU memory.

@@ -645,6 +645,9 @@ class PPO_HardPACT:
             (all_actions - self.transition.action_mean)
             / self.transition.action_sigma.clamp_min(1.0e-8)
         ).detach()
+        self.transition.context_latent_noise = (
+            self.actor_critic.cenet_latent_noise.detach()
+        )
         
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
@@ -1010,7 +1013,8 @@ class PPO_HardPACT:
             ppo_loss, surrogate_loss, value_loss, current_actions, policy_features = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
-                                                                                          advantages_batch, target_values_batch, returns_batch)
+                                                                                          advantages_batch, target_values_batch, returns_batch,
+                                                                                          latent_noise=self.storage.current_hard_pact_batch["context_latent_noise"])
 
             # Rebuild the same stochastic action path under the current
             # policy, then select the source chosen by the rollout's exact
@@ -1375,11 +1379,16 @@ class PPO_HardPACT:
                          actions_batch, critic_obs_batch,
                          old_sigma_batch, old_mu_batch,
                          old_actions_log_prob_batch,
-                         advantages_batch, target_values_batch, returns_batch):
+                         advantages_batch, target_values_batch, returns_batch,
+                         latent_noise=None):
         if self.use_boot:
-            self.actor_critic.act(obs_batch, obs_hist_batch)
+            self.actor_critic.act(
+                obs_batch, obs_hist_batch, latent_noise=latent_noise
+            )
         else:
-            self.actor_critic.act_bootmask(obs_batch, obs_hist_batch)
+            self.actor_critic.act_bootmask(
+                obs_batch, obs_hist_batch, latent_noise=latent_noise
+            )
 
         # Pull out the current actions for use later
         current_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
@@ -1653,9 +1662,13 @@ class PPO_HardPACT:
         ), dim=-1)
         return (violations / float(self.qp_config.force_scale_n)).square().mean()
 
-    def _policy_raw_action_from_noise(self, observation, history, noise):
+    def _policy_raw_action_from_noise(
+        self, observation, history, noise, context_latent_noise=None
+    ):
         """Reparameterize one stored policy draw under current parameters."""
-        _, _, latent, explicit = self.actor_critic.cenet_enc_forward(history)
+        _, _, latent, explicit = self.actor_critic.cenet_enc_forward(
+            history, latent_noise=context_latent_noise
+        )
         if self.use_boot:
             conditioning = torch.cat((observation, latent, explicit), dim=-1)
         else:
@@ -1708,6 +1721,7 @@ class PPO_HardPACT:
                 transition["delayed_source_observation"][delayed_rows].detach(),
                 transition["delayed_source_history"][delayed_rows].detach(),
                 transition["delayed_source_noise"][delayed_rows],
+                transition["delayed_source_context_latent_noise"][delayed_rows],
             )
         current_transformed = torch.clamp(
             current_raw, -self.action_clip, self.action_clip

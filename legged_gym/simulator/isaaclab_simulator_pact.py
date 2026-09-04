@@ -383,11 +383,13 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         if self.first_loop:
             self.first_loop = False
             self.first_loop_feedback = torques.clone()
-        return torch.clip(
-            self._motor_strength * torques,
-            -self.torque_limits,
-            self.torque_limits,
-        )
+        # return torch.clip(
+        #     self._motor_strength * torques,
+        #     -self.torque_limits,
+        #     self.torque_limits,
+        # )
+
+        return torques
 
     def post_physics_step(self):
         super().post_physics_step()

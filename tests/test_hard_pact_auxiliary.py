@@ -86,16 +86,21 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
     def test_hard_pact_ppo_is_self_contained(self):
         self.assertNotIn(PPO_PACT, PPO_HardPACT.__mro__)
 
-    def test_output_shapes_ranges_and_deterministic_runtime(self):
+    def test_output_shapes_ranges_and_stochastic_training_latent(self):
         actor, _ = make_modules()
         history = torch.randn(4, 57 * 20)
         first = actor.cenet_enc_forward(history)
         second = actor.cenet_enc_forward(history)
         self.assertEqual(first[0].shape, (4, 16))
         self.assertEqual(first[3].shape, (4, 11))
-        torch.testing.assert_close(first[2], first[0])
-        torch.testing.assert_close(first[2], second[2])
-        torch.testing.assert_close(first[3], second[3])
+        self.assertFalse(torch.equal(first[2], first[0]))
+        self.assertFalse(torch.equal(first[2], second[2]))
+        self.assertFalse(torch.equal(first[3], second[3]))
+        inference_latent, inference_explicit = actor.cenet_enc_inference(history)
+        torch.testing.assert_close(inference_latent, first[0])
+        torch.testing.assert_close(
+            inference_explicit, actor.explicit_estimator(first[0])
+        )
         self.assertTrue(torch.all((first[3][:, 3:7] >= 0) & (first[3][:, 3:7] <= 1)))
         self.assertTrue(torch.all(first[3][:, 7:11].abs() <= 1))
 

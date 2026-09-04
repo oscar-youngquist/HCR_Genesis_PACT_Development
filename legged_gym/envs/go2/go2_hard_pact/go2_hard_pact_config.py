@@ -285,6 +285,8 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         foot_clearance_target = 0.09
         foot_height_offset = 0.022
         overreach_x_max = 0.28
+        front_foot_x_nominal = 0.20
+        foot_x_margin = 0.10
         rear_foot_x_nominal = -0.25
         rear_foot_x_margin = 0.08
         support_polygon_sigma = 0.01

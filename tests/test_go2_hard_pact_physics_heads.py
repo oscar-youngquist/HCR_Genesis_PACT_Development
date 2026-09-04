@@ -49,7 +49,7 @@ from rsl_rl.modules.hard_pact_physics import (
 from rsl_rl.algorithms.ppo_pact import PPO_PACT
 
 
-def _small_actor(gains=None, actor_class=ActorCritic_HardPACT):
+def _small_actor(gains=None, actor_class=ActorCritic_HardPACT, latent_dim=16):
     gains = gains or calculate_physics_head_gains(GO2HardPACTCfg())
     return actor_class(
         num_actor_obs=57,
@@ -58,7 +58,7 @@ def _small_actor(gains=None, actor_class=ActorCritic_HardPACT):
         actor_layers=[32, 16],
         critic_layers=[32, 16],
         cenet_in_dim=57 * 20,
-        cenet_latent_dim=16,
+        cenet_latent_dim=latent_dim,
         cenet_velo_dim=11,
         cenet_enc_layers=[32, 16],
         activation="elu",
@@ -101,6 +101,20 @@ def _gain_cfg(
 
 
 class ExplicitEstimatorAndHeadTests(unittest.TestCase):
+    def test_history_latent_dimension_is_configurable(self):
+        for actor_class in (ActorCritic_HardPACT, ActorCritic_HardPACT_Pos):
+            with self.subTest(actor=actor_class.__name__):
+                actor = _small_actor(actor_class=actor_class, latent_dim=7)
+                history = torch.randn(2, 57 * 20)
+                noise = torch.randn(2, 7)
+                mean, logvar, sample, explicit = actor.cenet_enc_forward(
+                    history, latent_noise=noise
+                )
+                self.assertEqual(tuple(mean.shape), (2, 7))
+                self.assertEqual(tuple(logvar.shape), (2, 7))
+                self.assertEqual(tuple(sample.shape), (2, 7))
+                self.assertEqual(tuple(explicit.shape), (2, 11))
+
     def test_explicit_target_composition_order_scaling_and_clipping(self):
         velocity = torch.tensor([[1.0, -2.0, 3.0]]) * 0.5
         contacts = torch.tensor([[0.0, 0.25, 0.75, 1.0]])
@@ -174,15 +188,20 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
             [(27, 23), (23, 19), (19, 13), (13, 6)],
         )
 
-    def test_actor_preserves_policy_shape_and_uses_deterministic_latent(self):
+    def test_actor_uses_stochastic_training_latent_and_deterministic_inference(self):
         torch.manual_seed(5)
         actor = _small_actor()
         observation = torch.randn(2, 57)
         history = torch.randn(2, 57 * 20)
         first = actor.cenet_enc_forward(history)
         second = actor.cenet_enc_forward(history)
-        torch.testing.assert_close(first[2], first[0])
-        torch.testing.assert_close(first[2], second[2])
+        self.assertFalse(torch.equal(first[2], first[0]))
+        self.assertFalse(torch.equal(first[2], second[2]))
+        inference_latent, inference_explicit = actor.cenet_enc_inference(history)
+        torch.testing.assert_close(inference_latent, first[0])
+        torch.testing.assert_close(
+            inference_explicit, actor.explicit_estimator(first[0])
+        )
         self.assertEqual(tuple(first[2].shape), (2, 16))
         self.assertEqual(tuple(first[3].shape), (2, 11))
         action = actor.act(observation, history)
@@ -249,14 +268,15 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         first = actor.cenet_enc_forward(history)
         torch.manual_seed(999)
         second = actor.cenet_enc_forward(history)
-        torch.testing.assert_close(first[2], second[2])
-        torch.testing.assert_close(first[3], second[3])
+        self.assertFalse(torch.equal(first[2], second[2]))
+        self.assertFalse(torch.equal(first[3], second[3]))
 
     def test_estimate_is_used_by_actor_decoder_and_physics_consumers(self):
         actor = _small_actor()
         observation = torch.randn(3, 57)
         history = torch.randn(3, 57 * 20)
         mean, _, latent, estimate = actor.cenet_enc_forward(history)
+        latent_noise = actor.cenet_latent_noise.clone()
 
         captured_actor_input = []
         hook = actor.act_trunk[0].register_forward_pre_hook(
@@ -264,7 +284,9 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         )
         actor.act_inference(observation, history)
         hook.remove()
-        torch.testing.assert_close(captured_actor_input[0][:, -11:], estimate)
+        torch.testing.assert_close(
+            captured_actor_input[0][:, -11:], actor.explicit_estimator(mean)
+        )
 
         algorithm = PPO_PACT.__new__(PPO_PACT)
         algorithm.actor_critic = actor
@@ -278,12 +300,19 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
             torch.zeros(3, 11),
             mask,
         )
-        torch.testing.assert_close(decoder_input[:, :16], mean)
-        torch.testing.assert_close(decoder_input[:, 16:], estimate)
+        # Both auxiliary decoder inputs are derived from the same fresh
+        # reparameterized content sample.
+        self.assertFalse(torch.equal(decoder_input[:, :16], mean))
+        torch.testing.assert_close(
+            decoder_input[:, 16:],
+            actor.explicit_estimator(decoder_input[:, :16]),
+        )
 
         nominal_torque = torch.randn(3, 12)
         expected = actor.physics_heads(latent, estimate, nominal_torque)
-        actual = actor.physics_heads_from_history(history, nominal_torque)
+        actual = actor.physics_heads_from_history(
+            history, nominal_torque, latent_noise=latent_noise
+        )
         torch.testing.assert_close(actual.grf_yaw_scaled, expected.grf_yaw_scaled)
         torch.testing.assert_close(
             actual.base_wrench_yaw_scaled, expected.base_wrench_yaw_scaled

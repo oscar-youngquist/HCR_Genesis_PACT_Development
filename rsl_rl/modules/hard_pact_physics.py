@@ -92,13 +92,13 @@ def transform_explicit_estimator_output(raw, contact_epsilon=1.0e-2):
 
 
 class ExplicitEstimatorDecoder(nn.Module):
-    """Decode the deterministic history-latent mean into the 11-D estimate."""
+    """Decode a configurable history latent into the fixed 11-D estimate."""
 
     def __init__(self, latent_dim=16, hidden_layers=(128, 128), output_dim=11,
                  contact_epsilon=1.0e-2):
         super().__init__()
-        if latent_dim != 16 or output_dim != 11:
-            raise ValueError("HardPACT explicit decoding requires dimensions 16 -> 11")
+        if output_dim != 11:
+            raise ValueError("HardPACT explicit decoding requires 11 outputs")
         if not hidden_layers:
             raise ValueError("explicit estimator requires at least one hidden layer")
         layers = []
@@ -108,11 +108,14 @@ class ExplicitEstimatorDecoder(nn.Module):
             input_dim = int(hidden_dim)
         layers.append(nn.Linear(input_dim, output_dim))
         self.network = nn.Sequential(*layers)
+        self.latent_dim = int(latent_dim)
         self.contact_epsilon = float(contact_epsilon)
 
     def forward(self, latent_mean):
-        if latent_mean.shape[-1] != 16:
-            raise ValueError("explicit estimator input must be a 16-D latent mean")
+        if latent_mean.shape[-1] != self.latent_dim:
+            raise ValueError(
+                f"explicit estimator input must be {self.latent_dim}-D"
+            )
         return transform_explicit_estimator_output(
             self.network(latent_mean), self.contact_epsilon
         )
@@ -145,6 +148,8 @@ class DeploymentPhysicsHeads(nn.Module):
         wrench_radius=None,
     ):
         super().__init__()
+        self.latent_dim = int(latent_dim)
+        self.explicit_dim = int(explicit_dim)
         self.grf_head = _physics_head(
             latent_dim + explicit_dim + 12, grf_hidden_layers, 12
         )
@@ -171,8 +176,11 @@ class DeploymentPhysicsHeads(nn.Module):
             raise ValueError("wrench_scale must contain 6 values")
 
     def forward(self, latent, explicit, nominal_torque):
-        if latent.shape[-1] != 16 or explicit.shape[-1] != 11:
-            raise ValueError("HardPACT physics heads require z=16 and explicit=11")
+        if (latent.shape[-1] != self.latent_dim
+                or explicit.shape[-1] != self.explicit_dim):
+            raise ValueError(
+                "HardPACT physics-head input dimensions do not match configuration"
+            )
         if nominal_torque.shape[-1] != 12:
             raise ValueError("nominal torque must be 12-D")
         grf = self.predict_grf(latent, explicit, nominal_torque)
@@ -187,8 +195,11 @@ class DeploymentPhysicsHeads(nn.Module):
         Rollout calls this once per physics substep, so keeping it separate
         avoids redundantly evaluating the control-rate wrench head.
         """
-        if latent.shape[-1] != 16 or explicit.shape[-1] != 11:
-            raise ValueError("HardPACT physics heads require z=16 and explicit=11")
+        if (latent.shape[-1] != self.latent_dim
+                or explicit.shape[-1] != self.explicit_dim):
+            raise ValueError(
+                "HardPACT physics-head input dimensions do not match configuration"
+            )
         if nominal_torque.shape[-1] != 12:
             raise ValueError("nominal torque must be 12-D")
         stopped_explicit = explicit.detach()
@@ -199,8 +210,11 @@ class DeploymentPhysicsHeads(nn.Module):
 
     def predict_wrench(self, latent, explicit):
         """Evaluate the control-rate base-wrench prediction."""
-        if latent.shape[-1] != 16 or explicit.shape[-1] != 11:
-            raise ValueError("HardPACT physics heads require z=16 and explicit=11")
+        if (latent.shape[-1] != self.latent_dim
+                or explicit.shape[-1] != self.explicit_dim):
+            raise ValueError(
+                "HardPACT physics-head input dimensions do not match configuration"
+            )
         stopped_explicit = explicit.detach()
         raw = self.wrench_head(torch.cat((latent, stopped_explicit), dim=-1))
         return self.wrench_center + self.wrench_radius * torch.tanh(raw)

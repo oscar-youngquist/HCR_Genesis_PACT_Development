@@ -56,6 +56,36 @@ def test_hard_pact_pos_auxiliary_trains_both_physics_heads_and_logs_parts():
     assert all(torch.isfinite(value) for value in metrics.values())
 
 
+def test_hard_pact_pos_policy_uses_reparameterized_training_latent():
+    torch.manual_seed(23)
+    actor = ActorCritic_HardPACT_Pos(
+        num_actor_obs=57, num_critic_obs=64, num_actions=12,
+        actor_layers=[32, 16], critic_layers=[32, 16],
+        cenet_in_dim=57 * 10, cenet_enc_layers=[32, 16],
+        cenet_explicit_layers=[16], grf_decoder_layers=[16],
+        wrench_decoder_layers=[16],
+    )
+    observation = torch.randn(4, 57)
+    history = torch.randn(4, 57 * 10)
+    latent_noise = torch.randn(4, 16)
+
+    actor.act(observation, history, latent_noise=latent_noise)
+    first_mean = actor.action_mean.clone()
+    actor.act(observation, history, latent_noise=latent_noise)
+    torch.testing.assert_close(actor.action_mean, first_mean, rtol=0, atol=0)
+    actor.act(observation, history, latent_noise=-latent_noise)
+    assert not torch.equal(actor.action_mean, first_mean)
+
+    actor.zero_grad(set_to_none=True)
+    actor.action_mean.square().mean().backward()
+    assert actor.context_encoder.ce_out_mean.weight.grad.abs().sum() > 0
+    assert actor.context_encoder.ce_out_var[0].weight.grad.abs().sum() > 0
+
+    first_inference = actor.act_inference(observation, history)
+    second_inference = actor.act_inference(observation, history)
+    torch.testing.assert_close(first_inference, second_inference, rtol=0, atol=0)
+
+
 def test_legacy_pact_pos_auxiliary_does_not_allocate_physics_labels():
     from rsl_rl.modules.actor_critic_pact_pos import ActorCritic_PACT_Pos
 

@@ -31,8 +31,8 @@ def init_weights(m):
 class ContextEncoder(nn.Module):
     """VAE-style shared history trunk and latent distribution encoder.
 
-    The explicit estimate is intentionally decoded outside this module from the
-    deterministic latent mean.
+    The explicit estimate is decoded outside this module from the sampled
+    latent during training and the deterministic mean during inference.
 
     Args:
         context_input_dim (int): Dimension of input context features. Default: 230.
@@ -105,7 +105,8 @@ class ContextEncoder(nn.Module):
     def reparameterization_trick(
         self,
         mean: torch.Tensor,
-        logvar: torch.Tensor
+        logvar: torch.Tensor,
+        epsilon: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Sample from latent space using reparameterization trick.
 
@@ -116,7 +117,8 @@ class ContextEncoder(nn.Module):
         Returns:
             Sampled latent vector
         """
-        epsilon = torch.randn_like(logvar).to(logvar.device)
+        if epsilon is None:
+            epsilon = torch.randn_like(logvar)
         return mean + torch.exp(0.5 * logvar) * epsilon
 
     def forward(self, X_C: torch.Tensor):
@@ -205,8 +207,10 @@ class ActorCritic_HardPACT_Pos(nn.Module):
                  contact_epsilon=1.0e-2):
         super().__init__()
 
-        if cenet_latent_dim != 16 or cenet_velo_dim != 11:
-            raise ValueError("HardPACT requires a 16-D latent and 11-D estimator")
+        # The history latent is configurable; the 11-D explicit-estimator
+        # output is the only fixed deployment interface.
+        if cenet_velo_dim != 11:
+            raise ValueError("HardPACT requires an 11-D explicit estimator")
 
         # Construct the context encoder network
         self.context_encoder = ContextEncoder(context_input_dim=cenet_in_dim,
@@ -376,8 +380,12 @@ class ActorCritic_HardPACT_Pos(nn.Module):
     def physics_heads(self, latent, explicit, nominal_torque):
         return self.physics_estimator(latent, explicit, nominal_torque)
 
-    def physics_heads_from_history(self, obs_history, nominal_torque):
-        _, _, latent, explicit = self.cenet_enc_forward(obs_history)
+    def physics_heads_from_history(
+        self, obs_history, nominal_torque, latent_noise=None
+    ):
+        _, _, latent, explicit = self.cenet_enc_forward(
+            obs_history, latent_noise=latent_noise
+        )
         return self.physics_estimator(latent, explicit, nominal_torque)
 
     def configure_optimizers(self,
@@ -429,10 +437,16 @@ class ActorCritic_HardPACT_Pos(nn.Module):
         raise NotImplementedError
     
     # forward methods for the histroical context VAE
-    def cenet_enc_forward(self, obs_history):
+    def cenet_enc_forward(self, obs_history, latent_noise=None):
         mean, logvar = self.context_encoder(obs_history)
-        explicit = self.explicit_estimator(mean)
-        return mean, logvar, mean, explicit
+        if latent_noise is None:
+            latent_noise = torch.randn_like(logvar)
+        latent = self.context_encoder.reparameterization_trick(
+            mean, logvar, latent_noise
+        )
+        explicit = self.explicit_estimator(latent)
+        self.cenet_latent_noise = latent_noise.detach()
+        return mean, logvar, latent, explicit
     
     def cenet_enc_inference(self, obs_history):
         mean = self.context_encoder.forward_inference(obs_history)
@@ -497,9 +511,11 @@ class ActorCritic_HardPACT_Pos(nn.Module):
 
     # method used during simulated training
     @torch.jit.ignore
-    def act(self, obs, obs_history, **kwargs):
+    def act(self, obs, obs_history, latent_noise=None, **kwargs):
         # Call the forward method of the context encoder
-        mean, logvar, z, torso_velo = self.cenet_enc_forward(obs_history)
+        mean, logvar, z, torso_velo = self.cenet_enc_forward(
+            obs_history, latent_noise=latent_noise
+        )
         
         # create the actors observation
         current_obs = torch.cat((obs,z,torso_velo), dim=-1)   
@@ -521,9 +537,11 @@ class ActorCritic_HardPACT_Pos(nn.Module):
 
     # method used during simulated training
     @torch.jit.ignore
-    def act_bootmask(self, obs, obs_history, **kwargs):
+    def act_bootmask(self, obs, obs_history, latent_noise=None, **kwargs):
         # Call the forward method of the context encoder
-        mean, logvar, z, torso_velo = self.cenet_enc_forward(obs_history)
+        mean, logvar, z, torso_velo = self.cenet_enc_forward(
+            obs_history, latent_noise=latent_noise
+        )
         
         # Mask the latent/velo from the encoder with zeros
         boot_mask = torch.zeros((z.shape[0], (z.shape[1] + torso_velo.shape[1])), device=obs.device)

@@ -149,7 +149,8 @@ class PPO_PACT_Pos:
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape):
         self.storage = RolloutStoragePACTPos(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
                                                                action_shape, torso_velo_shape, grf_shape, self.device,
-                                                               hard_pact_auxiliary=self.is_hard_pact_pos)
+                                                               hard_pact_auxiliary=self.is_hard_pact_pos,
+                                                               context_latent_dim=self.actor_critic.context_encoder.ce_out_mean.out_features)
 
     def test_mode(self):
         self.actor_critic.test()
@@ -172,6 +173,10 @@ class PPO_PACT_Pos:
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
+        if self.is_hard_pact_pos:
+            self.transition.context_latent_noise = (
+                self.actor_critic.cenet_latent_noise.detach()
+            )
         
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
@@ -365,7 +370,8 @@ class PPO_PACT_Pos:
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
                                                                                           advantages_batch, target_values_batch, returns_batch,
-                                                                                          action_func, fb_func, default_pose, dt, qvel_scale)
+                                                                                          action_func, fb_func, default_pose, dt, qvel_scale,
+                                                                                          latent_noise=self.storage.current_context_latent_noise)
             
             torch.cuda.synchronize()
             timers["rl_loss"] += time.perf_counter() - t0
@@ -573,11 +579,16 @@ class PPO_PACT_Pos:
                          old_sigma_batch, old_mu_batch,
                          old_actions_log_prob_batch,
                          advantages_batch, target_values_batch, returns_batch,
-                         action_func, fb_func, default_pose, dt, qvel_scale):
+                         action_func, fb_func, default_pose, dt, qvel_scale,
+                         latent_noise=None):
         if self.use_boot:
-            self.actor_critic.act(obs_batch, obs_hist_batch)
+            self.actor_critic.act(
+                obs_batch, obs_hist_batch, latent_noise=latent_noise
+            )
         else:
-            self.actor_critic.act_bootmask(obs_batch, obs_hist_batch)
+            self.actor_critic.act_bootmask(
+                obs_batch, obs_hist_batch, latent_noise=latent_noise
+            )
 
         # Pull out the current actions for use later
         current_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)

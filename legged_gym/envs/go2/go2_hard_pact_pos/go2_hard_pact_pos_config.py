@@ -146,19 +146,19 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         motor_strength_range = [0.9, 1.1]
 
         randomize_joint_armature = True
-        joint_armature_range = [0.0, 0.03]
+        joint_armature_range = [0.0, 0.02]
 
         randomize_joint_friction = True
-        joint_friction_range_end = [0.0, 0.04]
-        joint_friction_range_start = [0.0, 0.02]
+        joint_friction_range_end = [0.0, 0.02]
+        joint_friction_range_start = [0.0, 0.01]
 
         randomize_joint_stiffness = False
         joint_stiffness_range_end = [0.0, 0.0]
         joint_stiffness_range_start = [0.0, 0.0]
 
         randomize_joint_damping = True
-        joint_damping_range_end = [0.0, 0.8]
-        joint_damping_range_start = [0.3, 0.6]
+        joint_damping_range_end = [0.25, 0.5]
+        joint_damping_range_start = [0.3, 0.4]
 
         best_reward_window = 200
         best_reward_quantile = 0.9
@@ -282,11 +282,17 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         foot_clearance_target = 0.09
         foot_height_offset = 0.022
 
+        # Legacy
         overreach_x_max = 0.28
-        support_polygon_sigma = 0.01
-
         rear_foot_x_nominal = -0.20
         rear_foot_x_margin = 0.08
+
+        support_polygon_sigma = 0.01
+
+        front_foot_x_nominal = 0.20
+        rear_foot_x_nominal = 0.20
+        foot_x_margin = 0.10
+
 
         foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
@@ -365,7 +371,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             vhip_angular_acc = -0.001         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
             
             # I developed these
-            front_foot_overreach = -10000.0
+            front_foot_overreach = -10.0
             rear_foot_overreach = -10.0
 
             # gait
@@ -380,8 +386,8 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
 
             feet_near_edge = -0.1
             edge_swing_clearance = -0.0
-            swing_foot_collision_edge = -0.1
-            feet_regulation = -0.1
+            swing_foot_collision_edge = -0.0
+            feet_regulation = -0.01
 
         class reward_curriculum:
             curr_reward_keys = ['orientation',
@@ -424,9 +430,9 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         init_noise_std = 1.0
 
         cenet_enc_layers = [256, 128]
-        cenet_enc_latent_dim = 16
+        cenet_enc_latent_dim = 32
         cenet_velo_dim = 11
-        cenet_dec_input_dim = 16 + 11
+        cenet_dec_input_dim = 32 + 11
         cenet_dec_layers = [128, 256, 512]
         cenet_dec_out_dim = 133
 

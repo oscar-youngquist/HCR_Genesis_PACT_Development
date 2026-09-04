@@ -247,7 +247,7 @@ class OnPolicyRunnerPACTPos:
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Reset the 
-        self.alg.actor_critic._init_std(pretrained_std)
+        # self.alg.actor_critic._init_std(pretrained_std)
         # Load the pretrained decoder network
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
 

@@ -14,6 +14,7 @@ from rsl_rl.algorithms.hard_pact_qp import (
 )
 from legged_gym.dynamics import wrench_at_point
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
+from legged_gym.utils.math_utils import quat_rotate_inverse
 
 from .grf import GRFProcessingConfig, IntervalGRFProcessor, world_to_yaw_local
 from .ablations import resolve_hard_pact_features
@@ -105,6 +106,92 @@ class Go2HardPACT(Go2PACT):
             -total_error
             / float(self.cfg.rewards.foot_clearance_tracking_sigma)
         )
+
+
+    def _reward_front_foot_overreach(self):
+        # Assumed order is FR/L, RL/R....
+        front_1 = quat_rotate_inverse(
+            self.simulator.base_quat,
+            self.simulator.feet_pos[:, 0, :] - self.simulator.base_pos
+        )  # (N,3)
+
+        front_2 = quat_rotate_inverse(
+            self.simulator.base_quat,
+            self.simulator.feet_pos[:, 1, :] - self.simulator.base_pos
+        )  # (N,3)
+
+        front_x_1 = front_1[:, 0]   # (N,)
+        front_x_2 = front_2[:, 0]   # (N,)
+
+        front_x = torch.stack([front_x_1, front_x_2], dim=1)   # (N,2)
+
+        # Penalize stance feet on either side of the optimized nominal x
+        # location, rather than only limiting excessive forward extension.
+        front_x_nominal = self.cfg.rewards.front_foot_x_nominal
+        front_x_margin = self.cfg.rewards.foot_x_margin
+        x_error = torch.abs(front_x - front_x_nominal)
+        overreach = torch.relu(x_error - front_x_margin)
+
+        # stance/contact gating
+        contact = (
+            self.simulator.link_contact_forces[
+                :, self.simulator.feet_contact_indices[:2], 2
+            ] > 5.0
+        ).float()
+
+        penalty = torch.sum(contact * overreach ** 2, dim=1)
+
+        return penalty
+
+    def _reward_rear_foot_overreach(self):
+        """
+        Penalize rear feet for being too far from their nominal rear-foot x location
+        in the base frame, in either direction.
+
+        Penalizes:
+        - rear foot too far forward
+        - rear foot too far backward
+
+        Assumed foot order: FR, FL, RR, RL
+        """
+
+        # Rear feet in base frame
+        rear_1 = quat_rotate_inverse(
+            self.simulator.base_quat,
+            self.simulator.feet_pos[:, 2, :] - self.simulator.base_pos
+        )  # RR, (N,3)
+
+        rear_2 = quat_rotate_inverse(
+            self.simulator.base_quat,
+            self.simulator.feet_pos[:, 3, :] - self.simulator.base_pos
+        )  # RL, (N,3)
+
+        rear_x = torch.stack([rear_1[:, 0], rear_2[:, 0]], dim=1)  # (N,2)
+
+        # Nominal rear-foot x location in base frame.
+        # This should usually be negative, e.g. -0.20 to -0.25 m.
+        rear_x_nominal = self.cfg.rewards.rear_foot_x_nominal
+
+        # Allowed deviation around nominal rear-foot x location.
+        # Example: 0.08 m allows rear_x in [nominal - 0.08, nominal + 0.08].
+        rear_x_margin = self.cfg.rewards.rear_foot_x_margin
+
+        # Penalize both too far forward and too far backward relative to nominal.
+        x_error = torch.abs(rear_x - rear_x_nominal)
+        overreach = torch.relu(x_error - rear_x_margin)
+
+        # Contact sensors have their own indexing, distinct from articulation
+        # body indices on Isaac Lab. Both lists are canonical FR, FL, RR, RL.
+        contact = (
+            self.simulator.link_contact_forces[
+                :, self.simulator.feet_contact_indices[2:4], 2
+            ] > 5.0
+        ).float()  # (N,2)
+
+        penalty = torch.sum(contact * overreach ** 2, dim=1)
+
+        return penalty
+
 
     def _init_buffers(self):
         self._legacy_task_class._init_buffers(self)

@@ -55,6 +55,7 @@ class RolloutStoragePACT:
             # observations, and histories already have canonical storage
             # above and are deliberately not duplicated for replay.
             self.action_noise = None
+            self.context_latent_noise = None
 
             #  PINN stuff
             self.prev_obs      = None
@@ -153,8 +154,10 @@ class RolloutStoragePACT:
         self._action_replay_boundary_observations = None
         self._action_replay_boundary_history = None
         self._action_replay_boundary_noise = None
+        self.context_latent_noise = None
+        self._action_replay_boundary_context_latent_noise = None
 
-    def configure_action_replay(self, max_action_delay):
+    def configure_action_replay(self, max_action_delay, context_latent_dim=16):
         """Allocate compact GPU-only stochastic-delay replay metadata."""
         maximum = int(max_action_delay)
         if maximum < 0 or maximum >= self.num_transitions_per_env:
@@ -163,6 +166,10 @@ class RolloutStoragePACT:
             )
         self.max_action_delay = maximum
         self.action_noise = torch.zeros_like(self.actions)
+        self.context_latent_noise = torch.zeros(
+            self.num_transitions_per_env, self.num_envs,
+            int(context_latent_dim), device=self.device,
+        )
         # Only sources crossing a rollout boundary need extra observation
         # storage. All in-rollout sources are gathered from the existing core
         # observation/history tensors by index.
@@ -175,6 +182,9 @@ class RolloutStoragePACT:
         )
         self._action_replay_boundary_noise = torch.zeros(
             maximum, self.num_envs, *self.actions_shape, device=self.device
+        )
+        self._action_replay_boundary_context_latent_noise = torch.zeros(
+            maximum, self.num_envs, int(context_latent_dim), device=self.device
         )
 
     def add_transitions(self, transition: Transition):
@@ -204,6 +214,13 @@ class RolloutStoragePACT:
             if transition.action_noise is None:
                 raise RuntimeError("HardPACT action replay requires stored noise")
             self.action_noise[self.step].copy_(transition.action_noise)
+            if transition.context_latent_noise is None:
+                raise RuntimeError(
+                    "HardPACT context replay requires stored latent noise"
+                )
+            self.context_latent_noise[self.step].copy_(
+                transition.context_latent_noise
+            )
 
         #  - PINN stuff
         self.prev_obs[self.step].copy_(transition.prev_obs)
@@ -263,6 +280,9 @@ class RolloutStoragePACT:
                 self.observation_history[-delay:]
             )
             self._action_replay_boundary_noise.copy_(self.action_noise[-delay:])
+            self._action_replay_boundary_context_latent_noise.copy_(
+                self.context_latent_noise[-delay:]
+            )
         self.step = 0
         self.current_hard_pact_batch = None
         self.current_batch_indices = None
@@ -283,11 +303,15 @@ class RolloutStoragePACT:
         source_noise = self.action_noise.new_empty(
             batch_idx.shape[0], *self.actions_shape
         )
+        source_context_noise = self.context_latent_noise.new_empty(
+            batch_idx.shape[0], self.context_latent_noise.shape[-1]
+        )
         current = source_timestep >= 0
         t, e = source_timestep[current], environment[current]
         source_observation[current] = self.observations[t, e]
         source_history[current] = self.observation_history[t, e]
         source_noise[current] = self.action_noise[t, e]
+        source_context_noise[current] = self.context_latent_noise[t, e]
         boundary = ~current
         index = self.max_action_delay + source_timestep[boundary]
         e = environment[boundary]
@@ -298,7 +322,10 @@ class RolloutStoragePACT:
             self._action_replay_boundary_history[index, e]
         )
         source_noise[boundary] = self._action_replay_boundary_noise[index, e]
-        return source_observation, source_history, source_noise
+        source_context_noise[boundary] = (
+            self._action_replay_boundary_context_latent_noise[index, e]
+        )
+        return source_observation, source_history, source_noise, source_context_noise
 
     def compute_returns(self, last_values, gamma, lam):
         advantage = 0
@@ -423,7 +450,8 @@ class RolloutStoragePACT:
                         delay = self.current_hard_pact_batch[
                             "sampled_action_delay"
                         ].reshape(-1).long()
-                        source_obs, source_history, source_noise = (
+                        (source_obs, source_history, source_noise,
+                         source_context_noise) = (
                             self._action_replay_sources(batch_idx, delay)
                         )
                         # Raw actions and their source observations already
@@ -435,11 +463,17 @@ class RolloutStoragePACT:
                             "standardized_action_noise": self.action_noise.flatten(
                                 0, 1
                             )[batch_idx],
+                            "context_latent_noise": self.context_latent_noise.flatten(
+                                0, 1
+                            )[batch_idx],
                             "action_source_observation": obs_batch,
                             "action_source_history": obs_hist_batch,
                             "delayed_source_observation": source_obs,
                             "delayed_source_history": source_history,
                             "delayed_source_noise": source_noise,
+                            "delayed_source_context_latent_noise": (
+                                source_context_noise
+                            ),
                         })
 
                 

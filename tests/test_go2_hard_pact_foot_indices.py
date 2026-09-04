@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import torch
 
 from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos import Go2PACTPos
+from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
 
 
 def test_pact_pos_uses_canonical_contact_indices_for_contacts_and_rewards():
@@ -48,3 +49,38 @@ def test_pact_pos_uses_canonical_contact_indices_for_contacts_and_rewards():
     # Three canonical stance feet form a support region. The erroneous body
     # indices expose only one stance foot and would return exactly zero.
     assert env._reward_support_polygon().item() > 0.0
+
+
+def test_hard_pact_overreach_uses_contact_not_articulation_indices():
+    env = Go2HardPACT.__new__(Go2HardPACT)
+    body_indices = [2, 4, 6, 7]
+    contact_indices = [8, 3, 10, 1]
+    forces = torch.zeros(1, 12, 3)
+    # Canonical sensor contacts: FR and RR. Articulation-index lookup would
+    # incorrectly report FL and RL instead, whose overreach errors differ.
+    forces[0, contact_indices, 2] = torch.tensor([10.0, 0.0, 10.0, 0.0])
+    forces[0, body_indices, 2] = torch.tensor([0.0, 10.0, 0.0, 10.0])
+    env.simulator = SimpleNamespace(
+        feet_indices=body_indices,
+        feet_contact_indices=contact_indices,
+        link_contact_forces=forces,
+        feet_pos=torch.tensor([[
+            [0.5, -0.2, 0.0], [0.7, 0.2, 0.0],
+            [-0.4, -0.2, 0.0], [-0.7, 0.2, 0.0],
+        ]]),
+        base_pos=torch.zeros(1, 3),
+        base_quat=torch.tensor([[0.0, 0.0, 0.0, 1.0]]),
+    )
+    env.cfg = SimpleNamespace(rewards=SimpleNamespace(
+        front_foot_x_nominal=0.2,
+        foot_x_margin=0.1,
+        rear_foot_x_nominal=-0.2,
+        rear_foot_x_margin=0.1,
+    ))
+
+    torch.testing.assert_close(
+        env._reward_front_foot_overreach(), torch.tensor([0.04])
+    )
+    torch.testing.assert_close(
+        env._reward_rear_foot_overreach(), torch.tensor([0.01])
+    )
