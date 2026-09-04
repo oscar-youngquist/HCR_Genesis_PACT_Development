@@ -451,7 +451,6 @@ class ActorCritic_HardPACT(nn.Module):
             mean, logvar, latent_noise
         )
         explicit = self.explicit_estimator(latent)
-        self.cenet_latent_noise = latent_noise.detach()
         return mean, logvar, latent, explicit
     
     def cenet_enc_inference(self, obs_history):
@@ -525,8 +524,12 @@ class ActorCritic_HardPACT(nn.Module):
             obs_history, latent_noise=latent_noise
         )
         
-        # create the actors observation
-        current_obs = torch.cat((obs,z,torso_velo), dim=-1)   
+        # Keep rollout/training policy conditioning deterministic.  The
+        # sampled latent and its explicit decode remain available below for
+        # the stochastic auxiliary/physics heads, but fresh VAE noise must not
+        # perturb the action mean from one control step to the next.
+        policy_explicit = self.explicit_estimator(mean)
+        current_obs = torch.cat((obs, mean, policy_explicit), dim=-1)
         
         # Upated the PPO training distribution
         self.update_distribution(current_obs)

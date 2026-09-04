@@ -451,19 +451,28 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         learning_rate = 0.0003
+        # Weight beta on the latent KL term in the combined auxiliary loss.
+        vae_kld_weight = 1.0
+        vae_kl_initial_weight = 0.001
+        vae_kl_warmup_start = 0
+        vae_kl_warmup_iterations = 1000
+
         privileged_loss_weight = 1.0
         explicit_loss_weight = 1.0
         grf_loss_weight = 1.0
         active_wrench_loss_weight = 1.0
         neutral_wrench_loss_weight = 0.25
         value_loss_coef = 1.0
+
         use_clipped_value_loss = True
         clip_param = 0.2
         num_learning_epochs = 5
         num_mini_batches = 4
+
         schedule = 'adaptive'
         gamma = 0.99
         lam = 0.95
+
         desired_kl = 0.01
         max_grad_norm = 1.0
 

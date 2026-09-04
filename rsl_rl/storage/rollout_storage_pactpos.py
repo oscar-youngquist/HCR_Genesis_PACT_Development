@@ -56,7 +56,6 @@ class RolloutStoragePACTPos:
             self.actions_log_prob = None
             self.action_mean = None
             self.action_sigma = None
-            self.context_latent_noise = None
             
             self.hidden_states = None
         
@@ -64,7 +63,7 @@ class RolloutStoragePACTPos:
             self.__init__()
 
     # We want all of the actions and associated data formatted in the Model kinematic definition - [FR, FL, RR, RL]
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, device="cpu", hard_pact_auxiliary=False, context_latent_dim=16):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, device="cpu", hard_pact_auxiliary=False):
 
         self.device = device
 
@@ -94,15 +93,10 @@ class RolloutStoragePACTPos:
                 num_transitions_per_env, num_envs, 1,
                 device=self.device, dtype=torch.bool,
             )
-            self.context_latent_noise = torch.zeros(
-                num_transitions_per_env, num_envs, int(context_latent_dim),
-                device=self.device,
-            )
         else:
             self.executed_torque_targets = None
             self.wrench_targets = None
             self.wrench_active_masks = None
-            self.context_latent_noise = None
 
         
         # For PPO
@@ -125,7 +119,6 @@ class RolloutStoragePACTPos:
         self.saved_hidden_states_c = None
 
         self.step = 0
-        self.current_context_latent_noise = None
 
     def add_transitions(self, transition: Transition):
         
@@ -148,9 +141,6 @@ class RolloutStoragePACTPos:
             self.wrench_targets[self.step].copy_(transition.wrench_targets)
             self.wrench_active_masks[self.step].copy_(
                 transition.wrench_active_masks
-            )
-            self.context_latent_noise[self.step].copy_(
-                transition.context_latent_noise
             )
         
         # Need a set for each "task"
@@ -183,7 +173,6 @@ class RolloutStoragePACTPos:
 
     def clear(self):
         self.step = 0
-        self.current_context_latent_noise = None
 
     def compute_returns(self, last_values, gamma, lam):
         advantage = 0
@@ -271,11 +260,6 @@ class RolloutStoragePACTPos:
                 old_sigma_batch = old_sigma[batch_idx]
 
                 terminated_batch = 1.0 - dones[batch_idx]
-                self.current_context_latent_noise = (
-                    self.context_latent_noise.flatten(0, 1)[batch_idx]
-                    if self.hard_pact_auxiliary else None
-                )
-                
                 yield terminated_batch, obs_batch, critic_observations_batch, obs_hist_batch, explicit_labels_batch, \
                         grf_labels_batch, obs_labels_batch, actions_batch, target_values_batch, \
                         advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \

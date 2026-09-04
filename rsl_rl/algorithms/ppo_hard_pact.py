@@ -256,7 +256,7 @@ class PPO_HardPACT:
                  pinn_warmup=1000,
                  pinn_init_steps=500,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
-                 vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
+                 vae_kld_weight=2.0,   # weight of KL divergence loss in VAE
                  use_adaptive_entropy=True,
                  adaptive_ent_bounds=[0.01, 0.001],
                  adaptive_ent_lin_threshold=0.75,
@@ -645,9 +645,6 @@ class PPO_HardPACT:
             (all_actions - self.transition.action_mean)
             / self.transition.action_sigma.clamp_min(1.0e-8)
         ).detach()
-        self.transition.context_latent_noise = (
-            self.actor_critic.cenet_latent_noise.detach()
-        )
         
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
@@ -1013,8 +1010,7 @@ class PPO_HardPACT:
             ppo_loss, surrogate_loss, value_loss, current_actions, policy_features = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
-                                                                                          advantages_batch, target_values_batch, returns_batch,
-                                                                                          latent_noise=self.storage.current_hard_pact_batch["context_latent_noise"])
+                                                                                          advantages_batch, target_values_batch, returns_batch)
 
             # Rebuild the same stochastic action path under the current
             # policy, then select the source chosen by the rollout's exact
@@ -1662,13 +1658,13 @@ class PPO_HardPACT:
         ), dim=-1)
         return (violations / float(self.qp_config.force_scale_n)).square().mean()
 
-    def _policy_raw_action_from_noise(
-        self, observation, history, noise, context_latent_noise=None
-    ):
+    def _policy_raw_action_from_noise(self, observation, history, noise):
         """Reparameterize one stored policy draw under current parameters."""
-        _, _, latent, explicit = self.actor_critic.cenet_enc_forward(
-            history, latent_noise=context_latent_noise
-        )
+        # Action replay follows the deterministic policy-conditioning path.
+        # The stored VAE noise is still consumed by the auxiliary/physics
+        # heads, but is deliberately absent from the policy mean.
+        latent, _ = self.actor_critic.context_encoder(history)
+        explicit = self.actor_critic.explicit_estimator(latent)
         if self.use_boot:
             conditioning = torch.cat((observation, latent, explicit), dim=-1)
         else:
@@ -1721,7 +1717,6 @@ class PPO_HardPACT:
                 transition["delayed_source_observation"][delayed_rows].detach(),
                 transition["delayed_source_history"][delayed_rows].detach(),
                 transition["delayed_source_noise"][delayed_rows],
-                transition["delayed_source_context_latent_noise"][delayed_rows],
             )
         current_transformed = torch.clamp(
             current_raw, -self.action_clip, self.action_clip

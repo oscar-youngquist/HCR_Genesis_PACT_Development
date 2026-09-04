@@ -59,7 +59,6 @@ class CompactStorageReplayTests(unittest.TestCase):
                 storage.observations[timestep, environment] = value
                 storage.observation_history[timestep, environment] = value + 100.0
                 storage.action_noise[timestep, environment] = value + 200.0
-                storage.context_latent_noise[timestep, environment] = value + 300.0
         storage._action_replay_boundary_observations[:, :, 0] = torch.tensor(
             [[-20.0, -19.0], [-10.0, -9.0]]
         )
@@ -69,9 +68,6 @@ class CompactStorageReplayTests(unittest.TestCase):
         storage._action_replay_boundary_noise[:, :, :] = (
             storage._action_replay_boundary_observations + 200.0
         )
-        storage._action_replay_boundary_context_latent_noise[:, :, :] = (
-            storage._action_replay_boundary_observations + 300.0
-        )
         return storage
 
     def test_delay_zero_maximum_and_rollout_boundary_sources(self):
@@ -79,7 +75,7 @@ class CompactStorageReplayTests(unittest.TestCase):
         # flat indices are (t=0,e=0), (t=1,e=1), and (t=3,e=0).
         indices = torch.tensor([0, 3, 6])
         delay = torch.tensor([0, 2, 2])
-        observation, history, noise, context_noise = storage._action_replay_sources(
+        observation, history, noise = storage._action_replay_sources(
             indices, delay
         )
         torch.testing.assert_close(
@@ -87,9 +83,6 @@ class CompactStorageReplayTests(unittest.TestCase):
         )
         torch.testing.assert_close(history[:, 0], observation[:, 0] + 100.0)
         torch.testing.assert_close(noise[:, 0], observation[:, 0] + 200.0)
-        torch.testing.assert_close(
-            context_noise[:, 0], observation[:, 0] + 300.0
-        )
 
     def test_only_noise_and_small_boundary_cache_add_persistent_vram(self):
         storage = self.make_storage()
@@ -106,15 +99,14 @@ class CompactStorageReplayTests(unittest.TestCase):
             "_action_replay_boundary_observations",
             "_action_replay_boundary_history",
             "_action_replay_boundary_noise",
-            "_action_replay_boundary_context_latent_noise",
         })
+        self.assertFalse(hasattr(storage, "context_latent_noise"))
 
     def test_clear_preserves_only_required_cross_rollout_sources(self):
         storage = self.make_storage()
         expected_obs = storage.observations[-2:].clone()
         expected_history = storage.observation_history[-2:].clone()
         expected_noise = storage.action_noise[-2:].clone()
-        expected_context_noise = storage.context_latent_noise[-2:].clone()
         storage.clear()
         torch.testing.assert_close(
             storage._action_replay_boundary_observations, expected_obs
@@ -125,21 +117,14 @@ class CompactStorageReplayTests(unittest.TestCase):
         torch.testing.assert_close(
             storage._action_replay_boundary_noise, expected_noise
         )
-        torch.testing.assert_close(
-            storage._action_replay_boundary_context_latent_noise,
-            expected_context_noise,
-        )
 
 
 class StochasticActionReplayTests(unittest.TestCase):
     def replay_inputs(self, algorithm, batch=3):
         observation = torch.randn(batch, 57)
         history = torch.randn(batch, 57 * 20)
-        _, _, latent, explicit = algorithm.actor_critic.cenet_enc_forward(history)
-        context_latent_noise = algorithm.actor_critic.cenet_latent_noise.clone()
-        conditioning = torch.cat((observation, latent, explicit), dim=-1)
-        mean_pos, mean_tau = algorithm.actor_critic.actor_forward(conditioning)
-        mean = torch.cat((mean_pos, mean_tau), dim=-1)
+        algorithm.actor_critic.act(observation, history)
+        mean = algorithm.actor_critic.action_mean
         noise = torch.randn(batch, 24)
         raw = mean.detach() + algorithm.actor_critic.std.detach() * noise
         transition = {
@@ -147,8 +132,6 @@ class StochasticActionReplayTests(unittest.TestCase):
             "delayed_source_observation": observation.clone(),
             "delayed_source_history": history.clone(),
             "delayed_source_noise": noise.clone(),
-            "context_latent_noise": context_latent_noise.clone(),
-            "delayed_source_context_latent_noise": context_latent_noise.clone(),
             "delayed_action_source_valid": torch.tensor(
                 [[True], [True], [False]]
             )[:batch],

@@ -188,7 +188,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
             [(27, 23), (23, 19), (19, 13), (13, 6)],
         )
 
-    def test_actor_uses_stochastic_training_latent_and_deterministic_inference(self):
+    def test_actor_policy_is_mean_based_while_decoder_latent_is_stochastic(self):
         torch.manual_seed(5)
         actor = _small_actor()
         observation = torch.randn(2, 57)
@@ -204,9 +204,23 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         )
         self.assertEqual(tuple(first[2].shape), (2, 16))
         self.assertEqual(tuple(first[3].shape), (2, 11))
-        action = actor.act(observation, history)
+        captured_actor_input = []
+        hook = actor.act_trunk[0].register_forward_pre_hook(
+            lambda _module, inputs: captured_actor_input.append(inputs[0].detach())
+        )
+        action = actor.act(observation, history, latent_noise=torch.ones_like(first[0]))
+        first_action_mean = actor.action_mean.clone()
+        first_decoder_latent = actor.cenet_z.clone()
+        actor.act(observation, history, latent_noise=-torch.ones_like(first[0]))
+        hook.remove()
         self.assertEqual(tuple(action.shape), (2, 24))
         self.assertEqual(actor.act_trunk[0].in_features, 57 + 16 + 11)
+        torch.testing.assert_close(captured_actor_input[0][:, 57:73], first[0])
+        torch.testing.assert_close(
+            captured_actor_input[0][:, 73:], actor.explicit_estimator(first[0])
+        )
+        torch.testing.assert_close(actor.action_mean, first_action_mean, rtol=0, atol=0)
+        self.assertFalse(torch.equal(actor.cenet_z, first_decoder_latent))
 
     def test_explicit_estimator_is_separate_registered_configurable_module(self):
         for actor_class in (ActorCritic_HardPACT, ActorCritic_HardPACT_Pos):
@@ -275,8 +289,10 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         actor = _small_actor()
         observation = torch.randn(3, 57)
         history = torch.randn(3, 57 * 20)
-        mean, _, latent, estimate = actor.cenet_enc_forward(history)
-        latent_noise = actor.cenet_latent_noise.clone()
+        latent_noise = torch.randn(3, 16)
+        mean, _, latent, estimate = actor.cenet_enc_forward(
+            history, latent_noise=latent_noise
+        )
 
         captured_actor_input = []
         hook = actor.act_trunk[0].register_forward_pre_hook(

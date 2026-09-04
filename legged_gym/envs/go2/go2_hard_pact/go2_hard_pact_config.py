@@ -468,6 +468,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         adaptive_ent_softmax_temp = 2.0
 
         auxiliary_learning_rate = 0.0002
+        # Weight beta on the latent KL term in the combined auxiliary loss.
+        vae_kld_weight = 2.0
         privileged_loss_weight = 1.0
         explicit_loss_weight = 1.0
         grf_loss_weight = 1.0

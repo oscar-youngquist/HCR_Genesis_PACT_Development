@@ -464,6 +464,11 @@ class OnPolicyRunnerPACTPos:
         self.writer.add_scalar('Loss/velo_pred', locs['mean_vel_loss'], locs['it'])
         self.writer.add_scalar('Loss/recon', locs['mean_recon_loss'], locs['it'])
         self.writer.add_scalar('Loss/kl_div', locs['mean_kld_loss'], locs['it'])
+        self.writer.add_scalar(
+            'Loss/vae_kl_effective_weight',
+            self.alg.current_vae_beta,
+            locs['it'],
+        )
         self.writer.add_scalar('Loss/decoder_function', locs['mean_decoder_loss'], locs['it'])
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
@@ -493,6 +498,7 @@ class OnPolicyRunnerPACTPos:
                 f"{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"
                 f"{'Reconstruction loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"
                 f"{'KL Divergence loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"
+                f"{'Effective VAE KL weight:':>{pad}} {self.alg.current_vae_beta:.6f}\n"
                 f"{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"
             )
             if self.is_hard_pact_pos:

@@ -34,6 +34,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch import linalg as LA
 import time
+import math
 
 import numpy as np
 import random
@@ -68,6 +69,9 @@ class PPO_PACT_Pos:
                  use_spo=False,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
                  vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
+                 vae_kl_initial_weight=0.0,
+                 vae_kl_warmup_start=0,
+                 vae_kl_warmup_iterations=0,
                  use_adaptive_entropy=True,
                  adaptive_ent_bounds=[0.01, 0.001],
                  adaptive_ent_lin_threshold=0.75,
@@ -99,7 +103,16 @@ class PPO_PACT_Pos:
         self.learning_rate = learning_rate
 
         self.num_enc_epochs = num_encoder_epochs
-        self.vae_beta = vae_kld_weight
+        self.vae_beta = float(vae_kld_weight)
+        self.vae_kl_initial_weight = float(vae_kl_initial_weight)
+        self.vae_kl_warmup_start = int(vae_kl_warmup_start)
+        self.vae_kl_warmup_iterations = int(vae_kl_warmup_iterations)
+        if self.vae_kl_warmup_iterations < 0:
+            raise ValueError("vae_kl_warmup_iterations must be nonnegative")
+        # Before the first explicit iteration boundary, preserve the legacy
+        # constant final weight. ``update`` freezes the scheduled value once
+        # and every auxiliary minibatch in that PPO iteration reuses it.
+        self.current_vae_beta = self.vae_beta
 
         # Adaptive entropy coefficent algorithm values
         self.use_adaptive_entropy = use_adaptive_entropy
@@ -149,8 +162,7 @@ class PPO_PACT_Pos:
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape):
         self.storage = RolloutStoragePACTPos(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
                                                                action_shape, torso_velo_shape, grf_shape, self.device,
-                                                               hard_pact_auxiliary=self.is_hard_pact_pos,
-                                                               context_latent_dim=self.actor_critic.context_encoder.ce_out_mean.out_features)
+                                                               hard_pact_auxiliary=self.is_hard_pact_pos)
 
     def test_mode(self):
         self.actor_critic.test()
@@ -173,10 +185,6 @@ class PPO_PACT_Pos:
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
-        if self.is_hard_pact_pos:
-            self.transition.context_latent_noise = (
-                self.actor_critic.cenet_latent_noise.detach()
-            )
         
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
@@ -326,6 +334,7 @@ class PPO_PACT_Pos:
         self.storage.compute_returns(last_values, self.gamma, self.lam)  
 
     def update(self, action_func, fb_func, dt, itr, default_pose, qvel_scale):
+        self.current_vae_beta = self._vae_beta_for_iteration(itr)
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_autoenc_loss = 0
@@ -370,8 +379,7 @@ class PPO_PACT_Pos:
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
                                                                                           advantages_batch, target_values_batch, returns_batch,
-                                                                                          action_func, fb_func, default_pose, dt, qvel_scale,
-                                                                                          latent_noise=self.storage.current_context_latent_noise)
+                                                                                          action_func, fb_func, default_pose, dt, qvel_scale)
             
             torch.cuda.synchronize()
             timers["rl_loss"] += time.perf_counter() - t0
@@ -666,6 +674,19 @@ class PPO_PACT_Pos:
         weights = valid.reshape(-1).to(per_sample.dtype)
         return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
 
+    def _vae_beta_for_iteration(self, iteration):
+        """Return the cosine-warmed KL weight for an absolute PPO iteration."""
+        if self.vae_kl_warmup_iterations == 0:
+            return self.vae_beta
+        progress = (
+            (float(iteration) - self.vae_kl_warmup_start)
+            / self.vae_kl_warmup_iterations
+        )
+        progress = min(max(progress, 0.0), 1.0)
+        return self.vae_kl_initial_weight + 0.5 * (
+            self.vae_beta - self.vae_kl_initial_weight
+        ) * (1.0 - math.cos(math.pi * progress))
+
     def _compute_vae_loss(self, obs_hist_batch, grf_target,
                           obs_target, explicit_labels_batch, terminated_batch,
                           executed_torque_target=None, wrench_target=None,
@@ -692,7 +713,7 @@ class PPO_PACT_Pos:
         kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
         # kl_div         = -0.5*torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp())
         auxiliary_metrics = {
-            "total": vel_pred_error + recon_error + self.vae_beta * kl_div,
+            "total": vel_pred_error + recon_error + self.current_vae_beta * kl_div,
             "privileged_reconstruction": recon_error,
             "kl": kl_div,
             "explicit": vel_pred_error,
@@ -733,7 +754,7 @@ class PPO_PACT_Pos:
             )
             vae_loss = (
                 self.privileged_loss_weight * recon_error
-                + self.vae_beta * kl_div
+                + self.current_vae_beta * kl_div
                 + self.explicit_loss_weight * vel_pred_error
                 + self.grf_loss_weight * grf_loss
                 + self.active_wrench_loss_weight * wrench_active_loss

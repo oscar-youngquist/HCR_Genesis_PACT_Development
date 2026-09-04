@@ -1,12 +1,50 @@
 """Focused HardPACTPos deployment-head auxiliary-training coverage."""
 
 import torch
+import pytest
 
 from rsl_rl.algorithms.ppo_pact_pos import PPO_PACT_Pos
 from rsl_rl.modules.actor_critic_hard_pact_pos import (
     ActorCritic_HardPACT_Pos,
     ContextDecoder,
 )
+
+
+def _small_algorithm(**kwargs):
+    actor = ActorCritic_HardPACT_Pos(
+        num_actor_obs=57, num_critic_obs=64, num_actions=12,
+        actor_layers=[32, 16], critic_layers=[32, 16],
+        cenet_in_dim=57 * 10, cenet_enc_layers=[32, 16],
+        cenet_explicit_layers=[16], grf_decoder_layers=[16],
+        wrench_decoder_layers=[16],
+    )
+    decoder = ContextDecoder(input_dim=27, layers=[32, 24, 16], decode_dim=133)
+    return PPO_PACT_Pos(
+        actor, decoder, num_priv_obs=181,
+        use_adaptive_entropy=False, **kwargs,
+    )
+
+
+def test_vae_kl_cosine_warmup_uses_absolute_iteration_and_zero_disables_it():
+    algorithm = _small_algorithm(
+        vae_kld_weight=1.0,
+        vae_kl_initial_weight=0.2,
+        vae_kl_warmup_start=100,
+        vae_kl_warmup_iterations=1000,
+    )
+    assert algorithm._vae_beta_for_iteration(0) == pytest.approx(0.2)
+    assert algorithm._vae_beta_for_iteration(100) == pytest.approx(0.2)
+    assert algorithm._vae_beta_for_iteration(600) == pytest.approx(0.6)
+    assert algorithm._vae_beta_for_iteration(1100) == pytest.approx(1.0)
+    assert algorithm._vae_beta_for_iteration(5000) == pytest.approx(1.0)
+
+    constant = _small_algorithm(
+        vae_kld_weight=0.7,
+        vae_kl_initial_weight=0.0,
+        vae_kl_warmup_iterations=0,
+    )
+    assert constant._vae_beta_for_iteration(-100) == pytest.approx(0.7)
+    assert constant._vae_beta_for_iteration(100000) == pytest.approx(0.7)
 
 
 def test_hard_pact_pos_auxiliary_trains_both_physics_heads_and_logs_parts():
@@ -56,7 +94,7 @@ def test_hard_pact_pos_auxiliary_trains_both_physics_heads_and_logs_parts():
     assert all(torch.isfinite(value) for value in metrics.values())
 
 
-def test_hard_pact_pos_policy_uses_reparameterized_training_latent():
+def test_hard_pact_pos_policy_uses_deterministic_mean_while_decoders_sample():
     torch.manual_seed(23)
     actor = ActorCritic_HardPACT_Pos(
         num_actor_obs=57, num_critic_obs=64, num_actions=12,
@@ -71,15 +109,18 @@ def test_hard_pact_pos_policy_uses_reparameterized_training_latent():
 
     actor.act(observation, history, latent_noise=latent_noise)
     first_mean = actor.action_mean.clone()
+    first_decoder_latent = actor.cenet_z.clone()
     actor.act(observation, history, latent_noise=latent_noise)
     torch.testing.assert_close(actor.action_mean, first_mean, rtol=0, atol=0)
     actor.act(observation, history, latent_noise=-latent_noise)
-    assert not torch.equal(actor.action_mean, first_mean)
+    torch.testing.assert_close(actor.action_mean, first_mean, rtol=0, atol=0)
+    assert not torch.equal(actor.cenet_z, first_decoder_latent)
 
     actor.zero_grad(set_to_none=True)
     actor.action_mean.square().mean().backward()
     assert actor.context_encoder.ce_out_mean.weight.grad.abs().sum() > 0
-    assert actor.context_encoder.ce_out_var[0].weight.grad.abs().sum() > 0
+    variance_grad = actor.context_encoder.ce_out_var[0].weight.grad
+    assert variance_grad is None or variance_grad.abs().sum() == 0
 
     first_inference = actor.act_inference(observation, history)
     second_inference = actor.act_inference(observation, history)
