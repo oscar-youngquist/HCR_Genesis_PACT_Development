@@ -125,6 +125,15 @@ class PPO_PACT_Pos:
             optim.Adam(self.grf_decoder.parameters(), lr=learning_rate)
             if self.grf_decoder is not None else None
         )
+        # PACTPos has no PINN decoder path, so PPO overlaps only with the
+        # context encoder, as established by configure_optimizers().
+        seen_ppo_parameters = set()
+        self.ppo_parameters = []
+        for group in self.act_optimizer.optimizer.param_groups:
+            for parameter in group["params"]:
+                if id(parameter) not in seen_ppo_parameters:
+                    seen_ppo_parameters.add(id(parameter))
+                    self.ppo_parameters.append(parameter)
         self.privileged_grf_start_index = privileged_grf_start_index
         self.grf_reconstruction_loss_weight = grf_reconstruction_loss_weight
 
@@ -360,7 +369,7 @@ class PPO_PACT_Pos:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
 
-            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
             self.act_optimizer.step()
 
             torch.cuda.synchronize()

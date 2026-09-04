@@ -38,10 +38,10 @@ class PCGrad():
         - objectives: a list of objectives
         '''
 
-        grads, shapes, has_grads = self._pack_grad(objectives)
+        grads, shapes, has_grads, has_any_grad = self._pack_grad(objectives)
         pc_grad = self._project_conflicting(grads, has_grads)
         pc_grad = self._unflatten_grad(pc_grad, shapes[0])
-        self._set_grad(pc_grad)
+        self._set_grad(pc_grad, has_any_grad)
         return
     
     def pc_backward_pinn(self, objectives):
@@ -52,10 +52,10 @@ class PCGrad():
         - objectives: a list of objectives
         '''
 
-        grads, shapes, has_grads = self._pack_grad(objectives)
+        grads, shapes, has_grads, has_any_grad = self._pack_grad(objectives)
         pc_grad = self._project_conflicting_pinn(grads, has_grads)
         pc_grad = self._unflatten_grad(pc_grad, shapes[0])
-        self._set_grad(pc_grad)
+        self._set_grad(pc_grad, has_any_grad)
         return
     
     def pc_backward_ppgrad(self, objectives):
@@ -66,10 +66,10 @@ class PCGrad():
         - objectives: a list of objectives
         '''
 
-        grads, shapes, has_grads = self._pack_grad(objectives)
+        grads, shapes, has_grads, has_any_grad = self._pack_grad(objectives)
         pc_grad = self._project_conflicting_pinn_balanced(grads, has_grads)
         pc_grad = self._unflatten_grad(pc_grad, shapes[0])
-        self._set_grad(pc_grad)
+        self._set_grad(pc_grad, has_any_grad)
         return
 
     def _project_conflicting(self, grads, has_grads, shapes=None):
@@ -224,7 +224,7 @@ class PCGrad():
         merged_grad[~shared] = torch.stack([g[~shared] for g in pp_grad]).sum(dim=0)
         return merged_grad
 
-    def _set_grad(self, grads):
+    def _set_grad(self, grads, has_any_grad):
         '''
         set the modified gradients to the network
         '''
@@ -232,8 +232,9 @@ class PCGrad():
         idx = 0
         for group in self._optim.param_groups:
             for p in group['params']:
-                # if p.grad is None: continue
-                p.grad = grads[idx]
+                # Leave parameters unused by every objective at ``None`` so
+                # optimizer momentum and weight decay cannot move them.
+                p.grad = grads[idx] if has_any_grad[idx] else None
                 idx += 1
         return
 
@@ -247,15 +248,17 @@ class PCGrad():
         - has_grad: a list of mask represent whether the parameter has gradient
         '''
 
-        grads, shapes, has_grads = [], [], []
+        grads, shapes, has_grads, param_masks = [], [], [], []
         for obj in objectives:
             self._optim.zero_grad(set_to_none=True)
             obj.backward(retain_graph=True)
-            grad, shape, has_grad = self._retrieve_grad()
+            grad, shape, has_grad, param_has_grad = self._retrieve_grad()
+            param_masks.append(param_has_grad)
             grads.append(self._flatten_grad(grad, shape))
             has_grads.append(self._flatten_grad(has_grad, shape))
             shapes.append(shape)
-        return grads, shapes, has_grads
+        has_any_grad = [any(flags) for flags in zip(*param_masks)]
+        return grads, shapes, has_grads, has_any_grad
 
     def _unflatten_grad(self, grads, shapes):
         unflatten_grad, idx = [], 0
@@ -280,17 +283,16 @@ class PCGrad():
         - has_grad: a list of mask represent whether the parameter has gradient
         '''
 
-        grad, shape, has_grad = [], [], []
+        grad, shape, has_grad, param_has_grad = [], [], [], []
         for group in self._optim.param_groups:
-            for p in group['params']:
-                # if p.grad is None: continue
-                # tackle the multi-head scenario
-                if p.grad is None:
-                    shape.append(p.shape)
-                    grad.append(torch.zeros_like(p).to(p.device))
-                    has_grad.append(torch.zeros_like(p).to(p.device))
-                    continue
-                shape.append(p.grad.shape)
-                grad.append(p.grad.clone())
-                has_grad.append(torch.ones_like(p).to(p.device))
-        return grad, shape, has_grad
+            for p in group["params"]:
+                active = p.grad is not None
+                param_has_grad.append(active)
+                shape.append(p.shape)
+                if active:
+                    grad.append(p.grad.detach().clone())
+                    has_grad.append(torch.ones_like(p))
+                else:
+                    grad.append(torch.zeros_like(p))
+                    has_grad.append(torch.zeros_like(p))
+        return grad, shape, has_grad, param_has_grad

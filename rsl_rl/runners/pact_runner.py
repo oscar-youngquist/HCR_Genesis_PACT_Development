@@ -31,6 +31,7 @@
 import math
 import time
 import os
+import copy
 from collections import deque
 import statistics
 import numpy as np
@@ -57,6 +58,14 @@ def _load_shape_compatible(module, state_dict):
     compatible = {key: value for key, value in state_dict.items()
                   if key in current and current[key].shape == value.shape}
     return module.load_state_dict(compatible, strict=False)
+
+def _load_optimizer_with_optional_appended_group(optimizer, state_dict):
+    """Migrate checkpoints saved before PPO began sharing the GRF decoder."""
+    current = optimizer.state_dict()
+    if len(current["param_groups"]) == len(state_dict["param_groups"]) + 1:
+        state_dict = copy.deepcopy(state_dict)
+        state_dict["param_groups"].append(current["param_groups"][-1])
+    optimizer.load_state_dict(state_dict)
 
 class OnPolicyRunnerPACT:
 
@@ -475,7 +484,9 @@ class OnPolicyRunnerPACT:
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Load optimizer(s)
         if load_optimizer:
-            self.alg.act_optimizer.optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
+            _load_optimizer_with_optional_appended_group(
+                self.alg.act_optimizer.optimizer, loaded_dict['act_optimizer_state_dict']
+            )
             self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
             # Legacy checkpoints predate the split and have a differently
             # shaped privileged-decoder output/optimizer state.
