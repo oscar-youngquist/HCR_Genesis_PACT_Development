@@ -181,10 +181,10 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         persistent_force_duration_range_s = [2.0, 4.0]
         persistent_torque_duration_range_s = [2.0, 4.0]
         persistent_ramp_fraction = 0.25
-        persistent_force_min_n = 5.0
-        persistent_force_max_n = 5.0
-        persistent_torque_min_nm = 3.0
-        persistent_torque_max_nm = 4.0
+        persistent_force_min_n = 15.0
+        persistent_force_max_n = 15.0
+        persistent_torque_min_nm = 6.0
+        persistent_torque_max_nm = 6.0
 
     class noise(LeggedRobotCfg.noise):
         add_noise = True
@@ -294,10 +294,10 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
 
 
         foot_clearance_tracking_sigma = 0.01
-        only_positive_rewards = False
+        only_positive_rewards = True
         use_reward_curriculum = True
 
-        max_contact_force = 400.0
+        max_contact_force = 200.0
         contact_force_threshold = 5.0
 
         feet_edge_threshold = 0.05
@@ -444,19 +444,19 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         pinn_warmup = 10000
         pinn_init_steps = 0
 
-        cenet_explicit_layers = [64, 64]
-        grf_decoder_layers = [128, 64]
-        wrench_decoder_layers = [64, 64]
+        cenet_explicit_layers = [128, 64]
+        grf_decoder_layers = [128, 128]
+        wrench_decoder_layers = [128, 64]
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         learning_rate = 0.0003
         # Shared by the context encoder and all auxiliary decoder heads.
         auxiliary_learning_rate = 0.0002
         # Weight beta on the latent KL term in the combined auxiliary loss.
-        vae_kld_weight = 0.1
+        vae_kld_weight = 0.01
         vae_kl_initial_weight = 0.0001
         vae_kl_warmup_start = 0
-        vae_kl_warmup_iterations = 1000
+        vae_kl_warmup_iterations = 0
 
         privileged_loss_weight = 1.0
         explicit_loss_weight = 1.0

@@ -153,6 +153,24 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
             self.assertGreater(
                 algorithm.actor_critic.context_encoder.ce_out_mean.weight.grad.abs().sum().item(), 0
             )
+            self.assertGreater(
+                algorithm.actor_critic.context_encoder.ce_out_var[0].weight.grad.abs().sum().item(), 0
+            )
+
+    def test_explicit_decoder_uses_reparameterized_sample_during_training(self):
+        algorithm = make_algorithm()
+        args = make_batch()
+        algorithm.actor_critic.zero_grad(set_to_none=True)
+        algorithm._compute_auxiliary_loss(*args)["explicit"].backward()
+
+        # A mean-only explicit estimate has no path to log variance.  A
+        # nonzero variance gradient therefore verifies explicit(z), matching
+        # the HardPACTPos auxiliary path.
+        variance_grad = (
+            algorithm.actor_critic.context_encoder.ce_out_var[0].weight.grad
+        )
+        self.assertIsNotNone(variance_grad)
+        self.assertGreater(variance_grad.abs().sum().item(), 0)
 
     def test_combined_auxiliary_step_updates_shared_trunk_not_actor_or_critic(self):
         algorithm = make_algorithm()

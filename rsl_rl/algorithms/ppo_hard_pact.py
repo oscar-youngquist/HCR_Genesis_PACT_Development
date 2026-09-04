@@ -1529,19 +1529,20 @@ class PPO_HardPACT:
     ):
         r"""Compute every decoder term on one shared stochastic VAE graph.
 
-        ``z = mu + exp(logvar/2) eps`` is used only for privileged
-        reconstruction. Runtime actor conditioning and both deployment heads
-        use the deterministic mean ``mu``. The heads internally stop gradients
-        through ``e = D_e(mu)`` while retaining gradients through ``mu`` (and
-        through nominal torque for the GRF head).
+        During training, privileged reconstruction, explicit estimation, and
+        both deployment heads share ``z = mu + exp(logvar/2) eps``.  The heads
+        internally stop gradients through ``e = D_e(z)`` while retaining
+        gradients through ``z`` (and through nominal torque for the GRF head).
+        Runtime policy conditioning and inference remain deterministic on
+        ``mu``.
         """
         mean, logvar = self.actor_critic.context_encoder(history)
         sample = self.actor_critic.context_encoder.reparameterization_trick(
             mean, logvar
         )
-        explicit = self.actor_critic.explicit_estimator(mean)
+        explicit = self.actor_critic.explicit_estimator(sample)
         reconstruction = self.decoder(torch.cat((sample, explicit), dim=-1))
-        heads = self.actor_critic.physics_heads(mean, explicit, nominal_torque)
+        heads = self.actor_critic.physics_heads(sample, explicit, nominal_torque)
 
         privileged = self._masked_mse(
             reconstruction, privileged_target.detach(), valid
