@@ -54,13 +54,13 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         suppress_backend_warnings = True
 
         class grf:
-            prediction_scale_n = [120.0, 120.0, 250.0]
+            prediction_scale_n = [250.0, 250.0, 500.0]
             vertical_deadband_n = 3.0
-            clip_min_n = -250.0
-            clip_max_n = 250.0
+            clip_min_n = -500.0
+            clip_max_n = 500.0
             ema_alpha = 0.2
             contact_threshold_n = 5.0
-            use_ema_grfs_buf = True
+            use_ema_grfs_buf = False
 
     class init_state(LeggedRobotCfg.init_state):
         leg_joint_limits = [[-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721], [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721], [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721], [-1.047, 1.047], [-0.663, 2.966], [-0.837, -2.721]]
@@ -95,7 +95,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         clip_actions = 50.0
 
     class domain_rand(LeggedRobotCfg.domain_rand):
-        use_domainrand_curriculum = False
+        use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 500
         push_warmup = 3000
@@ -157,8 +157,8 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         joint_stiffness_range_start = [0.0, 0.0]
 
         randomize_joint_damping = True
-        joint_damping_range_end = [0.0, 0.5]
-        joint_damping_range_start = [0.3, 0.4]
+        joint_damping_range_end = [0.0, 0.8]
+        joint_damping_range_start = [0.3, 0.6]
 
         best_reward_window = 200
         best_reward_quantile = 0.9
@@ -181,8 +181,8 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         persistent_force_duration_range_s = [2.0, 6.0]
         persistent_torque_duration_range_s = [2.0, 6.0]
         persistent_ramp_fraction = 0.25
-        persistent_force_min_n = 10.0
-        persistent_force_max_n = 10.0
+        persistent_force_min_n = 5.0
+        persistent_force_max_n = 5.0
         persistent_torque_min_nm = 3.0
         persistent_torque_max_nm = 4.0
 
@@ -230,7 +230,19 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
     class asset(LeggedRobotCfg.asset):
         name = 'go2'
         file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/go2/urdf/go2.urdf'
-        dof_names = ['FR_hip_joint', 'FR_thigh_joint', 'FR_calf_joint', 'FL_hip_joint', 'FL_thigh_joint', 'FL_calf_joint', 'RR_hip_joint', 'RR_thigh_joint', 'RR_calf_joint', 'RL_hip_joint', 'RL_thigh_joint', 'RL_calf_joint']
+        dof_names = [        # specify the sequence of actions
+            'FR_hip_joint',
+            'FR_thigh_joint',
+            'FR_calf_joint',
+            'FL_hip_joint',
+            'FL_thigh_joint',
+            'FL_calf_joint',
+            'RR_hip_joint',
+            'RR_thigh_joint',
+            'RR_calf_joint',
+            'RL_hip_joint',
+            'RL_thigh_joint',
+            'RL_calf_joint',]
         foot_name = ['FR_foot', 'FL_foot', 'RR_foot', 'RL_foot']
         penalize_contacts_on = ['thigh', 'hip', 'calf', 'base', 'Head']
         terminate_after_contacts_on = ['base', 'Head']
@@ -269,17 +281,20 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
 
         foot_clearance_target = 0.09
         foot_height_offset = 0.022
+
         overreach_x_max = 0.28
         support_polygon_sigma = 0.01
+
         rear_foot_x_nominal = -0.25
         rear_foot_x_margin = 0.08
-        foot_clearance_tracking_sigma = 0.01
 
+        foot_clearance_tracking_sigma = 0.01
         only_positive_rewards = True
         use_reward_curriculum = True
 
-        max_contact_force = 200.0
+        max_contact_force = 400.0
         contact_force_threshold = 5.0
+
         feet_edge_threshold = 0.05
         edge_clearance_lateral_cells = (-1, 0, 1)
         edge_clearance_forward_cells = (0, 1, 2)
@@ -294,67 +309,77 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         foot_clearance_excess_margin = 0.04
         foot_clearance_excess_weight = 0.25
 
-        class scales(LeggedRobotCfg.rewards.scales):
-            termination = 0.0
-            collision = -1.0
-            dof_pos_limits = -2.0
-            dof_close_to_default = -0.01
-            torque_limits = -0.0001
+        class scales( LeggedRobotCfg.rewards.scales ):
+            # General
+            termination           = 0.0
+            collision             = -1.0
+            dof_pos_limits        = -2.0
+            dof_close_to_default  = -0.01
+            torque_limits         = -0.0001
 
-            alive_bonus = 0.001
+            alive_bonus           = 0.001
 
             stand_still_contact = -0.5
             dof_pos_stand_still = -0.1
             dof_vel_stand_still = -0.0
 
-            tracking_lin_vel = 1.0
-            tracking_ang_vel = 0.5
-            dof_tracking = 0.05
+            # command tracking
+            tracking_lin_vel  = 1.0
+            tracking_ang_vel  = 0.5
+            
+            dof_tracking      = 0.00
+            aligned_torques   = 0.00
+            sparse_contacts   = 0.01
+            
+            # smoothness and stability
+            lin_vel_z        = -2.0
+            base_height      = -2.0
+            ang_vel_xy       = -0.05
+            orientation      = -0.2
+            dof_acc          = -2.0e-7
+            joint_power      = -2.0e-5
+            joint_power_dist = -1.0e-5
+            torques          = -1.0e-5     # don't need to use this when we already have joint power above...
 
-            aligned_torques = 0.0
-            sparse_contacts = 0.01
-
-            lin_vel_z = -2.0
-            base_height = -2.0
-            ang_vel_xy = -0.05
-            orientation = -0.2
-
-            dof_acc = -2e-07
-            joint_power = -2e-05
-            joint_power_dist = -1e-05
-            torques = -1e-05
-            action_rate = -0.01
+            # Zero out some values that are used in the individual reward classes below
+            action_rate       = -0.01
             action_smoothness = -0.01
 
-            pos_action_rate = 0.0
+            pos_action_rate       = 0.0
             pos_action_smoothness = 0.0
 
-            tau_action_rate = 0.0
+            tau_action_rate       = 0.0
             tau_action_smoothness = 0.0
 
-            feedforward_torques = 0.0
-            feedback_torques = 0.0
+            feedforward_torques   = 0.0
+            feedback_torques      = 0.0
+            dof_act_limits        = 0.0
 
-            dof_act_limits = 0.0
+            # Taken from MIT benchmarking PBRS for humanoid locomotion paper
+            pbrs_orientation = 10.0           # potiential reward for encouraging orientation recovery
+            pbrs_height = 10.0                # potiential reward for encouraging height change recovery
 
-            pbrs_orientation = 10.0
-            pbrs_height = 10.0
-
-            support_polygon = 0.2
-            vhip_angle = -0.1
-            vhip_angular_acc = -0.001
-
-            front_foot_overreach = -100.0
+            # Taken from "Stable Imitation of Multigait and Bipedal Motions for Quadrupedal Robots Over Uneven Terrains" paper
+            support_polygon = 0.2             # encourages well condition foot-placement realtive to the base CoM (and vice-versa)
+            vhip_angle = -0.1                 # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize unstable torso orientation w.r.t. ground contact 
+            vhip_angular_acc = -0.001         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
+            
+            # I developed these
+            front_foot_overreach = -10000.0
             rear_foot_overreach = -10.0
 
-            feet_air_time = 0.7
-            foot_clearance_terrain_aware = 0.5
+            # gait
+            feet_air_time    = 0.70            # tracking reward for long steps
+            # foot_clearance   = 0.20            # tracking reward for feet reaching the desired clearance
+            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
             hip_pos = -0.05
-            foot_slip = -0.01
-            stumble = -0.2
-            feet_contact_forces = -0.01
+            
+            foot_slip        = -0.01           # penalty for feet slipping
+            stumble          = -0.2
+            feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
+
             feet_near_edge = -1.0
-            edge_swing_clearance = -0.5
+            edge_swing_clearance = -2.0
             swing_foot_collision_edge = -1.0
             feet_regulation = -0.1
 
@@ -368,7 +393,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
                                   'dof_close_to_default': [-0.05, -0.1], 
                                   'torque_limits': [-0.0001, -0.01]}
             curr_steps = 1
-            warmup_steps = 2000
+            warmup_steps = 4000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -397,18 +422,23 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
     class policy(LeggedRobotCfgPPO.policy):
         activation = 'elu'
         init_noise_std = 1.0
+
         cenet_enc_layers = [256, 128]
         cenet_enc_latent_dim = 16
         cenet_velo_dim = 11
         cenet_dec_input_dim = 16 + 11
         cenet_dec_layers = [128, 256, 512]
         cenet_dec_out_dim = 133
+
         actor_layers = [512, 256, 128]
         critic_layers = [1024, 256, 128]
+
         dropout = 0.1
+
         pinn_loss_weight = 0.01
         pinn_warmup = 10000
         pinn_init_steps = 0
+
         cenet_explicit_layers = [128, 128]
         grf_decoder_layers = [128, 128]
         wrench_decoder_layers = [128, 128]
@@ -426,19 +456,20 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         desired_kl = 0.01
         max_grad_norm = 1.0
 
-        entropy_coef = 0.02
-        use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.01, 0.02]
-        adaptive_ent_lin_threshold = 0.75
-        adaptive_ent_ang_threshold = 0.35
-        adaptive_ent_ter_threshold = 6.0
-        adaptive_ent_softmax_temp = 2.0
+        # adaptive entropy coefficent algorithm parameters
+        entropy_coef = 0.02                      # initial entropy value
+        use_adaptive_entropy = True              # weather or not to use the adaptive entropy coef alg.
+        adaptive_ent_bounds = [0.01, 0.02]      # entropy coefficent bands
+        adaptive_ent_lin_threshold = 0.75        # minimum linear velocity tracking target
+        adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target
+        adaptive_ent_ter_threshold = 6.0         # minimum avg. terrain curriculum progress target
+        adaptive_ent_softmax_temp = 2.0          # temperature (sharpness) of the softmax operation used in the alg. 
 
     class runner(LeggedRobotCfgPPO.runner):
         policy_class_name = 'ActorCritic_HardPACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
         num_steps_per_env = 24
-        max_iterations = 3000
+        max_iterations = 5000
         grf_dim = 12
         run_name = 'pact_posboot_100hz_grf'
         experiment_name = 'go2_pact_pos_rough'
