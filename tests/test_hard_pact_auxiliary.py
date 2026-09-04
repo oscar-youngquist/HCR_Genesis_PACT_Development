@@ -48,14 +48,40 @@ def make_batch(batch=5):
             [[True], [False], [True], [False], [False]]
         )[:batch],
     }
+    explicit_target = torch.randn(batch, 11)
+    explicit_target[:, 3:7] = torch.randint(0, 2, (batch, 4)).float()
     return (
         torch.randn(batch, 57 * 20), torch.randn(batch, 133),
-        torch.randn(batch, 11), torch.randn(batch, 12),
+        explicit_target, torch.randn(batch, 12),
         torch.ones(batch, 1), torch.randn(batch, 12), transition,
     )
 
 
 class HardPACTAuxiliaryTests(unittest.TestCase):
+    def test_explicit_loss_uses_bce_only_for_contact_probabilities(self):
+        prediction = torch.tensor([
+            [0.2, -0.3, 0.4, 0.8, 0.2, 0.7, 0.1, 0.5, -0.4, 0.3, -0.2],
+            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1],
+        ], requires_grad=True)
+        target = torch.tensor([
+            [0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+        ], requires_grad=True)
+        valid = torch.tensor([[True], [False]])
+
+        actual = PPO_HardPACT._masked_explicit_loss(prediction, target, valid)
+        expected_elements = torch.cat((
+            (prediction[0, :3] - target[0, :3]).square(),
+            torch.nn.functional.binary_cross_entropy(
+                prediction[0, 3:7], target[0, 3:7], reduction="none"
+            ),
+            (prediction[0, 7:11] - target[0, 7:11]).square(),
+        ))
+        torch.testing.assert_close(actual, expected_elements.mean())
+        actual.backward()
+        self.assertGreater(prediction.grad.abs().sum().item(), 0)
+        self.assertIsNone(target.grad)
+
     def test_independent_physics_loss_weights_are_configurable(self):
         algorithm = make_algorithm(
             lambda_inverse=0.25, lambda_rollout=1.75,

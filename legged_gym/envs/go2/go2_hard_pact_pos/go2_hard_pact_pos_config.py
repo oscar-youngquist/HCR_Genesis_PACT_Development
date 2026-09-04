@@ -54,7 +54,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         suppress_backend_warnings = True
 
         class grf:
-            prediction_scale_n = [250.0, 250.0, 500.0]
+            prediction_scale_n = [120.0, 120.0, 250.0]
             vertical_deadband_n = 3.0
             clip_min_n = -500.0
             clip_max_n = 500.0

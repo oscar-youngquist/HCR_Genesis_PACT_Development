@@ -1452,6 +1452,23 @@ class PPO_HardPACT:
         weights = mask.reshape(-1).to(per_sample.dtype)
         return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
 
+    @staticmethod
+    def _masked_explicit_loss(prediction, target, mask):
+        """MSE for continuous estimates and BCE for contact probabilities."""
+        if prediction.shape[-1] != 11 or target.shape[-1] != 11:
+            raise ValueError("HardPACT explicit estimates and labels must be 11-D")
+        target = target.detach()
+        element_loss = torch.cat((
+            (prediction[:, :3] - target[:, :3]).square(),
+            F.binary_cross_entropy(
+                prediction[:, 3:7], target[:, 3:7], reduction="none"
+            ),
+            (prediction[:, 7:11] - target[:, 7:11]).square(),
+        ), dim=-1)
+        per_sample = element_loss.mean(dim=-1)
+        weights = mask.reshape(-1).to(per_sample.dtype)
+        return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
+
     def _start_bard_timing(self, name, reference):
         """Start one asynchronous forward-only PINN-loss measurement."""
         if not self.profile_bard_timing:
@@ -1547,7 +1564,7 @@ class PPO_HardPACT:
         privileged = self._masked_mse(
             reconstruction, privileged_target.detach(), valid
         )
-        explicit_loss = self._masked_mse(
+        explicit_loss = self._masked_explicit_loss(
             explicit, explicit_target.detach(), valid
         )
         per_sample_kl = -0.5 * torch.sum(

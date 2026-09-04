@@ -25,6 +25,29 @@ def _small_algorithm(**kwargs):
     )
 
 
+def test_hard_pact_pos_explicit_loss_uses_bce_for_contact_slice():
+    prediction = torch.tensor([
+        [0.2, -0.3, 0.4, 0.8, 0.2, 0.7, 0.1, 0.5, -0.4, 0.3, -0.2]
+    ], requires_grad=True)
+    target = torch.tensor([
+        [0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    ], requires_grad=True)
+    valid = torch.ones(1, 1, dtype=torch.bool)
+
+    actual = PPO_PACT_Pos._masked_explicit_loss(prediction, target, valid)
+    expected = torch.cat((
+        (prediction[:, :3] - target[:, :3]).square(),
+        torch.nn.functional.binary_cross_entropy(
+            prediction[:, 3:7], target[:, 3:7], reduction="none"
+        ),
+        (prediction[:, 7:11] - target[:, 7:11]).square(),
+    ), dim=-1).mean()
+    torch.testing.assert_close(actual, expected)
+    actual.backward()
+    assert prediction.grad.abs().sum() > 0
+    assert target.grad is None
+
+
 def test_vae_kl_cosine_warmup_uses_absolute_iteration_and_zero_disables_it():
     algorithm = _small_algorithm(
         vae_kld_weight=1.0,
@@ -66,6 +89,7 @@ def test_hard_pact_pos_auxiliary_trains_both_physics_heads_and_logs_parts():
     grf_target = torch.randn(batch, 12)
     privileged_target = torch.randn(batch, 133)
     explicit_target = torch.randn(batch, 11)
+    explicit_target[:, 3:7] = torch.randint(0, 2, (batch, 4)).float()
     valid = torch.ones(batch, 1)
     executed_torque = torch.randn(batch, 12)
     wrench_target = torch.randn(batch, 6)

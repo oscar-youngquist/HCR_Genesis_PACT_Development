@@ -689,6 +689,31 @@ class PPO_PACT_Pos:
         weights = valid.reshape(-1).to(per_sample.dtype)
         return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
 
+    @staticmethod
+    def _masked_explicit_loss(prediction, target, valid):
+        """MSE for continuous estimates and BCE for contact probabilities."""
+        if prediction.shape[-1] != 11 or target.shape[-1] != 11:
+            raise ValueError("HardPACTPos explicit estimates and labels must be 11-D")
+        target = target.detach()
+        element_loss = torch.cat((
+            (prediction[:, :3] - target[:, :3]).square(),
+            F.binary_cross_entropy(
+                prediction[:, 3:7], target[:, 3:7], reduction="none"
+            ),
+            (prediction[:, 7:11] - target[:, 7:11]).square(),
+        ), dim=-1)
+        per_sample = element_loss.mean(dim=-1)
+        weights = valid.reshape(-1).to(per_sample.dtype)
+        return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
+
+    @staticmethod
+    def _masked_bce(prediction, target, valid):
+        per_sample = F.binary_cross_entropy(
+            prediction, target.detach(), reduction="none"
+        ).mean(dim=-1)
+        weights = valid.reshape(-1).to(per_sample.dtype)
+        return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
+
     def _vae_beta_for_iteration(self, iteration):
         """Return the cosine-warmed KL weight for an absolute PPO iteration."""
         if self.vae_kl_warmup_iterations == 0:
@@ -740,6 +765,9 @@ class PPO_PACT_Pos:
                     wrench_active_mask)):
                 raise RuntimeError("HardPACTPos auxiliary physics labels are missing")
             valid = terminated_batch.bool()
+            vel_pred_error = self._masked_explicit_loss(
+                cenet_torso_velo, explicit_labels_batch, valid
+            )
             heads = self.actor_critic.physics_heads(
                 cenet_latent, cenet_torso_velo,
                 executed_torque_target.detach(),
@@ -761,7 +789,7 @@ class PPO_PACT_Pos:
             explicit_linear = self._masked_mse(
                 cenet_torso_velo[:, :3], explicit_labels_batch[:, :3], valid
             )
-            explicit_contact = self._masked_mse(
+            explicit_contact = self._masked_bce(
                 cenet_torso_velo[:, 3:7], explicit_labels_batch[:, 3:7], valid
             )
             explicit_clearance = self._masked_mse(
@@ -777,6 +805,7 @@ class PPO_PACT_Pos:
             )
             auxiliary_metrics.update({
                 "total": vae_loss,
+                "explicit": vel_pred_error,
                 "grf": grf_loss,
                 "wrench_active": wrench_active_loss,
                 "wrench_neutral": wrench_neutral_loss,

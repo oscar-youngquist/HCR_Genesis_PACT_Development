@@ -422,6 +422,12 @@ class GainAndScalingTests(unittest.TestCase):
             atol=1e-5, rtol=1e-4,
         )
 
+    def test_hard_pact_pos_grf_gains_match_hard_pact(self):
+        gains = calculate_physics_head_gains(GO2HardPACTCfg())
+        pos_gains = calculate_physics_head_gains(GO2HardPACTPosCfg())
+        self.assertEqual(pos_gains.physical_grf, gains.physical_grf)
+        self.assertEqual(pos_gains.model_grf, gains.model_grf)
+
     def test_gains_follow_ranges_gravity_and_com_envelope(self):
         small = calculate_physics_head_gains(_gain_cfg(force=10, torque=2, mass=1, com=(0, 0, 0)))
         large = calculate_physics_head_gains(_gain_cfg(force=20, torque=3, mass=5, com=(0.3, 0.2, 0.1)))
