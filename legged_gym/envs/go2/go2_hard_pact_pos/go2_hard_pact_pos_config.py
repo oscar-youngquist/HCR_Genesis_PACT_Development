@@ -170,7 +170,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         mass_com_progress_delta = 0.01
         disturbance_progress_delta = 0.01
         use_joint_dynamics_curriculum = True
-        use_mass_com_curriculum = False
+        use_mass_com_curriculum = True
         use_disturbance_curriculum = False
 
         persistent_disturbance = True
@@ -453,7 +453,7 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         # Shared by the context encoder and all auxiliary decoder heads.
         auxiliary_learning_rate = 0.0002
         # Weight beta on the latent KL term in the combined auxiliary loss.
-        vae_kld_weight = 0.01
+        vae_kld_weight = 0.1
         vae_kl_initial_weight = 0.0001
         vae_kl_warmup_start = 0
         vae_kl_warmup_iterations = 0
