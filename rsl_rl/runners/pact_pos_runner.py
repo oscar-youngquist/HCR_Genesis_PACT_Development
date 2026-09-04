@@ -203,7 +203,11 @@ class OnPolicyRunnerPACTPos:
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
                     # Call the algorithms act() method to store current transition data and predict actions
-                    with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                    with torch.inference_mode(), torch.amp.autocast(
+                        "cuda",
+                        dtype=torch.bfloat16,
+                        enabled=torch.device(self.device).type == "cuda",
+                    ):
                         actions = self.alg.act(obs, critic_obs, obs_hist) # obs_t, (obs_t-1)
                          
                     # Submit the predicted action and extract the resulting state... 

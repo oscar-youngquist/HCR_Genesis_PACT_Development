@@ -197,6 +197,14 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
         # num envs
         if args.num_envs is not None:
             env_cfg.env.num_envs = args.num_envs
+        if hasattr(env_cfg, "viewer") and hasattr(env_cfg.viewer, "rendered_envs_idx"):
+            env_cfg.viewer.rendered_envs_idx = [
+                env_id
+                for env_id in env_cfg.viewer.rendered_envs_idx
+                if 0 <= env_id < env_cfg.env.num_envs
+            ]
+            if not env_cfg.viewer.rendered_envs_idx and env_cfg.env.num_envs > 0:
+                env_cfg.viewer.rendered_envs_idx = [0]
         if args.debug:
             env_cfg.env.debug = args.debug
     # training parameters
@@ -403,7 +411,50 @@ class PolicyExporterWaQ(torch.nn.Module):
                               input_names=input_names,
                               output_names=output_names,
                               opset_version=11)
-            
+
+
+class PolicyExporterPosTau(torch.nn.Module):
+    """Exporter for the two-input inference path used by ``ActorCritic_PosTau``."""
+    def __init__(self, actor_critic):
+        super().__init__()
+        self.actor = copy.deepcopy(actor_critic.act_trunk)
+        self.context_encoder = copy.deepcopy(actor_critic.context_encoder)
+
+    def forward(self, obs, obs_history):
+        latent, torso_velocity = self.context_encoder.forward_inference(obs_history)
+        actor_input = torch.cat((obs, latent, torso_velocity), dim=-1)
+        actions = self.actor(actor_input)
+        if torch.isnan(actions).any():
+            actions = torch.nan_to_num(actions, nan=0.0, posinf=0.0, neginf=0.0)
+        return actions
+
+    def export(self, path, env_cfg, export_onnx=False, train_cfg=None):
+        os.makedirs(path, exist_ok=True)
+        filename = train_cfg.runner.load_run + "_ite" + str(train_cfg.runner.checkpoint) + ".pt"
+        path_pt = os.path.join(path, filename)
+        self.to('cpu')
+        scripted_module = torch.jit.script(self)
+        scripted_module.save(path_pt)
+
+        if export_onnx:
+            filename = train_cfg.runner.load_run + "_ite" + str(train_cfg.runner.checkpoint) + ".onnx"
+            path_onnx = os.path.join(path, filename)
+            dummy_obs = torch.randn(1, env_cfg.env.num_observations)
+            dummy_history = torch.randn(
+                1, env_cfg.env.num_observations * env_cfg.env.num_obs_hist
+            )
+            torch.onnx.export(
+                self,
+                (dummy_obs, dummy_history),
+                path_onnx,
+                verbose=True,
+                export_params=True,
+                input_names=["obs_input", "obs_history_input"],
+                output_names=["nn_output"],
+                opset_version=11,
+            )
+
+
 class PolicyExporterPACT():
     def __init__(self, actor_critic):
         self.actor = actor_critic

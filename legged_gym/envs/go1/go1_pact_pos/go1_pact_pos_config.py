@@ -348,6 +348,9 @@ class GO1PACTPosCfg( LeggedRobotCfg ):
         use_reward_curriculum = True
 
         max_contact_force = 200.0
+        feet_edge_threshold = 0.05
+        edge_clearance_lateral_cells = (-1, 0, 1)
+        edge_clearance_forward_cells = (0, 1, 2)
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
