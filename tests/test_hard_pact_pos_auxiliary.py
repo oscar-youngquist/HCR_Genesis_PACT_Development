@@ -94,6 +94,36 @@ def test_hard_pact_pos_auxiliary_trains_both_physics_heads_and_logs_parts():
     assert all(torch.isfinite(value) for value in metrics.values())
 
 
+def test_hard_pact_pos_auxiliary_modules_share_configured_learning_rate():
+    learning_rate = 7.0e-5
+    algorithm = _small_algorithm(auxiliary_learning_rate=learning_rate)
+
+    encoder_param_lrs = {
+        id(parameter): group["lr"]
+        for group in algorithm.enc_optimizer.param_groups
+        for parameter in group["params"]
+    }
+    expected_encoder_modules = (
+        algorithm.actor_critic.context_encoder,
+        algorithm.actor_critic.explicit_estimator,
+        algorithm.actor_critic.physics_estimator.grf_head,
+        algorithm.actor_critic.physics_estimator.wrench_head,
+    )
+    for module in expected_encoder_modules:
+        for parameter in module.parameters():
+            assert encoder_param_lrs[id(parameter)] == pytest.approx(learning_rate)
+
+    assert {group["lr"] for group in algorithm.decoder_optimizer.param_groups} == {
+        learning_rate
+    }
+    decoder_ids = {
+        id(parameter)
+        for group in algorithm.decoder_optimizer.param_groups
+        for parameter in group["params"]
+    }
+    assert decoder_ids == {id(parameter) for parameter in algorithm.decoder.parameters()}
+
+
 def test_hard_pact_pos_policy_uses_deterministic_mean_while_decoders_sample():
     torch.manual_seed(23)
     actor = ActorCritic_HardPACT_Pos(
@@ -143,3 +173,7 @@ def test_legacy_pact_pos_auxiliary_does_not_allocate_physics_labels():
     assert algorithm.storage.hard_pact_auxiliary is False
     assert algorithm.storage.executed_torque_targets is None
     assert algorithm.storage.wrench_targets is None
+    # The new HardPACT-only auxiliary rate must not alter legacy PACTPos.
+    assert {group["lr"] for group in algorithm.decoder_optimizer.param_groups} == {
+        algorithm.learning_rate
+    }

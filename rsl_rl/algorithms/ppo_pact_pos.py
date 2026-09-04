@@ -61,6 +61,7 @@ class PPO_PACT_Pos:
                  value_loss_coef=1.0,
                  entropy_coef=0.0,
                  learning_rate=1e-3,
+                 auxiliary_learning_rate=2.0e-4,
                  max_grad_norm=1.0,
                  use_clipped_value_loss=True,
                  schedule="fixed",
@@ -101,6 +102,9 @@ class PPO_PACT_Pos:
         self.desired_kl = desired_kl
         self.schedule = schedule
         self.learning_rate = learning_rate
+        self.auxiliary_learning_rate = float(auxiliary_learning_rate)
+        if self.auxiliary_learning_rate <= 0.0:
+            raise ValueError("auxiliary_learning_rate must be positive")
 
         self.num_enc_epochs = num_encoder_epochs
         self.vae_beta = float(vae_kld_weight)
@@ -131,6 +135,12 @@ class PPO_PACT_Pos:
         self.storage = None # initialized later
 
         self.act_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(learning_rate)
+        if self.is_hard_pact_pos:
+            # HardPACTPos trains the context encoder, explicit estimator, GRF
+            # decoder, wrench decoder, and privileged decoder as one auxiliary
+            # system.  Keep every part on the same configured learning rate.
+            for param_group in self.enc_optimizer.param_groups:
+                param_group["lr"] = self.auxiliary_learning_rate
         self.transition = RolloutStoragePACTPos.Transition()
 
         self.act_optimizer = PCGrad(self.act_optimizer, reduction='sum')
@@ -144,7 +154,12 @@ class PPO_PACT_Pos:
                     param_group['lr'] = (learning_rate / 3.0)
 
         self.decoder = decoder_network
-        self.decoder_optimizer = optim.Adam(self.decoder.parameters(), lr=learning_rate)
+        decoder_learning_rate = (
+            self.auxiliary_learning_rate if self.is_hard_pact_pos else learning_rate
+        )
+        self.decoder_optimizer = optim.Adam(
+            self.decoder.parameters(), lr=decoder_learning_rate
+        )
 
         self.boot_mult = 1.0
         self.use_boot = False

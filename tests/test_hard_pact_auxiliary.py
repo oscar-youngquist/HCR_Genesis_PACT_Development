@@ -188,6 +188,25 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
         self.assertTrue(actor_only <= set(ppo_ids))
         self.assertTrue(actor_only.isdisjoint(aux_ids))
 
+    def test_all_auxiliary_decoders_share_configured_learning_rate(self):
+        learning_rate = 7.0e-5
+        algorithm = make_algorithm(auxiliary_learning_rate=learning_rate)
+        parameter_lrs = {
+            id(parameter): group["lr"]
+            for group in algorithm.auxiliary_optimizer.param_groups
+            for parameter in group["params"]
+        }
+        modules = (
+            algorithm.actor_critic.context_encoder,
+            algorithm.actor_critic.explicit_estimator,
+            algorithm.actor_critic.physics_estimator.grf_head,
+            algorithm.actor_critic.physics_estimator.wrench_head,
+            algorithm.decoder,
+        )
+        for module in modules:
+            for parameter in module.parameters():
+                self.assertAlmostEqual(parameter_lrs[id(parameter)], learning_rate)
+
 
 if __name__ == "__main__":
     unittest.main()

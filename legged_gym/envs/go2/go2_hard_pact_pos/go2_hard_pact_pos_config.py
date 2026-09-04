@@ -444,12 +444,14 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         pinn_warmup = 10000
         pinn_init_steps = 0
 
-        cenet_explicit_layers = [128, 128]
-        grf_decoder_layers = [128, 128]
-        wrench_decoder_layers = [128, 128]
+        cenet_explicit_layers = [64, 64]
+        grf_decoder_layers = [128, 64]
+        wrench_decoder_layers = [64, 64]
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         learning_rate = 0.0003
+        # Shared by the context encoder and all auxiliary decoder heads.
+        auxiliary_learning_rate = 0.0002
         # Weight beta on the latent KL term in the combined auxiliary loss.
         vae_kld_weight = 0.01
         vae_kl_initial_weight = 0.0001
