@@ -147,6 +147,7 @@ class OnPolicyRunnerPACT:
                                        pinn_init_steps=self.policy_cfg["pinn_init_steps"],
                                        privileged_grf_start_index=self.policy_cfg.get("privileged_grf_start_index", 61),
                                        grf_observation_scale=float(self.env.obs_scales.grf),
+                                       dof_tau_observation_scale=float(self.env.obs_scales.dof_tau),
                                        device=self.device, **self.alg_cfg)
         
         self.num_steps_per_env = self.cfg["num_steps_per_env"]

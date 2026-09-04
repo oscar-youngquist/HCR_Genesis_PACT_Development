@@ -137,7 +137,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
             ang_vel = 0.25
             dof_pos = 1.0
             dof_vel = 0.05
-            dof_tau = 0.05               # in collected data the magnitude of the DOF's velocity and torques are roughly comparable 
+            dof_tau = 0.01
             grf = 0.01
             height_measurements = 5.0
         clip_observations = 100.
@@ -528,7 +528,7 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         cenet_dec_out_dim = 57 + (50 + 38) + 143 - 12
         privileged_grf_start_index = 61
         separate_grf_decoder = True
-        grf_dec_input_dim = cenet_dec_input_dim
+        grf_dec_input_dim = cenet_dec_input_dim + 12  # context plus detached tau_nom [Nm]
         grf_dec_layers = [128,256,512]
         grf_dec_out_dim = 12
 

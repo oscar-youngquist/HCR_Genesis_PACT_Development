@@ -54,17 +54,21 @@ def test_auxiliary_loss_trains_separate_privileged_and_grf_decoders(algorithm_ty
     algorithm = algorithm_type.__new__(algorithm_type)
     algorithm.actor_critic = _Actor()
     algorithm.decoder = nn.Linear(3, 276)
-    algorithm.grf_decoder = nn.Linear(3, 12)
+    algorithm.grf_decoder = nn.Linear(15, 12)
     algorithm.privileged_grf_start_index = 61
     algorithm.grf_reconstruction_loss_weight = 1.0
     algorithm.vae_beta = 0.1
+    algorithm.dof_tau_observation_scale = 0.01
     history = torch.randn(5, 3)
     privileged = torch.randn(5, 288)
     grfs = privileged[:, 61:73].clone()
     explicit = torch.randn(5, 1)
     mask = torch.ones(5, 1)
+    nominal_torque = torch.randn(5, 12)
 
-    result = algorithm._compute_vae_loss(history, grfs, privileged, explicit, mask)
+    result = algorithm._compute_vae_loss(
+        history, grfs, privileged, explicit, mask, nominal_torque
+    )
     loss, _, _, grf_loss, _, _, privileged_target, _ = result
     assert privileged_target.shape == (5, 276)
     assert grf_loss.isfinite()
@@ -77,22 +81,27 @@ def test_auxiliary_loss_trains_separate_privileged_and_grf_decoders(algorithm_ty
 def test_pinn_grf_gate_uses_decoder_below_threshold_and_simulator_above():
     algorithm = PPO_PACT.__new__(PPO_PACT)
     algorithm.actor_critic = _Actor()
-    algorithm.grf_decoder = nn.Linear(3, 12, bias=False)
+    algorithm.grf_decoder = nn.Linear(15, 12, bias=False)
     algorithm.grf_observation_scale = 0.01
+    algorithm.dof_tau_observation_scale = 0.01
     algorithm.pinn_grf_reconstruction_mse_threshold = 1e-8
     algorithm.last_pinn_grf_reconstruction_mse = float("nan")
     algorithm.last_pinn_grf_replacement_fraction = 0.0
 
     history = torch.randn(4, 3)
+    nominal_torque = torch.randn(4, 12)
     with torch.no_grad():
         _, _, latent, explicit = algorithm.actor_critic.context_encoder(history)
-        target = algorithm.grf_decoder(torch.cat((latent, explicit), dim=-1))
+        decoder_input = algorithm._grf_decoder_input(
+            torch.cat((latent, explicit), dim=-1), nominal_torque
+        )
+        target = algorithm.grf_decoder(decoder_input)
     jacobian = torch.randn(4, 18, 12)
     simulator_force = torch.randn(4, 18)
     mask = torch.ones(4, 1)
 
     selected, mse, used = algorithm._select_pinn_contact_forces(
-        history, target, mask, jacobian, simulator_force
+        history, target, mask, nominal_torque, jacobian, simulator_force
     )
     expected = torch.einsum("bnk,bk->bn", jacobian, target / 0.01)
     assert used.item()
@@ -105,7 +114,7 @@ def test_pinn_grf_gate_uses_decoder_below_threshold_and_simulator_above():
 
     algorithm.pinn_grf_reconstruction_mse_threshold = 0.0
     selected, _, used = algorithm._select_pinn_contact_forces(
-        history, target, mask, jacobian, simulator_force
+        history, target, mask, nominal_torque, jacobian, simulator_force
     )
     assert not used.item()
     torch.testing.assert_close(selected, simulator_force)
@@ -117,8 +126,61 @@ def test_all_go1_go2_pact_configs_define_split_decoders(relative_path):
     assert "cenet_dec_out_dim = 57 + (50 + 38) + 143 - 12" in source
     assert "privileged_grf_start_index = 61" in source
     assert "separate_grf_decoder = True" in source
-    assert "grf_dec_input_dim = cenet_dec_input_dim" in source
+    assert "grf_dec_input_dim = cenet_dec_input_dim + 12" in source
     assert "grf_dec_out_dim = 12" in source
+    assert "dof_tau = 0.01" in source
+
+
+@pytest.mark.parametrize("algorithm_type", [PPO_PACT, PPO_PACT_Pos])
+def test_grf_decoder_torque_condition_is_detached(algorithm_type):
+    context = torch.randn(4, 3, requires_grad=True)
+    nominal_torque = torch.randn(4, 12, requires_grad=True)
+    decoder = nn.Linear(15, 12, bias=False)
+
+    decoder_input = algorithm_type._grf_decoder_input(
+        context, nominal_torque, dof_tau_observation_scale=0.01
+    )
+    torch.testing.assert_close(decoder_input[:, :3], context)
+    torch.testing.assert_close(decoder_input[:, 3:], nominal_torque.detach() * 0.01)
+    prediction = decoder(decoder_input)
+    prediction.square().mean().backward()
+
+    assert context.grad is not None and context.grad.abs().sum() > 0
+    assert decoder.weight.grad is not None and decoder.weight.grad.abs().sum() > 0
+    assert nominal_torque.grad is None
+
+
+@pytest.mark.parametrize("algorithm_type", [PPO_PACT, PPO_PACT_Pos])
+@pytest.mark.parametrize("action_dim", [12, 24])
+def test_nominal_torque_condition_uses_physical_feedforward_plus_pd(
+    algorithm_type, action_dim
+):
+    actions = torch.randn(3, action_dim, requires_grad=True)
+    observations = torch.randn(3, 57, requires_grad=True)
+    default_pose = torch.linspace(-0.2, 0.2, 12)
+
+    def action_func(value):
+        return value[:, :12] + default_pose, 2.0 * value[:, 12:24]
+
+    def feedback_func(q_des, q_pos, q_vel):
+        return 3.0 * (q_des - q_pos) - 0.5 * q_vel
+
+    actual = algorithm_type._nominal_torque_from_action(
+        actions, observations, action_func, feedback_func,
+        default_pose, 0.25,
+    )
+    transformed_actions = actions.detach()
+    if action_dim == 12:
+        transformed_actions = torch.cat(
+            (transformed_actions, torch.zeros_like(transformed_actions)), dim=-1
+        )
+    q_des, tau_ff = action_func(transformed_actions)
+    q_pos = observations.detach()[:, 9:21] + default_pose
+    q_vel = observations.detach()[:, 21:33] / 0.25
+    expected = tau_ff + feedback_func(q_des, q_pos, q_vel)
+
+    torch.testing.assert_close(actual, expected)
+    assert not actual.requires_grad
 
 
 def test_contact_jacobian_maps_canonical_grfs_to_generalized_force():

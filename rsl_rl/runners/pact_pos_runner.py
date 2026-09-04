@@ -127,6 +127,7 @@ class OnPolicyRunnerPACTPos:
                                            self.env.num_privileged_obs,
                                            grf_decoder_network=grf_decoder,
                                            privileged_grf_start_index=self.policy_cfg.get("privileged_grf_start_index", 61),
+                                           dof_tau_observation_scale=float(self.env.obs_scales.dof_tau),
                                            device=self.device, 
                                            **self.alg_cfg)
         

@@ -60,6 +60,7 @@ class PPO_PACT_Pos:
                  value_loss_coef=1.0,
                  entropy_coef=0.0,
                  learning_rate=1e-3,
+                 dof_tau_observation_scale=0.01,
                  max_grad_norm=1.0,
                  use_clipped_value_loss=True,
                  schedule="fixed",
@@ -85,6 +86,7 @@ class PPO_PACT_Pos:
         self.desired_kl = desired_kl
         self.schedule = schedule
         self.learning_rate = learning_rate
+        self.dof_tau_observation_scale = float(dof_tau_observation_scale)
 
         self.num_enc_epochs = num_encoder_epochs
         self.vae_beta = vae_kld_weight
@@ -342,6 +344,13 @@ class PPO_PACT_Pos:
             self.act_optimizer.zero_grad()
             self.enc_optimizer.zero_grad()
 
+            grf_nominal_torque = None
+            if self.grf_decoder is not None:
+                grf_nominal_torque = self._nominal_torque_from_action(
+                    actions_batch, obs_batch, action_func, fb_func,
+                    default_pose, qvel_scale,
+                )
+
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             # Perform RL update
@@ -394,8 +403,11 @@ class PPO_PACT_Pos:
                 t0 = time.perf_counter()
 
                 # Calculate the DreamWaQ-style VAE update
-                vae_loss, kl_div, recon_error, grf_recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(obs_hist_batch, grf_target,
-                                                                                                                          obs_target, explicit_labels_batch, terminated_batch)
+                vae_loss, kl_div, recon_error, grf_recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(
+                    obs_hist_batch, grf_target, obs_target,
+                    explicit_labels_batch, terminated_batch,
+                    grf_nominal_torque,
+                )
                 
                 timers["vae_loss"] += time.perf_counter() - t0
                 
@@ -428,7 +440,12 @@ class PPO_PACT_Pos:
                 dec_recon = self.decoder(dec_input)
                 dec_loss = F.mse_loss(dec_recon, decode_targets)
                 if self.grf_decoder is not None:
-                    grf_dec_recon = self.grf_decoder(dec_input)
+                    grf_dec_recon = self.grf_decoder(
+                        self._grf_decoder_input(
+                            dec_input, grf_nominal_torque,
+                            self.dof_tau_observation_scale,
+                        )
+                    )
                     grf_dec_loss = F.mse_loss(grf_dec_recon, grf_target)
                 else:
                     grf_dec_loss = dec_loss.new_zeros(())
@@ -623,8 +640,9 @@ class PPO_PACT_Pos:
 
         return ppo_loss, surrogate_loss, value_loss, current_actions, tau_clone_loss
 
-    def _compute_vae_loss(self, obs_hist_batch, grf_target, 
-                          obs_target, explicit_labels_batch, terminated_batch):
+    def _compute_vae_loss(self, obs_hist_batch, grf_target,
+                          obs_target, explicit_labels_batch, terminated_batch,
+                          nominal_torque=None):
         vae_loss = None
         
         mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.context_encoder(obs_hist_batch)
@@ -634,7 +652,12 @@ class PPO_PACT_Pos:
         
         # with torch.no_grad():
         enc_update_obs_decode = self.decoder(dec_input)
-        enc_update_grf_decode = self.grf_decoder(dec_input) if self.grf_decoder is not None else None
+        enc_update_grf_decode = (
+            self.grf_decoder(self._grf_decoder_input(
+                dec_input, nominal_torque, self.dof_tau_observation_scale
+            ))
+            if self.grf_decoder is not None else None
+        )
         
         grf_target.requires_grad = False
         obs_target.requires_grad = False
@@ -657,6 +680,34 @@ class PPO_PACT_Pos:
         vae_loss = vel_pred_error + recon_error + self.grf_reconstruction_loss_weight*grf_recon_error + self.vae_beta*kl_div
         
         return vae_loss, kl_div, recon_error, grf_recon_error, vel_pred_error, dec_input.clone().detach(), decode_target.detach(), enc_update_obs_decode.detach()
+
+    @staticmethod
+    def _grf_decoder_input(context_input, nominal_torque,
+                           dof_tau_observation_scale=0.01):
+        """Condition GRF prediction on torque without backpropagating to policy."""
+        if nominal_torque is None:
+            raise ValueError("nominal_torque is required by the separate GRF decoder")
+        if nominal_torque.shape[-1] != 12:
+            raise ValueError("nominal_torque must have 12 values in canonical joint order")
+        scaled_torque = nominal_torque.detach() * dof_tau_observation_scale
+        return torch.cat((context_input, scaled_torque), dim=-1)
+
+    @staticmethod
+    def _nominal_torque_from_action(actions, observations, action_func, fb_func,
+                                    default_pose, qvel_scale):
+        """Reconstruct the commanded physical torque: tau_nom = tau_ff + tau_PD."""
+        detached_actions = actions.detach()
+        # PACTPos stores only its 12-D position action.  Its nominal torque has
+        # no feed-forward component, so reuse the coupled-action transform with
+        # an explicitly zero 12-D torque branch.
+        if detached_actions.shape[-1] == 12:
+            detached_actions = torch.cat(
+                (detached_actions, torch.zeros_like(detached_actions)), dim=-1
+            )
+        q_des, tau_ff = action_func(detached_actions)
+        q_pos = observations[:, 9:21].detach() + default_pose
+        q_vel = observations[:, 21:33].detach() / qvel_scale
+        return (tau_ff + fb_func(q_des, q_pos, q_vel)).detach()
 
     def _privileged_decode_target(self, obs_target, grf_dim):
         """Remove only the GRF block; the critic still receives obs_target unchanged."""
