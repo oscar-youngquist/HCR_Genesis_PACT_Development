@@ -197,7 +197,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
             ],
         },
         "latent_dimension": latent_dim,
-        "history": {"observation_dimension": 57, "steps": 20},
+        "history": {"observation_dimension": 57, "steps": 10},
         "deployment_heads": {
             "activation": "ELU",
             "grf": {"input_order": ["z_t", "stopgrad(explicit_t)", "tau_nom"], "input_dimension": latent_dim + explicit_dim + 12, "hidden_layers": _hidden_linear_widths(actor.physics_estimator.grf_head), "output_dimension": 12},

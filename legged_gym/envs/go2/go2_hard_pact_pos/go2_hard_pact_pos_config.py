@@ -284,18 +284,17 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
 
         # Legacy
         overreach_x_max = 0.28
-        rear_foot_x_nominal = -0.20
         rear_foot_x_margin = 0.08
 
         support_polygon_sigma = 0.01
 
         front_foot_x_nominal = 0.20
-        rear_foot_x_nominal = 0.20
+        rear_foot_x_nominal = -0.20
         foot_x_margin = 0.10
 
 
         foot_clearance_tracking_sigma = 0.01
-        only_positive_rewards = True
+        only_positive_rewards = False
         use_reward_curriculum = True
 
         max_contact_force = 400.0
@@ -452,8 +451,8 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
     class algorithm(LeggedRobotCfgPPO.algorithm):
         learning_rate = 0.0003
         # Weight beta on the latent KL term in the combined auxiliary loss.
-        vae_kld_weight = 1.0
-        vae_kl_initial_weight = 0.001
+        vae_kld_weight = 0.01
+        vae_kl_initial_weight = 0.0001
         vae_kl_warmup_start = 0
         vae_kl_warmup_iterations = 1000
 

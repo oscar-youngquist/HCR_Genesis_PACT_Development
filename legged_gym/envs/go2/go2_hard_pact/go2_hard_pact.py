@@ -174,7 +174,7 @@ class Go2HardPACT(Go2PACT):
 
         # Allowed deviation around nominal rear-foot x location.
         # Example: 0.08 m allows rear_x in [nominal - 0.08, nominal + 0.08].
-        rear_x_margin = self.cfg.rewards.rear_foot_x_margin
+        rear_x_margin = self.cfg.rewards.foot_x_margin
 
         # Penalize both too far forward and too far backward relative to nominal.
         x_error = torch.abs(rear_x - rear_x_nominal)
