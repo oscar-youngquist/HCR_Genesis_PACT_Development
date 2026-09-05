@@ -429,9 +429,9 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         init_noise_std = 1.0
 
         cenet_enc_layers = [256, 128]
-        cenet_enc_latent_dim = 32
+        cenet_enc_latent_dim = 16
         cenet_velo_dim = 11
-        cenet_dec_input_dim = 32 + 11
+        cenet_dec_input_dim = 16 + 11
         cenet_dec_layers = [128, 256, 512]
         cenet_dec_out_dim = 133
 
@@ -444,16 +444,16 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         pinn_warmup = 10000
         pinn_init_steps = 0
 
-        cenet_explicit_layers = [128, 64]
+        cenet_explicit_layers = [128, 128]
         grf_decoder_layers = [128, 128]
-        wrench_decoder_layers = [128, 64]
+        wrench_decoder_layers = [128, 128]
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         learning_rate = 0.0003
         # Shared by the context encoder and all auxiliary decoder heads.
         auxiliary_learning_rate = 0.0002
         # Weight beta on the latent KL term in the combined auxiliary loss.
-        vae_kld_weight = 0.1
+        vae_kld_weight = 1.0
         vae_kl_initial_weight = 0.0001
         vae_kl_warmup_start = 0
         vae_kl_warmup_iterations = 0
@@ -463,8 +463,8 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         grf_loss_weight = 1.0
         active_wrench_loss_weight = 1.0
         neutral_wrench_loss_weight = 0.25
-        value_loss_coef = 1.0
 
+        value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
         num_learning_epochs = 5
@@ -479,7 +479,7 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
 
         # adaptive entropy coefficent algorithm parameters
         entropy_coef = 0.01                      # initial entropy value
-        use_adaptive_entropy = False              # weather or not to use the adaptive entropy coef alg.
+        use_adaptive_entropy = True              # weather or not to use the adaptive entropy coef alg.
         adaptive_ent_bounds = [0.01, 0.02]      # entropy coefficent bands
         adaptive_ent_lin_threshold = 0.75        # minimum linear velocity tracking target
         adaptive_ent_ang_threshold = 0.35        # minimum angular velocity tracking target

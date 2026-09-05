@@ -1546,18 +1546,20 @@ class PPO_HardPACT:
     ):
         r"""Compute every decoder term on one shared stochastic VAE graph.
 
-        During training, privileged reconstruction, explicit estimation, and
-        both deployment heads share ``z = mu + exp(logvar/2) eps``.  The heads
-        internally stop gradients through ``e = D_e(z)`` while retaining
-        gradients through ``z`` (and through nominal torque for the GRF head).
-        Runtime policy conditioning and inference remain deterministic on
-        ``mu``.
+        During training the policy, privileged reconstruction, and deployment
+        heads share ``z = mu + exp(logvar/2) eps``.  The explicit estimate is
+        the third encoder branch ``e = D_e(h)`` beside ``mu(h)`` and
+        ``logvar(h)``. The physics heads stop gradients through ``e`` while
+        retaining gradients through ``z`` (and nominal torque for the GRF
+        head). Runtime inference remains deterministic on ``mu``.
         """
-        mean, logvar = self.actor_critic.context_encoder(history)
+        mean, logvar, features = (
+            self.actor_critic.context_encoder.encode_with_features(history)
+        )
         sample = self.actor_critic.context_encoder.reparameterization_trick(
             mean, logvar
         )
-        explicit = self.actor_critic.explicit_estimator(sample)
+        explicit = self.actor_critic.explicit_estimator(features)
         reconstruction = self.decoder(torch.cat((sample, explicit), dim=-1))
         heads = self.actor_critic.physics_heads(sample, explicit, nominal_torque)
 
@@ -1678,11 +1680,13 @@ class PPO_HardPACT:
 
     def _policy_raw_action_from_noise(self, observation, history, noise):
         """Reparameterize one stored policy draw under current parameters."""
-        # Action replay follows the deterministic policy-conditioning path.
-        # The stored VAE noise is still consumed by the auxiliary/physics
-        # heads, but is deliberately absent from the policy mean.
-        latent, _ = self.actor_critic.context_encoder(history)
-        explicit = self.actor_critic.explicit_estimator(latent)
+        mean, logvar, features = (
+            self.actor_critic.context_encoder.encode_with_features(history)
+        )
+        latent = self.actor_critic.context_encoder.reparameterization_trick(
+            mean, logvar
+        )
+        explicit = self.actor_critic.explicit_estimator(features)
         if self.use_boot:
             conditioning = torch.cat((observation, latent, explicit), dim=-1)
         else:

@@ -148,7 +148,7 @@ def test_hard_pact_pos_auxiliary_modules_share_configured_learning_rate():
     assert decoder_ids == {id(parameter) for parameter in algorithm.decoder.parameters()}
 
 
-def test_hard_pact_pos_policy_uses_deterministic_mean_while_decoders_sample():
+def test_hard_pact_pos_policy_uses_sample_and_explicit_uses_shared_features():
     torch.manual_seed(23)
     actor = ActorCritic_HardPACT_Pos(
         num_actor_obs=57, num_critic_obs=64, num_actions=12,
@@ -164,17 +164,19 @@ def test_hard_pact_pos_policy_uses_deterministic_mean_while_decoders_sample():
     actor.act(observation, history, latent_noise=latent_noise)
     first_mean = actor.action_mean.clone()
     first_decoder_latent = actor.cenet_z.clone()
+    first_explicit = actor.cenet_torso_velo.clone()
     actor.act(observation, history, latent_noise=latent_noise)
     torch.testing.assert_close(actor.action_mean, first_mean, rtol=0, atol=0)
     actor.act(observation, history, latent_noise=-latent_noise)
-    torch.testing.assert_close(actor.action_mean, first_mean, rtol=0, atol=0)
+    assert not torch.equal(actor.action_mean, first_mean)
     assert not torch.equal(actor.cenet_z, first_decoder_latent)
+    torch.testing.assert_close(actor.cenet_torso_velo, first_explicit, rtol=0, atol=0)
 
     actor.zero_grad(set_to_none=True)
     actor.action_mean.square().mean().backward()
     assert actor.context_encoder.ce_out_mean.weight.grad.abs().sum() > 0
     variance_grad = actor.context_encoder.ce_out_var[0].weight.grad
-    assert variance_grad is None or variance_grad.abs().sum() == 0
+    assert variance_grad.abs().sum() > 0
 
     first_inference = actor.act_inference(observation, history)
     second_inference = actor.act_inference(observation, history)

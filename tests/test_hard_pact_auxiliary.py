@@ -121,11 +121,12 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
         self.assertEqual(first[3].shape, (4, 11))
         self.assertFalse(torch.equal(first[2], first[0]))
         self.assertFalse(torch.equal(first[2], second[2]))
-        self.assertFalse(torch.equal(first[3], second[3]))
+        torch.testing.assert_close(first[3], second[3], rtol=0, atol=0)
         inference_latent, inference_explicit = actor.cenet_enc_inference(history)
         torch.testing.assert_close(inference_latent, first[0])
+        _, _, features = actor.context_encoder.encode_with_features(history)
         torch.testing.assert_close(
-            inference_explicit, actor.explicit_estimator(first[0])
+            inference_explicit, actor.explicit_estimator(features)
         )
         self.assertTrue(torch.all((first[3][:, 3:7] >= 0) & (first[3][:, 3:7] <= 1)))
         self.assertTrue(torch.all(first[3][:, 7:11].abs() <= 1))
@@ -183,20 +184,16 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
                 algorithm.actor_critic.context_encoder.ce_out_var[0].weight.grad.abs().sum().item(), 0
             )
 
-    def test_explicit_decoder_uses_reparameterized_sample_during_training(self):
+    def test_explicit_decoder_branches_from_shared_history_features(self):
         algorithm = make_algorithm()
         args = make_batch()
         algorithm.actor_critic.zero_grad(set_to_none=True)
         algorithm._compute_auxiliary_loss(*args)["explicit"].backward()
 
-        # A mean-only explicit estimate has no path to log variance.  A
-        # nonzero variance gradient therefore verifies explicit(z), matching
-        # the HardPACTPos auxiliary path.
-        variance_grad = (
-            algorithm.actor_critic.context_encoder.ce_out_var[0].weight.grad
-        )
-        self.assertIsNotNone(variance_grad)
-        self.assertGreater(variance_grad.abs().sum().item(), 0)
+        encoder = algorithm.actor_critic.context_encoder
+        self.assertGreater(encoder.ce_h2.weight.grad.abs().sum().item(), 0)
+        self.assertIsNone(encoder.ce_out_mean.weight.grad)
+        self.assertIsNone(encoder.ce_out_var[0].weight.grad)
 
     def test_combined_auxiliary_step_updates_shared_trunk_not_actor_or_critic(self):
         algorithm = make_algorithm()

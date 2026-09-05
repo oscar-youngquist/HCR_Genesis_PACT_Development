@@ -31,8 +31,8 @@ def init_weights(m):
 class ContextEncoder(nn.Module):
     """VAE-style shared history trunk and latent distribution encoder.
 
-    The explicit estimate is decoded outside this module from the sampled
-    latent during training and the deterministic mean during inference.
+    Mean, log-variance, and the explicit estimate are separate branches of
+    the same shared history feature tensor.
 
     Args:
         context_input_dim (int): Dimension of input context features. Default: 230.
@@ -53,6 +53,7 @@ class ContextEncoder(nn.Module):
         super().__init__()
 
         output_hdim = 2*(context_latent_size + context_torso_velo_size)
+        self.feature_dim = output_hdim
 
         # VAE-style context encoder layers
         # Input Layer
@@ -89,18 +90,27 @@ class ContextEncoder(nn.Module):
 
         self.ce_out_var.apply(init_weights)
 
-    def encode(self, X_C: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Forward pass through encoder
+    def encode_features(self, X_C: torch.Tensor) -> torch.Tensor:
+        """Return the shared history features consumed by every output branch."""
         x = self.activation(self.ce_in(X_C))
-        # x = self.drop_1(x)
         x = self.activation(self.ce_h1(x))
-        # x = self.drop_2(x)
-        x = self.activation(self.ce_h2(x))
+        return self.activation(self.ce_h2(x))
 
-        lat_mean = self.activation(self.ce_latmean_h(x))
-        lat_var  = self.activation(self.ce_latvar_h(x))
-
+    def distribution_from_features(
+        self, features: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        lat_mean = self.activation(self.ce_latmean_h(features))
+        lat_var = self.activation(self.ce_latvar_h(features))
         return self.ce_out_mean(lat_mean), self.ce_out_var(lat_var)
+
+    def encode_with_features(self, X_C: torch.Tensor):
+        features = self.encode_features(X_C)
+        mean, logvar = self.distribution_from_features(features)
+        return mean, logvar, features
+
+    def encode(self, X_C: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        mean, logvar, _ = self.encode_with_features(X_C)
+        return mean, logvar
 
     def reparameterization_trick(
         self,
@@ -122,17 +132,13 @@ class ContextEncoder(nn.Module):
         return mean + torch.exp(0.5 * logvar) * epsilon
 
     def forward(self, X_C: torch.Tensor):
-        """Complete forward pass including encoding and sampling.
+        """Return the latent-distribution parameters for compatibility.
 
         Args:
             X_C: Input context tensor
 
         Returns:
-            Tuple containing:
-                - mean: Latent space mean
-                - logvar: Latent space log variance
-                - z: Sampled latent vector
-                - torso_velo: Predicted velocity
+            Tuple containing the latent mean and log variance.
         """
         return self.encode(X_C)
     
@@ -219,7 +225,8 @@ class ActorCritic_HardPACT_Pos(nn.Module):
                                               context_torso_velo_size=cenet_velo_dim,
                                               activation=activation)
         self.explicit_estimator = ExplicitEstimatorDecoder(
-            cenet_latent_dim, cenet_explicit_layers, cenet_velo_dim,
+            self.context_encoder.feature_dim,
+            cenet_explicit_layers, cenet_velo_dim,
             contact_epsilon=contact_epsilon,
         )
         self.physics_estimator = DeploymentPhysicsHeads(
@@ -438,18 +445,20 @@ class ActorCritic_HardPACT_Pos(nn.Module):
     
     # forward methods for the histroical context VAE
     def cenet_enc_forward(self, obs_history, latent_noise=None):
-        mean, logvar = self.context_encoder(obs_history)
+        mean, logvar, features = self.context_encoder.encode_with_features(
+            obs_history
+        )
         if latent_noise is None:
             latent_noise = torch.randn_like(logvar)
         latent = self.context_encoder.reparameterization_trick(
             mean, logvar, latent_noise
         )
-        explicit = self.explicit_estimator(latent)
+        explicit = self.explicit_estimator(features)
         return mean, logvar, latent, explicit
     
     def cenet_enc_inference(self, obs_history):
-        mean = self.context_encoder.forward_inference(obs_history)
-        return mean, self.explicit_estimator(mean)
+        mean, _, features = self.context_encoder.encode_with_features(obs_history)
+        return mean, self.explicit_estimator(features)
 
     # Method for the forward method of the actor network, used mostly as an internal method
     def actor_forward(self, current_obs):
@@ -516,11 +525,10 @@ class ActorCritic_HardPACT_Pos(nn.Module):
             obs_history, latent_noise=latent_noise
         )
         
-        # The policy uses the deterministic latent mean.  Stochastic z and
-        # explicit(z) are retained for decoder-head training only, avoiding
-        # control-rate action jitter from independently sampled VAE noise.
-        policy_explicit = self.explicit_estimator(mean)
-        current_obs = torch.cat((obs, mean, policy_explicit), dim=-1)
+        # Training uses the reparameterized content sample. The explicit
+        # estimate is a sibling encoder branch and therefore does not depend
+        # on that sampling noise.
+        current_obs = torch.cat((obs, z, torso_velo), dim=-1)
         
         # Upated the PPO training distribution
         self.update_distribution(current_obs)

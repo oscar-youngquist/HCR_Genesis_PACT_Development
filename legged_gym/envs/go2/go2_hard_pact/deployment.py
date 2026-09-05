@@ -182,8 +182,8 @@ def build_deployment_contract(cfg, actor, gain_spec):
         "schema_version": 2,
         "explicit_estimator": {
             "dimension": 11,
-            "input": "deterministic_latent_mean",
-            "input_dimension": latent_dim,
+            "input": "shared_history_encoder_features",
+            "input_dimension": actor.context_encoder.feature_dim,
             "hidden_layers": [
                 layer.out_features
                 for layer in actor.explicit_estimator.network

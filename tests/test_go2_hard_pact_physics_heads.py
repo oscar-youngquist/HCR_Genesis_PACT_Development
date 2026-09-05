@@ -188,7 +188,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
             [(27, 23), (23, 19), (19, 13), (13, 6)],
         )
 
-    def test_actor_policy_is_mean_based_while_decoder_latent_is_stochastic(self):
+    def test_actor_policy_uses_sample_and_explicit_uses_shared_features(self):
         torch.manual_seed(5)
         actor = _small_actor()
         observation = torch.randn(2, 57)
@@ -199,8 +199,9 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         self.assertFalse(torch.equal(first[2], second[2]))
         inference_latent, inference_explicit = actor.cenet_enc_inference(history)
         torch.testing.assert_close(inference_latent, first[0])
+        _, _, features = actor.context_encoder.encode_with_features(history)
         torch.testing.assert_close(
-            inference_explicit, actor.explicit_estimator(first[0])
+            inference_explicit, actor.explicit_estimator(features)
         )
         self.assertEqual(tuple(first[2].shape), (2, 16))
         self.assertEqual(tuple(first[3].shape), (2, 11))
@@ -215,12 +216,22 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         hook.remove()
         self.assertEqual(tuple(action.shape), (2, 24))
         self.assertEqual(actor.act_trunk[0].in_features, 57 + 16 + 11)
-        torch.testing.assert_close(captured_actor_input[0][:, 57:73], first[0])
         torch.testing.assert_close(
-            captured_actor_input[0][:, 73:], actor.explicit_estimator(first[0])
+            captured_actor_input[0][:, 57:73], first_decoder_latent
         )
-        torch.testing.assert_close(actor.action_mean, first_action_mean, rtol=0, atol=0)
+        torch.testing.assert_close(
+            captured_actor_input[0][:, 73:], actor.explicit_estimator(features)
+        )
+        self.assertFalse(torch.equal(actor.action_mean, first_action_mean))
         self.assertFalse(torch.equal(actor.cenet_z, first_decoder_latent))
+        actor.zero_grad(set_to_none=True)
+        actor.action_mean.square().mean().backward()
+        self.assertGreater(
+            actor.context_encoder.ce_out_mean.weight.grad.abs().sum(), 0.0
+        )
+        self.assertGreater(
+            actor.context_encoder.ce_out_var[0].weight.grad.abs().sum(), 0.0
+        )
 
     def test_explicit_estimator_is_separate_registered_configurable_module(self):
         for actor_class in (ActorCritic_HardPACT, ActorCritic_HardPACT_Pos):
@@ -232,6 +243,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
                     for name, _ in actor.context_encoder.named_modules()
                 ))
                 self.assertEqual(actor.context_encoder.ce_h2.out_features, 54)
+                self.assertEqual(actor.context_encoder.feature_dim, 54)
                 self.assertEqual(actor.context_encoder.ce_latmean_h.in_features, 54)
                 self.assertEqual(actor.context_encoder.ce_out_mean.in_features, 54)
                 self.assertEqual(actor.context_encoder.ce_out_mean.out_features, 16)
@@ -241,7 +253,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
                 ]
                 self.assertEqual(
                     [(layer.in_features, layer.out_features) for layer in linears],
-                    [(16, 128), (128, 128), (128, 11)],
+                    [(54, 128), (128, 128), (128, 11)],
                 )
                 self.assertEqual(
                     sum(isinstance(module, torch.nn.ELU)
@@ -265,11 +277,11 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
                     for parameter in actor.explicit_estimator.parameters()
                 ))
 
-    def test_mean_decoder_output_ranges_and_sampling_independence(self):
+    def test_feature_decoder_output_ranges_and_sampling_independence(self):
         actor = _small_actor()
         history = torch.randn(4, 57 * 20)
-        mean, logvar = actor.context_encoder(history)
-        estimate = actor.explicit_estimator(mean)
+        mean, logvar, features = actor.context_encoder.encode_with_features(history)
+        estimate = actor.explicit_estimator(features)
         inference_mean, inference_estimate = actor.cenet_enc_inference(history)
         torch.testing.assert_close(inference_mean, mean)
         torch.testing.assert_close(inference_estimate, estimate)
@@ -283,7 +295,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         torch.manual_seed(999)
         second = actor.cenet_enc_forward(history)
         self.assertFalse(torch.equal(first[2], second[2]))
-        self.assertFalse(torch.equal(first[3], second[3]))
+        torch.testing.assert_close(first[3], second[3], rtol=0, atol=0)
 
     def test_estimate_is_used_by_actor_decoder_and_physics_consumers(self):
         actor = _small_actor()
@@ -293,6 +305,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         mean, _, latent, estimate = actor.cenet_enc_forward(
             history, latent_noise=latent_noise
         )
+        _, _, features = actor.context_encoder.encode_with_features(history)
 
         captured_actor_input = []
         hook = actor.act_trunk[0].register_forward_pre_hook(
@@ -301,7 +314,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         actor.act_inference(observation, history)
         hook.remove()
         torch.testing.assert_close(
-            captured_actor_input[0][:, -11:], actor.explicit_estimator(mean)
+            captured_actor_input[0][:, -11:], actor.explicit_estimator(features)
         )
 
         algorithm = PPO_PACT.__new__(PPO_PACT)
@@ -316,12 +329,12 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
             torch.zeros(3, 11),
             mask,
         )
-        # Both auxiliary decoder inputs are derived from the same fresh
-        # reparameterized content sample.
+        # The latent input is a fresh sample, while the explicit input is the
+        # deterministic sibling branch of the shared history features.
         self.assertFalse(torch.equal(decoder_input[:, :16], mean))
+        _, _, _, expected_explicit = actor.cenet_enc_forward(history)
         torch.testing.assert_close(
-            decoder_input[:, 16:],
-            actor.explicit_estimator(decoder_input[:, :16]),
+            decoder_input[:, 16:], expected_explicit,
         )
 
         nominal_torque = torch.randn(3, 12)
@@ -334,21 +347,21 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
             actual.base_wrench_yaw_scaled, expected.base_wrench_yaw_scaled
         )
 
-    def test_estimator_gradient_reaches_decoder_and_shared_latent_mean(self):
+    def test_estimator_gradient_reaches_decoder_and_shared_history_trunk(self):
         actor = _small_actor()
         history = torch.randn(2, 57 * 20)
-        mean, _ = actor.context_encoder(history)
-        mean.retain_grad()
-        estimate = actor.explicit_estimator(mean)
+        features = actor.context_encoder.encode_features(history)
+        features.retain_grad()
+        estimate = actor.explicit_estimator(features)
         estimate[:, :3].square().mean().backward()
-        self.assertGreater(mean.grad.abs().sum().item(), 0.0)
+        self.assertGreater(features.grad.abs().sum().item(), 0.0)
         self.assertTrue(any(
             parameter.grad is not None and parameter.grad.abs().sum().item() > 0.0
             for parameter in actor.explicit_estimator.parameters()
         ))
-        self.assertGreater(
-            actor.context_encoder.ce_out_mean.weight.grad.abs().sum().item(), 0.0
-        )
+        self.assertGreater(actor.context_encoder.ce_h2.weight.grad.abs().sum(), 0.0)
+        self.assertIsNone(actor.context_encoder.ce_out_mean.weight.grad)
+        self.assertIsNone(actor.context_encoder.ce_out_var[0].weight.grad)
 
     def test_hard_pact_actors_are_standalone_legacy_copies(self):
         self.assertFalse(issubclass(ActorCritic_HardPACT, ActorCritic_PACT))
@@ -468,8 +481,10 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertEqual(loaded["schema_version"], 2)
         self.assertEqual(loaded["explicit_estimator"]["dimension"], 11)
         self.assertEqual(
-            loaded["explicit_estimator"]["input"], "deterministic_latent_mean"
+            loaded["explicit_estimator"]["input"],
+            "shared_history_encoder_features",
         )
+        self.assertEqual(loaded["explicit_estimator"]["input_dimension"], 54)
         self.assertEqual(loaded["explicit_estimator"]["hidden_layers"], [128, 128])
         self.assertEqual(
             loaded["deployment_heads"]["grf"]["hidden_layers"], [128, 128]

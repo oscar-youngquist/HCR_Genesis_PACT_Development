@@ -92,7 +92,7 @@ def transform_explicit_estimator_output(raw, contact_epsilon=1.0e-2):
 
 
 class ExplicitEstimatorDecoder(nn.Module):
-    """Decode a configurable history latent into the fixed 11-D estimate."""
+    """Decode shared history-encoder features into the fixed 11-D estimate."""
 
     def __init__(self, latent_dim=16, hidden_layers=(128, 128), output_dim=11,
                  contact_epsilon=1.0e-2):
@@ -108,16 +108,16 @@ class ExplicitEstimatorDecoder(nn.Module):
             input_dim = int(hidden_dim)
         layers.append(nn.Linear(input_dim, output_dim))
         self.network = nn.Sequential(*layers)
-        self.latent_dim = int(latent_dim)
+        self.input_dim = int(latent_dim)
         self.contact_epsilon = float(contact_epsilon)
 
-    def forward(self, latent_mean):
-        if latent_mean.shape[-1] != self.latent_dim:
+    def forward(self, encoder_features):
+        if encoder_features.shape[-1] != self.input_dim:
             raise ValueError(
-                f"explicit estimator input must be {self.latent_dim}-D"
+                f"explicit estimator input must be {self.input_dim}-D"
             )
         return transform_explicit_estimator_output(
-            self.network(latent_mean), self.contact_epsilon
+            self.network(encoder_features), self.contact_epsilon
         )
 
 
