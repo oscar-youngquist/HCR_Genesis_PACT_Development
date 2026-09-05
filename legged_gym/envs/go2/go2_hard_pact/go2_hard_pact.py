@@ -1208,7 +1208,8 @@ class Go2HardPACT(Go2PACT):
                 self._disturbance_interval_sum_yaw_scaled / divisor
             ).clone(),
             "total_external_wrench_label_yaw_normalized": normalize_wrench_target(
-                self._disturbance_interval_sum_yaw_physical / divisor
+                self._disturbance_interval_sum_yaw_physical / divisor,
+                self.cfg.deployment_physics.wrench_scale,
             ).clone(),
             "realized_added_mass": self._realized_added_mass.clone(),
             "realized_com_shift_body": self._realized_com_shift_body.clone(),
@@ -1426,7 +1427,10 @@ class Go2HardPACT(Go2PACT):
             self.rew_buf,
             self.reset_buf,
             self.extras,
-            normalize_grf_target(interval_grf),
+            normalize_grf_target(
+                interval_grf,
+                tuple(float(v) for v in self.cfg.sim.grf.prediction_scale_n) * 4,
+            ),
         )
 
     def _pre_sim_step(self, actions):

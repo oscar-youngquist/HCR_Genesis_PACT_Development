@@ -1619,13 +1619,19 @@ class PPO_HardPACT:
             "reconstruction": reconstruction,
         }
         metrics.update(wrench_regression_metrics(
-            heads.wrench_raw_normalized, wrench_target, valid
+            heads.wrench_raw_normalized, wrench_target, valid,
+            self.actor_critic.physics_estimator.wrench_scale,
+            self.actor_critic.physics_estimator.wrench_qp_clip,
         ))
         active_diagnostics = wrench_regression_metrics(
-            heads.wrench_raw_normalized, wrench_target, active_mask
+            heads.wrench_raw_normalized, wrench_target, active_mask,
+            self.actor_critic.physics_estimator.wrench_scale,
+            self.actor_critic.physics_estimator.wrench_qp_clip,
         )
         neutral_diagnostics = wrench_regression_metrics(
-            heads.wrench_raw_normalized, wrench_target, neutral_mask
+            heads.wrench_raw_normalized, wrench_target, neutral_mask,
+            self.actor_critic.physics_estimator.wrench_scale,
+            self.actor_critic.physics_estimator.wrench_qp_clip,
         )
         metrics["wrench_active_mae_physical"] = active_diagnostics[
             "wrench_raw_mae_physical"

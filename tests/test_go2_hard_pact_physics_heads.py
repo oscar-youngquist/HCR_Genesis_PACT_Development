@@ -7,6 +7,7 @@ import inspect
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 os.environ.setdefault("SIMULATOR", "genesis_pact")
 os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_hard_pact_tests")
@@ -28,6 +29,9 @@ from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import (
     GO2HardPACTCfgPPO,
 )
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
+from legged_gym.envs.go2.go2_hard_pact.ablation_configs import (
+    make_hard_pact_variant_configs,
+)
 from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import (
     GO2HardPACTPosCfg,
     GO2HardPACTPosCfgPPO,
@@ -74,6 +78,9 @@ def _small_actor(gains=None, actor_class=ActorCritic_HardPACT, latent_dim=16):
         cenet_enc_layers=[32, 16],
         activation="elu",
         init_noise_std=1.0,
+        grf_scale_n=gains.grf_scale_n,
+        wrench_scale=gains.wrench_scale_n_nm,
+        wrench_qp_clip=gains.wrench_qp_clip_n_nm,
     )
 
 
@@ -413,6 +420,141 @@ class GainAndScalingTests(unittest.TestCase):
         self.assertEqual(pos_gains.grf_scale_n, gains.grf_scale_n)
         self.assertEqual(pos_gains.wrench_scale_n_nm, gains.wrench_scale_n_nm)
         self.assertEqual(pos_gains.wrench_qp_clip_n_nm, gains.wrench_qp_clip_n_nm)
+        for cfg in (GO2HardPACTCfg, GO2HardPACTPosCfg):
+            self.assertEqual(
+                tuple(cfg.deployment_physics.wrench_scale), WRENCH_SCALE_N_NM
+            )
+            self.assertEqual(
+                tuple(cfg.deployment_physics.wrench_qp_clip),
+                WRENCH_QP_CLIP_N_NM,
+            )
+        for variant in (
+            "baseline", "soft", "hard", "full", "stopgrad",
+            "soft_penalty", "inverse", "rollout",
+        ):
+            variant_cfg, _ = make_hard_pact_variant_configs(variant, "genesis")
+            self.assertEqual(
+                tuple(variant_cfg.deployment_physics.wrench_scale),
+                WRENCH_SCALE_N_NM,
+            )
+            self.assertEqual(
+                tuple(variant_cfg.deployment_physics.wrench_qp_clip),
+                WRENCH_QP_CLIP_N_NM,
+            )
+        actor = ActorCritic_HardPACT(
+            num_actor_obs=57, num_critic_obs=64, num_actions=12,
+            actor_layers=[16], critic_layers=[16], cenet_in_dim=57 * 20,
+            cenet_enc_layers=[16, 8], wrench_scale=gains.wrench_scale_n_nm,
+            wrench_qp_clip=gains.wrench_qp_clip_n_nm,
+        )
+        torch.testing.assert_close(
+            actor.physics_estimator.wrench_scale,
+            torch.tensor(WRENCH_SCALE_N_NM),
+        )
+        torch.testing.assert_close(
+            actor.physics_estimator.wrench_qp_clip,
+            torch.tensor(WRENCH_QP_CLIP_N_NM),
+        )
+
+    def test_edited_force_config_propagates_to_targets_model_qp_and_contract(self):
+        configured_grf_scale = (100., 200., 300.)
+        configured_grf_clip = (-321., 432.)
+        configured_scale = (80., 90., 100., 20., 22., 24.)
+        configured_clip = (120., 130., 140., 30., 32., 34.)
+        cfg = SimpleNamespace(
+            sim=SimpleNamespace(
+                grf=SimpleNamespace(
+                    prediction_scale_n=configured_grf_scale,
+                    clip_min_n=configured_grf_clip[0],
+                    clip_max_n=configured_grf_clip[1],
+                )
+            ),
+            normalization=SimpleNamespace(
+                obs_scales=SimpleNamespace(grf=0.01, base_wrench=0.01)
+            ),
+            deployment_physics=SimpleNamespace(
+                wrench_scale=configured_scale,
+                wrench_qp_clip=configured_clip,
+            ),
+        )
+        gains = calculate_physics_head_gains(cfg)
+        actor = ActorCritic_HardPACT(
+            num_actor_obs=57, num_critic_obs=64, num_actions=12,
+            actor_layers=[16], critic_layers=[16], cenet_in_dim=57 * 20,
+            cenet_enc_layers=[16, 8], wrench_scale=gains.wrench_scale_n_nm,
+            wrench_qp_clip=gains.wrench_qp_clip_n_nm,
+            grf_scale_n=gains.grf_scale_n,
+        )
+        pos_actor = ActorCritic_HardPACT_Pos(
+            num_actor_obs=57, num_critic_obs=64, num_actions=12,
+            actor_layers=[16], critic_layers=[16], cenet_in_dim=57 * 20,
+            cenet_enc_layers=[16, 8], wrench_scale=gains.wrench_scale_n_nm,
+            wrench_qp_clip=gains.wrench_qp_clip_n_nm,
+            grf_scale_n=gains.grf_scale_n,
+        )
+        expected_grf_scale = torch.tensor([100., 200., 300.] * 4)
+        for model in (actor, pos_actor):
+            torch.testing.assert_close(
+                model.physics_estimator.grf_scale_n, expected_grf_scale
+            )
+        self.assertEqual(gains.grf_clip_min_n, configured_grf_clip[0])
+        self.assertEqual(gains.grf_clip_max_n, configured_grf_clip[1])
+        torch.testing.assert_close(
+            actor.physics_estimator.wrench_scale, torch.tensor(configured_scale)
+        )
+        torch.testing.assert_close(
+            actor.physics_estimator.wrench_qp_clip, torch.tensor(configured_clip)
+        )
+        physical = torch.tensor([configured_scale])
+        torch.testing.assert_close(
+            normalize_wrench_target(physical, configured_scale), torch.ones(1, 6)
+        )
+        raw = torch.full((1, 6), 2.0)
+        torch.testing.assert_close(
+            actor.physics_estimator.wrench_to_qp_physical(raw),
+            torch.tensor([configured_clip]),
+        )
+        grf_physical = expected_grf_scale.reshape(1, 12)
+        grf_normalized = normalize_grf_target(
+            grf_physical, gains.grf_scale_n
+        )
+        torch.testing.assert_close(grf_normalized, torch.ones_like(grf_normalized))
+        torch.testing.assert_close(
+            actor.physics_estimator.grf_to_physical(grf_normalized), grf_physical
+        )
+        torch.testing.assert_close(
+            pos_actor.physics_estimator.grf_to_physical(grf_normalized),
+            grf_physical,
+        )
+        contract = build_deployment_contract(GO2HardPACTCfg(), actor, gains)
+        self.assertEqual(
+            contract["grf_decoder_normalization"]["scale_n"],
+            expected_grf_scale.tolist(),
+        )
+        self.assertEqual(
+            contract["grf_decoder_normalization"]["interval_target_clip_n"],
+            {
+                "minimum": configured_grf_clip[0],
+                "maximum": configured_grf_clip[1],
+                "location": "GRF processor before control-interval averaging",
+            },
+        )
+        self.assertEqual(
+            contract["wrench_decoder_normalization"]["scale_n_nm"],
+            list(configured_scale),
+        )
+        self.assertEqual(
+            contract["qp_inputs"]["base_wrench"]["qp_clip"],
+            list(configured_clip),
+        )
+        self.assertIn(
+            "self.cfg.deployment_physics.wrench_scale",
+            inspect.getsource(Go2HardPACT._end_disturbance_interval),
+        )
+        self.assertIn(
+            "self.cfg.sim.grf.prediction_scale_n",
+            inspect.getsource(Go2HardPACT.step),
+        )
 
     def test_grf_normalization_round_trip_and_direct_huber(self):
         physical = torch.tensor([[250.0, -125.0, 62.5] * 4])

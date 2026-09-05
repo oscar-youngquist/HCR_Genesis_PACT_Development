@@ -817,13 +817,19 @@ class PPO_PACT_Pos:
                 "explicit_foot_clearance": explicit_clearance,
             })
             auxiliary_metrics.update(wrench_regression_metrics(
-                heads.wrench_raw_normalized, wrench_target.detach(), valid
+                heads.wrench_raw_normalized, wrench_target.detach(), valid,
+                self.actor_critic.physics_estimator.wrench_scale,
+                self.actor_critic.physics_estimator.wrench_qp_clip,
             ))
             active_diagnostics = wrench_regression_metrics(
-                heads.wrench_raw_normalized, wrench_target.detach(), active
+                heads.wrench_raw_normalized, wrench_target.detach(), active,
+                self.actor_critic.physics_estimator.wrench_scale,
+                self.actor_critic.physics_estimator.wrench_qp_clip,
             )
             neutral_diagnostics = wrench_regression_metrics(
-                heads.wrench_raw_normalized, wrench_target.detach(), neutral
+                heads.wrench_raw_normalized, wrench_target.detach(), neutral,
+                self.actor_critic.physics_estimator.wrench_scale,
+                self.actor_critic.physics_estimator.wrench_qp_clip,
             )
             auxiliary_metrics.update({
                 "wrench_active_mae_physical": active_diagnostics[

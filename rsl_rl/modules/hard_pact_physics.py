@@ -108,11 +108,17 @@ def normalized_wrench_huber_loss(prediction, target, mask=None, delta=1.0):
 
 
 @torch.no_grad()
-def wrench_regression_metrics(prediction_normalized, target_normalized, mask=None):
+def wrench_regression_metrics(
+    prediction_normalized,
+    target_normalized,
+    mask=None,
+    wrench_scale=WRENCH_SCALE_N_NM,
+    wrench_qp_clip=WRENCH_QP_CLIP_N_NM,
+):
     """Return scalar diagnostics in physical units without affecting training."""
-    raw = wrench_normalized_to_physical(prediction_normalized)
-    target = wrench_normalized_to_physical(target_normalized)
-    clipped = sanitize_and_clip_wrench_for_qp(raw)
+    raw = wrench_normalized_to_physical(prediction_normalized, wrench_scale)
+    target = wrench_normalized_to_physical(target_normalized, wrench_scale)
+    clipped = sanitize_and_clip_wrench_for_qp(raw, wrench_qp_clip)
     finite = torch.isfinite(raw)
     safe_raw = torch.where(finite, raw, torch.zeros_like(raw))
     valid = torch.ones(raw.shape[0], device=raw.device, dtype=raw.dtype)
@@ -129,7 +135,9 @@ def wrench_regression_metrics(prediction_normalized, target_normalized, mask=Non
     error = safe_raw - target
     absolute = error.abs()
     squared = error.square()
-    limit = raw.new_tensor(WRENCH_QP_CLIP_N_NM)
+    limit = torch.as_tensor(
+        wrench_qp_clip, device=raw.device, dtype=raw.dtype
+    )
     exceedance = torch.where(
         finite, (raw.abs() - limit).clamp_min(0.0), torch.zeros_like(raw)
     )
@@ -257,6 +265,9 @@ class DeploymentPhysicsHeads(nn.Module):
         explicit_dim=11,
         grf_hidden_layers=(128, 128),
         wrench_hidden_layers=(128, 128),
+        grf_scale_n=GRF_SCALE_N,
+        wrench_scale=WRENCH_SCALE_N_NM,
+        wrench_qp_clip=WRENCH_QP_CLIP_N_NM,
     ):
         super().__init__()
         self.latent_dim = int(latent_dim)
@@ -270,7 +281,7 @@ class DeploymentPhysicsHeads(nn.Module):
         # Persistent constants make the deployed numerical contract part of
         # every checkpoint and available without an external config object.
         self.register_buffer(
-            "grf_scale_n", torch.tensor(GRF_SCALE_N, dtype=torch.float32)
+            "grf_scale_n", torch.as_tensor(grf_scale_n, dtype=torch.float32)
         )
         self.register_buffer(
             "grf_normalization_version",
@@ -279,11 +290,11 @@ class DeploymentPhysicsHeads(nn.Module):
         # The fixed scale, QP safety boundary, and contract version travel
         # with the weights used by both HardPACT training pipelines.
         self.register_buffer(
-            "wrench_scale", torch.tensor(WRENCH_SCALE_N_NM, dtype=torch.float32)
+            "wrench_scale", torch.as_tensor(wrench_scale, dtype=torch.float32)
         )
         self.register_buffer(
             "wrench_qp_clip",
-            torch.tensor(WRENCH_QP_CLIP_N_NM, dtype=torch.float32),
+            torch.as_tensor(wrench_qp_clip, dtype=torch.float32),
         )
         self.register_buffer(
             "wrench_normalization_version",
@@ -293,6 +304,8 @@ class DeploymentPhysicsHeads(nn.Module):
             raise ValueError("grf_scale_n must contain 12 values")
         if self.wrench_scale.shape != (6,):
             raise ValueError("wrench_scale must contain 6 values")
+        if self.wrench_qp_clip.shape != (6,):
+            raise ValueError("wrench_qp_clip must contain 6 values")
 
     def forward(self, latent, explicit, nominal_torque):
         if (latent.shape[-1] != self.latent_dim

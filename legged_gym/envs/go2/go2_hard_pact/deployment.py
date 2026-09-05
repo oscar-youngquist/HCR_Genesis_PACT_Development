@@ -8,7 +8,6 @@ import os
 
 from rsl_rl.modules.hard_pact_physics import (
     GRF_NORMALIZATION_VERSION,
-    GRF_SCALE_N,
     WRENCH_NORMALIZATION_VERSION,
     WRENCH_QP_CLIP_N_NM,
     WRENCH_SCALE_N_NM,
@@ -24,18 +23,21 @@ RECONSTRUCTION_DIM = len(RECONSTRUCTION_INDICES)
 @dataclass(frozen=True)
 class PhysicsGainSpec:
     grf_scale_n: tuple[float, ...]
+    grf_clip_min_n: float
+    grf_clip_max_n: float
     wrench_scale_n_nm: tuple[float, ...]
     wrench_qp_clip_n_nm: tuple[float, ...]
 
 
 def calculate_physics_head_gains(cfg):
-    """Validate and return the fixed HardPACT decoder/QP scales."""
+    """Validate and return the configured HardPACT force scales and bounds."""
     grf_scale_n = tuple(float(v) for v in cfg.sim.grf.prediction_scale_n) * 4
-    if grf_scale_n != GRF_SCALE_N:
-        raise ValueError(
-            "HardPACT GRF decoder normalization must be [250, 250, 250] N "
-            "in FR/FL/RR/RL order"
-        )
+    if len(grf_scale_n) != 12 or any(value <= 0.0 for value in grf_scale_n):
+        raise ValueError("HardPACT GRF prediction_scale_n must contain 3 positive values")
+    grf_clip_min_n = float(cfg.sim.grf.clip_min_n)
+    grf_clip_max_n = float(cfg.sim.grf.clip_max_n)
+    if grf_clip_min_n > grf_clip_max_n:
+        raise ValueError("HardPACT GRF clip_min_n must not exceed clip_max_n")
     grf_obs_scale = float(cfg.normalization.obs_scales.grf)
     wrench_obs_scale = float(cfg.normalization.obs_scales.base_wrench)
     if grf_obs_scale <= 0.0 or wrench_obs_scale <= 0.0:
@@ -48,14 +50,20 @@ def calculate_physics_head_gains(cfg):
     configured_qp_clip = tuple(float(v) for v in getattr(
         deployment, "wrench_qp_clip", WRENCH_QP_CLIP_N_NM
     ))
-    if configured_wrench_scale != WRENCH_SCALE_N_NM:
-        raise ValueError("HardPACT wrench_scale must be [100,100,100,25,25,25]")
-    if configured_qp_clip != WRENCH_QP_CLIP_N_NM:
-        raise ValueError("HardPACT wrench_qp_clip must be [150,150,150,40,40,40]")
+    if len(configured_wrench_scale) != 6 or any(
+        value <= 0.0 for value in configured_wrench_scale
+    ):
+        raise ValueError("HardPACT wrench_scale must contain 6 positive values")
+    if len(configured_qp_clip) != 6 or any(
+        value <= 0.0 for value in configured_qp_clip
+    ):
+        raise ValueError("HardPACT wrench_qp_clip must contain 6 positive values")
     return PhysicsGainSpec(
         grf_scale_n=grf_scale_n,
-        wrench_scale_n_nm=WRENCH_SCALE_N_NM,
-        wrench_qp_clip_n_nm=WRENCH_QP_CLIP_N_NM,
+        grf_clip_min_n=grf_clip_min_n,
+        grf_clip_max_n=grf_clip_max_n,
+        wrench_scale_n_nm=configured_wrench_scale,
+        wrench_qp_clip_n_nm=configured_qp_clip,
     )
 
 
@@ -132,6 +140,12 @@ def build_deployment_contract(cfg, actor, gain_spec):
             "target": "target_grf_physical_n / scale_n",
             "output": "predicted_normalized",
             "physical_reconstruction": "predicted_normalized * scale_n",
+            "decoder_prediction_clipping": None,
+            "interval_target_clip_n": {
+                "minimum": gain_spec.grf_clip_min_n,
+                "maximum": gain_spec.grf_clip_max_n,
+                "location": "GRF processor before control-interval averaging",
+            },
             "observation_scale_is_independent": True,
         },
         "wrench_decoder_normalization": {
