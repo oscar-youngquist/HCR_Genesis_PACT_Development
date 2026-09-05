@@ -379,8 +379,6 @@ class TestHardPACTAliases(unittest.TestCase):
                         "lambda_inverse", "lambda_rollout",
                         "lambda_projection", "hard_pact_qp",
                         "action_clip",
-                        "grf_observation_scale",
-                        "base_wrench_observation_scale",
                         "auxiliary_learning_rate", "privileged_loss_weight",
                         "explicit_loss_weight", "grf_loss_weight",
                         "active_wrench_loss_weight", "neutral_wrench_loss_weight",

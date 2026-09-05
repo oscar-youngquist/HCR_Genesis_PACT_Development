@@ -37,12 +37,16 @@ def added_mass_gravity_wrench_world(
     return torch.cat((force_world, moment_world), dim=-1)
 
 
-def wrench_world_to_scaled_yaw_local(wrench_world, base_quat_xyzw, scale):
+def wrench_world_to_yaw_local(wrench_world, base_quat_xyzw):
     local = torch.cat((
         _world_to_yaw_local(wrench_world[:, :3], base_quat_xyzw),
         _world_to_yaw_local(wrench_world[:, 3:], base_quat_xyzw),
     ), dim=-1)
-    return local * float(scale)
+    return local
+
+
+def wrench_world_to_scaled_yaw_local(wrench_world, base_quat_xyzw, scale):
+    return wrench_world_to_yaw_local(wrench_world, base_quat_xyzw) * float(scale)
 
 
 def physics_transition_mask(reset, timeout, teleport, push_event=None):

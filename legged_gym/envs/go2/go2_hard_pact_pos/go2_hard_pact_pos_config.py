@@ -13,7 +13,9 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         num_explicit_recon_obs = 11
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 10
+        # Match full HardPACT so position-pretraining checkpoints have the
+        # same history-encoder input shape and migrate with strict=True.
+        num_obs_hist = 20
         grf_dim = 12
         whole_body_dim = 18
         debug = False
@@ -54,7 +56,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         suppress_backend_warnings = True
 
         class grf:
-            prediction_scale_n = [120.0, 120.0, 250.0]
+            prediction_scale_n = [250.0, 250.0, 250.0]
             vertical_deadband_n = 3.0
             clip_min_n = -500.0
             clip_max_n = 500.0
@@ -414,9 +416,9 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             heading = [-3.14, 3.14]
 
     class deployment_physics:
-        sustained_force_bounds_n = [-60.0, 60.0]
-        sustained_torque_bounds_nm = [-12.0, 12.0]
-        planned_added_mass_range_kg = [-1.0, 4.0]
+        wrench_scale = [100.0, 100.0, 100.0, 25.0, 25.0, 25.0]
+        wrench_qp_clip = [150.0, 150.0, 150.0, 40.0, 40.0, 40.0]
+        contact_probability_epsilon = 0.01
 
 GO2HardPACTPosCfg.sim.dt = GO2HardPACTPosCfg.control.dt / GO2HardPACTPosCfg.control.decimation
 

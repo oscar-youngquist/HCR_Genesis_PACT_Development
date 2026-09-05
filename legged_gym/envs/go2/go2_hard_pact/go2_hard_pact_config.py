@@ -63,7 +63,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         suppress_backend_warnings = True
 
         class grf:
-            prediction_scale_n = [120.0, 120.0, 250.0]
+            prediction_scale_n = [250.0, 250.0, 250.0]
             vertical_deadband_n = 3.0
             clip_min_n = -250.0
             clip_max_n = 250.0
@@ -412,15 +412,9 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             heading = [-3.14, 3.14]
 
     class deployment_physics:
-        sustained_force_bounds_n = [-60.0, 60.0]
-        sustained_torque_bounds_nm = [-12.0, 12.0]
-        planned_added_mass_range_kg = [-1.0, 4.0]
-        wrench_margin_absolute = 0.0
-        wrench_margin_relative = 0.0
-        wrench_learning_offset = [0.0] * 6
+        wrench_scale = [100.0, 100.0, 100.0, 25.0, 25.0, 25.0]
+        wrench_qp_clip = [150.0, 150.0, 150.0, 40.0, 40.0, 40.0]
         contact_probability_epsilon = 0.01
-        contact_observation_offset = 0.0
-        contact_observation_scale = 1.0
 GO2HardPACTCfg.sim.dt = GO2HardPACTCfg.control.dt / GO2HardPACTCfg.control.decimation
 
 class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
@@ -531,7 +525,6 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'torque_rate_limit_nm_s': 1000.0, 
                         'contact_acceleration_limit_m_s2': 0.0, 
                         'interior_margin': 0.001, 
-                        'contact_probability_floor': 0.01, 
                         'qdd_scale': 50.0, 
                         'force_scale_n': 250.0, 
                         'torque_scale_nm': 40.0, 
@@ -574,8 +567,6 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'ppo_chunk_size': 8000, 
                         'position_integration_coefficient': 1.0}
 
-        grf_observation_scale = GO2HardPACTCfg.normalization.obs_scales.grf
-        base_wrench_observation_scale = GO2HardPACTCfg.normalization.obs_scales.base_wrench
         action_clip = GO2HardPACTCfg.normalization.clip_actions
 
     class runner(LeggedRobotCfgPPO.runner):

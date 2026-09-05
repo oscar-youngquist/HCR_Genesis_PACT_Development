@@ -18,6 +18,8 @@ from rsl_rl.algorithms.hard_pact_qp_backends import (
     QPBackendUnavailable, backend_capability, moreau_conic_mapping,
 )
 from rsl_rl.modules.actor_critic_hard_pact import ActorCritic_HardPACT
+from rsl_rl.modules.hard_pact_physics import sanitize_and_clip_wrench_for_qp
+from rsl_rl.modules.hard_pact_physics import contact_logits_to_qp_probability
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
 from rsl_rl.runners.pact_runner import OnPolicyRunnerPACT
 
@@ -608,6 +610,10 @@ class HardPACTQPTests(unittest.TestCase):
 
         class Heads:
             def predict_grf(self, _z, _e, torque): return torque
+            def grf_to_physical(self, prediction): return prediction * 250.0
+            def wrench_to_qp_physical(self, prediction):
+                scale = torch.tensor([100., 100., 100., 25., 25., 25.])
+                return sanitize_and_clip_wrench_for_qp(prediction * scale)
 
         class Dynamics:
             def build_context(self, *_args, **_kwargs):
@@ -620,10 +626,18 @@ class HardPACTQPTests(unittest.TestCase):
                 )
 
         class QP:
-            def __init__(self): self.previous = []; self.nominal = []
+            def __init__(self):
+                self.previous = []
+                self.nominal = []
+                self.wrenches = []
+                self.cfg = SimpleNamespace(
+                    qp_update_mode="every_substep",
+                    elastic_recovery_enabled=False,
+                )
             def solve(self, **values):
                 self.previous.append(values["previous_torque"].clone())
                 self.nominal.append(values["tau_nom"].clone())
+                self.wrenches.append(values["wrench_pred_world"].clone())
                 safe = values["tau_nom"].clamp(-2.0, 2.0)
                 zeros = torch.zeros(batch)
                 diagnostics = {
@@ -655,7 +669,8 @@ class HardPACTQPTests(unittest.TestCase):
             _joint_damping=torch.zeros(batch, 12), _torques=torch.zeros(batch, 12),
         )
         task._hard_pact_actor_critic = SimpleNamespace(
-            physics_estimator=Heads()
+            physics_estimator=Heads(),
+            explicit_estimator=SimpleNamespace(contact_epsilon=0.01),
         )
         task._hard_pact_bard_dynamics = Dynamics()
         qp = QP()
@@ -665,7 +680,9 @@ class HardPACTQPTests(unittest.TestCase):
         task._hard_pact_previous_substep_torque = torch.zeros(batch, 12)
         task._hard_pact_policy_latent = torch.zeros(batch, 16)
         task._hard_pact_policy_explicit = torch.zeros(batch, 11)
-        task._hard_pact_wrench_yaw_scaled = torch.zeros(batch, 6)
+        task._hard_pact_wrench_raw_normalized = torch.tensor(
+            [[2.0, -2.0, 1.0, 2.0, -2.0, 1.0]]
+        ).expand(batch, -1)
         task._realized_added_mass = torch.zeros(batch, 1)
         task._realized_com_shift_body = torch.zeros(batch, 3)
         task._get_pinn_feedback = lambda desired, q, qdot: 4 * (desired - q) - qdot
@@ -674,6 +691,10 @@ class HardPACTQPTests(unittest.TestCase):
         mass_wrench = torch.zeros(batch, 6)
         task._solve_hard_pact_rollout_qp_substep(quat, mass_wrench)
         first_safe = task.simulator._torques.clone()
+        torch.testing.assert_close(
+            qp.wrenches[0],
+            torch.tensor([[150., -150., 100., 40., -40., 25.]]).expand(batch, -1),
+        )
         robot.q.fill_(0.5)
         robot.v.fill_(0.25)
         task._solve_hard_pact_rollout_qp_substep(quat, mass_wrench)
@@ -1094,9 +1115,15 @@ class HardPACTQPTests(unittest.TestCase):
 
         data = qp_data(1)
         data["tau_nom"] = nominal
-        data["force_pred_world"] = heads.grf_yaw_scaled.reshape(1, 4, 3)
-        data["wrench_pred_world"] = heads.base_wrench_yaw_scaled
-        data["contact_probability"] = explicit[:, 3:7]
+        data["force_pred_world"] = actor.physics_estimator.grf_to_physical(
+            heads.grf_normalized.reshape(1, 4, 3)
+        )
+        data["wrench_pred_world"] = actor.physics_estimator.wrench_to_qp_physical(
+            heads.wrench_raw_normalized
+        )
+        data["contact_probability"] = contact_logits_to_qp_probability(
+            explicit[:, 3:7], 0.01
+        )
         data["foot_acceleration_bias"].fill_(0.2)
         # Couple learned force/wrench references into floating-base dynamics.
         data["base_jacobian"][0, :, :6] = torch.eye(6, dtype=torch.float64)

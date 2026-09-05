@@ -41,7 +41,11 @@ import random
 import gc
 
 from rsl_rl.modules import ActorCritic_PACT_Pos, ContextDecoder
-from rsl_rl.modules.hard_pact_physics import normalized_huber_loss
+from rsl_rl.modules.hard_pact_physics import (
+    normalized_grf_huber_loss,
+    normalized_wrench_huber_loss,
+    wrench_regression_metrics,
+)
 from rsl_rl.storage import RolloutStoragePACTPos
 
 from .pc_grad import PCGrad
@@ -233,7 +237,7 @@ class PPO_PACT_Pos:
                 "interval_executed_torque"
             ]
             self.transition.wrench_targets = hard_pact[
-                "total_external_wrench_label_yaw_scaled"
+                "total_external_wrench_label_yaw_normalized"
             ]
             self.transition.wrench_active_masks = hard_pact[
                 "sustained_wrench_active_mask"
@@ -691,24 +695,26 @@ class PPO_PACT_Pos:
 
     @staticmethod
     def _masked_explicit_loss(prediction, target, valid):
-        """MSE for continuous estimates and BCE for contact probabilities."""
+        """MSE for continuous estimates and BCE-with-logits for contacts."""
         if prediction.shape[-1] != 11 or target.shape[-1] != 11:
             raise ValueError("HardPACTPos explicit estimates and labels must be 11-D")
         target = target.detach()
-        element_loss = torch.cat((
+        continuous_loss = torch.cat((
             (prediction[:, :3] - target[:, :3]).square(),
-            F.binary_cross_entropy(
-                prediction[:, 3:7], target[:, 3:7], reduction="none"
-            ),
             (prediction[:, 7:11] - target[:, 7:11]).square(),
-        ), dim=-1)
-        per_sample = element_loss.mean(dim=-1)
-        weights = valid.reshape(-1).to(per_sample.dtype)
-        return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
+        ), dim=-1).mean(dim=-1)
+        contact_loss = F.binary_cross_entropy_with_logits(
+            prediction[:, 3:7], target[:, 3:7], reduction="none"
+        ).mean(dim=-1)
+        weights = valid.reshape(-1).to(continuous_loss.dtype)
+        denominator = weights.sum().clamp_min(1.0)
+        return (
+            ((continuous_loss + contact_loss) * weights).sum() / denominator
+        )
 
     @staticmethod
     def _masked_bce(prediction, target, valid):
-        per_sample = F.binary_cross_entropy(
+        per_sample = F.binary_cross_entropy_with_logits(
             prediction, target.detach(), reduction="none"
         ).mean(dim=-1)
         weights = valid.reshape(-1).to(per_sample.dtype)
@@ -772,19 +778,16 @@ class PPO_PACT_Pos:
                 cenet_latent, cenet_torso_velo,
                 executed_torque_target.detach(),
             )
-            grf_loss = normalized_huber_loss(
-                heads.grf_yaw_scaled, grf_target.detach(),
-                self.actor_critic.physics_estimator.grf_scale, valid,
+            grf_loss = normalized_grf_huber_loss(
+                heads.grf_normalized, grf_target.detach(), valid,
             )
             active = valid & wrench_active_mask.bool()
             neutral = valid & ~wrench_active_mask.bool()
-            wrench_active_loss = normalized_huber_loss(
-                heads.base_wrench_yaw_scaled, wrench_target.detach(),
-                self.actor_critic.physics_estimator.wrench_scale, active,
+            wrench_active_loss = normalized_wrench_huber_loss(
+                heads.wrench_raw_normalized, wrench_target.detach(), active,
             )
-            wrench_neutral_loss = normalized_huber_loss(
-                heads.base_wrench_yaw_scaled, wrench_target.detach(),
-                self.actor_critic.physics_estimator.wrench_scale, neutral,
+            wrench_neutral_loss = normalized_wrench_huber_loss(
+                heads.wrench_raw_normalized, wrench_target.detach(), neutral,
             )
             explicit_linear = self._masked_mse(
                 cenet_torso_velo[:, :3], explicit_labels_batch[:, :3], valid
@@ -812,6 +815,29 @@ class PPO_PACT_Pos:
                 "explicit_base_linear_velocity": explicit_linear,
                 "explicit_contact_probabilities": explicit_contact,
                 "explicit_foot_clearance": explicit_clearance,
+            })
+            auxiliary_metrics.update(wrench_regression_metrics(
+                heads.wrench_raw_normalized, wrench_target.detach(), valid
+            ))
+            active_diagnostics = wrench_regression_metrics(
+                heads.wrench_raw_normalized, wrench_target.detach(), active
+            )
+            neutral_diagnostics = wrench_regression_metrics(
+                heads.wrench_raw_normalized, wrench_target.detach(), neutral
+            )
+            auxiliary_metrics.update({
+                "wrench_active_mae_physical": active_diagnostics[
+                    "wrench_raw_mae_physical"
+                ],
+                "wrench_active_rmse_physical": active_diagnostics[
+                    "wrench_raw_rmse_physical"
+                ],
+                "wrench_neutral_mae_physical": neutral_diagnostics[
+                    "wrench_raw_mae_physical"
+                ],
+                "wrench_neutral_rmse_physical": neutral_diagnostics[
+                    "wrench_raw_rmse_physical"
+                ],
             })
         else:
             vae_loss = auxiliary_metrics["total"]

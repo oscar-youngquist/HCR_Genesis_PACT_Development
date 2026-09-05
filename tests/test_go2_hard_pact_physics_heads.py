@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
-from types import SimpleNamespace
 import tempfile
 import unittest
 
@@ -27,26 +27,37 @@ from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import (
     GO2HardPACTCfg,
     GO2HardPACTCfgPPO,
 )
+from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
 from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import (
     GO2HardPACTPosCfg,
     GO2HardPACTPosCfgPPO,
 )
 from legged_gym.envs.go2.go2_pact.go2_pact_config import GO2PACTCfg
+from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos import Go2PACTPos
 from rsl_rl.modules import ActorCritic_HardPACT, ActorCritic_HardPACT_Pos
 from rsl_rl.modules.actor_critic_pact import ActorCritic_PACT
 from rsl_rl.modules.actor_critic_pact_pos import ActorCritic_PACT_Pos
 from rsl_rl.modules.hard_pact_physics import (
+    GRF_NORMALIZATION_VERSION,
+    GRF_SCALE_N,
+    WRENCH_NORMALIZATION_VERSION,
+    WRENCH_QP_CLIP_N_NM,
+    WRENCH_SCALE_N_NM,
     DeploymentPhysicsHeads,
     ExplicitEstimatorDecoder,
     compose_explicit_estimator_target,
-    model_output_to_physical,
-    normalized_huber_loss,
-    physical_unit_mae,
-    scale_head_output,
-    scale_physical_target,
-    smooth_contact_probability,
+    grf_normalized_to_physical,
+    normalize_grf_target,
+    normalized_grf_huber_loss,
+    normalized_wrench_huber_loss,
+    contact_logits_to_qp_probability,
+    sanitize_and_clip_wrench_for_qp,
+    normalize_wrench_target,
+    wrench_normalized_to_physical,
 )
 from rsl_rl.algorithms.ppo_pact import PPO_PACT
+from rsl_rl.algorithms.ppo_hard_pact import PPO_HardPACT
+from rsl_rl.runners.pact_pos_runner import build_hard_pact_start_checkpoint
 
 
 def _small_actor(gains=None, actor_class=ActorCritic_HardPACT, latent_dim=16):
@@ -63,40 +74,6 @@ def _small_actor(gains=None, actor_class=ActorCritic_HardPACT, latent_dim=16):
         cenet_enc_layers=[32, 16],
         activation="elu",
         init_noise_std=1.0,
-        grf_scale=gains.model_grf,
-        wrench_scale=gains.model_wrench,
-    )
-
-
-def _gain_cfg(
-    force=60.0, torque=12.0, mass=4.0, com=(0.20, 0.15, 0.15),
-    gravity=(0.0, 0.0, -9.81), grf=(120.0, 120.0, 250.0),
-):
-    return SimpleNamespace(
-        sim=SimpleNamespace(
-            gravity=gravity,
-            grf=SimpleNamespace(prediction_scale_n=grf),
-        ),
-        normalization=SimpleNamespace(
-            obs_scales=SimpleNamespace(grf=0.01, base_wrench=0.01)
-        ),
-        deployment_physics=SimpleNamespace(
-            sustained_force_bounds_n=(-force, force),
-            sustained_torque_bounds_nm=(-torque, torque),
-            planned_added_mass_range_kg=(-1.0, mass),
-        ),
-        domain_rand=SimpleNamespace(
-            randomize_base_mass=True,
-            randomize_com_displacement=True,
-            added_mass_min=-1.0,
-            min_added_mass_max=mass,
-            com_displacement_x_min=0.075,
-            com_displacement_y_min=0.075,
-            com_displacement_z_min=0.075,
-            com_displacement_x_max=com[0],
-            com_displacement_y_max=com[1],
-            com_displacement_z_max=com[2],
-        ),
     )
 
 
@@ -128,14 +105,14 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         )
 
     def test_alias_dimensions_and_reconstruction_schema(self):
-        for env_cls, train_cls in (
-            (GO2HardPACTCfg, GO2HardPACTCfgPPO),
-            (GO2HardPACTPosCfg, GO2HardPACTPosCfgPPO),
+        for env_cls, train_cls, history_steps in (
+            (GO2HardPACTCfg, GO2HardPACTCfgPPO, 20),
+            (GO2HardPACTPosCfg, GO2HardPACTPosCfgPPO, 20),
         ):
             env, train = env_cls(), train_cls()
             with self.subTest(env=env_cls.__name__):
                 self.assertEqual(env.env.num_observations, 57)
-                self.assertEqual(env.env.num_obs_hist, 20)
+                self.assertEqual(env.env.num_obs_hist, history_steps)
                 self.assertEqual(env.env.num_explicit_recon_obs, 11)
                 self.assertEqual(train.policy.cenet_enc_latent_dim, 16)
                 self.assertEqual(train.policy.cenet_velo_dim, 11)
@@ -153,22 +130,20 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         self.assertTrue(set(range(145, 288)).isdisjoint(RECONSTRUCTION_INDICES))
 
     def test_head_shapes_stop_gradient_and_preserved_gradients(self):
-        heads = DeploymentPhysicsHeads((1.0,) * 12, (1.0,) * 6)
+        heads = DeploymentPhysicsHeads()
         latent = torch.randn(3, 16, requires_grad=True)
         explicit = torch.randn(3, 11, requires_grad=True)
         nominal = torch.randn(3, 12, requires_grad=True)
         output = heads(latent, explicit, nominal)
-        self.assertEqual(tuple(output.grf_yaw_scaled.shape), (3, 12))
-        self.assertEqual(tuple(output.base_wrench_yaw_scaled.shape), (3, 6))
-        (output.grf_yaw_scaled.sum() + output.base_wrench_yaw_scaled.sum()).backward()
+        self.assertEqual(tuple(output.grf_normalized.shape), (3, 12))
+        self.assertEqual(tuple(output.wrench_raw_normalized.shape), (3, 6))
+        (output.grf_normalized.sum() + output.wrench_raw_normalized.sum()).backward()
         self.assertIsNone(explicit.grad)
         self.assertGreater(latent.grad.abs().sum().item(), 0.0)
         self.assertGreater(nominal.grad.abs().sum().item(), 0.0)
 
     def test_physics_decoder_hidden_layers_are_independently_configurable(self):
         heads = DeploymentPhysicsHeads(
-            (1.0,) * 12,
-            (1.0,) * 6,
             grf_hidden_layers=(31, 17),
             wrench_hidden_layers=(23, 19, 13),
         )
@@ -288,7 +263,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         self.assertEqual(tuple(mean.shape), (4, 16))
         self.assertEqual(tuple(logvar.shape), (4, 16))
         self.assertEqual(tuple(estimate.shape), (4, 11))
-        self.assertTrue(torch.all((estimate[:, 3:7] >= 0.0) & (estimate[:, 3:7] <= 1.0)))
+        self.assertTrue(torch.isfinite(estimate[:, 3:7]).all())
         self.assertTrue(torch.all((estimate[:, 7:11] >= -1.0) & (estimate[:, 7:11] <= 1.0)))
         torch.manual_seed(1)
         first = actor.cenet_enc_forward(history)
@@ -342,9 +317,9 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         actual = actor.physics_heads_from_history(
             history, nominal_torque, latent_noise=latent_noise
         )
-        torch.testing.assert_close(actual.grf_yaw_scaled, expected.grf_yaw_scaled)
+        torch.testing.assert_close(actual.grf_normalized, expected.grf_normalized)
         torch.testing.assert_close(
-            actual.base_wrench_yaw_scaled, expected.base_wrench_yaw_scaled
+            actual.wrench_raw_normalized, expected.wrench_raw_normalized
         )
 
     def test_estimator_gradient_reaches_decoder_and_shared_history_trunk(self):
@@ -371,9 +346,9 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
 
 
 class GainAndScalingTests(unittest.TestCase):
-    def test_smooth_contact_is_bounded_once_and_has_gradient(self):
+    def test_contact_logits_map_to_qp_probability_once_and_have_gradient(self):
         logits = torch.tensor([-100.0, 0.0, 100.0], requires_grad=True)
-        probability = smooth_contact_probability(logits, 0.01)
+        probability = contact_logits_to_qp_probability(logits, 0.01)
         torch.testing.assert_close(
             probability.detach(), torch.tensor([0.01, 0.5, 0.99]),
             atol=1e-6, rtol=0,
@@ -381,84 +356,169 @@ class GainAndScalingTests(unittest.TestCase):
         probability.sum().backward()
         self.assertGreater(logits.grad[1].item(), 0.0)
 
-    def test_wrench_head_uses_saved_smooth_center_and_radius(self):
+        decoder = ExplicitEstimatorDecoder(8, (4,))
+        with torch.no_grad():
+            decoder.network[-1].weight.zero_()
+            decoder.network[-1].bias.zero_()
+            decoder.network[-1].bias[3:7] = torch.tensor([-4., -2., 2., 4.])
+        estimate = decoder(torch.zeros(1, 8))
+        torch.testing.assert_close(
+            estimate[:, 3:7], torch.tensor([[-4., -2., 2., 4.]])
+        )
+
+    def test_wrench_head_is_unbounded_linear_and_qp_clips_once(self):
         head = DeploymentPhysicsHeads(
-            torch.ones(12), torch.ones(6), grf_hidden_layers=(4,),
-            wrench_hidden_layers=(4,), wrench_center=torch.arange(6.0),
-            wrench_radius=torch.arange(1.0, 7.0),
+            grf_hidden_layers=(4,), wrench_hidden_layers=(4,),
         )
         latent = torch.randn(3, 16, requires_grad=True)
         explicit = torch.randn(3, 11)
-        wrench = head.predict_wrench(latent, explicit)
-        center, radius = head.wrench_center, head.wrench_radius
-        self.assertTrue((wrench >= center - radius).all())
-        self.assertTrue((wrench <= center + radius).all())
-        wrench.sum().backward()
+        raw = head.predict_wrench(latent, explicit)
+        physical = head.wrench_to_physical(raw)
+        torch.testing.assert_close(
+            physical, raw * torch.tensor(WRENCH_SCALE_N_NM)
+        )
+        forced = torch.tensor([[2.0, -2.0, 1.0, 2.0, -2.0, 1.0]])
+        torch.testing.assert_close(
+            head.wrench_to_qp_physical(forced),
+            torch.tensor([[150.0, -150.0, 100.0, 40.0, -40.0, 25.0]]),
+        )
+        raw.sum().backward()
         self.assertGreater(latent.grad.abs().sum().item(), 0.0)
+        with torch.no_grad():
+            head.wrench_head[-1].weight.zero_()
+            head.wrench_head[-1].bias.fill_(10.0)
+        torch.testing.assert_close(
+            head.predict_wrench(latent.detach(), explicit), torch.full((3, 6), 10.0)
+        )
 
-    def test_wrench_envelope_and_contract_are_fully_materialized(self):
+    def test_fixed_wrench_contract_is_fully_materialized(self):
         cfg = GO2HardPACTCfg()
-        old_abs = cfg.deployment_physics.wrench_margin_absolute
-        old_rel = cfg.deployment_physics.wrench_margin_relative
-        cfg.deployment_physics.wrench_margin_absolute = 1.0
-        cfg.deployment_physics.wrench_margin_relative = 0.1
         gains = calculate_physics_head_gains(cfg)
-        expected = torch.tensor(gains.physical_wrench) * 1.1 + 1.0
-        torch.testing.assert_close(torch.tensor(gains.wrench_physical_radius), expected)
         actor = _small_actor(gains)
         contract = build_deployment_contract(cfg, actor, gains)
-        smooth = contract["smooth_qp_inputs"]
-        self.assertEqual(len(smooth["source_configuration_sha256"]), 64)
-        self.assertEqual(smooth["curriculum_stage"], "final")
-        self.assertEqual(smooth["contact"]["epsilon"], 0.01)
-        self.assertEqual(
-            smooth["base_wrench"]["physical_radius"],
-            list(gains.wrench_physical_radius),
-        )
-        cfg.deployment_physics.wrench_margin_absolute = old_abs
-        cfg.deployment_physics.wrench_margin_relative = old_rel
-    def test_default_expected_physical_and_model_gains(self):
-        gains = calculate_physics_head_gains(GO2HardPACTCfg())
-        expected_grf = (120.0, 120.0, 250.0) * 4
-        self.assertEqual(gains.physical_grf, expected_grf)
-        torch.testing.assert_close(
-            torch.tensor(gains.model_grf), torch.tensor((1.2, 1.2, 2.5) * 4)
-        )
-        torch.testing.assert_close(
-            torch.tensor(gains.physical_wrench),
-            torch.tensor((60.0, 60.0, 138.48, 34.88066, 34.88066, 34.88066)),
-            atol=1e-4, rtol=1e-4,
-        )
-        torch.testing.assert_close(
-            torch.tensor(gains.model_wrench),
-            torch.tensor((0.6, 0.6, 1.3848, 0.3488066, 0.3488066, 0.3488066)),
-            atol=1e-5, rtol=1e-4,
-        )
+        qp_inputs = contract["qp_inputs"]
+        self.assertEqual(qp_inputs["contact"]["epsilon"], 0.01)
+        self.assertEqual(qp_inputs["base_wrench"]["decoder_scale"], [100.0] * 3 + [25.0] * 3)
+        self.assertEqual(qp_inputs["base_wrench"]["qp_clip"], [150.0] * 3 + [40.0] * 3)
 
-    def test_hard_pact_pos_grf_gains_match_hard_pact(self):
+    def test_default_fixed_scales(self):
+        gains = calculate_physics_head_gains(GO2HardPACTCfg())
+        self.assertEqual(gains.grf_scale_n, GRF_SCALE_N)
+        self.assertEqual(gains.wrench_scale_n_nm, WRENCH_SCALE_N_NM)
+        self.assertEqual(gains.wrench_qp_clip_n_nm, WRENCH_QP_CLIP_N_NM)
+
+    def test_hard_pact_pos_and_hard_pact_share_force_normalization(self):
         gains = calculate_physics_head_gains(GO2HardPACTCfg())
         pos_gains = calculate_physics_head_gains(GO2HardPACTPosCfg())
-        self.assertEqual(pos_gains.physical_grf, gains.physical_grf)
-        self.assertEqual(pos_gains.model_grf, gains.model_grf)
+        self.assertEqual(pos_gains.grf_scale_n, gains.grf_scale_n)
+        self.assertEqual(pos_gains.wrench_scale_n_nm, gains.wrench_scale_n_nm)
+        self.assertEqual(pos_gains.wrench_qp_clip_n_nm, gains.wrench_qp_clip_n_nm)
 
-    def test_gains_follow_ranges_gravity_and_com_envelope(self):
-        small = calculate_physics_head_gains(_gain_cfg(force=10, torque=2, mass=1, com=(0, 0, 0)))
-        large = calculate_physics_head_gains(_gain_cfg(force=20, torque=3, mass=5, com=(0.3, 0.2, 0.1)))
-        self.assertGreater(large.physical_wrench[2], small.physical_wrench[2])
-        self.assertGreater(large.physical_wrench[3], small.physical_wrench[3])
-        self.assertNotEqual(large.model_wrench, small.model_wrench)
-
-    def test_scaling_round_trip_losses_and_physical_mae(self):
-        physical = torch.tensor([[10.0, -20.0, 30.0]])
-        model = scale_physical_target(physical, 0.01)
-        torch.testing.assert_close(model_output_to_physical(model, 0.01), physical)
-        raw = torch.tensor([[0.5, -0.5, 1.0]])
+    def test_grf_normalization_round_trip_and_direct_huber(self):
+        physical = torch.tensor([[250.0, -125.0, 62.5] * 4])
+        normalized = normalize_grf_target(physical)
         torch.testing.assert_close(
-            scale_head_output(raw, torch.tensor([2.0, 4.0, 8.0])),
-            torch.tensor([[1.0, -2.0, 8.0]]),
+            normalized, torch.tensor([[1.0, -0.5, 0.25] * 4])
         )
-        self.assertEqual(normalized_huber_loss(model, model, torch.ones(3)).item(), 0.0)
-        self.assertEqual(physical_unit_mae(model, model, 0.01).item(), 0.0)
+        torch.testing.assert_close(grf_normalized_to_physical(normalized), physical)
+        self.assertEqual(
+            normalized_grf_huber_loss(normalized, normalized).item(), 0.0
+        )
+
+    def test_wrench_normalization_round_trip_and_qp_boundary_clip(self):
+        physical = torch.tensor([[25.0, -50.0, 200.0, 12.5, -50.0, 0.0]])
+        normalized = normalize_wrench_target(physical)
+        torch.testing.assert_close(
+            normalized, torch.tensor([[0.25, -0.5, 2.0, 0.5, -2.0, 0.0]])
+        )
+        torch.testing.assert_close(wrench_normalized_to_physical(normalized), physical)
+        self.assertEqual(
+            normalized_wrench_huber_loss(normalized, normalized).item(), 0.0
+        )
+        torch.testing.assert_close(
+            sanitize_and_clip_wrench_for_qp(physical),
+            torch.tensor([[25.0, -50.0, 150.0, 12.5, -40.0, 0.0]]),
+        )
+
+    def test_observation_scale_is_independent_and_absent_from_physics_paths(self):
+        self.assertEqual(GO2HardPACTCfg.normalization.obs_scales.grf, 0.01)
+        self.assertEqual(GO2HardPACTPosCfg.normalization.obs_scales.grf, 0.01)
+        observation_source = inspect.getsource(Go2PACTPos.compute_observations)
+        self.assertIn("_grfs_buf * self.obs_scales.grf", observation_source)
+        self.assertNotIn(
+            "grf_observation_scale",
+            inspect.signature(PPO_HardPACT.__init__).parameters,
+        )
+        self.assertNotIn(
+            "grf_observation_scale",
+            inspect.getsource(PPO_HardPACT._compute_bard_loss),
+        )
+        bard_source = inspect.getsource(PPO_HardPACT._compute_bard_loss)
+        self.assertNotIn("base_wrench_observation_scale", bard_source)
+        self.assertIn("wrench_to_physical", bard_source)
+        self.assertIn("sanitize_and_clip_wrench_for_qp", bard_source)
+        rollout_source = inspect.getsource(
+            Go2HardPACT._solve_hard_pact_rollout_qp_substep
+        )
+        self.assertIn("wrench_to_qp_physical", rollout_source)
+        self.assertNotIn("obs_scales.base_wrench", rollout_source)
+        self.assertEqual(
+            rollout_source.count("contact_logits_to_qp_probability"), 1
+        )
+        self.assertEqual(
+            bard_source.count("contact_logits_to_qp_probability"), 1
+        )
+        self.assertNotIn("sigmoid", inspect.getsource(
+            PPO_HardPACT._masked_explicit_loss
+        ))
+
+    def test_pos_migration_preserves_physical_grf_and_old_scale_is_rejected(self):
+        torch.manual_seed(37)
+        pos = _small_actor(actor_class=ActorCritic_HardPACT_Pos)
+        hard = _small_actor(actor_class=ActorCritic_HardPACT)
+        checkpoint = build_hard_pact_start_checkpoint(
+            pos.state_dict(), {}, iteration=3
+        )
+        hard.load_state_dict(checkpoint["model_state_dict"], strict=True)
+        latent = torch.randn(3, 16)
+        explicit = torch.randn(3, 11)
+        torque = torch.randn(3, 12)
+        pos_newtons = pos.physics_estimator.grf_to_physical(
+            pos.physics_estimator.predict_grf(latent, explicit, torque)
+        )
+        hard_newtons = hard.physics_estimator.grf_to_physical(
+            hard.physics_estimator.predict_grf(latent, explicit, torque)
+        )
+        torch.testing.assert_close(hard_newtons, pos_newtons, rtol=0, atol=0)
+
+        old = hard.state_dict()
+        old["physics_estimator.grf_scale"] = old.pop(
+            "physics_estimator.grf_scale_n"
+        )
+        old.pop("physics_estimator.grf_normalization_version")
+        with self.assertRaisesRegex(RuntimeError, "grf_scale"):
+            hard.load_state_dict(old, strict=True)
+
+    def test_pos_migration_preserves_wrench_and_rejects_legacy_semantics(self):
+        torch.manual_seed(39)
+        pos = _small_actor(actor_class=ActorCritic_HardPACT_Pos)
+        hard = _small_actor(actor_class=ActorCritic_HardPACT)
+        checkpoint = build_hard_pact_start_checkpoint(pos.state_dict(), {}, 3)
+        hard.load_state_dict(checkpoint["model_state_dict"], strict=True)
+        latent, explicit = torch.randn(3, 16), torch.randn(3, 11)
+        pos_normalized = pos.physics_estimator.predict_wrench(latent, explicit)
+        hard_normalized = hard.physics_estimator.predict_wrench(latent, explicit)
+        torch.testing.assert_close(hard_normalized, pos_normalized, rtol=0, atol=0)
+        torch.testing.assert_close(
+            hard.physics_estimator.wrench_to_physical(hard_normalized),
+            pos.physics_estimator.wrench_to_physical(pos_normalized),
+            rtol=0, atol=0,
+        )
+        legacy = hard.state_dict()
+        legacy.pop("physics_estimator.wrench_normalization_version")
+        legacy.pop("physics_estimator.wrench_qp_clip")
+        with self.assertRaisesRegex(RuntimeError, "wrench_"):
+            hard.load_state_dict(legacy, strict=True)
 
 
 class DeploymentContractTests(unittest.TestCase):
@@ -478,7 +538,10 @@ class DeploymentContractTests(unittest.TestCase):
                 self.assertEqual(stream.read(), first_text)
             loaded = json.loads(first_text)
 
-        self.assertEqual(loaded["schema_version"], 2)
+        self.assertEqual(loaded["schema_version"], 4)
+        self.assertEqual(
+            loaded["grf_normalization_version"], GRF_NORMALIZATION_VERSION
+        )
         self.assertEqual(loaded["explicit_estimator"]["dimension"], 11)
         self.assertEqual(
             loaded["explicit_estimator"]["input"],
@@ -493,16 +556,50 @@ class DeploymentContractTests(unittest.TestCase):
             loaded["deployment_heads"]["base_wrench"]["hidden_layers"],
             [128, 128],
         )
+        contact_field = loaded["explicit_estimator"]["fields"][1]
+        self.assertEqual(contact_field["name"], "foot_contact_logits")
+        self.assertEqual(
+            contact_field["training_loss"], "binary_cross_entropy_with_logits"
+        )
+        self.assertEqual(
+            loaded["qp_inputs"]["contact"]["parameterization"],
+            "epsilon + (1 - 2*epsilon) * sigmoid(contact_logits)",
+        )
         self.assertEqual(loaded["frames_and_units"]["grf"]["foot_order"], list(FOOT_ORDER))
+        self.assertEqual(
+            loaded["grf_decoder_normalization"]["scale_n"], [250.0] * 12
+        )
+        self.assertTrue(
+            loaded["grf_decoder_normalization"]["observation_scale_is_independent"]
+        )
+        self.assertEqual(
+            loaded["critic_observation_scales_independent_of_decoders"]["grf"],
+            0.01,
+        )
         self.assertTrue(loaded["reconstruction_target"]["critic_input_unchanged"])
         state = actor.state_dict()
         grf_key = loaded["checkpoint_buffer_keys"]["grf"]
+        grf_version_key = loaded["checkpoint_buffer_keys"][
+            "grf_normalization_version"
+        ]
         wrench_key = loaded["checkpoint_buffer_keys"]["base_wrench"]
+        wrench_clip_key = loaded["checkpoint_buffer_keys"]["base_wrench_qp_clip"]
+        wrench_version_key = loaded["checkpoint_buffer_keys"][
+            "wrench_normalization_version"
+        ]
         torch.testing.assert_close(
-            state[grf_key], torch.tensor(loaded["model_space_gains"]["grf"])
+            state[grf_key],
+            torch.tensor(loaded["grf_decoder_normalization"]["scale_n"]),
         )
+        self.assertEqual(
+            state[grf_version_key].item(), loaded["grf_normalization_version"]
+        )
+        torch.testing.assert_close(state[wrench_key], torch.tensor(WRENCH_SCALE_N_NM))
         torch.testing.assert_close(
-            state[wrench_key], torch.tensor(loaded["model_space_gains"]["base_wrench"])
+            state[wrench_clip_key], torch.tensor(WRENCH_QP_CLIP_N_NM)
+        )
+        self.assertEqual(
+            state[wrench_version_key].item(), WRENCH_NORMALIZATION_VERSION
         )
 
 

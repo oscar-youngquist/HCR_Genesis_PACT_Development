@@ -157,6 +157,7 @@ class WrenchLabelTests(unittest.TestCase):
             "_disturbance_interval_sum_sustained", "_disturbance_interval_sum_mass_com",
             "_disturbance_interval_sum_total", "_disturbance_interval_sum_sustained_yaw_scaled",
             "_disturbance_interval_sum_mass_com_yaw_scaled", "_disturbance_interval_sum_yaw_scaled",
+            "_disturbance_interval_sum_yaw_physical",
         ):
             setattr(task, name, torch.zeros(1, 6))
         task._disturbance_interval_count = torch.zeros(1, 1)
@@ -169,6 +170,11 @@ class WrenchLabelTests(unittest.TestCase):
         torch.testing.assert_close(interval["applied_sustained_wrench_world"], sustained)
         torch.testing.assert_close(interval["equivalent_mass_com_wrench_world"], mass_wrench)
         torch.testing.assert_close(interval["total_external_wrench_label_world"], sustained + mass_wrench)
+        torch.testing.assert_close(
+            interval["total_external_wrench_label_yaw_normalized"],
+            (sustained + mass_wrench)
+            / torch.tensor([[100., 100., 100., 25., 25., 25.]]),
+        )
         self.assertEqual(len(solver.forces), 3)
         self.assertEqual(len(solver.torques), 3)
         for force, torque in zip(solver.forces, solver.torques):

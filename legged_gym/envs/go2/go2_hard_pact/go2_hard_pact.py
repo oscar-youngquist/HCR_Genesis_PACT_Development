@@ -7,7 +7,12 @@ import time
 
 import torch
 
-from rsl_rl.modules.hard_pact_physics import compose_explicit_estimator_target
+from rsl_rl.modules.hard_pact_physics import (
+    compose_explicit_estimator_target,
+    contact_logits_to_qp_probability,
+    normalize_grf_target,
+    normalize_wrench_target,
+)
 from rsl_rl.algorithms.hard_pact_qp import (
     balanced_anchor_indices,
     balanced_substep_indices,
@@ -25,6 +30,7 @@ from .transition import (
     added_mass_gravity_wrench_world,
     pack_disturbance_fields,
     physics_transition_mask,
+    wrench_world_to_yaw_local,
     wrench_world_to_scaled_yaw_local,
 )
 
@@ -278,6 +284,9 @@ class Go2HardPACT(Go2PACT):
         self._disturbance_interval_sum_yaw_scaled = torch.zeros_like(
             self._current_sustained_wrench_world
         )
+        self._disturbance_interval_sum_yaw_physical = torch.zeros_like(
+            self._current_sustained_wrench_world
+        )
         self._disturbance_interval_count = torch.zeros(
             self.num_envs, 1, device=self.device
         )
@@ -400,7 +409,7 @@ class Go2HardPACT(Go2PACT):
         self._hard_pact_policy_latent = latent.detach().float()
         self._hard_pact_policy_explicit = explicit.detach().float()
         with torch.no_grad():
-            self._hard_pact_wrench_yaw_scaled = (
+            self._hard_pact_wrench_raw_normalized = (
                 self._hard_pact_actor_critic.physics_estimator.predict_wrench(
                     self._hard_pact_policy_latent,
                     self._hard_pact_policy_explicit,
@@ -649,6 +658,7 @@ class Go2HardPACT(Go2PACT):
         yaw_scaled = wrench_world_to_scaled_yaw_local(
             total_wrench, quat, self.obs_scales.base_wrench
         )
+        yaw_physical = wrench_world_to_yaw_local(total_wrench, quat)
         self._disturbance_interval_sum_sustained.add_(
             self._current_sustained_wrench_world
         )
@@ -661,6 +671,7 @@ class Go2HardPACT(Go2PACT):
             mass_com_yaw_scaled
         )
         self._disturbance_interval_sum_yaw_scaled.add_(yaw_scaled)
+        self._disturbance_interval_sum_yaw_physical.add_(yaw_physical)
         self._disturbance_interval_count.add_(1.0)
         if (
             getattr(self, "_hard_pact_rollout_qp_enabled", False)
@@ -733,9 +744,9 @@ class Go2HardPACT(Go2PACT):
                 update_mode == "two_anchor_held_correction"
                 and self._qp_substep > 0
             ):
-                grf_yaw_scaled = self._hard_pact_held_grf_yaw_scaled
+                grf_normalized = self._hard_pact_held_grf_normalized
             else:
-                grf_yaw_scaled = (
+                grf_normalized = (
                     self._hard_pact_actor_critic.physics_estimator.predict_grf(
                         self._hard_pact_policy_latent,
                         self._hard_pact_policy_explicit,
@@ -743,18 +754,23 @@ class Go2HardPACT(Go2PACT):
                     )
                 )
                 if update_mode == "two_anchor_held_correction":
-                    self._hard_pact_held_grf_yaw_scaled.copy_(grf_yaw_scaled)
-            # Decoder output is observation-scaled and yaw-local. Divide by
-            # obs scale to recover Newtons, reshape FR/FL/RR/RL XYZ, and rotate
-            # yaw-local axes into the world axes used by J_f.
+                    self._hard_pact_held_grf_normalized.copy_(grf_normalized)
+            # The decoder output is normalized yaw-local force. Reconstruct
+            # Newtons once, preserve FR/FL/RR/RL XYZ, then rotate into J_f's
+            # world-axis convention. Observation scaling is not involved.
             grf_world = self._yaw_local_to_world(
-                (grf_yaw_scaled / float(self.obs_scales.grf)).reshape(-1, 4, 3),
+                self._hard_pact_actor_critic.physics_estimator.grf_to_physical(
+                    grf_normalized
+                ).reshape(-1, 4, 3),
                 quat,
             )
-            # The wrench head is policy-rate and was evaluated once when the
-            # action was chosen. Recover physical [F,T] units here.
-            wrench_yaw = self._hard_pact_wrench_yaw_scaled / float(
-                self.obs_scales.base_wrench
+            # Reconstruct physical N/Nm and apply the sole sanitization/clamp
+            # immediately at the QP boundary. The subsequent rotation cannot
+            # introduce a second scaling or clamp.
+            wrench_yaw = (
+                self._hard_pact_actor_critic.physics_estimator.wrench_to_qp_physical(
+                    self._hard_pact_wrench_raw_normalized
+                )
             )
             # Rotate both force and moment from yaw-local to world axes while
             # preserving ordering [Fx,Fy,Fz,Tx,Ty,Tz].
@@ -835,6 +851,10 @@ class Go2HardPACT(Go2PACT):
             context = self._hard_pact_bard_dynamics.build_context(
                 q_simulator, v_world, parameters=parameters, need_qp=True
             )
+            contact_prob_qp = contact_logits_to_qp_probability(
+                self._hard_pact_policy_explicit[:, 3:7],
+                self._hard_pact_actor_critic.explicit_estimator.contact_epsilon,
+            )
             # Wall-clock measurement encloses matrix assembly inside solve and
             # qpth/fallback execution, but excludes state/head preprocessing.
             start = time.perf_counter()
@@ -859,8 +879,9 @@ class Go2HardPACT(Go2PACT):
                 force_pred_world=grf_world,
                 # Fixed generalized-force RHS input, world [N,Nm] at J_b point.
                 wrench_pred_world=applied_wrench,
-                # e_t[3:7] gates contact acceleration continuously in [0,1].
-                contact_probability=self._hard_pact_policy_explicit[:, 3:7],
+                # Convert the estimator's raw logits exactly once at the QP
+                # boundary; the solver consumes this probability directly.
+                contact_probability=contact_prob_qp,
                 # tau_safe,k-1 centers the hard rate box for this substep.
                 previous_torque=self._hard_pact_previous_substep_torque,
                 # q_k/qdot_k form one-step joint position/velocity constraints.
@@ -984,7 +1005,7 @@ class Go2HardPACT(Go2PACT):
                     applied_wrench[selected]
                 )
                 sample["sampled_qp_rollout_contact_probability"][selected] = (
-                    self._hard_pact_policy_explicit[selected, 3:7]
+                    contact_prob_qp[selected]
                 )
                 # Store all primal blocks and solver certification metadata.
                 sample["sampled_qp_qdd"][selected] = result.qdd[selected]
@@ -1016,6 +1037,7 @@ class Go2HardPACT(Go2PACT):
             self._disturbance_interval_sum_sustained_yaw_scaled,
             self._disturbance_interval_sum_mass_com_yaw_scaled,
             self._disturbance_interval_sum_yaw_scaled,
+            self._disturbance_interval_sum_yaw_physical,
             self._disturbance_interval_count,
         ):
             value.zero_()
@@ -1084,7 +1106,7 @@ class Go2HardPACT(Go2PACT):
                 self.num_envs, self._hard_pact_qp_anchors, self.device
             )
             self._hard_pact_held_correction = shape(12)
-            self._hard_pact_held_grf_yaw_scaled = shape(12)
+            self._hard_pact_held_grf_normalized = shape(12)
             self._hard_pact_held_force_world = shape(12)
             self._hard_pact_held_qdd = shape(18)
             self._hard_pact_held_slack = shape(12)
@@ -1116,7 +1138,7 @@ class Go2HardPACT(Go2PACT):
             # Label-only mass wrench and resulting applied-wrench QP input.
             "sampled_qp_mass_com_wrench_world": shape(6),
             "sampled_qp_rollout_applied_wrench_world": shape(6),
-            # Held explicit-estimator contact probabilities c_i.
+            # Held QP probabilities derived once from contact logits.
             "sampled_qp_rollout_contact_probability": shape(4),
             # Complete rollout primal x*=[qdd,f,tau_safe,s].
             "sampled_qp_qdd": shape(18), "sampled_qp_force_world": shape(12),
@@ -1185,6 +1207,9 @@ class Go2HardPACT(Go2PACT):
             "total_external_wrench_label_yaw_scaled": (
                 self._disturbance_interval_sum_yaw_scaled / divisor
             ).clone(),
+            "total_external_wrench_label_yaw_normalized": normalize_wrench_target(
+                self._disturbance_interval_sum_yaw_physical / divisor
+            ).clone(),
             "realized_added_mass": self._realized_added_mass.clone(),
             "realized_com_shift_body": self._realized_com_shift_body.clone(),
         }
@@ -1216,6 +1241,9 @@ class Go2HardPACT(Go2PACT):
             "equivalent_mass_com_wrench_world": pending["equivalent_mass_com_wrench_world"],
             "total_external_wrench_label_world": pending["total_external_wrench_label_world"],
             "total_external_wrench_label_yaw_scaled": pending["total_external_wrench_label_yaw_scaled"],
+            "total_external_wrench_label_yaw_normalized": pending[
+                "total_external_wrench_label_yaw_normalized"
+            ],
             "realized_added_mass": pending["realized_added_mass"],
             "realized_com_shift_body": pending["realized_com_shift_body"],
             "pre_q": self._bard_pre_q_simulator.clone(),
@@ -1398,7 +1426,7 @@ class Go2HardPACT(Go2PACT):
             self.rew_buf,
             self.reset_buf,
             self.extras,
-            interval_grf * self.obs_scales.grf,
+            normalize_grf_target(interval_grf),
         )
 
     def _pre_sim_step(self, actions):
@@ -1514,6 +1542,7 @@ class Go2HardPACT(Go2PACT):
                 self._disturbance_interval_sum_sustained_yaw_scaled,
                 self._disturbance_interval_sum_mass_com_yaw_scaled,
                 self._disturbance_interval_sum_yaw_scaled,
+                self._disturbance_interval_sum_yaw_physical,
                 self._disturbance_interval_count,
                 self._interval_executed_torque_sum,
                 self._interval_executed_torque_count,
@@ -1547,7 +1576,7 @@ class Go2HardPACT(Go2PACT):
             "_hard_pact_previous_certified_qdd",
             "_hard_pact_q_d", "_hard_pact_tau_ff",
             "_hard_pact_held_correction",
-            "_hard_pact_held_grf_yaw_scaled",
+            "_hard_pact_held_grf_normalized",
             "_hard_pact_held_force_world",
             "_hard_pact_held_qdd", "_hard_pact_held_slack",
             "_hard_pact_held_residual", "_hard_pact_held_stage",

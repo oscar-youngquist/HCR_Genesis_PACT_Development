@@ -35,13 +35,14 @@ def test_hard_pact_pos_explicit_loss_uses_bce_for_contact_slice():
     valid = torch.ones(1, 1, dtype=torch.bool)
 
     actual = PPO_PACT_Pos._masked_explicit_loss(prediction, target, valid)
-    expected = torch.cat((
+    expected_continuous = torch.cat((
         (prediction[:, :3] - target[:, :3]).square(),
-        torch.nn.functional.binary_cross_entropy(
-            prediction[:, 3:7], target[:, 3:7], reduction="none"
-        ),
         (prediction[:, 7:11] - target[:, 7:11]).square(),
     ), dim=-1).mean()
+    expected_contact = torch.nn.functional.binary_cross_entropy_with_logits(
+        prediction[:, 3:7], target[:, 3:7], reduction="none"
+    ).mean()
+    expected = expected_continuous + expected_contact
     torch.testing.assert_close(actual, expected)
     actual.backward()
     assert prediction.grad.abs().sum() > 0
@@ -109,12 +110,21 @@ def test_hard_pact_pos_auxiliary_trains_both_physics_heads_and_logs_parts():
     assert actor.physics_estimator.wrench_head[0].weight.grad.abs().sum() > 0
     assert actor.context_encoder.ce_out_mean.weight.grad.abs().sum() > 0
     assert actor.explicit_estimator.network[0].weight.grad.abs().sum() > 0
-    assert set(metrics) == {
+    assert {
         "total", "privileged_reconstruction", "kl", "explicit", "grf",
         "wrench_active", "wrench_neutral",
         "explicit_base_linear_velocity", "explicit_contact_probabilities",
         "explicit_foot_clearance",
-    }
+    }.issubset(metrics)
+    assert {
+        "wrench_raw_mae_physical", "wrench_raw_rmse_physical",
+        "wrench_clipping_any_row_fraction", "wrench_nonfinite_fraction",
+        "wrench_bound_exceedance_mean", "wrench_bound_exceedance_max",
+        "wrench_raw_norm_mean", "wrench_clipped_norm_mean",
+        "wrench_raw_clipped_abs_difference_mean",
+        "wrench_target_outside_qp_bound_fraction",
+        "wrench_active_mae_physical", "wrench_neutral_mae_physical",
+    }.issubset(metrics)
     assert all(torch.isfinite(value) for value in metrics.values())
 
 

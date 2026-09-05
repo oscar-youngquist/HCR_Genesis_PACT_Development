@@ -205,10 +205,6 @@ class ActorCritic_HardPACT(nn.Module):
                  cenet_explicit_layers=(128, 128),
                  grf_decoder_layers=(128, 128),
                  wrench_decoder_layers=(128, 128),
-                 grf_scale=(1.2, 1.2, 2.5) * 4,
-                 wrench_scale=(0.6, 0.6, 0.9924, 0.234403, 0.234403, 0.234403),
-                 wrench_center=None,
-                 wrench_radius=None,
                  contact_epsilon=1.0e-2,
                  ablation_features="full"):
         super().__init__()
@@ -220,7 +216,7 @@ class ActorCritic_HardPACT(nn.Module):
 
         # The history latent is an architecture hyperparameter.  Only the
         # deployment estimator contract is fixed: [base velocity (3), contact
-        # probabilities (4), foot clearances (4)] = 11 values.
+        # logits (4), foot clearances (4)] = 11 values.
         if cenet_velo_dim != 11:
             raise ValueError("HardPACT requires an 11-D explicit estimator")
 
@@ -236,14 +232,10 @@ class ActorCritic_HardPACT(nn.Module):
             contact_epsilon=contact_epsilon,
         )
         self.physics_estimator = DeploymentPhysicsHeads(
-            grf_scale,
-            wrench_scale,
             cenet_latent_dim,
             cenet_velo_dim,
             grf_decoder_layers,
             wrench_decoder_layers,
-            wrench_center,
-            wrench_radius,
         )
         
         # Get the activation function used by the actor and critic networks

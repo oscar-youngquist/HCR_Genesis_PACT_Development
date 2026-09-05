@@ -200,15 +200,19 @@ class CorrectedInverseLossTests(unittest.TestCase):
 
     def test_inverse_loss_routes_gradients_to_both_deployment_heads(self):
         torch.manual_seed(4)
-        heads = DeploymentPhysicsHeads(torch.ones(12), torch.ones(6))
+        heads = DeploymentPhysicsHeads()
         latent = torch.randn(2, 16, requires_grad=True)
         explicit = torch.randn(2, 11, requires_grad=True)
         torque = torch.randn(2, 12, requires_grad=True)
         prediction = heads(latent, explicit, torque)
         data = self.inputs(2)
         data["required_generalized_force"].normal_()
-        data["interval_grf_world"] = prediction.grf_yaw_scaled.reshape(2, 4, 3)
-        data["total_wrench_world"] = prediction.base_wrench_yaw_scaled
+        data["interval_grf_world"] = heads.grf_to_physical(
+            prediction.grf_normalized.reshape(2, 4, 3)
+        )
+        data["total_wrench_world"] = heads.wrench_to_physical(
+            prediction.wrench_raw_normalized
+        )
         result = corrected_bard_inverse_dynamics_loss(**data)
         result.loss.backward()
         self.assertGreater(sum(
@@ -942,8 +946,12 @@ class RolloutEndToEndGradientTests(unittest.TestCase):
         result = differentiable_bard_rollout_loss(
             context=context,
             control_torque=control_torque,
-            interval_grf_world=heads.grf_yaw_scaled.reshape(1, 4, 3),
-            applied_wrench_world=heads.base_wrench_yaw_scaled,
+            interval_grf_world=actor.physics_estimator.grf_to_physical(
+                heads.grf_normalized.reshape(1, 4, 3)
+            ),
+            applied_wrench_world=actor.physics_estimator.wrench_to_physical(
+                heads.wrench_raw_normalized
+            ),
             control_dt=torch.tensor([[0.02]]),
             push_event_mask=torch.zeros(1, 1, dtype=torch.bool),
             reset_mask=torch.zeros(1, 1, dtype=torch.bool),

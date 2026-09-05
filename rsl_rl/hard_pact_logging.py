@@ -96,6 +96,14 @@ def collect_hard_pact_scalars(algorithm, features):
     ):
         if source in auxiliary:
             values[target] = auxiliary[source]
+    # Wrench-regression diagnostics are already reduced to device scalars by
+    # the auxiliary update. Mirror them under a stable physical-unit prefix;
+    # no per-environment tensor reaches the runner.
+    for name, value in auxiliary.items():
+        if name.startswith("wrench_") and name not in (
+            "wrench_active", "wrench_neutral"
+        ):
+            values[f"physics/wrench/{name[len('wrench_'):]}"] = value
     values.update(getattr(algorithm, "last_qp_metrics", {}))
     gradients = getattr(algorithm, "last_physics_gradient_metrics", {})
     if "physics_gradient/finite_fraction" in gradients:

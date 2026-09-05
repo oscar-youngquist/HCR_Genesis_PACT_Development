@@ -96,7 +96,6 @@ class HardPACTQPConfig:
     torque_rate_limit_nm_s: float = 1000.0  # dot(tau)_lim [Nm/s].
     contact_acceleration_limit_m_s2: float = 0.0  # a_tol [m/s^2].
     interior_margin: float = 1.0e-3  # Strict-feasibility epsilon for contact rows.
-    contact_probability_floor: float = 1.0e-2  # c_min prevents zero contact rows.
     qdd_scale: float = 50.0  # D diagonal for generalized acceleration.
     force_scale_n: float = 250.0  # D diagonal/reference normalization for GRF.
     torque_scale_nm: float = 40.0  # D diagonal for safe torque variables.
@@ -382,8 +381,6 @@ class HardPACTDifferentiableQP:
             chunk_sizes = (config.chunk_size, config.chunk_size)
         if config.not_improved_limit <= 0 or min(chunk_sizes) <= 0:
             raise ValueError("QP iteration and chunk limits must be positive")
-        if not (0.0 < config.contact_probability_floor <= 1.0):
-            raise ValueError("contact_probability_floor must lie in (0,1]")
         if config.position_integration_coefficient not in (0.5, 1.0):
             raise ValueError("position integration coefficient must be 0.5 or 1.0")
         if config.diagnostics_level not in ("minimal", "physical", "full"):

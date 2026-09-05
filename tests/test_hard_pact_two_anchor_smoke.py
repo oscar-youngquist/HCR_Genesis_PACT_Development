@@ -41,6 +41,12 @@ def test_two_anchor_rollout_reset_and_ppo_backward():
             self.grf_calls += 1
             return 0.1 * tau_nom
 
+        def grf_to_physical(self, prediction):
+            return prediction * 250.0
+
+        def wrench_to_qp_physical(self, prediction):
+            return prediction * torch.tensor([100., 100., 100., 25., 25., 25.])
+
     class Dynamics:
         def __init__(self):
             self.calls = 0
@@ -129,13 +135,16 @@ def test_two_anchor_rollout_reset_and_ppo_backward():
     heads = Heads()
     dynamics = Dynamics()
     qp = QP()
-    task._hard_pact_actor_critic = SimpleNamespace(physics_estimator=heads)
+    task._hard_pact_actor_critic = SimpleNamespace(
+        physics_estimator=heads,
+        explicit_estimator=SimpleNamespace(contact_epsilon=0.01),
+    )
     task._hard_pact_bard_dynamics = dynamics
     task._hard_pact_rollout_qp = qp
     task._legacy_task_class = Legacy
     task._hard_pact_policy_latent = torch.zeros(batch, 16)
     task._hard_pact_policy_explicit = torch.full((batch, 11), 0.5)
-    task._hard_pact_wrench_yaw_scaled = torch.zeros(batch, 6)
+    task._hard_pact_wrench_raw_normalized = torch.zeros(batch, 6)
     task._hard_pact_q_d = torch.ones(batch, 12)
     task._hard_pact_tau_ff = torch.zeros(batch, 12)
     task._hard_pact_previous_substep_torque = torch.ones(batch, 12)

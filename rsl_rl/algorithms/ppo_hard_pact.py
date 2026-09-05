@@ -43,7 +43,13 @@ import random
 from rsl_rl.utils import print_class_attributes
 
 from rsl_rl.storage import RolloutStoragePACT
-from rsl_rl.modules.hard_pact_physics import normalized_huber_loss
+from rsl_rl.modules.hard_pact_physics import (
+    contact_logits_to_qp_probability,
+    normalized_grf_huber_loss,
+    normalized_wrench_huber_loss,
+    sanitize_and_clip_wrench_for_qp,
+    wrench_regression_metrics,
+)
 
 from legged_gym.dynamics import (
     create_go2_dynamics,
@@ -297,8 +303,6 @@ class PPO_HardPACT:
                  ppo_qp_sampling_logging_enabled=True,
                  ablation_variant="full",
                  hard_pact_qp=None,
-                 grf_observation_scale=0.01,
-                 base_wrench_observation_scale=0.01,
                  action_clip=100.0,
                  ):
         
@@ -482,8 +486,6 @@ class PPO_HardPACT:
         self.hard_pact_qp = None
         self.last_qp_metrics = {}
         self._qp_full_audit_inputs = None
-        self.grf_observation_scale = float(grf_observation_scale)
-        self.base_wrench_observation_scale = float(base_wrench_observation_scale)
         self.action_clip = float(action_clip)
         if self.action_clip <= 0.0:
             raise ValueError("action_clip must be positive")
@@ -1454,20 +1456,22 @@ class PPO_HardPACT:
 
     @staticmethod
     def _masked_explicit_loss(prediction, target, mask):
-        """MSE for continuous estimates and BCE for contact probabilities."""
+        """MSE for continuous estimates and BCE-with-logits for contacts."""
         if prediction.shape[-1] != 11 or target.shape[-1] != 11:
             raise ValueError("HardPACT explicit estimates and labels must be 11-D")
         target = target.detach()
-        element_loss = torch.cat((
+        continuous_loss = torch.cat((
             (prediction[:, :3] - target[:, :3]).square(),
-            F.binary_cross_entropy(
-                prediction[:, 3:7], target[:, 3:7], reduction="none"
-            ),
             (prediction[:, 7:11] - target[:, 7:11]).square(),
-        ), dim=-1)
-        per_sample = element_loss.mean(dim=-1)
-        weights = mask.reshape(-1).to(per_sample.dtype)
-        return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
+        ), dim=-1).mean(dim=-1)
+        contact_loss = F.binary_cross_entropy_with_logits(
+            prediction[:, 3:7], target[:, 3:7], reduction="none"
+        ).mean(dim=-1)
+        weights = mask.reshape(-1).to(continuous_loss.dtype)
+        denominator = weights.sum().clamp_min(1.0)
+        return (
+            ((continuous_loss + contact_loss) * weights).sum() / denominator
+        )
 
     def _start_bard_timing(self, name, reference):
         """Start one asynchronous forward-only PINN-loss measurement."""
@@ -1575,29 +1579,26 @@ class PPO_HardPACT:
         weights = valid.reshape(-1).to(per_sample_kl.dtype)
         kl = (per_sample_kl * weights).sum() / weights.sum().clamp_min(1.0)
 
-        grf = normalized_huber_loss(
-            heads.grf_yaw_scaled, grf_target.detach(),
-            self.actor_critic.physics_estimator.grf_scale, valid,
+        grf = normalized_grf_huber_loss(
+            heads.grf_normalized, grf_target.detach(), valid,
         )
         if transition is None:
-            wrench_target = heads.base_wrench_yaw_scaled.detach().new_zeros(
-                heads.base_wrench_yaw_scaled.shape
+            wrench_target = heads.wrench_raw_normalized.detach().new_zeros(
+                heads.wrench_raw_normalized.shape
             )
             active = torch.zeros_like(valid, dtype=torch.bool)
         else:
             wrench_target = transition[
-                "total_external_wrench_label_yaw_scaled"
+                "total_external_wrench_label_yaw_normalized"
             ].detach()
             active = transition["sustained_wrench_active_mask"].bool()
         active_mask = valid.bool() & active
         neutral_mask = valid.bool() & ~active
-        wrench_active = normalized_huber_loss(
-            heads.base_wrench_yaw_scaled, wrench_target,
-            self.actor_critic.physics_estimator.wrench_scale, active_mask,
+        wrench_active = normalized_wrench_huber_loss(
+            heads.wrench_raw_normalized, wrench_target, active_mask,
         )
-        wrench_neutral = normalized_huber_loss(
-            heads.base_wrench_yaw_scaled, wrench_target,
-            self.actor_critic.physics_estimator.wrench_scale, neutral_mask,
+        wrench_neutral = normalized_wrench_huber_loss(
+            heads.wrench_raw_normalized, wrench_target, neutral_mask,
         )
         loss = (
             self.privileged_loss_weight * privileged
@@ -1607,7 +1608,7 @@ class PPO_HardPACT:
             + self.active_wrench_loss_weight * wrench_active
             + self.neutral_wrench_loss_weight * wrench_neutral
         )
-        return {
+        metrics = {
             "loss": loss,
             "privileged": privileged,
             "kl": kl,
@@ -1617,6 +1618,28 @@ class PPO_HardPACT:
             "wrench_neutral": wrench_neutral,
             "reconstruction": reconstruction,
         }
+        metrics.update(wrench_regression_metrics(
+            heads.wrench_raw_normalized, wrench_target, valid
+        ))
+        active_diagnostics = wrench_regression_metrics(
+            heads.wrench_raw_normalized, wrench_target, active_mask
+        )
+        neutral_diagnostics = wrench_regression_metrics(
+            heads.wrench_raw_normalized, wrench_target, neutral_mask
+        )
+        metrics["wrench_active_mae_physical"] = active_diagnostics[
+            "wrench_raw_mae_physical"
+        ]
+        metrics["wrench_active_rmse_physical"] = active_diagnostics[
+            "wrench_raw_rmse_physical"
+        ]
+        metrics["wrench_neutral_mae_physical"] = neutral_diagnostics[
+            "wrench_raw_mae_physical"
+        ]
+        metrics["wrench_neutral_rmse_physical"] = neutral_diagnostics[
+            "wrench_raw_rmse_physical"
+        ]
+        return metrics
 
     @staticmethod
     def _nominal_torque(actions, observations, action_func, fb_func,
@@ -1861,17 +1884,21 @@ class PPO_HardPACT:
             return applied, applied + label_mass_wrench
 
         if compute_pinn:
-            grf_yaw = self.actor_critic.physics_estimator.predict_grf(
+            grf_normalized = self.actor_critic.physics_estimator.predict_grf(
                 latent, explicit, nominal_torque
             ).reshape(-1, 4, 3)
             grf_world = _yaw_local_to_world(
-                grf_yaw / self.grf_observation_scale,
+                self.actor_critic.physics_estimator.grf_to_physical(
+                    grf_normalized
+                ),
                 batch["pre_q"][:, 3:7],
             )
             if self.bard_inverse_enabled or self.bard_rollout_enabled:
-                wrench_yaw = self.actor_critic.physics_estimator.predict_wrench(
-                    latent, explicit
-                ) / self.base_wrench_observation_scale
+                wrench_yaw = self.actor_critic.physics_estimator.wrench_to_physical(
+                    self.actor_critic.physics_estimator.predict_wrench(
+                        latent, explicit
+                    )
+                )
                 applied_at_base, total_at_base = world_wrench(
                     batch["pre_q"], mass_wrench, wrench_yaw,
                     batch["realized_com_shift_body"],
@@ -2040,13 +2067,15 @@ class PPO_HardPACT:
                 sampled_nominal = nominal_torque[qp_rows]
             # Recompute only the GRF head at K because its input includes
             # tau_nom,K. z_t and e_t remain the current policy-step features.
-            sample_grf_yaw = self.actor_critic.physics_estimator.predict_grf(
+            sample_grf_normalized = self.actor_critic.physics_estimator.predict_grf(
                 qp_latent, qp_explicit, sampled_nominal
             ).reshape(-1, 4, 3)
-            # Undo observation scaling and rotate yaw-local Newtons to the
-            # world-axis convention of the reconstructed sampled J_f.
+            # Reconstruct physical Newtons exactly once, then rotate from the
+            # normalized decoder's yaw-local frame into sampled J_f's world frame.
             sample_grf_world = _yaw_local_to_world(
-                sample_grf_yaw / self.grf_observation_scale,
+                self.actor_critic.physics_estimator.grf_to_physical(
+                    sample_grf_normalized
+                ),
                 sample_q[:, 3:7],
             )
             # Projection is a deployment operation: nominal mechanics and the
@@ -2054,11 +2083,16 @@ class PPO_HardPACT:
             # robot. In particular, neither realized randomization nor its
             # label-only mass/CoM wrench enters this path.
             qp_wrench_yaw = (
-                wrench_yaw[qp_rows]
+                sanitize_and_clip_wrench_for_qp(
+                    wrench_yaw[qp_rows],
+                    self.actor_critic.physics_estimator.wrench_qp_clip,
+                )
                 if wrench_yaw is not None
-                else self.actor_critic.physics_estimator.predict_wrench(
-                    qp_latent, qp_explicit
-                ) / self.base_wrench_observation_scale
+                else self.actor_critic.physics_estimator.wrench_to_qp_physical(
+                    self.actor_critic.physics_estimator.predict_wrench(
+                        qp_latent, qp_explicit
+                    )
+                )
             )
             sample_applied = torch.cat((
                 _yaw_local_to_world(
@@ -2083,7 +2117,10 @@ class PPO_HardPACT:
             #   x=[qdd_18,f_12,tau_safe_12,s_12].
             # Gradients enter through sampled_nominal, sample_grf_world, and
             # sample_applied; all state/mechanics/rate-center tensors detach.
-            sample_contact_probability = qp_explicit[:, 3:7]
+            sample_contact_probability = contact_logits_to_qp_probability(
+                qp_explicit[:, 3:7],
+                self.actor_critic.explicit_estimator.contact_epsilon,
+            )
             differentiate_qp = self.hard_pact_features.differentiable_qp
             qp_arguments = dict(
                 # Equality coefficient M_K.
@@ -2102,8 +2139,8 @@ class PPO_HardPACT:
                 force_pred_world=(sample_grf_world if differentiate_qp else sample_grf_world.detach()),
                 # Differentiable world [force,moment] equality input.
                 wrench_pred_world=(sample_applied if differentiate_qp else sample_applied.detach()),
-                # The estimator's eps-bounded sigmoid was applied exactly
-                # once; the QP consumes that probability without clipping.
+                # The eps-bounded sigmoid was applied exactly once above;
+                # the QP consumes that probability without another transform.
                 contact_probability=(sample_contact_probability if differentiate_qp else sample_contact_probability.detach()),
                 # Exact rollout tau_safe,K-1 reproduces the sampled rate box.
                 previous_torque=qp_batch.get(

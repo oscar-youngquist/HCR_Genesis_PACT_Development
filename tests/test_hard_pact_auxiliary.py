@@ -43,7 +43,7 @@ def make_algorithm(**kwargs):
 def make_batch(batch=5):
     torch.manual_seed(11)
     transition = {
-        "total_external_wrench_label_yaw_scaled": torch.randn(batch, 6),
+        "total_external_wrench_label_yaw_normalized": torch.randn(batch, 6),
         "sustained_wrench_active_mask": torch.tensor(
             [[True], [False], [True], [False], [False]]
         )[:batch],
@@ -70,14 +70,14 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
         valid = torch.tensor([[True], [False]])
 
         actual = PPO_HardPACT._masked_explicit_loss(prediction, target, valid)
-        expected_elements = torch.cat((
+        expected_continuous = torch.cat((
             (prediction[0, :3] - target[0, :3]).square(),
-            torch.nn.functional.binary_cross_entropy(
-                prediction[0, 3:7], target[0, 3:7], reduction="none"
-            ),
             (prediction[0, 7:11] - target[0, 7:11]).square(),
-        ))
-        torch.testing.assert_close(actual, expected_elements.mean())
+        )).mean()
+        expected_contact = torch.nn.functional.binary_cross_entropy_with_logits(
+            prediction[0, 3:7], target[0, 3:7], reduction="none"
+        ).mean()
+        torch.testing.assert_close(actual, expected_continuous + expected_contact)
         actual.backward()
         self.assertGreater(prediction.grad.abs().sum().item(), 0)
         self.assertIsNone(target.grad)
@@ -128,7 +128,7 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
         torch.testing.assert_close(
             inference_explicit, actor.explicit_estimator(features)
         )
-        self.assertTrue(torch.all((first[3][:, 3:7] >= 0) & (first[3][:, 3:7] <= 1)))
+        self.assertTrue(torch.isfinite(first[3][:, 3:7]).all())
         self.assertTrue(torch.all(first[3][:, 7:11].abs() <= 1))
 
     def test_privileged_reconstruction_is_stochastic_and_reparameterized(self):
