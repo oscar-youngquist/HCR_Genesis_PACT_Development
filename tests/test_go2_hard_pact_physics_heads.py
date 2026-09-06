@@ -42,6 +42,7 @@ from rsl_rl.modules import ActorCritic_HardPACT, ActorCritic_HardPACT_Pos
 from rsl_rl.modules.actor_critic_pact import ActorCritic_PACT
 from rsl_rl.modules.actor_critic_pact_pos import ActorCritic_PACT_Pos
 from rsl_rl.modules.hard_pact_physics import (
+    ContactEstimatorMetricsAccumulator,
     GRFDecoderMetricsAccumulator,
     DeploymentPhysicsHeads,
     ExplicitEstimatorDecoder,
@@ -50,7 +51,6 @@ from rsl_rl.modules.hard_pact_physics import (
     normalize_grf_target,
     normalized_grf_huber_loss,
     normalized_wrench_huber_loss,
-    contact_logits_to_qp_probability,
     sanitize_and_clip_wrench_for_qp,
     normalize_wrench_target,
     wrench_normalized_to_physical,
@@ -157,7 +157,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
     def test_alias_dimensions_and_reconstruction_schema(self):
         for env_cls, train_cls, history_steps in (
             (GO2HardPACTCfg, GO2HardPACTCfgPPO, 20),
-            (GO2HardPACTPosCfg, GO2HardPACTPosCfgPPO, 20),
+            (GO2HardPACTPosCfg, GO2HardPACTPosCfgPPO, 10),
         ):
             env, train = env_cls(), train_cls()
             with self.subTest(env=env_cls.__name__):
@@ -171,6 +171,19 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
                 self.assertEqual(train.policy.wrench_decoder_layers, [128, 128])
                 self.assertEqual(train.policy.cenet_dec_input_dim, 27)
                 self.assertEqual(train.policy.cenet_dec_out_dim, 133)
+                expected_contact_weight = (
+                    1.0 if env_cls is GO2HardPACTCfg else 0.1
+                )
+                self.assertEqual(
+                    train.algorithm.contact_probability_loss_weight,
+                    expected_contact_weight,
+                )
+                self.assertFalse(train.algorithm.ppo_latent_diagnostics_enabled)
+                self.assertEqual(train.algorithm.ppo_latent_diagnostics_interval, 100)
+                self.assertEqual(train.algorithm.ppo_latent_diagnostics_sample_count, 256)
+                self.assertEqual(
+                    train.algorithm.latent_active_unit_variance_threshold, 1e-2
+                )
                 self.assertEqual(
                     env.env.num_privileged_obs,
                     GO2PACTCfg.env.num_privileged_obs + DISTURBANCE_CRITIC_DIM,
@@ -196,6 +209,48 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         self.assertIsNone(explicit.grad)
         self.assertGreater(latent.grad.abs().sum().item(), 0.0)
         self.assertGreater(nominal.grad.abs().sum().item(), 0.0)
+
+    def test_both_variants_feed_sampled_latent_and_detached_explicit_to_heads(self):
+        history = torch.randn(3, 57 * 20)
+        nominal = torch.randn(3, 12)
+        noise_a = torch.zeros(3, 16)
+        noise_b = torch.ones(3, 16)
+        for actor_class in (ActorCritic_HardPACT, ActorCritic_HardPACT_Pos):
+            with self.subTest(actor=actor_class.__name__):
+                actor = _small_actor(actor_class=actor_class)
+                mean, _, sample_a, explicit = actor.cenet_enc_forward(
+                    history, latent_noise=noise_a
+                )
+                _, _, sample_b, _ = actor.cenet_enc_forward(
+                    history, latent_noise=noise_b
+                )
+                self.assertFalse(torch.equal(sample_b, mean))
+
+                captured = []
+                hooks = [
+                    head[0].register_forward_pre_hook(
+                        lambda _module, inputs: captured.append(inputs[0])
+                    )
+                    for head in (
+                        actor.physics_estimator.grf_head,
+                        actor.physics_estimator.wrench_head,
+                    )
+                ]
+                actor.physics_heads_from_history(
+                    history, nominal, latent_noise=noise_b
+                )
+                for hook in hooks:
+                    hook.remove()
+                torch.testing.assert_close(captured[0][:, :16], sample_b)
+                torch.testing.assert_close(captured[1][:, :16], sample_b)
+
+                explicit_leaf = explicit.detach().requires_grad_()
+                sample_leaf = sample_a.detach().requires_grad_()
+                outputs = actor.physics_heads(sample_leaf, explicit_leaf, nominal)
+                (outputs.grf_normalized.sum()
+                 + outputs.wrench_raw_normalized.sum()).backward()
+                self.assertIsNone(explicit_leaf.grad)
+                self.assertGreater(sample_leaf.grad.abs().sum().item(), 0.0)
 
     def test_physics_decoder_hidden_layers_are_independently_configurable(self):
         gains = calculate_physics_head_gains(GO2HardPACTCfg())
@@ -235,7 +290,8 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         torch.testing.assert_close(inference_latent, first[0])
         _, _, features = actor.context_encoder.encode_with_features(history)
         torch.testing.assert_close(
-            inference_explicit, actor.explicit_estimator(features)
+            inference_explicit,
+            actor.explicit_estimator(features).explicit_for_policy,
         )
         self.assertEqual(tuple(first[2].shape), (2, 16))
         self.assertEqual(tuple(first[3].shape), (2, 11))
@@ -254,7 +310,8 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
             captured_actor_input[0][:, 57:73], first_decoder_latent
         )
         torch.testing.assert_close(
-            captured_actor_input[0][:, 73:], actor.explicit_estimator(features)
+            captured_actor_input[0][:, 73:],
+            actor.explicit_estimator(features).explicit_for_policy,
         )
         self.assertFalse(torch.equal(actor.action_mean, first_action_mean))
         self.assertFalse(torch.equal(actor.cenet_z, first_decoder_latent))
@@ -318,12 +375,19 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         estimate = actor.explicit_estimator(features)
         inference_mean, inference_estimate = actor.cenet_enc_inference(history)
         torch.testing.assert_close(inference_mean, mean)
-        torch.testing.assert_close(inference_estimate, estimate)
+        torch.testing.assert_close(
+            inference_estimate, estimate.explicit_for_policy
+        )
         self.assertEqual(tuple(mean.shape), (4, 16))
         self.assertEqual(tuple(logvar.shape), (4, 16))
-        self.assertEqual(tuple(estimate.shape), (4, 11))
-        self.assertTrue(torch.isfinite(estimate[:, 3:7]).all())
-        self.assertTrue(torch.all((estimate[:, 7:11] >= -1.0) & (estimate[:, 7:11] <= 1.0)))
+        self.assertEqual(tuple(estimate.explicit_for_policy.shape), (4, 11))
+        self.assertTrue(torch.all(
+            (estimate.contact_probability >= 0.01)
+            & (estimate.contact_probability <= 0.99)
+        ))
+        self.assertTrue(torch.all(
+            estimate.explicit_for_policy[:, 7:11].abs() <= 1.0
+        ))
         torch.manual_seed(1)
         first = actor.cenet_enc_forward(history)
         torch.manual_seed(999)
@@ -348,7 +412,8 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         actor.act_inference(observation, history)
         hook.remove()
         torch.testing.assert_close(
-            captured_actor_input[0][:, -11:], actor.explicit_estimator(features)
+            captured_actor_input[0][:, -11:],
+            actor.explicit_estimator(features).explicit_for_policy,
         )
 
         algorithm = PPO_PACT.__new__(PPO_PACT)
@@ -387,7 +452,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         features = actor.context_encoder.encode_features(history)
         features.retain_grad()
         estimate = actor.explicit_estimator(features)
-        estimate[:, :3].square().mean().backward()
+        estimate.explicit_for_policy[:, :3].square().mean().backward()
         self.assertGreater(features.grad.abs().sum().item(), 0.0)
         self.assertTrue(any(
             parameter.grad is not None and parameter.grad.abs().sum().item() > 0.0
@@ -405,16 +470,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
 
 
 class GainAndScalingTests(unittest.TestCase):
-    def test_contact_logits_map_to_qp_probability_once_and_have_gradient(self):
-        logits = torch.tensor([-100.0, 0.0, 100.0], requires_grad=True)
-        probability = contact_logits_to_qp_probability(logits, 0.01)
-        torch.testing.assert_close(
-            probability.detach(), torch.tensor([0.01, 0.5, 0.99]),
-            atol=1e-6, rtol=0,
-        )
-        probability.sum().backward()
-        self.assertGreater(logits.grad[1].item(), 0.0)
-
+    def test_contact_estimator_structures_logits_and_converts_exactly_once(self):
         decoder = ExplicitEstimatorDecoder(8, (4,))
         with torch.no_grad():
             decoder.network[-1].weight.zero_()
@@ -422,8 +478,30 @@ class GainAndScalingTests(unittest.TestCase):
             decoder.network[-1].bias[3:7] = torch.tensor([-4., -2., 2., 4.])
         estimate = decoder(torch.zeros(1, 8))
         torch.testing.assert_close(
-            estimate[:, 3:7], torch.tensor([[-4., -2., 2., 4.]])
+            estimate.contact_logits, torch.tensor([[-4., -2., 2., 4.]])
         )
+        expected = 0.01 + 0.98 * torch.sigmoid(estimate.contact_logits)
+        torch.testing.assert_close(estimate.contact_probability, expected)
+        torch.testing.assert_close(
+            estimate.explicit_for_policy[:, 3:7], estimate.contact_probability
+        )
+        estimate.contact_probability.sum().backward()
+        self.assertGreater(decoder.network[-1].bias.grad[3:7].abs().sum(), 0.0)
+
+    def test_contact_diagnostics_use_logits_probabilities_and_valid_mask(self):
+        decoder = ExplicitEstimatorDecoder(2, (2,), contact_epsilon=0.01)
+        with torch.no_grad():
+            decoder.network[-1].weight.zero_()
+            decoder.network[-1].bias.zero_()
+        estimate = decoder(torch.zeros(2, 2))
+        labels = torch.tensor([[0., 1., 0., 1.], [1., 1., 1., 1.]])
+        accumulator = ContactEstimatorMetricsAccumulator(0.01)
+        accumulator.update(estimate, labels, torch.tensor([[True], [False]]))
+        metrics = accumulator.finalize()
+        torch.testing.assert_close(metrics["contact_bce"], torch.log(torch.tensor(2.0)))
+        torch.testing.assert_close(metrics["contact_probability_mean"], torch.tensor(0.5))
+        torch.testing.assert_close(metrics["contact_classification_accuracy"], torch.tensor(0.5))
+        torch.testing.assert_close(metrics["contact_brier_score"], torch.tensor(0.25))
 
     def test_wrench_head_is_unbounded_linear_and_qp_clips_once(self):
         gains = calculate_physics_head_gains(GO2HardPACTCfg())
@@ -489,7 +567,9 @@ class GainAndScalingTests(unittest.TestCase):
             "baseline", "soft", "hard", "full", "stopgrad",
             "soft_penalty", "inverse", "rollout",
         ):
-            variant_cfg, _ = make_hard_pact_variant_configs(variant, "genesis")
+            variant_cfg, variant_train = make_hard_pact_variant_configs(
+                variant, "genesis"
+            )
             self.assertEqual(
                 tuple(variant_cfg.deployment_physics.wrench_scale),
                 gains.wrench_scale_n_nm,
@@ -497,6 +577,12 @@ class GainAndScalingTests(unittest.TestCase):
             self.assertEqual(
                 tuple(variant_cfg.deployment_physics.wrench_qp_clip),
                 gains.wrench_qp_clip_n_nm,
+            )
+            self.assertFalse(
+                variant_train.algorithm.ppo_latent_diagnostics_enabled
+            )
+            self.assertEqual(
+                variant_train.algorithm.ppo_latent_diagnostics_interval, 100
             )
         actor = ActorCritic_HardPACT(
             num_actor_obs=57, num_critic_obs=64, num_actions=12,
@@ -671,13 +757,10 @@ class GainAndScalingTests(unittest.TestCase):
         )
         self.assertIn("wrench_to_qp_physical", rollout_source)
         self.assertNotIn("obs_scales.base_wrench", rollout_source)
-        self.assertEqual(
-            rollout_source.count("contact_logits_to_qp_probability"), 1
-        )
-        self.assertEqual(
-            bard_source.count("contact_logits_to_qp_probability"), 1
-        )
-        self.assertNotIn("sigmoid", inspect.getsource(
+        self.assertNotIn("torch.sigmoid(", rollout_source)
+        self.assertNotIn("torch.sigmoid(", bard_source)
+        self.assertNotIn("binary_cross_entropy", rollout_source)
+        self.assertIn("binary_cross_entropy_with_logits", inspect.getsource(
             PPO_HardPACT._masked_explicit_loss
         ))
 
@@ -727,6 +810,15 @@ class GainAndScalingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "wrench_"):
             hard.load_state_dict(legacy, strict=True)
 
+    def test_legacy_logits_in_policy_checkpoint_is_rejected_explicitly(self):
+        hard = _small_actor(actor_class=ActorCritic_HardPACT)
+        legacy = hard.state_dict()
+        legacy.pop("explicit_estimator.contact_probability_semantics")
+        with self.assertRaisesRegex(
+            RuntimeError, "contact_probability_semantics"
+        ):
+            hard.load_state_dict(legacy, strict=True)
+
 
 class DeploymentContractTests(unittest.TestCase):
     def test_json_contents_single_write_and_checkpoint_buffer_agreement(self):
@@ -745,7 +837,7 @@ class DeploymentContractTests(unittest.TestCase):
                 self.assertEqual(stream.read(), first_text)
             loaded = json.loads(first_text)
 
-        self.assertEqual(loaded["schema_version"], 5)
+        self.assertEqual(loaded["schema_version"], 6)
         self.assertEqual(loaded["explicit_estimator"]["dimension"], 11)
         self.assertEqual(
             loaded["explicit_estimator"]["input"],
@@ -761,13 +853,14 @@ class DeploymentContractTests(unittest.TestCase):
             [128, 128],
         )
         contact_field = loaded["explicit_estimator"]["fields"][1]
-        self.assertEqual(contact_field["name"], "foot_contact_logits")
+        self.assertEqual(contact_field["name"], "foot_contact_probability")
         self.assertEqual(
-            contact_field["training_loss"], "binary_cross_entropy_with_logits"
+            loaded["contact_estimator_supervision"]["training_loss"],
+            "binary_cross_entropy_with_logits",
         )
         self.assertEqual(
             loaded["qp_inputs"]["contact"]["parameterization"],
-            "epsilon + (1 - 2*epsilon) * sigmoid(contact_logits)",
+            "already converted by explicit estimator",
         )
         self.assertEqual(loaded["frames_and_units"]["grf"]["foot_order"], list(FOOT_ORDER))
         self.assertEqual(
@@ -785,6 +878,9 @@ class DeploymentContractTests(unittest.TestCase):
         grf_key = loaded["checkpoint_buffer_keys"]["grf"]
         wrench_key = loaded["checkpoint_buffer_keys"]["base_wrench"]
         wrench_clip_key = loaded["checkpoint_buffer_keys"]["base_wrench_qp_clip"]
+        contact_semantics_key = loaded["checkpoint_buffer_keys"][
+            "contact_semantics"
+        ]
         torch.testing.assert_close(
             state[grf_key],
             torch.tensor(loaded["grf_decoder_normalization"]["scale_n"]),
@@ -795,6 +891,7 @@ class DeploymentContractTests(unittest.TestCase):
         torch.testing.assert_close(
             state[wrench_clip_key], torch.tensor(gains.wrench_qp_clip_n_nm)
         )
+        self.assertEqual(state[contact_semantics_key].item(), 1)
 
 
 if __name__ == "__main__":

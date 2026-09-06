@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 import torch.nn as nn
@@ -368,19 +369,31 @@ def compose_explicit_estimator_target(
     )
 
 
-def contact_logits_to_qp_probability(contact_logits, epsilon=1.0e-2):
-    """Map raw contact logits once at the QP boundary."""
-    if not 0.0 <= float(epsilon) < 0.5:
+class ExplicitEstimatorOutput(NamedTuple):
+    """The supervised logits and the sole runtime explicit representation."""
+
+    contact_logits: torch.Tensor
+    contact_probability: torch.Tensor
+    explicit_for_policy: torch.Tensor
+
+
+def _explicit_estimator_output(raw, epsilon):
+    """Apply the canonical contact-logit transform exactly once."""
+    epsilon = float(epsilon)
+    if not 0.0 <= epsilon < 0.5:
         raise ValueError("contact epsilon must lie in [0, 0.5)")
-    return float(epsilon) + (
-        1.0 - 2.0 * float(epsilon)
+    contact_logits = raw[:, 3:7]
+    contact_probability = epsilon + (
+        1.0 - 2.0 * epsilon
     ) * torch.sigmoid(contact_logits)
-
-
-def transform_explicit_estimator_output(raw):
-    # Contacts remain raw logits. Only the continuous clearance branch retains
-    # its established runtime clipping; QP probability conversion is separate.
-    return torch.cat((raw[:, :7], raw[:, 7:11].clamp(-1.0, 1.0)), dim=-1)
+    explicit_for_policy = torch.cat((
+        raw[:, :3],
+        contact_probability,
+        raw[:, 7:11].clamp(-1.0, 1.0),
+    ), dim=-1)
+    return ExplicitEstimatorOutput(
+        contact_logits, contact_probability, explicit_for_policy
+    )
 
 
 class ExplicitEstimatorDecoder(nn.Module):
@@ -402,13 +415,125 @@ class ExplicitEstimatorDecoder(nn.Module):
         self.network = nn.Sequential(*layers)
         self.input_dim = int(latent_dim)
         self.contact_epsilon = float(contact_epsilon)
+        if not 0.0 <= self.contact_epsilon < 0.5:
+            raise ValueError("contact epsilon must lie in [0, 0.5)")
+        # This persistent marker makes checkpoints from the former
+        # logits-in-policy convention fail strict loading instead of silently
+        # changing the policy's conditioning semantics.
+        self.register_buffer(
+            "contact_probability_semantics", torch.ones((), dtype=torch.int64)
+        )
 
     def forward(self, encoder_features):
         if encoder_features.shape[-1] != self.input_dim:
             raise ValueError(
                 f"explicit estimator input must be {self.input_dim}-D"
             )
-        return transform_explicit_estimator_output(self.network(encoder_features))
+        return _explicit_estimator_output(
+            self.network(encoder_features), self.contact_epsilon
+        )
+
+
+class ContactEstimatorMetricsAccumulator:
+    """Exactly aggregate masked contact diagnostics across minibatches."""
+
+    def __init__(self, epsilon, saturation_fraction=0.01):
+        self.epsilon = float(epsilon)
+        if not 0.0 <= self.epsilon < 0.5:
+            raise ValueError("contact epsilon must lie in [0, 0.5)")
+        self.saturation_width = (
+            float(saturation_fraction) * (1.0 - 2.0 * self.epsilon)
+        )
+        self._totals = {}
+
+    def _add(self, name, value, reduce="sum"):
+        value = value.detach()
+        if name not in self._totals:
+            self._totals[name] = value
+        elif reduce == "max":
+            self._totals[name] = torch.maximum(self._totals[name], value)
+        elif reduce == "min":
+            self._totals[name] = torch.minimum(self._totals[name], value)
+        else:
+            self._totals[name] = self._totals[name] + value
+
+    @torch.no_grad()
+    def update(self, estimator, labels, mask=None):
+        logits = estimator.contact_logits.detach()
+        probability = estimator.contact_probability.detach()
+        labels = labels.detach().to(logits.dtype)
+        valid = torch.ones_like(labels, dtype=torch.bool)
+        if mask is not None:
+            valid &= mask.detach().reshape(-1, 1).bool()
+        weights = valid.to(logits.dtype)
+        self._add("count", weights.sum())
+        self._add("bce", (
+            F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+            * weights
+        ).sum())
+        self._add("logit", (logits * weights).sum())
+        self._add("probability", (probability * weights).sum())
+        self._add("brier", ((probability - labels).square() * weights).sum())
+        self._add("correct", (
+            ((probability >= 0.5) == labels.bool()).to(logits.dtype) * weights
+        ).sum())
+        self._add("lower_saturated", (
+            ((probability - self.epsilon) <= self.saturation_width)
+            .to(logits.dtype) * weights
+        ).sum())
+        self._add("upper_saturated", (
+            (((1.0 - self.epsilon) - probability) <= self.saturation_width)
+            .to(logits.dtype) * weights
+        ).sum())
+        self._add(
+            "logit_abs_max",
+            torch.where(valid, logits.abs(), logits.new_full((), -torch.inf)).max(),
+            "max",
+        )
+        self._add(
+            "probability_min",
+            torch.where(valid, probability, probability.new_full((), torch.inf)).min(),
+            "min",
+        )
+        self._add(
+            "probability_max",
+            torch.where(valid, probability, probability.new_full((), -torch.inf)).max(),
+            "max",
+        )
+
+    @torch.no_grad()
+    def finalize(self):
+        if not self._totals:
+            return {}
+        total = self._totals
+        denominator = total["count"].clamp_min(1.0)
+        zero = denominator.new_zeros(())
+        finite_or_zero = lambda value: torch.where(
+            torch.isfinite(value), value, zero
+        )
+        return {
+            "contact_bce": total["bce"] / denominator,
+            "contact_logit_mean": total["logit"] / denominator,
+            "contact_logit_abs_max": finite_or_zero(total["logit_abs_max"]),
+            "contact_probability_mean": total["probability"] / denominator,
+            "contact_probability_min": finite_or_zero(total["probability_min"]),
+            "contact_probability_max": finite_or_zero(total["probability_max"]),
+            "contact_probability_lower_saturation_fraction": (
+                total["lower_saturated"] / denominator
+            ),
+            "contact_probability_upper_saturation_fraction": (
+                total["upper_saturated"] / denominator
+            ),
+            "contact_classification_accuracy": total["correct"] / denominator,
+            "contact_brier_score": total["brier"] / denominator,
+        }
+
+
+def contact_estimator_metrics(estimator, labels, epsilon, mask=None):
+    """One-batch convenience wrapper around the shared exact accumulator."""
+    accumulator = ContactEstimatorMetricsAccumulator(epsilon)
+    accumulator.update(estimator, labels, mask)
+    return accumulator.finalize()
 
 
 def _physics_head(input_dim, hidden_layers, output_dim):
@@ -467,27 +592,34 @@ class DeploymentPhysicsHeads(nn.Module):
         if self.wrench_qp_clip.shape != (6,):
             raise ValueError("wrench_qp_clip must contain 6 values")
 
-    def forward(self, latent, explicit, nominal_torque):
-        if (latent.shape[-1] != self.latent_dim
+    def forward(self, latent_sample, explicit, nominal_torque):
+        """Evaluate both heads from the reparameterized training sample.
+
+        ``explicit`` conditions the predictions by value only.  Detaching it
+        at each decoder boundary prevents either physics loss from optimizing
+        the explicit-estimator branch, while gradients through
+        ``latent_sample`` continue into the shared context encoder.
+        """
+        if (latent_sample.shape[-1] != self.latent_dim
                 or explicit.shape[-1] != self.explicit_dim):
             raise ValueError(
                 "HardPACT physics-head input dimensions do not match configuration"
             )
         if nominal_torque.shape[-1] != 12:
             raise ValueError("nominal torque must be 12-D")
-        grf = self.predict_grf(latent, explicit, nominal_torque)
-        wrench = self.predict_wrench(latent, explicit)
+        grf = self.predict_grf(latent_sample, explicit, nominal_torque)
+        wrench = self.predict_wrench(latent_sample, explicit)
         return PhysicsHeadOutput(
             grf, wrench,
         )
 
-    def predict_grf(self, latent, explicit, nominal_torque):
+    def predict_grf(self, latent_sample, explicit, nominal_torque):
         """Evaluate only the torque-conditioned head.
 
         Rollout calls this once per physics substep, so keeping it separate
         avoids redundantly evaluating the control-rate wrench head.
         """
-        if (latent.shape[-1] != self.latent_dim
+        if (latent_sample.shape[-1] != self.latent_dim
                 or explicit.shape[-1] != self.explicit_dim):
             raise ValueError(
                 "HardPACT physics-head input dimensions do not match configuration"
@@ -496,7 +628,7 @@ class DeploymentPhysicsHeads(nn.Module):
             raise ValueError("nominal torque must be 12-D")
         stopped_explicit = explicit.detach()
         return self.grf_head(
-            torch.cat((latent, stopped_explicit, nominal_torque), dim=-1)
+            torch.cat((latent_sample, stopped_explicit, nominal_torque), dim=-1)
         )
 
     def grf_to_physical(self, prediction_normalized):
@@ -505,15 +637,17 @@ class DeploymentPhysicsHeads(nn.Module):
             prediction_normalized, self.grf_scale_n
         )
 
-    def predict_wrench(self, latent, explicit):
-        """Evaluate the unbounded, normalized control-rate wrench head."""
-        if (latent.shape[-1] != self.latent_dim
+    def predict_wrench(self, latent_sample, explicit):
+        """Evaluate the unbounded wrench head from a sampled latent."""
+        if (latent_sample.shape[-1] != self.latent_dim
                 or explicit.shape[-1] != self.explicit_dim):
             raise ValueError(
                 "HardPACT physics-head input dimensions do not match configuration"
             )
         stopped_explicit = explicit.detach()
-        return self.wrench_head(torch.cat((latent, stopped_explicit), dim=-1))
+        return self.wrench_head(
+            torch.cat((latent_sample, stopped_explicit), dim=-1)
+        )
 
     def wrench_to_physical(self, prediction_normalized):
         return wrench_normalized_to_physical(

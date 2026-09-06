@@ -79,6 +79,27 @@ def collect_force_decoder_scalars(auxiliary):
     return values
 
 
+def collect_contact_estimator_scalars(auxiliary):
+    """Map contact-estimator diagnostics to the shared TensorBoard prefix."""
+    return {
+        f"physics/contact_estimator/{name[len('contact_'):]}": value
+        for name, value in auxiliary.items()
+        if name.startswith("contact_")
+    }
+
+
+def collect_latent_diagnostics_scalars(diagnostics):
+    """Expand per-dimension device tensors into stable scalar TB keys."""
+    values = {}
+    for name, value in diagnostics.items():
+        if getattr(value, "ndim", 0) == 1:
+            for dimension in range(value.shape[0]):
+                values[f"{name}/dim_{dimension:02d}"] = value[dimension]
+        else:
+            values[name] = value
+    return values
+
+
 def collect_hard_pact_scalars(algorithm, features):
     """Merge algorithm summaries into the stable schema without host copies."""
     spec = resolve_hard_pact_features(features)
@@ -116,6 +137,11 @@ def collect_hard_pact_scalars(algorithm, features):
     # Force-regression diagnostics are reduced to device scalars by the
     # auxiliary update; no per-environment tensor reaches the runner.
     values.update(collect_force_decoder_scalars(auxiliary))
+    values.update(collect_contact_estimator_scalars(auxiliary))
+    if getattr(algorithm, "ppo_latent_diagnostics_enabled", False):
+        values.update(collect_latent_diagnostics_scalars(
+            getattr(algorithm, "last_latent_diagnostics", {})
+        ))
     values.update(getattr(algorithm, "last_qp_metrics", {}))
     gradients = getattr(algorithm, "last_physics_gradient_metrics", {})
     if "physics_gradient/finite_fraction" in gradients:

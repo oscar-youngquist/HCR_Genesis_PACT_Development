@@ -69,7 +69,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
     latent_dim = actor.context_encoder.ce_out_mean.out_features
     explicit_dim = actor.explicit_estimator.network[-1].out_features
     contract = {
-        "schema_version": 5,
+        "schema_version": 6,
         "explicit_estimator": {
             "dimension": 11,
             "input": "shared_history_encoder_features",
@@ -82,11 +82,25 @@ def build_deployment_contract(cfg, actor, gain_spec):
             "activation": "ELU",
             "fields": [
                 {"name": "base_linear_velocity_body", "dimension": 3, "units": "observation_scaled_m_per_s", "scaling": "obs_scales.lin_vel", "clipping": None},
-                {"name": "foot_contact_logits", "dimension": 4, "order": list(FOOT_ORDER), "units": "logit", "scaling": 1.0, "clipping": None, "training_loss": "binary_cross_entropy_with_logits"},
+                {"name": "foot_contact_probability", "dimension": 4, "order": list(FOOT_ORDER), "units": "probability", "scaling": "epsilon + (1 - 2*epsilon) * sigmoid(contact_logits)", "clipping": None},
                 {"name": "foot_clearance", "dimension": 4, "order": list(FOOT_ORDER), "units": "m", "scaling": 1.0, "clipping": [-1.0, 1.0]},
             ],
         },
+        "contact_estimator_supervision": {
+            "raw_output": "contact_logits",
+            "training_loss": "binary_cross_entropy_with_logits",
+            "labels": "canonical_binary_contact_FR_FL_RR_RL",
+            "epsilon": float(cfg.deployment_physics.contact_probability_epsilon),
+            "runtime_conversion_count": "exactly_once_in_explicit_estimator",
+            "shared_runtime_vector": "explicit_for_policy",
+            "checkpoint_semantics_key": "explicit_estimator.contact_probability_semantics",
+        },
         "latent_dimension": latent_dim,
+        "physics_head_latent_semantics": {
+            "training": "reparameterized_sample_mu_plus_sigma_epsilon",
+            "deployment": "deterministic_mean",
+            "explicit_conditioning": "stop_gradient_explicit_for_policy",
+        },
         "history": {
             "observation_dimension": int(cfg.env.num_observations),
             "steps": int(cfg.env.num_obs_hist),
@@ -160,11 +174,11 @@ def build_deployment_contract(cfg, actor, gain_spec):
                 "clamp_gradient": "ordinary_clamp_no_straight_through",
             },
             "contact": {
-                "epsilon": float(getattr(cfg.deployment_physics, "contact_probability_epsilon", 1.0e-2)),
-                "input": "explicit_estimator.foot_contact_logits",
-                "output": "QP contact probability",
-                "parameterization": "epsilon + (1 - 2*epsilon) * sigmoid(contact_logits)",
-                "application_count": "exactly_once_at_QP_boundary",
+                "epsilon": float(cfg.deployment_physics.contact_probability_epsilon),
+                "input": "explicit_for_policy.foot_contact_probability",
+                "output": "unchanged QP contact probability",
+                "parameterization": "already converted by explicit estimator",
+                "application_count": "no downstream conversion",
                 "foot_order": list(FOOT_ORDER),
             },
         },
@@ -185,6 +199,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
             "grf": "physics_estimator.grf_scale_n",
             "base_wrench": "physics_estimator.wrench_scale",
             "base_wrench_qp_clip": "physics_estimator.wrench_qp_clip",
+            "contact_semantics": "explicit_estimator.contact_probability_semantics",
         },
     }
     return contract

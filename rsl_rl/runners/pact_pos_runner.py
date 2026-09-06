@@ -42,7 +42,11 @@ from rsl_rl.algorithms import PPO_PACT_Pos
 from rsl_rl.modules import ActorCritic_PACT_Pos, ActorCritic_HardPACT_Pos, ContextDecoder
 from rsl_rl.env import VecEnv
 from rsl_rl.utils import pretty_print_module
-from rsl_rl.hard_pact_logging import collect_force_decoder_scalars
+from rsl_rl.hard_pact_logging import (
+    collect_contact_estimator_scalars,
+    collect_force_decoder_scalars,
+    collect_latent_diagnostics_scalars,
+)
 from legged_gym.envs.go2.go2_hard_pact.deployment import (
     RECONSTRUCTION_DIM,
     RECONSTRUCTION_INDICES,
@@ -160,9 +164,8 @@ class OnPolicyRunnerPACTPos:
                 "grf_scale_n": gain_spec.grf_scale_n,
                 "wrench_scale": gain_spec.wrench_scale_n_nm,
                 "wrench_qp_clip": gain_spec.wrench_qp_clip_n_nm,
-                "contact_epsilon": getattr(
-                    self.env.cfg.deployment_physics,
-                    "contact_probability_epsilon", 1.0e-2,
+                "contact_epsilon": (
+                    self.env.cfg.deployment_physics.contact_probability_epsilon
                 ),
             }
             reconstruction_indices = RECONSTRUCTION_INDICES
@@ -494,6 +497,15 @@ class OnPolicyRunnerPACTPos:
                 self.alg.last_auxiliary_metrics
             ).items():
                 self.writer.add_scalar(name, value, locs['it'])
+            for name, value in collect_contact_estimator_scalars(
+                self.alg.last_auxiliary_metrics
+            ).items():
+                self.writer.add_scalar(name, value, locs['it'])
+            if self.alg.ppo_latent_diagnostics_enabled:
+                for name, value in collect_latent_diagnostics_scalars(
+                    self.alg.last_latent_diagnostics
+                ).items():
+                    self.writer.add_scalar(name, value, locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])

@@ -219,7 +219,9 @@ class ActorCritic_HardPACT(nn.Module):
 
         # The history latent is an architecture hyperparameter.  Only the
         # deployment estimator contract is fixed: [base velocity (3), contact
-        # logits (4), foot clearances (4)] = 11 values.
+        # probabilities (4), foot clearances (4)] = 11 values.  The decoder's
+        # raw contact logits remain available only through its structured
+        # result for BCE supervision.
         if cenet_velo_dim != 11:
             raise ValueError("HardPACT requires an 11-D explicit estimator")
 
@@ -390,16 +392,17 @@ class ActorCritic_HardPACT(nn.Module):
 
         return params_act, params_enc
 
-    def physics_heads(self, latent, explicit, nominal_torque):
-        return self.physics_estimator(latent, explicit, nominal_torque)
+    def physics_heads(self, latent_sample, explicit, nominal_torque):
+        """Evaluate physics decoders from a reparameterized latent sample."""
+        return self.physics_estimator(latent_sample, explicit, nominal_torque)
 
     def physics_heads_from_history(
         self, obs_history, nominal_torque, latent_noise=None
     ):
-        _, _, latent, explicit = self.cenet_enc_forward(
+        _, _, latent_sample, explicit = self.cenet_enc_forward(
             obs_history, latent_noise=latent_noise
         )
-        return self.physics_estimator(latent, explicit, nominal_torque)
+        return self.physics_estimator(latent_sample, explicit, nominal_torque)
 
     def configure_optimizers(self,
                              learning_rate: float = 1e-4,
@@ -457,12 +460,13 @@ class ActorCritic_HardPACT(nn.Module):
         latent = self.context_encoder.reparameterization_trick(
             mean, logvar, latent_noise
         )
-        explicit = self.explicit_estimator(features)
-        return mean, logvar, latent, explicit
+        estimator = self.explicit_estimator(features)
+        return mean, logvar, latent, estimator.explicit_for_policy
     
     def cenet_enc_inference(self, obs_history):
         mean, _, features = self.context_encoder.encode_with_features(obs_history)
-        return mean, self.explicit_estimator(features)
+        estimator = self.explicit_estimator(features)
+        return mean, estimator.explicit_for_policy
 
     # Method for the forward method of the actor network, used mostly as an internal method
     def actor_forward(self, current_obs):

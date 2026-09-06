@@ -9,7 +9,6 @@ import torch
 
 from rsl_rl.modules.hard_pact_physics import (
     compose_explicit_estimator_target,
-    contact_logits_to_qp_probability,
     normalize_grf_target,
     normalize_wrench_target,
 )
@@ -851,10 +850,7 @@ class Go2HardPACT(Go2PACT):
             context = self._hard_pact_bard_dynamics.build_context(
                 q_simulator, v_world, parameters=parameters, need_qp=True
             )
-            contact_prob_qp = contact_logits_to_qp_probability(
-                self._hard_pact_policy_explicit[:, 3:7],
-                self._hard_pact_actor_critic.explicit_estimator.contact_epsilon,
-            )
+            contact_prob_qp = self._hard_pact_policy_explicit[:, 3:7]
             # Wall-clock measurement encloses matrix assembly inside solve and
             # qpth/fallback execution, but excludes state/head preprocessing.
             start = time.perf_counter()
@@ -879,8 +875,8 @@ class Go2HardPACT(Go2PACT):
                 force_pred_world=grf_world,
                 # Fixed generalized-force RHS input, world [N,Nm] at J_b point.
                 wrench_pred_world=applied_wrench,
-                # Convert the estimator's raw logits exactly once at the QP
-                # boundary; the solver consumes this probability directly.
+                # The estimator converted logits once at policy evaluation;
+                # the solver consumes that shared probability directly.
                 contact_probability=contact_prob_qp,
                 # tau_safe,k-1 centers the hard rate box for this substep.
                 previous_torque=self._hard_pact_previous_substep_torque,
@@ -1138,7 +1134,8 @@ class Go2HardPACT(Go2PACT):
             # Label-only mass wrench and resulting applied-wrench QP input.
             "sampled_qp_mass_com_wrench_world": shape(6),
             "sampled_qp_rollout_applied_wrench_world": shape(6),
-            # Held QP probabilities derived once from contact logits.
+            # Held QP probabilities already converted once by the explicit
+            # estimator; replay and the QP must not apply another sigmoid.
             "sampled_qp_rollout_contact_probability": shape(4),
             # Complete rollout primal x*=[qdd,f,tau_safe,s].
             "sampled_qp_qdd": shape(18), "sampled_qp_force_world": shape(12),

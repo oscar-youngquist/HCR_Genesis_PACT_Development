@@ -55,6 +55,7 @@ class RolloutStoragePACT:
             # observations, and histories already have canonical storage
             # above and are deliberately not duplicated for replay.
             self.action_noise = None
+            self.latent_noise = None
 
             #  PINN stuff
             self.prev_obs      = None
@@ -73,7 +74,7 @@ class RolloutStoragePACT:
             self.__init__()
 
     # We want all of the actions and associated data formatted in the Model kinematic definition - [FR, FL, RR, RL]
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, wb_shape, device="cpu", *, store_legacy_pinn_dynamics=True):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, wb_shape, device="cpu", *, store_legacy_pinn_dynamics=True, latent_noise_dim=None):
 
         self.device = device
 
@@ -149,6 +150,13 @@ class RolloutStoragePACT:
         self.current_hard_pact_batch = None
         self.current_batch_indices = None
         self.action_noise = None
+        self.latent_noise = (
+            torch.zeros(
+                num_transitions_per_env, num_envs, int(latent_noise_dim),
+                device=self.device,
+            ) if latent_noise_dim is not None else None
+        )
+        self.current_latent_noise_batch = None
         self.max_action_delay = None
         self._action_replay_boundary_observations = None
         self._action_replay_boundary_history = None
@@ -204,6 +212,10 @@ class RolloutStoragePACT:
             if transition.action_noise is None:
                 raise RuntimeError("HardPACT action replay requires stored noise")
             self.action_noise[self.step].copy_(transition.action_noise)
+        if self.latent_noise is not None:
+            if transition.latent_noise is None:
+                raise RuntimeError("latent diagnostics require stored latent noise")
+            self.latent_noise[self.step].copy_(transition.latent_noise)
 
         #  - PINN stuff
         self.prev_obs[self.step].copy_(transition.prev_obs)
@@ -344,6 +356,10 @@ class RolloutStoragePACT:
         advantages = self.advantages.flatten(0, 1)
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
+        latent_noise = (
+            self.latent_noise.flatten(0, 1)
+            if self.latent_noise is not None else None
+        )
 
         dones = self.dones.flatten(0, 1)
 
@@ -374,6 +390,9 @@ class RolloutStoragePACT:
                 end = (i+1)*mini_batch_size
                 batch_idx = indices[start:end]
                 self.current_batch_indices = batch_idx
+                self.current_latent_noise_batch = (
+                    latent_noise[batch_idx] if latent_noise is not None else None
+                )
 
                 # Baseline PPO stuff
                 obs_batch = observations[batch_idx]

@@ -8,8 +8,15 @@ os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_hard_pact_aux_tests")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib_hard_pact_aux_tests")
 
 import torch
+import copy
 
 from rsl_rl.algorithms.ppo_hard_pact import PPO_HardPACT
+from rsl_rl.algorithms.hard_pact_latent_diagnostics import (
+    LatentDiagnosticsAccumulator,
+    diagonal_gaussian_kl,
+    latent_ablation_metrics,
+    policy_distribution_without_side_effects,
+)
 from rsl_rl.algorithms.ppo_pact import PPO_PACT
 from rsl_rl.modules.actor_critic_hard_pact import (
     ActorCritic_HardPACT,
@@ -64,6 +71,67 @@ def make_batch(batch=5):
 
 
 class HardPACTAuxiliaryTests(unittest.TestCase):
+    def test_optional_latent_storage_and_disabled_default(self):
+        disabled = make_algorithm()
+        disabled.init_storage(2, 2, [57], [95], [133], [57 * 20], [24], [11], [12], [18])
+        self.assertIsNone(disabled.storage.latent_noise)
+        enabled = make_algorithm(ppo_latent_diagnostics_enabled=True)
+        enabled.init_storage(2, 2, [57], [95], [133], [57 * 20], [24], [11], [12], [18])
+        self.assertEqual(tuple(enabled.storage.latent_noise.shape), (2, 2, 16))
+
+    def test_side_effect_free_policy_recompute_and_rng_preservation(self):
+        actor, decoder = make_modules()
+        clone = copy.deepcopy(actor)
+        observation = torch.randn(4, 57)
+        history = torch.randn(4, 57 * 20)
+        torch.manual_seed(123)
+        action_a = actor.act(observation, history)
+        torch.manual_seed(123)
+        noise = torch.randn(4, 16)
+        action_b = clone.act(observation, history, latent_noise=noise)
+        torch.testing.assert_close(action_a, action_b, rtol=0, atol=0)
+
+        cached_z = clone.cenet_z.clone()
+        cached_explicit = clone.cenet_torso_velo.clone()
+        cached_mean = clone.action_mean.clone()
+        rng = torch.random.get_rng_state()
+        result = policy_distribution_without_side_effects(
+            clone, observation, history, noise
+        )
+        torch.testing.assert_close(torch.random.get_rng_state(), rng)
+        torch.testing.assert_close(clone.cenet_z, cached_z)
+        torch.testing.assert_close(clone.cenet_torso_velo, cached_explicit)
+        torch.testing.assert_close(clone.action_mean, cached_mean)
+        self.assertEqual(result[0].shape, (4, 24))
+
+        reconstruction_target = torch.randn(4, 133)
+        nominal_torque = torch.randn(4, 12)
+        rng = torch.random.get_rng_state()
+        metrics = latent_ablation_metrics(
+            clone, decoder, observation, history, reconstruction_target,
+            nominal_torque,
+        )
+        torch.testing.assert_close(torch.random.get_rng_state(), rng)
+        self.assertIn("latent/ablation/zero/policy_rms_change", metrics)
+        self.assertIn("latent/ablation/permuted/grf_rms_change", metrics)
+
+    def test_gaussian_kl_and_latent_health_metrics(self):
+        mean = torch.tensor([[0.0, 0.0], [2.0, 0.0]])
+        sigma = torch.ones_like(mean)
+        torch.testing.assert_close(
+            diagonal_gaussian_kl(mean, sigma, mean, sigma), torch.zeros(2)
+        )
+        accumulator = LatentDiagnosticsAccumulator(0.5)
+        accumulator.add_latent(mean, torch.zeros_like(mean))
+        accumulator.add_ppo(torch.zeros(2), 0.2)
+        metrics = accumulator.finalize()
+        torch.testing.assert_close(metrics["latent/kl_per_dim"], torch.tensor([1.0, 0.0]))
+        torch.testing.assert_close(metrics["latent/mu_variance_per_dim"], torch.tensor([1.0, 0.0]))
+        torch.testing.assert_close(
+            metrics["latent/active_unit_count"], torch.tensor(1.0)
+        )
+        torch.testing.assert_close(metrics["ppo/approx_kl"], torch.tensor(0.0))
+
     def test_explicit_loss_uses_bce_only_for_contact_probabilities(self):
         prediction = torch.tensor([
             [0.2, -0.3, 0.4, 0.8, 0.2, 0.7, 0.1, 0.5, -0.4, 0.3, -0.2],
@@ -75,18 +143,47 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
         ], requires_grad=True)
         valid = torch.tensor([[True], [False]])
 
-        actual = PPO_HardPACT._masked_explicit_loss(prediction, target, valid)
+        contact_logits = prediction[:, 3:7]
+        probability_prediction = prediction.clone()
+        probability_prediction[:, 3:7] = (
+            0.01 + 0.98 * torch.sigmoid(contact_logits)
+        )
+        actual = PPO_HardPACT._masked_explicit_loss(
+            probability_prediction, contact_logits, target, valid
+        )
         expected_continuous = torch.cat((
             (prediction[0, :3] - target[0, :3]).square(),
             (prediction[0, 7:11] - target[0, 7:11]).square(),
         )).mean()
         expected_contact = torch.nn.functional.binary_cross_entropy_with_logits(
-            prediction[0, 3:7], target[0, 3:7], reduction="none"
+            contact_logits[0], target[0, 3:7], reduction="none"
         ).mean()
         torch.testing.assert_close(actual, expected_continuous + expected_contact)
         actual.backward()
         self.assertGreater(prediction.grad.abs().sum().item(), 0)
         self.assertIsNone(target.grad)
+
+    def test_contact_bce_has_independent_configurable_weight(self):
+        prediction = torch.zeros(2, 11)
+        logits = torch.zeros(2, 4)
+        target = torch.zeros(2, 11)
+        valid = torch.ones(2, 1, dtype=torch.bool)
+        continuous = PPO_HardPACT._masked_explicit_loss(
+            prediction, logits, target, valid,
+            contact_probability_loss_weight=0.0,
+        )
+        weighted = PPO_HardPACT._masked_explicit_loss(
+            prediction, logits, target, valid,
+            contact_probability_loss_weight=2.5,
+        )
+        torch.testing.assert_close(continuous, torch.zeros(()))
+        torch.testing.assert_close(
+            weighted, 2.5 * torch.log(torch.tensor(2.0))
+        )
+        algorithm = make_algorithm(contact_probability_loss_weight=2.5)
+        self.assertEqual(algorithm.contact_probability_loss_weight, 2.5)
+        with self.assertRaisesRegex(ValueError, "must be nonnegative"):
+            make_algorithm(contact_probability_loss_weight=-1.0)
 
     def test_independent_physics_loss_weights_are_configurable(self):
         algorithm = make_algorithm(
@@ -132,7 +229,8 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
         torch.testing.assert_close(inference_latent, first[0])
         _, _, features = actor.context_encoder.encode_with_features(history)
         torch.testing.assert_close(
-            inference_explicit, actor.explicit_estimator(features)
+            inference_explicit,
+            actor.explicit_estimator(features).explicit_for_policy,
         )
         self.assertTrue(torch.isfinite(first[3][:, 3:7]).all())
         self.assertTrue(torch.all(first[3][:, 7:11].abs() <= 1))

@@ -46,19 +46,54 @@ def test_hard_pact_pos_explicit_loss_uses_bce_for_contact_slice():
     ], requires_grad=True)
     valid = torch.ones(1, 1, dtype=torch.bool)
 
-    actual = PPO_PACT_Pos._masked_explicit_loss(prediction, target, valid)
+    contact_logits = prediction[:, 3:7]
+    probability_prediction = prediction.clone()
+    probability_prediction[:, 3:7] = 0.01 + 0.98 * torch.sigmoid(contact_logits)
+    actual = PPO_PACT_Pos._masked_explicit_loss(
+        probability_prediction, contact_logits, target, valid
+    )
     expected_continuous = torch.cat((
         (prediction[:, :3] - target[:, :3]).square(),
         (prediction[:, 7:11] - target[:, 7:11]).square(),
     ), dim=-1).mean()
     expected_contact = torch.nn.functional.binary_cross_entropy_with_logits(
-        prediction[:, 3:7], target[:, 3:7], reduction="none"
+        contact_logits, target[:, 3:7], reduction="none"
     ).mean()
     expected = expected_continuous + expected_contact
     torch.testing.assert_close(actual, expected)
     actual.backward()
     assert prediction.grad.abs().sum() > 0
     assert target.grad is None
+
+
+def test_hard_pact_pos_contact_bce_has_independent_configurable_weight():
+    prediction = torch.zeros(2, 11)
+    logits = torch.zeros(2, 4)
+    target = torch.zeros(2, 11)
+    valid = torch.ones(2, 1, dtype=torch.bool)
+    continuous = PPO_PACT_Pos._masked_explicit_loss(
+        prediction, logits, target, valid,
+        contact_probability_loss_weight=0.0,
+    )
+    weighted = PPO_PACT_Pos._masked_explicit_loss(
+        prediction, logits, target, valid,
+        contact_probability_loss_weight=3.0,
+    )
+    torch.testing.assert_close(continuous, torch.zeros(()))
+    torch.testing.assert_close(weighted, 3.0 * torch.log(torch.tensor(2.0)))
+    algorithm = _small_algorithm(contact_probability_loss_weight=3.0)
+    assert algorithm.contact_probability_loss_weight == 3.0
+    with pytest.raises(ValueError, match="must be nonnegative"):
+        _small_algorithm(contact_probability_loss_weight=-1.0)
+
+
+def test_hard_pact_pos_latent_diagnostics_storage_is_strictly_optional():
+    disabled = _small_algorithm()
+    disabled.init_storage(2, 2, [57], [64], [133], [57 * 10], [12], [11], [12])
+    assert disabled.storage.latent_noise is None
+    enabled = _small_algorithm(ppo_latent_diagnostics_enabled=True)
+    enabled.init_storage(2, 2, [57], [64], [133], [57 * 10], [12], [11], [12])
+    assert enabled.storage.latent_noise.shape == (2, 2, 16)
 
 
 def test_vae_kl_cosine_warmup_uses_absolute_iteration_and_zero_disables_it():
@@ -129,6 +164,12 @@ def test_hard_pact_pos_auxiliary_trains_both_physics_heads_and_logs_parts():
         "wrench_active", "wrench_neutral",
         "explicit_base_linear_velocity", "explicit_contact_probabilities",
         "explicit_foot_clearance",
+        "contact_bce", "contact_logit_mean", "contact_logit_abs_max",
+        "contact_probability_mean", "contact_probability_min",
+        "contact_probability_max",
+        "contact_probability_lower_saturation_fraction",
+        "contact_probability_upper_saturation_fraction",
+        "contact_classification_accuracy", "contact_brier_score",
     }.issubset(metrics)
     assert {
         "wrench_raw_mae_physical", "wrench_raw_rmse_physical",

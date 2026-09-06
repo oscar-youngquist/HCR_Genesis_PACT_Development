@@ -56,6 +56,7 @@ class RolloutStoragePACTPos:
             self.actions_log_prob = None
             self.action_mean = None
             self.action_sigma = None
+            self.latent_noise = None
             
             self.hidden_states = None
         
@@ -63,7 +64,7 @@ class RolloutStoragePACTPos:
             self.__init__()
 
     # We want all of the actions and associated data formatted in the Model kinematic definition - [FR, FL, RR, RL]
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, device="cpu", hard_pact_auxiliary=False):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, device="cpu", hard_pact_auxiliary=False, latent_noise_dim=None):
 
         self.device = device
 
@@ -109,6 +110,13 @@ class RolloutStoragePACTPos:
         self.advantages       = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.mu               = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.sigma            = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+        self.latent_noise = (
+            torch.zeros(
+                num_transitions_per_env, num_envs, int(latent_noise_dim),
+                device=self.device,
+            ) if latent_noise_dim is not None else None
+        )
+        self.current_latent_noise_batch = None
 
         #  Shared
         self.num_transitions_per_env = num_transitions_per_env
@@ -151,6 +159,10 @@ class RolloutStoragePACTPos:
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
         self.mu[self.step].copy_(transition.action_mean)
         self.sigma[self.step].copy_(transition.action_sigma)
+        if self.latent_noise is not None:
+            if transition.latent_noise is None:
+                raise RuntimeError("latent diagnostics require stored latent noise")
+            self.latent_noise[self.step].copy_(transition.latent_noise)
 
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
@@ -230,6 +242,10 @@ class RolloutStoragePACTPos:
         advantages = self.advantages.flatten(0, 1)
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
+        latent_noise = (
+            self.latent_noise.flatten(0, 1)
+            if self.latent_noise is not None else None
+        )
 
         dones = self.dones.flatten(0, 1)
 
@@ -239,6 +255,9 @@ class RolloutStoragePACTPos:
                 start = i*mini_batch_size
                 end = (i+1)*mini_batch_size
                 batch_idx = indices[start:end]
+                self.current_latent_noise_batch = (
+                    latent_noise[batch_idx] if latent_noise is not None else None
+                )
 
                 # Baseline PPO stuff
                 obs_batch = observations[batch_idx]

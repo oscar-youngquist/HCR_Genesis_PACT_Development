@@ -45,7 +45,8 @@ from rsl_rl.utils import print_class_attributes
 from rsl_rl.storage import RolloutStoragePACT
 from rsl_rl.modules.hard_pact_physics import (
     GRFDecoderMetricsAccumulator,
-    contact_logits_to_qp_probability,
+    ContactEstimatorMetricsAccumulator,
+    contact_estimator_metrics,
     normalized_grf_huber_loss,
     normalized_wrench_huber_loss,
     sanitize_and_clip_wrench_for_qp,
@@ -62,6 +63,11 @@ from rsl_rl.hard_pact_ablations import resolve_hard_pact_features
 from .pc_grad import PCGrad
 from .hard_pact_bard import corrected_bard_inverse_dynamics_loss
 from .hard_pact_bard import differentiable_bard_rollout_loss
+from .hard_pact_latent_diagnostics import (
+    LatentDiagnosticsAccumulator, deterministic_subsample,
+    diagonal_gaussian_kl, diagonal_gaussian_log_prob, latent_ablation_metrics,
+    policy_distribution_without_side_effects,
+)
 from .hard_pact_qp import (
     HardPACTDifferentiableQP,
     HardPACTQPConfig,
@@ -274,6 +280,11 @@ class PPO_HardPACT:
                  auxiliary_learning_rate=2.0e-4,
                  privileged_loss_weight=1.0,
                  explicit_loss_weight=1.0,
+                 contact_probability_loss_weight=1.0,
+                 ppo_latent_diagnostics_enabled=False,
+                 ppo_latent_diagnostics_interval=100,
+                 ppo_latent_diagnostics_sample_count=256,
+                 latent_active_unit_variance_threshold=1.0e-2,
                  grf_loss_weight=1.0,
                  active_wrench_loss_weight=1.0,
                  neutral_wrench_loss_weight=0.25,
@@ -321,6 +332,25 @@ class PPO_HardPACT:
         self.vae_beta = vae_kld_weight
         self.privileged_loss_weight = float(privileged_loss_weight)
         self.explicit_loss_weight = float(explicit_loss_weight)
+        self.contact_probability_loss_weight = float(
+            contact_probability_loss_weight
+        )
+        if self.contact_probability_loss_weight < 0.0:
+            raise ValueError(
+                "contact_probability_loss_weight must be nonnegative"
+            )
+        self.ppo_latent_diagnostics_enabled = bool(ppo_latent_diagnostics_enabled)
+        self.ppo_latent_diagnostics_interval = int(ppo_latent_diagnostics_interval)
+        self.ppo_latent_diagnostics_sample_count = int(ppo_latent_diagnostics_sample_count)
+        self.latent_active_unit_variance_threshold = float(latent_active_unit_variance_threshold)
+        if self.ppo_latent_diagnostics_interval <= 0:
+            raise ValueError("ppo_latent_diagnostics_interval must be positive")
+        if self.ppo_latent_diagnostics_sample_count <= 0:
+            raise ValueError("ppo_latent_diagnostics_sample_count must be positive")
+        if self.latent_active_unit_variance_threshold < 0.0:
+            raise ValueError("latent active-unit threshold must be nonnegative")
+        self.last_latent_diagnostics = {}
+        self._latent_diagnostics_due = False
         self.grf_loss_weight = float(grf_loss_weight)
         self.active_wrench_loss_weight = float(active_wrench_loss_weight)
         self.neutral_wrench_loss_weight = float(neutral_wrench_loss_weight)
@@ -328,6 +358,7 @@ class PPO_HardPACT:
             force_decoder_diagnostics_enabled
         )
         self._grf_diagnostics = None
+        self._contact_diagnostics = None
 
         # ``pinn_encoder_weight`` remains in the constructor solely so legacy
         # configs instantiate unchanged. B1Z1 PCGrad replaced that historical
@@ -592,7 +623,11 @@ class PPO_HardPACT:
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
         self.storage = RolloutStoragePACT(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
                                               action_shape, torso_velo_shape, grf_shape, wb_shape, self.device,
-                                              store_legacy_pinn_dynamics=False)
+                                              store_legacy_pinn_dynamics=False,
+                                              latent_noise_dim=(
+                                                  self.actor_critic.context_encoder.ce_out_mean.out_features
+                                                  if self.ppo_latent_diagnostics_enabled else None
+                                              ))
 
     def test_mode(self):
         self.actor_critic.test()
@@ -633,10 +668,17 @@ class PPO_HardPACT:
         self.actor_critic.train()
 
     def act(self, obs, critic_obs, obs_history, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist):
+        latent_noise = None
+        if self.ppo_latent_diagnostics_enabled:
+            latent_noise = torch.randn(
+                obs.shape[0], self.actor_critic.context_encoder.ce_out_mean.out_features,
+                device=obs.device, dtype=obs.dtype,
+            )
         if self.use_boot:
-            all_actions = self.actor_critic.act(obs,obs_history).detach()
+            all_actions = self.actor_critic.act(obs, obs_history, latent_noise=latent_noise).detach()
         else:
-            all_actions = self.actor_critic.act_bootmask(obs,obs_history).detach()
+            all_actions = self.actor_critic.act_bootmask(obs, obs_history, latent_noise=latent_noise).detach()
+        self.transition.latent_noise = latent_noise
 
         # Compute the actions and values
         #  - Position Control
@@ -948,10 +990,22 @@ class PPO_HardPACT:
         mean_kld_loss = metric_zero.clone()
         mean_decoder_loss = metric_zero.clone()
         mean_pinn_loss = metric_zero.clone()
+        self._latent_diagnostics_due = (
+            self.ppo_latent_diagnostics_enabled
+            and int(itr) % self.ppo_latent_diagnostics_interval == 0
+        )
+        latent_diagnostics = (
+            LatentDiagnosticsAccumulator(self.latent_active_unit_variance_threshold)
+            if self._latent_diagnostics_due else None
+        )
+        latent_ablation_ran = False
         self._grf_diagnostics = (
             GRFDecoderMetricsAccumulator(
                 self.actor_critic.physics_estimator.grf_scale_n
             ) if self.force_decoder_diagnostics_enabled else None
+        )
+        self._contact_diagnostics = ContactEstimatorMetricsAccumulator(
+            self.actor_critic.explicit_estimator.contact_epsilon
         )
         self._bard_timing_records = {
             "inverse": [], "rollout": [], "dynamics": [],
@@ -1024,6 +1078,20 @@ class PPO_HardPACT:
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
                                                                                           advantages_batch, target_values_batch, returns_batch)
+            if latent_diagnostics is not None:
+                with torch.no_grad():
+                    diagnostic_policy = policy_distribution_without_side_effects(
+                        self.actor_critic, obs_batch, obs_hist_batch,
+                        self.storage.current_latent_noise_batch, self.use_boot,
+                    )
+                    diagnostic_log_probability = diagonal_gaussian_log_prob(
+                        actions_batch, diagnostic_policy[0], diagnostic_policy[1]
+                    )
+                    latent_diagnostics.add_ppo(
+                        diagnostic_log_probability
+                        - old_actions_log_prob_batch.reshape(-1),
+                        self.clip_param,
+                    )
 
             # Rebuild the same stochastic action path under the current
             # policy, then select the source chosen by the rollout's exact
@@ -1252,6 +1320,33 @@ class PPO_HardPACT:
                 auxiliary_timing = self._start_bard_timing(
                     "auxiliary", obs_batch
                 )
+                diagnostic_indices = None
+                pre_aux = None
+                if latent_diagnostics is not None:
+                    diagnostic_indices = deterministic_subsample(
+                        obs_batch, self.ppo_latent_diagnostics_sample_count
+                    )
+                    with torch.no_grad():
+                        pre_aux = policy_distribution_without_side_effects(
+                            self.actor_critic, obs_batch[diagnostic_indices],
+                            obs_hist_batch[diagnostic_indices],
+                            self.storage.current_latent_noise_batch[diagnostic_indices],
+                            self.use_boot,
+                        )
+                        pre_kl = diagonal_gaussian_kl(
+                            old_mu_batch[diagnostic_indices], old_sigma_batch[diagnostic_indices],
+                            pre_aux[0], pre_aux[1],
+                        )
+                        latent_diagnostics.add("ppo/policy_kl_pre_aux", pre_kl[:, None])
+                        if not latent_ablation_ran:
+                            latent_diagnostics.add_latent(pre_aux[2], pre_aux[3])
+                            self.last_latent_diagnostics = latent_ablation_metrics(
+                                self.actor_critic, self.decoder,
+                                obs_batch[diagnostic_indices], obs_hist_batch[diagnostic_indices],
+                                obs_target[diagnostic_indices],
+                                replay["nominal_torque"][diagnostic_indices],
+                            )
+                            latent_ablation_ran = True
                 aux = self._compute_auxiliary_loss(
                     obs_hist_batch, obs_target, explicit_labels_batch, grf_target,
                     terminated_batch, replay["nominal_torque"].detach(),
@@ -1261,6 +1356,28 @@ class PPO_HardPACT:
                 aux["loss"].backward()
                 nn.utils.clip_grad_norm_(self.auxiliary_parameters, self.max_grad_norm)
                 self.auxiliary_optimizer.step()
+                if latent_diagnostics is not None:
+                    with torch.no_grad():
+                        post_aux = policy_distribution_without_side_effects(
+                            self.actor_critic, obs_batch[diagnostic_indices],
+                            obs_hist_batch[diagnostic_indices],
+                            self.storage.current_latent_noise_batch[diagnostic_indices],
+                            self.use_boot,
+                        )
+                        pre_kl = diagonal_gaussian_kl(
+                            old_mu_batch[diagnostic_indices], old_sigma_batch[diagnostic_indices],
+                            pre_aux[0], pre_aux[1],
+                        )
+                        post_kl = diagonal_gaussian_kl(
+                            old_mu_batch[diagnostic_indices], old_sigma_batch[diagnostic_indices],
+                            post_aux[0], post_aux[1],
+                        )
+                        latent_diagnostics.add("ppo/policy_kl_post_aux", post_kl[:, None])
+                        latent_diagnostics.add(
+                            "ppo/policy_kl_aux_only",
+                            diagonal_gaussian_kl(pre_aux[0], pre_aux[1], post_aux[0], post_aux[1])[:, None],
+                        )
+                        latent_diagnostics.add("ppo/policy_kl_aux_delta", (post_kl - pre_kl)[:, None])
                 self._stop_bard_timing("auxiliary", auxiliary_timing)
                 vae_loss, kl_div = aux["loss"], aux["kl"]
                 recon_error, vel_pred_error = aux["privileged"], aux["explicit"]
@@ -1321,6 +1438,12 @@ class PPO_HardPACT:
         if self._grf_diagnostics is not None:
             self.last_auxiliary_metrics.update(self._grf_diagnostics.finalize())
         self._grf_diagnostics = None
+        self.last_auxiliary_metrics.update(self._contact_diagnostics.finalize())
+        self._contact_diagnostics = None
+        if latent_diagnostics is not None:
+            self.last_latent_diagnostics.update(latent_diagnostics.finalize())
+        else:
+            self.last_latent_diagnostics = {}
 
         if self.profile_bard_timing:
             self._finalize_bard_timing(num_updates)
@@ -1470,8 +1593,11 @@ class PPO_HardPACT:
         return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
 
     @staticmethod
-    def _masked_explicit_loss(prediction, target, mask):
-        """MSE for continuous estimates and BCE-with-logits for contacts."""
+    def _masked_explicit_loss(
+        prediction, contact_logits, target, mask,
+        contact_probability_loss_weight=1.0,
+    ):
+        """Combine continuous MSE with independently weighted contact BCE."""
         if prediction.shape[-1] != 11 or target.shape[-1] != 11:
             raise ValueError("HardPACT explicit estimates and labels must be 11-D")
         target = target.detach()
@@ -1480,12 +1606,14 @@ class PPO_HardPACT:
             (prediction[:, 7:11] - target[:, 7:11]).square(),
         ), dim=-1).mean(dim=-1)
         contact_loss = F.binary_cross_entropy_with_logits(
-            prediction[:, 3:7], target[:, 3:7], reduction="none"
+            contact_logits, target[:, 3:7], reduction="none"
         ).mean(dim=-1)
         weights = mask.reshape(-1).to(continuous_loss.dtype)
         denominator = weights.sum().clamp_min(1.0)
         return (
-            ((continuous_loss + contact_loss) * weights).sum() / denominator
+            ((continuous_loss
+              + float(contact_probability_loss_weight) * contact_loss)
+             * weights).sum() / denominator
         )
 
     def _start_bard_timing(self, name, reference):
@@ -1578,7 +1706,8 @@ class PPO_HardPACT:
         sample = self.actor_critic.context_encoder.reparameterization_trick(
             mean, logvar
         )
-        explicit = self.actor_critic.explicit_estimator(features)
+        estimator = self.actor_critic.explicit_estimator(features)
+        explicit = estimator.explicit_for_policy
         reconstruction = self.decoder(torch.cat((sample, explicit), dim=-1))
         heads = self.actor_critic.physics_heads(sample, explicit, nominal_torque)
 
@@ -1586,7 +1715,8 @@ class PPO_HardPACT:
             reconstruction, privileged_target.detach(), valid
         )
         explicit_loss = self._masked_explicit_loss(
-            explicit, explicit_target.detach(), valid
+            explicit, estimator.contact_logits, explicit_target.detach(), valid,
+            self.contact_probability_loss_weight,
         )
         per_sample_kl = -0.5 * torch.sum(
             1 + logvar - mean.square() - logvar.exp(), dim=-1
@@ -1640,6 +1770,15 @@ class PPO_HardPACT:
             "wrench_neutral": wrench_neutral,
             "reconstruction": reconstruction,
         }
+        if self._contact_diagnostics is None:
+            metrics.update(contact_estimator_metrics(
+                estimator, explicit_target[:, 3:7],
+                self.actor_critic.explicit_estimator.contact_epsilon, valid,
+            ))
+        else:
+            self._contact_diagnostics.update(
+                estimator, explicit_target[:, 3:7], valid
+            )
         if self.force_decoder_diagnostics_enabled:
             metrics.update(wrench_regression_metrics(
                 heads.wrench_raw_normalized, wrench_target, valid,
@@ -1738,7 +1877,9 @@ class PPO_HardPACT:
         latent = self.actor_critic.context_encoder.reparameterization_trick(
             mean, logvar
         )
-        explicit = self.actor_critic.explicit_estimator(features)
+        explicit = self.actor_critic.explicit_estimator(
+            features
+        ).explicit_for_policy
         if self.use_boot:
             conditioning = torch.cat((observation, latent, explicit), dim=-1)
         else:
@@ -2146,10 +2287,7 @@ class PPO_HardPACT:
             #   x=[qdd_18,f_12,tau_safe_12,s_12].
             # Gradients enter through sampled_nominal, sample_grf_world, and
             # sample_applied; all state/mechanics/rate-center tensors detach.
-            sample_contact_probability = contact_logits_to_qp_probability(
-                qp_explicit[:, 3:7],
-                self.actor_critic.explicit_estimator.contact_epsilon,
-            )
+            sample_contact_probability = qp_explicit[:, 3:7]
             differentiate_qp = self.hard_pact_features.differentiable_qp
             qp_arguments = dict(
                 # Equality coefficient M_K.
@@ -2168,8 +2306,8 @@ class PPO_HardPACT:
                 force_pred_world=(sample_grf_world if differentiate_qp else sample_grf_world.detach()),
                 # Differentiable world [force,moment] equality input.
                 wrench_pred_world=(sample_applied if differentiate_qp else sample_applied.detach()),
-                # The eps-bounded sigmoid was applied exactly once above;
-                # the QP consumes that probability without another transform.
+                # The estimator already applied the eps-bounded sigmoid; the
+                # QP consumes the shared policy probability unchanged.
                 contact_probability=(sample_contact_probability if differentiate_qp else sample_contact_probability.detach()),
                 # Exact rollout tau_safe,K-1 reproduces the sampled rate box.
                 previous_torque=qp_batch.get(

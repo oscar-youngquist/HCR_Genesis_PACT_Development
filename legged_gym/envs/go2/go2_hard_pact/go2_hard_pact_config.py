@@ -466,6 +466,12 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         vae_kld_weight = 2.0
         privileged_loss_weight = 1.0
         explicit_loss_weight = 1.0
+        # Multiplies contact BCE inside the collective explicit-estimator loss.
+        contact_probability_loss_weight = 1.0
+        ppo_latent_diagnostics_enabled = False
+        ppo_latent_diagnostics_interval = 100
+        ppo_latent_diagnostics_sample_count = 256
+        latent_active_unit_variance_threshold = 1e-2
         grf_loss_weight = 1.0
         active_wrench_loss_weight = 1.0
         neutral_wrench_loss_weight = 0.25

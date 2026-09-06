@@ -15,7 +15,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         env_spacing = 0.5
         # Match full HardPACT so position-pretraining checkpoints have the
         # same history-encoder input shape and migrate with strict=True.
-        num_obs_hist = 20
+        num_obs_hist = 10
         grf_dim = 12
         whole_body_dim = 18
         debug = False
@@ -183,10 +183,10 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         persistent_force_duration_range_s = [2.0, 4.0]
         persistent_torque_duration_range_s = [2.0, 4.0]
         persistent_ramp_fraction = 0.25
-        persistent_force_min_n = 15.0
-        persistent_force_max_n = 15.0
-        persistent_torque_min_nm = 6.0
-        persistent_torque_max_nm = 6.0
+        persistent_force_min_n = 10.0
+        persistent_force_max_n = 10.0
+        persistent_torque_min_nm = 4.0
+        persistent_torque_max_nm = 4.0
 
     class noise(LeggedRobotCfg.noise):
         add_noise = True
@@ -462,9 +462,18 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
 
         privileged_loss_weight = 1.0
         explicit_loss_weight = 1.0
+        # Multiplies contact BCE inside the collective explicit-estimator loss.
+        contact_probability_loss_weight = 0.1
+
+        ppo_latent_diagnostics_enabled = False
+        ppo_latent_diagnostics_interval = 100
+        ppo_latent_diagnostics_sample_count = 256
+        latent_active_unit_variance_threshold = 1e-2
+
         grf_loss_weight = 1.0
         active_wrench_loss_weight = 1.0
         neutral_wrench_loss_weight = 0.25
+
         # Detailed physical GRF/base-wrench TensorBoard reductions. Decoder
         # losses remain logged when this is disabled.
         force_decoder_diagnostics_enabled = True

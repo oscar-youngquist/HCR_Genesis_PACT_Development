@@ -121,9 +121,8 @@ class OnPolicyRunnerPACT:
                 "grf_scale_n": gain_spec.grf_scale_n,
                 "wrench_scale": gain_spec.wrench_scale_n_nm,
                 "wrench_qp_clip": gain_spec.wrench_qp_clip_n_nm,
-                "contact_epsilon": getattr(
-                    self.env.cfg.deployment_physics,
-                    "contact_probability_epsilon", 1.0e-2,
+                "contact_epsilon": (
+                    self.env.cfg.deployment_physics.contact_probability_epsilon
                 ),
                 "ablation_features": self.hard_pact_features,
             }

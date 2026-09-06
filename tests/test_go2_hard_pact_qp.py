@@ -19,7 +19,6 @@ from rsl_rl.algorithms.hard_pact_qp_backends import (
 )
 from rsl_rl.modules.actor_critic_hard_pact import ActorCritic_HardPACT
 from rsl_rl.modules.hard_pact_physics import sanitize_and_clip_wrench_for_qp
-from rsl_rl.modules.hard_pact_physics import contact_logits_to_qp_probability
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
 from legged_gym.envs.go2.go2_hard_pact.deployment import calculate_physics_head_gains
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCfg
@@ -1128,9 +1127,7 @@ class HardPACTQPTests(unittest.TestCase):
         data["wrench_pred_world"] = actor.physics_estimator.wrench_to_qp_physical(
             heads.wrench_raw_normalized
         )
-        data["contact_probability"] = contact_logits_to_qp_probability(
-            explicit[:, 3:7], 0.01
-        )
+        data["contact_probability"] = explicit[:, 3:7]
         data["foot_acceleration_bias"].fill_(0.2)
         # Couple learned force/wrench references into floating-base dynamics.
         data["base_jacobian"][0, :, :6] = torch.eye(6, dtype=torch.float64)
