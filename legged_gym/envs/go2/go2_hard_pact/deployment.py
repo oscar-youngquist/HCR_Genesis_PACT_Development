@@ -90,7 +90,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
             "raw_output": "contact_logits",
             "training_loss": "binary_cross_entropy_with_logits",
             "labels": "canonical_binary_contact_FR_FL_RR_RL",
-            "epsilon": float(cfg.deployment_physics.contact_probability_epsilon),
+            "epsilon": float(actor.explicit_estimator.contact_epsilon),
             "runtime_conversion_count": "exactly_once_in_explicit_estimator",
             "shared_runtime_vector": "explicit_for_policy",
             "checkpoint_semantics_key": "explicit_estimator.contact_probability_semantics",
@@ -174,7 +174,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
                 "clamp_gradient": "ordinary_clamp_no_straight_through",
             },
             "contact": {
-                "epsilon": float(cfg.deployment_physics.contact_probability_epsilon),
+                "epsilon": float(actor.explicit_estimator.contact_epsilon),
                 "input": "explicit_for_policy.foot_contact_probability",
                 "output": "unchanged QP contact probability",
                 "parameterization": "already converted by explicit estimator",

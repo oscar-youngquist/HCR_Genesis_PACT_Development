@@ -60,7 +60,10 @@ from rsl_rl.algorithms.ppo_hard_pact import PPO_HardPACT
 from rsl_rl.runners.pact_pos_runner import build_hard_pact_start_checkpoint
 
 
-def _small_actor(gains=None, actor_class=ActorCritic_HardPACT, latent_dim=16):
+def _small_actor(
+    gains=None, actor_class=ActorCritic_HardPACT, latent_dim=16,
+    contact_epsilon=0.01,
+):
     gains = gains or calculate_physics_head_gains(GO2HardPACTCfg())
     return actor_class(
         num_actor_obs=57,
@@ -77,6 +80,7 @@ def _small_actor(gains=None, actor_class=ActorCritic_HardPACT, latent_dim=16):
         grf_scale_n=gains.grf_scale_n,
         wrench_scale=gains.wrench_scale_n_nm,
         wrench_qp_clip=gains.wrench_qp_clip_n_nm,
+        contact_epsilon=contact_epsilon,
     )
 
 
@@ -150,9 +154,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         self.assertEqual(tuple(target.shape), (1, 11))
         torch.testing.assert_close(target[:, :3], velocity)
         torch.testing.assert_close(target[:, 3:7], contacts)
-        torch.testing.assert_close(
-            target[:, 7:11], torch.tensor([[-1.0, -0.2, 0.4, 1.0]])
-        )
+        torch.testing.assert_close(target[:, 7:11], clearance)
 
     def test_alias_dimensions_and_reconstruction_schema(self):
         for env_cls, train_cls, history_steps in (
@@ -166,6 +168,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
                 self.assertEqual(env.env.num_explicit_recon_obs, 11)
                 self.assertEqual(train.policy.cenet_enc_latent_dim, 16)
                 self.assertEqual(train.policy.cenet_velo_dim, 11)
+                self.assertEqual(train.policy.contact_epsilon, 0.01)
                 self.assertEqual(train.policy.cenet_explicit_layers, [128, 128])
                 self.assertEqual(train.policy.grf_decoder_layers, [128, 128])
                 self.assertEqual(train.policy.wrench_decoder_layers, [128, 128])
@@ -487,6 +490,20 @@ class GainAndScalingTests(unittest.TestCase):
         )
         estimate.contact_probability.sum().backward()
         self.assertGreater(decoder.network[-1].bias.grad[3:7].abs().sum(), 0.0)
+
+    def test_configured_contact_epsilon_reaches_actor_and_contract(self):
+        cfg = GO2HardPACTCfg()
+        gains = calculate_physics_head_gains(cfg)
+        actor = _small_actor(gains, contact_epsilon=0.07)
+        estimate = actor.explicit_estimator(torch.zeros(
+            1, actor.context_encoder.feature_dim
+        ))
+        self.assertEqual(actor.explicit_estimator.contact_epsilon, 0.07)
+        self.assertTrue(torch.all(estimate.contact_probability >= 0.07))
+        self.assertTrue(torch.all(estimate.contact_probability <= 0.93))
+        contract = build_deployment_contract(cfg, actor, gains)
+        self.assertEqual(contract["contact_estimator_supervision"]["epsilon"], 0.07)
+        self.assertEqual(contract["qp_inputs"]["contact"]["epsilon"], 0.07)
 
     def test_contact_diagnostics_use_logits_probabilities_and_valid_mask(self):
         decoder = ExplicitEstimatorDecoder(2, (2,), contact_epsilon=0.01)

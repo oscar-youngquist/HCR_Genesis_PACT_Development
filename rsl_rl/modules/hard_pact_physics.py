@@ -363,7 +363,7 @@ def compose_explicit_estimator_target(
         (
             scaled_body_linear_velocity,
             contact_probabilities.clamp(0.0, 1.0),
-            clipped_foot_clearances.clamp(-1.0, 1.0),
+            clipped_foot_clearances,
         ),
         dim=-1,
     )
@@ -389,7 +389,7 @@ def _explicit_estimator_output(raw, epsilon):
     explicit_for_policy = torch.cat((
         raw[:, :3],
         contact_probability,
-        raw[:, 7:11].clamp(-1.0, 1.0),
+        raw[:, 7:11],
     ), dim=-1)
     return ExplicitEstimatorOutput(
         contact_logits, contact_probability, explicit_for_policy

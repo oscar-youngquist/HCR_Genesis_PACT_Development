@@ -414,7 +414,6 @@ class GO2HardPACTCfg(LeggedRobotCfg):
     class deployment_physics:
         wrench_scale = [100.0, 100.0, 100.0, 25.0, 25.0, 25.0]
         wrench_qp_clip = [150.0, 150.0, 150.0, 40.0, 40.0, 40.0]
-        contact_probability_epsilon = 0.01
 GO2HardPACTCfg.sim.dt = GO2HardPACTCfg.control.dt / GO2HardPACTCfg.control.decimation
 
 class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
@@ -427,6 +426,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         cenet_enc_layers = [256, 128]
         cenet_enc_latent_dim = 16
         cenet_velo_dim = 11
+        # Bounds runtime contact probabilities to [epsilon, 1-epsilon].
+        contact_epsilon = 0.01
         cenet_dec_input_dim = 16 + 11
         cenet_dec_layers = [128, 256, 512]
         cenet_dec_out_dim = 133

@@ -164,9 +164,7 @@ class OnPolicyRunnerPACTPos:
                 "grf_scale_n": gain_spec.grf_scale_n,
                 "wrench_scale": gain_spec.wrench_scale_n_nm,
                 "wrench_qp_clip": gain_spec.wrench_qp_clip_n_nm,
-                "contact_epsilon": (
-                    self.env.cfg.deployment_physics.contact_probability_epsilon
-                ),
+                "contact_epsilon": self.policy_cfg["contact_epsilon"],
             }
             reconstruction_indices = RECONSTRUCTION_INDICES
             reconstruction_dim = RECONSTRUCTION_DIM
