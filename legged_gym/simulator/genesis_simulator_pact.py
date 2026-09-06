@@ -81,7 +81,8 @@ class GenesisSimulator_PACT(Simulator):
                 self._dof_indices)
 
     def _get_pinn_wb_dynamics(self):
-        #           total GT forces  ,  generalized mass mat, bias vector
+        # Keep the legacy four values in their original order and append the
+        # contact Jacobian used by the separate GRF decoder.
         return self._contact_forces_buff, self._wb_mass_mat_buff, self._wb_bias_vec_buff, \
                self._torso_6dof_acceleration, self._contact_jacobian_buff
 

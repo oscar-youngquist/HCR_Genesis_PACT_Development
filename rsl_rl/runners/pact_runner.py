@@ -67,6 +67,27 @@ def _load_optimizer_with_optional_appended_group(optimizer, state_dict):
         state_dict["param_groups"].append(current["param_groups"][-1])
     optimizer.load_state_dict(state_dict)
 
+
+def _unpack_pinn_wb_dynamics(pinn_values, include_contact_jacobian):
+    """Normalize simulator dynamics output to the order used by PPO_PACT."""
+    if include_contact_jacobian:
+        if len(pinn_values) != 5:
+            raise ValueError(
+                "PACT with a GRF decoder requires forces, mass matrix, bias vector, "
+                "torso acceleration, and contact Jacobian"
+            )
+        gt_forces, mass_mats, bias_vecs, torso_acc, contact_jacobians = pinn_values
+    else:
+        if len(pinn_values) not in (4, 5):
+            raise ValueError(
+                "Legacy PACT requires forces, mass matrix, bias vector, and torso acceleration"
+            )
+        # New simulators may append a Jacobian even when a legacy checkpoint
+        # does not have a GRF decoder.
+        gt_forces, mass_mats, bias_vecs, torso_acc = pinn_values[:4]
+        contact_jacobians = None
+    return gt_forces, contact_jacobians, mass_mats, bias_vecs, torso_acc
+
 class OnPolicyRunnerPACT:
 
     def __init__(self,
@@ -225,7 +246,11 @@ class OnPolicyRunnerPACT:
                     pprev_obs, pprev_obs_hist = pprev_obs.to(self.device), pprev_obs_hist.to(self.device)
 
                     # Call the algorithms act() method to store current transition data and predict actions
-                    with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                    with torch.inference_mode(), torch.amp.autocast(
+                        "cuda",
+                        dtype=torch.bfloat16,
+                        enabled=torch.device(self.device).type == "cuda",
+                    ):
                         actions = self.alg.act(obs, critic_obs, obs_hist, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist) # obs_t, (obs_t-1)
                          
                     # Submit the predicted action and extract the resulting state... 
@@ -236,13 +261,12 @@ class OnPolicyRunnerPACT:
                     
                     # get the PINN specific data
                     pinn_values = self.env.get_pinn_wb_dynamics()
-                    if self.alg.grf_decoder is not None:
-                        gt_forces, contact_jacobians, mass_mats, bias_vecs, torso_acc = pinn_values
+                    gt_forces, contact_jacobians, mass_mats, bias_vecs, torso_acc = \
+                        _unpack_pinn_wb_dynamics(
+                            pinn_values, self.alg.grf_decoder is not None
+                        )
+                    if contact_jacobians is not None:
                         contact_jacobians = contact_jacobians.to(self.device)
-                    else:
-                        # Compatibility path for legacy PACT-derived tasks.
-                        gt_forces, mass_mats, bias_vecs, torso_acc = pinn_values
-                        contact_jacobians = None
                     gt_forces, mass_mats, bias_vecs, torso_acc = gt_forces.to(self.device), mass_mats.to(self.device), bias_vecs.to(self.device), torso_acc.to(self.device)
 
                     # move everything to the correct device

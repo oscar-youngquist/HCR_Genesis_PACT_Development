@@ -6,6 +6,7 @@ from torch import nn
 
 from rsl_rl.algorithms.ppo_pact import PPO_PACT
 from rsl_rl.algorithms.ppo_pact_pos import PPO_PACT_Pos
+from rsl_rl.runners.pact_runner import _unpack_pinn_wb_dynamics
 from rsl_rl.storage.rollout_storage_pact import RolloutStoragePACT
 
 
@@ -194,6 +195,29 @@ def test_contact_jacobian_maps_canonical_grfs_to_generalized_force():
         for foot, block in enumerate(blocks)
     )
     torch.testing.assert_close(mapped, direct)
+
+
+def test_pact_runner_unpacks_appended_contact_jacobian_after_legacy_dynamics():
+    forces = torch.randn(2, 18)
+    mass = torch.randn(2, 18, 18)
+    bias = torch.randn(2, 18)
+    torso_acc = torch.randn(2, 6)
+    jacobian = torch.randn(2, 18, 12)
+
+    actual = _unpack_pinn_wb_dynamics(
+        (forces, mass, bias, torso_acc, jacobian), include_contact_jacobian=True
+    )
+
+    expected = (forces, jacobian, mass, bias, torso_acc)
+    assert all(actual_value is expected_value
+               for actual_value, expected_value in zip(actual, expected))
+
+    legacy_actual = _unpack_pinn_wb_dynamics(
+        (forces, mass, bias, torso_acc, jacobian), include_contact_jacobian=False
+    )
+    legacy_expected = (forces, None, mass, bias, torso_acc)
+    assert all(actual_value is expected_value
+               for actual_value, expected_value in zip(legacy_actual, legacy_expected))
 
 
 def test_pact_storage_preserves_contact_map_for_pinn_reconstruction():
