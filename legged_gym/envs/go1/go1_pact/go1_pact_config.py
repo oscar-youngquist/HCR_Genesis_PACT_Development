@@ -531,12 +531,12 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May09_19-14-36_pact_posboot_100hz_grf/model_3000_converted.pt"
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May10_16-17-52_pact_posboot_100hz_grf/model_3000_converted.pt"
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May11_16-36-57_pact_posboot_100hz_grf/model_3000_converted.pt"
+        pretrained_path = "/home/oyoungquist/Research/Genesis_Development/HCR_Genesis_PACT_Development/rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/Sep04_19-09-01_pact_posboot_100hz_grf/model_5000_converted.pt"
 
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         grf_reconstruction_loss_weight = 1.0
         # Observation-scaled GRF MSE below which PINN uses reconstructed GRFs.
-        pinn_grf_reconstruction_mse_threshold = 0.01
+        pinn_grf_reconstruction_mse_threshold = 0.10
         # learning_rate = 1.0e-3 #
         learning_rate = 3.0e-4 #
         value_loss_coef = 1.0
