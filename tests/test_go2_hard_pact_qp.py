@@ -21,6 +21,8 @@ from rsl_rl.modules.actor_critic_hard_pact import ActorCritic_HardPACT
 from rsl_rl.modules.hard_pact_physics import sanitize_and_clip_wrench_for_qp
 from rsl_rl.modules.hard_pact_physics import contact_logits_to_qp_probability
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
+from legged_gym.envs.go2.go2_hard_pact.deployment import calculate_physics_head_gains
+from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCfg
 from rsl_rl.runners.pact_runner import OnPolicyRunnerPACT
 
 
@@ -613,7 +615,8 @@ class HardPACTQPTests(unittest.TestCase):
             def grf_to_physical(self, prediction): return prediction * 250.0
             def wrench_to_qp_physical(self, prediction):
                 scale = torch.tensor([100., 100., 100., 25., 25., 25.])
-                return sanitize_and_clip_wrench_for_qp(prediction * scale)
+                clip = torch.tensor([150., 150., 150., 40., 40., 40.])
+                return sanitize_and_clip_wrench_for_qp(prediction * scale, clip)
 
         class Dynamics:
             def build_context(self, *_args, **_kwargs):
@@ -1097,12 +1100,16 @@ class HardPACTQPTests(unittest.TestCase):
 
     def test_qpth_graph_reaches_policy_encoder_and_force_heads(self):
         torch.manual_seed(31)
+        gains = calculate_physics_head_gains(GO2HardPACTCfg())
         actor = ActorCritic_HardPACT(
             num_actor_obs=57, num_critic_obs=95, num_actions=12,
             actor_layers=[32, 16], critic_layers=[32, 16],
             cenet_in_dim=57 * 20, cenet_enc_layers=[32, 16],
             cenet_explicit_layers=[16, 16],
             grf_decoder_layers=[16, 16], wrench_decoder_layers=[16, 16],
+            grf_scale_n=gains.grf_scale_n,
+            wrench_scale=gains.wrench_scale_n_nm,
+            wrench_qp_clip=gains.wrench_qp_clip_n_nm,
         ).double()
         observation = torch.randn(1, 57, dtype=torch.float64)
         history = torch.randn(1, 57 * 20, dtype=torch.float64)

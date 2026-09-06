@@ -42,6 +42,7 @@ import gc
 
 from rsl_rl.modules import ActorCritic_PACT_Pos, ContextDecoder
 from rsl_rl.modules.hard_pact_physics import (
+    GRFDecoderMetricsAccumulator,
     normalized_grf_huber_loss,
     normalized_wrench_huber_loss,
     wrench_regression_metrics,
@@ -89,6 +90,7 @@ class PPO_PACT_Pos:
                  grf_loss_weight=1.0,
                  active_wrench_loss_weight=1.0,
                  neutral_wrench_loss_weight=0.25,
+                 force_decoder_diagnostics_enabled=False,
                  ):
         
         self.device = device
@@ -101,6 +103,10 @@ class PPO_PACT_Pos:
         self.grf_loss_weight = float(grf_loss_weight)
         self.active_wrench_loss_weight = float(active_wrench_loss_weight)
         self.neutral_wrench_loss_weight = float(neutral_wrench_loss_weight)
+        self.force_decoder_diagnostics_enabled = bool(
+            force_decoder_diagnostics_enabled
+        )
+        self._grf_diagnostics = None
         self.last_auxiliary_metrics = {}
 
         self.desired_kl = desired_kl
@@ -363,6 +369,13 @@ class PPO_PACT_Pos:
         mean_decoder_loss = 0
         mean_tau_loss = 0
         auxiliary_metric_sums = {}
+        self._grf_diagnostics = (
+            GRFDecoderMetricsAccumulator(
+                self.actor_critic.physics_estimator.grf_scale_n
+            )
+            if self.is_hard_pact_pos and self.force_decoder_diagnostics_enabled
+            else None
+        )
 
         timers = {
             "rl_loss": 0.0,
@@ -554,6 +567,9 @@ class PPO_PACT_Pos:
             name: value / auxiliary_denominator
             for name, value in auxiliary_metric_sums.items()
         }
+        if self._grf_diagnostics is not None:
+            self.last_auxiliary_metrics.update(self._grf_diagnostics.finalize())
+        self._grf_diagnostics = None
 
 
         torch.cuda.synchronize()
@@ -781,6 +797,13 @@ class PPO_PACT_Pos:
             grf_loss = normalized_grf_huber_loss(
                 heads.grf_normalized, grf_target.detach(), valid,
             )
+            if self._grf_diagnostics is not None:
+                self._grf_diagnostics.update(
+                    heads.grf_normalized,
+                    grf_target,
+                    explicit_labels_batch[:, 3:7],
+                    valid,
+                )
             active = valid & wrench_active_mask.bool()
             neutral = valid & ~wrench_active_mask.bool()
             wrench_active_loss = normalized_wrench_huber_loss(
@@ -816,35 +839,36 @@ class PPO_PACT_Pos:
                 "explicit_contact_probabilities": explicit_contact,
                 "explicit_foot_clearance": explicit_clearance,
             })
-            auxiliary_metrics.update(wrench_regression_metrics(
-                heads.wrench_raw_normalized, wrench_target.detach(), valid,
-                self.actor_critic.physics_estimator.wrench_scale,
-                self.actor_critic.physics_estimator.wrench_qp_clip,
-            ))
-            active_diagnostics = wrench_regression_metrics(
-                heads.wrench_raw_normalized, wrench_target.detach(), active,
-                self.actor_critic.physics_estimator.wrench_scale,
-                self.actor_critic.physics_estimator.wrench_qp_clip,
-            )
-            neutral_diagnostics = wrench_regression_metrics(
-                heads.wrench_raw_normalized, wrench_target.detach(), neutral,
-                self.actor_critic.physics_estimator.wrench_scale,
-                self.actor_critic.physics_estimator.wrench_qp_clip,
-            )
-            auxiliary_metrics.update({
-                "wrench_active_mae_physical": active_diagnostics[
-                    "wrench_raw_mae_physical"
-                ],
-                "wrench_active_rmse_physical": active_diagnostics[
-                    "wrench_raw_rmse_physical"
-                ],
-                "wrench_neutral_mae_physical": neutral_diagnostics[
-                    "wrench_raw_mae_physical"
-                ],
-                "wrench_neutral_rmse_physical": neutral_diagnostics[
-                    "wrench_raw_rmse_physical"
-                ],
-            })
+            if self.force_decoder_diagnostics_enabled:
+                auxiliary_metrics.update(wrench_regression_metrics(
+                    heads.wrench_raw_normalized, wrench_target.detach(), valid,
+                    self.actor_critic.physics_estimator.wrench_scale,
+                    self.actor_critic.physics_estimator.wrench_qp_clip,
+                ))
+                active_diagnostics = wrench_regression_metrics(
+                    heads.wrench_raw_normalized, wrench_target.detach(), active,
+                    self.actor_critic.physics_estimator.wrench_scale,
+                    self.actor_critic.physics_estimator.wrench_qp_clip,
+                )
+                neutral_diagnostics = wrench_regression_metrics(
+                    heads.wrench_raw_normalized, wrench_target.detach(), neutral,
+                    self.actor_critic.physics_estimator.wrench_scale,
+                    self.actor_critic.physics_estimator.wrench_qp_clip,
+                )
+                auxiliary_metrics.update({
+                    "wrench_active_mae_physical": active_diagnostics[
+                        "wrench_raw_mae_physical"
+                    ],
+                    "wrench_active_rmse_physical": active_diagnostics[
+                        "wrench_raw_rmse_physical"
+                    ],
+                    "wrench_neutral_mae_physical": neutral_diagnostics[
+                        "wrench_raw_mae_physical"
+                    ],
+                    "wrench_neutral_rmse_physical": neutral_diagnostics[
+                        "wrench_raw_rmse_physical"
+                    ],
+                })
         else:
             vae_loss = auxiliary_metrics["total"]
         

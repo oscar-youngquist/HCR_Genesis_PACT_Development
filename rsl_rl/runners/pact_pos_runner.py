@@ -42,6 +42,7 @@ from rsl_rl.algorithms import PPO_PACT_Pos
 from rsl_rl.modules import ActorCritic_PACT_Pos, ActorCritic_HardPACT_Pos, ContextDecoder
 from rsl_rl.env import VecEnv
 from rsl_rl.utils import pretty_print_module
+from rsl_rl.hard_pact_logging import collect_force_decoder_scalars
 from legged_gym.envs.go2.go2_hard_pact.deployment import (
     RECONSTRUCTION_DIM,
     RECONSTRUCTION_INDICES,
@@ -485,6 +486,14 @@ class OnPolicyRunnerPACTPos:
                 self.writer.add_scalar(
                     f'Loss/autoencoder_{name}', value, locs['it']
                 )
+            self.writer.add_scalar(
+                "physics/force_decoder_diagnostics_enabled",
+                float(self.alg.force_decoder_diagnostics_enabled), locs['it'],
+            )
+            for name, value in collect_force_decoder_scalars(
+                self.alg.last_auxiliary_metrics
+            ).items():
+                self.writer.add_scalar(name, value, locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])

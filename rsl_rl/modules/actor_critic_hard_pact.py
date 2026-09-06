@@ -205,9 +205,9 @@ class ActorCritic_HardPACT(nn.Module):
                  cenet_explicit_layers=(128, 128),
                  grf_decoder_layers=(128, 128),
                  wrench_decoder_layers=(128, 128),
-                 grf_scale_n=(250.0, 250.0, 250.0) * 4,
-                 wrench_scale=(100.0, 100.0, 100.0, 25.0, 25.0, 25.0),
-                 wrench_qp_clip=(150.0, 150.0, 150.0, 40.0, 40.0, 40.0),
+                 grf_scale_n=None,
+                 wrench_scale=None,
+                 wrench_qp_clip=None,
                  contact_epsilon=1.0e-2,
                  ablation_features="full"):
         super().__init__()

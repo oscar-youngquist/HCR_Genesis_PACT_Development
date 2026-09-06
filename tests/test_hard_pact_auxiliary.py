@@ -15,16 +15,22 @@ from rsl_rl.modules.actor_critic_hard_pact import (
     ActorCritic_HardPACT,
     ContextDecoder,
 )
+from legged_gym.envs.go2.go2_hard_pact.deployment import calculate_physics_head_gains
+from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCfg
 
 
 def make_modules():
     torch.manual_seed(7)
+    gains = calculate_physics_head_gains(GO2HardPACTCfg())
     actor = ActorCritic_HardPACT(
         num_actor_obs=57, num_critic_obs=95, num_actions=12,
         actor_layers=[32, 16], critic_layers=[32, 16],
         cenet_in_dim=57 * 20, cenet_enc_layers=[32, 16],
         cenet_explicit_layers=[16, 16],
         grf_decoder_layers=[16, 16], wrench_decoder_layers=[16, 16],
+        grf_scale_n=gains.grf_scale_n,
+        wrench_scale=gains.wrench_scale_n_nm,
+        wrench_qp_clip=gains.wrench_qp_clip_n_nm,
     )
     decoder = ContextDecoder(input_dim=27, layers=[32, 24, 16], decode_dim=133)
     return actor, decoder

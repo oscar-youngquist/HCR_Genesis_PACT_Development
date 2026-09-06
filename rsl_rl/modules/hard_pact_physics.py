@@ -8,14 +8,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-GRF_NORMALIZATION_VERSION = 2
-GRF_COMPONENT_SCALE_N = (250.0, 250.0, 250.0)
-GRF_SCALE_N = GRF_COMPONENT_SCALE_N * 4
-WRENCH_NORMALIZATION_VERSION = 2
-WRENCH_SCALE_N_NM = (100.0, 100.0, 100.0, 25.0, 25.0, 25.0)
-WRENCH_QP_CLIP_N_NM = (150.0, 150.0, 150.0, 40.0, 40.0, 40.0)
-
-
 @dataclass
 class PhysicsHeadOutput:
     grf_normalized: torch.Tensor
@@ -33,14 +25,14 @@ def _broadcast_grf_scale(reference, grf_scale_n):
     return scale
 
 
-def normalize_grf_target(grf_physical_n, grf_scale_n=GRF_SCALE_N):
+def normalize_grf_target(grf_physical_n, grf_scale_n):
     """Normalize yaw-local FR/FL/RR/RL XYZ forces without observation scaling."""
     return grf_physical_n / _broadcast_grf_scale(
         grf_physical_n, grf_scale_n
     )
 
 
-def grf_normalized_to_physical(grf_normalized, grf_scale_n=GRF_SCALE_N):
+def grf_normalized_to_physical(grf_normalized, grf_scale_n):
     """Reconstruct yaw-local physical Newtons from the dedicated GRF head."""
     return grf_normalized * _broadcast_grf_scale(
         grf_normalized, grf_scale_n
@@ -58,7 +50,182 @@ def normalized_grf_huber_loss(prediction, target, mask=None, delta=1.0):
     return (loss * weights).sum() / weights.sum().clamp_min(1.0)
 
 
-def normalize_wrench_target(wrench_physical, wrench_scale=WRENCH_SCALE_N_NM):
+class GRFDecoderMetricsAccumulator:
+    """Accumulate canonical GRF decoder diagnostics without retaining graphs.
+
+    Inputs are normalized decoder tensors in flattened FR/FL/RR/RL XYZ order.
+    All reported force errors are computed after conversion to Newtons. Sums,
+    squared sums, and sample counts are retained so unequal minibatches and
+    transition/contact masks are reduced exactly rather than averaging means.
+    """
+
+    FOOT_NAMES = ("FR", "FL", "RR", "RL")
+    AXIS_NAMES = ("Fx", "Fy", "Fz")
+
+    def __init__(self, grf_scale_n):
+        self.grf_scale_n = tuple(float(value) for value in grf_scale_n)
+        if len(self.grf_scale_n) != 12:
+            raise ValueError("grf_scale_n must contain FR/FL/RR/RL XYZ scales")
+        self._totals = {}
+
+    def _add(self, name, value):
+        value = value.detach()
+        self._totals[name] = self._totals.get(name, torch.zeros_like(value)) + value
+
+    @torch.no_grad()
+    def update(self, prediction_normalized, target_normalized, contact_labels,
+               transition_valid_mask=None):
+        prediction = prediction_normalized.detach().reshape(-1, 4, 3)
+        target = target_normalized.detach().reshape(-1, 4, 3)
+        contact = contact_labels.detach().reshape(-1, 4).bool()
+        valid_row = torch.ones(
+            prediction.shape[0], device=prediction.device, dtype=torch.bool
+        )
+        if transition_valid_mask is not None:
+            valid_row = transition_valid_mask.detach().reshape(-1).bool()
+        valid_foot = valid_row[:, None].expand(-1, 4)
+        valid_component = valid_foot[:, :, None].expand(-1, -1, 3)
+
+        prediction_finite = torch.isfinite(prediction)
+        target_finite = torch.isfinite(target)
+        finite_pair = prediction_finite & target_finite
+        regression_mask = valid_component & finite_pair
+        safe_prediction = torch.where(
+            prediction_finite, prediction, torch.zeros_like(prediction)
+        )
+        safe_target = torch.where(target_finite, target, torch.zeros_like(target))
+        scale = prediction.new_tensor(self.grf_scale_n).reshape(4, 3)
+        prediction_n = safe_prediction * scale
+        target_n = safe_target * scale
+        error_n = prediction_n - target_n
+        absolute_n = error_n.abs()
+        squared_n = error_n.square()
+        mask_f = regression_mask.to(prediction.dtype)
+
+        self._add("valid_component_count", mask_f.sum())
+        self._add("absolute_sum", (absolute_n * mask_f).sum())
+        self._add("squared_sum", (squared_n * mask_f).sum())
+        self._add("axis_absolute_sum", (absolute_n * mask_f).sum(dim=(0, 1)))
+        self._add("axis_squared_sum", (squared_n * mask_f).sum(dim=(0, 1)))
+        self._add("axis_signed_sum", (error_n * mask_f).sum(dim=(0, 1)))
+        self._add("axis_count", mask_f.sum(dim=(0, 1)))
+        self._add("foot_absolute_sum", (absolute_n * mask_f).sum(dim=(0, 2)))
+        self._add("foot_squared_sum", (squared_n * mask_f).sum(dim=(0, 2)))
+        self._add("foot_count", mask_f.sum(dim=(0, 2)))
+
+        normalized_huber = F.huber_loss(
+            safe_prediction, safe_target, reduction="none"
+        )
+        self._add("normalized_huber_sum", (normalized_huber * mask_f).sum())
+
+        valid_component_count = valid_component.to(prediction.dtype).sum()
+        self._add("finite_fraction_count", valid_component_count)
+        self._add(
+            "prediction_nonfinite_count",
+            ((~prediction_finite) & valid_component).to(prediction.dtype).sum(),
+        )
+        self._add(
+            "target_nonfinite_count",
+            ((~target_finite) & valid_component).to(prediction.dtype).sum(),
+        )
+
+        # Norms are per-foot XYZ magnitudes. Only fully finite feet contribute.
+        finite_foot = finite_pair.all(dim=-1) & valid_foot
+        prediction_norm = prediction_n.norm(dim=-1)
+        target_norm = target_n.norm(dim=-1)
+        for state_name, state_mask in (
+            ("overall", finite_foot),
+            ("stance", finite_foot & contact),
+            ("swing", finite_foot & ~contact),
+        ):
+            state_f = state_mask.to(prediction.dtype)
+            self._add(f"{state_name}_foot_count", state_f.sum())
+            self._add(
+                f"{state_name}_predicted_norm_sum",
+                (prediction_norm * state_f).sum(),
+            )
+            self._add(
+                f"{state_name}_target_norm_sum", (target_norm * state_f).sum()
+            )
+            state_components = state_mask[:, :, None] & finite_pair
+            state_component_f = state_components.to(prediction.dtype)
+            self._add(
+                f"{state_name}_component_count", state_component_f.sum()
+            )
+            self._add(
+                f"{state_name}_absolute_sum",
+                (absolute_n * state_component_f).sum(),
+            )
+            self._add(
+                f"{state_name}_squared_sum",
+                (squared_n * state_component_f).sum(),
+            )
+
+    @torch.no_grad()
+    def finalize(self):
+        if not self._totals:
+            return {}
+        totals = self._totals
+
+        def mean(sum_name, count_name):
+            return totals[sum_name] / totals[count_name].clamp_min(1.0)
+
+        metrics = {
+            "grf_decoder_loss_normalized": mean(
+                "normalized_huber_sum", "valid_component_count"
+            ),
+            "grf_mae_physical": mean("absolute_sum", "valid_component_count"),
+            "grf_rmse_physical": mean(
+                "squared_sum", "valid_component_count"
+            ).sqrt(),
+            "grf_prediction_nonfinite_fraction": mean(
+                "prediction_nonfinite_count", "finite_fraction_count"
+            ),
+            "grf_target_nonfinite_fraction": mean(
+                "target_nonfinite_count", "finite_fraction_count"
+            ),
+        }
+        for index, name in enumerate(self.AXIS_NAMES):
+            count = totals["axis_count"][index].clamp_min(1.0)
+            metrics[f"grf_mae_{name}_physical"] = (
+                totals["axis_absolute_sum"][index] / count
+            )
+            metrics[f"grf_rmse_{name}_physical"] = (
+                totals["axis_squared_sum"][index] / count
+            ).sqrt()
+            metrics[f"grf_signed_error_{name}_mean_physical"] = (
+                totals["axis_signed_sum"][index] / count
+            )
+        for index, name in enumerate(self.FOOT_NAMES):
+            count = totals["foot_count"][index].clamp_min(1.0)
+            metrics[f"grf_mae_{name}_physical"] = (
+                totals["foot_absolute_sum"][index] / count
+            )
+            metrics[f"grf_rmse_{name}_physical"] = (
+                totals["foot_squared_sum"][index] / count
+            ).sqrt()
+        for state_name in ("overall", "stance", "swing"):
+            component_count = totals[
+                f"{state_name}_component_count"
+            ].clamp_min(1.0)
+            foot_count = totals[f"{state_name}_foot_count"].clamp_min(1.0)
+            if state_name != "overall":
+                metrics[f"grf_{state_name}_mae_physical"] = (
+                    totals[f"{state_name}_absolute_sum"] / component_count
+                )
+                metrics[f"grf_{state_name}_rmse_physical"] = (
+                    totals[f"{state_name}_squared_sum"] / component_count
+                ).sqrt()
+            metrics[f"grf_predicted_norm_{state_name}_physical"] = (
+                totals[f"{state_name}_predicted_norm_sum"] / foot_count
+            )
+            metrics[f"grf_target_norm_{state_name}_physical"] = (
+                totals[f"{state_name}_target_norm_sum"] / foot_count
+            )
+        return metrics
+
+
+def normalize_wrench_target(wrench_physical, wrench_scale):
     """Normalize yaw-local [force, moment] labels without observation scaling."""
     scale = torch.as_tensor(
         wrench_scale, device=wrench_physical.device, dtype=wrench_physical.dtype
@@ -67,7 +234,7 @@ def normalize_wrench_target(wrench_physical, wrench_scale=WRENCH_SCALE_N_NM):
 
 
 def wrench_normalized_to_physical(
-    wrench_raw_normalized, wrench_scale=WRENCH_SCALE_N_NM
+    wrench_raw_normalized, wrench_scale
 ):
     """Convert the unbounded decoder output to physical N/Nm exactly once."""
     scale = torch.as_tensor(
@@ -79,7 +246,7 @@ def wrench_normalized_to_physical(
 
 
 def sanitize_and_clip_wrench_for_qp(
-    wrench_raw_physical, wrench_qp_clip=WRENCH_QP_CLIP_N_NM
+    wrench_raw_physical, wrench_qp_clip
 ):
     """Apply the sole deployment safety boundary in physical yaw-local units.
 
@@ -111,9 +278,9 @@ def normalized_wrench_huber_loss(prediction, target, mask=None, delta=1.0):
 def wrench_regression_metrics(
     prediction_normalized,
     target_normalized,
-    mask=None,
-    wrench_scale=WRENCH_SCALE_N_NM,
-    wrench_qp_clip=WRENCH_QP_CLIP_N_NM,
+    mask,
+    wrench_scale,
+    wrench_qp_clip,
 ):
     """Return scalar diagnostics in physical units without affecting training."""
     raw = wrench_normalized_to_physical(prediction_normalized, wrench_scale)
@@ -265,9 +432,9 @@ class DeploymentPhysicsHeads(nn.Module):
         explicit_dim=11,
         grf_hidden_layers=(128, 128),
         wrench_hidden_layers=(128, 128),
-        grf_scale_n=GRF_SCALE_N,
-        wrench_scale=WRENCH_SCALE_N_NM,
-        wrench_qp_clip=WRENCH_QP_CLIP_N_NM,
+        grf_scale_n=None,
+        wrench_scale=None,
+        wrench_qp_clip=None,
     ):
         super().__init__()
         self.latent_dim = int(latent_dim)
@@ -278,27 +445,20 @@ class DeploymentPhysicsHeads(nn.Module):
         self.wrench_head = _physics_head(
             latent_dim + explicit_dim, wrench_hidden_layers, 6
         )
-        # Persistent constants make the deployed numerical contract part of
-        # every checkpoint and available without an external config object.
+        if grf_scale_n is None or wrench_scale is None or wrench_qp_clip is None:
+            raise ValueError(
+                "GRF/wrench scales and QP clip must come from the task config"
+            )
+        # Config-resolved values travel with each deployed checkpoint.
         self.register_buffer(
             "grf_scale_n", torch.as_tensor(grf_scale_n, dtype=torch.float32)
         )
-        self.register_buffer(
-            "grf_normalization_version",
-            torch.tensor(GRF_NORMALIZATION_VERSION, dtype=torch.int64),
-        )
-        # The fixed scale, QP safety boundary, and contract version travel
-        # with the weights used by both HardPACT training pipelines.
         self.register_buffer(
             "wrench_scale", torch.as_tensor(wrench_scale, dtype=torch.float32)
         )
         self.register_buffer(
             "wrench_qp_clip",
             torch.as_tensor(wrench_qp_clip, dtype=torch.float32),
-        )
-        self.register_buffer(
-            "wrench_normalization_version",
-            torch.tensor(WRENCH_NORMALIZATION_VERSION, dtype=torch.int64),
         )
         if self.grf_scale_n.shape != (12,):
             raise ValueError("grf_scale_n must contain 12 values")

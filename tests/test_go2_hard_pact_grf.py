@@ -19,7 +19,6 @@ from legged_gym.envs.go2.go2_hard_pact.grf import (
     IntervalGRFProcessor,
     world_to_yaw_local,
 )
-from rsl_rl.modules.hard_pact_physics import GRF_SCALE_N
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
 from legged_gym.envs.go2.go2_pact.go2_pact_config import GO2PACTCfg
 from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos import Go2HardPACTPos
@@ -265,7 +264,6 @@ class GRFIntegrationTests(unittest.TestCase):
         expected_target[:, 2::3] = (20.0 / 3.0) / 250.0
         torch.testing.assert_close(result[-1], expected_target)
         self.assertEqual(tuple(task.cfg.sim.grf.prediction_scale_n), (250.0,) * 3)
-        self.assertEqual(tuple(GRF_SCALE_N), (250.0,) * 12)
         self.assertEqual(task.cfg.normalization.obs_scales.grf, 0.01)
         self.assertFalse(torch.equal(processor.ema.flatten(1) * 0.01, result[-1]))
 

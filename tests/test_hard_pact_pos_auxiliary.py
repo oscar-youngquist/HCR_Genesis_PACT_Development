@@ -8,6 +8,17 @@ from rsl_rl.modules.actor_critic_hard_pact_pos import (
     ActorCritic_HardPACT_Pos,
     ContextDecoder,
 )
+from legged_gym.envs.go2.go2_hard_pact.deployment import calculate_physics_head_gains
+from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import GO2HardPACTPosCfg
+
+
+def _force_kwargs():
+    gains = calculate_physics_head_gains(GO2HardPACTPosCfg())
+    return dict(
+        grf_scale_n=gains.grf_scale_n,
+        wrench_scale=gains.wrench_scale_n_nm,
+        wrench_qp_clip=gains.wrench_qp_clip_n_nm,
+    )
 
 
 def _small_algorithm(**kwargs):
@@ -17,6 +28,7 @@ def _small_algorithm(**kwargs):
         cenet_in_dim=57 * 10, cenet_enc_layers=[32, 16],
         cenet_explicit_layers=[16], grf_decoder_layers=[16],
         wrench_decoder_layers=[16],
+        **_force_kwargs(),
     )
     decoder = ContextDecoder(input_dim=27, layers=[32, 24, 16], decode_dim=133)
     return PPO_PACT_Pos(
@@ -79,11 +91,13 @@ def test_hard_pact_pos_auxiliary_trains_both_physics_heads_and_logs_parts():
         cenet_in_dim=57 * 10, cenet_enc_layers=[32, 16],
         cenet_explicit_layers=[16], grf_decoder_layers=[16],
         wrench_decoder_layers=[16],
+        **_force_kwargs(),
     )
     decoder = ContextDecoder(input_dim=27, layers=[32, 24, 16], decode_dim=133)
     algorithm = PPO_PACT_Pos(
         actor, decoder, num_priv_obs=181,
         use_adaptive_entropy=False,
+        force_decoder_diagnostics_enabled=True,
     )
     batch = 6
     history = torch.randn(batch, 57 * 10)
@@ -166,6 +180,7 @@ def test_hard_pact_pos_policy_uses_sample_and_explicit_uses_shared_features():
         cenet_in_dim=57 * 10, cenet_enc_layers=[32, 16],
         cenet_explicit_layers=[16], grf_decoder_layers=[16],
         wrench_decoder_layers=[16],
+        **_force_kwargs(),
     )
     observation = torch.randn(4, 57)
     history = torch.randn(4, 57 * 10)

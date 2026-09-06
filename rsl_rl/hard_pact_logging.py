@@ -31,6 +31,7 @@ STABLE_HARD_PACT_SCALARS = {
     "physics/rollout/joints_mae_physical": math.nan,
     "physics/rollout/all_mae_physical": math.nan,
     "physics/grf/loss": math.nan,
+    "physics/force_decoder_diagnostics_enabled": 0.0,
     "physics/wrench/active_loss": math.nan,
     "physics/wrench/neutral_loss": math.nan,
     "qp/enabled": 0.0,
@@ -65,6 +66,19 @@ STABLE_HARD_PACT_SCALARS = {
 }
 
 
+def collect_force_decoder_scalars(auxiliary):
+    """Map shared auxiliary force metrics to identical TensorBoard names."""
+    values = {}
+    for name, value in auxiliary.items():
+        if name.startswith("grf_"):
+            values[f"physics/grf/{name[len('grf_'):]}"] = value
+        elif name.startswith("wrench_") and name not in (
+            "wrench_active", "wrench_neutral"
+        ):
+            values[f"physics/wrench/{name[len('wrench_'):]}"] = value
+    return values
+
+
 def collect_hard_pact_scalars(algorithm, features):
     """Merge algorithm summaries into the stable schema without host copies."""
     spec = resolve_hard_pact_features(features)
@@ -76,6 +90,9 @@ def collect_hard_pact_scalars(algorithm, features):
         "qp/enabled": float(spec.execution_qp),
         "qp/projection_loss_enabled": float(spec.projection_loss),
         "qp/projection_metric_enabled": float(spec.projection_metric),
+        "physics/force_decoder_diagnostics_enabled": float(
+            getattr(algorithm, "force_decoder_diagnostics_enabled", False)
+        ),
     })
     for name, value in getattr(algorithm, "last_physics_loss_metrics", {}).items():
         values[name] = value
@@ -96,14 +113,9 @@ def collect_hard_pact_scalars(algorithm, features):
     ):
         if source in auxiliary:
             values[target] = auxiliary[source]
-    # Wrench-regression diagnostics are already reduced to device scalars by
-    # the auxiliary update. Mirror them under a stable physical-unit prefix;
-    # no per-environment tensor reaches the runner.
-    for name, value in auxiliary.items():
-        if name.startswith("wrench_") and name not in (
-            "wrench_active", "wrench_neutral"
-        ):
-            values[f"physics/wrench/{name[len('wrench_'):]}"] = value
+    # Force-regression diagnostics are reduced to device scalars by the
+    # auxiliary update; no per-environment tensor reaches the runner.
+    values.update(collect_force_decoder_scalars(auxiliary))
     values.update(getattr(algorithm, "last_qp_metrics", {}))
     gradients = getattr(algorithm, "last_physics_gradient_metrics", {})
     if "physics_gradient/finite_fraction" in gradients:

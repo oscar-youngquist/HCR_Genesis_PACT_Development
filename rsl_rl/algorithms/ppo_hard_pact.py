@@ -44,6 +44,7 @@ from rsl_rl.utils import print_class_attributes
 
 from rsl_rl.storage import RolloutStoragePACT
 from rsl_rl.modules.hard_pact_physics import (
+    GRFDecoderMetricsAccumulator,
     contact_logits_to_qp_probability,
     normalized_grf_huber_loss,
     normalized_wrench_huber_loss,
@@ -276,6 +277,7 @@ class PPO_HardPACT:
                  grf_loss_weight=1.0,
                  active_wrench_loss_weight=1.0,
                  neutral_wrench_loss_weight=0.25,
+                 force_decoder_diagnostics_enabled=False,
                  bard_enabled=True,
                  bard_randomize_base_inertia=True,
                  bard_scale_rotational_inertia=True,
@@ -322,6 +324,10 @@ class PPO_HardPACT:
         self.grf_loss_weight = float(grf_loss_weight)
         self.active_wrench_loss_weight = float(active_wrench_loss_weight)
         self.neutral_wrench_loss_weight = float(neutral_wrench_loss_weight)
+        self.force_decoder_diagnostics_enabled = bool(
+            force_decoder_diagnostics_enabled
+        )
+        self._grf_diagnostics = None
 
         # ``pinn_encoder_weight`` remains in the constructor solely so legacy
         # configs instantiate unchanged. B1Z1 PCGrad replaced that historical
@@ -942,6 +948,11 @@ class PPO_HardPACT:
         mean_kld_loss = metric_zero.clone()
         mean_decoder_loss = metric_zero.clone()
         mean_pinn_loss = metric_zero.clone()
+        self._grf_diagnostics = (
+            GRFDecoderMetricsAccumulator(
+                self.actor_critic.physics_estimator.grf_scale_n
+            ) if self.force_decoder_diagnostics_enabled else None
+        )
         self._bard_timing_records = {
             "inverse": [], "rollout": [], "dynamics": [],
             "auxiliary": [], "pcgrad": [],
@@ -1307,6 +1318,10 @@ class PPO_HardPACT:
         mean_vel_loss /= (num_updates * self.num_enc_epochs)
         mean_recon_loss /= (num_updates * self.num_enc_epochs)
 
+        if self._grf_diagnostics is not None:
+            self.last_auxiliary_metrics.update(self._grf_diagnostics.finalize())
+        self._grf_diagnostics = None
+
         if self.profile_bard_timing:
             self._finalize_bard_timing(num_updates)
 
@@ -1582,6 +1597,13 @@ class PPO_HardPACT:
         grf = normalized_grf_huber_loss(
             heads.grf_normalized, grf_target.detach(), valid,
         )
+        if self._grf_diagnostics is not None:
+            self._grf_diagnostics.update(
+                heads.grf_normalized,
+                grf_target,
+                explicit_target[:, 3:7],
+                valid,
+            )
         if transition is None:
             wrench_target = heads.wrench_raw_normalized.detach().new_zeros(
                 heads.wrench_raw_normalized.shape
@@ -1618,33 +1640,34 @@ class PPO_HardPACT:
             "wrench_neutral": wrench_neutral,
             "reconstruction": reconstruction,
         }
-        metrics.update(wrench_regression_metrics(
-            heads.wrench_raw_normalized, wrench_target, valid,
-            self.actor_critic.physics_estimator.wrench_scale,
-            self.actor_critic.physics_estimator.wrench_qp_clip,
-        ))
-        active_diagnostics = wrench_regression_metrics(
-            heads.wrench_raw_normalized, wrench_target, active_mask,
-            self.actor_critic.physics_estimator.wrench_scale,
-            self.actor_critic.physics_estimator.wrench_qp_clip,
-        )
-        neutral_diagnostics = wrench_regression_metrics(
-            heads.wrench_raw_normalized, wrench_target, neutral_mask,
-            self.actor_critic.physics_estimator.wrench_scale,
-            self.actor_critic.physics_estimator.wrench_qp_clip,
-        )
-        metrics["wrench_active_mae_physical"] = active_diagnostics[
-            "wrench_raw_mae_physical"
-        ]
-        metrics["wrench_active_rmse_physical"] = active_diagnostics[
-            "wrench_raw_rmse_physical"
-        ]
-        metrics["wrench_neutral_mae_physical"] = neutral_diagnostics[
-            "wrench_raw_mae_physical"
-        ]
-        metrics["wrench_neutral_rmse_physical"] = neutral_diagnostics[
-            "wrench_raw_rmse_physical"
-        ]
+        if self.force_decoder_diagnostics_enabled:
+            metrics.update(wrench_regression_metrics(
+                heads.wrench_raw_normalized, wrench_target, valid,
+                self.actor_critic.physics_estimator.wrench_scale,
+                self.actor_critic.physics_estimator.wrench_qp_clip,
+            ))
+            active_diagnostics = wrench_regression_metrics(
+                heads.wrench_raw_normalized, wrench_target, active_mask,
+                self.actor_critic.physics_estimator.wrench_scale,
+                self.actor_critic.physics_estimator.wrench_qp_clip,
+            )
+            neutral_diagnostics = wrench_regression_metrics(
+                heads.wrench_raw_normalized, wrench_target, neutral_mask,
+                self.actor_critic.physics_estimator.wrench_scale,
+                self.actor_critic.physics_estimator.wrench_qp_clip,
+            )
+            metrics["wrench_active_mae_physical"] = active_diagnostics[
+                "wrench_raw_mae_physical"
+            ]
+            metrics["wrench_active_rmse_physical"] = active_diagnostics[
+                "wrench_raw_rmse_physical"
+            ]
+            metrics["wrench_neutral_mae_physical"] = neutral_diagnostics[
+                "wrench_raw_mae_physical"
+            ]
+            metrics["wrench_neutral_rmse_physical"] = neutral_diagnostics[
+                "wrench_raw_rmse_physical"
+            ]
         return metrics
 
     @staticmethod

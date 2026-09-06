@@ -18,6 +18,7 @@ import torch
 
 import legged_gym.envs  # noqa: F401
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
+from legged_gym.envs.go2.go2_hard_pact.deployment import calculate_physics_head_gains
 from legged_gym.utils.helpers import class_to_dict, save_hard_pact_resolved_config
 from legged_gym.utils.task_registry import task_registry
 from rsl_rl.algorithms.hard_pact_qp import HardPACTDifferentiableQP, HardPACTQPConfig
@@ -27,7 +28,8 @@ from rsl_rl.hard_pact_ablations import (
     hard_pact_task_names, resolve_hard_pact_features,
 )
 from rsl_rl.hard_pact_logging import (
-    STABLE_HARD_PACT_SCALARS, collect_hard_pact_scalars,
+    STABLE_HARD_PACT_SCALARS, collect_force_decoder_scalars,
+    collect_hard_pact_scalars,
 )
 from rsl_rl.modules.actor_critic_hard_pact import ActorCritic_HardPACT
 from rsl_rl.runners.pact_runner import OnPolicyRunnerPACT
@@ -171,6 +173,7 @@ class HardPACTAblationTests(unittest.TestCase):
             self.assertEqual((env_cfg.env.num_observations, env_cfg.env.num_privileged_obs,
                               env_cfg.env.num_actions, env_cfg.env.num_obs_hist), dims)
             policy = train_cfg.policy
+            gains = calculate_physics_head_gains(env_cfg)
             torch.manual_seed(7)
             actor = ActorCritic_HardPACT(
                 num_actor_obs=env_cfg.env.num_observations,
@@ -185,6 +188,9 @@ class HardPACTAblationTests(unittest.TestCase):
                 cenet_explicit_layers=policy.cenet_explicit_layers,
                 grf_decoder_layers=policy.grf_decoder_layers,
                 wrench_decoder_layers=policy.wrench_decoder_layers,
+                grf_scale_n=gains.grf_scale_n,
+                wrench_scale=gains.wrench_scale_n_nm,
+                wrench_qp_clip=gains.wrench_qp_clip_n_nm,
                 ablation_features=variant,
             )
             signature = tuple((key, tuple(value.shape)) for key, value in actor.state_dict().items())
@@ -232,6 +238,30 @@ class HardPACTAblationTests(unittest.TestCase):
             self.assertEqual(values["physics/inverse/enabled"], float(EXPECTED[variant][0]))
         self.assertTrue(all(keys == key_sets[0] for keys in key_sets))
         self.assertTrue(set(STABLE_HARD_PACT_SCALARS) <= key_sets[0])
+
+    def test_force_decoder_metrics_have_shared_tensorboard_names(self):
+        auxiliary = {
+            "grf_decoder_loss_normalized": torch.tensor(0.25),
+            "grf_mae_FR_physical": torch.tensor(12.0),
+            "wrench_raw_mae_physical": torch.tensor(4.0),
+        }
+        expected = {
+            "physics/grf/decoder_loss_normalized",
+            "physics/grf/mae_FR_physical",
+            "physics/wrench/raw_mae_physical",
+        }
+        self.assertEqual(
+            set(collect_force_decoder_scalars(auxiliary)), expected
+        )
+        algorithm = SimpleNamespace(
+            force_decoder_diagnostics_enabled=True,
+            last_physics_loss_metrics={}, last_inverse_dynamics_metrics={},
+            last_rollout_dynamics_metrics={}, last_auxiliary_metrics=auxiliary,
+            last_qp_metrics={}, last_physics_gradient_metrics={},
+        )
+        logged = collect_hard_pact_scalars(algorithm, "full")
+        self.assertTrue(logged["physics/force_decoder_diagnostics_enabled"])
+        self.assertTrue(expected <= set(logged))
 
     def test_rollout_qp_logging_is_scalar_aggregated_on_device(self):
         runner = OnPolicyRunnerPACT.__new__(OnPolicyRunnerPACT)

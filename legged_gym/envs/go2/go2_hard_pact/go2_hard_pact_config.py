@@ -469,6 +469,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         grf_loss_weight = 1.0
         active_wrench_loss_weight = 1.0
         neutral_wrench_loss_weight = 0.25
+        # Detailed physical GRF/base-wrench TensorBoard reductions. Decoder
+        # losses remain logged when this is disabled.
+        force_decoder_diagnostics_enabled = True
 
         bard_enabled = True
         dynamics_backend = 'bard'

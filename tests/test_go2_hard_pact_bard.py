@@ -27,6 +27,8 @@ from rsl_rl.algorithms.hard_pact_bard import (
 from rsl_rl.algorithms.ppo_hard_pact import PPO_HardPACT
 from rsl_rl.modules.actor_critic_hard_pact import ActorCritic_HardPACT
 from rsl_rl.modules.hard_pact_physics import DeploymentPhysicsHeads
+from legged_gym.envs.go2.go2_hard_pact.deployment import calculate_physics_head_gains
+from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCfg
 
 
 URDF = "resources/robots/go2/urdf/go2.urdf"
@@ -200,7 +202,12 @@ class CorrectedInverseLossTests(unittest.TestCase):
 
     def test_inverse_loss_routes_gradients_to_both_deployment_heads(self):
         torch.manual_seed(4)
-        heads = DeploymentPhysicsHeads()
+        gains = calculate_physics_head_gains(GO2HardPACTCfg())
+        heads = DeploymentPhysicsHeads(
+            grf_scale_n=gains.grf_scale_n,
+            wrench_scale=gains.wrench_scale_n_nm,
+            wrench_qp_clip=gains.wrench_qp_clip_n_nm,
+        )
         latent = torch.randn(2, 16, requires_grad=True)
         explicit = torch.randn(2, 11, requires_grad=True)
         torque = torch.randn(2, 12, requires_grad=True)
@@ -734,12 +741,16 @@ class BARDPinocchioParityTests(unittest.TestCase):
 
     def test_aba_and_rnea_pinocchio_parity_with_replayed_stochastic_torque(self):
         torch.manual_seed(29)
+        gains = calculate_physics_head_gains(GO2HardPACTCfg())
         actor = ActorCritic_HardPACT(
             num_actor_obs=57, num_critic_obs=95, num_actions=12,
             actor_layers=[32, 16], critic_layers=[32, 16],
             cenet_in_dim=57 * 20, cenet_enc_layers=[32, 16],
             cenet_explicit_layers=[16, 16],
             grf_decoder_layers=[16, 16], wrench_decoder_layers=[16, 16],
+            grf_scale_n=gains.grf_scale_n,
+            wrench_scale=gains.wrench_scale_n_nm,
+            wrench_qp_clip=gains.wrench_qp_clip_n_nm,
         )
         algorithm = PPO_HardPACT.__new__(PPO_HardPACT)
         algorithm.actor_critic = actor
@@ -927,12 +938,16 @@ class RolloutEndToEndGradientTests(unittest.TestCase):
             q, pre_v, post_v_world=post_v, need_jacobians=True,
             need_forward_dynamics=True,
         )
+        gains = calculate_physics_head_gains(GO2HardPACTCfg())
         actor = ActorCritic_HardPACT(
             num_actor_obs=57, num_critic_obs=95, num_actions=12,
             actor_layers=[32, 16], critic_layers=[32, 16],
             cenet_in_dim=57 * 20, cenet_enc_layers=[32, 16],
             cenet_explicit_layers=[16, 16],
             grf_decoder_layers=[16, 16], wrench_decoder_layers=[16, 16],
+            grf_scale_n=gains.grf_scale_n,
+            wrench_scale=gains.wrench_scale_n_nm,
+            wrench_qp_clip=gains.wrench_qp_clip_n_nm,
         )
         observation = torch.randn(1, 57)
         history = torch.randn(1, 57 * 20)

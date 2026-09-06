@@ -22,6 +22,7 @@ from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import (
     GO2HardPACTCfg,
     GO2HardPACTCfgPPO,
 )
+from legged_gym.envs.go2.go2_hard_pact.deployment import calculate_physics_head_gains
 from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos import Go2HardPACTPos
 from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import (
     GO2HardPACTPosCfg,
@@ -81,7 +82,7 @@ CASES = (
 
 def _actor_kwargs(env_cfg, train_cfg):
     policy = train_cfg.policy
-    return dict(
+    kwargs = dict(
         num_actor_obs=env_cfg.env.num_observations,
         num_critic_obs=env_cfg.env.num_privileged_obs * env_cfg.env.num_priv_stack,
         num_actions=env_cfg.env.num_actions,
@@ -94,6 +95,14 @@ def _actor_kwargs(env_cfg, train_cfg):
         activation=policy.activation,
         init_noise_std=policy.init_noise_std,
     )
+    if hasattr(env_cfg.sim, "grf"):
+        gains = calculate_physics_head_gains(env_cfg)
+        kwargs.update(
+            grf_scale_n=gains.grf_scale_n,
+            wrench_scale=gains.wrench_scale_n_nm,
+            wrench_qp_clip=gains.wrench_qp_clip_n_nm,
+        )
+    return kwargs
 
 
 def _synthetic_task(task_cls, cfg, action_width):

@@ -6,14 +6,6 @@ from dataclasses import dataclass
 import json
 import os
 
-from rsl_rl.modules.hard_pact_physics import (
-    GRF_NORMALIZATION_VERSION,
-    WRENCH_NORMALIZATION_VERSION,
-    WRENCH_QP_CLIP_N_NM,
-    WRENCH_SCALE_N_NM,
-)
-
-
 FOOT_ORDER = ("FR", "FL", "RR", "RL")
 WRENCH_ORDER = ("Fx", "Fy", "Fz", "Tx", "Ty", "Tz")
 RECONSTRUCTION_INDICES = tuple(range(61)) + tuple(range(73, 145))
@@ -44,12 +36,8 @@ def calculate_physics_head_gains(cfg):
         raise ValueError("force observation scales must be positive")
 
     deployment = cfg.deployment_physics
-    configured_wrench_scale = tuple(float(v) for v in getattr(
-        deployment, "wrench_scale", WRENCH_SCALE_N_NM
-    ))
-    configured_qp_clip = tuple(float(v) for v in getattr(
-        deployment, "wrench_qp_clip", WRENCH_QP_CLIP_N_NM
-    ))
+    configured_wrench_scale = tuple(float(v) for v in deployment.wrench_scale)
+    configured_qp_clip = tuple(float(v) for v in deployment.wrench_qp_clip)
     if len(configured_wrench_scale) != 6 or any(
         value <= 0.0 for value in configured_wrench_scale
     ):
@@ -81,9 +69,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
     latent_dim = actor.context_encoder.ce_out_mean.out_features
     explicit_dim = actor.explicit_estimator.network[-1].out_features
     contract = {
-        "schema_version": 4,
-        "grf_normalization_version": GRF_NORMALIZATION_VERSION,
-        "wrench_normalization_version": WRENCH_NORMALIZATION_VERSION,
+        "schema_version": 5,
         "explicit_estimator": {
             "dimension": 11,
             "input": "shared_history_encoder_features",
@@ -149,7 +135,6 @@ def build_deployment_contract(cfg, actor, gain_spec):
             "observation_scale_is_independent": True,
         },
         "wrench_decoder_normalization": {
-            "version": WRENCH_NORMALIZATION_VERSION,
             "scale_n_nm": wrench_buffer,
             "target": "wrench_target_physical / scale_n_nm",
             "output": "unbounded_raw_normalized",
@@ -198,10 +183,8 @@ def build_deployment_contract(cfg, actor, gain_spec):
         },
         "checkpoint_buffer_keys": {
             "grf": "physics_estimator.grf_scale_n",
-            "grf_normalization_version": "physics_estimator.grf_normalization_version",
             "base_wrench": "physics_estimator.wrench_scale",
             "base_wrench_qp_clip": "physics_estimator.wrench_qp_clip",
-            "wrench_normalization_version": "physics_estimator.wrench_normalization_version",
         },
     }
     return contract
