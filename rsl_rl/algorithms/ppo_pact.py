@@ -770,7 +770,7 @@ class PPO_PACT:
         _, _, latent, explicit = self.actor_critic.context_encoder(obs_hist_batch)
         predicted_grf_scaled = self.grf_decoder(
             self._grf_decoder_input(
-                torch.cat((latent, explicit), dim=-1), nominal_torque,
+                torch.cat((latent, explicit.detach()), dim=-1), nominal_torque,
                 self.dof_tau_observation_scale,
             )
         )

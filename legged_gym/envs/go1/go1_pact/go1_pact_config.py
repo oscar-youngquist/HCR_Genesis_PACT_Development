@@ -570,7 +570,7 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         grf_dim = 12
         
         # debug_warmpinn_wb
-        run_name = 'pact_100hz_spec_smartcurr_lower_jointrand_hightau_03'
+        run_name = 'pact_100hz_spec_smartcurr'
         experiment_name = 'go1_pact_rough'
         save_interval = 500
         
