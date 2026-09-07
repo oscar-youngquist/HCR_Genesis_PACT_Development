@@ -61,6 +61,7 @@ from legged_gym.dynamics import (
 from rsl_rl.hard_pact_ablations import resolve_hard_pact_features
 
 from .pc_grad import PCGrad
+from .hard_pact_boot_statistics import ValidBootStatistics
 from .hard_pact_bard import corrected_bard_inverse_dynamics_loss
 from .hard_pact_bard import differentiable_bard_rollout_loss
 from .hard_pact_latent_diagnostics import (
@@ -981,6 +982,7 @@ class PPO_HardPACT:
         return self.pinn_weight
 
     def update(self, action_func, fb_func, dt, itr, default_pose, qvel_scale):
+        valid_boot_statistics = ValidBootStatistics()
         metric_zero = torch.zeros((), device=self.device)
         mean_value_loss = metric_zero.clone()
         mean_surrogate_loss = metric_zero.clone()
@@ -1011,13 +1013,6 @@ class PPO_HardPACT:
             "inverse": [], "rollout": [], "dynamics": [],
             "auxiliary": [], "pcgrad": [],
         }
-
-        boot_count = 0
-        boot_sum_x = None
-        boot_sum_x2 = None
-        boot_sum_recon_sqerr = torch.zeros(
-            (), device=self.device, dtype=torch.float64
-        )
 
         self._update_pinn_weight_for_iteration(itr)
 
@@ -1388,27 +1383,7 @@ class PPO_HardPACT:
                     if name not in ("loss", "reconstruction")
                 }
 
-                # Log the decode targets and recons for computing boot-probability
-                with torch.no_grad():
-                    x = decode_targets * terminated_batch
-                    r = recons * terminated_batch
-
-                    # flatten batch dimension only; keep feature dim
-                    # assumes x shape [B, D]
-                    if boot_sum_x is None:
-                        boot_sum_x = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
-                        boot_sum_x2 = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
-
-                    x64 = x.to(torch.float64)
-                    r64 = r.to(torch.float64)
-
-                    boot_sum_x += x64.sum(dim=0)
-                    boot_sum_x2 += (x64 * x64).sum(dim=0)
-
-                    # scalar sum over all elements
-                    boot_sum_recon_sqerr += ((r64 - x64) ** 2).sum()
-
-                    boot_count += x.shape[0]
+                valid_boot_statistics.add(decode_targets, recons, terminated_batch)
 
                 # Log losses
                 mean_autoenc_loss += vae_loss.detach()
@@ -1482,23 +1457,7 @@ class PPO_HardPACT:
                 ),
             })
 
-        # Calculate the total bootstrapping probability over the performance of the autoencoder on all of the above
-        #      total number of scalar elements per sample vector
-        feat_dim = boot_sum_x.shape[0]
-
-        mean_pred = boot_sum_x / boot_count                     # [D]
-        ex2 = boot_sum_x2 / boot_count                          # [D]
-        var = torch.clamp(ex2 - mean_pred**2, min=0.0)          # [D]
-        mean_pred_error = var.mean()
-        actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
-        ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
-        # This is the update's single mandatory scalar synchronization. All
-        # minibatch losses and diagnostics stayed on-device until now.
-        pboot = float(torch.tanh(ratio).detach().cpu())
-
-        # Use the (scaled) ratio of mean-prediction performance to actual prediction performance
-        #     to determine if encoder bootstrapping is performed.
-        self.use_boot = random.random() < pboot
+        valid_boot_statistics.update_boot(self)
         if self.console_debug:
             print("Use bootstrapped Encoder Dynamics: ", self.use_boot)
 

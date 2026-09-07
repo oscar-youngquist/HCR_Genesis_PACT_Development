@@ -178,15 +178,15 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         persistent_disturbance = True
         persistent_force_probability = 0.1
         persistent_torque_probability = 0.1
-        persistent_force_interval_range_s = [5.0, 10.0]
-        persistent_torque_interval_range_s = [5.0, 10.0]
-        persistent_force_duration_range_s = [2.0, 4.0]
-        persistent_torque_duration_range_s = [2.0, 4.0]
+        persistent_force_interval_range_s = [5.0, 15.0]
+        persistent_torque_interval_range_s = [5.0, 15.0]
+        persistent_force_duration_range_s = [2.0, 6.0]
+        persistent_torque_duration_range_s = [2.0, 6.0]
         persistent_ramp_fraction = 0.25
-        persistent_force_min_n = 10.0
-        persistent_force_max_n = 10.0
-        persistent_torque_min_nm = 4.0
-        persistent_torque_max_nm = 4.0
+        persistent_force_min_n = 5.0
+        persistent_force_max_n = 5.0
+        persistent_torque_min_nm = 3.0
+        persistent_torque_max_nm = 3.0
 
     class noise(LeggedRobotCfg.noise):
         add_noise = True
@@ -299,7 +299,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         only_positive_rewards = True
         use_reward_curriculum = True
 
-        max_contact_force = 200.0
+        max_contact_force = 400.0
         contact_force_threshold = 5.0
 
         feet_edge_threshold = 0.05
@@ -385,10 +385,10 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             stumble          = -0.2
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
 
-            feet_near_edge = -0.1
-            edge_swing_clearance = -0.0
-            swing_foot_collision_edge = -0.0
-            feet_regulation = -0.01
+            feet_near_edge = -1.0
+            edge_swing_clearance = -2.0
+            swing_foot_collision_edge = -1.0
+            feet_regulation = -0.1
 
         class reward_curriculum:
             curr_reward_keys = ['orientation',
@@ -456,10 +456,10 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         # Shared by the context encoder and all auxiliary decoder heads.
         auxiliary_learning_rate = 0.0002
         # Weight beta on the latent KL term in the combined auxiliary loss.
-        vae_kld_weight = 1.0
-        vae_kl_initial_weight = 0.0001
-        vae_kl_warmup_start = 0
-        vae_kl_warmup_iterations = 0
+        vae_kld_weight = 0.1
+        vae_kl_initial_weight = 0.001
+        vae_kl_warmup_start = 100
+        vae_kl_warmup_iterations = 500
 
         privileged_loss_weight = 1.0
         explicit_loss_weight = 1.0

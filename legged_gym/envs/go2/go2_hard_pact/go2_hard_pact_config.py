@@ -13,7 +13,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         num_explicit_recon_obs = 11
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 20
+        num_obs_hist = 10
         grf_dim = 12
         whole_body_dim = 18
         debug = False

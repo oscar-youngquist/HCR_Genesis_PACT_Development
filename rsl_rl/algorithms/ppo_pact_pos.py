@@ -52,6 +52,7 @@ from rsl_rl.modules.hard_pact_physics import (
 from rsl_rl.storage import RolloutStoragePACTPos
 
 from .pc_grad import PCGrad
+from .hard_pact_boot_statistics import ValidBootStatistics
 from .hard_pact_latent_diagnostics import (
     LatentDiagnosticsAccumulator, deterministic_subsample,
     diagonal_gaussian_kl, diagonal_gaussian_log_prob, latent_ablation_metrics,
@@ -229,7 +230,7 @@ class PPO_PACT_Pos:
 
     def test_mode(self):
         self.actor_critic.test()
-    
+
     def train_mode(self):
         self.actor_critic.train()
 
@@ -262,7 +263,7 @@ class PPO_PACT_Pos:
         self.transition.critic_observations = critic_obs
         
         return all_actions
-    
+
     def process_env_step(self, rewards, dones, infos, grf_labels, obs_labels, explicit_labels):
         self.transition.rewards = rewards.clone()
         
@@ -404,6 +405,7 @@ class PPO_PACT_Pos:
         self.storage.compute_returns(last_values, self.gamma, self.lam)  
 
     def update(self, action_func, fb_func, dt, itr, default_pose, qvel_scale):
+        valid_boot_statistics = ValidBootStatistics() if self.is_hard_pact_pos else None
         self.current_vae_beta = self._vae_beta_for_iteration(itr)
         self._latent_diagnostics_due = (
             self.ppo_latent_diagnostics_enabled
@@ -517,6 +519,15 @@ class PPO_PACT_Pos:
 
             # Calculate the encoder update n-times
             for _ in range(self.num_enc_epochs):
+                if self.is_hard_pact_pos and not terminated_batch.reshape(-1).bool().any():
+                    # No supervised optimizer step: Adam momentum/decay must
+                    # not move parameters on an empty supervised phase.
+                    for name in ("total", "privileged_reconstruction", "kl", "explicit",
+                                 "grf", "wrench_active", "wrench_neutral",
+                                 "explicit_base_linear_velocity", "explicit_contact_probabilities",
+                                 "explicit_foot_clearance"):
+                        auxiliary_metric_sums.setdefault(name, obs_batch.new_zeros(()))
+                    continue
                 ###
                 #  Update encoder with frozen decoder
                 ###
@@ -630,28 +641,31 @@ class PPO_PACT_Pos:
                 torch.cuda.synchronize()
                 t0 = time.perf_counter()
 
-                # Log the decode targets and recons for computing boot-probability
-                with torch.no_grad():
-                    x = decode_targets * terminated_batch
-                    r = recons * terminated_batch
+                if self.is_hard_pact_pos:
+                    valid_boot_statistics.add(
+                        decode_targets, recons,
+                        torch.ones(decode_targets.shape[0], device=decode_targets.device, dtype=torch.bool),
+                    )
+                else:
+                    with torch.no_grad():
+                        x = decode_targets * terminated_batch
+                        r = recons * terminated_batch
+                        # flatten batch dimension only; keep feature dim
+                        # assumes x shape [B, D]
+                        if boot_sum_x is None:
+                            boot_sum_x = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
+                            boot_sum_x2 = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
 
-                    # flatten batch dimension only; keep feature dim
-                    # assumes x shape [B, D]
-                    if boot_sum_x is None:
-                        boot_sum_x = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
-                        boot_sum_x2 = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
+                        x64 = x.to(torch.float64)
+                        r64 = r.to(torch.float64)
 
-                    x64 = x.to(torch.float64)
-                    r64 = r.to(torch.float64)
+                        boot_sum_x += x64.sum(dim=0)
+                        boot_sum_x2 += (x64 * x64).sum(dim=0)
 
-                    boot_sum_x += x64.sum(dim=0)
-                    boot_sum_x2 += (x64 * x64).sum(dim=0)
+                        # scalar sum over all elements
+                        boot_sum_recon_sqerr += ((r64 - x64) ** 2).sum().item()
 
-                    # scalar sum over all elements
-                    boot_sum_recon_sqerr += ((r64 - x64) ** 2).sum().item()
-
-                    boot_count += x.shape[0]
-
+                        boot_count += x.shape[0]
 
                 timers["boot_stats"] += time.perf_counter() - t0
 
@@ -713,25 +727,28 @@ class PPO_PACT_Pos:
         # ratio = mean_pred_error / (actual_pred_error * self.boot_mult)
         # pboot = np.tanh(ratio)
 
-        # total number of scalar elements per sample vector
-        feat_dim = boot_sum_x.shape[0]
+        if self.is_hard_pact_pos:
+            valid_boot_statistics.update_boot(self)
+        else:
+            # total number of scalar elements per sample vector
+            feat_dim = boot_sum_x.shape[0]
 
-        mean_pred = boot_sum_x / boot_count                     # [D]
-        ex2 = boot_sum_x2 / boot_count                          # [D]
-        var = torch.clamp(ex2 - mean_pred**2, min=0.0)          # [D]
+            mean_pred = boot_sum_x / boot_count                     # [D]
+            ex2 = boot_sum_x2 / boot_count                          # [D]
+            var = torch.clamp(ex2 - mean_pred**2, min=0.0)          # [D]
 
-        mean_pred_error = var.mean().item()
+            mean_pred_error = var.mean().item()
 
-        actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
+            actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
 
-        ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
-        pboot = np.tanh(ratio)
+            ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
+            pboot = np.tanh(ratio)
 
-        timers["boot_prob"] += time.perf_counter() - t0
+            timers["boot_prob"] += time.perf_counter() - t0
 
-        # Use the (scaled) ratio of mean-prediction performance to actual prediction performance
-        #     to determine if encoder bootstrapping is performed.
-        self.use_boot = random.random() < pboot
+            # Use the (scaled) ratio of mean-prediction performance to actual prediction performance
+            #     to determine if encoder bootstrapping is performed.
+            self.use_boot = random.random() < pboot
         print("Use bootstrapped Encoder Dynamics: ", self.use_boot)
 
         self.storage.clear()
@@ -890,6 +907,29 @@ class PPO_PACT_Pos:
                           executed_torque_target=None, wrench_target=None,
                           wrench_active_mask=None):
         vae_loss = None
+        if self.is_hard_pact_pos:
+            rows = terminated_batch.reshape(-1).bool()
+            # Compact before the network forward as well as loss arithmetic;
+            # zero upstream gradients cannot sanitize NaN activations.
+            obs_hist_batch = obs_hist_batch[rows]
+            grf_target = grf_target.detach()[rows]
+            obs_target = obs_target.detach()[rows]
+            explicit_labels_batch = explicit_labels_batch.detach()[rows]
+            executed_torque_target = executed_torque_target.detach()[rows] if executed_torque_target is not None else None
+            wrench_target = wrench_target.detach()[rows] if wrench_target is not None else None
+            wrench_active_mask = wrench_active_mask[rows] if wrench_active_mask is not None else None
+            terminated_batch = terminated_batch[rows]
+            if obs_hist_batch.shape[0] == 0:
+                zero = obs_target.new_zeros(())
+                width = self.actor_critic.context_encoder.ce_out_mean.out_features + 11
+                return (zero, zero, zero, zero,
+                        obs_target.new_empty((0, width)), obs_target, obs_target,
+                        {name: zero for name in (
+                            "total", "privileged_reconstruction", "kl", "explicit",
+                            "grf", "wrench_active", "wrench_neutral",
+                            "explicit_base_linear_velocity", "explicit_contact_probabilities",
+                            "explicit_foot_clearance",
+                        )})
         
         mean_latent, logvar_latent, features = (
             self.actor_critic.context_encoder.encode_with_features(obs_hist_batch)
@@ -913,9 +953,18 @@ class PPO_PACT_Pos:
         decode_target = obs_target
         explicit_labels_batch.requires_grad = False
 
-        vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
-        recon_error    = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
-        kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
+        if self.is_hard_pact_pos:
+            # Inputs are compacted to valid rows. MSE divides by N_valid * D;
+            # KL sums latent coordinates, then divides by N_valid.
+            vel_pred_error = F.mse_loss(cenet_torso_velo, explicit_labels_batch)
+            recon_error = F.mse_loss(enc_update_obs_decode, decode_target)
+            kl_div = -0.5 * (
+                1 + logvar_latent - mean_latent.square() - logvar_latent.exp()
+            ).sum(dim=-1).mean()
+        else:
+            vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
+            recon_error = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
+            kl_div = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
         # kl_div         = -0.5*torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp())
         auxiliary_metrics = {
             "total": vel_pred_error + recon_error + self.current_vae_beta * kl_div,
