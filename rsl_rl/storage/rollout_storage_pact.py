@@ -56,6 +56,7 @@ class RolloutStoragePACT:
             # above and are deliberately not duplicated for replay.
             self.action_noise = None
             self.latent_noise = None
+            self.latent_boot_mask = None
 
             #  PINN stuff
             self.prev_obs      = None
@@ -157,6 +158,11 @@ class RolloutStoragePACT:
             ) if latent_noise_dim is not None else None
         )
         self.current_latent_noise_batch = None
+        self.latent_boot_mask = (
+            torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device, dtype=torch.bool)
+            if latent_noise_dim is not None else None
+        )
+        self.current_latent_boot_mask_batch = None
         self.max_action_delay = None
         self._action_replay_boundary_observations = None
         self._action_replay_boundary_history = None
@@ -214,8 +220,11 @@ class RolloutStoragePACT:
             self.action_noise[self.step].copy_(transition.action_noise)
         if self.latent_noise is not None:
             if transition.latent_noise is None:
-                raise RuntimeError("latent diagnostics require stored latent noise")
+                raise RuntimeError("HardPACT PPO replay requires stored latent noise")
             self.latent_noise[self.step].copy_(transition.latent_noise)
+            if transition.latent_boot_mask is None:
+                raise RuntimeError("HardPACT PPO replay requires rollout boot conditioning")
+            self.latent_boot_mask[self.step].copy_(transition.latent_boot_mask)
 
         #  - PINN stuff
         self.prev_obs[self.step].copy_(transition.prev_obs)
@@ -392,6 +401,10 @@ class RolloutStoragePACT:
                 self.current_batch_indices = batch_idx
                 self.current_latent_noise_batch = (
                     latent_noise[batch_idx] if latent_noise is not None else None
+                )
+                self.current_latent_boot_mask_batch = (
+                    self.latent_boot_mask.flatten(0, 1)[batch_idx]
+                    if self.latent_boot_mask is not None else None
                 )
 
                 # Baseline PPO stuff

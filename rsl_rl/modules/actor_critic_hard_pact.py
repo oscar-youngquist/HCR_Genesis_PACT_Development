@@ -529,7 +529,7 @@ class ActorCritic_HardPACT(nn.Module):
 
     # method used during simulated training
     @torch.jit.ignore
-    def act(self, obs, obs_history, latent_noise=None, **kwargs):
+    def act(self, obs, obs_history, latent_noise=None, latent_boot_mask=None, **kwargs):
         # Call the forward method of the context encoder
         mean, logvar, z, torso_velo = self.cenet_enc_forward(
             obs_history, latent_noise=latent_noise
@@ -539,6 +539,11 @@ class ActorCritic_HardPACT(nn.Module):
         # estimate is a sibling encoder branch and therefore does not depend
         # on that sampling noise.
         current_obs = torch.cat((obs, z, torso_velo), dim=-1)
+        if latent_boot_mask is not None:
+            context = torch.cat((z, torso_velo), dim=-1)
+            current_obs = torch.cat((
+                obs, torch.where(latent_boot_mask.bool(), context, torch.zeros_like(context))
+            ), dim=-1)
         
         # Upated the PPO training distribution
         self.update_distribution(current_obs)

@@ -56,7 +56,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         suppress_backend_warnings = True
 
         class grf:
-            prediction_scale_n = [250.0, 250.0, 250.0]
+            prediction_scale_n = [100.0, 100.0, 100.0]
             vertical_deadband_n = 3.0
             clip_min_n = -500.0
             clip_max_n = 500.0
@@ -172,7 +172,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         mass_com_progress_delta = 0.01
         disturbance_progress_delta = 0.01
         use_joint_dynamics_curriculum = True
-        use_mass_com_curriculum = True
+        use_mass_com_curriculum = False
         use_disturbance_curriculum = False
 
         persistent_disturbance = True
@@ -372,7 +372,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             vhip_angular_acc = -0.001         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
             
             # I developed these
-            front_foot_overreach = -10.0
+            front_foot_overreach = -10000.0
             rear_foot_overreach = -10.0
 
             # gait
@@ -385,10 +385,10 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             stumble          = -0.2
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
 
-            feet_near_edge = -1.0
-            edge_swing_clearance = -2.0
-            swing_foot_collision_edge = -1.0
-            feet_regulation = -0.1
+            feet_near_edge = -0.1
+            edge_swing_clearance = -0.0
+            swing_foot_collision_edge = -0.0
+            feet_regulation = -0.0
 
         class reward_curriculum:
             curr_reward_keys = ['orientation',
@@ -430,11 +430,11 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         init_noise_std = 1.0
 
         cenet_enc_layers = [256, 128]
-        cenet_enc_latent_dim = 16
+        cenet_enc_latent_dim = 32
         cenet_velo_dim = 11
         # Bounds runtime contact probabilities to [epsilon, 1-epsilon].
         contact_epsilon = 0.01
-        cenet_dec_input_dim = 16 + 11
+        cenet_dec_input_dim = 32 + 11
         cenet_dec_layers = [128, 256, 512]
         cenet_dec_out_dim = 133
 
@@ -456,24 +456,24 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         # Shared by the context encoder and all auxiliary decoder heads.
         auxiliary_learning_rate = 0.0002
         # Weight beta on the latent KL term in the combined auxiliary loss.
-        vae_kld_weight = 0.1
+        vae_kld_weight = 1.0
         vae_kl_initial_weight = 0.001
-        vae_kl_warmup_start = 100
-        vae_kl_warmup_iterations = 500
+        vae_kl_warmup_start = 0
+        vae_kl_warmup_iterations = 0
 
         privileged_loss_weight = 1.0
         explicit_loss_weight = 1.0
         # Multiplies contact BCE inside the collective explicit-estimator loss.
         contact_probability_loss_weight = 0.1
 
-        ppo_latent_diagnostics_enabled = False
+        ppo_latent_diagnostics_enabled = True
         ppo_latent_diagnostics_interval = 100
         ppo_latent_diagnostics_sample_count = 256
         latent_active_unit_variance_threshold = 1e-2
 
         grf_loss_weight = 1.0
         active_wrench_loss_weight = 1.0
-        neutral_wrench_loss_weight = 0.25
+        neutral_wrench_loss_weight = 1.0
 
         # Detailed physical GRF/base-wrench TensorBoard reductions. Decoder
         # losses remain logged when this is disabled.

@@ -71,10 +71,10 @@ def make_batch(batch=5):
 
 
 class HardPACTAuxiliaryTests(unittest.TestCase):
-    def test_optional_latent_storage_and_disabled_default(self):
+    def test_replay_latent_storage_is_independent_of_diagnostics(self):
         disabled = make_algorithm()
         disabled.init_storage(2, 2, [57], [95], [133], [57 * 20], [24], [11], [12], [18])
-        self.assertIsNone(disabled.storage.latent_noise)
+        self.assertEqual(tuple(disabled.storage.latent_noise.shape), (2, 2, 16))
         enabled = make_algorithm(ppo_latent_diagnostics_enabled=True)
         enabled.init_storage(2, 2, [57], [95], [133], [57 * 20], [24], [11], [12], [18])
         self.assertEqual(tuple(enabled.storage.latent_noise.shape), (2, 2, 16))

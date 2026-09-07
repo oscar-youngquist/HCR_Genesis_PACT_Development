@@ -87,10 +87,10 @@ def test_hard_pact_pos_contact_bce_has_independent_configurable_weight():
         _small_algorithm(contact_probability_loss_weight=-1.0)
 
 
-def test_hard_pact_pos_latent_diagnostics_storage_is_strictly_optional():
+def test_hard_pact_pos_replay_storage_is_independent_of_diagnostics():
     disabled = _small_algorithm()
     disabled.init_storage(2, 2, [57], [64], [133], [57 * 10], [12], [11], [12])
-    assert disabled.storage.latent_noise is None
+    assert disabled.storage.latent_noise.shape == (2, 2, 16)
     enabled = _small_algorithm(ppo_latent_diagnostics_enabled=True)
     enabled.init_storage(2, 2, [57], [64], [133], [57 * 10], [12], [11], [12])
     assert enabled.storage.latent_noise.shape == (2, 2, 16)

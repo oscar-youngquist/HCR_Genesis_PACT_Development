@@ -33,7 +33,12 @@ def policy_distribution_without_side_effects(
     )
     estimator = actor.explicit_estimator(features)
     explicit = estimator.explicit_for_policy
-    if use_boot:
+    if isinstance(use_boot, torch.Tensor):
+        context = torch.cat((latent, explicit), dim=-1)
+        conditioning = torch.cat((observation, torch.where(
+            use_boot.bool(), context, torch.zeros_like(context)
+        )), dim=-1)
+    elif use_boot:
         conditioning = torch.cat((observation, latent, explicit), dim=-1)
     else:
         conditioning = torch.cat((

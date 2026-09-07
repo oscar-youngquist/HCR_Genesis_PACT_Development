@@ -57,6 +57,7 @@ class RolloutStoragePACTPos:
             self.action_mean = None
             self.action_sigma = None
             self.latent_noise = None
+            self.latent_boot_mask = None
             
             self.hidden_states = None
         
@@ -117,6 +118,11 @@ class RolloutStoragePACTPos:
             ) if latent_noise_dim is not None else None
         )
         self.current_latent_noise_batch = None
+        self.latent_boot_mask = (
+            torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device, dtype=torch.bool)
+            if latent_noise_dim is not None else None
+        )
+        self.current_latent_boot_mask_batch = None
 
         #  Shared
         self.num_transitions_per_env = num_transitions_per_env
@@ -161,8 +167,11 @@ class RolloutStoragePACTPos:
         self.sigma[self.step].copy_(transition.action_sigma)
         if self.latent_noise is not None:
             if transition.latent_noise is None:
-                raise RuntimeError("latent diagnostics require stored latent noise")
+                raise RuntimeError("HardPACT PPO replay requires stored latent noise")
             self.latent_noise[self.step].copy_(transition.latent_noise)
+            if transition.latent_boot_mask is None:
+                raise RuntimeError("HardPACT PPO replay requires rollout boot conditioning")
+            self.latent_boot_mask[self.step].copy_(transition.latent_boot_mask)
 
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
@@ -257,6 +266,10 @@ class RolloutStoragePACTPos:
                 batch_idx = indices[start:end]
                 self.current_latent_noise_batch = (
                     latent_noise[batch_idx] if latent_noise is not None else None
+                )
+                self.current_latent_boot_mask_batch = (
+                    self.latent_boot_mask.flatten(0, 1)[batch_idx]
+                    if self.latent_boot_mask is not None else None
                 )
 
                 # Baseline PPO stuff

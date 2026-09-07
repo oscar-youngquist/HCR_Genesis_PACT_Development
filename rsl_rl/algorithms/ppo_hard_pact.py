@@ -66,7 +66,7 @@ from .hard_pact_bard import corrected_bard_inverse_dynamics_loss
 from .hard_pact_bard import differentiable_bard_rollout_loss
 from .hard_pact_latent_diagnostics import (
     LatentDiagnosticsAccumulator, deterministic_subsample,
-    diagonal_gaussian_kl, diagonal_gaussian_log_prob, latent_ablation_metrics,
+    diagonal_gaussian_kl, latent_ablation_metrics,
     policy_distribution_without_side_effects,
 )
 from .hard_pact_qp import (
@@ -627,7 +627,6 @@ class PPO_HardPACT:
                                               store_legacy_pinn_dynamics=False,
                                               latent_noise_dim=(
                                                   self.actor_critic.context_encoder.ce_out_mean.out_features
-                                                  if self.ppo_latent_diagnostics_enabled else None
                                               ))
 
     def test_mode(self):
@@ -669,17 +668,19 @@ class PPO_HardPACT:
         self.actor_critic.train()
 
     def act(self, obs, critic_obs, obs_history, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist):
-        latent_noise = None
-        if self.ppo_latent_diagnostics_enabled:
-            latent_noise = torch.randn(
-                obs.shape[0], self.actor_critic.context_encoder.ce_out_mean.out_features,
-                device=obs.device, dtype=obs.dtype,
-            )
+        # Replay data is required for PPO even when optional diagnostics are off.
+        latent_noise = torch.randn(
+            obs.shape[0], self.actor_critic.context_encoder.ce_out_mean.out_features,
+            device=obs.device, dtype=obs.dtype,
+        )
         if self.use_boot:
             all_actions = self.actor_critic.act(obs, obs_history, latent_noise=latent_noise).detach()
         else:
             all_actions = self.actor_critic.act_bootmask(obs, obs_history, latent_noise=latent_noise).detach()
         self.transition.latent_noise = latent_noise
+        self.transition.latent_boot_mask = torch.full(
+            (obs.shape[0], 1), self.use_boot, device=obs.device, dtype=torch.bool
+        )
 
         # Compute the actions and values
         #  - Position Control
@@ -1072,21 +1073,11 @@ class PPO_HardPACT:
             ppo_loss, surrogate_loss, value_loss, current_actions, policy_features = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
-                                                                                          advantages_batch, target_values_batch, returns_batch)
+                                                                                          advantages_batch, target_values_batch, returns_batch,
+                                                                                          latent_noise=self.storage.current_latent_noise_batch,
+                                                                                          latent_boot_mask=self.storage.current_latent_boot_mask_batch)
             if latent_diagnostics is not None:
-                with torch.no_grad():
-                    diagnostic_policy = policy_distribution_without_side_effects(
-                        self.actor_critic, obs_batch, obs_hist_batch,
-                        self.storage.current_latent_noise_batch, self.use_boot,
-                    )
-                    diagnostic_log_probability = diagonal_gaussian_log_prob(
-                        actions_batch, diagnostic_policy[0], diagnostic_policy[1]
-                    )
-                    latent_diagnostics.add_ppo(
-                        diagnostic_log_probability
-                        - old_actions_log_prob_batch.reshape(-1),
-                        self.clip_param,
-                    )
+                latent_diagnostics.add_ppo(self._ppo_log_ratio, self.clip_param)
 
             # Rebuild the same stochastic action path under the current
             # policy, then select the source chosen by the rollout's exact
@@ -1326,7 +1317,7 @@ class PPO_HardPACT:
                             self.actor_critic, obs_batch[diagnostic_indices],
                             obs_hist_batch[diagnostic_indices],
                             self.storage.current_latent_noise_batch[diagnostic_indices],
-                            self.use_boot,
+                            self.storage.current_latent_boot_mask_batch[diagnostic_indices],
                         )
                         pre_kl = diagonal_gaussian_kl(
                             old_mu_batch[diagnostic_indices], old_sigma_batch[diagnostic_indices],
@@ -1357,7 +1348,7 @@ class PPO_HardPACT:
                             self.actor_critic, obs_batch[diagnostic_indices],
                             obs_hist_batch[diagnostic_indices],
                             self.storage.current_latent_noise_batch[diagnostic_indices],
-                            self.use_boot,
+                            self.storage.current_latent_boot_mask_batch[diagnostic_indices],
                         )
                         pre_kl = diagonal_gaussian_kl(
                             old_mu_batch[diagnostic_indices], old_sigma_batch[diagnostic_indices],
@@ -1475,15 +1466,14 @@ class PPO_HardPACT:
                          old_sigma_batch, old_mu_batch,
                          old_actions_log_prob_batch,
                          advantages_batch, target_values_batch, returns_batch,
-                         latent_noise=None):
-        if self.use_boot:
-            self.actor_critic.act(
-                obs_batch, obs_hist_batch, latent_noise=latent_noise
-            )
-        else:
-            self.actor_critic.act_bootmask(
-                obs_batch, obs_hist_batch, latent_noise=latent_noise
-            )
+                         latent_noise=None, latent_boot_mask=None):
+        if latent_noise is None or latent_boot_mask is None:
+            raise RuntimeError("HardPACT PPO replay requires stored latent noise and boot mask")
+        # Freeze only the draw: current mu/logvar retain their encoder graph.
+        self.actor_critic.act(
+            obs_batch, obs_hist_batch, latent_noise=latent_noise.detach(),
+            latent_boot_mask=latent_boot_mask,
+        )
 
         # Pull out the current actions for use later
         current_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
@@ -1517,6 +1507,10 @@ class PPO_HardPACT:
 
         # PPO Surrogate loss
         ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
+        if self._latent_diagnostics_due:
+            self._ppo_log_ratio = (
+                actions_log_prob_batch - old_actions_log_prob_batch.reshape(-1)
+            ).detach()
         surrogate = -torch.squeeze(advantages_batch) * ratio
         surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
         surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
