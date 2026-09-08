@@ -379,7 +379,7 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         # clone supervision even though it has no feed-forward action half.
         self.feedback_torques = torques
         self.feedforward_torques = torch.zeros_like(torques)
-        # self._unweighted_torques = self._motor_strength * torques
+        self._unweighted_torques = self._motor_strength * torques
         if self.first_loop:
             self.first_loop = False
             self.first_loop_feedback = torques.clone()

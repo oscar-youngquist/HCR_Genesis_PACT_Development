@@ -64,10 +64,10 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         suppress_backend_warnings = True
 
         class grf:
-            prediction_scale_n = [250.0, 250.0, 250.0]
+            prediction_scale_n = [100.0, 100.0, 100.0]
             vertical_deadband_n = 3.0
-            clip_min_n = -250.0
-            clip_max_n = 250.0
+            clip_min_n = -500.0
+            clip_max_n = 500.0
             ema_alpha = 0.3
             contact_threshold_n = 5.0
             use_ema_grfs_buf = True
@@ -108,7 +108,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000
-        push_warmup = 2000
+        push_warmup = 5000
         num_jumps = 10
 
         randomize_friction = True
@@ -132,7 +132,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
 
         randomize_base_mass = True
         min_added_mass_max = 2.0
-        max_added_mass_max = 4.0
+        max_added_mass_max = 6.0
         added_mass_min = -1.0
 
         randomize_com_displacement = True
@@ -164,7 +164,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         joint_friction_range_end = [0.0, 0.2]
         joint_friction_range_start = [0.0, 0.05]
 
-        randomize_joint_stiffness = True
+        randomize_joint_stiffness = False
         joint_stiffness_range_end = [0.0, 0.02]
         joint_stiffness_range_start = [0.0, 0.005]
 
@@ -190,8 +190,8 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         persistent_torque_probability = 0.3
         persistent_force_interval_range_s = [5.0, 15.0]
         persistent_torque_interval_range_s = [5.0, 15.0]
-        persistent_force_duration_range_s = [2.0, 6.0]
-        persistent_torque_duration_range_s = [2.0, 6.0]
+        persistent_force_duration_range_s = [1.0, 5.0]
+        persistent_torque_duration_range_s = [1.0, 5.0]
         persistent_ramp_fraction = 0.25
         persistent_force_min_n = 10.0
         persistent_force_max_n = 60.0
@@ -253,7 +253,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
 
     class control(LeggedRobotCfg.control):
         stiffness = {'joint': 30.0}
-        damping = {'joint': 0.6}
+        damping = {'joint': 0.75}
         action_scale = 0.25
         torque_scale = 10.0
         dt = 0.02
@@ -285,20 +285,24 @@ class GO2HardPACTCfg(LeggedRobotCfg):
 
         foot_clearance_target = 0.09
         foot_height_offset = 0.022
+
         overreach_x_max = 0.28
         front_foot_x_nominal = 0.20
+
         foot_x_margin = 0.10
         rear_foot_x_nominal = -0.25
         rear_foot_x_margin = 0.08
         support_polygon_sigma = 0.01
+
         foot_clearance_tracking_sigma = 0.01
 
         only_positive_rewards = True
         use_reward_curriculum = True
 
-        max_contact_force = 200.0
+        max_contact_force = 400.0
         contact_force_threshold = 5.0
         feet_edge_threshold = 0.05
+
         edge_clearance_lateral_cells = (-1, 0, 1)
         edge_clearance_forward_cells = (0, 1, 2)
         edge_swing_clearance_margin = 0.04
@@ -349,8 +353,8 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             pos_action_rate = -0.001
             pos_action_smoothness = -0.001
 
-            tau_action_rate = -0.001
-            tau_action_smoothness = -0.001
+            tau_action_rate = -0.004
+            tau_action_smoothness = -0.004
 
             feedforward_torques_scaled = -1e-05
             feedback_torques = -2e-05
@@ -373,10 +377,10 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             foot_slip = -0.01
             stumble = -1.0
             feet_contact_forces = -0.01
-            feet_near_edge = -0.5
-            edge_swing_clearance = -0.5
-            swing_foot_collision_edge = -1.0
-            feet_regulation = -0.1
+            feet_near_edge = -0.1
+            edge_swing_clearance = -0.0
+            swing_foot_collision_edge = -0.0
+            feet_regulation = -0.0
 
         class reward_curriculum:
             curr_reward_keys = ['ang_vel_xy', 
@@ -393,10 +397,10 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                   'hip_pos': [-0.2, -0.4], 
                                   'pos_action_rate': [-0.001, -0.01], 
                                   'pos_action_smoothness': [-0.001, -0.01], 
-                                  'tau_action_rate': [-0.002, -0.02], 
-                                  'tau_action_smoothness': [-0.002, -0.02]}
+                                  'tau_action_rate': [-0.004, -0.04], 
+                                  'tau_action_smoothness': [-0.004, -0.04]}
             curr_steps = 1000
-            warmup_steps = 4000
+            warmup_steps = 6000
 
 
     class commands(LeggedRobotCfg.commands):
@@ -424,19 +428,26 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
     class policy(LeggedRobotCfgPPO.policy):
         activation = 'elu'
         init_noise_std = 1.0
+
         cenet_enc_layers = [256, 128]
         cenet_enc_latent_dim = 16
         cenet_velo_dim = 11
+
         # Bounds runtime contact probabilities to [epsilon, 1-epsilon].
         contact_epsilon = 0.01
-        cenet_dec_input_dim = 16 + 11
+        cenet_dec_input_dim = cenet_enc_latent_dim + 11
         cenet_dec_layers = [128, 256, 512]
+
         cenet_dec_out_dim = 276  # 133 retained features + 143 terrain heights
+
         actor_layers = [512, 256, 128]
         critic_layers = [1024, 256, 128]
-        pinn_loss_weight = 0.01
+
+        pinn_loss_weight = -1.0
         pinn_warmup = 10
         pinn_init_steps = 0
+
+        # pretrained_path = '../../rsl_rl/modules/pretrained_checkpoints/go2_hard_pact/hard_pact_start_model_5000.pt'
         pretrained_path = ''
         cenet_explicit_layers = [128, 128]
         grf_decoder_layers = [128, 128]
@@ -465,18 +476,21 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         auxiliary_learning_rate = 0.0002
         # Weight beta on the latent KL term in the combined auxiliary loss.
-        vae_kld_weight = 2.0
+        vae_kld_weight = 1.0
+
         privileged_loss_weight = 1.0
         explicit_loss_weight = 1.0
+
         # Multiplies contact BCE inside the collective explicit-estimator loss.
         contact_probability_loss_weight = 1.0
-        ppo_latent_diagnostics_enabled = False
+        ppo_latent_diagnostics_enabled = True
         ppo_latent_diagnostics_interval = 100
         ppo_latent_diagnostics_sample_count = 256
         latent_active_unit_variance_threshold = 1e-2
         grf_loss_weight = 1.0
         active_wrench_loss_weight = 1.0
-        neutral_wrench_loss_weight = 0.25
+        neutral_wrench_loss_weight = 1.0
+
         # Detailed physical GRF/base-wrench TensorBoard reductions. Decoder
         # losses remain logged when this is disabled.
         force_decoder_diagnostics_enabled = True
@@ -490,16 +504,16 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         bard_inverse_enabled = True
         bard_rollout_enabled = True
 
-        lambda_inverse = 0.01
-        lambda_rollout = 0.01
-        lambda_projection = 0.001
+        lambda_inverse = 1.00
+        lambda_rollout = 1.00
+        lambda_projection = 0.01
 
         profile_bard_timing = False
         console_debug = False
 
-        pcgrad_diagnostics_enabled = False
+        pcgrad_diagnostics_enabled = True
         pcgrad_diagnostics_start_iteration = 0
-        pcgrad_diagnostics_interval = 50
+        pcgrad_diagnostics_interval = 100
         cache_rollout_mechanics = True
 
         ppo_qp_sampling = 'disjoint_epoch_partition'
@@ -584,14 +598,15 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         policy_class_name = 'ActorCritic_HardPACT'
         algorithm_class_name = 'PPO_HardPACT'
         num_steps_per_env = 24
-        max_iterations = 8000
+        max_iterations = 10000
         grf_dim = 12
-        run_name = 'pact_100hz_spec_smartcurr_stricterer'
+        run_name = 'hardpact_50hz_noboot'
         experiment_name = 'go2_pact_rough'
         save_interval = 500
         load_run = 'Aug01_18-27-22_pact_100hz_spec_smartcurr_stricterer'
         checkpoint = -1
         resume = False
+
         exp_data_path = 'exp_data/corl_tests_01/pact_stairs_12-16kg.csv'
         console_iteration = True
         console_model_summary = False
