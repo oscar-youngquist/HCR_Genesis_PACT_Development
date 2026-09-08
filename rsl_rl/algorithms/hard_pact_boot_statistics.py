@@ -43,3 +43,4 @@ class ValidBootStatistics:
         variance, mse = errors
         probability = float(torch.tanh(variance / (mse * algorithm.boot_mult + 1e-8)))
         algorithm.use_boot = random.random() < probability
+        algorithm.use_boot = True

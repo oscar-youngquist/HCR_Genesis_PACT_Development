@@ -288,6 +288,8 @@ class OnPolicyRunnerPACT:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
+            if self.is_hard_pact:
+                self.env._terrain_curriculum_iteration = it
             if self.is_hard_pact and self.alg.profile_bard_timing and torch.cuda.is_available():
                 torch.cuda.synchronize(self.device)
             start = time.time()

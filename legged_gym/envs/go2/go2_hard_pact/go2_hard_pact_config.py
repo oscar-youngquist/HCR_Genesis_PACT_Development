@@ -37,6 +37,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         restitution = 0.0
         border_size = 20.0
         curriculum = True
+        curriculum_upward_delay_iterations = 250  # Absolute PPO iteration; 0 disables delay.
         obtain_terrain_info_around_feet = True
         measure_heights = True
         measured_points_x = [-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
@@ -430,7 +431,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         contact_epsilon = 0.01
         cenet_dec_input_dim = 16 + 11
         cenet_dec_layers = [128, 256, 512]
-        cenet_dec_out_dim = 133
+        cenet_dec_out_dim = 276  # 133 retained features + 143 terrain heights
         actor_layers = [512, 256, 128]
         critic_layers = [1024, 256, 128]
         pinn_loss_weight = 0.01

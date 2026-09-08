@@ -31,6 +31,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         restitution = 0.0
         border_size = 20.0
         curriculum = True
+        curriculum_upward_delay_iterations = 250  # Absolute PPO iteration; 0 disables delay.
         obtain_terrain_info_around_feet = True
         measure_heights = True
         measured_points_x = [-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
@@ -97,7 +98,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         clip_actions = 50.0
 
     class domain_rand(LeggedRobotCfg.domain_rand):
-        use_domainrand_curriculum = True
+        use_domainrand_curriculum = False
         com_rand_z_positive = False
         num_push_steps = 500
         push_warmup = 3000
@@ -159,7 +160,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         joint_stiffness_range_start = [0.0, 0.0]
 
         randomize_joint_damping = True
-        joint_damping_range_end = [0.25, 0.5]
+        joint_damping_range_end = [0.3, 0.4]
         joint_damping_range_start = [0.3, 0.4]
 
         best_reward_window = 200
@@ -183,10 +184,10 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         persistent_force_duration_range_s = [2.0, 6.0]
         persistent_torque_duration_range_s = [2.0, 6.0]
         persistent_ramp_fraction = 0.25
-        persistent_force_min_n = 5.0
-        persistent_force_max_n = 5.0
-        persistent_torque_min_nm = 3.0
-        persistent_torque_max_nm = 3.0
+        persistent_force_min_n = 7.0
+        persistent_force_max_n = 7.0
+        persistent_torque_min_nm = 4.0
+        persistent_torque_max_nm = 4.0
 
     class noise(LeggedRobotCfg.noise):
         add_noise = True
@@ -255,7 +256,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
 
     class control(LeggedRobotCfg.control):
         stiffness = {'joint': 30.0}
-        damping = {'joint': 0.6}
+        damping = {'joint': 0.75}
         action_scale = 0.25
         torque_scale = 10.0
         dt = 0.02
@@ -324,7 +325,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             dof_close_to_default  = -0.01
             torque_limits         = -0.0001
 
-            alive_bonus           = 0.001
+            alive_bonus           = 0.01
 
             stand_still_contact = -0.5
             dof_pos_stand_still = -0.1
@@ -346,7 +347,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             dof_acc          = -2.0e-7
             joint_power      = -2.0e-5
             joint_power_dist = -1.0e-5
-            torques          = -1.0e-5     # don't need to use this when we already have joint power above...
+            torques          = 0.0     # don't need to use this when we already have joint power above...
 
             # Zero out some values that are used in the individual reward classes below
             action_rate       = -0.01
@@ -372,7 +373,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             vhip_angular_acc = -0.001         # Use a Variable-Height Inverted Pendulum (VHIP) model to penalize moving torwards and unstable torso orientation w.r.t. ground contact
             
             # I developed these
-            front_foot_overreach = -10000.0
+            front_foot_overreach = -100.0
             rear_foot_overreach = -10.0
 
             # gait
@@ -430,13 +431,13 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         init_noise_std = 1.0
 
         cenet_enc_layers = [256, 128]
-        cenet_enc_latent_dim = 32
+        cenet_enc_latent_dim = 16
         cenet_velo_dim = 11
         # Bounds runtime contact probabilities to [epsilon, 1-epsilon].
         contact_epsilon = 0.01
-        cenet_dec_input_dim = 32 + 11
+        cenet_dec_input_dim = cenet_enc_latent_dim + 11
         cenet_dec_layers = [128, 256, 512]
-        cenet_dec_out_dim = 133
+        cenet_dec_out_dim = 276  # 133 retained features + 143 terrain heights
 
         actor_layers = [512, 256, 128]
         critic_layers = [1024, 256, 128]

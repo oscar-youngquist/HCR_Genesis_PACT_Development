@@ -281,6 +281,8 @@ class OnPolicyRunnerPACTPos:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
+            if self.is_hard_pact_pos:
+                self.env._terrain_curriculum_iteration = it
             start = time.time()
             # Rollout
             with torch.inference_mode():

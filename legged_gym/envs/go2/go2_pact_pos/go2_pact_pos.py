@@ -434,6 +434,9 @@ class Go2PACTPos(BaseTask):
         move_down = (distance < torch.norm(
             self.commands[env_ids, :2], dim=1)*self.max_episode_length_s*0.5) * ~move_up
         
+        # Optional HardPACT promotion gate, after unchanged demotion logic.
+        if hasattr(self, "_filter_terrain_move_up"):
+            move_up = self._filter_terrain_move_up(move_up)
         self.simulator.update_terrain_curriculum(env_ids, move_up, move_down)
     
     def _reset_dofs(self, env_ids):

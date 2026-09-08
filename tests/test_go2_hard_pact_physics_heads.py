@@ -173,7 +173,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
                 self.assertEqual(train.policy.grf_decoder_layers, [128, 128])
                 self.assertEqual(train.policy.wrench_decoder_layers, [128, 128])
                 self.assertEqual(train.policy.cenet_dec_input_dim, 27)
-                self.assertEqual(train.policy.cenet_dec_out_dim, 133)
+                self.assertEqual(train.policy.cenet_dec_out_dim, 276)
                 expected_contact_weight = (
                     1.0 if env_cls is GO2HardPACTCfg else 0.1
                 )
@@ -191,9 +191,9 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
                     env.env.num_privileged_obs,
                     GO2PACTCfg.env.num_privileged_obs + DISTURBANCE_CRITIC_DIM,
                 )
-        self.assertEqual(RECONSTRUCTION_DIM, 133)
+        self.assertEqual(RECONSTRUCTION_DIM, 276)
         self.assertTrue(set(range(61, 73)).isdisjoint(RECONSTRUCTION_INDICES))
-        self.assertTrue(set(range(145, 288)).isdisjoint(RECONSTRUCTION_INDICES))
+        self.assertEqual(RECONSTRUCTION_INDICES[-143:], tuple(range(145, 288)))
 
     def test_head_shapes_stop_gradient_and_preserved_gradients(self):
         gains = calculate_physics_head_gains(GO2HardPACTCfg())
@@ -854,7 +854,7 @@ class DeploymentContractTests(unittest.TestCase):
                 self.assertEqual(stream.read(), first_text)
             loaded = json.loads(first_text)
 
-        self.assertEqual(loaded["schema_version"], 6)
+        self.assertEqual(loaded["schema_version"], 7)
         self.assertEqual(loaded["explicit_estimator"]["dimension"], 11)
         self.assertEqual(
             loaded["explicit_estimator"]["input"],

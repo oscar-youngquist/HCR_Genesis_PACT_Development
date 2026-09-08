@@ -8,7 +8,10 @@ import os
 
 FOOT_ORDER = ("FR", "FL", "RR", "RL")
 WRENCH_ORDER = ("Fx", "Fy", "Fz", "Tx", "Ty", "Tz")
-RECONSTRUCTION_INDICES = tuple(range(61)) + tuple(range(73, 145))
+# Preserve the legacy critic ordering and height-observation scaling. Only
+# duplicate GRFs (61:73) belong exclusively to their dedicated decoder;
+# the terrain height patch (145:288) is reconstructed here again.
+RECONSTRUCTION_INDICES = tuple(range(61)) + tuple(range(73, 288))
 RECONSTRUCTION_DIM = len(RECONSTRUCTION_INDICES)
 
 
@@ -69,7 +72,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
     latent_dim = actor.context_encoder.ce_out_mean.out_features
     explicit_dim = actor.explicit_estimator.network[-1].out_features
     contract = {
-        "schema_version": 6,
+        "schema_version": 7,
         "explicit_estimator": {
             "dimension": 11,
             "input": "shared_history_encoder_features",
@@ -184,7 +187,13 @@ def build_deployment_contract(cfg, actor, gain_spec):
         },
         "reconstruction_target": {
             "dimension": RECONSTRUCTION_DIM,
-            "excluded": ["grf_12", "terrain_heights_143"],
+            "excluded": ["grf_12"],
+            "terrain_heights": {
+                "dimension": 143,
+                "critic_slice": [145, 288],
+                "target_slice": [133, 276],
+                "scaling": "unchanged critic height_measurements observation scale",
+            },
             "critic_input_unchanged": True,
         },
         "conversion": {

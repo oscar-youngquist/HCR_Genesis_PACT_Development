@@ -39,6 +39,20 @@ class Go2HardPACT(Go2PACT):
 
     _legacy_task_class = Go2PACT
 
+    def _filter_terrain_move_up(self, move_up):
+        """Delay promotions only; retain the legacy demotion decision.
+
+        The runner supplies the absolute iteration before rollout collection,
+        including after resume. Initial resets default to iteration zero.
+        This is deliberately independent of domain-randomization scheduling.
+        """
+        delay = int(self.cfg.terrain.curriculum_upward_delay_iterations)
+        if delay < 0:
+            raise ValueError("curriculum_upward_delay_iterations must be nonnegative")
+        if getattr(self, "_terrain_curriculum_iteration", 0) < delay:
+            return torch.zeros_like(move_up)
+        return move_up
+
     def _reward_torque_cancellation(self):
         r"""Penalize opposing effective PD/feed-forward joint torques.
 
