@@ -193,10 +193,10 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         persistent_force_duration_range_s = [1.0, 5.0]
         persistent_torque_duration_range_s = [1.0, 5.0]
         persistent_ramp_fraction = 0.25
-        persistent_force_min_n = 10.0
-        persistent_force_max_n = 60.0
-        persistent_torque_min_nm = 3.0
-        persistent_torque_max_nm = 12.0
+        persistent_force_min_n = 5.0
+        persistent_force_max_n = 40.0
+        persistent_torque_min_nm = 2.0
+        persistent_torque_max_nm = 10.0
 
     class noise(LeggedRobotCfg.noise):
         add_noise = True
@@ -530,7 +530,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
                         # at absolute iteration N. Zero keeps current behavior.
-                        'warmup_iterations': 0,
+                        'warmup_iterations': 2000,
                         'exception_capture_enabled': True,
                         'exception_capture_limit': 1,
                         'exception_capture_dir': '/tmp/hard_pact_qp_failures',
