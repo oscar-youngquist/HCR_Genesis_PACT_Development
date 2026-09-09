@@ -15,6 +15,29 @@ RECONSTRUCTION_INDICES = tuple(range(61)) + tuple(range(73, 288))
 RECONSTRUCTION_DIM = len(RECONSTRUCTION_INDICES)
 
 
+def qp_update_contract(mode, decimation, warmup_iterations=0):
+    """Execution metadata using the same schedule and projection as rollout."""
+    from rsl_rl.algorithms.hard_pact_qp import qp_substep_anchors
+
+    return {
+        "mode": mode,
+        "training_warmup_iterations": warmup_iterations,
+        "physics_substep_anchors": list(qp_substep_anchors(mode, decimation)),
+        "prediction_horizon": "one physics/PD timestep (not the hold duration)",
+        "correction_hold": "delta_tau = tau_safe - tau_nom at each anchor; hold until next anchor or policy interval",
+        "nominal_torque": "recompute PD/feedforward every physics substep with held policy actions",
+        "held_predictions": "GRF, wrench, contact, latent, explicit at policy rate in held-correction modes",
+        "held_execution_helper": "rsl_rl.algorithms.hard_pact_qp.held_correction_torque",
+        "held_execution_sanitize": mode == "single_anchor_held_correction",
+        "held_execution": "clamp(tau_nom + delta_tau, max(-tau_limit, tau_previous - rate*dt_pd), min(tau_limit, tau_previous + rate*dt_pd))",
+        "previous_torque": "previous executed command; zero on reset",
+        "correction_reset": "clear on reset, each policy interval, and mode/warmup boundaries",
+        "held_commands_are_freshly_qp_certified": False,
+        "ppo_anchor_selection": "fixed_zero_no_rng" if mode == "single_anchor_held_correction" else "balanced_uniform",
+        "ppo_projection_loss_multiplier": 1,
+    }
+
+
 @dataclass(frozen=True)
 class PhysicsGainSpec:
     grf_scale_n: tuple[float, ...]

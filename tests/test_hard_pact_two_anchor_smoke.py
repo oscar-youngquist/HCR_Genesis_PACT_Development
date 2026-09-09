@@ -3,12 +3,18 @@
 from types import SimpleNamespace
 
 import torch
+import pytest
 
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
 from rsl_rl.algorithms.hard_pact_qp import projection_loss
 
 
-def test_two_anchor_rollout_reset_and_ppo_backward():
+@pytest.mark.parametrize("mode,anchors", [
+    ("every_substep", (0, 1, 2, 3)),
+    ("two_anchor_held_correction", (0, 2)),
+    ("single_anchor_held_correction", (0,)),
+])
+def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors):
     batch = 8
     physics_dt = 0.01
     torque_rate = 10.0
@@ -67,7 +73,7 @@ def test_two_anchor_rollout_reset_and_ppo_backward():
             self.clear_calls = 0
             self.torque_limits = torch.full((12,), 2.0)
             self.cfg = SimpleNamespace(
-                qp_update_mode="two_anchor_held_correction",
+                qp_update_mode=mode,
                 torque_rate_limit_nm_s=torque_rate,
                 elastic_recovery_enabled=False,
                 slack_scale_m_s2=1.0,
@@ -155,11 +161,13 @@ def test_two_anchor_rollout_reset_and_ppo_backward():
 
     # One episode reset must clear both the torque-rate center and held state.
     task._begin_qp_interval()
-    task._hard_pact_held_correction.fill_(1.0)
+    if mode != "every_substep":
+        task._hard_pact_held_correction.fill_(1.0)
     task.reset_idx(torch.arange(batch))
     assert qp.clear_calls == 1
     assert torch.count_nonzero(task._hard_pact_previous_substep_torque) == 0
-    assert torch.count_nonzero(task._hard_pact_held_correction) == 0
+    if mode != "every_substep":
+        assert torch.count_nonzero(task._hard_pact_held_correction) == 0
     task._hard_pact_q_d.fill_(1.0)
 
     quaternion = torch.tensor([[0.0, 0.0, 0.0, 1.0]]).expand(batch, -1)
@@ -167,24 +175,60 @@ def test_two_anchor_rollout_reset_and_ppo_backward():
     previous = torch.zeros(batch, 12)
     control_steps = 3
     for control_step in range(control_steps):
+        rng_state = torch.random.get_rng_state()
         task._begin_qp_interval()
+        if mode == "single_anchor_held_correction":
+            assert torch.equal(rng_state, torch.random.get_rng_state())
         sampled = task._qp_sampled_substep_index.long()
-        assert set(sampled.tolist()) == {0, 2}
-        assert torch.bincount(sampled // 2, minlength=2).tolist() == [4, 4]
+        assert set(sampled.tolist()) == set(anchors)
+        assert all(int((sampled == k).sum()) == batch // len(anchors) for k in anchors)
         for substep in range(4):
             task.simulator._robot.q.fill_(0.05 * (4 * control_step + substep))
             task.simulator._robot.v.fill_(0.01 * substep)
             task._solve_hard_pact_rollout_qp_substep(quaternion, mass_wrench)
             executed = task.simulator._torques
+            if substep not in anchors:
+                fresh_nominal = task._get_pinn_feedback(
+                    task._hard_pact_q_d, task.simulator._robot.q,
+                    task.simulator._robot.v,
+                )
+                expected = torch.maximum(torch.minimum(
+                    fresh_nominal + task._hard_pact_held_correction,
+                    torch.minimum(qp.torque_limits, previous + torque_rate * physics_dt),
+                ), torch.maximum(-qp.torque_limits, previous - torque_rate * physics_dt))
+                torch.testing.assert_close(executed, expected, rtol=0, atol=0)
             assert torch.isfinite(executed).all()
             assert (executed.abs() <= qp.torque_limits + 1.0e-7).all()
             assert ((executed - previous).abs() <= torque_rate * physics_dt + 1.0e-7).all()
             previous = executed.clone()
+            if substep == 0 and mode == "single_anchor_held_correction":
+                anchor_sample = {k: v.clone() for k, v in task._qp_sampled_transition.items()}
+        if mode == "single_anchor_held_correction":
+            # Held substeps cannot overwrite anchor mechanics, previous torque,
+            # proximal reference, or primal replay values.
+            for key, value in anchor_sample.items():
+                torch.testing.assert_close(task._qp_sampled_transition[key], value, rtol=0, atol=0)
+            replay = qp.solve(
+                differentiable=True,
+                tau_nom=anchor_sample["sampled_qp_rollout_nominal_torque"],
+                force_pred_world=anchor_sample["sampled_qp_rollout_grf_world"].reshape(batch, 4, 3),
+                wrench_pred_world=anchor_sample["sampled_qp_rollout_applied_wrench_world"],
+                contact_probability=anchor_sample["sampled_qp_rollout_contact_probability"],
+                previous_torque=anchor_sample["sampled_qp_previous_torque"],
+            )
+            torch.testing.assert_close(replay.tau_safe, anchor_sample["sampled_qp_safe_torque"], rtol=0, atol=0)
+            assert (task._qp_interval_stage_counts.sum(-1) == 1).all()
+        else:
+            assert (task._qp_interval_stage_counts.sum(-1) == 4).all()
+        torch.testing.assert_close(
+            task._qp_interval_safe_sum,
+            torch.stack(task.simulator.history[-4:]).sum(0),
+        )
 
     # Exactly two mechanics/QP refreshes and one GRF prediction per interval.
-    assert qp.calls == 2 * control_steps
-    assert dynamics.calls == 2 * control_steps
-    assert heads.grf_calls == control_steps
+    assert qp.calls == len(anchors) * control_steps
+    assert dynamics.calls == len(anchors) * control_steps
+    assert heads.grf_calls == (4 if mode == "every_substep" else 1) * control_steps
     assert len(task.simulator.history) == 4 * control_steps
 
     # One selected-QP PPO-style backward: all learned inputs and their shared
@@ -224,3 +268,21 @@ def test_two_anchor_rollout_reset_and_ppo_backward():
         assert parameter.grad is not None
         assert torch.isfinite(parameter.grad).all()
         assert parameter.grad.abs().sum() > 0
+
+    if mode == "single_anchor_held_correction":
+        task._hard_pact_held_correction.fill_(.25)
+        task.reset_idx(torch.tensor([0, 3]))
+        assert (task._hard_pact_held_correction[[0, 3]] == 0).all()
+        assert (task._hard_pact_held_correction[[1, 2, 4, 5, 6, 7]] == .25).all()
+        task.hard_pact_features = SimpleNamespace(execution_qp=True)
+        with torch.inference_mode():
+            task._hard_pact_held_correction = torch.ones(batch, 12)
+        task.set_hard_pact_qp_enabled(False)
+        assert not task._hard_pact_held_correction.any()
+        task.set_hard_pact_qp_enabled(True)
+        task._begin_qp_interval()
+        for next_mode in ("every_substep", "two_anchor_held_correction", mode):
+            task._hard_pact_held_correction.fill_(.5)
+            qp.cfg.qp_update_mode = next_mode
+            task._begin_qp_interval()
+            assert not task._hard_pact_held_correction.any()

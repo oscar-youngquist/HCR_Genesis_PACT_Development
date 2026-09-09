@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import torch
+import pytest
 
 from rsl_rl.algorithms.ppo_hard_pact import (
     PPO_HardPACT,
@@ -11,11 +12,14 @@ from rsl_rl.algorithms.ppo_hard_pact import (
 from rsl_rl.hard_pact_ablations import resolve_hard_pact_features
 
 
-def test_disjoint_anchor_stratified_qp_sampling_and_zero_pinn_weight():
+@pytest.mark.parametrize("single_anchor", [False, True])
+def test_disjoint_anchor_stratified_qp_sampling_and_zero_pinn_weight(single_anchor):
     rows = 20
     epochs = 5
     rollout_indices = torch.arange(rows)
     anchors = torch.tensor([0, 2] * (rows // 2))
+    if single_anchor:
+        anchors.zero_()
 
     masks = [
         disjoint_qp_epoch_mask(
@@ -35,8 +39,8 @@ def test_disjoint_anchor_stratified_qp_sampling_and_zero_pinn_weight():
     assert torch.equal(coverage, torch.ones_like(coverage))
     for mask in masks:
         assert int(mask.sum()) == 4
-        assert int((anchors[mask] == 0).sum()) == 2
-        assert int((anchors[mask] == 2).sum()) == 2
+        assert int((anchors[mask] == 0).sum()) == (4 if single_anchor else 2)
+        assert int((anchors[mask] == 2).sum()) == (0 if single_anchor else 2)
     # Stateless sampling is exactly reproducible at resume iteration 11.
     repeated = disjoint_qp_epoch_mask(
         rollout_indices,

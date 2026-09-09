@@ -51,6 +51,44 @@ SLACK = slice(42, 54)    # x[42:54] = contact-acceleration slack, [m/s^2].
 NUM_VARIABLES = 54
 
 
+def qp_substep_anchors(mode, decimation):
+    """Shared rollout/deployment schedule; QP horizons remain one physics dt."""
+    if decimation < 1:
+        raise ValueError("QP decimation must be positive")
+    if mode == "single_anchor_held_correction":
+        return (0,)
+    if mode == "two_anchor_held_correction":
+        if decimation != 4:
+            raise ValueError("two_anchor_held_correction requires control decimation=4")
+        return (0, 2)
+    if mode == "every_substep":
+        return tuple(range(decimation))
+    raise ValueError(f"Unknown qp_update_mode: {mode}")
+
+
+def project_torque_interval(torque, lower, upper):
+    """Exact actuator/rate box projection, retaining ordinary clamp gradients."""
+    return torch.maximum(torch.minimum(torque, upper), lower)
+
+
+def held_correction_torque(tau_nom, delta_tau, previous_torque,
+                           torque_limit, torque_rate_limit, dt, *, sanitize=False):
+    """Shared execution/deployment: fresh PD plus held correction [Nm].
+
+    This is actuator/rate projection, NOT a fresh dynamics certification.
+    ``previous_torque`` is the executed command, dt the physics/PD timestep.
+    Optional sanitization matches analytic anchor recovery; the default
+    retains the existing two-anchor path exactly, including its arithmetic.
+    """
+    rate = torque_rate_limit * dt
+    lower = torch.maximum(-torque_limit, previous_torque - rate)
+    upper = torch.minimum(torque_limit, previous_torque + rate)
+    requested = tau_nom + delta_tau
+    if sanitize:
+        requested = requested.nan_to_num()
+    return project_torque_interval(requested, lower, upper)
+
+
 @dataclass(frozen=True)
 class HardPACTQPConfig:
     """Numerics and physical weights exposed by the HardPACT config.
@@ -417,11 +455,11 @@ class HardPACTDifferentiableQP:
         if config.cupiqp_mode not in ("dense", "sparse"):
             raise ValueError("cupiqp_mode must be dense or sparse")
         if config.qp_update_mode not in (
-            "every_substep", "two_anchor_held_correction"
+            "every_substep", "two_anchor_held_correction", "single_anchor_held_correction"
         ):
             raise ValueError(
                 "qp_update_mode must be every_substep or "
-                "two_anchor_held_correction"
+                "two_anchor_held_correction or single_anchor_held_correction"
             )
         for policy in (
             config.rollout_duality_gap_policy, config.ppo_duality_gap_policy,
@@ -1941,9 +1979,7 @@ class HardPACTDifferentiableQP:
             project_lower = torch.where(torque_ok[:, None], lower, repaired_lower)
             project_upper = torch.where(torque_ok[:, None], upper, repaired_upper)
             safe_nominal = chunk["tau_nom"].nan_to_num()
-            projected = torch.maximum(
-                torch.minimum(safe_nominal, project_upper), project_lower
-            )
+            projected = project_torque_interval(safe_nominal, project_lower, project_upper)
             fallback = torch.zeros_like(chosen)
             fallback[:, TORQUE] = projected
             chosen = torch.where(differentiated_mask[:, None], chosen, fallback)
@@ -1956,9 +1992,7 @@ class HardPACTDifferentiableQP:
                 (pre_clamp_tau - project_upper).clamp_min(0.0),
                 (project_lower - pre_clamp_tau).clamp_min(0.0),
             ).amax(dim=-1)
-            chosen_tau = torch.maximum(
-                torch.minimum(pre_clamp_tau, project_upper), project_lower
-            )
+            chosen_tau = project_torque_interval(pre_clamp_tau, project_lower, project_upper)
             chosen = torch.cat((chosen[:, :TORQUE.start], chosen_tau,
                                 chosen[:, TORQUE.stop:]), dim=-1)
 

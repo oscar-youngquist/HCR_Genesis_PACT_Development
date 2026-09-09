@@ -15,6 +15,8 @@ from rsl_rl.modules.hard_pact_physics import (
 from rsl_rl.algorithms.hard_pact_qp import (
     balanced_anchor_indices,
     balanced_substep_indices,
+    qp_substep_anchors,
+    held_correction_torque,
 )
 from legged_gym.dynamics import wrench_at_point
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
@@ -417,6 +419,12 @@ class Go2HardPACT(Go2PACT):
         if not self._hard_pact_rollout_qp_enabled:
             self._hard_pact_policy_context_ready = False
             getattr(self, "extras", {}).pop("hard_pact_qp_interval", None)
+            held = getattr(self, "_hard_pact_held_correction", None)
+            if held is not None:
+                # Rollout buffers may have been allocated in inference mode;
+                # the runner changes the warmup gate outside that context.
+                with torch.inference_mode():
+                    held.zero_()
 
     def set_hard_pact_policy_context(self, latent, explicit):
         """Hold policy-rate features and wrench prediction for one interval."""
@@ -755,11 +763,14 @@ class Go2HardPACT(Go2PACT):
                 self._hard_pact_rollout_qp.cfg,
                 "qp_update_mode", "every_substep",
             )
+            held_mode = update_mode in (
+                "two_anchor_held_correction", "single_anchor_held_correction"
+            )
             # z_t and e_t remain policy-rate values. The default retains its
-            # legacy per-substep GRF evaluation; two-anchor mode evaluates the
+            # legacy per-substep GRF evaluation; held modes evaluate the
             # torque-conditioned decoder only at k=0 and holds that prediction.
             if (
-                update_mode == "two_anchor_held_correction"
+                held_mode
                 and self._qp_substep > 0
             ):
                 grf_normalized = self._hard_pact_held_grf_normalized
@@ -771,7 +782,7 @@ class Go2HardPACT(Go2PACT):
                         tau_nom,
                     )
                 )
-                if update_mode == "two_anchor_held_correction":
+                if held_mode:
                     self._hard_pact_held_grf_normalized.copy_(grf_normalized)
             # The decoder output is normalized yaw-local force. Reconstruct
             # Newtons once, preserve FR/FL/RR/RL XYZ, then rotate into J_f's
@@ -801,7 +812,7 @@ class Go2HardPACT(Go2PACT):
             # never reads the privileged realized mass/CoM label.
             applied_wrench = total_wrench_world
             is_anchor = self._qp_substep in self._hard_pact_qp_anchors
-            if update_mode == "two_anchor_held_correction" and not is_anchor:
+            if held_mode and not is_anchor:
                 # Hold only delta_tau from the preceding anchor. PD feedback
                 # above remains live at every physics substep. The final
                 # analytic projection enforces both actuator magnitude and
@@ -809,20 +820,13 @@ class Go2HardPACT(Go2PACT):
                 torque_limit = self._hard_pact_rollout_qp.torque_limits.to(
                     device=tau_nom.device, dtype=tau_nom.dtype
                 )
-                rate = (
-                    self._hard_pact_rollout_qp.cfg.torque_rate_limit_nm_s
-                    * float(self.cfg.sim.dt)
+                safe = held_correction_torque(
+                    tau_nom, self._hard_pact_held_correction,
+                    self._hard_pact_previous_substep_torque, torque_limit,
+                    self._hard_pact_rollout_qp.cfg.torque_rate_limit_nm_s,
+                    float(self.cfg.sim.dt),
+                    sanitize=update_mode == "single_anchor_held_correction",
                 )
-                lower = torch.maximum(
-                    -torque_limit,
-                    self._hard_pact_previous_substep_torque - rate,
-                )
-                upper = torch.minimum(
-                    torque_limit,
-                    self._hard_pact_previous_substep_torque + rate,
-                )
-                requested = tau_nom + self._hard_pact_held_correction
-                safe = torch.maximum(torch.minimum(requested, upper), lower)
                 setter = getattr(
                     simulator, "hard_pact_set_executed_torque", None
                 )
@@ -852,17 +856,21 @@ class Go2HardPACT(Go2PACT):
                     self._qp_interval_slack_peak,
                     self._hard_pact_held_slack,
                 ))
-                self._qp_interval_residual_sum.add_(
-                    self._hard_pact_held_residual
-                )
-                self._qp_interval_residual_peak.copy_(torch.maximum(
-                    self._qp_interval_residual_peak,
-                    self._hard_pact_held_residual,
-                ))
-                self._qp_interval_stage_counts.scatter_add_(
-                    1, self._hard_pact_held_stage[:, None],
-                    torch.ones(self.num_envs, 1, device=self.device),
-                )
+                if update_mode != "single_anchor_held_correction":
+                    # Preserve historical two-anchor interval summaries.
+                    # Single-anchor status/residuals describe actual solves
+                    # only: a held command has no fresh QP certification.
+                    self._qp_interval_residual_sum.add_(
+                        self._hard_pact_held_residual
+                    )
+                    self._qp_interval_residual_peak.copy_(torch.maximum(
+                        self._qp_interval_residual_peak,
+                        self._hard_pact_held_residual,
+                    ))
+                    self._qp_interval_stage_counts.scatter_add_(
+                        1, self._hard_pact_held_stage[:, None],
+                        torch.ones(self.num_envs, 1, device=self.device),
+                    )
                 self._hard_pact_previous_substep_torque.copy_(safe)
                 self._qp_substep += 1
                 return
@@ -948,7 +956,7 @@ class Go2HardPACT(Go2PACT):
                     "selected/complementarity_max", optional_zero
                 ),
             ), dim=-1).nan_to_num()
-            if update_mode == "two_anchor_held_correction":
+            if held_mode:
                 self._hard_pact_held_correction.copy_(
                     result.tau_safe - tau_nom
                 )
@@ -994,7 +1002,7 @@ class Go2HardPACT(Go2PACT):
             self._qp_interval_timing_ms.add_(elapsed_ms)
 
             # Each environment stores exactly one preselected replay point:
-            # k in [0,D) for the default, or a balanced k in {0,2} here.
+            # k in [0,D), balanced k in {0,2}, or fixed k=0, respectively.
             selected = self._qp_sampled_substep_index.long() == self._qp_substep
             if selected.any():
                 # Store compact vectors only. M/J/A/G/Q are rebuilt during PPO
@@ -1078,7 +1086,8 @@ class Go2HardPACT(Go2PACT):
         finalization and peaks become ``max_k |value_k|``. For each environment
         a single replay point is chosen with balanced strata. It is uniform
         over ``{0,...,D-1}`` in the default mode and over anchors ``{0,2}``
-        in ``two_anchor_held_correction`` mode.
+        in ``two_anchor_held_correction`` mode. Single-anchor mode stores k=0
+        for every environment without consuming anchor-selection RNG.
         """
         # All physical/diagnostic values use float32 on the simulation device.
         shape = lambda width: torch.zeros(
@@ -1116,15 +1125,21 @@ class Go2HardPACT(Go2PACT):
         update_mode = getattr(
             self._hard_pact_rollout_qp.cfg, "qp_update_mode", "every_substep"
         )
-        if update_mode == "two_anchor_held_correction":
-            if decimation != 4:
-                raise ValueError(
-                    "two_anchor_held_correction requires control decimation=4"
+        self._hard_pact_qp_anchors = qp_substep_anchors(update_mode, decimation)
+        # A policy boundary cannot reuse an old correction after a mode change.
+        held = getattr(self, "_hard_pact_held_correction", None)
+        if held is not None:
+            with torch.inference_mode():
+                held.zero_()
+        if update_mode in ("two_anchor_held_correction", "single_anchor_held_correction"):
+            if update_mode == "single_anchor_held_correction":
+                self._qp_sampled_substep_index = torch.zeros(
+                    self.num_envs, device=self.device, dtype=torch.int16
                 )
-            self._hard_pact_qp_anchors = (0, 2)
-            self._qp_sampled_substep_index = balanced_anchor_indices(
-                self.num_envs, self._hard_pact_qp_anchors, self.device
-            )
+            else:
+                self._qp_sampled_substep_index = balanced_anchor_indices(
+                    self.num_envs, self._hard_pact_qp_anchors, self.device
+                )
             self._hard_pact_held_correction = shape(12)
             self._hard_pact_held_grf_normalized = shape(12)
             self._hard_pact_held_force_world = shape(12)
@@ -1301,6 +1316,10 @@ class Go2HardPACT(Go2PACT):
             and getattr(self, "_hard_pact_policy_context_ready", False)
         ):
             qp_divisor = self._interval_executed_torque_count.clamp_min(1.0)
+            solve_divisor = (
+                1.0 if getattr(self._hard_pact_rollout_qp.cfg, "qp_update_mode", "every_substep")
+                == "single_anchor_held_correction" else qp_divisor
+            )
             fields.update(self._qp_sampled_transition)
             # Interval diagnostics are exposed to logging but deliberately not
             # inserted into `fields`: RolloutStorage persists every named
@@ -1314,10 +1333,10 @@ class Go2HardPACT(Go2PACT):
                 "interval_qp_grf_world": self._qp_interval_grf_sum / qp_divisor,
                 "interval_qp_contact_slack": self._qp_interval_slack_sum / qp_divisor,
                 "interval_qp_peak_contact_slack": self._qp_interval_slack_peak,
-                "interval_qp_residuals": self._qp_interval_residual_sum / qp_divisor,
+                "interval_qp_residuals": self._qp_interval_residual_sum / solve_divisor,
                 "interval_qp_peak_residuals": self._qp_interval_residual_peak,
-                "interval_qp_stage_fractions": self._qp_interval_stage_counts / qp_divisor,
-                "interval_qp_timing_ms": self._qp_interval_timing_ms / qp_divisor,
+                "interval_qp_stage_fractions": self._qp_interval_stage_counts / solve_divisor,
+                "interval_qp_timing_ms": self._qp_interval_timing_ms / solve_divisor,
             }
         # These deployment-facing views are named transition values but are
         # intentionally not duplicated in the critic: its required input is

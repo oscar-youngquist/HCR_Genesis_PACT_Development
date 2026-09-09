@@ -235,15 +235,11 @@ class OnPolicyRunnerPACT:
                 self.env.cfg, self.alg.actor_critic, gain_spec
             )
             qp_mode = self.alg.qp_config.qp_update_mode
-            self.deployment_contract["qp_update"] = {
-                "mode": qp_mode,
-                # Training-only delay; deployment uses the configured QP.
-                "training_warmup_iterations": self.alg.qp_config.warmup_iterations,
-                "physics_substep_anchors": (
-                    [0, 2] if qp_mode == "two_anchor_held_correction"
-                    else list(range(int(self.env.cfg.control.decimation)))
-                ),
-            }
+            from legged_gym.envs.go2.go2_hard_pact.deployment import qp_update_contract
+            self.deployment_contract["qp_update"] = qp_update_contract(
+                qp_mode, int(self.env.cfg.control.decimation),
+                self.alg.qp_config.warmup_iterations,
+            )
             write_deployment_contract_once(self.log_dir, self.deployment_contract)
 
         self.env.create_async_pino_workers()
