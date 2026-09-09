@@ -37,7 +37,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         restitution = 0.0
         border_size = 20.0
         curriculum = True
-        curriculum_upward_delay_iterations = 250  # Absolute PPO iteration; 0 disables delay.
+        curriculum_upward_delay_iterations = 100  # Absolute PPO iteration; 0 disables delay.
         obtain_terrain_info_around_feet = True
         measure_heights = True
         measured_points_x = [-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
@@ -192,11 +192,11 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         persistent_torque_interval_range_s = [5.0, 15.0]
         persistent_force_duration_range_s = [1.0, 5.0]
         persistent_torque_duration_range_s = [1.0, 5.0]
-        persistent_ramp_fraction = 0.25
-        persistent_force_min_n = 5.0
+        persistent_ramp_fraction = 0.30
+        persistent_force_min_n = 10.0
         persistent_force_max_n = 40.0
-        persistent_torque_min_nm = 2.0
-        persistent_torque_max_nm = 10.0
+        persistent_torque_min_nm = 3.0
+        persistent_torque_max_nm = 12.0
 
     class noise(LeggedRobotCfg.noise):
         add_noise = True
@@ -383,22 +383,26 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             feet_regulation = -0.0
 
         class reward_curriculum:
-            curr_reward_keys = ['ang_vel_xy', 
+            curr_reward_keys = ['ang_vel_xy',
+                                'lin_vel_z', 
                                 'orientation', 
                                 'torque_limits',
                                 'hip_pos',
                                 'pos_action_rate', 
                                 'pos_action_smoothness', 
                                 'tau_action_rate', 
-                                'tau_action_smoothness']
-            curr_reward_bounds = {'ang_vel_xy': [-0.05, -0.2], 
-                                  'orientation': [-0.2, -2.0], 
+                                'tau_action_smoothness',
+                                'dof_acc']
+            curr_reward_bounds = {'ang_vel_xy': [-0.01, -0.1], 
+                                  'lin_vel_z':[-0.5, -1.0],
+                                  'orientation': [-0.2, -1.0], 
                                   'torque_limits': [-0.01, -1.0], 
                                   'hip_pos': [-0.2, -0.4], 
                                   'pos_action_rate': [-0.001, -0.01], 
                                   'pos_action_smoothness': [-0.001, -0.01], 
-                                  'tau_action_rate': [-0.004, -0.04], 
-                                  'tau_action_smoothness': [-0.004, -0.04]}
+                                  'tau_action_rate': [-0.002, -0.02], 
+                                  'tau_action_smoothness': [-0.002, -0.02],
+                                  'dof_acc':[-2.5e-08, -2.5e-07]}
             curr_steps = 1000
             warmup_steps = 6000
 
