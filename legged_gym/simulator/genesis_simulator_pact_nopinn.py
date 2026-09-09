@@ -1,4 +1,5 @@
 from legged_gym import *
+from rsl_rl.modules.grf_transition import capture_substep
 from legged_gym.simulator.simulator import Simulator
 from PIL import Image as im
 import cv2 as cv
@@ -50,8 +51,10 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
 
         self.first_loop = True
 
-        for _ in range(self._cfg.control.decimation):
+        for substep in range(self._cfg.control.decimation):
             self._torques = self._compute_torques(actions)
+            if hasattr(self, "_grf_current_causal") and substep == self._cfg.control.decimation - 1:
+                capture_substep(self, motor_strength=1.0)
             
             self._robot.control_dofs_force(
                 self._torques, self._dof_indices)
@@ -62,6 +65,9 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
                 self._dof_indices)
             self._dof_vel[:] = self._robot.get_dofs_velocity(
                 self._dof_indices)
+
+        if hasattr(self, "_grf_current_causal"):
+            self._grf_transition[:, 72:84] = (self._dof_vel-self._grf_start_vel) / (self._control_dt/self._cfg.control.decimation)
 
     def _get_pinn_wb_dynamics(self):
         #           total GT forces  ,  generalized mass mat, bias vector

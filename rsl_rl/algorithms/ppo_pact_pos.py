@@ -43,6 +43,8 @@ from rsl_rl.modules import ActorCritic_PACT_Pos, ContextDecoder
 from rsl_rl.storage import RolloutStoragePACTPos
 
 from .pc_grad import PCGrad
+from .ppo_pact import PPO_PACT
+from rsl_rl.modules.grf_transition import masked_mean, reconstruction
 
 class PPO_PACT_Pos:
     actor_critic: ActorCritic_PACT_Pos
@@ -71,6 +73,9 @@ class PPO_PACT_Pos:
                  vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
                  privileged_grf_start_index=61,
                  grf_reconstruction_loss_weight=1.0,
+                 grf_reconstruction_mode="mse",
+                 grf_huber_delta=1.0,
+                 aligned_grf_transition=False,
                  use_adaptive_entropy=True,
                  adaptive_ent_bounds=[0.01, 0.001],
                  adaptive_ent_lin_threshold=0.75,
@@ -80,6 +85,11 @@ class PPO_PACT_Pos:
                  ):
         
         self.device = device
+        reconstruction(torch.zeros(1, 1), torch.zeros(1, 1), torch.ones(1, 1), grf_reconstruction_mode, grf_huber_delta)
+        self.grf_reconstruction_mode = grf_reconstruction_mode
+        self.grf_huber_delta = grf_huber_delta
+        self.aligned_grf_transition = aligned_grf_transition
+        self.last_grf_mse = 0.0
 
         self.num_priv_obs = num_priv_obs
 
@@ -120,9 +130,9 @@ class PPO_PACT_Pos:
                 if "critic" in param_group["name"]:
                     param_group['lr'] = (learning_rate / 3.0)
 
-        self.decoder = decoder_network
+        self.decoder = decoder_network.to(self.device)
         self.decoder_optimizer = optim.Adam(self.decoder.parameters(), lr=learning_rate)
-        self.grf_decoder = grf_decoder_network
+        self.grf_decoder = grf_decoder_network.to(self.device) if grf_decoder_network is not None else None
         self.grf_decoder_optimizer = (
             optim.Adam(self.grf_decoder.parameters(), lr=learning_rate)
             if self.grf_decoder is not None else None
@@ -157,10 +167,10 @@ class PPO_PACT_Pos:
                                                                action_shape, torso_velo_shape, grf_shape, self.device)
 
     def test_mode(self):
-        self.actor_critic.test()
+        PPO_PACT.test_mode(self)
     
     def train_mode(self):
-        self.actor_critic.train()
+        PPO_PACT.train_mode(self)
 
     def act(self, obs, critic_obs, obs_history):
         # if self.actor_critic.is_recurrent:
@@ -189,6 +199,7 @@ class PPO_PACT_Pos:
         self.transition.rewards = rewards.clone()
         
         self.transition.dones = dones
+        self.transition.grf_transition = infos.get("grf_transition")
         # Values from the next-time step used as labels for the decoder network
         self.transition.grf_targets = grf_labels
 
@@ -345,7 +356,12 @@ class PPO_PACT_Pos:
             self.enc_optimizer.zero_grad()
 
             grf_nominal_torque = None
-            if self.grf_decoder is not None:
+            if self.aligned_grf_transition:
+                data = self.storage.grf_transition_batch
+                if data is None:
+                    raise ValueError("Aligned Go1 PACT-Pos GRF training requires simulator transition metadata")
+                grf_nominal_torque = data[:, :12].detach()
+            elif self.grf_decoder is not None:
                 grf_nominal_torque = self._nominal_torque_from_action(
                     actions_batch, obs_batch, action_func, fb_func,
                     default_pose, qvel_scale,
@@ -438,7 +454,8 @@ class PPO_PACT_Pos:
                 t0 = time.perf_counter()
 
                 dec_recon = self.decoder(dec_input)
-                dec_loss = F.mse_loss(dec_recon, decode_targets)
+                dec_loss = (masked_mean((dec_recon-decode_targets).square(), terminated_batch)
+                            if self.aligned_grf_transition else F.mse_loss(dec_recon, decode_targets))
                 if self.grf_decoder is not None:
                     grf_dec_recon = self.grf_decoder(
                         self._grf_decoder_input(
@@ -446,7 +463,11 @@ class PPO_PACT_Pos:
                             self.dof_tau_observation_scale,
                         )
                     )
-                    grf_dec_loss = F.mse_loss(grf_dec_recon, grf_target)
+                    if self.aligned_grf_transition:
+                        grf_dec_loss, grf_mse = self._grf_reconstruction(grf_dec_recon, grf_target, terminated_batch)
+                    else:
+                        grf_dec_loss = grf_mse = F.mse_loss(grf_dec_recon, grf_target)
+                    self.last_grf_mse = grf_mse.detach().item()
                 else:
                     grf_dec_loss = dec_loss.new_zeros(())
                 (dec_loss + self.grf_reconstruction_loss_weight * grf_dec_loss).backward()
@@ -643,6 +664,9 @@ class PPO_PACT_Pos:
     def _compute_vae_loss(self, obs_hist_batch, grf_target,
                           obs_target, explicit_labels_batch, terminated_batch,
                           nominal_torque=None):
+        if getattr(self, "aligned_grf_transition", False):
+            return PPO_PACT._compute_vae_loss(self, obs_hist_batch, grf_target, obs_target,
+                                             explicit_labels_batch, terminated_batch, nominal_torque)
         vae_loss = None
         
         mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.context_encoder(obs_hist_batch)
@@ -680,6 +704,8 @@ class PPO_PACT_Pos:
         vae_loss = vel_pred_error + recon_error + self.grf_reconstruction_loss_weight*grf_recon_error + self.vae_beta*kl_div
         
         return vae_loss, kl_div, recon_error, grf_recon_error, vel_pred_error, dec_input.clone().detach(), decode_target.detach(), enc_update_obs_decode.detach()
+
+    _grf_reconstruction = PPO_PACT._grf_reconstruction
 
     @staticmethod
     def _grf_decoder_input(context_input, nominal_torque,

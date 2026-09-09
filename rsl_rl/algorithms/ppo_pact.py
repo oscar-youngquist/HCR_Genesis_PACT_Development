@@ -29,6 +29,7 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 import torch
+from rsl_rl.modules.grf_transition import masked_mean, reconstruction, commanded_torque
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -82,6 +83,9 @@ class PPO_PACT:
                  vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
                  privileged_grf_start_index=61,
                  grf_reconstruction_loss_weight=1.0,
+                 grf_reconstruction_mode="mse",
+                 grf_huber_delta=1.0,
+                 aligned_grf_transition=False,
                  pinn_grf_reconstruction_mse_threshold=0.01,
                  grf_observation_scale=0.01,
                  dof_tau_observation_scale=0.01,
@@ -94,6 +98,11 @@ class PPO_PACT:
                  ):
         
         self.device = device
+        reconstruction(torch.zeros(1, 1), torch.zeros(1, 1), torch.ones(1, 1), grf_reconstruction_mode, grf_huber_delta)
+        self.grf_reconstruction_mode = grf_reconstruction_mode
+        self.grf_huber_delta = grf_huber_delta
+        self.aligned_grf_transition = aligned_grf_transition
+        self.last_grf_mse = 0.0
 
         self.num_priv_obs = num_priv_obs
 
@@ -137,9 +146,9 @@ class PPO_PACT:
                 if "critic" in param_group["name"]:
                     param_group['lr'] = (learning_rate / 3.0)
 
-        self.decoder = decoder_network
+        self.decoder = decoder_network.to(self.device)
         self.decoder_optimizer = optim.Adam(self.decoder.parameters(), lr=learning_rate)
-        self.grf_decoder = grf_decoder_network
+        self.grf_decoder = grf_decoder_network.to(self.device) if grf_decoder_network is not None else None
         self.grf_decoder_optimizer = (
             optim.Adam(self.grf_decoder.parameters(), lr=learning_rate)
             if self.grf_decoder is not None else None
@@ -198,7 +207,10 @@ class PPO_PACT:
                                               store_contact_jacobian=self.grf_decoder is not None)
 
     def test_mode(self):
-        self.actor_critic.test()
+        self.actor_critic.eval()
+        self.decoder.eval()
+        if self.grf_decoder is not None:
+            self.grf_decoder.eval()
 
     def _set_std_clip_lwr(self, clip_val=0.1):
         self.actor_critic._set_std_clip_lwr(clip_val)
@@ -234,6 +246,9 @@ class PPO_PACT:
     
     def train_mode(self):
         self.actor_critic.train()
+        self.decoder.train()
+        if self.grf_decoder is not None:
+            self.grf_decoder.train()
 
     def act(self, obs, critic_obs, obs_history, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist):
         # if self.actor_critic.is_recurrent:
@@ -269,6 +284,7 @@ class PPO_PACT:
         self.transition.rewards = rewards.clone()
         
         self.transition.dones = dones
+        self.transition.grf_transition = infos.get("grf_transition")
         # Values from the next-time step used as labels for the decoder network
         self.transition.grf_targets = grf_labels
 
@@ -397,12 +413,18 @@ class PPO_PACT:
             self.act_optimizer.zero_grad()
             self.enc_optimizer.zero_grad()
 
+            self.grf_transition_batch = self.storage.grf_transition_batch
+            if self.aligned_grf_transition and self.grf_transition_batch is None:
+                raise ValueError("Aligned Go1 GRF training requires simulator transition metadata")
             grf_nominal_torque = None
-            if self.grf_decoder is not None:
+            if self.grf_decoder is not None and not self.aligned_grf_transition:
                 grf_nominal_torque = self._nominal_torque_from_action(
                     actions_batch, obs_batch, action_func, fb_func,
                     default_pose, qvel_scale,
                 )
+
+            if self.aligned_grf_transition:
+                grf_nominal_torque = self.grf_transition_batch[:, :12].detach()
 
             # Perform RL update
             ppo_loss, surrogate_loss, value_loss, current_actions = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
@@ -533,7 +555,7 @@ class PPO_PACT:
                     self.grf_decoder_optimizer.zero_grad()
 
                 dec_recon = self.decoder(dec_input)
-                dec_loss = F.mse_loss(dec_recon, decode_targets)
+                dec_loss = masked_mean((dec_recon-decode_targets).square(), terminated_batch) if self.aligned_grf_transition else F.mse_loss(dec_recon, decode_targets)
                 if self.grf_decoder is not None:
                     grf_dec_recon = self.grf_decoder(
                         self._grf_decoder_input(
@@ -541,7 +563,11 @@ class PPO_PACT:
                             self.dof_tau_observation_scale,
                         )
                     )
-                    grf_dec_loss = F.mse_loss(grf_dec_recon, grf_target)
+                    if self.aligned_grf_transition:
+                        grf_dec_loss, grf_mse = self._grf_reconstruction(grf_dec_recon, grf_target, terminated_batch)
+                    else:
+                        grf_dec_loss = grf_mse = F.mse_loss(grf_dec_recon, grf_target)
+                    self.last_grf_mse = grf_mse.detach().item()
                 else:
                     grf_dec_loss = dec_loss.new_zeros(())
                 (dec_loss + self.grf_reconstruction_loss_weight * grf_dec_loss).backward()
@@ -705,37 +731,49 @@ class PPO_PACT:
             if self.grf_decoder is not None else None
         )
         
-        grf_target.requires_grad = False
-        obs_target.requires_grad = False
+        grf_target = grf_target.detach()
+        obs_target = obs_target.detach()
         
         # decode_target = torch.cat((obs_target, grf_target), dim=-1)
         decode_target = (
             self._privileged_decode_target(obs_target, grf_target.shape[-1])
             if self.grf_decoder is not None else obs_target
         )
-        explicit_labels_batch.requires_grad = False
+        explicit_labels_batch = explicit_labels_batch.detach()
 
         vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
         recon_error    = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
         grf_recon_error = (
-            F.mse_loss(enc_update_grf_decode*terminated_batch, grf_target*terminated_batch)
+            (self._grf_reconstruction(enc_update_grf_decode, grf_target, terminated_batch)[0]
+             if getattr(self, "aligned_grf_transition", False) else
+             F.mse_loss(enc_update_grf_decode*terminated_batch, grf_target*terminated_batch))
             if enc_update_grf_decode is not None else recon_error.new_zeros(())
         )
+        if getattr(self, "aligned_grf_transition", False):
+            vel_pred_error = masked_mean((cenet_torso_velo-explicit_labels_batch).square(), terminated_batch)
+            recon_error = masked_mean((enc_update_obs_decode-decode_target).square(), terminated_batch)
         # kl_div         = (-0.5 * torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp()))
         kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
+        if getattr(self, "aligned_grf_transition", False):
+            kl_div = masked_mean(-0.5*torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1, keepdim=True), terminated_batch)
         vae_loss = vel_pred_error + recon_error + self.grf_reconstruction_loss_weight*grf_recon_error + self.vae_beta*kl_div
         
         return vae_loss, kl_div, recon_error, grf_recon_error, vel_pred_error, dec_input.clone().detach(), decode_target, enc_update_obs_decode
 
+    def _grf_reconstruction(self, prediction, target, valid):
+        return reconstruction(prediction, target, valid,
+                              getattr(self, "grf_reconstruction_mode", "mse"),
+                              getattr(self, "grf_huber_delta", 1.0))
+
     @staticmethod
     def _grf_decoder_input(context_input, nominal_torque,
-                           dof_tau_observation_scale=0.01):
-        """Condition GRF prediction on torque without backpropagating to policy."""
+                           dof_tau_observation_scale=0.01, detach_torque=True):
+        """Supervision detaches torque; the aligned PINN path explicitly retains it."""
         if nominal_torque is None:
             raise ValueError("nominal_torque is required by the separate GRF decoder")
         if nominal_torque.shape[-1] != 12:
             raise ValueError("nominal_torque must have 12 values in canonical joint order")
-        scaled_torque = nominal_torque.detach() * dof_tau_observation_scale
+        scaled_torque = (nominal_torque.detach() if detach_torque else nominal_torque) * dof_tau_observation_scale
         return torch.cat((context_input, scaled_torque), dim=-1)
 
     @staticmethod
@@ -770,15 +808,16 @@ class PPO_PACT:
         _, _, latent, explicit = self.actor_critic.context_encoder(obs_hist_batch)
         predicted_grf_scaled = self.grf_decoder(
             self._grf_decoder_input(
-                torch.cat((latent, explicit.detach()), dim=-1), nominal_torque,
+                torch.cat((latent, explicit if getattr(self, "aligned_grf_transition", False) else explicit.detach()), dim=-1), nominal_torque,
                 self.dof_tau_observation_scale,
+                detach_torque=not getattr(self, "aligned_grf_transition", False),
             )
         )
         active = terminated_batch.to(predicted_grf_scaled.dtype)
         grf_mse = ((predicted_grf_scaled - grf_target.detach()).square() * active).sum() / (
             active.sum().clamp_min(1.0) * predicted_grf_scaled.shape[-1]
         )
-        use_reconstruction = grf_mse.detach() < self.pinn_grf_reconstruction_mse_threshold
+        use_reconstruction = (active.sum() > 0) & (grf_mse.detach() < self.pinn_grf_reconstruction_mse_threshold)
         predicted_generalized_force = torch.einsum(
             "bnk,bk->bn",
             contact_jacobian_batch.detach(),
@@ -797,6 +836,21 @@ class PPO_PACT:
                            torso_accs_batch, mass_mat_batch, bias_vec_batch, gt_forces_batch,     # PINN stuff
                            contact_jacobian_batch, grf_target, terminated_batch,
                            action_func, fb_func, default_pose, dt, qvel_scale):                   # simulator functions/values passthrough
+        if getattr(self, "aligned_grf_transition", False):
+            data = self.grf_transition_batch.detach()
+            valid = terminated_batch * data[:, 84:85]
+            torque = commanded_torque(current_actions, data)
+            wb_tau = torch.cat((torch.zeros_like(torque[:, :6]), torque), -1)
+            acc = torch.cat((torso_accs_batch.detach(), data[:, 72:84]), -1)
+            dynamics = torch.bmm(mass_mat_batch.detach(), acc.unsqueeze(-1)).squeeze(-1) + bias_vec_batch.detach()
+            contact, _, _ = self._select_pinn_contact_forces(
+                obs_hist_batch, grf_target, valid, torque, contact_jacobian_batch, gt_forces_batch)
+            error = dynamics - contact - wb_tau
+            magnitude = contact.clamp_min(0.)
+            weight = magnitude / (magnitude.max(-1, keepdim=True).values + 1.e-8)
+            relative = (error*weight).norm(dim=-1) / (1.e-8 + wb_tau.detach().norm(dim=-1) + contact.norm(dim=-1))
+            return masked_mean(relative[:, None], valid)
+
         # if self.use_boot:
         #     self.actor_critic.act(prev_obs_batch, prev_obs_hist_batch)
         # else:

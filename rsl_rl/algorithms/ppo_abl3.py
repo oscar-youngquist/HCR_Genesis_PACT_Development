@@ -29,6 +29,7 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 import torch
+from rsl_rl.modules.grf_transition import masked_mean, reconstruction
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -40,6 +41,7 @@ import random
 from rsl_rl.modules import ActorCritic_PACT, ContextDecoder
 from rsl_rl.storage import RolloutStoragePACTAblation3
 from rsl_rl.utils import print_class_attributes
+from .ppo_pact import PPO_PACT
 
 class PPO_ABL3:
     actor_critic: ActorCritic_PACT
@@ -48,6 +50,13 @@ class PPO_ABL3:
                  actor_critic,
                  decoder_network,
                  num_priv_obs,
+                 grf_decoder_network=None,
+                 privileged_grf_start_index=61,
+                 grf_reconstruction_loss_weight=1.0,
+                 grf_reconstruction_mode="mse",
+                 grf_huber_delta=1.0,
+                 dof_tau_observation_scale=0.01,
+                 aligned_grf_transition=True,
                  num_learning_epochs=1,
                  num_mini_batches=1,
                  clip_param=0.2,
@@ -111,7 +120,17 @@ class PPO_ABL3:
                 if "critic" in param_group["name"]:
                     param_group['lr'] = (learning_rate / 3.0)
 
-        self.decoder = decoder_network
+        self.aligned_grf_transition = aligned_grf_transition
+        self.privileged_grf_start_index = privileged_grf_start_index
+        self.grf_reconstruction_loss_weight = grf_reconstruction_loss_weight
+        self.grf_reconstruction_mode = grf_reconstruction_mode
+        self.grf_huber_delta = grf_huber_delta
+        self.dof_tau_observation_scale = dof_tau_observation_scale
+        reconstruction(torch.zeros(1, 1), torch.zeros(1, 1), torch.ones(1, 1), grf_reconstruction_mode, grf_huber_delta)
+        self.last_grf_mse = self.last_grf_loss = 0.0
+        self.grf_decoder = grf_decoder_network.to(self.device)
+        self.grf_decoder_optimizer = optim.Adam(self.grf_decoder.parameters(), lr=learning_rate)
+        self.decoder = decoder_network.to(self.device)
         self.decoder_optimizer = optim.Adam(self.decoder.parameters(), lr=learning_rate)
 
         self.boot_mult = 1.0
@@ -195,6 +214,7 @@ class PPO_ABL3:
         self.transition.rewards = rewards.clone()
         
         self.transition.dones = dones
+        self.transition.grf_transition = infos.get("grf_transition")
         # Values from the next-time step used as labels for the decoder network
         self.transition.grf_targets = grf_labels
 
@@ -299,6 +319,10 @@ class PPO_ABL3:
             grf_target, obs_target, actions_batch, target_values_batch, \
             advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
             old_sigma_batch  in generator:
+            grf_data = self.storage.grf_transition_batch
+            if grf_data is None:
+                raise ValueError("Go1 ABL3 GRF training requires simulator transition metadata")
+            grf_nominal_torque = grf_data[:, :12].detach()
             
             self.actor_critic.train()
             self.act_optimizer.zero_grad()
@@ -326,10 +350,11 @@ class PPO_ABL3:
                 ###
                 self.actor_critic.train()
                 self.decoder.eval()
+                self.grf_decoder.eval()
 
                 # Calculate the DreamWaQ-style VAE update
-                vae_loss, kl_div, recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(obs_hist_batch, grf_target, 
-                                                                                                                          obs_target, explicit_labels_batch, terminated_batch)
+                vae_loss, kl_div, recon_error, grf_recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(obs_hist_batch, grf_target,
+                                                                                                                          obs_target, explicit_labels_batch, terminated_batch, grf_nominal_torque)
                 
                 # Update paramaters of encoder
                 self.enc_optimizer.zero_grad()
@@ -345,8 +370,16 @@ class PPO_ABL3:
                 self.decoder_optimizer.zero_grad()
 
                 dec_recon = self.decoder(dec_input)
-                dec_loss = F.mse_loss(dec_recon, decode_targets)
-                dec_loss.backward()
+                dec_loss = masked_mean((dec_recon-decode_targets).square(), terminated_batch)
+                self.grf_decoder.train()
+                self.grf_decoder_optimizer.zero_grad()
+                grf_recon = self.grf_decoder(self._grf_decoder_input(dec_input, grf_nominal_torque, self.dof_tau_observation_scale))
+                grf_loss, grf_mse = self._grf_reconstruction(grf_recon, grf_target, terminated_batch)
+                (dec_loss + self.grf_reconstruction_loss_weight*grf_loss).backward()
+                nn.utils.clip_grad_norm_(self.grf_decoder.parameters(), self.max_grad_norm)
+                self.grf_decoder_optimizer.step()
+                self.last_grf_mse = grf_mse.detach().item()
+                self.last_grf_loss = grf_loss.detach().item()
                 nn.utils.clip_grad_norm_(self.decoder.parameters(), self.max_grad_norm)
                 self.decoder_optimizer.step()
 
@@ -490,26 +523,10 @@ class PPO_ABL3:
         
         return ppo_loss, surrogate_loss, value_loss
 
-    def _compute_vae_loss(self, obs_hist_batch, grf_target, 
-                          obs_target, explicit_labels_batch, terminated_batch):
-        vae_loss = None
-
-        mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.context_encoder(obs_hist_batch)
-        
-        dec_input = torch.cat((cenet_latent, cenet_torso_velo), dim=-1)
-        enc_update_obs_decode = self.decoder(dec_input)
-        
-        grf_target.requires_grad = False
-        obs_target.requires_grad = False
-        
-        # decode_target = torch.cat((obs_target, grf_target), dim=-1)
-        decode_target = obs_target
-        explicit_labels_batch.requires_grad = False
-
-        vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
-        recon_error    = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
-        # kl_div         = (-0.5 * torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp()))
-        kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
-        vae_loss = vel_pred_error + recon_error + self.vae_beta*kl_div
-        
-        return vae_loss, kl_div, recon_error, vel_pred_error, dec_input.clone().detach(), decode_target, enc_update_obs_decode
+    # Only supervised helpers are shared: ABL3 has no physics objective.
+    _compute_vae_loss = PPO_PACT._compute_vae_loss
+    _grf_decoder_input = staticmethod(PPO_PACT._grf_decoder_input)
+    _privileged_decode_target = PPO_PACT._privileged_decode_target
+    _grf_reconstruction = PPO_PACT._grf_reconstruction
+    test_mode = PPO_PACT.test_mode
+    train_mode = PPO_PACT.train_mode

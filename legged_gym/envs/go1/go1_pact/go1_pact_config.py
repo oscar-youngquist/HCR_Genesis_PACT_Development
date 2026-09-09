@@ -139,6 +139,9 @@ class GO1PACTCfg( LeggedRobotCfg ):
             dof_vel = 0.05
             dof_tau = 0.01
             grf = 0.01
+            # Fixed across Go1 pretraining/training; zero offset stays zero.
+            mass_offset = 0.125  # 8 kg -> 1.0
+            com_offset = 5.0     # 0.20 m -> 1.0 (all axes)
             height_measurements = 5.0
         clip_observations = 100.
         clip_actions = 50.
@@ -519,9 +522,10 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         cenet_dec_out_dim = 57 + (50 + 38) + 143 - 12
         privileged_grf_start_index = 61
         separate_grf_decoder = True
-        grf_dec_input_dim = cenet_dec_input_dim + 12  # context plus detached tau_nom [Nm]
+        grf_dec_input_dim = cenet_dec_input_dim + 12  # context plus scaled actuator torque
         grf_dec_layers = [128,256,512]
         grf_dec_out_dim = 12
+        grf_torque_observation_scale = 0.01
 
         # Actor/critic
         actor_layers = [512,256,128]
@@ -537,6 +541,9 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
         pretrained_path = "/home/oyoungquist/Research/Genesis_Development/HCR_Genesis_PACT_Development/rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/Sep04_19-09-01_pact_posboot_100hz_grf/model_5000_converted.pt"
 
     class algorithm( LeggedRobotCfgPPO.algorithm ):
+        aligned_grf_transition = True
+        grf_reconstruction_mode = "mse"
+        grf_huber_delta = 1.0  # scaled force observation units
         grf_reconstruction_loss_weight = 1.0
         # Observation-scaled GRF MSE below which PINN uses reconstructed GRFs.
         pinn_grf_reconstruction_mse_threshold = 0.10

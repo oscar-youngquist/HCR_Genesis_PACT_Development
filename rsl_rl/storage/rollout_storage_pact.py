@@ -45,6 +45,7 @@ class RolloutStoragePACT:
             self.grf_targets = None  # next time-step from observations, used by decoder output
             self.obs_targets = None  # next time-step from observations, used by decoder output
 
+            self.grf_transition = None
             self.actions = None
             self.rewards = None
             self.values = None
@@ -73,6 +74,7 @@ class RolloutStoragePACT:
     def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, wb_shape, device="cpu", store_contact_jacobian=False):
 
         self.device = device
+        self.grf_transition = None
 
         self.obs_shape        = obs_shape
         self.critic_obs_shape = critic_obs_shape
@@ -139,6 +141,11 @@ class RolloutStoragePACT:
         # Specific to DreamWaQ style history encoder
         self.explicit_labels[self.step].copy_(transition.explicit_labels)
         self.grf_targets[self.step].copy_(transition.grf_targets)
+        data = getattr(transition, "grf_transition", None)
+        if data is not None:
+            if self.grf_transition is None:
+                self.grf_transition = torch.zeros(*self.grf_targets.shape[:2], 86, device=self.device)
+            self.grf_transition[self.step].copy_(data.detach())
         self.observation_targets[self.step].copy_(transition.obs_targets)
         
         # Need a set for each "task"
@@ -290,6 +297,8 @@ class RolloutStoragePACT:
                 pprev_obs_hist_batch = pprev_obs_hist[batch_idx]
 
                 
+                self.grf_transition_batch = (
+                    self.grf_transition.flatten(0, 1)[batch_idx] if self.grf_transition is not None else None)
                 yield terminated_batch, obs_batch, critic_observations_batch, obs_hist_batch, explicit_labels_batch, \
                         grf_labels_batch, obs_labels_batch, actions_batch, target_values_batch, \
                         advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \

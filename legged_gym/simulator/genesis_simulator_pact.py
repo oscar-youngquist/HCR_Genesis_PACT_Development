@@ -1,4 +1,5 @@
 from legged_gym import *
+from rsl_rl.modules.grf_transition import capture_substep
 from legged_gym.simulator.simulator import Simulator
 from PIL import Image as im
 import cv2 as cv
@@ -67,8 +68,10 @@ class GenesisSimulator_PACT(Simulator):
 
         self.first_loop = True
 
-        for _ in range(self._cfg.control.decimation):
+        for substep in range(self._cfg.control.decimation):
             self._torques = self._compute_torques(actions)
+            if hasattr(self, "_grf_current_causal") and substep == self._cfg.control.decimation - 1:
+                capture_substep(self)
             
             self._robot.control_dofs_force(
                 self._torques, self._dof_indices)
@@ -80,11 +83,16 @@ class GenesisSimulator_PACT(Simulator):
             self._dof_vel[:] = self._robot.get_dofs_velocity(
                 self._dof_indices)
 
+        if hasattr(self, "_grf_current_causal"):
+            self._grf_transition[:, 72:84] = (self._dof_vel-self._grf_start_vel) / (self._control_dt/self._cfg.control.decimation)
+            self._grf_torso_acc = torch.cat((self._robot.get_vel()-self._grf_start_world_lin,
+                                             self._robot.get_ang()-self._grf_start_world_ang), -1) / (self._control_dt/self._cfg.control.decimation)
+
     def _get_pinn_wb_dynamics(self):
         # Keep the legacy four values in their original order and append the
         # contact Jacobian used by the separate GRF decoder.
         return self._contact_forces_buff, self._wb_mass_mat_buff, self._wb_bias_vec_buff, \
-               self._torso_6dof_acceleration, self._contact_jacobian_buff
+               (self._grf_torso_acc if hasattr(self, "_grf_current_causal") else self._torso_6dof_acceleration), self._contact_jacobian_buff
 
     def _get_pinn_feedback(self, pos_actions, dof_pos, dof_vel):
         feedback_torques = (
@@ -148,6 +156,7 @@ class GenesisSimulator_PACT(Simulator):
         self.async_pino_manager.shared.qd_prev[:] = wb_vel_prev_np   # num_envs x 18
         self.async_pino_manager.shared.grf[:]     = grf_np           # num_envs x 4 x 3
         self.async_pino_manager.shared.dt[0]      = self._control_dt
+
         
         #     Pass the numpy (cpu) domain randomization parameters to shared memory
         self.async_pino_manager.shared.base_added_mass[:] = self._added_base_mass.cpu().numpy()  # num_envs x 1

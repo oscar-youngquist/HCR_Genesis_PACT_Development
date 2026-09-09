@@ -37,6 +37,7 @@ import numpy as np
 
 from torch.utils.tensorboard import SummaryWriter
 import torch
+import warnings
 
 from rsl_rl.algorithms import PPO_PACT_Pos
 from rsl_rl.modules import ActorCritic_PACT_Pos, ContextDecoder
@@ -127,7 +128,7 @@ class OnPolicyRunnerPACTPos:
                                            self.env.num_privileged_obs,
                                            grf_decoder_network=grf_decoder,
                                            privileged_grf_start_index=self.policy_cfg.get("privileged_grf_start_index", 61),
-                                           dof_tau_observation_scale=float(self.env.obs_scales.dof_tau),
+                                           dof_tau_observation_scale=self.policy_cfg.get("grf_torque_observation_scale", float(self.env.obs_scales.dof_tau)),
                                            device=self.device, 
                                            **self.alg_cfg)
         
@@ -159,7 +160,9 @@ class OnPolicyRunnerPACTPos:
         pretrained_path = self.policy_cfg["pretrained_path"]
         pretrained_std = self.policy_cfg["pretrained_std"]
         print(pretrained_path)
-        loaded_dict = torch.load(pretrained_path)
+        loaded_dict = torch.load(pretrained_path, map_location=self.device)
+        if self.alg.grf_decoder is not None and loaded_dict.get('grf_decoder_state_dict') is None:
+            warnings.warn("Legacy PACT-Pos checkpoint: GRF head initialized fresh; resized decoder optimizer not restored.")
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Reset the 
@@ -365,6 +368,7 @@ class OnPolicyRunnerPACTPos:
         self.writer.add_scalar('Loss/kl_div', locs['mean_kld_loss'], locs['it'])
         self.writer.add_scalar('Loss/decoder_function', locs['mean_decoder_loss'], locs['it'])
         self.writer.add_scalar('Loss/grf_decoder_function', locs['mean_grf_decoder_loss'], locs['it'])
+        self.writer.add_scalar('Loss/grf_reconstruction_mse', self.alg.last_grf_mse, locs['it'])
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
@@ -442,7 +446,9 @@ class OnPolicyRunnerPACTPos:
         torch.save(checkpoint, path)
 
     def load(self, path, load_optimizer=True):
-        loaded_dict = torch.load(path)
+        loaded_dict = torch.load(path, map_location=self.device)
+        if self.alg.grf_decoder is not None and loaded_dict.get('grf_decoder_state_dict') is None:
+            warnings.warn("Legacy PACT-Pos checkpoint: GRF head initialized fresh; resized decoder optimizer not restored.")
         # Load actor/critic model(s)
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Load optimizer(s)
@@ -464,7 +470,7 @@ class OnPolicyRunnerPACTPos:
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):
-        self.alg.actor_critic.eval() # switch to evaluation mode (dropout for example)
+        self.alg.test_mode()
         if device is not None:
             self.alg.actor_critic.to(device)
         return self.alg.actor_critic.act_inference

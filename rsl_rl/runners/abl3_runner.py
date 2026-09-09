@@ -37,6 +37,7 @@ import numpy as np
 
 from torch.utils.tensorboard import SummaryWriter
 import torch
+from rsl_rl.modules.grf_checkpoint import load_grf_decoders
 
 from rsl_rl.algorithms import PPO_ABL3
 from rsl_rl.modules import ActorCritic_PACT, ContextDecoder
@@ -96,6 +97,9 @@ class OnPolicyRunnerABL3:
                                  self.policy_cfg["cenet_dec_out_dim"]
                                  ).to(self.device)
         
+        grf_decoder = ContextDecoder(self.policy_cfg["grf_dec_input_dim"],
+                                     self.policy_cfg["grf_dec_layers"],
+                                     self.policy_cfg["grf_dec_out_dim"]).to(self.device)
         print("Created Parallel Actor-Critic Model")
         pretty_print_module(actor_critic)
         pretty_print_module(decoder)
@@ -108,6 +112,9 @@ class OnPolicyRunnerABL3:
         self.alg: PPO_ABL3 = alg_class(actor_critic, 
                                        decoder, 
                                        self.env.num_privileged_obs,
+                                       grf_decoder_network=grf_decoder,
+                                       privileged_grf_start_index=self.policy_cfg["privileged_grf_start_index"],
+                                       dof_tau_observation_scale=self.policy_cfg.get("grf_torque_observation_scale", float(self.env.obs_scales.dof_tau)),
                                        device=self.device,
                                        **self.alg_cfg)
         
@@ -138,11 +145,11 @@ class OnPolicyRunnerABL3:
     def _load_pretrained_model(self):
         pretrained_path = self.policy_cfg["pretrained_path"]
         print("Loading boot-strapping model from - ", pretrained_path)
-        loaded_dict = torch.load(pretrained_path)
+        loaded_dict = torch.load(pretrained_path, map_location=self.device)
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Load the pretrained decoder network
-        self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
+        load_grf_decoders(self.alg, loaded_dict)
 
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
@@ -345,6 +352,8 @@ class OnPolicyRunnerABL3:
         self.writer.add_scalar('Loss/recon', locs['mean_recon_loss'], locs['it'])
         self.writer.add_scalar('Loss/kl_div', locs['mean_kld_loss'], locs['it'])
         self.writer.add_scalar('Loss/decoder_function', locs['mean_decoder_loss'], locs['it'])
+        self.writer.add_scalar('Loss/grf_decoder_function', self.alg.last_grf_loss, locs['it'])
+        self.writer.add_scalar('Loss/grf_reconstruction_mse', self.alg.last_grf_mse, locs['it'])
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
@@ -406,6 +415,8 @@ class OnPolicyRunnerABL3:
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'act_optimizer_state_dict': self.alg.act_optimizer.state_dict(),
             'enc_optimizer_state_dict': self.alg.enc_optimizer.state_dict(),
+            'grf_decoder_state_dict': self.alg.grf_decoder.state_dict(),
+            'grf_decoder_opt_state_dict': self.alg.grf_decoder_optimizer.state_dict(),
             'decoder_state_dict': self.alg.decoder.state_dict(),
             'decoder_opt_state_dict': self.alg.decoder_optimizer.state_dict(),
             'iter': self.current_learning_iteration,
@@ -413,22 +424,24 @@ class OnPolicyRunnerABL3:
             }, path)
 
     def load(self, path, load_optimizer=True):
-        loaded_dict = torch.load(path)
+        loaded_dict = torch.load(path, map_location=self.device)
         # Load actor/critic model(s)
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Load optimizer(s)
         if load_optimizer:
             self.alg.act_optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
             self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
-            self.alg.decoder_optimizer.load_state_dict(loaded_dict['decoder_opt_state_dict'])
+            if loaded_dict.get('grf_decoder_state_dict') is not None:
+                self.alg.decoder_optimizer.load_state_dict(loaded_dict['decoder_opt_state_dict'])
+                self.alg.grf_decoder_optimizer.load_state_dict(loaded_dict['grf_decoder_opt_state_dict'])
         # Load the VAE decoder model...
-        self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
+        load_grf_decoders(self.alg, loaded_dict)
         self.current_learning_iteration = loaded_dict['iter']
         self.current_learning_iteration = 0
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):
-        self.alg.actor_critic.eval() # switch to evaluation mode (dropout for example)
+        self.alg.test_mode()
         if device is not None:
             self.alg.actor_critic.to(device)
         return self.alg.actor_critic.act_inference

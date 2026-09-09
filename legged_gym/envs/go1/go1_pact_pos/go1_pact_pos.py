@@ -55,9 +55,14 @@ class Go1PACTPos(BaseTask):
         """
         actions = self._pre_sim_step(actions)
         
+        self.simulator._grf_current_causal = (
+            self.action_delay == 0 if self.cfg.domain_rand.randomize_ctrl_delay
+            else torch.ones(self.num_envs, device=self.device, dtype=torch.bool))
         self.simulator.step(actions)
         
+        transition = self.simulator._grf_transition.clone()
         self.post_physics_step()
+        self.extras["grf_transition"] = transition
 
         # return clipped obs, clipped states (None), rewards, dones and infos
         clip_obs = self.cfg.normalization.clip_observations
@@ -311,8 +316,8 @@ class Go1PACTPos(BaseTask):
             torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) - 
                        self.simulator.measured_heights, dim=1, keepdim=True) - 
                        self.cfg.rewards.base_height_target,                            # 1  - base height error
-            self.simulator._added_base_mass,                                           # 1  - payload mass
-            self.simulator._base_com_bias,                                             # 3  - CoM shift
+            self.simulator._added_base_mass * self.obs_scales.mass_offset,  # 1 - scaled mass offset
+            self.simulator._base_com_bias * self.obs_scales.com_offset,      # 3 - scaled CoM offset
         ), dim=-1)
 
         # track history buffer
@@ -328,8 +333,8 @@ class Go1PACTPos(BaseTask):
         # build up privlieged domain randomization buffer
         domain_randomization_info = torch.cat((
             (self.simulator._friction_values - self.friction_value_offset),  # 1
-            self.simulator._added_base_mass,                                 # 1
-            self.simulator._base_com_bias,                                   # 3
+            self.simulator._added_base_mass * self.obs_scales.mass_offset,  # 1 - scaled mass offset
+            self.simulator._base_com_bias * self.obs_scales.com_offset,      # 3 - scaled CoM offset
             self.simulator._rand_push_vels,                                  # 3
             self.simulator._rand_wrench_vels,                                # 3
             (self.simulator._kp_scale - self.kp_scale_offset),               # num_actions
