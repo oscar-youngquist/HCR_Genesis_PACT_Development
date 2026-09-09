@@ -522,6 +522,7 @@ class PPO_HardPACT:
             enabled=self.hard_pact_features.execution_qp,
         )
         self.hard_pact_qp = None
+        self._qp_training_iteration = 0
         self.last_qp_metrics = {}
         self._qp_full_audit_inputs = None
         self.action_clip = float(action_clip)
@@ -619,6 +620,20 @@ class PPO_HardPACT:
             position_limits[:12, 1],
             velocity_limits[:12],
         )
+
+    def qp_enabled_at_iteration(self, iteration=None):
+        """One gate for rollout, deployment mechanics, sampling, and replay.
+
+        QP warmup is independent of the PINN weight and immutable ablation
+        flags. The runner sets the absolute iteration before collecting data;
+        update() also records it for direct algorithm callers/tests.
+        """
+        if not self.hard_pact_features.execution_qp or self.hard_pact_qp is None:
+            return False
+        if iteration is None:
+            iteration = getattr(self, "_qp_training_iteration", 0)
+        warmup = getattr(getattr(self, "qp_config", None), "warmup_iterations", 0)
+        return int(iteration) >= warmup
         
         
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape, wb_shape):
@@ -896,10 +911,7 @@ class PPO_HardPACT:
                     "equivalent_mass_com_wrench_world"
                 ],
             )
-        qp_ready = (
-            self.hard_pact_features.execution_qp
-            and self.hard_pact_qp is not None
-        )
+        qp_ready = self.qp_enabled_at_iteration()
         if need_qp and qp_ready:
             sample_q = flat.get("sampled_qp_q", flat["pre_q"])
             sample_v = flat.get("sampled_qp_v", flat["pre_v"])
@@ -921,8 +933,7 @@ class PPO_HardPACT:
         """Select QP-only rows without changing the full PPO/BARD batch."""
         batch = self.storage.current_hard_pact_batch
         if (
-            not self.hard_pact_features.execution_qp
-            or self.hard_pact_qp is None
+            not self.qp_enabled_at_iteration(iteration)
             or batch is None
         ):
             return None
@@ -983,6 +994,7 @@ class PPO_HardPACT:
         return self.pinn_weight
 
     def update(self, action_func, fb_func, dt, itr, default_pose, qvel_scale):
+        self._qp_training_iteration = int(itr)
         valid_boot_statistics = ValidBootStatistics()
         metric_zero = torch.zeros((), device=self.device)
         mean_value_loss = metric_zero.clone()
@@ -1017,10 +1029,14 @@ class PPO_HardPACT:
 
         self._update_pinn_weight_for_iteration(itr)
 
-        qp_iteration_ready = (
-            self.hard_pact_features.execution_qp
-            and self.hard_pact_qp is not None
-        )
+        qp_iteration_ready = self.qp_enabled_at_iteration()
+        if self.hard_pact_qp is not None and hasattr(self.hard_pact_qp, "begin_iteration_diagnostics"):
+            self.hard_pact_qp.begin_iteration_diagnostics("ppo")
+        if not qp_iteration_ready:
+            # Do not report stale solves or retain diagnostic gradient inputs
+            # during warmup. Other losses and their optimizers still run.
+            self.last_qp_metrics = {}
+            self._qp_full_audit_inputs = None
         pinn_iteration_ready = self.pinn_weight > 0.0 and (
             self.bard_inverse_enabled
             or self.bard_rollout_enabled
@@ -1089,8 +1105,8 @@ class PPO_HardPACT:
             )
 
             
-            # BARD retains the legacy warmup, while projection is deliberately
-            # active from iteration zero and receives only this epoch's shard.
+            # BARD retains its independent schedule. Projection starts after
+            # the configurable QP warmup and receives only this epoch's shard.
             qp_rows = self._qp_rows_for_epoch(ppo_epoch, itr)
             self._qp_sampling_gradient_inputs = None
             if self.ppo_qp_sampling_logging_enabled and qp_rows is not None:
@@ -1454,6 +1470,15 @@ class PPO_HardPACT:
 
         self._clear_rollout_mechanics_cache()
         self.storage.clear()
+        # Periodic checkpoints must resume at the next uncollected iteration,
+        # not restart a configured QP warmup from an old runner counter.
+        self._last_completed_iteration = int(itr)
+        self.last_qp_metrics.update({
+            "qp/minimal/warmup/qp_enabled": metric_zero.new_tensor(float(qp_iteration_ready)),
+            "qp/minimal/warmup/remaining_iterations": metric_zero.new_tensor(
+                max(0, self.qp_config.warmup_iterations - int(itr))
+            ),
+        })
         results = torch.stack((
             mean_value_loss, mean_surrogate_loss, mean_autoenc_loss,
             mean_decoder_loss, mean_vel_loss, mean_recon_loss,
@@ -1966,11 +1991,7 @@ class PPO_HardPACT:
             zero = nominal_torque.sum() * 0.0
             self.last_unweighted_pinn_loss = zero.detach()
             return zero
-        qp_ready = (
-            self.hard_pact_features.execution_qp
-            and self.hard_pact_qp is not None
-            and qp_rows is not None
-        )
+        qp_ready = self.qp_enabled_at_iteration() and qp_rows is not None
         if not ((compute_pinn and (
                 self.bard_inverse_enabled or self.bard_rollout_enabled)) or qp_ready
                 or self.hard_pact_features.soft_constraint_penalty):
@@ -2279,14 +2300,14 @@ class PPO_HardPACT:
                 qp_arguments.pop("proximal_reference")
             if differentiate_qp:
                 qp_result = self.hard_pact_qp.solve(
-                    differentiable=True, **qp_arguments
+                    differentiable=True, diagnostics_phase="ppo", **qp_arguments
                 )
             else:
                 # stopgrad pays only for the required forward metric. It does
                 # not retain qpth's KKT graph or any physics-head activation.
                 with torch.no_grad():
                     qp_result = self.hard_pact_qp.solve(
-                        differentiable=False, **qp_arguments
+                        differentiable=False, diagnostics_phase="ppo", **qp_arguments
                     )
             # m_physics=not(push or reset or timeout or teleport). Sustained
             # wrench and randomized-mass transitions deliberately remain valid.
@@ -2330,6 +2351,14 @@ class PPO_HardPACT:
             self.last_qp_metrics["qp/minimal/projection_loss"] = qp_loss.detach()
             correction = (qp_result.tau_safe - sampled_nominal).detach()
             intervention = correction.abs().amax(dim=-1) > 1.0e-6
+            if hasattr(self.hard_pact_qp, "iteration_diagnostics"):
+                aggregate = self.hard_pact_qp.iteration_diagnostics["ppo"]
+                supervised = valid.reshape(-1) & qp_result.differentiated_mask.reshape(-1)
+                per_row = (correction / torque_limits).square().sum(-1) + (
+                    qp_result.contact_slack.detach().flatten(1) / self.qp_config.slack_scale_m_s2
+                ).square().mean(-1)
+                aggregate.add_values("projection_loss", per_row, supervised)
+                aggregate.add_values("intervention_fraction", intervention.float())
             self.last_qp_metrics["qp/minimal/intervention_fraction"] = (
                 intervention.float().mean()
             )

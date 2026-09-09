@@ -65,18 +65,12 @@ class Go2HardPACT(Go2PACT):
         configured deadband comparable across Go2 joints.
         """
         simulator = self.simulator
-        feedback = (
-            simulator.feedback_tau_weight * simulator.feedback_torques
-        )
-        feedforward = (
-            simulator.feedforward_tau_weight * simulator.feedforward_torques
-        )
-        # Go2 PACT applies motor-strength scaling after combining the two
-        # weighted branches, so include it in both effective contributions.
-        motor_strength = getattr(simulator, "_motor_strength", None)
-        if motor_strength is not None:
-            feedback = feedback * motor_strength
-            feedforward = feedforward * motor_strength
+        feedback = simulator.feedback_torques
+        feedforward = simulator.feedforward_torques
+
+        # print(feedback[0:10,:])
+        # print(feedforward[0:10,:])
+
         limits = simulator.torque_limits[:feedback.shape[-1]].clamp_min(1.0e-6)
         cancellation = (
             feedback.abs() + feedforward.abs()
@@ -408,10 +402,21 @@ class Go2HardPACT(Go2PACT):
         self._hard_pact_actor_critic = actor_critic
         self._hard_pact_bard_dynamics = bard_dynamics
         self._hard_pact_rollout_qp = qp
-        self._hard_pact_rollout_qp_enabled = (
-            self.hard_pact_features.execution_qp
-            and bard_dynamics is not None and qp is not None
+        # Runner construction/reset occurs at absolute iteration zero.
+        self.set_hard_pact_qp_enabled(
+            getattr(getattr(qp, "cfg", None), "warmup_iterations", 0) == 0
         )
+
+    def set_hard_pact_qp_enabled(self, enabled):
+        """Apply the runner's iteration gate without changing ablation flags."""
+        self._hard_pact_rollout_qp_enabled = (
+            bool(enabled) and self.hard_pact_features.execution_qp
+            and getattr(self, "_hard_pact_bard_dynamics", None) is not None
+            and getattr(self, "_hard_pact_rollout_qp", None) is not None
+        )
+        if not self._hard_pact_rollout_qp_enabled:
+            self._hard_pact_policy_context_ready = False
+            getattr(self, "extras", {}).pop("hard_pact_qp_interval", None)
 
     def set_hard_pact_policy_context(self, latent, explicit):
         """Hold policy-rate features and wrench prediction for one interval."""
@@ -826,6 +831,11 @@ class Go2HardPACT(Go2PACT):
                 else:
                     setter(safe)
                 correction = safe - tau_nom
+                if hasattr(self._hard_pact_rollout_qp, "iteration_diagnostics"):
+                    aggregate = self._hard_pact_rollout_qp.iteration_diagnostics["rollout"]
+                    aggregate.add_sum("held/real_rows", safe.new_tensor(self.num_envs))
+                    aggregate.add_sum("held/substep_calls", safe.new_tensor(1))
+                    aggregate.add_values("held/torque_correction_mean_nm", correction.abs())
                 self._qp_interval_safe_sum.add_(safe)
                 self._qp_interval_safe_peak.copy_(torch.maximum(
                     self._qp_interval_safe_peak, safe.abs()

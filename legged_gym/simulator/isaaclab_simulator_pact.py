@@ -23,6 +23,30 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
     # ------------------------------------------------------------------
     # Canonical HardPACT backend boundary
     # ------------------------------------------------------------------
+    @property
+    def torque_limits(self):
+        """Physical actuator limits in canonical joint order, in Nm.
+
+        Explicit Isaac Lab actuators set PhysX's effort limit to 1e9 to
+        avoid double clipping. That is not the motor limit used by rewards,
+        action clipping, or the QP. Resolve the actuator groups in articulation
+        order first, then apply our named-joint permutation exactly once.
+        These nominal limits are fixed; cache them outside the substep hot path.
+        """
+        if not hasattr(self, "_pact_torque_limits"):
+            sim_limits = self._robot.data.joint_effort_limits[0]
+            motor_limits = torch.full_like(sim_limits, float("nan"))
+            for actuator in self._robot.actuators.values():
+                motor_limits[actuator.joint_indices] = actuator.effort_limit[0]
+            limits = torch.minimum(motor_limits, sim_limits)[self._dof_indices]
+            if not torch.all(torch.isfinite(limits) & (limits > 0)):
+                raise ValueError(
+                    "PACT requires finite positive actuator effort limits "
+                    "for every controlled joint"
+                )
+            self._pact_torque_limits = limits.detach().clone()
+        return self._pact_torque_limits
+
     def hard_pact_configuration(self):
         return torch.cat((
             self._robot.data.root_link_pos_w,

@@ -253,6 +253,16 @@ class RolloutStoragePACT:
                     for name, value in hard_pact.items()
                 }
             for name, value in hard_pact.items():
+                if name not in self.hard_pact_fields:
+                    # HardPACT QP warmup adds its compact replay fields only
+                    # at the first active rollout. No extra storage during
+                    # warmup, and no reallocation of existing transition data.
+                    if self.step != 0:
+                        raise RuntimeError("New HardPACT fields require a rollout boundary")
+                    self.hard_pact_fields[name] = torch.zeros(
+                        self.num_transitions_per_env, self.num_envs,
+                        *value.shape[1:], device=self.device, dtype=value.dtype,
+                    )
                 self.hard_pact_fields[name][self.step].copy_(value)
         
         self._save_hidden_states(transition.hidden_states)

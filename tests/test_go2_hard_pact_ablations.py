@@ -282,17 +282,10 @@ class HardPACTAblationTests(unittest.TestCase):
                 "sustained_wrench_active_mask": torch.tensor([[True], [False]])
             },
         })
-        self.assertEqual(runner._rollout_qp_metric_count, 1)
-        self.assertTrue(all(value.ndim == 0 for value in runner._rollout_qp_metric_sums.values()))
-        torch.testing.assert_close(
-            runner._rollout_qp_metric_sums["qp/minimal/full_fraction"],
-            torch.tensor(0.5),
-        )
-        torch.testing.assert_close(
-            runner._rollout_qp_metric_sums[
-                "qp/minimal/normalized_inequality_violation_max"
-            ], torch.tensor(0.4),
-        )
+        # Held-substep interval averages are not solve outcomes. The shared
+        # solver now aggregates actual anchor solves in disjoint namespaces.
+        self.assertEqual(runner._rollout_qp_metric_count, 0)
+        self.assertEqual(runner._rollout_qp_metric_sums, {})
         torch.testing.assert_close(
             runner._rollout_disturbance_active_sum, torch.tensor(0.5)
         )

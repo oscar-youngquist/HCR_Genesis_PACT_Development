@@ -143,6 +143,30 @@ class HardPACTQPTests(unittest.TestCase):
         self.assertTrue((solution[:, 30:42].abs() <= 20.0 + 1e-6).all())
         self.assertTrue((diagnostics["equality_max"] == 0).all())
 
+    def test_elastic_empty_equalities_at_all_diagnostics_levels(self):
+        reference = None
+        for level in ("minimal", "physical", "full"):
+            with self.subTest(level=level):
+                qp = make_qp(elastic_recovery_enabled=True, diagnostics_level=level)
+                source = qp_data(2)
+                source["tau_nom"].fill_(100.0)
+                # Matches the fallback call: expensive audits are disabled
+                # for recovery, including when diagnostics_level is full.
+                solution, certified, diagnostics = qp._solve_stage(
+                    source, True, elastic=True, audit_count=0
+                )
+                self.assertTrue(certified.all())
+                self.assertTrue(torch.isfinite(solution).all())
+                if reference is None:
+                    reference = solution
+                torch.testing.assert_close(solution, reference, rtol=0, atol=0)
+                if level != "minimal":
+                    for key in ("physical_equality_max",
+                                "physical_base_linear_equality_max",
+                                "physical_base_angular_equality_max",
+                                "physical_joint_equality_max"):
+                        torch.testing.assert_close(diagnostics[key], torch.zeros(2, dtype=solution.dtype))
+
     def test_solver_registration_validation_and_capabilities(self):
         for name in ("qpth", "cupiqp", "moreau"):
             qp = make_qp(qp_solver=name)
@@ -503,21 +527,18 @@ class HardPACTQPTests(unittest.TestCase):
 
         runner = OnPolicyRunnerPACT.__new__(OnPolicyRunnerPACT)
         runner.writer = Writer()
-        runner.alg = SimpleNamespace(last_qp_metrics={
+        runner.alg = SimpleNamespace(hard_pact_qp=make_qp(), last_qp_metrics={
             "qp/minimal/full_fraction": torch.tensor(1.0),
             "qp/physical/force/max": torch.tensor(2.0),
             "qp/full/q_condition_mean": torch.tensor(3.0),
             "unscoped/internal": torch.tensor(4.0),
         })
         runner._log_qp_metrics(7)
-        self.assertEqual(
-            [name for name, _, _ in runner.writer.calls],
-            [
-                "qp/minimal/full_fraction",
-                "qp/physical/force/max",
-                "qp/full/q_condition_mean",
-            ],
-        )
+        names = [name for name, _, _ in runner.writer.calls]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertTrue(all(name.startswith(("qp/rollout/", "qp/ppo/")) for name in names))
+        self.assertIn("qp/rollout/final/full_fraction", names)
+        self.assertIn("qp/ppo/final/full_fraction", names)
         self.assertTrue(all(call[2] == 7 for call in runner.writer.calls))
 
     def test_successful_qpth_torque_is_post_projected_with_gradient(self):

@@ -108,7 +108,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000
-        push_warmup = 5000
+        push_warmup = 4000
         num_jumps = 10
 
         randomize_friction = True
@@ -258,7 +258,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         torque_scale = 10.0
         dt = 0.02
         decimation = 4
-        tradeoff_init_weights = [0.4, 1.6]
+        tradeoff_init_weights = [1.0, 1.6]
         tradeoff_final_weights = [1.0, 1.0]
         tradeoff_steps = 10
         tradeoff_threshold = 0.7
@@ -296,7 +296,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
 
         foot_clearance_tracking_sigma = 0.01
 
-        only_positive_rewards = True
+        only_positive_rewards = False
         use_reward_curriculum = True
 
         max_contact_force = 400.0
@@ -333,7 +333,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             dof_tracking = 0.1
 
             torque_conflict_symmetric = 0.0
-            torque_alignment = 0.0
+            torque_alignment = 0.01
             ff_ratio = 0.0
             torque_cancellation = -0.1
 
@@ -447,8 +447,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        # pretrained_path = '../../rsl_rl/modules/pretrained_checkpoints/go2_hard_pact/hard_pact_start_model_5000.pt'
-        pretrained_path = ''
+        pretrained_path = '../../rsl_rl/modules/pretrained_checkpoints/go2_hard_pact/Sep08_hard_pact_start_model_5000.pt'
+        # pretrained_path = ''
         cenet_explicit_layers = [128, 128]
         grf_decoder_layers = [128, 128]
         wrench_decoder_layers = [128, 128]
@@ -483,7 +483,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         # Multiplies contact BCE inside the collective explicit-estimator loss.
         contact_probability_loss_weight = 1.0
-        ppo_latent_diagnostics_enabled = True
+        # Opt-in policy recomputation/latent ablations; basic KL/loss logging
+        # remains available without these diagnostic-only forward passes.
+        ppo_latent_diagnostics_enabled = False
         ppo_latent_diagnostics_interval = 100
         ppo_latent_diagnostics_sample_count = 256
         latent_active_unit_variance_threshold = 1e-2
@@ -493,7 +495,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         # Detailed physical GRF/base-wrench TensorBoard reductions. Decoder
         # losses remain logged when this is disabled.
-        force_decoder_diagnostics_enabled = True
+        force_decoder_diagnostics_enabled = False
 
         bard_enabled = True
         dynamics_backend = 'bard'
@@ -511,7 +513,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         profile_bard_timing = False
         console_debug = False
 
-        pcgrad_diagnostics_enabled = True
+        # Keep PCGrad optimization, but skip diagnostic gradient clones,
+        # per-module norms/cosines, and nonfinite scans in production.
+        pcgrad_diagnostics_enabled = False
         pcgrad_diagnostics_start_iteration = 0
         pcgrad_diagnostics_interval = 100
         cache_rollout_mechanics = True
@@ -524,6 +528,12 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         ppo_qp_sampling_logging_enabled = True
 
         hard_pact_qp = {'enabled': True, 
+                        # No rollout or PPO QP for iterations [0, N); enable
+                        # at absolute iteration N. Zero keeps current behavior.
+                        'warmup_iterations': 2000,
+                        'exception_capture_enabled': True,
+                        'exception_capture_limit': 1,
+                        'exception_capture_dir': '/tmp/hard_pact_qp_failures',
                         'qp_update_mode': 'two_anchor_held_correction', 
                         'qp_solver': 'qpth', 
                         'rollout_qp_solver': None, 
@@ -531,6 +541,12 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'allow_solver_mismatch': False, 
                         'cupiqp_mode': 'dense', 
                         'cupiqp_cuda_graph': False, 
+                        # Reuse bounded rollout/fallback solver capacities.
+                        'cupiqp_rollout_capacity_reuse': True,
+                        'cupiqp_rollout_cache_size': 4,  # idle capacity buckets, LRU
+                        'cupiqp_ppo_reuse': True,  # False: fresh-instance reference
+                        'cupiqp_ppo_pool_size': 8,  # busy graphs never evicted
+                        'cuda_event_profiling': False,  # opt-in iteration-end sync
                         'rollout_eps_abs': 0.0001, 
                         'rollout_eps_rel': 0.0001, 
                         'rollout_max_iter': 20, 
@@ -585,9 +601,12 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'check_equality_rank': True, 
                         'solver_dtype': 'auto', 
                         'verbose': 0, 
-                        'diagnostics_level': 'minimal', 
-                        'full_audit_period': 1000, 
-                        'full_audit_sample_size': 8, 
+                        # Always retain primal safety/fallback summaries.
+                        # Physical/KKT audits and synchronized timing are opt-in.
+                        'diagnostics_level': 'minimal',
+                        # Conservative cadence if 'full' is enabled later.
+                        'full_audit_period': 100,
+                        'full_audit_sample_size': 8,
                         'rollout_chunk_size': 4096, 
                         'ppo_chunk_size': 8000, 
                         'position_integration_coefficient': 1.0}

@@ -237,6 +237,8 @@ class OnPolicyRunnerPACT:
             qp_mode = self.alg.qp_config.qp_update_mode
             self.deployment_contract["qp_update"] = {
                 "mode": qp_mode,
+                # Training-only delay; deployment uses the configured QP.
+                "training_warmup_iterations": self.alg.qp_config.warmup_iterations,
                 "physics_substep_anchors": (
                     [0, 2] if qp_mode == "two_anchor_held_correction"
                     else list(range(int(self.env.cfg.control.decimation)))
@@ -288,13 +290,17 @@ class OnPolicyRunnerPACT:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
+            qp_profile = None
             if self.is_hard_pact:
                 self.env._terrain_curriculum_iteration = it
+                self._set_hard_pact_qp_iteration(it)
+                if self.alg.hard_pact_qp is not None:
+                    self.alg.hard_pact_qp.begin_iteration_diagnostics("rollout")
+                    qp_profile = self.alg.hard_pact_qp.profiles["rollout"]
+                    qp_collection_token = qp_profile.begin(obs)
             if self.is_hard_pact and self.alg.profile_bard_timing and torch.cuda.is_available():
                 torch.cuda.synchronize(self.device)
             start = time.time()
-            self._rollout_qp_metric_sums = {}
-            self._rollout_qp_metric_count = 0
             self._rollout_disturbance_active_sum = torch.zeros(
                 (), device=self.device
             )
@@ -359,6 +365,11 @@ class OnPolicyRunnerPACT:
                     torch.cuda.synchronize(self.device)
                 stop = time.time()
                 collection_time = stop - start
+                if qp_profile is not None:
+                    qp_profile.end("total_collection", qp_collection_token)
+                    # Keep this timer in the rollout profile: update() clears
+                    # the PPO diagnostics at entry, but this spans all PPO work.
+                    qp_update_token = qp_profile.begin(obs)
 
                 # Learning step
                 start = stop
@@ -367,6 +378,8 @@ class OnPolicyRunnerPACT:
             mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, mean_vel_loss, \
                     mean_recon_loss, mean_kld_loss, mean_pinn_loss \
                     = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, it, self.env.simulator.default_dof_pos, self.env.obs_scales.dof_vel)
+            if qp_profile is not None:
+                qp_profile.end("total_update", qp_update_token)
 
             # self.env.step_tradeoff_curriculum()
             if self.console_debug:
@@ -480,16 +493,35 @@ class OnPolicyRunnerPACT:
         if self.is_hard_pact and hasattr(self.alg.physics_dynamics, "shutdown"):
             self.alg.physics_dynamics.shutdown()
 
+    def _set_hard_pact_qp_iteration(self, iteration):
+        """Set both rollout and PPO gates before collecting this iteration."""
+        self.alg._qp_training_iteration = int(iteration)
+        self.env.set_hard_pact_qp_enabled(self.alg.qp_enabled_at_iteration())
+
     def _log_qp_metrics(self, iteration):
         """Transfer only aggregated QP scalars to TensorBoard."""
+        metrics = {}
+        qp = getattr(self.alg, "hard_pact_qp", None)
+        if qp is not None:
+            reference = qp.torque_limits
+            for phase in ("rollout", "ppo"):
+                metrics.update(qp.iteration_metrics(phase, reference))
+            update_time = metrics.pop("qp/rollout/profiling/total_update_ms", None)
+            if update_time is not None:
+                metrics["qp/ppo/profiling/total_update_ms"] = update_time
         for name, value in getattr(self.alg, "last_qp_metrics", {}).items():
-            if not name.startswith(("qp/minimal/", "qp/physical/", "qp/full/")):
+            # Sampling/warmup are already iteration aggregates. Do not export
+            # last-minibatch solve fractions over the authoritative totals.
+            if not name.startswith(("qp/minimal/sampling/", "qp/minimal/warmup/", "qp/full/gradient_")):
                 continue
+            metrics[name.replace("qp/", "qp/ppo/", 1)] = value
+        for name, value in metrics.items():
             if not isinstance(value, torch.Tensor) or value.numel() != 1:
                 raise ValueError(
                     f"QP runner metric {name!r} must be one scalar tensor"
                 )
             self.writer.add_scalar(name, value.item(), iteration)
+        self._last_qp_iteration_metrics = metrics
 
     def _accumulate_rollout_qp_metrics(self, infos):
         """Reduce per-environment rollout QP diagnostics on the live device."""
@@ -499,33 +531,8 @@ class OnPolicyRunnerPACT:
                 "sustained_wrench_active_mask"
             ].float().mean()
             self._rollout_disturbance_metric_count += 1
-        interval = infos.get("hard_pact_qp_interval") if isinstance(infos, dict) else None
-        if not interval:
-            return
-        stage = interval["interval_qp_stage_fractions"]
-        correction = interval["interval_qp_correction"].abs().reshape(-1)
-        slack = interval["interval_qp_contact_slack"].abs().reshape(-1)
-        residual = interval["interval_qp_residuals"].abs()
-        timing = interval["interval_qp_timing_ms"]
-        metrics = {
-            "qp/minimal/full_fraction": stage[:, 0].mean(),
-            "qp/minimal/relaxed_fraction": stage[:, 1].mean(),
-            "qp/minimal/fallback_fraction": stage[:, 2].mean(),
-            "qp/minimal/normalized_equality_residual_max": residual[:, 0].max(),
-            "qp/minimal/normalized_inequality_violation_max": residual[:, 1].max(),
-            "qp/minimal/rollout_timing_ms": timing.mean(),
-            "qp/minimal/rollout_correction_mean": correction.mean(),
-            "qp/minimal/rollout_correction_p95": torch.quantile(correction, 0.95),
-            "qp/minimal/rollout_correction_max": correction.max(),
-            "qp/minimal/rollout_slack_mean": slack.mean(),
-            "qp/minimal/rollout_slack_p95": torch.quantile(slack, 0.95),
-            "qp/minimal/rollout_slack_max": slack.max(),
-        }
-        for key, value in metrics.items():
-            self._rollout_qp_metric_sums[key] = (
-                self._rollout_qp_metric_sums.get(key, torch.zeros_like(value)) + value
-            )
-        self._rollout_qp_metric_count += 1
+        # Solver statistics are accumulated at actual solve calls. Interval
+        # averages include held substeps and cannot be used as solve counts.
 
     @staticmethod
     def _scalar(value):
@@ -577,12 +584,8 @@ class OnPolicyRunnerPACT:
         if not hasattr(self, "hard_pact_features"):
             return
         metrics = collect_hard_pact_scalars(self.alg, self.hard_pact_features)
-        count = getattr(self, "_rollout_qp_metric_count", 0)
-        if count:
-            metrics.update({
-                key: value / count
-                for key, value in self._rollout_qp_metric_sums.items()
-            })
+        metrics = {key: value for key, value in metrics.items()
+                   if not key.startswith(("qp/minimal/", "qp/physical/", "qp/full/"))}
         disturbance_count = getattr(self, "_rollout_disturbance_metric_count", 0)
         if disturbance_count:
             metrics["disturbance/persistent_active_fraction"] = (
@@ -778,15 +781,16 @@ class OnPolicyRunnerPACT:
                 )
 
         if self.console_qp_timing and hasattr(self, "hard_pact_features"):
-            qp_count = getattr(self, "_rollout_qp_metric_count", 0)
-            qp_sum = getattr(self, "_rollout_qp_metric_sums", {}).get(
-                "qp/minimal/rollout_timing_ms"
-            )
-            if qp_count and qp_sum is not None:
-                log_string += (
-                    f"{'QP solver rollout:':>{pad}} "
-                    f"{(qp_sum / qp_count).item():.3f} ms/substep\n"
-                )
+            if getattr(getattr(self.alg, "qp_config", None), "cuda_event_profiling", False):
+                for phase in ("rollout", "ppo"):
+                    value = getattr(self, "_last_qp_iteration_metrics", {}).get(
+                        f"qp/{phase}/profiling/solve_ms"
+                    )
+                    if value is not None:
+                        log_string += (
+                            f"{('QP solver ' + phase + ':'):>{pad}} "
+                            f"{value.item():.3f} ms/iteration\n"
+                        )
 
         log_string += ep_string
         log_string += (f"""{'-' * width}\n"""
@@ -808,6 +812,14 @@ class OnPolicyRunnerPACT:
             'iter': self.current_learning_iteration,
             'infos': infos,
         }
+        if self.is_hard_pact:
+            # The legacy runner counter advances only after learn() finishes.
+            # Save the next iteration for HardPACT periodic checkpoints too,
+            # so resuming cannot accidentally repeat its QP warmup.
+            checkpoint['iter'] = max(
+                self.current_learning_iteration,
+                getattr(self.alg, "_last_completed_iteration", -1) + 1,
+            )
         if self.is_hard_pact and hasattr(
             self.env, "domain_rand_curriculum_state_dict"
         ):
@@ -836,6 +848,9 @@ class OnPolicyRunnerPACT:
         else:
             # Preserve the historical PACT resume behavior for legacy tasks.
             self.current_learning_iteration = 0
+        if self.is_hard_pact:
+            self.alg._last_completed_iteration = self.current_learning_iteration - 1
+            self._set_hard_pact_qp_iteration(self.current_learning_iteration)
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):

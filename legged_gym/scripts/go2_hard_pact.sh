@@ -83,7 +83,7 @@ echo "HardPACT environment: ${CONDA_DEFAULT_ENV:-$target_env}; simulator: $SIMUL
 if [ "$smoke" -eq 1 ]; then
     # One iteration contains 32 real control steps and a differentiable PPO
     # update. User-provided values later in argv retain normal argparse order.
-    exec python -u "$script_dir/train.py" \
+    exec python -u "$script_dir/train_hard_pact.py" \
         --num_envs 8 --max_iterations 1 "${forward[@]}"
 fi
-exec python -u "$script_dir/train.py" "${forward[@]}"
+exec python -u "$script_dir/train_hard_pact.py" "${forward[@]}"

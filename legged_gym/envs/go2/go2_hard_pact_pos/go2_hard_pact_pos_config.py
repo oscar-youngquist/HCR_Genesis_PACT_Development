@@ -467,7 +467,9 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         # Multiplies contact BCE inside the collective explicit-estimator loss.
         contact_probability_loss_weight = 0.1
 
-        ppo_latent_diagnostics_enabled = True
+        # Match HardPACT's low-overhead defaults; extra policy/latent
+        # recomputation is opt-in while basic KL/loss logging stays enabled.
+        ppo_latent_diagnostics_enabled = False
         ppo_latent_diagnostics_interval = 100
         ppo_latent_diagnostics_sample_count = 256
         latent_active_unit_variance_threshold = 1e-2
@@ -478,7 +480,7 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
 
         # Detailed physical GRF/base-wrench TensorBoard reductions. Decoder
         # losses remain logged when this is disabled.
-        force_decoder_diagnostics_enabled = True
+        force_decoder_diagnostics_enabled = False
 
         value_loss_coef = 1.0
         use_clipped_value_loss = True
