@@ -543,7 +543,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
                         # at absolute iteration N. Zero keeps current behavior.
-                        'warmup_iterations': 2000,
+                        'warmup_iterations': 10,
                         'exception_capture_enabled': True,
                         'exception_capture_limit': 1,
                         'exception_capture_dir': '/tmp/hard_pact_qp_failures',
