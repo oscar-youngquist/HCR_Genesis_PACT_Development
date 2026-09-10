@@ -2181,6 +2181,7 @@ class PPO_HardPACT:
         else:
             latent, explicit = policy_features
         grf_world = None
+        rollout_control_torque = None
         applied_at_base = None
         total_at_base = None
         wrench_yaw = None
@@ -2197,16 +2198,36 @@ class PPO_HardPACT:
             applied = wrench_at_point(total - label_mass_wrench, com, base)
             return applied, applied + label_mass_wrench
 
-        if compute_pinn:
+        def pinn_grf(torque):
+            # Both PINNs may train the GRF decoder and its latent encoder,
+            # but neither may reach the actor through torque conditioning.
+            # The explicit estimate is separately detached inside the head.
             grf_normalized = self.actor_critic.physics_estimator.predict_grf(
-                latent, explicit, nominal_torque.detach()
+                latent, explicit, torque.detach()
             ).reshape(-1, 4, 3)
-            grf_world = _yaw_local_to_world(
+            return _yaw_local_to_world(
                 self.actor_critic.physics_estimator.grf_to_physical(
                     grf_normalized
                 ),
                 batch["pre_q"][:, 3:7],
             )
+
+        if compute_pinn:
+            if (self.bard_inverse_enabled or self.bard_rollout_enabled
+                    or self.hard_pact_features.soft_constraint_penalty):
+                # Both PINNs condition on deployment-available nominal torque,
+                # never the future interval-average execution label. Reuse one
+                # prediction/encoder graph for the two dynamics objectives.
+                grf_world = pinn_grf(nominal_torque)
+            if self.bard_rollout_enabled:
+                executed_torque = batch["interval_executed_torque"].detach()
+                # Forward value: final bounded execution, including QP and
+                # fallback when enabled. Backward: preserve the existing
+                # identity VJP to replayed nominal torque. This direct
+                # actuation term is the ONLY actor path from either PINN.
+                rollout_control_torque = (
+                    nominal_torque + executed_torque - nominal_torque.detach()
+                )
             if self.bard_inverse_enabled or self.bard_rollout_enabled:
                 wrench_yaw = self.actor_critic.physics_estimator.wrench_to_physical(
                     self.actor_critic.physics_estimator.predict_wrench(
@@ -2326,11 +2347,7 @@ class PPO_HardPACT:
                     timing = self._start_bard_timing("rollout", nominal_torque)
                     rollout = differentiable_bard_rollout_loss(
                         context=context,
-                        control_torque=(
-                            nominal_torque[sl]
-                            + batch["interval_executed_torque"][sl].detach()
-                            - nominal_torque[sl].detach()
-                        ),
+                        control_torque=rollout_control_torque[sl],
                         interval_grf_world=grf_world[sl],
                         applied_wrench_world=applied_at_base[sl],
                         control_dt=control_dt[sl],

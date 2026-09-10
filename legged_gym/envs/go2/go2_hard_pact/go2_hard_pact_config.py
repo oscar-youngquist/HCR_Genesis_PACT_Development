@@ -255,6 +255,11 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         obtain_link_contact_states = True
         contact_state_link_names = ['thigh', 'calf', 'foot', 'base', 'hip']
 
+        dof_vel_limits = [30.1, 30.1, 15.7, 
+                          30.1, 30.1, 15.7, 
+                          30.1, 30.1, 15.7, 
+                          30.1, 30.1, 15.7]
+
     class control(LeggedRobotCfg.control):
         stiffness = {'joint': 30.0}
         damping = {'joint': 0.75}
@@ -519,8 +524,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         bard_inverse_enabled = True
         bard_rollout_enabled = True
 
-        lambda_inverse = 1.0
-        lambda_rollout = 1.0
+        lambda_inverse = 0.5
+        lambda_rollout = 0.5
         lambda_projection = 0.01
 
         profile_bard_timing = False

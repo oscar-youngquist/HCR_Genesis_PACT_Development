@@ -131,10 +131,26 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads():
     from rsl_rl.algorithms.hard_pact_bard import (
         corrected_bard_inverse_dynamics_loss, differentiable_bard_rollout_loss,
     )
-    inverse_torques, rollout_torques = [], []
+    inverse_torques, rollout_torques, grf_torques, inverse_grfs = [], [], [], []
+    actor_weights = [alg.actor_critic.act_pos_out.weight, alg.actor_critic.act_tau_out.weight]
+    predict_grf = alg.actor_critic.physics_estimator.predict_grf
+    replay_action_path = alg._replay_action_path
+    replayed_nominal = []
+
+    def checked_replay(*args, **kwargs):
+        result = replay_action_path(*args, **kwargs)
+        replayed_nominal.append(result["nominal_torque"].detach().clone())
+        return result
+
+    def checked_grf(latent, explicit, torque):
+        # Both PINNs share the first nominal-conditioned prediction; later
+        # calls belong to the independent auxiliary update phases.
+        grf_torques.append((torque.detach().clone(), torque.requires_grad))
+        return predict_grf(latent, explicit, torque)
 
     def checked_loss(**kwargs):
         inverse_torques.append(kwargs["interval_executed_torque"].detach().clone())
+        inverse_grfs.append(kwargs["interval_grf_world"].detach().clone())
         measured.append(kwargs["measured_generalized_contact_force"])
         result = corrected_bard_inverse_dynamics_loss(**kwargs)
         weights = [alg.actor_critic.context_encoder.ce_out_mean.weight,
@@ -142,16 +158,37 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads():
                    alg.actor_critic.physics_estimator.wrench_head[-1].weight]
         grads = torch.autograd.grad(result.loss, weights, retain_graph=True)
         gradients.extend(g.detach() for g in grads)
+        actor_grads = torch.autograd.grad(result.loss, actor_weights, retain_graph=True, allow_unused=True)
+        assert all(g is None or not g.count_nonzero() for g in actor_grads)
         assert result.loss > 0 and torch.isfinite(result.loss)
         return result
 
     def checked_rollout(**kwargs):
         assert kwargs["control_torque"].requires_grad
+        assert len(grf_torques) == 1  # No second, execution-label-conditioned forward.
+        torch.testing.assert_close(kwargs["interval_grf_world"], inverse_grfs[-1], rtol=0, atol=0)
         rollout_torques.append(kwargs["control_torque"].detach().clone())
-        return differentiable_bard_rollout_loss(**kwargs)
+        result = differentiable_bard_rollout_loss(**kwargs)
+        actor_grads = torch.autograd.grad(result.loss, actor_weights, retain_graph=True, allow_unused=True)
+        assert all(g is not None and g.isfinite().all() and g.abs().sum() > 0 for g in actor_grads)
+        # Removing ONLY the actuation edge must remove all actor gradients,
+        # while GRF/wrench/encoder gradients remain available.
+        force_only = differentiable_bard_rollout_loss(
+            **dict(kwargs, control_torque=kwargs["control_torque"].detach())
+        )
+        stopped = torch.autograd.grad(force_only.loss, actor_weights, retain_graph=True, allow_unused=True)
+        assert all(g is None or not g.count_nonzero() for g in stopped)
+        force_weights = [alg.actor_critic.context_encoder.ce_out_mean.weight,
+                         alg.actor_critic.physics_estimator.grf_head[-1].weight,
+                         alg.actor_critic.physics_estimator.wrench_head[-1].weight]
+        force_grads = torch.autograd.grad(force_only.loss, force_weights, retain_graph=True)
+        assert all(g.isfinite().all() and g.abs().sum() > 0 for g in force_grads)
+        return result
 
     with patch("rsl_rl.algorithms.ppo_hard_pact.corrected_bard_inverse_dynamics_loss", side_effect=checked_loss), \
-         patch("rsl_rl.algorithms.ppo_hard_pact.differentiable_bard_rollout_loss", side_effect=checked_rollout):
+         patch("rsl_rl.algorithms.ppo_hard_pact.differentiable_bard_rollout_loss", side_effect=checked_rollout), \
+         patch.object(alg.actor_critic.physics_estimator, "predict_grf", side_effect=checked_grf), \
+         patch.object(alg, "_replay_action_path", side_effect=checked_replay):
         alg.update(lambda a: (a[:, :12], a[:, 12:]), lambda q, p, v: q-p-v,
                    .02, 0, torch.zeros(12), 1.)
     assert measured and all(x.abs().sum() > 0 and not x.requires_grad for x in measured)
@@ -160,3 +197,6 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads():
     torch.testing.assert_close(torch.cat(inverse_torques).sort(dim=0).values, expected_torques)
     torch.testing.assert_close(torch.cat(rollout_torques).sort(dim=0).values, expected_torques,
                                rtol=0, atol=2e-7)  # Existing straight-through float32 arithmetic.
+    assert not grf_torques[0][1]
+    torch.testing.assert_close(grf_torques[0][0], replayed_nominal[0], rtol=0, atol=0)
+    assert not torch.equal(grf_torques[0][0].sort(dim=0).values, expected_torques)
