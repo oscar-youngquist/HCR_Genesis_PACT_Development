@@ -861,6 +861,7 @@ class Go2HardPACT(Go2PACT):
             selected = qp_substep_mask(qp.cfg.qp_update_mode,self._qp_substep,
                                        self._qp_sampled_substep_index)
             rows = selected.nonzero(as_tuple=True)[0]
+            certified = torch.zeros_like(selected)
             aggregate = getattr(qp,"iteration_diagnostics",{}).get("rollout")
             if aggregate is not None:
                 aggregate.add_sum("unsolved/real_rows",(~selected).sum())
@@ -891,6 +892,7 @@ class Go2HardPACT(Go2PACT):
                     dt=tau_nom.new_full((rows.numel(),1),dt))
                 self._qp_interval_timing_ms[rows] += (time.perf_counter()-start)*1000.0
                 safe[rows] = result.tau_safe
+                certified[rows] = result.differentiated_mask
                 zeros = tau_nom.new_zeros(rows.numel())
                 residual = torch.stack((result.diagnostics["selected/equality_max"],
                     result.diagnostics["selected/inequality_max"],
@@ -933,6 +935,25 @@ class Go2HardPACT(Go2PACT):
                 self.simulator._torques = safe
             else:
                 setter(safe)
+            if aggregate is not None and getattr(qp,"diagnostics_scheduled",False):
+                from rsl_rl.algorithms.hard_pact_qp_diagnostics import QPMeasuredMotion
+                if not hasattr(self,"_qp_measured_motion"):
+                    self._qp_measured_motion = QPMeasuredMotion()
+                self._qp_measured_motion.update(aggregate,qj,vj,safe,dt,
+                    qp.position_lower.to(qj),qp.position_upper.to(qj),qp.velocity_limits.to(qj),certified)
+                angular = self._canonical_velocity_world()[:,3:6]
+                aggregate.add_values("measured/base_angular_rate_abs_rad_s",angular.abs())
+                # Tilt magnitude from body-z/world-z dot product, xyzw quaternion.
+                tilt = torch.acos((1-2*(quat[:,0].square()+quat[:,1].square())).clamp(-1,1))
+                aggregate.add_values("measured/base_tilt_rad",tilt)
+                if hasattr(self.simulator,"feet_vel") and hasattr(self.simulator,"feet_contact_indices"):
+                    contacts = self.simulator.link_contact_forces[:,self.simulator.feet_contact_indices,2] > 5.
+                    aggregate.add_values("measured/stance_slip_m_s",
+                        self.simulator.feet_vel[...,:2].norm(dim=-1),contacts)
+            elif hasattr(self,"_qp_measured_motion"):
+                # A skipped diagnostic interval breaks the finite-difference stencil.
+                self._qp_measured_motion.valid.zero_()
+                self._qp_measured_motion.acceleration_valid.zero_()
             correction = safe-tau_nom
             self._qp_interval_safe_sum.add_(safe)
             self._qp_interval_safe_peak.copy_(torch.maximum(self._qp_interval_safe_peak,safe.abs()))
@@ -996,6 +1017,12 @@ class Go2HardPACT(Go2PACT):
         )
         qp_substep_anchors(update_mode, decimation)  # validates exactly four substeps
         self._qp_sampled_substep_index = balanced_substep_indices(self.num_envs,decimation,self.device)
+        aggregate = getattr(self._hard_pact_rollout_qp, "iteration_diagnostics", {}).get("rollout")
+        if aggregate is not None:
+            aggregate.add_sum("environment_control_intervals", torch.tensor(self.num_envs,device=self.device))
+            for k in range(4):
+                aggregate.add_sum(f"sampled_substep/{k}_count", (self._qp_sampled_substep_index==k).sum())
+            aggregate.add_values("mode/every_substep", torch.tensor(float(update_mode=="every_substep"),device=self.device))
         self._qp_interval_solve_count = shape(1)
         self._qp_grf_conditioning_q = shape(12)
         self._qp_grf_conditioning_v = shape(12)
@@ -1496,6 +1523,8 @@ class Go2HardPACT(Go2PACT):
         packet = getattr(self, "_qp_sampled_transition", {})
         if "sampled_qp_valid" in packet:
             packet["sampled_qp_valid"][env_ids] = False
+        if hasattr(self,"_qp_measured_motion"):
+            self._qp_measured_motion.reset(env_ids)
 
 
 def install_hard_pact_environment_methods(task_class):

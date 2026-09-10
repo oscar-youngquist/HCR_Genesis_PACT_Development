@@ -4,6 +4,7 @@ from legged_gym.scripts.train_hard_pact import prepare_solver_runtime
 prepare_solver_runtime(sys.argv[1:])
 import json
 import tempfile
+import time
 from dataclasses import replace
 import torch
 from legged_gym.envs import *  # register actual tasks
@@ -23,6 +24,7 @@ def main():
         runner,_=task_registry.make_alg_runner(env,args.task,args,train_cfg=train,
             log_root=tempfile.mkdtemp(prefix="hard_pact_modes_control_"))
         qp=runner.alg.hard_pact_qp
+        qp.diagnostics_scheduled=True
         original=qp.solve;counts=torch.zeros(env.num_envs,device=env.device,dtype=torch.long)
         stages=torch.zeros(3,device=env.device,dtype=torch.long)
         def solve(**kw):
@@ -60,6 +62,8 @@ def main():
             qp.cfg=replace(qp.cfg,qp_update_mode=mode)
             env.set_hard_pact_qp_enabled(True)
             counts.zero_();stages.zero_()
+            torch.cuda.synchronize();torch.cuda.reset_peak_memory_stats()
+            started=time.perf_counter()
             for _ in range(3):
                 obs,hist,priv,_=env.get_observations()
                 with torch.inference_mode():
@@ -70,7 +74,11 @@ def main():
                 bins=torch.bincount(env._qp_sampled_substep_index.long(),minlength=4)
                 assert bins.max()-bins.min()<=1
             assert counts.eq(3*expected).all(),counts
+            torch.cuda.synchronize()
             report[mode]={"problems_per_environment":counts.tolist(),"stages":stages.tolist(),
+                          "three_control_intervals_wall_ms":1000*(time.perf_counter()-started),
+                          "torch_cuda_peak_allocated_bytes":torch.cuda.max_memory_allocated(),
+                          "torch_cuda_peak_reserved_bytes":torch.cuda.max_memory_reserved(),
                           "network_calls_during_substeps":0}
         print("QP_MODES_CONTROL_SMOKE_PASS "+json.dumps(report),flush=True)
     finally:

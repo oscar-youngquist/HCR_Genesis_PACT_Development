@@ -21,7 +21,7 @@ def test_cli_defaults_and_exact_variant_matrix(tmp_path):
     assert VARIANTS == {
         "pre_qp": None, "analytic": None,
         "qp_every_substep": "every_substep",
-        "qp_single_anchor": "single_anchor_held_correction",
+        "qp_random_one_substep": "random_one_substep",
     }
 
 

@@ -778,7 +778,7 @@ class GainAndScalingTests(unittest.TestCase):
         self.assertIn("wrench_to_physical", bard_source)
         self.assertIn("sanitize_and_clip_wrench_for_qp", bard_source)
         rollout_source = inspect.getsource(
-            Go2HardPACT._solve_hard_pact_rollout_qp_substep
+            Go2HardPACT._prepare_qp_control_predictions
         )
         self.assertIn("wrench_to_qp_physical", rollout_source)
         self.assertNotIn("obs_scales.base_wrench", rollout_source)
@@ -862,7 +862,7 @@ class DeploymentContractTests(unittest.TestCase):
                 self.assertEqual(stream.read(), first_text)
             loaded = json.loads(first_text)
 
-        self.assertEqual(loaded["schema_version"], 10)
+        self.assertEqual(loaded["schema_version"], 13)
         self.assertEqual(loaded["torque_convention"]["conversion_helper"],
                          "rsl_rl.modules.hard_pact_control.bounded_nominal_torque")
         self.assertIn("nominal_torque_tracking", loaded["qp_objective"]["terms"])

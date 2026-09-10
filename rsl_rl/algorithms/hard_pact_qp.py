@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 from typing import Mapping
-import warnings
 
 import torch
 from qpth.qp import QPFunction
@@ -152,6 +151,8 @@ class HardPACTQPConfig:
     # physical-unit summaries; ``full`` periodically enables sampled matrix,
     # KKT, timing, memory, and gradient audits.
     diagnostics_level: str = "minimal"
+    tensorboard_diagnostics_enabled: bool = True
+    tensorboard_diagnostics_interval: int = 50  # Absolute PPO iterations.
     full_audit_period: int = 1000
     full_audit_sample_size: int = 8
     # Legacy chunk_size overrides both paths when not None.
@@ -176,27 +177,12 @@ class HardPACTQPConfig:
 
     @classmethod
     def from_dict(cls, values):
-        """Load saved settings without reviving removed 54-D/proximal costs.
-
-        Obsolete HardPACT formulation keys are metadata only. cuPIQP's own
-        numerical regularization/settings are deliberately left untouched.
-        Policy tensors and checkpoint migration do not depend on these keys.
-        """
-        values = dict(values)
-        obsolete = {key: values.pop(key) for key in
-                    ("proximal_rho", "proximal_block_weights", "qdd_scale",
-                     "slack_scale_m_s2", "slack_weight", "qdd_regularization",
-                     "force_regularization", "torque_regularization",
-                     "elastic_recovery_enabled", "elastic_dynamics_weight",
-                     "contact_acceleration_limit_m_s2") if key in values}
-        if obsolete:
-            warnings.warn(
-                "Ignoring obsolete HardPACT QP metadata: "
-                + ", ".join(obsolete) + ". Using the 24-variable torque/force objective; "
-                "policy weights and cuPIQP internal regularization are unchanged.",
-                stacklevel=2,
-            )
-        return cls(**values)
+        """Reject incompatible formulation settings rather than silently migrate."""
+        unknown = set(values)-{field.name for field in fields(cls)}
+        if unknown:
+            raise ValueError("Incompatible HardPACT QP metadata; re-export current 24-D settings. Unknown keys: "
+                             + ", ".join(sorted(unknown)))
+        return cls(**dict(values))
 
     def __post_init__(self):
         qp_substep_anchors(self.qp_update_mode,4)
@@ -399,6 +385,8 @@ class HardPACTDifferentiableQP:
             )
         if self._full_audit_period(config) < 0:
             raise ValueError("QP full_audit_period must be nonnegative")
+        if config.tensorboard_diagnostics_interval < 0:
+            raise ValueError("QP tensorboard_diagnostics_interval must be nonnegative")
         if self._full_audit_sample_size(config) <= 0:
             raise ValueError("QP full_audit_sample_size must be positive")
         self._constant_cache = {}
@@ -502,7 +490,8 @@ class HardPACTDifferentiableQP:
         return self.cfg.diagnostics_level
 
     def _physical_enabled(self):
-        return self.diagnostics_level in ("physical", "full")
+        return (self.diagnostics_level in ("physical", "full")
+                and getattr(self, "diagnostics_scheduled", True))
 
     def _solve_dtype(self, reference):
         """Resolve auto precision from the live learned input's device."""
@@ -742,6 +731,31 @@ class HardPACTDifferentiableQP:
                         ("friction_unilateral",slice(48,None))):
             metrics[name+"/violation_max"] = self._maximum(residual[:,sl].clamp_min(0))
             metrics[name+"/margin_min"] = (-residual[:,sl]).amin(-1) if residual[:,sl].shape[1] else x.new_full((x.shape[0],),float("nan"))
+            metrics[name+"/active_fraction"] = (residual[:,sl].abs()<=self.cfg.active_tolerance).float().mean(-1) if residual[:,sl].shape[1] else x.new_full((x.shape[0],),float("nan"))
+        stance = (data["contact_probability"] >= self.cfg.contact_threshold).detach()
+        ca = torch.einsum("bfkn,bn->bfk",data["foot_jacobians"],a)+data["foot_acceleration_bias"]
+        stance_sq = ca.square().sum(-1).mul(stance).sum(-1)
+        metrics["model_stance_acceleration_rms_m_s2"] = (stance_sq/(3*stance.sum(-1)).clamp_min(1)).sqrt()
+        torque_error = x[:,:12]-data["tau_nom"]
+        force_error = x[:,12:].reshape(-1,4,3)-torch.where(stance[...,None],data["force_pred_world"],0.)
+        metrics["torque_correction_rms_nm"] = torque_error.square().mean(-1).sqrt()
+        metrics["force_reference_error_rms_n"] = force_error.square().mean((1,2)).sqrt()
+        metrics["objective/torque_dimensionless"] = self.cfg.torque_tracking_weight*(torque_error/self.cfg.torque_scale_nm).square().sum(-1)
+        metrics["objective/grf_dimensionless"] = self.cfg.force_tracking_weight*(force_error/self.cfg.force_scale_n).square().sum((1,2))
+        metrics["objective/stance_dimensionless"] = self.cfg.contact_acceleration_weight*stance_sq/self.cfg.contact_acceleration_scale_m_s2**2
+        # Same instantaneous yaw-local physical angular acceleration used by
+        # the soft attitude objective (not Euler-angle second derivatives).
+        q=data["base_quaternion"]
+        yaw=torch.atan2(2*(q[:,3]*q[:,2]+q[:,0]*q[:,1]),1-2*(q[:,1].square()+q[:,2].square()))
+        R=x.new_zeros(x.shape[0],2,3)
+        R[:,0,0],R[:,0,1]=yaw.cos(),yaw.sin()
+        R[:,1,0],R[:,1,1]=-yaw.sin(),yaw.cos()
+        tilt_world=torch.stack((-2*(q[:,1]*q[:,2]-q[:,3]*q[:,0]),
+            2*(q[:,0]*q[:,2]+q[:,3]*q[:,1]),torch.zeros_like(yaw)),-1)
+        angular=(data["base_jacobian"][:,3:6]@a[...,None]).squeeze(-1)
+        error=(R@(angular+self.cfg.attitude_kp*tilt_world+
+            self.cfg.attitude_kd*data["base_angular_velocity_world"])[...,None]).squeeze(-1)
+        metrics["objective/attitude_dimensionless"]=self.cfg.attitude_weight*(error/self.cfg.attitude_acceleration_scale_rad_s2).square().sum(-1)
         for name,value in (("qdd",a),("force",x[:,12:]),("torque",x[:,:12])):
             metrics[name+"/mean"] = value.abs().mean(-1)
             metrics[name+"/max"] = value.abs().amax(-1)
@@ -838,7 +852,7 @@ class HardPACTDifferentiableQP:
         require_backend(self._active_solver,device=reference.device,dtype=dtype)
         self._solve_count += 1
         audit_remaining = (self._full_audit_sample_size(self.cfg)
-            if self.diagnostics_level=="full" and self._full_audit_period(self.cfg)>0
+            if self.diagnostics_level=="full" and getattr(self,"diagnostics_scheduled",True) and self._full_audit_period(self.cfg)>0
             and self._solve_count % self._full_audit_period(self.cfg)==0 else 0)
         event_profile = self.profiles[self._diagnostics_phase]
         self._last_gradient_metrics = {}
@@ -916,8 +930,7 @@ class HardPACTDifferentiableQP:
                 except Exception as error:
                     G,h,lo,hi = self._cupiqp_native_pack(m) if self._active_solver=="cupiqp" else (m.G,m.h,None,None)
                     capture_failure(self,error,dict(Q=m.Q,p=m.p,G=G,h=h,A=m.A,b=m.b,
-                                                    native_lower=lo,native_upper=hi),
-                                    relaxed_contact=False,elastic=False)
+                                                    native_lower=lo,native_upper=hi))
                     diag["full/solver_exception"][rows] = True
                     continue
                 diag["full/output_finite"][rows] = torch.isfinite(z.detach()).all(-1)
@@ -946,7 +959,7 @@ class HardPACTDifferentiableQP:
                     for key,value in physical.items():
                         name="physical/"+key
                         if name not in diag: diag[name]=ref.new_full((n,),float("nan"))
-                        diag[name][rows]=value
+                        diag[name][rows]=value.to(ref.dtype)
                 count=min(audit_remaining,rows.numel())
                 if count:
                     sampled=torch.arange(count,device=ref.device)
@@ -978,7 +991,7 @@ class HardPACTDifferentiableQP:
         result = HardPACTQPResult(qdd.to(reference.dtype),
             primal[:,12:].reshape(n,4,3).to(reference.dtype),
             primal[:,:12].to(reference.dtype),stage,ok,diag,metrics)
-        self.iteration_diagnostics[self._diagnostics_phase].add_result(result,False,differentiable)
+        self.iteration_diagnostics[self._diagnostics_phase].add_result(result,differentiable)
         return result
 
 

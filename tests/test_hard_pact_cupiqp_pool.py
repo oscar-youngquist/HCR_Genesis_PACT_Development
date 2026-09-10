@@ -44,31 +44,16 @@ def test_disabled_profiling_does_not_create_events_or_synchronize():
 
 
 def test_final_stages_counts_and_fraction_partition_invariance():
-    qp = make_qp(elastic_recovery_enabled=True)
-    # Exercise mixed full/relaxed/elastic/analytic results without relying on
-    # numerical failure of a particular iterative solver on this platform.
-    def stage_solver(data, relaxed, **kwargs):
-        n = data["tau_nom"].shape[0]
-        row_id = data["tau_nom"][:, 0].long()
-        code = 2 if kwargs.get("elastic") else int(relaxed)
-        ok = row_id == code
-        diag = {"attempted": torch.ones(n, dtype=torch.bool),
-                "solver_exception": torch.zeros(n, dtype=torch.bool),
-                "output_finite": torch.ones(n, dtype=torch.bool),
-                "equality_max": torch.zeros(n), "inequality_max": torch.zeros(n)}
-        return torch.zeros(n, 54, dtype=torch.float64), ok, diag
+    qp = make_qp()
     data = qp_data(4)
-    data["tau_nom"][:, 0] = torch.arange(4)
-    with mock.patch.object(qp, "_solve_stage", side_effect=stage_solver):
-        result = qp.solve(differentiable=True, diagnostics_phase="ppo", **data)
+    data["joint_velocity"][2:] = 1e6  # Empty acceleration intersection: analytic fallback.
+    result = qp.solve(differentiable=True, diagnostics_phase="ppo", **data)
     metrics = qp.iteration_metrics("ppo", data["tau_nom"])
-    for name in ("full", "relaxed", "elastic", "analytic"):
-        assert metrics[f"qp/ppo/final/{name}_count"] == 1
-        assert metrics[f"qp/ppo/final/{name}_fraction"] == 0.25
-    assert metrics["qp/ppo/attempt/full_count"] == 4
-    assert metrics["qp/ppo/attempt/relaxed_count"] == 3
-    assert metrics["qp/ppo/attempt/elastic_count"] == 2
-    assert metrics["qp/ppo/differentiated_fraction"] == .75
+    for name in ("full", "analytic"):
+        assert metrics[f"qp/ppo/final/{name}_count"] == 2
+        assert metrics[f"qp/ppo/final/{name}_fraction"] == 0.5
+    assert metrics["qp/ppo/attempt/full_count"] == 2
+    assert metrics["qp/ppo/differentiated_fraction"] == .5
     assert metrics["qp/ppo/selected/equality_max"] == 0
     assert torch.isnan(metrics["qp/ppo/backend/solver_iterations_mean"])
     split = QPIterationDiagnostics()
@@ -76,17 +61,17 @@ def test_final_stages_counts_and_fraction_partition_invariance():
         split.add_result(SimpleNamespace(
             stage=result.stage[ids], differentiated_mask=result.differentiated_mask[ids],
             diagnostics={k: v[ids] for k, v in result.diagnostics.items()}, metrics={},
-        ), True, True)
+        ), True)
     for key, value in split.finalize(data["tau_nom"]).items():
         if key != "solve_calls":
             torch.testing.assert_close(value, metrics[f"qp/ppo/{key}"], equal_nan=True)
 
 
-def test_runner_emits_disjoint_scalar_tags_once_and_held_rows_are_separate():
+def test_runner_emits_disjoint_scalar_tags_once_and_unsolved_rows_are_separate():
     qp = make_qp()
     data = qp_data(2)
     qp.solve(differentiable=False, **data)
-    qp.iteration_diagnostics["rollout"].add_sum("held/real_rows", torch.tensor(2))
+    qp.iteration_diagnostics["rollout"].add_sum("unsolved/real_rows", torch.tensor(2))
     qp.solve(differentiable=False, diagnostics_phase="ppo", **data)  # stopgrad
     runner = OnPolicyRunnerPACT.__new__(OnPolicyRunnerPACT)
     runner.alg = SimpleNamespace(hard_pact_qp=qp, last_qp_metrics={
@@ -100,14 +85,14 @@ def test_runner_emits_disjoint_scalar_tags_once_and_held_rows_are_separate():
     assert all(key.startswith(("qp/rollout/", "qp/ppo/")) for key in keys)
     values = {key: value for key, value, _ in calls}
     assert values["qp/rollout/real_rows"] == 2
-    assert values["qp/rollout/held/real_rows"] == 2
+    assert values["qp/rollout/unsolved/real_rows"] == 2
     assert values["qp/ppo/differentiated_fraction"] == 0
     assert values["qp/ppo/certified_fraction"] == 1
 
 
-def raw_solve(qp, data, relaxed=False, elastic=False):
-    build = qp._build(data, relaxed, elastic)
-    G, h, lo, hi = qp._cupiqp_native_pack(build, relaxed, elastic)
+def raw_solve(qp, data):
+    build = qp._build(data)
+    G, h, lo, hi = qp._cupiqp_native_pack(build)
     return qp._backend_instances["cupiqp"].solve(
         build.Q, build.p, G, h, build.A, build.b, differentiable=True,
         native_lower=lo, native_upper=hi,
@@ -256,7 +241,7 @@ def test_profiled_forward_vjp_parity_and_event_timings():
 
 
 @requires_cupiqp_gpu
-def test_ppo_elastic_pool_updates_state_dependent_hessian():
+def test_ppo_pool_updates_state_dependent_hessian():
     options = dict(qp_solver="cupiqp",
                    ppo_eps_abs=1e-8, ppo_eps_rel=1e-8)
     reused = make_qp(**options)
@@ -265,7 +250,7 @@ def test_ppo_elastic_pool_updates_state_dependent_hessian():
         data = coupled_data(2, torch.float64, "cuda")
         data["mass_matrix"] *= mass
         data["tau_nom"].requires_grad_()
-        out = raw_solve(qp, data, relaxed=True, elastic=True)
+        out = raw_solve(qp, data)
         grad = torch.autograd.grad(out.square().mean(), data["tau_nom"])[0]
         return out.detach().clone(), grad
     for mass in (1., 1.8, .9):

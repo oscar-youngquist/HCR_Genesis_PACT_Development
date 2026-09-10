@@ -11,7 +11,7 @@ import sys
 import torch
 
 
-def capture_failure(owner, error, tensors, *, relaxed_contact, elastic):
+def capture_failure(owner, error, tensors):
     count = getattr(owner, "_exception_capture_count", 0)
     if not owner.cfg.exception_capture_enabled or count >= owner.cfg.exception_capture_limit:
         return
@@ -29,7 +29,7 @@ def capture_failure(owner, error, tensors, *, relaxed_contact, elastic):
             "schema_version": 1, "config": asdict(owner.cfg),
             "solver": owner._active_solver,
             "differentiable": owner._active_differentiable,
-            "relaxed_contact": relaxed_contact, "elastic": elastic,
+            "formulation": "torque_force_24",
             "exception": repr(error), "traceback": traceback.format_exc(),
             "python": platform.python_version(), "packages": packages,
             # Package metadata alone missed Isaac Sim's shadowed Warp module.

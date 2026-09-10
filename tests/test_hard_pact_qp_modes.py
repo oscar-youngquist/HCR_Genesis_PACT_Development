@@ -112,7 +112,7 @@ def test_control_reset_bounds_no_held_correction_and_current_parameter_replay(mo
 def test_contract_rejects_retired_modes_and_partition_preserved():
     assert HardPACTQPConfig().qp_update_mode=="random_one_substep"
     for mode in ("every_substep","random_one_substep"):
-        c={"schema_version":12,"qp_update":qp_update_contract(mode,4)}
+        c={"schema_version":13,"qp_update":qp_update_contract(mode,4)}
         assert validate_qp_deployment_contract(c) is c
         assert c["qp_update"]["ppo_projection_loss_multiplier"]==1
     for mode in ("active_constraint_update","two_anchor_held_correction","single_anchor_held_correction"):

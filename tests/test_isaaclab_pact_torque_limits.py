@@ -11,7 +11,7 @@ from legged_gym.simulator.isaaclab_simulator import IsaacLabSimulator
 from legged_gym.simulator.isaaclab_simulator_pact import IsaacLabSimulator_PACT
 from legged_gym.simulator.genesis_simulator_pact import GenesisSimulator_PACT
 from legged_gym.simulator.genesis_simulator_pact_pos import GenesisSimulator_PACT_Pos
-from rsl_rl.algorithms.hard_pact_qp import HardPACTQPConfig, held_correction_torque
+from rsl_rl.algorithms.hard_pact_qp import HardPACTQPConfig, project_nominal_torque
 from rsl_rl.algorithms.ppo_hard_pact import PPO_HardPACT
 
 
@@ -239,10 +239,10 @@ def test_actual_substep_callback_records_the_clipped_effort_command(action_dim, 
             def project(*_):
                 nominal_inputs.append(env._hard_pact_bounded_nominal_torque.clone())
                 if fallback:
-                    selected = held_correction_torque(
-                        nominal_inputs[-1], torch.zeros(2, 12),
+                    selected = project_nominal_torque(
+                        nominal_inputs[-1],
                         env._hard_pact_previous_substep_torque,
-                        sim.torque_limits, 50., .005, sanitize=True)
+                        sim.torque_limits, 50., .005)
                 else:
                     selected = .5 * sim.torque_limits.expand(2, -1)
                 sim.hard_pact_set_executed_torque(selected)

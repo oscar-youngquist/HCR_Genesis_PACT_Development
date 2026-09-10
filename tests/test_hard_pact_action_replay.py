@@ -268,8 +268,8 @@ class StochasticActionReplayTests(unittest.TestCase):
     def test_frozen_policy_sampled_substep_nominal_torque_matches_rollout_formula(self):
         self._check_sampled_substep_nominal_and_grf("every_substep")
 
-    def test_active_update_replay_holds_initial_grf_conditioning_but_refreshes_sampled_pd(self):
-        self._check_sampled_substep_nominal_and_grf("active_constraint_update")
+    def test_random_substep_replay_holds_initial_grf_conditioning_but_refreshes_sampled_pd(self):
+        self._check_sampled_substep_nominal_and_grf("random_one_substep")
 
     def _check_sampled_substep_nominal_and_grf(self, mode):
         algorithm = make_algorithm(action_clip=1.0)
@@ -297,6 +297,8 @@ class StochasticActionReplayTests(unittest.TestCase):
         transition["sampled_qp_q"][:, 7:] = sampled_q
         transition["sampled_qp_v"] = transition["pre_v"].clone()
         transition["sampled_qp_v"][:, 6:] = sampled_qdot
+        transition["sampled_qp_grf_conditioning_q"] = transition["pre_q"][:,7:].clone()
+        transition["sampled_qp_grf_conditioning_v"] = transition["pre_v"][:,6:].clone()
         rollout = bounded_nominal_torque(
             replay["desired_position"].detach(), replay["feedforward_torque"].detach(),
             sampled_q, sampled_qdot, transition)
@@ -332,11 +334,11 @@ class StochasticActionReplayTests(unittest.TestCase):
         grf_torque = (bounded_nominal_torque(
             replay["desired_position"], replay["feedforward_torque"],
             transition["pre_q"][:, 7:], transition["pre_v"][:, 6:], transition,
-        ) if mode == "active_constraint_update" else replayed)
+        ))
         raw = heads.predict_grf(latent, explicit, grf_torque)
-        deployment = heads.grf_to_qp_physical(raw, explicit[:, 3:7]).reshape(3, 4, 3)
+        deployment = heads.grf_to_physical(raw).reshape(3, 4, 3)
         torch.testing.assert_close(qp_forces, deployment, rtol=0, atol=0)
-        assert qp_forces[:, [0, 3]].eq(0).all()
+        # The shared builder gates the reference; its input remains raw physical GRF.
         torch.testing.assert_close(qp_forces[:, [1, 2]], heads.grf_to_physical(raw).reshape(3, 4, 3)[:, [1, 2]])
         replayed.square().mean().backward()
         self.assertGreater(algorithm.actor_critic.act_tau_out.weight.grad.abs().sum(), 0.)

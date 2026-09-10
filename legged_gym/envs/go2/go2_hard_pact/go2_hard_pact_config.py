@@ -623,6 +623,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         # Always retain primal safety/fallback summaries.
                         # Physical/KKT audits and synchronized timing are opt-in.
                         'diagnostics_level': 'full',
+                        'tensorboard_diagnostics_enabled': True,
+                        'tensorboard_diagnostics_interval': 50,
                         # Conservative cadence if 'full' is enabled later.
                         'full_audit_period': 100,
                         'full_audit_sample_size': 256,

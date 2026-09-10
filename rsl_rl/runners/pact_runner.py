@@ -502,15 +502,31 @@ class OnPolicyRunnerPACT:
         """Set both rollout and PPO gates before collecting this iteration."""
         self.alg._qp_training_iteration = int(iteration)
         self.env.set_hard_pact_qp_enabled(self.alg.qp_enabled_at_iteration())
+        qp = self.alg.hard_pact_qp
+        if qp is not None:
+            qp.diagnostics_scheduled = (qp.cfg.tensorboard_diagnostics_enabled
+                and qp.cfg.tensorboard_diagnostics_interval > 0
+                and iteration % qp.cfg.tensorboard_diagnostics_interval == 0)
+            for owner in (qp, *qp._backend_instances.values()):
+                for profile in getattr(owner,"profiles",{}).values():
+                    profile.enabled = qp.cfg.cuda_event_profiling and qp.diagnostics_scheduled
 
     def _log_qp_metrics(self, iteration):
         """Transfer only aggregated QP scalars to TensorBoard."""
         metrics = {}
         qp = getattr(self.alg, "hard_pact_qp", None)
+        if qp is not None and not getattr(qp, "diagnostics_scheduled", True):
+            return
         if qp is not None:
             reference = qp.torque_limits
             for phase in ("rollout", "ppo"):
                 metrics.update(qp.iteration_metrics(phase, reference))
+            if reference.is_cuda:
+                # PyTorch allocator only: excludes cuPIQP/CuPy and simulator allocations.
+                for name, fn in (("allocated_bytes",torch.cuda.memory_allocated),
+                                 ("reserved_bytes",torch.cuda.memory_reserved),
+                                 ("peak_allocated_since_reset_bytes",torch.cuda.max_memory_allocated)):
+                    metrics[f"qp/rollout/memory/torch_cuda_{name}"] = reference.new_tensor(fn(reference.device))
             update_time = metrics.pop("qp/rollout/profiling/total_update_ms", None)
             if update_time is not None:
                 metrics["qp/ppo/profiling/total_update_ms"] = update_time
@@ -525,7 +541,13 @@ class OnPolicyRunnerPACT:
                 raise ValueError(
                     f"QP runner metric {name!r} must be one scalar tensor"
                 )
-            self.writer.add_scalar(name, value.item(), iteration)
+        # One aggregate device-to-host transfer, not one synchronization per tag.
+        if metrics:
+            if qp is None:
+                reference = next(iter(metrics.values()))
+            scalars = torch.stack([value.detach().to(reference).reshape(()) for value in metrics.values()]).cpu().tolist()
+            for name, value in zip(metrics, scalars):
+                self.writer.add_scalar(name, value, iteration)
         self._last_qp_iteration_metrics = metrics
 
     def _accumulate_rollout_qp_metrics(self, infos):

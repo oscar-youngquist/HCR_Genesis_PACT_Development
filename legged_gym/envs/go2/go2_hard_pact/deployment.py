@@ -111,7 +111,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
     explicit_dim = actor.explicit_estimator.network[-1].out_features
     swing_config = GRFSwingConfig.from_task(cfg)
     contract = {
-        "schema_version": 12,
+        "schema_version": 13,
         "grf_swing_gating": {
             "enabled": swing_config.enabled,
             "contact_probability_threshold": swing_config.threshold,
@@ -138,8 +138,9 @@ def build_deployment_contract(cfg, actor, gain_spec):
             "raw_requested": "unclipped delayed action converted to physical Nm before action clipping, saturation or QP correction; used by torque-limit/feedforward/feedback magnitude penalties",
             "bounded_nominal": "execution-clipped delayed action converted using PD gains, branch weights and motor strength exactly once, then actuator magnitude bounds",
             "non_qp_rate_limit": "none in the current Genesis/Isaac Lab PACT actuator paths",
-            "final_executed": "after QP/fallback/held rate projection and final actuator saturation; authoritative physics label and next torque-rate center",
-            "rollout_physics_gradient": "unchanged straight-through executed interval value with bounded-nominal gradient",
+            "final_executed": "after QP or analytic magnitude/rate projection and final actuator saturation; authoritative physics label and next torque-rate center",
+            "rollout_physics_gradient": "detached actual interval-average executed torque; no actor/QP actuation gradient; GRF/wrench/encoder gradients retained",
+            "projection_gradient": "certified-row torque correction plus soft stance acceleration; implicit gradients to learned torque/GRF/wrench and encoder, detached mechanics and stance; stopgrad ablation metric only",
             "supervised_grf_wrench_predictions": "raw decoder predictions, unchanged",
             "units": "Nm in canonical joint order",
         },
@@ -318,7 +319,7 @@ def write_deployment_contract_once(log_dir, contract):
 
 def validate_qp_deployment_contract(contract):
     """Reject old held/active execution contracts rather than reinterpret them."""
-    if contract.get("schema_version") != 12:
+    if contract.get("schema_version") != 13:
         raise ValueError("Incompatible HardPACT deployment schema; re-export using the current controller")
     update = contract.get("qp_update")
     if update is not None:
