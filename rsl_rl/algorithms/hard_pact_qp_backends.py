@@ -36,6 +36,9 @@ class QPBackendResult:
     solution: torch.Tensor
     duality_gap: torch.Tensor | None = None
     duality_gap_rel: torch.Tensor | None = None
+    # Owned, unpreconditioned cuPIQP variables. Rollout active-set seeding
+    # only: these must never be reused as an implicit-backward context.
+    snapshot: dict[str, torch.Tensor] | None = None
 
 
 class SolverLease:
@@ -585,6 +588,9 @@ class SolverBackend:
             _as_torch_zero_copy(
                 solver.result.info.duality_gap_rel, p
             )[:batch].clone(),
+            ({name: _as_torch_zero_copy(getattr(solver.result, name), p)[:batch].clone()
+              for name in ("y", "z_u", "z_bl", "z_bu", "s_u", "s_bl", "s_bu")}
+             if self.config.qp_update_mode == "active_constraint_update" else None),
         )
 
     def _solve_moreau(self, Q, p, G, h, A, b, *, differentiable):

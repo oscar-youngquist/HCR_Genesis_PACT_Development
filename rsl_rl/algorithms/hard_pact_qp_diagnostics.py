@@ -30,6 +30,8 @@ class QPIterationDiagnostics:
         self.add_sum("differentiated_count", result.differentiated_mask.sum() * int(differentiable))
         for name in ("full", "relaxed", "elastic"):
             attempted = diag.get(f"{name}/attempted", torch.zeros_like(stage, dtype=torch.bool))
+            if name == "full" and "full/active/full_solve" in diag:
+                attempted = attempted & diag["full/active/full_solve"]
             self.add_sum(f"attempt/{name}_count", attempted.sum())
             failed = diag.get(f"{name}/solver_exception", torch.zeros_like(attempted))
             self.add_sum(f"attempt/{name}_exception_count", (failed & attempted).sum())
@@ -39,6 +41,12 @@ class QPIterationDiagnostics:
             for gap in ("duality_gap", "duality_gap_rel"):
                 values = diag.get(f"{name}/{gap}", torch.full_like(stage, float("nan"), dtype=torch.float32))
                 self.add_values(f"attempt/{name}/{gap}_mean", values, attempted)
+        for key, value in diag.items():
+            if key.startswith("full/active/"):
+                name = key.removeprefix("full/")
+                self.add_values(name + ("_fraction" if value.dtype == torch.bool else "_mean"), value)
+                if name in ("active/attempted", "active/accepted", "active/full_solve"):
+                    self.add_sum(name + "_count", value.sum())
         for name in ("nonfinite_input", "empty_torque_intersection", "empty_qdd_intersection"):
             self.add_sum(f"failure/{name}_count", diag[f"failure/{name}"].sum())
         for key, value in (result.metrics or {}).items():
@@ -90,4 +98,9 @@ class QPIterationDiagnostics:
             result[key] = torch.where(weight > 0, self.sums[key] / weight.clamp_min(1), zero + float("nan"))
         for key, value in self.extrema.items():
             result[key] = torch.where(torch.isfinite(value), value, zero + float("nan"))
+        if "active/attempted_count" in self.sums:
+            attempted = self.sums["active/attempted_count"]
+            accepted = self.sums["active/accepted_count"]
+            result["active/acceptance_given_attempt"] = accepted / attempted.clamp_min(1)
+            result["active/fallback_given_attempt"] = (attempted - accepted) / attempted.clamp_min(1)
         return result

@@ -15,6 +15,7 @@ from rsl_rl.algorithms.hard_pact_qp_diagnostics import QPIterationDiagnostics
     ("every_substep", (0, 1, 2, 3)),
     ("two_anchor_held_correction", (0, 2)),
     ("single_anchor_held_correction", (0,)),
+    ("active_constraint_update", (0, 1, 2, 3)),
 ])
 @pytest.mark.parametrize("swing_gate", [False, True])
 def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors, swing_gate):
@@ -92,6 +93,9 @@ def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors, swing_gate):
                   wrench_pred_world, contact_probability, previous_torque,
                   **_kwargs):
             self.calls += int(not differentiable)
+            if not differentiable and mode == "active_constraint_update":
+                assert _kwargs["substep_index"] in range(4)
+                torch.testing.assert_close(_kwargs["environment_ids"], torch.arange(batch))
             if not differentiable:
                 raw = heads.last_raw.reshape(batch, 4, 3) * 250.
                 expected = raw.clone()
@@ -173,12 +177,12 @@ def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors, swing_gate):
 
     # One episode reset must clear both the torque-rate center and held state.
     task._begin_qp_interval()
-    if mode != "every_substep":
+    if mode in ("single_anchor_held_correction", "two_anchor_held_correction"):
         task._hard_pact_held_correction.fill_(1.0)
     task.reset_idx(torch.arange(batch))
     assert qp.clear_calls == 1
     assert torch.count_nonzero(task._hard_pact_previous_substep_torque) == 0
-    if mode != "every_substep":
+    if mode in ("single_anchor_held_correction", "two_anchor_held_correction"):
         assert torch.count_nonzero(task._hard_pact_held_correction) == 0
     task._hard_pact_q_d.fill_(1.0)
 

@@ -2402,8 +2402,25 @@ class PPO_HardPACT:
                 sampled_nominal = nominal_torque[qp_rows]
             # Recompute only the GRF head at K because its input includes
             # tau_nom,K. z_t and e_t remain the current policy-step features.
+            grf_nominal = sampled_nominal
+            if getattr(getattr(self.hard_pact_qp, "cfg", None), "qp_update_mode", "every_substep") == "active_constraint_update":
+                # This mode holds the k=0 force prediction, but refreshes the
+                # sampled k torque/QP mechanics. Recreate the head's original
+                # torque conditioning at the stored control-interval start.
+                if desired_position is not None and fb_func is not None:
+                    if "control_kp" in qp_batch:
+                        grf_nominal = bounded_nominal_torque(
+                            desired_position[qp_rows], feedforward_torque[qp_rows],
+                            qp_batch["pre_q"][:, 7:], qp_batch["pre_v"][:, 6:], qp_batch,
+                        )
+                    else:
+                        grf_nominal = feedforward_torque[qp_rows] + fb_func(
+                            desired_position[qp_rows], qp_batch["pre_q"][:, 7:], qp_batch["pre_v"][:, 6:],
+                        )
+                else:
+                    grf_nominal = nominal_torque[qp_rows]
             sample_grf_normalized = self.actor_critic.physics_estimator.predict_grf(
-                qp_latent, qp_explicit, sampled_nominal
+                qp_latent, qp_explicit, grf_nominal
             ).reshape(-1, 4, 3)
             # Reconstruct physical Newtons exactly once, then rotate from the
             # normalized decoder's yaw-local frame into sampled J_f's world frame.

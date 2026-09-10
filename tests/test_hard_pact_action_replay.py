@@ -266,6 +266,12 @@ class StochasticActionReplayTests(unittest.TestCase):
         self.assertGreater(algorithm.actor_critic.std.grad.abs().sum().item(), 0.0)
 
     def test_frozen_policy_sampled_substep_nominal_torque_matches_rollout_formula(self):
+        self._check_sampled_substep_nominal_and_grf("every_substep")
+
+    def test_active_update_replay_holds_initial_grf_conditioning_but_refreshes_sampled_pd(self):
+        self._check_sampled_substep_nominal_and_grf("active_constraint_update")
+
+    def _check_sampled_substep_nominal_and_grf(self, mode):
         algorithm = make_algorithm(action_clip=1.0)
         observation, _, mean, _, transition = self.replay_inputs(algorithm)
         replay = algorithm._replay_action_path(
@@ -304,7 +310,9 @@ class StochasticActionReplayTests(unittest.TestCase):
             foot_acceleration_bias=torch.zeros(3, 4, 3))
         # Exercise the actual sampled-QP assembly caller; stop at the solver
         # boundary, whose certified solve/backward is covered by QP tests.
-        algorithm.hard_pact_qp = SimpleNamespace(solve=Mock(side_effect=RuntimeError("captured QP input")))
+        algorithm.hard_pact_qp = SimpleNamespace(
+            cfg=SimpleNamespace(qp_update_mode=mode),
+            solve=Mock(side_effect=RuntimeError("captured QP input")))
         heads = algorithm.actor_critic.physics_estimator
         heads.grf_swing = GRFSwingConfig(enabled=True)
         _, _, latent, explicit = algorithm.actor_critic.cenet_enc_forward(torch.randn(3, 1140))
@@ -321,7 +329,11 @@ class StochasticActionReplayTests(unittest.TestCase):
         replayed = algorithm.hard_pact_qp.solve.call_args.kwargs["tau_nom"]
         torch.testing.assert_close(replayed, rollout, rtol=0, atol=0)
         qp_forces = algorithm.hard_pact_qp.solve.call_args.kwargs["force_pred_world"]
-        raw = heads.predict_grf(latent, explicit, replayed)
+        grf_torque = (bounded_nominal_torque(
+            replay["desired_position"], replay["feedforward_torque"],
+            transition["pre_q"][:, 7:], transition["pre_v"][:, 6:], transition,
+        ) if mode == "active_constraint_update" else replayed)
+        raw = heads.predict_grf(latent, explicit, grf_torque)
         deployment = heads.grf_to_qp_physical(raw, explicit[:, 3:7]).reshape(3, 4, 3)
         torch.testing.assert_close(qp_forces, deployment, rtol=0, atol=0)
         assert qp_forces[:, [0, 3]].eq(0).all()

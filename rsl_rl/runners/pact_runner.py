@@ -241,6 +241,7 @@ class OnPolicyRunnerPACT:
             self.deployment_contract["qp_update"] = qp_update_contract(
                 qp_mode, int(self.env.cfg.control.decimation),
                 self.alg.qp_config.warmup_iterations,
+                qp_config=self.alg.qp_config,
             )
             write_deployment_contract_once(self.log_dir, self.deployment_contract)
 

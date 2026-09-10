@@ -62,7 +62,7 @@ def qp_substep_anchors(mode, decimation):
         if decimation != 4:
             raise ValueError("two_anchor_held_correction requires control decimation=4")
         return (0, 2)
-    if mode == "every_substep":
+    if mode in ("every_substep", "active_constraint_update"):
         return tuple(range(decimation))
     raise ValueError(f"Unknown qp_update_mode: {mode}")
 
@@ -104,6 +104,12 @@ class HardPACTQPConfig:
     # iteration. Zero preserves immediate projection; independent of PINN.
     warmup_iterations: int = 0
     qp_update_mode: str = "every_substep"
+    # Opt-in rollout ECQP candidate selection/certification. These do not
+    # alter cuPIQP's internal proximal settings or PPO's differentiable solve.
+    active_binding_tolerance: float = 1.0e-4
+    active_dual_tolerance: float = 1.0e-5
+    active_rank_tolerance: float = 1.0e-6
+    active_kkt_tolerance: float = 1.0e-4
     # One canonical QP and fallback cascade can be solved by any registered
     # numerical backend. Overrides are diagnostics-only and require an
     # explicit mismatch opt-in so rollout/training cannot diverge silently.
@@ -472,12 +478,19 @@ class HardPACTDifferentiableQP:
         if config.cupiqp_mode not in ("dense", "sparse"):
             raise ValueError("cupiqp_mode must be dense or sparse")
         if config.qp_update_mode not in (
-            "every_substep", "two_anchor_held_correction", "single_anchor_held_correction"
+            "every_substep", "two_anchor_held_correction", "single_anchor_held_correction",
+            "active_constraint_update",
         ):
             raise ValueError(
                 "qp_update_mode must be every_substep or "
-                "two_anchor_held_correction or single_anchor_held_correction"
+                "two_anchor_held_correction, single_anchor_held_correction or active_constraint_update"
             )
+        if config.qp_update_mode == "active_constraint_update" and solvers != {"cupiqp"}:
+            raise ValueError("active_constraint_update requires cuPIQP for rollout and PPO")
+        if any(getattr(config, name) <= 0 for name in (
+            "active_binding_tolerance", "active_dual_tolerance", "active_rank_tolerance", "active_kkt_tolerance"
+        )):
+            raise ValueError("active-constraint tolerances must be positive")
         for policy in (
             config.rollout_duality_gap_policy, config.ppo_duality_gap_policy,
         ):
@@ -509,6 +522,8 @@ class HardPACTDifferentiableQP:
         # from discarding or contaminating any other environment's state.
         # PPO remains cold so no rollout iterate enters an unrelated minibatch.
         self._qpth_warm_states = {}
+        from .hard_pact_active_constraints import ActiveConstraintCache
+        self._active_constraint_cache = ActiveConstraintCache()
         self._last_gradient_metrics = {}
 
         from .hard_pact_qp_diagnostics import QPIterationDiagnostics
@@ -553,6 +568,7 @@ class HardPACTDifferentiableQP:
 
     def clear_warm_start(self, env_ids=None):
         """Clear qpth rollout state globally or for chunks touching env_ids."""
+        self._active_constraint_cache.clear(env_ids)
         if env_ids is None:
             self._qpth_warm_states.clear()
             return
@@ -1270,7 +1286,7 @@ class HardPACTDifferentiableQP:
         return result
 
     def _solve_stage(self, data, relaxed_contact, audit_count=0, warm_key=None,
-                     elastic=False):
+                     elastic=False, active_ids=None, active_reuse=False, environment_count=None):
         r"""Build, validate, solve, and certify one QP fallback stage.
 
         qpth returns ``z*`` and its backward differentiates the KKT system;
@@ -1327,11 +1343,19 @@ class HardPACTDifferentiableQP:
         duality_gap_rel = duality_gap.clone()
         warm_hit_mask = torch.zeros_like(valid)
         terminal_state = None
+        active_snapshot, active_metrics = None, None
         try:
             # Every backend consumes these exact canonical scaled matrices.
             # QP construction, certification, and fallback never live in an
             # adapter, so changing solvers cannot change physical semantics.
-            if (
+            if active_ids is not None:
+                backend_result, active_snapshot, active_metrics = self._active_constraint_cache.solve(
+                    self, matrices, active_ids, active_reuse, environment_count,
+                )
+                solution_scaled = backend_result.solution
+                duality_gap, duality_gap_rel = backend_result.duality_gap, backend_result.duality_gap_rel
+                solver_exception = active_metrics.get("solver_exception", solver_exception)
+            elif (
                 self._active_solver == "qpth"
                 and self.cfg.qpth_warm_start
                 and not self._active_differentiable
@@ -1452,6 +1476,16 @@ class HardPACTDifferentiableQP:
                 | (duality_gap_rel <= profile["gap_rel"])
             )
             success &= gap_ok
+        if active_ids is not None:
+            if active_snapshot is not None:
+                # Recovery stages never seed a full-problem active cache.
+                self._active_constraint_cache.commit(
+                    matrices, active_ids, active_snapshot, success, self.cfg,
+                )
+                for name, value in active_metrics.items():
+                    diagnostics["active/" + name] = value.detach()
+            else:
+                self._active_constraint_cache.clear(active_ids)
         if warm_key is not None and terminal_state is not None:
             # Install only certified terminal rows. Reset/failed rows remain
             # cold next substep, while every unaffected environment keeps its
@@ -1764,7 +1798,8 @@ class HardPACTDifferentiableQP:
             metrics.update(forward_metrics)
         return metrics
 
-    def solve(self, *, differentiable=None, diagnostics_phase=None, **data):
+    def solve(self, *, differentiable=None, diagnostics_phase=None,
+              environment_ids=None, substep_index=None, environment_count=None, **data):
         r"""Solve full QP, relaxed-contact QP, then actuator/rate projection.
 
         Per environment the deterministic cascade is
@@ -1793,6 +1828,17 @@ class HardPACTDifferentiableQP:
             )
         if differentiable:
             self._last_gradient_metrics = {}
+        active_update = (not differentiable and self.cfg.qp_update_mode == "active_constraint_update"
+                         and substep_index is not None)
+        if active_update:
+            if environment_ids is None or environment_count is None:
+                raise ValueError("active-constraint rollout requires stable environment_ids and environment_count")
+            if environment_ids.shape != (reference.shape[0],) or environment_ids.dtype != torch.long:
+                raise ValueError("environment_ids must be a batch-aligned int64 vector")
+            if environment_ids.device != reference.device or substep_index < 0:
+                raise ValueError("invalid active-constraint substep/device")
+            if substep_index == 0:
+                self._active_constraint_cache.clear(environment_ids)
         self._diagnostics_phase = diagnostics_phase or ("ppo" if differentiable else "rollout")
         event_profile = self.profiles[self._diagnostics_phase]
         for backend in self._backend_instances.values():
@@ -1841,6 +1887,8 @@ class HardPACTDifferentiableQP:
             with event_profile.measure("certification_recovery", reference):
                 finite, torque_ok, qdd_ok, lower, upper = self._precheck(chunk)
             valid = finite & torque_ok & qdd_ok
+            if active_update:
+                self._active_constraint_cache.clear(environment_ids[start:stop][~valid])
 
             # Invalid rows never enter qpth. Initialize all rows as analytic
             # fallbacks, then scatter certified full/relaxed solutions back.
@@ -1886,6 +1934,9 @@ class HardPACTDifferentiableQP:
                     self.clear_warm_start(invalid_ids)
                 full, full_ok, full_diag = self._solve_stage(
                     compact, False, audit_count=audit_count, warm_key=warm_key,
+                    **({"active_ids": environment_ids[start:stop][valid_indices],
+                        "active_reuse": substep_index > 0, "environment_count": environment_count}
+                       if active_update else {}),
                 )
                 failed = ~full_ok
                 relaxed = torch.zeros_like(full)

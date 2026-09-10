@@ -17,11 +17,11 @@ RECONSTRUCTION_INDICES = tuple(range(61)) + tuple(range(73, 288))
 RECONSTRUCTION_DIM = len(RECONSTRUCTION_INDICES)
 
 
-def qp_update_contract(mode, decimation, warmup_iterations=0):
+def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None):
     """Execution metadata using the same schedule and projection as rollout."""
     from rsl_rl.algorithms.hard_pact_qp import qp_substep_anchors
 
-    return {
+    result = {
         "mode": mode,
         "training_warmup_iterations": warmup_iterations,
         "physics_substep_anchors": list(qp_substep_anchors(mode, decimation)),
@@ -38,6 +38,23 @@ def qp_update_contract(mode, decimation, warmup_iterations=0):
         "ppo_anchor_selection": "fixed_zero_no_rng" if mode == "single_anchor_held_correction" else "balanced_uniform",
         "ppo_projection_loss_multiplier": 1,
     }
+    if mode == "active_constraint_update":
+        from rsl_rl.algorithms.hard_pact_qp import HardPACTQPConfig
+        settings = qp_config or HardPACTQPConfig()
+        result.update({
+            "correction_hold": "none; refresh deployment mechanics and nominal PD every substep",
+            "held_predictions": "yaw-local GRF, wrench, contact, latent and explicit fixed at policy rate",
+            "execution_helper": "HardPACTDifferentiableQP.solve(environment_ids, environment_count, substep_index)",
+            "active_constraint_execution": "k=0 full cuPIQP; k>0 refactored equality-constrained QP; certify all physical and scaled KKT conditions; full cuPIQP and existing recovery for rejected rows only",
+            "active_constraint_cache": "owned primal/dual/slack and canonical binding rows including native bounds, indexed by environment identity; reset on episodes, intervals, settings/structure/device/dtype changes and recovery",
+            "ppo_execution": "isolated full differentiable cuPIQP on one balanced sampled substep; no custom active-set backward",
+            "active_constraint_tolerances": {name: getattr(settings, name) for name in (
+                "active_binding_tolerance", "active_dual_tolerance", "active_rank_tolerance",
+                "active_kkt_tolerance", "rollout_feasibility_tolerance", "rollout_duality_gap_abs", "rollout_duality_gap_rel")},
+        })
+        for name in ("held_execution_helper", "held_execution_sanitize", "held_execution"):
+            result.pop(name)
+    return result
 
 
 @dataclass(frozen=True)

@@ -513,6 +513,9 @@ class Go2HardPACT(Go2PACT):
             and getattr(self, "_hard_pact_rollout_qp", None) is not None
         )
         if not self._hard_pact_rollout_qp_enabled:
+            qp = getattr(self, "_hard_pact_rollout_qp", None)
+            if getattr(getattr(qp, "cfg", None), "qp_update_mode", None) == "active_constraint_update":
+                qp.clear_warm_start()
             self._hard_pact_policy_context_ready = False
             getattr(self, "extras", {}).pop("hard_pact_qp_interval", None)
             held = getattr(self, "_hard_pact_held_correction", None)
@@ -880,11 +883,12 @@ class Go2HardPACT(Go2PACT):
             held_mode = update_mode in (
                 "two_anchor_held_correction", "single_anchor_held_correction"
             )
+            fixed_prediction = held_mode or update_mode == "active_constraint_update"
             # z_t and e_t remain policy-rate values. The default retains its
             # legacy per-substep GRF evaluation; held modes evaluate the
             # torque-conditioned decoder only at k=0 and holds that prediction.
             if (
-                held_mode
+                fixed_prediction
                 and self._qp_substep > 0
             ):
                 grf_normalized = self._hard_pact_held_grf_normalized
@@ -896,7 +900,7 @@ class Go2HardPACT(Go2PACT):
                         tau_nom,
                     )
                 )
-                if held_mode:
+                if fixed_prediction:
                     self._hard_pact_held_grf_normalized.copy_(grf_normalized)
             # The decoder output is normalized yaw-local force. Reconstruct
             # Newtons once, preserve FR/FL/RR/RL XYZ, then rotate into J_f's
@@ -1013,6 +1017,11 @@ class Go2HardPACT(Go2PACT):
             # to a documented physical block in hard_pact_qp.py.
             result = self._hard_pact_rollout_qp.solve(
                 differentiable=False,
+                # Stable ownership survives compact recovery batches; PPO
+                # deliberately omits this rollout-only execution metadata.
+                **({"environment_ids": self._hard_pact_qp_environment_ids,
+                    "environment_count": self.num_envs, "substep_index": self._qp_substep}
+                   if update_mode == "active_constraint_update" else {}),
                 # M multiplies generalized acceleration in A[:,QDD].
                 mass_matrix=context.mass_matrix,
                 # b_dyn moves to the equality RHS as J_b^T*W-b_dyn.
@@ -1229,6 +1238,11 @@ class Go2HardPACT(Go2PACT):
             self._hard_pact_rollout_qp.cfg, "qp_update_mode", "every_substep"
         )
         self._hard_pact_qp_anchors = qp_substep_anchors(update_mode, decimation)
+        if update_mode == "active_constraint_update":
+            self._hard_pact_qp_environment_ids = torch.arange(
+                self.num_envs, device=self.device, dtype=torch.long,
+            )
+            self._hard_pact_held_grf_normalized = shape(12)
         # A policy boundary cannot reuse an old correction after a mode change.
         held = getattr(self, "_hard_pact_held_correction", None)
         if held is not None:

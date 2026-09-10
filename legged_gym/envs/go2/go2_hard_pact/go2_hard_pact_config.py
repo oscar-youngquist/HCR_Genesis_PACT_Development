@@ -548,8 +548,13 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'exception_capture_limit': 1,
                         'exception_capture_dir': '/tmp/hard_pact_qp_failures',
                         # every_substep | two_anchor_held_correction | single_anchor_held_correction
-                        'qp_update_mode': 'single_anchor_held_correction',
-                        'qp_solver': 'qpth', 
+                        # Optional: active_constraint_update (cuPIQP only).
+                        'qp_update_mode': 'active_constraint_update',
+                        'active_binding_tolerance': 1.0e-4,
+                        'active_dual_tolerance': 1.0e-5,
+                        'active_rank_tolerance': 1.0e-6,
+                        'active_kkt_tolerance': 1.0e-4,
+                        'qp_solver': 'cupiqp', 
                         'rollout_qp_solver': None, 
                         'ppo_qp_solver': None, 
                         'allow_solver_mismatch': False, 
