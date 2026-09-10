@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from typing import Mapping
 import warnings
 
@@ -26,41 +26,32 @@ NUM_VARIABLES = 24
 
 
 def qp_substep_anchors(mode, decimation):
-    """Shared rollout/deployment schedule; QP horizons remain one physics dt."""
-    if decimation < 1:
-        raise ValueError("QP decimation must be positive")
-    if mode == "single_anchor_held_correction":
-        return (0,)
-    if mode == "two_anchor_held_correction":
-        if decimation != 4:
-            raise ValueError("two_anchor_held_correction requires control decimation=4")
-        return (0, 2)
-    if mode in ("every_substep", "active_constraint_update"):
-        return tuple(range(decimation))
-    raise ValueError(f"Unknown qp_update_mode: {mode}")
+    """Possible dispatch times, not per-environment solve counts."""
+    if mode not in ("every_substep", "random_one_substep"):
+        raise ValueError(f"Unsupported qp_update_mode: {mode}")
+    if decimation != 4:
+        raise ValueError("HardPACT QP execution requires exactly four physics substeps")
+    return (0,1,2,3)
+
+
+def qp_substep_mask(mode, substep, selected):
+    qp_substep_anchors(mode,4)
+    return torch.ones_like(selected,dtype=torch.bool) if mode=="every_substep" else selected==substep
 
 
 def project_torque_interval(torque, lower, upper):
-    """Exact actuator/rate box projection, retaining ordinary clamp gradients."""
+    """Ordinary exact actuator/rate clamp, not a joint/contact certificate."""
     return torch.maximum(torch.minimum(torque, upper), lower)
 
 
-def held_correction_torque(tau_nom, delta_tau, previous_torque,
-                           torque_limit, torque_rate_limit, dt, *, sanitize=False):
-    """Shared execution/deployment: fresh PD plus held correction [Nm].
-
-    This is actuator/rate projection, NOT a fresh dynamics certification.
-    ``previous_torque`` is the executed command, dt the physics/PD timestep.
-    Optional sanitization matches analytic anchor recovery; the default
-    retains the existing two-anchor path exactly, including its arithmetic.
-    """
-    rate = torque_rate_limit * dt
-    lower = torch.maximum(-torque_limit, previous_torque - rate)
-    upper = torch.minimum(torque_limit, previous_torque + rate)
-    requested = tau_nom + delta_tau
-    if sanitize:
-        requested = requested.nan_to_num()
-    return project_torque_interval(requested, lower, upper)
+def project_nominal_torque(tau_nom, previous_torque, torque_limit, torque_rate_limit, dt):
+    """No held correction: project sanitized fresh total PD/feedforward torque."""
+    previous = torch.nan_to_num(previous_torque,nan=0.,posinf=0.,neginf=0.)
+    lower = torch.maximum(-torque_limit,previous-torque_rate_limit*dt)
+    upper = torch.minimum(torque_limit,previous+torque_rate_limit*dt)
+    empty = lower>upper
+    lower,upper = torch.where(empty,-torque_limit,lower),torch.where(empty,torque_limit,upper)
+    return project_torque_interval(torch.nan_to_num(tau_nom,nan=0.,posinf=0.,neginf=0.),lower,upper)
 
 
 @dataclass(frozen=True)
@@ -76,13 +67,7 @@ class HardPACTQPConfig:
     # Train normally without rollout/replay QPs until this absolute PPO
     # iteration. Zero preserves immediate projection; independent of PINN.
     warmup_iterations: int = 0
-    qp_update_mode: str = "every_substep"
-    # Opt-in rollout ECQP candidate selection/certification. These do not
-    # alter cuPIQP's internal proximal settings or PPO's differentiable solve.
-    active_binding_tolerance: float = 1.0e-4
-    active_dual_tolerance: float = 1.0e-5
-    active_rank_tolerance: float = 1.0e-6
-    active_kkt_tolerance: float = 1.0e-4
+    qp_update_mode: str = "random_one_substep"
     # One canonical QP and fallback cascade can be solved by any registered
     # numerical backend. Overrides are diagnostics-only and require an
     # explicit mismatch opt-in so rollout/training cannot diverge silently.
@@ -214,6 +199,7 @@ class HardPACTQPConfig:
         return cls(**values)
 
     def __post_init__(self):
+        qp_substep_anchors(self.qp_update_mode,4)
         if self.cupiqp_rollout_cache_size < 1 or self.cupiqp_ppo_pool_size < 0:
             raise ValueError("cuPIQP cache size must be positive and pool size nonnegative")
         if (self.warmup_iterations < 0
@@ -264,6 +250,12 @@ class _QPBuild:
         # Preserve the legacy seven-value private test/debug unpacking API.
         return iter((self.Q, self.p, self.G, self.h, self.A, self.b,
                      self.variable_scale))
+
+
+def select_problem(m, rows):
+    """Index only batch-dependent mechanics/matrices; share immutable scales."""
+    return replace(m, **{f.name:getattr(m,f.name).index_select(0,rows)
+                         for f in fields(m) if f.name!="variable_scale"})
 
 
 def _dtype_from_name(name: str, reference=None):
@@ -394,20 +386,7 @@ class HardPACTDifferentiableQP:
             raise ValueError("QP solver must be qpth, cupiqp, or moreau")
         if config.cupiqp_mode not in ("dense", "sparse"):
             raise ValueError("cupiqp_mode must be dense or sparse")
-        if config.qp_update_mode not in (
-            "every_substep", "two_anchor_held_correction", "single_anchor_held_correction",
-            "active_constraint_update",
-        ):
-            raise ValueError(
-                "qp_update_mode must be every_substep or "
-                "two_anchor_held_correction, single_anchor_held_correction or active_constraint_update"
-            )
-        if config.qp_update_mode == "active_constraint_update" and solvers != {"cupiqp"}:
-            raise ValueError("active_constraint_update requires cuPIQP for rollout and PPO")
-        if any(getattr(config, name) <= 0 for name in (
-            "active_binding_tolerance", "active_dual_tolerance", "active_rank_tolerance", "active_kkt_tolerance"
-        )):
-            raise ValueError("active-constraint tolerances must be positive")
+        qp_substep_anchors(config.qp_update_mode,4)
         for policy in (
             config.rollout_duality_gap_policy, config.ppo_duality_gap_policy,
         ):
@@ -438,7 +417,6 @@ class HardPACTDifferentiableQP:
         # from discarding or contaminating any other environment's state.
         # PPO remains cold so no rollout iterate enters an unrelated minibatch.
         self._qpth_warm_states = {}
-        self._active_pattern_caches = {}
         self._last_gradient_metrics = {}
 
         from .hard_pact_qp_diagnostics import QPIterationDiagnostics
@@ -483,8 +461,6 @@ class HardPACTDifferentiableQP:
 
     def clear_warm_start(self, env_ids=None):
         """Clear qpth rollout state globally or for chunks touching env_ids."""
-        for cache in self._active_pattern_caches.values():
-            cache.clear(env_ids)
         if env_ids is None:
             self._qpth_warm_states.clear()
             return
@@ -836,7 +812,6 @@ class HardPACTDifferentiableQP:
         padding equality rows. Backend caches are keyed by actual matrix shape;
         PPO graphs retain exclusive backend leases through all backward uses.
         """
-        from .hard_pact_active_constraints import select_problem
         reference = data["tau_nom"]
         if differentiable is None:
             differentiable = torch.is_grad_enabled() and any(
@@ -908,9 +883,6 @@ class HardPACTDifferentiableQP:
                 "pre_clamp_torque_violation_max":ref.new_zeros(n)}
         stance = values["contact_probability"].detach() >= self.cfg.contact_threshold
         pattern = (stance.long()*torch.tensor([1,2,4,8],device=ref.device)).sum(-1)
-        if environment_ids is not None:
-            for code,cache in self._active_pattern_caches.items():
-                cache.clear(environment_ids[pattern!=code])
         profile = self._profile(differentiable)
         tolerance = (profile["feasibility"] if self._active_solver!="qpth"
                      else self._normalized_tolerance(dtype))
@@ -936,27 +908,8 @@ class HardPACTDifferentiableQP:
                 self._qpth_context=((code,chunk_index,m.p.shape,m.G.shape,m.A.shape,ref.device,ref.dtype),owners)
                 diag["full/attempted"][rows] = True
                 try:
-                    # Active updates remain rollout-only, one cache per
-                    # stance pattern; incompatible old 54-D factors never enter.
-                    active = (not differentiable and self.cfg.qp_update_mode=="active_constraint_update"
-                              and substep_index is not None)
-                    if active:
-                        if environment_ids is None or environment_count is None:
-                            raise ValueError("active updates require stable environment identities")
-                        from .hard_pact_active_constraints import ActiveConstraintCache
-                        cache = self._active_pattern_caches.setdefault(code,ActiveConstraintCache())
-                        if substep_index==0:
-                            cache.clear(environment_ids[rows])
-                        result,snapshot,ametrics = cache.solve(self,m,environment_ids[rows],
-                                                               substep_index>0,environment_count)
-                        for k,v in ametrics.items():
-                            key="full/active/"+k
-                            if key not in diag:
-                                diag[key]=torch.zeros(n,device=ref.device,dtype=v.dtype)
-                            diag[key][rows]=v
-                    else:
-                        with event_profile.measure("solve",ref):
-                            result = self._backend_solve(m)
+                    with event_profile.measure("solve",ref):
+                        result = self._backend_solve(m)
                     z = result.solution
                 except QPBackendUnavailable:
                     raise
@@ -1009,8 +962,6 @@ class HardPACTDifferentiableQP:
                 derived = (m.acceleration_map @ x[...,None]).squeeze(-1)+m.acceleration_offset
                 qdd = qdd.index_copy(0,rows,torch.where(accepted[:,None],derived,torch.zeros_like(derived)))
                 ok[rows]=accepted
-                if active:
-                    cache.commit(m,environment_ids[rows],snapshot,accepted,self.cfg)
         # Keep the existing analytic stage code 2 for stored/logged status
         # compatibility. Stage 1 is retired; there is no recovery QP.
         stage = torch.where(ok,0,2)
@@ -1031,12 +982,28 @@ class HardPACTDifferentiableQP:
         return result
 
 
-def projection_loss(tau_safe, tau_nom, torque_limit, physics_valid, differentiated):
-    """Unchanged torque-correction norm; no contact slack variables remain."""
+def projection_loss(tau_safe, tau_nom, torque_limit, physics_valid, differentiated,
+                    *, qdd=None, foot_jacobians=None, foot_acceleration_bias=None,
+                    stance_mask=None, contact_weight=0.0, contact_scale=1.0,
+                    return_per_row=False):
+    """Certified outer loss: normalized torque correction plus soft stance acceleration.
+
+    Mechanics and discrete stance are constants; the certified solution retains
+    its implicit derivative. Select valid rows before arithmetic (NaN * 0 is
+    not safe). The solver independently masks failed-row VJPs inside autograd.
+    The existing unit torque coefficient and outer lambda_projection are retained.
+    """
     valid = physics_valid.reshape(-1).bool() & differentiated.reshape(-1).bool()
-    difference = torch.where(valid[:,None], tau_safe-tau_nom, torch.zeros_like(tau_nom))
-    per_row = (difference/torque_limit).square().sum(-1)
-    return per_row.sum()/valid.sum().clamp_min(1)
+    per_valid = ((tau_safe[valid]-tau_nom[valid])/torque_limit).square().sum(-1)
+    if contact_weight:
+        acceleration = (torch.einsum("bfkn,bn->bfk", foot_jacobians.detach()[valid],
+                                     qdd[valid]) + foot_acceleration_bias.detach()[valid])
+        stance = stance_mask.detach()[valid].bool()
+        acceleration = torch.where(stance[..., None], acceleration, 0.0)
+        per_valid = per_valid + contact_weight * (acceleration/contact_scale).square().sum((1,2))
+    per_row = tau_nom.new_zeros(tau_nom.shape[0]).masked_scatter(valid, per_valid)
+    loss = per_valid.sum()/valid.sum().clamp_min(1)
+    return (loss, per_row) if return_per_row else loss
 
 
 def balanced_substep_indices(num_samples, decimation, device, *, generator=None):

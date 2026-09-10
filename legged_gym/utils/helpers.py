@@ -403,7 +403,7 @@ def get_args():
     )
     parser.add_argument(
         '--qp_update_mode',
-        choices=('every_substep', 'two_anchor_held_correction', 'single_anchor_held_correction'),
+        choices=('every_substep', 'random_one_substep'),
         default=None,
         help='HardPACT-only QP update mode override',
     )

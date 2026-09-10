@@ -29,7 +29,7 @@ VARIANTS = {
     "pre_qp": None,
     "analytic": None,
     "qp_every_substep": "every_substep",
-    "qp_single_anchor": "single_anchor_held_correction",
+    "qp_random_one_substep": "random_one_substep",
 }
 
 
@@ -241,7 +241,7 @@ class Observer:
 
     def pre(self):
         import torch
-        from rsl_rl.algorithms.hard_pact_qp import held_correction_torque
+        from rsl_rl.algorithms.hard_pact_qp import project_nominal_torque
         e, s = self.env, self.sim
         q, v = e._canonical_joint_state()
         warm = s._torques.detach().clone()  # same-state legacy weighted/randomized controller
@@ -255,21 +255,21 @@ class Observer:
         # Analytic baseline projects the existing pre-QP law, not a redefined
         # PD law; the QP modes retain their own existing nominal convention.
         if self.step >= PREFIX and self.args.variant == "analytic":
-            s.hard_pact_set_executed_torque(held_correction_torque(
-                warm, torch.zeros_like(warm), self.previous, self.qp.torque_limits,
-                self.qp.cfg.torque_rate_limit_nm_s, float(e.cfg.sim.dt), sanitize=True))
+            s.hard_pact_set_executed_torque(project_nominal_torque(
+                warm, self.previous, self.qp.torque_limits,
+                self.qp.cfg.torque_rate_limit_nm_s, float(e.cfg.sim.dt)))
         if not is_qp:
             normalized = self.actor.physics_estimator.predict_grf(
                 self.actor.cenet_z, self.actor.cenet_torso_velo, nominal)
             self.pred_force = e._yaw_local_to_world(
                 self.actor.physics_estimator.grf_to_physical(normalized).reshape(-1, 4, 3),
                 e._current_base_quat_xyzw())
-        self._pre()  # existing QP, certification, recovery, wrench application, torque labels
-        if is_qp and self.args.variant != "qp_every_substep":
-            # Held modes freeze the yaw-local prediction, not its world
-            # rotation; use the same live quaternion as the execution path.
+        self.solved_force.fill_(float("nan"))  # unsolved rows have no force certificate
+        self._pre()  # existing QP, certification, fallback, wrench application, torque labels
+        if is_qp:
+            # Neural predictions are fixed, but their world frame is current.
             self.pred_force = e._yaw_local_to_world(
-                self.actor.physics_estimator.grf_to_physical(e._hard_pact_held_grf_normalized).reshape(-1, 4, 3),
+                e._qp_control_grf,
                 e._current_base_quat_xyzw())
         executed = s.hard_pact_executed_torque().clone()
         phase = "evaluation" if self.step >= PREFIX else "prefix"
@@ -300,8 +300,8 @@ class Observer:
         import torch
         self.calls += 1  # primary batched anchor calls, not internal recovery solves
         result = self._solve(**data)
-        self.pred_force = data["force_pred_world"].detach().clone()
-        self.solved_force = result.force_world.detach().clone()
+        rows = data["environment_ids"]
+        self.solved_force[rows] = result.force_world.detach()
         for stage, name in ((0, "full"), (2, "analytic")):
             self.metrics.add(f"qp/final_stage/{name}", result.stage == stage)
         self.metrics.add("qp/certified_solver_row", result.differentiated_mask)
@@ -313,21 +313,22 @@ class Observer:
         bad = (result.stage != 0).nonzero().flatten()
         if self.packet_count < self.args.packet_limit and (self.packet_count == 0 or bad.numel()):
             row = int(bad[0]) if bad.numel() else 0
+            env_row = int(rows[row])  # Compact solver row is not an environment ID.
             inputs = {k: v[row:row + 1].detach().clone() for k, v in data.items() if torch.is_tensor(v)}
             solver_inputs = {k: v.to(self.qp._solve_dtype(data["tau_nom"])) for k, v in inputs.items()}
             build = self.qp._build(solver_inputs)
             builds = {"full": {f.name: getattr(build, f.name).detach().cpu().clone() for f in fields(build)}}
             packet = {
                 "schema_version": 1, "variant": self.args.variant, "control_step": self.step,
-                "substep": self.k, "environment": row, "solver_settings": asdict(self.qp.cfg),
+                "substep": self.k, "environment": env_row, "solver_settings": asdict(self.qp.cfg),
                 "inputs": {k: v.cpu() for k, v in inputs.items()}, "matrices": builds,
-                "state": self.env._canonical_configuration()[row:row + 1].cpu(),
-                "velocity_world": self.env._canonical_velocity_world()[row:row + 1].cpu(),
-                "observation": self.obs[row:row + 1].cpu(), "history": self.history[row:row + 1].cpu(),
-                "raw_action": self.actions[row:row + 1].cpu(),
-                "delayed_action": self.env._pending_action_replay_transition["delayed_action"][row:row + 1].cpu(),
-                "latent": self.actor.cenet_z[row:row + 1].cpu(),
-                "explicit": self.actor.cenet_torso_velo[row:row + 1].cpu(),
+                "state": self.env._canonical_configuration()[env_row:env_row + 1].cpu(),
+                "velocity_world": self.env._canonical_velocity_world()[env_row:env_row + 1].cpu(),
+                "observation": self.obs[env_row:env_row + 1].cpu(), "history": self.history[env_row:env_row + 1].cpu(),
+                "raw_action": self.actions[env_row:env_row + 1].cpu(),
+                "delayed_action": self.env._pending_action_replay_transition["delayed_action"][env_row:env_row + 1].cpu(),
+                "latent": self.actor.cenet_z[env_row:env_row + 1].cpu(),
+                "explicit": self.actor.cenet_torso_velo[env_row:env_row + 1].cpu(),
                 "outputs": {k: getattr(result, k)[row:row + 1].cpu().clone() for k in
                             ("qdd", "force_world", "tau_safe", "stage", "differentiated_mask")},
                 "diagnostics": {k: v[row:row + 1].cpu() for k, v in result.diagnostics.items()},
@@ -575,7 +576,7 @@ def worker(args):
                     env.compute_observations()
         metrics = observer.metrics.result()
         actual_steps = steps - PREFIX
-        expected_calls = actual_steps * (cfg.control.decimation if mode == "every_substep" else int(mode is not None))
+        expected_calls = actual_steps * (cfg.control.decimation if mode == "every_substep" else min(args.num_envs,4) if mode is not None else 0)
         unchanged = tensor_hash(actor.state_dict()) == weights_before
         current_curriculum = env.domain_rand_curriculum_state_dict()
         curriculum_unchanged = all(current_curriculum[k] == frozen_curriculum[k] for k in ("progress", "last_iteration"))
@@ -592,7 +593,7 @@ def worker(args):
             "first_episode_censored": observer.first_episode_censored.cpu().tolist(),
             "failure_reasons": {k: int(v.sum()) for k, v in observer.reasons.items()},
             "qp_calls": observer.calls, "expected_qp_calls": expected_calls,
-            "held_substep_commands": actual_steps * (cfg.control.decimation - 1) * args.num_envs if mode == "single_anchor_held_correction" else 0,
+            "analytic_unsolved_substep_commands": actual_steps * 3 * args.num_envs if mode == "random_one_substep" else 0,
             "weights_and_buffers_unchanged": unchanged, "smoke_reset_checked": reset_checked,
             "curriculum_unchanged": curriculum_unchanged,
             "initial_state_hash": initial_hash, "scenario_hash": scenario_hash,
@@ -692,7 +693,7 @@ def main(argv=None):
         writer = csv.writer(stream)
         writer.writerow(("seed", "variant", "metric", "count", "nonfinite_count", "mean", "rms", "mean_abs", "abs_max"))
         for trial in summaries:
-            for name in ("survival_fraction", "survived_to_activation_fraction", "qp_calls", "expected_qp_calls", "held_substep_commands"):
+            for name in ("survival_fraction", "survived_to_activation_fraction", "qp_calls", "expected_qp_calls", "analytic_unsolved_substep_commands"):
                 writer.writerow((trial["seed"], trial["variant"], name, 1, 0, trial[name], "", "", ""))
             for name, metric in trial["metrics"].items():
                 writer.writerow((trial["seed"], trial["variant"], name, *(metric[k] for k in

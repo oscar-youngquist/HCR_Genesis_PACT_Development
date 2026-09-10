@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+import pytest
 
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
@@ -74,7 +75,8 @@ def test_measured_contact_projection_frame_scale_order_and_detachment():
     assert not actual.requires_grad and labels.grad is None and jac.grad is None
 
 
-def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads():
+@pytest.mark.parametrize("qp_mode", [None, "every_substep", "random_one_substep"])
+def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads(qp_mode):
     alg = make_algorithm(num_learning_epochs=1, num_mini_batches=1)
     alg.bard_enabled = alg.bard_inverse_enabled = True
     alg.bard_rollout_enabled = True
@@ -82,6 +84,10 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads():
     alg.pinn_init, alg.pinn_weight_final = -1, .01
     alg.pinn_warmup_steps, alg.num_pinn_updates = 1, 1
     alg.physics_dynamics = BardGo2Dynamics(URDF, device="cpu", batch_capacity=4)
+    if qp_mode is not None:
+        from test_hard_pact_reduced_qp import solver
+        alg.hard_pact_qp = solver(qp_update_mode=qp_mode)
+        alg.qp_config = alg.hard_pact_qp.cfg
     alg.init_storage(4, 2, [57], [95], [133], [1140], [24], [11], [12], [18])
     storage = alg.storage
     storage.max_action_delay = 0
@@ -112,6 +118,16 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads():
         **{name: zeros(1).bool() for name in ("push_event_mask", "reset_mask", "timeout_mask", "teleport_mask")},
     }
     storage.hard_pact_fields = fields
+    if qp_mode is not None:
+        fields.update(
+            sampled_qp_q=q.clone(), sampled_qp_v=zeros(18),
+            sampled_qp_grf_conditioning_q=q[..., 7:].clone(),
+            sampled_qp_grf_conditioning_v=zeros(12),
+            sampled_qp_previous_torque=zeros(12),
+            sampled_qp_valid=torch.ones(2,4,1,dtype=torch.bool),
+            sampled_qp_substep_index=torch.arange(4).reshape(1,4,1).expand(2,4,1).clone(),
+            physics_dt=torch.full((2,4,1),.005),
+        )
     for t in range(2):
         obs, hist, critic = torch.randn(4, 57), torch.randn(4, 1140), torch.randn(4, 95)
         with torch.no_grad():
@@ -136,6 +152,19 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads():
     predict_grf = alg.actor_critic.physics_estimator.predict_grf
     replay_action_path = alg._replay_action_path
     replayed_nominal = []
+    projection_checks = []
+    from rsl_rl.algorithms.hard_pact_qp import projection_loss
+
+    def checked_projection(*args, **kwargs):
+        result = projection_loss(*args, **kwargs)
+        assert args[4].any(), "Tiny replay must include certified rows"
+        weights = actor_weights + [alg.actor_critic.context_encoder.ce_out_mean.weight,
+            alg.actor_critic.physics_estimator.grf_head[-1].weight,
+            alg.actor_critic.physics_estimator.wrench_head[-1].weight]
+        grads = torch.autograd.grad(result[0], weights, retain_graph=True, allow_unused=True)
+        assert all(g is not None and g.isfinite().all() and g.abs().sum()>0 for g in grads)
+        projection_checks.append(True)
+        return result
 
     def checked_replay(*args, **kwargs):
         result = replay_action_path(*args, **kwargs)
@@ -164,39 +193,35 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads():
         return result
 
     def checked_rollout(**kwargs):
-        assert kwargs["control_torque"].requires_grad
+        assert not kwargs["control_torque"].requires_grad
         assert len(grf_torques) == 1  # No second, execution-label-conditioned forward.
         torch.testing.assert_close(kwargs["interval_grf_world"], inverse_grfs[-1], rtol=0, atol=0)
         rollout_torques.append(kwargs["control_torque"].detach().clone())
         result = differentiable_bard_rollout_loss(**kwargs)
         actor_grads = torch.autograd.grad(result.loss, actor_weights, retain_graph=True, allow_unused=True)
-        assert all(g is not None and g.isfinite().all() and g.abs().sum() > 0 for g in actor_grads)
-        # Removing ONLY the actuation edge must remove all actor gradients,
-        # while GRF/wrench/encoder gradients remain available.
-        force_only = differentiable_bard_rollout_loss(
-            **dict(kwargs, control_torque=kwargs["control_torque"].detach())
-        )
-        stopped = torch.autograd.grad(force_only.loss, actor_weights, retain_graph=True, allow_unused=True)
-        assert all(g is None or not g.count_nonzero() for g in stopped)
+        assert all(g is None or not g.count_nonzero() for g in actor_grads)
+        # Direct actuation is detached, while physics heads/encoder remain live.
         force_weights = [alg.actor_critic.context_encoder.ce_out_mean.weight,
                          alg.actor_critic.physics_estimator.grf_head[-1].weight,
                          alg.actor_critic.physics_estimator.wrench_head[-1].weight]
-        force_grads = torch.autograd.grad(force_only.loss, force_weights, retain_graph=True)
+        force_grads = torch.autograd.grad(result.loss, force_weights, retain_graph=True)
         assert all(g.isfinite().all() and g.abs().sum() > 0 for g in force_grads)
         return result
 
     with patch("rsl_rl.algorithms.ppo_hard_pact.corrected_bard_inverse_dynamics_loss", side_effect=checked_loss), \
          patch("rsl_rl.algorithms.ppo_hard_pact.differentiable_bard_rollout_loss", side_effect=checked_rollout), \
          patch.object(alg.actor_critic.physics_estimator, "predict_grf", side_effect=checked_grf), \
+         patch("rsl_rl.algorithms.ppo_hard_pact.projection_loss", side_effect=checked_projection), \
          patch.object(alg, "_replay_action_path", side_effect=checked_replay):
         alg.update(lambda a: (a[:, :12], a[:, 12:]), lambda q, p, v: q-p-v,
                    .02, 0, torch.zeros(12), 1.)
+    assert bool(projection_checks) == (qp_mode is not None)
     assert measured and all(x.abs().sum() > 0 and not x.requires_grad for x in measured)
     assert gradients and all(torch.isfinite(g).all() and g.abs().sum() > 0 for g in gradients)
     expected_torques = fields["interval_executed_torque"].flatten(0, 1).sort(dim=0).values
     torch.testing.assert_close(torch.cat(inverse_torques).sort(dim=0).values, expected_torques)
     torch.testing.assert_close(torch.cat(rollout_torques).sort(dim=0).values, expected_torques,
-                               rtol=0, atol=2e-7)  # Existing straight-through float32 arithmetic.
+                               rtol=0, atol=0)
     assert not grf_torques[0][1]
     torch.testing.assert_close(grf_torques[0][0], replayed_nominal[0], rtol=0, atol=0)
     assert not torch.equal(grf_torques[0][0].sort(dim=0).values, expected_torques)

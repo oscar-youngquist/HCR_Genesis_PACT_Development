@@ -32,6 +32,51 @@ def solver(**kw):
     return HardPACTDifferentiableQP(cfg,[23.5]*12,[-2]*12,[2]*12,[30]*12)
 
 
+def test_outer_projection_stance_mask_invalid_rows_and_empty_batch():
+    tau=torch.ones(3,12,dtype=torch.float64,requires_grad=True)
+    nominal=torch.zeros_like(tau,requires_grad=True)
+    acc=torch.ones(3,18,dtype=torch.float64,requires_grad=True)
+    jac=torch.zeros(3,4,3,18,dtype=torch.float64)
+    jac[:,:,:,:3]=torch.eye(3,dtype=torch.float64)
+    jac.requires_grad_()
+    bias=torch.zeros(3,4,3,dtype=torch.float64,requires_grad=True)
+    stance=torch.tensor([[1.,0.,0.,0.]]*3,requires_grad=True)
+    with torch.no_grad():
+        tau[1:]=float('nan');acc[1:]=float('nan');jac[1:]=float('nan')
+    kwargs=dict(qdd=acc,foot_jacobians=jac,foot_acceleration_bias=bias,
+                stance_mask=stance,contact_weight=2.,contact_scale=2.)
+    loss=projection_loss(tau,nominal,torch.ones(12),torch.tensor([1,1,0]),
+                         torch.tensor([1,0,1]),**kwargs)
+    torch.testing.assert_close(loss,torch.tensor(13.5,dtype=torch.float64))
+    loss.backward()
+    for value in (tau,nominal,acc):
+        assert value.grad.isfinite().all() and value.grad[1:].eq(0).all()
+    assert acc.grad[0,:3].abs().sum()>0
+    assert jac.grad is None and bias.grad is None and stance.grad is None
+    empty=projection_loss(tau,nominal,torch.ones(12),torch.zeros(3),torch.ones(3),**kwargs)
+    assert empty.isfinite() and empty==0
+    for value in (tau,nominal,acc):value.grad=None
+    empty.backward()
+    assert all(value.grad.eq(0).all() for value in (tau,nominal,acc))
+
+
+def test_outer_projection_wrench_clamp_gradient():
+    from rsl_rl.modules.hard_pact_physics import sanitize_and_clip_wrench_for_qp
+    qp=solver(); d=inputs(1)
+    # Couple base acceleration into contact acceleration so the outer loss
+    # sees the wrench, while the ordinary physical clamp blocks saturated axes.
+    d['foot_jacobians'][:,:,:3,:3]=torch.eye(3,dtype=torch.float64)
+    raw=torch.tensor([[200.,1.,1.,0.,0.,0.]],dtype=torch.float64,requires_grad=True)
+    d['wrench_pred_world']=sanitize_and_clip_wrench_for_qp(raw,torch.tensor([150.,150.,150.,40.,40.,40.]))
+    out=qp.solve(differentiable=True,**d)
+    assert out.differentiated_mask.all()
+    loss=projection_loss(out.tau_safe,d['tau_nom'],qp.torque_limits,torch.ones(1),out.differentiated_mask,
+        qdd=out.qdd,foot_jacobians=d['foot_jacobians'],foot_acceleration_bias=d['foot_acceleration_bias'],
+        stance_mask=d['contact_probability']>=.5,contact_weight=1.,contact_scale=50.)
+    loss.backward()
+    assert raw.grad.isfinite().all() and raw.grad[0,0]==0 and raw.grad[0,1:3].abs().sum()>0
+
+
 def objective(qp,d,m,x):
     a=(m.acceleration_map@x[...,None]).squeeze(-1)+m.acceleration_offset
     mask=d["contact_probability"]>=qp.cfg.contact_threshold
@@ -209,32 +254,6 @@ def test_diagnostics_do_not_change_primal_or_gradients():
         if level=="full": assert torch.isfinite(r.diagnostics["full/audit/q_min_eigenvalue"]).sum()==1
     for x in outputs[1:]:
         for actual,expected in zip(x,outputs[0]):torch.testing.assert_close(actual,expected,rtol=0,atol=0)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(),reason="CUDA unavailable")
-def test_cuda_active_cache_reordering_pattern_reset_and_ppo_isolation():
-    d=inputs(4,torch.float64,"cuda"); ids=torch.arange(4,device="cuda")
-    qp=solver(qp_solver="cupiqp",qp_update_mode="active_constraint_update",solver_dtype="float64")
-    for step in range(4):
-        d["mass_matrix"]*=1.001
-        r=qp.solve(differentiable=False,substep_index=step,environment_ids=ids,environment_count=4,**d)
-        assert r.stage.eq(0).all(),r.diagnostics
-        ref=solver(qp_solver="cupiqp",solver_dtype="float64").solve(differentiable=False,**d)
-        torch.testing.assert_close(r.tau_safe,ref.tau_safe,rtol=1e-4,atol=2e-4)
-        if step: assert r.diagnostics["full/active/accepted"].all(),r.diagnostics
-        d["previous_torque"]=r.tau_safe
-    qp.clear_warm_start(ids[1:2])
-    order=torch.tensor([3,1,0,2],device="cuda"); ids=ids[order]
-    d={k:v[order] for k,v in d.items()}
-    d["contact_probability"][0,0]=0
-    r=qp.solve(differentiable=False,substep_index=1,environment_ids=ids,environment_count=4,**d)
-    assert r.stage.eq(0).all()
-    assert r.diagnostics["full/active/full_solve"].tolist()==[True,True,False,False]
-    d["tau_nom"].requires_grad_()
-    with mock.patch("rsl_rl.algorithms.hard_pact_active_constraints.ActiveConstraintCache.solve",side_effect=AssertionError("PPO cache reuse")):
-        out=qp.solve(differentiable=True,**d)
-        out.tau_safe.sum().backward()
-    assert torch.isfinite(d["tau_nom"].grad).all() and d["tau_nom"].grad.abs().sum()>0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(),reason="CUDA unavailable")

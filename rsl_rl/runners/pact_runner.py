@@ -243,6 +243,12 @@ class OnPolicyRunnerPACT:
                 self.alg.qp_config.warmup_iterations,
                 qp_config=self.alg.qp_config,
             )
+            if self.alg.hard_pact_qp is not None:
+                qp = self.alg.hard_pact_qp
+                self.deployment_contract["qp_update"]["physical_joint_limits"] = {
+                    name: getattr(qp, name).detach().cpu().tolist()
+                    for name in ("torque_limits", "position_lower", "position_upper", "velocity_limits")
+                }
             write_deployment_contract_once(self.log_dir, self.deployment_contract)
 
         self.env.create_async_pino_workers()

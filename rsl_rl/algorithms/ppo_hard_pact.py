@@ -163,6 +163,24 @@ def _body_point_to_world(point_body, q_xyzw):
     return torch.einsum("bij,bj->bi", rotation, point_body)
 
 
+def replay_qp_torques(desired_position, feedforward_torque, packet, feedback):
+    """Recompute both current-parameter torque inputs from detached measurements.
+
+    The QP tracks the sampled-state torque; the held GRF prediction was
+    conditioned on the control-start torque. Neither is a cached prediction.
+    """
+    if "sampled_qp_grf_conditioning_q" not in packet:
+        raise ValueError("QP replay lacks control-step GRF conditioning state")
+    def nominal(q, v):
+        if "control_kp" in packet:
+            return bounded_nominal_torque(desired_position,feedforward_torque,q.detach(),v.detach(),packet)
+        if feedback is None:
+            raise ValueError("QP replay requires the physical PD conversion")
+        return feedforward_torque+feedback(desired_position,q.detach(),v.detach())
+    return (nominal(packet["sampled_qp_q"][:,7:],packet["sampled_qp_v"][:,6:]),
+            nominal(packet["sampled_qp_grf_conditioning_q"],packet["sampled_qp_grf_conditioning_v"]))
+
+
 def disjoint_qp_epoch_mask(
     rollout_indices,
     anchor_indices,
@@ -1089,7 +1107,9 @@ class PPO_HardPACT:
         qp_target_count = torch.zeros((), device=self.device)
         qp_valid_count = torch.zeros((), device=self.device)
         qp_anchor_zero_count = torch.zeros((), device=self.device)
+        qp_anchor_one_count = torch.zeros((), device=self.device)
         qp_anchor_two_count = torch.zeros((), device=self.device)
+        qp_anchor_three_count = torch.zeros((), device=self.device)
         qp_gradient_square_sum = torch.zeros((), device=self.device)
         self._qp_sampling_gradient_inputs = None
 
@@ -1142,7 +1162,9 @@ class PPO_HardPACT:
                 qp_sampled_count.add_(float(qp_rows.numel()))
                 qp_valid_count.add_(valid_qp.float().sum())
                 qp_anchor_zero_count.add_((anchors == 0).float().sum())
+                qp_anchor_one_count.add_((anchors == 1).float().sum())
                 qp_anchor_two_count.add_((anchors == 2).float().sum())
+                qp_anchor_three_count.add_((anchors == 3).float().sum())
                 if ppo_epoch == 0:
                     full = float(obs_batch.shape[0])
                     qp_full_count.add_(full)
@@ -1510,6 +1532,8 @@ class PPO_HardPACT:
                 "qp/minimal/sampling/anchor_2_fraction": (
                     qp_anchor_two_count / sampled_denominator
                 ),
+                "qp/minimal/sampling/anchor_1_fraction": qp_anchor_one_count / sampled_denominator,
+                "qp/minimal/sampling/anchor_3_fraction": qp_anchor_three_count / sampled_denominator,
                 "qp/minimal/sampling/valid_fraction": (
                     qp_valid_count / sampled_denominator
                 ),
@@ -2220,14 +2244,10 @@ class PPO_HardPACT:
                 # prediction/encoder graph for the two dynamics objectives.
                 grf_world = pinn_grf(nominal_torque)
             if self.bard_rollout_enabled:
-                executed_torque = batch["interval_executed_torque"].detach()
-                # Forward value: final bounded execution, including QP and
-                # fallback when enabled. Backward: preserve the existing
-                # identity VJP to replayed nominal torque. This direct
-                # actuation term is the ONLY actor path from either PINN.
-                rollout_control_torque = (
-                    nominal_torque + executed_torque - nominal_torque.detach()
-                )
+                # Measured interval-average actuation is a fixed dynamics input,
+                # including final QP/fallback/actuator projection. No straight-
+                # through actor or QP edge; GRF/wrench/encoder edges stay live.
+                rollout_control_torque = batch["interval_executed_torque"].detach()
             if self.bard_inverse_enabled or self.bard_rollout_enabled:
                 wrench_yaw = self.actor_critic.physics_estimator.wrench_to_physical(
                     self.actor_critic.physics_estimator.predict_wrench(
@@ -2381,11 +2401,11 @@ class PPO_HardPACT:
             soft_constraint_loss = self._soft_constraint_loss(grf_world)
 
         # ---------------- sampled differentiable substep QP ---------------
-        # Rollout solved every substep under no_grad.  PPO stores one compact
+        # Rollout solved its selected substeps under no_grad. PPO stores one compact
         # stratified-uniform sample per environment and rebuilds only that
         # sample's detached BARD matrices.  No [T,D,M,J] tensors are retained,
         # which is the principal VRAM saving.  Since P(k)=1/D, its normalized
-        # correction-plus-slack value directly estimates mean_k L_proj,k.
+        # correction-plus-stance-acceleration value estimates mean_k L_proj,k.
         qp_loss = zero
         if qp_ready:
             # Slice before every QP-only head/mechanics operation. PPO, BARD,
@@ -2401,41 +2421,10 @@ class PPO_HardPACT:
             sample_dt = qp_batch.get(
                 "physics_dt", control_dt[qp_rows]
             ).detach()
-            if desired_position is not None and fb_func is not None:
-                # Replay the current stochastic/delayed policy into held q_d
-                # and tau_ff, then evaluate the sampled-state PD law:
-                # tau_nom,K=Kp(q_d-q_K)-Kd*qdot_K+tau_ff.
-                if "control_kp" in qp_batch:
-                    sampled_nominal = bounded_nominal_torque(
-                        desired_position[qp_rows], feedforward_torque[qp_rows],
-                        sample_q[:, 7:], sample_v[:, 6:], qp_batch,
-                    )
-                else:
-                    sampled_nominal = feedforward_torque[qp_rows] + fb_func(
-                        desired_position[qp_rows], sample_q[:, 7:], sample_v[:, 6:]
-                    )
-            else:
-                # Compatibility path for direct legacy unit/integration calls.
-                sampled_nominal = nominal_torque[qp_rows]
-            # Recompute only the GRF head at K because its input includes
-            # tau_nom,K. z_t and e_t remain the current policy-step features.
-            grf_nominal = sampled_nominal
-            if getattr(getattr(self.hard_pact_qp, "cfg", None), "qp_update_mode", "every_substep") == "active_constraint_update":
-                # This mode holds the k=0 force prediction, but refreshes the
-                # sampled k torque/QP mechanics. Recreate the head's original
-                # torque conditioning at the stored control-interval start.
-                if desired_position is not None and fb_func is not None:
-                    if "control_kp" in qp_batch:
-                        grf_nominal = bounded_nominal_torque(
-                            desired_position[qp_rows], feedforward_torque[qp_rows],
-                            qp_batch["pre_q"][:, 7:], qp_batch["pre_v"][:, 6:], qp_batch,
-                        )
-                    else:
-                        grf_nominal = feedforward_torque[qp_rows] + fb_func(
-                            desired_position[qp_rows], qp_batch["pre_q"][:, 7:], qp_batch["pre_v"][:, 6:],
-                        )
-                else:
-                    grf_nominal = nominal_torque[qp_rows]
+            if desired_position is None or feedforward_torque is None:
+                raise ValueError("QP replay requires delayed physical actions")
+            sampled_nominal, grf_nominal = replay_qp_torques(
+                desired_position[qp_rows],feedforward_torque[qp_rows],qp_batch,fb_func)
             sample_grf_normalized = self.actor_critic.physics_estimator.predict_grf(
                 qp_latent, qp_explicit, grf_nominal
             ).reshape(-1, 4, 3)
@@ -2543,6 +2532,7 @@ class PPO_HardPACT:
                 | qp_batch["timeout_mask"].bool()
                 | qp_batch["teleport_mask"].bool()
             )
+            valid = valid & qp_batch["sampled_qp_valid"].bool()
             # Normalize correction by the same backend torque limits used by G.
             torque_limits = self.hard_pact_qp.torque_limits.to(
                 sampled_nominal.device, sampled_nominal.dtype
@@ -2550,9 +2540,16 @@ class PPO_HardPACT:
             # For K~Uniform{0,...,D-1}, this direct sampled loss satisfies
             # E[L_K]=(1/D)sum_k L_k. There is no decimation multiplier.
             # Stage-2 rows are excluded because they have no qpth KKT graph.
-            qp_loss = projection_loss(
+            qp_loss, projection_per_row = projection_loss(
                 qp_result.tau_safe, sampled_nominal, torque_limits, valid,
                 qp_result.differentiated_mask,
+                qdd=qp_result.qdd,
+                foot_jacobians=sampled_mechanics.foot_jacobians,
+                foot_acceleration_bias=sampled_mechanics.foot_acceleration_bias,
+                stance_mask=sample_contact_probability.detach() >= self.hard_pact_qp.cfg.contact_threshold,
+                contact_weight=self.hard_pact_qp.cfg.contact_acceleration_weight,
+                contact_scale=self.hard_pact_qp.cfg.contact_acceleration_scale_m_s2,
+                return_per_row=True,
             )
             # stopgrad deliberately computes and reports exactly this metric,
             # but neither it nor any QP output participates in optimization.
@@ -2578,8 +2575,7 @@ class PPO_HardPACT:
             if hasattr(self.hard_pact_qp, "iteration_diagnostics"):
                 aggregate = self.hard_pact_qp.iteration_diagnostics["ppo"]
                 supervised = valid.reshape(-1) & qp_result.differentiated_mask.reshape(-1)
-                per_row = (correction / torque_limits).square().sum(-1)
-                aggregate.add_values("projection_loss", per_row, supervised)
+                aggregate.add_values("projection_loss", projection_per_row.detach(), supervised)
                 aggregate.add_values("intervention_fraction", intervention.float())
             self.last_qp_metrics["qp/minimal/intervention_fraction"] = (
                 intervention.float().mean()
@@ -2591,7 +2587,9 @@ class PPO_HardPACT:
                 correction.square().mean(dim=-1).mul(intervention_weights).sum()
                 / intervention_weights.sum().clamp_min(1.0)
             ).sqrt()
-            audit_ran = self.hard_pact_qp._full_audit_due(differentiate_qp)
+            audit_ran = differentiate_qp and any(
+                key.startswith("full/audit/") for key in qp_result.diagnostics
+            )
             if audit_ran:
                 # Retain only four compact learned QP inputs, and only on a
                 # periodic full audit. This exposes actual autograd routing

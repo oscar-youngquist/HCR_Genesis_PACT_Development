@@ -24,44 +24,32 @@ def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None):
     from rsl_rl.algorithms.hard_pact_qp import HardPACTQPConfig
     settings = qp_config or HardPACTQPConfig()
 
+    qp_substep_anchors(mode,decimation)
     result = {
-        "mode": mode,
-        "formulation": "torque_force_24",
-        "solver_and_objective_settings": asdict(settings),
+        "mode": mode, "formulation": "torque_force_24",
+        "variable_ordering": ["total_actuator_torque_12", "FR_FL_RR_RL_world_XYZ_force_12"],
+        "solver_and_objective_settings": dict(asdict(settings),qp_update_mode=mode),
         "stance_threshold": settings.contact_threshold,
-        "stance_selection": "detached probability >= threshold; gate only the raw QP reference; optimized swing XYZ force equals zero",
+        "stance_selection": "detached probability >= threshold; optimized swing force exactly zero",
         "joint_position_beta": settings.position_integration_coefficient,
         "training_warmup_iterations": warmup_iterations,
-        "physics_substep_anchors": list(qp_substep_anchors(mode, decimation)),
-        "prediction_horizon": "one physics/PD timestep (not the hold duration)",
-        "correction_hold": "delta_tau = tau_safe - tau_nom at each anchor; hold until next anchor or policy interval",
-        "nominal_torque": "bounded non-QP actuator command from clipped delayed actions; recompute PD/feedforward and apply actuator gains/weights/motor strength exactly once every physics substep",
-        "held_predictions": "GRF, wrench, contact, latent, explicit at policy rate in held-correction modes",
-        "held_execution_helper": "rsl_rl.algorithms.hard_pact_qp.held_correction_torque",
-        "held_execution_sanitize": mode == "single_anchor_held_correction",
-        "held_execution": "clamp(tau_nom + delta_tau, max(-tau_limit, tau_previous - rate*dt_pd), min(tau_limit, tau_previous + rate*dt_pd))",
-        "previous_torque": "previous executed command; zero on reset",
-        "correction_reset": "clear on reset, each policy interval, and mode/warmup boundaries",
-        "held_commands_are_freshly_qp_certified": False,
-        "ppo_anchor_selection": "fixed_zero_no_rng" if mode == "single_anchor_held_correction" else "balanced_uniform",
+        "physics_substep_anchors": [0,1,2,3],
+        "problems_per_environment_interval": 4 if mode=="every_substep" else 1,
+        "execution_selection": "all rows" if mode=="every_substep" else "preselected balanced uniform K per environment; compact K=k at each substep",
+        "prediction_horizon": "one physics/PD timestep",
+        "prediction_rate": "GRF/wrench/contact/latent/explicit evaluated before first physics substep in both modes; no neural forward during substepping; refresh yaw-to-world at each solve",
+        "selection_helper": "rsl_rl.algorithms.hard_pact_qp.qp_substep_mask",
+        "grf_conditioning": "bounded k=0 total nominal PD/feedforward torque; store k=0 joint q/v and actuator parameters; recompute using current replayed actions",
+        "nominal_torque": "fresh bounded total PD/feedforward each substep, actuator effects exactly once",
+        "unsolved_execution_helper": "rsl_rl.algorithms.hard_pact_qp.project_nominal_torque",
+        "unsolved_execution": "project fresh nominal torque on actuator magnitude/rate intersection; no held correction",
+        "previous_torque": "previous actually applied torque, zero on reset",
+        "joint_contact_certification": "successful QP solves only; no certificate for unsolved or analytic fallback rows",
+        "ppo_anchor_selection": "one balanced uniform executed QP substep per environment in both modes",
         "ppo_projection_loss_multiplier": 1,
+        "frames": "world forces and world-aligned wrench about the existing base-Jacobian point; yaw-local head outputs rotated once",
+        "limits": "canonical joint-specific magnitude/position/velocity limits from backend; acceleration/rate and objective scales in solver_and_objective_settings",
     }
-    if mode == "active_constraint_update":
-        from rsl_rl.algorithms.hard_pact_qp import HardPACTQPConfig
-        settings = qp_config or HardPACTQPConfig()
-        result.update({
-            "correction_hold": "none; refresh deployment mechanics and nominal PD every substep",
-            "held_predictions": "yaw-local GRF, wrench, contact, latent and explicit fixed at policy rate",
-            "execution_helper": "HardPACTDifferentiableQP.solve(environment_ids, environment_count, substep_index)",
-            "active_constraint_execution": "k=0 full cuPIQP; k>0 refactored equality-constrained QP; certify all physical and scaled KKT conditions; full cuPIQP and existing recovery for rejected rows only",
-            "active_constraint_cache": "owned primal/dual/slack and canonical binding rows including native bounds, indexed by environment identity; reset on episodes, intervals, settings/structure/device/dtype changes and recovery",
-            "ppo_execution": "isolated full differentiable cuPIQP on one balanced sampled substep; no custom active-set backward",
-            "active_constraint_tolerances": {name: getattr(settings, name) for name in (
-                "active_binding_tolerance", "active_dual_tolerance", "active_rank_tolerance",
-                "active_kkt_tolerance", "rollout_feasibility_tolerance", "rollout_duality_gap_abs", "rollout_duality_gap_rel")},
-        })
-        for name in ("held_execution_helper", "held_execution_sanitize", "held_execution"):
-            result.pop(name)
     return result
 
 
@@ -123,7 +111,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
     explicit_dim = actor.explicit_estimator.network[-1].out_features
     swing_config = GRFSwingConfig.from_task(cfg)
     contract = {
-        "schema_version": 11,
+        "schema_version": 12,
         "grf_swing_gating": {
             "enabled": swing_config.enabled,
             "contact_probability_threshold": swing_config.threshold,
@@ -321,12 +309,19 @@ def write_deployment_contract_once(log_dir, contract):
     except FileExistsError:
         with open(path, encoding="utf-8") as stream:
             existing = json.load(stream)
-        if existing.get("schema_version", 0) < contract.get("schema_version", 0):
-            warnings.warn(
-                "Existing HardPACT deployment contract predates the current controller "
-                "contract. It is an unchanged historical snapshot, not the current "
-                "deployment specification; export to a new directory. Policy weights "
-                "remain compatible.", stacklevel=2,
-            )
+        validate_qp_deployment_contract(existing)
+        if existing.get("qp_update") != contract.get("qp_update"):
+            raise ValueError("Incompatible existing QP deployment contract; export to a new run directory")
         return path, False
     return path, True
+
+
+def validate_qp_deployment_contract(contract):
+    """Reject old held/active execution contracts rather than reinterpret them."""
+    if contract.get("schema_version") != 12:
+        raise ValueError("Incompatible HardPACT deployment schema; re-export using the current controller")
+    update = contract.get("qp_update")
+    if update is not None:
+        if update.get("mode") not in ("every_substep", "random_one_substep") or update.get("formulation") != "torque_force_24":
+            raise ValueError("Incompatible HardPACT QP execution contract")
+    return contract

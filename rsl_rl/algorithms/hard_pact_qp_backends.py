@@ -588,9 +588,7 @@ class SolverBackend:
             _as_torch_zero_copy(
                 solver.result.info.duality_gap_rel, p
             )[:batch].clone(),
-            ({name: _as_torch_zero_copy(getattr(solver.result, name), p)[:batch].clone()
-              for name in ("y", "z_u", "z_bl", "z_bu", "s_u", "s_bl", "s_bu")}
-             if self.config.qp_update_mode == "active_constraint_update" else None),
+            None,  # No rollout active-set snapshots/factors are retained.
         )
 
     def _solve_moreau(self, Q, p, G, h, A, b, *, differentiable):

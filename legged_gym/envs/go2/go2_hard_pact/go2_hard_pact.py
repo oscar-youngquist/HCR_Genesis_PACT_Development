@@ -17,10 +17,9 @@ from rsl_rl.modules.hard_pact_physics import (
     normalize_wrench_target,
 )
 from rsl_rl.algorithms.hard_pact_qp import (
-    balanced_anchor_indices,
     balanced_substep_indices,
     qp_substep_anchors,
-    held_correction_torque,
+    project_nominal_torque, qp_substep_mask,
 )
 from legged_gym.dynamics import wrench_at_point
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
@@ -513,16 +512,10 @@ class Go2HardPACT(Go2PACT):
         )
         if not self._hard_pact_rollout_qp_enabled:
             qp = getattr(self, "_hard_pact_rollout_qp", None)
-            if getattr(getattr(qp, "cfg", None), "qp_update_mode", None) == "active_constraint_update":
+            if qp is not None:
                 qp.clear_warm_start()
             self._hard_pact_policy_context_ready = False
             getattr(self, "extras", {}).pop("hard_pact_qp_interval", None)
-            held = getattr(self, "_hard_pact_held_correction", None)
-            if held is not None:
-                # Rollout buffers may have been allocated in inference mode;
-                # the runner changes the warmup gate outside that context.
-                with torch.inference_mode():
-                    held.zero_()
 
     def set_hard_pact_policy_context(self, latent, explicit):
         """Hold policy-rate features and wrench prediction for one interval."""
@@ -828,332 +821,126 @@ class Go2HardPACT(Go2PACT):
         # already realizes the randomized mass and CoM in its dynamics.
         self._apply_sustained_world_wrench(self._current_sustained_wrench_world)
 
+    @torch.no_grad()
+    def _prepare_qp_control_predictions(self):
+        """Run once BEFORE simulator.step, never from a physics callback."""
+        qj,vj = self._canonical_joint_state()
+        if hasattr(self,"_hard_pact_control_parameters"):
+            nominal = bounded_nominal_torque(self._hard_pact_q_d,self._hard_pact_tau_ff,
+                qj,vj,self._hard_pact_control_parameters)
+        else:
+            nominal = self._hard_pact_tau_ff+self._get_pinn_feedback(self._hard_pact_q_d,qj,vj)
+        self._qp_grf_conditioning_q.copy_(qj)
+        self._qp_grf_conditioning_v.copy_(vj)
+        self._qp_grf_conditioning_torque.copy_(nominal)
+        heads = self._hard_pact_actor_critic.physics_estimator
+        self._qp_control_grf = heads.grf_to_physical(heads.predict_grf(
+            self._hard_pact_policy_latent,self._hard_pact_policy_explicit,nominal
+        )).reshape(-1,4,3).detach()
+        self._qp_control_wrench = heads.wrench_to_qp_physical(
+            self._hard_pact_wrench_raw_normalized).detach()
+
     def _solve_hard_pact_rollout_qp_substep(self, quat, mass_com_wrench):
-        r"""Refresh and solve one inference-only QP immediately before actuation.
+        """Fresh PD/rate projection every substep; no held QP corrections.
 
-        ``q_d`` and ``tau_ff`` are held across decimation, while PD feedback
-        and the torque-rate box always use the current physics-substep state.
-        In the default mode BARD/QP/head inputs are refreshed every substep.
-        The optional two-anchor mode refreshes BARD/QP only at ``k={0,2}``
-        and holds its control-step GRF/head features plus anchor correction.
-
-        At substep ``k`` this path computes
-
-        .. math::
-
-           \tau_{nom,k}=\operatorname{clip}_{\tau_{lim}}\left[
-             m_{motor}\{w_{fb}[K_p(q_d-q_k)-K_d\dot q_k]
-             +w_{ff}\tau_{ff}\}\right],
-
-           \hat f_k=D_F(z_t,\operatorname{sg}(e_t),\tau_{nom,k}),
-
-        then solves ``x_k*=QP(q_k,v_k,tau_{nom,k},f_hat_k,W_hat_t,
-        tau_safe,k-1)`` and sends only ``tau_safe,k`` to Genesis. The outer
-        ``no_grad`` is intentional: rollout needs numeric safety decisions,
-        whereas PPO later rebuilds one selected substep with autograd enabled.
+        Both modes hold neural predictions in yaw-local coordinates at control
+        rate. Their GRF conditioning is the bounded nominal torque at k=0.
+        Only selected rows refresh QP mechanics/frames. Outputs are total
+        actuator torques, never feedforward terms to which PD is added again.
         """
-        # Never retain qpth/BARD/head graphs for D rollout substeps.
         with torch.no_grad():
-            # Local alias shortens all live-state reads below.
-            simulator = self.simulator
-            # Refresh actuated q_k directly from Genesis immediately before
-            # actuation; the control-rate cached state may be one substep old.
-            joint_position, joint_velocity = self._canonical_joint_state()
-            # Refresh qdot_k for the same reason and timestamp.
-            # Simulator configuration q_sim=[p_WB(3),quat_xyzw(4),q_joints(12)].
-            q_simulator = self._canonical_configuration(quat)
-            # Simulator velocity v_sim=[v_WB^W(3),omega_WB^W(3),qdot(12)].
-            v_world = self._canonical_velocity_world()
-
-            # tau_nom is the bounded non-QP command, not an unweighted or
-            # unsaturated decoder/action request. q_d includes default pose.
-            if hasattr(self, "_hard_pact_control_parameters"):
-                # The backend just computed the bounded non-QP command using
-                # the same shared conversion. Do not apply actuator effects twice.
-                tau_nom = self._hard_pact_bounded_nominal_torque
-            else:  # Direct synthetic solver fixtures without an actuator hook.
-                tau_nom = self._hard_pact_tau_ff + self._get_pinn_feedback(
-                    self._hard_pact_q_d, joint_position, joint_velocity
-                )
-            update_mode = getattr(
-                self._hard_pact_rollout_qp.cfg,
-                "qp_update_mode", "every_substep",
-            )
-            held_mode = update_mode in (
-                "two_anchor_held_correction", "single_anchor_held_correction"
-            )
-            fixed_prediction = held_mode or update_mode == "active_constraint_update"
-            # z_t and e_t remain policy-rate values. The default retains its
-            # legacy per-substep GRF evaluation; held modes evaluate the
-            # torque-conditioned decoder only at k=0 and holds that prediction.
-            if (
-                fixed_prediction
-                and self._qp_substep > 0
-            ):
-                grf_normalized = self._hard_pact_held_grf_normalized
-            else:
-                grf_normalized = (
-                    self._hard_pact_actor_critic.physics_estimator.predict_grf(
-                        self._hard_pact_policy_latent,
-                        self._hard_pact_policy_explicit,
-                        tau_nom,
-                    )
-                )
-                if fixed_prediction:
-                    self._hard_pact_held_grf_normalized.copy_(grf_normalized)
-            # The decoder output is normalized yaw-local force. Reconstruct
-            # Newtons once, preserve FR/FL/RR/RL XYZ, then rotate into J_f's
-            # world-axis convention. Observation scaling is not involved.
-            heads = self._hard_pact_actor_critic.physics_estimator
-            raw_grf_physical = heads.grf_to_physical(grf_normalized).reshape(-1, 4, 3)
-            # The shared QP builder alone selects stance and gates references;
-            # do not apply the auxiliary swing configuration a second time.
-            grf_world = self._yaw_local_to_world(raw_grf_physical, quat)
-            # Reconstruct physical N/Nm and apply the sole sanitization/clamp
-            # immediately at the QP boundary. The subsequent rotation cannot
-            # introduce a second scaling or clamp.
-            wrench_yaw = (
-                self._hard_pact_actor_critic.physics_estimator.wrench_to_qp_physical(
-                    self._hard_pact_wrench_raw_normalized
-                )
-            )
-            # Rotate both force and moment from yaw-local to world axes while
-            # preserving ordering [Fx,Fy,Fz,Tx,Ty,Tz].
-            total_wrench_world = torch.cat((
-                self._yaw_local_to_world(wrench_yaw[:, :3].unsqueeze(1), quat).squeeze(1),
-                self._yaw_local_to_world(wrench_yaw[:, 3:].unsqueeze(1), quat).squeeze(1),
-            ), dim=-1)
-            # Projection is deployment-facing. It therefore uses the total
-            # predicted wrench about the nominal base reference directly and
-            # never reads the privileged realized mass/CoM label.
-            applied_wrench = total_wrench_world
-            is_anchor = self._qp_substep in self._hard_pact_qp_anchors
-            if held_mode and not is_anchor:
-                # Hold only delta_tau from the preceding anchor. PD feedback
-                # above remains live at every physics substep. The final
-                # analytic projection enforces both actuator magnitude and
-                # the rate box relative to the actually executed substep k-1.
-                torque_limit = self._hard_pact_rollout_qp.torque_limits.to(
-                    device=tau_nom.device, dtype=tau_nom.dtype
-                )
-                safe = held_correction_torque(
-                    tau_nom, self._hard_pact_held_correction,
-                    self._hard_pact_previous_substep_torque, torque_limit,
-                    self._hard_pact_rollout_qp.cfg.torque_rate_limit_nm_s,
-                    float(self.cfg.sim.dt),
-                    sanitize=update_mode == "single_anchor_held_correction",
-                )
-                setter = getattr(
-                    simulator, "hard_pact_set_executed_torque", None
-                )
-                if setter is None:
-                    simulator._torques = safe
-                else:
-                    setter(safe)
-                correction = safe - tau_nom
-                if hasattr(self._hard_pact_rollout_qp, "iteration_diagnostics"):
-                    aggregate = self._hard_pact_rollout_qp.iteration_diagnostics["rollout"]
-                    aggregate.add_sum("held/real_rows", safe.new_tensor(self.num_envs))
-                    aggregate.add_sum("held/substep_calls", safe.new_tensor(1))
-                    aggregate.add_values("held/torque_correction_mean_nm", correction.abs())
-                self._qp_interval_safe_sum.add_(safe)
-                self._qp_interval_safe_peak.copy_(torch.maximum(
-                    self._qp_interval_safe_peak, safe.abs()
-                ))
-                self._qp_interval_correction_sum.add_(correction)
-                self._qp_interval_correction_peak.copy_(torch.maximum(
-                    self._qp_interval_correction_peak, correction.abs()
-                ))
-                self._qp_interval_grf_sum.add_(
-                    self._hard_pact_held_force_world
-                )
-                if update_mode != "single_anchor_held_correction":
-                    # Preserve historical two-anchor interval summaries.
-                    # Single-anchor status/residuals describe actual solves
-                    # only: a held command has no fresh QP certification.
-                    self._qp_interval_residual_sum.add_(
-                        self._hard_pact_held_residual
-                    )
-                    self._qp_interval_residual_peak.copy_(torch.maximum(
-                        self._qp_interval_residual_peak,
-                        self._hard_pact_held_residual,
-                    ))
-                    self._qp_interval_stage_counts.scatter_add_(
-                        1, self._hard_pact_held_stage[:, None],
-                        torch.ones(self.num_envs, 1, device=self.device),
-                    )
-                self._hard_pact_previous_substep_torque.copy_(safe)
-                self._qp_substep += 1
-                return
-            # Empty parameters select URDF/nominal mechanics. Actual realized
-            # randomization is reserved for the PINN-target mechanics cache.
-            parameters = {}
-            # One kinematic update builds M(q_k), b(q_k,v_k), J_f(q_k),
-            # J_b(q_k), and Jdot_f(q_k,v_k)*v_k for this substep.
-            context = self._hard_pact_bard_dynamics.build_context(
-                q_simulator, v_world, parameters=parameters, need_qp=True
-            )
-            contact_prob_qp = self._hard_pact_policy_explicit[:, 3:7]
-            log_qp_swing_grf(
-                getattr(self._hard_pact_rollout_qp, "iteration_diagnostics", {}).get("rollout"),
-                raw_grf_physical, contact_prob_qp, getattr(heads, "grf_swing", None),
-            )
-            # Wall-clock measurement encloses matrix assembly inside solve and
-            # qpth/fallback execution, but excludes state/head preprocessing.
-            start = time.perf_counter()
-            # The solver constructs min 1/2*x'Qx+p'x subject to Gx<=h, Ax=b,
-            # where x=[tau_safe,f]. Every argument below maps directly
-            # to a documented physical block in hard_pact_qp.py.
-            result = self._hard_pact_rollout_qp.solve(
-                differentiable=False,
-                # Stable ownership survives compact recovery batches; PPO
-                # deliberately omits this rollout-only execution metadata.
-                **({"environment_ids": self._hard_pact_qp_environment_ids,
-                    "environment_count": self.num_envs, "substep_index": self._qp_substep}
-                   if update_mode == "active_constraint_update" else {}),
-                # Detached mechanics eliminate a via batched linear solves.
-                base_quaternion=q_simulator[:,3:7],
-                base_angular_velocity_world=v_world[:,3:6],
-                mass_matrix=context.mass_matrix,
-                # h enters the affine acceleration offset as J_b^T*W-h.
-                bias=context.bias,
-                # J_f maps force to acceleration and soft stance acceleration.
-                foot_jacobians=context.foot_jacobians,
-                # J_b maps the predicted applied wrench into generalized force.
-                base_jacobian=context.base_jacobian,
-                # Jdot_f*v is the affine foot-acceleration contribution.
-                foot_acceleration_bias=context.foot_acceleration_bias,
-                # Tracking center for tau_safe and source of actor gradients in PPO.
-                tau_nom=tau_nom,
-                # Tracking center for the QP force decision, in world Newtons.
-                force_pred_world=grf_world,
-                # Fixed generalized-force RHS input, world [N,Nm] at J_b point.
-                wrench_pred_world=applied_wrench,
-                # The estimator converted logits once at policy evaluation;
-                # the solver consumes that shared probability directly.
-                contact_probability=contact_prob_qp,
-                # tau_safe,k-1 centers the hard rate box for this substep.
-                previous_torque=self._hard_pact_previous_substep_torque,
-                # q_k/qdot_k form one-step joint position/velocity constraints.
-                joint_position=joint_position,
-                joint_velocity=joint_velocity,
-                # Hard rate and one-step integration limits use physics dt,
-                # never the D-times-larger policy/control interval.
-                dt=torch.full(
-                    (self.num_envs, 1), float(self.cfg.sim.dt),
-                    device=self.device, dtype=tau_nom.dtype,
-                ),
-            )
-            # Record elapsed milliseconds for interval diagnostics.
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            # This is the only torque command sent to Genesis for substep k.
-            setter = getattr(simulator, "hard_pact_set_executed_torque", None)
-            if setter is None:
-                simulator._torques = result.tau_safe
-            else:
-                setter(result.tau_safe)
-            # Delta_tau_k is the projection correction used by L_proj/logging.
-            correction = result.tau_safe - tau_nom
-            # Pack certified infinity-norm residuals as [eq,ineq,dual,comp].
-            # Dual/complementarity values exist only on periodic full audits;
-            # zero is the neutral interval-aggregation placeholder otherwise.
-            optional_zero = torch.zeros_like(
-                result.diagnostics["selected/equality_max"]
-            )
-            residual = torch.stack((
-                result.diagnostics["selected/equality_max"],
-                result.diagnostics["selected/inequality_max"],
-                result.diagnostics.get(
-                    "selected/stationarity_max", optional_zero
-                ),
-                result.diagnostics.get(
-                    "selected/complementarity_max", optional_zero
-                ),
-            ), dim=-1).nan_to_num()
-            if held_mode:
-                self._hard_pact_held_correction.copy_(
-                    result.tau_safe - tau_nom
-                )
-                self._hard_pact_held_force_world.copy_(
-                    result.force_world.flatten(1)
-                )
-                self._hard_pact_held_qdd.copy_(result.qdd)
-                self._hard_pact_held_residual.copy_(residual)
-                self._hard_pact_held_stage.copy_(result.stage)
-                self._hard_pact_held_differentiated.copy_(
-                    result.differentiated_mask
-                )
-            # Accumulate sum/absolute peak of executed safe torque.
-            self._qp_interval_safe_sum.add_(result.tau_safe)
-            self._qp_interval_safe_peak.copy_(torch.maximum(
-                self._qp_interval_safe_peak, result.tau_safe.abs()
-            ))
-            # Accumulate signed mean correction and absolute peak correction.
-            self._qp_interval_correction_sum.add_(correction)
-            self._qp_interval_correction_peak.copy_(torch.maximum(
-                self._qp_interval_correction_peak, correction.abs()
-            ))
-            # QP-selected physical GRFs are averaged over the interval.
-            self._qp_interval_grf_sum.add_(result.force_world.flatten(1))
-            # Slack is nonnegative, so ordinary max is its physical peak.
-            # Residual means and peaks summarize numerical solve quality.
-            self._qp_interval_residual_sum.add_(residual)
-            self._qp_interval_residual_peak.copy_(torch.maximum(
-                self._qp_interval_residual_peak, residual
-            ))
-            # stage in {0,1,2}; scatter_add forms per-env fallback counts.
-            self._qp_interval_stage_counts.scatter_add_(
-                1, result.stage[:, None],
-                torch.ones(self.num_envs, 1, device=self.device),
-            )
-            # Each env shares this batched wall time; averaging later reports
-            # milliseconds per batched substep solve.
-            self._qp_interval_timing_ms.add_(elapsed_ms)
-
-            # Each environment stores exactly one preselected replay point:
-            # k in [0,D), balanced k in {0,2}, or fixed k=0, respectively.
-            selected = self._qp_sampled_substep_index.long() == self._qp_substep
-            if selected.any():
-                # Store compact vectors only. M/J/A/G/Q are rebuilt during PPO
-                # and never occupy [rollout_length,decimation] GPU storage.
+            qp = self._hard_pact_rollout_qp
+            qj, vj = self._canonical_joint_state()
+            tau_nom = (self._hard_pact_bounded_nominal_torque
+                       if hasattr(self, "_hard_pact_control_parameters")
+                       else self._hard_pact_tau_ff+self._get_pinn_feedback(self._hard_pact_q_d,qj,vj))
+            previous = self._hard_pact_previous_substep_torque
+            dt = float(self.cfg.sim.dt)
+            safe = project_nominal_torque(tau_nom,previous,qp.torque_limits.to(tau_nom),
+                                         qp.cfg.torque_rate_limit_nm_s,dt)
+            selected = qp_substep_mask(qp.cfg.qp_update_mode,self._qp_substep,
+                                       self._qp_sampled_substep_index)
+            rows = selected.nonzero(as_tuple=True)[0]
+            aggregate = getattr(qp,"iteration_diagnostics",{}).get("rollout")
+            if aggregate is not None:
+                aggregate.add_sum("unsolved/real_rows",(~selected).sum())
+                aggregate.add_sum("substeps/real_rows",selected.new_tensor(self.num_envs,dtype=torch.long))
+            if rows.numel():
+                # No QP-only context is built for unsolved environments.
+                q = self._canonical_configuration(quat)[rows]
+                v = self._canonical_velocity_world()[rows]
+                context = self._hard_pact_bard_dynamics.build_context(
+                    q,v,parameters={},need_qp=True)
+                grf = self._yaw_local_to_world(self._qp_control_grf[rows],quat[rows])
+                wy = self._qp_control_wrench[rows]
+                wrench = torch.cat((
+                    self._yaw_local_to_world(wy[:,:3,None].transpose(1,2),quat[rows]).squeeze(1),
+                    self._yaw_local_to_world(wy[:,3:,None].transpose(1,2),quat[rows]).squeeze(1)),1)
+                contact = self._hard_pact_policy_explicit[rows,3:7]
+                log_qp_swing_grf(aggregate,self._qp_control_grf[rows],contact,
+                    getattr(self._hard_pact_actor_critic.physics_estimator,"grf_swing",None))
+                start=time.perf_counter()
+                result = qp.solve(differentiable=False,environment_ids=rows,
+                    mass_matrix=context.mass_matrix,bias=context.bias,
+                    foot_jacobians=context.foot_jacobians,base_jacobian=context.base_jacobian,
+                    foot_acceleration_bias=context.foot_acceleration_bias,
+                    base_quaternion=q[:,3:7],base_angular_velocity_world=v[:,3:6],
+                    tau_nom=tau_nom[rows],force_pred_world=grf,wrench_pred_world=wrench,
+                    contact_probability=contact,previous_torque=previous[rows],
+                    joint_position=qj[rows],joint_velocity=vj[rows],
+                    dt=tau_nom.new_full((rows.numel(),1),dt))
+                self._qp_interval_timing_ms[rows] += (time.perf_counter()-start)*1000.0
+                safe[rows] = result.tau_safe
+                zeros = tau_nom.new_zeros(rows.numel())
+                residual = torch.stack((result.diagnostics["selected/equality_max"],
+                    result.diagnostics["selected/inequality_max"],
+                    result.diagnostics.get("selected/stationarity_max",zeros),
+                    result.diagnostics.get("selected/complementarity_max",zeros)),1).nan_to_num().to(tau_nom.dtype)
+                self._qp_interval_grf_sum[rows] += result.force_world.flatten(1)
+                self._qp_interval_residual_sum[rows] += residual
+                self._qp_interval_residual_peak[rows] = torch.maximum(
+                    self._qp_interval_residual_peak[rows],residual)
+                self._qp_interval_stage_counts[rows,result.stage] += 1
+                self._qp_interval_solve_count[rows] += 1
+                # In full mode only the preselected executed solve is stored;
+                # in sampled mode every dispatched row is its replay point.
+                local = (self._qp_sampled_substep_index[rows].long()==self._qp_substep).nonzero(as_tuple=True)[0]
+                dest = rows[local]
                 sample = self._qp_sampled_transition
-                # State required to reconstruct BARD mechanics at sampled k.
-                sample["sampled_qp_q"][selected] = q_simulator[selected]
-                sample["sampled_qp_v"][selected] = v_world[selected]
-                # Exact rate-box center tau_safe,k-1.
-                sample["sampled_qp_previous_torque"][selected] = (
-                    self._hard_pact_previous_substep_torque[selected]
-                )
-                # Rollout references permit frozen-policy equality diagnostics.
-                sample["sampled_qp_rollout_nominal_torque"][selected] = tau_nom[selected]
-                sample["sampled_qp_rollout_grf_world"][selected] = (
-                    grf_world[selected].flatten(1)
-                )
-                # Label-only term must be subtracted once during PPO replay.
-                sample["sampled_qp_mass_com_wrench_world"][selected] = (
-                    mass_com_wrench[selected]
-                )
-                sample["sampled_qp_rollout_applied_wrench_world"][selected] = (
-                    applied_wrench[selected]
-                )
-                sample["sampled_qp_rollout_contact_probability"][selected] = (
-                    contact_prob_qp[selected]
-                )
-                # Store all primal blocks and solver certification metadata.
-                sample["sampled_qp_qdd"][selected] = result.qdd[selected]
-                sample["sampled_qp_force_world"][selected] = result.force_world[selected].flatten(1)
-                sample["sampled_qp_safe_torque"][selected] = result.tau_safe[selected]
-                sample["sampled_qp_stage"][selected] = (
-                    result.stage[selected, None].to(torch.int16)
-                )
-                sample["sampled_qp_differentiated"][selected] = (
-                    result.differentiated_mask[selected, None]
-                )
-                sample["sampled_qp_residuals"][selected] = residual[selected]
-                sample["sampled_qp_timing_ms"][selected] = elapsed_ms
-            # Advance the rate constraint: next substep uses this exact command.
-            self._hard_pact_previous_substep_torque.copy_(result.tau_safe)
-            # Advance k after sampling so the first callback is k=0.
+                fields = {
+                    "sampled_qp_q":q,"sampled_qp_v":v,
+                    "sampled_qp_previous_torque":previous[rows],
+                    "sampled_qp_rollout_nominal_torque":tau_nom[rows],
+                    "sampled_qp_rollout_grf_world":grf.flatten(1),
+                    "sampled_qp_rollout_applied_wrench_world":wrench,
+                    "sampled_qp_rollout_contact_probability":contact,
+                    "sampled_qp_stance_mask":contact>=qp.cfg.contact_threshold,
+                    "sampled_qp_grf_conditioning_q":self._qp_grf_conditioning_q[rows],
+                    "sampled_qp_grf_conditioning_v":self._qp_grf_conditioning_v[rows],
+                    "sampled_qp_grf_conditioning_torque":self._qp_grf_conditioning_torque[rows],
+                    "sampled_qp_qdd":result.qdd,"sampled_qp_force_world":result.force_world.flatten(1),
+                    "sampled_qp_safe_torque":result.tau_safe,
+                    "sampled_qp_stage":result.stage[:,None].to(torch.int16),
+                    "sampled_qp_differentiated":result.differentiated_mask[:,None],
+                    "sampled_qp_residuals":residual}
+                for name,value in fields.items():
+                    sample[name][dest] = value[local].detach()
+                sample["sampled_qp_valid"][dest] = True
+            # Unsolved rows retain ONLY analytic projection of fresh nominal
+            # torque. No previous QP correction/force/certificate is reused.
+            setter = getattr(self.simulator,"hard_pact_set_executed_torque",None)
+            if setter is None:
+                self.simulator._torques = safe
+            else:
+                setter(safe)
+            correction = safe-tau_nom
+            self._qp_interval_safe_sum.add_(safe)
+            self._qp_interval_safe_peak.copy_(torch.maximum(self._qp_interval_safe_peak,safe.abs()))
+            self._qp_interval_correction_sum.add_(correction)
+            self._qp_interval_correction_peak.copy_(torch.maximum(self._qp_interval_correction_peak,correction.abs()))
+            # The post-actuation callback overwrites this with actual applied
+            # torque if the backend performs any final actuator projection.
+            previous.copy_(safe)
             self._qp_substep += 1
 
     def _begin_disturbance_interval(self):
@@ -1179,15 +966,7 @@ class Go2HardPACT(Go2PACT):
             self._begin_qp_interval()
 
     def _begin_qp_interval(self):
-        r"""Allocate interval statistics and one sampled replay row.
-
-        For decimation ``D``, sums become ``(1/D)sum_k value_k`` at interval
-        finalization and peaks become ``max_k |value_k|``. For each environment
-        a single replay point is chosen with balanced strata. It is uniform
-        over ``{0,...,D-1}`` in the default mode and over anchors ``{0,2}``
-        in ``two_anchor_held_correction`` mode. Single-anchor mode stores k=0
-        for every environment without consuming anchor-selection RNG.
-        """
+        """Select one uniform executed replay point; reset control-rate predictions."""
         # All physical/diagnostic values use float32 on the simulation device.
         shape = lambda width: torch.zeros(
             self.num_envs, width, device=self.device, dtype=torch.float32
@@ -1215,43 +994,14 @@ class Go2HardPACT(Go2PACT):
         update_mode = getattr(
             self._hard_pact_rollout_qp.cfg, "qp_update_mode", "every_substep"
         )
-        self._hard_pact_qp_anchors = qp_substep_anchors(update_mode, decimation)
-        if update_mode == "active_constraint_update":
-            self._hard_pact_qp_environment_ids = torch.arange(
-                self.num_envs, device=self.device, dtype=torch.long,
-            )
-            self._hard_pact_held_grf_normalized = shape(12)
-        # A policy boundary cannot reuse an old correction after a mode change.
-        held = getattr(self, "_hard_pact_held_correction", None)
-        if held is not None:
-            with torch.inference_mode():
-                held.zero_()
-        if update_mode in ("two_anchor_held_correction", "single_anchor_held_correction"):
-            if update_mode == "single_anchor_held_correction":
-                self._qp_sampled_substep_index = torch.zeros(
-                    self.num_envs, device=self.device, dtype=torch.int16
-                )
-            else:
-                self._qp_sampled_substep_index = balanced_anchor_indices(
-                    self.num_envs, self._hard_pact_qp_anchors, self.device
-                )
-            self._hard_pact_held_correction = shape(12)
-            self._hard_pact_held_grf_normalized = shape(12)
-            self._hard_pact_held_force_world = shape(12)
-            self._hard_pact_held_qdd = shape(18)
-            self._hard_pact_held_residual = shape(4)
-            self._hard_pact_held_stage = torch.zeros(
-                self.num_envs, device=self.device, dtype=torch.long
-            )
-            self._hard_pact_held_differentiated = torch.zeros(
-                self.num_envs, device=self.device, dtype=torch.bool
-            )
-        else:
-            self._hard_pact_qp_anchors = tuple(range(decimation))
-            # One int16 index per env is the only decimation-dependent replay key.
-            self._qp_sampled_substep_index = balanced_substep_indices(
-                self.num_envs, decimation, self.device
-            )
+        qp_substep_anchors(update_mode, decimation)  # validates exactly four substeps
+        self._qp_sampled_substep_index = balanced_substep_indices(self.num_envs,decimation,self.device)
+        self._qp_interval_solve_count = shape(1)
+        self._qp_grf_conditioning_q = shape(12)
+        self._qp_grf_conditioning_v = shape(12)
+        self._qp_grf_conditioning_torque = shape(12)
+        self._qp_control_grf = shape(12).reshape(-1,4,3)
+        self._qp_control_wrench = shape(6)
         # Preallocate exactly one compact sampled row per env. Dynamics/QP
         # matrices are intentionally absent and reconstructed during PPO.
         self._qp_sampled_transition = {
@@ -1264,12 +1014,16 @@ class Go2HardPACT(Go2PACT):
             "sampled_qp_rollout_nominal_torque": shape(12),
             "sampled_qp_rollout_grf_world": shape(12),
             # Label-only mass wrench and resulting applied-wrench QP input.
-            "sampled_qp_mass_com_wrench_world": shape(6),
+            "sampled_qp_grf_conditioning_q": shape(12),
+            "sampled_qp_grf_conditioning_v": shape(12),
+            "sampled_qp_grf_conditioning_torque": shape(12),
+            "sampled_qp_stance_mask": torch.zeros(self.num_envs,4,device=self.device,dtype=torch.bool),
+            "sampled_qp_valid": torch.zeros(self.num_envs,1,device=self.device,dtype=torch.bool),
             "sampled_qp_rollout_applied_wrench_world": shape(6),
             # Held QP probabilities already converted once by the explicit
             # estimator; replay and the QP must not apply another sigmoid.
             "sampled_qp_rollout_contact_probability": shape(4),
-            # Complete rollout primal x*=[qdd,f,tau_safe,s].
+            # 24-D primal [tau_safe,f] plus derived acceleration for diagnostics.
             "sampled_qp_qdd": shape(18), "sampled_qp_force_world": shape(12),
             "sampled_qp_safe_torque": shape(12),
             # Compact fallback stage and whether qpth supplied its KKT graph.
@@ -1279,10 +1033,12 @@ class Go2HardPACT(Go2PACT):
             "sampled_qp_differentiated": torch.zeros(
                 self.num_envs, 1, device=self.device, dtype=torch.bool
             ),
-            # Numeric certification vector and elapsed batched solve time.
+            # Numeric certification; per-dispatch timing is logging-only.
             "sampled_qp_residuals": shape(4),
-            "sampled_qp_timing_ms": shape(1),
+
         }
+
+        self._prepare_qp_control_predictions()
 
     def _capture_bard_pre_state(self):
         simulator = self.simulator
@@ -1408,10 +1164,7 @@ class Go2HardPACT(Go2PACT):
             and getattr(self, "_hard_pact_policy_context_ready", False)
         ):
             qp_divisor = self._interval_executed_torque_count.clamp_min(1.0)
-            solve_divisor = (
-                1.0 if getattr(self._hard_pact_rollout_qp.cfg, "qp_update_mode", "every_substep")
-                == "single_anchor_held_correction" else qp_divisor
-            )
+            solve_divisor = self._qp_interval_solve_count.clamp_min(1.0)
             fields.update(self._qp_sampled_transition)
             # Interval diagnostics are exposed to logging but deliberately not
             # inserted into `fields`: RolloutStorage persists every named
@@ -1422,7 +1175,8 @@ class Go2HardPACT(Go2PACT):
                 "interval_qp_peak_safe_torque": self._qp_interval_safe_peak,
                 "interval_qp_correction": self._qp_interval_correction_sum / qp_divisor,
                 "interval_qp_peak_correction": self._qp_interval_correction_peak,
-                "interval_qp_grf_world": self._qp_interval_grf_sum / qp_divisor,
+                "interval_qp_grf_world": self._qp_interval_grf_sum / solve_divisor,
+                "interval_qp_solve_count": self._qp_interval_solve_count,
                 "interval_qp_residuals": self._qp_interval_residual_sum / solve_divisor,
                 "interval_qp_peak_residuals": self._qp_interval_residual_peak,
                 "interval_qp_stage_fractions": self._qp_interval_stage_counts / solve_divisor,
@@ -1717,7 +1471,7 @@ class Go2HardPACT(Go2PACT):
                     value[env_ids] = 0
             for frame in self.disturbance_critic_deque:
                 frame[env_ids] = 0
-        # QP torque-rate and held-anchor state belongs to the actuator path,
+        # QP torque-rate and control-step prediction state belongs to the actuator path,
         # not the optional persistent-disturbance feature.  Always clear it at
         # an episode boundary so the first post-reset rate box is centred at
         # zero and no correction from the previous episode can be replayed.
@@ -1728,16 +1482,20 @@ class Go2HardPACT(Go2PACT):
             "_hard_pact_bounded_nominal_torque", "_hard_pact_executed_torque",
             "_hard_pact_previous_substep_torque",
             "_hard_pact_q_d", "_hard_pact_tau_ff",
-            "_hard_pact_held_correction",
-            "_hard_pact_held_grf_normalized",
-            "_hard_pact_held_force_world",
-            "_hard_pact_held_qdd",
-            "_hard_pact_held_residual", "_hard_pact_held_stage",
-            "_hard_pact_held_differentiated",
+            "_qp_control_grf", "_qp_control_wrench", "_qp_interval_solve_count",
+            "_qp_grf_conditioning_q", "_qp_grf_conditioning_v", "_qp_grf_conditioning_torque",
         ):
             value = getattr(self, name, None)
             if value is not None:
                 value[env_ids] = 0
+
+        # Keep completed pre-reset measurements for the terminal transition;
+        # replacing q/quat with zeros would poison the detached mechanics cache.
+        # No projection loss may use that reset row. The next interval allocates
+        # a fresh packet and redraws K before any actuation.
+        packet = getattr(self, "_qp_sampled_transition", {})
+        if "sampled_qp_valid" in packet:
+            packet["sampled_qp_valid"][env_ids] = False
 
 
 def install_hard_pact_environment_methods(task_class):
