@@ -389,7 +389,10 @@ def get_args():
     parser.add_argument('--seed',       type=int, default=1, help="int seed for random sampling (default 1)")
 
     # PACT PINN specific thing.
-    parser.add_argument('--pinn_loss_weight',       type=float, default=0.01, help="float for weight of PINN loss (default 0.01)")
+    parser.add_argument(
+        '--pinn_loss_weight', type=float, default=None,
+        help='PINN weight override (HardPACT defaults to its config; legacy tasks default to 0.01)',
+    )
     parser.add_argument(
         '--qp_solver', choices=('qpth', 'cupiqp', 'moreau'), default=None,
         help='HardPACT-only QP backend override (legacy tasks ignore it)',
@@ -437,7 +440,13 @@ def get_args():
         help='HardPACT-only persistent Pinocchio CPU worker count',
     )
 
-    return configure_runtime_device(parser.parse_args())
+    args = parser.parse_args()
+    # Keep omission distinguishable for HardPACT: a parser default must not
+    # replace the configured weight or switch its PCGrad projection mode.
+    # Other tasks retain their historical numeric CLI default unchanged.
+    if args.pinn_loss_weight is None and not args.task.startswith('go2_hard_pact'):
+        args.pinn_loss_weight = 0.01
+    return configure_runtime_device(args)
 
 # def export_policy_as_jit(actor_critic, path, prefix=None):
 #     if hasattr(actor_critic, 'memory_a'):

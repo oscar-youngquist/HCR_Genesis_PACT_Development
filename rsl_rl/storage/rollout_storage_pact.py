@@ -167,6 +167,8 @@ class RolloutStoragePACT:
         self._action_replay_boundary_observations = None
         self._action_replay_boundary_history = None
         self._action_replay_boundary_noise = None
+        self._action_replay_boundary_latent_noise = None
+        self._action_replay_boundary_boot_mask = None
 
     def configure_action_replay(self, max_action_delay):
         """Allocate compact GPU-only stochastic-delay replay metadata."""
@@ -190,6 +192,15 @@ class RolloutStoragePACT:
         self._action_replay_boundary_noise = torch.zeros(
             maximum, self.num_envs, *self.actions_shape, device=self.device
         )
+        # Reuse the existing rollout latent draws/masks; only the D boundary
+        # rows need another copy. Legacy tasks allocate neither tensor.
+        if self.latent_noise is not None:
+            self._action_replay_boundary_latent_noise = torch.zeros_like(
+                self.latent_noise[:maximum]
+            )
+            self._action_replay_boundary_boot_mask = torch.zeros_like(
+                self.latent_boot_mask[:maximum]
+            )
 
     def add_transitions(self, transition: Transition):
         
@@ -294,6 +305,9 @@ class RolloutStoragePACT:
                 self.observation_history[-delay:]
             )
             self._action_replay_boundary_noise.copy_(self.action_noise[-delay:])
+            if self.latent_noise is not None:
+                self._action_replay_boundary_latent_noise.copy_(self.latent_noise[-delay:])
+                self._action_replay_boundary_boot_mask.copy_(self.latent_boot_mask[-delay:])
         self.step = 0
         self.current_hard_pact_batch = None
         self.current_batch_indices = None
@@ -329,7 +343,18 @@ class RolloutStoragePACT:
             self._action_replay_boundary_history[index, e]
         )
         source_noise[boundary] = self._action_replay_boundary_noise[index, e]
-        return source_observation, source_history, source_noise
+        source_latent_noise = source_boot_mask = None
+        if self.latent_noise is not None:
+            source_latent_noise = self.latent_noise.new_empty(
+                batch_idx.shape[0], self.latent_noise.shape[-1]
+            )
+            source_boot_mask = self.latent_boot_mask.new_empty(batch_idx.shape[0], 1)
+            source_latent_noise[current] = self.latent_noise[t, environment[current]]
+            source_boot_mask[current] = self.latent_boot_mask[t, environment[current]]
+            source_latent_noise[boundary] = self._action_replay_boundary_latent_noise[index, e]
+            source_boot_mask[boundary] = self._action_replay_boundary_boot_mask[index, e]
+        return (source_observation, source_history, source_noise,
+                source_latent_noise, source_boot_mask)
 
     def compute_returns(self, last_values, gamma, lam):
         advantage = 0
@@ -465,7 +490,8 @@ class RolloutStoragePACT:
                         delay = self.current_hard_pact_batch[
                             "sampled_action_delay"
                         ].reshape(-1).long()
-                        (source_obs, source_history, source_noise) = (
+                        (source_obs, source_history, source_noise,
+                         source_latent_noise, source_boot_mask) = (
                             self._action_replay_sources(batch_idx, delay)
                         )
                         # Raw actions and their source observations already
@@ -482,6 +508,8 @@ class RolloutStoragePACT:
                             "delayed_source_observation": source_obs,
                             "delayed_source_history": source_history,
                             "delayed_source_noise": source_noise,
+                            "delayed_source_latent_noise": source_latent_noise,
+                            "delayed_source_boot_mask": source_boot_mask,
                         })
 
                 

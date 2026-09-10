@@ -64,6 +64,16 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
             :, self._feet_contact_indices, :
         ]
 
+    def hard_pact_executed_torque(self):
+        """The effort command sent to Isaac Lab, in canonical order and Nm.
+
+        The pre-substep callback records this command before the API write,
+        including when QP execution is disabled. Keep the unclipped request
+        in ``_torques``/``_unweighted_torques`` for the existing reward path;
+        physics labels must instead use the same actuator clipping as step().
+        """
+        return torch.clip(self._torques, -self.torque_limits, self.torque_limits)
+
     def hard_pact_apply_base_wrench_world(self, wrench):
         """Set the current persistent world-frame wrench without warnings."""
         force = wrench[:, :3].unsqueeze(1)
@@ -345,7 +355,7 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
             if callback is not None:
                 callback()
             self._robot.set_joint_effort_target(
-                torch.clip(self._torques, -self.torque_limits, self.torque_limits),
+                self.hard_pact_executed_torque(),
                 self._dof_indices,
             )
             self._robot.write_data_to_sim()
@@ -399,8 +409,9 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         else:
             raise NameError(f"Unknown controller type: {self._cfg.control.control_type}")
 
-        # HardPACTPos records the actually executed PD torque for history and
-        # clone supervision even though it has no feed-forward action half.
+        # Preserve the legacy raw PD history/clone buffers. HardPACTPos's
+        # physical transition labels use hard_pact_executed_torque() instead,
+        # which includes motor strength and actuator clipping.
         self.feedback_torques = torques
         self.feedforward_torques = torch.zeros_like(torques)
         self._unweighted_torques = self._motor_strength * torques

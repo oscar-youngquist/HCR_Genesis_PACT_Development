@@ -109,3 +109,78 @@ def test_ppo_qp_binding_receives_physical_motor_limits():
     torch.testing.assert_close(
         alg.hard_pact_qp.torque_limits, torch.tensor([23.7, 23.7, 45.43] * 4)
     )
+
+
+@pytest.mark.parametrize("action_dim", [12, 24])
+@pytest.mark.parametrize("qp_active", [False, True])
+def test_actual_substep_callback_records_the_clipped_effort_command(action_dim, qp_active):
+    """Run the real adapter loop and HardPACT accumulator against a fake API.
+
+    Both Pos PD and coupled controls exercise motor-strength scaling and
+    saturation. QP-off covers warmup/ablations; QP-on replaces the command
+    at the same hook used by the certified solve/fallback pipeline.
+    """
+    sim = simulator()
+    sim._num_actions = 12
+    sim._cfg = SimpleNamespace(control=SimpleNamespace(
+        decimation=4, action_scale=.25, torque_scale=10., control_type="P",
+    ))
+    sim._sim_params = {"dt": .005}
+    sim._headless = True
+    sim._feet_indices = [0, 1, 2, 3]
+    sim._robot.data.joint_vel = torch.zeros(2, 12)
+    sim._robot.data.joint_pos = torch.zeros(2, 12)
+    sim._robot.data.default_joint_pos = torch.zeros(2, 12)
+    sim._robot.data.body_link_vel_w = torch.zeros(2, 4, 6)
+    sim._kp_scale = sim._kd_scale = torch.ones(2, 12)
+    sim._motor_strength = torch.tensor([[.8], [1.2]])
+    sim._p_gains, sim._d_gains = torch.full((12,), 30.), torch.full((12,), .75)
+    sim.feedforward_tau_weight = sim.feedback_tau_weight = 1.
+    for name in ("_base_lin_vel", "_base_ang_vel", "_base_world_lin_vel", "_base_world_ang_vel"):
+        setattr(sim, name, torch.zeros(2, 3))
+        setattr(sim, "_last" + name, torch.zeros(2, 3))
+    sim._last_feet_vel = torch.zeros(2, 4, 3)
+    sim._last_dof_vel = torch.zeros(2, 12)
+    commands = []
+    sim._robot.set_joint_effort_target = lambda value, ids: commands.append(value.clone())
+    sim._robot.write_data_to_sim = lambda: None
+    sim._robot.update = lambda dt: None
+    sim._sim = SimpleNamespace(step=lambda **kwargs: None)
+    sim._contact_sensors = SimpleNamespace(update=lambda dt: None)
+
+    env = Go2HardPACT.__new__(Go2HardPACT)
+    env.simulator = sim
+    env.cfg = SimpleNamespace(sim=SimpleNamespace(gravity=[0., 0., -9.81]))
+    env.obs_scales = SimpleNamespace(base_wrench=.01)
+    env._realized_added_mass = torch.zeros(2, 1)
+    env._realized_com_shift_body = torch.zeros(2, 3)
+    env._current_sustained_wrench_world = torch.zeros(2, 6)
+    env._current_base_quat_xyzw = lambda: torch.tensor([[0., 0., 0., 1.]]).expand(2, -1)
+    env._apply_sustained_world_wrench = lambda wrench: None
+    for suffix in ("sustained", "mass_com", "total", "sustained_yaw_scaled",
+                   "mass_com_yaw_scaled", "yaw_scaled", "yaw_physical"):
+        setattr(env, "_disturbance_interval_sum_" + suffix, torch.zeros(2, 6))
+    env._disturbance_interval_count = torch.zeros(2, 1)
+    env._interval_executed_torque_sum = torch.zeros(2, 12)
+    env._interval_executed_torque_peak = torch.zeros(2, 12)
+    env._interval_executed_torque_count = torch.zeros(2, 1)
+    env._hard_pact_rollout_qp_enabled = qp_active
+    env._hard_pact_policy_context_ready = True
+    env._solve_hard_pact_rollout_qp_substep = lambda *args: sim.hard_pact_set_executed_torque(
+        .5 * sim.torque_limits.expand(2, -1)
+    )
+    sim._hard_pact_pre_physics_substep = env._hard_pact_pre_physics_substep
+    sim.step(torch.full((2, action_dim), 10.))
+    assert len(commands) == 4
+    commands = torch.stack(commands)
+    torch.testing.assert_close(
+        env._interval_executed_torque_sum / env._interval_executed_torque_count,
+        commands.mean(0), rtol=0, atol=0,
+    )
+    torch.testing.assert_close(env._interval_executed_torque_peak, commands.abs().amax(0))
+    assert (commands.abs() <= sim.torque_limits).all()
+    # Reward buffers must still detect saturation of the original request.
+    assert (sim._unweighted_torques.abs() > sim.torque_limits).all()
+    if not qp_active:
+        assert (sim._torques.abs() > sim.torque_limits).all()
+        torch.testing.assert_close(commands[0], sim.torque_limits.expand(2, -1))

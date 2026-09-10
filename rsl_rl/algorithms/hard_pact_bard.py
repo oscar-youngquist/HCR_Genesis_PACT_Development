@@ -49,6 +49,21 @@ def _masked_coordinate_metric(values, valid, coordinate_slice):
     return (block * weights).sum() / denominator
 
 
+@torch.no_grad()
+def measured_contact_generalized_force(foot_jacobians, interval_grf_world):
+    r"""Label-only g_contact = sum_i J_fi(q_pre)^T F_measured,i [18-D].
+
+    Both inputs use world axes and FR/FL/RR/RL foot order. The forces are
+    conditioned physical interval averages, not predicted forces or legacy
+    simulator compatibility buffers (which are zero on Isaac Lab).
+    Reuse cached actual-mechanics Jacobians; no new dynamics evaluation.
+    """
+    return torch.einsum(
+        "bfkn,bfk->bn", foot_jacobians.detach(),
+        interval_grf_world.detach().reshape(-1, 4, 3),
+    )
+
+
 def compose_generalized_force(
     control_torque, foot_jacobians, interval_grf_world,
     base_jacobian, applied_wrench_world,

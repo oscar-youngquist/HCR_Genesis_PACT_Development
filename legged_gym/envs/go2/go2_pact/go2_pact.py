@@ -84,7 +84,7 @@ class Go2PACT(BaseTask):
         return self.reset_buf * ~self.time_out_buf * ~self.non_failure_reset_buf
 
     def _feet_contact_mask(self):
-        return self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > self.cfg.rewards.contact_force_threshold
+        return self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices, 2] > self.cfg.rewards.contact_force_threshold
 
     def _feet_near_edge_mask(self):
         if getattr(self, "_feet_edge_cache_step", -1) != self.common_step_counter:
@@ -177,21 +177,23 @@ class Go2PACT(BaseTask):
             
             if "roll" in self.cfg.termination.termination_terms:
                 r_term_buff = torch.abs(r) > self.cfg.termination.roll_threshold
-                self.fail_buf |= r_term_buff
+                fail_buf |= r_term_buff
                 # print(f"roll termination: {r}")
             if "pitch" in self.cfg.termination.termination_terms:
                 p_term_buff = torch.abs(p) > self.cfg.termination.pitch_threshold
-                self.fail_buf |= p_term_buff
+                fail_buf |= p_term_buff
                 # print(f"pitch termination: {p}")
             if "height_min" in self.cfg.termination.termination_terms:
                 height_term_buff = base_height < self.cfg.termination.height_min
-                self.fail_buf |= height_term_buff
+                fail_buf |= height_term_buff
                 # print(f"height termination: {base_height}")
             if "height_max" in self.cfg.termination.termination_terms:
                 height_term_buff = base_height > self.cfg.termination.height_max
-                self.fail_buf |= height_term_buff
+                fail_buf |= height_term_buff
         
-        self.fail_buf += fail_buf
+        # Count consecutive failing control steps, not lifetime contact hits
+        # or bitwise flags in an integer counter. A healthy step clears it.
+        self.fail_buf.copy_(torch.where(fail_buf, self.fail_buf + 1, 0))
         self.time_out_buf = self.episode_length_buf > self.max_episode_length  # no terminal reward for time-outs
         
         if getattr(self.cfg.terrain, "reset_out_of_bounds", False):
@@ -349,7 +351,7 @@ class Go2PACT(BaseTask):
         # build the explicit labels buffer
         self.explicit_labels_buf = torch.cat((
             self.simulator.base_lin_vel * self.obs_scales.lin_vel,                     # torso linear velocity         3
-            self.simulator.link_contact_states[:,self.simulator.feet_indices],         # contact states feet and base  4
+            self.simulator.link_contact_states[:,self.simulator.feet_contact_indices], # contact-sensor foot order 4
             torch.clip(self.simulator.feet_pos[:, :, 2] -
             torch.mean(self.simulator.height_around_feet, dim=-1) -
             self.cfg.rewards.foot_height_offset, -1, 1.),                              # feet height                   4
@@ -393,7 +395,7 @@ class Go2PACT(BaseTask):
                            self.simulator.measured_heights, dim=1, keepdim=True),      # 1  - base height
                 self.simulator._grfs_buf * self.obs_scales.grf,                        # 12 - measured ground reaction forces (GRFs)
                 self.simulator.normal_vector_around_feet.reshape(self.num_envs, -1),   # 12 - terrain info around feet
-                self.simulator.link_contact_states[:,self.simulator.feet_indices],     # 4  - contact states of feet
+                self.simulator.link_contact_states[:,self.simulator.feet_contact_indices], # 4 - contact states of feet
                 torch.clip(self.simulator.feet_pos[:, :, 2] -
                     torch.mean(self.simulator.height_around_feet, dim=-1) -
                     self.cfg.rewards.foot_height_offset, -1, 1.),                      # 4 - feet height
@@ -1028,7 +1030,7 @@ class Go2PACT(BaseTask):
         feet_xy = feet_stack_base[:,:,:2]  # (N,4,2) use XY for support polygon in ground plane
 
         # contact mask (N,4) in {0,1}
-        c = (self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > fz_thr).float()
+        c = (self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices, 2] > fz_thr).float()
 
         # Define pair groups per your constraint
         side_pairs   = [(FL, FR), (RL, RR)]      # left/right
@@ -1126,12 +1128,12 @@ class Go2PACT(BaseTask):
 
     def _reward_foot_slip(self):
         # penalize feet that are in-contact for any movement in the x/y direction
-        contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.
+        contact = self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices, 2] > 1.
         return  torch.sum(torch.square(contact * torch.sum(self.simulator.feet_vel[:,:,:2], dim=-1)), dim=-1)
 
     def _reward_feet_contact_forces(self):
         # penalize high contact forces
-        return torch.sum((torch.norm(self.simulator.link_contact_forces[:, self.simulator.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
+        return torch.sum((torch.norm(self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
 
     def _reward_feet_near_edge(self):
         return torch.sum(self._feet_near_edge_mask() & self._feet_contact_mask(), dim=-1).float()
@@ -1176,7 +1178,7 @@ class Go2PACT(BaseTask):
 
     def _reward_feet_air_time(self):
         # Reward long steps
-        contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.
+        contact = self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices, 2] > 1.
         contact_filt = torch.logical_or(contact, self.last_contacts)
         self.last_contacts = contact
         first_contact = (self.feet_air_time > 0.) * contact_filt
@@ -1196,7 +1198,7 @@ class Go2PACT(BaseTask):
     
     def _reward_stand_still_contact(self):
         # Encourage feet contact with the ground at zero commands
-        contacts = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 0.1
+        contacts = self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices, 2] > 0.1
         full_contact = torch.sum(1.*contacts, dim=1)==len(self.simulator.feet_indices)
         return 1.0*full_contact * (torch.norm(self.commands[:, :3], dim=1) < 0.1)
     
@@ -1298,7 +1300,7 @@ class Go2PACT(BaseTask):
         
         # stance/contact gating
         contact = (
-            self.simulator.link_contact_forces[:, self.simulator.feet_indices[:2], 2] > 5.0
+            self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices[:2], 2] > 5.0
         ).float()
 
         penalty = torch.sum(contact * overreach ** 2, dim=1)
@@ -1343,7 +1345,7 @@ class Go2PACT(BaseTask):
 
     def _reward_foot_landing_vel(self):
         z_vels = self.simulator.feet_vel[:, :, 2]
-        contacts = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 0.1
+        contacts = self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices, 2] > 0.1
         about_to_land = ((self.simulator.feet_pos[:, :, 2] -
                           self.cfg.rewards.foot_height_offset) <
                          self.cfg.rewards.about_landing_threshold) & (~contacts) & (z_vels < 0.0)
@@ -1362,7 +1364,7 @@ class Go2PACT(BaseTask):
         return torch.sum(torch.square(foot_acc), dim=(1, 2))
 
     def _reward_sparse_contacts(self):
-        fz = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2]
+        fz = self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices, 2]
         contact_prob = torch.sigmoid(10.0*(fz - 10.0))
         num_contacts = torch.sum(contact_prob, dim=-1)
         
@@ -1514,7 +1516,7 @@ class Go2PACT(BaseTask):
             self.simulator.base_pos:            (N, 3)
             self.simulator.feet_pos:            (N, 4, 3)
             self.simulator.link_contact_forces: (N, n_links, 3)
-            self.simulator.feet_indices:        4 foot link ids
+            self.simulator.feet_contact_indices: 4 contact-sensor foot ids
             self.cfg.rewards.support_polygon_sigma: float
         """
         fz_thr = 5.0
@@ -1524,7 +1526,7 @@ class Go2PACT(BaseTask):
         feet_xy = self.simulator.feet_pos[:, :, :2]                  # (N,4,2)
 
         contact = (
-            self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > fz_thr
+            self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices, 2] > fz_thr
         ).float()                                                    # (N,4)
 
         n_stance = torch.sum(contact, dim=1)                         # (N,)
@@ -1597,7 +1599,7 @@ class Go2PACT(BaseTask):
     def _compute_vhip_angle(self):
         com_pos = self.simulator.base_pos[:,0:3]  # B x 3
 
-        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]    # B, num_feet, 3
+        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_contact_indices, :]    # B, num_feet, 3
         foot_positions = self.simulator.feet_pos
 
         normal_forces = foot_contact_forces[:,:,2:3]  # B. num_feet, 1
@@ -1618,7 +1620,7 @@ class Go2PACT(BaseTask):
         
         com_pos = self.simulator.base_pos[:,0:3]  # B x 3
 
-        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_indices, :]    # B, num_feet, 3
+        foot_contact_forces = self.simulator._link_contact_forces[:, self.simulator.feet_contact_indices, :]    # B, num_feet, 3
         foot_positions = self.simulator.feet_pos
 
         normal_forces = foot_contact_forces[:,:,2:3]  # B. num_feet, 1
@@ -1692,7 +1694,7 @@ class Go2PACT(BaseTask):
 
         # Contact gate rear feet only: feet_indices[2:4], not [:2]
         contact = (
-            self.simulator.link_contact_forces[:, self.simulator.feet_indices[2:4], 2] > 5.0
+            self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices[2:4], 2] > 5.0
         ).float()  # (N,2)
 
         penalty = torch.sum(contact * overreach ** 2, dim=1)
@@ -1705,7 +1707,7 @@ class Go2PACT(BaseTask):
         Penalize feet colliding with vertical surfaces / obstacles during swing.
         """
 
-        contact_forces = self.simulator.link_contact_forces[:, self.simulator.feet_indices, :]  # (N,4,3)
+        contact_forces = self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices, :]  # (N,4,3)
 
         horizontal_force = torch.norm(contact_forces[:, :, :2], dim=2)
         vertical_force = torch.abs(contact_forces[:, :, 2])

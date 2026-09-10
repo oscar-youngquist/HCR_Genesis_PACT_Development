@@ -80,9 +80,11 @@ class CompactStorageReplayTests(unittest.TestCase):
         # flat indices are (t=0,e=0), (t=1,e=1), and (t=3,e=0).
         indices = torch.tensor([0, 3, 6])
         delay = torch.tensor([0, 2, 2])
-        observation, history, noise = storage._action_replay_sources(
+        observation, history, noise, latent_noise, boot_mask = storage._action_replay_sources(
             indices, delay
         )
+        self.assertIsNone(latent_noise)
+        self.assertIsNone(boot_mask)
         torch.testing.assert_close(
             observation[:, 0], torch.tensor([0.0, -9.0, 10.0])
         )
@@ -123,12 +125,44 @@ class CompactStorageReplayTests(unittest.TestCase):
             storage._action_replay_boundary_noise, expected_noise
         )
 
+    def test_latent_noise_and_boot_mask_follow_shuffled_sources_and_boundary(self):
+        storage = RolloutStoragePACT(
+            2, 4, [1], [1], [1], [2], [24], [1], [1], [1], "cpu",
+            latent_noise_dim=3,
+        )
+        storage.configure_action_replay(2)
+        row_id = torch.arange(8).reshape(4, 2, 1).float()
+        storage.observations.copy_(row_id)
+        storage.latent_noise.copy_(row_id + 100)
+        storage.latent_boot_mask.copy_(row_id.long().remainder(2).bool())
+        storage.clear()
+        torch.testing.assert_close(storage._action_replay_boundary_latent_noise, storage.latent_noise[-2:])
+        torch.testing.assert_close(storage._action_replay_boundary_boot_mask, storage.latent_boot_mask[-2:])
+        # Overwrite current rollout, as training does after update()/clear().
+        storage.observations.add_(8)
+        storage.latent_noise.add_(8)
+        storage.latent_boot_mask.logical_not_()
+        storage.hard_pact_fields = {"sampled_action_delay": torch.tensor(
+            [[[0], [2]], [[1], [2]], [[2], [0]], [[1], [2]]]
+        )}
+        for _ in storage.mini_batch_generator(2, 3):
+            fields = storage.current_hard_pact_batch
+            source = fields["delayed_source_observation"]
+            torch.testing.assert_close(fields["delayed_source_latent_noise"], (source + 100).expand(-1, 3))
+            expected_boot = source.long().remainder(2).bool() ^ source.ge(8)
+            torch.testing.assert_close(fields["delayed_source_boot_mask"], expected_boot)
+        self.assertEqual(storage._action_replay_boundary_latent_noise.shape, (2, 2, 3))
+
 
 class StochasticActionReplayTests(unittest.TestCase):
     def replay_inputs(self, algorithm, batch=3):
         observation = torch.randn(batch, 57)
         history = torch.randn(batch, 57 * 20)
-        algorithm.actor_critic.act(observation, history)
+        latent_noise = torch.randn(batch, algorithm.actor_critic.context_encoder.ce_out_mean.out_features)
+        boot_mask = torch.ones(batch, 1, dtype=torch.bool)
+        algorithm.actor_critic.act(
+            observation, history, latent_noise=latent_noise, latent_boot_mask=boot_mask,
+        )
         mean = algorithm.actor_critic.action_mean
         noise = torch.randn(batch, 24)
         raw = mean.detach() + algorithm.actor_critic.std.detach() * noise
@@ -137,6 +171,8 @@ class StochasticActionReplayTests(unittest.TestCase):
             "delayed_source_observation": observation.clone(),
             "delayed_source_history": history.clone(),
             "delayed_source_noise": noise.clone(),
+            "delayed_source_latent_noise": latent_noise.clone(),
+            "delayed_source_boot_mask": boot_mask.clone(),
             "delayed_action_source_valid": torch.tensor(
                 [[True], [True], [False]]
             )[:batch],
@@ -148,10 +184,13 @@ class StochasticActionReplayTests(unittest.TestCase):
     def test_frozen_policy_exact_raw_delayed_action_and_torque(self):
         algorithm = make_algorithm(action_clip=1.0)
         observation, _, mean, raw, transition = self.replay_inputs(algorithm)
+        algorithm.use_boot = False  # Source boot state, not this flag, wins.
+        rng_state = torch.get_rng_state()
         result = algorithm._replay_action_path(
             mean, observation, transition, action_transform, feedback,
             torch.zeros(12), 1.0,
         )
+        torch.testing.assert_close(torch.get_rng_state(), rng_state)
         expected_delayed = torch.clamp(raw, -1.0, 1.0)
         expected_delayed[2] = 0.0  # reset/boundary queue entry
         expected_torque = algorithm._nominal_torque(
@@ -169,6 +208,26 @@ class StochasticActionReplayTests(unittest.TestCase):
         torch.testing.assert_close(
             result["nominal_torque"], transition["nominal_torque"]
         )
+
+    def test_missing_source_latent_noise_or_boot_mask_fails_clearly(self):
+        algorithm = make_algorithm()
+        observation, _, mean, _, transition = self.replay_inputs(algorithm)
+        for key in ("delayed_source_latent_noise", "delayed_source_boot_mask"):
+            missing = dict(transition)
+            missing.pop(key)
+            with self.assertRaisesRegex(RuntimeError, "stored latent noise and boot mask"):
+                algorithm._replay_action_path(mean, observation, missing,
+                    action_transform, feedback, torch.zeros(12), 1.)
+
+    def test_invalid_reset_source_is_zero_without_evaluating_nan_history(self):
+        algorithm = make_algorithm()
+        observation, _, mean, _, transition = self.replay_inputs(algorithm)
+        transition["delayed_source_history"][2] = float("nan")
+        result = algorithm._replay_action_path(mean, observation, transition,
+            action_transform, feedback, torch.zeros(12), 1.)
+        assert result["delayed_action"][2].eq(0).all()
+        result["nominal_torque"].square().mean().backward()
+        assert all(torch.isfinite(p.grad).all() for p in algorithm.actor_critic.parameters() if p.grad is not None)
 
     def test_replayed_stochastic_torque_routes_actor_encoder_and_noise_scale_gradients(self):
         algorithm = make_algorithm(action_clip=10.0)

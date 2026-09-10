@@ -168,18 +168,20 @@ class Go2PACTPos(BaseTask):
 
             if "roll" in self.cfg.termination.termination_terms:
                 r_term_buff = torch.abs(r) > self.cfg.termination.roll_threshold
-                self.fail_buf |= r_term_buff
+                fail_buf |= r_term_buff
             if "pitch" in self.cfg.termination.termination_terms:
                 p_term_buff = torch.abs(p) > self.cfg.termination.pitch_threshold
-                self.fail_buf |= p_term_buff
+                fail_buf |= p_term_buff
             if "height_min" in self.cfg.termination.termination_terms:
                 height_term_buff = base_height < self.cfg.termination.height_min
-                self.fail_buf |= height_term_buff
+                fail_buf |= height_term_buff
             if "height_max" in self.cfg.termination.termination_terms:
                 height_term_buff = base_height > self.cfg.termination.height_max
-                self.fail_buf |= height_term_buff
+                fail_buf |= height_term_buff
         
-        self.fail_buf += fail_buf
+        # Match Go2 PACT: all failure predicates share one consecutive-step
+        # counter, which must clear whenever the robot is healthy.
+        self.fail_buf.copy_(torch.where(fail_buf, self.fail_buf + 1, 0))
         self.time_out_buf = self.episode_length_buf > self.max_episode_length  # no terminal reward for time-outs
         self.reset_buf = (
             (self.fail_buf > self.cfg.env.fail_to_terminal_time_s / self.dt)

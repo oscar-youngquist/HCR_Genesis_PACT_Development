@@ -184,6 +184,10 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         persistent_force_duration_range_s = [2.0, 6.0]
         persistent_torque_duration_range_s = [2.0, 6.0]
         persistent_ramp_fraction = 0.25
+        # Initial -> final maximum absolute XYZ component, in N / Nm.
+        # Enable use_domainrand_curriculum + use_disturbance_curriculum and
+        # increase the final values to expand the envelope during pretraining.
+        # Equal endpoints below deliberately retain fixed Pos disturbances.
         persistent_force_min_n = 7.0
         persistent_force_max_n = 7.0
         persistent_torque_min_nm = 4.0

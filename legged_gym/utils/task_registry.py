@@ -124,8 +124,10 @@ class TaskRegistry():
         train_cfg_dict = class_to_dict(train_cfg)
         sim_device = "cpu" if args.cpu else args.gpu
 
-        # Don't do this for pact-pos settings
-        if "pact" in name and "pos" not in name:
+        # Pos retains its existing config-only behavior. HardPACT's parser
+        # returns None when omitted, preserving the resolved config (including
+        # benchmark overrides); explicit CLI values, including zero, still win.
+        if "pact" in name and "pos" not in name and args.pinn_loss_weight is not None:
             train_cfg_dict["policy"]["pinn_loss_weight"] = args.pinn_loss_weight
 
         # select runner according to runner_class_name

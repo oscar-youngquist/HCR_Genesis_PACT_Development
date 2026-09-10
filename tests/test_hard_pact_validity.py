@@ -1,12 +1,105 @@
 """Valid-row auxiliary reductions and boot statistics, without simulation."""
 import random
+import copy
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+import pytest
 
 from test_hard_pact_pos_auxiliary import _small_algorithm
 from rsl_rl.algorithms.hard_pact_boot_statistics import ValidBootStatistics
+from test_hard_pact_auxiliary import make_algorithm, make_batch
+
+
+def test_full_hard_pact_auxiliary_compacts_before_forward_and_loss():
+    alg = make_algorithm()
+    args = make_batch(3)
+    torch.manual_seed(31)
+    reference = alg._compute_auxiliary_loss(*args)
+    torch.testing.assert_close(reference["privileged"], (reference["reconstruction"] - args[1]).square().mean())
+    mean, logvar, _ = alg.actor_critic.context_encoder.encode_with_features(args[0])
+    torch.testing.assert_close(reference["kl"], -.5 * (1 + logvar - mean.square() - logvar.exp()).sum(-1).mean())
+    ref_grads = torch.autograd.grad(reference["loss"], alg.auxiliary_parameters)
+
+    extended = []
+    for i, value in enumerate(args[:-1]):
+        tail = torch.full_like(value[:2], float("nan"))
+        if i == 4:  # validity, not a target
+            tail.zero_()
+        extended.append(torch.cat((value, tail)))
+    extended.append({
+        key: torch.cat((value, torch.full_like(value[:2], float("inf"))
+                        if value.is_floating_point() else torch.zeros_like(value[:2])))
+        for key, value in args[-1].items()
+    })
+    extended[0].requires_grad_()
+    torch.manual_seed(31)
+    actual = alg._compute_auxiliary_loss(*extended)
+    for name in ("loss", "privileged", "kl", "explicit", "grf", "wrench_active", "wrench_neutral"):
+        torch.testing.assert_close(actual[name], reference[name], rtol=0, atol=0)
+    grads = torch.autograd.grad(actual["loss"], [*alg.auxiliary_parameters, extended[0]])
+    for a, b in zip(grads[:-1], ref_grads):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+    assert torch.isfinite(grads[-1]).all() and grads[-1][3:].eq(0).all()
+    assert actual["reconstruction"].shape == (3, 133)
+
+
+@pytest.mark.parametrize("diagnostics", [False, True])
+def test_full_hard_pact_empty_auxiliary_keeps_adam_state_parameters_and_boot(diagnostics):
+    alg = make_algorithm(num_learning_epochs=1, num_mini_batches=1,
+                         ppo_latent_diagnostics_enabled=diagnostics)
+    # Prime real AdamW momentum: stepping on zero gradients would now change
+    # these weights and moments. Isolate the auxiliary phase from PPO steps.
+    alg.auxiliary_optimizer.zero_grad()
+    alg._compute_auxiliary_loss(*make_batch())["loss"].backward()
+    alg.auxiliary_optimizer.step()
+    parameters = [p.detach().clone() for p in alg.auxiliary_parameters]
+    optimizer_state = copy.deepcopy(alg.auxiliary_optimizer.state_dict())
+    empty_args = list(make_batch())
+    empty_args[4].zero_()
+    empty_args[0].fill_(float("nan"))
+    empty = alg._compute_auxiliary_loss(*empty_args)
+    assert all(value == 0 and torch.isfinite(value) for key, value in empty.items() if key != "reconstruction")
+    assert empty["reconstruction"].shape == (0, 133)
+
+    alg.init_storage(2, 1, [57], [95], [133], [1140], [24], [11], [12], [18])
+    alg.storage.dones.fill_(1)
+    alg.storage.observation_history.fill_(float("nan"))
+    alg.storage.observation_targets.fill_(float("nan"))
+    alg.storage.max_action_delay = 0
+    alg.storage.hard_pact_fields = {
+        "standardized_action_noise": torch.zeros(1, 2, 24),
+        "delayed_action_source_valid": torch.zeros(1, 2, 1, dtype=torch.bool),
+    }
+    alg.use_boot = False
+    rng_state = random.getstate()
+
+    def rl(obs, *args, **kwargs):
+        # Unrelated policy learning still performs its backward/update path.
+        loss = alg.actor_critic.act_trunk[0].weight.square().mean()
+        alg._ppo_log_ratio = torch.zeros(obs.shape[0])
+        return loss, loss, loss, obs.new_zeros(obs.shape[0], 24), None
+
+    with patch.object(alg, "_compute_rl_loss", side_effect=rl) as ppo, \
+         patch.object(alg, "spectral_normalization"), \
+         patch.object(alg.act_optimizer, "step") as ppo_step, \
+         patch.object(alg.auxiliary_optimizer, "step", wraps=alg.auxiliary_optimizer.step) as aux_step, \
+         patch.object(alg, "_compute_auxiliary_loss", wraps=alg._compute_auxiliary_loss) as auxiliary:
+        losses = alg.update(lambda a: (a[:, :12], a[:, 12:]),
+                            lambda q, p, v: q - p - v, .02, 0, torch.zeros(12), 1.)
+    assert ppo.call_count == ppo_step.call_count == 1
+    auxiliary.assert_not_called()
+    aux_step.assert_not_called()
+    assert losses[2:7] == (0., 0., 0., 0., 0.)
+    assert not alg.use_boot and rng_state == random.getstate()
+    for current, previous in zip(alg.auxiliary_parameters, parameters):
+        torch.testing.assert_close(current, previous, rtol=0, atol=0)
+    current_state = alg.auxiliary_optimizer.state_dict()
+    assert current_state["param_groups"] == optimizer_state["param_groups"]
+    for parameter_id, state in optimizer_state["state"].items():
+        for key, previous in state.items():
+            torch.testing.assert_close(current_state["state"][parameter_id][key], previous, rtol=0, atol=0)
 
 
 def batch(n=3):

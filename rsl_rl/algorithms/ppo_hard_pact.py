@@ -64,6 +64,7 @@ from .pc_grad import PCGrad
 from .hard_pact_boot_statistics import ValidBootStatistics
 from .hard_pact_bard import corrected_bard_inverse_dynamics_loss
 from .hard_pact_bard import differentiable_bard_rollout_loss
+from .hard_pact_bard import measured_contact_generalized_force
 from .hard_pact_latent_diagnostics import (
     LatentDiagnosticsAccumulator, deterministic_subsample,
     diagonal_gaussian_kl, latent_ablation_metrics,
@@ -1076,7 +1077,7 @@ class PPO_HardPACT:
         for batch_number, (terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
             grf_target, obs_target, actions_batch, target_values_batch, \
             advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
-            old_sigma_batch, _prev_obs_batch, _prev_obs_hist_batch, gt_forces_batch, _mass_mat_batch, \
+            old_sigma_batch, _prev_obs_batch, _prev_obs_hist_batch, _gt_forces_batch, _mass_mat_batch, \
             _bias_vec_batch, _torso_accs_batch, _pprev_obs_batch, _pprev_obs_hist_batch) in enumerate(generator):
             ppo_epoch = batch_number // self.num_mini_batches
             
@@ -1135,7 +1136,7 @@ class PPO_HardPACT:
             if pinn_iteration_ready or qp_rows is not None:
                 pinn_loss = self._compute_bard_loss(
                     replay["nominal_torque"], obs_batch, obs_hist_batch,
-                    gt_forces_batch, default_pose,
+                    grf_target, default_pose,
                     replay["desired_position"], replay["feedforward_torque"],
                     fb_func, policy_features=policy_features,
                     qp_rows=qp_rows, compute_pinn=pinn_iteration_ready,
@@ -1315,7 +1316,19 @@ class PPO_HardPACT:
 
             # Phase 2: recompute and aggregate every auxiliary term before a
             # single backward/step, following the B1Z1 adaptation phase.
+            auxiliary_indices = terminated_batch.reshape(-1).bool().nonzero(as_tuple=False).flatten()
             for enc_epoch in range(self.num_enc_epochs):
+                if auxiliary_indices.numel() == 0:
+                    # A zero gradient still lets Adam momentum/weight decay
+                    # move shared parameters. Skip the entire supervised
+                    # phase, including optional forwards and boot statistics.
+                    self.last_auxiliary_metrics = {
+                        name: obs_batch.new_zeros(()) for name in (
+                            "privileged", "kl", "explicit", "grf",
+                            "wrench_active", "wrench_neutral",
+                        )
+                    }
+                    continue
                 self.actor_critic.train()
                 self.decoder.train()
 
@@ -1325,9 +1338,9 @@ class PPO_HardPACT:
                 diagnostic_indices = None
                 pre_aux = None
                 if latent_diagnostics is not None:
-                    diagnostic_indices = deterministic_subsample(
-                        obs_batch, self.ppo_latent_diagnostics_sample_count
-                    )
+                    diagnostic_indices = auxiliary_indices[deterministic_subsample(
+                        auxiliary_indices, self.ppo_latent_diagnostics_sample_count
+                    )]
                     with torch.no_grad():
                         pre_aux = policy_distribution_without_side_effects(
                             self.actor_critic, obs_batch[diagnostic_indices],
@@ -1390,7 +1403,10 @@ class PPO_HardPACT:
                     if name not in ("loss", "reconstruction")
                 }
 
-                valid_boot_statistics.add(decode_targets, recons, terminated_batch)
+                valid_boot_statistics.add(
+                    decode_targets[auxiliary_indices], recons,
+                    terminated_batch[auxiliary_indices],
+                )
 
                 # Log losses
                 mean_autoenc_loss += vae_loss.detach()
@@ -1566,9 +1582,10 @@ class PPO_HardPACT:
 
     @staticmethod
     def _masked_mse(prediction, target, mask):
-        per_sample = (prediction - target).square().mean(dim=-1)
-        weights = mask.reshape(-1).to(per_sample.dtype)
-        return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
+        rows = mask.reshape(-1).bool()
+        error = prediction[rows] - target[rows]
+        # Select before arithmetic: NaN * 0 is not a valid masked loss.
+        return error.square().sum() / max(error.numel(), 1)
 
     @staticmethod
     def _masked_explicit_loss(
@@ -1578,7 +1595,10 @@ class PPO_HardPACT:
         """Combine continuous MSE with independently weighted contact BCE."""
         if prediction.shape[-1] != 11 or target.shape[-1] != 11:
             raise ValueError("HardPACT explicit estimates and labels must be 11-D")
-        target = target.detach()
+        rows = mask.reshape(-1).bool()
+        prediction = prediction[rows]
+        contact_logits = contact_logits[rows]
+        target = target.detach()[rows]
         continuous_loss = torch.cat((
             (prediction[:, :3] - target[:, :3]).square(),
             (prediction[:, 7:11] - target[:, 7:11]).square(),
@@ -1586,12 +1606,9 @@ class PPO_HardPACT:
         contact_loss = F.binary_cross_entropy_with_logits(
             contact_logits, target[:, 3:7], reduction="none"
         ).mean(dim=-1)
-        weights = mask.reshape(-1).to(continuous_loss.dtype)
-        denominator = weights.sum().clamp_min(1.0)
         return (
-            ((continuous_loss
-              + float(contact_probability_loss_weight) * contact_loss)
-             * weights).sum() / denominator
+            (continuous_loss + float(contact_probability_loss_weight) * contact_loss).sum()
+            / max(prediction.shape[0], 1)
         )
 
     def _start_bard_timing(self, name, reference):
@@ -1678,6 +1695,24 @@ class PPO_HardPACT:
         retaining gradients through ``z`` (and nominal torque for the GRF
         head). Runtime inference remains deterministic on ``mu``.
         """
+        # Match HardPACTPos: invalid transitions must not enter a decoder or
+        # any loss arithmetic. This also makes the VAE sample stream invariant
+        # to appended invalid rows. Keep the existing validity definition.
+        rows = valid.reshape(-1).bool()
+        history = history[rows]
+        privileged_target = privileged_target.detach()[rows]
+        explicit_target = explicit_target.detach()[rows]
+        grf_target = grf_target.detach()[rows]
+        nominal_torque = nominal_torque[rows]
+        valid = valid.reshape(-1, 1)[rows]
+        if history.shape[0] == 0:
+            return {
+                **{name: privileged_target.new_zeros(()) for name in (
+                    "loss", "privileged", "kl", "explicit", "grf",
+                    "wrench_active", "wrench_neutral",
+                )},
+                "reconstruction": privileged_target,
+            }
         mean, logvar, features = (
             self.actor_critic.context_encoder.encode_with_features(history)
         )
@@ -1720,8 +1755,8 @@ class PPO_HardPACT:
         else:
             wrench_target = transition[
                 "total_external_wrench_label_yaw_normalized"
-            ].detach()
-            active = transition["sustained_wrench_active_mask"].bool()
+            ].detach()[rows]
+            active = transition["sustained_wrench_active_mask"].reshape(-1, 1).bool()[rows]
         active_mask = valid.bool() & active
         neutral_mask = valid.bool() & ~active
         wrench_active = normalized_wrench_huber_loss(
@@ -1847,24 +1882,30 @@ class PPO_HardPACT:
         ), dim=-1)
         return (violations / float(self.qp_config.force_scale_n)).square().mean()
 
-    def _policy_raw_action_from_noise(self, observation, history, noise):
-        """Reparameterize one stored policy draw under current parameters."""
+    def _policy_raw_action_from_noise(
+        self, observation, history, noise, latent_noise, latent_boot_mask,
+    ):
+        """Replay both stored draws and the source transition's boot gate.
+
+        Freeze epsilon_z and epsilon_a, not the current encoder/actor. The
+        delayed source may precede this rollout and have a different boot
+        gate from the current transition (or the algorithm's current flag).
+        """
+        if latent_noise is None or latent_boot_mask is None:
+            raise RuntimeError("Delayed HardPACT replay requires stored latent noise and boot mask")
         mean, logvar, features = (
             self.actor_critic.context_encoder.encode_with_features(history)
         )
         latent = self.actor_critic.context_encoder.reparameterization_trick(
-            mean, logvar
+            mean, logvar, latent_noise.detach()
         )
         explicit = self.actor_critic.explicit_estimator(
             features
         ).explicit_for_policy
-        if self.use_boot:
-            conditioning = torch.cat((observation, latent, explicit), dim=-1)
-        else:
-            conditioning = torch.cat((
-                observation,
-                torch.zeros_like(torch.cat((latent, explicit), dim=-1)),
-            ), dim=-1)
+        context = torch.cat((latent, explicit), dim=-1)
+        conditioning = torch.cat((observation, torch.where(
+            latent_boot_mask.bool(), context, torch.zeros_like(context),
+        )), dim=-1)
         mean_position, mean_torque = self.actor_critic.actor_forward(conditioning)
         mean = torch.cat((mean_position, mean_torque), dim=-1)
         return mean + self.actor_critic.std.unsqueeze(0) * noise.detach()
@@ -1905,11 +1946,18 @@ class PPO_HardPACT:
                 )
                 if sampled_delay is None else sampled_delay.reshape(-1).ne(0)
             )
+            delayed_rows &= transition["delayed_action_source_valid"].reshape(-1).bool()
+            source_latent_noise = transition.get("delayed_source_latent_noise")
+            source_boot_mask = transition.get("delayed_source_boot_mask")
+            if source_latent_noise is None or source_boot_mask is None:
+                raise RuntimeError("Delayed HardPACT replay requires stored latent noise and boot mask")
             source_raw = current_raw.clone()
             source_raw[delayed_rows] = self._policy_raw_action_from_noise(
                 transition["delayed_source_observation"][delayed_rows].detach(),
                 transition["delayed_source_history"][delayed_rows].detach(),
                 transition["delayed_source_noise"][delayed_rows],
+                source_latent_noise[delayed_rows],
+                source_boot_mask[delayed_rows],
             )
         current_transformed = torch.clamp(
             current_raw, -self.action_clip, self.action_clip
@@ -1941,7 +1989,7 @@ class PPO_HardPACT:
 
     def _compute_bard_loss(
         self, nominal_torque, obs_batch, obs_hist_batch,
-        measured_generalized_contact_force, default_pose,
+        measured_grf_normalized, default_pose,
         desired_position=None, feedforward_torque=None, fb_func=None,
         policy_features=None, qp_rows=None, compute_pinn=True,
     ):
@@ -2054,6 +2102,20 @@ class PPO_HardPACT:
         # making the forward-dynamics value exactly the torque Genesis executed.
         inverse_loss = zero
         rollout_loss = zero
+        measured_grf_world = None
+        if compute_pinn and self.bard_inverse_enabled:
+            # The rollout stores the measured conditioned interval average
+            # as F_yaw / decoder_scale. Undo that normalization exactly once
+            # and the pre-step yaw rotation used by env.step(). Do not use
+            # critic observation scaling, EMA, learned forces, or the unused
+            # legacy 18-D simulator buffer to weight the inverse residual.
+            with torch.no_grad():
+                measured_grf_world = _yaw_local_to_world(
+                    self.actor_critic.physics_estimator.grf_to_physical(
+                        measured_grf_normalized.detach()
+                    ).reshape(-1, 4, 3),
+                    batch["pre_q"][:, 3:7].detach(),
+                )
         self.last_inverse_dynamics_metrics = {}
         self.last_rollout_dynamics_metrics = {}
         if compute_pinn and (
@@ -2124,7 +2186,9 @@ class PPO_HardPACT:
                         interval_grf_world=grf_world[sl],
                         total_wrench_world=total_at_base[sl],
                         mass_com_wrench_world=chunk.mass_com_wrench_world,
-                        measured_generalized_contact_force=measured_generalized_contact_force[sl],
+                        measured_generalized_contact_force=measured_contact_generalized_force(
+                            context.foot_jacobians, measured_grf_world[sl]
+                        ),
                         push_event_mask=batch["push_event_mask"][sl],
                         reset_mask=batch["reset_mask"][sl],
                         timeout_mask=batch["timeout_mask"][sl],

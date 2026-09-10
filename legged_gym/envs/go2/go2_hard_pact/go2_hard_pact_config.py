@@ -37,7 +37,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         restitution = 0.0
         border_size = 20.0
         curriculum = True
-        curriculum_upward_delay_iterations = 100  # Absolute PPO iteration; 0 disables delay.
+        curriculum_upward_delay_iterations = 0  # Absolute PPO iteration; 0 disables delay.
         obtain_terrain_info_around_feet = True
         measure_heights = True
         measured_points_x = [-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
@@ -117,7 +117,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         push_robots = True
         push_interval_max = 10.0
         push_interval_min = 5.0
-        max_push_vel_xy = 1.0
+        max_push_vel_xy = 0.7
         min_push_vel_xy = 0.5
 
         max_vertical_push = 0.5
@@ -125,14 +125,14 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         vert_interval_max = 10.0
         vert_interval_min = 5.0
 
-        max_push_torque = 1.0
+        max_push_torque = 0.8
         min_push_torque = 0.5
         wrench_timeout_max = 10.0
         wrench_timeout_min = 5.0
 
         randomize_base_mass = True
         min_added_mass_max = 2.0
-        max_added_mass_max = 6.0
+        max_added_mass_max = 4.0
         added_mass_min = -1.0
 
         randomize_com_displacement = True
@@ -172,7 +172,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         joint_damping_range_end = [0.0, 0.8]
         joint_damping_range_start = [0.2, 0.6]
 
-        best_reward_window = 400
+        best_reward_window = 200
         best_reward_quantile = 0.9
         recovery_ratio = 0.9
         step_interval = 10
@@ -186,13 +186,17 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         use_disturbance_curriculum = True
 
         persistent_disturbance = True
-        persistent_force_probability = 0.3
-        persistent_torque_probability = 0.3
+        persistent_force_probability = 0.2
+        persistent_torque_probability = 0.2
         persistent_force_interval_range_s = [5.0, 15.0]
         persistent_torque_interval_range_s = [5.0, 15.0]
         persistent_force_duration_range_s = [1.0, 5.0]
         persistent_torque_duration_range_s = [1.0, 5.0]
         persistent_ramp_fraction = 0.30
+        # Initial -> final maximum absolute XYZ component, in N / Nm.
+        # The disturbance curriculum expands uniform [-max, +max] sampling
+        # after push_warmup and the joint-dynamics/mass-CoM phases. Existing
+        # events finish their waveform; only new events use expanded bounds.
         persistent_force_min_n = 10.0
         persistent_force_max_n = 40.0
         persistent_torque_min_nm = 3.0
@@ -312,11 +316,11 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         ff_ratio_width = 0.2
 
         torque_cancellation_deadband = 0.03
-        foot_clearance_excess_margin = 0.1
+        foot_clearance_excess_margin = 0.04
         foot_clearance_excess_weight = 0.25
         class scales(LeggedRobotCfg.rewards.scales):
             termination = 0.0
-            collision = -10.0
+            collision = -1.0
             dof_pos_limits = -2.0
             dof_close_to_default = -0.01
             torque_limits = -0.01
@@ -332,8 +336,8 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             tracking_ang_vel = 0.5
             dof_tracking = 0.1
 
-            torque_conflict_symmetric = 0.0
-            torque_alignment = 0.01
+            torque_conflict_symmetric = -0.01
+            torque_alignment = 0.05
             ff_ratio = 0.0
             torque_cancellation = -0.1
 
@@ -451,7 +455,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = '../../rsl_rl/modules/pretrained_checkpoints/go2_hard_pact/Sep08_hard_pact_start_model_5000.pt'
+        pretrained_path = '../../rsl_rl/modules/pretrained_checkpoints/go2_hard_pact/Sep08_hard_pact_start_model_5000_pos_std_mean_torque.pt'
         # pretrained_path = ''
         cenet_explicit_layers = [128, 128]
         grf_decoder_layers = [128, 128]
@@ -471,7 +475,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         max_grad_norm = 1.0
 
         entropy_coef = 0.01
-        use_adaptive_entropy = True
+        use_adaptive_entropy = False
         adaptive_ent_bounds = [0.005, 0.01]
         adaptive_ent_lin_threshold = 0.75
         adaptive_ent_ang_threshold = 0.35
@@ -486,10 +490,10 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         explicit_loss_weight = 1.0
 
         # Multiplies contact BCE inside the collective explicit-estimator loss.
-        contact_probability_loss_weight = 1.0
+        contact_probability_loss_weight = 0.1
         # Opt-in policy recomputation/latent ablations; basic KL/loss logging
         # remains available without these diagnostic-only forward passes.
-        ppo_latent_diagnostics_enabled = False
+        ppo_latent_diagnostics_enabled = True
         ppo_latent_diagnostics_interval = 100
         ppo_latent_diagnostics_sample_count = 256
         latent_active_unit_variance_threshold = 1e-2
@@ -499,7 +503,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         # Detailed physical GRF/base-wrench TensorBoard reductions. Decoder
         # losses remain logged when this is disabled.
-        force_decoder_diagnostics_enabled = False
+        force_decoder_diagnostics_enabled = True
 
         bard_enabled = True
         dynamics_backend = 'bard'
@@ -510,8 +514,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         bard_inverse_enabled = True
         bard_rollout_enabled = True
 
-        lambda_inverse = 1.00
-        lambda_rollout = 1.00
+        lambda_inverse = 1.0
+        lambda_rollout = 1.0
         lambda_projection = 0.01
 
         profile_bard_timing = False
@@ -519,7 +523,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         # Keep PCGrad optimization, but skip diagnostic gradient clones,
         # per-module norms/cosines, and nonfinite scans in production.
-        pcgrad_diagnostics_enabled = False
+        pcgrad_diagnostics_enabled = True
         pcgrad_diagnostics_start_iteration = 0
         pcgrad_diagnostics_interval = 100
         cache_rollout_mechanics = True
@@ -608,10 +612,10 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'verbose': 0, 
                         # Always retain primal safety/fallback summaries.
                         # Physical/KKT audits and synchronized timing are opt-in.
-                        'diagnostics_level': 'minimal',
+                        'diagnostics_level': 'full',
                         # Conservative cadence if 'full' is enabled later.
                         'full_audit_period': 100,
-                        'full_audit_sample_size': 8,
+                        'full_audit_sample_size': 256,
                         'rollout_chunk_size': 4096, 
                         'ppo_chunk_size': 8000, 
                         'position_integration_coefficient': 1.0}

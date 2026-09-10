@@ -11,8 +11,11 @@ os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_hard_pact_tests")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib_hard_pact_tests")
 
 import torch
+import pytest
 
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
+from legged_gym.envs.go2.go2_hard_pact.domain_rand_curriculum import HardPACTDomainRandCurriculum
+from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos import Go2HardPACTPos
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCfg
 from legged_gym.envs.go2.go2_hard_pact.transition import (
     DISTURBANCE_CRITIC_DIM,
@@ -27,13 +30,15 @@ from legged_gym.envs.go2.go2_pact.go2_pact_config import GO2PACTCfg
 from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos_config import GO2PACTPosCfg
 
 
-def _persistent_task(num_envs=1, progress=1.0):
-    task = Go2HardPACT.__new__(Go2HardPACT)
+def _persistent_task(num_envs=1, progress=1.0, task_class=Go2HardPACT, config=None):
+    task = task_class.__new__(task_class)
     task.num_envs = num_envs
     task.device = "cpu"
     task.dt = GO2HardPACTCfg.control.dt
     task.common_step_counter = 0
-    task.cfg = GO2HardPACTCfg()
+    task.cfg = GO2HardPACTCfg() if config is None else config
+    task.domain_rand_curriculum = HardPACTDomainRandCurriculum(task.cfg)
+    task.domain_rand_curriculum.progress["disturbance"] = progress
     task.simulator = SimpleNamespace(domain_rand_disturbance_progress=progress)
     task._persistent_wrench_target_world = torch.zeros(num_envs, 6)
     task._current_sustained_wrench_world = torch.zeros(num_envs, 6)
@@ -61,18 +66,18 @@ class _WrenchSolver:
 class PersistentWrenchTests(unittest.TestCase):
     def test_curriculum_progress_scales_only_new_external_wrench(self):
         task = _persistent_task(progress=0.0)
-        self.assertEqual(task._persistent_component_settings(0)[3], 10.0)
-        self.assertEqual(task._persistent_component_settings(1)[3], 3.0)
-        task.simulator.domain_rand_disturbance_progress = 0.5
-        self.assertEqual(task._persistent_component_settings(0)[3], 35.0)
-        self.assertEqual(task._persistent_component_settings(1)[3], 7.5)
-        task.simulator.domain_rand_disturbance_progress = 1.0
-        self.assertEqual(task._persistent_component_settings(0)[3], 60.0)
-        self.assertEqual(task._persistent_component_settings(1)[3], 12.0)
+        cfg = task.cfg.domain_rand
+        for progress in (0., .5, 1.):
+            task.domain_rand_curriculum.progress["disturbance"] = progress
+            self.assertEqual(task._persistent_component_settings(0)[3],
+                             cfg.persistent_force_min_n + progress * (cfg.persistent_force_max_n - cfg.persistent_force_min_n))
+            self.assertEqual(task._persistent_component_settings(1)[3],
+                             cfg.persistent_torque_min_nm + progress * (cfg.persistent_torque_max_nm - cfg.persistent_torque_min_nm))
         self.assertTrue(task.cfg.domain_rand.push_robots)
 
     def test_ramp_hold_ramp_down(self):
         task = _persistent_task()
+        task.cfg.domain_rand.persistent_ramp_fraction = .25
         task._persistent_component_active[0, 0] = True
         task._persistent_start_step[0, 0] = 0
         task._persistent_end_step[0, 0] = 8
@@ -112,6 +117,97 @@ class PersistentWrenchTests(unittest.TestCase):
         self.assertTrue(task._persistent_component_active[0].all())
 
 
+@pytest.mark.parametrize("task_class,config_class", [
+    (Go2HardPACT, GO2HardPACTCfg), (Go2HardPACTPos, GO2HardPACTPosCfg),
+])
+def test_external_wrench_curriculum_advances_sampling_and_restores(task_class, config_class):
+    cfg = config_class()
+    d = cfg.domain_rand
+    d.use_domainrand_curriculum = True
+    d.use_joint_dynamics_curriculum = d.use_mass_com_curriculum = d.use_disturbance_curriculum = True
+    d.push_warmup, d.step_interval = 2, 2
+    d.joint_dynamics_progress_delta = d.mass_com_progress_delta = d.disturbance_progress_delta = .5
+    d.persistent_force_min_n, d.persistent_force_max_n = 2., 6.
+    d.persistent_torque_min_nm, d.persistent_torque_max_nm = 1., 3.
+    d.persistent_force_probability = d.persistent_torque_probability = 1.
+    d.persistent_force_duration_range_s = d.persistent_torque_duration_range_s = [.16, .16]
+    d.persistent_ramp_fraction = .25
+    task = _persistent_task(8, 0., task_class, cfg)
+    # No simulator is started: exercise the same neutral runner entrypoint
+    # and sampler as both backends, with a deliberately stale reporting value.
+    task.simulator.hard_pact_capabilities = lambda: {
+        "supports_domain_rand_curriculum": False,
+        "features": {"persistent_force": True, "persistent_torque": True},
+    }
+
+    def bounds():
+        return [task._persistent_component_settings(i)[3] for i in (0, 1)]
+
+    def sample():
+        task._persistent_component_active.zero_()
+        task._persistent_next_event_step.zero_()
+        torch.manual_seed(19)
+        for component in (0, 1):
+            task._start_due_persistent_events(component, 0)
+        value = task._persistent_wrench_target_world.clone()
+        scale = torch.tensor([bounds()[0]] * 3 + [bounds()[1]] * 3)
+        assert torch.all(value.abs() <= scale)
+        assert task._persistent_component_active.all()
+        return value, value / scale
+
+    assert bounds() == [2., 1.]
+    initial, normalized_initial = sample()
+    for iteration in (0, 1, 2):
+        assert not task.step_domain_rand_curriculum(iteration, .8)
+    # Earlier phases do not expand the wrench envelope.
+    for iteration in (3, 5, 7, 9):
+        assert task.step_domain_rand_curriculum(iteration, .8)
+        assert bounds() == [2., 1.]
+    assert task.domain_rand_curriculum.phase == "disturbance"
+    assert not task.step_domain_rand_curriculum(10, .8)
+    assert task.step_domain_rand_curriculum(11, .8)
+    assert bounds() == [4., 2.]
+    assert not task.step_domain_rand_curriculum(11, .8)  # once per iteration
+    task.simulator.domain_rand_disturbance_progress = 0.  # reporting is not the source
+    assert bounds() == [4., 2.]
+    # A curriculum step must not amplify an event already in its ramp.
+    task._update_persistent_wrench(1)
+    torch.testing.assert_close(task._persistent_wrench_target_world, initial, rtol=0, atol=0)
+    torch.testing.assert_close(task._current_sustained_wrench_world, initial * .5)
+    middle, normalized_middle = sample()
+    torch.testing.assert_close(normalized_middle, normalized_initial, rtol=1e-6, atol=1e-7)
+    assert middle[:, :3].abs().max() > 2.
+    state = task.domain_rand_curriculum_state_dict()
+    resumed = _persistent_task(8, 0., task_class, cfg)
+    resumed.simulator.hard_pact_capabilities = task.simulator.hard_pact_capabilities
+    resumed.load_domain_rand_curriculum_state_dict(state)
+    assert [resumed._persistent_component_settings(i)[3] for i in (0, 1)] == [4., 2.]
+    assert not resumed.step_domain_rand_curriculum(11, .8)
+    assert resumed.step_domain_rand_curriculum(13, .8)
+    assert task.step_domain_rand_curriculum(13, .8)
+    assert bounds() == [6., 3.]
+    assert resumed.domain_rand_curriculum.progress == task.domain_rand_curriculum.progress
+    final, normalized_final = sample()
+    torch.testing.assert_close(normalized_final, normalized_initial, rtol=1e-6, atol=1e-7)
+    assert final[:, :3].abs().max() > 4.
+    for name, maximum in (("persistent_force", 6.), ("persistent_torque", 3.)):
+        report = task.domain_rand_capability_report[name]
+        assert report["requested_range"] == report["effective_range"] == (-maximum, maximum)
+        assert report["phase"] == "disturbance" and report["update_mode"] == "runtime"
+
+
+def test_external_wrench_curriculum_disabled_phase_retains_initial_bounds():
+    cfg = GO2HardPACTCfg()
+    cfg.domain_rand.use_joint_dynamics_curriculum = False
+    cfg.domain_rand.use_mass_com_curriculum = False
+    cfg.domain_rand.use_disturbance_curriculum = False
+    task = _persistent_task(progress=0., config=cfg)
+    for iteration in (5000, 10000, 20000):
+        assert not task.domain_rand_curriculum.advance(iteration, .8)
+        assert task._persistent_component_settings(0)[3] == cfg.domain_rand.persistent_force_min_n
+        assert task._persistent_component_settings(1)[3] == cfg.domain_rand.persistent_torque_min_nm
+
+
 class WrenchLabelTests(unittest.TestCase):
     def test_equivalent_gravity_wrench_identity_and_rotated_pose(self):
         mass = torch.tensor([[2.0]])
@@ -139,7 +235,7 @@ class WrenchLabelTests(unittest.TestCase):
         )
 
         task = _persistent_task()
-        task.cfg = SimpleNamespace(sim=SimpleNamespace(gravity=[0., 0., -10.]))
+        task.cfg.sim.gravity = [0., 0., -10.]
         task.obs_scales = SimpleNamespace(base_wrench=0.1)
         solver = _WrenchSolver()
         task.simulator = SimpleNamespace(

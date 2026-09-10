@@ -469,27 +469,33 @@ class Go2HardPACT(Go2PACT):
         )
 
     def _persistent_component_settings(self, component):
+        """Sample each XYZ component within the current disturbance envelope.
+
+        The schema interpolates the *maximum absolute magnitude*,
+        m(p) = m_initial + p * (m_final - m_initial), p in [0, 1].
+        Read the authoritative checkpointed curriculum, not a backend's
+        reporting copy. New events use [-m(p), m(p)]; active events retain
+        their sampled target and existing ramp/hold/ramp-down waveform.
+        """
         cfg = self.cfg.domain_rand
-        progress = float(getattr(
-            self.simulator, "domain_rand_disturbance_progress", 0.0
-        ))
+        curriculum = self.domain_rand_curriculum
+        name = "persistent_force" if component == 0 else "persistent_torque"
+        magnitude = curriculum.schema[name].range_at(
+            curriculum.progress["disturbance"]
+        )[1]
         if component == 0:
-            minimum = float(cfg.persistent_force_min_n)
-            maximum = float(cfg.persistent_force_max_n)
             return (
                 float(cfg.persistent_force_probability),
                 cfg.persistent_force_interval_range_s,
                 cfg.persistent_force_duration_range_s,
-                minimum + progress * (maximum - minimum),
+                magnitude,
                 slice(0, 3),
             )
-        minimum = float(cfg.persistent_torque_min_nm)
-        maximum = float(cfg.persistent_torque_max_nm)
         return (
             float(cfg.persistent_torque_probability),
             cfg.persistent_torque_interval_range_s,
             cfg.persistent_torque_duration_range_s,
-            minimum + progress * (maximum - minimum),
+            magnitude,
             slice(3, 6),
         )
 

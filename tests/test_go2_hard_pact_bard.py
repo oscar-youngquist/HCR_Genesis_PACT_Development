@@ -758,7 +758,8 @@ class BARDPinocchioParityTests(unittest.TestCase):
         algorithm.action_clip = 2.0
         observation = torch.randn(1, 57)
         history = torch.randn(1, 57 * 20)
-        _, _, latent, explicit = actor.cenet_enc_forward(history)
+        latent_noise = torch.randn(1, actor.context_encoder.ce_out_mean.out_features)
+        _, _, latent, explicit = actor.cenet_enc_forward(history, latent_noise=latent_noise)
         mean_pos, mean_tau = actor.actor_forward(torch.cat((
             observation, latent, explicit
         ), dim=-1))
@@ -769,6 +770,8 @@ class BARDPinocchioParityTests(unittest.TestCase):
             "delayed_source_observation": observation,
             "delayed_source_history": history,
             "delayed_source_noise": noise,
+            "delayed_source_latent_noise": latent_noise,
+            "delayed_source_boot_mask": torch.ones(1, 1, dtype=torch.bool),
             "delayed_action_source_valid": torch.ones(1, 1, dtype=torch.bool),
         }
 
