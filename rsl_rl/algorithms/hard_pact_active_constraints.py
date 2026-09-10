@@ -28,16 +28,11 @@ def canonical_snapshot(m, result):
     """
     s = result.snapshot
     dual, slack = torch.zeros_like(m.h), torch.zeros_like(m.h)
-    dual[:, 48:68], dual[:, 80:104] = s["z_u"][:, :20], s["z_u"][:, 20:44]
-    slack[:, 48:68], slack[:, 80:104] = s["s_u"][:, :20], s["s_u"][:, 20:44]
-    for rows, columns, side in ((slice(0, 12), slice(30, 42), "bu"),
-                                (slice(12, 24), slice(30, 42), "bl"),
-                                (slice(24, 36), slice(6, 18), "bu"),
-                                (slice(36, 48), slice(6, 18), "bl"),
-                                (slice(68, 80), slice(42, 54), "bl")):
-        coefficient = m.G[:, rows].abs().amax(-1)
-        dual[:, rows] = s["z_" + side][:, columns] / coefficient
-        slack[:, rows] = s["s_" + side][:, columns] * coefficient
+    dual[:,24:], slack[:,24:] = s["z_u"], s["s_u"]
+    for rows, side in ((slice(0,12),"bu"),(slice(12,24),"bl")):
+        coefficient = m.G[:,rows].abs().amax(-1)
+        dual[:,rows] = s["z_"+side][:,:12] / coefficient
+        slack[:,rows] = s["s_"+side][:,:12] * coefficient
     return {"primal": result.solution.detach().clone(), "dual": dual,
             "slack": slack, "equality_dual": s["y"].detach().clone()}
 
@@ -88,7 +83,7 @@ def equality_candidate(m, binding, cfg):
     z = -inv_p - (inv_ct @ dual[..., None]).squeeze(-1)
     # Certify the actual post-projected command, not a slightly out-of-box
     # floating-point optimum. The normal solver repeats this idempotent clamp.
-    z[:, 30:42] = z[:, 30:42].clamp(m.native_lower[:, 30:42], m.native_upper[:, 30:42])
+    z[:, 0:12] = z[:, 0:12].clamp(m.native_lower[:, 0:12], m.native_upper[:, 0:12])
     inequality_dual = torch.zeros_like(m.h).scatter(1, ids, dual[:, ne:] * used)
     snapshot = {"primal": z, "equality_dual": dual[:, :ne],
                 "dual": inequality_dual, "slack": m.h - (m.G @ z[..., None]).squeeze(-1)}
@@ -125,19 +120,23 @@ def certify(m, s, cfg):
     tolerance = cfg.rollout_feasibility_tolerance
     metrics = {
         "nonfinite_rejected": ~finite,
-        "primal_rejected": (eq.abs().amax(-1) > tolerance) | (ineq.amax(-1) > tolerance),
+        "primal_rejected": (_max(eq.abs()) > tolerance) | (ineq.amax(-1) > tolerance),
         "physical_rejected": (peq > tolerance * m.equality_row_scale).any(-1) | (pineq > tolerance * m.inequality_row_scale).any(-1),
         "stationarity": (qz + m.p + dual_force).abs().amax(-1) / norm,
         "multiplier_violation": (-lam).clamp_min(0).amax(-1) / norm,
         "complementarity": (lam * ineq).abs().amax(-1) / (1 + objective.abs()),
         "gap": gap, "gap_relative": gap / (1 + torch.maximum(objective.abs(), dual_objective.abs())),
-        "physical_equality_max": peq.amax(-1), "physical_inequality_max": pineq.amax(-1),
+        "physical_equality_max": _max(peq), "physical_inequality_max": pineq.amax(-1),
     }
     for key in ("stationarity", "multiplier_violation", "complementarity"):
         metrics[key + "_rejected"] = metrics[key] > cfg.active_kkt_tolerance
     metrics["gap_rejected"] = (gap > cfg.rollout_duality_gap_abs) & (metrics["gap_relative"] > cfg.rollout_duality_gap_rel)
     accepted = ~torch.stack([v for k, v in metrics.items() if k.endswith("_rejected")]).any(0)
     return accepted, metrics
+
+
+def _max(value):
+    return value.amax(-1) if value.shape[-1] else value.new_zeros(value.shape[0])
 
 
 class ActiveConstraintCache:
@@ -175,20 +174,6 @@ class ActiveConstraintCache:
         # primal against canonical current rows to identify binding IDs.
         margin = m.h - (m.G @ snapshot["primal"][..., None]).squeeze(-1)
         binding = (margin <= cfg.active_binding_tolerance) & (snapshot["dual"] > cfg.active_dual_tolerance)
-        # The strictly positive, uncoupled slack cost implies that at least
-        # one of {-s<=0, +c*a-s<=tol, -c*a-s<=tol} binds per foot-axis at an
-        # optimum. Interior-point slack margins can exceed the numerical
-        # binding cutoff even when a face is essential. Select the nearest
-        # of these three faces in physical acceleration units; this is only
-        # a WORKING-SET proposal, never a relaxation of KKT certification.
-        # Picking one avoids blindly including both nearly parallel faces.
-        physical_margin = margin * m.inequality_row_scale
-        slack_faces = torch.stack((physical_margin[:, 68:80],
-                                   physical_margin[:, 80:92], physical_margin[:, 92:104]), dim=1)
-        face = slack_faces.argmin(1)
-        contact_ids = 68 + 12 * face + torch.arange(12, device=margin.device)
-        binding[:, 68:104] = False
-        binding.scatter_(1, contact_ids, True)
         self.state["binding"][ids] = binding
         for name, value in (("lower_pattern", m.native_lower.isfinite()), ("upper_pattern", m.native_upper.isfinite())):
             self.state[name][ids] = value
@@ -220,7 +205,7 @@ class ActiveConstraintCache:
             except RuntimeError:
                 # A cuSOLVER factor failure rejects the candidate, NOT
                 # the original full QP. Still try ordinary cuPIQP before the
-                # existing relaxed/elastic/analytic recovery stages.
+                # actuator-only analytic fallback if that full solve fails.
                 diagnostics = {"factor_exception": torch.ones_like(rows, dtype=torch.bool),
                                "gap": m.p.new_full(rows.shape, float("nan")),
                                "gap_relative": m.p.new_full(rows.shape, float("nan"))}
@@ -234,14 +219,14 @@ class ActiveConstraintCache:
             gap[rows], gap_rel[rows] = diagnostics["gap"], diagnostics["gap_relative"]
         if rejected.numel():
             part = select_problem(m, rejected)
-            G, h, lower, upper = qp._cupiqp_native_pack(part, False)
+            G, h, lower, upper = qp._cupiqp_native_pack(part)
             # Ordinary full solve and owned snapshots, not a warm start. An
             # exception is handled row-locally here so certified candidates
             # are not lost when a disjoint rejected batch fails in cuPIQP.
             try:
                 result = qp._backend_instances["cupiqp"].solve(
                     part.Q, part.p, G, h, part.A, part.b, differentiable=False,
-                    native_lower=lower, native_upper=upper, constant_hessian=True)
+                    native_lower=lower, native_upper=upper, constant_hessian=False)
                 fresh = canonical_snapshot(part, result)
                 for name, value in fresh.items():
                     s[name][rejected] = value
@@ -258,7 +243,7 @@ class ActiveConstraintCache:
         # Differences from the previous snapshot are not claimed as
         # same-state full-solver parity; the benchmark measures that separately.
         old = self.state["primal"][ids]
-        metrics["torque_change_nm"] = ((s["primal"][:, 30:42] - old[:, 30:42]) * m.variable_scale[30:42]).abs().mean(-1)
+        metrics["torque_change_nm"] = ((s["primal"][:, 0:12] - old[:, 0:12]) * m.variable_scale[0:12]).abs().mean(-1)
         def objective(z):
             return .5 * (z * (m.Q @ z[..., None]).squeeze(-1)).sum(-1) + (m.p * z).sum(-1)
         metrics["objective_change_current_data"] = objective(s["primal"]) - objective(old)

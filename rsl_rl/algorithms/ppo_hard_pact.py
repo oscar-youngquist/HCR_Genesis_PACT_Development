@@ -36,7 +36,7 @@ from dataclasses import dataclass, replace
 import torch
 from rsl_rl.modules.hard_pact_control import bounded_nominal_torque
 from rsl_rl.modules.hard_pact_physics import (
-    gate_grf_for_qp, log_qp_swing_grf, GRFSwingMetricsAccumulator,
+    log_qp_swing_grf, GRFSwingMetricsAccumulator,
 )
 import torch.nn as nn
 import torch.optim as optim
@@ -2442,13 +2442,8 @@ class PPO_HardPACT:
             # Reconstruct physical Newtons exactly once, then rotate from the
             # normalized decoder's yaw-local frame into sampled J_f's world frame.
             sample_grf_physical = self.actor_critic.physics_estimator.grf_to_physical(sample_grf_normalized)
-            sample_grf_world = _yaw_local_to_world(
-                gate_grf_for_qp(
-                    sample_grf_physical,
-                    qp_explicit[:, 3:7], self.actor_critic.physics_estimator.grf_swing,
-                ),
-                sample_q[:, 3:7],
-            )
+            # Stance/reference gating occurs once in the shared 24-D builder.
+            sample_grf_world = _yaw_local_to_world(sample_grf_physical, sample_q[:, 3:7])
             # Projection is a deployment operation: nominal mechanics and the
             # total predicted wrench are the only quantities available on the
             # robot. In particular, neither realized randomization nor its
@@ -2485,7 +2480,7 @@ class PPO_HardPACT:
                 )
             # qpth solves
             #   min_x 1/2*x^TQx+p^Tx,  Gx<=h, Ax=b,
-            #   x=[qdd_18,f_12,tau_safe_12,s_12].
+            #   x=[tau_safe_12,f_world_12].
             # Gradients enter through sampled_nominal, sample_grf_world, and
             # sample_applied; all state/mechanics/rate-center tensors detach.
             sample_contact_probability = qp_explicit[:, 3:7]
@@ -2497,6 +2492,8 @@ class PPO_HardPACT:
             differentiate_qp = self.hard_pact_features.differentiable_qp
             qp_arguments = dict(
                 # Equality coefficient M_K.
+                base_quaternion=sample_q[:,3:7],
+                base_angular_velocity_world=sample_v[:,3:6],
                 mass_matrix=sampled_mechanics.mass_matrix,
                 # Equality RHS contribution -b_K.
                 bias=sampled_mechanics.bias,
@@ -2556,8 +2553,6 @@ class PPO_HardPACT:
             qp_loss = projection_loss(
                 qp_result.tau_safe, sampled_nominal, torque_limits, valid,
                 qp_result.differentiated_mask,
-                contact_slack=qp_result.contact_slack,
-                slack_scale=self.qp_config.slack_scale_m_s2,
             )
             # stopgrad deliberately computes and reports exactly this metric,
             # but neither it nor any QP output participates in optimization.
@@ -2583,9 +2578,7 @@ class PPO_HardPACT:
             if hasattr(self.hard_pact_qp, "iteration_diagnostics"):
                 aggregate = self.hard_pact_qp.iteration_diagnostics["ppo"]
                 supervised = valid.reshape(-1) & qp_result.differentiated_mask.reshape(-1)
-                per_row = (correction / torque_limits).square().sum(-1) + (
-                    qp_result.contact_slack.detach().flatten(1) / self.qp_config.slack_scale_m_s2
-                ).square().mean(-1)
+                per_row = (correction / torque_limits).square().sum(-1)
                 aggregate.add_values("projection_loss", per_row, supervised)
                 aggregate.add_values("intervention_fraction", intervention.float())
             self.last_qp_metrics["qp/minimal/intervention_fraction"] = (

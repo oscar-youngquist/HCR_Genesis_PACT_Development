@@ -82,8 +82,6 @@ def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors, swing_gate):
             self.cfg = SimpleNamespace(
                 qp_update_mode=mode,
                 torque_rate_limit_nm_s=torque_rate,
-                elastic_recovery_enabled=False,
-                slack_scale_m_s2=1.0,
             )
 
         def clear_warm_start(self, _env_ids):
@@ -99,8 +97,8 @@ def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors, swing_gate):
             if not differentiable:
                 raw = heads.last_raw.reshape(batch, 4, 3) * 250.
                 expected = raw.clone()
-                if swing_gate:
-                    expected[contact_probability < .5] = 0.
+                # Raw world references reach the shared builder, which now
+                # owns detached stance selection and optimized swing zeros.
                 torch.testing.assert_close(force_pred_world, expected, rtol=0, atol=0)
             # A compact differentiable stand-in for the selected PPO QP row.
             correction = (
@@ -118,7 +116,6 @@ def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors, swing_gate):
                 qdd=torch.zeros(tau_nom.shape[0], 18),
                 force_world=force_pred_world,
                 tau_safe=safe,
-                contact_slack=contact_probability[:, :, None].expand(-1, -1, 3),
                 stage=torch.zeros(tau_nom.shape[0], dtype=torch.long),
                 differentiated_mask=torch.ones(tau_nom.shape[0], dtype=torch.bool),
                 diagnostics={
@@ -278,8 +275,6 @@ def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors, swing_gate):
         qp.torque_limits,
         torch.ones(batch, 1, dtype=torch.bool),
         differentiated.differentiated_mask[:, None],
-        contact_slack=differentiated.contact_slack,
-        slack_scale=1.0,
     )
     loss.backward()
     assert torch.isfinite(loss)

@@ -1,34 +1,9 @@
-r"""Differentiable fixed-shape safety QP for HardPACT.
-
-The public solver operates in physical units and canonical Go2 order.  It
-internally scales variables and constraint rows before calling qpth's OptNet
-layer; returned accelerations, forces, torques, and slacks are physical again.
-
-For each environment the layer solves the standard convex QP
-
-.. math::
-
-   \min_x \; \tfrac12 x^TQx+p^Tx
-   \quad\text{s.t.}\quad Gx\le h,\;Ax=b,
-
-with physical decision vector
-
-.. math::
-
-   x=[\ddot q_{18},\;f_{FR,FL,RR,RL}^{W}\!{}_{12},\;
-      \tau_{safe,12},\;s_{contact,12}].
-
-The code constructs that physical problem first and then substitutes
-``x = D z``. qpth solves for the dimensionless variable ``z``; the public
-result is recovered as ``x = D z``. Comments beside each matrix assignment
-below state the exact scalar/vector constraint represented by that assignment.
-"""
+"""HardPACT 24-variable torque/world-force QP with eliminated acceleration."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Mapping
-import time
 import warnings
 
 import torch
@@ -45,11 +20,9 @@ from .hard_pact_qp_capture import capture_failure
 
 # Fixed slices make every Q/P/G/A block visibly correspond to one physical
 # variable group. Keeping these compile-time fixed also avoids ragged QPs.
-QDD = slice(0, 18)       # x[0:18]  = generalized acceleration, [m/s^2, rad/s^2].
-FORCE = slice(18, 30)    # x[18:30] = four world-frame XYZ GRFs, [N].
-TORQUE = slice(30, 42)   # x[30:42] = executed actuator torque, [Nm].
-SLACK = slice(42, 54)    # x[42:54] = contact-acceleration slack, [m/s^2].
-NUM_VARIABLES = 54
+TORQUE = slice(0, 12)
+FORCE = slice(12, 24)
+NUM_VARIABLES = 24
 
 
 def qp_substep_anchors(mode, decimation):
@@ -149,18 +122,19 @@ class HardPACTQPConfig:
     qpth_warm_start: bool = False
     friction_coefficient: float = 0.6  # mu in |fx|,|fy|<=mu*fz.
     torque_rate_limit_nm_s: float = 1000.0  # dot(tau)_lim [Nm/s].
-    contact_acceleration_limit_m_s2: float = 0.0  # a_tol [m/s^2].
+    contact_threshold: float = 0.5
+    contact_acceleration_weight: float = 1.0
+    contact_acceleration_scale_m_s2: float = 50.0
+    attitude_weight: float = 1.0
+    attitude_acceleration_scale_rad_s2: float = 20.0
+    attitude_kp: float = 20.0
+    attitude_kd: float = 5.0
+    joint_acceleration_limits_rad_s2: tuple = (100.0,) * 12
     interior_margin: float = 1.0e-3  # Strict-feasibility epsilon for contact rows.
-    qdd_scale: float = 50.0  # D diagonal for generalized acceleration.
     force_scale_n: float = 250.0  # D diagonal/reference normalization for GRF.
     torque_scale_nm: float = 40.0  # D diagonal for safe torque variables.
-    slack_scale_m_s2: float = 50.0  # D/objective scale for contact slack.
     torque_tracking_weight: float = 20.0  # w_tau.
-    force_tracking_weight: float = 5.0  # w_f.
-    slack_weight: float = 200.0  # w_s.
-    qdd_regularization: float = 1.0e-3  # r_qdd.
-    force_regularization: float = 1.0e-4  # r_f.
-    torque_regularization: float = 1.0e-4  # r_tau.
+    force_tracking_weight: float = 1.0  # w_f.
     q_regularization: float = 1.0e-7  # r_Q and final solver-space SPD ridge.
     # Deprecated scalar overrides remain accepted for checkpoint/config
     # compatibility; None selects the dtype-aware values below.
@@ -206,8 +180,6 @@ class HardPACTQPConfig:
     # Genesis and PhysX use semi-implicit Euler: q+=dt*v+dt^2*qdd. A backend
     # with constant-acceleration position integration may configure 0.5.
     position_integration_coefficient: float = 1.0
-    elastic_recovery_enabled: bool = True
-    elastic_dynamics_weight: float = 1.0e4
     gradient_scale_tau: float = 1.0
     gradient_scale_grf: float = 1.0
     gradient_scale_wrench: float = 1.0
@@ -219,19 +191,23 @@ class HardPACTQPConfig:
 
     @classmethod
     def from_dict(cls, values):
-        """Load saved settings without reviving the removed task objective.
+        """Load saved settings without reviving removed 54-D/proximal costs.
 
-        These two obsolete HardPACT keys are metadata only. cuPIQP's own
+        Obsolete HardPACT formulation keys are metadata only. cuPIQP's own
         numerical regularization/settings are deliberately left untouched.
         Policy tensors and checkpoint migration do not depend on these keys.
         """
         values = dict(values)
         obsolete = {key: values.pop(key) for key in
-                    ("proximal_rho", "proximal_block_weights") if key in values}
+                    ("proximal_rho", "proximal_block_weights", "qdd_scale",
+                     "slack_scale_m_s2", "slack_weight", "qdd_regularization",
+                     "force_regularization", "torque_regularization",
+                     "elastic_recovery_enabled", "elastic_dynamics_weight",
+                     "contact_acceleration_limit_m_s2") if key in values}
         if obsolete:
             warnings.warn(
-                "Ignoring obsolete HardPACT proximal-objective metadata: "
-                + ", ".join(obsolete) + ". The added objective has been removed; "
+                "Ignoring obsolete HardPACT QP metadata: "
+                + ", ".join(obsolete) + ". Using the 24-variable torque/force objective; "
                 "policy weights and cuPIQP internal regularization are unchanged.",
                 stacklevel=2,
             )
@@ -247,18 +223,12 @@ class HardPACTQPConfig:
 
 @dataclass
 class HardPACTQPResult:
-    """Physical-space primal result plus fallback/KKT metadata.
-
-    ``stage`` is 0 for full, 1 for relaxed-contact, 2 for elastic recovery,
-    and 3 for analytic actuator/rate projection when elastic recovery is
-    enabled. ``differentiated_mask`` excludes only analytic projection.
-    """
+    """Physical torque/force solution and derived acceleration; stage 2 is uncertified fallback."""
     qdd: torch.Tensor  # [B,18], canonical generalized acceleration.
     force_world: torch.Tensor  # [B,4,3], FR/FL/RR/RL world XYZ [N].
     tau_safe: torch.Tensor  # [B,12], actuator command [Nm].
-    contact_slack: torch.Tensor  # [B,4,3], acceleration slack [m/s^2].
-    stage: torch.Tensor  # [B], 0=full, 1=relaxed, 2=elastic, 3=analytic.
-    differentiated_mask: torch.Tensor  # [B], true exactly for stages 0/1.
+    stage: torch.Tensor  # [B], 0=certified QP, 2=uncertified analytic fallback.
+    differentiated_mask: torch.Tensor  # [B], true exactly for certified rows.
     diagnostics: Mapping[str, torch.Tensor]  # Per-stage primal/KKT metrics.
     metrics: Mapping[str, torch.Tensor] | None = None  # Aggregated GPU scalars.
 
@@ -286,6 +256,9 @@ class _QPBuild:
     qdd_upper: torch.Tensor
     native_lower: torch.Tensor
     native_upper: torch.Tensor
+    acceleration_map: torch.Tensor
+    acceleration_offset: torch.Tensor
+    mechanics_valid: torch.Tensor
 
     def __iter__(self):
         # Preserve the legacy seven-value private test/debug unpacking API.
@@ -363,64 +336,7 @@ class _ScaleClipRows(torch.autograd.Function):
 
 
 class HardPACTDifferentiableQP:
-    r"""Construct and solve the fixed 54-variable HardPACT OptNet problem.
-
-    Physical variable ordering is
-
-    .. math:: x=[\ddot q_{18}, f_{12}, \tau_{safe,12}, s_{contact,12}].
-
-    Floating-base ``qdd[:3]`` is m/s^2, angular ``qdd[3:6]`` and joint
-    ``qdd[6:]`` are rad/s^2. ``f`` is Newtons in world-frame XYZ and
-    FR, FL, RR, RL order.  Slack has foot linear-acceleration units (m/s^2).
-    The wrench is a
-    world-aligned ``[Fx,Fy,Fz,Tx,Ty,Tz]`` wrench about the base-Jacobian point.
-    Dynamics therefore use the same sign convention as BARD:
-
-    .. math:: M\ddot q+b-S^T\tau-J_f^Tf=J_b^TW_{pred}.
-
-    The physical objective is
-
-    .. math::
-
-       w_\tau\left\|\frac{\tau-\tau_{nom}}{\tau_{lim}}\right\|_2^2
-       +w_f\left\|\frac{f-\hat f}{f_s}\right\|_2^2
-       +w_s\left\|\frac{s}{s_s}\right\|_2^2
-       +r_{\ddot q}\|\ddot q\|_2^2
-       +r_f\left\|\frac f{f_s}\right\|_2^2
-       +r_\tau\left\|\frac\tau{\tau_{lim}}\right\|_2^2
-       +r_Q\|x\|_2^2.
-
-    Its inequalities enforce, componentwise,
-
-    .. math::
-
-       \max(-\tau_{lim},\tau_{k-1}-\dot\tau_{lim}\Delta t)
-       \le\tau_k\le
-       \min(\tau_{lim},\tau_{k-1}+\dot\tau_{lim}\Delta t),
-
-    one-step joint position/velocity bounds, ``f_z>=0``, the fixed-world-Z
-    pyramid ``|f_x|,|f_y|<=mu*f_z``, ``s>=0``, and
-
-    .. math::
-
-       |c_i(J_i\ddot q+\dot J_i v)|\le s_i+a_{tol}.
-
-    qpth implicitly differentiates the KKT system. Measured state, matrices,
-    limits, and acceleration bias are detached; ``tau_nom``, predicted GRF,
-    predicted wrench, and contact probabilities retain gradients.
-
-    For optimum ``(x*,lambda*,nu*)``, qpth differentiates the residual system
-
-    .. math::
-
-       Qx^*+p+G^T\lambda^*+A^T\nu^*=0,\quad
-       \operatorname{diag}(\lambda^*)(Gx^*-h)=0,\quad
-       Ax^*-b=0,
-
-    rather than differentiating solver iterations. Consequently gradients of
-    ``tau_safe``, ``f``, and ``s`` propagate to the learned entries of ``p``,
-    ``G``, and ``b`` whenever stage 0 or 1 passes certification.
-    """
+    """Shared 24-variable solver. Mechanics are detached; learned references retain VJPs."""
 
     def __init__(self, config: HardPACTQPConfig, torque_limits,
                  position_lower, position_upper, velocity_limits):
@@ -440,19 +356,20 @@ class HardPACTDifferentiableQP:
         self.position_upper = torch.as_tensor(position_upper).reshape(12).detach()
         self.velocity_limits = torch.as_tensor(velocity_limits).reshape(12).detach()
         # D must be invertible, hence every variable scale is strictly positive.
-        if min(config.qdd_scale, config.force_scale_n, config.torque_scale_nm,
-               config.slack_scale_m_s2) <= 0:
-            raise ValueError("all QP variable scales must be positive")
-        if config.friction_coefficient <= 0 or config.torque_rate_limit_nm_s <= 0:
-            raise ValueError("friction and torque-rate limits must be positive")
-        if config.q_regularization <= 0.0:
-            raise ValueError("QP q_regularization must be strictly positive")
-        if min(
-            config.torque_tracking_weight, config.force_tracking_weight,
-            config.slack_weight, config.qdd_regularization,
-            config.force_regularization, config.torque_regularization,
-        ) < 0.0:
-            raise ValueError("QP weights and regularizers must be nonnegative")
+        if min(config.force_scale_n, config.torque_scale_nm,
+               config.contact_acceleration_scale_m_s2, config.attitude_acceleration_scale_rad_s2) <= 0:
+            raise ValueError("QP physical scales must be positive")
+        if min(config.torque_tracking_weight, config.force_tracking_weight) <= 0:
+            raise ValueError("torque and force tracking weights must be positive")
+        if min(config.contact_acceleration_weight, config.attitude_weight,
+               config.attitude_kp, config.attitude_kd) < 0:
+            raise ValueError("soft objective weights and gains must be nonnegative")
+        if len(config.joint_acceleration_limits_rad_s2) != 12 or min(config.joint_acceleration_limits_rad_s2) <= 0:
+            raise ValueError("12 positive canonical joint acceleration limits required")
+        if not 0 <= config.contact_threshold <= 1:
+            raise ValueError("contact_threshold must be in [0,1]")
+        if min(config.friction_coefficient, config.torque_rate_limit_nm_s, config.q_regularization) <= 0:
+            raise ValueError("friction, torque rate and SPD ridge must be positive")
         if ((config.eps is not None and config.eps <= 0.0)
                 or config.eps_float32 <= 0.0 or config.eps_float64 <= 0.0
                 or config.max_iter <= 0):
@@ -507,9 +424,8 @@ class HardPACTDifferentiableQP:
             raise ValueError("QP full_audit_sample_size must be positive")
         self._constant_cache = {}
         self._limit_cache = {}
-        self._assembly_cache = {}
         self._solve_count = 0
-        self._solve_count_by_mode = {False: 0, True: 0}
+        self._backend_config = config
         self._backend_instances = {
             name: create_backend(name, config) for name in solvers
             if name != "qpth"
@@ -522,8 +438,7 @@ class HardPACTDifferentiableQP:
         # from discarding or contaminating any other environment's state.
         # PPO remains cold so no rollout iterate enters an unrelated minibatch.
         self._qpth_warm_states = {}
-        from .hard_pact_active_constraints import ActiveConstraintCache
-        self._active_constraint_cache = ActiveConstraintCache()
+        self._active_pattern_caches = {}
         self._last_gradient_metrics = {}
 
         from .hard_pact_qp_diagnostics import QPIterationDiagnostics
@@ -568,24 +483,17 @@ class HardPACTDifferentiableQP:
 
     def clear_warm_start(self, env_ids=None):
         """Clear qpth rollout state globally or for chunks touching env_ids."""
-        self._active_constraint_cache.clear(env_ids)
+        for cache in self._active_pattern_caches.values():
+            cache.clear(env_ids)
         if env_ids is None:
             self._qpth_warm_states.clear()
             return
         # Keep reset ownership updates on the warm-state device. A reset is a
         # hot rollout path and must not introduce GPU->CPU->GPU synchronization.
         ids = torch.as_tensor(env_ids).detach()
-        for key in list(self._qpth_warm_states):
-            start, stop, _ = key
-            state, valid = self._qpth_warm_states[key]
-            device_ids = ids.to(valid.device)
-            local = device_ids[
-                (device_ids >= start) & (device_ids < stop)
-            ] - start
-            if local.numel():
-                valid = valid.clone()
-                valid[local] = False
-                self._qpth_warm_states[key] = (state, valid)
+        for key, (state, owners, valid) in self._qpth_warm_states.items():
+            self._qpth_warm_states[key] = (state, owners,
+                valid & ~torch.isin(owners, ids.to(owners.device)))
 
     def solver_for_mode(self, differentiable):
         """Return the explicitly configured rollout or PPO backend."""
@@ -659,60 +567,6 @@ class HardPACTDifferentiableQP:
                    else self.cfg.rollout_chunk_size)
 
     @torch.inference_mode(False)
-    def _constants(self, reference):
-        """Cache immutable 54-D selectors/scales/shared Hessian by device/dtype."""
-        key = (reference.device.type, reference.device.index, reference.dtype)
-        cached = self._constant_cache.get(key)
-        # The decorator creates ordinary tensors even on the first rollout
-        # inference call, so PPO can save them without rebuilding the cache.
-        if cached is not None:
-            return cached
-        device, dtype = reference.device, reference.dtype
-        eye12 = torch.eye(12, device=device, dtype=dtype)
-        selectors = {}
-        for name, columns in (("tau", TORQUE), ("qdd", slice(6, 18)),
-                              ("slack", SLACK)):
-            value = torch.zeros(12, NUM_VARIABLES, device=device, dtype=dtype)
-            value[:, columns] = eye12
-            selectors[name] = value
-        variable_scale = reference.new_tensor(
-            [self.cfg.qdd_scale] * 18 + [self.cfg.force_scale_n] * 12
-            + [self.cfg.torque_scale_nm] * 12
-            + [self.cfg.slack_scale_m_s2] * 12
-        )
-        torque_limit = self._limits(reference)[0]
-        diagonal = torch.full(
-            (NUM_VARIABLES,), 2.0 * self.cfg.q_regularization,
-            device=device, dtype=dtype,
-        )
-        diagonal[QDD] += 2.0 * self.cfg.qdd_regularization
-        diagonal[FORCE] += 2.0 * (
-            self.cfg.force_tracking_weight + self.cfg.force_regularization
-        ) / self.cfg.force_scale_n ** 2
-        diagonal[TORQUE] += 2.0 * (
-            self.cfg.torque_tracking_weight + self.cfg.torque_regularization
-        ) / torque_limit.square()
-        diagonal[SLACK] += 2.0 * self.cfg.slack_weight / (
-            self.cfg.slack_scale_m_s2 ** 2
-        )
-        shared_q = torch.diag(diagonal)
-        friction = torch.zeros(20, NUM_VARIABLES, device=device, dtype=dtype)
-        for foot in range(4):
-            col, row = FORCE.start + 3 * foot, 5 * foot
-            friction[row, col + 2] = -1.0
-            friction[row + 1, col] = 1.0
-            friction[row + 1, col + 2] = -self.cfg.friction_coefficient
-            friction[row + 2, col] = -1.0
-            friction[row + 2, col + 2] = -self.cfg.friction_coefficient
-            friction[row + 3, col + 1] = 1.0
-            friction[row + 3, col + 2] = -self.cfg.friction_coefficient
-            friction[row + 4, col + 1] = -1.0
-            friction[row + 4, col + 2] = -self.cfg.friction_coefficient
-        cached = selectors, friction, variable_scale, shared_q
-        self._constant_cache[key] = cached
-        return cached
-
-    @torch.inference_mode(False)
     def _limits(self, reference):
         """Copy immutable actuator limits once per device/dtype, not per chunk."""
         key = (reference.device, reference.dtype)
@@ -724,1491 +578,465 @@ class HardPACTDifferentiableQP:
             )
         return self._limit_cache[key]
 
+
     @torch.inference_mode(False)
-    def _assembly_templates(self, reference, relaxed_contact, elastic):
-        """Immutable physical blocks and scaled Hessian, shared across B rows.
+    def _constants(self, reference):
+        """Only immutable selectors and physical scales are cached, never Q."""
+        key = (reference.device, reference.dtype, self.cfg.torque_scale_nm, self.cfg.force_scale_n)
+        if key not in self._constant_cache:
+            eye = torch.eye(24, device=reference.device, dtype=reference.dtype)
+            scale = reference.new_tensor([self.cfg.torque_scale_nm] * 12
+                                         + [self.cfg.force_scale_n] * 12)
+            self._constant_cache[key] = (eye, scale)
+        return self._constant_cache[key]
 
-        These ordinary (non-inference) tensors can safely be saved by PPO
-        autograd after rollout first creates them. Only per-call clones of
-        A/G are written; no learned value or autograd graph enters the cache.
+    def _build(self, data, stance_pattern=None):
+        r"""Assemble x=[tau_12; f_FR,FL,RR,RL_world_12], and substitute x=D z.
+
+        One call contains one detached stance pattern. Swing coordinates have
+        exactly one identity equality each and NO friction rows. No dynamics
+        equalities, accelerations, contact slacks, or temporal costs are added.
         """
-        key = (reference.device, reference.dtype, relaxed_contact, elastic)
-        if key in self._assembly_cache:
-            return self._assembly_cache[key]
-        selectors, friction, scale, Q = self._constants(reference)
-        scaled_Q = Q * scale[:, None] * scale[None, :]
-        scaled_Q = 0.5 * (scaled_Q + scaled_Q.T)
-        scaled_Q.diagonal().add_(self.cfg.q_regularization)
-        A = reference.new_zeros(18, NUM_VARIABLES)
-        A[6:, TORQUE] = -selectors["tau"][:, TORQUE]
-        rows = [selectors["tau"], -selectors["tau"]]
-        if not elastic:
-            rows.extend((selectors["qdd"], -selectors["qdd"]))
-        rows.append(friction)
-        if not relaxed_contact and not elastic:
-            # ±cJ is filled in per call; both contact rows contain -I*s.
-            rows.extend((-selectors["slack"], -selectors["slack"],
-                         -selectors["slack"]))
-        G = torch.cat(rows)
-        cached = Q, scaled_Q, A, G
-        self._assembly_cache[key] = cached
-        return cached
-
-    def _build(self, data, relaxed_contact=False, elastic=False):
-        r"""Build physical blocks, then apply ``x=D z`` and row scaling.
-
-        Every inequality is written ``G x <= h``. The fixed-gravity-normal
-        friction pyramid uses world Z: ``|fx|,|fy| <= mu*fz`` and ``fz>=0``.
-        Contact acceleration is softened symmetrically as
-        ``|c_i*(J_i*qdd+jdotv_i)| <= slack_i + a_tol`` with ``slack>=0``.
-
-        Input shapes use ``B`` environments, ``n_v=18``, four feet, and three
-        Cartesian axes: ``M:[B,18,18]``, ``J_f:[B,4,3,18]``,
-        ``J_b:[B,6,18]``. All Jacobians are world-axis and all generalized
-        coordinates are canonical ``[base-linear, base-angular, FR,FL,RR,RL]``.
-        """
-        # Measured mechanics are constants in the OptNet graph. Only learned
-        # references below remain attached to autograd.
+        ref = data["tau_nom"]
+        batch = ref.shape[0]
+        eye, scale = self._constants(ref)
         mass = data["mass_matrix"].detach()
+        J = data["foot_jacobians"].detach().reshape(batch, 12, 18)
+        Jb = data["base_jacobian"].detach()
         bias = data["bias"].detach()
-        foot_jac = data["foot_jacobians"].detach()
-        base_jac = data["base_jacobian"].detach()
-        foot_bias = data["foot_acceleration_bias"].detach()
-        # tau_nom, f_hat, and W_hat are learned QP inputs. In the equality,
-        # W_hat enters b and therefore retains a qpth implicit-gradient path.
-        tau_nom = _ScaleClipRows.apply(
-            data["tau_nom"], self.cfg.gradient_scale_tau,
-            self.cfg.gradient_clip_tau, self, "tau_nom",
-        )
-        force_input = _ScaleClipRows.apply(
-            data["force_pred_world"], self.cfg.gradient_scale_grf,
-            self.cfg.gradient_clip_grf, self, "grf",
-        )
-        force_pred = force_input.reshape(-1, 12)
-        wrench_pred = _ScaleClipRows.apply(
-            data["wrench_pred_world"], self.cfg.gradient_scale_wrench,
-            self.cfg.gradient_clip_wrench, self, "wrench",
-        )
-        # c_i in [0,1] continuously gates the contact-acceleration rows.
-        # The estimator already applies eps+(1-2eps)*sigmoid(logit) exactly
-        # once. The QP consumes that smooth probability directly.
-        contact = _ScaleClipRows.apply(
-            data["contact_probability"], self.cfg.gradient_scale_contact,
-            self.cfg.gradient_clip_contact, self, "contact",
-        )
-        # Previous execution/state/dt define hard boxes and are measurements.
-        previous_tau = data["previous_torque"].detach()
-        joint_position = data["joint_position"].detach()
-        joint_velocity = data["joint_velocity"].detach()
-        dt = data["dt"].detach().reshape(-1, 1).clamp_min(1.0e-8)
-        # Derive allocation metadata from the live learned torque reference.
-        batch = tau_nom.shape[0]
-        device, dtype = tau_nom.device, tau_nom.dtype
-        # Copy fixed backend limits to the current solver device/dtype only.
-        torque_limit, q_lower, q_upper, velocity_limit = self._limits(tau_nom)
-        _, _, variable_scale, _ = self._constants(tau_nom)
-        shared_q, scaled_q, A_template, G_template = (
-            self._assembly_templates(tau_nom, relaxed_contact, elastic)
-        )
+        # M a = [S^T J^T]x + Jb^T W - h. solve_ex reports a singular
+        # mechanics row without poisoning all other environments in its batch.
+        selector = ref.new_zeros(18, 12)
+        selector[6:] = torch.eye(12, device=ref.device, dtype=ref.dtype)
+        rhs = torch.cat((selector.expand(batch, -1, -1), J.transpose(1, 2),
+                         Jb.transpose(1, 2), bias[..., None]), -1)
+        solved, info = torch.linalg.solve_ex(mass, rhs, check_errors=False)
+        mechanics_valid = (info == 0) & torch.isfinite(solved).all(dim=(1,2))
+        # Fixed mechanics have no gradient responsibility. Sanitizing a failed
+        # factor before multiplying learned W also prevents 0*NaN VJPs.
+        solved = torch.nan_to_num(solved.detach(), nan=0., posinf=0., neginf=0.)
+        mechanics_map = solved[:,:,:24]
+        wrench = _ScaleClipRows.apply(data["wrench_pred_world"],
+            self.cfg.gradient_scale_wrench, self.cfg.gradient_clip_wrench, self, "wrench")
+        offset = (solved[:,:,24:30] @ wrench[...,None]).squeeze(-1)-solved[:,:,30]
+        stance = data["contact_probability"].detach() >= self.cfg.contact_threshold
+        if stance_pattern is None:
+            # Private builder accepts homogeneous batches for algebra tests.
+            if not torch.equal(stance, stance[:1].expand_as(stance)):
+                raise ValueError("_build requires a homogeneous stance pattern")
+            stance_pattern = sum(int(stance[0, i]) << i for i in range(4))
+        feet = [i for i in range(4) if stance_pattern & (1 << i)]
+        swing = [i for i in range(4) if not stance_pattern & (1 << i)]
+        tau = _ScaleClipRows.apply(ref, self.cfg.gradient_scale_tau,
+                                  self.cfg.gradient_clip_tau, self, "tau_nom")
+        force = _ScaleClipRows.apply(data["force_pred_world"],
+            self.cfg.gradient_scale_grf, self.cfg.gradient_clip_grf, self, "grf")
+        # Mask ONLY the tracking reference. Raw supervised predictions stay
+        # unbounded, and optimized swing forces are constrained separately.
+        force = torch.where(stance[..., None], force, torch.zeros_like(force)).flatten(1)
+        target = torch.cat((tau, force), -1)
+        weights = ref.new_tensor([self.cfg.torque_tracking_weight] * 12
+                                 + [self.cfg.force_tracking_weight] * 12)
+        diagonal = 2 * weights / scale.square()
+        Q = torch.diag(diagonal).expand(batch, -1, -1).clone()
+        p = -diagonal * target
 
-        # Objective is assembled in physical x. For w||y-y*||^2, qpth's
-        # 1/2*x'Q*x+p'x convention requires Q=2wI and p=-2w*y*.
-        # Every weight is nonnegative and q_regularization is strictly
-        # positive, so the symmetrized Q below is positive definite and the
-        # OptNet problem is a strictly convex QP with a unique primal result.
-        # Start Q and p for 1/2*x^T Q x + p^T x in physical coordinates.
-        Q = shared_q.unsqueeze(0).expand(batch, -1, -1)
-        p = torch.zeros(batch, NUM_VARIABLES, device=device, dtype=dtype)
-        # Expanding w_f||(f-f_hat)/f_s||^2 gives
-        # p_f=-2*w_f*f_hat/f_s^2 (the constant ||f_hat|| term is discarded).
-        p[:, FORCE] = -2.0 * self.cfg.force_tracking_weight * force_pred / (
-            self.cfg.force_scale_n ** 2
-        )
-        # Likewise p_tau=-2*w_tau*tau_nom/tau_lim^2.
-        p[:, TORQUE] = -2.0 * self.cfg.torque_tracking_weight * tau_nom / (
-            torque_limit.square().unsqueeze(0)
-        )
+        def add_residual(C, e, weight):
+            # w||C x+e||^2 -> Q += 2w C^T C, p += 2w C^T e.
+            nonlocal Q, p
+            Q = Q + 2 * weight * C.transpose(1, 2) @ C
+            p = p + 2 * weight * (C.transpose(1, 2) @ e[..., None]).squeeze(-1)
 
-        # Dynamics equality A*x=b. M and all Jacobians use canonical
-        # [base linear, base angular, FR,FL,RR,RL joints] generalized order.
-        # Starting from M*qdd+b=S^T*tau+J_f^T*f+J_b^T*W, move all decision
-        # variables left and the fixed learned wrench/bias right:
-        # [M, -J_f^T, -S^T, 0] x = J_b^T*W - b.
-        A = A_template.expand(batch, -1, -1).clone()
-        # Coefficient of qdd is the realized generalized mass matrix M.
-        A[:, :, QDD] = mass
-        # Flatten feet in FR,FL,RR,RL XYZ order, then transpose J_f to J_f^T.
-        A[:, :, FORCE] = -foot_jac.reshape(batch, 12, 18).transpose(1, 2)
-        # S^T=[0_{6x12};I_12], hence only actuated rows 6:18 are -I.
-        # The constant -S^T block is already present in A_template.
-        # einsum computes J_b^T W because base_jac is stored [B,6,18].
-        b = torch.einsum("bkn,bk->bn", base_jac, wrench_pred) - bias
-        if elastic:
-            # Elastic recovery represents the dynamics violation e_dyn=A*x-b
-            # as an unconstrained slack and penalizes ||e_dyn||^2 rather than
-            # enforcing equality. This retains the fixed 54-D deployment
-            # vector while making an inconsistent mechanics row recoverable.
-            weight = self.cfg.elastic_dynamics_weight
-            Q = Q + 2.0 * weight * torch.bmm(A.transpose(1, 2), A)
-            p = p - 2.0 * weight * torch.bmm(
-                A.transpose(1, 2), b.unsqueeze(-1)
-            ).squeeze(-1)
-            A = A[:, :0]
-            b = b[:, :0]
+        if feet and self.cfg.contact_acceleration_weight:
+            rows = [3 * foot + axis for foot in feet for axis in range(3)]
+            contact_J = J[:, rows]
+            C = contact_J @ mechanics_map / self.cfg.contact_acceleration_scale_m_s2
+            e = ((contact_J @ offset[..., None]).squeeze(-1)
+                 + data["foot_acceleration_bias"].detach().flatten(1)[:, rows])
+            add_residual(C, e / self.cfg.contact_acceleration_scale_m_s2,
+                         self.cfg.contact_acceleration_weight)
 
-        # Fixed selectors/friction/slack blocks are cached. Only contact qdd
-        # columns depend on learned inputs; bounds vary with measured state.
-        G = G_template.expand(batch, -1, -1)
-        h = tau_nom.new_zeros(batch, G.shape[1])
+        if self.cfg.attitude_weight:
+            # H maps canonical acceleration to yaw-local PHYSICAL angular
+            # acceleration (not Euler-angle second derivatives). In a free
+            # flyer Jb_angular*v = R_WB*w_B and Jdotb_angular*v =
+            # R_WB*(w_B cross w_B)=0. Project into instantaneous yaw axes;
+            # we do not differentiate the yaw coordinate frame.
+            q = data["base_quaternion"].detach()  # canonical xyzw
+            yaw = torch.atan2(2*(q[:,3]*q[:,2]+q[:,0]*q[:,1]),
+                              1-2*(q[:,1].square()+q[:,2].square()))
+            c, s = yaw.cos(), yaw.sin()
+            R = ref.new_zeros(batch, 2, 3)
+            R[:,0,0], R[:,0,1] = c, s
+            R[:,1,0], R[:,1,1] = -s, c
+            up = torch.stack((2*(q[:,0]*q[:,2]+q[:,3]*q[:,1]),
+                              2*(q[:,1]*q[:,2]-q[:,3]*q[:,0]),
+                              1-2*(q[:,0].square()+q[:,1].square())), -1)
+            # z_world cross z_body is a restoring tilt-error rotation vector
+            # near upright: [roll,pitch] in yaw-local horizontal axes.
+            tilt_world = torch.stack((-up[:,1], up[:,0], torch.zeros_like(up[:,0])), -1)
+            tilt = (R @ tilt_world[...,None]).squeeze(-1)
+            omega = (R @ data["base_angular_velocity_world"].detach()[...,None]).squeeze(-1)
+            desired = -self.cfg.attitude_kp * tilt - self.cfg.attitude_kd * omega
+            H = R @ Jb[:,3:6]
+            C = H @ mechanics_map / self.cfg.attitude_acceleration_scale_rad_s2
+            e = ((H @ offset[...,None]).squeeze(-1) - desired)
+            add_residual(C, e / self.cfg.attitude_acceleration_scale_rad_s2,
+                         self.cfg.attitude_weight)
 
-        # Intersect magnitude and rate boxes before adding rows.  Two pairs of
-        # parallel rows are mathematically valid but redundant; qpth's primal-
-        # dual factorization is substantially better conditioned with the
-        # exact same feasible set represented by one lower/upper pair.
-        # Delta_tau_max = dot_tau_lim*dt at this *physics* substep.
-        rate_delta = self.cfg.torque_rate_limit_nm_s * dt
-        # Upper intersection: min(tau_lim, tau_previous+Delta_tau_max).
-        tau_upper = torch.minimum(
-            torque_limit.expand(batch, -1), previous_tau + rate_delta
-        )
-        # Lower intersection: max(-tau_lim, tau_previous-Delta_tau_max).
-        tau_lower = torch.maximum(
-            -torque_limit.expand(batch, -1), previous_tau - rate_delta
-        )
-        # +I*tau<=tau_upper.
-        h[:, :12] = tau_upper
-        # -I*tau<=-tau_lower, equivalent to tau>=tau_lower.
-        h[:, 12:24] = -tau_lower
-
-        # One-step joint limits use the configured backend coefficient alpha:
-        # v+ = v + dt*qdd; q+ = q + dt*v + alpha*dt^2*qdd.
-        # Isolate qdd in q_lower<=q+dt*v+alpha*dt^2*qdd<=q_upper.
-        position_coefficient = (
-            self.cfg.position_integration_coefficient * dt.square()
-        )
-        # Isolate qdd in -v_lim<=v+dt*qdd<=v_lim.
-        velocity_coefficient = dt
-        # Position-derived componentwise qdd upper/lower bounds.
-        qdd_upper_position = (
-            q_upper - joint_position - dt * joint_velocity
-        ) / position_coefficient
-        qdd_lower_position = (
-            q_lower - joint_position - dt * joint_velocity
-        ) / position_coefficient
-        # Velocity-derived componentwise qdd upper/lower bounds.
-        qdd_upper_velocity = (
-            velocity_limit - joint_velocity
-        ) / velocity_coefficient
-        qdd_lower_velocity = (
-            -velocity_limit - joint_velocity
-        ) / velocity_coefficient
-        # Their intersection enforces position and velocity simultaneously.
-        qdd_upper = torch.minimum(qdd_upper_position, qdd_upper_velocity)
-        qdd_lower = torch.maximum(qdd_lower_position, qdd_lower_velocity)
-        # Select generalized coordinates 6:18 because the floating base has
-        # no actuator joint position/velocity box in this QP.
-        if not elastic:
-            h[:, 24:36] = qdd_upper
-            h[:, 36:48] = -qdd_lower
-
-        # World-Z unilateral/friction pyramid, five rows per foot.
-        # All friction and -s<=0 bounds are zero in the cached structure.
-
-        if not relaxed_contact and not elastic:
-            # c is scalar per foot and is repeated over XYZ. Scaling the whole
-            # acceleration makes the constraint vanish continuously in swing.
-            # Repeat each scalar c_i over its foot's XYZ acceleration axes.
-            contact_effective = contact
-            contact_xyz = contact_effective.unsqueeze(-1).expand(
-                -1, -1, 3
-            ).reshape(batch, 12)
-            # c_i*J_i is the qdd coefficient in c_i*a_i, where
-            # a_i=J_i*qdd+(Jdot_i*v).
-            weighted_jacobian = foot_jac.reshape(batch, 12, 18) * contact_xyz.unsqueeze(-1)
-            # c_i*(Jdot_i*v) is the known affine acceleration term.
-            weighted_bias = foot_bias.reshape(batch, 12) * contact_xyz
-            # Positive side: cJ*qdd-s <= a_tol-c*Jdot*v.
-            G = G.clone()
-            G[:, 80:92, QDD] = weighted_jacobian
-            # A tiny margin makes s=0 a strict interior point when c=0,
-            # avoiding duplicate active rows with the independent s>=0 box.
-            tolerance = torch.full_like(
-                weighted_bias,
-                self.cfg.contact_acceleration_limit_m_s2
-                + self.cfg.interior_margin,
-            )
-            h[:, 80:92] = tolerance - weighted_bias
-            # Negative side: -cJ*qdd-s <= a_tol+c*Jdot*v. Together the two
-            # rows encode |c_i*a_i|<=s_i+a_tol independently for XYZ.
-            G[:, 92:104, QDD] = -weighted_jacobian
-            h[:, 92:104] = tolerance + weighted_bias
-
-        # Concatenation order is torque box, joint-step box, friction pyramid,
-        # slack nonnegativity, positive contact acceleration, negative contact
-        # acceleration. This order is fixed across every full solve.
-
-        # Native cuPIQP bounds are expressed in physical x here and converted
-        # to solver z below. Floating-base qdd and forces remain unbounded.
-        native_lower = torch.full(
-            (batch, NUM_VARIABLES), -torch.inf, device=device, dtype=dtype
-        )
-        native_upper = torch.full_like(native_lower, torch.inf)
-        native_lower[:, 6:18] = qdd_lower
-        native_upper[:, 6:18] = qdd_upper
-        native_lower[:, TORQUE] = tau_lower
-        native_upper[:, TORQUE] = tau_upper
-        if not relaxed_contact:
-            native_lower[:, SLACK] = 0.0
-
-        # x=D*z makes all solver variables O(1). Constraint-row scaling then
-        # balances Newton-system rows without changing equality/inequality sets.
-        # D=diag([qdd_scale]*18,[force_scale]*12,[torque_scale]*12,
-        #        [slack_scale]*12), with x=Dz. z is dimensionless/O(1).
-        # Keep exact physical matrices for post-solve certification before
-        # applying the variable substitution and numerical row scaling.
-        physical_G, physical_h = G, h
-        physical_A, physical_b = A, b
-        # 1/2*(Dz)^T Q (Dz) = 1/2*z^T(DQD)z.
-        if elastic:
-            Q = Q * variable_scale.view(1, -1, 1) * variable_scale.view(1, 1, -1)
-        # p^T(Dz)=(Dp)^Tz because D is diagonal.
-        p = p * variable_scale
-        # Normalize physical rows by max(||row||,|rhs|,1), then apply x=Dz.
-        # The order matters numerically: including D in the row norm would
-        # erase the useful relative scaling between constraint families and
-        # caused qpth to return poor but primal-feasible force iterates.
-        A, b, equality_row_scale = _row_scale(A, b)
-        G, h, inequality_row_scale = _row_scale(G, h)
-        # A(Dz)=b and G(Dz)<=h scale matrix columns, not right-hand sides.
-        A = A * variable_scale
-        G = G * variable_scale
-        # Remove roundoff asymmetry before Cholesky and add the final strictly
-        # positive diagonal in solver space, following qpth's SPD guidance.
-        if elastic:
-            Q = 0.5 * (Q + Q.transpose(-1, -2))
-        # qpth requires Q strictly positive definite, not merely semidefinite.
-        # This solver-space ridge ensures lambda_min(Q)>0 after roundoff.
-        if elastic:
-            Q = Q.clone()
-            Q.diagonal(dim1=-2, dim2=-1).add_(self.cfg.q_regularization)
-        else:
-            Q = scaled_q.expand(batch, -1, -1)
-        native_lower = native_lower / variable_scale
-        native_upper = native_upper / variable_scale
-        return _QPBuild(
-            Q, p, G, h, A, b, variable_scale,
-            physical_G, physical_h, physical_A, physical_b,
-            equality_row_scale, inequality_row_scale,
-            tau_lower, tau_upper, qdd_lower, qdd_upper,
-            native_lower, native_upper,
-        )
-
-    @staticmethod
-    def _cupiqp_native_pack(matrices, relaxed_contact, elastic=False):
-        """Replace true coordinate rows by cuPIQP 0.1 native x_l/x_u.
-
-        Canonical matrices remain on ``matrices`` for backend-neutral
-        certification. Only the numerical packet drops redundant box rows.
-        """
-        # Fixed slices avoid boolean indexing/nonzero's CUDA synchronization.
-        start = 24 if elastic else 48
-        G, h = matrices.G[:, start:start + 20], matrices.h[:, start:start + 20]
-        if not relaxed_contact and not elastic:
-            G = torch.cat((G, matrices.G[:, 80:104]), dim=1)
-            h = torch.cat((h, matrices.h[:, 80:104]), dim=1)
-        return (
-            G, h,
-            matrices.native_lower, matrices.native_upper,
-        )
-
-    def _validate_inputs(self, matrices, audit_count=0):
-        r"""Check mandatory finiteness and optional sampled matrix health.
-
-        Only finiteness controls whether a row may enter qpth. Rank and SPD
-        values are detached observations in ``full`` diagnostics; enabling an
-        audit must never change a QP solution or fallback decision.
-        """
-        Q, p, G, h, A, b, _ = matrices
-        # Reduce each coefficient tensor to one finite/nonfinite bit per env.
-        finite = torch.stack([
-            tensor.reshape(tensor.shape[0], -1).isfinite().all(dim=-1)
-            for tensor in (Q, p, G, h, A, b)
-        ]).all(dim=0)
-        # Matrix health is calculated once in _diagnostics for sampled full
-        # audits. These compatibility fields are deliberately observational.
-        rank_ok = torch.ones_like(finite)
-        spd = torch.ones_like(finite)
-        return finite, finite, rank_ok, spd
-
-    @staticmethod
-    def _audit_inequality_groups(relaxed_contact, device):
-        """Return fixed row indices for active-set summaries."""
-        groups = {
-            "torque_box": torch.arange(0, 24, device=device),
-            "joint_step": torch.arange(24, 48, device=device),
-            "unilateral_force": torch.tensor(
-                [48, 53, 58, 63], device=device
-            ),
-            "friction_pyramid": torch.tensor(
-                [row for foot in range(4)
-                 for row in range(49 + 5 * foot, 53 + 5 * foot)],
-                device=device,
-            ),
-        }
-        if not relaxed_contact:
-            groups.update({
-                "slack": torch.arange(68, 80, device=device),
-                "contact_acceleration": torch.arange(80, 104, device=device),
-            })
-        return groups
-
-    def _diagnostics(
-        self, x_scaled, matrices, audit_count=0,
-        relaxed_contact=False, data=None,
-    ):
-        r"""Evaluate primal and approximate dual KKT residuals in z-space.
-
-        With equality multiplier ``nu`` and inequality multiplier
-        ``lambda>=0``, the KKT conditions are
-
-        .. math::
-
-           Az-b=0,\quad Gz-h\le0,\quad
-           Qz+p+A^T\nu+G^T\lambda=0,\quad
-           \lambda\odot(Gz-h)=0.
-
-        qpth owns the actual backward multipliers. The least-squares values
-        computed here are detached diagnostics only.
-        """
-        Q, p, G, h, A, b, variable_scale = matrices
-        with torch.no_grad():
-            equality = torch.einsum("bij,bj->bi", A, x_scaled) - b
-            inequality = torch.einsum("bij,bj->bi", G, x_scaled) - h
-            finite_output = torch.isfinite(x_scaled).all(dim=-1)
-            equality_max = (
-                equality.abs().amax(dim=-1) if equality.shape[1]
-                else x_scaled.new_zeros(x_scaled.shape[0])
-            )
-        result = {
-            # Mandatory normalized primal certification. These values are
-            # computed at every diagnostics level because they decide whether
-            # qpth's candidate advances or enters the fallback cascade.
-            "equality_max": equality_max.detach(),
-            "inequality_max": inequality.detach().clamp_min(0.0).amax(dim=-1),
-            "output_finite": finite_output,
-        }
-        if self._physical_enabled():
-            # Physical matrix products are reporting-only and intentionally
-            # absent from minimal training.
-            with torch.no_grad():
-                physical_x = x_scaled * variable_scale
-                physical_equality = (
-                    torch.einsum(
-                        "bij,bj->bi", matrices.physical_A, physical_x
-                    ) - matrices.physical_b
-                )
-                physical_inequality = (
-                    torch.einsum(
-                        "bij,bj->bi", matrices.physical_G, physical_x
-                    ) - matrices.physical_h
-                )
-            # Elastic recovery moves dynamics equalities into its objective,
-            # leaving A with zero rows. An empty constraint block has zero
-            # violation (not a claim of zero physical dynamics error).
-            def equality_block_max(block):
-                return (block.abs().amax(dim=-1) if block.shape[-1]
-                        else x_scaled.new_zeros(x_scaled.shape[0]))
-
-            result.update({
-                "physical_equality_max": equality_block_max(physical_equality),
-                "physical_inequality_max": physical_inequality.clamp_min(0.0).amax(dim=-1),
-                "physical_base_linear_equality_max": equality_block_max(physical_equality[:, :3]),
-                "physical_base_angular_equality_max": equality_block_max(physical_equality[:, 3:6]),
-                "physical_joint_equality_max": equality_block_max(physical_equality[:, 6:18]),
-            })
-        # Full multiplier reconstruction is sampled debug instrumentation;
-        # normal acceptance uses exact primal residuals only.
-        stationarity = x_scaled.new_full((x_scaled.shape[0],), float("nan"))
-        stationarity_raw = stationarity.clone()
-        complementarity = stationarity.clone()
-        audit_count = min(int(audit_count), x_scaled.shape[0])
-        if audit_count:
-            gradient = torch.einsum("bij,bj->bi", Q, x_scaled).detach() + p.detach()
-            active = inequality > -self.cfg.active_tolerance
-            stationarity_values, raw_values, complementarity_values = [], [], []
-            for index in range(audit_count):
-            # G_A contains the active inequality rows for one environment.
-                active_g = G[index, active[index]]
-            # Diagnostic multipliers are detached; implicit gradients are
-            # provided exclusively by qpth's backward KKT solve. Alternate
-            # equality least-squares with a projected (lambda>=0) active-set
-            # solve; this validates dual feasibility without retaining another
-            # differentiable KKT graph.
-            # Stationarity matrix columns are [A^T,G_A^T].
-                a_t = A[index].detach().transpose(0, 1)
-                g_t = active_g.detach().transpose(0, 1)
-                grad = gradient[index]
-                combined = torch.cat((a_t, g_t), dim=-1)
-            # Minimum-norm initial multipliers solve
-            # [A^T,G_A^T][nu,lambda] approximately equal to -grad.
-                initial = torch.linalg.pinv(combined) @ (-grad)
-                equality_multiplier = initial[:A.shape[1]]
-            # Inequality dual feasibility requires lambda>=0.
-                inequality_multiplier = initial[A.shape[1]:].clamp_min(0.0)
-            # A few alternating least-squares projections improve the
-            # detached multiplier estimate without another KKT factorization.
-                for _ in range(3):
-                    if active_g.shape[0]:
-                        inequality_multiplier = (
-                            torch.linalg.pinv(g_t)
-                            @ (-grad - a_t @ equality_multiplier)
-                        ).clamp_min(0.0)
-                    equality_multiplier = (
-                        torch.linalg.pinv(a_t)
-                        @ (-grad - g_t @ inequality_multiplier)
-                    )
-            # r_dual=Qz+p+A^T*nu+G_A^T*lambda.
-                residual = grad + a_t @ equality_multiplier + g_t @ inequality_multiplier
-                raw_stationarity = residual.abs().max()
-                raw_values.append(raw_stationarity)
-            # Q and p are dimensionless scaled-space coefficients whose
-            # magnitude changes with configured tracking weights. Report and
-            # gate on a relative KKT stationarity residual while retaining the
-            # raw value for diagnosis.
-                stationarity_values.append(
-                    raw_stationarity / (1.0 + grad.abs().max())
-                )
-                if active_g.shape[0]:
-                # Complementarity residual max|lambda_i*(G_i z-h_i)|.
-                    complementarity_values.append((
-                        inequality_multiplier * inequality[index, active[index]].detach()
-                    ).abs().max())
-                else:
-                    complementarity_values.append(residual.new_zeros(()))
-            stationarity[:audit_count] = torch.stack(stationarity_values)
-            stationarity_raw[:audit_count] = torch.stack(raw_values)
-            complementarity[:audit_count] = torch.stack(complementarity_values)
-            # Matrix-health audits operate on only the configured sample.
-            eigenvalues = torch.linalg.eigvalsh(Q[:audit_count].detach())
-            singular_values = torch.linalg.svdvals(A[:audit_count].detach())
-            _, cholesky_info = torch.linalg.cholesky_ex(Q[:audit_count].detach())
-
-            def sampled(values):
-                aligned = x_scaled.new_full(
-                    (x_scaled.shape[0],), float("nan")
-                )
-                aligned[:audit_count] = values
-                return aligned
-
-            q_min = eigenvalues[:, 0]
-            q_max = eigenvalues[:, -1]
-            a_min = singular_values[:, -1]
-            a_max = singular_values[:, 0]
-            result.update({
-                "stationarity_max": stationarity,
-                "stationarity_raw_max": stationarity_raw,
-                "complementarity_max": complementarity,
-                "audit_q_eigen_min": sampled(q_min),
-                "audit_q_eigen_max": sampled(q_max),
-                "audit_q_condition": sampled(q_max / q_min.clamp_min(1.0e-30)),
-                "audit_q_cholesky_success": sampled(
-                    (cholesky_info == 0).to(x_scaled.dtype)
-                ),
-                "audit_a_singular_min": sampled(a_min),
-                "audit_a_singular_max": sampled(a_max),
-                "audit_a_rank": sampled(
-                    (singular_values > 1.0e-9).sum(dim=-1).to(x_scaled.dtype)
-                ),
-                "audit_equality_row_scale_min": sampled(
-                    matrices.equality_row_scale[:audit_count].amin(dim=-1)
-                ),
-                "audit_equality_row_scale_max": sampled(
-                    matrices.equality_row_scale[:audit_count].amax(dim=-1)
-                ),
-                "audit_equality_row_scale_mean": sampled(
-                    matrices.equality_row_scale[:audit_count].mean(dim=-1)
-                ),
-                "audit_inequality_row_scale_min": sampled(
-                    matrices.inequality_row_scale[:audit_count].amin(dim=-1)
-                ),
-                "audit_inequality_row_scale_max": sampled(
-                    matrices.inequality_row_scale[:audit_count].amax(dim=-1)
-                ),
-                "audit_inequality_row_scale_mean": sampled(
-                    matrices.inequality_row_scale[:audit_count].mean(dim=-1)
-                ),
-            })
-            for name, indices in self._audit_inequality_groups(
-                relaxed_contact, inequality.device
-            ).items():
-                result[f"audit_active_fraction_{name}"] = sampled(
-                    active[:audit_count, indices].float().mean(dim=-1)
-                )
-
-            if data is not None:
-                # Decompose the configured physical objective on the audited
-                # candidates. Constant target-only offsets are omitted, just
-                # as they are from qpth's p/Q representation.
-                physical = x_scaled[:audit_count] * variable_scale
-                tau = physical[:, TORQUE]
-                force = physical[:, FORCE]
-                qdd = physical[:, QDD]
-                slack = physical[:, SLACK]
-                tau_ref = data["tau_nom"][:audit_count].detach()
-                force_ref = data["force_pred_world"][:audit_count].reshape(-1, 12).detach()
-                tau_limit = self._limits(tau)[0]
-                objective_terms = {
-                    "torque_tracking": self.cfg.torque_tracking_weight
-                    * ((tau - tau_ref) / tau_limit).square().sum(dim=-1),
-                    "force_tracking": self.cfg.force_tracking_weight
-                    * ((force - force_ref) / self.cfg.force_scale_n).square().sum(dim=-1),
-                    "slack": self.cfg.slack_weight
-                    * (slack / self.cfg.slack_scale_m_s2).square().sum(dim=-1),
-                    "qdd_regularization": self.cfg.qdd_regularization
-                    * qdd.square().sum(dim=-1),
-                    "force_regularization": self.cfg.force_regularization
-                    * (force / self.cfg.force_scale_n).square().sum(dim=-1),
-                    "torque_regularization": self.cfg.torque_regularization
-                    * (tau / tau_limit).square().sum(dim=-1),
-                    "ridge": self.cfg.q_regularization
-                    * physical.square().sum(dim=-1),
-                    # The final solver-space diagonal ridge contributes
-                    # 1/2*r_Q*||z||^2 in qpth's 1/2*z^TQz convention.
-                    "solver_space_spd_ridge": 0.5
-                    * self.cfg.q_regularization
-                    * x_scaled[:audit_count].square().sum(dim=-1),
-                }
-                for name, values in objective_terms.items():
-                    result[f"audit_objective_{name}"] = sampled(values)
-                result["audit_objective_total"] = sampled(
-                    sum(objective_terms.values())
-                )
-        return result
-
-    def _solve_stage(self, data, relaxed_contact, audit_count=0, warm_key=None,
-                     elastic=False, active_ids=None, active_reuse=False, environment_count=None):
-        r"""Build, validate, solve, and certify one QP fallback stage.
-
-        qpth returns ``z*`` and its backward differentiates the KKT system;
-        this method returns physical ``x*=D z*`` only after residual checks.
-        """
-        # Construct either the full contact-softened problem or stage one with
-        # contact/slack inequalities removed. No ``s=0`` equality is added:
-        # the strictly positive quadratic slack cost has its minimum at zero.
-        event_profile = self.profiles[self._diagnostics_phase]
-        with event_profile.measure("assembly", data["tau_nom"]):
-            matrices = self._build(
-                data, relaxed_contact=relaxed_contact, elastic=elastic
-            )
-        # Validate coefficients before entering qpth's batched factorization.
-        valid, finite, rank_ok, spd = self._validate_inputs(
-            matrices, audit_count=audit_count
-        )
-        Q, p, G, h, A, b, variable_scale = matrices
-        # A bad row cannot be sent through a batched factorization. Replace it
-        # by a finite, known-SPD placeholder; its output is rejected below and
-        # deterministically falls through to the next stage.
-        invalid = ~valid
-        # Dynamic compaction requires a size read, but do not also read any(),
-        # all(), or sum() scalars. Reuse one index tensor per decision point.
-        invalid_indices = invalid.nonzero(as_tuple=True)[0]
-        if invalid_indices.numel():
-            # Q=I is finite/SPD and cannot poison other environments' batch.
-            eye = torch.eye(NUM_VARIABLES, device=Q.device, dtype=Q.dtype)
-            Q = torch.where(invalid[:, None, None], eye, Q)
-            # p=0 makes z=0 the placeholder objective minimizer.
-            p = torch.where(invalid[:, None], torch.zeros_like(p), p)
-            # 0*z<=1 gives a strictly feasible placeholder inequality set.
-            G = torch.where(invalid[:, None, None], torch.zeros_like(G), G)
-            h = torch.where(invalid[:, None], torch.ones_like(h), h)
-            # [I_18,0]z=0 is full-row-rank and feasible at z=0.
-            placeholder_a = torch.zeros_like(A)
-            placeholder_a[:, :, :A.shape[1]] = torch.eye(
-                A.shape[1], device=A.device, dtype=A.dtype
-            )
-            A = torch.where(invalid[:, None, None], placeholder_a, A)
-            b = torch.where(invalid[:, None], torch.zeros_like(b), b)
-            # Diagnostics must inspect exactly the sanitized matrices qpth saw.
-            matrices = replace(
-                matrices, Q=Q, p=p, G=G, h=h, A=A, b=b,
-                native_lower=torch.where(invalid[:, None], -torch.inf,
-                                         matrices.native_lower),
-                native_upper=torch.where(invalid[:, None], torch.inf,
-                                         matrices.native_upper),
-            )
-        # This bit is separate from coefficient validity: qpth can reject an
-        # otherwise valid numerical factorization at runtime.
-        solver_exception = torch.zeros_like(valid)
-        duality_gap = p.new_full((p.shape[0],), float("nan"))
-        duality_gap_rel = duality_gap.clone()
-        warm_hit_mask = torch.zeros_like(valid)
-        terminal_state = None
-        active_snapshot, active_metrics = None, None
-        try:
-            # Every backend consumes these exact canonical scaled matrices.
-            # QP construction, certification, and fallback never live in an
-            # adapter, so changing solvers cannot change physical semantics.
-            if active_ids is not None:
-                backend_result, active_snapshot, active_metrics = self._active_constraint_cache.solve(
-                    self, matrices, active_ids, active_reuse, environment_count,
-                )
-                solution_scaled = backend_result.solution
-                duality_gap, duality_gap_rel = backend_result.duality_gap, backend_result.duality_gap_rel
-                solver_exception = active_metrics.get("solver_exception", solver_exception)
-            elif (
-                self._active_solver == "qpth"
-                and self.cfg.qpth_warm_start
-                and not self._active_differentiable
-                and warm_key is not None
-            ):
-                warm_entry = self._qpth_warm_states.get(warm_key)
-                if warm_entry is None:
-                    warm_state, warm_mask = None, None
-                else:
-                    warm_state, warm_mask = warm_entry
-                    warm_hit_mask = warm_mask.to(valid.device).clone()
-                solution_scaled, terminal_state = solve_qpth_warm(
-                    Q, p, G, h, A, b, warm_start=warm_state,
-                    warm_mask=warm_mask,
-                    eps=self._eps(Q.dtype),
-                    verbose=(-1 if self.cfg.verbose == 0 else self.cfg.verbose),
-                    not_improved_limit=self.cfg.not_improved_limit,
-                    max_iter=self.cfg.max_iter,
-                    check_q_spd=self.cfg.check_q_spd,
-                )
-            elif self._active_solver == "qpth":
-                solution_scaled = QPFunction(
-                    eps=self._eps(Q.dtype),
-                    # qpth gates its inaccurate-solution banner on verbose>=0.
-                    # Our mandatory primal checks classify the candidate, so
-                    # public quiet mode maps to -1 without weakening safety.
-                    verbose=(-1 if self.cfg.verbose == 0 else self.cfg.verbose),
-                    notImprovedLim=self.cfg.not_improved_limit,
-                    maxIter=self.cfg.max_iter,
-                    check_Q_spd=self.cfg.check_q_spd,
-                )(Q, p, G, h, A, b)
-            else:
-                backend_g = G
-                backend_h = h
-                native_lower = matrices.native_lower
-                native_upper = matrices.native_upper
-                if self._active_solver == "cupiqp":
-                    # Native box rows: tau[0:24], actuated qdd[24:48], and
-                    # (full stage only) slack nonnegativity[68:80]. Canonical
-                    # G/h remain untouched above for physical certification.
-                    with event_profile.measure("packing", Q):
-                        backend_g, backend_h, native_lower, native_upper = (
-                            self._cupiqp_native_pack(
-                                matrices, relaxed_contact, elastic=elastic
-                            )
-                        )
-                backend_result = self._backend_instances[
-                    self._active_solver
-                ].solve(
-                    Q, p, backend_g, backend_h, A, b,
-                    differentiable=self._active_differentiable,
-                    native_lower=native_lower,
-                    native_upper=native_upper,
-                    constant_hessian=not elastic and not invalid_indices.numel(),
-                )
-                solution_scaled = backend_result.solution
-                if backend_result.duality_gap is not None:
-                    duality_gap = backend_result.duality_gap
-                    duality_gap_rel = backend_result.duality_gap_rel
-        except QPBackendUnavailable:
-            # An explicitly selected unavailable GPU solver is a configuration
-            # error, never a reason to execute another backend or CPU path.
-            raise
-        except Exception as error:
-            # Optional GPU libraries also raise their own exception classes
-            # (e.g. nvmath cuBLASError / CuPy allocation errors). Capture these
-            # at this backend-only boundary; unavailable backends still raise
-            # above, and interrupts/SystemExit are deliberately not caught.
-            capture_failure(self, error, {
-                "Q": Q, "p": p, "G": G if self._active_solver == "qpth" else backend_g,
-                "h": h if self._active_solver == "qpth" else backend_h,
-                "A": A, "b": b,
-                "native_lower": None if self._active_solver == "qpth" else native_lower,
-                "native_upper": None if self._active_solver == "qpth" else native_upper,
-            }, relaxed_contact=relaxed_contact, elastic=elastic)
-            # qpth factorizes a complete batch. A numerical failure therefore
-            # rejects this stage for the chunk; solve() proceeds to the less
-            # constrained stage, then the analytic actuator/rate projection.
-            solution_scaled = torch.zeros_like(p)
-            solver_exception = torch.ones_like(valid)
-        if solution_scaled is None:
-            # Defensive handling for solver versions that return None instead
-            # of throwing when their factorization fails.
-            solution_scaled = torch.zeros_like(p)
-            solver_exception = torch.ones_like(valid)
-        # Certify the returned z against the precise scaled problem.
-        certification_token = event_profile.begin(data["tau_nom"])
-        diagnostics = self._diagnostics(
-            solution_scaled, matrices, audit_count=audit_count,
-            relaxed_contact=relaxed_contact, data=data,
-        )
-        diagnostics["duality_gap"] = duality_gap.detach()
-        diagnostics["duality_gap_rel"] = duality_gap_rel.detach()
-        # Dual KKT validity requires both relative stationarity and
-        # complementarity below their configured tolerance.
-        if audit_count:
-            diagnostics["kkt_valid"] = (
-                (diagnostics["stationarity_max"] <= self.cfg.kkt_tolerance)
-                & (diagnostics["complementarity_max"] <= self.cfg.kkt_tolerance)
-            )
-        # A stage is accepted only if all input, solver, finite-output, primal,
-        # and dual checks pass for that environment.
-        profile = self._profile(self._active_differentiable)
-        feasibility_tolerance = (
-            profile["feasibility"] if self._active_solver == "cupiqp"
-            else self._normalized_tolerance(Q.dtype)
-        )
-        success = (
-            valid & ~solver_exception
-            & diagnostics["output_finite"]
-            & (diagnostics["equality_max"] <= feasibility_tolerance)
-            & (diagnostics["inequality_max"] <= feasibility_tolerance)
-        )
-        if self._active_solver == "cupiqp" and profile["gap_policy"] == "require":
-            gap_ok = torch.isfinite(duality_gap) & torch.isfinite(duality_gap_rel)
-            gap_ok &= (
-                (duality_gap <= profile["gap_abs"])
-                | (duality_gap_rel <= profile["gap_rel"])
-            )
-            success &= gap_ok
-        if active_ids is not None:
-            if active_snapshot is not None:
-                # Recovery stages never seed a full-problem active cache.
-                self._active_constraint_cache.commit(
-                    matrices, active_ids, active_snapshot, success, self.cfg,
-                )
-                for name, value in active_metrics.items():
-                    diagnostics["active/" + name] = value.detach()
-            else:
-                self._active_constraint_cache.clear(active_ids)
-        if warm_key is not None and terminal_state is not None:
-            # Install only certified terminal rows. Reset/failed rows remain
-            # cold next substep, while every unaffected environment keeps its
-            # own primal/dual/slack iterate.
-            self._qpth_warm_states[warm_key] = (
-                terminal_state, success.detach().clone()
-            )
-        elif warm_key is not None and warm_key in self._qpth_warm_states:
-            # No terminal state means the batched warm call raised before a
-            # candidate existed; every row is cold-retried below, so discard
-            # the structurally bad cached entry and let the next solve seed it.
-            self._qpth_warm_states.pop(warm_key, None)
-        cold_indices = ((~success).nonzero(as_tuple=True)[0]
-                        if warm_key is not None else None)
-        if cold_indices is not None and cold_indices.numel():
-            # Any failed warm candidate must be cold-resolved before entering
-            # the relaxed-contact stage. Successful rows retain their states;
-            # failed rows stay invalid even if this one-off cold retry passes.
-            failed = ~success
-            cold_data = {name: value.index_select(0, cold_indices)
-                         for name, value in data.items()}
-            cold_solution, cold_ok, cold_diag = self._solve_stage(
-                cold_data, relaxed_contact, audit_count=0, warm_key=None,
-            )
-            solution_scaled = solution_scaled.clone()
-            solution_scaled[cold_indices] = (
-                cold_solution / variable_scale
-            )
-            success = success.clone()
-            success[cold_indices] = cold_ok
-            for name, values in cold_diag.items():
-                if name in diagnostics and diagnostics[name].shape == success.shape:
-                    diagnostics[name] = diagnostics[name].clone()
-                    diagnostics[name][cold_indices] = values
-            diagnostics["warm_residual_cold_retry"] = failed
-        if "warm_residual_cold_retry" not in diagnostics:
-            diagnostics["warm_residual_cold_retry"] = torch.zeros_like(success)
-        if self._active_differentiable and solution_scaled.requires_grad:
-            # The mask sits immediately above the backend autograd Function,
-            # so an uncertified row contributes exactly zero to its batched
-            # implicit KKT VJP and cannot contaminate certified neighbours.
-            solution_scaled = _CertifiedRows.apply(solution_scaled, success.detach())
-        diagnostics["warm_start_hit"] = warm_hit_mask
-        diagnostics.update({"input_finite": finite, "equality_rank": rank_ok,
-                            "q_spd": spd,
-                            "solver_exception": solver_exception})
-        # Undo x=Dz. This multiplication retains qpth's implicit gradient.
-        diagnostics["attempted"] = torch.ones_like(success)
-        event_profile.end("certification_recovery", certification_token)
-        return solution_scaled * variable_scale, success, diagnostics
-
-    def _precheck(self, data):
-        """Return cheap validity masks and exact bound intersections."""
-        reference = data["tau_nom"]
-        torque_limit, q_lower, q_upper, velocity_limit = self._limits(reference)
-        previous = data["previous_torque"].detach()
-        joint_position = data["joint_position"].detach()
-        joint_velocity = data["joint_velocity"].detach()
+        limits, qmin, qmax, vmax = self._limits(ref)
         dt = data["dt"].detach().reshape(-1, 1)
-        rate = self.cfg.torque_rate_limit_nm_s * dt
-        tau_lower = torch.maximum(-torque_limit, previous - rate)
-        tau_upper = torch.minimum(torque_limit, previous + rate)
-        position_coefficient = (
-            self.cfg.position_integration_coefficient * dt.square()
-        ).clamp_min(torch.finfo(reference.dtype).tiny)
-        velocity_coefficient = dt.clamp_min(torch.finfo(reference.dtype).tiny)
-        qdd_upper = torch.minimum(
-            (q_upper - joint_position - dt * joint_velocity)
-            / position_coefficient,
-            (velocity_limit - joint_velocity) / velocity_coefficient,
-        )
-        qdd_lower = torch.maximum(
-            (q_lower - joint_position - dt * joint_velocity)
-            / position_coefficient,
-            (-velocity_limit - joint_velocity) / velocity_coefficient,
-        )
-        finite = torch.stack([
-            value.detach().reshape(value.shape[0], -1).isfinite().all(dim=-1)
-            for value in data.values()
-        ]).all(dim=0)
-        torque_ok = (tau_lower <= tau_upper).all(dim=-1)
-        qdd_ok = (qdd_lower <= qdd_upper).all(dim=-1)
-        return finite, torque_ok, qdd_ok, tau_lower, tau_upper
-
-    def _full_audit_due(self, differentiable):
-        period = self._full_audit_period(self.cfg)
-        return (
-            self.diagnostics_level == "full"
-            and period > 0
-            and self._solve_count_by_mode[bool(differentiable)] % period == 0
-        )
+        previous = data["previous_torque"].detach()
+        lower = torch.maximum(-limits, previous - self.cfg.torque_rate_limit_nm_s * dt)
+        upper = torch.minimum(limits, previous + self.cfg.torque_rate_limit_nm_s * dt)
+        q, v = data["joint_position"].detach(), data["joint_velocity"].detach()
+        amax = ref.new_tensor(self.cfg.joint_acceleration_limits_rad_s2).reshape(1,12)
+        beta = self.cfg.position_integration_coefficient
+        alower = torch.maximum(-amax, torch.maximum((-vmax-v)/dt, (qmin-q-dt*v)/(beta*dt.square())))
+        aupper = torch.minimum(amax, torch.minimum((vmax-v)/dt, (qmax-q-dt*v)/(beta*dt.square())))
+        joint_map, joint_offset = mechanics_map[:,6:], offset[:,6:]
+        # Torque 24 rows, acceleration intersection 24 rows. beta=1 matches
+        # semi-implicit Genesis/PhysX; beta=.5 is the constant-a convention.
+        G = [eye[:12].expand(batch,-1,-1), -eye[:12].expand(batch,-1,-1),
+             joint_map, -joint_map]
+        h = [upper, -lower, aupper-joint_offset, joint_offset-alower]
+        for foot in feet:
+            block = ref.new_zeros(5,24)
+            col = 12+3*foot
+            block[0,col+2] = -1
+            block[1,col], block[2,col] = 1, -1
+            block[3,col+1], block[4,col+1] = 1, -1
+            block[1:,col+2] = -self.cfg.friction_coefficient
+            G.append(block.expand(batch,-1,-1))
+            h.append(ref.new_zeros(batch,5))
+        physical_G, physical_h = torch.cat(G,1), torch.cat(h,1)
+        swing_columns = [12+3*foot+axis for foot in swing for axis in range(3)]
+        physical_A = eye[swing_columns].expand(batch,-1,-1)
+        physical_b = ref.new_zeros(batch,len(swing_columns))
+        G, h, gs = _row_scale(physical_G * scale, physical_h)
+        A, b, es = _row_scale(physical_A * scale, physical_b)
+        Q = Q * scale[:,None] * scale[None,:]
+        Q = .5 * (Q + Q.transpose(1,2))
+        Q = Q + self.cfg.q_regularization * eye
+        p = p * scale
+        native_lower = ref.new_full((batch,24), -torch.inf)
+        native_upper = ref.new_full((batch,24), torch.inf)
+        native_lower[:,:12], native_upper[:,:12] = lower/scale[:12], upper/scale[:12]
+        return _QPBuild(Q,p,G,h,A,b,scale,physical_G,physical_h,physical_A,physical_b,
+                        es,gs,lower,upper,alower,aupper,native_lower,native_upper,
+                        mechanics_map,offset,mechanics_valid)
 
     @staticmethod
-    def _finite_mean(values):
-        finite = torch.isfinite(values)
-        return torch.where(finite, values, torch.zeros_like(values)).sum() / (
-            finite.sum().clamp_min(1).to(values.dtype)
-        )
+    def _cupiqp_native_pack(m):
+        # cuPIQP 0.1 setup/update support x_l/x_u. Only the first 24 canonical
+        # inequalities are true coordinate bounds. Joint acceleration bounds
+        # are coupled affine rows and MUST remain general inequalities.
+        return m.G[:,24:], m.h[:,24:], m.native_lower, m.native_upper
 
     @staticmethod
-    def _absolute_stats(metrics, prefix, values):
-        """Add detached scalar mean/p95/max statistics on the live device."""
-        flat = values.detach().abs().reshape(-1)
-        metrics[f"{prefix}/mean"] = flat.mean()
-        metrics[f"{prefix}/p95"] = torch.quantile(flat, 0.95)
-        metrics[f"{prefix}/max"] = flat.max()
+    def _maximum(value):
+        return value.amax(-1) if value.shape[-1] else value.new_zeros(value.shape[0])
 
-    def _minimal_summary(self, stage, differentiated, diagnostics):
-        """Aggregate mandatory certification/fallback values on-device."""
-        prefix = "qp/minimal"
-        analytic_stage = 3 if self.cfg.elastic_recovery_enabled else 2
-        metrics = {
-            f"{prefix}/full_count": (stage == 0).sum(),
-            f"{prefix}/relaxed_count": (stage == 1).sum(),
-            f"{prefix}/elastic_count": (stage == 2).sum() if self.cfg.elastic_recovery_enabled else stage.new_zeros(()),
-            f"{prefix}/fallback_count": (stage == analytic_stage).sum(),
-            f"{prefix}/full_fraction": (stage == 0).float().mean(),
-            f"{prefix}/relaxed_fraction": (stage == 1).float().mean(),
-            f"{prefix}/elastic_fraction": (stage == 2).float().mean() if self.cfg.elastic_recovery_enabled else stage.new_zeros((), dtype=torch.float32),
-            f"{prefix}/fallback_fraction": (stage == analytic_stage).float().mean(),
-            f"{prefix}/differentiated_fraction": differentiated.float().mean(),
-            f"{prefix}/gradient_masked_fraction": (~differentiated).float().mean(),
-            f"{prefix}/pre_clamp_torque_violation_max": diagnostics[
-                "pre_clamp_torque_violation_max"
-            ].max(),
-            f"{prefix}/solver_qpth": stage.new_tensor(
-                float(self._active_solver == "qpth"), dtype=torch.float32
-            ),
-            f"{prefix}/solver_cupiqp": stage.new_tensor(
-                float(self._active_solver == "cupiqp"), dtype=torch.float32
-            ),
-            f"{prefix}/solver_moreau": stage.new_tensor(
-                float(self._active_solver == "moreau"), dtype=torch.float32
-            ),
-            f"{prefix}/rollout_ppo_solver_mismatch": stage.new_tensor(
-                float(self.solver_for_mode(False) != self.solver_for_mode(True)),
-                dtype=torch.float32,
-            ),
-        }
-        for source, name in (
-            ("selected/equality_max", "normalized_equality_residual_max"),
-            ("selected/inequality_max", "normalized_inequality_violation_max"),
-        ):
-            metrics[f"{prefix}/{name}"] = diagnostics[source].nan_to_num().max()
-        for source in (
-            "failure/nonfinite_input",
-            "failure/empty_torque_intersection",
-            "failure/empty_qdd_intersection",
-        ):
-            metrics[f"{prefix}/{source}"] = diagnostics[source].float().mean()
-        stage_names = ["full", "relaxed"]
-        if self.cfg.elastic_recovery_enabled:
-            stage_names.append("elastic")
-        for stage_name in stage_names:
-            for source in ("input_finite", "output_finite", "solver_exception"):
-                key = f"{stage_name}/{source}"
-                if key in diagnostics:
-                    metrics[f"{prefix}/{key}_fraction"] = (
-                        diagnostics[key].float().mean()
-                    )
-            for source in ("duality_gap", "duality_gap_rel"):
-                key = f"{stage_name}/{source}"
-                if key in diagnostics:
-                    metrics[f"{prefix}/{key}_mean"] = self._finite_mean(
-                        diagnostics[key]
-                    )
-        for name in ("warm_start_hit", "warm_residual_cold_retry"):
-            key = f"full/{name}"
-            metrics[f"{prefix}/{name}_fraction"] = (
-                diagnostics[key].float().mean()
-                if key in diagnostics else stage.new_tensor(0.0, dtype=torch.float32)
-            )
+    @torch.no_grad()
+    def _certificate(self, m, z, tolerance):
+        # Certify the EXACT final command after torque projection and exact
+        # swing equality enforcement; never certify a different pre-clamp x.
+        eq = (m.A @ z[...,None]).squeeze(-1)-m.b
+        iq = (m.G @ z[...,None]).squeeze(-1)-m.h
+        finite = torch.isfinite(z).all(-1)
+        er, ir = self._maximum(eq.abs()), self._maximum(iq.clamp_min(0))
+        return finite & (er<=tolerance) & (ir<=tolerance), er, ir
+
+    @torch.no_grad()
+    def _physical_diagnostics(self, m, x, data):
+        """Physical-unit checks remain separate from normalized acceptance."""
+        residual = (m.physical_G @ x[...,None]).squeeze(-1)-m.physical_h
+        equality = (m.physical_A @ x[...,None]).squeeze(-1)-m.physical_b
+        a = (m.acceleration_map @ x[...,None]).squeeze(-1)+m.acceleration_offset
+        dyn = (data["mass_matrix"] @ a[...,None]).squeeze(-1)+data["bias"]
+        dyn[:,6:] -= x[:,:12]
+        dyn -= torch.einsum("bfkn,bfk->bn",data["foot_jacobians"],x[:,12:].reshape(-1,4,3))
+        dyn -= torch.einsum("bkn,bk->bn",data["base_jacobian"],data["wrench_pred_world"])
+        metrics = {"equality_max":self._maximum(equality.abs()),
+                   "inequality_max":self._maximum(residual.clamp_min(0))}
+        for name,sl in (("base_linear",slice(0,3)),("base_angular",slice(3,6)),("joint",slice(6,18))):
+            metrics["dynamics/"+name+"_mae"] = dyn[:,sl].abs().mean(-1)
+        for name,sl in (("torque_rate_intersection",slice(0,24)),
+                        ("joint_acceleration_intersection",slice(24,48)),
+                        ("friction_unilateral",slice(48,None))):
+            metrics[name+"/violation_max"] = self._maximum(residual[:,sl].clamp_min(0))
+            metrics[name+"/margin_min"] = (-residual[:,sl]).amin(-1) if residual[:,sl].shape[1] else x.new_full((x.shape[0],),float("nan"))
+        for name,value in (("qdd",a),("force",x[:,12:]),("torque",x[:,:12])):
+            metrics[name+"/mean"] = value.abs().mean(-1)
+            metrics[name+"/max"] = value.abs().amax(-1)
         return metrics
 
-    def _physical_summary(self, solution, data):
-        """Compute physical-unit summaries without host transfer or sync."""
-        prefix = "qp/physical"
-        qdd = solution[:, QDD]
-        force = solution[:, FORCE].reshape(-1, 4, 3)
-        tau = solution[:, TORQUE]
-        slack = solution[:, SLACK].reshape(-1, 4, 3)
-        dtype, device = solution.dtype, solution.device
+    @torch.no_grad()
+    def _audit(self, m, z):
+        """Periodic bounded audits only; never used to reject a solution."""
+        eig = torch.linalg.eigvalsh(m.Q)
+        rank = torch.linalg.matrix_rank(m.A) if m.A.shape[1] else z.new_zeros(z.shape[0])
+        slack = m.h-(m.G @ z[...,None]).squeeze(-1)
+        active = slack.abs() <= self.cfg.active_tolerance
+        C = torch.cat((m.A,m.G*active[...,None]),1)
+        grad = (m.Q @ z[...,None]).squeeze(-1)+m.p
+        dual = (torch.linalg.pinv(C.transpose(1,2)) @ -grad[...,None]).squeeze(-1)
+        stationarity = grad+(C.transpose(1,2)@dual[...,None]).squeeze(-1)
+        lam = dual[:,m.A.shape[1]:]
+        return {"q_min_eigenvalue":eig[:,0],"q_max_eigenvalue":eig[:,-1],
+                "q_condition":eig[:,-1]/eig[:,0],"equality_rank":rank,
+                "stationarity_max":stationarity.abs().amax(-1),
+                "complementarity_max":(lam*slack).abs().amax(-1),
+                "active_constraint_fraction":active.float().mean(-1)}
 
-        def measured(name):
-            return data[name].detach().to(device=device, dtype=dtype)
-
-        mass = measured("mass_matrix")
-        bias = measured("bias")
-        foot_jac = measured("foot_jacobians")
-        base_jac = measured("base_jacobian")
-        wrench = measured("wrench_pred_world")
-        dynamics = (
-            torch.einsum("bij,bj->bi", mass, qdd) + bias
-            - torch.cat((torch.zeros_like(tau[:, :6]), tau), dim=-1)
-            - torch.einsum("bfkn,bfk->bn", foot_jac, force)
-            - torch.einsum("bkn,bk->bn", base_jac, wrench)
-        )
-        metrics = {}
-        for name, block in (
-            ("base_linear", dynamics[:, :3]),
-            ("base_angular", dynamics[:, 3:6]),
-            ("joint", dynamics[:, 6:18]),
-            ("all", dynamics),
-        ):
-            metrics[f"{prefix}/dynamics_residual/{name}_mae"] = block.abs().mean()
-            metrics[f"{prefix}/dynamics_residual/{name}_max"] = block.abs().max()
-
-        torque_limit, q_lower, q_upper, velocity_limit = self._limits(solution)
-        previous = measured("previous_torque")
-        joint_position = measured("joint_position")
-        joint_velocity = measured("joint_velocity")
-        dt = measured("dt").reshape(-1, 1)
-        next_velocity = joint_velocity + dt * qdd[:, 6:]
-        next_position = (
-            joint_position + dt * joint_velocity
-            + self.cfg.position_integration_coefficient * dt.square() * qdd[:, 6:]
-        )
-        c_eff = measured("contact_probability")
-        foot_acceleration = (
-            torch.einsum("bfkn,bn->bfk", foot_jac, qdd)
-            + measured("foot_acceleration_bias")
-        )
-        margins = {
-            "torque": torque_limit - tau.abs(),
-            "torque_rate": self.cfg.torque_rate_limit_nm_s * dt
-            - (tau - previous).abs(),
-            "joint_position": torch.minimum(
-                next_position - q_lower, q_upper - next_position
-            ),
-            "joint_velocity": velocity_limit - next_velocity.abs(),
-            "unilateral_force": force[..., 2],
-            "friction_pyramid": torch.stack((
-                self.cfg.friction_coefficient * force[..., 2] - force[..., 0],
-                self.cfg.friction_coefficient * force[..., 2] + force[..., 0],
-                self.cfg.friction_coefficient * force[..., 2] - force[..., 1],
-                self.cfg.friction_coefficient * force[..., 2] + force[..., 1],
-            ), dim=-1),
-            "slack": slack,
-            "contact_acceleration": (
-                self.cfg.contact_acceleration_limit_m_s2
-                + self.cfg.interior_margin + slack
-                - (c_eff.unsqueeze(-1) * foot_acceleration).abs()
-            ),
-        }
-        for name, margin in margins.items():
-            metrics[f"{prefix}/margin_min/{name}"] = margin.min()
-            metrics[f"{prefix}/violation_max/{name}"] = (
-                -margin
-            ).clamp_min(0.0).max()
-
-        force_prediction = measured("force_pred_world").reshape_as(force)
-        self._absolute_stats(metrics, f"{prefix}/torque_correction", tau - measured("tau_nom"))
-        self._absolute_stats(metrics, f"{prefix}/grf_tracking_error", force - force_prediction)
-        self._absolute_stats(metrics, f"{prefix}/slack", slack)
-        self._absolute_stats(metrics, f"{prefix}/qdd", qdd)
-        self._absolute_stats(metrics, f"{prefix}/force", force)
-        self._absolute_stats(metrics, f"{prefix}/torque", tau)
-        return metrics
-
-    def _full_summary(self, diagnostics, audit_solve, forward_metrics):
-        """Aggregate sampled matrix/KKT values and full-stage causes."""
-        prefix = "qp/full"
-        analytic_stage = 3 if self.cfg.elastic_recovery_enabled else 2
-        metrics = {
-            f"{prefix}/audit_ran": diagnostics["stage"].new_tensor(
-                float(audit_solve), dtype=torch.float32
-            ),
-            f"{prefix}/full_solver_success_fraction": (
-                diagnostics["stage"] == 0
-            ).float().mean(),
-            f"{prefix}/relaxed_solver_success_fraction": (
-                diagnostics["stage"] == 1
-            ).float().mean(),
-            f"{prefix}/elastic_recovery_fraction": (
-                (diagnostics["stage"] == 2).float().mean()
-                if self.cfg.elastic_recovery_enabled
-                else diagnostics["stage"].new_zeros((), dtype=torch.float32)
-            ),
-            f"{prefix}/analytic_fallback_fraction": (
-                diagnostics["stage"] == analytic_stage
-            ).float().mean(),
-        }
-        precheck_failure = (
-            diagnostics["failure/nonfinite_input"]
-            | diagnostics["failure/empty_torque_intersection"]
-            | diagnostics["failure/empty_qdd_intersection"]
-        )
-        metrics[f"{prefix}/fallback_precheck_fraction"] = (
-            ((diagnostics["stage"] == analytic_stage) & precheck_failure).float().mean()
-        )
-        metrics[f"{prefix}/fallback_solver_fraction"] = (
-            ((diagnostics["stage"] == analytic_stage) & ~precheck_failure).float().mean()
-        )
-        for stage_name in ("full", "relaxed"):
-            exception = diagnostics.get(f"{stage_name}/solver_exception")
-            if exception is not None:
-                metrics[f"{prefix}/{stage_name}_solver_exception_fraction"] = (
-                    exception.float().mean()
-                )
-        if audit_solve:
-            for key, values in diagnostics.items():
-                marker = "/audit_"
-                if not key.startswith("full/audit_"):
-                    continue
-                name = key[len("full/audit_"):]
-                metrics[f"{prefix}/{name}_mean"] = self._finite_mean(values)
-                finite = values[torch.isfinite(values)]
-                metrics[f"{prefix}/{name}_min"] = finite.min()
-                metrics[f"{prefix}/{name}_max"] = finite.max()
-            metrics.update(forward_metrics)
-        return metrics
+    def _backend_solve(self, m):
+        from .hard_pact_qp_backends import QPBackendResult
+        if self._active_solver == "qpth":
+            if self.cfg.qpth_warm_start and not self._active_differentiable:
+                key, owners = self._qpth_context
+                entry = self._qpth_warm_states.get(key)
+                warm = entry[0] if entry is not None else None
+                mask = (entry[2] & (entry[1]==owners)) if entry is not None else None
+                z, terminal = solve_qpth_warm(m.Q,m.p,m.G,m.h,m.A,m.b,
+                    warm_start=warm,warm_mask=mask,eps=self._eps(m.p.dtype),
+                    verbose=-1 if self.cfg.verbose==0 else self.cfg.verbose,
+                    not_improved_limit=self.cfg.not_improved_limit,
+                    max_iter=self.cfg.max_iter,check_q_spd=self.cfg.check_q_spd)
+                valid,_,_ = self._certificate(m,z,self._normalized_tolerance(m.p.dtype))
+                self._qpth_warm_states[key]=(terminal,owners.detach().clone(),valid.detach().clone())
+                retry=(~valid).nonzero(as_tuple=True)[0]
+                if retry.numel():
+                    # A bad initializer gets the same unmodified cold QP,
+                    # never a relaxed/elastic recovery problem.
+                    cold=QPFunction(eps=self._eps(m.p.dtype),verbose=-1,
+                        notImprovedLim=self.cfg.not_improved_limit,maxIter=self.cfg.max_iter,
+                        check_Q_spd=self.cfg.check_q_spd)(m.Q[retry],m.p[retry],m.G[retry],m.h[retry],m.A[retry],m.b[retry])
+                    z=z.index_copy(0,retry,cold)
+                return QPBackendResult(z)
+            z = QPFunction(eps=self._eps(m.p.dtype),
+                verbose=-1 if self.cfg.verbose==0 else self.cfg.verbose,
+                notImprovedLim=self.cfg.not_improved_limit,
+                maxIter=self.cfg.max_iter, check_Q_spd=self.cfg.check_q_spd)(
+                    m.Q,m.p,m.G,m.h,m.A,m.b)
+            return QPBackendResult(z)
+        G,h,lo,hi = self._cupiqp_native_pack(m) if self._active_solver=="cupiqp" else (
+            m.G,m.h,None,None)
+        return self._backend_instances[self._active_solver].solve(
+            m.Q,m.p,G,h,m.A,m.b,differentiable=self._active_differentiable,
+            native_lower=lo,native_upper=hi,
+            # Contact/attitude residuals refresh Q at EVERY state. Never
+            # reuse a Hessian/preconditioner as if the mechanics were constant.
+            constant_hessian=False)
 
     def solve(self, *, differentiable=None, diagnostics_phase=None,
               environment_ids=None, substep_index=None, environment_count=None, **data):
-        r"""Solve full QP, relaxed-contact QP, then actuator/rate projection.
+        """One certified QP, otherwise detached actuator/rate projection.
 
-        Per environment the deterministic cascade is
-
-        ``stage 0``: all dynamics/hard-limit/friction/contact-softening rows;
-        ``stage 1``: remove contact/slack inequalities (the positive quadratic
-        slack cost makes the unconstrained slack optimum exactly zero);
-        ``stage 2``: optional elastic dynamics/contact/joint recovery;
-        ``stage 3`` (or 2 when elastic is disabled): return
-        ``clamp(tau_nom, max(-tau_lim,tau_prev-rate*dt),
-        min(tau_lim,tau_prev+rate*dt))`` with other variables zero.
-
-        Only failed rows enter stage 1. This avoids retaining a second qpth
-        KKT graph for the common successful case and materially reduces VRAM.
+        Stance-pattern grouping removes redundant swing constraints without
+        padding equality rows. Backend caches are keyed by actual matrix shape;
+        PPO graphs retain exclusive backend leases through all backward uses.
         """
+        from .hard_pact_active_constraints import select_problem
         reference = data["tau_nom"]
-        original_dtype = reference.dtype
-        solver_dtype = self._solve_dtype(reference)
-        self.solver_dtype = solver_dtype  # observable diagnostic, not a cache key
         if differentiable is None:
             differentiable = torch.is_grad_enabled() and any(
-                data[name].requires_grad for name in (
-                    "tau_nom", "force_pred_world", "wrench_pred_world",
-                    "contact_probability",
-                )
-            )
-        if differentiable:
-            self._last_gradient_metrics = {}
-        active_update = (not differentiable and self.cfg.qp_update_mode == "active_constraint_update"
-                         and substep_index is not None)
-        if active_update:
-            if environment_ids is None or environment_count is None:
-                raise ValueError("active-constraint rollout requires stable environment_ids and environment_count")
-            if environment_ids.shape != (reference.shape[0],) or environment_ids.dtype != torch.long:
-                raise ValueError("environment_ids must be a batch-aligned int64 vector")
-            if environment_ids.device != reference.device or substep_index < 0:
-                raise ValueError("invalid active-constraint substep/device")
-            if substep_index == 0:
-                self._active_constraint_cache.clear(environment_ids)
+                data[k].requires_grad for k in ("tau_nom","force_pred_world","wrench_pred_world"))
+        if not differentiable and torch.is_grad_enabled():
+            with torch.no_grad():
+                return self.solve(differentiable=False, diagnostics_phase=diagnostics_phase,
+                    environment_ids=environment_ids,substep_index=substep_index,
+                    environment_count=environment_count,**data)
+        dtype = self._solve_dtype(reference)
+        if self._backend_config != self.cfg:
+            # Never carry solver allocations/settings or active/warm snapshots
+            # across a runtime settings change.
+            self.clear_warm_start()
+            names={self.solver_for_mode(False),self.solver_for_mode(True)}
+            self._backend_instances={name:create_backend(name,self.cfg) for name in names if name!="qpth"}
+            self._backend_config=self.cfg
+        self.solver_dtype = dtype
+        self._active_solver = self.solver_for_mode(differentiable)
+        self._active_differentiable = bool(differentiable)
         self._diagnostics_phase = diagnostics_phase or ("ppo" if differentiable else "rollout")
-        event_profile = self.profiles[self._diagnostics_phase]
         for backend in self._backend_instances.values():
             backend.diagnostics_phase = self._diagnostics_phase
-        solver_name = self.solver_for_mode(bool(differentiable))
-        # Fail before constructing/falling back if a requested optional
-        # backend is unavailable. This prevents a missing package from being
-        # misreported as an ordinary numerical stage-2 fallback.
-        require_backend(
-            solver_name, device=reference.device, dtype=solver_dtype
-        )
-        self._active_solver = solver_name
-        self._active_differentiable = bool(differentiable)
-        chunk_size = self._chunk_size(bool(differentiable))
+        require_backend(self._active_solver,device=reference.device,dtype=dtype)
         self._solve_count += 1
-        self._solve_count_by_mode[bool(differentiable)] += 1
-        audit_solve = self._full_audit_due(bool(differentiable))
-        audit_remaining = (
-            self._full_audit_sample_size(self.cfg) if audit_solve else 0
-        )
-        # CUDA synchronization is forbidden in minimal/physical. A periodic
-        # full audit explicitly pays for synchronization so its forward time
-        # and peak allocation are meaningful rather than queue-submit times.
-        forward_start = None
-        cuda_memory_start = None
-        if audit_solve:
-            if reference.device.type == "cuda":
-                torch.cuda.synchronize(reference.device)
-                # Torch 2.8's reset API rejects ``torch.device`` even though
-                # synchronize accepts it; use the live tensor's ordinal.
-                cuda_ordinal = reference.device.index
-                if cuda_ordinal is None:
-                    cuda_ordinal = torch.cuda.current_device()
-                torch.cuda.reset_peak_memory_stats(cuda_ordinal)
-                cuda_memory_start = torch.cuda.memory_allocated(cuda_ordinal)
-            forward_start = time.perf_counter()
-        outputs = []
-
-        for start in range(0, reference.shape[0], chunk_size):
-            stop = min(start + chunk_size, reference.shape[0])
-            chunk = {
-                name: value[start:stop].to(dtype=solver_dtype)
-                for name, value in data.items()
-            }
-            count = stop - start
-            with event_profile.measure("certification_recovery", reference):
-                finite, torque_ok, qdd_ok, lower, upper = self._precheck(chunk)
-            valid = finite & torque_ok & qdd_ok
-            if active_update:
-                self._active_constraint_cache.clear(environment_ids[start:stop][~valid])
-
-            # Invalid rows never enter qpth. Initialize all rows as analytic
-            # fallbacks, then scatter certified full/relaxed solutions back.
-            chosen = chunk["tau_nom"].new_zeros(count, NUM_VARIABLES)
-            analytic_stage = 3 if self.cfg.elastic_recovery_enabled else 2
-            stage = torch.full(
-                (count,), analytic_stage, device=reference.device, dtype=torch.long
-            )
-            differentiated_mask = torch.zeros(
-                count, device=reference.device, dtype=torch.bool
-            )
-            stage_diagnostics = {}
-
-            valid_indices = valid.nonzero(as_tuple=True)[0]
-            valid_count = valid_indices.numel()
-            if valid_count:
-                compact = (chunk if valid_count == count else {
-                    name: value.index_select(0, valid_indices)
-                    for name, value in chunk.items()
-                })
-                # Expensive factorization audits are periodic and bounded even
-                # for large rollout batches. The leading compact rows are a
-                # deterministic sample; ordinary primal certification still
-                # covers every environment below.
-                audit_count = min(valid_count, audit_remaining)
-                audit_remaining -= audit_count
-                warm_key = None
-                if (
-                    self.cfg.qpth_warm_start
-                    and solver_name == "qpth"
-                    and not differentiable
-                    and valid_count == count
-                ):
-                    warm_key = (start, stop, False)
-                elif self.cfg.qpth_warm_start:
-                    # Invalid coefficients/bounds clear only their owning
-                    # environments. Other rows must retain independent warm
-                    # iterates even though this compact solve cannot use the
-                    # fixed full-chunk structure on this call.
-                    invalid_ids = torch.arange(
-                        start, stop, device=valid.device
-                    )[~valid]
-                    self.clear_warm_start(invalid_ids)
-                full, full_ok, full_diag = self._solve_stage(
-                    compact, False, audit_count=audit_count, warm_key=warm_key,
-                    **({"active_ids": environment_ids[start:stop][valid_indices],
-                        "active_reuse": substep_index > 0, "environment_count": environment_count}
-                       if active_update else {}),
-                )
-                failed = ~full_ok
-                relaxed = torch.zeros_like(full)
-                relaxed_ok = torch.zeros_like(full_ok)
-                relaxed_diag = {
-                    key: torch.full_like(value, False if value.dtype == torch.bool
-                                         else float("nan"))
-                    for key, value in full_diag.items()
-                }
-                failed_indices = failed.nonzero(as_tuple=True)[0]
-                if failed_indices.numel():
-                    failed_compact = {
-                        name: value.index_select(0, failed_indices)
-                        for name, value in compact.items()
-                    }
-                    relaxed_solution, failed_ok, failed_diag = self._solve_stage(
-                        failed_compact, True, audit_count=0,
-                    )
-                    relaxed[failed_indices] = relaxed_solution
-                    relaxed_ok[failed_indices] = failed_ok
-                    for key, value in failed_diag.items():
-                        relaxed_diag[key][failed_indices] = value
-                elastic = torch.zeros_like(full)
-                elastic_ok = torch.zeros_like(full_ok)
-                elastic_diag = {
-                    key: torch.full_like(
-                        value, False if value.dtype == torch.bool else float("nan")
-                    ) for key, value in full_diag.items()
-                }
-                needs_elastic = failed & ~relaxed_ok
-                elastic_indices = (needs_elastic.nonzero(as_tuple=True)[0]
-                                   if self.cfg.elastic_recovery_enabled else None)
-                if elastic_indices is not None and elastic_indices.numel():
-                    elastic_solution, recovered, recovered_diag = self._solve_stage(
-                        {name: value.index_select(0, elastic_indices)
-                         for name, value in compact.items()},
-                        True, audit_count=0, elastic=True,
-                    )
-                    elastic[elastic_indices] = elastic_solution
-                    elastic_ok[elastic_indices] = recovered
-                    for key, value in recovered_diag.items():
-                        elastic_diag[key][elastic_indices] = value
-                selected_compact = torch.where(
-                    (needs_elastic & elastic_ok)[:, None], elastic,
-                    torch.where((failed & relaxed_ok)[:, None], relaxed, full),
-                )
-                differentiated_compact = full_ok | relaxed_ok | elastic_ok
-                chosen[valid_indices] = selected_compact
-                differentiated_mask[valid_indices] = differentiated_compact
-                stage[valid_indices] = torch.where(
-                    full_ok, torch.zeros_like(full_ok, dtype=torch.long),
-                    torch.where(relaxed_ok,
-                                torch.ones_like(full_ok, dtype=torch.long),
-                                torch.where(
-                                    elastic_ok,
-                                    torch.full_like(full_ok, 2, dtype=torch.long),
-                                    torch.full_like(
-                                        full_ok, analytic_stage, dtype=torch.long
-                                    ),
-                                )),
-                )
-                stage_diagnostics = {
-                    "full": (valid_indices, full_diag),
-                    "relaxed": (valid_indices, relaxed_diag),
-                }
-                if self.cfg.elastic_recovery_enabled:
-                    stage_diagnostics["elastic"] = (valid_indices, elastic_diag)
-
-            # An empty raw intersection can only arise from corrupted/reset
-            # previous torque. Project that center into actuator limits first;
-            # normal valid rows use the exact original intersection unchanged.
-            recovery_token = event_profile.begin(reference)
-            torque_limit = self._limits(chunk["tau_nom"])[0]
-            dt = chunk["dt"].detach().reshape(-1, 1)
-            rate = self.cfg.torque_rate_limit_nm_s * dt
-            repaired_previous = chunk["previous_torque"].detach().nan_to_num().clamp(
-                -torque_limit, torque_limit
-            )
-            repaired_lower = torch.maximum(-torque_limit, repaired_previous - rate)
-            repaired_upper = torch.minimum(torque_limit, repaired_previous + rate)
-            project_lower = torch.where(torque_ok[:, None], lower, repaired_lower)
-            project_upper = torch.where(torque_ok[:, None], upper, repaired_upper)
-            safe_nominal = chunk["tau_nom"].nan_to_num()
-            projected = project_torque_interval(safe_nominal, project_lower, project_upper)
-            fallback = torch.zeros_like(chosen)
-            fallback[:, TORQUE] = projected
-            chosen = torch.where(differentiated_mask[:, None], chosen, fallback)
-
-            # Even a certified interior-point result may exceed a hard box by
-            # roundoff. Preserve the clamp's piecewise gradient while ensuring
-            # the command sent to the simulator is exactly in the interval.
-            pre_clamp_tau = chosen[:, TORQUE]
-            pre_clamp_violation = torch.maximum(
-                (pre_clamp_tau - project_upper).clamp_min(0.0),
-                (project_lower - pre_clamp_tau).clamp_min(0.0),
-            ).amax(dim=-1)
-            chosen_tau = project_torque_interval(pre_clamp_tau, project_lower, project_upper)
-            chosen = torch.cat((chosen[:, :TORQUE.start], chosen_tau,
-                                chosen[:, TORQUE.stop:]), dim=-1)
-
-            # Scatter diagnostics into fixed batch order. Missing/analytic
-            # entries are NaN, while explicit failure reasons are booleans.
-            diagnostics = {
-                "failure/nonfinite_input": ~finite,
-                "failure/empty_torque_intersection": finite & ~torque_ok,
-                "failure/empty_qdd_intersection": finite & torque_ok & ~qdd_ok,
-                "pre_clamp_torque_violation_max": pre_clamp_violation.detach(),
-            }
-            diagnostic_keys = set()
-            for _, (_, values) in stage_diagnostics.items():
-                diagnostic_keys.update(values)
-            prefixes = ["full", "relaxed"]
-            if self.cfg.elastic_recovery_enabled:
-                prefixes.append("elastic")
-            for prefix in prefixes:
-                indices_values = stage_diagnostics.get(prefix)
-                for key in diagnostic_keys:
-                    template = None
-                    if indices_values is not None:
-                        template = indices_values[1].get(key)
-                    if template is None:
-                        template = next(
-                            values[key] for _, (_, values) in stage_diagnostics.items()
-                            if key in values
-                        )
-                    fill = False if template.dtype == torch.bool else float("nan")
-                    aligned = torch.full(
-                        (count,), fill, device=reference.device,
-                        dtype=template.dtype,
-                    )
-                    if indices_values is not None and key in indices_values[1]:
-                        aligned[indices_values[0]] = indices_values[1][key]
-                    diagnostics[f"{prefix}/{key}"] = aligned
-            outputs.append((chosen, stage, differentiated_mask, diagnostics))
-            event_profile.end("certification_recovery", recovery_token)
-
-        solution = torch.cat([item[0] for item in outputs]).to(original_dtype)
-        # ``differentiable=False`` is an explicit API guarantee, not merely a
-        # chunk-size hint. This is used by the stop-gradient ablation outside
-        # rollout inference mode, so sever every accidental construction path
-        # (including the exact post-clamp) before returning.
-        if not differentiable:
-            solution = solution.detach()
-        stage = torch.cat([item[1] for item in outputs])
-        differentiated_mask = torch.cat([item[2] for item in outputs])
-        all_diagnostic_keys = set().union(*(item[3].keys() for item in outputs))
-        diagnostics = {}
-        for key in all_diagnostic_keys:
-            template = next(item[3][key] for item in outputs if key in item[3])
-            fill = False if template.dtype == torch.bool else float("nan")
-            diagnostics[key] = torch.cat([
-                item[3].get(key, torch.full(
-                    (item[1].shape[0],), fill, device=stage.device,
-                    dtype=template.dtype,
-                ))
-                for item in outputs
-            ])
-        diagnostics["stage"] = stage
-        diagnostics["differentiated"] = differentiated_mask
-        selected_keys = ["equality_max", "inequality_max", "output_finite"]
+        audit_remaining = (self._full_audit_sample_size(self.cfg)
+            if self.diagnostics_level=="full" and self._full_audit_period(self.cfg)>0
+            and self._solve_count % self._full_audit_period(self.cfg)==0 else 0)
+        event_profile = self.profiles[self._diagnostics_phase]
+        self._last_gradient_metrics = {}
+        values = {k: v.to(dtype=dtype) for k,v in data.items()}
+        n = reference.shape[0]
+        ref = values["tau_nom"]
+        limits = self._limits(ref)[0]
+        dt = values["dt"].detach().reshape(-1,1)
+        # Invalid previous state has no feasible rate claim. Reset/nonfinite
+        # history to zero for deterministic actuator-only fallback and log it.
+        prev = torch.nan_to_num(values["previous_torque"].detach(),nan=0.,posinf=0.,neginf=0.)
+        safe_dt = torch.where(torch.isfinite(dt)&(dt>0),dt,torch.zeros_like(dt))
+        lower = torch.maximum(-limits,prev-self.cfg.torque_rate_limit_nm_s*safe_dt)
+        upper = torch.minimum(limits,prev+self.cfg.torque_rate_limit_nm_s*safe_dt)
+        empty_tau = (lower>upper).any(-1)
+        # Empty intersection cannot satisfy both claims: actuator limits win,
+        # with a distinct failure reason, NEVER a joint/contact certificate.
+        lower = torch.where(empty_tau[:,None],-limits,lower)
+        upper = torch.where(empty_tau[:,None],limits,upper)
+        fallback = torch.nan_to_num(ref.detach(),nan=0.,posinf=0.,neginf=0.).clamp(lower,upper)
+        primal = torch.cat((fallback,ref.new_zeros(n,12)),1)
+        # Graph-connected zero (also for an all-invalid update), no learned
+        # VJP through analytic fallback and no invalid NaN arithmetic.
+        primal = primal + sum(torch.nan_to_num(values[k],nan=0.,posinf=0.,neginf=0.).sum()*0
+                              for k in ("tau_nom","force_pred_world","wrench_pred_world"))
+        qdd = ref.new_zeros(n,18)
+        ok = torch.zeros(n,device=ref.device,dtype=torch.bool)
+        finite_input = torch.stack([torch.isfinite(v).reshape(n,-1).all(-1)
+                                    for v in values.values()]).all(0) & (dt[:,0]>0)
+        diag = {"failure/nonfinite_input":~finite_input,
+                "failure/empty_torque_intersection":empty_tau,
+                "failure/empty_qdd_intersection":torch.zeros_like(ok),
+                "failure/mechanics":torch.zeros_like(ok),
+                "full/attempted":torch.zeros_like(ok),
+                "full/solver_exception":torch.zeros_like(ok),
+                "full/input_finite":finite_input,
+                "full/output_finite":torch.zeros_like(ok),
+                "full/duality_gap":ref.new_full((n,),float("nan")),
+                "full/duality_gap_rel":ref.new_full((n,),float("nan")),
+                "selected/equality_max":ref.new_full((n,),float("nan")),
+                "selected/inequality_max":ref.new_full((n,),float("nan")),
+                "pre_clamp_torque_violation_max":ref.new_zeros(n)}
+        stance = values["contact_probability"].detach() >= self.cfg.contact_threshold
+        pattern = (stance.long()*torch.tensor([1,2,4,8],device=ref.device)).sum(-1)
+        if environment_ids is not None:
+            for code,cache in self._active_pattern_caches.items():
+                cache.clear(environment_ids[pattern!=code])
+        profile = self._profile(differentiable)
+        tolerance = (profile["feasibility"] if self._active_solver!="qpth"
+                     else self._normalized_tolerance(dtype))
+        for code in range(16):
+            ids = ((pattern==code)&finite_input&~empty_tau).nonzero(as_tuple=True)[0]
+            for chunk_index, rows in enumerate(ids.split(self._chunk_size(differentiable))):
+                if not rows.numel():
+                    continue
+                part = {k:v.index_select(0,rows) for k,v in values.items()}
+                with event_profile.measure("assembly",ref):
+                    m = self._build(part,code)
+                finite = torch.stack([torch.isfinite(t).flatten(1).all(-1)
+                                      for t in (m.Q,m.p,m.G,m.h,m.A,m.b)]).all(0)
+                empty_a = (m.qdd_lower>m.qdd_upper).any(-1)
+                diag["failure/empty_qdd_intersection"][rows] = empty_a
+                diag["failure/mechanics"][rows] = ~m.mechanics_valid
+                local = (finite & m.mechanics_valid & ~empty_a).nonzero(as_tuple=True)[0]
+                if not local.numel():
+                    continue
+                rows = rows[local]
+                m = select_problem(m,local)
+                owners=rows if environment_ids is None else environment_ids[rows]
+                self._qpth_context=((code,chunk_index,m.p.shape,m.G.shape,m.A.shape,ref.device,ref.dtype),owners)
+                diag["full/attempted"][rows] = True
+                try:
+                    # Active updates remain rollout-only, one cache per
+                    # stance pattern; incompatible old 54-D factors never enter.
+                    active = (not differentiable and self.cfg.qp_update_mode=="active_constraint_update"
+                              and substep_index is not None)
+                    if active:
+                        if environment_ids is None or environment_count is None:
+                            raise ValueError("active updates require stable environment identities")
+                        from .hard_pact_active_constraints import ActiveConstraintCache
+                        cache = self._active_pattern_caches.setdefault(code,ActiveConstraintCache())
+                        if substep_index==0:
+                            cache.clear(environment_ids[rows])
+                        result,snapshot,ametrics = cache.solve(self,m,environment_ids[rows],
+                                                               substep_index>0,environment_count)
+                        for k,v in ametrics.items():
+                            key="full/active/"+k
+                            if key not in diag:
+                                diag[key]=torch.zeros(n,device=ref.device,dtype=v.dtype)
+                            diag[key][rows]=v
+                    else:
+                        with event_profile.measure("solve",ref):
+                            result = self._backend_solve(m)
+                    z = result.solution
+                except QPBackendUnavailable:
+                    raise
+                except Exception as error:
+                    G,h,lo,hi = self._cupiqp_native_pack(m) if self._active_solver=="cupiqp" else (m.G,m.h,None,None)
+                    capture_failure(self,error,dict(Q=m.Q,p=m.p,G=G,h=h,A=m.A,b=m.b,
+                                                    native_lower=lo,native_upper=hi),
+                                    relaxed_contact=False,elastic=False)
+                    diag["full/solver_exception"][rows] = True
+                    continue
+                diag["full/output_finite"][rows] = torch.isfinite(z.detach()).all(-1)
+                x = z * m.variable_scale
+                pre = torch.maximum((m.tau_lower-x[:,:12]).clamp_min(0),
+                                    (x[:,:12]-m.tau_upper).clamp_min(0)).amax(-1)
+                diag["pre_clamp_torque_violation_max"][rows] = pre.detach()
+                torque = x[:,:12].clamp(m.tau_lower,m.tau_upper)
+                forces = x[:,12:].reshape(-1,4,3)
+                forces = torch.where(stance[rows,:,None],forces,torch.zeros_like(forces))
+                x = torch.cat((torque,forces.flatten(1)),1)
+                with event_profile.measure("certification_recovery",ref):
+                    accepted,er,ir = self._certificate(m,x/m.variable_scale,tolerance)
+                accepted &= torch.isfinite(z.detach()).all(-1)
+                for key,value in (("duality_gap",result.duality_gap),
+                                  ("duality_gap_rel",result.duality_gap_rel)):
+                    if value is not None:
+                        diag["full/"+key][rows] = value.detach()
+                if self._active_solver=="cupiqp" and profile["gap_policy"]=="require":
+                    gap,rel = result.duality_gap,result.duality_gap_rel
+                    accepted &= (torch.isfinite(gap)&torch.isfinite(rel)
+                                 & ((gap<=profile["gap_abs"])|(rel<=profile["gap_rel"]))) if gap is not None and rel is not None else False
+                diag["selected/equality_max"][rows],diag["selected/inequality_max"][rows]=er,ir
+                if self._physical_enabled():
+                    physical = self._physical_diagnostics(m,x,{k:v.index_select(0,local) for k,v in part.items()})
+                    for key,value in physical.items():
+                        name="physical/"+key
+                        if name not in diag: diag[name]=ref.new_full((n,),float("nan"))
+                        diag[name][rows]=value
+                count=min(audit_remaining,rows.numel())
+                if count:
+                    sampled=torch.arange(count,device=ref.device)
+                    for key,value in self._audit(select_problem(m,sampled),(x/m.variable_scale)[:count]).items():
+                        name="full/audit/"+key
+                        if name not in diag: diag[name]=ref.new_full((n,),float("nan"))
+                        diag[name][rows[:count]]=value.to(ref.dtype)
+                    audit_remaining-=count
+                # The backend gets a zero adjoint on each failed row before
+                # invoking its implicit solve. Forward NaNs are removed too.
+                x = _CertifiedRows.apply(torch.nan_to_num(x,nan=0.,posinf=0.,neginf=0.),accepted)
+                primal = primal.index_copy(0,rows,torch.where(accepted[:,None],x,primal[rows]))
+                derived = (m.acceleration_map @ x[...,None]).squeeze(-1)+m.acceleration_offset
+                qdd = qdd.index_copy(0,rows,torch.where(accepted[:,None],derived,torch.zeros_like(derived)))
+                ok[rows]=accepted
+                if active:
+                    cache.commit(m,environment_ids[rows],snapshot,accepted,self.cfg)
+        # Keep the existing analytic stage code 2 for stored/logged status
+        # compatibility. Stage 1 is retired; there is no recovery QP.
+        stage = torch.where(ok,0,2)
+        metrics = {"qp/minimal/full_fraction":ok.float().mean(),
+                   "qp/minimal/fallback_fraction":(~ok).float().mean(),
+                   "qp/minimal/differentiated_fraction":ok.float().mean()*int(differentiable)}
+        # Physical diagnostics are optional, never part of the objective.
         if self._physical_enabled():
-            selected_keys.extend((
-                "physical_equality_max", "physical_inequality_max",
-                "physical_base_linear_equality_max",
-                "physical_base_angular_equality_max",
-                "physical_joint_equality_max",
-            ))
-        if audit_solve:
-            selected_keys.extend((
-                "stationarity_max", "stationarity_raw_max",
-                "complementarity_max", "kkt_valid",
-            ))
-        for key in selected_keys:
-            full_value = diagnostics.get(f"full/{key}")
-            relaxed_value = diagnostics.get(f"relaxed/{key}")
-            if full_value is None:
-                dtype = torch.bool if key in ("kkt_valid", "output_finite") else solver_dtype
-                fill = False if dtype == torch.bool else float("nan")
-                full_value = torch.full(
-                    stage.shape, fill, device=stage.device, dtype=dtype
-                )
-                relaxed_value = full_value.clone()
-            fallback_value = (
-                torch.zeros_like(full_value) if full_value.dtype == torch.bool
-                else torch.full_like(full_value, float("nan"))
-            )
-            elastic_value = diagnostics.get(f"elastic/{key}", fallback_value)
-            diagnostics[f"selected/{key}"] = torch.where(
-                stage == 0, full_value,
-                torch.where(stage == 1, relaxed_value,
-                            torch.where(stage == 2, elastic_value, fallback_value)
-                            if self.cfg.elastic_recovery_enabled else fallback_value),
-            )
-        forward_metrics = {}
-        if audit_solve:
-            if reference.device.type == "cuda":
-                torch.cuda.synchronize(reference.device)
-            elapsed_ms = (time.perf_counter() - forward_start) * 1000.0
-            forward_metrics["qp/full/forward_time_ms"] = reference.new_tensor(
-                elapsed_ms, dtype=torch.float32
-            )
-            if reference.device.type == "cuda":
-                peak = (
-                    torch.cuda.max_memory_allocated(cuda_ordinal)
-                    - cuda_memory_start
-                ) / (1024.0 ** 2)
-                forward_metrics["qp/full/forward_peak_cuda_mib"] = (
-                    reference.new_tensor(peak, dtype=torch.float32)
-                )
-
-        metrics = self._minimal_summary(stage, differentiated_mask, diagnostics)
-        if self._physical_enabled():
-            metrics.update(self._physical_summary(solution, data))
-        if self.diagnostics_level == "full":
-            metrics.update(
-                self._full_summary(diagnostics, audit_solve, forward_metrics)
-            )
-        result = HardPACTQPResult(
-            solution[:, QDD], solution[:, FORCE].reshape(-1, 4, 3),
-            solution[:, TORQUE], solution[:, SLACK].reshape(-1, 4, 3),
-            stage, differentiated_mask, diagnostics, metrics,
-        )
-        self.iteration_diagnostics[self._diagnostics_phase].add_result(
-            result, self.cfg.elastic_recovery_enabled, differentiable,
-        )
+            metrics["qp/physical/torque_correction_mean"]=(primal[:,:12].detach()-ref.detach()).abs().mean()
+        for key,value in diag.items():
+            if key.startswith(("physical/","full/audit/")):
+                finite=torch.isfinite(value)
+                metrics["qp/"+key]=value.where(finite,0).sum()/finite.sum().clamp_min(1)
+        result = HardPACTQPResult(qdd.to(reference.dtype),
+            primal[:,12:].reshape(n,4,3).to(reference.dtype),
+            primal[:,:12].to(reference.dtype),stage,ok,diag,metrics)
+        self.iteration_diagnostics[self._diagnostics_phase].add_result(result,False,differentiable)
         return result
 
 
-def projection_loss(tau_safe, tau_nom, torque_limit, physics_valid,
-                    differentiated, contact_slack=None, slack_scale=1.0):
-    r"""Unbiased sampled-substep projection objective.
-
-    The torque term is ``||(tau_safe-tau_nom)/tau_limit||^2``.  When supplied,
-    the nonnegative contact slack contributes
-    ``mean((slack/slack_scale)^2)``.  There is deliberately no decimation
-    multiplier: one uniformly selected substep per transition is already an
-    unbiased estimator of the interval mean.
-
-    ``physics_valid`` is the exact no-push/no-reset/no-timeout/no-teleport
-    transition mask. ``differentiated`` additionally removes actuator-only
-    fallbacks, while sustained-wrench and randomized-inertia samples remain.
-    A zero denominator leaves a graph-connected zero with zero gradients.
-
-    In notation, for selected substep ``K_e`` of transition ``e``,
-
-    .. math::
-
-       \ell_e=\left\|\frac{\tau_{safe,e,K_e}-\tau_{nom,e,K_e}}
-       {\tau_{lim}}\right\|_2^2
-       +\frac1{12}\left\|\frac{s_{e,K_e}}{s_{scale}}\right\|_2^2,
-
-       L_{proj}=\frac{\sum_e m_e\ell_e}{\max(1,\sum_e m_e)}.
-
-    Since ``K_e`` is uniform on ``{0,...,D-1}``,
-    ``E[ell_e,K_e]=(1/D)sum_k ell_e,k``. Multiplication by ``D`` would bias
-    the estimator and is intentionally absent.
-    """
-    # First term: squared normalized Euclidean torque correction.
-    per_sample = ((tau_safe - tau_nom) / torque_limit).square().sum(dim=-1)
-    if contact_slack is not None:
-        # Second term: mean squared normalized XYZ slack over four feet.
-        per_sample = per_sample + (
-            contact_slack.reshape(contact_slack.shape[0], -1)
-            / float(slack_scale)
-        ).square().mean(dim=-1)
-    # m_e excludes discontinuous transitions and analytic fallbacks; certified
-    # full, relaxed, and optional elastic solves retain their solver VJPs.
+def projection_loss(tau_safe, tau_nom, torque_limit, physics_valid, differentiated):
+    """Unchanged torque-correction norm; no contact slack variables remain."""
     valid = physics_valid.reshape(-1).bool() & differentiated.reshape(-1).bool()
-    # Cast the boolean mask only at the final reduction.
-    weights = valid.to(per_sample.dtype)
-    # clamp_min gives a graph-connected zero when every mask entry is false.
-    return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
+    difference = torch.where(valid[:,None], tau_safe-tau_nom, torch.zeros_like(tau_nom))
+    per_row = (difference/torque_limit).square().sum(-1)
+    return per_row.sum()/valid.sum().clamp_min(1)
 
 
 def balanced_substep_indices(num_samples, decimation, device, *, generator=None):

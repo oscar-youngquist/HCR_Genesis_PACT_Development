@@ -20,9 +20,17 @@ RECONSTRUCTION_DIM = len(RECONSTRUCTION_INDICES)
 def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None):
     """Execution metadata using the same schedule and projection as rollout."""
     from rsl_rl.algorithms.hard_pact_qp import qp_substep_anchors
+    from dataclasses import asdict
+    from rsl_rl.algorithms.hard_pact_qp import HardPACTQPConfig
+    settings = qp_config or HardPACTQPConfig()
 
     result = {
         "mode": mode,
+        "formulation": "torque_force_24",
+        "solver_and_objective_settings": asdict(settings),
+        "stance_threshold": settings.contact_threshold,
+        "stance_selection": "detached probability >= threshold; gate only the raw QP reference; optimized swing XYZ force equals zero",
+        "joint_position_beta": settings.position_integration_coefficient,
         "training_warmup_iterations": warmup_iterations,
         "physics_substep_anchors": list(qp_substep_anchors(mode, decimation)),
         "prediction_horizon": "one physics/PD timestep (not the hold duration)",
@@ -115,19 +123,19 @@ def build_deployment_contract(cfg, actor, gain_spec):
     explicit_dim = actor.explicit_estimator.network[-1].out_features
     swing_config = GRFSwingConfig.from_task(cfg)
     contract = {
-        "schema_version": 10,
+        "schema_version": 11,
         "grf_swing_gating": {
             "enabled": swing_config.enabled,
             "contact_probability_threshold": swing_config.threshold,
             "consistency_loss_weight": swing_config.loss_weight,
             "consistency_force_scale_n": grf_buffer,
             "swing": "contact_probability.detach() < threshold; no sigmoid or observation scaling",
-            "qp_reference": "zero all physical XYZ components for predicted swing feet; stance unchanged",
-            "helper": "rsl_rl.modules.hard_pact_physics.gate_grf_for_qp",
-            "deployment_conversion": "physics_estimator.grf_to_qp_physical(normalized_prediction, contact_probability), then existing yaw-to-world rotation",
+            "qp_reference": "QP stance selection is mandatory and independent of this auxiliary switch; see qp_update.stance_threshold",
+            "helper": "rsl_rl.algorithms.hard_pact_qp.HardPACTDifferentiableQP._build",
+            "deployment_conversion": "physics_estimator.grf_to_physical(normalized_prediction), then yaw-to-world rotation; shared QP builder applies stance/reference gating exactly once",
             "ordering": list(FOOT_ORDER),
             "frame_units": "yaw-local Newtons before existing world rotation",
-            "qp_decision_variables_and_constraints": "unchanged",
+            "qp_decision_variables_and_constraints": "24-D torque/force variables; swing optimized XYZ force constrained to zero",
             "raw_supervised_predictions": "unchanged and ungated",
             "consistency_formula": "weight * sum_swing ||GRF_raw_N / grf_scale_N||^2 / max(swing_count, 1)",
             "consistency_target": "physical zero, independent of any normalization offset",
@@ -150,9 +158,14 @@ def build_deployment_contract(cfg, actor, gain_spec):
         "qp_objective": {
             "implementation": "rsl_rl.algorithms.hard_pact_qp.HardPACTDifferentiableQP._build",
             "terms": ["nominal_torque_tracking", "predicted_grf_tracking",
-                      "contact_slack_penalty", "acceleration_force_torque_regularization",
+                      "stance_acceleration_soft_tracking", "yaw_local_roll_pitch_stabilization",
                       "positive_definite_regularization"],
-            "recovery": "elastic dynamics penalty only in the existing elastic stage",
+            "variables": "x=[total_actuator_torque_12; world_FR_FL_RR_RL_force_12]",
+            "acceleration": "a=solve(M,[S^T,Jf^T])x+solve(M,Jb^T W-h)",
+            "attitude_frame": "instantaneous yaw-local physical angular acceleration; not Euler-angle acceleration",
+            "attitude_target": "-Kp*(z_world cross z_body)_yaw_xy-Kd*omega_yaw_xy",
+            "stance": "detached probability >= configured contact_threshold; swing optimized force exactly zero; no swing friction rows",
+            "recovery": "sanitized bounded nominal actuator/rate projection; no joint/contact certification or implicit VJP",
             "torque_history": "previous executed torque centers hard torque-rate constraints",
         },
         "explicit_estimator": {

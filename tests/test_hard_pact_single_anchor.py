@@ -9,7 +9,7 @@ from rsl_rl.algorithms.hard_pact_qp import (
     HardPACTQPConfig, held_correction_torque, qp_substep_anchors,
 )
 from legged_gym.envs.go2.go2_hard_pact.deployment import qp_update_contract
-from test_go2_hard_pact_qp import make_qp, qp_data
+from test_hard_pact_reduced_qp import solver as make_qp, inputs as qp_data
 
 
 def test_contract_shared_execution_and_default():
@@ -44,7 +44,7 @@ def test_anchor_solver_primal_gradient_and_fallback_parity():
     anchor = make_qp(qp_update_mode="single_anchor_held_correction")
     old = reference.solve(**data, differentiable=True)
     new = anchor.solve(**data, differentiable=True)
-    for name in ("tau_safe", "force_world", "qdd", "contact_slack", "stage", "differentiated_mask"):
+    for name in ("tau_safe", "force_world", "qdd", "stage", "differentiated_mask"):
         torch.testing.assert_close(getattr(old, name), getattr(new, name), rtol=0, atol=0)
     grad_old, = torch.autograd.grad(old.tau_safe.sum(), data["tau_nom"], retain_graph=True)
     grad_new, = torch.autograd.grad(new.tau_safe.sum(), data["tau_nom"])

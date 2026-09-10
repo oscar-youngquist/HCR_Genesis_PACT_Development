@@ -11,7 +11,6 @@ from rsl_rl.modules.hard_pact_control import (
 )
 
 from rsl_rl.modules.hard_pact_physics import (
-    gate_grf_for_qp,
     log_qp_swing_grf,
     compose_explicit_estimator_target,
     normalize_grf_target,
@@ -907,14 +906,9 @@ class Go2HardPACT(Go2PACT):
             # world-axis convention. Observation scaling is not involved.
             heads = self._hard_pact_actor_critic.physics_estimator
             raw_grf_physical = heads.grf_to_physical(grf_normalized).reshape(-1, 4, 3)
-            grf_world = self._yaw_local_to_world(
-                gate_grf_for_qp(
-                    raw_grf_physical,
-                    self._hard_pact_policy_explicit[:, 3:7],
-                    getattr(heads, "grf_swing", None),
-                ),
-                quat,
-            )
+            # The shared QP builder alone selects stance and gates references;
+            # do not apply the auxiliary swing configuration a second time.
+            grf_world = self._yaw_local_to_world(raw_grf_physical, quat)
             # Reconstruct physical N/Nm and apply the sole sanitization/clamp
             # immediately at the QP boundary. The subsequent rotation cannot
             # introduce a second scaling or clamp.
@@ -973,11 +967,6 @@ class Go2HardPACT(Go2PACT):
                 self._qp_interval_grf_sum.add_(
                     self._hard_pact_held_force_world
                 )
-                self._qp_interval_slack_sum.add_(self._hard_pact_held_slack)
-                self._qp_interval_slack_peak.copy_(torch.maximum(
-                    self._qp_interval_slack_peak,
-                    self._hard_pact_held_slack,
-                ))
                 if update_mode != "single_anchor_held_correction":
                     # Preserve historical two-anchor interval summaries.
                     # Single-anchor status/residuals describe actual solves
@@ -1013,7 +1002,7 @@ class Go2HardPACT(Go2PACT):
             # qpth/fallback execution, but excludes state/head preprocessing.
             start = time.perf_counter()
             # The solver constructs min 1/2*x'Qx+p'x subject to Gx<=h, Ax=b,
-            # where x=[qdd,f,tau_safe,s]. Every argument below maps directly
+            # where x=[tau_safe,f]. Every argument below maps directly
             # to a documented physical block in hard_pact_qp.py.
             result = self._hard_pact_rollout_qp.solve(
                 differentiable=False,
@@ -1022,11 +1011,13 @@ class Go2HardPACT(Go2PACT):
                 **({"environment_ids": self._hard_pact_qp_environment_ids,
                     "environment_count": self.num_envs, "substep_index": self._qp_substep}
                    if update_mode == "active_constraint_update" else {}),
-                # M multiplies generalized acceleration in A[:,QDD].
+                # Detached mechanics eliminate a via batched linear solves.
+                base_quaternion=q_simulator[:,3:7],
+                base_angular_velocity_world=v_world[:,3:6],
                 mass_matrix=context.mass_matrix,
-                # b_dyn moves to the equality RHS as J_b^T*W-b_dyn.
+                # h enters the affine acceleration offset as J_b^T*W-h.
                 bias=context.bias,
-                # J_f supplies -J_f^T in dynamics and J_f in contact rows.
+                # J_f maps force to acceleration and soft stance acceleration.
                 foot_jacobians=context.foot_jacobians,
                 # J_b maps the predicted applied wrench into generalized force.
                 base_jacobian=context.base_jacobian,
@@ -1063,8 +1054,6 @@ class Go2HardPACT(Go2PACT):
                 setter(result.tau_safe)
             # Delta_tau_k is the projection correction used by L_proj/logging.
             correction = result.tau_safe - tau_nom
-            # Flatten [foot,XYZ] slack to its fixed 12-D transition ordering.
-            slack = result.contact_slack.reshape(self.num_envs, -1)
             # Pack certified infinity-norm residuals as [eq,ineq,dual,comp].
             # Dual/complementarity values exist only on periodic full audits;
             # zero is the neutral interval-aggregation placeholder otherwise.
@@ -1089,7 +1078,6 @@ class Go2HardPACT(Go2PACT):
                     result.force_world.flatten(1)
                 )
                 self._hard_pact_held_qdd.copy_(result.qdd)
-                self._hard_pact_held_slack.copy_(slack)
                 self._hard_pact_held_residual.copy_(residual)
                 self._hard_pact_held_stage.copy_(result.stage)
                 self._hard_pact_held_differentiated.copy_(
@@ -1108,10 +1096,6 @@ class Go2HardPACT(Go2PACT):
             # QP-selected physical GRFs are averaged over the interval.
             self._qp_interval_grf_sum.add_(result.force_world.flatten(1))
             # Slack is nonnegative, so ordinary max is its physical peak.
-            self._qp_interval_slack_sum.add_(slack)
-            self._qp_interval_slack_peak.copy_(torch.maximum(
-                self._qp_interval_slack_peak, slack
-            ))
             # Residual means and peaks summarize numerical solve quality.
             self._qp_interval_residual_sum.add_(residual)
             self._qp_interval_residual_peak.copy_(torch.maximum(
@@ -1159,7 +1143,6 @@ class Go2HardPACT(Go2PACT):
                 sample["sampled_qp_qdd"][selected] = result.qdd[selected]
                 sample["sampled_qp_force_world"][selected] = result.force_world[selected].flatten(1)
                 sample["sampled_qp_safe_torque"][selected] = result.tau_safe[selected]
-                sample["sampled_qp_contact_slack"][selected] = slack[selected]
                 sample["sampled_qp_stage"][selected] = (
                     result.stage[selected, None].to(torch.int16)
                 )
@@ -1217,16 +1200,11 @@ class Go2HardPACT(Go2PACT):
         self._qp_interval_correction_peak = shape(12)
         # QP primal force sum in FR/FL/RR/RL world XYZ [N].
         self._qp_interval_grf_sum = shape(12)
-        # Contact-acceleration slack sum and componentwise peak [m/s^2].
-        self._qp_interval_slack_sum = shape(12)
-        self._qp_interval_slack_peak = shape(12)
         # [equality, inequality, stationarity, complementarity] residuals.
         self._qp_interval_residual_sum = shape(4)
         self._qp_interval_residual_peak = shape(4)
         # Counts for stage 0/full, stage 1/relaxed, stage 2/projection.
-        stage_count = 4 if bool(getattr(
-            getattr(self, "_hard_pact_rollout_qp", None), "cfg", None
-        ) and self._hard_pact_rollout_qp.cfg.elastic_recovery_enabled) else 3
+        stage_count = 3  # 0=certified, 1=retired, 2=analytic (uncertified).
         self._qp_interval_stage_counts = shape(stage_count)
         # Sum of batched QP wall-clock milliseconds across substeps.
         self._qp_interval_timing_ms = shape(1)
@@ -1261,7 +1239,6 @@ class Go2HardPACT(Go2PACT):
             self._hard_pact_held_grf_normalized = shape(12)
             self._hard_pact_held_force_world = shape(12)
             self._hard_pact_held_qdd = shape(18)
-            self._hard_pact_held_slack = shape(12)
             self._hard_pact_held_residual = shape(4)
             self._hard_pact_held_stage = torch.zeros(
                 self.num_envs, device=self.device, dtype=torch.long
@@ -1295,7 +1272,6 @@ class Go2HardPACT(Go2PACT):
             # Complete rollout primal x*=[qdd,f,tau_safe,s].
             "sampled_qp_qdd": shape(18), "sampled_qp_force_world": shape(12),
             "sampled_qp_safe_torque": shape(12),
-            "sampled_qp_contact_slack": shape(12),
             # Compact fallback stage and whether qpth supplied its KKT graph.
             "sampled_qp_stage": torch.zeros(
                 self.num_envs, 1, device=self.device, dtype=torch.int16
@@ -1447,8 +1423,6 @@ class Go2HardPACT(Go2PACT):
                 "interval_qp_correction": self._qp_interval_correction_sum / qp_divisor,
                 "interval_qp_peak_correction": self._qp_interval_correction_peak,
                 "interval_qp_grf_world": self._qp_interval_grf_sum / qp_divisor,
-                "interval_qp_contact_slack": self._qp_interval_slack_sum / qp_divisor,
-                "interval_qp_peak_contact_slack": self._qp_interval_slack_peak,
                 "interval_qp_residuals": self._qp_interval_residual_sum / solve_divisor,
                 "interval_qp_peak_residuals": self._qp_interval_residual_peak,
                 "interval_qp_stage_fractions": self._qp_interval_stage_counts / solve_divisor,
@@ -1733,8 +1707,8 @@ class Go2HardPACT(Go2PACT):
             for name in (
                 "_qp_interval_safe_sum", "_qp_interval_safe_peak",
                 "_qp_interval_correction_sum", "_qp_interval_correction_peak",
-                "_qp_interval_grf_sum", "_qp_interval_slack_sum",
-                "_qp_interval_slack_peak", "_qp_interval_residual_sum",
+                "_qp_interval_grf_sum",
+                "_qp_interval_residual_sum",
                 "_qp_interval_residual_peak", "_qp_interval_stage_counts",
                 "_qp_interval_timing_ms",
             ):
@@ -1757,7 +1731,7 @@ class Go2HardPACT(Go2PACT):
             "_hard_pact_held_correction",
             "_hard_pact_held_grf_normalized",
             "_hard_pact_held_force_world",
-            "_hard_pact_held_qdd", "_hard_pact_held_slack",
+            "_hard_pact_held_qdd",
             "_hard_pact_held_residual", "_hard_pact_held_stage",
             "_hard_pact_held_differentiated",
         ):

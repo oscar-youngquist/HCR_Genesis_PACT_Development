@@ -302,10 +302,7 @@ class Observer:
         result = self._solve(**data)
         self.pred_force = data["force_pred_world"].detach().clone()
         self.solved_force = result.force_world.detach().clone()
-        analytic_stage = 3 if self.qp.cfg.elastic_recovery_enabled else 2
-        for stage, name in ((0, "full"), (1, "relaxed"), (2, "elastic"), (analytic_stage, "analytic")):
-            if name == "elastic" and analytic_stage == 2:
-                continue
+        for stage, name in ((0, "full"), (2, "analytic")):
             self.metrics.add(f"qp/final_stage/{name}", result.stage == stage)
         self.metrics.add("qp/certified_solver_row", result.differentiated_mask)
         for name, value in result.diagnostics.items():
@@ -318,12 +315,8 @@ class Observer:
             row = int(bad[0]) if bad.numel() else 0
             inputs = {k: v[row:row + 1].detach().clone() for k, v in data.items() if torch.is_tensor(v)}
             solver_inputs = {k: v.to(self.qp._solve_dtype(data["tau_nom"])) for k, v in inputs.items()}
-            builds = {}
-            for name, relaxed, elastic in (("full", False, False), ("relaxed", True, False), ("elastic", True, True)):
-                if name == "elastic" and not self.qp.cfg.elastic_recovery_enabled:
-                    continue
-                build = self.qp._build(solver_inputs, relaxed_contact=relaxed, elastic=elastic)
-                builds[name] = {f.name: getattr(build, f.name).detach().cpu().clone() for f in fields(build)}
+            build = self.qp._build(solver_inputs)
+            builds = {"full": {f.name: getattr(build, f.name).detach().cpu().clone() for f in fields(build)}}
             packet = {
                 "schema_version": 1, "variant": self.args.variant, "control_step": self.step,
                 "substep": self.k, "environment": row, "solver_settings": asdict(self.qp.cfg),
@@ -336,7 +329,7 @@ class Observer:
                 "latent": self.actor.cenet_z[row:row + 1].cpu(),
                 "explicit": self.actor.cenet_torso_velo[row:row + 1].cpu(),
                 "outputs": {k: getattr(result, k)[row:row + 1].cpu().clone() for k in
-                            ("qdd", "force_world", "tau_safe", "contact_slack", "stage", "differentiated_mask")},
+                            ("qdd", "force_world", "tau_safe", "stage", "differentiated_mask")},
                 "diagnostics": {k: v[row:row + 1].cpu() for k, v in result.diagnostics.items()},
             }
             torch.save(packet, self.args.output_dir / f"replay_{self.packet_count:02d}.pt")

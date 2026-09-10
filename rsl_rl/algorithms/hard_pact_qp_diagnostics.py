@@ -47,7 +47,9 @@ class QPIterationDiagnostics:
                 self.add_values(name + ("_fraction" if value.dtype == torch.bool else "_mean"), value)
                 if name in ("active/attempted", "active/accepted", "active/full_solve"):
                     self.add_sum(name + "_count", value.sum())
-        for name in ("nonfinite_input", "empty_torque_intersection", "empty_qdd_intersection"):
+        for name in ("nonfinite_input", "empty_torque_intersection", "empty_qdd_intersection", "mechanics"):
+            if f"failure/{name}" not in diag:
+                continue
             self.add_sum(f"failure/{name}_count", diag[f"failure/{name}"].sum())
         for key, value in (result.metrics or {}).items():
             # Counts/fractions above are authoritative. Physical/full metrics
