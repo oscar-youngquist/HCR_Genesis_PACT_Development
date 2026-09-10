@@ -7,6 +7,8 @@ import pytest
 
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
 from rsl_rl.algorithms.hard_pact_qp import projection_loss
+from rsl_rl.modules.hard_pact_physics import GRFSwingConfig
+from rsl_rl.algorithms.hard_pact_qp_diagnostics import QPIterationDiagnostics
 
 
 @pytest.mark.parametrize("mode,anchors", [
@@ -14,7 +16,8 @@ from rsl_rl.algorithms.hard_pact_qp import projection_loss
     ("two_anchor_held_correction", (0, 2)),
     ("single_anchor_held_correction", (0,)),
 ])
-def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors):
+@pytest.mark.parametrize("swing_gate", [False, True])
+def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors, swing_gate):
     batch = 8
     physics_dt = 0.01
     torque_rate = 10.0
@@ -42,10 +45,12 @@ def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors):
     class Heads:
         def __init__(self):
             self.grf_calls = 0
+            self.grf_swing = GRFSwingConfig(enabled=swing_gate)
 
         def predict_grf(self, _latent, _explicit, tau_nom):
             self.grf_calls += 1
-            return 0.1 * tau_nom
+            self.last_raw = 0.1 * tau_nom
+            return self.last_raw
 
         def grf_to_physical(self, prediction):
             return prediction * 250.0
@@ -71,6 +76,7 @@ def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors):
         def __init__(self):
             self.calls = 0
             self.clear_calls = 0
+            self.iteration_diagnostics = {"rollout": QPIterationDiagnostics()}
             self.torque_limits = torch.full((12,), 2.0)
             self.cfg = SimpleNamespace(
                 qp_update_mode=mode,
@@ -86,6 +92,12 @@ def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors):
                   wrench_pred_world, contact_probability, previous_torque,
                   **_kwargs):
             self.calls += int(not differentiable)
+            if not differentiable:
+                raw = heads.last_raw.reshape(batch, 4, 3) * 250.
+                expected = raw.clone()
+                if swing_gate:
+                    expected[contact_probability < .5] = 0.
+                torch.testing.assert_close(force_pred_world, expected, rtol=0, atol=0)
             # A compact differentiable stand-in for the selected PPO QP row.
             correction = (
                 0.05 * tau_nom
@@ -150,11 +162,11 @@ def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors):
     task._legacy_task_class = Legacy
     task._hard_pact_policy_latent = torch.zeros(batch, 16)
     task._hard_pact_policy_explicit = torch.full((batch, 11), 0.5)
+    task._hard_pact_policy_explicit[:, 3:7] = torch.tensor([.25, .5, .75, .1])
     task._hard_pact_wrench_raw_normalized = torch.zeros(batch, 6)
     task._hard_pact_q_d = torch.ones(batch, 12)
     task._hard_pact_tau_ff = torch.zeros(batch, 12)
     task._hard_pact_previous_substep_torque = torch.ones(batch, 12)
-    task._hard_pact_previous_certified_qdd = torch.ones(batch, 18)
     task._get_pinn_feedback = (
         lambda desired, position, velocity: 3.0 * (desired - position) - velocity
     )
@@ -205,7 +217,7 @@ def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors):
                 anchor_sample = {k: v.clone() for k, v in task._qp_sampled_transition.items()}
         if mode == "single_anchor_held_correction":
             # Held substeps cannot overwrite anchor mechanics, previous torque,
-            # proximal reference, or primal replay values.
+            # or primal replay values.
             for key, value in anchor_sample.items():
                 torch.testing.assert_close(task._qp_sampled_transition[key], value, rtol=0, atol=0)
             replay = qp.solve(
@@ -230,6 +242,12 @@ def test_two_anchor_rollout_reset_and_ppo_backward(mode, anchors):
     assert dynamics.calls == len(anchors) * control_steps
     assert heads.grf_calls == (4 if mode == "every_substep" else 1) * control_steps
     assert len(task.simulator.history) == 4 * control_steps
+    aggregate = qp.iteration_diagnostics["rollout"]
+    if swing_gate:
+        assert aggregate.weights["grf_swing/fraction"] == batch * 4 * len(anchors) * control_steps
+        assert aggregate.finalize(torch.tensor(0.))["grf_swing/fraction"] == .5
+    else:
+        assert "grf_swing/fraction" not in aggregate.weights
 
     # One selected-QP PPO-style backward: all learned inputs and their shared
     # source receive finite, nonzero gradients through the projection loss.

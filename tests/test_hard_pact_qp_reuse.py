@@ -31,7 +31,7 @@ def coupled_data(batch, dtype, device="cpu"):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("relaxed,elastic", [(False, False), (True, False), (True, True)])
 def test_cached_blocks_match_physical_equations_and_are_not_mutated(dtype, relaxed, elastic):
-    qp = make_qp(proximal_rho=0.2)
+    qp = make_qp()
     data = coupled_data(3, dtype)
     first = qp._build(data, relaxed, elastic)
     templates = qp._assembly_templates(data["tau_nom"], relaxed, elastic)
@@ -157,11 +157,9 @@ def test_mixed_compaction_preserves_order_fallback_and_safety():
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("relaxed,elastic", [(False, False), (True, False), (True, True)])
 def test_capacity_reuse_forward_parity_and_bounded_setups(dtype, relaxed, elastic):
-    # Use the production proximal term for the elastic A^T*A problem; with
-    # rho=0 its near-null directions are ill-conditioned in float32 and
-    # primal feasibility alone does not certify objective/solution parity.
+    # Exercise the original tracking/slack objective, including the existing
+    # SPD ridge. Primal feasibility alone does not certify solution parity.
     options = dict(qp_solver="cupiqp", solver_dtype=str(dtype).split(".")[-1],
-                   proximal_rho=0.1,
                    rollout_eps_abs=1e-7 if dtype == torch.float64 else 1e-6,
                    rollout_eps_rel=1e-7 if dtype == torch.float64 else 1e-6,
                    rollout_max_iter=30)
@@ -188,7 +186,7 @@ def test_capacity_reuse_forward_parity_and_bounded_setups(dtype, relaxed, elasti
 @requires_cupiqp_gpu
 def test_capacity_growth_output_ownership_and_elastic_hessian_refresh():
     qp = make_qp(qp_solver="cupiqp", solver_dtype="float64", rollout_eps_abs=1e-8,
-                 rollout_eps_rel=1e-8, rollout_max_iter=30, proximal_rho=0.1)
+                 rollout_eps_rel=1e-8, rollout_max_iter=30)
     backend = qp._backend_instances["cupiqp"]
     with torch.inference_mode():
         for batch in (3, 2, 5, 3):

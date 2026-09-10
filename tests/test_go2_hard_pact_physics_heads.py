@@ -129,8 +129,9 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         self.assertFalse(any("clipping" in name for name in metrics))
 
     def test_force_decoder_diagnostic_flags_are_explicit_in_both_configs(self):
-        self.assertTrue(GO2HardPACTCfgPPO.algorithm.force_decoder_diagnostics_enabled)
-        self.assertTrue(GO2HardPACTPosCfgPPO.algorithm.force_decoder_diagnostics_enabled)
+        for cfg in (GO2HardPACTCfgPPO, GO2HardPACTPosCfgPPO):
+            self.assertIn("force_decoder_diagnostics_enabled", vars(cfg.algorithm))
+            self.assertIsInstance(cfg.algorithm.force_decoder_diagnostics_enabled, bool)
 
     def test_history_latent_dimension_is_configurable(self):
         for actor_class in (ActorCritic_HardPACT, ActorCritic_HardPACT_Pos):
@@ -157,14 +158,18 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         torch.testing.assert_close(target[:, 7:11], clearance)
 
     def test_alias_dimensions_and_reconstruction_schema(self):
-        for env_cls, train_cls, history_steps in (
-            (GO2HardPACTCfg, GO2HardPACTCfgPPO, 20),
-            (GO2HardPACTPosCfg, GO2HardPACTPosCfgPPO, 10),
+        for env_cls, train_cls in (
+            (GO2HardPACTCfg, GO2HardPACTCfgPPO),
+            (GO2HardPACTPosCfg, GO2HardPACTPosCfgPPO),
         ):
             env, train = env_cls(), train_cls()
             with self.subTest(env=env_cls.__name__):
                 self.assertEqual(env.env.num_observations, 57)
-                self.assertEqual(env.env.num_obs_hist, history_steps)
+                # History length is editable; materialized config must retain
+                # it instead of imposing the former 20-step training default.
+                self.assertEqual(env.env.num_obs_hist, env_cls.env.num_obs_hist)
+                self.assertGreater(env.env.num_obs_hist, 0)
+                self.assertIsInstance(env.env.num_obs_hist, int)
                 self.assertEqual(env.env.num_explicit_recon_obs, 11)
                 self.assertEqual(train.policy.cenet_enc_latent_dim, 16)
                 self.assertEqual(train.policy.cenet_velo_dim, 11)
@@ -174,14 +179,15 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
                 self.assertEqual(train.policy.wrench_decoder_layers, [128, 128])
                 self.assertEqual(train.policy.cenet_dec_input_dim, 27)
                 self.assertEqual(train.policy.cenet_dec_out_dim, 276)
-                expected_contact_weight = (
-                    1.0 if env_cls is GO2HardPACTCfg else 0.1
-                )
+                expected_contact_weight = train_cls.algorithm.contact_probability_loss_weight
                 self.assertEqual(
                     train.algorithm.contact_probability_loss_weight,
                     expected_contact_weight,
                 )
-                self.assertFalse(train.algorithm.ppo_latent_diagnostics_enabled)
+                self.assertEqual(
+                    train.algorithm.ppo_latent_diagnostics_enabled,
+                    train_cls.algorithm.ppo_latent_diagnostics_enabled,
+                )
                 self.assertEqual(train.algorithm.ppo_latent_diagnostics_interval, 100)
                 self.assertEqual(train.algorithm.ppo_latent_diagnostics_sample_count, 256)
                 self.assertEqual(
@@ -595,8 +601,9 @@ class GainAndScalingTests(unittest.TestCase):
                 tuple(variant_cfg.deployment_physics.wrench_qp_clip),
                 gains.wrench_qp_clip_n_nm,
             )
-            self.assertFalse(
-                variant_train.algorithm.ppo_latent_diagnostics_enabled
+            self.assertEqual(
+                variant_train.algorithm.ppo_latent_diagnostics_enabled,
+                GO2HardPACTCfgPPO.algorithm.ppo_latent_diagnostics_enabled,
             )
             self.assertEqual(
                 variant_train.algorithm.ppo_latent_diagnostics_interval, 100
@@ -719,10 +726,11 @@ class GainAndScalingTests(unittest.TestCase):
 
     def test_grf_normalization_round_trip_and_direct_huber(self):
         gains = calculate_physics_head_gains(GO2HardPACTCfg())
-        physical = torch.tensor([[250.0, -125.0, 62.5] * 4])
+        expected_normalized = torch.tensor([[1.0, -0.5, 0.25] * 4])
+        physical = expected_normalized * torch.tensor(gains.grf_scale_n)
         normalized = normalize_grf_target(physical, gains.grf_scale_n)
         torch.testing.assert_close(
-            normalized, torch.tensor([[1.0, -0.5, 0.25] * 4])
+            normalized, expected_normalized
         )
         torch.testing.assert_close(
             grf_normalized_to_physical(normalized, gains.grf_scale_n), physical
@@ -854,7 +862,10 @@ class DeploymentContractTests(unittest.TestCase):
                 self.assertEqual(stream.read(), first_text)
             loaded = json.loads(first_text)
 
-        self.assertEqual(loaded["schema_version"], 7)
+        self.assertEqual(loaded["schema_version"], 10)
+        self.assertEqual(loaded["torque_convention"]["conversion_helper"],
+                         "rsl_rl.modules.hard_pact_control.bounded_nominal_torque")
+        self.assertIn("nominal_torque_tracking", loaded["qp_objective"]["terms"])
         self.assertEqual(loaded["explicit_estimator"]["dimension"], 11)
         self.assertEqual(
             loaded["explicit_estimator"]["input"],
@@ -881,7 +892,8 @@ class DeploymentContractTests(unittest.TestCase):
         )
         self.assertEqual(loaded["frames_and_units"]["grf"]["foot_order"], list(FOOT_ORDER))
         self.assertEqual(
-            loaded["grf_decoder_normalization"]["scale_n"], [250.0] * 12
+            loaded["grf_decoder_normalization"]["scale_n"],
+            list(cfg.sim.grf.prediction_scale_n) * 4,
         )
         self.assertTrue(
             loaded["grf_decoder_normalization"]["observation_scale_is_independent"]

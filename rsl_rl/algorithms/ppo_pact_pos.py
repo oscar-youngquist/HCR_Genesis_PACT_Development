@@ -42,6 +42,7 @@ import gc
 
 from rsl_rl.modules import ActorCritic_PACT_Pos, ContextDecoder
 from rsl_rl.modules.hard_pact_physics import (
+    GRFSwingMetricsAccumulator,
     GRFDecoderMetricsAccumulator,
     ContactEstimatorMetricsAccumulator,
     contact_estimator_metrics,
@@ -429,6 +430,11 @@ class PPO_PACT_Pos:
         mean_decoder_loss = 0
         mean_tau_loss = 0
         auxiliary_metric_sums = {}
+        self._grf_swing_metrics = None
+        if self.is_hard_pact_pos:
+            swing_config = self.actor_critic.physics_estimator.grf_swing
+            if swing_config.active:
+                self._grf_swing_metrics = GRFSwingMetricsAccumulator(swing_config)
         self._grf_diagnostics = (
             GRFDecoderMetricsAccumulator(
                 self.actor_critic.physics_estimator.grf_scale_n
@@ -700,6 +706,9 @@ class PPO_PACT_Pos:
         if self._grf_diagnostics is not None:
             self.last_auxiliary_metrics.update(self._grf_diagnostics.finalize())
         self._grf_diagnostics = None
+        if self._grf_swing_metrics is not None:
+            self.last_auxiliary_metrics.update(self._grf_swing_metrics.finalize())
+        self._grf_swing_metrics = None
         if self._contact_diagnostics is not None:
             self.last_auxiliary_metrics.update(
                 self._contact_diagnostics.finalize()
@@ -1029,6 +1038,19 @@ class PPO_PACT_Pos:
                 + self.active_wrench_loss_weight * wrench_active_loss
                 + self.neutral_wrench_loss_weight * wrench_neutral_loss
             )
+            physics = self.actor_critic.physics_estimator
+            if physics.grf_swing.active:
+                # A second GRF-only forward is necessary here: reusing heads
+                # above would propagate the new loss into the shared encoder.
+                swing_loss, statistics = physics.swing_grf_auxiliary(
+                    cenet_latent, cenet_torso_velo, executed_torque_target,
+                    heads.grf_normalized, valid,
+                )
+                vae_loss = vae_loss + swing_loss
+                auxiliary_metrics["grf_swing_consistency_loss"] = swing_loss
+                accumulator = getattr(self, "_grf_swing_metrics", None)
+                if accumulator is not None:
+                    accumulator.add(statistics)
             auxiliary_metrics.update({
                 "total": vae_loss,
                 "explicit": vel_pred_error,

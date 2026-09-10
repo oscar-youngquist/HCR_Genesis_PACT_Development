@@ -1515,6 +1515,9 @@ class GenesisSimulator_PACT_Pos(Simulator):
                 self._base_pos[env_ids], zero_velocity=False, envs_idx=env_ids)
 
     def _compute_torques(self, actions):
+        conversion = getattr(self, "_hard_pact_torque_conversion", None)
+        if conversion is not None:
+            return conversion(actions)
         # Pull out the position control actions
         pos_actions = actions
         

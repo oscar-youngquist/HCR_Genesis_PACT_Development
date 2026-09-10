@@ -6,8 +6,13 @@ from collections import deque
 import time
 
 import torch
+from rsl_rl.modules.hard_pact_control import (
+    bounded_nominal_torque, requested_torque_components,
+)
 
 from rsl_rl.modules.hard_pact_physics import (
+    gate_grf_for_qp,
+    log_qp_swing_grf,
     compose_explicit_estimator_target,
     normalize_grf_target,
     normalize_wrench_target,
@@ -40,6 +45,91 @@ class Go2HardPACT(Go2PACT):
     """Legacy Go2 PACT with GRF and persistent external-wrench targets."""
 
     _legacy_task_class = Go2PACT
+
+    def _reward_torque_limits(self):
+        requested = getattr(self, "_hard_pact_requested_torque", None)
+        if requested is None:  # Lightweight legacy-only fixtures.
+            return self._legacy_task_class._reward_torque_limits(self)
+        return torch.sum((requested.abs() - self.simulator.torque_limits
+                          * self.cfg.rewards.soft_torque_limit).clamp_min(0.), dim=1)
+
+    def _reward_feedback_torques(self):
+        requested = getattr(self, "_hard_pact_first_requested_feedback", None)
+        if requested is None:
+            return self._legacy_task_class._reward_feedback_torques(self)
+        return requested.square().sum(dim=1)
+
+    def _reward_feedforward_torques(self):
+        requested = getattr(self, "_hard_pact_requested_feedforward", None)
+        if requested is None:
+            return self._legacy_task_class._reward_feedforward_torques(self)
+        return requested.square().sum(dim=1)
+
+    def _reward_feedforward_torques_scaled(self):
+        sim = self.simulator
+        total_mass = sim._robot_mass + sim._added_base_mass.clamp_min(0.)
+        return (sim._robot_mass / total_mass).squeeze(-1) * self._reward_feedforward_torques()
+
+    def _capture_control_parameters(self):
+        """Snapshot actuator conversion, not privileged rigid-body mechanics.
+
+        Store the current controller values with each transition: reading the
+        simulator during a shuffled PPO update would use another environment's
+        or a post-reset sample's gains. Pos executes PD only, without branch
+        weighting, just like both existing backend position controllers.
+        """
+        sim = self.simulator
+        # Legacy num_actions counts joints (12) in *both* tasks. The coupled
+        # task's actual action/history tensor is 24-D; Pos's is 12-D.
+        position_only = self.actions.shape[-1] == 12
+
+        def rows(value):
+            value = torch.as_tensor(value, device=self.device, dtype=torch.float32)
+            if value.ndim < 2:
+                value = value.reshape(1, -1)
+            return value.expand(self.num_envs, -1).detach().clone()
+
+        return {
+            "control_kp": rows(sim._kp_scale * sim._p_gains),
+            "control_kd": rows(sim._kd_scale * sim._d_gains),
+            "control_motor_strength": rows(sim._motor_strength),
+            "control_feedback_weight": rows(1. if position_only else sim.feedback_tau_weight),
+            "control_feedforward_weight": rows(0. if position_only else sim.feedforward_tau_weight),
+            "control_torque_limits": rows(sim.torque_limits),
+        }
+
+    def _hard_pact_compute_torques(self, actions):
+        """HardPACT-only backend hook; legacy tasks never install this hook.
+
+        Keep legacy observation/history buffers from the clipped action path.
+        Separate reward buffers use the same delayed request *before* clipping.
+        Neither set is overwritten by QP/fallback output.
+        """
+        sim = self.simulator
+        position, velocity = self._canonical_joint_state()
+        parameters = self._hard_pact_control_parameters
+        desired, ff = self._get_pinn_actions(actions)
+        if ff.shape[-1] == 0:
+            ff = torch.zeros_like(desired)
+        requested, _, _, pd = requested_torque_components(desired, ff, position, velocity, parameters)
+        raw_desired, raw_ff = self._get_pinn_actions(self._hard_pact_raw_delayed_action)
+        if raw_ff.shape[-1] == 0:
+            raw_ff = torch.zeros_like(raw_desired)
+        raw, raw_fb, raw_ff, _ = requested_torque_components(
+            raw_desired, raw_ff, position, velocity, parameters,
+        )
+        self._hard_pact_requested_torque = raw
+        self._hard_pact_requested_feedback = raw_fb
+        self._hard_pact_requested_feedforward = raw_ff
+        sim.feedback_torques, sim.feedforward_torques = pd, ff
+        sim._unweighted_torques = parameters["control_motor_strength"] * (pd + ff)
+        if sim.first_loop:
+            sim.first_loop = False
+            sim.first_loop_feedback = pd.clone()
+            self._hard_pact_first_requested_feedback = raw_fb.clone()
+        limits = parameters["control_torque_limits"]
+        self._hard_pact_bounded_nominal_torque = torch.clamp(requested, -limits, limits)
+        return self._hard_pact_bounded_nominal_torque.clone()
 
     def _filter_terrain_move_up(self, move_up):
         """Delay promotions only; retain the legacy demotion decision.
@@ -317,16 +407,15 @@ class Go2HardPACT(Go2PACT):
             self.num_envs, 12, device=self.device
         )
         # The runner binds the already-created BARD/QP modules after policy
-        # construction.  Until then (and when the QP is disabled), this alias
-        # follows the byte-for-byte legacy torque path.
+        # construction. Until then (and when disabled), execute the bounded
+        # non-QP actuator command without any QP correction.
         self._hard_pact_rollout_qp_enabled = False
         self._hard_pact_policy_context_ready = False
         self._hard_pact_push_event_mask = torch.zeros(
             self.num_envs, 1, device=self.device, dtype=torch.bool
         )
-        # Mirror only the validity of the legacy action queue. The actions
-        # themselves remain owned by the unchanged legacy queue, so exact
-        # delayed-action replay adds just one boolean per queue slot here.
+        # Keep delay selection unchanged. A separate raw queue is reward-only;
+        # execution and PPO likelihood continue using their existing storage.
         action_queue_length = (
             self.action_queue.shape[1]
             if hasattr(self, "action_queue") else 1
@@ -335,6 +424,13 @@ class Go2HardPACT(Go2PACT):
             self.num_envs, action_queue_length,
             device=self.device, dtype=torch.bool,
         )
+        self._hard_pact_raw_action_queue = torch.zeros(
+            self.num_envs, action_queue_length, self.actions.shape[-1], device=self.device,
+        )
+        for name in ("requested_torque", "requested_feedback", "requested_feedforward",
+                     "first_requested_feedback", "bounded_nominal_torque", "executed_torque"):
+            setattr(self, "_hard_pact_" + name, torch.zeros(self.num_envs, 12, device=self.device))
+        self.simulator._hard_pact_torque_conversion = self._hard_pact_compute_torques
         self._pending_action_replay_transition = None
         self.simulator._hard_pact_pre_physics_substep = (
             self._hard_pact_pre_physics_substep
@@ -715,6 +811,11 @@ class Go2HardPACT(Go2PACT):
         if hasattr(self, "_interval_executed_torque_sum"):
             getter = getattr(self.simulator, "hard_pact_executed_torque", None)
             executed = getter() if getter is not None else self.simulator._torques
+            # Retain the post-QP/fallback, post-actuator-projection value, not
+            # a pre-saturation request, as both label and next rate-box center.
+            self._hard_pact_executed_torque = executed.detach().clone()
+            if hasattr(self, "_hard_pact_previous_substep_torque"):
+                self._hard_pact_previous_substep_torque.copy_(executed)
             self._interval_executed_torque_sum.add_(executed)
             self._interval_executed_torque_count.add_(1.0)
             self._interval_executed_torque_peak.copy_(torch.maximum(
@@ -738,7 +839,9 @@ class Go2HardPACT(Go2PACT):
 
         .. math::
 
-           \tau_{nom,k}=K_p(q_d-q_k)-K_d\dot q_k+\tau_{ff},
+           \tau_{nom,k}=\operatorname{clip}_{\tau_{lim}}\left[
+             m_{motor}\{w_{fb}[K_p(q_d-q_k)-K_d\dot q_k]
+             +w_{ff}\tau_{ff}\}\right],
 
            \hat f_k=D_F(z_t,\operatorname{sg}(e_t),\tau_{nom,k}),
 
@@ -760,11 +863,16 @@ class Go2HardPACT(Go2PACT):
             # Simulator velocity v_sim=[v_WB^W(3),omega_WB^W(3),qdot(12)].
             v_world = self._canonical_velocity_world()
 
-            # tau_nom,k = Kp(q_d-q_k)-Kd*qdot_k+tau_ff.  The legacy feedback
-            # helper supplies the task's exact gains/default-pose convention.
-            tau_nom = self._hard_pact_tau_ff + self._get_pinn_feedback(
-                self._hard_pact_q_d, joint_position, joint_velocity
-            )
+            # tau_nom is the bounded non-QP command, not an unweighted or
+            # unsaturated decoder/action request. q_d includes default pose.
+            if hasattr(self, "_hard_pact_control_parameters"):
+                # The backend just computed the bounded non-QP command using
+                # the same shared conversion. Do not apply actuator effects twice.
+                tau_nom = self._hard_pact_bounded_nominal_torque
+            else:  # Direct synthetic solver fixtures without an actuator hook.
+                tau_nom = self._hard_pact_tau_ff + self._get_pinn_feedback(
+                    self._hard_pact_q_d, joint_position, joint_velocity
+                )
             update_mode = getattr(
                 self._hard_pact_rollout_qp.cfg,
                 "qp_update_mode", "every_substep",
@@ -793,10 +901,14 @@ class Go2HardPACT(Go2PACT):
             # The decoder output is normalized yaw-local force. Reconstruct
             # Newtons once, preserve FR/FL/RR/RL XYZ, then rotate into J_f's
             # world-axis convention. Observation scaling is not involved.
+            heads = self._hard_pact_actor_critic.physics_estimator
+            raw_grf_physical = heads.grf_to_physical(grf_normalized).reshape(-1, 4, 3)
             grf_world = self._yaw_local_to_world(
-                self._hard_pact_actor_critic.physics_estimator.grf_to_physical(
-                    grf_normalized
-                ).reshape(-1, 4, 3),
+                gate_grf_for_qp(
+                    raw_grf_physical,
+                    self._hard_pact_policy_explicit[:, 3:7],
+                    getattr(heads, "grf_swing", None),
+                ),
                 quat,
             )
             # Reconstruct physical N/Nm and apply the sole sanitization/clamp
@@ -889,6 +1001,10 @@ class Go2HardPACT(Go2PACT):
                 q_simulator, v_world, parameters=parameters, need_qp=True
             )
             contact_prob_qp = self._hard_pact_policy_explicit[:, 3:7]
+            log_qp_swing_grf(
+                getattr(self._hard_pact_rollout_qp, "iteration_diagnostics", {}).get("rollout"),
+                raw_grf_physical, contact_prob_qp, getattr(heads, "grf_swing", None),
+            )
             # Wall-clock measurement encloses matrix assembly inside solve and
             # qpth/fallback execution, but excludes state/head preprocessing.
             start = time.perf_counter()
@@ -927,12 +1043,6 @@ class Go2HardPACT(Go2PACT):
                     (self.num_envs, 1), float(self.cfg.sim.dt),
                     device=self.device, dtype=tau_nom.dtype,
                 ),
-                previous_certified_qdd=self._hard_pact_previous_certified_qdd,
-                proximal_reference=torch.cat((
-                    self._hard_pact_previous_certified_qdd,
-                    grf_world.flatten(1), tau_nom,
-                    torch.zeros_like(grf_world.flatten(1)),
-                ), dim=-1).detach(),
             )
             # Record elapsed milliseconds for interval diagnostics.
             elapsed_ms = (time.perf_counter() - start) * 1000.0
@@ -1021,11 +1131,6 @@ class Go2HardPACT(Go2PACT):
                 sample["sampled_qp_previous_torque"][selected] = (
                     self._hard_pact_previous_substep_torque[selected]
                 )
-                sample["sampled_qp_proximal_reference"][selected] = torch.cat((
-                    self._hard_pact_previous_certified_qdd[selected],
-                    grf_world[selected].flatten(1), tau_nom[selected],
-                    torch.zeros_like(grf_world[selected].flatten(1)),
-                ), dim=-1)
                 # Rollout references permit frozen-policy equality diagnostics.
                 sample["sampled_qp_rollout_nominal_torque"][selected] = tau_nom[selected]
                 sample["sampled_qp_rollout_grf_world"][selected] = (
@@ -1056,10 +1161,6 @@ class Go2HardPACT(Go2PACT):
                 sample["sampled_qp_timing_ms"][selected] = elapsed_ms
             # Advance the rate constraint: next substep uses this exact command.
             self._hard_pact_previous_substep_torque.copy_(result.tau_safe)
-            self._hard_pact_previous_certified_qdd.copy_(torch.where(
-                result.differentiated_mask[:, None], result.qdd,
-                self._hard_pact_previous_certified_qdd,
-            ))
             # Advance k after sampling so the first callback is k=0.
             self._qp_substep += 1
 
@@ -1114,10 +1215,6 @@ class Go2HardPACT(Go2PACT):
         self._qp_interval_residual_sum = shape(4)
         self._qp_interval_residual_peak = shape(4)
         # Counts for stage 0/full, stage 1/relaxed, stage 2/projection.
-        if not hasattr(self, "_hard_pact_previous_certified_qdd"):
-            self._hard_pact_previous_certified_qdd = torch.zeros(
-                self.num_envs, 18, device=self.device
-            )
         stage_count = 4 if bool(getattr(
             getattr(self, "_hard_pact_rollout_qp", None), "cfg", None
         ) and self._hard_pact_rollout_qp.cfg.elastic_recovery_enabled) else 3
@@ -1173,7 +1270,6 @@ class Go2HardPACT(Go2PACT):
             "sampled_qp_q": shape(19), "sampled_qp_v": shape(18),
             # Hard rate-box center and rollout learned references.
             "sampled_qp_previous_torque": shape(12),
-            "sampled_qp_proximal_reference": shape(54),
             "sampled_qp_rollout_nominal_torque": shape(12),
             "sampled_qp_rollout_grf_world": shape(12),
             # Label-only mass wrench and resulting applied-wrench QP input.
@@ -1485,7 +1581,10 @@ class Go2HardPACT(Go2PACT):
         # end of the preceding control interval.  Capture it before the legacy
         # action path updates simulator control buffers.  This is one compact
         # 12-float transition field and avoids storing any QP matrices.
-        previous_torque_buffer = getattr(self.simulator, "_torques", None)
+        previous_torque_buffer = getattr(self, "_hard_pact_executed_torque", None)
+        if previous_torque_buffer is None:
+            getter = getattr(self.simulator, "hard_pact_executed_torque", None)
+            previous_torque_buffer = getter() if getter is not None else getattr(self.simulator, "_torques", None)
         previous_executed_torque = (
             previous_torque_buffer.detach().clone()
             if previous_torque_buffer is not None else None
@@ -1535,8 +1634,18 @@ class Go2HardPACT(Go2PACT):
             torch.arange(self.num_envs, device=self.device), delay
         ].unsqueeze(-1)
 
-        # Match the legacy PINN torque convention exactly, evaluated at the
-        # pre-step joint state on the action actually selected by the queue.
+        if hasattr(self, "_hard_pact_raw_action_queue"):
+            raw_queue = self._hard_pact_raw_action_queue
+            if raw_queue.shape[1] > 1:
+                raw_queue[:, 1:] = raw_queue[:, :-1].clone()
+            raw_queue[:, 0] = actions.detach()
+            self._hard_pact_raw_delayed_action = raw_queue[
+                torch.arange(self.num_envs, device=self.device), delay
+            ].clone()
+            self._hard_pact_control_parameters = self._capture_control_parameters()
+
+        # Bound the physical actuator command at the pre-step joint state,
+        # using the execution-clipped action actually selected by the queue.
         desired_position, feedforward_torque = self._get_pinn_actions(
             delayed_action
         )
@@ -1545,11 +1654,15 @@ class Go2HardPACT(Go2PACT):
             # feedback-only torque convention without widening its actions.
             feedforward_torque = torch.zeros_like(desired_position)
         joint_position, joint_velocity = self._canonical_joint_state()
-        nominal_torque = feedforward_torque + self._get_pinn_feedback(
-            desired_position,
-            joint_position,
-            joint_velocity,
-        )
+        if hasattr(self, "_hard_pact_control_parameters"):
+            nominal_torque = bounded_nominal_torque(
+                desired_position, feedforward_torque, joint_position, joint_velocity,
+                self._hard_pact_control_parameters,
+            )
+        else:
+            nominal_torque = feedforward_torque + self._get_pinn_feedback(
+                desired_position, joint_position, joint_velocity,
+            )
         self._pending_action_replay_transition = {
             "sampled_action_delay": delay.to(torch.int16).unsqueeze(-1),
             "delayed_action": delayed_action.detach().clone(),
@@ -1557,16 +1670,15 @@ class Go2HardPACT(Go2PACT):
             "nominal_torque": nominal_torque.detach().clone(),
             "previous_executed_torque": previous_executed_torque,
         }
+        self._pending_action_replay_transition.update(
+            getattr(self, "_hard_pact_control_parameters", {})
+        )
         # Hold the action-space command across decimation.  PD feedback is
         # intentionally *not* held: it is reevaluated from q_k,qdot_k in the
         # callback immediately before every physics actuation.
         self._hard_pact_q_d = desired_position.detach().clone()
         self._hard_pact_tau_ff = feedforward_torque.detach().clone()
         self._hard_pact_previous_substep_torque = previous_executed_torque.clone()
-        if not hasattr(self, "_hard_pact_previous_certified_qdd"):
-            self._hard_pact_previous_certified_qdd = torch.zeros(
-                self.num_envs, 18, device=self.device
-            )
         return delayed_action
 
     def reset_idx(self, env_ids):
@@ -1617,13 +1729,16 @@ class Go2HardPACT(Go2PACT):
                     value[env_ids] = 0
             for frame in self.disturbance_critic_deque:
                 frame[env_ids] = 0
-        # QP rate/proximal and held-anchor state belongs to the actuator path,
+        # QP torque-rate and held-anchor state belongs to the actuator path,
         # not the optional persistent-disturbance feature.  Always clear it at
         # an episode boundary so the first post-reset rate box is centred at
         # zero and no correction from the previous episode can be replayed.
         for name in (
+            "_hard_pact_raw_action_queue", "_hard_pact_raw_delayed_action",
+            "_hard_pact_requested_torque", "_hard_pact_requested_feedback",
+            "_hard_pact_requested_feedforward", "_hard_pact_first_requested_feedback",
+            "_hard_pact_bounded_nominal_torque", "_hard_pact_executed_torque",
             "_hard_pact_previous_substep_torque",
-            "_hard_pact_previous_certified_qdd",
             "_hard_pact_q_d", "_hard_pact_tau_ff",
             "_hard_pact_held_correction",
             "_hard_pact_held_grf_normalized",

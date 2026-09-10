@@ -421,6 +421,11 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             heading = [-3.14, 3.14]
 
     class deployment_physics:
+        # Gate only the QP GRF reference; raw supervised predictions stay intact.
+        grf_swing_gating_enabled = False
+        grf_swing_contact_threshold = 0.5
+        # Independent, GRF-decoder-only physical-zero consistency penalty.
+        grf_swing_loss_weight = 0.0
         wrench_scale = [100.0, 100.0, 100.0, 25.0, 25.0, 25.0]
         wrench_qp_clip = [150.0, 150.0, 150.0, 40.0, 40.0, 40.0]
 

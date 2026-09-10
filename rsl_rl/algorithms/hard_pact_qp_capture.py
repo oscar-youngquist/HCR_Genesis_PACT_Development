@@ -66,7 +66,12 @@ def replay_snapshot(payload, device):
     from .hard_pact_qp import HardPACTQPConfig
     from .hard_pact_qp_backends import create_backend
     from qpth.qp import QPFunction
-    cfg = HardPACTQPConfig(**payload["config"])
+    if payload["config"].get("proximal_rho", 0) != 0:
+        raise ValueError(
+            "Snapshot matrices contain the removed HardPACT proximal objective; "
+            "recapture with the current configuration. Policy weights remain compatible."
+        )
+    cfg = HardPACTQPConfig.from_dict(payload["config"])
     tensors = {k: v.to(device) if torch.is_tensor(v) else v
                for k, v in payload["tensors"].items()}
     args = [tensors[k] for k in ("Q", "p", "G", "h", "A", "b")]

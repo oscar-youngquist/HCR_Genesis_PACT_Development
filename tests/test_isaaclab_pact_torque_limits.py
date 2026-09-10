@@ -6,9 +6,12 @@ import pytest
 import torch
 
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
+from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos import Go2HardPACTPos
 from legged_gym.simulator.isaaclab_simulator import IsaacLabSimulator
 from legged_gym.simulator.isaaclab_simulator_pact import IsaacLabSimulator_PACT
-from rsl_rl.algorithms.hard_pact_qp import HardPACTQPConfig
+from legged_gym.simulator.genesis_simulator_pact import GenesisSimulator_PACT
+from legged_gym.simulator.genesis_simulator_pact_pos import GenesisSimulator_PACT_Pos
+from rsl_rl.algorithms.hard_pact_qp import HardPACTQPConfig, held_correction_torque
 from rsl_rl.algorithms.ppo_hard_pact import PPO_HardPACT
 
 
@@ -184,3 +187,92 @@ def test_actual_substep_callback_records_the_clipped_effort_command(action_dim, 
     if not qp_active:
         assert (sim._torques.abs() > sim.torque_limits).all()
         torch.testing.assert_close(commands[0], sim.torque_limits.expand(2, -1))
+
+    # Install precisely the HardPACT-only conversion used in production.
+    # The legacy assertions above remain unchanged: no generic backend edit.
+    if action_dim == 12:
+        env.__class__ = Go2HardPACTPos
+    env.num_envs, env.num_actions, env.device = 2, 12, "cpu"
+    env.actions = torch.zeros(2, action_dim)
+    env.cfg.control = sim._cfg.control
+    env.cfg.rewards = SimpleNamespace(soft_torque_limit=.9)
+    sim._robot.data.default_joint_pos[:] = torch.linspace(-.2, .2, 12)
+    sim._robot.data.joint_pos[:] = torch.linspace(-.1, .1, 12)
+    sim._robot.data.joint_vel[:] = torch.linspace(-.3, .3, 12)
+    sim._kp_scale = torch.linspace(.8, 1.2, 24).reshape(2, 12)
+    sim._kd_scale = 1.3 * torch.ones(2, 12)
+    sim.feedforward_tau_weight, sim.feedback_tau_weight = .7, 1.1
+    clipped_actions = torch.ones(2, action_dim)
+    expected_nominal = sim._compute_torques(clipped_actions).clamp(
+        -sim.torque_limits, sim.torque_limits)
+    genesis = SimpleNamespace(
+        _cfg=sim._cfg, _num_envs=2, first_loop=True,
+        _kp_scale=sim._kp_scale, _kd_scale=sim._kd_scale,
+        _p_gains=sim._p_gains.clone(), _d_gains=sim._d_gains.clone(),
+        _default_dof_pos=sim.default_dof_pos, _dof_pos=sim.dof_pos, _dof_vel=sim.dof_vel,
+        _motor_strength=sim._motor_strength,
+        feedforward_tau_weight=sim.feedforward_tau_weight,
+        feedback_tau_weight=sim.feedback_tau_weight,
+    )
+    genesis_class = GenesisSimulator_PACT_Pos if action_dim == 12 else GenesisSimulator_PACT
+    # Both legacy backend controller formulas agree before installing the
+    # shared HardPACT hook, including default pose and randomized actuators.
+    torch.testing.assert_close(genesis_class._compute_torques(genesis, clipped_actions).clamp(
+        -sim.torque_limits, sim.torque_limits), expected_nominal)
+    expected_feedback, expected_ff = sim.feedback_torques.clone(), sim.feedforward_torques.clone()
+    env._hard_pact_control_parameters = env._capture_control_parameters()
+    sim._hard_pact_torque_conversion = env._hard_pact_compute_torques
+
+    # Real simulator substep loop + real transition callback: non-QP,
+    # successful-QP and analytic-fallback values must be the API command.
+    requested_rewards = []
+    for raw_magnitude in (10., 20.):
+        env._hard_pact_raw_delayed_action = torch.full((2, action_dim), raw_magnitude)
+        for fallback in (False, True) if qp_active else (False,):
+            commands = []
+            env._interval_executed_torque_sum.zero_()
+            env._interval_executed_torque_count.zero_()
+            env._interval_executed_torque_peak.zero_()
+            env._hard_pact_previous_substep_torque = torch.zeros(2, 12)
+            nominal_inputs = []
+
+            def project(*_):
+                nominal_inputs.append(env._hard_pact_bounded_nominal_torque.clone())
+                if fallback:
+                    selected = held_correction_torque(
+                        nominal_inputs[-1], torch.zeros(2, 12),
+                        env._hard_pact_previous_substep_torque,
+                        sim.torque_limits, 50., .005, sanitize=True)
+                else:
+                    selected = .5 * sim.torque_limits.expand(2, -1)
+                sim.hard_pact_set_executed_torque(selected)
+
+            env._solve_hard_pact_rollout_qp_substep = project
+            sim.step(clipped_actions)
+            commands_tensor = torch.stack(commands)
+            assert len(commands) == 4
+            torch.testing.assert_close(env._hard_pact_bounded_nominal_torque, expected_nominal)
+            for nominal in nominal_inputs:
+                torch.testing.assert_close(nominal, expected_nominal)
+            if not qp_active:
+                torch.testing.assert_close(commands_tensor, expected_nominal.expand(4, -1, -1))
+            if fallback:
+                delta = torch.diff(commands_tensor, dim=0, prepend=torch.zeros(1, 2, 12))
+                assert (delta.abs() <= .25).all()
+            torch.testing.assert_close(env._hard_pact_executed_torque, commands[-1])
+            torch.testing.assert_close(env._hard_pact_previous_substep_torque, commands[-1])
+            torch.testing.assert_close(
+                env._interval_executed_torque_sum / env._interval_executed_torque_count,
+                commands_tensor.mean(0), rtol=0, atol=0)
+            torch.testing.assert_close(sim.feedback_torques, expected_feedback)
+            torch.testing.assert_close(sim.feedforward_torques, expected_ff)
+            assert (commands_tensor.abs() <= sim.torque_limits).all()
+        requested_rewards.append(torch.stack((env._reward_torque_limits(),
+            env._reward_feedback_torques(), env._reward_feedforward_torques())))
+    assert (requested_rewards[1][:2] > requested_rewards[0][:2]).all()
+    if action_dim == 24:
+        assert (requested_rewards[1][2] > requested_rewards[0][2]).all()
+    else:
+        assert requested_rewards[1][2].eq(0).all()
+    genesis._hard_pact_torque_conversion = env._hard_pact_compute_torques
+    torch.testing.assert_close(genesis_class._compute_torques(genesis, clipped_actions), expected_nominal)

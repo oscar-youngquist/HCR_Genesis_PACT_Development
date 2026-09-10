@@ -425,6 +425,11 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             heading = [-3.14, 3.14]
 
     class deployment_physics:
+        # Gate only the QP GRF reference; raw supervised predictions stay intact.
+        grf_swing_gating_enabled = True
+        grf_swing_contact_threshold = 0.5
+        # Independent, GRF-decoder-only physical-zero consistency penalty.
+        grf_swing_loss_weight = 0.1
         wrench_scale = [100.0, 100.0, 100.0, 25.0, 25.0, 25.0]
         wrench_qp_clip = [150.0, 150.0, 150.0, 40.0, 40.0, 40.0]
 GO2HardPACTCfg.sim.dt = GO2HardPACTCfg.control.dt / GO2HardPACTCfg.control.decimation
@@ -586,8 +591,6 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'force_regularization': 0.0001, 
                         'torque_regularization': 0.0001, 
                         'q_regularization': 1e-07, 
-                        'proximal_rho': 0.1, 
-                        'proximal_block_weights': (1.0, 1.0, 1.0, 1.0), 
                         'elastic_recovery_enabled': True, 
                         'elastic_dynamics_weight': 10000.0, 
                         'gradient_scale_tau': 1.0, 

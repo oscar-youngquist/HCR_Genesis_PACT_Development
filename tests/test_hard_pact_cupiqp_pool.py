@@ -257,7 +257,7 @@ def test_profiled_forward_vjp_parity_and_event_timings():
 
 @requires_cupiqp_gpu
 def test_ppo_elastic_pool_updates_state_dependent_hessian():
-    options = dict(qp_solver="cupiqp", proximal_rho=.1,
+    options = dict(qp_solver="cupiqp",
                    ppo_eps_abs=1e-8, ppo_eps_rel=1e-8)
     reused = make_qp(**options)
     fresh = make_qp(**options, cupiqp_ppo_reuse=False)

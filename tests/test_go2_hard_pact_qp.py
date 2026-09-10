@@ -19,6 +19,7 @@ from rsl_rl.algorithms.hard_pact_qp_backends import (
 )
 from rsl_rl.modules.actor_critic_hard_pact import ActorCritic_HardPACT
 from rsl_rl.modules.hard_pact_physics import sanitize_and_clip_wrench_for_qp
+from rsl_rl.modules.hard_pact_control import bounded_nominal_torque
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
 from legged_gym.envs.go2.go2_hard_pact.deployment import calculate_physics_head_gains
 from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCfg
@@ -81,31 +82,40 @@ class HardPACTQPTests(unittest.TestCase):
         self.assertEqual(relaxed_g.shape, (2, 20, 54))
         self.assertTrue(torch.isneginf(relaxed_lower[:, 42:54]).all())
 
-    def test_proximal_objective_algebra_and_zero_parity(self):
+    def test_original_tracking_objective_algebra_and_saved_zero_parity(self):
+        from dataclasses import asdict
         source = qp_data(2)
-        source["previous_certified_qdd"] = torch.full((2, 18), 0.2)
-        zero = make_qp(proximal_rho=0.0)._build(source)
-        rho = 0.7
-        weights = (2.0, 3.0, 4.0, 5.0)
-        proximal = make_qp(
-            proximal_rho=rho, proximal_block_weights=weights
-        )._build(source)
-        d2 = torch.tensor(
-            [weights[0] ** 2] * 18 + [weights[1] ** 2] * 12
-            + [weights[2] ** 2] * 12 + [weights[3] ** 2] * 12,
-            dtype=torch.float64,
-        )
-        # Compare in physical coordinates before x=Dz.
-        scale2 = zero.variable_scale.square()
-        diagonal_delta = (
-            proximal.Q.diagonal(dim1=-2, dim2=-1)
-            - zero.Q.diagonal(dim1=-2, dim2=-1)
-        ) / scale2
-        torch.testing.assert_close(diagonal_delta, rho * d2.expand_as(diagonal_delta))
-        self.assertGreater(torch.linalg.eigvalsh(proximal.Q).min().item(), 0.0)
-        exact_zero = make_qp(proximal_rho=0.0).solve(**qp_data(1))
-        legacy = make_qp().solve(**qp_data(1))
-        torch.testing.assert_close(exact_zero.tau_safe, legacy.tau_safe)
+        source["tau_nom"].fill_(0.3)
+        source["tau_nom"].requires_grad_()
+        qp = make_qp()
+        cfg = qp.cfg
+        matrices = qp._build(source)
+        # Original rho=0 objective, including both physical and solver-space
+        # SPD ridges. No temporal reference is part of Q or p.
+        diagonal = torch.full((54,), 2 * cfg.q_regularization, dtype=torch.float64)
+        diagonal[:18] += 2 * cfg.qdd_regularization
+        diagonal[18:30] += 2 * (cfg.force_tracking_weight + cfg.force_regularization) / cfg.force_scale_n**2
+        diagonal[30:42] += 2 * (cfg.torque_tracking_weight + cfg.torque_regularization) / qp.torque_limits.double().square()
+        diagonal[42:] += 2 * cfg.slack_weight / cfg.slack_scale_m_s2**2
+        expected_q = torch.diag(diagonal * matrices.variable_scale.square() + cfg.q_regularization)
+        torch.testing.assert_close(matrices.Q, expected_q.expand(2, -1, -1), rtol=1e-15, atol=1e-15)
+        expected_p = torch.zeros_like(matrices.p)
+        expected_p[:, 18:30] = -2 * cfg.force_tracking_weight * source["force_pred_world"].flatten(1) / cfg.force_scale_n**2
+        expected_p[:, 30:42] = -2 * cfg.torque_tracking_weight * source["tau_nom"] / qp.torque_limits.double().square()
+        torch.testing.assert_close(matrices.p, expected_p * matrices.variable_scale, rtol=0, atol=0)
+        self.assertGreater(torch.linalg.eigvalsh(matrices.Q).min().item(), 0.0)
+        saved = dict(asdict(cfg), proximal_rho=0., proximal_block_weights=(1.,) * 4)
+        with self.assertWarnsRegex(UserWarning, "obsolete HardPACT"):
+            restored = HardPACTQPConfig.from_dict(saved)
+        self.assertEqual(asdict(restored), asdict(cfg))
+        reference = make_qp()
+        reference.cfg = restored
+        a, b = qp.solve(**source), reference.solve(**source)
+        torch.testing.assert_close(a.tau_safe, b.tau_safe, rtol=0, atol=0)
+        ga, = torch.autograd.grad(a.tau_safe.sum(), source["tau_nom"], retain_graph=True)
+        gb, = torch.autograd.grad(b.tau_safe.sum(), source["tau_nom"])
+        torch.testing.assert_close(ga, gb, rtol=0, atol=0)
+        self.assertTrue(torch.isfinite(ga).all() and ga.abs().sum() > 0)
 
     def test_rollout_and_ppo_profiles_are_independent(self):
         qp = make_qp(
@@ -709,10 +719,22 @@ class HardPACTQPTests(unittest.TestCase):
         task._realized_added_mass = torch.zeros(batch, 1)
         task._realized_com_shift_body = torch.zeros(batch, 3)
         task._get_pinn_feedback = lambda desired, q, qdot: 4 * (desired - q) - qdot
+        task._hard_pact_control_parameters = {
+            "control_kp": torch.full((batch, 12), 4.),
+            "control_kd": torch.ones(batch, 12),
+            "control_motor_strength": torch.full((batch, 1), 1.2),
+            "control_feedback_weight": torch.full((batch, 1), .9),
+            "control_feedforward_weight": torch.full((batch, 1), .7),
+            "control_torque_limits": torch.full((batch, 12), 3.),
+        }
+        task._hard_pact_bounded_nominal_torque = bounded_nominal_torque(
+            task._hard_pact_q_d, task._hard_pact_tau_ff, robot.q, robot.v,
+            task._hard_pact_control_parameters)
         task._begin_qp_interval()
         quat = torch.tensor([[0.0, 0.0, 0.0, 1.0]]).expand(batch, -1)
         mass_wrench = torch.zeros(batch, 6)
         task._solve_hard_pact_rollout_qp_substep(quat, mass_wrench)
+        torch.testing.assert_close(qp.nominal[0], torch.full((batch, 12), 3.))
         first_safe = task.simulator._torques.clone()
         torch.testing.assert_close(
             qp.wrenches[0],
@@ -720,7 +742,11 @@ class HardPACTQPTests(unittest.TestCase):
         )
         robot.q.fill_(0.5)
         robot.v.fill_(0.25)
+        task._hard_pact_bounded_nominal_torque = bounded_nominal_torque(
+            task._hard_pact_q_d, task._hard_pact_tau_ff, robot.q, robot.v,
+            task._hard_pact_control_parameters)
         task._solve_hard_pact_rollout_qp_substep(quat, mass_wrench)
+        torch.testing.assert_close(qp.nominal[1], torch.full((batch, 12), 1.89))
         self.assertFalse(torch.equal(qp.nominal[0], qp.nominal[1]))
         self.assertTrue(torch.equal(qp.previous[1], first_safe))
         expected_average = (first_safe + task.simulator._torques) / 2

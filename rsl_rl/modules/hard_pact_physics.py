@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import NamedTuple
 
 import torch
@@ -13,6 +14,85 @@ import torch.nn.functional as F
 class PhysicsHeadOutput:
     grf_normalized: torch.Tensor
     wrench_raw_normalized: torch.Tensor
+
+
+@dataclass(frozen=True)
+class GRFSwingConfig:
+    """QP-reference gate and independent GRF-exclusive auxiliary penalty."""
+    enabled: bool = False
+    threshold: float = 0.5
+    loss_weight: float = 0.0
+
+    def __post_init__(self):
+        if not math.isfinite(self.threshold) or not 0.0 <= self.threshold <= 1.0:
+            raise ValueError("GRF swing contact threshold must be in [0, 1]")
+        if not math.isfinite(self.loss_weight) or self.loss_weight < 0.0:
+            raise ValueError("GRF swing consistency weight must be finite and nonnegative")
+
+    @property
+    def active(self):
+        return self.enabled or self.loss_weight > 0.0
+
+    @classmethod
+    def from_task(cls, cfg):
+        values = cfg.deployment_physics
+        return cls(
+            bool(getattr(values, "grf_swing_gating_enabled", False)),
+            float(getattr(values, "grf_swing_contact_threshold", 0.5)),
+            float(getattr(values, "grf_swing_loss_weight", 0.0)),
+        )
+
+
+def gate_grf_for_qp(grf_physical, contact_probability, config=None):
+    """Gate only the physical QP reference, never optimized forces or labels.
+
+    Contact is already an epsilon-bounded probability in canonical FR/FL/RR/RL
+    order. The detached threshold decision must not train the contact branch.
+    XYZ zeroing commutes with the existing per-foot yaw/world rotation.
+    Disabled mode returns the original tensor/graph without any arithmetic.
+    """
+    if config is None or not config.enabled:
+        return grf_physical
+    swing = contact_probability.detach().reshape(-1, 4) < config.threshold
+    forces = grf_physical.reshape(-1, 4, 3)
+    return torch.where(swing[..., None], 0.0, forces).reshape_as(grf_physical)
+
+
+def log_qp_swing_grf(aggregate, grf_physical, contact_probability, config):
+    """Log actual anchor/replay references, not held commands or extra solves."""
+    if aggregate is None or config is None or not config.enabled:
+        return
+    with torch.no_grad():
+        swing = contact_probability.detach().reshape(-1, 4) < config.threshold
+        norm = grf_physical.detach().reshape(-1, 4, 3).norm(dim=-1)
+        aggregate.add_values("grf_swing/fraction", swing.float())
+        aggregate.add_values("grf_swing/raw_norm_n", norm, swing)
+        aggregate.add_values("grf_swing/removed_norm_n", norm.where(swing, 0.))
+
+
+class GRFSwingMetricsAccumulator:
+    """Device sums; only scalar summaries leave PPO at the iteration boundary."""
+    def __init__(self, config):
+        self.config, self.sums = config, None
+
+    def add(self, statistics):
+        detached = {name: value.detach() for name, value in statistics.items()}
+        if self.sums is None:
+            self.sums = detached
+        else:
+            for name, value in detached.items():
+                self.sums[name] = self.sums[name] + value
+
+    def finalize(self):
+        if self.sums is None:
+            return {}
+        s = self.sums
+        return {
+            "grf_swing_fraction": s["swing_count"] / s["foot_count"].clamp_min(1.),
+            "grf_swing_raw_norm_n": s["raw_norm_sum"] / s["swing_count"].clamp_min(1.),
+            "grf_swing_removed_norm_n": s["removed_norm_sum"] / s["foot_count"].clamp_min(1.),
+            "grf_swing_consistency_loss": self.config.loss_weight * s["squared_sum"] / s["swing_count"].clamp_min(1.),
+        }
 
 
 def _broadcast_grf_scale(reference, grf_scale_n):
@@ -560,10 +640,12 @@ class DeploymentPhysicsHeads(nn.Module):
         grf_scale_n=None,
         wrench_scale=None,
         wrench_qp_clip=None,
+        grf_swing=None,
     ):
         super().__init__()
         self.latent_dim = int(latent_dim)
         self.explicit_dim = int(explicit_dim)
+        self.grf_swing = GRFSwingConfig() if grf_swing is None else grf_swing
         self.grf_head = _physics_head(
             latent_dim + explicit_dim + 12, grf_hidden_layers, 12
         )
@@ -587,6 +669,8 @@ class DeploymentPhysicsHeads(nn.Module):
         )
         if self.grf_scale_n.shape != (12,):
             raise ValueError("grf_scale_n must contain 12 values")
+        if not torch.isfinite(self.grf_scale_n).all() or not (self.grf_scale_n > 0).all():
+            raise ValueError("GRF physical normalization scales must be finite and positive")
         if self.wrench_scale.shape != (6,):
             raise ValueError("wrench_scale must contain 6 values")
         if self.wrench_qp_clip.shape != (6,):
@@ -636,6 +720,51 @@ class DeploymentPhysicsHeads(nn.Module):
         return grf_normalized_to_physical(
             prediction_normalized, self.grf_scale_n
         )
+
+    def grf_to_qp_physical(self, prediction_normalized, contact_probability):
+        """Deployment boundary: denormalize once, then gate the QP reference."""
+        return gate_grf_for_qp(
+            self.grf_to_physical(prediction_normalized), contact_probability, self.grf_swing,
+        )
+
+    def swing_grf_auxiliary(self, latent, explicit, nominal_torque, raw_normalized, valid):
+        """A separate graph that can reach *only* this GRF decoder's weights.
+
+        All shared features and the torque action are detached before this
+        forward. Existing supervised/PINN graphs remain untouched. Do not use
+        the gated force as a training prediction: physical zero is the target.
+        """
+        cfg = self.grf_swing
+        if not cfg.active:
+            return raw_normalized.new_zeros(()), None
+        rows = valid.detach().reshape(-1).bool()
+        explicit = explicit.detach()[rows]
+        if cfg.loss_weight > 0.0:
+            raw_normalized = self.predict_grf(
+                latent.detach()[rows], explicit, nominal_torque.detach()[rows],
+            )
+        else:
+            # Gate-only diagnostics reuse the existing raw prediction.
+            raw_normalized = raw_normalized.detach()[rows]
+        physical = self.grf_to_physical(raw_normalized).reshape(-1, 4, 3)
+        swing = explicit[:, 3:7] < cfg.threshold
+        # Select before loss arithmetic: inactive/invalid NaN rows cannot
+        # contaminate the zero-swing result or its gradients.
+        selected = physical[swing]
+        scale = self.grf_scale_n.detach().reshape(1, 4, 3).expand_as(physical)[swing]
+        squared_sum = (selected / scale).square().sum()
+        count = swing.sum().to(physical.dtype)
+        loss = cfg.loss_weight * squared_sum / count.clamp_min(1.)
+        with torch.no_grad():
+            norm_sum = selected.detach().norm(dim=-1).sum()
+            statistics = {
+                "swing_count": count,
+                "foot_count": count.new_tensor(swing.numel()),
+                "raw_norm_sum": norm_sum,
+                "removed_norm_sum": norm_sum if cfg.enabled else norm_sum.new_zeros(()),
+                "squared_sum": squared_sum.detach(),
+            }
+        return loss, statistics
 
     def predict_wrench(self, latent_sample, explicit):
         """Evaluate the unbounded wrench head from a sampled latent."""

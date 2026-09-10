@@ -30,9 +30,14 @@
 
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
 import torch
+from rsl_rl.modules.hard_pact_control import bounded_nominal_torque
+from rsl_rl.modules.hard_pact_physics import (
+    gate_grf_for_qp, log_qp_swing_grf, GRFSwingMetricsAccumulator,
+)
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -384,8 +389,8 @@ class PPO_HardPACT:
 
         # Match the B1Z1 PACT ownership plan. PPO/PINN PCGrad owns the complete
         # differentiable policy path, including context and deployment
-        # decoders. A second optimizer performs the temporally separate,
-        # combined auxiliary update on that shared context/decoder boundary.
+        # decoders. A second optimizer performs the temporally separate
+        # encoder and decoder auxiliary phases on that shared boundary.
         actor_groups, context_groups = actor_critic.get_optim_groups()
         decoder_group = {
             "params": list(decoder_network.parameters()),
@@ -429,6 +434,17 @@ class PPO_HardPACT:
             parameter for group in self.auxiliary_optimizer.param_groups
             for parameter in group["params"]
         ))
+        self.auxiliary_decoder_parameters = list(dict.fromkeys(
+            parameter for module in (
+                self.decoder,
+                self.actor_critic.physics_estimator.grf_head,
+                self.actor_critic.physics_estimator.wrench_head,
+            ) for parameter in module.parameters()
+        ))
+        decoder_parameter_ids = {id(p) for p in self.auxiliary_decoder_parameters}
+        self.auxiliary_encoder_parameters = [
+            p for p in self.auxiliary_parameters if id(p) not in decoder_parameter_ids
+        ]
 
         self.boot_mult = 1.0
         self.use_boot = False
@@ -519,7 +535,7 @@ class PPO_HardPACT:
                 "physics loss weights must be nonnegative"
             )
         self.qp_config = replace(
-            HardPACTQPConfig(**(hard_pact_qp or {})),
+            HardPACTQPConfig.from_dict(hard_pact_qp or {}),
             enabled=self.hard_pact_features.execution_qp,
         )
         self.hard_pact_qp = None
@@ -1015,6 +1031,10 @@ class PPO_HardPACT:
             if self._latent_diagnostics_due else None
         )
         latent_ablation_ran = False
+        swing_config = self.actor_critic.physics_estimator.grf_swing
+        self._grf_swing_metrics = (
+            GRFSwingMetricsAccumulator(swing_config) if swing_config.active else None
+        )
         self._grf_diagnostics = (
             GRFDecoderMetricsAccumulator(
                 self.actor_critic.physics_estimator.grf_scale_n
@@ -1314,8 +1334,9 @@ class PPO_HardPACT:
                 mean_pinn_loss += self.last_unweighted_pinn_loss
 
 
-            # Phase 2: recompute and aggregate every auxiliary term before a
-            # single backward/step, following the B1Z1 adaptation phase.
+            # Auxiliary adaptation follows Pos's two-stage routine: train the
+            # encoder through frozen decoders, then train the three decoders
+            # using detached copies of that same stochastic encoder output.
             auxiliary_indices = terminated_batch.reshape(-1).bool().nonzero(as_tuple=False).flatten()
             for enc_epoch in range(self.num_enc_epochs):
                 if auxiliary_indices.numel() == 0:
@@ -1362,15 +1383,17 @@ class PPO_HardPACT:
                                 replay["nominal_torque"][diagnostic_indices],
                             )
                             latent_ablation_ran = True
-                aux = self._compute_auxiliary_loss(
-                    obs_hist_batch, obs_target, explicit_labels_batch, grf_target,
-                    terminated_batch, replay["nominal_torque"].detach(),
-                    self.storage.current_hard_pact_batch,
-                )
                 self.auxiliary_optimizer.zero_grad(set_to_none=True)
-                aux["loss"].backward()
-                nn.utils.clip_grad_norm_(self.auxiliary_parameters, self.max_grad_norm)
-                self.auxiliary_optimizer.step()
+                with self._frozen_auxiliary_decoders():
+                    aux = self._compute_auxiliary_loss(
+                        obs_hist_batch, obs_target, explicit_labels_batch, grf_target,
+                        terminated_batch, replay["nominal_torque"].detach(),
+                        self.storage.current_hard_pact_batch,
+                        return_decoder_inputs=True,
+                    )
+                    aux["loss"].backward()
+                    nn.utils.clip_grad_norm_(self.auxiliary_encoder_parameters, self.max_grad_norm)
+                    self.auxiliary_optimizer.step()
                 if latent_diagnostics is not None:
                     with torch.no_grad():
                         post_aux = policy_distribution_without_side_effects(
@@ -1393,10 +1416,22 @@ class PPO_HardPACT:
                             diagonal_gaussian_kl(pre_aux[0], pre_aux[1], post_aux[0], post_aux[1])[:, None],
                         )
                         latent_diagnostics.add("ppo/policy_kl_aux_delta", (post_kl - pre_kl)[:, None])
+
+                # Keep the optimizer groups/state-dict layout unchanged. With
+                # grad=None on inactive parameters, AdamW skips their momentum
+                # and weight decay: each parameter is stepped in only its own
+                # auxiliary phase. No encoder forward or new sample is needed.
+                self.auxiliary_optimizer.zero_grad(set_to_none=True)
+                decoder_aux = self._compute_auxiliary_decoder_loss(
+                    **aux.pop("decoder_inputs")
+                )
+                decoder_aux["loss"].backward()
+                nn.utils.clip_grad_norm_(self.auxiliary_decoder_parameters, self.max_grad_norm)
+                self.auxiliary_optimizer.step()
                 self._stop_bard_timing("auxiliary", auxiliary_timing)
                 vae_loss, kl_div = aux["loss"], aux["kl"]
                 recon_error, vel_pred_error = aux["privileged"], aux["explicit"]
-                dec_loss = aux["privileged"]
+                dec_loss = decoder_aux["privileged"]
                 decode_targets, recons = obs_target, aux["reconstruction"]
                 self.last_auxiliary_metrics = {
                     name: value.detach() for name, value in aux.items()
@@ -1436,6 +1471,9 @@ class PPO_HardPACT:
         if self._grf_diagnostics is not None:
             self.last_auxiliary_metrics.update(self._grf_diagnostics.finalize())
         self._grf_diagnostics = None
+        if self._grf_swing_metrics is not None:
+            self.last_auxiliary_metrics.update(self._grf_swing_metrics.finalize())
+        self._grf_swing_metrics = None
         self.last_auxiliary_metrics.update(self._contact_diagnostics.finalize())
         self._contact_diagnostics = None
         if latent_diagnostics is not None:
@@ -1682,9 +1720,73 @@ class PPO_HardPACT:
             transfer_total, device=self.device, dtype=torch.float32
         )
 
+    @contextmanager
+    def _frozen_auxiliary_decoders(self):
+        """Freeze weights, not input gradients; restore flags even on failure."""
+        requires_grad = [p.requires_grad for p in self.auxiliary_decoder_parameters]
+        try:
+            for parameter in self.auxiliary_decoder_parameters:
+                parameter.requires_grad_(False)
+            yield
+        finally:
+            for parameter, enabled in zip(self.auxiliary_decoder_parameters, requires_grad):
+                parameter.requires_grad_(enabled)
+
+    def _compute_auxiliary_decoder_loss(
+        self, sample, explicit, nominal_torque, privileged_target, grf_target,
+        wrench_target, valid, active_mask, neutral_mask,
+    ):
+        """Train all three decoders on the encoder phase's valid, fixed inputs.
+
+        Like Pos's decoder-only update, reuse its sampled z rather than drawing
+        new noise or recomputing the encoder after its step. Only decoder
+        weights receive gradients; targets, explicit estimates, and torque are
+        detached. The existing normalized losses and coefficients are retained.
+        """
+        valid, active_mask, neutral_mask = (
+            mask.detach() for mask in (valid, active_mask, neutral_mask)
+        )
+        reconstruction = self.decoder(torch.cat((sample.detach(), explicit.detach()), dim=-1))
+        heads = self.actor_critic.physics_heads(
+            sample.detach(), explicit.detach(), nominal_torque.detach()
+        )
+        privileged = self._masked_mse(reconstruction, privileged_target.detach(), valid)
+        grf = normalized_grf_huber_loss(heads.grf_normalized, grf_target.detach(), valid)
+        wrench_active = normalized_wrench_huber_loss(
+            heads.wrench_raw_normalized, wrench_target.detach(), active_mask
+        )
+        wrench_neutral = normalized_wrench_huber_loss(
+            heads.wrench_raw_normalized, wrench_target.detach(), neutral_mask
+        )
+        result = {
+            "loss": (
+                self.privileged_loss_weight * privileged
+                + self.grf_loss_weight * grf
+                + self.active_wrench_loss_weight * wrench_active
+                + self.neutral_wrench_loss_weight * wrench_neutral
+            ),
+            "privileged": privileged,
+            "grf": grf,
+            "wrench_active": wrench_active,
+            "wrench_neutral": wrench_neutral,
+        }
+        physics = self.actor_critic.physics_estimator
+        if physics.grf_swing.active:
+            # Only the decoder phase includes this extra objective. Its
+            # dedicated forward detaches every input, including z and torque.
+            swing_loss, statistics = physics.swing_grf_auxiliary(
+                sample, explicit, nominal_torque, heads.grf_normalized, valid,
+            )
+            result["loss"] = result["loss"] + swing_loss
+            result["grf_swing_consistency_loss"] = swing_loss
+            accumulator = getattr(self, "_grf_swing_metrics", None)
+            if accumulator is not None:
+                accumulator.add(statistics)
+        return result
+
     def _compute_auxiliary_loss(
         self, history, privileged_target, explicit_target, grf_target,
-        valid, nominal_torque, transition,
+        valid, nominal_torque, transition, *, return_decoder_inputs=False,
     ):
         r"""Compute every decoder term on one shared stochastic VAE graph.
 
@@ -1783,6 +1885,17 @@ class PPO_HardPACT:
             "wrench_neutral": wrench_neutral,
             "reconstruction": reconstruction,
         }
+        if return_decoder_inputs:
+            # These are already compacted to valid rows. Detach without copying
+            # or retaining the encoder graph, preserving Pos's sampled inputs.
+            metrics["decoder_inputs"] = {
+                "sample": sample.detach(), "explicit": explicit.detach(),
+                "nominal_torque": nominal_torque.detach(),
+                "privileged_target": privileged_target,
+                "grf_target": grf_target, "wrench_target": wrench_target,
+                "valid": valid, "active_mask": active_mask,
+                "neutral_mask": neutral_mask,
+            }
         if self._contact_diagnostics is None:
             metrics.update(contact_estimator_metrics(
                 estimator, explicit_target[:, 3:7],
@@ -1973,11 +2086,20 @@ class PPO_HardPACT:
         desired_position, feedforward_torque = action_func(delayed_action)
         if feedforward_torque.shape[-1] == 0:
             feedforward_torque = torch.zeros_like(desired_position)
-        joint_position = observation.detach()[:, 9:21] + default_pose
-        joint_velocity = observation.detach()[:, 21:33] / qvel_scale
-        nominal_torque = feedforward_torque + fb_func(
-            desired_position, joint_position, joint_velocity
-        )
+        if "control_kp" in transition:
+            # Reuse the measured pre-step state and that transition's actuator
+            # sample, not noisy/clipped observations or the live reset gains.
+            nominal_torque = bounded_nominal_torque(
+                desired_position, feedforward_torque,
+                transition["pre_q"].detach()[:, 7:],
+                transition["pre_v"].detach()[:, 6:], transition,
+            )
+        else:  # Direct legacy/synthetic callers without HardPACT control fields.
+            joint_position = observation.detach()[:, 9:21] + default_pose
+            joint_velocity = observation.detach()[:, 21:33] / qvel_scale
+            nominal_torque = feedforward_torque + fb_func(
+                desired_position, joint_position, joint_velocity
+            )
         return {
             "raw_action": current_raw,
             "transformed_action": current_transformed,
@@ -2077,7 +2199,7 @@ class PPO_HardPACT:
 
         if compute_pinn:
             grf_normalized = self.actor_critic.physics_estimator.predict_grf(
-                latent, explicit, nominal_torque
+                latent, explicit, nominal_torque.detach()
             ).reshape(-1, 4, 3)
             grf_world = _yaw_local_to_world(
                 self.actor_critic.physics_estimator.grf_to_physical(
@@ -2266,10 +2388,15 @@ class PPO_HardPACT:
                 # Replay the current stochastic/delayed policy into held q_d
                 # and tau_ff, then evaluate the sampled-state PD law:
                 # tau_nom,K=Kp(q_d-q_K)-Kd*qdot_K+tau_ff.
-                sampled_nominal = feedforward_torque[qp_rows] + fb_func(
-                    desired_position[qp_rows],
-                    sample_q[:, 7:], sample_v[:, 6:]
-                )
+                if "control_kp" in qp_batch:
+                    sampled_nominal = bounded_nominal_torque(
+                        desired_position[qp_rows], feedforward_torque[qp_rows],
+                        sample_q[:, 7:], sample_v[:, 6:], qp_batch,
+                    )
+                else:
+                    sampled_nominal = feedforward_torque[qp_rows] + fb_func(
+                        desired_position[qp_rows], sample_q[:, 7:], sample_v[:, 6:]
+                    )
             else:
                 # Compatibility path for direct legacy unit/integration calls.
                 sampled_nominal = nominal_torque[qp_rows]
@@ -2280,9 +2407,11 @@ class PPO_HardPACT:
             ).reshape(-1, 4, 3)
             # Reconstruct physical Newtons exactly once, then rotate from the
             # normalized decoder's yaw-local frame into sampled J_f's world frame.
+            sample_grf_physical = self.actor_critic.physics_estimator.grf_to_physical(sample_grf_normalized)
             sample_grf_world = _yaw_local_to_world(
-                self.actor_critic.physics_estimator.grf_to_physical(
-                    sample_grf_normalized
+                gate_grf_for_qp(
+                    sample_grf_physical,
+                    qp_explicit[:, 3:7], self.actor_critic.physics_estimator.grf_swing,
                 ),
                 sample_q[:, 3:7],
             )
@@ -2326,6 +2455,11 @@ class PPO_HardPACT:
             # Gradients enter through sampled_nominal, sample_grf_world, and
             # sample_applied; all state/mechanics/rate-center tensors detach.
             sample_contact_probability = qp_explicit[:, 3:7]
+            log_qp_swing_grf(
+                getattr(self.hard_pact_qp, "iteration_diagnostics", {}).get("ppo"),
+                sample_grf_physical, sample_contact_probability,
+                self.actor_critic.physics_estimator.grf_swing,
+            )
             differentiate_qp = self.hard_pact_features.differentiable_qp
             qp_arguments = dict(
                 # Equality coefficient M_K.
@@ -2358,10 +2492,7 @@ class PPO_HardPACT:
                 # Sampled joint state defines hard one-step q/qdot boxes.
                 joint_position=sample_q[:, 7:], joint_velocity=sample_v[:, 6:],
                 dt=sample_dt,
-                proximal_reference=qp_batch.get("sampled_qp_proximal_reference"),
             )
-            if qp_arguments["proximal_reference"] is None:
-                qp_arguments.pop("proximal_reference")
             if differentiate_qp:
                 qp_result = self.hard_pact_qp.solve(
                     differentiable=True, diagnostics_phase="ppo", **qp_arguments

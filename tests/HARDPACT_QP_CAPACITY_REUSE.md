@@ -16,7 +16,7 @@ Warp 1.17.0, Isaac Sim 5.1.0, RTX 4090 (24 GiB). No environment/package changes.
   Capacity never exceeds the configured rollout chunk budget unless a direct
   caller itself supplies a larger batch. Returned results own their storage.
 - `rsl_rl/algorithms/hard_pact_qp.py`: cache limits, selectors, physical A/G
-  templates, proximal diagonal, and scaled shared Q. Only variable entries
+  templates and scaled shared Q. Only variable entries
   change. Reuse compact-row indices and fixed native-bound slices instead of
   repeated boolean gathers/scalar decisions. Preserve physical certification.
 - `legged_gym/envs/go2/go2_hard_pact/go2_hard_pact_config.py`:
@@ -57,13 +57,18 @@ QP-only change. The warnings are two deliberately forced solver failures and
 the installed hppfcl deprecation. Full log: `/tmp/hard_pact_qp_reuse_tests.log`.
 
 The focused new file alone: **20 passed, 1 warning in 22.04 s**. GPU capacity
-parity uses the production proximal rho=0.1, unchanged assertion tolerances
+parity historically used the then-production added proximal rho=0.1, with assertion tolerances
 `rtol=atol=2e-4` (float32) and `2e-6` (float64); test solver tolerances are
 stricter than rollout defaults. PPO outputs and four learned-input gradients
 match exactly with reuse on/off. Rollout sizes 7/5/3/8/6 require **1 setup +
 4 updates**, versus 5 exact-size setups. Tests also cover growing capacities,
 memory caps, result ownership, changed elastic mechanics, invalid-row ordering,
 hard bounds, inference-to-PPO cache reuse, and no wrapper `item`/tensor-bool reads.
+
+The added HardPACT proximal objective and its diagonal/reference caches have
+since been removed. Current reuse tests exercise only tracking/slack costs and
+the original SPD ridge; the historical results above are not new validation
+of that change. cuPIQP's internal numerical regularization is unchanged.
 
 ## Small real training smoke
 

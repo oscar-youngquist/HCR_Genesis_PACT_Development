@@ -1,6 +1,7 @@
 import io
 import os
 import unittest
+from unittest.mock import Mock, patch
 from contextlib import redirect_stdout
 from types import SimpleNamespace
 
@@ -11,6 +12,8 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib_hard_pact_action_replay")
 import torch
 
 from rsl_rl.algorithms.ppo_hard_pact import PPO_HardPACT
+from rsl_rl.modules.hard_pact_control import bounded_nominal_torque
+from rsl_rl.modules.hard_pact_physics import GRFSwingConfig
 from rsl_rl.modules.actor_critic_hard_pact import (
     ActorCritic_HardPACT,
     ContextDecoder,
@@ -185,6 +188,17 @@ class StochasticActionReplayTests(unittest.TestCase):
         algorithm = make_algorithm(action_clip=1.0)
         observation, _, mean, raw, transition = self.replay_inputs(algorithm)
         algorithm.use_boot = False  # Source boot state, not this flag, wins.
+        # Actual actuator parameters and physical state deliberately differ
+        # from the noisy observation and the old feedback helper's gains.
+        transition.update({
+            "control_kp": torch.full((3, 12), 4.),
+            "control_kd": torch.full((3, 12), .3),
+            "control_motor_strength": torch.tensor([[.8], [1.2], [1.1]]),
+            "control_feedback_weight": torch.full((3, 1), .9),
+            "control_feedforward_weight": torch.full((3, 1), .7),
+            "control_torque_limits": torch.full((3, 12), 2.),
+            "pre_q": torch.randn(3, 19), "pre_v": torch.randn(3, 18),
+        })
         rng_state = torch.get_rng_state()
         result = algorithm._replay_action_path(
             mean, observation, transition, action_transform, feedback,
@@ -193,10 +207,10 @@ class StochasticActionReplayTests(unittest.TestCase):
         torch.testing.assert_close(torch.get_rng_state(), rng_state)
         expected_delayed = torch.clamp(raw, -1.0, 1.0)
         expected_delayed[2] = 0.0  # reset/boundary queue entry
-        expected_torque = algorithm._nominal_torque(
-            expected_delayed, observation, action_transform, feedback,
-            torch.zeros(12), 1.0,
-        )
+        desired, ff = action_transform(expected_delayed)
+        expected_torque = (transition["control_motor_strength"] * (
+            .9 * (4. * (desired-transition["pre_q"][:, 7:]) - .3*transition["pre_v"][:, 6:])
+            + .7 * ff)).clamp(-2., 2.)
         transition["delayed_action"] = expected_delayed
         transition["nominal_torque"] = expected_torque
         torch.testing.assert_close(
@@ -260,13 +274,60 @@ class StochasticActionReplayTests(unittest.TestCase):
         )
         sampled_q = torch.randn(3, 12)
         sampled_qdot = torch.randn(3, 12)
-        replayed = replay["feedforward_torque"] + feedback(
-            replay["desired_position"], sampled_q, sampled_qdot
-        )
-        rollout = replay["feedforward_torque"].detach() + feedback(
-            replay["desired_position"].detach(), sampled_q, sampled_qdot
-        )
-        torch.testing.assert_close(replayed, rollout)
+        transition.update({
+            "control_kp": torch.full((3, 12), 4.),
+            "control_kd": torch.full((3, 12), .3),
+            "control_motor_strength": torch.full((3, 1), 1.2),
+            "control_feedback_weight": torch.full((3, 1), .9),
+            "control_feedforward_weight": torch.full((3, 1), .7),
+            "control_torque_limits": torch.full((3, 12), 2.),
+            "control_dt": torch.full((3, 1), .02),
+            "equivalent_mass_com_wrench_world": torch.zeros(3, 6),
+            "interval_executed_torque": torch.zeros(3, 12),
+            "pre_q": torch.zeros(3, 19), "pre_v": torch.zeros(3, 18),
+        })
+        transition["pre_q"][:, 6] = 1.
+        transition["sampled_qp_q"] = transition["pre_q"].clone()
+        transition["sampled_qp_q"][:, 7:] = sampled_q
+        transition["sampled_qp_v"] = transition["pre_v"].clone()
+        transition["sampled_qp_v"][:, 6:] = sampled_qdot
+        rollout = bounded_nominal_torque(
+            replay["desired_position"].detach(), replay["feedforward_torque"].detach(),
+            sampled_q, sampled_qdot, transition)
+        algorithm.bard_enabled = True
+        algorithm.qp_enabled_at_iteration = lambda: True
+        algorithm.storage = SimpleNamespace(
+            current_hard_pact_batch=transition, current_batch_indices=torch.arange(3))
+        algorithm._materialize_mechanics_cache = lambda **_: SimpleNamespace(
+            mass_matrix=torch.eye(18).expand(3, -1, -1), bias=torch.zeros(3, 18),
+            foot_jacobians=torch.zeros(3, 4, 3, 18), base_jacobian=torch.zeros(3, 6, 18),
+            foot_acceleration_bias=torch.zeros(3, 4, 3))
+        # Exercise the actual sampled-QP assembly caller; stop at the solver
+        # boundary, whose certified solve/backward is covered by QP tests.
+        algorithm.hard_pact_qp = SimpleNamespace(solve=Mock(side_effect=RuntimeError("captured QP input")))
+        heads = algorithm.actor_critic.physics_estimator
+        heads.grf_swing = GRFSwingConfig(enabled=True)
+        _, _, latent, explicit = algorithm.actor_critic.cenet_enc_forward(torch.randn(3, 1140))
+        explicit = explicit.clone()
+        explicit[:, 3:7] = torch.tensor([.25, .5, .75, .1])
+        with self.assertRaisesRegex(RuntimeError, "captured QP input"):
+            algorithm._compute_bard_loss(
+                replay["nominal_torque"], observation, torch.randn(3, 1140),
+                torch.zeros(3, 12), torch.zeros(12),
+                desired_position=replay["desired_position"],
+                feedforward_torque=replay["feedforward_torque"], fb_func=feedback,
+                qp_rows=torch.arange(3), compute_pinn=False,
+                policy_features=(latent, explicit))
+        replayed = algorithm.hard_pact_qp.solve.call_args.kwargs["tau_nom"]
+        torch.testing.assert_close(replayed, rollout, rtol=0, atol=0)
+        qp_forces = algorithm.hard_pact_qp.solve.call_args.kwargs["force_pred_world"]
+        raw = heads.predict_grf(latent, explicit, replayed)
+        deployment = heads.grf_to_qp_physical(raw, explicit[:, 3:7]).reshape(3, 4, 3)
+        torch.testing.assert_close(qp_forces, deployment, rtol=0, atol=0)
+        assert qp_forces[:, [0, 3]].eq(0).all()
+        torch.testing.assert_close(qp_forces[:, [1, 2]], heads.grf_to_physical(raw).reshape(3, 4, 3)[:, [1, 2]])
+        replayed.square().mean().backward()
+        self.assertGreater(algorithm.actor_critic.act_tau_out.weight.grad.abs().sum(), 0.)
 
 
 class EnvironmentActionCaptureTests(unittest.TestCase):
@@ -275,18 +336,25 @@ class EnvironmentActionCaptureTests(unittest.TestCase):
         task.cfg = GO2HardPACTCfg()
         task.device = "cpu"
         task.num_envs = 2
-        task.num_actions = 12
+        task.num_actions = 12  # Legacy joint count; the action vector is 24-D.
+        task.cfg.normalization.clip_actions = .5
         task.actions = torch.zeros(2, 24)
         task.last_actions = torch.zeros_like(task.actions)
         task.llast_actions = torch.zeros_like(task.actions)
         task.action_queue = torch.zeros(2, 3, 24)
         task.action_delay = torch.tensor([0, 2])
         task._action_replay_valid_queue = torch.zeros(2, 3, dtype=torch.bool)
+        task._hard_pact_raw_action_queue = torch.zeros(2, 3, 24)
         task.simulator = SimpleNamespace(
             default_dof_pos=torch.linspace(-0.2, 0.2, 12),
             _dof_pos=torch.linspace(-0.1, 0.1, 12).repeat(2, 1),
             _dof_vel=torch.linspace(-0.3, 0.3, 12).repeat(2, 1),
             _torques=torch.linspace(-2.0, 2.0, 12).repeat(2, 1),
+            _kp_scale=torch.ones(2, 12), _kd_scale=torch.ones(2, 12),
+            _p_gains=torch.full((12,), 3.), _d_gains=torch.full((12,), .2),
+            _motor_strength=torch.tensor([[.8], [1.2]]),
+            feedforward_tau_weight=.9, feedback_tau_weight=1.1,
+            torque_limits=torch.full((12,), 2.),
         )
         task._get_pinn_feedback = feedback
 
@@ -298,7 +366,8 @@ class EnvironmentActionCaptureTests(unittest.TestCase):
         self.assertFalse(task._pending_action_replay_transition[
             "delayed_action_source_valid"
         ][1])
-        torch.testing.assert_close(first_delayed[0], first[0])
+        torch.testing.assert_close(first_delayed[0], first[0].clamp(-.5, .5))
+        torch.testing.assert_close(task._hard_pact_raw_delayed_action[0], first[0])
         torch.testing.assert_close(first_delayed[1], torch.zeros(24))
         torch.testing.assert_close(
             task._pending_action_replay_transition[
@@ -312,17 +381,29 @@ class EnvironmentActionCaptureTests(unittest.TestCase):
         self.assertTrue(task._pending_action_replay_transition[
             "delayed_action_source_valid"
         ].all())
-        torch.testing.assert_close(third_delayed[1], first[1])
+        torch.testing.assert_close(third_delayed[1], first[1].clamp(-.5, .5))
+        torch.testing.assert_close(task._hard_pact_raw_delayed_action[1], first[1])
         expected_torque = task._pending_action_replay_transition[
             "nominal_torque"
         ]
         desired, feedforward_torque = task._get_pinn_actions(third_delayed)
         torch.testing.assert_close(
             expected_torque,
-            feedforward_torque + feedback(
-                desired, task.simulator._dof_pos, task.simulator._dof_vel
+            bounded_nominal_torque(
+                desired, feedforward_torque, task.simulator._dof_pos,
+                task.simulator._dof_vel, task._hard_pact_control_parameters,
             ),
         )
+        # Reset clears raw reward/delay and executed-rate state for just the
+        # affected environments, without retaining a previous episode request.
+        untouched = task._hard_pact_raw_action_queue[1].clone()
+        task._hard_pact_executed_torque = torch.ones(2, 12)
+        with patch.object(task._legacy_task_class, "reset_idx"):
+            task.reset_idx(torch.tensor([0]))
+        self.assertTrue(task._hard_pact_raw_action_queue[0].eq(0).all())
+        self.assertTrue(task._hard_pact_raw_delayed_action[0].eq(0).all())
+        self.assertTrue(task._hard_pact_executed_torque[0].eq(0).all())
+        torch.testing.assert_close(task._hard_pact_raw_action_queue[1], untouched)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,17 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         self.first_loop = True
         self.first_loop_feedback = None
         super().__init__(cfg, sim_params, device, headless)
+        if headless:
+            # Isaac Lab's interactive STOP handler renders until playback
+            # resumes. Nobody can press Play in headless training/evaluation,
+            # so stopping/closing the simulator would hang indefinitely.
+            # Remove only that subscription, not the live SimulationContext.
+            # Unlike its temporary disable flag (reset() restores that flag),
+            # unsubscribing also remains effective after subsequent resets.
+            handle = getattr(self._sim, "_app_control_on_stop_handle", None)
+            if handle is not None:
+                handle.unsubscribe()
+                self._sim._app_control_on_stop_handle = None
 
     # ------------------------------------------------------------------
     # Canonical HardPACT backend boundary
@@ -369,6 +380,9 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
             self._sim.render()
 
     def _compute_torques(self, actions):
+        conversion = getattr(self, "_hard_pact_torque_conversion", None)
+        if conversion is not None:
+            return conversion(actions)
         if actions.shape[-1] == 2 * self._num_actions:
             position = actions[:, :self._num_actions] * self._cfg.control.action_scale
             feedforward = (

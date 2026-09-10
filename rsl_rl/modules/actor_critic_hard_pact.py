@@ -209,7 +209,8 @@ class ActorCritic_HardPACT(nn.Module):
                  wrench_scale=None,
                  wrench_qp_clip=None,
                  contact_epsilon=1.0e-2,
-                 ablation_features="full"):
+                 ablation_features="full",
+                 grf_swing=None):
         super().__init__()
 
         # Metadata only: every ablation deliberately constructs the identical
@@ -244,6 +245,7 @@ class ActorCritic_HardPACT(nn.Module):
             grf_scale_n=grf_scale_n,
             wrench_scale=wrench_scale,
             wrench_qp_clip=wrench_qp_clip,
+            grf_swing=grf_swing,
         )
         
         # Get the activation function used by the actor and critic networks

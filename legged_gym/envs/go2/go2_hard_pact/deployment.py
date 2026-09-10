@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
+import warnings
+from rsl_rl.modules.hard_pact_physics import GRFSwingConfig
 
 FOOT_ORDER = ("FR", "FL", "RR", "RL")
 WRENCH_ORDER = ("Fx", "Fy", "Fz", "Tx", "Ty", "Tz")
@@ -25,7 +27,7 @@ def qp_update_contract(mode, decimation, warmup_iterations=0):
         "physics_substep_anchors": list(qp_substep_anchors(mode, decimation)),
         "prediction_horizon": "one physics/PD timestep (not the hold duration)",
         "correction_hold": "delta_tau = tau_safe - tau_nom at each anchor; hold until next anchor or policy interval",
-        "nominal_torque": "recompute PD/feedforward every physics substep with held policy actions",
+        "nominal_torque": "bounded non-QP actuator command from clipped delayed actions; recompute PD/feedforward and apply actuator gains/weights/motor strength exactly once every physics substep",
         "held_predictions": "GRF, wrench, contact, latent, explicit at policy rate in held-correction modes",
         "held_execution_helper": "rsl_rl.algorithms.hard_pact_qp.held_correction_torque",
         "held_execution_sanitize": mode == "single_anchor_held_correction",
@@ -94,8 +96,48 @@ def build_deployment_contract(cfg, actor, gain_spec):
     wrench_buffer = actor.physics_estimator.wrench_scale.detach().cpu().tolist()
     latent_dim = actor.context_encoder.ce_out_mean.out_features
     explicit_dim = actor.explicit_estimator.network[-1].out_features
+    swing_config = GRFSwingConfig.from_task(cfg)
     contract = {
-        "schema_version": 7,
+        "schema_version": 10,
+        "grf_swing_gating": {
+            "enabled": swing_config.enabled,
+            "contact_probability_threshold": swing_config.threshold,
+            "consistency_loss_weight": swing_config.loss_weight,
+            "consistency_force_scale_n": grf_buffer,
+            "swing": "contact_probability.detach() < threshold; no sigmoid or observation scaling",
+            "qp_reference": "zero all physical XYZ components for predicted swing feet; stance unchanged",
+            "helper": "rsl_rl.modules.hard_pact_physics.gate_grf_for_qp",
+            "deployment_conversion": "physics_estimator.grf_to_qp_physical(normalized_prediction, contact_probability), then existing yaw-to-world rotation",
+            "ordering": list(FOOT_ORDER),
+            "frame_units": "yaw-local Newtons before existing world rotation",
+            "qp_decision_variables_and_constraints": "unchanged",
+            "raw_supervised_predictions": "unchanged and ungated",
+            "consistency_formula": "weight * sum_swing ||GRF_raw_N / grf_scale_N||^2 / max(swing_count, 1)",
+            "consistency_target": "physical zero, independent of any normalization offset",
+            "consistency_parameters": "GRF-exclusive decoder only; latent, explicit/contact and torque inputs detached",
+            "metrics": "swing fraction of valid feet; raw norm mean over swing feet (N); removed norm mean over all valid feet (N); weighted consistency loss",
+            "checkpoint": "no policy/state-dict changes; load this configuration alongside weights",
+        },
+        "torque_convention": {
+            "conversion_helper": "rsl_rl.modules.hard_pact_control.bounded_nominal_torque",
+            "requested_components_helper": "rsl_rl.modules.hard_pact_control.requested_torque_components",
+            "position_target": "absolute joint position; default pose included exactly once",
+            "raw_requested": "unclipped delayed action converted to physical Nm before action clipping, saturation or QP correction; used by torque-limit/feedforward/feedback magnitude penalties",
+            "bounded_nominal": "execution-clipped delayed action converted using PD gains, branch weights and motor strength exactly once, then actuator magnitude bounds",
+            "non_qp_rate_limit": "none in the current Genesis/Isaac Lab PACT actuator paths",
+            "final_executed": "after QP/fallback/held rate projection and final actuator saturation; authoritative physics label and next torque-rate center",
+            "rollout_physics_gradient": "unchanged straight-through executed interval value with bounded-nominal gradient",
+            "supervised_grf_wrench_predictions": "raw decoder predictions, unchanged",
+            "units": "Nm in canonical joint order",
+        },
+        "qp_objective": {
+            "implementation": "rsl_rl.algorithms.hard_pact_qp.HardPACTDifferentiableQP._build",
+            "terms": ["nominal_torque_tracking", "predicted_grf_tracking",
+                      "contact_slack_penalty", "acceleration_force_torque_regularization",
+                      "positive_definite_regularization"],
+            "recovery": "elastic dynamics penalty only in the existing elastic stage",
+            "torque_history": "previous executed torque centers hard torque-rate constraints",
+        },
         "explicit_estimator": {
             "dimension": 11,
             "input": "shared_history_encoder_features",
@@ -247,5 +289,14 @@ def write_deployment_contract_once(log_dir, contract):
         with open(path, "x", encoding="utf-8") as stream:
             json.dump(contract, stream, indent=2)
     except FileExistsError:
+        with open(path, encoding="utf-8") as stream:
+            existing = json.load(stream)
+        if existing.get("schema_version", 0) < contract.get("schema_version", 0):
+            warnings.warn(
+                "Existing HardPACT deployment contract predates the current controller "
+                "contract. It is an unchanged historical snapshot, not the current "
+                "deployment specification; export to a new directory. Policy weights "
+                "remain compatible.", stacklevel=2,
+            )
         return path, False
     return path, True

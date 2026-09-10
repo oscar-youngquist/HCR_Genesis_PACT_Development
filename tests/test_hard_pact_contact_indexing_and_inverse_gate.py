@@ -77,7 +77,7 @@ def test_measured_contact_projection_frame_scale_order_and_detachment():
 def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads():
     alg = make_algorithm(num_learning_epochs=1, num_mini_batches=1)
     alg.bard_enabled = alg.bard_inverse_enabled = True
-    alg.bard_rollout_enabled = False
+    alg.bard_rollout_enabled = True
     # Exercise the live run's positive-weight (unbalanced) PCGrad path.
     alg.pinn_init, alg.pinn_weight_final = -1, .01
     alg.pinn_warmup_steps, alg.num_pinn_updates = 1, 1
@@ -92,7 +92,15 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads():
     fields = {
         "pre_q": q, "pre_v": zeros(18), "post_v": zeros(18),
         "control_dt": torch.full((2, 4, 1), .02),
-        "interval_executed_torque": zeros(12),
+        # Rows represent bounded non-QP, successful-QP, and fallback commands;
+        # they must reach both PINNs unchanged, not become raw replay torques.
+        "interval_executed_torque": torch.tensor([.1, .2, .25, -.25]).reshape(1, 4, 1).expand(2, 4, 12).clone(),
+        "control_kp": torch.full((2, 4, 12), 3.),
+        "control_kd": torch.full((2, 4, 12), .2),
+        "control_motor_strength": torch.full((2, 4, 1), 1.2),
+        "control_feedback_weight": torch.full((2, 4, 1), .9),
+        "control_feedforward_weight": torch.full((2, 4, 1), .7),
+        "control_torque_limits": torch.full((2, 4, 12), 2.),
         "standardized_action_noise": zeros(24),
         "delayed_action_source_valid": torch.ones(2, 4, 1, dtype=torch.bool),
         "realized_added_mass": zeros(1), "realized_com_shift_body": zeros(3),
@@ -120,9 +128,13 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads():
     storage.grf_targets[..., 2::3] = .3
     assert not storage.wb_contact_forces.any()  # The real Isaac Lab failure condition.
     measured, gradients = [], []
-    from rsl_rl.algorithms.hard_pact_bard import corrected_bard_inverse_dynamics_loss
+    from rsl_rl.algorithms.hard_pact_bard import (
+        corrected_bard_inverse_dynamics_loss, differentiable_bard_rollout_loss,
+    )
+    inverse_torques, rollout_torques = [], []
 
     def checked_loss(**kwargs):
+        inverse_torques.append(kwargs["interval_executed_torque"].detach().clone())
         measured.append(kwargs["measured_generalized_contact_force"])
         result = corrected_bard_inverse_dynamics_loss(**kwargs)
         weights = [alg.actor_critic.context_encoder.ce_out_mean.weight,
@@ -133,8 +145,18 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads():
         assert result.loss > 0 and torch.isfinite(result.loss)
         return result
 
-    with patch("rsl_rl.algorithms.ppo_hard_pact.corrected_bard_inverse_dynamics_loss", side_effect=checked_loss):
+    def checked_rollout(**kwargs):
+        assert kwargs["control_torque"].requires_grad
+        rollout_torques.append(kwargs["control_torque"].detach().clone())
+        return differentiable_bard_rollout_loss(**kwargs)
+
+    with patch("rsl_rl.algorithms.ppo_hard_pact.corrected_bard_inverse_dynamics_loss", side_effect=checked_loss), \
+         patch("rsl_rl.algorithms.ppo_hard_pact.differentiable_bard_rollout_loss", side_effect=checked_rollout):
         alg.update(lambda a: (a[:, :12], a[:, 12:]), lambda q, p, v: q-p-v,
                    .02, 0, torch.zeros(12), 1.)
     assert measured and all(x.abs().sum() > 0 and not x.requires_grad for x in measured)
     assert gradients and all(torch.isfinite(g).all() and g.abs().sum() > 0 for g in gradients)
+    expected_torques = fields["interval_executed_torque"].flatten(0, 1).sort(dim=0).values
+    torch.testing.assert_close(torch.cat(inverse_torques).sort(dim=0).values, expected_torques)
+    torch.testing.assert_close(torch.cat(rollout_torques).sort(dim=0).values, expected_torques,
+                               rtol=0, atol=2e-7)  # Existing straight-through float32 arithmetic.

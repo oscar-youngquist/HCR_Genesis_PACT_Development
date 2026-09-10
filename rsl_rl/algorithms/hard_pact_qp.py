@@ -29,6 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Mapping
 import time
+import warnings
 
 import torch
 from qpth.qp import QPFunction
@@ -199,10 +200,6 @@ class HardPACTQPConfig:
     # Genesis and PhysX use semi-implicit Euler: q+=dt*v+dt^2*qdd. A backend
     # with constant-acceleration position integration may configure 0.5.
     position_integration_coefficient: float = 1.0
-    # Optional deployment-compatible temporal proximal objective. Block
-    # weights correspond to [qdd, GRF, safe torque, contact slack].
-    proximal_rho: float = 0.0
-    proximal_block_weights: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
     elastic_recovery_enabled: bool = True
     elastic_dynamics_weight: float = 1.0e4
     gradient_scale_tau: float = 1.0
@@ -213,6 +210,26 @@ class HardPACTQPConfig:
     gradient_clip_grf: float = 0.0
     gradient_clip_wrench: float = 0.0
     gradient_clip_contact: float = 0.0
+
+    @classmethod
+    def from_dict(cls, values):
+        """Load saved settings without reviving the removed task objective.
+
+        These two obsolete HardPACT keys are metadata only. cuPIQP's own
+        numerical regularization/settings are deliberately left untouched.
+        Policy tensors and checkpoint migration do not depend on these keys.
+        """
+        values = dict(values)
+        obsolete = {key: values.pop(key) for key in
+                    ("proximal_rho", "proximal_block_weights") if key in values}
+        if obsolete:
+            warnings.warn(
+                "Ignoring obsolete HardPACT proximal-objective metadata: "
+                + ", ".join(obsolete) + ". The added objective has been removed; "
+                "policy weights and cuPIQP internal regularization are unchanged.",
+                stacklevel=2,
+            )
+        return cls(**values)
 
     def __post_init__(self):
         if self.cupiqp_rollout_cache_size < 1 or self.cupiqp_ppo_pool_size < 0:
@@ -466,8 +483,6 @@ class HardPACTDifferentiableQP:
         ):
             if policy not in ("ignore", "report", "require"):
                 raise ValueError("duality_gap_policy must be ignore, report, or require")
-        if config.proximal_rho < 0 or len(config.proximal_block_weights) != 4:
-            raise ValueError("proximal_rho must be nonnegative and needs four block weights")
         if len(solvers) > 1 and not config.allow_solver_mismatch:
             raise ValueError(
                 "different rollout/PPO QP solvers require "
@@ -705,13 +720,6 @@ class HardPACTDifferentiableQP:
         if key in self._assembly_cache:
             return self._assembly_cache[key]
         selectors, friction, scale, Q = self._constants(reference)
-        weights = reference.new_tensor(self.cfg.proximal_block_weights)
-        proximal_diagonal = self.cfg.proximal_rho * torch.repeat_interleave(
-            weights, weights.new_tensor([18, 12, 12, 12], dtype=torch.long),
-            output_size=NUM_VARIABLES,
-        ).square()
-        Q = Q.clone()
-        Q.diagonal().add_(proximal_diagonal)
         scaled_Q = Q * scale[:, None] * scale[None, :]
         scaled_Q = 0.5 * (scaled_Q + scaled_Q.T)
         scaled_Q.diagonal().add_(self.cfg.q_regularization)
@@ -726,7 +734,7 @@ class HardPACTDifferentiableQP:
             rows.extend((-selectors["slack"], -selectors["slack"],
                          -selectors["slack"]))
         G = torch.cat(rows)
-        cached = Q, scaled_Q, proximal_diagonal, A, G
+        cached = Q, scaled_Q, A, G
         self._assembly_cache[key] = cached
         return cached
 
@@ -783,7 +791,7 @@ class HardPACTDifferentiableQP:
         # Copy fixed backend limits to the current solver device/dtype only.
         torque_limit, q_lower, q_upper, velocity_limit = self._limits(tau_nom)
         _, _, variable_scale, _ = self._constants(tau_nom)
-        shared_q, scaled_q, proximal_diagonal, A_template, G_template = (
+        shared_q, scaled_q, A_template, G_template = (
             self._assembly_templates(tau_nom, relaxed_contact, elastic)
         )
 
@@ -804,24 +812,6 @@ class HardPACTDifferentiableQP:
         p[:, TORQUE] = -2.0 * self.cfg.torque_tracking_weight * tau_nom / (
             torque_limit.square().unsqueeze(0)
         )
-
-        # rho/2 ||D_prox(x-x_ref)||^2 contributes rho*D^2 to Q and
-        # -rho*D^2*x_ref to p.  The reference is detached: it stabilizes
-        # consecutive solves without creating temporal autograd edges.
-        if self.cfg.proximal_rho:
-            previous_qdd = data.get("previous_certified_qdd")
-            if previous_qdd is None:
-                previous_qdd = torch.zeros_like(mass[:, 0])
-            x_ref = data.get("proximal_reference")
-            if x_ref is None:
-                x_ref = torch.cat((
-                    previous_qdd, force_pred.detach(), tau_nom.detach(),
-                    torch.zeros_like(force_pred),
-                ), dim=-1)
-            else:
-                x_ref = x_ref.detach()
-            # Its constant Hessian contribution is already in shared_q.
-            p = p - proximal_diagonal * x_ref
 
         # Dynamics equality A*x=b. M and all Jacobians use canonical
         # [base linear, base angular, FR,FL,RR,RL joints] generalized order.

@@ -209,7 +209,8 @@ class ActorCritic_HardPACT_Pos(nn.Module):
                  grf_scale_n=None,
                  wrench_scale=None,
                  wrench_qp_clip=None,
-                 contact_epsilon=1.0e-2):
+                 contact_epsilon=1.0e-2,
+                 grf_swing=None):
         super().__init__()
 
         # The history latent is configurable; the 11-D explicit-estimator
@@ -236,6 +237,7 @@ class ActorCritic_HardPACT_Pos(nn.Module):
             grf_scale_n=grf_scale_n,
             wrench_scale=wrench_scale,
             wrench_qp_clip=wrench_qp_clip,
+            grf_swing=grf_swing,
         )
         
         # Get the activation function used by the actor and critic networks

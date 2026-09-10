@@ -157,6 +157,7 @@ class OnPolicyRunnerPACTPos:
         reconstruction_dim = self.env.num_privileged_obs
         if actor_critic_class is ActorCritic_HardPACT_Pos:
             gain_spec = calculate_physics_head_gains(self.env.cfg)
+            from rsl_rl.modules.hard_pact_physics import GRFSwingConfig
             actor_extra_kwargs = {
                 "cenet_explicit_layers": self.policy_cfg["cenet_explicit_layers"],
                 "grf_decoder_layers": self.policy_cfg["grf_decoder_layers"],
@@ -164,6 +165,7 @@ class OnPolicyRunnerPACTPos:
                 "grf_scale_n": gain_spec.grf_scale_n,
                 "wrench_scale": gain_spec.wrench_scale_n_nm,
                 "wrench_qp_clip": gain_spec.wrench_qp_clip_n_nm,
+                "grf_swing": GRFSwingConfig.from_task(self.env.cfg),
                 "contact_epsilon": self.policy_cfg["contact_epsilon"],
             }
             reconstruction_indices = RECONSTRUCTION_INDICES
