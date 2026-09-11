@@ -69,6 +69,10 @@ class HardPACTQPConfig:
     soft_joint_recovery_enabled: bool = True
     soft_joint_recovery_weight: float = 200.0
     soft_joint_recovery_scale_rad_s2: float = 100.0
+    # Outer recovery loss, relative to lambda_projection. Zero disables its
+    # contribution, without changing the recovery QP objective/execution.
+    recovery_projection_weight: float = 1.0
+    recovery_projection_slack_weight: float = 1.0
     qp_update_mode: str = "random_one_substep"
     # One canonical QP and fallback cascade can be solved by any registered
     # numerical backend. Overrides are diagnostics-only and require an
@@ -206,6 +210,8 @@ class HardPACTQPResult:
     differentiated_mask: torch.Tensor  # [B], true exactly for certified rows.
     diagnostics: Mapping[str, torch.Tensor]  # Per-stage primal/KKT metrics.
     metrics: Mapping[str, torch.Tensor] | None = None  # Aggregated GPU scalars.
+    recovery_mask: torch.Tensor | None = None  # Certified softened, NOT hard-joint certified.
+    recovery_slack: torch.Tensor | None = None  # [B,12], rad/s²; differentiable in PPO.
 
 
 @dataclass
@@ -338,6 +344,8 @@ class HardPACTDifferentiableQP:
         self.velocity_limits = torch.as_tensor(velocity_limits).reshape(12).detach()
         if min(config.soft_joint_recovery_weight, config.soft_joint_recovery_scale_rad_s2) <= 0:
             raise ValueError("soft-joint recovery weight and scale must be positive")
+        if min(config.recovery_projection_weight, config.recovery_projection_slack_weight) < 0:
+            raise ValueError("recovery projection weights must be nonnegative")
         # D must be invertible, hence every variable scale is strictly positive.
         if min(config.force_scale_n, config.torque_scale_nm,
                config.contact_acceleration_scale_m_s2, config.attitude_acceleration_scale_rad_s2) <= 0:
@@ -1005,10 +1013,11 @@ class HardPACTDifferentiableQP:
             derived = (m.acceleration_map @ x[...,None]).squeeze(-1)+m.acceleration_offset
             qdd = qdd.index_copy(0,rows,torch.where(accepted[:,None],derived,torch.zeros_like(derived)))
             ok[rows]=accepted
-        # Recovery is execution-only: never provide an implicit VJP or claim
-        # hard joint certification for a softened solution. Preserve the hard
-        # solution graph outside no_grad, including mixed accepted/failed rows.
+        # Recovery has its own certificate and loss, never a hard-joint
+        # certificate. PPO owns an isolated differentiable solver lease;
+        # rollout/stopgrad remain graph-free. Failed rows get zero solver VJPs.
         soft_ok = torch.zeros_like(ok)
+        recovery_slack = ref.new_zeros(n,12)
         recovered = primal.detach().clone()
         recovered_qdd = qdd.detach().clone()
         diag["soft_joint/attempted"] = torch.zeros_like(ok)
@@ -1016,13 +1025,13 @@ class HardPACTDifferentiableQP:
         diag["soft_joint/slack_max_rad_s2"] = ref.new_full((n,),float("nan"))
         if self.cfg.soft_joint_recovery_enabled:
             try:
-                self._active_differentiable = False
-                with torch.no_grad():
+                self._active_differentiable = bool(differentiable)
+                with torch.set_grad_enabled(differentiable and torch.is_grad_enabled()):
                     recovery_ids = (finite_input & ~empty_tau & ~ok).nonzero(as_tuple=True)[0]
-                    for rows in recovery_ids.split(self._chunk_size(False)):
+                    for rows in recovery_ids.split(self._chunk_size(differentiable)):
                         if not rows.numel():
                             continue
-                        m = self._soft_joint_problem(self._build({k:v[rows].detach() for k,v in values.items()}))
+                        m = self._soft_joint_problem(self._build({k:v[rows] for k,v in values.items()}))
                         finite = m.mechanics_valid & torch.stack([
                             torch.isfinite(t).flatten(1).all(-1) for t in (m.Q,m.p,m.G,m.h)]).all(0)
                         local = finite.nonzero(as_tuple=True)[0]
@@ -1046,23 +1055,24 @@ class HardPACTDifferentiableQP:
                         x = result.solution*m.variable_scale
                         pre = torch.maximum((m.tau_lower-x[:,:12]).clamp_min(0),
                                             (x[:,:12]-m.tau_upper).clamp_min(0)).amax(-1)
-                        diag["pre_clamp_torque_violation_max"][rows] = pre
-                        x[:,:12] = x[:,:12].clamp(m.tau_lower,m.tau_upper)
-                        x[:,12:24] *= stance[rows].repeat_interleave(3,1)
+                        diag["pre_clamp_torque_violation_max"][rows] = pre.detach()
+                        x = torch.cat((x[:,:12].clamp(m.tau_lower,m.tau_upper),
+                            x[:,12:24]*stance[rows].repeat_interleave(3,1),x[:,24:]),1)
                         accepted,er,ir = self._certificate(m,x/m.variable_scale,tolerance)
                         accepted &= torch.isfinite(result.solution).all(-1)
-                        # Execution-only recovery uses the rollout numerical
-                        # profile, including its configured gap policy.
-                        recovery_profile = self._profile(False)
+                        # Retain separate rollout/PPO numerical and gap policies.
+                        recovery_profile = self._profile(differentiable)
                         if self._active_solver=="cupiqp" and recovery_profile["gap_policy"]=="require":
                             gap,rel = result.duality_gap,result.duality_gap_rel
                             accepted &= (torch.isfinite(gap)&torch.isfinite(rel)&
                                 ((gap<=recovery_profile["gap_abs"])|(rel<=recovery_profile["gap_rel"]))) if gap is not None and rel is not None else False
                         soft_ok[rows] = accepted
-                        recovered[rows] = torch.where(accepted[:,None],x[:,:24],recovered[rows])
+                        x = _CertifiedRows.apply(torch.nan_to_num(x,nan=0.,posinf=0.,neginf=0.),accepted)
+                        recovered = recovered.index_copy(0,rows,torch.where(accepted[:,None],x[:,:24],recovered[rows]))
+                        recovery_slack = recovery_slack.index_copy(0,rows,torch.where(accepted[:,None],x[:,24:],torch.zeros_like(x[:,24:])))
                         a = (m.acceleration_map@x[...,None]).squeeze(-1)+m.acceleration_offset
-                        recovered_qdd[rows] = torch.where(accepted[:,None],a,recovered_qdd[rows])
-                        diag["soft_joint/slack_max_rad_s2"][rows] = x[:,24:].amax(-1)
+                        recovered_qdd = recovered_qdd.index_copy(0,rows,torch.where(accepted[:,None],a,recovered_qdd[rows]))
+                        diag["soft_joint/slack_max_rad_s2"][rows] = x[:,24:].detach().amax(-1)
                         diag["selected/equality_max"][rows] = er
                         diag["selected/inequality_max"][rows] = ir
             finally:
@@ -1074,7 +1084,7 @@ class HardPACTDifferentiableQP:
         metrics = {"qp/minimal/full_fraction":ok.float().mean(),
                    "qp/minimal/soft_joint_fraction":soft_ok.float().mean(),
                    "qp/minimal/fallback_fraction":(stage==2).float().mean(),
-                   "qp/minimal/differentiated_fraction":ok.float().mean()*int(differentiable)}
+                   "qp/minimal/differentiated_fraction":(ok|soft_ok).float().mean()*int(differentiable)}
         # Physical diagnostics are optional, never part of the objective.
         if self._physical_enabled():
             metrics["qp/physical/torque_correction_mean"]=(primal[:,:12].detach()-ref.detach()).abs().mean()
@@ -1084,9 +1094,26 @@ class HardPACTDifferentiableQP:
                 metrics["qp/"+key]=value.where(finite,0).sum()/finite.sum().clamp_min(1)
         result = HardPACTQPResult(qdd.to(reference.dtype),
             primal[:,12:].reshape(n,4,3).to(reference.dtype),
-            primal[:,:12].to(reference.dtype),stage,ok,diag,metrics)
+            primal[:,:12].to(reference.dtype),stage,ok,diag,metrics,
+            soft_ok,recovery_slack.to(reference.dtype))
         self.iteration_diagnostics[self._diagnostics_phase].add_result(result,differentiable)
         return result
+
+
+def recovery_projection_loss(result, tau_nom, torque_limit, physics_valid, cfg):
+    """Mean over valid softened solves; outer lambda_projection applies in PPO.
+
+    L_rec = w_rec * mean(||(tau_soft-tau_nom)/tau_limit||²
+                        + w_slack ||s_soft/s_scale||²).
+    Select rows before arithmetic; failed/analytic rows receive no supervision.
+    The original hard-QP loss and its denominator are unchanged.
+    """
+    valid = physics_valid.reshape(-1).bool() & result.recovery_mask
+    torque = ((result.tau_safe[valid]-tau_nom[valid])/torque_limit).square().sum(-1)
+    slack = (result.recovery_slack[valid]/cfg.soft_joint_recovery_scale_rad_s2).square().sum(-1)
+    per_valid = cfg.recovery_projection_weight*(torque+cfg.recovery_projection_slack_weight*slack)
+    per_row = tau_nom.new_zeros(tau_nom.shape[0]).masked_scatter(valid,per_valid)
+    return per_valid.sum()/valid.sum().clamp_min(1),per_row
 
 
 def projection_loss(tau_safe, tau_nom, torque_limit, physics_valid, differentiated,

@@ -594,6 +594,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'soft_joint_recovery_enabled': True,
                         'soft_joint_recovery_weight': 200.0,
                         'soft_joint_recovery_scale_rad_s2': 100.0,
+                        # Outer recovery loss is also multiplied by lambda_projection.
+                        'recovery_projection_weight': 1.0,
+                        'recovery_projection_slack_weight': 1.0,
                         'contact_acceleration_scale_m_s2': 50.0,
                         'attitude_weight': 1.0,
                         'attitude_acceleration_scale_rad_s2': 20.0,
@@ -628,9 +631,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         # Physical/KKT audits and synchronized timing are opt-in.
                         'diagnostics_level': 'full',
                         'tensorboard_diagnostics_enabled': True,
-                        'tensorboard_diagnostics_interval': 50,
+                        'tensorboard_diagnostics_interval': 2,
                         # Conservative cadence if 'full' is enabled later.
-                        'full_audit_period': 100,
+                        'full_audit_period': 2,
                         'full_audit_sample_size': 256,
                         'rollout_chunk_size': 4096, 
                         'ppo_chunk_size': 8000, 

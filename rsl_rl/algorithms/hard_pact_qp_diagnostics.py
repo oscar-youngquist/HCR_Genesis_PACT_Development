@@ -71,7 +71,9 @@ class QPIterationDiagnostics:
         for name, code in final_codes.items():
             self.add_sum(f"final/{name}_count", (stage == code).sum())
         self.add_sum("certified_count", result.differentiated_mask.sum())
-        self.add_sum("differentiated_count", result.differentiated_mask.sum() * int(differentiable))
+        recovery = getattr(result,"recovery_mask",None)
+        differentiated = result.differentiated_mask if recovery is None else result.differentiated_mask | recovery
+        self.add_sum("differentiated_count", differentiated.sum() * int(differentiable))
         for name in ("full", "soft_joint"):
             attempted = diag.get(f"{name}/attempted", torch.zeros_like(stage, dtype=torch.bool))
             self.add_sum(f"attempt/{name}_count", attempted.sum())
@@ -132,7 +134,7 @@ class QPIterationDiagnostics:
         for name in ("nonfinite_input", "empty_torque_intersection", "empty_qdd_intersection"):
             key = f"failure/{name}_count"
             result[key] = self.sums.get(key, zero)
-        for key in ("selected/equality_max", "selected/inequality_max", "pre_clamp_torque_violation_max", "projection_loss"):
+        for key in ("selected/equality_max", "selected/inequality_max", "pre_clamp_torque_violation_max", "projection_loss", "recovery_projection_loss"):
             result.setdefault(key, zero + float("nan"))
         for name in ("full", "soft_joint", "analytic"):
             count = self.sums.get(f"final/{name}_count", zero)

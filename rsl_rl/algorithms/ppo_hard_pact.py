@@ -79,6 +79,7 @@ from .hard_pact_qp import (
     HardPACTDifferentiableQP,
     HardPACTQPConfig,
     projection_loss,
+    recovery_projection_loss,
 )
 
 
@@ -2551,6 +2552,10 @@ class PPO_HardPACT:
                 contact_scale=self.hard_pact_qp.cfg.contact_acceleration_scale_m_s2,
                 return_per_row=True,
             )
+            recovery_loss, recovery_per_row = recovery_projection_loss(
+                qp_result, sampled_nominal, torque_limits, valid, self.hard_pact_qp.cfg,
+            )
+            qp_loss = qp_loss + recovery_loss
             # stopgrad deliberately computes and reports exactly this metric,
             # but neither it nor any QP output participates in optimization.
             if not self.hard_pact_features.projection_loss:
@@ -2576,6 +2581,8 @@ class PPO_HardPACT:
                 aggregate = self.hard_pact_qp.iteration_diagnostics["ppo"]
                 supervised = valid.reshape(-1) & qp_result.differentiated_mask.reshape(-1)
                 aggregate.add_values("projection_loss", projection_per_row.detach(), supervised)
+                recovery_supervised = valid.reshape(-1) & qp_result.recovery_mask
+                aggregate.add_values("recovery_projection_loss", recovery_per_row.detach(), recovery_supervised)
                 aggregate.add_values("intervention_fraction", intervention.float())
             self.last_qp_metrics["qp/minimal/intervention_fraction"] = (
                 intervention.float().mean()

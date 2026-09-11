@@ -48,7 +48,7 @@ def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None):
         "unsolved_execution": "project fresh nominal torque on actuator magnitude/rate intersection; no held correction",
         "previous_torque": "previous actually applied torque, zero on reset",
         "joint_contact_certification": "stage 0: hard QP; stage 1: soft-joint recovery, no hard joint certificate; stage 2/unsolved: actuator-only",
-        "soft_joint_recovery": "optional 36-D [tau12, masked-force12, nonnegative joint-slack12(rad/s²)]; quadratic normalized slack cost; torque/rate/friction/swing-zero stay hard; execution-only, no implicit VJP",
+        "soft_joint_recovery": "optional 36-D [tau12, masked-force12, nonnegative joint-slack12(rad/s²)]; quadratic normalized slack cost; torque/rate/friction/swing-zero stay hard; certified softened replay has a separately weighted torque-correction/slack loss and implicit VJP; failed rows excluded",
         "ppo_anchor_selection": "one balanced uniform executed QP substep per environment in both modes",
         "ppo_projection_loss_multiplier": 1,
         "frames": "world forces and world-aligned wrench about the existing base-Jacobian point; yaw-local head outputs rotated once",
