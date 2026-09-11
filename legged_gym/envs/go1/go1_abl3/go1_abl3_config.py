@@ -162,7 +162,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 5.00
-        max_push_vel_xy = 1.50
+        max_push_vel_xy = 1.30
         min_push_vel_xy = 0.50
 
         max_vertical_push = 0.50
@@ -170,7 +170,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         vert_interval_max = 15.0
         vert_interval_min = 5.00
 
-        max_push_torque = 1.50
+        max_push_torque = 1.30
         min_push_torque = 0.50
         wrench_timeout_min = 5.00
         wrench_timeout_max = 15.0
@@ -178,21 +178,21 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         # Randomized base mass, applied at COM
         randomize_base_mass = True
         min_added_mass_max = 4.0
-        max_added_mass_max = 8.0
+        max_added_mass_max = 7.0
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.20
+        com_displacement_x_max = 0.16
         
         com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.15
+        com_displacement_y_max = 0.12
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
         com_displacement_z_min = 0.075
-        com_displacement_z_max = 0.15
+        com_displacement_z_max = 0.12
         
         # Control delay
         randomize_ctrl_delay = True
@@ -382,6 +382,9 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         use_reward_curriculum = True
 
         max_contact_force = 200.0
+        feet_edge_threshold = 0.05
+        edge_clearance_lateral_cells = (-1, 0, 1)
+        edge_clearance_forward_cells = (0, 1, 2)
 
         ff_ratio_target = 0.50
         ff_ratio_width  = 0.20
