@@ -187,15 +187,15 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.16
+        com_displacement_x_max = 0.18
         
         com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.12
+        com_displacement_y_max = 0.13
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
         com_displacement_z_min = 0.075
-        com_displacement_z_max = 0.12
+        com_displacement_z_max = 0.13
         
         # Control delay
         randomize_ctrl_delay = True
