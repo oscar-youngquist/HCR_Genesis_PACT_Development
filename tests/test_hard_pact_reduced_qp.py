@@ -118,10 +118,12 @@ def test_affine_acceleration_and_objective_spd():
 def test_swing_zero_nonredundant_constraints_and_native_pack(pattern):
     d=inputs(1); d["contact_probability"][0]=torch.tensor([(pattern>>i)&1 for i in range(4)])
     qp=solver(); m=qp._build(d)
-    ns=pattern.bit_count()
-    assert m.G.shape==(1,48+5*ns,24)
-    assert m.A.shape==(1,3*(4-ns),24)
-    if m.A.shape[1]: assert torch.linalg.matrix_rank(m.A)==m.A.shape[1]
+    assert m.G.shape==(1,68,24)
+    assert m.A.shape==(1,0,24)
+    for foot in range(4):
+        if not pattern & (1<<foot):
+            assert m.G[:,48+5*foot:53+5*foot].eq(0).all()
+            assert m.h[:,48+5*foot:53+5*foot].eq(1).all()
     g,h,lo,hi=qp._cupiqp_native_pack(m)
     torch.testing.assert_close(g,m.G[:,24:]);torch.testing.assert_close(h,m.h[:,24:])
     torch.testing.assert_close(lo[:,:12],m.tau_lower/m.variable_scale[:12])

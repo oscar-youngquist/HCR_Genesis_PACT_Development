@@ -59,6 +59,15 @@ def _make_warm_forward():
     )
     source = source[:begin] + replacement + source[end:]
     namespace = dict(pdipm_batch.__dict__)
+    # Fixed inactive rows have ds=0 exactly. Upstream get_step divides by
+    # zero and treats -inf as a step bound, producing NaNs. Only negative
+    # directions bound a positive variable's feasible step; zero/positive
+    # directions impose +inf. This changes no QP or implicit derivative.
+    def positive_step(v, dv):
+        decreasing = dv < 0
+        denominator = torch.where(decreasing,dv,-torch.ones_like(dv))
+        return torch.where(decreasing,-v/denominator,torch.full_like(v,float('inf'))).amin(1).squeeze()
+    namespace["get_step"] = positive_step
     exec(compile(source, __file__, "exec"), namespace)
     return namespace["forward_warm"]
 

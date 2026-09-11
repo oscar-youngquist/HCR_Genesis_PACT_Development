@@ -239,7 +239,7 @@ def _configure_cupiqp(solver, config, dtype, *, differentiable):
         solver.settings.eps_duality_gap_abs = gap_abs
         solver.settings.eps_duality_gap_rel = gap_rel
     solver.settings.check_duality_gap = (
-        getattr(config, f"{prefix}_duality_gap_policy") != "ignore"
+        getattr(config, f"{prefix}_duality_gap_policy") == "require"
     )
     solver.settings.max_iter = int(getattr(config, f"{prefix}_max_iter"))
     # Keep Ruiz/preconditioner state across rollout updates. Mechanics values

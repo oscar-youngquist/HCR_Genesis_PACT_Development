@@ -1003,8 +1003,8 @@ class Go2HardPACT(Go2PACT):
         # [equality, inequality, stationarity, complementarity] residuals.
         self._qp_interval_residual_sum = shape(4)
         self._qp_interval_residual_peak = shape(4)
-        # Counts for stage 0/full, stage 1/relaxed, stage 2/projection.
-        stage_count = 3  # 0=certified, 1=retired, 2=analytic (uncertified).
+        # Counts for stage 0/hard, stage 1/soft-joint, stage 2/projection.
+        stage_count = 3  # 0=hard certified, 1=soft-joint recovery, 2=analytic.
         self._qp_interval_stage_counts = shape(stage_count)
         # Sum of batched QP wall-clock milliseconds across substeps.
         self._qp_interval_timing_ms = shape(1)

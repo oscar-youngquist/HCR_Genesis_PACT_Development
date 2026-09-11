@@ -590,6 +590,10 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         # x=[total torque12; world GRF12]; no acceleration/slack variables.
                         'contact_threshold': 0.5,
                         'contact_acceleration_weight': 1.0,
+                        # Recovery softens only joint acceleration/position/velocity.
+                        'soft_joint_recovery_enabled': True,
+                        'soft_joint_recovery_weight': 200.0,
+                        'soft_joint_recovery_scale_rad_s2': 100.0,
                         'contact_acceleration_scale_m_s2': 50.0,
                         'attitude_weight': 1.0,
                         'attitude_acceleration_scale_rad_s2': 20.0,

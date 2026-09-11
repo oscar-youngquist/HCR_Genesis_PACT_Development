@@ -26,8 +26,11 @@ def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None):
 
     qp_substep_anchors(mode,decimation)
     result = {
-        "mode": mode, "formulation": "torque_force_24",
-        "variable_ordering": ["total_actuator_torque_12", "FR_FL_RR_RL_world_XYZ_force_12"],
+        "mode": mode, "formulation": "masked_torque_force_24",
+        "variable_ordering": ["total_actuator_torque_12", "FR_FL_RR_RL_world_XYZ_tilde_force_12"],
+        "physical_force": "f=D_m*tilde_f; detached stance inside dynamics, joint rows and soft contact objective; returned forces are physical f",
+        "matrix_shape": "24 variables; 68 canonical inequalities, zero equalities; cuPIQP native torque bounds plus 44 general inequalities (24 joint,20 friction)",
+        "swing_rows": "friction rows 0<=1, not equality padding; positive force tracking curvature retained",
         "solver_and_objective_settings": dict(asdict(settings),qp_update_mode=mode),
         "stance_threshold": settings.contact_threshold,
         "stance_selection": "detached probability >= threshold; optimized swing force exactly zero",
@@ -44,7 +47,8 @@ def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None):
         "unsolved_execution_helper": "rsl_rl.algorithms.hard_pact_qp.project_nominal_torque",
         "unsolved_execution": "project fresh nominal torque on actuator magnitude/rate intersection; no held correction",
         "previous_torque": "previous actually applied torque, zero on reset",
-        "joint_contact_certification": "successful QP solves only; no certificate for unsolved or analytic fallback rows",
+        "joint_contact_certification": "stage 0: hard QP; stage 1: soft-joint recovery, no hard joint certificate; stage 2/unsolved: actuator-only",
+        "soft_joint_recovery": "optional 36-D [tau12, masked-force12, nonnegative joint-slack12(rad/s²)]; quadratic normalized slack cost; torque/rate/friction/swing-zero stay hard; execution-only, no implicit VJP",
         "ppo_anchor_selection": "one balanced uniform executed QP substep per environment in both modes",
         "ppo_projection_loss_multiplier": 1,
         "frames": "world forces and world-aligned wrench about the existing base-Jacobian point; yaw-local head outputs rotated once",
@@ -111,7 +115,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
     explicit_dim = actor.explicit_estimator.network[-1].out_features
     swing_config = GRFSwingConfig.from_task(cfg)
     contract = {
-        "schema_version": 13,
+        "schema_version": 15,
         "grf_swing_gating": {
             "enabled": swing_config.enabled,
             "contact_probability_threshold": swing_config.threshold,
@@ -319,10 +323,10 @@ def write_deployment_contract_once(log_dir, contract):
 
 def validate_qp_deployment_contract(contract):
     """Reject old held/active execution contracts rather than reinterpret them."""
-    if contract.get("schema_version") != 13:
+    if contract.get("schema_version") != 15:
         raise ValueError("Incompatible HardPACT deployment schema; re-export using the current controller")
     update = contract.get("qp_update")
     if update is not None:
-        if update.get("mode") not in ("every_substep", "random_one_substep") or update.get("formulation") != "torque_force_24":
+        if update.get("mode") not in ("every_substep", "random_one_substep") or update.get("formulation") != "masked_torque_force_24":
             raise ValueError("Incompatible HardPACT QP execution contract")
     return contract

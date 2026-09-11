@@ -56,3 +56,23 @@ def test_runner_throttle_has_no_writes_when_unscheduled():
     runner._set_hard_pact_qp_iteration(3);runner._log_qp_metrics(3)
     assert calls and qp.diagnostics_scheduled
     assert len(calls)==len({x[0] for x in calls})
+    for phase in ('rollout','ppo'):
+        assert f'qp/{phase}/attempt/soft_joint_fraction' in {x[0] for x in calls}
+
+def test_soft_joint_recovery_rates_aggregate_counts_before_division():
+    agg=QPIterationDiagnostics();ref=torch.zeros(1)
+    # Unequal chunks: 2/2 and 1/8 attempts, two successes, one exception.
+    for rows,attempts,successes,exceptions in ((2,2,1,1),(8,1,1,0)):
+        for key,value in (('real_rows',rows),('attempt/soft_joint_count',attempts),
+                          ('final/soft_joint_count',successes),
+                          ('attempt/soft_joint_exception_count',exceptions)):
+            agg.add_sum(key,torch.tensor(value))
+    metrics=agg.finalize(ref)
+    for key,value in (('attempt/soft_joint_fraction',.3),
+                      ('attempt/soft_joint_success_fraction',2/3),
+                      ('attempt/soft_joint_failure_fraction',1/3),
+                      ('attempt/soft_joint_exception_fraction',1/3),
+                      ('final/soft_joint_fraction',.2)):
+        torch.testing.assert_close(metrics[key],torch.tensor(value))
+    empty=QPIterationDiagnostics().finalize(ref)
+    assert all(empty[k]==0 for k in metrics if k.startswith('attempt/soft_joint') and k.endswith('fraction'))

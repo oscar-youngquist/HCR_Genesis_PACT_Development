@@ -10,13 +10,8 @@ def prepare_solver_runtime(arguments):
     # AppLauncher startup. cuPIQP requires Warp >=1.12; importing the installed
     # compatible runtime first prevents the bundled extension from shadowing
     # it. This changes process import order, never either installed package.
-    options = {"--qp_solver", "--rollout_qp_solver", "--ppo_qp_solver"}
-    solvers = []
-    for index, argument in enumerate(arguments):
-        name, separator, value = argument.partition("=")
-        if name in options:
-            if separator or index + 1 < len(arguments):
-                solvers.append(value if separator else arguments[index + 1])
+    resolver = runpy.run_path(str(Path(__file__).with_name("hard_pact_solver_selection.py")))
+    solvers = resolver["effective_solvers"](arguments)
     if os.environ.get("SIMULATOR") == "isaaclab" and "cupiqp" in solvers:
         import warp
         from packaging.version import Version

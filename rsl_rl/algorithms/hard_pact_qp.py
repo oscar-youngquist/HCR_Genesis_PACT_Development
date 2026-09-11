@@ -66,6 +66,9 @@ class HardPACTQPConfig:
     # Train normally without rollout/replay QPs until this absolute PPO
     # iteration. Zero preserves immediate projection; independent of PINN.
     warmup_iterations: int = 0
+    soft_joint_recovery_enabled: bool = True
+    soft_joint_recovery_weight: float = 200.0
+    soft_joint_recovery_scale_rad_s2: float = 100.0
     qp_update_mode: str = "random_one_substep"
     # One canonical QP and fallback cascade can be solved by any registered
     # numerical backend. Overrides are diagnostics-only and require an
@@ -199,7 +202,7 @@ class HardPACTQPResult:
     qdd: torch.Tensor  # [B,18], canonical generalized acceleration.
     force_world: torch.Tensor  # [B,4,3], FR/FL/RR/RL world XYZ [N].
     tau_safe: torch.Tensor  # [B,12], actuator command [Nm].
-    stage: torch.Tensor  # [B], 0=certified QP, 2=uncertified analytic fallback.
+    stage: torch.Tensor  # [B], 0=hard certified, 1=soft-joint recovery, 2=analytic.
     differentiated_mask: torch.Tensor  # [B], true exactly for certified rows.
     diagnostics: Mapping[str, torch.Tensor]  # Per-stage primal/KKT metrics.
     metrics: Mapping[str, torch.Tensor] | None = None  # Aggregated GPU scalars.
@@ -333,6 +336,8 @@ class HardPACTDifferentiableQP:
         self.position_lower = torch.as_tensor(position_lower).reshape(12).detach()
         self.position_upper = torch.as_tensor(position_upper).reshape(12).detach()
         self.velocity_limits = torch.as_tensor(velocity_limits).reshape(12).detach()
+        if min(config.soft_joint_recovery_weight, config.soft_joint_recovery_scale_rad_s2) <= 0:
+            raise ValueError("soft-joint recovery weight and scale must be positive")
         # D must be invertible, hence every variable scale is strictly positive.
         if min(config.force_scale_n, config.torque_scale_nm,
                config.contact_acceleration_scale_m_s2, config.attitude_acceleration_scale_rad_s2) <= 0:
@@ -555,25 +560,27 @@ class HardPACTDifferentiableQP:
             self._constant_cache[key] = (eye, scale)
         return self._constant_cache[key]
 
-    def _build(self, data, stance_pattern=None):
+    def _build(self, data):
         r"""Assemble x=[tau_12; f_FR,FL,RR,RL_world_12], and substitute x=D z.
 
-        One call contains one detached stance pattern. Swing coordinates have
-        exactly one identity equality each and NO friction rows. No dynamics
-        equalities, accelerations, contact slacks, or temporal costs are added.
+        x=[tau,tilde_f]; physical f=D_m tilde_f. All contact patterns share
+        68 inequalities (24 actuator, 24 joint, 20 friction), zero equalities.
+        Positive force curvature fixes otherwise unused swing variables.
         """
         ref = data["tau_nom"]
         batch = ref.shape[0]
         eye, scale = self._constants(ref)
         mass = data["mass_matrix"].detach()
         J = data["foot_jacobians"].detach().reshape(batch, 12, 18)
+        stance = data["contact_probability"].detach() >= self.cfg.contact_threshold
+        force_mask = stance.repeat_interleave(3,dim=1).to(ref.dtype)
         Jb = data["base_jacobian"].detach()
         bias = data["bias"].detach()
         # M a = [S^T J^T]x + Jb^T W - h. solve_ex reports a singular
         # mechanics row without poisoning all other environments in its batch.
         selector = ref.new_zeros(18, 12)
         selector[6:] = torch.eye(12, device=ref.device, dtype=ref.dtype)
-        rhs = torch.cat((selector.expand(batch, -1, -1), J.transpose(1, 2),
+        rhs = torch.cat((selector.expand(batch, -1, -1), J.transpose(1, 2)*force_mask[:,None,:],
                          Jb.transpose(1, 2), bias[..., None]), -1)
         solved, info = torch.linalg.solve_ex(mass, rhs, check_errors=False)
         mechanics_valid = (info == 0) & torch.isfinite(solved).all(dim=(1,2))
@@ -584,20 +591,12 @@ class HardPACTDifferentiableQP:
         wrench = _ScaleClipRows.apply(data["wrench_pred_world"],
             self.cfg.gradient_scale_wrench, self.cfg.gradient_clip_wrench, self, "wrench")
         offset = (solved[:,:,24:30] @ wrench[...,None]).squeeze(-1)-solved[:,:,30]
-        stance = data["contact_probability"].detach() >= self.cfg.contact_threshold
-        if stance_pattern is None:
-            # Private builder accepts homogeneous batches for algebra tests.
-            if not torch.equal(stance, stance[:1].expand_as(stance)):
-                raise ValueError("_build requires a homogeneous stance pattern")
-            stance_pattern = sum(int(stance[0, i]) << i for i in range(4))
-        feet = [i for i in range(4) if stance_pattern & (1 << i)]
-        swing = [i for i in range(4) if not stance_pattern & (1 << i)]
         tau = _ScaleClipRows.apply(ref, self.cfg.gradient_scale_tau,
                                   self.cfg.gradient_clip_tau, self, "tau_nom")
         force = _ScaleClipRows.apply(data["force_pred_world"],
             self.cfg.gradient_scale_grf, self.cfg.gradient_clip_grf, self, "grf")
-        # Mask ONLY the tracking reference. Raw supervised predictions stay
-        # unbounded, and optimized swing forces are constrained separately.
+        # Mask the tilde-f tracking reference; D_m already masks mechanics.
+        # Raw supervised predictions remain unbounded and unchanged.
         force = torch.where(stance[..., None], force, torch.zeros_like(force)).flatten(1)
         target = torch.cat((tau, force), -1)
         weights = ref.new_tensor([self.cfg.torque_tracking_weight] * 12
@@ -612,12 +611,11 @@ class HardPACTDifferentiableQP:
             Q = Q + 2 * weight * C.transpose(1, 2) @ C
             p = p + 2 * weight * (C.transpose(1, 2) @ e[..., None]).squeeze(-1)
 
-        if feet and self.cfg.contact_acceleration_weight:
-            rows = [3 * foot + axis for foot in feet for axis in range(3)]
-            contact_J = J[:, rows]
+        if self.cfg.contact_acceleration_weight:
+            contact_J = J*force_mask[:,:,None]
             C = contact_J @ mechanics_map / self.cfg.contact_acceleration_scale_m_s2
             e = ((contact_J @ offset[..., None]).squeeze(-1)
-                 + data["foot_acceleration_bias"].detach().flatten(1)[:, rows])
+                 + data["foot_acceleration_bias"].detach().flatten(1)*force_mask)
             add_residual(C, e / self.cfg.contact_acceleration_scale_m_s2,
                          self.cfg.contact_acceleration_weight)
 
@@ -665,19 +663,20 @@ class HardPACTDifferentiableQP:
         G = [eye[:12].expand(batch,-1,-1), -eye[:12].expand(batch,-1,-1),
              joint_map, -joint_map]
         h = [upper, -lower, aupper-joint_offset, joint_offset-alower]
-        for foot in feet:
+        for foot in range(4):
             block = ref.new_zeros(5,24)
             col = 12+3*foot
             block[0,col+2] = -1
             block[1,col], block[2,col] = 1, -1
             block[3,col+1], block[4,col+1] = 1, -1
             block[1:,col+2] = -self.cfg.friction_coefficient
-            G.append(block.expand(batch,-1,-1))
-            h.append(ref.new_zeros(batch,5))
+            # In swing these become 0<=1 after row normalization, not active
+            # zero equalities. Stance rows retain the physical friction cone.
+            G.append(block.expand(batch,-1,-1)*stance[:,foot,None,None])
+            h.append((~stance[:,foot,None]).to(ref.dtype).expand(-1,5))
         physical_G, physical_h = torch.cat(G,1), torch.cat(h,1)
-        swing_columns = [12+3*foot+axis for foot in swing for axis in range(3)]
-        physical_A = eye[swing_columns].expand(batch,-1,-1)
-        physical_b = ref.new_zeros(batch,len(swing_columns))
+        physical_A = ref.new_empty(batch,0,24)
+        physical_b = ref.new_empty(batch,0)
         G, h, gs = _row_scale(physical_G * scale, physical_h)
         A, b, es = _row_scale(physical_A * scale, physical_b)
         Q = Q * scale[:,None] * scale[None,:]
@@ -697,6 +696,36 @@ class HardPACTDifferentiableQP:
         # inequalities are true coordinate bounds. Joint acceleration bounds
         # are coupled affine rows and MUST remain general inequalities.
         return m.G[:,24:], m.h[:,24:], m.native_lower, m.native_upper
+
+    def _soft_joint_problem(self, m):
+        """Recovery only: y=[tau, f_tilde, s], s>=0 in rad/s².
+
+        Relax the combined joint envelope to lower-s <= a_joint <= upper+s.
+        This softens acceleration and predicted position/velocity limits, NOT
+        actuator/rate, friction or exact physical swing-force elimination.
+        Add w*||s/scale||²; the original 24-D objective remains unchanged.
+        """
+        batch = m.p.shape[0]
+        scale = m.variable_scale.new_full((12,), self.cfg.soft_joint_recovery_scale_rad_s2)
+        variable_scale = torch.cat((m.variable_scale, scale))
+        Q = m.Q.new_zeros(batch,36,36)
+        Q[:,:24,:24] = m.Q
+        eye = torch.eye(12,device=Q.device,dtype=Q.dtype)
+        Q[:,24:,24:] = (2*self.cfg.soft_joint_recovery_weight+self.cfg.q_regularization)*eye
+        physical_G = m.G.new_zeros(batch,80,36)
+        physical_G[:,:68,:24] = m.physical_G
+        physical_G[:,24:36,24:] = -eye
+        physical_G[:,36:48,24:] = -eye
+        physical_G[:,68:,24:] = -eye
+        physical_h = torch.cat((m.physical_h,m.p.new_zeros(batch,12)),1)
+        G,h,row_scale = _row_scale(physical_G*variable_scale,physical_h)
+        empty = m.A.new_zeros(batch,0,36)
+        return replace(m,Q=Q,p=torch.cat((m.p,m.p.new_zeros(batch,12)),1),
+            G=G,h=h,A=empty,physical_A=empty,physical_G=physical_G,physical_h=physical_h,
+            variable_scale=variable_scale,inequality_row_scale=row_scale,
+            native_lower=torch.cat((m.native_lower,m.p.new_full((batch,12),-torch.inf)),1),
+            native_upper=torch.cat((m.native_upper,m.p.new_full((batch,12),torch.inf)),1),
+            acceleration_map=torch.cat((m.acceleration_map,m.p.new_zeros(batch,18,12)),2))
 
     @staticmethod
     def _maximum(value):
@@ -803,11 +832,11 @@ class HardPACTDifferentiableQP:
                         check_Q_spd=self.cfg.check_q_spd)(m.Q[retry],m.p[retry],m.G[retry],m.h[retry],m.A[retry],m.b[retry])
                     z=z.index_copy(0,retry,cold)
                 return QPBackendResult(z)
-            z = QPFunction(eps=self._eps(m.p.dtype),
+            z, _ = solve_qpth_warm(m.Q,m.p,m.G,m.h,m.A,m.b,
+                warm_start=None,eps=self._eps(m.p.dtype),
                 verbose=-1 if self.cfg.verbose==0 else self.cfg.verbose,
-                notImprovedLim=self.cfg.not_improved_limit,
-                maxIter=self.cfg.max_iter, check_Q_spd=self.cfg.check_q_spd)(
-                    m.Q,m.p,m.G,m.h,m.A,m.b)
+                not_improved_limit=self.cfg.not_improved_limit,
+                max_iter=self.cfg.max_iter, check_q_spd=self.cfg.check_q_spd)
             return QPBackendResult(z)
         G,h,lo,hi = self._cupiqp_native_pack(m) if self._active_solver=="cupiqp" else (
             m.G,m.h,None,None)
@@ -820,10 +849,10 @@ class HardPACTDifferentiableQP:
 
     def solve(self, *, differentiable=None, diagnostics_phase=None,
               environment_ids=None, substep_index=None, environment_count=None, **data):
-        """One certified QP, otherwise detached actuator/rate projection.
+        """Hard QP, optional soft-joint recovery, then actuator/rate projection.
 
-        Stance-pattern grouping removes redundant swing constraints without
-        padding equality rows. Backend caches are keyed by actual matrix shape;
+        A fixed stance mask eliminates physical swing forces without equality
+        padding. Backend caches are keyed by actual matrix shape;
         PPO graphs retain exclusive backend leases through all backward uses.
         """
         reference = data["tau_nom"]
@@ -896,90 +925,155 @@ class HardPACTDifferentiableQP:
                 "selected/inequality_max":ref.new_full((n,),float("nan")),
                 "pre_clamp_torque_violation_max":ref.new_zeros(n)}
         stance = values["contact_probability"].detach() >= self.cfg.contact_threshold
-        pattern = (stance.long()*torch.tensor([1,2,4,8],device=ref.device)).sum(-1)
         profile = self._profile(differentiable)
         tolerance = (profile["feasibility"] if self._active_solver!="qpth"
                      else self._normalized_tolerance(dtype))
-        for code in range(16):
-            ids = ((pattern==code)&finite_input&~empty_tau).nonzero(as_tuple=True)[0]
-            for chunk_index, rows in enumerate(ids.split(self._chunk_size(differentiable))):
-                if not rows.numel():
-                    continue
-                part = {k:v.index_select(0,rows) for k,v in values.items()}
-                with event_profile.measure("assembly",ref):
-                    m = self._build(part,code)
-                finite = torch.stack([torch.isfinite(t).flatten(1).all(-1)
-                                      for t in (m.Q,m.p,m.G,m.h,m.A,m.b)]).all(0)
-                empty_a = (m.qdd_lower>m.qdd_upper).any(-1)
-                diag["failure/empty_qdd_intersection"][rows] = empty_a
-                diag["failure/mechanics"][rows] = ~m.mechanics_valid
-                local = (finite & m.mechanics_valid & ~empty_a).nonzero(as_tuple=True)[0]
-                if not local.numel():
-                    continue
-                rows = rows[local]
-                m = select_problem(m,local)
-                owners=rows if environment_ids is None else environment_ids[rows]
-                self._qpth_context=((code,chunk_index,m.p.shape,m.G.shape,m.A.shape,ref.device,ref.dtype),owners)
-                diag["full/attempted"][rows] = True
-                try:
-                    with event_profile.measure("solve",ref):
-                        result = self._backend_solve(m)
-                    z = result.solution
-                except QPBackendUnavailable:
-                    raise
-                except Exception as error:
-                    G,h,lo,hi = self._cupiqp_native_pack(m) if self._active_solver=="cupiqp" else (m.G,m.h,None,None)
-                    capture_failure(self,error,dict(Q=m.Q,p=m.p,G=G,h=h,A=m.A,b=m.b,
-                                                    native_lower=lo,native_upper=hi))
-                    diag["full/solver_exception"][rows] = True
-                    continue
-                diag["full/output_finite"][rows] = torch.isfinite(z.detach()).all(-1)
-                x = z * m.variable_scale
-                pre = torch.maximum((m.tau_lower-x[:,:12]).clamp_min(0),
-                                    (x[:,:12]-m.tau_upper).clamp_min(0)).amax(-1)
-                diag["pre_clamp_torque_violation_max"][rows] = pre.detach()
-                torque = x[:,:12].clamp(m.tau_lower,m.tau_upper)
-                forces = x[:,12:].reshape(-1,4,3)
-                forces = torch.where(stance[rows,:,None],forces,torch.zeros_like(forces))
-                x = torch.cat((torque,forces.flatten(1)),1)
-                with event_profile.measure("certification_recovery",ref):
-                    accepted,er,ir = self._certificate(m,x/m.variable_scale,tolerance)
-                accepted &= torch.isfinite(z.detach()).all(-1)
-                for key,value in (("duality_gap",result.duality_gap),
-                                  ("duality_gap_rel",result.duality_gap_rel)):
-                    if value is not None:
-                        diag["full/"+key][rows] = value.detach()
-                if self._active_solver=="cupiqp" and profile["gap_policy"]=="require":
-                    gap,rel = result.duality_gap,result.duality_gap_rel
-                    accepted &= (torch.isfinite(gap)&torch.isfinite(rel)
-                                 & ((gap<=profile["gap_abs"])|(rel<=profile["gap_rel"]))) if gap is not None and rel is not None else False
-                diag["selected/equality_max"][rows],diag["selected/inequality_max"][rows]=er,ir
-                if self._physical_enabled():
-                    physical = self._physical_diagnostics(m,x,{k:v.index_select(0,local) for k,v in part.items()})
-                    for key,value in physical.items():
-                        name="physical/"+key
-                        if name not in diag: diag[name]=ref.new_full((n,),float("nan"))
-                        diag[name][rows]=value.to(ref.dtype)
-                count=min(audit_remaining,rows.numel())
-                if count:
-                    sampled=torch.arange(count,device=ref.device)
-                    for key,value in self._audit(select_problem(m,sampled),(x/m.variable_scale)[:count]).items():
-                        name="full/audit/"+key
-                        if name not in diag: diag[name]=ref.new_full((n,),float("nan"))
-                        diag[name][rows[:count]]=value.to(ref.dtype)
-                    audit_remaining-=count
-                # The backend gets a zero adjoint on each failed row before
-                # invoking its implicit solve. Forward NaNs are removed too.
-                x = _CertifiedRows.apply(torch.nan_to_num(x,nan=0.,posinf=0.,neginf=0.),accepted)
-                primal = primal.index_copy(0,rows,torch.where(accepted[:,None],x,primal[rows]))
-                derived = (m.acceleration_map @ x[...,None]).squeeze(-1)+m.acceleration_offset
-                qdd = qdd.index_copy(0,rows,torch.where(accepted[:,None],derived,torch.zeros_like(derived)))
-                ok[rows]=accepted
-        # Keep the existing analytic stage code 2 for stored/logged status
-        # compatibility. Stage 1 is retired; there is no recovery QP.
+        ids = (finite_input & ~empty_tau).nonzero(as_tuple=True)[0]
+        for chunk_index, rows in enumerate(ids.split(self._chunk_size(differentiable))):
+            if not rows.numel():
+                continue
+            part = {k:v.index_select(0,rows) for k,v in values.items()}
+            with event_profile.measure("assembly",ref):
+                m = self._build(part)
+            finite = torch.stack([torch.isfinite(t).flatten(1).all(-1)
+                                  for t in (m.Q,m.p,m.G,m.h,m.A,m.b)]).all(0)
+            empty_a = (m.qdd_lower>m.qdd_upper).any(-1)
+            diag["failure/empty_qdd_intersection"][rows] = empty_a
+            diag["failure/mechanics"][rows] = ~m.mechanics_valid
+            local = (finite & m.mechanics_valid & ~empty_a).nonzero(as_tuple=True)[0]
+            if not local.numel():
+                continue
+            rows = rows[local]
+            m = select_problem(m,local)
+            owners=rows if environment_ids is None else environment_ids[rows]
+            self._qpth_context=((chunk_index,m.p.shape,m.G.shape,m.A.shape,ref.device,ref.dtype),owners)
+            diag["full/attempted"][rows] = True
+            aggregate=self.iteration_diagnostics[self._diagnostics_phase]
+            aggregate.add_sum("backend/dispatch_count",rows.new_tensor(1))
+            aggregate.add_sum("backend/dispatched_rows",rows.new_tensor(rows.numel()))
+            try:
+                with event_profile.measure("solve",ref):
+                    result = self._backend_solve(m)
+                z = result.solution
+            except QPBackendUnavailable:
+                raise
+            except Exception as error:
+                G,h,lo,hi = self._cupiqp_native_pack(m) if self._active_solver=="cupiqp" else (m.G,m.h,None,None)
+                capture_failure(self,error,dict(Q=m.Q,p=m.p,G=G,h=h,A=m.A,b=m.b,
+                                                native_lower=lo,native_upper=hi))
+                diag["full/solver_exception"][rows] = True
+                continue
+            diag["full/output_finite"][rows] = torch.isfinite(z.detach()).all(-1)
+            x = z * m.variable_scale
+            pre = torch.maximum((m.tau_lower-x[:,:12]).clamp_min(0),
+                                (x[:,:12]-m.tau_upper).clamp_min(0)).amax(-1)
+            diag["pre_clamp_torque_violation_max"][rows] = pre.detach()
+            torque = x[:,:12].clamp(m.tau_lower,m.tau_upper)
+            forces = x[:,12:].reshape(-1,4,3)
+            forces = torch.where(stance[rows,:,None],forces,torch.zeros_like(forces))
+            x = torch.cat((torque,forces.flatten(1)),1)
+            with event_profile.measure("certification_recovery",ref):
+                accepted,er,ir = self._certificate(m,x/m.variable_scale,tolerance)
+            accepted &= torch.isfinite(z.detach()).all(-1)
+            for key,value in (("duality_gap",result.duality_gap),
+                              ("duality_gap_rel",result.duality_gap_rel)):
+                if value is not None:
+                    diag["full/"+key][rows] = value.detach()
+            if self._active_solver=="cupiqp" and profile["gap_policy"]=="require":
+                gap,rel = result.duality_gap,result.duality_gap_rel
+                accepted &= (torch.isfinite(gap)&torch.isfinite(rel)
+                             & ((gap<=profile["gap_abs"])|(rel<=profile["gap_rel"]))) if gap is not None and rel is not None else False
+            diag["selected/equality_max"][rows],diag["selected/inequality_max"][rows]=er,ir
+            if self._physical_enabled():
+                physical = self._physical_diagnostics(m,x,{k:v.index_select(0,local) for k,v in part.items()})
+                for key,value in physical.items():
+                    name="physical/"+key
+                    if name not in diag: diag[name]=ref.new_full((n,),float("nan"))
+                    diag[name][rows]=value.to(ref.dtype)
+            count=min(audit_remaining,rows.numel())
+            if count:
+                sampled=torch.arange(count,device=ref.device)
+                for key,value in self._audit(select_problem(m,sampled),(x/m.variable_scale)[:count]).items():
+                    name="full/audit/"+key
+                    if name not in diag: diag[name]=ref.new_full((n,),float("nan"))
+                    diag[name][rows[:count]]=value.to(ref.dtype)
+                audit_remaining-=count
+            # The backend gets a zero adjoint on each failed row before
+            # invoking its implicit solve. Forward NaNs are removed too.
+            x = _CertifiedRows.apply(torch.nan_to_num(x,nan=0.,posinf=0.,neginf=0.),accepted)
+            primal = primal.index_copy(0,rows,torch.where(accepted[:,None],x,primal[rows]))
+            derived = (m.acceleration_map @ x[...,None]).squeeze(-1)+m.acceleration_offset
+            qdd = qdd.index_copy(0,rows,torch.where(accepted[:,None],derived,torch.zeros_like(derived)))
+            ok[rows]=accepted
+        # Recovery is execution-only: never provide an implicit VJP or claim
+        # hard joint certification for a softened solution. Preserve the hard
+        # solution graph outside no_grad, including mixed accepted/failed rows.
+        soft_ok = torch.zeros_like(ok)
+        recovered = primal.detach().clone()
+        recovered_qdd = qdd.detach().clone()
+        diag["soft_joint/attempted"] = torch.zeros_like(ok)
+        diag["soft_joint/solver_exception"] = torch.zeros_like(ok)
+        diag["soft_joint/slack_max_rad_s2"] = ref.new_full((n,),float("nan"))
+        if self.cfg.soft_joint_recovery_enabled:
+            try:
+                self._active_differentiable = False
+                with torch.no_grad():
+                    recovery_ids = (finite_input & ~empty_tau & ~ok).nonzero(as_tuple=True)[0]
+                    for rows in recovery_ids.split(self._chunk_size(False)):
+                        if not rows.numel():
+                            continue
+                        m = self._soft_joint_problem(self._build({k:v[rows].detach() for k,v in values.items()}))
+                        finite = m.mechanics_valid & torch.stack([
+                            torch.isfinite(t).flatten(1).all(-1) for t in (m.Q,m.p,m.G,m.h)]).all(0)
+                        local = finite.nonzero(as_tuple=True)[0]
+                        if not local.numel():
+                            continue
+                        rows,m = rows[local],select_problem(m,local)
+                        diag["soft_joint/attempted"][rows] = True
+                        owners=rows if environment_ids is None else environment_ids[rows]
+                        self._qpth_context=(("soft_joint",m.p.shape,m.G.shape,m.A.shape,ref.device,ref.dtype),owners)
+                        aggregate=self.iteration_diagnostics[self._diagnostics_phase]
+                        aggregate.add_sum("backend/dispatch_count",rows.new_tensor(1))
+                        aggregate.add_sum("backend/dispatched_rows",rows.new_tensor(rows.numel()))
+                        try:
+                            result = self._backend_solve(m)
+                        except QPBackendUnavailable:
+                            raise
+                        except Exception as error:
+                            capture_failure(self,error,dict(Q=m.Q,p=m.p,G=m.G,h=m.h,A=m.A,b=m.b))
+                            diag["soft_joint/solver_exception"][rows] = True
+                            continue
+                        x = result.solution*m.variable_scale
+                        pre = torch.maximum((m.tau_lower-x[:,:12]).clamp_min(0),
+                                            (x[:,:12]-m.tau_upper).clamp_min(0)).amax(-1)
+                        diag["pre_clamp_torque_violation_max"][rows] = pre
+                        x[:,:12] = x[:,:12].clamp(m.tau_lower,m.tau_upper)
+                        x[:,12:24] *= stance[rows].repeat_interleave(3,1)
+                        accepted,er,ir = self._certificate(m,x/m.variable_scale,tolerance)
+                        accepted &= torch.isfinite(result.solution).all(-1)
+                        # Execution-only recovery uses the rollout numerical
+                        # profile, including its configured gap policy.
+                        recovery_profile = self._profile(False)
+                        if self._active_solver=="cupiqp" and recovery_profile["gap_policy"]=="require":
+                            gap,rel = result.duality_gap,result.duality_gap_rel
+                            accepted &= (torch.isfinite(gap)&torch.isfinite(rel)&
+                                ((gap<=recovery_profile["gap_abs"])|(rel<=recovery_profile["gap_rel"]))) if gap is not None and rel is not None else False
+                        soft_ok[rows] = accepted
+                        recovered[rows] = torch.where(accepted[:,None],x[:,:24],recovered[rows])
+                        a = (m.acceleration_map@x[...,None]).squeeze(-1)+m.acceleration_offset
+                        recovered_qdd[rows] = torch.where(accepted[:,None],a,recovered_qdd[rows])
+                        diag["soft_joint/slack_max_rad_s2"][rows] = x[:,24:].amax(-1)
+                        diag["selected/equality_max"][rows] = er
+                        diag["selected/inequality_max"][rows] = ir
+            finally:
+                self._active_differentiable = bool(differentiable)
+        primal = torch.where(soft_ok[:,None],recovered,primal)
+        qdd = torch.where(soft_ok[:,None],recovered_qdd,qdd)
         stage = torch.where(ok,0,2)
+        stage = torch.where(soft_ok,1,stage)
         metrics = {"qp/minimal/full_fraction":ok.float().mean(),
-                   "qp/minimal/fallback_fraction":(~ok).float().mean(),
+                   "qp/minimal/soft_joint_fraction":soft_ok.float().mean(),
+                   "qp/minimal/fallback_fraction":(stage==2).float().mean(),
                    "qp/minimal/differentiated_fraction":ok.float().mean()*int(differentiable)}
         # Physical diagnostics are optional, never part of the objective.
         if self._physical_enabled():

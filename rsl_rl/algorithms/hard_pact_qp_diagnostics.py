@@ -67,12 +67,12 @@ class QPIterationDiagnostics:
         stage, diag = result.stage, result.diagnostics
         self.add_sum("real_rows", stage.new_tensor(stage.numel()))
         self.add_sum("solve_calls", stage.new_tensor(1))
-        final_codes = {"full": 0, "analytic": 2}
+        final_codes = {"full": 0, "soft_joint": 1, "analytic": 2}
         for name, code in final_codes.items():
             self.add_sum(f"final/{name}_count", (stage == code).sum())
         self.add_sum("certified_count", result.differentiated_mask.sum())
         self.add_sum("differentiated_count", result.differentiated_mask.sum() * int(differentiable))
-        for name in ("full",):
+        for name in ("full", "soft_joint"):
             attempted = diag.get(f"{name}/attempted", torch.zeros_like(stage, dtype=torch.bool))
             self.add_sum(f"attempt/{name}_count", attempted.sum())
             failed = diag.get(f"{name}/solver_exception", torch.zeros_like(attempted))
@@ -85,6 +85,8 @@ class QPIterationDiagnostics:
                 self.add_values(f"attempt/{name}/{gap}_mean", values, attempted)
         # Reduce per-row physical values directly, not means of chunk means.
         for key, value in diag.items():
+            if key == "soft_joint/slack_max_rad_s2":
+                self.add_values(key + "_mean", value, stage == 1)
             if key.startswith("physical/"):
                 for status, mask in (("certified", result.differentiated_mask),
                                      ("rejected", ~result.differentiated_mask)):
@@ -120,7 +122,7 @@ class QPIterationDiagnostics:
         rows = self.sums.get("real_rows", zero)
         result["real_rows"] = rows
         result["solve_calls"] = self.sums.get("solve_calls", zero)
-        for name in ("full",):
+        for name in ("full", "soft_joint"):
             for suffix in ("count", "exception_count"):
                 key = f"attempt/{name}_{suffix}"
                 result[key] = self.sums.get(key, zero)
@@ -132,12 +134,21 @@ class QPIterationDiagnostics:
             result[key] = self.sums.get(key, zero)
         for key in ("selected/equality_max", "selected/inequality_max", "pre_clamp_torque_violation_max", "projection_loss"):
             result.setdefault(key, zero + float("nan"))
-        for name in ("full", "analytic"):
+        for name in ("full", "soft_joint", "analytic"):
             count = self.sums.get(f"final/{name}_count", zero)
             result[f"final/{name}_count"] = count
             result[f"final/{name}_fraction"] = count / rows.clamp_min(1)
         for name in ("certified", "differentiated"):
             result[f"{name}_fraction"] = self.sums.get(f"{name}_count", zero) / rows.clamp_min(1)
+        # Recovery frequency is per real primary-QP row (not dispatch, padded
+        # capacity or unsolved physics substep). Form ratios after accumulating
+        # counts across chunks. Conditional rates are zero when never invoked.
+        recovery_attempts = result["attempt/soft_joint_count"]
+        recovery_successes = result["final/soft_joint_count"]
+        result["attempt/soft_joint_fraction"] = recovery_attempts / rows.clamp_min(1)
+        result["attempt/soft_joint_success_fraction"] = recovery_successes / recovery_attempts.clamp_min(1)
+        result["attempt/soft_joint_failure_fraction"] = (recovery_attempts-recovery_successes) / recovery_attempts.clamp_min(1)
+        result["attempt/soft_joint_exception_fraction"] = result["attempt/soft_joint_exception_count"] / recovery_attempts.clamp_min(1)
         attempted = self.sums.get("attempt/full_count",zero)
         finite_outputs = self.sums.get("attempt/full/output_finite_count",zero)
         exceptions = self.sums.get("attempt/full_exception_count",zero)

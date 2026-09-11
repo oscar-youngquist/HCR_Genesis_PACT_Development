@@ -56,6 +56,8 @@ case "$backend" in
     isaacgym) target_env="${HARD_PACT_ISAACGYM_ENV:-lr_gym}" ;;
     isaaclab) target_env="${HARD_PACT_ISAACLAB_ENV:-lr_lab}" ;;
 esac
+resolved_solvers="$(python "$script_dir/hard_pact_solver_selection.py" "${forward[@]}")"
+mapfile -t requested_solvers <<< "$resolved_solvers"
 for solver in "${requested_solvers[@]}"; do
     case "$solver" in
         cupiqp)

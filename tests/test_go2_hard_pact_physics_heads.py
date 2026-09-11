@@ -862,7 +862,7 @@ class DeploymentContractTests(unittest.TestCase):
                 self.assertEqual(stream.read(), first_text)
             loaded = json.loads(first_text)
 
-        self.assertEqual(loaded["schema_version"], 13)
+        self.assertEqual(loaded["schema_version"], 14)
         self.assertEqual(loaded["torque_convention"]["conversion_helper"],
                          "rsl_rl.modules.hard_pact_control.bounded_nominal_torque")
         self.assertIn("nominal_torque_tracking", loaded["qp_objective"]["terms"])
