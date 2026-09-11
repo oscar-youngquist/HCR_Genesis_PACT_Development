@@ -19,6 +19,9 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         # Added for PACT experiment collection
         lateral_push_only = False
         
+        # Added for PACT experiment collection
+        lateral_push_only = False
+        
         # stuff for drawing the surface normal visulations
         debug_draw_swing_planes = False
         debug_viz_env                 = 0
@@ -150,7 +153,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000  # number of steps to increase the domain randomization ranges
-        push_warmup = 1000     # number of steps with initial values held constant
+        push_warmup = 2000     # number of steps with initial values held constant
         num_jumps = 10
         
         # Randomize Friction
@@ -162,15 +165,15 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_max = 15.0
         push_interval_min = 5.00
-        max_push_vel_xy = 1.50
+        max_push_vel_xy = 1.35
         min_push_vel_xy = 0.50
 
-        max_vertical_push = 0.50
+        max_vertical_push = 0.45
         min_vertical_push = 0.10
         vert_interval_max = 15.0
         vert_interval_min = 5.00
 
-        max_push_torque = 1.50
+        max_push_torque = 1.35
         min_push_torque = 0.50
         wrench_timeout_min = 5.00
         wrench_timeout_max = 15.0
@@ -178,21 +181,21 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         # Randomized base mass, applied at COM
         randomize_base_mass = True
         min_added_mass_max = 4.0
-        max_added_mass_max = 8.0
+        max_added_mass_max = 7.25
         added_mass_min = -1.0
         
         # COM displacement crap
         randomize_com_displacement = True
         com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.20
+        com_displacement_x_max = 0.18
         
         com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.15
+        com_displacement_y_max = 0.13
         
         com_displacement_z_positive = False
         com_displacement_z_min_pos = 0.1
         com_displacement_z_min = 0.075
-        com_displacement_z_max = 0.15
+        com_displacement_z_max = 0.13
         
         # Control delay
         randomize_ctrl_delay = True
@@ -215,7 +218,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         joint_friction_range_end   = [0.00, 0.20]
         joint_friction_range_start = [0.00, 0.05]
         
-        randomize_joint_stiffness = True
+        randomize_joint_stiffness = False
         joint_stiffness_range_end   = [0.0, 0.02]
         joint_stiffness_range_start = [0.0, 0.005]
         
@@ -388,7 +391,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
         class scales( LeggedRobotCfg.rewards.scales ):
             # General
             termination           = 0.0
-            collision             = -1.0
+            collision             = -10.0
             dof_pos_limits        = -2.0
             dof_close_to_default  = -0.01
             torque_limits         = -0.01
@@ -412,7 +415,7 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             # antagonisitc_energy = -0.01
             torque_conflict_symmetric = -0.1
             torque_alignment = 0.4
-            ff_ratio = 0.1
+            ff_ratio = 0.0
             
             # smoothness and stability
             lin_vel_z        = -2.0
@@ -425,14 +428,14 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             torques          = 0.0     # don't need to use this when we already have joint power above...
 
             # Zero out some values that are used in the individual reward classes below
-            action_rate       = -0.001
-            action_smoothness = -0.001
+            action_rate       = 0.0
+            action_smoothness = 0.0
 
-            pos_action_rate       = 0.0
-            pos_action_smoothness = 0.0
+            pos_action_rate       = -0.001
+            pos_action_smoothness = -0.001
 
-            tau_action_rate       = 0.0
-            tau_action_smoothness = 0.0
+            tau_action_rate       = -0.001
+            tau_action_smoothness = -0.001
 
             # feedforward_torques   = -2.5e-5
             # feedback_torques      = -2.0e-5
@@ -457,33 +460,37 @@ class GO1ABL3Cfg( LeggedRobotCfg ):
             # gait
             feet_air_time    = 0.70            # tracking reward for long steps
             # foot_clearance   = 0.2            # tracking reward for feet reaching the desired clearance      
-            foot_clearance_terrain_aware = 0.30  # tracking reward for feet reaching the desired clearance responsive to terrain height    
-            hip_pos = -0.05
+            foot_clearance_terrain_aware = 0.70  # tracking reward for feet reaching the desired clearance responsive to terrain height    
+            hip_pos = -0.2
             
             foot_slip        = -0.01           # penalty for feet slipping
-            stumble          = -0.2
+            stumble          = -1.0
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
             feet_spread_pairwise_axes = 0.0
         class reward_curriculum():
             curr_reward_keys = ["ang_vel_xy", 
                                 "orientation",
                                 "torque_limits",
-                                "action_rate", 
-                                "action_smoothness",
-                                "dof_close_to_default",
+                                "pos_action_rate", 
+                                "pos_action_smoothness",
+                                "tau_action_rate", 
+                                "tau_action_smoothness",
+                                "hip_pos",
                                 ]
             
             curr_reward_bounds = {
-                                  "ang_vel_xy":[-0.05, -0.2],
-                                  "orientation":[-0.2,-2.0],
+                                  "ang_vel_xy":[-0.05, -0.15],
+                                  "orientation":[-0.2,-1.5],
                                   "torque_limits":[-1.0e-2, -1.0],
-                                  "action_rate":[-1.0e-3, -0.01],
-                                  "action_smoothness":[-1.0e-3,-0.01],
-                                  "dof_close_to_default":[-0.05, -0.20],
+                                  "pos_action_rate":[-0.001, -0.01],
+                                  "pos_action_smoothness":[-0.001,-0.01],
+                                  "tau_action_rate":[-0.002, -0.02],
+                                  "tau_action_smoothness":[-0.002,-0.02],
+                                  "hip_pos":[-0.2, -0.5],
                                  }
 
             curr_steps = 500
-            warmup_steps = 4500
+            warmup_steps = 6000
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
@@ -531,7 +538,7 @@ class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
 
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go1_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May09_19-14-36_pact_posboot_100hz_grf/model_3000_converted.pt"
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/May11_16-36-57_pact_posboot_100hz_grf/model_3000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go1_pact_pos_rough/Sep10_05-20-19_pact_posboot_100hz_grf/model_5000_converted.pt"
 
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         aligned_grf_transition = True
@@ -563,7 +570,7 @@ class GO1ABL3CfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic_PACT'
         algorithm_class_name = 'PPO_ABL3'
         num_steps_per_env = 32 # per iteration
-        max_iterations = 6000 # number of policy updates
+        max_iterations = 8000 # number of policy updates
 
 
         grf_dim = 12
