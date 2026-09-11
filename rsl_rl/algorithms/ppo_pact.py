@@ -154,10 +154,10 @@ class PPO_PACT:
             if self.grf_decoder is not None else None
         )
         if self.grf_decoder is not None:
-            # As in B1Z1 PACT, modules used by both the PPO/PINN graph and the
-            # auxiliary reconstruction graph are intentionally owned by both
-            # optimizers.  The new GRF decoder is the only external decoder
-            # participating in this PACT PINN graph.
+            # Retain this group for optimizer checkpoint compatibility. The PINN
+            # forward freezes decoder parameters, so PCGrad leaves their grads
+            # at None and Adam skips them (including momentum/weight decay).
+            # Reconstruction updates still train them with their own optimizer.
             self.act_optimizer.optimizer.add_param_group({
                 "params": list(self.grf_decoder.parameters()),
                 "weight_decay": 0.0,
@@ -806,13 +806,24 @@ class PPO_PACT:
     ):
         """Select decoded or simulator contact generalized force for PINN."""
         _, _, latent, explicit = self.actor_critic.context_encoder(obs_hist_batch)
-        predicted_grf_scaled = self.grf_decoder(
-            self._grf_decoder_input(
-                torch.cat((latent, explicit if getattr(self, "aligned_grf_transition", False) else explicit.detach()), dim=-1), nominal_torque,
-                self.dof_tau_observation_scale,
-                detach_torque=not getattr(self, "aligned_grf_transition", False),
+        # Freeze weights only for this graph; autograd still differentiates the
+        # decoder with respect to its context and torque inputs. Restore flags
+        # before auxiliary reconstruction training, even if the forward fails.
+        parameters = list(self.grf_decoder.parameters())
+        requires_grad = [parameter.requires_grad for parameter in parameters]
+        try:
+            for parameter in parameters:
+                parameter.requires_grad_(False)
+            predicted_grf_scaled = self.grf_decoder(
+                self._grf_decoder_input(
+                    torch.cat((latent, explicit if getattr(self, "aligned_grf_transition", False) else explicit.detach()), dim=-1), nominal_torque,
+                    self.dof_tau_observation_scale,
+                    detach_torque=not getattr(self, "aligned_grf_transition", False),
+                )
             )
-        )
+        finally:
+            for parameter, trainable in zip(parameters, requires_grad):
+                parameter.requires_grad_(trainable)
         active = terminated_batch.to(predicted_grf_scaled.dtype)
         grf_mse = ((predicted_grf_scaled - grf_target.detach()).square() * active).sum() / (
             active.sum().clamp_min(1.0) * predicted_grf_scaled.shape[-1]

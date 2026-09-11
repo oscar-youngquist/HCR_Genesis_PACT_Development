@@ -153,7 +153,7 @@ def test_pinn_joint_path_and_delayed_mask():
     loss.backward()
     assert torch.isfinite(loss) and actions.grad[0].norm()>0
     assert actions.grad[1:3].count_nonzero()==0  # queued delay and reset
-    assert alg.grf_decoder.dec_out.weight.grad.norm()>0
+    assert all(p.grad is None for p in alg.grf_decoder.parameters())
     assert alg.actor_critic.context_encoder.ce_in.weight.grad.norm()>0
 
 

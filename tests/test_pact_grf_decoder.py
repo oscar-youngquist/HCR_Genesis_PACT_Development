@@ -109,8 +109,8 @@ def test_pinn_grf_gate_uses_decoder_below_threshold_and_simulator_above():
     assert mse.item() == pytest.approx(0.0)
     torch.testing.assert_close(selected, expected)
     selected.square().mean().backward()
-    assert algorithm.grf_decoder.weight.grad is not None
-    assert algorithm.grf_decoder.weight.grad.abs().sum() > 0
+    assert algorithm.grf_decoder.weight.grad is None
+    assert algorithm.grf_decoder.weight.requires_grad
     assert algorithm.actor_critic.context_encoder.scale.grad is not None
 
     algorithm.pinn_grf_reconstruction_mse_threshold = 0.0
@@ -273,3 +273,45 @@ def test_legacy_pact_path_keeps_full_decoder_target_and_skips_map_storage():
         1, 1, [57], [288], [288], [1140], [24], [15], [12], [18], "cpu"
     )
     assert storage.wb_contact_jacobians is None
+
+
+def test_frozen_pinn_decoder_skips_adam_momentum_but_still_trains_on_reconstruction():
+    from rsl_rl.algorithms.pc_grad import PCGrad
+
+    torch.manual_seed(7)
+    algorithm = PPO_PACT.__new__(PPO_PACT)
+    algorithm.actor_critic = _Actor()
+    algorithm.actor_critic.context_encoder.scale = nn.Parameter(torch.ones(1))
+    algorithm.grf_decoder = nn.Linear(15, 12)
+    algorithm.aligned_grf_transition = True
+    algorithm.grf_observation_scale = 0.01
+    algorithm.dof_tau_observation_scale = 0.01
+    algorithm.pinn_grf_reconstruction_mse_threshold = float("inf")
+    torque = nn.Parameter(torch.ones(4, 12))
+    parameters = list(algorithm.grf_decoder.parameters())
+    optimizer = PCGrad(torch.optim.AdamW(
+        parameters + list(algorithm.actor_critic.parameters()) + [torque], lr=0.01
+    ), reduction="sum")
+    # Simulate momentum restored from a checkpoint that trained decoder weights.
+    optimizer.pc_backward([sum(p.square().sum() for p in parameters)])
+    optimizer.step()
+    optimizer.zero_grad()
+    before = [p.detach().clone() for p in parameters]
+    selected, _, used = algorithm._select_pinn_contact_forces(
+        torch.ones(4, 3), torch.zeros(4, 12), torch.ones(4, 1), torque,
+        torch.ones(4, 18, 12), torch.zeros(4, 18),
+    )
+    assert used
+    optimizer.pc_backward_pinn([torque.square().mean(), selected.square().mean()])
+    assert torque.grad.abs().sum() > 0
+    assert algorithm.actor_critic.context_encoder.scale.grad.abs() > 0
+    assert all(p.grad is None and p.requires_grad for p in parameters)
+    optimizer.step()
+    for parameter, original in zip(parameters, before):
+        assert torch.equal(parameter, original)
+
+    auxiliary_optimizer = torch.optim.Adam(parameters, lr=0.01)
+    auxiliary_optimizer.zero_grad()
+    algorithm.grf_decoder(torch.ones(4, 15)).square().mean().backward()
+    auxiliary_optimizer.step()
+    assert any(not torch.equal(p, original) for p, original in zip(parameters, before))
