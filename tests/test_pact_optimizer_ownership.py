@@ -109,7 +109,10 @@ def test_pre_shared_decoder_optimizer_checkpoint_migrates():
     ]
 
 
-@pytest.mark.parametrize("pinn_direction,expected", [([-2., 3.], [1., 3.]), ([2., 3.], [3., 3.])])
+@pytest.mark.parametrize("pinn_direction,expected", [
+    ([-2., 3.], [1., 3.]), ([2., 3.], [1., 3.]),
+    ([0., 3.], [1., 3.]), ([2., 0.], [1., 0.]),
+])
 def test_aux_projection_protects_primary_and_isolates_parameter_group(pinn_direction, expected):
     shared = torch.nn.Parameter(torch.ones(2))
     decoder = torch.nn.Parameter(torch.ones(2))
@@ -123,7 +126,9 @@ def test_aux_projection_protects_primary_and_isolates_parameter_group(pinn_direc
     torch.testing.assert_close(shared.grad, torch.tensor(expected))
     torch.testing.assert_close(decoder.grad, torch.full((2,), 4.))
     assert outside.grad is None and unused.grad is None
-    assert info["projected"] == float(pinn_direction[0] < 0)
+    assert info["projected"] == 1.0
+    # The added PINN contribution is orthogonal to the primary gradient.
+    torch.testing.assert_close((shared.grad - torch.tensor([1., 0.]))[0], torch.tensor(0.))
     before = [p.detach().clone() for p in (shared, decoder)]
     optimizer.step()
     assert not torch.equal(shared, before[0])

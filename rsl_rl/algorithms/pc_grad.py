@@ -46,8 +46,9 @@ class PCGrad():
     def pc_backward_primary(self, primary_loss, pinn_loss=None, eps=1e-12):
         """Set gradients only on this group, prioritizing its primary objective.
 
-        Project PINN only when it conflicts with the primary gradient. Compare
-        shared parameters only: primary-only parameters (e.g. frozen PINN
+        Always remove PINN's component parallel to the primary gradient,
+        regardless of their dot-product sign. Compare shared parameters only:
+        primary-only parameters (e.g. frozen PINN
         decoders or the critic) must not acquire a PINN update by projection.
         autograd.grad preserves differentiation through modules outside this
         group without accumulating gradients on their parameters.
@@ -71,11 +72,11 @@ class PCGrad():
             dot = sum((a * b).sum() for a, b in shared)
             primary_sq = sum(a.square().sum() for a, _ in shared)
             pinn_sq = sum(b.square().sum() for _, b in shared)
-            coefficient = dot.clamp(max=0) / primary_sq.clamp_min(eps)
+            coefficient = dot / primary_sq.clamp_min(eps)
             diagnostics = {
                 "dot_before": dot.item(),
                 "cosine_before": (dot / (primary_sq * pinn_sq).sqrt().clamp_min(eps)).item(),
-                "projected": float(dot < 0),
+                "projected": float(primary_sq > 0),
                 "shared_primary_norm": primary_sq.sqrt().item(),
                 "shared_pinn_norm": pinn_sq.sqrt().item(),
             }
