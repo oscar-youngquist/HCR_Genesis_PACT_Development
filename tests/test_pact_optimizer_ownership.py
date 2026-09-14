@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from rsl_rl.algorithms.pc_grad import PCGrad
@@ -18,7 +19,7 @@ def _make_actor(actor_type):
     )
 
 
-def test_pact_optimizer_ownership_matches_shared_b1z1_plan():
+def test_pact_actor_and_auxiliary_parameter_groups_are_disjoint():
     actor = _make_actor(ActorCritic_PACT)
     privileged_decoder = ContextDecoder(32, [16, 16, 16], 276)
     grf_decoder = ContextDecoder(32, [16, 16, 16], 12)
@@ -34,12 +35,16 @@ def test_pact_optimizer_ownership_matches_shared_b1z1_plan():
     grf_ids = {id(parameter) for parameter in grf_decoder.parameters()}
     privileged_ids = {id(parameter) for parameter in privileged_decoder.parameters()}
 
-    assert context_ids <= ppo_ids & auxiliary_encoder_ids
-    assert grf_ids <= ppo_ids & grf_auxiliary_ids
-    assert ppo_ids.isdisjoint(privileged_ids)
+    aux_ids = {id(p) for p in algorithm.aux_parameters}
+    assert context_ids <= auxiliary_encoder_ids
+    assert grf_ids <= grf_auxiliary_ids
+    assert aux_ids == context_ids | grf_ids | privileged_ids
+    assert ppo_ids.isdisjoint(aux_ids)
+    assert len(aux_ids) == len(algorithm.aux_parameters)
+    assert ppo_ids | context_ids == {id(p) for p in actor.parameters()}
 
 
-def test_pact_pos_overlaps_context_but_not_auxiliary_only_decoders():
+def test_pact_pos_actor_and_auxiliary_parameter_groups_are_disjoint():
     actor = _make_actor(ActorCritic_PACT_Pos)
     privileged_decoder = ContextDecoder(32, [16, 16, 16], 276)
     grf_decoder = ContextDecoder(32, [16, 16, 16], 12)
@@ -51,9 +56,26 @@ def test_pact_pos_overlaps_context_but_not_auxiliary_only_decoders():
     ppo_ids = _parameter_ids(algorithm.act_optimizer.optimizer)
     auxiliary_encoder_ids = _parameter_ids(algorithm.enc_optimizer)
     context_ids = {id(parameter) for parameter in actor.context_encoder.parameters()}
-    assert context_ids <= ppo_ids & auxiliary_encoder_ids
+    assert context_ids == auxiliary_encoder_ids
+    assert ppo_ids.isdisjoint(context_ids)
+    assert ppo_ids | context_ids == {id(p) for p in actor.parameters()}
     assert ppo_ids.isdisjoint({id(parameter) for parameter in grf_decoder.parameters()})
     assert ppo_ids.isdisjoint({id(parameter) for parameter in privileged_decoder.parameters()})
+
+    # A loss may depend on encoder outputs without granting PPO ownership.
+    encoder_parameters = list(actor.context_encoder.parameters())
+    before = [p.detach().clone() for p in encoder_parameters]
+    primary = sum(p.square().sum() for p in actor.parameters())
+    cloning = sum(p.sum() for p in actor.parameters())
+    algorithm.act_optimizer.pc_backward_ppgrad([primary, cloning])
+    assert all(p.grad is None for p in encoder_parameters)
+    algorithm.act_optimizer.step()
+    for p, original in zip(encoder_parameters, before):
+        assert torch.equal(p, original)
+    algorithm.enc_optimizer.zero_grad()
+    sum(p.square().sum() for p in encoder_parameters).backward()
+    algorithm.enc_optimizer.step()
+    assert any(not torch.equal(p, original) for p, original in zip(encoder_parameters, before))
 
 
 def test_pcgrad_leaves_parameters_unused_by_all_objectives_at_none():
@@ -85,3 +107,53 @@ def test_pre_shared_decoder_optimizer_checkpoint_migrates():
     assert [group["name"] for group in current_optimizer.param_groups] == [
         "actor", "ppo_grf_decoder"
     ]
+
+
+@pytest.mark.parametrize("pinn_direction,expected", [([-2., 3.], [1., 3.]), ([2., 3.], [3., 3.])])
+def test_aux_projection_protects_primary_and_isolates_parameter_group(pinn_direction, expected):
+    shared = torch.nn.Parameter(torch.ones(2))
+    decoder = torch.nn.Parameter(torch.ones(2))
+    outside = torch.nn.Parameter(torch.ones(2))
+    unused = torch.nn.Parameter(torch.ones(2))
+    primary = shared[0] + 4 * decoder.sum() + outside.sum()
+    pinn = (shared * torch.tensor(pinn_direction)).sum() + 5 * outside.sum()
+    optimizer = PCGrad([torch.optim.SGD([shared, unused], lr=0.1),
+                        torch.optim.Adam([decoder], lr=0.1)])
+    info = optimizer.pc_backward_primary(primary, pinn)
+    torch.testing.assert_close(shared.grad, torch.tensor(expected))
+    torch.testing.assert_close(decoder.grad, torch.full((2,), 4.))
+    assert outside.grad is None and unused.grad is None
+    assert info["projected"] == float(pinn_direction[0] < 0)
+    before = [p.detach().clone() for p in (shared, decoder)]
+    optimizer.step()
+    assert not torch.equal(shared, before[0])
+    assert not torch.equal(decoder, before[1])
+    optimizer.zero_grad()
+    assert shared.grad is None and decoder.grad is None
+
+
+def test_aux_projection_handles_zero_primary_and_inactive_pinn():
+    parameter = torch.nn.Parameter(torch.ones(2))
+    optimizer = PCGrad(torch.optim.SGD([parameter], lr=0.1))
+    optimizer.pc_backward_primary(parameter.sum() * 0, parameter.sum())
+    torch.testing.assert_close(parameter.grad, torch.ones(2))
+    optimizer.pc_backward_primary(3 * parameter.sum())
+    torch.testing.assert_close(parameter.grad, torch.full((2,), 3.))
+
+
+@pytest.mark.parametrize("method", ["pc_backward", "pc_backward_pinn", "pc_backward_ppgrad"])
+def test_restricted_actor_backward_preserves_original_projection(method):
+    import random
+    results = []
+    for restricted in (False, True):
+        parameter = torch.nn.Parameter(torch.tensor([1., 2.]))
+        encoder = torch.nn.Parameter(torch.tensor([2., 3.]))
+        optimizer = PCGrad(torch.optim.Adam([parameter]), reduction="sum", restrict_backward=restricted)
+        primary = (parameter * encoder).sum()
+        pinn = (parameter * torch.tensor([-3., 1.]) * encoder).sum()
+        random.seed(0)
+        getattr(optimizer, method)([primary, pinn])
+        results.append(parameter.grad.clone())
+        if restricted:
+            assert encoder.grad is None
+    torch.testing.assert_close(*results)

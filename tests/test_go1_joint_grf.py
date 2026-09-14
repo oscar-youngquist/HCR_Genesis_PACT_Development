@@ -86,6 +86,20 @@ def test_real_queue_and_pd_substep_capture(task, sim_name):
     replay_actions = torch.cat((queued, torch.zeros_like(queued)), -1) if width == 12 else queued
     torch.testing.assert_close(commanded_torque(replay_actions, sim._grf_transition), applied[-1])
     torch.testing.assert_close(sim._grf_transition[:,72:84], applied[-1])
+    if task == 'pact':
+        expected = torch.cat((robot_vel[:, :3], robot_vel[:, 3:6], robot_vel), -1) / .03
+        torch.testing.assert_close(sim._policy_step_acceleration, expected)
+        assert not torch.allclose(sim._policy_step_acceleration[:, 6:], sim._grf_transition[:, 72:84])
+        sim._contact_forces_buff = torch.zeros(2, 18)
+        sim._wb_mass_mat_buff = torch.eye(18).repeat(2, 1, 1)
+        sim._wb_bias_vec_buff = torch.zeros(2, 18)
+        sim._contact_jacobian_buff = torch.zeros(2, 18, 12)
+        dynamics = method('legged_gym/simulator/genesis_simulator_pact.py', '_get_pinn_wb_dynamics')(sim)
+        torch.testing.assert_close(dynamics[3], expected)
+        # The full-step acceleration is its own snapshot, unaffected by reset.
+        saved_acceleration = sim._policy_step_acceleration.clone()
+        sim._dof_vel.zero_()
+        torch.testing.assert_close(sim._policy_step_acceleration, saved_acceleration)
     assert sim._grf_transition[:,84].tolist()==[1,0]
     # A reset cannot mutate the copied rollout torque/state.
     saved=sim._grf_transition.clone()
@@ -128,7 +142,7 @@ def test_supervised_gradient_routing(kind):
         assert not ppo_ids.intersection(id(p) for p in alg.grf_decoder.parameters())
 
 
-def test_pinn_joint_path_and_delayed_mask():
+def test_legacy_pinn_joint_path_and_whole_batch_reduction():
     alg=algorithm(PPO_PACT)
     alg.pinn_grf_reconstruction_mse_threshold=float('inf')
     alg.grf_transition_batch=metadata()
@@ -148,18 +162,21 @@ def test_pinn_joint_path_and_delayed_mask():
     with torch.no_grad(): alg.grf_decoder.dec_out.bias.fill_(1)
     valid=torch.tensor([[1.],[1.],[0.],[1.]])
     loss=alg._compute_PINN_loss(actions,torch.zeros(4,57),history,None,None,None,None,
-        torch.randn(4,6),torch.eye(18).repeat(4,1,1),torch.randn(4,18),torch.ones(4,18),
-        jac,torch.zeros(4,12),valid,None,None,None,.02,1.)
+        torch.randn(4,18),torch.eye(18).repeat(4,1,1),torch.randn(4,18),torch.ones(4,18),
+        jac,torch.zeros(4,12),valid,lambda a:(a[:,:12],a[:,12:]),
+        lambda q,p,v:q-p-v,torch.zeros(12),.02,1.)
     loss.backward()
     assert torch.isfinite(loss) and actions.grad[0].norm()>0
-    assert actions.grad[1:3].count_nonzero()==0  # queued delay and reset
+    # Legacy PINN has no causal-delay/reset mask in its whole-minibatch mean.
+    assert actions.grad[1:3].norm()>0
     assert all(p.grad is None for p in alg.grf_decoder.parameters())
     assert alg.actor_critic.context_encoder.ce_in.weight.grad.norm()>0
 
 
 @pytest.mark.parametrize('kind', [PPO_PACT,PPO_ABL3,PPO_PACT_Pos])
 @pytest.mark.parametrize('mode', ['mse','huber'])
-def test_short_rollout_backward_update(kind,mode,monkeypatch):
+@pytest.mark.parametrize('pinn_weight', [0.01, 0.0, -1.0])
+def test_short_rollout_backward_update(kind,mode,monkeypatch,pinn_weight):
     torch.manual_seed(4)
     alg=algorithm(kind,mode)
     if kind is PPO_PACT_Pos:
@@ -176,16 +193,47 @@ def test_short_rollout_backward_update(kind,mode,monkeypatch):
         info={'grf_transition':data,'time_outs':torch.tensor([0,0,1,0])}
         args=(torch.ones(4),torch.tensor([0,0,1,0]),info,torch.randn(4,12),critic,torch.randn(4,16))
         if kind is PPO_PACT:
-            alg.process_env_step(*args,torch.ones(4,18),torch.ones(4,18,12),torch.eye(18).repeat(4,1,1),torch.randn(4,18),torch.randn(4,6))
+            alg.process_env_step(*args,torch.ones(4,18),torch.ones(4,18,12),torch.eye(18).repeat(4,1,1),torch.randn(4,18),torch.randn(4,18))
         else: alg.process_env_step(*args)
     alg.compute_returns(torch.randn(4,288))
     before=alg.grf_decoder.dec_out.weight.detach().clone()
     if kind is PPO_PACT:
-        alg.pinn_weight=.01
+        alg.pinn_weight = pinn_weight if pinn_weight >= 0 else 1.0
+        alg.pinn_weight_final = pinn_weight
+        alg.use_boot = True  # exercise the encoder -> actor -> torque path
         alg.pinn_grf_reconstruction_mse_threshold=float('inf')
-        def forbidden_recompute(*args):
-            raise AssertionError("Aligned GRF paths must use the cached PD law, not legacy action transforms")
-        result=alg.update(forbidden_recompute,forbidden_recompute,.02,0,torch.zeros(12),1.)
+        mode_calls = []
+        for name in ('pc_backward', 'pc_backward_pinn', 'pc_backward_ppgrad'):
+            original = getattr(alg.act_optimizer, name)
+            def backward(losses, original=original, name=name):
+                mode_calls.append(name)
+                return original(losses)
+            monkeypatch.setattr(alg.act_optimizer, name, backward)
+        actor_step = alg.act_optimizer.step
+        aux_step = alg.grf_decoder_optimizer.step
+        actor_after = []
+        def checked_actor_step():
+            aux_before = [p.detach().clone() for p in alg.aux_parameters]
+            assert all(p.grad is None for p in alg.aux_parameters)
+            actor_step()
+            for before, p in zip(aux_before, alg.aux_parameters):
+                assert torch.equal(before, p)
+            actor_after[:] = [p.detach().clone() for p in alg.ppo_parameters]
+        def checked_aux_step():
+            assert all(p.grad is None for p in alg.ppo_parameters)
+            aux_step()
+            for before, p in zip(actor_after, alg.ppo_parameters):
+                assert torch.equal(before, p)
+        monkeypatch.setattr(alg.act_optimizer, 'step', checked_actor_step)
+        monkeypatch.setattr(alg.grf_decoder_optimizer, 'step', checked_aux_step)
+        monkeypatch.setattr(alg, '_nominal_torque_from_action',
+                            lambda *args: pytest.fail('Supervised GRF must still use cached torque'))
+        result=alg.update(lambda a:(a[:,:12],a[:,12:]),lambda q,p,v:q-p-v,
+                          .02,0,torch.zeros(12),1.)
+        expected_mode = ('pc_backward_pinn' if pinn_weight > 0 else
+                         'pc_backward_ppgrad' if pinn_weight < 0 else 'pc_backward')
+        assert mode_calls and set(mode_calls) == {expected_mode}
+        assert alg.last_encoder_pinn_loss >= 0
     elif kind is PPO_PACT_Pos:
         result=alg.update(lambda a:(a[:,:12],a[:,12:]),lambda q,p,v:q-p-v,.02,0,torch.zeros(12),1.)
     else: result=alg.update()
@@ -266,3 +314,62 @@ def test_pact_pos_legacy_checkpoint_keeps_new_grf_head(tmp_path):
     assert not runner.alg.decoder_optimizer.state
     assert not runner.alg.grf_decoder_optimizer.state
     for key,val in before.items(): torch.testing.assert_close(runner.alg.grf_decoder.state_dict()[key],val)
+
+
+def test_encoder_pinn_action_forward_preserves_actor_even_outside_std_limits():
+    alg = algorithm(PPO_PACT)
+    alg.use_boot = True
+    with torch.no_grad():
+        alg.actor_critic.std.fill_(10.)
+    before = [p.detach().clone() for p in alg.ppo_parameters]
+    actions = alg._encoder_pinn_actions(torch.randn(4, 57), torch.randn(4, 57))
+    encoder_parameters = list(alg.actor_critic.context_encoder.parameters())
+    gradients = torch.autograd.grad(actions.square().mean(), encoder_parameters, allow_unused=True)
+    assert any(g is not None and g.abs().sum() > 0 for g in gradients)
+    for original, parameter in zip(before, alg.ppo_parameters):
+        assert torch.equal(original, parameter)
+        assert parameter.grad is None
+
+
+def test_legacy_pinn_feedback_adds_default_pose_once():
+    default = torch.full((12,), .8)
+    env = NS(cfg=NS(control=NS(action_scale=.5, torque_scale=2.)),
+             simulator=NS(default_dof_pos=default))
+    sim = NS(_default_dof_pos=default, _cahed_pgain=torch.full((12,), 20.),
+             _cahed_dgain=torch.full((12,), 2.))
+    action_fn = method('legged_gym/envs/go1/go1_pact/go1_pact.py', '_get_pinn_actions')
+    feedback_fn = method('legged_gym/simulator/genesis_simulator_pact.py', '_get_pinn_feedback')
+    actions = torch.zeros(2, 24, requires_grad=True)
+    target, ff = action_fn(env, actions)
+    torque = ff + feedback_fn(sim, target, default.expand(2, -1), torch.zeros(2, 12))
+    torch.testing.assert_close(torque, torch.zeros_like(torque))
+    torque.sum().backward()
+    torch.testing.assert_close(actions.grad[:, :12], torch.full((2, 12), 10.))
+    torch.testing.assert_close(actions.grad[:, 12:], torch.full((2, 12), 2.))
+
+
+def test_legacy_pinn_normalization_uses_full_policy_acceleration_and_batch_mean():
+    alg = PPO_PACT.__new__(PPO_PACT)
+    alg.grf_decoder = None
+    # Even aligned supervision must not select the old cached-torque PINN path.
+    alg.aligned_grf_transition = True
+    actions = torch.zeros(2, 24, requires_grad=True)
+    with torch.no_grad(): actions[:, 12:] = 1.
+    acceleration = torch.cat((torch.zeros(2, 6), torch.tensor([[2.]*12, [4.]*12])), -1)
+    acceleration.requires_grad_()
+    contact = torch.ones(2, 18, requires_grad=True)
+    mass = torch.eye(18).repeat(2, 1, 1).requires_grad_()
+    bias = torch.zeros(2, 18, requires_grad=True)
+    loss = alg._compute_PINN_loss(
+        actions, torch.zeros(2, 57), None, None, None, None, None,
+        acceleration, mass, bias, contact, None, None,
+        torch.tensor([[1.], [0.]]), lambda a:(a[:,:12],a[:,12:]),
+        lambda q,p,v:q-p-v, torch.zeros(12), .02, .05,
+    )
+    wb_torque = torch.cat((torch.zeros(2, 6), torch.ones(2, 12)), -1)
+    expected = ((acceleration.detach() - contact.detach() - wb_torque).norm(dim=-1)
+                / (1e-8 + wb_torque.norm(dim=-1) + contact.detach().norm(dim=-1))).mean()
+    torch.testing.assert_close(loss, expected)
+    loss.backward()
+    assert actions.grad[1].abs().sum() > 0
+    assert all(x.grad is None for x in (acceleration, mass, bias, contact))

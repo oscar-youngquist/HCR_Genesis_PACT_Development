@@ -79,18 +79,20 @@ def test_auxiliary_loss_trains_separate_privileged_and_grf_decoders(algorithm_ty
     assert algorithm.actor_critic.context_encoder.scale.grad.abs() > 0
 
 
-def test_pinn_grf_gate_uses_decoder_below_threshold_and_simulator_above():
+@pytest.mark.parametrize("aligned", [False, True])
+def test_pinn_grf_gate_uses_decoder_below_threshold_and_simulator_above(aligned):
     algorithm = PPO_PACT.__new__(PPO_PACT)
     algorithm.actor_critic = _Actor()
     algorithm.grf_decoder = nn.Linear(15, 12, bias=False)
     algorithm.grf_observation_scale = 0.01
     algorithm.dof_tau_observation_scale = 0.01
     algorithm.pinn_grf_reconstruction_mse_threshold = 1e-8
+    algorithm.aligned_grf_transition = aligned
     algorithm.last_pinn_grf_reconstruction_mse = float("nan")
     algorithm.last_pinn_grf_replacement_fraction = 0.0
 
     history = torch.randn(4, 3)
-    nominal_torque = torch.randn(4, 12)
+    nominal_torque = torch.randn(4, 12, requires_grad=True)
     with torch.no_grad():
         _, _, latent, explicit = algorithm.actor_critic.context_encoder(history)
         decoder_input = algorithm._grf_decoder_input(
@@ -111,6 +113,7 @@ def test_pinn_grf_gate_uses_decoder_below_threshold_and_simulator_above():
     selected.square().mean().backward()
     assert algorithm.grf_decoder.weight.grad is None
     assert algorithm.grf_decoder.weight.requires_grad
+    assert nominal_torque.grad is not None and nominal_torque.grad.abs().sum() > 0
     assert algorithm.actor_critic.context_encoder.scale.grad is not None
 
     algorithm.pinn_grf_reconstruction_mse_threshold = 0.0
@@ -201,7 +204,7 @@ def test_pact_runner_unpacks_appended_contact_jacobian_after_legacy_dynamics():
     forces = torch.randn(2, 18)
     mass = torch.randn(2, 18, 18)
     bias = torch.randn(2, 18)
-    torso_acc = torch.randn(2, 6)
+    torso_acc = torch.randn(2, 18)
     jacobian = torch.randn(2, 18, 12)
 
     actual = _unpack_pinn_wb_dynamics(
@@ -247,7 +250,7 @@ def test_pact_storage_preserves_contact_map_for_pinn_reconstruction():
     transition.wb_contact_jacobian = torch.randn(1, 18, 12).expand(2, -1, -1).clone()
     transition.wb_mass_mat = torch.eye(18).expand(2, -1, -1)
     transition.wb_bias_vec = torch.zeros(2, 18)
-    transition.torso_acc = torch.zeros(2, 6)
+    transition.torso_acc = torch.zeros(2, 18)
 
     storage.add_transitions(transition)
     batch = next(storage.mini_batch_generator(1, 1))

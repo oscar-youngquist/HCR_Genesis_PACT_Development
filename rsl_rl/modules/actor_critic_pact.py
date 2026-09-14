@@ -361,7 +361,8 @@ class ActorCritic_PACT(nn.Module):
                              learning_rate: float = 1e-4,
                              weight_decay: float = 1e-6,
                              strong_decay: float = 1e-1,
-                             betas: Tuple[float, float] = (0.9, 0.999)) -> torch.optim.Optimizer:
+                             betas: Tuple[float, float] = (0.9, 0.999),
+                             share_encoder_with_actor: bool = True):
         """Configure the AdamW optimizer with parameter groups.
 
         Standard weights in Linear/Attention layers - weight_decay
@@ -373,9 +374,9 @@ class ActorCritic_PACT(nn.Module):
         """
         opt_groups_act, opt_groups_enc = self.get_optim_groups(weight_decay=weight_decay, strong_decay=strong_decay)
 
-        # PPO and the auxiliary VAE update both optimize the context encoder.
-        # These are separate optimizer param-group dictionaries that point at
-        # the same underlying nn.Parameter objects.
+        # PACT disables sharing: PPO/PINN owns actor and critic parameters,
+        # while reconstruction/encoder-PINN exclusively owns the encoder.
+        # Keep the shared option for other algorithms using this module.
         ppo_enc_groups = [
             {
                 "params": list(group["params"]),
@@ -393,7 +394,8 @@ class ActorCritic_PACT(nn.Module):
             for group in opt_groups_enc
         ]
 
-        act_opt = torch.optim.AdamW([*opt_groups_act, *ppo_enc_groups], lr=learning_rate, betas=betas)
+        actor_groups = [*opt_groups_act, *ppo_enc_groups] if share_encoder_with_actor else opt_groups_act
+        act_opt = torch.optim.AdamW(actor_groups, lr=learning_rate, betas=betas)
         enc_opt = torch.optim.AdamW(auxiliary_enc_groups, lr=2.0e-4, betas=betas)
         return act_opt, enc_opt
 

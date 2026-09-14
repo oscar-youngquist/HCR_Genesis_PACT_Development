@@ -120,7 +120,8 @@ class RolloutStoragePACT:
         )
         self.wb_mass_mats        = torch.zeros(num_transitions_per_env, num_envs, *wb_shape, *wb_shape, device=self.device)
         self.wb_bias_vecs        = torch.zeros(num_transitions_per_env, num_envs, *wb_shape, device=self.device)
-        self.torso_accelerations = torch.zeros(num_transitions_per_env, num_envs, 6, device=self.device)
+        # Legacy field name; contains base (6) and joint (12) policy-step acceleration.
+        self.torso_accelerations = torch.zeros(num_transitions_per_env, num_envs, *wb_shape, device=self.device)
 
         # rnn
         self.saved_hidden_states_a = None

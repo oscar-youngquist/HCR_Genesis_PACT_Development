@@ -8,27 +8,85 @@ import random
 
 
 class PCGrad():
-    def __init__(self, optimizer, reduction='mean'):
-        self._optim, self._reduction = optimizer, reduction
+    """Project gradients for one optimizer or a disjoint collection of optimizers."""
+
+    def __init__(self, optimizer, reduction='mean', restrict_backward=False):
+        self._optimizers = list(optimizer) if isinstance(optimizer, (list, tuple)) else [optimizer]
+        self._optim, self._reduction = self._optimizers[0], reduction
+        self._restrict_backward = restrict_backward
         return
 
     @property
     def optimizer(self):
+        if len(self._optimizers) != 1:
+            raise ValueError("This PCGrad instance manages multiple optimizers; use param_groups or step().")
         return self._optim
+
+    @property
+    def param_groups(self):
+        """All groups participating in this projection, with distinct Adam states."""
+        return [group for optimizer in self._optimizers for group in optimizer.param_groups]
 
     def zero_grad(self):
         '''
         clear the gradient of the parameters
         '''
 
-        return self._optim.zero_grad(set_to_none=True)
+        for optimizer in self._optimizers:
+            optimizer.zero_grad(set_to_none=True)
 
     def step(self):
         '''
         update the parameters with the gradient
         '''
 
-        return self._optim.step()
+        for optimizer in self._optimizers:
+            optimizer.step()
+
+    def pc_backward_primary(self, primary_loss, pinn_loss=None, eps=1e-12):
+        """Set gradients only on this group, prioritizing its primary objective.
+
+        Project PINN only when it conflicts with the primary gradient. Compare
+        shared parameters only: primary-only parameters (e.g. frozen PINN
+        decoders or the critic) must not acquire a PINN update by projection.
+        autograd.grad preserves differentiation through modules outside this
+        group without accumulating gradients on their parameters.
+        """
+        parameters = [p for group in self.param_groups for p in group["params"] if p.requires_grad]
+
+        def gradients(loss, retain_graph):
+            if loss is None or not loss.requires_grad:
+                return [None] * len(parameters)
+            return torch.autograd.grad(
+                loss, parameters, allow_unused=True, retain_graph=retain_graph
+            )
+
+        primary = gradients(primary_loss, retain_graph=pinn_loss is not None)
+        pinn = gradients(pinn_loss, retain_graph=False)
+        shared = [(a, b) for a, b in zip(primary, pinn) if a is not None and b is not None]
+        coefficient = 0.0
+        diagnostics = {"dot_before": 0.0, "cosine_before": 0.0, "projected": 0.0,
+                       "shared_primary_norm": 0.0, "shared_pinn_norm": 0.0}
+        if shared:
+            dot = sum((a * b).sum() for a, b in shared)
+            primary_sq = sum(a.square().sum() for a, _ in shared)
+            pinn_sq = sum(b.square().sum() for _, b in shared)
+            coefficient = dot.clamp(max=0) / primary_sq.clamp_min(eps)
+            diagnostics = {
+                "dot_before": dot.item(),
+                "cosine_before": (dot / (primary_sq * pinn_sq).sqrt().clamp_min(eps)).item(),
+                "projected": float(dot < 0),
+                "shared_primary_norm": primary_sq.sqrt().item(),
+                "shared_pinn_norm": pinn_sq.sqrt().item(),
+            }
+        for parameter, a, b in zip(parameters, primary, pinn):
+            if b is None:
+                parameter.grad = None if a is None else a.detach().clone()
+            elif a is None:
+                parameter.grad = b.detach().clone()
+            else:
+                parameter.grad = (a + b - coefficient * a).detach()
+        return diagnostics
 
     def pc_backward(self, objectives):
         '''
@@ -230,7 +288,7 @@ class PCGrad():
         '''
 
         idx = 0
-        for group in self._optim.param_groups:
+        for group in self.param_groups:
             for p in group['params']:
                 # Leave parameters unused by every objective at ``None`` so
                 # optimizer momentum and weight decay cannot move them.
@@ -250,8 +308,17 @@ class PCGrad():
 
         grads, shapes, has_grads, param_masks = [], [], [], []
         for obj in objectives:
-            self._optim.zero_grad(set_to_none=True)
-            obj.backward(retain_graph=True)
+            self.zero_grad()
+            if self._restrict_backward:
+                parameters = [p for group in self.param_groups for p in group["params"]
+                              if p.requires_grad]
+                gradients = torch.autograd.grad(
+                    obj, parameters, retain_graph=True, allow_unused=True
+                )
+                for parameter, gradient in zip(parameters, gradients):
+                    parameter.grad = None if gradient is None else gradient.detach().clone()
+            else:
+                obj.backward(retain_graph=True)
             grad, shape, has_grad, param_has_grad = self._retrieve_grad()
             param_masks.append(param_has_grad)
             grads.append(self._flatten_grad(grad, shape))
@@ -284,7 +351,7 @@ class PCGrad():
         '''
 
         grad, shape, has_grad, param_has_grad = [], [], [], []
-        for group in self._optim.param_groups:
+        for group in self.param_groups:
             for p in group["params"]:
                 active = p.grad is not None
                 param_has_grad.append(active)

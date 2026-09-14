@@ -120,7 +120,7 @@ class PPO_PACT_Pos:
         self.act_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(learning_rate)
         self.transition = RolloutStoragePACTPos.Transition()
 
-        self.act_optimizer = PCGrad(self.act_optimizer, reduction='sum')
+        self.act_optimizer = PCGrad(self.act_optimizer, reduction='sum', restrict_backward=True)
 
         # # We want to reduce the LR of the critic
         for param_group in self.act_optimizer.optimizer.param_groups:
@@ -137,8 +137,8 @@ class PPO_PACT_Pos:
             optim.Adam(self.grf_decoder.parameters(), lr=learning_rate)
             if self.grf_decoder is not None else None
         )
-        # PACTPos has no PINN decoder path, so PPO overlaps only with the
-        # context encoder, as established by configure_optimizers().
+        # The module gives PPO/torque cloning exclusive actor/critic ownership;
+        # the context encoder and decoders belong only to auxiliary training.
         seen_ppo_parameters = set()
         self.ppo_parameters = []
         for group in self.act_optimizer.optimizer.param_groups:

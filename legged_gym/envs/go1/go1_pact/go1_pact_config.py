@@ -542,6 +542,9 @@ class GO1PACTCfgPPO( LeggedRobotCfgPPO ):
 
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         aligned_grf_transition = True
+        # Auxiliary PINN weight = this multiplier * warmed-up actor PINN weight.
+        # Set to zero to train the encoder/decoders only on reconstruction.
+        pinn_encoder_weight = 0.05
         grf_reconstruction_mode = "mse"
         grf_huber_delta = 1.0  # scaled force observation units
         grf_reconstruction_loss_weight = 1.0

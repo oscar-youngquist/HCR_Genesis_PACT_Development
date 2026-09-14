@@ -70,7 +70,7 @@ def _load_optimizer_with_optional_appended_group(optimizer, state_dict):
 
 
 def _unpack_pinn_wb_dynamics(pinn_values, include_contact_jacobian):
-    """Normalize simulator dynamics output to the order used by PPO_PACT."""
+    """Reorder dynamics for PPO_PACT; acceleration contains all 18 policy-step DOFs."""
     if include_contact_jacobian:
         if len(pinn_values) != 5:
             raise ValueError(
@@ -433,6 +433,9 @@ class OnPolicyRunnerPACT:
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
         self.writer.add_scalar('Loss/pinn_loss', locs['mean_pinn_loss'], locs['it'])
+        self.writer.add_scalar('Loss/encoder_pinn_last_minibatch', self.alg.last_encoder_pinn_loss, locs['it'])
+        for metric, value in self.alg.last_encoder_pinn_projection.items():
+            self.writer.add_scalar(f'PINN/encoder_{metric}_last_minibatch', value, locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
@@ -513,9 +516,7 @@ class OnPolicyRunnerPACT:
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Load optimizer(s)
         if load_optimizer:
-            _load_optimizer_with_optional_appended_group(
-                self.alg.act_optimizer.optimizer, loaded_dict['act_optimizer_state_dict']
-            )
+            self.alg.act_optimizer.optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
             self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
             # Legacy checkpoints predate the split and have a differently
             # shaped privileged-decoder output/optimizer state.

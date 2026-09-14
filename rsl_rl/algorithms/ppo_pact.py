@@ -29,7 +29,7 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 import torch
-from rsl_rl.modules.grf_transition import masked_mean, reconstruction, commanded_torque
+from rsl_rl.modules.grf_transition import masked_mean, reconstruction
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -44,14 +44,6 @@ from rsl_rl.modules import ActorCritic_PACT, ContextDecoder
 from rsl_rl.storage import RolloutStoragePACT
 
 from .pc_grad import PCGrad
-
-# Old manual PINN-to-encoder gradient projection path. PPO now owns encoder
-# parameter groups directly, so PPO/PINN gradients flow through the optimizer.
-# from .encoder_pinn_grad_utils import (
-#     compute_encoder_grads_from_loss,
-#     add_projected_pinn_grads_to_encoder,
-#     zero_module_grads,
-# )
 
 class PPO_PACT:
     actor_critic: ActorCritic_PACT
@@ -113,10 +105,12 @@ class PPO_PACT:
         self.num_enc_epochs = num_encoder_epochs
         self.vae_beta = vae_kld_weight
 
-        # Old manual PINN-to-encoder gradient projection scale. Kept as an
-        # init argument for config compatibility, but no longer used because
-        # PPO gradients now flow into the encoder through act_optimizer.
-        # self.pinn_encoder_grad_weight = pinn_encoder_weight
+        # Multiplier on the warmed-up PINN weight for the auxiliary group.
+        if pinn_encoder_weight < 0:
+            raise ValueError("pinn_encoder_weight must be nonnegative")
+        self.pinn_encoder_grad_weight = pinn_encoder_weight
+        self.last_encoder_pinn_projection = {}
+        self.last_encoder_pinn_loss = 0.0
 
         # Adaptive entropy coefficent algorithm values
         self.use_adaptive_entropy = use_adaptive_entropy
@@ -134,10 +128,12 @@ class PPO_PACT:
         self.actor_critic.to(self.device)
         self.storage = None # initialized later
 
-        self.act_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(learning_rate)
+        self.act_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(
+            learning_rate, share_encoder_with_actor=False
+        )
         self.transition = RolloutStoragePACT.Transition()
 
-        self.act_optimizer = PCGrad(self.act_optimizer, reduction='sum')
+        self.act_optimizer = PCGrad(self.act_optimizer, reduction='sum', restrict_backward=True)
 
         # # We want to reduce the LR of the critic
         for param_group in self.act_optimizer.optimizer.param_groups:
@@ -153,16 +149,13 @@ class PPO_PACT:
             optim.Adam(self.grf_decoder.parameters(), lr=learning_rate)
             if self.grf_decoder is not None else None
         )
-        if self.grf_decoder is not None:
-            # Retain this group for optimizer checkpoint compatibility. The PINN
-            # forward freezes decoder parameters, so PCGrad leaves their grads
-            # at None and Adam skips them (including momentum/weight decay).
-            # Reconstruction updates still train them with their own optimizer.
-            self.act_optimizer.optimizer.add_param_group({
-                "params": list(self.grf_decoder.parameters()),
-                "weight_decay": 0.0,
-                "name": "ppo_grf_decoder",
-            })
+        # Project one auxiliary gradient group, retaining the encoder and
+        # decoder learning rates and Adam states in their respective optimizers.
+        auxiliary_optimizers = [self.enc_optimizer, self.decoder_optimizer]
+        if self.grf_decoder_optimizer is not None:
+            auxiliary_optimizers.append(self.grf_decoder_optimizer)
+        self.aux_optimizer = PCGrad(auxiliary_optimizers, reduction='sum', restrict_backward=True)
+        self.aux_parameters = [p for group in self.aux_optimizer.param_groups for p in group["params"]]
         seen_ppo_parameters = set()
         self.ppo_parameters = []
         for group in self.act_optimizer.optimizer.param_groups:
@@ -411,7 +404,7 @@ class PPO_PACT:
             
             self.actor_critic.train()
             self.act_optimizer.zero_grad()
-            self.enc_optimizer.zero_grad()
+            self.aux_optimizer.zero_grad()
 
             self.grf_transition_batch = self.storage.grf_transition_batch
             if self.aligned_grf_transition and self.grf_transition_batch is None:
@@ -443,53 +436,17 @@ class PPO_PACT:
                                                     contact_jacobian_batch, grf_target, terminated_batch,
                                                     action_func, fb_func, default_pose, dt, qvel_scale)
                 
-            if self.pinn_weight > 0.0 and self.pinn_weight_final > 0:
-                weighted_pinn_loss = self.pinn_weight * pinn_loss
-                ppo_losses = [ppo_loss, self.pinn_weight * pinn_loss]
-            elif self.pinn_weight > 0.0 and self.pinn_weight_final < 0:
-                weighted_pinn_loss = pinn_loss
-                ppo_losses = [ppo_loss, pinn_loss]
-            else:
-                ppo_losses = [ppo_loss]
-
-
-
-            # ------------------------------------------------------------
-            # Old manual PINN gradient extraction for the encoder.
-            #
-            # PPO optimizer param groups now include context_encoder
-            # parameters, so the PINN/RL signal backpropagates into the encoder
-            # through the normal PPO optimizer step.
-            # ------------------------------------------------------------
-            # pinn_encoder_grads = None
-            # pinn_encoder_grad_info = None
-            # pinn_encoder_has_grad = False
-            #
-            # if weighted_pinn_loss is not None:
-            #     pinn_encoder_grads, pinn_encoder_grad_info = compute_encoder_grads_from_loss(
-            #         weighted_pinn_loss,
-            #         self.actor_critic.context_encoder,
-            #     )
-            #
-            #     # Handle either dataclass-style diagnostics or dict-style diagnostics.
-            #     if hasattr(pinn_encoder_grad_info, "has_any_grad"):
-            #         pinn_encoder_has_grad = pinn_encoder_grad_info.has_any_grad
-            #     elif isinstance(pinn_encoder_grad_info, dict):
-            #         pinn_encoder_has_grad = pinn_encoder_grad_info.get("has_any_grad", False)
-            #     else:
-            #         pinn_encoder_has_grad = any(g is not None for g in pinn_encoder_grads)
-            
-            # PCGrad - back-propigate the loss
-            if self.pinn_weight > 0 and self.pinn_weight_final > 0 and pinn_loss is not None:    # just being extra cautious
-                self.act_optimizer.pc_backward_pinn(ppo_losses)
+            if pinn_loss is not None:
+                weighted_pinn_loss = (
+                    self.pinn_weight * pinn_loss if self.pinn_weight_final > 0 else pinn_loss
+                )
+            # Preserve the original pinn-weight-dependent actor backward modes.
+            if self.pinn_weight > 0 and self.pinn_weight_final > 0 and pinn_loss is not None:
+                self.act_optimizer.pc_backward_pinn([ppo_loss, weighted_pinn_loss])
             elif self.pinn_weight_final < 0 and pinn_loss is not None:
-                self.act_optimizer.pc_backward_ppgrad(ppo_losses)
+                self.act_optimizer.pc_backward_ppgrad([ppo_loss, pinn_loss])
             else:
-                self.act_optimizer.pc_backward(ppo_losses)
-            
-            # Encoder grads are intentionally kept so the PPO optimizer can
-            # update encoder parameters directly.
-            # zero_module_grads(self.actor_critic.context_encoder)
+                self.act_optimizer.pc_backward([ppo_loss])
 
             nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
             self.act_optimizer.step()
@@ -505,78 +462,53 @@ class PPO_PACT:
 
             # Calculate the encoder update n-times
             for enc_epoch in range(self.num_enc_epochs):
-                ###
-                #  Update encoder with frozen decoder
-                ###
+                # Joint reconstruction objective for encoder and both decoders.
                 self.actor_critic.train()
-                self.decoder.eval()
-                if self.grf_decoder is not None:
-                    self.grf_decoder.eval()
-
-                # Calculate the DreamWaQ-style VAE update
-                vae_loss, kl_div, recon_error, grf_recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(
-                    obs_hist_batch, grf_target, obs_target,
-                    explicit_labels_batch, terminated_batch,
-                    grf_nominal_torque,
-                )
-                
-                # Update paramaters of encoder
-                self.enc_optimizer.zero_grad()
-                vae_loss.backward()
-
-                # --------------------------------------------------------
-                # Old manual PINN-gradient injection into the auxiliary encoder
-                # update. The PPO optimizer now applies that signal directly.
-                # --------------------------------------------------------
-                # if (
-                #     enc_epoch == 0
-                #     and pinn_encoder_grads is not None
-                #     and pinn_encoder_has_grad
-                # ):
-                #     add_projected_pinn_grads_to_encoder(
-                #         self.actor_critic.context_encoder,
-                #         pinn_encoder_grads,
-                #         scale=self.pinn_encoder_grad_weight,
-                #     )
-
-
-                nn.utils.clip_grad_norm_(self.actor_critic.context_encoder.parameters(), self.max_grad_norm)
-                self.enc_optimizer.step()
-
-                ###
-                #  Update decoder with frozen encoder
-                ###
-                self.actor_critic.eval()
                 self.decoder.train()
                 if self.grf_decoder is not None:
                     self.grf_decoder.train()
-                self.decoder_optimizer.zero_grad()
-                if self.grf_decoder_optimizer is not None:
-                    self.grf_decoder_optimizer.zero_grad()
-
-                dec_recon = self.decoder(dec_input)
-                dec_loss = masked_mean((dec_recon-decode_targets).square(), terminated_batch) if self.aligned_grf_transition else F.mse_loss(dec_recon, decode_targets)
-                if self.grf_decoder is not None:
-                    grf_dec_recon = self.grf_decoder(
-                        self._grf_decoder_input(
-                            dec_input, grf_nominal_torque,
-                            self.dof_tau_observation_scale,
-                        )
+                self.aux_optimizer.zero_grad()
+                # Discard gradients from the completed actor step. The restricted
+                # auxiliary backward below cannot write new actor gradients.
+                self.act_optimizer.zero_grad()
+                vae_loss, kl_div, recon_error, grf_recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(
+                    obs_hist_batch, grf_target, obs_target,
+                    explicit_labels_batch, terminated_batch, grf_nominal_torque,
+                )
+                encoder_pinn_loss = None
+                self.last_encoder_pinn_loss = 0.0
+                if self.pinn_weight > 0 and self.pinn_encoder_grad_weight > 0:
+                    # Recompute after the actor step, retaining the encoder ->
+                    # actor -> torque derivative but updating no actor weights.
+                    encoder_actions = self._encoder_pinn_actions(obs_batch, obs_hist_batch)
+                    encoder_pinn_loss = self._compute_PINN_loss(
+                        encoder_actions, obs_batch, obs_hist_batch, prev_obs_batch, prev_obs_hist_batch,
+                        pprev_obs_batch, pprev_obs_hist_batch, torso_accs_batch,
+                        mass_mat_batch, bias_vec_batch, gt_forces_batch,
+                        contact_jacobian_batch, grf_target, terminated_batch,
+                        action_func, fb_func, default_pose, dt, qvel_scale,
                     )
-                    if self.aligned_grf_transition:
-                        grf_dec_loss, grf_mse = self._grf_reconstruction(grf_dec_recon, grf_target, terminated_batch)
-                    else:
-                        grf_dec_loss = grf_mse = F.mse_loss(grf_dec_recon, grf_target)
-                    self.last_grf_mse = grf_mse.detach().item()
-                else:
-                    grf_dec_loss = dec_loss.new_zeros(())
-                (dec_loss + self.grf_reconstruction_loss_weight * grf_dec_loss).backward()
-                nn.utils.clip_grad_norm_(self.decoder.parameters(), self.max_grad_norm)
-                if self.grf_decoder is not None:
-                    nn.utils.clip_grad_norm_(self.grf_decoder.parameters(), self.max_grad_norm)
-                self.decoder_optimizer.step()
-                if self.grf_decoder_optimizer is not None:
-                    self.grf_decoder_optimizer.step()
+                    self.last_encoder_pinn_loss = encoder_pinn_loss.detach().item()
+                    encoder_pinn_loss = (
+                        self.pinn_encoder_grad_weight * self.pinn_weight * encoder_pinn_loss
+                    )
+                self.last_encoder_pinn_projection = self.aux_optimizer.pc_backward_primary(
+                    vae_loss, encoder_pinn_loss
+                )
+                nn.utils.clip_grad_norm_(self.aux_parameters, self.max_grad_norm)
+                self.aux_optimizer.step()
+                dec_loss = recon_error
+                grf_dec_loss = grf_recon_error
+                self.last_grf_mse = grf_recon_error.detach().item()
+                if self.grf_decoder is not None and self.grf_reconstruction_mode != "mse":
+                    # Keep MSE logging distinct from a configured Huber objective.
+                    with torch.no_grad():
+                        prediction = self.grf_decoder(self._grf_decoder_input(
+                            dec_input, grf_nominal_torque, self.dof_tau_observation_scale
+                        ))
+                        self.last_grf_mse = self._grf_reconstruction(
+                            prediction, grf_target, terminated_batch
+                        )[1].item()
 
                 # Log the decode targets and recons for computing boot-probability
                 with torch.no_grad():
@@ -648,6 +580,15 @@ class PPO_PACT:
 
         return mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, \
                mean_grf_decoder_loss, mean_vel_loss, mean_recon_loss, mean_kld_loss, mean_pinn_loss
+
+    def _encoder_pinn_actions(self, observations, history):
+        """Differentiable actor means without sampling or mutating policy std."""
+        _, _, latent, explicit = self.actor_critic.cenet_enc_forward(history)
+        context = torch.cat((latent, explicit), dim=-1)
+        if not self.use_boot:
+            context = torch.zeros_like(context)
+        position, torque = self.actor_critic.actor_forward(torch.cat((observations, context), dim=-1))
+        return torch.cat((position, torque), dim=-1)
 
     def _compute_rl_loss(self, obs_batch, obs_hist_batch,
                          actions_batch, critic_obs_batch,
@@ -768,7 +709,7 @@ class PPO_PACT:
     @staticmethod
     def _grf_decoder_input(context_input, nominal_torque,
                            dof_tau_observation_scale=0.01, detach_torque=True):
-        """Supervision detaches torque; the aligned PINN path explicitly retains it."""
+        """Supervision detaches torque; the PINN path explicitly retains it."""
         if nominal_torque is None:
             raise ValueError("nominal_torque is required by the separate GRF decoder")
         if nominal_torque.shape[-1] != 12:
@@ -816,9 +757,9 @@ class PPO_PACT:
                 parameter.requires_grad_(False)
             predicted_grf_scaled = self.grf_decoder(
                 self._grf_decoder_input(
-                    torch.cat((latent, explicit if getattr(self, "aligned_grf_transition", False) else explicit.detach()), dim=-1), nominal_torque,
+                    torch.cat((latent, explicit), dim=-1), nominal_torque,
                     self.dof_tau_observation_scale,
-                    detach_torque=not getattr(self, "aligned_grf_transition", False),
+                    detach_torque=False,
                 )
             )
         finally:
@@ -847,109 +788,41 @@ class PPO_PACT:
                            torso_accs_batch, mass_mat_batch, bias_vec_batch, gt_forces_batch,     # PINN stuff
                            contact_jacobian_batch, grf_target, terminated_batch,
                            action_func, fb_func, default_pose, dt, qvel_scale):                   # simulator functions/values passthrough
-        if getattr(self, "aligned_grf_transition", False):
-            data = self.grf_transition_batch.detach()
-            valid = terminated_batch * data[:, 84:85]
-            torque = commanded_torque(current_actions, data)
-            wb_tau = torch.cat((torch.zeros_like(torque[:, :6]), torque), -1)
-            acc = torch.cat((torso_accs_batch.detach(), data[:, 72:84]), -1)
-            dynamics = torch.bmm(mass_mat_batch.detach(), acc.unsqueeze(-1)).squeeze(-1) + bias_vec_batch.detach()
-            contact, _, _ = self._select_pinn_contact_forces(
-                obs_hist_batch, grf_target, valid, torque, contact_jacobian_batch, gt_forces_batch)
-            error = dynamics - contact - wb_tau
-            magnitude = contact.clamp_min(0.)
-            weight = magnitude / (magnitude.max(-1, keepdim=True).values + 1.e-8)
-            relative = (error*weight).norm(dim=-1) / (1.e-8 + wb_tau.detach().norm(dim=-1) + contact.norm(dim=-1))
-            return masked_mean(relative[:, None], valid)
+        """Legacy nominal-torque residual with completed policy-step acceleration.
 
-        # if self.use_boot:
-        #     self.actor_critic.act(prev_obs_batch, prev_obs_hist_batch)
-        # else:
-        #     self.actor_critic.act_bootmask(prev_obs_batch, prev_obs_hist_batch)
-        # prev_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
+        Reconstruction alignment controls supervised GRF inputs only. PINN
+        uses the current actor's unweighted feedforward + PD torque, with no
+        final-substep actuator replay. Both PINN updates share this calculation.
+        """
+        if torso_accs_batch.shape[-1] != 18:
+            raise ValueError("PACT PINN requires all 18 completed policy-step accelerations")
+        q_des, tau_ff = action_func(current_actions)
+        q_pos = obs_batch[:, 9:21].detach().float() + default_pose
+        q_vel = obs_batch[:, 21:33].detach().float() / qvel_scale
+        # q_des is an absolute target; fb_func must not add the default pose again.
+        torque = tau_ff.float() + fb_func(q_des, q_pos, q_vel).float()
+        wb_tau = torch.cat((torch.zeros_like(torque[:, :6]), torque), dim=-1)
 
-        # pprev_actions = None
-        # if self.use_boot:
-        #     self.actor_critic.act(pprev_obs_batch, pprev_obs_hist_batch)
-        # else:
-        #     self.actor_critic.act_bootmask(pprev_obs_batch, pprev_obs_hist_batch)
-        # pprev_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
-
-        # Process current and previous actions into the action-space
-        q_des_curr, tau_des_curr = action_func(current_actions)
-        # q_des_prev, _            = action_func(prev_actions)
-        # q_des_pprev, _           = action_func(pprev_actions)
-
-        # Extract joint pose and velocity data
-        # Obs - cmd (3), proj_grav (3), ang_vel (3)
-        q_pos_curr,  q_velo_curr  = obs_batch[:,9:21].detach().clone(),   obs_batch[:,21:33].detach().clone()
-        q_pos_curr,  q_velo_curr  = (q_pos_curr + default_pose).float(),  (q_velo_curr / qvel_scale).float()
-
-        q_velo_prev = prev_obs_batch[:,21:33].detach().clone()
-        q_velo_prev = (q_velo_prev / qvel_scale).float()
-        
-        # Calculate feedback torques
-        pd_tau_curr  = fb_func(q_des_curr,  q_pos_curr,  q_velo_curr)
-        
-        # dof_acc_target = (q_velo_curr - q_velo_prev) / dt
-
-        ###
-        #   WB-dynamics
-        ###
-        # Use 1st order backwards finite differences to approximate models command acceleration
-        # dof_acc = (q_des_curr - 2.0*q_des_prev + q_des_pprev) / np.power(dt,2)
-        dof_acc = (q_velo_curr - q_velo_prev) / dt
-        # Create the whole-body acceleration vector
-        wb_acc = torch.cat([torso_accs_batch, dof_acc], dim=1).float()
-        # Create the whole-boyd tau vector 
-        wb_tau = torch.cat([torch.zeros(torso_accs_batch.shape[0], 6).float().to(self.device), (tau_des_curr.float() + pd_tau_curr.float())], dim=1).float()
-
-        # Calculate the models wb-dynamics
-        model_wb_dynamics = torch.bmm(mass_mat_batch.float(), wb_acc.unsqueeze(-1)).squeeze(-1) + bias_vec_batch.float()
-
-        # error = model_wb_dynamics[:,6:] - gt_forces_batch[:,6:] - wb_tau[:,6:]
-
-        # # softly weight by contact
-        # # Apply soft (to make this a continuous reward signal) contact weighting to avoid over-penalizing for leg movement
-        # contact_magnitude = torch.clamp(gt_forces_batch[:,6:], min=0.0)
-        # contact_max = torch.max(contact_magnitude, dim=1, keepdim=True)[0]
-        # contact_weight = contact_magnitude / (contact_max + 1e-8)
-        # error *= contact_weight
-
-        # # Make the error relative, so that it is less senesitive to scale
-        # rel_error = torch.norm(error, dim=1) / (1e-8 + torch.norm(wb_tau[:,6:].detach().clone(), dim=1) + torch.norm(gt_forces_batch[:,6:], dim=1))
-        
-        # The GRF decoder predicts the next-step force label in observation
-        # units.  Once its detached reconstruction MSE meets the configured
-        # quality threshold, use J_f^T F_hat in place of the cached simulator
-        # J_f^T F.  The tensor-valued gate keeps the selected prediction path
-        # differentiable without changing the simulator fallback.
+        # Simulator velocities span the same completed policy step as the force
+        # target. No noisy observation differences or mixed substep dt here.
+        acceleration = torso_accs_batch.detach().float()
+        dynamics = torch.bmm(
+            mass_mat_batch.detach().float(), acceleration.unsqueeze(-1)
+        ).squeeze(-1) + bias_vec_batch.detach().float()
         if self.grf_decoder is not None:
-            pinn_contact_force, _, _ = self._select_pinn_contact_forces(
-                obs_hist_batch, grf_target, terminated_batch,
-                tau_des_curr + pd_tau_curr,
+            contact, _, _ = self._select_pinn_contact_forces(
+                obs_hist_batch, grf_target, terminated_batch, torque,
                 contact_jacobian_batch, gt_forces_batch,
             )
         else:
-            pinn_contact_force = gt_forces_batch
+            contact = gt_forces_batch.detach()
 
-        error = model_wb_dynamics - pinn_contact_force - wb_tau
-
-        # softly weight by contact
-        # Apply soft (to make this a continuous reward signal) contact weighting to avoid over-penalizing for leg movement
-        contact_magnitude = torch.clamp(pinn_contact_force, min=0.0)
-        contact_max = torch.max(contact_magnitude, dim=1, keepdim=True)[0]
-        contact_weight = contact_magnitude / (contact_max + 1e-8)
-        error *= contact_weight
-
-        # Make the error relative, so that it is less senesitive to scale
-        rel_error = torch.norm(error, dim=1) / (1e-8 + torch.norm(wb_tau.detach().clone(), dim=1) + torch.norm(pinn_contact_force, dim=1))
-        
-        # rel_acc_error = torch.norm(dof_acc - dof_acc_target, dim=1) / (1e-8 + torch.norm(dof_acc_target, dim=1) +  torch.norm(dof_acc, dim=1))
-
-        # Calculate the whole-body PINN loss
-        pinn_loss = torch.mean(rel_error)
-        
-        # acc_loss = torch.mean(rel_acc_error)
-        
-        return pinn_loss
+        error = dynamics - contact - wb_tau
+        magnitude = contact.clamp_min(0.0)
+        weight = magnitude / (magnitude.max(dim=-1, keepdim=True).values + 1e-8)
+        # Restore the legacy normalization and whole-minibatch mean. The
+        # termination mask is used by the GRF quality gate, not this reduction.
+        relative = (error * weight).norm(dim=-1) / (
+            1e-8 + wb_tau.detach().norm(dim=-1) + contact.norm(dim=-1)
+        )
+        return relative.mean()

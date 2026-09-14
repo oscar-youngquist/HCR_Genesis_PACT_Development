@@ -58,6 +58,11 @@ class GenesisSimulator_PACT(Simulator):
     
     #----- Public methods -----#
     def step(self, actions):
+        # Use actual endpoint velocities over the full policy interval. Capture
+        # before reset/push bookkeeping can overwrite velocity history buffers.
+        policy_start_velocity = torch.cat((
+            self._robot.get_vel(), self._robot.get_ang(), self._dof_vel
+        ), dim=-1).clone()
         self._last_base_lin_vel[:] = self._base_lin_vel[:]
         self._last_base_ang_vel[:] = self._base_ang_vel[:]
         self._last_feet_vel[:] = self._feet_vel[:]
@@ -88,15 +93,20 @@ class GenesisSimulator_PACT(Simulator):
             self._grf_torso_acc = torch.cat((self._robot.get_vel()-self._grf_start_world_lin,
                                              self._robot.get_ang()-self._grf_start_world_ang), -1) / (self._control_dt/self._cfg.control.decimation)
 
-    def _get_pinn_wb_dynamics(self):
-        # Keep the legacy four values in their original order and append the
-        # contact Jacobian used by the separate GRF decoder.
-        return self._contact_forces_buff, self._wb_mass_mat_buff, self._wb_bias_vec_buff, \
-               (self._grf_torso_acc if hasattr(self, "_grf_current_causal") else self._torso_6dof_acceleration), self._contact_jacobian_buff
+        self._policy_step_acceleration = (torch.cat((
+            self._robot.get_vel(), self._robot.get_ang(), self._dof_vel
+        ), dim=-1) - policy_start_velocity) / self._control_dt
 
-    def _get_pinn_feedback(self, pos_actions, dof_pos, dof_vel):
+    def _get_pinn_wb_dynamics(self):
+        # The fourth value now contains all 18 policy-step accelerations in
+        # world-base/canonical-joint order, captured before environment resets.
+        return self._contact_forces_buff, self._wb_mass_mat_buff, self._wb_bias_vec_buff, \
+               self._policy_step_acceleration, self._contact_jacobian_buff
+
+    def _get_pinn_feedback(self, target_dof_pos, dof_pos, dof_vel):
+        # The action helper already adds the default pose to this absolute target.
         feedback_torques = (
-            self._cahed_pgain * (pos_actions + self._default_dof_pos - dof_pos) - self._cahed_dgain * dof_vel
+            self._cahed_pgain * (target_dof_pos - dof_pos) - self._cahed_dgain * dof_vel
         )
         return feedback_torques
 
