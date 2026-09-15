@@ -3,6 +3,17 @@ import torch
 import torch.nn.functional as F
 
 
+def recorded_applied_torque(transition):
+    """Evaluation accessor for training's clipped final-substep torque (Nm).
+
+    This is the recorded conditioning input, not a replay of a new policy action.
+    The remaining columns encode the affine PD law, acceleration and delay flag.
+    """
+    if transition.ndim != 2 or transition.shape[1] != 86:
+        raise ValueError('Expected the 86-column final-substep GRF transition schema')
+    return transition[:, :12].detach().clone()
+
+
 def masked_mean(values, valid):
     per_sample = values.reshape(values.shape[0], -1).mean(-1)
     mask = valid.reshape(-1).to(per_sample.dtype)

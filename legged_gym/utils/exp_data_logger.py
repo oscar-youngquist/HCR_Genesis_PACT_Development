@@ -53,7 +53,7 @@ class ExpLogger:
 
         # Create DF and save it to CSV
         temp_df = pd.DataFrame.from_dict(self.state_log)
-        temp_df.to_csv(self.output_path, mode='a', header=not os.path.exists(self.output_path))
+        temp_df.to_csv(self.output_path, mode='a', header=not os.path.exists(self.output_path), index=False)
         del temp_df
         self.reset()
 

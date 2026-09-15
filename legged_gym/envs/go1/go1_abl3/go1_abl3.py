@@ -142,6 +142,9 @@ class Go1ABL3(BaseTask):
         
         self.compute_reward()
         
+        if getattr(self, "reconstruction_evaluation", None) is not None:
+            self.reconstruction_evaluation.capture(self)
+
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
         

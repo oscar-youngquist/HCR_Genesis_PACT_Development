@@ -74,6 +74,8 @@ class GenesisSimulator_PACT(Simulator):
         self.first_loop = True
 
         for substep in range(self._cfg.control.decimation):
+            if getattr(self, "reconstruction_evaluation", None) is not None:
+                self.reconstruction_evaluation.before_substep(self, substep)
             self._torques = self._compute_torques(actions)
             if hasattr(self, "_grf_current_causal") and substep == self._cfg.control.decimation - 1:
                 capture_substep(self)
@@ -82,6 +84,8 @@ class GenesisSimulator_PACT(Simulator):
                 self._torques, self._dof_indices)
             
             self._scene.step()
+            if getattr(self, "reconstruction_evaluation", None) is not None:
+                self.reconstruction_evaluation.after_substep(self)
             
             self._dof_pos[:] = self._robot.get_dofs_position(
                 self._dof_indices)
@@ -140,59 +144,61 @@ class GenesisSimulator_PACT(Simulator):
         #     extract the values used to calculate the dynamics consitentcy reward separately.
         self._grfs_buf[:] = self._robot.get_links_net_contact_force()[:, self._feet_indices, :].reshape(self._base_pos.shape[0], self._grf_dim)
 
-        # All the below is done in the pinocchio indexing scheme [FL, FR, RL, RR]
-        # Use the Pinocchio library to calculate the (1) contact forces and (2) whole-body dynamics of the robot for use
-        #     in the dynamic consistency reward and PINN loss. All done in WORLD FRAME!
-        
-        #     extract the contact forces in pinocchio order GRF
-        contact_temp = self._link_contact_forces[:, self.pino_feet_indices, :]
+        # Reconstruction evaluation uses its common offline dynamics reference.
+        if getattr(self, "reconstruction_evaluation", None) is None:
+            # All the below is done in the pinocchio indexing scheme [FL, FR, RL, RR]
+            # Use the Pinocchio library to calculate the (1) contact forces and (2) whole-body dynamics of the robot for use
+            #     in the dynamic consistency reward and PINN loss. All done in WORLD FRAME!
 
-        #     push all the CUDA stuff from GPU to CPU for use by the PinocchioAsync class
-        #     The whole-body pose
-        wb_pos_np = torch.concatenate([self._base_pos, self._base_quat, self._dof_pos[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
-        
-        #     The whole-body velocity
-        wb_vel_np = torch.concatenate([self._base_world_lin_vel, self._base_world_ang_vel, self._dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
-        
-        #     The previous whole-body velocity
-        wb_vel_prev_np = torch.concatenate([self._last_base_world_lin_vel, self._last_base_world_ang_vel, self._last_dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
+            #     extract the contact forces in pinocchio order GRF
+            contact_temp = self._link_contact_forces[:, self.pino_feet_indices, :]
 
-        #     The GRF forces
-        grf_np = contact_temp.reshape(contact_temp.shape[0], 12).unsqueeze(2).cpu().numpy()
+            #     push all the CUDA stuff from GPU to CPU for use by the PinocchioAsync class
+            #     The whole-body pose
+            wb_pos_np = torch.concatenate([self._base_pos, self._base_quat, self._dof_pos[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
 
-        #     Pass the numpy (cpu) data structures to shared memeory
-        self.async_pino_manager.shared.q[:]       = wb_pos_np        # num_envs x 19
-        self.async_pino_manager.shared.qd[:]      = wb_vel_np        # num_envs x 18
-        self.async_pino_manager.shared.qd_prev[:] = wb_vel_prev_np   # num_envs x 18
-        self.async_pino_manager.shared.grf[:]     = grf_np           # num_envs x 4 x 3
-        self.async_pino_manager.shared.dt[0]      = self._control_dt
+            #     The whole-body velocity
+            wb_vel_np = torch.concatenate([self._base_world_lin_vel, self._base_world_ang_vel, self._dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
 
-        
-        #     Pass the numpy (cpu) domain randomization parameters to shared memory
-        self.async_pino_manager.shared.base_added_mass[:] = self._added_base_mass.cpu().numpy()  # num_envs x 1
-        self.async_pino_manager.shared.base_com_shift[:] = self._base_com_bias.cpu().numpy()    # num_envs x 3
+            #     The previous whole-body velocity
+            wb_vel_prev_np = torch.concatenate([self._last_base_world_lin_vel, self._last_base_world_ang_vel, self._last_dof_vel[:,self.model_2_pino_joint_map]], dim=1).cpu().numpy()
 
-        self.async_pino_manager.compute_async()
-        self.async_pino_manager.wait()            # blocking, wait until all workers are done
+            #     The GRF forces
+            grf_np = contact_temp.reshape(contact_temp.shape[0], 12).unsqueeze(2).cpu().numpy()
 
-        # now stack the tensor lists to get the necessary state values
-        self._wb_dynamics_buff[:]        = torch.from_numpy(
-            self.async_pino_manager.shared.wb_dynamics).to(self._device) # num_envs x 18
-        self._contact_forces_buff[:]     = torch.from_numpy(
-            self.async_pino_manager.shared.wb_contacts).to(self._device) # num_envs x 18
-        # Workers expose columns in Pinocchio's foot order.  The decoder and
-        # simulator GRF labels use the configured model order (FR, FL, RR, RL).
-        self._contact_jacobian_buff[:] = torch.from_numpy(
-            self.async_pino_manager.shared.contact_jacobian[..., self._model_order_contact_columns]
-        ).to(self._device)
-        self._wb_mass_mat_buff[:]        = torch.from_numpy(
-            self.async_pino_manager.shared.mass_mat).to(self._device)    # num_envs x 18 x 18
-        self._wb_bias_vec_buff[:]        = torch.from_numpy(
-            self.async_pino_manager.shared.bias).to(self._device)        # num_envs x 18
-        self._torso_6dof_acceleration[:] = torch.from_numpy(
-            self.async_pino_manager.shared.acc6d).to(self._device)       # num_envs x 6
-        
-        
+            #     Pass the numpy (cpu) data structures to shared memeory
+            self.async_pino_manager.shared.q[:]       = wb_pos_np        # num_envs x 19
+            self.async_pino_manager.shared.qd[:]      = wb_vel_np        # num_envs x 18
+            self.async_pino_manager.shared.qd_prev[:] = wb_vel_prev_np   # num_envs x 18
+            self.async_pino_manager.shared.grf[:]     = grf_np           # num_envs x 4 x 3
+            self.async_pino_manager.shared.dt[0]      = self._control_dt
+
+
+            #     Pass the numpy (cpu) domain randomization parameters to shared memory
+            self.async_pino_manager.shared.base_added_mass[:] = self._added_base_mass.cpu().numpy()  # num_envs x 1
+            self.async_pino_manager.shared.base_com_shift[:] = self._base_com_bias.cpu().numpy()    # num_envs x 3
+
+            self.async_pino_manager.compute_async()
+            self.async_pino_manager.wait()            # blocking, wait until all workers are done
+
+            # now stack the tensor lists to get the necessary state values
+            self._wb_dynamics_buff[:]        = torch.from_numpy(
+                self.async_pino_manager.shared.wb_dynamics).to(self._device) # num_envs x 18
+            self._contact_forces_buff[:]     = torch.from_numpy(
+                self.async_pino_manager.shared.wb_contacts).to(self._device) # num_envs x 18
+            # Workers expose columns in Pinocchio's foot order.  The decoder and
+            # simulator GRF labels use the configured model order (FR, FL, RR, RL).
+            self._contact_jacobian_buff[:] = torch.from_numpy(
+                self.async_pino_manager.shared.contact_jacobian[..., self._model_order_contact_columns]
+            ).to(self._device)
+            self._wb_mass_mat_buff[:]        = torch.from_numpy(
+                self.async_pino_manager.shared.mass_mat).to(self._device)    # num_envs x 18 x 18
+            self._wb_bias_vec_buff[:]        = torch.from_numpy(
+                self.async_pino_manager.shared.bias).to(self._device)        # num_envs x 18
+            self._torso_6dof_acceleration[:] = torch.from_numpy(
+                self.async_pino_manager.shared.acc6d).to(self._device)       # num_envs x 6
+
+
         # Link contact state
         if self._cfg.asset.obtain_link_contact_states:
             self._link_contact_states = 1. * (torch.norm(
@@ -247,6 +253,9 @@ class GenesisSimulator_PACT(Simulator):
         self._base_world_ang_vel[env_ids] = 0.
         self._last_base_world_lin_vel[env_ids] = 0.
         self._last_base_world_ang_vel[env_ids] = 0.
+
+        if getattr(self, "reconstruction_evaluation", None) is not None:
+            self.reconstruction_evaluation.reset(self, env_ids)
 
     def reset_dofs(self, env_ids, dof_pos, dof_vel):
         """ Resets DOF position and velocities of selected environmments

@@ -47,4 +47,4 @@ isaaclab = [
 ]
 
 [tool.setuptools]
-packages = ['rsl_rl', 'resources', 'legged_gym']
+packages = ['rsl_rl', 'resources', 'legged_gym', 'reconstruction_eval']

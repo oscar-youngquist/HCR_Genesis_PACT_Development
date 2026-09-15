@@ -52,6 +52,8 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         self.first_loop = True
 
         for substep in range(self._cfg.control.decimation):
+            if getattr(self, "reconstruction_evaluation", None) is not None:
+                self.reconstruction_evaluation.before_substep(self, substep)
             self._torques = self._compute_torques(actions)
             if hasattr(self, "_grf_current_causal") and substep == self._cfg.control.decimation - 1:
                 capture_substep(self, motor_strength=1.0)
@@ -60,6 +62,8 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
                 self._torques, self._dof_indices)
             
             self._scene.step()
+            if getattr(self, "reconstruction_evaluation", None) is not None:
+                self.reconstruction_evaluation.after_substep(self)
             
             self._dof_pos[:] = self._robot.get_dofs_position(
                 self._dof_indices)
@@ -167,6 +171,9 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         self._base_world_ang_vel[env_ids] = 0.
         self._last_base_world_lin_vel[env_ids] = 0.
         self._last_base_world_ang_vel[env_ids] = 0.
+
+        if getattr(self, "reconstruction_evaluation", None) is not None:
+            self.reconstruction_evaluation.reset(self, env_ids)
 
     def reset_dofs(self, env_ids, dof_pos, dof_vel):
         """ Resets DOF position and velocities of selected environmments

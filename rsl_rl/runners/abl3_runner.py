@@ -440,6 +440,16 @@ class OnPolicyRunnerABL3:
         self.current_learning_iteration = 0
         return loaded_dict['infos']
 
+    def get_evaluation_metadata(self, training_seed=None):
+        """Explicit export for reconstruction evaluation; does not mutate training."""
+        from reconstruction_eval.schema import metadata_from_config
+        return metadata_from_config(self.env.cfg, self.policy_cfg, training_seed)
+
+    def get_reconstruction_evaluator(self, checkpoint, metadata=None):
+        """Strict evaluation load, including trained GRF weights, without optimizers."""
+        from reconstruction_eval.models import FrozenModel
+        return FrozenModel(dict(method="abl3", checkpoint=checkpoint, metadata=metadata), self.device)
+
     def get_inference_policy(self, device=None):
         self.alg.test_mode()
         if device is not None:
