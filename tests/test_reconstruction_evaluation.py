@@ -106,6 +106,21 @@ def test_world_velocity_injection_converts_genesis_angular_dofs():
     assert not np.allclose(command[0,3:],world[0,3:])
 
 
+def test_bounded_velocity_disturbance_limits_and_scenario_reproducibility():
+    from reconstruction_eval.disturbances import sample_velocity_delta
+    ids = np.arange(1000)
+    episodes = ids % 7
+    delta = sample_velocity_delta(42, ids, episodes, 2., 1., 2.)
+    assert (np.linalg.norm(delta[:,:2], axis=1) <= 2.).all()
+    assert ((delta[:,2] >= -1.) & (delta[:,2] <= 0.)).all()
+    assert (np.abs(delta[:,3:]) <= 2.).all()
+    # No policy/source or reset scheduling enters the random stream.
+    np.testing.assert_equal(delta[::-1], sample_velocity_delta(42, ids[::-1], episodes[::-1], 2., 1., 2.))
+    assert not np.array_equal(delta, sample_velocity_delta(42, ids, episodes+1, 2., 1., 2.))
+    with pytest.raises(ValueError, match='nonnegative'):
+        sample_velocity_delta(42, ids, episodes, 2., -1., 2.)
+
+
 def test_rmse_pools_squared_errors_and_bootstraps_episodes():
     identity = {k:'x' for k in GROUPS}
     records = [dict(identity,episode_key='a',absolute_error_sum=1.,squared_error_sum=1.,scalar_count=1,valid_sample_count=1),
@@ -244,7 +259,8 @@ def test_probe_pipeline_groups_shared_families_across_terrains(tmp_path):
     assert set(result.valid_episode_count) == {2}
 
 
-def test_per_episode_mass_com_readback_and_independent_sampling(monkeypatch):
+@pytest.mark.parametrize('condition', ['payload', 'impulse_com'])
+def test_per_episode_mass_com_readback_and_independent_sampling(monkeypatch, condition):
     # Minimal tensor interface exercises the actual reset helper with a fake
     # simulator setter/readback, not a second implementation of its sampler.
     monkeypatch.setitem(sys.modules,'torch',NS(float32=np.float32,
@@ -255,15 +271,19 @@ def test_per_episode_mass_com_readback_and_independent_sampling(monkeypatch):
     robot = NS(link_start=0,set_mass_shift=set_mass,set_COM_shift=set_com,
         _solver=NS(get_links_mass_shift=lambda link,ids:mass[ids], get_links_COM_shift=lambda link,ids:com[ids]))
     sim=NS(_device='cpu',_base_link_index=0,_robot=robot,_added_base_mass=np.zeros((2,1)),_base_com_bias=np.zeros((2,3)))
-    hook=EvaluationHook(NS(num_envs=2),17,'payload',[2.,8.],[-.2,.2,-.1,.1,0.,.3])
+    hook=EvaluationHook(NS(num_envs=2),17,condition,[2.,8.],[-.2,.2,-.1,.1,0.,.3])
     hook.reset(sim,np.array([0,1]))
     first_mass,first_com=mass.copy(),com.copy()
     hook.reset(sim,np.array([0]))
     assert mass[1] == first_mass[1]
     np.testing.assert_equal(com[1],first_com[1])
-    assert mass[0] != first_mass[0]
+    if condition == 'payload':
+        assert mass[0] != first_mass[0]
+    else:
+        np.testing.assert_equal(mass, 0.)
     assert not np.allclose(com[0],first_com[0])
-    robot._solver.get_links_mass_shift=lambda link,ids:np.zeros((len(ids),1))
+    assert ((com >= [-.2,-.1,0.]) & (com <= [.2,.1,.3])).all()
+    robot._solver.get_links_COM_shift=lambda link,ids:np.zeros((len(ids),1,3))
     with pytest.raises(RuntimeError,match='did not apply'):
         hook.reset(sim,np.array([0]))
 
