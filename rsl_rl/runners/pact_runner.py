@@ -861,9 +861,14 @@ class OnPolicyRunnerPACT:
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Load optimizer(s)
         if load_optimizer:
-            self.alg.act_optimizer.optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
-            self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
-            self.alg.decoder_optimizer.load_state_dict(loaded_dict['decoder_opt_state_dict'])
+            if self.is_hard_pact:
+                self.alg.load_actor_optimizer_state(loaded_dict['act_optimizer_state_dict'])
+                self.alg.load_auxiliary_optimizer_states(
+                    loaded_dict['enc_optimizer_state_dict'], loaded_dict['decoder_opt_state_dict'])
+            else:
+                self.alg.act_optimizer.optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
+                self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
+                self.alg.decoder_optimizer.load_state_dict(loaded_dict['decoder_opt_state_dict'])
         # Load the VAE decoder model...
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']

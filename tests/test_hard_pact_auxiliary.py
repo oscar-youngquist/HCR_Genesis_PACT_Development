@@ -316,7 +316,8 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
     def test_b1z1_pcgrad_parameter_ownership_topology(self):
         algorithm = make_algorithm()
         ppo_ids = [id(p) for g in algorithm.act_optimizer.optimizer.param_groups for p in g["params"]]
-        aux_ids = [id(p) for g in algorithm.auxiliary_optimizer.param_groups for p in g["params"]]
+        aux_ids = [id(p) for opt in (algorithm.enc_optimizer,algorithm.decoder_optimizer)
+                   for g in opt.param_groups for p in g["params"]]
         self.assertEqual(len(ppo_ids), len(set(ppo_ids)))
         self.assertEqual(len(aux_ids), len(set(aux_ids)))
         shared = {
@@ -328,7 +329,7 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
             )
         }
         self.assertEqual(set(aux_ids), shared)
-        self.assertTrue(shared <= set(ppo_ids))
+        self.assertTrue(shared.isdisjoint(ppo_ids))
         actor_only = {id(p) for p in algorithm.actor_critic.act_trunk.parameters()}
         self.assertTrue(actor_only <= set(ppo_ids))
         self.assertTrue(actor_only.isdisjoint(aux_ids))
@@ -338,7 +339,8 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
         algorithm = make_algorithm(auxiliary_learning_rate=learning_rate)
         parameter_lrs = {
             id(parameter): group["lr"]
-            for group in algorithm.auxiliary_optimizer.param_groups
+            for opt in (algorithm.enc_optimizer,algorithm.decoder_optimizer)
+            for group in opt.param_groups
             for parameter in group["params"]
         }
         modules = (

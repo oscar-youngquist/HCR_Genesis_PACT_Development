@@ -33,7 +33,7 @@ dist/
 *.csv
 *.pt
 *.json
-
+**eval/*
 # JetBrains IDE
 .idea/
 

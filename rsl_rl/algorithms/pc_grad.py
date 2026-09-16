@@ -16,11 +16,14 @@ class PCGrad:
     cannot change them through momentum or weight decay.
     """
 
-    def __init__(self, optimizer, reduction="mean"):
+    def __init__(self, optimizer, reduction="mean", *, owned_only=False):
         if reduction not in ("mean", "sum"):
             raise ValueError("reduction must be 'mean' or 'sum'")
         self._optim = optimizer
         self._reduction = reduction
+        # Opt-in for disjoint optimizers sharing one graph. Legacy callers
+        # retain backward() semantics; owned VJPs never overwrite peers' grads.
+        self._owned_only = owned_only
         self.last_objective_grads = None
         self.last_merged_grad = None
         self.last_has_grads = None
@@ -136,7 +139,13 @@ class PCGrad:
         grads, shapes, has_grads, parameter_masks = [], [], [], []
         for objective in objectives:
             self._optim.zero_grad(set_to_none=True)
-            objective.backward(retain_graph=True)
+            if self._owned_only:
+                parameters = [p for group in self._optim.param_groups for p in group["params"] if p.requires_grad]
+                gradients = torch.autograd.grad(objective, parameters, retain_graph=True, allow_unused=True)
+                for parameter, gradient in zip(parameters, gradients):
+                    parameter.grad = gradient
+            else:
+                objective.backward(retain_graph=True)
             grad, shape, has_grad, parameter_has_grad = self._retrieve_grad()
             grads.append(self._flatten_grad(grad))
             shapes.append(shape)

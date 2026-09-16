@@ -3,6 +3,7 @@ import ast
 import inspect
 from types import SimpleNamespace
 from unittest.mock import patch
+from contextlib import nullcontext
 
 import torch
 import pytest
@@ -77,16 +78,24 @@ def test_measured_contact_projection_frame_scale_order_and_detachment():
 
 @pytest.mark.parametrize("qp_mode", [None, "every_substep", "random_one_substep"])
 def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads(qp_mode):
-    alg = make_algorithm(num_learning_epochs=1, num_mini_batches=1)
+    if qp_mode is not None and not torch.cuda.is_available():
+        pytest.skip("cuPIQP replay requires CUDA")
+    device="cuda" if qp_mode is not None else "cpu"
+    with torch.device(device):
+        _run_owned_update(qp_mode,device)
+
+
+def _run_owned_update(qp_mode,device):
+    alg = make_algorithm(num_learning_epochs=1, num_mini_batches=1,device=device)
     alg.bard_enabled = alg.bard_inverse_enabled = True
     alg.bard_rollout_enabled = True
     # Exercise the live run's positive-weight (unbalanced) PCGrad path.
     alg.pinn_init, alg.pinn_weight_final = -1, .01
     alg.pinn_warmup_steps, alg.num_pinn_updates = 1, 1
-    alg.physics_dynamics = BardGo2Dynamics(URDF, device="cpu", batch_capacity=4)
+    alg.physics_dynamics = BardGo2Dynamics(URDF, device=device, batch_capacity=4)
     if qp_mode is not None:
         from test_hard_pact_reduced_qp import solver
-        alg.hard_pact_qp = solver(qp_update_mode=qp_mode)
+        alg.hard_pact_qp = solver(qp_update_mode=qp_mode,qp_solver="cupiqp")
         alg.qp_config = alg.hard_pact_qp.cfg
     alg.init_storage(4, 2, [57], [95], [133], [1140], [24], [11], [12], [18])
     storage = alg.storage
@@ -153,6 +162,15 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads(qp_
     replay_action_path = alg._replay_action_path
     replayed_nominal = []
     projection_checks = []
+    versions = {p:p._version for p in alg.ppo_parameters+alg.auxiliary_parameters}
+    auxiliary_backwards = []
+    auxiliary_backward = alg._auxiliary_pcgrad_step
+
+    def checked_auxiliary_backward(*args,**kwargs):
+        # No parameter is stepped until every owner's QP VJP is complete.
+        assert all(p._version==version for p,version in versions.items())
+        auxiliary_backwards.append(args[0])
+        return auxiliary_backward(*args,**kwargs)
     from rsl_rl.algorithms.hard_pact_qp import projection_loss
 
     def checked_projection(*args, **kwargs):
@@ -185,8 +203,9 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads(qp_
         weights = [alg.actor_critic.context_encoder.ce_out_mean.weight,
                    alg.actor_critic.physics_estimator.grf_head[-1].weight,
                    alg.actor_critic.physics_estimator.wrench_head[-1].weight]
-        grads = torch.autograd.grad(result.loss, weights, retain_graph=True)
-        gradients.extend(g.detach() for g in grads)
+        weights = [p for p in weights if p.requires_grad]
+        grads = torch.autograd.grad(result.loss, weights, retain_graph=True, allow_unused=True)
+        gradients.extend(g.detach() for g in grads if g is not None)
         actor_grads = torch.autograd.grad(result.loss, actor_weights, retain_graph=True, allow_unused=True)
         assert all(g is None or not g.count_nonzero() for g in actor_grads)
         assert result.loss > 0 and torch.isfinite(result.loss)
@@ -194,7 +213,7 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads(qp_
 
     def checked_rollout(**kwargs):
         assert not kwargs["control_torque"].requires_grad
-        assert len(grf_torques) == 1  # No second, execution-label-conditioned forward.
+        # PPO, encoder and decoder phases each share one GRF between PINNs.
         torch.testing.assert_close(kwargs["interval_grf_world"], inverse_grfs[-1], rtol=0, atol=0)
         rollout_torques.append(kwargs["control_torque"].detach().clone())
         result = differentiable_bard_rollout_loss(**kwargs)
@@ -204,11 +223,17 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads(qp_
         force_weights = [alg.actor_critic.context_encoder.ce_out_mean.weight,
                          alg.actor_critic.physics_estimator.grf_head[-1].weight,
                          alg.actor_critic.physics_estimator.wrench_head[-1].weight]
-        force_grads = torch.autograd.grad(result.loss, force_weights, retain_graph=True)
-        assert all(g.isfinite().all() and g.abs().sum() > 0 for g in force_grads)
+        force_weights = [p for p in force_weights if p.requires_grad]
+        force_grads = torch.autograd.grad(result.loss, force_weights, retain_graph=True,allow_unused=True)
+        assert any(g is not None for g in force_grads)
+        assert all(g.isfinite().all() and g.abs().sum() > 0 for g in force_grads if g is not None)
         return result
 
-    with patch("rsl_rl.algorithms.ppo_hard_pact.corrected_bard_inverse_dynamics_loss", side_effect=checked_loss), \
+    solve_context = (patch.object(alg.hard_pact_qp,"solve",wraps=alg.hard_pact_qp.solve)
+                     if qp_mode is not None else nullcontext())
+    with solve_context as solve_calls, \
+         patch.object(alg,"_auxiliary_pcgrad_step",side_effect=checked_auxiliary_backward), \
+         patch("rsl_rl.algorithms.ppo_hard_pact.corrected_bard_inverse_dynamics_loss", side_effect=checked_loss), \
          patch("rsl_rl.algorithms.ppo_hard_pact.differentiable_bard_rollout_loss", side_effect=checked_rollout), \
          patch.object(alg.actor_critic.physics_estimator, "predict_grf", side_effect=checked_grf), \
          patch("rsl_rl.algorithms.ppo_hard_pact.projection_loss", side_effect=checked_projection), \
@@ -216,12 +241,17 @@ def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads(qp_
         alg.update(lambda a: (a[:, :12], a[:, 12:]), lambda q, p, v: q-p-v,
                    .02, 0, torch.zeros(12), 1.)
     assert bool(projection_checks) == (qp_mode is not None)
+    assert auxiliary_backwards == [alg.encoder_pcgrad,alg.decoder_pcgrad]
+    if qp_mode is not None:
+        assert solve_calls.call_count == 1  # Not one new solve per optimizer.
     assert measured and all(x.abs().sum() > 0 and not x.requires_grad for x in measured)
     assert gradients and all(torch.isfinite(g).all() and g.abs().sum() > 0 for g in gradients)
     expected_torques = fields["interval_executed_torque"].flatten(0, 1).sort(dim=0).values
-    torch.testing.assert_close(torch.cat(inverse_torques).sort(dim=0).values, expected_torques)
-    torch.testing.assert_close(torch.cat(rollout_torques).sort(dim=0).values, expected_torques,
+    expected_all = expected_torques.repeat(2,1).sort(dim=0).values
+    torch.testing.assert_close(torch.cat(inverse_torques).sort(dim=0).values, expected_all)
+    torch.testing.assert_close(torch.cat(rollout_torques).sort(dim=0).values, expected_all,
                                rtol=0, atol=0)
-    assert not grf_torques[0][1]
-    torch.testing.assert_close(grf_torques[0][0], replayed_nominal[0], rtol=0, atol=0)
-    assert not torch.equal(grf_torques[0][0].sort(dim=0).values, expected_torques)
+    pinn_torques = [t for t,requires_grad in grf_torques if not requires_grad]
+    assert pinn_torques
+    torch.testing.assert_close(pinn_torques[0], replayed_nominal[0], rtol=0, atol=0)
+    assert not torch.equal(pinn_torques[0].sort(dim=0).values, expected_torques)

@@ -251,24 +251,25 @@ class PPO_HardPACT:
 
     The legacy PPO rollout, clipped surrogate/value losses, entropy schedule,
     bootstrapping decision, spectral clipping, and checkpoint-facing optimizer
-    attributes are retained locally. HardPACT adds two training phases per
-    minibatch:
+    attributes are retained locally. Three disjoint PCGrad/AdamW optimizers
+    use one parameter snapshot per minibatch:
 
-    1. PPO and the corrected BARD objective share one PCGrad backward pass.
-       The B1Z1 PACT ownership boundary is used, so this optimizer contains the
-       policy, critic, history pathway, privileged decoder, and physics heads.
-    2. A newly recomputed graph forms the single auxiliary objective
+    1. Actor/critic: PPO plus QP projection, never PINNs or VAE losses.
+    2. Encoder/explicit branch: auxiliary reconstruction/KL plus PINNs and QP
+       projection. Decoder weights are frozen for auxiliary/PINN forwards.
+    3. Privileged/GRF/wrench decoders: auxiliary reconstruction plus PINNs and
+       QP projection, using detached auxiliary encoder samples.
+
+    The supervised auxiliary objective retains
 
        ``L_aux = lambda_priv L_priv + beta L_KL + lambda_e L_e``
        ``        + lambda_F L_F + lambda_Wa L_W_active``
        ``        + lambda_Wn L_W_neutral``.
 
-       One auxiliary optimizer step updates the shared history/decoder
-       boundary. Actor, critic, and action-noise parameters are excluded.
-
-    Recomputing phase two is important: PCGrad consumes the first autograd
-    graph, and retaining it across optimizer steps would both waste memory and
-    make the gradients depend on stale parameters.
+    One QP graph supplies isolated owned VJPs to all three optimizers. All
+    gradients are computed before any parameter step, so no stale QP gradient
+    is reused. Multiple encoder epochs are averaged auxiliary passes at this
+    snapshot. PINNs reuse detached actor commands and cached actual mechanics.
     """
     actor_critic: nn.Module
     decoder_network: nn.Module
@@ -406,10 +407,8 @@ class PPO_HardPACT:
         self.actor_critic.to(self.device)
         self.storage = None # initialized later
 
-        # Match the B1Z1 PACT ownership plan. PPO/PINN PCGrad owns the complete
-        # differentiable policy path, including context and deployment
-        # decoders. A second optimizer performs the temporally separate
-        # encoder and decoder auxiliary phases on that shared boundary.
+        # Disjoint actor, encoder and decoder ownership; retain the B1Z1
+        # primary/physics PCGrad projection rule, not overlapping optimizers.
         actor_groups, context_groups = actor_critic.get_optim_groups()
         decoder_group = {
             "params": list(decoder_network.parameters()),
@@ -417,23 +416,14 @@ class PPO_HardPACT:
             "name": "privileged_decoder",
         }
         shared_groups = [*context_groups, decoder_group]
-        ppo_shared_groups = [
-            {**group, "params": list(group["params"]), "name": f"ppo_{group['name']}"}
-            for group in shared_groups
-        ]
         auxiliary_groups = [
             {**group, "params": list(group["params"]), "name": f"auxiliary_{group['name']}"}
             for group in shared_groups
         ]
         self.act_optimizer = PCGrad(
-            optim.AdamW([*actor_groups, *ppo_shared_groups], lr=learning_rate),
-            reduction="sum",
+            optim.AdamW(actor_groups, lr=learning_rate),
+            reduction="sum", owned_only=True,
         )
-        self.auxiliary_optimizer = optim.AdamW(
-            auxiliary_groups, lr=auxiliary_learning_rate
-        )
-        self.enc_optimizer = self.auxiliary_optimizer
-        self.decoder_optimizer = self.auxiliary_optimizer
         self.transition = RolloutStoragePACT.Transition()
 
         # # We want to reduce the LR of the critic
@@ -450,7 +440,7 @@ class PPO_HardPACT:
             for parameter in group["params"]
         ))
         self.auxiliary_parameters = list(dict.fromkeys(
-            parameter for group in self.auxiliary_optimizer.param_groups
+            parameter for group in auxiliary_groups
             for parameter in group["params"]
         ))
         self.auxiliary_decoder_parameters = list(dict.fromkeys(
@@ -464,6 +454,19 @@ class PPO_HardPACT:
         self.auxiliary_encoder_parameters = [
             p for p in self.auxiliary_parameters if id(p) not in decoder_parameter_ids
         ]
+        # Separate Adam moments and PCGrad ownership for the two auxiliary
+        # phases. No parameter belongs to more than one optimizer.
+        self._old_auxiliary_groups = auxiliary_groups
+        def owned_groups(decoders):
+            return [{**g, "params": selected} for g in auxiliary_groups
+                    if (selected := [p for p in g["params"]
+                        if (id(p) in decoder_parameter_ids) == decoders])]
+        self.enc_optimizer = optim.AdamW(owned_groups(False), lr=auxiliary_learning_rate)
+        self.decoder_optimizer = optim.AdamW(owned_groups(True), lr=auxiliary_learning_rate)
+        self.encoder_pcgrad = PCGrad(self.enc_optimizer, reduction="sum", owned_only=True)
+        self.decoder_pcgrad = PCGrad(self.decoder_optimizer, reduction="sum", owned_only=True)
+        # Retain the old encoder-facing attribute for external callers.
+        self.auxiliary_optimizer = self.enc_optimizer
 
         self.boot_mult = 1.0
         self.use_boot = False
@@ -1125,9 +1128,10 @@ class PPO_HardPACT:
             self.actor_critic.train()
             self.act_optimizer.zero_grad()
 
-            # Phase 1: reproduce the legacy PPO objective and retain its mean
-            # action, which supplies the differentiable nominal-torque input
-            # to the BARD force prediction path.
+            # Owned PCGrad computes PPO VJPs only for actor/critic parameters.
+            # Keep the live features/action graph for the shared QP, so its
+            # encoder VJP can also follow torque conditioning without another
+            # policy evaluation or a different latent-noise draw.
             ppo_loss, surrogate_loss, value_loss, current_actions, policy_features = self._compute_rl_loss(obs_batch, obs_hist_batch, actions_batch,
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
@@ -1176,17 +1180,18 @@ class PPO_HardPACT:
                     )
                     qp_target_count.add_(full * expected)
             pinn_loss = None
-            if pinn_iteration_ready or qp_rows is not None:
+            if qp_rows is not None:
+                # One QP graph shared by the three owned VJPs, using the exact
+                # stored-noise policy features from the existing PPO forward.
                 pinn_loss = self._compute_bard_loss(
-                    replay["nominal_torque"], obs_batch, obs_hist_batch,
-                    grf_target, default_pose,
-                    replay["desired_position"], replay["feedforward_torque"],
-                    fb_func, policy_features=policy_features,
-                    qp_rows=qp_rows, compute_pinn=pinn_iteration_ready,
-                )
+                        replay["nominal_torque"], obs_batch, obs_hist_batch,
+                        grf_target, default_pose,
+                        replay["desired_position"], replay["feedforward_torque"],
+                        fb_func, policy_features=policy_features,
+                        qp_rows=qp_rows, compute_pinn=False,
+                    )
             optimize_physics = (
-                pinn_iteration_ready
-                or (
+                (
                     qp_rows is not None
                     and self.hard_pact_features.projection_loss
                 )
@@ -1213,8 +1218,8 @@ class PPO_HardPACT:
                     )
                 qp_backward_start = time.perf_counter()
 
-            # PCGrad treats reward learning as the primary objective and
-            # removes the reward-parallel component of the BARD gradient.
+            # Actor PCGrad uses reward as primary and QP projection as physics;
+            # PINNs are evaluated only in the encoder and decoder phases.
             pcgrad_timing = self._start_bard_timing("pcgrad", obs_batch)
             if optimize_physics and self.pinn_weight_final >= 0:
                 self.act_optimizer.pc_backward_pinn(
@@ -1344,23 +1349,18 @@ class PPO_HardPACT:
                 ] = torch.ones((), device=obs_batch.device)
             
             nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
-            self.act_optimizer.step()
 
             # Perform some logging
             mean_value_loss += value_loss.detach()
             mean_surrogate_loss += surrogate_loss.detach()
-            if pinn_loss is not None:
-                # ``pinn_loss`` is the optimization objective and therefore
-                # contains ``pinn_weight`` (and potentially the independent
-                # QP projection term).  Console/TensorBoard should expose the
-                # underlying PINN magnitude, not its scheduled contribution.
-                mean_pinn_loss += self.last_unweighted_pinn_loss
 
 
             # Auxiliary adaptation follows Pos's two-stage routine: train the
             # encoder through frozen decoders, then train the three decoders
             # using detached copies of that same stochastic encoder output.
             auxiliary_indices = terminated_batch.reshape(-1).bool().nonzero(as_tuple=False).flatten()
+            encoder_gradients = [None]*len(self.auxiliary_encoder_parameters)
+            decoder_gradients = [None]*len(self.auxiliary_decoder_parameters)
             for enc_epoch in range(self.num_enc_epochs):
                 if auxiliary_indices.numel() == 0:
                     # A zero gradient still lets Adam momentum/weight decay
@@ -1406,7 +1406,8 @@ class PPO_HardPACT:
                                 replay["nominal_torque"][diagnostic_indices],
                             )
                             latent_ablation_ran = True
-                self.auxiliary_optimizer.zero_grad(set_to_none=True)
+                self.encoder_pcgrad.zero_grad()
+                self.decoder_pcgrad.zero_grad()
                 with self._frozen_auxiliary_decoders():
                     aux = self._compute_auxiliary_loss(
                         obs_hist_batch, obs_target, explicit_labels_batch, grf_target,
@@ -1414,43 +1415,37 @@ class PPO_HardPACT:
                         self.storage.current_hard_pact_batch,
                         return_decoder_inputs=True,
                     )
-                    aux["loss"].backward()
-                    nn.utils.clip_grad_norm_(self.auxiliary_encoder_parameters, self.max_grad_norm)
-                    self.auxiliary_optimizer.step()
-                if latent_diagnostics is not None:
-                    with torch.no_grad():
-                        post_aux = policy_distribution_without_side_effects(
-                            self.actor_critic, obs_batch[diagnostic_indices],
-                            obs_hist_batch[diagnostic_indices],
-                            self.storage.current_latent_noise_batch[diagnostic_indices],
-                            self.storage.current_latent_boot_mask_batch[diagnostic_indices],
-                        )
-                        pre_kl = diagonal_gaussian_kl(
-                            old_mu_batch[diagnostic_indices], old_sigma_batch[diagnostic_indices],
-                            pre_aux[0], pre_aux[1],
-                        )
-                        post_kl = diagonal_gaussian_kl(
-                            old_mu_batch[diagnostic_indices], old_sigma_batch[diagnostic_indices],
-                            post_aux[0], post_aux[1],
-                        )
-                        latent_diagnostics.add("ppo/policy_kl_post_aux", post_kl[:, None])
-                        latent_diagnostics.add(
-                            "ppo/policy_kl_aux_only",
-                            diagonal_gaussian_kl(pre_aux[0], pre_aux[1], post_aux[0], post_aux[1])[:, None],
-                        )
-                        latent_diagnostics.add("ppo/policy_kl_aux_delta", (post_kl - pre_kl)[:, None])
-
-                # Keep the optimizer groups/state-dict layout unchanged. With
-                # grad=None on inactive parameters, AdamW skips their momentum
-                # and weight decay: each parameter is stepped in only its own
-                # auxiliary phase. No encoder forward or new sample is needed.
-                self.auxiliary_optimizer.zero_grad(set_to_none=True)
+                    features = aux.pop("pinn_features")
+                    encoder_pinn = self._auxiliary_pinn_loss(
+                        features, auxiliary_indices, replay["nominal_torque"],
+                        obs_batch, obs_hist_batch, grf_target, default_pose,
+                        phase="encoder",
+                    ) if pinn_iteration_ready else None
+                    encoder_physics = self._auxiliary_physics_objective(encoder_pinn,pinn_loss,optimize_physics)
+                    # Decoders must be trainable for their already-built QP
+                    # graph; the supervised/PINN graph was built frozen.
+                self._auxiliary_pcgrad_step(self.encoder_pcgrad,
+                        self.auxiliary_encoder_parameters, aux["loss"], encoder_physics)
+                self._accumulate_auxiliary_gradients(encoder_gradients,self.auxiliary_encoder_parameters)
+                del features, encoder_pinn
+                # Train decoders on the same detached sample. Encoder merged
+                # gradients are stored separately until every VJP is complete.
+                self.encoder_pcgrad.zero_grad()
+                self.decoder_pcgrad.zero_grad()
+                decoder_inputs = aux.pop("decoder_inputs")
                 decoder_aux = self._compute_auxiliary_decoder_loss(
-                    **aux.pop("decoder_inputs")
+                    **decoder_inputs
                 )
-                decoder_aux["loss"].backward()
-                nn.utils.clip_grad_norm_(self.auxiliary_decoder_parameters, self.max_grad_norm)
-                self.auxiliary_optimizer.step()
+                decoder_pinn = self._auxiliary_pinn_loss(
+                    (decoder_inputs["sample"], decoder_inputs["explicit"]),
+                    auxiliary_indices, replay["nominal_torque"], obs_batch,
+                    obs_hist_batch, grf_target, default_pose,
+                    phase="decoder",
+                ) if pinn_iteration_ready else None
+                decoder_physics = self._auxiliary_physics_objective(decoder_pinn,pinn_loss,optimize_physics)
+                self._auxiliary_pcgrad_step(self.decoder_pcgrad,
+                    self.auxiliary_decoder_parameters, decoder_aux["loss"], decoder_physics)
+                self._accumulate_auxiliary_gradients(decoder_gradients,self.auxiliary_decoder_parameters)
                 self._stop_bard_timing("auxiliary", auxiliary_timing)
                 vae_loss, kl_div = aux["loss"], aux["kl"]
                 recon_error, vel_pred_error = aux["privileged"], aux["explicit"]
@@ -1460,6 +1455,11 @@ class PPO_HardPACT:
                     name: value.detach() for name, value in aux.items()
                     if name not in ("loss", "reconstruction")
                 }
+                if pinn_iteration_ready:
+                    self.last_auxiliary_metrics.update(self._auxiliary_pinn_metrics)
+                if pinn_iteration_ready:
+                    mean_pinn_loss += (self._auxiliary_pinn_metrics["encoder_pinn_unweighted"]
+                        + self._auxiliary_pinn_metrics["decoder_pinn_unweighted"])/(2*self.num_enc_epochs)
 
                 valid_boot_statistics.add(
                     decode_targets[auxiliary_indices], recons,
@@ -1473,6 +1473,38 @@ class PPO_HardPACT:
                 mean_kld_loss += kl_div.detach()
                 mean_decoder_loss += dec_loss.detach()
 
+            # All gradients (including QP VJPs) now refer to the same parameter
+            # snapshot. Multiple auxiliary passes average their merged grads;
+            # no optimizer mutates a parameter while the QP graph is in use.
+            if auxiliary_indices.numel():
+                for optimizer,parameters,gradients in (
+                    (self.enc_optimizer,self.auxiliary_encoder_parameters,encoder_gradients),
+                    (self.decoder_optimizer,self.auxiliary_decoder_parameters,decoder_gradients)):
+                    self.encoder_pcgrad.zero_grad()
+                    self.decoder_pcgrad.zero_grad()
+                    for parameter,gradient in zip(parameters,gradients):
+                        parameter.grad=gradient
+                    nn.utils.clip_grad_norm_(parameters,self.max_grad_norm)
+                    optimizer.step()
+                if latent_diagnostics is not None:
+                    with torch.no_grad():
+                        post_aux = policy_distribution_without_side_effects(
+                            self.actor_critic, obs_batch[diagnostic_indices],
+                            obs_hist_batch[diagnostic_indices],
+                            self.storage.current_latent_noise_batch[diagnostic_indices],
+                            self.storage.current_latent_boot_mask_batch[diagnostic_indices])
+                        post_kl = diagonal_gaussian_kl(old_mu_batch[diagnostic_indices],
+                            old_sigma_batch[diagnostic_indices],post_aux[0],post_aux[1])
+                        latent_diagnostics.add("ppo/policy_kl_post_aux",post_kl[:,None])
+                        latent_diagnostics.add("ppo/policy_kl_aux_only",
+                            diagonal_gaussian_kl(pre_aux[0],pre_aux[1],post_aux[0],post_aux[1])[:,None])
+                        latent_diagnostics.add("ppo/policy_kl_aux_delta",(post_kl-pre_kl)[:,None])
+            self.act_optimizer.step()
+            # Release the shared solver lease before the next minibatch solve.
+            # No autograd graph is used after these three parameter steps.
+            del ppo_losses, pinn_loss
+            if auxiliary_indices.numel():
+                del aux, decoder_aux, encoder_physics, decoder_physics, decoder_pinn
             # Keeps the interaction of incoming data with layer wieghts below the threashold that 
             #     saturates the tanh activation function.
             self.spectral_normalization(self.actor_critic, sigma_max=6.0)
@@ -1745,17 +1777,111 @@ class PPO_HardPACT:
             transfer_total, device=self.device, dtype=torch.float32
         )
 
-    @contextmanager
-    def _frozen_auxiliary_decoders(self):
-        """Freeze weights, not input gradients; restore flags even on failure."""
-        requires_grad = [p.requires_grad for p in self.auxiliary_decoder_parameters]
+    def load_actor_optimizer_state(self, saved):
+        """Drop obsolete encoder/decoder Adam groups from old PPO checkpoints."""
+        groups = [g for g in saved["param_groups"] if not g.get("name","").startswith("ppo_")]
+        ids = {key for group in groups for key in group["params"]}
+        self.act_optimizer.optimizer.load_state_dict({"param_groups":groups,
+            "state":{key:value for key,value in saved["state"].items() if key in ids}})
+
+    def load_auxiliary_optimizer_states(self, encoder_state, decoder_state):
+        """Restore separate optimizers, or split the old shared AdamW state.
+
+        Old checkpoints stored the same optimizer under both keys. Parameter
+        order within each named group is unchanged, so moments can be selected
+        by ownership rather than discarded. Policy weights are unaffected.
+        """
+        for optimizer, saved in ((self.enc_optimizer, encoder_state),
+                                 (self.decoder_optimizer, decoder_state)):
+            current = optimizer.state_dict()["param_groups"]
+            if [(g["name"],len(g["params"])) for g in saved["param_groups"]] == [
+                    (g["name"],len(g["params"])) for g in current]:
+                optimizer.load_state_dict(saved)
+                continue
+            old_groups = self._old_auxiliary_groups
+            if [(g["name"],len(g["params"])) for g in saved["param_groups"]] != [
+                    (g["name"],len(g["params"])) for g in old_groups]:
+                raise ValueError("Unrecognized HardPACT auxiliary optimizer layout")
+            owned = {id(p) for g in optimizer.param_groups for p in g["params"]}
+            selected_groups = []
+            for old, group in zip(old_groups, saved["param_groups"]):
+                ids = [key for p,key in zip(old["params"],group["params"]) if id(p) in owned]
+                if ids:
+                    selected_groups.append({**group,"params":ids})
+            ids = {key for group in selected_groups for key in group["params"]}
+            optimizer.load_state_dict({"param_groups":selected_groups,
+                "state":{key:value for key,value in saved["state"].items() if key in ids}})
+
+    def _auxiliary_pcgrad_step(self, optimizer, parameters, supervised, pinn):
+        """Same primary/physics projection rule and norm balancing as PPO.
+
+        Each phase owns only its encoder or decoder parameters. Only compute
+        merged gradients here; the caller delays all steps until QP VJPs end.
+        """
+        losses = [supervised] if pinn is None else [supervised,pinn]
+        audit = getattr(self,"_pcgrad_audit_ran",False)
+        if pinn is None:
+            optimizer.pc_backward(losses,record_diagnostics=audit)
+        elif self.pinn_weight_final >= 0:
+            optimizer.pc_backward_pinn(losses,record_diagnostics=audit)
+        else:
+            optimizer.pc_backward_ppgrad(losses,record_diagnostics=audit)
+
+    @staticmethod
+    def _auxiliary_physics_objective(pinn, projection, optimize_projection):
+        if not optimize_projection:
+            return pinn
+        return projection if pinn is None else pinn+projection
+
+    def _accumulate_auxiliary_gradients(self, accumulated, parameters):
+        # Retain only one owned gradient vector, not graphs from auxiliary
+        # epochs. Average passes before the single shared-snapshot update.
+        for i,parameter in enumerate(parameters):
+            if parameter.grad is not None:
+                value=parameter.grad.detach()/self.num_enc_epochs
+                accumulated[i]=value if accumulated[i] is None else accumulated[i]+value
+
+    def _auxiliary_pinn_loss(self, features, rows, nominal, obs, history, grf,
+                             default_pose, *, phase):
+        """Re-evaluate PINNs on valid auxiliary rows, never replay a QP here.
+
+        Encoder phase passes live sampled features through frozen heads;
+        decoder phase passes those same samples detached into trainable heads.
+        Reuse actor torque values detached and index the existing mechanics
+        cache. Neither phase creates an actor actuation gradient or changes
+        the rollout/PPO likelihood, transition masks, or PINN schedule.
+        """
+        names = ("last_qp_metrics", "_qp_sampling_gradient_inputs", "_qp_full_audit_inputs")
+        saved = {name:getattr(self,name,None) for name in names}
         try:
-            for parameter in self.auxiliary_decoder_parameters:
+            batch = {name:value[rows] for name,value in self.storage.current_hard_pact_batch.items()}
+            indices = self.storage.current_batch_indices
+            loss = self._compute_bard_loss(nominal.detach()[rows],obs[rows],history[rows],
+                grf[rows],default_pose,policy_features=features,qp_rows=None,
+                transition_batch=batch,
+                transition_indices=None if indices is None else indices[rows])
+            if not hasattr(self,"_auxiliary_pinn_metrics"):
+                self._auxiliary_pinn_metrics = {}
+            self._auxiliary_pinn_metrics[phase+"_pinn_unweighted"] = self.last_unweighted_pinn_loss
+            return loss
+        finally:
+            for name,value in saved.items():
+                setattr(self,name,value)
+
+    @contextmanager
+    def _frozen_parameters(self, parameters):
+        """Freeze weights, not input gradients; restore flags even on failure."""
+        requires_grad = [p.requires_grad for p in parameters]
+        try:
+            for parameter in parameters:
                 parameter.requires_grad_(False)
             yield
         finally:
-            for parameter, enabled in zip(self.auxiliary_decoder_parameters, requires_grad):
+            for parameter, enabled in zip(parameters, requires_grad):
                 parameter.requires_grad_(enabled)
+
+    def _frozen_auxiliary_decoders(self):
+        return self._frozen_parameters(self.auxiliary_decoder_parameters)
 
     def _compute_auxiliary_decoder_loss(
         self, sample, explicit, nominal_torque, privileged_target, grf_target,
@@ -1911,6 +2037,7 @@ class PPO_HardPACT:
             "reconstruction": reconstruction,
         }
         if return_decoder_inputs:
+            metrics["pinn_features"] = (sample, explicit)
             # These are already compacted to valid rows. Detach without copying
             # or retaining the encoder graph, preserving Pos's sampled inputs.
             metrics["decoder_inputs"] = {
@@ -2139,6 +2266,7 @@ class PPO_HardPACT:
         measured_grf_normalized, default_pose,
         desired_position=None, feedforward_torque=None, fb_func=None,
         policy_features=None, qp_rows=None, compute_pinn=True,
+        transition_batch=None, transition_indices=None,
     ):
         r"""Evaluate interval BARD losses and one sampled substep projection.
 
@@ -2173,7 +2301,7 @@ class PPO_HardPACT:
         scores are averaged so the 12 joint coordinates cannot dominate only
         because that block is wider.
 
-        It retains gradients through ``tau_control`` and both physics heads.
+        Executed ``tau_control`` is detached; gradients enter physics heads.
         The detached 18x18 solve uses an RHS-only custom VJP; official BARD
         ABA remains a test/reference path. Before minibatch iteration, one
         detached actual-mechanics cache materializes ``M,h,J_f,J_b`` at every
@@ -2193,7 +2321,7 @@ class PPO_HardPACT:
             zero = nominal_torque.sum() * 0.0
             self.last_unweighted_pinn_loss = zero.detach()
             return zero
-        batch = self.storage.current_hard_pact_batch
+        batch = self.storage.current_hard_pact_batch if transition_batch is None else transition_batch
         if batch is None:
             raise RuntimeError("HardPACT BARD loss requires named transition fields")
         control_dt = batch["control_dt"].detach().clamp_min(1.0e-8)
@@ -2260,10 +2388,8 @@ class PPO_HardPACT:
                     batch["realized_com_shift_body"],
                 )
 
-        # BARD's interval objectives intentionally retain their control-rate
-        # state and logged interval-average executed torque.  A straight-
-        # through value preserves the earlier rollout gradient contract while
-        # making the forward-dynamics value exactly the torque Genesis executed.
+        # BARD uses logged interval-average executed torque as a constant;
+        # only predicted GRF/wrench inputs carry a trainable graph.
         inverse_loss = zero
         rollout_loss = zero
         measured_grf_world = None
@@ -2285,7 +2411,7 @@ class PPO_HardPACT:
         if compute_pinn and (
             self.bard_inverse_enabled or self.bard_rollout_enabled
         ):
-            flat_indices = self.storage.current_batch_indices
+            flat_indices = self.storage.current_batch_indices if transition_indices is None else transition_indices
             if self._rollout_actual_mechanics is None:
                 # Direct unit-test/compatibility calls may bypass update().
                 # Production update() always materializes the full cache once.
@@ -2458,7 +2584,7 @@ class PPO_HardPACT:
                     qp_wrench_yaw[:, 3:].unsqueeze(1), sample_q[:, 3:7]
                 ).squeeze(1),
             ), dim=-1)
-            flat_indices = self.storage.current_batch_indices[qp_rows]
+            flat_indices = (self.storage.current_batch_indices if transition_indices is None else transition_indices)[qp_rows]
             if self._rollout_deployment_qp_mechanics is None:
                 sampled_mechanics = self._materialize_mechanics_cache(
                     kind="deployment", q=sample_q, v=sample_v,
@@ -2570,7 +2696,8 @@ class PPO_HardPACT:
                     sample_applied, sample_contact_probability,
                 )
                 for value in self._qp_sampling_gradient_inputs:
-                    value.retain_grad()
+                    if value.requires_grad:
+                        value.retain_grad()
             # Log only the newly recomputed sampled solve, whose status can
             # differ from rollout after policy/head parameters update.
             self.last_qp_metrics = dict(qp_result.metrics or {})
@@ -2608,7 +2735,8 @@ class PPO_HardPACT:
                     "contact": sample_contact_probability,
                 }
                 for value in self._qp_full_audit_inputs.values():
-                    value.retain_grad()
+                    if value.requires_grad:
+                        value.retain_grad()
         else:
             self.last_qp_metrics = {}
         # One weighted physics objective enters the existing PCGrad path:
