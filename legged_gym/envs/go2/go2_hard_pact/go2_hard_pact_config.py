@@ -342,9 +342,9 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             dof_tracking = 0.1
 
             torque_conflict_symmetric = -0.01
-            torque_alignment = 0.05
+            torque_alignment = 0.01
             ff_ratio = 0.0
-            torque_cancellation = -0.1
+            torque_cancellation = -0.2
 
             lin_vel_z = -2.0
             base_height = -2.0
@@ -362,8 +362,8 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             pos_action_rate = -0.001
             pos_action_smoothness = -0.001
 
-            tau_action_rate = -0.004
-            tau_action_smoothness = -0.004
+            tau_action_rate = -0.002
+            tau_action_smoothness = -0.002
 
             feedforward_torques_scaled = -1e-05
             feedback_torques = -2e-05
@@ -465,8 +465,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         pinn_warmup = 10
         pinn_init_steps = 0
 
-        pretrained_path = '../../rsl_rl/modules/pretrained_checkpoints/go2_hard_pact/Sep08_hard_pact_start_model_5000_pos_std_mean_torque.pt'
-        # pretrained_path = ''
+        # pretrained_path = '../../rsl_rl/modules/pretrained_checkpoints/go2_hard_pact/Sep08_hard_pact_start_model_5000_pos_std_mean_torque.pt'
+        pretrained_path = ''
         cenet_explicit_layers = [128, 128]
         grf_decoder_layers = [128, 128]
         wrench_decoder_layers = [128, 128]
@@ -548,7 +548,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
                         # at absolute iteration N. Zero keeps current behavior.
-                        'warmup_iterations': 1000,
+                        'warmup_iterations': 10000,
                         'exception_capture_enabled': True,
                         'exception_capture_limit': 1,
                         'exception_capture_dir': '/tmp/hard_pact_qp_failures',
