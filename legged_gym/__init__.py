@@ -33,8 +33,11 @@ if sys.version_info[1] >= 10: # >=3.10 for genesis and isaacsim
         SIMULATOR = "genesis_b1z1_pact_pos"
     elif simulator_type == "genesis_b1_unifp":
         SIMULATOR = "genesis_b1_unifp"
-    elif simulator_type == "isaaclab":
-        SIMULATOR = "isaaclab"
+    elif simulator_type in (
+        "isaaclab", "isaaclab_b1z1_unifp", "isaaclab_b1z1_pact",
+        "isaaclab_b1z1_pact_pos",
+    ):
+        SIMULATOR = simulator_type
     else:
         raise ValueError(
             "Unsupported SIMULATOR type. Expected a configured Genesis or IsaacLab simulator."
@@ -99,7 +102,7 @@ elif "isaacgym" in SIMULATOR:
     except ImportError as e:
         print("Failed to import Isaac Gym. Please ensure that the Isaac Gym is properly installed and configured.")
         raise e
-elif SIMULATOR == "isaaclab":
+elif "isaaclab" in SIMULATOR:
     try:
         import isaaclab
     except ImportError as e:

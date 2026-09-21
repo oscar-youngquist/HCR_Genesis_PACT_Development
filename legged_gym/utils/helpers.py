@@ -48,7 +48,8 @@ def configure_runtime_device(args):
     requested_gpu = _normalize_gpu_arg(requested_gpu)
     runtime_gpu = requested_gpu
 
-    if requested_gpu.startswith("cuda:"):
+    # Isaac Sim selects the physical device itself; CUDA masking can desync it.
+    if requested_gpu.startswith("cuda:") and not os.environ.get("SIMULATOR", "").startswith("isaaclab"):
         visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
         if visible_devices:
             visible_gpu_ids = [gpu_id.strip() for gpu_id in visible_devices.split(",") if gpu_id.strip()]

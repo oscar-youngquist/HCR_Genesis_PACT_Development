@@ -240,6 +240,7 @@ class B1Z1UniFPCfg:
         slope_treshold = 0.75
 
     class sim:
+        suppress_backend_warnings = True
         dt = 0.002
         substeps = 1
         max_collision_pairs = 100

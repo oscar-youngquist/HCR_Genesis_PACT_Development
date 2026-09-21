@@ -43,7 +43,8 @@ genesis = [
 ]
 isaaclab = [
     "isaaclab",
-    "isaacsim"
+    "isaacsim",
+    "pycollada>=0.9,<1"
 ]
 
 [tool.setuptools]

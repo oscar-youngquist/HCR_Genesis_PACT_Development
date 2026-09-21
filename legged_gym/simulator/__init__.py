@@ -23,5 +23,9 @@ elif "genesis" in SIMULATOR:
     from .genesis_simulator_b1z1_unifp import GenesisSimulatorB1Z1UniFP
     from .genesis_simulator_b1z1_pact import GenesisSimulatorB1Z1PACT
     from .genesis_simulator_b1z1_pact_pos import GenesisSimulatorB1Z1PACTPos
-elif SIMULATOR == "isaaclab":
+elif "isaaclab" in SIMULATOR:
     from .isaaclab_simulator import IsaacLabSimulator
+    from .isaaclab_simulator_b1z1 import (
+        IsaacLabSimulatorB1Z1UniFP, IsaacLabSimulatorB1Z1PACT,
+        IsaacLabSimulatorB1Z1PACTPos,
+    )

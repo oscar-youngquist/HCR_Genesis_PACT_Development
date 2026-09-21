@@ -37,6 +37,10 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
     # ---------------------------------------------------------------------
     def _parse_cfg(self):
         super()._parse_cfg()
+        self._parse_b1z1_cfg()
+
+    def _parse_b1z1_cfg(self):
+        """Shared control and randomization configuration for Gym and Lab."""
         self._control_dt = self._cfg.control.dt
         self._num_learned_actions = self._cfg.env.num_actions
         self._wb_dim = self._cfg.env.whole_body_dim
@@ -276,6 +280,9 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
 
     def _init_buffers(self):
         super()._init_buffers()
+        # Control and PACT training labels share the configured joint ordering.
+        self._p_gains = self._p_gains[self._dof_indices_tensor]
+        self._d_gains = self._d_gains[self._dof_indices_tensor]
         self.common_step_counter = 0
         self._actuation_torques = torch.zeros_like(self._torques)
         self.unclipped_torques = torch.zeros_like(self._torques)
@@ -644,8 +651,8 @@ class IsaacGymSimulatorB1Z1UniFP(_IsaacGymSimulatorB1Z1):
             raise RuntimeError(f"Expected {self._num_learned_actions} UniFP actions, got {actions.shape[-1]}")
         q = self.dof_pos
         qd = self.dof_vel
-        p_gains = self._p_gains[self._dof_indices_tensor]
-        d_gains = self._d_gains[self._dof_indices_tensor]
+        p_gains = self._p_gains
+        d_gains = self._d_gains
         target_offset = torch.zeros_like(q)
         target_offset[:, :self._num_learned_actions] = (
             actions
@@ -670,8 +677,8 @@ class IsaacGymSimulatorB1Z1PACTPos(_IsaacGymSimulatorB1Z1):
             raise RuntimeError(f"Expected {self._num_learned_actions} PACT-Pos actions, got {actions.shape[-1]}")
         q = self.dof_pos
         qd = self.dof_vel
-        p_gains = self._p_gains[self._dof_indices_tensor]
-        d_gains = self._d_gains[self._dof_indices_tensor]
+        p_gains = self._p_gains
+        d_gains = self._d_gains
         target_offset = torch.zeros_like(q)
         target_offset[:, :self._num_learned_actions] = actions * self._cfg.control.action_scale
         self.feedback_torques = (
@@ -696,8 +703,8 @@ class IsaacGymSimulatorB1Z1PACT(_IsaacGymSimulatorB1Z1):
         torque_actions = actions[:, self._num_learned_actions:]
         q = self.dof_pos
         qd = self.dof_vel
-        p_gains = self._p_gains[self._dof_indices_tensor]
-        d_gains = self._d_gains[self._dof_indices_tensor]
+        p_gains = self._p_gains
+        d_gains = self._d_gains
         target_offset = torch.zeros_like(q)
         target_offset[:, :self._num_learned_actions] = position_actions * self._cfg.control.action_scale
         self.feedback_torques = (

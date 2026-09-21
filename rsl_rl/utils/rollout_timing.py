@@ -67,9 +67,10 @@ def startup_metadata(env, runner_device, observations, policy):
     simulator = env.simulator
     runner_device = torch.device(runner_device)
     is_isaac = "isaacgym" in simulator.__class__.__module__
+    is_b1z1_lab = "isaaclab_simulator_b1z1" in simulator.__class__.__module__
     asset_template = (
         getattr(env.cfg.asset, "isaacgym_file", env.cfg.asset.file)
-        if is_isaac else env.cfg.asset.file
+        if is_isaac or is_b1z1_lab else env.cfg.asset.file
     )
     urdf_path = os.path.abspath(
         asset_template.replace(
@@ -87,7 +88,8 @@ def startup_metadata(env, runner_device, observations, policy):
         robot = getattr(simulator, "_robot", None)
         shape_count = int(getattr(robot, "n_geoms", 0))
         if shape_count == 0 and robot is not None:
-            shape_count = sum(len(getattr(link, "geoms", ())) for link in robot.links)
+            # IsaacLab articulations do not expose Genesis link geometry objects.
+            shape_count = sum(len(getattr(link, "geoms", ())) for link in getattr(robot, "links", ()))
     obs_devices = sorted({str(value.device) for value in observations if value is not None})
     policy_device = next(policy.parameters()).device
     gpu_name = (

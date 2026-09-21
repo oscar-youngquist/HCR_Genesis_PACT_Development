@@ -7,7 +7,7 @@ import numpy as np
 import os
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.math_utils import *
-if SIMULATOR == "isaaclab":
+if "isaaclab" in SIMULATOR:
     from isaaclab.app import AppLauncher
     import carb
     GROUND_PATH = "/World/ground"
@@ -161,8 +161,15 @@ class IsaacLabSimulator(Simulator):
         if self._cfg.sensor.add_depth:
             self._frame_count = 0
             
+    def _lab_launcher_args(self):
+        launcher_args = {"headless": self._headless, "device": self._device, "multi_gpu": False}
+        if bool(getattr(self._cfg.sim, "suppress_backend_warnings", False)):
+            # Keep errors visible while quieting repeated Kit/asset warnings.
+            launcher_args["kit_args"] = "--/log/level=error --/log/outputStreamLevel=error"
+        return launcher_args
+
     def _create_sim(self):
-        self._app_launcher = AppLauncher({"headless": self._headless, "device": self._device})
+        self._app_launcher = AppLauncher(self._lab_launcher_args())
         
         import isaaclab.sim as sim_utils
         from isaacsim.core.utils.stage import get_current_stage

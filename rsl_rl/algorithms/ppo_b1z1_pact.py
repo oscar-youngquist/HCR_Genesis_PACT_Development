@@ -257,8 +257,9 @@ class PPO_B1Z1PACT:
         # linearly to one. Persist this reference across checkpoint resumes.
         self.force_blend_start_ema = None
 
-    def init_storage(self, *args):
-        self.storage = RolloutStorageB1Z1PACT(*args, device=self.device)
+    def init_storage(self, *args, **kwargs):
+        # Forward optional rollout-state dimensions supplied by the runner.
+        self.storage = RolloutStorageB1Z1PACT(*args, device=self.device, **kwargs)
 
     def update_adaptive_entropy_coef(self, performance_metrics):
         """Increase exploration when tracking or terrain progress is below target."""

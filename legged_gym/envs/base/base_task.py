@@ -31,8 +31,12 @@ class BaseTask():
             from legged_gym.simulator.genesis_simulator_b1z1_unifp import GenesisSimulatorB1Z1UniFP
             from legged_gym.simulator.genesis_simulator_b1z1_pact import GenesisSimulatorB1Z1PACT
             from legged_gym.simulator.genesis_simulator_b1z1_pact_pos import GenesisSimulatorB1Z1PACTPos
-        elif SIMULATOR == "isaaclab":
+        elif "isaaclab" in SIMULATOR:
             from legged_gym.simulator.isaaclab_simulator import IsaacLabSimulator
+            from legged_gym.simulator.isaaclab_simulator_b1z1 import (
+                IsaacLabSimulatorB1Z1UniFP, IsaacLabSimulatorB1Z1PACT,
+                IsaacLabSimulatorB1Z1PACTPos,
+            )
         
         self.render_fps = 50
         self.last_frame_time = 0
@@ -68,6 +72,12 @@ class BaseTask():
             self.simulator = IsaacGymSimulator(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "isaaclab":
             self.simulator = IsaacLabSimulator(cfg, sim_params, sim_device, self.headless)
+        elif SIMULATOR == "isaaclab_b1z1_unifp":
+            self.simulator = IsaacLabSimulatorB1Z1UniFP(cfg, sim_params, sim_device, self.headless)
+        elif SIMULATOR == "isaaclab_b1z1_pact":
+            self.simulator = IsaacLabSimulatorB1Z1PACT(cfg, sim_params, sim_device, self.headless)
+        elif SIMULATOR == "isaaclab_b1z1_pact_pos":
+            self.simulator = IsaacLabSimulatorB1Z1PACTPos(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "genesis_pact":
             self.simulator = GenesisSimulator_PACT(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "genesis_pact_pos":
