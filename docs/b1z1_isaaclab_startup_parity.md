@@ -84,9 +84,60 @@ checks and `git diff --check` cover modified files.
   need dedicated checks; the smoke tests do not establish these.
 - Force-buffer checks verify routing and values, not a measured acceleration
   response or full wrench-frame equivalence under arbitrary robot rotations.
-- GRF measurement utilities were not expanded or subjected to equivalence tests.
+- GRF substep filtering and sensor-order tests are now covered below; physical
+  contact-force equivalence across engines remains unverified.
 - Full terrain grids, long curricula, viewer/camera behavior, sustained PINN
   optimization after warmup, and large-environment throughput remain untested.
 
 Launch from `legged_gym/scripts` using `sh b1z1_unifp_lab.sh` (or the corresponding
 PACT/PACT-Pos Lab launcher). These launchers select `lr_lab_cupiqp` and GPU 1.
+
+## HardPACT Functionality Shared With B1Z1
+
+The Lab adapter now applies the existing B1Z1 reward-gated domain-randomization
+curriculum at runtime. Set `domain_rand.use_domainrand_curriculum = True` to
+enable it; this update does not override the existing configured enable flag.
+Enabled curricula start at initial bounds regardless of Gym's construction-only
+`isaacgym_use_final_domain_rand_ranges` setting. Phase progress changes at most
+once per PPO iteration. Updated mass (including gripper), CoM and joint-dynamics
+bounds are sampled on the next episode reset. Friction and armature retain their
+configured fixed ranges. Base/EE command-force curricula remain independent.
+
+All B1Z1 runners save/restore optional `domain_rand_curriculum_state`, including
+reward EMA/history, current phase/progress and last processed iteration. Older
+checkpoints without it retain initial state. Existing `Values/domain_rand_*`
+logs continue to report progression. The implementation reuses B1Z1's existing
+phase/gating equations rather than substituting Go2-specific ranges or pushes.
+
+GRF processing reuses HardPACT's `IntervalGRFProcessor`: each physics substep
+reads world-frame contact-sensor forces, rejects the entire XYZ vector when
+vertical force is inside the deadband, clips it, and updates its EMA. The
+control-interval average uses clipped forces, not EMA forces. `_grfs_buf` keeps
+the B1Z1 `(N,12)` EMA contract and existing normalization; interval averages are
+available separately in `_grfs_interval_buf`, not substituted for PINN labels.
+Configured `sim.grf` thresholds and alpha remain unchanged. Alpha now applies
+per physics substep in Lab, so the time constant differs from the former
+control-rate filter. Reset clears all filter and interval history per environment.
+
+Sensor and articulation indices must not be interchanged: `_feet_contact_indices`
+indexes native `ContactSensor.data.net_forces_w`; `_contact_indices` reorders
+all sensor forces into articulation order for `_link_contact_forces` and existing
+reward/termination consumers. `_feet_indices` indexes only articulation-ordered
+tensors. Both mappings are resolved by configured link names.
+
+TensorBoard `GRF/*` reports per-foot world-Z forces and mean vector norms for
+raw, deadbanded, clipped, EMA and interval-average stages, plus contact fraction.
+These are snapshots of the latest control interval at logging time, not averages
+over the PPO rollout. They remain enabled with normal force/contact logging when
+`enable_additional_diagnostics` is false. No QP controller, Go2 policy layout,
+Go2-specific force normalization or additional PINN objective is transplanted.
+
+Validation: the B1Z1 PACT-Pos two-environment GPU-1 smoke test advanced the
+curriculum, resampled physical properties at reset, verified randomized inertia,
+collected one force sample per physics substep, and completed a short PPO update.
+CPU tests cover sensor-name permutation, filter stages, selective reset, logging,
+duplicate-iteration protection and curriculum state restoration. The separately
+run existing Go2 GRF suite has a target-scale mismatch in
+`test_alias_step_returns_interval_target_and_keeps_ema_separate`; its expected
+250-N normalization does not match the current Go2 result. Go2 code/config was
+not changed to address that independent failure.

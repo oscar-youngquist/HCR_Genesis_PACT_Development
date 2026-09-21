@@ -9,6 +9,7 @@ from legged_gym.utils.math_utils import get_euler_xyz, quat_rotate_inverse, torc
 from legged_gym.utils.terrain import Terrain
 from .isaaclab_simulator import IsaacLabSimulator
 from .b1z1_lab_assets import prepare_lab_urdf
+from legged_gym.envs.go2.go2_hard_pact.grf import GRFProcessingConfig, IntervalGRFProcessor
 from .isaacgym_simulator_b1z1 import (
     _IsaacGymSimulatorB1Z1,
     IsaacGymSimulatorB1Z1UniFP,
@@ -37,11 +38,43 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
 
     def _parse_cfg(self):
         super()._parse_cfg()
-        _IsaacGymSimulatorB1Z1._parse_b1z1_cfg(self)
+        # Lab can update physical properties at reset; an enabled curriculum
+        # must begin at its initial bounds, not Gym's immutable final bounds.
+        active = self._cfg.domain_rand.use_domainrand_curriculum
+        _IsaacGymSimulatorB1Z1._parse_b1z1_cfg(self, use_final_ranges=False if active else None)
+        self._domain_rand_last_iteration = -1
 
     _init_domain_rand_curriculum_state = _IsaacGymSimulatorB1Z1._init_domain_rand_curriculum_state
     _advance_domain_rand_phase = _IsaacGymSimulatorB1Z1._advance_domain_rand_phase
-    _step_domian_rand = _IsaacGymSimulatorB1Z1._step_domian_rand
+    _update_domain_rand_bounds = _IsaacGymSimulatorB1Z1._update_domain_rand_bounds
+    def _step_domian_rand(self, num_iters, mean_reward=None):
+        """Retain B1Z1 reward gating, advancing at most once per PPO iteration."""
+        if num_iters <= self._domain_rand_last_iteration:
+            return
+        self._domain_rand_last_iteration = num_iters
+        _IsaacGymSimulatorB1Z1._step_domian_rand(self, num_iters, mean_reward)
+
+    def domain_rand_curriculum_state_dict(self):
+        """Preserve progression and reward gating across training resumes."""
+        state = {name: value for name, value in vars(self).items()
+                 if name.startswith("domain_rand_") and name != "domain_rand_reward_ema_hist"}
+        state["reward_history"] = list(self.domain_rand_reward_ema_hist)
+        state["last_iteration"] = self._domain_rand_last_iteration
+        state["required_reward"] = self.required_reward
+        return state
+
+    def load_domain_rand_curriculum_state_dict(self, state):
+        if not state:
+            return  # Older checkpoints retain configured initial bounds.
+        for name, value in state.items():
+            if name.startswith("domain_rand_") and hasattr(self, name):
+                setattr(self, name, value)
+        self.domain_rand_reward_ema_hist.clear()
+        self.domain_rand_reward_ema_hist.extend(state["reward_history"])
+        self._domain_rand_last_iteration = state["last_iteration"]
+        self.required_reward = state["required_reward"]
+        if self.use_domainrand_curriculum:
+            self._update_domain_rand_bounds()
 
     def _create_sim(self):
         # The existing Lab terrain helper already accepts a trimesh. Convert
@@ -177,7 +210,7 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         )
         self._contact_sensors = ContactSensor(ContactSensorCfg(
             prim_path=f"/World/envs/env_.*/{cfg.asset.name}/.*",
-            update_period=0.0, history_length=1, debug_vis=False,
+            update_period=self._sim_params["dt"], history_length=2, debug_vis=False,
         ))
         scene_path = next(
             prim.GetPrimPath().pathString for prim in self._stage.Traverse()
@@ -204,11 +237,7 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         )
         self._gripper_index = self._body_names.index(cfg.asset.gripper_name)
         self._base_link_index = self._body_names.index(cfg.asset.base_link_name)
-        sensor_names = list(self._contact_sensors.body_names)
-        self._contact_indices = torch.tensor(
-            [sensor_names.index(name) for name in self._body_names],
-            device=self._device, dtype=torch.long,
-        )
+        self._resolve_contact_indices()
         self._termination_contact_indices = torch.tensor(
             [i for i, name in enumerate(self._body_names)
              if any(pattern in name for pattern in cfg.asset.terminate_after_contacts_on)],
@@ -219,7 +248,6 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
              if any(pattern in name for pattern in cfg.asset.penalize_contacts_on)],
             device=self._device, dtype=torch.long,
         )
-        self._feet_contact_indices = self._contact_indices[self._feet_indices]
         self._contact_state_link_indices = torch.tensor(
             [i for i, name in enumerate(self._body_names)
              if any(pattern in name for pattern in cfg.asset.contact_state_link_names)],
@@ -233,6 +261,17 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         )
         self._dof_indices_tensor = torch.tensor(self._dof_indices, device=self._device)
         self._init_domain_params()
+
+    def _resolve_contact_indices(self):
+        """Keep sensor indices distinct from articulation-order contact buffers."""
+        names = list(self._contact_sensors.body_names)
+        if len(set(names)) != len(names) or any(name not in names for name in self._body_names):
+            raise ValueError("B1Z1 contact sensor must uniquely cover every articulation body")
+        self._contact_indices = torch.tensor(
+            [names.index(name) for name in self._body_names],
+            device=self._device, dtype=torch.long,
+        )
+        self._feet_contact_indices = self._contact_indices[self._feet_indices]
 
     def _init_domain_params(self):
         n, d = self._num_envs, len(self._dof_indices)
@@ -394,6 +433,21 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self._dof_tau = torch.zeros_like(self._torques)
         self._grfs_buf = torch.zeros(n, self._grf_dim, device=device)
         self._configure_grf_processing()
+        self._grf_processor = IntervalGRFProcessor(
+            n, len(self._feet_names), device, self._grfs_buf.dtype,
+            GRFProcessingConfig(
+                vertical_deadband_n=self._grf_deadband,
+                clip_min_n=self._grf_clip_min, clip_max_n=self._grf_clip_max,
+                ema_alpha=self._grf_ema_alpha,
+                contact_threshold_n=self._foot_contact_force_threshold,
+            ),
+        )
+        # Keep existing B1Z1 diagnostics/labels as views of the shared processor.
+        self._grfs_raw_buf = self._grf_processor.raw.flatten(1)
+        self._grfs_deadband_buf = self._grf_processor.complete.flatten(1)
+        self._grfs_clipped_buf = self._grf_processor.clipped.flatten(1)
+        self._grfs_smoothed_buf = self._grf_processor.ema.flatten(1)
+        self._grfs_interval_buf = self._grf_processor.interval_average.flatten(1)
         self._feet_pos = torch.zeros(n, 4, 3, device=device)
         self._feet_vel = torch.zeros_like(self._feet_pos)
         self._last_feet_vel = torch.zeros_like(self._feet_pos)
@@ -435,6 +489,7 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self._last_dof_vel.copy_(self._robot.data.joint_vel)
         self.first_loop = True
         self._apply_external_forces()
+        self._grf_processor.begin_interval()
         for _ in range(self._cfg.control.decimation):
             torque = self._compute_torques(actions)
             self.executed_torques = torch.clamp(torque, -1.1 * self.torque_limits, 1.1 * self.torque_limits)
@@ -444,6 +499,11 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
             self._sim.step(render=False)
             self._robot.update(self._sim_params["dt"])
             self._contact_sensors.update(self._sim_params["dt"])
+            # Sensor order is independent of articulation order. Read with
+            # sensor indices exactly once, preserving configured FR/FL/RR/RL.
+            self._grf_processor.update_substep(self._sensor_foot_forces_world())
+        self._grf_processor.end_interval()
+        self._grfs_buf.copy_(self._grfs_smoothed_buf)
         if not self._headless:
             self._sim.render()
 
@@ -472,7 +532,7 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
                 self._link_contact_forces[:, self._contact_state_link_indices].norm(dim=-1)
                 > self._foot_contact_force_threshold
             ).float()
-        self._update_grf_buffer(self._link_contact_forces[:, self._feet_indices])
+        # GRFs were conditioned at physics rate in step(); do not EMA twice.
         # Projected joint forces are solver-reported; applied_torque is only
         # the command and would change force-manipulability reward semantics.
         self._dof_tau.copy_(
@@ -486,8 +546,12 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self.common_step_counter += 1
 
     def reset_idx(self, env_ids):
+        if env_ids.numel() == 0:
+            return
         self._robot.reset(env_ids)
         self._contact_sensors.reset(env_ids)
+        # Install current curriculum bounds only at episode boundaries.
+        self._randomize_physical_properties(env_ids)
         if self._cfg.domain_rand.randomize_pd_gain:
             self._randomize_pd_gain(env_ids)
         if self._cfg.domain_rand.randomize_motor_strength:
@@ -500,6 +564,23 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self._last_feet_vel[env_ids] = 0
         self._dof_tau[env_ids] = 0
         self._reset_grf_buffer(env_ids)
+        self._grf_processor.reset(env_ids)
+
+    def _sensor_foot_forces_world(self):
+        return self._contact_sensors.data.net_forces_w[:, self._feet_contact_indices]
+
+    def get_grf_metrics(self):
+        """Current control-interval force diagnostics, in world-frame Newtons."""
+        metrics = {}
+        for stage, forces in self._grf_processor.flattened_stages().items():
+            if stage == "complete":
+                continue  # Alias of deadbanded.
+            feet = forces.reshape(self._num_envs, len(self._feet_names), 3)
+            metrics[f"GRF/{stage}_norm_mean"] = feet.norm(dim=-1).mean()
+            for index, name in enumerate(self._feet_names):
+                metrics[f"GRF/{stage}_{name}_fz"] = feet[:, index, 2].mean()
+        metrics["GRF/contact_fraction"] = self._grf_processor.contacts.float().mean()
+        return metrics
 
     def reset_dofs(self, env_ids, dof_pos, dof_vel):
         self._robot.write_joint_state_to_sim(dof_pos, dof_vel, self._dof_indices, env_ids)

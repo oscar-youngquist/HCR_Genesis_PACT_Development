@@ -9,6 +9,7 @@ import statistics
 from collections import deque
 
 import torch
+from rsl_rl.utils.simulator_diagnostics import log_grf_metrics, domain_rand_state, load_domain_rand_state
 from torch.utils.tensorboard import SummaryWriter
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
@@ -356,6 +357,7 @@ class B1Z1PACTRunner:
 
     def _log(self, iteration, total_iterations, metrics, collection_time, learning_time, rewards, lengths, ep_infos):
         """Print the shared PACT/UniFP training panel plus B1Z1 diagnostics."""
+        log_grf_metrics(self.writer, self.env.simulator, iteration)
         self.total_timesteps += self.steps * self.env.num_envs
         iteration_time = collection_time + learning_time
         self.total_time += iteration_time
@@ -448,11 +450,13 @@ class B1Z1PACTRunner:
             "entropy_coef": self.alg.current_entropy_coef,
             "kl_controller_state": self.alg.kl_controller.state_dict(),
             "force_curriculum_state": staged_force_curriculum_state_dict(self.env),
+            "domain_rand_curriculum_state": domain_rand_state(self.env.simulator),
         }, path)
 
     def load(self, path, load_optimizer=True):
         """Restore learned heads and the privileged-force reliability gate."""
         checkpoint = torch.load(path, map_location=self.device)
+        load_domain_rand_state(self.env.simulator, checkpoint.get("domain_rand_curriculum_state"))
         self.actor_critic.load_state_dict(checkpoint["model_state_dict"])
         self.privileged_decoder.load_state_dict(checkpoint["privileged_decoder_state_dict"])
         if load_optimizer:

@@ -5,6 +5,7 @@ import time
 from collections import deque
 
 import torch
+from rsl_rl.utils.simulator_diagnostics import log_grf_metrics, domain_rand_state, load_domain_rand_state
 from torch.utils.tensorboard import SummaryWriter
 
 from legged_gym.envs.b1z1.force_task_utils import (
@@ -330,6 +331,7 @@ class OnPolicyRunnerUniFP:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
     def log(self, locs, width=80, pad=35):
+        log_grf_metrics(self.writer, self.env.simulator, locs["it"])
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
         self.tot_time += locs["collection_time"] + locs["learn_time"]
         iteration_time = locs["collection_time"] + locs["learn_time"]
@@ -447,6 +449,7 @@ class OnPolicyRunnerUniFP:
                 "iter": self.current_learning_iteration if iteration is None else iteration,
                 "entropy_coef": self.alg.current_entropy_coef,
                 "kl_controller_state": self.alg.kl_controller.state_dict(),
+                "domain_rand_curriculum_state": domain_rand_state(self.env.simulator),
                 "force_curriculum_state": (
                     staged_force_curriculum_state_dict(self.env)
                     if hasattr(self.env, "_staged_force_curriculum") else None
@@ -458,6 +461,7 @@ class OnPolicyRunnerUniFP:
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path, map_location=self.device)
+        load_domain_rand_state(self.env.simulator, loaded_dict.get("domain_rand_curriculum_state"))
         self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])

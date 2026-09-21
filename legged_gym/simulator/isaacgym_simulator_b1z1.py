@@ -39,7 +39,7 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
         super()._parse_cfg()
         self._parse_b1z1_cfg()
 
-    def _parse_b1z1_cfg(self):
+    def _parse_b1z1_cfg(self, use_final_ranges=None):
         """Shared control and randomization configuration for Gym and Lab."""
         self._control_dt = self._cfg.control.dt
         self._num_learned_actions = self._cfg.env.num_actions
@@ -60,7 +60,7 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
         # after construction. Select either curriculum endpoint up front.
         self.isaacgym_use_final_domain_rand_ranges = getattr(
             dr, "isaacgym_use_final_domain_rand_ranges", False
-        )
+        ) if use_final_ranges is None else use_final_ranges
         construction_range_index = (
             1 if self.isaacgym_use_final_domain_rand_ranges else 0
         )
@@ -609,6 +609,10 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
             if progress >= 1.0:
                 self._advance_domain_rand_phase()
 
+        self._update_domain_rand_bounds()
+
+    def _update_domain_rand_bounds(self):
+        """Map phase progress to physical bounds, including the arm payload."""
         p_mass = self.domain_rand_mass_com_progress
         p_dist = self.domain_rand_disturbance_progress
         p_joint = self.domain_rand_joint_dynamics_progress
