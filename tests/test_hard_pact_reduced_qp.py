@@ -158,7 +158,7 @@ def test_mixed_failures_bypass_solver_and_have_zero_gradients():
     d=inputs(5); d["mass_matrix"][1]=0; d["joint_position"][2]=10
     d["previous_torque"][3]=100; d["force_pred_world"][4,0,0]=float("nan")
     d["tau_nom"].requires_grad_();d["wrench_pred_world"].requires_grad_()
-    qp=solver()
+    qp=solver(soft_joint_recovery_enabled=False)
     with mock.patch.object(qp,"_backend_solve",wraps=qp._backend_solve) as call:
         r=qp.solve(**d)
         assert sum(c.args[0].p.shape[0] for c in call.call_args_list)==1
@@ -174,7 +174,7 @@ def test_mixed_failures_bypass_solver_and_have_zero_gradients():
 
 
 def test_exception_and_uncertified_rows_have_no_implicit_vjp():
-    qp=solver(); d=inputs();d["tau_nom"].requires_grad_()
+    qp=solver(soft_joint_recovery_enabled=False); d=inputs();d["tau_nom"].requires_grad_()
     with mock.patch.object(qp,"_backend_solve",side_effect=RuntimeError("forced")):
         r=qp.solve(**d)
     assert r.stage.eq(2).all() and not r.differentiated_mask.any()

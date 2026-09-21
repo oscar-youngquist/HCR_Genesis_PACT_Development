@@ -585,6 +585,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'rollout_duality_gap_abs': 0.001, 
                         'rollout_duality_gap_rel': 0.001, 
                         'rollout_duality_gap_policy': 'report', 
+
                         'ppo_eps_abs': 3e-06, 
                         'ppo_eps_rel': 3e-06, 
                         'ppo_max_iter': 30, 
@@ -592,6 +593,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'ppo_duality_gap_abs': 3e-06, 
                         'ppo_duality_gap_rel': 3e-06, 
                         'ppo_duality_gap_policy': 'require', 
+
                         'qpth_warm_start': True, 
                         'friction_coefficient': 0.6, 
                         'torque_rate_limit_nm_s': 1000.0, 

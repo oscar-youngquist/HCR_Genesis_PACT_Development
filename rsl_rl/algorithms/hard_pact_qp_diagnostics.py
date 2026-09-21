@@ -63,6 +63,85 @@ class QPIterationDiagnostics:
         self.add_sum(key, values.where(finite, 0).sum())
         self.weights[key] = self.weights.get(key, 0) + finite.sum()
 
+    def _candidate_summary(self, key, values, mask):
+        """Coordinate-weighted mean/max and explicit finite denominator."""
+        self.add_values(key + "/mean", values, mask)
+        finite = torch.isfinite(values) & mask
+        self.add_sum(key + "/count", finite.sum())
+        maximum = values.detach().where(finite, -torch.inf).amax()
+        self.extrema[key + "/max"] = torch.maximum(
+            self.extrema.get(key + "/max", maximum), maximum)
+
+    @torch.no_grad()
+    def joint_envelope(self, data, qmin, qmax, vmax, amax, beta):
+        """Original acceleration intervals. Ties: acceleration, velocity, position.
+
+        Each joint has one winning lower/upper family. Pair conflict magnitudes
+        are in rad/s²; pair fractions use all finite joint coordinates, not only
+        conflicting ones. These describe inputs, including pre-solve rejections.
+        """
+        q, v = data["joint_position"].detach(), data["joint_velocity"].detach()
+        dt = data["dt"].detach().reshape(-1, 1)
+        low = torch.stack((-amax.expand_as(q), (-vmax-v)/dt,
+                           (qmin-q-dt*v)/(beta*dt.square())), -1)
+        high = torch.stack((amax.expand_as(q), (vmax-v)/dt,
+                            (qmax-q-dt*v)/(beta*dt.square())), -1)
+        finite = torch.isfinite(low).all(-1) & torch.isfinite(high).all(-1)
+        lower, li = low.max(-1)
+        upper, ui = high.min(-1)
+        conflict = (lower-upper).clamp_min(0)
+        prefix = "model_candidate/joint_envelope"
+        self.add_values(prefix + "/nonfinite_row_fraction", (~finite.all(-1)).float())
+        self.add_values(prefix + "/empty_row_fraction", (conflict>0).any(-1).float(), finite.all(-1))
+        self._candidate_summary(prefix + "/conflict_rad_s2", conflict, finite)
+        families = ("acceleration", "velocity", "position")
+        for i, name in enumerate(families):
+            self.add_values(prefix + "/lower/" + name, (li==i).float(), finite)
+            self.add_values(prefix + "/upper/" + name, (ui==i).float(), finite)
+            for j, other in enumerate(families):
+                pair = (li==i) & (ui==j) & (conflict>0)
+                key = prefix + "/conflict_pair/" + name + "_" + other
+                self.add_values(key + "/fraction", pair.float(), finite)
+                self._candidate_summary(key + "/rad_s2", conflict, finite & pair)
+
+    @torch.no_grad()
+    def joint_candidate(self, stage, data, acceleration, accepted, qmin, qmax, vmax, amax, beta):
+        """Post-actuator-projection model prediction, NOT executed motion.
+
+        Recovery uses original limits, never slack-expanded bounds. Counts use
+        thresholds 1e-5 rad, 1e-4 rad/s, 1e-3 rad/s²; raw magnitudes are retained.
+        Nonfinite rows are excluded in full, with separate counts. Empty groups
+        have count zero and NaN means/maxima. No per-environment iteration.
+        """
+        q, v = data["joint_position"].detach(), data["joint_velocity"].detach()
+        a = acceleration.detach()[:, 6:]
+        dt = data["dt"].detach().reshape(-1, 1)
+        qnext, vnext = q + dt*v + beta*dt.square()*a, v + dt*a
+        finite = torch.isfinite(torch.cat((qnext, vnext, a), -1)).all(-1)
+        lo = torch.maximum(-amax, torch.maximum((-vmax-v)/dt, (qmin-q-dt*v)/(beta*dt.square())))
+        hi = torch.minimum(amax, torch.minimum((vmax-v)/dt, (qmax-q-dt*v)/(beta*dt.square())))
+        empty = (lo>hi).any(-1)
+        for status, selected in (("accepted", accepted), ("rejected", ~accepted)):
+            prefix = f"model_candidate/{stage}/{status}"
+            self.add_sum(prefix + "/rows", selected.sum())
+            self.add_sum(prefix + "/finite_rows", (selected & finite).sum())
+            self.add_sum(prefix + "/nonfinite_rows", (selected & ~finite).sum())
+            self.add_values(prefix + "/nonfinite_fraction", (~finite).float(), selected)
+            self.add_values(prefix + "/empty_envelope_fraction", empty.float(), selected & finite)
+            self.add_values(prefix + "/nonempty_envelope_fraction", (~empty).float(), selected & finite)
+            for name, excess, threshold in (
+                ("position_rad", torch.maximum(qmin-qnext, qnext-qmax).clamp_min(0), 1e-5),
+                ("velocity_rad_s", (vnext.abs()-vmax).clamp_min(0), 1e-4),
+                ("acceleration_rad_s2", (a.abs()-amax).clamp_min(0), 1e-3)):
+                key = prefix + "/" + name
+                mask = (selected & finite)[:, None]
+                self._candidate_summary(key, excess, mask)
+                self.add_values(key + "/coordinate_fraction", (excess>threshold).float(), mask)
+                self.add_values(key + "/any_joint_fraction", (excess>threshold).any(-1).float(), mask[:,0])
+                for joint in range(12):
+                    self._candidate_summary(key + f"/joint_{joint}", excess[:,joint], mask[:,0])
+                    self.add_values(key + f"/joint_{joint}/fraction", (excess[:,joint]>threshold).float(), mask[:,0])
+
     def add_result(self, result, differentiable):
         stage, diag = result.stage, result.diagnostics
         self.add_sum("real_rows", stage.new_tensor(stage.numel()))
@@ -158,8 +237,22 @@ class QPIterationDiagnostics:
             /(attempted-exceptions).clamp_min(1))
         for key, weight in self.weights.items():
             result[key] = torch.where(weight > 0, self.sums[key] / weight.clamp_min(1), zero + float("nan"))
+            if key.startswith("model_candidate/"):
+                result[key + "/samples"] = weight
         for key, value in self.extrema.items():
             result[key] = torch.where(torch.isfinite(value), value, zero + float("nan"))
+        if "model_candidate/joint_envelope/empty_row_fraction" in self.weights:
+            # Pre-solve rejection/exception has no candidate. Do not invent a
+            # zero violation: expose zero denominator and unavailable values.
+            for stage in ("primary", "recovery"):
+                for status in ("accepted", "rejected"):
+                    prefix = f"model_candidate/{stage}/{status}"
+                    for name in ("rows", "finite_rows", "nonfinite_rows"):
+                        result.setdefault(prefix + "/" + name, zero)
+                    for family in ("position_rad", "velocity_rad_s", "acceleration_rad_s2"):
+                        for suffix in ("mean", "max", "coordinate_fraction", "any_joint_fraction"):
+                            result.setdefault(prefix + "/" + family + "/" + suffix, zero + float("nan"))
+                        result.setdefault(prefix + "/" + family + "/count", zero)
         for name in ("nonfinite_input", "empty_torque_intersection", "empty_qdd_intersection", "mechanics"):
             result[f"failure/{name}_fraction"] = self.sums.get(f"failure/{name}_count", zero) / rows.clamp_min(1)
         intervals = self.sums.get("environment_control_intervals", zero)

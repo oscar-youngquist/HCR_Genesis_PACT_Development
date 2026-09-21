@@ -750,6 +750,15 @@ class HardPACTDifferentiableQP:
         return finite & (er<=tolerance) & (ir<=tolerance), er, ir
 
     @torch.no_grad()
+    def _joint_candidate_diagnostics(self, stage, m, x, data, accepted):
+        aggregate = self.iteration_diagnostics[self._diagnostics_phase]
+        _, qmin, qmax, vmax = self._limits(x)
+        amax = x.new_tensor(self.cfg.joint_acceleration_limits_rad_s2)
+        acceleration = (m.acceleration_map @ x[..., None]).squeeze(-1) + m.acceleration_offset
+        aggregate.joint_candidate(stage, data, acceleration, accepted, qmin, qmax,
+                                  vmax, amax, self.cfg.position_integration_coefficient)
+
+    @torch.no_grad()
     def _physical_diagnostics(self, m, x, data):
         """Physical-unit checks remain separate from normalized acceptance."""
         residual = (m.physical_G @ x[...,None]).squeeze(-1)-m.physical_h
@@ -946,6 +955,12 @@ class HardPACTDifferentiableQP:
             finite = torch.stack([torch.isfinite(t).flatten(1).all(-1)
                                   for t in (m.Q,m.p,m.G,m.h,m.A,m.b)]).all(0)
             empty_a = (m.qdd_lower>m.qdd_upper).any(-1)
+            if self._physical_enabled():
+                _, qmin, qmax, vmax = self._limits(ref)
+                self.iteration_diagnostics[self._diagnostics_phase].joint_envelope(
+                    part, qmin, qmax, vmax,
+                    ref.new_tensor(self.cfg.joint_acceleration_limits_rad_s2),
+                    self.cfg.position_integration_coefficient)
             diag["failure/empty_qdd_intersection"][rows] = empty_a
             diag["failure/mechanics"][rows] = ~m.mechanics_valid
             local = (finite & m.mechanics_valid & ~empty_a).nonzero(as_tuple=True)[0]
@@ -994,6 +1009,8 @@ class HardPACTDifferentiableQP:
             diag["selected/equality_max"][rows],diag["selected/inequality_max"][rows]=er,ir
             if self._physical_enabled():
                 physical = self._physical_diagnostics(m,x,{k:v.index_select(0,local) for k,v in part.items()})
+                self._joint_candidate_diagnostics("primary", m, x,
+                    {k:v.index_select(0,local) for k,v in part.items()}, accepted)
                 for key,value in physical.items():
                     name="physical/"+key
                     if name not in diag: diag[name]=ref.new_full((n,),float("nan"))
@@ -1067,6 +1084,9 @@ class HardPACTDifferentiableQP:
                             accepted &= (torch.isfinite(gap)&torch.isfinite(rel)&
                                 ((gap<=recovery_profile["gap_abs"])|(rel<=recovery_profile["gap_rel"]))) if gap is not None and rel is not None else False
                         soft_ok[rows] = accepted
+                        if self._physical_enabled():
+                            self._joint_candidate_diagnostics("recovery", m, x,
+                                {k:v[rows] for k,v in values.items()}, accepted)
                         x = _CertifiedRows.apply(torch.nan_to_num(x,nan=0.,posinf=0.,neginf=0.),accepted)
                         recovered = recovered.index_copy(0,rows,torch.where(accepted[:,None],x[:,:24],recovered[rows]))
                         recovery_slack = recovery_slack.index_copy(0,rows,torch.where(accepted[:,None],x[:,24:],torch.zeros_like(x[:,24:])))
