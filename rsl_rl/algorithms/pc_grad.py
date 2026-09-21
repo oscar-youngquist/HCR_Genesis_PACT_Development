@@ -48,24 +48,12 @@ class PCGrad:
             objectives, self._project_conflicting_pinn, record_diagnostics
         )
 
-<<<<<<< HEAD
-        grads, shapes, has_grads, has_any_grad = self._pack_grad(objectives)
-        pc_grad = self._project_conflicting(grads, has_grads)
-        pc_grad = self._unflatten_grad(pc_grad, shapes[0])
-        self._set_grad(pc_grad, has_any_grad)
-        return
-    
-    def pc_backward_pinn(self, objectives):
-        '''
-        calculate the gradient of the parameters
-=======
     def pc_backward_ppgrad(self, objectives, *, record_diagnostics=True):
         """Apply the norm-balanced form of B1Z1's PINN projection."""
         self._backward(
             objectives, self._project_conflicting_pinn_balanced,
             record_diagnostics,
         )
->>>>>>> aligned_iclr_2027_qp_pinn
 
     def _backward(self, objectives, projector, record_diagnostics):
         if not objectives:
@@ -81,27 +69,6 @@ class PCGrad:
             self.last_has_grads = None
         self._set_grad(self._unflatten_grad(merged, shapes[0]), has_any_grad)
 
-<<<<<<< HEAD
-        grads, shapes, has_grads, has_any_grad = self._pack_grad(objectives)
-        pc_grad = self._project_conflicting_pinn(grads, has_grads)
-        pc_grad = self._unflatten_grad(pc_grad, shapes[0])
-        self._set_grad(pc_grad, has_any_grad)
-        return
-    
-    def pc_backward_ppgrad(self, objectives):
-        '''
-        calculate the gradient of the parameters
-
-        input:
-        - objectives: a list of objectives
-        '''
-
-        grads, shapes, has_grads, has_any_grad = self._pack_grad(objectives)
-        pc_grad = self._project_conflicting_pinn_balanced(grads, has_grads)
-        pc_grad = self._unflatten_grad(pc_grad, shapes[0])
-        self._set_grad(pc_grad, has_any_grad)
-        return
-=======
     def _merge(self, projected, shared):
         merged = torch.zeros_like(projected[0])
         shared_values = torch.stack([gradient[shared] for gradient in projected])
@@ -115,7 +82,6 @@ class PCGrad:
             [gradient[~shared] for gradient in projected]
         ).sum(dim=0)
         return merged
->>>>>>> aligned_iclr_2027_qp_pinn
 
     def _project_conflicting(self, grads, has_grads, shapes=None):
         shared = torch.stack(has_grads).prod(0).bool()
@@ -162,50 +128,12 @@ class PCGrad:
         self.last_merged_grad = merged_grad.detach().clone()
         self.last_has_grads = tuple(mask.detach().clone() for mask in has_grads)
 
-<<<<<<< HEAD
-        proj_coeff = torch.dot(g_R, g_P) / (g_R.norm() ** 2)
-
-        g_P_orth = (g_P - proj_coeff * g_R)   # orthogonal component of the PINN loss gradient
-
-        # Adaptive \beta scaling to ensure the norm of projected PINN gradient
-        #     is not greater than the norm of the task reward gradient
-        beta = g_R.norm() / g_P_orth.norm() if g_P_orth.norm() > g_R.norm() else 1.0
-        g_P_scaled = beta * g_P_orth
-
-        pp_grad = [grads[0], g_P_scaled]   # Modified and scaled PINN loss gradient
-
-        merged_grad = torch.zeros_like(grads[0]).to(grads[0].device)
-
-        if self._reduction:
-            merged_grad[shared] = torch.stack([g[shared] for g in pp_grad]).mean(dim=0)
-        elif self._reduction == "sum":
-            merged_grad[shared] = torch.stack([g[shared] for g in pp_grad]).sum(dim=0)
-        else:
-            exit("invalid reduction method")
-
-        merged_grad[~shared] = torch.stack([g[~shared] for g in pp_grad]).sum(dim=0)
-        return merged_grad
-
-    def _set_grad(self, grads, has_any_grad):
-        '''
-        set the modified gradients to the network
-        '''
-
-        idx = 0
-        for group in self._optim.param_groups:
-            for p in group['params']:
-                # if p.grad is None: continue
-                p.grad = grads[idx] if has_any_grad[idx] else None
-                idx += 1
-        return
-=======
     def _set_grad(self, grads, has_any_grad):
         index = 0
         for group in self._optim.param_groups:
             for parameter in group["params"]:
                 parameter.grad = grads[index] if has_any_grad[index] else None
                 index += 1
->>>>>>> aligned_iclr_2027_qp_pinn
 
     # def _pack_grad(self, objectives):
     #     '''
@@ -228,27 +156,6 @@ class PCGrad:
     #     return grads, shapes, has_grads
 
     def _pack_grad(self, objectives):
-<<<<<<< HEAD
-        '''
-        pack the gradient of the parameters of the network for each objective
-        
-        output:
-        - grad: a list of the gradient of the parameters
-        - shape: a list of the shape of the parameters
-        - has_grad: a list of mask represent whether the parameter has gradient
-        '''
-
-        grads, shapes, has_grads, param_masks = [], [], [], []
-        for obj in objectives:
-            self._optim.zero_grad(set_to_none=True)
-            obj.backward(retain_graph=True)
-            grad, shape, has_grad, param_has_grad = self._retrieve_grad()
-            param_masks.append(param_has_grad)
-            grads.append(self._flatten_grad(grad, shape))
-            has_grads.append(self._flatten_grad(has_grad, shape))
-            shapes.append(shape)
-        has_any_grad = [any(flags) for flags in zip(*param_masks)]
-=======
         grads, shapes, has_grads, parameter_masks = [], [], [], []
         for objective in objectives:
             self._optim.zero_grad(set_to_none=True)
@@ -265,7 +172,6 @@ class PCGrad:
             has_grads.append(self._flatten_grad(has_grad))
             parameter_masks.append(parameter_has_grad)
         has_any_grad = [any(flags) for flags in zip(*parameter_masks)]
->>>>>>> aligned_iclr_2027_qp_pinn
         return grads, shapes, has_grads, has_any_grad
 
     @staticmethod
@@ -282,51 +188,6 @@ class PCGrad:
     def _flatten_grad(grads):
         return torch.cat([gradient.flatten() for gradient in grads])
 
-<<<<<<< HEAD
-    # def _retrieve_grad(self):
-    #     '''
-    #     get the gradient of the parameters of the network with specific 
-    #     objective
-        
-    #     output:
-    #     - grad: a list of the gradient of the parameters
-    #     - shape: a list of the shape of the parameters
-    #     - has_grad: a list of mask represent whether the parameter has gradient
-    #     '''
-
-    #     grad, shape, has_grad, = [], [], []
-    #     for group in self._optim.param_groups:
-    #         for p in group['params']:
-    #             # if p.grad is None: continue
-    #             # tackle the multi-head scenario
-    #             if p.grad is None:
-    #                 shape.append(p.shape)
-    #                 grad.append(torch.zeros_like(p).to(p.device))
-    #                 has_grad.append(torch.zeros_like(p).to(p.device))
-    #                 continue
-    #             shape.append(p.grad.shape)
-    #             grad.append(p.grad.clone())
-    #             has_grad.append(torch.ones_like(p).to(p.device))
-    #     return grad, shape, has_grad
-
-    def _retrieve_grad(self):
-        grad, shape, has_grad, param_has_grad = [], [], [], []
-
-        for group in self._optim.param_groups:
-            for p in group["params"]:
-                active = p.grad is not None
-                param_has_grad.append(active)
-
-                shape.append(p.shape)
-                if active:
-                    grad.append(p.grad.detach().clone())
-                    has_grad.append(torch.ones_like(p))
-                else:
-                    grad.append(torch.zeros_like(p))
-                    has_grad.append(torch.zeros_like(p))
-
-        return grad, shape, has_grad, param_has_grad
-=======
     def _retrieve_grad(self):
         grads, shapes, has_grads, parameter_has_grad = [], [], [], []
         for group in self._optim.param_groups:
@@ -341,4 +202,3 @@ class PCGrad:
                     grads.append(torch.zeros_like(parameter))
                     has_grads.append(torch.zeros_like(parameter))
         return grads, shapes, has_grads, parameter_has_grad
->>>>>>> aligned_iclr_2027_qp_pinn

@@ -41,11 +41,7 @@ from .ppo_kite import PPO_KITE
 from .ppo_postau import PPO_PosTau
 from .ppo_rl2ac import PPO_RL2AC
 from .ppo_abl1 import PPO_ABL1
-<<<<<<< HEAD
 from .ppo_abl3 import PPO_ABL3 
 from .ppo_unifp import PPO_UniFP
 from .ppo_b1z1_pact import PPO_B1Z1PACT
 from .ppo_b1z1_pact_pos import PPO_B1Z1PACTPos
-=======
-from .ppo_abl3 import PPO_ABL3
->>>>>>> aligned_iclr_2027_qp_pinn

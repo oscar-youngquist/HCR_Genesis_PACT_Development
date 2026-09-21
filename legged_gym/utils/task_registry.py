@@ -113,11 +113,9 @@ class TaskRegistry():
         _, train_cfg = update_cfg_from_args(None, train_cfg, args)
 
         if log_root=="default":
-<<<<<<< HEAD
-            log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', 'b1z1', train_cfg.runner.experiment_name)
-=======
-            log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', 'hardpact_iclr', train_cfg.runner.experiment_name)
->>>>>>> aligned_iclr_2027_qp_pinn
+            # Preserve each project's existing default log namespace.
+            log_group = "hardpact_iclr" if "hard_pact" in (name or "") else "b1z1"
+            log_root = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", log_group, train_cfg.runner.experiment_name)
             # log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
             log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
         elif log_root is None:

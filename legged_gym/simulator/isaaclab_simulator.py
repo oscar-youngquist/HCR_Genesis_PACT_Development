@@ -169,18 +169,7 @@ class IsaacLabSimulator(Simulator):
         return launcher_args
 
     def _create_sim(self):
-<<<<<<< HEAD
         self._app_launcher = AppLauncher(self._lab_launcher_args())
-=======
-        launcher_args = {"headless": self._headless, "device": self._device}
-        if bool(getattr(self._cfg.sim, "suppress_backend_warnings", False)):
-            # Keep errors visible while preventing repeated per-clone USD and
-            # asset-import warnings from flooding long HardPACT runs.
-            launcher_args["kit_args"] = (
-                "--/log/level=error --/log/outputStreamLevel=error"
-            )
-        self._app_launcher = AppLauncher(launcher_args)
->>>>>>> aligned_iclr_2027_qp_pinn
         
         import isaaclab.sim as sim_utils
         from isaacsim.core.utils.stage import get_current_stage

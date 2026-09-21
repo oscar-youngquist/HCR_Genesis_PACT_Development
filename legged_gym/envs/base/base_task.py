@@ -73,15 +73,6 @@ class BaseTask():
             from legged_gym.simulator import IsaacGymSimulator
             self.simulator = IsaacGymSimulator(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "isaaclab":
-<<<<<<< HEAD
-            self.simulator = IsaacLabSimulator(cfg, sim_params, sim_device, self.headless)
-        elif SIMULATOR == "isaaclab_b1z1_unifp":
-            self.simulator = IsaacLabSimulatorB1Z1UniFP(cfg, sim_params, sim_device, self.headless)
-        elif SIMULATOR == "isaaclab_b1z1_pact":
-            self.simulator = IsaacLabSimulatorB1Z1PACT(cfg, sim_params, sim_device, self.headless)
-        elif SIMULATOR == "isaaclab_b1z1_pact_pos":
-            self.simulator = IsaacLabSimulatorB1Z1PACTPos(cfg, sim_params, sim_device, self.headless)
-=======
             if getattr(cfg.sim, "use_pact_adapter", False):
                 from legged_gym.simulator import IsaacLabSimulator_PACT
                 simulator_cls = IsaacLabSimulator_PACT
@@ -91,7 +82,12 @@ class BaseTask():
             self.simulator = simulator_cls(
                 cfg, sim_params, sim_device, self.headless
             )
->>>>>>> aligned_iclr_2027_qp_pinn
+        elif SIMULATOR == "isaaclab_b1z1_unifp":
+            self.simulator = IsaacLabSimulatorB1Z1UniFP(cfg, sim_params, sim_device, self.headless)
+        elif SIMULATOR == "isaaclab_b1z1_pact":
+            self.simulator = IsaacLabSimulatorB1Z1PACT(cfg, sim_params, sim_device, self.headless)
+        elif SIMULATOR == "isaaclab_b1z1_pact_pos":
+            self.simulator = IsaacLabSimulatorB1Z1PACTPos(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "genesis_pact":
             from legged_gym.simulator import GenesisSimulator_PACT
             self.simulator = GenesisSimulator_PACT(cfg, sim_params, sim_device, self.headless)

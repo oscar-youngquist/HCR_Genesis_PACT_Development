@@ -159,11 +159,6 @@ class OnPolicyRunnerPACT:
         # print(actor_critic)
         # print(decoder)
 
-<<<<<<< HEAD
-        print("Created Actor-Critic Model")
-        pretty_print_module(actor_critic)
-        pretty_print_module(decoder)
-=======
         self.console_debug = bool(self.cfg.get("console_debug", False))
         self.console_iteration = bool(self.cfg.get("console_iteration", True))
         self.console_model_summary = bool(
@@ -185,7 +180,6 @@ class OnPolicyRunnerPACT:
             print("Created Parallel Actor-Critic Model")
             pretty_print_module(actor_critic)
             pretty_print_module(decoder)
->>>>>>> aligned_iclr_2027_qp_pinn
 
         self._init_entropy_coef = self.alg_cfg["entropy_coef"]
         self.use_adaptive_entropy = self.alg_cfg["use_adaptive_entropy"]

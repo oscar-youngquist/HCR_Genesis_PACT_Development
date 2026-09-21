@@ -1,13 +1,8 @@
-<<<<<<< HEAD
 from .whole_body_dynamics import WholeBodyDynamicsBackend
 from .pinocchio_whole_body_dynamics import PinocchioWholeBodyDynamics
 from .bard_b1z1_dynamics import BardB1Z1DynamicsBackend
 from .b1z1_parallel_pino_workers import B1Z1PinocchioAsync
 
-__all__ = [
-    "WholeBodyDynamicsBackend", "PinocchioWholeBodyDynamics",
-    "BardB1Z1DynamicsBackend", "B1Z1PinocchioAsync",
-=======
 """Differentiable dynamics adapters used by HardPACT."""
 
 from .bard_go2_dynamics import (
@@ -39,6 +34,8 @@ def create_go2_dynamics(backend, *args, **kwargs):
     return implementation(*args, **kwargs)
 
 __all__ = [
+    "WholeBodyDynamicsBackend", "PinocchioWholeBodyDynamics",
+    "BardB1Z1DynamicsBackend", "B1Z1PinocchioAsync",
     "BARD_FOOT_ORDER",
     "BARD_JOINT_ORDER",
     "SIMULATOR_FOOT_ORDER",
@@ -52,5 +49,4 @@ __all__ = [
     "wrench_at_point",
     "PinocchioGo2Dynamics",
     "create_go2_dynamics",
->>>>>>> aligned_iclr_2027_qp_pinn
 ]

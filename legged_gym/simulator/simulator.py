@@ -19,7 +19,6 @@ class Simulator(ABC):
         self._create_envs()
         self._init_buffers()
 
-<<<<<<< HEAD
     def _configure_grf_processing(self):
         """Configure the shared foot-GRF conditioning pipeline.
 
@@ -85,7 +84,7 @@ class Simulator(ABC):
         self._grfs_clipped_buf[env_ids] = 0.0
         self._grfs_smoothed_buf[env_ids] = 0.0
         self._grfs_buf[env_ids] = 0.0
-=======
+
     # ------------------------------------------------------------------
     # HardPACT canonical backend boundary
     # ------------------------------------------------------------------
@@ -150,7 +149,6 @@ class Simulator(ABC):
             "supports_domain_rand_curriculum": False,
             "features": {},
         }
->>>>>>> aligned_iclr_2027_qp_pinn
 
     #----- Public methods -----#
     @abstractmethod
