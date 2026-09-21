@@ -36,6 +36,7 @@ from .actor_critic_cts import ActorCriticCTS
 from .actor_critic_dreamwaq import ActorCriticDreamWaQ
 from .actor_critic_pact import ContextDecoder, ActorCritic_PACT
 from .actor_critic_pact_pos import ActorCritic_PACT_Pos
+<<<<<<< HEAD
 from .actor_critic_kite import (
     ActorCritic_KITE,
     KITEActorAsyncPipeline,
@@ -44,6 +45,11 @@ from .actor_critic_kite import (
     export_kite_async_deployment_pipelines,
     script_kite_async_deployment_pipelines,
 )
+=======
+from .actor_critic_hard_pact import ActorCritic_HardPACT
+from .actor_critic_hard_pact_pos import ActorCritic_HardPACT_Pos
+from .actor_critic_kite import ActorCritic_KITE, ContextDecoderKITE
+>>>>>>> aligned_iclr_2027_qp_pinn
 from .actor_critic_pact_pos import ActorCritic_PACT_Pos
 from .actor_critic_postau import ActorCritic_PosTau
 from .actor_critic_rl2ac import ActorCritic_RL2AC

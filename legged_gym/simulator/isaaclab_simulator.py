@@ -169,7 +169,18 @@ class IsaacLabSimulator(Simulator):
         return launcher_args
 
     def _create_sim(self):
+<<<<<<< HEAD
         self._app_launcher = AppLauncher(self._lab_launcher_args())
+=======
+        launcher_args = {"headless": self._headless, "device": self._device}
+        if bool(getattr(self._cfg.sim, "suppress_backend_warnings", False)):
+            # Keep errors visible while preventing repeated per-clone USD and
+            # asset-import warnings from flooding long HardPACT runs.
+            launcher_args["kit_args"] = (
+                "--/log/level=error --/log/outputStreamLevel=error"
+            )
+        self._app_launcher = AppLauncher(launcher_args)
+>>>>>>> aligned_iclr_2027_qp_pinn
         
         import isaaclab.sim as sim_utils
         from isaacsim.core.utils.stage import get_current_stage
@@ -306,8 +317,8 @@ class IsaacLabSimulator(Simulator):
         # Add contact sensors
         contact_sensor_cfg = ContactSensorCfg(
             prim_path="/World/envs/env_.*/" + self._cfg.asset.name + "/.*", # track all links of the robot, but only the ones specified in cfg will be used for termination and penalty
-            update_period=self._control_dt,                      # update every control step
-            history_length=1,                       # keep contact history of last 2 steps
+            update_period=self._contact_sensor_update_period(),
+            history_length=self._contact_sensor_history_length(),
             debug_vis=not self._headless,           # visualize contact points if not headless
         )
         
@@ -335,14 +346,17 @@ class IsaacLabSimulator(Simulator):
         # print info after reset the simulation, to make sure the sensors are initialized
         # links in contact sensors have different order from the body names in the robot articulation, 
         # so we need to print them to make sure we get the correct indices for termination and penalty
-        print(f"Created contact sensors: {self._contact_sensors}")
+        console_debug = bool(getattr(self._cfg.sim, "console_debug", True))
+        if console_debug:
+            print(f"Created contact sensors: {self._contact_sensors}")
         
         self._get_env_origins()
         
         self._dof_names = self._robot.joint_names
         # find the indices (in the robot's joint list) of joints specified in self._cfg.asset.dof_names
         self._dof_indices = [self._dof_names.index(name) for name in self._cfg.asset.dof_names]
-        print(f"dof indices: {self._dof_indices}")
+        if console_debug:
+            print(f"dof indices: {self._dof_indices}")
         self._num_dof = len(self._dof_names)
         self._num_bodies = len(self._robot.body_names)
         
@@ -385,18 +399,20 @@ class IsaacLabSimulator(Simulator):
 
         self._termination_contact_indices = find_link_contact_indices(
             self._cfg.asset.terminate_after_contacts_on)
-        print(f"All link names: {self._robot.body_names}")
-        print(f"Termination contact link indices: {self._termination_contact_indices}")
+        if console_debug:
+            print(f"All link names: {self._robot.body_names}")
+            print(f"Termination contact link indices: {self._termination_contact_indices}")
         self._penalized_contact_indices = find_link_contact_indices(
             self._cfg.asset.penalize_contacts_on)
-        print(f"Penalized contact link indices: {self._penalized_contact_indices}")
-        self._feet_names = [
-            link for link in self._robot.body_names if self._cfg.asset.foot_name in link
-        ]
+        if console_debug:
+            print(f"Penalized contact link indices: {self._penalized_contact_indices}")
+        self._feet_names = self._resolve_feet_names()
         # the order of bodies in contact sensors is different from the order of bodies in the robot articulation, so we need to find indices separately
-        self._feet_contact_indices = find_link_contact_indices(self._feet_names)
-        self._feet_indices = find_link_indices(self._feet_names)
-        print(f"feet names: {self._feet_names}")
+        self._feet_contact_indices, self._feet_indices = self._resolve_feet_indices(
+            find_link_contact_indices, find_link_indices
+        )
+        if console_debug:
+            print(f"feet names: {self._feet_names}")
         assert len(self._feet_indices) > 0
         # get base link index in the robot articulation
         self._base_link_index = self._robot.body_names.index(self._cfg.asset.base_link_name)
@@ -428,6 +444,24 @@ class IsaacLabSimulator(Simulator):
         # randomize pd gain
         if self._cfg.domain_rand.randomize_pd_gain:
             self._randomize_pd_gain(torch.arange(self._num_envs))
+
+    def _contact_sensor_update_period(self):
+        return self._control_dt
+
+    def _contact_sensor_history_length(self):
+        return 1
+
+    def _resolve_feet_names(self):
+        return [
+            link for link in self._robot.body_names
+            if self._cfg.asset.foot_name in link
+        ]
+
+    def _resolve_feet_indices(self, find_contact_indices, find_body_indices):
+        return (
+            find_contact_indices(self._feet_names),
+            find_body_indices(self._feet_names),
+        )
     
     def _init_buffers(self):
         self._base_pos = torch.zeros_like(self._robot.data.root_link_pos_w)
@@ -660,7 +694,7 @@ class IsaacLabSimulator(Simulator):
             torques = actions_scaled
         else:
             raise NameError(f"Unknown controller type: {control_type}")
-        
+
         self._robot.set_joint_effort_target(
                 torch.clip(torques, -self.torque_limits, self.torque_limits),
                 self._dof_indices
@@ -797,7 +831,7 @@ class IsaacLabSimulator(Simulator):
         damping = damping.repeat(1, self._num_actions)
         # refer to https://isaac-sim.github.io/IsaacLab/main/source/api/lab/isaaclab.assets.html#isaaclab.assets.Articulation.write_joint_damping_to_sim
         self._robot.write_joint_damping_to_sim(damping, self._dof_indices, env_ids)
-        
+
     def _randomize_pd_gain(self, env_ids):
         self._kp_scale[env_ids] = torch_rand_float(
                 self._cfg.domain_rand.kp_range[0], self._cfg.domain_rand.kp_range[1], (len(env_ids), self._num_actions), device=self._device)
@@ -879,7 +913,7 @@ class IsaacLabSimulator(Simulator):
             Tensor ((num_dof, 2)): DOF position limits of the robot.
         """
         return self._robot.data.soft_joint_pos_limits[0, self._dof_indices, :]
-    
+
     @property
     def dof_vel_limits(self):
         """Returns the DOF velocity limits of the robot.
@@ -934,7 +968,7 @@ class IsaacLabSimulator(Simulator):
         """
         # return self._contact_sensors.data.force_matrix_w.sum(dim=-2)
         return self._contact_sensors.data.net_forces_w
-    
+
     @property
     def torques(self):
         """Returns the torques applied to the robot's joints.

@@ -19,6 +19,37 @@ if SIMULATOR == "genesis":
 
 """ ********** Genesis Simulator ********** """
 class GenesisSimulator_PACT_Pos(Simulator):
+    # Match Genesis PACT's canonical HardPACT adapter for position pretraining.
+    def hard_pact_joint_state(self):
+        return (
+            self._robot.get_dofs_position(self._dof_indices),
+            self._robot.get_dofs_velocity(self._dof_indices),
+        )
+
+    def hard_pact_base_quat_xyzw(self):
+        return self._robot.get_quat()[:, (1, 2, 3, 0)]
+
+    def hard_pact_configuration(self):
+        q, _ = self.hard_pact_joint_state()
+        return torch.cat((self._robot.get_pos(), self.hard_pact_base_quat_xyzw(), q), -1)
+
+    def hard_pact_velocity_world(self):
+        _, qd = self.hard_pact_joint_state()
+        return torch.cat((self._robot.get_vel(), self._robot.get_ang(), qd), -1)
+
+    def hard_pact_foot_forces_world(self):
+        return self._robot.get_links_net_contact_force()[:, self._feet_indices, :]
+
+    def hard_pact_apply_base_wrench_world(self, wrench):
+        base = torch.as_tensor([self._base_link_index], device=self._device)
+        self._robot._solver.apply_links_external_force(
+            force=wrench[:, :3].unsqueeze(1), links_idx=base,
+            envs_idx=None, ref="link_com", local=False,
+        )
+        self._robot._solver.apply_links_external_torque(
+            torque=wrench[:, 3:].unsqueeze(1), links_idx=base,
+            envs_idx=None, ref="link_com", local=False,
+        )
     def __init__(self, cfg, sim_params: dict, device, headless):
         self._sim_params = sim_params
         super().__init__(cfg, sim_params, device, headless)
@@ -49,6 +80,12 @@ class GenesisSimulator_PACT_Pos(Simulator):
 
         for _ in range(self._cfg.control.decimation):
             self._torques = self._compute_torques(actions)
+
+            hard_pact_pre_callback = getattr(
+                self, "_hard_pact_pre_physics_substep", None
+            )
+            if hard_pact_pre_callback is not None:
+                hard_pact_pre_callback()
             
             self._robot.control_dofs_force(
                 self._torques, self._dof_indices)
@@ -59,6 +96,11 @@ class GenesisSimulator_PACT_Pos(Simulator):
                 self._dof_indices)
             self._dof_vel[:] = self._robot.get_dofs_velocity(
                 self._dof_indices)
+            grf_callback = getattr(
+                self, "_hard_pact_grf_post_physics_substep", None
+            )
+            if grf_callback is not None:
+                grf_callback()
 
     def _get_pinn_wb_dynamics(self):
         #           total GT forces  ,  generalized mass mat, bias vector
@@ -297,8 +339,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
         # Apply angular wrench
         if num_wrench_reset > 0:
             ang_push = torch_rand_float(
-                -self.wrench_value,
-                self.wrench_value,
+                -self.angular_push_value,
+                self.angular_push_value,
                 (num_wrench_reset, 3),
                 self._device,
             )
@@ -417,7 +459,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
         
     #     elif num_iters <= self.push_warmup_step:
     #         print("Push Value: ", self.push_value)
-    #         print("Wrench Value: ", self.wrench_value)
+    #         print("Angular Push Value: ", self.angular_push_value)
     #         print("Vertical Push Value: ", self.vert_value)
     #         print("Mass Max Value: ", self.mass_max_value)
     #         print("COM Delta X Value: ", self.com_delta_x_value)
@@ -433,7 +475,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
     #     # Safety catch, hopefully isn't needed really
     #     if adjusted_step == 0:
     #         print("Push Value: ", self.push_value)
-    #         print("Wrench Value: ", self.wrench_value)
+    #         print("Angular Push Value: ", self.angular_push_value)
     #         print("Vertical Push Value: ", self.vert_value)
     #         print("Mass Max Value: ", self.mass_max_value)
     #         print("COM Delta X Value: ", self.com_delta_x_value)
@@ -445,7 +487,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
     #         return
 
     #     self.push_value      = (adjusted_step / self.num_push_steps) * self.push_diff + self.push_bounds[0]
-    #     self.wrench_value    = (adjusted_step / self.num_push_steps) * self.wrench_diff + self.wrench_bounds[0]
+    #     self.angular_push_value = (adjusted_step / self.num_push_steps) * self.angular_push_diff + self.angular_push_bounds[0]
     #     self.vert_value      = (adjusted_step / self.num_push_steps) * self.vert_diff + self.vert_bounds[0]
     #     self.mass_max_value  = (adjusted_step / self.num_push_steps) * self.mass_bounds_diff + self.max_mass_bounds[0]
     #     self.com_delta_x_value = (adjusted_step / self.num_push_steps) * self.com_delta_x_diff + self.com_delta_x_bounds[0]
@@ -464,7 +506,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
     #     # self._torque_limits   = (adjusted_step / self.num_push_steps) * self.torque_limits_diff  + self.torque_limits_lower
 
     #     print("Push Value: ", self.push_value)
-    #     print("Wrench Value: ", self.wrench_value)
+    #     print("Angular Push Value: ", self.angular_push_value)
     #     print("Vertical Push Value: ", self.vert_value)
     #     print("Mass Max Value: ", self.mass_max_value)
     #     print("COM Delta X Value: ", self.com_delta_x_value)
@@ -481,7 +523,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
         print("Mass/COM Progress: ", self.domain_rand_mass_com_progress)
         print("Disturbance Progress: ", self.domain_rand_disturbance_progress)
         print("Push Value: ", self.push_value)
-        print("Wrench Value: ", self.wrench_value)
+        print("Angular Push Value: ", self.angular_push_value)
         print("Vertical Push Value: ", self.vert_value)
         print("Mass Max Value: ", self.mass_max_value)
         print("COM Delta X Value: ", self.com_delta_x_value)
@@ -628,8 +670,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
         self.push_value = _interp(
             p_dist, self.push_bounds[0], self.push_diff
         )
-        self.wrench_value = _interp(
-            p_dist, self.wrench_bounds[0], self.wrench_diff
+        self.angular_push_value = _interp(
+            p_dist, self.angular_push_bounds[0], self.angular_push_diff
         )
         self.vert_value = _interp(
             p_dist, self.vert_bounds[0], self.vert_diff
@@ -708,10 +750,12 @@ class GenesisSimulator_PACT_Pos(Simulator):
         self.vert_diff = self.vert_bounds[1] - self.vert_bounds[0]
         self.vert_value = self.vert_bounds[0]
         
-        self.wrench_bounds = [self._cfg.domain_rand.min_push_torque,
-                              self._cfg.domain_rand.max_push_torque]
-        self.wrench_diff = self.wrench_bounds[1] - self.wrench_bounds[0]
-        self.wrench_value = self.wrench_bounds[0]
+        self.angular_push_bounds = [self._cfg.domain_rand.min_push_torque,
+                                    self._cfg.domain_rand.max_push_torque]
+        self.angular_push_diff = (
+            self.angular_push_bounds[1] - self.angular_push_bounds[0]
+        )
+        self.angular_push_value = self.angular_push_bounds[0]
 
         self.max_mass_bounds = [self._cfg.domain_rand.min_added_mass_max,
                                 self._cfg.domain_rand.max_added_mass_max]
@@ -1235,6 +1279,8 @@ class GenesisSimulator_PACT_Pos(Simulator):
                 self._num_envs, len(self._feet_indices) * 3, dtype=torch.float, device=self._device, requires_grad=False)
             self._height_around_feet = torch.zeros(
                 self._num_envs, len(self._feet_indices), 9, dtype=torch.float, device=self._device, requires_grad=False)
+            self._max_height_ahead_feet = torch.zeros(
+                self._num_envs, len(self._feet_indices), dtype=torch.float, device=self._device, requires_grad=False)
         
         if self._cfg.asset.obtain_link_contact_states:
             self._link_contact_states = torch.zeros(
@@ -1402,6 +1448,54 @@ class GenesisSimulator_PACT_Pos(Simulator):
         for i in range(9):
             self._height_around_feet[:, :, i] = eval(f'heights{i+1}').view(self._num_envs, -1)[:] * self._cfg.terrain.vertical_scale
 
+        self._update_max_height_ahead_feet(px, py)
+
+    def _update_max_height_ahead_feet(self, px, py):
+        """Update the forward-looking terrain-height target for each foot."""
+        direction_base = torch.cat((self._base_lin_vel[:, :2], torch.zeros(self._num_envs, 1, device=self._device)), dim=-1)
+        direction_world = quat_apply_yaw(self._base_quat, direction_base)[:, :2]
+        direction_norm = torch.linalg.norm(direction_world, dim=-1, keepdim=True)
+        heading_world = quat_apply_yaw(
+            self._base_quat,
+            torch.tensor([1.0, 0.0, 0.0], device=self._device, dtype=self._base_quat.dtype).repeat(self._num_envs, 1),
+        )[:, :2]
+        direction_world = torch.where(
+            (direction_norm.squeeze(-1) > 1e-4).unsqueeze(-1),
+            direction_world / direction_norm.clamp_min(1e-6),
+            heading_world,
+        )
+        forward = direction_world.repeat_interleave(len(self._feet_indices), dim=0)
+        lateral = torch.stack((-forward[:, 1], forward[:, 0]), dim=-1)
+        max_height = None
+        for fwd in self._cfg.rewards.edge_clearance_forward_cells:
+            for lat in self._cfg.rewards.edge_clearance_lateral_cells:
+                offset = torch.round(forward * fwd + lateral * lat).long()
+                sx = (px + offset[:, 0]).clamp(0, self._height_samples.shape[0] - 1)
+                sy = (py + offset[:, 1]).clamp(0, self._height_samples.shape[1] - 1)
+                sample = self._height_samples[sx, sy]
+                max_height = sample if max_height is None else torch.maximum(max_height, sample)
+        self._max_height_ahead_feet[:] = max_height.view(self._num_envs, -1) * self._cfg.terrain.vertical_scale
+
+    def calc_feet_near_edge(self):
+        """Return a mask of feet within the configured distance of a terrain edge."""
+        if self._cfg.terrain.mesh_type == "plane":
+            return torch.zeros((self._num_envs, len(self._feet_indices)), device=self._device, dtype=torch.bool)
+        feet_xy = self._feet_pos[:, :, :2]
+        points = ((feet_xy + self._cfg.terrain.border_size) / self._cfg.terrain.horizontal_scale).long()
+        px = points[:, :, 0].clamp(0, self._edge_mask.shape[0] - 1)
+        py = points[:, :, 1].clamp(0, self._edge_mask.shape[1] - 1)
+        near_edge = torch.zeros_like(px, dtype=torch.bool)
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                ex = (px + dx).clamp(0, self._edge_mask.shape[0] - 1)
+                ey = (py + dy).clamp(0, self._edge_mask.shape[1] - 1)
+                edge_xy = torch.stack((
+                    ex.float() * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size,
+                    ey.float() * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size,
+                ), dim=-1)
+                near_edge |= self._edge_mask[ex, ey] & (torch.norm(feet_xy - edge_xy, dim=-1) < self._cfg.rewards.feet_edge_threshold)
+        return near_edge
+
     def _check_base_pos_out_of_bound(self):
         """ Check if the base position is out of the terrain bounds
         """
@@ -1421,6 +1515,9 @@ class GenesisSimulator_PACT_Pos(Simulator):
                 self._base_pos[env_ids], zero_velocity=False, envs_idx=env_ids)
 
     def _compute_torques(self, actions):
+        conversion = getattr(self, "_hard_pact_torque_conversion", None)
+        if conversion is not None:
+            return conversion(actions)
         # Pull out the position control actions
         pos_actions = actions
         
@@ -1622,6 +1719,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
         )
         self._height_samples = torch.tensor(self._terrain.heightsamples).view(
             self._terrain.tot_rows, self._terrain.tot_cols).to(self._device)
+        self._edge_mask = torch.as_tensor(self._terrain.edge_mask, device=self._device, dtype=torch.bool)
     
     def _create_trimesh(self):
         """ Adds a trimesh terrain to the simulation, sets parameters based on the cfg.
@@ -1645,6 +1743,7 @@ class GenesisSimulator_PACT_Pos(Simulator):
         # save height samples for height sampling
         self._height_samples = torch.tensor(self._terrain.heightsamples).view(
             self._terrain.tot_rows, self._terrain.tot_cols).to(self._device)
+        self._edge_mask = torch.as_tensor(self._terrain.edge_mask, device=self._device, dtype=torch.bool)
 
     def _setup_depth_camera(self):
         ''' Set camera position and direction

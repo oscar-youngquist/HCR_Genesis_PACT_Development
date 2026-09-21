@@ -113,7 +113,11 @@ class TaskRegistry():
         _, train_cfg = update_cfg_from_args(None, train_cfg, args)
 
         if log_root=="default":
+<<<<<<< HEAD
             log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', 'b1z1', train_cfg.runner.experiment_name)
+=======
+            log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', 'hardpact_iclr', train_cfg.runner.experiment_name)
+>>>>>>> aligned_iclr_2027_qp_pinn
             # log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
             log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
         elif log_root is None:
@@ -124,8 +128,10 @@ class TaskRegistry():
         train_cfg_dict = class_to_dict(train_cfg)
         sim_device = "cpu" if args.cpu else args.gpu
 
-        # Don't do this for pact-pos settings
-        if "pact" in name and "pos" not in name:
+        # Pos retains its existing config-only behavior. HardPACT's parser
+        # returns None when omitted, preserving the resolved config (including
+        # benchmark overrides); explicit CLI values, including zero, still win.
+        if "pact" in name and "pos" not in name and args.pinn_loss_weight is not None:
             train_cfg_dict["policy"]["pinn_loss_weight"] = args.pinn_loss_weight
 
         # select runner according to runner_class_name

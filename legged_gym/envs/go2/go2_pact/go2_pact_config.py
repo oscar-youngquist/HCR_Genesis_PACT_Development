@@ -74,7 +74,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
         num_cols = 20  # number of terrain cols (types), Y direction
         num_subterrains = num_rows * num_cols
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, wave]
-        terrain_proportions = [0.10, 0.15, 0.25, 0.25, 0.20, 0.05]
+        terrain_proportions = [0.10, 0.10, 0.25, 0.25, 0.20, 0.10]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
@@ -83,7 +83,9 @@ class GO2PACTCfg( LeggedRobotCfg ):
 
     class sim:
         # Common
-        dt = 0.002                 # 1000 Hz
+        # Assigned from control.dt / control.decimation after the complete
+        # environment config class is defined. Keep one timing source of truth.
+        dt = None
         substeps = 1
         # For Genesis
         max_collision_pairs = 100  # More collision pairs will occupy more GPU memory and slow down the simulation
@@ -334,8 +336,8 @@ class GO2PACTCfg( LeggedRobotCfg ):
         torque_scale = 10.0   # action scale:  target torque = torque_scale * tau_action + defaultTorque
         
         
-        dt =  0.01     # control frequency 200Hz
-        decimation = 5  # decimation: Number of control action updates @ sim DT per policy DT
+        dt =  0.02     # control frequency 200Hz
+        decimation = 4  # decimation: Number of control action updates @ sim DT per policy DT
 
         # Assumed order - tau_ff, tau_fb
         # tradeoff_init_weights  = [0.20, 1.16]
@@ -362,14 +364,14 @@ class GO2PACTCfg( LeggedRobotCfg ):
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.90
         soft_torque_limit = 0.90
-        base_height_target = 0.30
+        base_height_target = 0.38
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         
         foot_clearance_target = 0.09 # desired foot clearance above ground [m]
         foot_height_offset = 0.022    # height of the foot coordinate origin above ground [m]
         
         overreach_x_max = 0.28
-        rear_foot_x_nominal = -0.20
+        rear_foot_x_nominal = -0.25
         rear_foot_x_margin = 0.08
         support_polygon_sigma = 0.01
         
@@ -379,6 +381,14 @@ class GO2PACTCfg( LeggedRobotCfg ):
         use_reward_curriculum = True
 
         max_contact_force = 200.0
+        contact_force_threshold = 5.0
+
+        feet_edge_threshold = 0.05
+        edge_clearance_lateral_cells = (-1, 0, 1)
+        edge_clearance_forward_cells = (0, 1, 2)
+        edge_swing_clearance_margin = 0.04
+        swing_collision_max_normal_z = 0.85
+        swing_collision_min_speed = 0.05
 
         ff_ratio_target = 0.50
         ff_ratio_width  = 0.20
@@ -394,7 +404,7 @@ class GO2PACTCfg( LeggedRobotCfg ):
             alive_bonus           = 0.001
 
             dof_vel_stand_still = 0.0
-            stand_still_contact = -0.5
+            stand_still_contact = 0.5
             dof_pos_stand_still = -0.1
 
             # command tracking
@@ -456,8 +466,12 @@ class GO2PACTCfg( LeggedRobotCfg ):
             hip_pos = -0.2
             
             foot_slip        = -0.01          # penalty for feet slipping
-            stumble          = -1.0
+            stumble          = -4.0
             feet_contact_forces = -1.0e-2     # penalty for high contact forces on the feet
+            feet_near_edge = -0.5
+            edge_swing_clearance = -1.0
+            swing_foot_collision_edge = -1.0
+            feet_regulation = -0.1
 
         class reward_curriculum():
             curr_reward_keys = ["ang_vel_xy", 
@@ -496,6 +510,11 @@ class GO2PACTCfg( LeggedRobotCfg ):
             ang_vel_yaw = [-1.0, 1.0]    # min max [rad/s]
             heading = [-3.14, 3.14]
 
+# A nested ``sim`` class is declared before ``control`` above, so derive its
+# physics timestep only after Python has finished constructing GO2PACTCfg.
+GO2PACTCfg.sim.dt = GO2PACTCfg.control.dt / GO2PACTCfg.control.decimation
+
+
 class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
     seed = 1
     runner_class_name = "PACTRunner" # Teacher-Student Runner
@@ -525,7 +544,7 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/May09_19-14-36_pact_posboot_100hz_grf/model_3000_converted.pt"
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_coral/go2_pact_pos_rough/Apr23_00-50-42_pact_posboot_100hz_spec_grf/model_5000_converted.pt"
         # pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/May10_16-17-52_pact_posboot_100hz_grf/model_3000_converted.pt"
-        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/Jun10_18-16-06_pact_posboot_100hz_grf/model_3000_converted.pt"
+        pretrained_path = "../../rsl_rl/modules/pretained_checkpoints/rl_pos/pact_corl/go2_pact_pos_rough/Jul31_16-57-38_pact_posboot_100hz_grf/model_3000_converted.pt"
 
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         # learning_rate = 1.0e-3 #
@@ -572,7 +591,7 @@ class GO2PACTCfgPPO( LeggedRobotCfgPPO ):
         # load_run = "May10_20-41-46_pact_100hz_spec_smartcurr"    # most recent model with strong boot and rear-overreah, 3000 pos-boot start
         # load_run = "May11_21-55-58_pact_100hz_spec_smartcurr"    # best performing aligned model
         # load_run = "May14_18-35-56_pact_100hz_spec_smartcurr_stricterer"
-        load_run = "May15_18-41-46_pact_100hz_spec_smartcurr_stricterer"
+        load_run = "Aug01_18-27-22_pact_100hz_spec_smartcurr_stricterer"
         checkpoint = -1
         resume = False
         exp_data_path = "exp_data/corl_tests_01/pact_stairs_12-16kg.csv"

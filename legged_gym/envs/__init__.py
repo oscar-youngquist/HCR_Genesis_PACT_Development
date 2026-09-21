@@ -112,6 +112,18 @@ from legged_gym.envs.go2.go2_pact_pos.go2_pact_pos import Go2PACTPos
 from legged_gym.envs.go2.go2_pact.go2_pact_config import GO2PACTCfg, GO2PACTCfgPPO
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
 
+from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCfg, GO2HardPACTCfgPPO
+from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
+from legged_gym.envs.go2.go2_hard_pact.ablations import (
+    HARD_PACT_BACKENDS, HARD_PACT_VARIANTS,
+)
+from legged_gym.envs.go2.go2_hard_pact.ablation_configs import (
+    make_hard_pact_variant_configs, make_hard_pact_pos_backend_configs,
+)
+
+from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import GO2HardPACTPosCfg, GO2HardPACTPosCfgPPO
+from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos import Go2HardPACTPos
+
 from legged_gym.envs.go2.go2_kite.go2_kite_config import GO2KITECfg, GO2KITECfgPPO
 from legged_gym.envs.go2.go2_kite.go2_kite import Go2KITE
 
@@ -155,10 +167,42 @@ task_registry.register("go1_abl3", Go1ABL3, GO1ABL3Cfg(), GO1ABL3CfgPPO())
 
 task_registry.register("go2_pact_pos", Go2PACTPos, GO2PACTPosCfg(), GO2PACTPosCfgPPO())
 task_registry.register("go2_pact", Go2PACT, GO2PACTCfg(), GO2PACTCfgPPO())
+task_registry.register("go2_hard_pact", Go2HardPACT, GO2HardPACTCfg(), GO2HardPACTCfgPPO())
+task_registry.register("go2_hard_pact_pos", Go2HardPACTPos, GO2HardPACTPosCfg(), GO2HardPACTPosCfgPPO())
+
+# All ablations share the exact environment class. Backend suffixes are
+# experiment identity/launcher selectors; backend construction remains in the
+# repository's existing BaseTask simulator dispatch.
+for _hard_variant in HARD_PACT_VARIANTS:
+    for _hard_backend in HARD_PACT_BACKENDS:
+        _env_cfg, _ppo_cfg = make_hard_pact_variant_configs(
+            _hard_variant, _hard_backend
+        )
+        task_registry.register(
+            f"go2_hard_pact_{_hard_variant}_{_hard_backend}",
+            Go2HardPACT, _env_cfg(), _ppo_cfg(),
+        )
+for _hard_backend in HARD_PACT_BACKENDS:
+    _env_cfg, _ppo_cfg = make_hard_pact_variant_configs("full", _hard_backend)
+    task_registry.register(
+        f"go2_hard_pact_{_hard_backend}",
+        Go2HardPACT, _env_cfg(), _ppo_cfg(),
+    )
+    if _hard_backend in ("genesis", "isaaclab"):
+        _pos_env_cfg, _pos_ppo_cfg = make_hard_pact_pos_backend_configs(
+            _hard_backend
+        )
+        task_registry.register(
+            f"go2_hard_pact_pos_{_hard_backend}", Go2HardPACTPos,
+            _pos_env_cfg(), _pos_ppo_cfg(),
+        )
 
 task_registry.register("go2_kite", Go2KITE, GO2KITECfg(), GO2KITECfgPPO())
 task_registry.register("go2_kite_baseline", Go2KITEBaseline, GO2KITEBaselineCfg(), GO2KITEBaselineCfgPPO())
+<<<<<<< HEAD
 task_registry.register("b1z1_unifp", B1Z1UniFP, B1Z1UniFPCfg(), B1Z1UniFPCfgPPO())
 task_registry.register("b1z1_pact", B1Z1PACT, B1Z1PACTCfg(), B1Z1PACTCfgPPO())
 task_registry.register("b1z1_pact_pos", B1Z1PACTPos, B1Z1PACTPosCfg(), B1Z1PACTPosCfgPPO())
 task_registry.register("b1_unifp", B1UniFP, B1UniFPCfg(), B1UniFPCfgPPO())
+=======
+>>>>>>> aligned_iclr_2027_qp_pinn

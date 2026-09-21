@@ -44,6 +44,14 @@ from rsl_rl.storage import RolloutStoragePACT
 
 from .pc_grad import PCGrad
 
+# Old manual PINN-to-encoder gradient projection path. PPO now owns encoder
+# parameter groups directly, so PPO/PINN gradients flow through the optimizer.
+# from .encoder_pinn_grad_utils import (
+#     compute_encoder_grads_from_loss,
+#     add_projected_pinn_grads_to_encoder,
+#     zero_module_grads,
+# )
+
 class PPO_PACT:
     actor_critic: ActorCritic_PACT
     decoder_network: ContextDecoder
@@ -66,6 +74,7 @@ class PPO_PACT:
                  device='cpu',
                  use_spo=False,
                  pinn_lambda=0.001,
+                 pinn_encoder_weight=0.05,
                  pinn_warmup=1000,
                  pinn_init_steps=500,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
@@ -76,11 +85,13 @@ class PPO_PACT:
                  adaptive_ent_ang_threshold=0.35,
                  adaptive_ent_ter_threshold=5.0,
                  adaptive_ent_softmax_temp=2.0,
+                 reconstruction_indices=None,
                  ):
         
         self.device = device
 
         self.num_priv_obs = num_priv_obs
+        self.reconstruction_indices = reconstruction_indices
 
         self.desired_kl = desired_kl
         self.schedule = schedule
@@ -88,6 +99,11 @@ class PPO_PACT:
 
         self.num_enc_epochs = num_encoder_epochs
         self.vae_beta = vae_kld_weight
+
+        # Old manual PINN-to-encoder gradient projection scale. Kept as an
+        # init argument for config compatibility, but no longer used because
+        # PPO gradients now flow into the encoder through act_optimizer.
+        # self.pinn_encoder_grad_weight = pinn_encoder_weight
 
         # Adaptive entropy coefficent algorithm values
         self.use_adaptive_entropy = use_adaptive_entropy
@@ -222,7 +238,10 @@ class PPO_PACT:
         self.transition.grf_targets = grf_labels
 
         # This is now the stack of critic observations, we want to prune off the last one
-        self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
+        reconstruction_target = obs_labels[:, -self.num_priv_obs:]
+        if self.reconstruction_indices is not None:
+            reconstruction_target = reconstruction_target[:, self.reconstruction_indices]
+        self.transition.obs_targets = reconstruction_target
         # self.transition.obs_targets = obs_labels
 
         self.transition.explicit_labels = explicit_labels
@@ -352,6 +371,7 @@ class PPO_PACT:
 
             
             # PINN loss calculation
+            weighted_pinn_loss = None
             pinn_loss = None
             if self.pinn_weight > 0.0:
                 pinn_loss = self._compute_PINN_loss(current_actions, obs_batch, prev_obs_batch, prev_obs_hist_batch,
@@ -360,11 +380,40 @@ class PPO_PACT:
                                                     action_func, fb_func, default_pose, dt, qvel_scale)
                 
             if self.pinn_weight > 0.0 and self.pinn_weight_final > 0:
+                weighted_pinn_loss = self.pinn_weight * pinn_loss
                 ppo_losses = [ppo_loss, self.pinn_weight * pinn_loss]
             elif self.pinn_weight > 0.0 and self.pinn_weight_final < 0:
+                weighted_pinn_loss = pinn_loss
                 ppo_losses = [ppo_loss, pinn_loss]
             else:
                 ppo_losses = [ppo_loss]
+
+
+
+            # ------------------------------------------------------------
+            # Old manual PINN gradient extraction for the encoder.
+            #
+            # PPO optimizer param groups now include context_encoder
+            # parameters, so the PINN/RL signal backpropagates into the encoder
+            # through the normal PPO optimizer step.
+            # ------------------------------------------------------------
+            # pinn_encoder_grads = None
+            # pinn_encoder_grad_info = None
+            # pinn_encoder_has_grad = False
+            #
+            # if weighted_pinn_loss is not None:
+            #     pinn_encoder_grads, pinn_encoder_grad_info = compute_encoder_grads_from_loss(
+            #         weighted_pinn_loss,
+            #         self.actor_critic.context_encoder,
+            #     )
+            #
+            #     # Handle either dataclass-style diagnostics or dict-style diagnostics.
+            #     if hasattr(pinn_encoder_grad_info, "has_any_grad"):
+            #         pinn_encoder_has_grad = pinn_encoder_grad_info.has_any_grad
+            #     elif isinstance(pinn_encoder_grad_info, dict):
+            #         pinn_encoder_has_grad = pinn_encoder_grad_info.get("has_any_grad", False)
+            #     else:
+            #         pinn_encoder_has_grad = any(g is not None for g in pinn_encoder_grads)
             
             # PCGrad - back-propigate the loss
             if self.pinn_weight > 0 and self.pinn_weight_final > 0 and pinn_loss is not None:    # just being extra cautious
@@ -373,6 +422,11 @@ class PPO_PACT:
                 self.act_optimizer.pc_backward_ppgrad(ppo_losses)
             else:
                 self.act_optimizer.pc_backward(ppo_losses)
+            
+            # Encoder grads are intentionally kept so the PPO optimizer can
+            # update encoder parameters directly.
+            # zero_module_grads(self.actor_critic.context_encoder)
+
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.act_optimizer.step()
 
@@ -386,7 +440,7 @@ class PPO_PACT:
 
 
             # Calculate the encoder update n-times
-            for _ in range(self.num_enc_epochs):
+            for enc_epoch in range(self.num_enc_epochs):
                 ###
                 #  Update encoder with frozen decoder
                 ###
@@ -400,6 +454,23 @@ class PPO_PACT:
                 # Update paramaters of encoder
                 self.enc_optimizer.zero_grad()
                 vae_loss.backward()
+
+                # --------------------------------------------------------
+                # Old manual PINN-gradient injection into the auxiliary encoder
+                # update. The PPO optimizer now applies that signal directly.
+                # --------------------------------------------------------
+                # if (
+                #     enc_epoch == 0
+                #     and pinn_encoder_grads is not None
+                #     and pinn_encoder_has_grad
+                # ):
+                #     add_projected_pinn_grads_to_encoder(
+                #         self.actor_critic.context_encoder,
+                #         pinn_encoder_grads,
+                #         scale=self.pinn_encoder_grad_weight,
+                #     )
+
+
                 nn.utils.clip_grad_norm_(self.actor_critic.context_encoder.parameters(), self.max_grad_norm)
                 self.enc_optimizer.step()
 
@@ -555,7 +626,7 @@ class PPO_PACT:
                           obs_target, explicit_labels_batch, terminated_batch):
         vae_loss = None
 
-        mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.context_encoder(obs_hist_batch)
+        mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.cenet_enc_forward(obs_hist_batch)
         
         dec_input = torch.cat((cenet_latent, cenet_torso_velo), dim=-1)
         enc_update_obs_decode = self.decoder(dec_input)

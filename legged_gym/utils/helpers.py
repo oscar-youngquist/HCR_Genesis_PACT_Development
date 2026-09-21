@@ -1,5 +1,9 @@
 import os
 import copy
+import dataclasses
+import inspect
+import json
+from pathlib import Path
 import torch
 import numpy as np
 import random
@@ -104,6 +108,117 @@ def class_to_dict(obj) -> dict:
             element = class_to_dict(val)
         result[key] = element
     return result
+
+
+def _json_config_value(value):
+    """Convert resolved config values to stable JSON-compatible objects."""
+    if dataclasses.is_dataclass(value):
+        value = dataclasses.asdict(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _json_config_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_config_value(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu()
+        return value.item() if value.numel() == 1 else value.tolist()
+    if isinstance(value, (torch.dtype, torch.device, Path)):
+        return str(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _declared_config_values(config_class):
+    """Return only values declared by one class, excluding inherited values."""
+    declared = {}
+    for name, value in vars(config_class).items():
+        if name.startswith("_"):
+            continue
+        if isinstance(value, type):
+            nested = _declared_config_values(value)
+            if nested:
+                declared[name] = nested
+        elif not callable(value):
+            declared[name] = _json_config_value(value)
+    return declared
+
+
+def _config_inheritance(config):
+    """Describe every contributing config class and its local overrides."""
+    result = []
+    for config_class in type(config).__mro__:
+        if config_class is object:
+            continue
+        try:
+            source = inspect.getsourcefile(config_class)
+        except (TypeError, OSError):
+            source = None
+        result.append({
+            "class": f"{config_class.__module__}.{config_class.__qualname__}",
+            "source": source,
+            "declared_values": _declared_config_values(config_class),
+        })
+    return result
+
+
+def save_hard_pact_resolved_config(
+    log_dir, task_name, env_cfg, train_cfg, *, effective_train_cfg=None,
+):
+    """Write one complete, inheritance-aware HardPACT run configuration.
+
+    The dynamically-created backend/ablation classes are intentionally thin,
+    so copying only their source file cannot reproduce a run.  This snapshot
+    records the fully resolved values *after CLI overrides*, each parent class
+    that contributed values, and the canonical immutable ablation feature
+    selection.  Legacy task logging remains untouched.
+    """
+    if log_dir is None or not str(task_name).startswith("go2_hard_pact"):
+        return None
+    from rsl_rl.hard_pact_ablations import resolve_hard_pact_features
+
+    variant = getattr(
+        env_cfg, "ablation_variant",
+        getattr(getattr(train_cfg, "algorithm", object()),
+                "ablation_variant", "full"),
+    )
+    features = resolve_hard_pact_features(variant)
+    resolved_train = (
+        class_to_dict(train_cfg)
+        if effective_train_cfg is None else effective_train_cfg
+    )
+    document = {
+        "schema_version": 1,
+        "task": str(task_name),
+        "ablation": {
+            "variant_id": features.variant_id,
+            "features": dataclasses.asdict(features),
+        },
+        "environment": {
+            "resolved": class_to_dict(env_cfg),
+            "inheritance": _config_inheritance(env_cfg),
+        },
+        "training": {
+            "resolved": resolved_train,
+            "inheritance": _config_inheritance(train_cfg),
+        },
+    }
+    destination = Path(log_dir) / "hard_pact_resolved_config.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(_json_config_value(document), indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, destination)
+    return destination
 
 def update_class_from_dict(obj, dict):
     for key, val in dict.items():
@@ -213,6 +328,38 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
         #     cfg_train.runner.checkpoint = args.ckpt
         if args.load_run is not None:
             cfg_train.runner.load_run = args.load_run
+        # Optional HardPACT benchmark overrides are deliberately applied only
+        # when the selected algorithm exposes the shared QP dictionary. They
+        # therefore have no effect on legacy tasks or their configuration.
+        qp_cfg = getattr(cfg_train.algorithm, "hard_pact_qp", None)
+        if qp_cfg is not None:
+            if getattr(args, "dynamics_backend", None) is not None:
+                cfg_train.algorithm.dynamics_backend = args.dynamics_backend
+            if getattr(args, "pinocchio_num_workers", None) is not None:
+                cfg_train.algorithm.pinocchio_num_workers = args.pinocchio_num_workers
+            if getattr(args, "profile_bard_timing", False):
+                cfg_train.algorithm.profile_bard_timing = True
+            if getattr(args, "bard_batch_capacity", None) is not None:
+                cfg_train.algorithm.bard_batch_capacity = args.bard_batch_capacity
+            if getattr(args, "benchmark_bard_active", False):
+                # Benchmark-only: execute both configured BARD losses from
+                # iteration zero at full weight without changing defaults.
+                cfg_train.policy.pinn_init_steps = -1
+                cfg_train.policy.pinn_loss_weight = -1.0
+            if getattr(args, "disable_rollout_mechanics_cache", False):
+                cfg_train.algorithm.cache_rollout_mechanics = False
+            if getattr(args, "qp_solver", None) is not None:
+                qp_cfg["qp_solver"] = args.qp_solver
+                qp_cfg["rollout_qp_solver"] = None
+                qp_cfg["ppo_qp_solver"] = None
+            if getattr(args, "qp_solver_dtype", None) is not None:
+                qp_cfg["solver_dtype"] = args.qp_solver_dtype
+            if getattr(args, "qp_update_mode", None) is not None:
+                qp_cfg["qp_update_mode"] = args.qp_update_mode
+            if getattr(args, "qp_rollout_chunk_size", None) is not None:
+                qp_cfg["rollout_chunk_size"] = args.qp_rollout_chunk_size
+            if getattr(args, "qp_ppo_chunk_size", None) is not None:
+                qp_cfg["ppo_chunk_size"] = args.qp_ppo_chunk_size
 
     return env_cfg, cfg_train
 
@@ -243,9 +390,64 @@ def get_args():
     parser.add_argument('--seed',       type=int, default=1, help="int seed for random sampling (default 1)")
 
     # PACT PINN specific thing.
-    parser.add_argument('--pinn_loss_weight',       type=float, default=0.01, help="float for weight of PINN loss (default 0.01)")
+    parser.add_argument(
+        '--pinn_loss_weight', type=float, default=None,
+        help='PINN weight override (HardPACT defaults to its config; legacy tasks default to 0.01)',
+    )
+    parser.add_argument(
+        '--qp_solver', choices=('qpth', 'cupiqp', 'moreau'), default=None,
+        help='HardPACT-only QP backend override (legacy tasks ignore it)',
+    )
+    parser.add_argument(
+        '--qp_solver_dtype', choices=('auto', 'float32', 'float64'), default=None,
+        help='HardPACT-only solver precision override',
+    )
+    parser.add_argument(
+        '--qp_update_mode',
+        choices=('every_substep', 'random_one_substep'),
+        default=None,
+        help='HardPACT-only QP update mode override',
+    )
+    parser.add_argument(
+        '--qp_rollout_chunk_size', type=int, default=None,
+        help='HardPACT-only rollout QP chunk size override',
+    )
+    parser.add_argument(
+        '--qp_ppo_chunk_size', type=int, default=None,
+        help='HardPACT-only differentiable PPO QP chunk size override',
+    )
+    parser.add_argument(
+        '--profile_bard_timing', action='store_true', default=False,
+        help='HardPACT-only CUDA-event timing for inverse/rollout PINN losses',
+    )
+    parser.add_argument(
+        '--benchmark_bard_active', action='store_true', default=False,
+        help='HardPACT benchmark-only: activate BARD losses from iteration zero',
+    )
+    parser.add_argument(
+        '--disable_rollout_mechanics_cache', action='store_true', default=False,
+        help='benchmark HardPACT with per-minibatch uncached mechanics',
+    )
+    parser.add_argument(
+        '--bard_batch_capacity', type=int, default=None,
+        help='HardPACT-only BARD streaming workspace capacity',
+    )
+    parser.add_argument(
+        '--dynamics_backend', choices=('bard', 'pinocchio'), default=None,
+        help='HardPACT-only rigid-body dynamics backend override',
+    )
+    parser.add_argument(
+        '--pinocchio_num_workers', type=int, default=None,
+        help='HardPACT-only persistent Pinocchio CPU worker count',
+    )
 
-    return configure_runtime_device(parser.parse_args())
+    args = parser.parse_args()
+    # Keep omission distinguishable for HardPACT: a parser default must not
+    # replace the configured weight or switch its PCGrad projection mode.
+    # Other tasks retain their historical numeric CLI default unchanged.
+    if args.pinn_loss_weight is None and not args.task.startswith('go2_hard_pact'):
+        args.pinn_loss_weight = 0.01
+    return configure_runtime_device(args)
 
 # def export_policy_as_jit(actor_critic, path, prefix=None):
 #     if hasattr(actor_critic, 'memory_a'):

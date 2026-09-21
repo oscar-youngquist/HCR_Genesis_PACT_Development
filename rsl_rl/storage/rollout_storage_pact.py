@@ -51,6 +51,12 @@ class RolloutStoragePACT:
             self.actions_log_prob = None
             self.action_mean = None
             self.action_sigma = None
+            # HardPACT stores epsilon=(a-mu)/sigma once. Raw actions, policy
+            # observations, and histories already have canonical storage
+            # above and are deliberately not duplicated for replay.
+            self.action_noise = None
+            self.latent_noise = None
+            self.latent_boot_mask = None
 
             #  PINN stuff
             self.prev_obs      = None
@@ -69,7 +75,7 @@ class RolloutStoragePACT:
             self.__init__()
 
     # We want all of the actions and associated data formatted in the Model kinematic definition - [FR, FL, RR, RL]
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, wb_shape, device="cpu"):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, wb_shape, device="cpu", *, store_legacy_pinn_dynamics=True, latent_noise_dim=None):
 
         self.device = device
 
@@ -110,16 +116,91 @@ class RolloutStoragePACT:
         self.pprev_obs      = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
         self.pprev_obs_hist = torch.zeros(num_transitions_per_env, num_envs, *obs_hist_shape, device=self.device)
 
-        self.wb_contact_forces   = torch.zeros(num_transitions_per_env, num_envs, *wb_shape, device=self.device)
-        self.wb_mass_mats        = torch.zeros(num_transitions_per_env, num_envs, *wb_shape, *wb_shape, device=self.device)
-        self.wb_bias_vecs        = torch.zeros(num_transitions_per_env, num_envs, *wb_shape, device=self.device)
-        self.torso_accelerations = torch.zeros(num_transitions_per_env, num_envs, 6, device=self.device)
+        self.wb_contact_forces = torch.zeros(
+            num_transitions_per_env, num_envs, *wb_shape, device=self.device
+        )
+        # Legacy PACT consumes these Pinocchio tensors directly. HardPACT
+        # reconstructs detached mechanics once per rollout update, so keeping
+        # T x N copies would waste both VRAM and gather bandwidth.
+        self.store_legacy_pinn_dynamics = bool(store_legacy_pinn_dynamics)
+        if self.store_legacy_pinn_dynamics:
+            self.wb_mass_mats = torch.zeros(
+                num_transitions_per_env, num_envs, *wb_shape, *wb_shape,
+                device=self.device,
+            )
+            self.wb_bias_vecs = torch.zeros(
+                num_transitions_per_env, num_envs, *wb_shape,
+                device=self.device,
+            )
+            self.torso_accelerations = torch.zeros(
+                num_transitions_per_env, num_envs, 6, device=self.device
+            )
+        else:
+            self.wb_mass_mats = None
+            self.wb_bias_vecs = None
+            self.torso_accelerations = None
 
         # rnn
         self.saved_hidden_states_a = None
         self.saved_hidden_states_c = None
 
         self.step = 0
+        # HardPACT adds named physics fields lazily. Legacy PACT never creates
+        # these tensors and therefore retains its exact storage behavior.
+        self.hard_pact_fields = None
+        self.current_hard_pact_batch = None
+        self.current_batch_indices = None
+        self.action_noise = None
+        self.latent_noise = (
+            torch.zeros(
+                num_transitions_per_env, num_envs, int(latent_noise_dim),
+                device=self.device,
+            ) if latent_noise_dim is not None else None
+        )
+        self.current_latent_noise_batch = None
+        self.latent_boot_mask = (
+            torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device, dtype=torch.bool)
+            if latent_noise_dim is not None else None
+        )
+        self.current_latent_boot_mask_batch = None
+        self.max_action_delay = None
+        self._action_replay_boundary_observations = None
+        self._action_replay_boundary_history = None
+        self._action_replay_boundary_noise = None
+        self._action_replay_boundary_latent_noise = None
+        self._action_replay_boundary_boot_mask = None
+
+    def configure_action_replay(self, max_action_delay):
+        """Allocate compact GPU-only stochastic-delay replay metadata."""
+        maximum = int(max_action_delay)
+        if maximum < 0 or maximum >= self.num_transitions_per_env:
+            raise ValueError(
+                "max_action_delay must be nonnegative and shorter than a rollout"
+            )
+        self.max_action_delay = maximum
+        self.action_noise = torch.zeros_like(self.actions)
+        # Only sources crossing a rollout boundary need extra observation
+        # storage. All in-rollout sources are gathered from the existing core
+        # observation/history tensors by index.
+        self._action_replay_boundary_observations = torch.zeros(
+            maximum, self.num_envs, *self.obs_shape, device=self.device
+        )
+        self._action_replay_boundary_history = torch.zeros(
+            maximum, self.num_envs, *self.observation_history.shape[2:],
+            device=self.device,
+        )
+        self._action_replay_boundary_noise = torch.zeros(
+            maximum, self.num_envs, *self.actions_shape, device=self.device
+        )
+        # Reuse the existing rollout latent draws/masks; only the D boundary
+        # rows need another copy. Legacy tasks allocate neither tensor.
+        if self.latent_noise is not None:
+            self._action_replay_boundary_latent_noise = torch.zeros_like(
+                self.latent_noise[:maximum]
+            )
+            self._action_replay_boundary_boot_mask = torch.zeros_like(
+                self.latent_boot_mask[:maximum]
+            )
 
     def add_transitions(self, transition: Transition):
         
@@ -144,6 +225,17 @@ class RolloutStoragePACT:
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
         self.mu[self.step].copy_(transition.action_mean)
         self.sigma[self.step].copy_(transition.action_sigma)
+        if self.action_noise is not None:
+            if transition.action_noise is None:
+                raise RuntimeError("HardPACT action replay requires stored noise")
+            self.action_noise[self.step].copy_(transition.action_noise)
+        if self.latent_noise is not None:
+            if transition.latent_noise is None:
+                raise RuntimeError("HardPACT PPO replay requires stored latent noise")
+            self.latent_noise[self.step].copy_(transition.latent_noise)
+            if transition.latent_boot_mask is None:
+                raise RuntimeError("HardPACT PPO replay requires rollout boot conditioning")
+            self.latent_boot_mask[self.step].copy_(transition.latent_boot_mask)
 
         #  - PINN stuff
         self.prev_obs[self.step].copy_(transition.prev_obs)
@@ -153,9 +245,36 @@ class RolloutStoragePACT:
         self.pprev_obs_hist[self.step].copy_(transition.pprev_obs_hist)
         
         self.wb_contact_forces[self.step].copy_(transition.wb_contact_forces)
-        self.wb_mass_mats[self.step].copy_(transition.wb_mass_mat)
-        self.wb_bias_vecs[self.step].copy_(transition.wb_bias_vec)
-        self.torso_accelerations[self.step].copy_(transition.torso_acc)
+        if self.store_legacy_pinn_dynamics:
+            self.wb_mass_mats[self.step].copy_(transition.wb_mass_mat)
+            self.wb_bias_vecs[self.step].copy_(transition.wb_bias_vec)
+            self.torso_accelerations[self.step].copy_(transition.torso_acc)
+
+        hard_pact = getattr(transition, "hard_pact", None)
+        if hard_pact is not None:
+            if self.hard_pact_fields is None:
+                self.hard_pact_fields = {
+                    name: torch.zeros(
+                        self.num_transitions_per_env,
+                        self.num_envs,
+                        *value.shape[1:],
+                        device=self.device,
+                        dtype=value.dtype,
+                    )
+                    for name, value in hard_pact.items()
+                }
+            for name, value in hard_pact.items():
+                if name not in self.hard_pact_fields:
+                    # HardPACT QP warmup adds its compact replay fields only
+                    # at the first active rollout. No extra storage during
+                    # warmup, and no reallocation of existing transition data.
+                    if self.step != 0:
+                        raise RuntimeError("New HardPACT fields require a rollout boundary")
+                    self.hard_pact_fields[name] = torch.zeros(
+                        self.num_transitions_per_env, self.num_envs,
+                        *value.shape[1:], device=self.device, dtype=value.dtype,
+                    )
+                self.hard_pact_fields[name][self.step].copy_(value)
         
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
@@ -177,7 +296,65 @@ class RolloutStoragePACT:
             self.saved_hidden_states_c[i][self.step].copy_(hid_c[i])
 
     def clear(self):
+        if self.max_action_delay:
+            delay = self.max_action_delay
+            self._action_replay_boundary_observations.copy_(
+                self.observations[-delay:]
+            )
+            self._action_replay_boundary_history.copy_(
+                self.observation_history[-delay:]
+            )
+            self._action_replay_boundary_noise.copy_(self.action_noise[-delay:])
+            if self.latent_noise is not None:
+                self._action_replay_boundary_latent_noise.copy_(self.latent_noise[-delay:])
+                self._action_replay_boundary_boot_mask.copy_(self.latent_boot_mask[-delay:])
         self.step = 0
+        self.current_hard_pact_batch = None
+        self.current_batch_indices = None
+
+    def _action_replay_sources(self, batch_idx, delay):
+        """Resolve delayed sources on GPU without duplicating rollout history."""
+        timestep = torch.div(
+            batch_idx, self.num_envs, rounding_mode="floor"
+        )
+        environment = batch_idx.remainder(self.num_envs)
+        source_timestep = timestep - delay
+        source_observation = self.observations.new_empty(
+            batch_idx.shape[0], *self.obs_shape
+        )
+        source_history = self.observation_history.new_empty(
+            batch_idx.shape[0], *self.observation_history.shape[2:]
+        )
+        source_noise = self.action_noise.new_empty(
+            batch_idx.shape[0], *self.actions_shape
+        )
+        current = source_timestep >= 0
+        t, e = source_timestep[current], environment[current]
+        source_observation[current] = self.observations[t, e]
+        source_history[current] = self.observation_history[t, e]
+        source_noise[current] = self.action_noise[t, e]
+        boundary = ~current
+        index = self.max_action_delay + source_timestep[boundary]
+        e = environment[boundary]
+        source_observation[boundary] = (
+            self._action_replay_boundary_observations[index, e]
+        )
+        source_history[boundary] = (
+            self._action_replay_boundary_history[index, e]
+        )
+        source_noise[boundary] = self._action_replay_boundary_noise[index, e]
+        source_latent_noise = source_boot_mask = None
+        if self.latent_noise is not None:
+            source_latent_noise = self.latent_noise.new_empty(
+                batch_idx.shape[0], self.latent_noise.shape[-1]
+            )
+            source_boot_mask = self.latent_boot_mask.new_empty(batch_idx.shape[0], 1)
+            source_latent_noise[current] = self.latent_noise[t, environment[current]]
+            source_boot_mask[current] = self.latent_boot_mask[t, environment[current]]
+            source_latent_noise[boundary] = self._action_replay_boundary_latent_noise[index, e]
+            source_boot_mask[boundary] = self._action_replay_boundary_boot_mask[index, e]
+        return (source_observation, source_history, source_noise,
+                source_latent_noise, source_boot_mask)
 
     def compute_returns(self, last_values, gamma, lam):
         advantage = 0
@@ -223,6 +400,10 @@ class RolloutStoragePACT:
         advantages = self.advantages.flatten(0, 1)
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
+        latent_noise = (
+            self.latent_noise.flatten(0, 1)
+            if self.latent_noise is not None else None
+        )
 
         dones = self.dones.flatten(0, 1)
 
@@ -233,9 +414,18 @@ class RolloutStoragePACT:
         pprev_obs_hist = self.pprev_obs_hist.flatten(0, 1)
 
         gt_forces     = self.wb_contact_forces.flatten(0,1)
-        wb_mass_mats  = self.wb_mass_mats.flatten(0,1)
-        wb_bias_vecs  = self.wb_bias_vecs.flatten(0,1)
-        torso_accs    = self.torso_accelerations.flatten(0,1)
+        wb_mass_mats = (
+            self.wb_mass_mats.flatten(0, 1)
+            if self.wb_mass_mats is not None else None
+        )
+        wb_bias_vecs = (
+            self.wb_bias_vecs.flatten(0, 1)
+            if self.wb_bias_vecs is not None else None
+        )
+        torso_accs = (
+            self.torso_accelerations.flatten(0, 1)
+            if self.torso_accelerations is not None else None
+        )
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -243,6 +433,14 @@ class RolloutStoragePACT:
                 start = i*mini_batch_size
                 end = (i+1)*mini_batch_size
                 batch_idx = indices[start:end]
+                self.current_batch_indices = batch_idx
+                self.current_latent_noise_batch = (
+                    latent_noise[batch_idx] if latent_noise is not None else None
+                )
+                self.current_latent_boot_mask_batch = (
+                    self.latent_boot_mask.flatten(0, 1)[batch_idx]
+                    if self.latent_boot_mask is not None else None
+                )
 
                 # Baseline PPO stuff
                 obs_batch = observations[batch_idx]
@@ -270,12 +468,49 @@ class RolloutStoragePACT:
                 prev_obs_batch      = prev_obs[batch_idx]
                 prev_obs_hist_batch = prev_obs_hist[batch_idx]
                 gt_forces_batch     = gt_forces[batch_idx]
-                mass_mat_batch      = wb_mass_mats[batch_idx]
-                bias_vec_batch      = wb_bias_vecs[batch_idx]
-                torso_accs_batch    = torso_accs[batch_idx]
+                mass_mat_batch = (
+                    wb_mass_mats[batch_idx] if wb_mass_mats is not None else None
+                )
+                bias_vec_batch = (
+                    wb_bias_vecs[batch_idx] if wb_bias_vecs is not None else None
+                )
+                torso_accs_batch = (
+                    torso_accs[batch_idx] if torso_accs is not None else None
+                )
 
                 pprev_obs_batch = pprev_obs[batch_idx]
                 pprev_obs_hist_batch = pprev_obs_hist[batch_idx]
+
+                if self.hard_pact_fields is not None:
+                    self.current_hard_pact_batch = {
+                        name: value.flatten(0, 1)[batch_idx]
+                        for name, value in self.hard_pact_fields.items()
+                    }
+                    if self.action_noise is not None:
+                        delay = self.current_hard_pact_batch[
+                            "sampled_action_delay"
+                        ].reshape(-1).long()
+                        (source_obs, source_history, source_noise,
+                         source_latent_noise, source_boot_mask) = (
+                            self._action_replay_sources(batch_idx, delay)
+                        )
+                        # Raw actions and their source observations already
+                        # live in core rollout tensors; these aliases expose
+                        # them to the named HardPACT replay interface without
+                        # allocating duplicate persistent buffers.
+                        self.current_hard_pact_batch.update({
+                            "raw_sampled_action": actions_batch,
+                            "standardized_action_noise": self.action_noise.flatten(
+                                0, 1
+                            )[batch_idx],
+                            "action_source_observation": obs_batch,
+                            "action_source_history": obs_hist_batch,
+                            "delayed_source_observation": source_obs,
+                            "delayed_source_history": source_history,
+                            "delayed_source_noise": source_noise,
+                            "delayed_source_latent_noise": source_latent_noise,
+                            "delayed_source_boot_mask": source_boot_mask,
+                        })
 
                 
                 yield terminated_batch, obs_batch, critic_observations_batch, obs_hist_batch, explicit_labels_batch, \

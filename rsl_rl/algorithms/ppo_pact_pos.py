@@ -34,15 +34,31 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch import linalg as LA
 import time
+from .vae_kl_schedule import cosine_vae_beta
 
 import numpy as np
 import random
 import gc
 
 from rsl_rl.modules import ActorCritic_PACT_Pos, ContextDecoder
+from rsl_rl.modules.hard_pact_physics import (
+    GRFSwingMetricsAccumulator,
+    GRFDecoderMetricsAccumulator,
+    ContactEstimatorMetricsAccumulator,
+    contact_estimator_metrics,
+    normalized_grf_huber_loss,
+    normalized_wrench_huber_loss,
+    wrench_regression_metrics,
+)
 from rsl_rl.storage import RolloutStoragePACTPos
 
 from .pc_grad import PCGrad
+from .hard_pact_boot_statistics import ValidBootStatistics
+from .hard_pact_latent_diagnostics import (
+    LatentDiagnosticsAccumulator, deterministic_subsample,
+    diagonal_gaussian_kl, latent_ablation_metrics,
+    policy_distribution_without_side_effects,
+)
 
 class PPO_PACT_Pos:
     actor_critic: ActorCritic_PACT_Pos
@@ -59,6 +75,7 @@ class PPO_PACT_Pos:
                  value_loss_coef=1.0,
                  entropy_coef=0.0,
                  learning_rate=1e-3,
+                 auxiliary_learning_rate=2.0e-4,
                  max_grad_norm=1.0,
                  use_clipped_value_loss=True,
                  schedule="fixed",
@@ -67,24 +84,85 @@ class PPO_PACT_Pos:
                  use_spo=False,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
                  vae_kld_weight=1.0,   # weight of KL divergence loss in VAE
+                 vae_kl_initial_weight=0.0,
+                 vae_kl_warmup_start=0,
+                 vae_kl_warmup_iterations=0,
                  use_adaptive_entropy=True,
                  adaptive_ent_bounds=[0.01, 0.001],
                  adaptive_ent_lin_threshold=0.75,
                  adaptive_ent_ang_threshold=0.35,
                  adaptive_ent_ter_threshold=5.0,
                  adaptive_ent_softmax_temp=2.0,
+                 reconstruction_indices=None,
+                 privileged_loss_weight=1.0,
+                 explicit_loss_weight=1.0,
+                 contact_probability_loss_weight=1.0,
+                 ppo_latent_diagnostics_enabled=False,
+                 ppo_latent_diagnostics_interval=100,
+                 ppo_latent_diagnostics_sample_count=256,
+                 latent_active_unit_variance_threshold=1.0e-2,
+                 grf_loss_weight=1.0,
+                 active_wrench_loss_weight=1.0,
+                 neutral_wrench_loss_weight=0.25,
+                 force_decoder_diagnostics_enabled=False,
                  ):
         
         self.device = device
 
         self.num_priv_obs = num_priv_obs
+        self.reconstruction_indices = reconstruction_indices
+        self.is_hard_pact_pos = hasattr(actor_critic, "physics_estimator")
+        self.privileged_loss_weight = float(privileged_loss_weight)
+        self.explicit_loss_weight = float(explicit_loss_weight)
+        self.contact_probability_loss_weight = float(
+            contact_probability_loss_weight
+        )
+        if self.contact_probability_loss_weight < 0.0:
+            raise ValueError(
+                "contact_probability_loss_weight must be nonnegative"
+            )
+        self.ppo_latent_diagnostics_enabled = bool(
+            ppo_latent_diagnostics_enabled and self.is_hard_pact_pos
+        )
+        self.ppo_latent_diagnostics_interval = int(ppo_latent_diagnostics_interval)
+        self.ppo_latent_diagnostics_sample_count = int(ppo_latent_diagnostics_sample_count)
+        self.latent_active_unit_variance_threshold = float(latent_active_unit_variance_threshold)
+        if self.ppo_latent_diagnostics_interval <= 0:
+            raise ValueError("ppo_latent_diagnostics_interval must be positive")
+        if self.ppo_latent_diagnostics_sample_count <= 0:
+            raise ValueError("ppo_latent_diagnostics_sample_count must be positive")
+        if self.latent_active_unit_variance_threshold < 0.0:
+            raise ValueError("latent active-unit threshold must be nonnegative")
+        self.last_latent_diagnostics = {}
+        self._latent_diagnostics_due = False
+        self.grf_loss_weight = float(grf_loss_weight)
+        self.active_wrench_loss_weight = float(active_wrench_loss_weight)
+        self.neutral_wrench_loss_weight = float(neutral_wrench_loss_weight)
+        self.force_decoder_diagnostics_enabled = bool(
+            force_decoder_diagnostics_enabled
+        )
+        self._grf_diagnostics = None
+        self._contact_diagnostics = None
+        self.last_auxiliary_metrics = {}
 
         self.desired_kl = desired_kl
         self.schedule = schedule
         self.learning_rate = learning_rate
+        self.auxiliary_learning_rate = float(auxiliary_learning_rate)
+        if self.auxiliary_learning_rate <= 0.0:
+            raise ValueError("auxiliary_learning_rate must be positive")
 
         self.num_enc_epochs = num_encoder_epochs
-        self.vae_beta = vae_kld_weight
+        self.vae_beta = float(vae_kld_weight)
+        self.vae_kl_initial_weight = float(vae_kl_initial_weight)
+        self.vae_kl_warmup_start = int(vae_kl_warmup_start)
+        self.vae_kl_warmup_iterations = int(vae_kl_warmup_iterations)
+        if self.vae_kl_warmup_iterations < 0:
+            raise ValueError("vae_kl_warmup_iterations must be nonnegative")
+        # Before the first explicit iteration boundary, preserve the legacy
+        # constant final weight. ``update`` freezes the scheduled value once
+        # and every auxiliary minibatch in that PPO iteration reuses it.
+        self.current_vae_beta = self.vae_beta
 
         # Adaptive entropy coefficent algorithm values
         self.use_adaptive_entropy = use_adaptive_entropy
@@ -103,6 +181,12 @@ class PPO_PACT_Pos:
         self.storage = None # initialized later
 
         self.act_optimizer, self.enc_optimizer = actor_critic.configure_optimizers(learning_rate)
+        if self.is_hard_pact_pos:
+            # HardPACTPos trains the context encoder, explicit estimator, GRF
+            # decoder, wrench decoder, and privileged decoder as one auxiliary
+            # system.  Keep every part on the same configured learning rate.
+            for param_group in self.enc_optimizer.param_groups:
+                param_group["lr"] = self.auxiliary_learning_rate
         self.transition = RolloutStoragePACTPos.Transition()
 
         self.act_optimizer = PCGrad(self.act_optimizer, reduction='sum')
@@ -116,7 +200,12 @@ class PPO_PACT_Pos:
                     param_group['lr'] = (learning_rate / 3.0)
 
         self.decoder = decoder_network
-        self.decoder_optimizer = optim.Adam(self.decoder.parameters(), lr=learning_rate)
+        decoder_learning_rate = (
+            self.auxiliary_learning_rate if self.is_hard_pact_pos else learning_rate
+        )
+        self.decoder_optimizer = optim.Adam(
+            self.decoder.parameters(), lr=decoder_learning_rate
+        )
 
         self.boot_mult = 1.0
         self.use_boot = False
@@ -133,21 +222,37 @@ class PPO_PACT_Pos:
         
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, action_shape, torso_velo_shape, grf_shape):
         self.storage = RolloutStoragePACTPos(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, priv_obs_shape, obs_hist_shape, \
-                                                               action_shape, torso_velo_shape, grf_shape, self.device)
+                                                               action_shape, torso_velo_shape, grf_shape, self.device,
+                                                               hard_pact_auxiliary=self.is_hard_pact_pos,
+                                                               latent_noise_dim=(
+                                                                   self.actor_critic.context_encoder.ce_out_mean.out_features
+                                                                   if self.is_hard_pact_pos else None
+                                                               ))
 
     def test_mode(self):
         self.actor_critic.test()
-    
+
     def train_mode(self):
         self.actor_critic.train()
 
     def act(self, obs, critic_obs, obs_history):
         # if self.actor_critic.is_recurrent:
         #     self.transition.hidden_states = self.actor_critic.get_hidden_states()
+        latent_noise = None
+        if self.is_hard_pact_pos:
+            latent_noise = torch.randn(
+                obs.shape[0], self.actor_critic.context_encoder.ce_out_mean.out_features,
+                device=obs.device, dtype=obs.dtype,
+            )
         if self.use_boot:
-            all_actions = self.actor_critic.act(obs,obs_history).detach()
+            all_actions = self.actor_critic.act(obs, obs_history, latent_noise=latent_noise).detach()
         else:
-            all_actions = self.actor_critic.act_bootmask(obs,obs_history).detach()
+            all_actions = self.actor_critic.act_bootmask(obs, obs_history, latent_noise=latent_noise).detach()
+        self.transition.latent_noise = latent_noise
+        if self.is_hard_pact_pos:
+            self.transition.latent_boot_mask = torch.full(
+                (obs.shape[0], 1), self.use_boot, device=obs.device, dtype=torch.bool
+            )
 
         # Compute the actions and values
         #  - Position Control
@@ -163,7 +268,7 @@ class PPO_PACT_Pos:
         self.transition.critic_observations = critic_obs
         
         return all_actions
-    
+
     def process_env_step(self, rewards, dones, infos, grf_labels, obs_labels, explicit_labels):
         self.transition.rewards = rewards.clone()
         
@@ -172,10 +277,28 @@ class PPO_PACT_Pos:
         self.transition.grf_targets = grf_labels
 
         # This is now the stack of critic observations, we want to prune off the last one
-        self.transition.obs_targets = obs_labels[:, -self.num_priv_obs:]
+        reconstruction_target = obs_labels[:, -self.num_priv_obs:]
+        if self.reconstruction_indices is not None:
+            reconstruction_target = reconstruction_target[:, self.reconstruction_indices]
+        self.transition.obs_targets = reconstruction_target
         # self.transition.obs_targets = obs_labels
 
         self.transition.explicit_labels = explicit_labels
+        if self.is_hard_pact_pos:
+            hard_pact = infos.get("hard_pact_transition")
+            if hard_pact is None:
+                raise RuntimeError(
+                    "HardPACTPos auxiliary heads require hard_pact_transition labels"
+                )
+            self.transition.executed_torque_targets = hard_pact[
+                "interval_executed_torque"
+            ]
+            self.transition.wrench_targets = hard_pact[
+                "total_external_wrench_label_yaw_normalized"
+            ]
+            self.transition.wrench_active_masks = hard_pact[
+                "sustained_wrench_active_mask"
+            ].bool()
         
         # Bootstrapping on time outs
         if 'time_outs' in infos:
@@ -287,6 +410,17 @@ class PPO_PACT_Pos:
         self.storage.compute_returns(last_values, self.gamma, self.lam)  
 
     def update(self, action_func, fb_func, dt, itr, default_pose, qvel_scale):
+        valid_boot_statistics = ValidBootStatistics() if self.is_hard_pact_pos else None
+        self.current_vae_beta = self._vae_beta_for_iteration(itr)
+        self._latent_diagnostics_due = (
+            self.ppo_latent_diagnostics_enabled
+            and int(itr) % self.ppo_latent_diagnostics_interval == 0
+        )
+        latent_diagnostics = (
+            LatentDiagnosticsAccumulator(self.latent_active_unit_variance_threshold)
+            if self._latent_diagnostics_due else None
+        )
+        latent_ablation_ran = False
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_autoenc_loss = 0
@@ -295,6 +429,24 @@ class PPO_PACT_Pos:
         mean_kld_loss = 0
         mean_decoder_loss = 0
         mean_tau_loss = 0
+        auxiliary_metric_sums = {}
+        self._grf_swing_metrics = None
+        if self.is_hard_pact_pos:
+            swing_config = self.actor_critic.physics_estimator.grf_swing
+            if swing_config.active:
+                self._grf_swing_metrics = GRFSwingMetricsAccumulator(swing_config)
+        self._grf_diagnostics = (
+            GRFDecoderMetricsAccumulator(
+                self.actor_critic.physics_estimator.grf_scale_n
+            )
+            if self.is_hard_pact_pos and self.force_decoder_diagnostics_enabled
+            else None
+        )
+        self._contact_diagnostics = (
+            ContactEstimatorMetricsAccumulator(
+                self.actor_critic.explicit_estimator.contact_epsilon
+            ) if self.is_hard_pact_pos else None
+        )
 
         timers = {
             "rl_loss": 0.0,
@@ -316,7 +468,8 @@ class PPO_PACT_Pos:
         for terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
             grf_target, obs_target, actions_batch, target_values_batch, \
             advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
-            old_sigma_batch in generator:
+            old_sigma_batch, executed_torque_target, wrench_target, \
+            wrench_active_mask in generator:
             
             self.actor_critic.train()
             self.act_optimizer.zero_grad()
@@ -329,7 +482,11 @@ class PPO_PACT_Pos:
                                                                                           critic_obs_batch, old_sigma_batch, old_mu_batch,
                                                                                           old_actions_log_prob_batch,
                                                                                           advantages_batch, target_values_batch, returns_batch,
-                                                                                          action_func, fb_func, default_pose, dt, qvel_scale)
+                                                                                          action_func, fb_func, default_pose, dt, qvel_scale,
+                                                                                          latent_noise=self.storage.current_latent_noise_batch,
+                                                                                          latent_boot_mask=self.storage.current_latent_boot_mask_batch)
+            if latent_diagnostics is not None:
+                latent_diagnostics.add_ppo(self._ppo_log_ratio, self.clip_param)
             
             torch.cuda.synchronize()
             timers["rl_loss"] += time.perf_counter() - t0
@@ -362,6 +519,15 @@ class PPO_PACT_Pos:
 
             # Calculate the encoder update n-times
             for _ in range(self.num_enc_epochs):
+                if self.is_hard_pact_pos and not terminated_batch.reshape(-1).bool().any():
+                    # No supervised optimizer step: Adam momentum/decay must
+                    # not move parameters on an empty supervised phase.
+                    for name in ("total", "privileged_reconstruction", "kl", "explicit",
+                                 "grf", "wrench_active", "wrench_neutral",
+                                 "explicit_base_linear_velocity", "explicit_contact_probabilities",
+                                 "explicit_foot_clearance"):
+                        auxiliary_metric_sums.setdefault(name, obs_batch.new_zeros(()))
+                    continue
                 ###
                 #  Update encoder with frozen decoder
                 ###
@@ -372,8 +538,40 @@ class PPO_PACT_Pos:
                 t0 = time.perf_counter()
 
                 # Calculate the DreamWaQ-style VAE update
-                vae_loss, kl_div, recon_error, vel_pred_error, dec_input, decode_targets, recons = self._compute_vae_loss(obs_hist_batch, grf_target, 
-                                                                                                                          obs_target, explicit_labels_batch, terminated_batch)
+                diagnostic_indices = None
+                pre_aux = None
+                if latent_diagnostics is not None:
+                    diagnostic_indices = deterministic_subsample(
+                        obs_batch, self.ppo_latent_diagnostics_sample_count
+                    )
+                    with torch.no_grad():
+                        pre_aux = policy_distribution_without_side_effects(
+                            self.actor_critic, obs_batch[diagnostic_indices],
+                            obs_hist_batch[diagnostic_indices],
+                            self.storage.current_latent_noise_batch[diagnostic_indices],
+                            self.storage.current_latent_boot_mask_batch[diagnostic_indices],
+                        )
+                        pre_kl = diagonal_gaussian_kl(
+                            old_mu_batch[diagnostic_indices], old_sigma_batch[diagnostic_indices],
+                            pre_aux[0], pre_aux[1],
+                        )
+                        latent_diagnostics.add("ppo/policy_kl_pre_aux", pre_kl[:, None])
+                        if not latent_ablation_ran:
+                            latent_diagnostics.add_latent(pre_aux[2], pre_aux[3])
+                            self.last_latent_diagnostics = latent_ablation_metrics(
+                                self.actor_critic, self.decoder,
+                                obs_batch[diagnostic_indices], obs_hist_batch[diagnostic_indices],
+                                obs_target[diagnostic_indices],
+                                executed_torque_target[diagnostic_indices],
+                            )
+                            latent_ablation_ran = True
+                vae_loss, kl_div, recon_error, vel_pred_error, dec_input, \
+                    decode_targets, recons, auxiliary_metrics = self._compute_vae_loss(
+                        obs_hist_batch, grf_target, obs_target,
+                        explicit_labels_batch, terminated_batch,
+                        executed_torque_target, wrench_target,
+                        wrench_active_mask,
+                    )
                 
                 timers["vae_loss"] += time.perf_counter() - t0
                 
@@ -384,8 +582,41 @@ class PPO_PACT_Pos:
                 # Update paramaters of encoder
                 self.enc_optimizer.zero_grad()
                 vae_loss.backward()
-                nn.utils.clip_grad_norm_(self.actor_critic.context_encoder.parameters(), self.max_grad_norm)
+                auxiliary_parameters = self.actor_critic.context_encoder.parameters()
+                if self.is_hard_pact_pos:
+                    auxiliary_parameters = (
+                        parameter
+                        for module in (
+                            self.actor_critic.context_encoder,
+                            self.actor_critic.explicit_estimator,
+                            self.actor_critic.physics_estimator,
+                        )
+                        for parameter in module.parameters()
+                    )
+                nn.utils.clip_grad_norm_(auxiliary_parameters, self.max_grad_norm)
                 self.enc_optimizer.step()
+                if latent_diagnostics is not None:
+                    with torch.no_grad():
+                        post_aux = policy_distribution_without_side_effects(
+                            self.actor_critic, obs_batch[diagnostic_indices],
+                            obs_hist_batch[diagnostic_indices],
+                            self.storage.current_latent_noise_batch[diagnostic_indices],
+                            self.storage.current_latent_boot_mask_batch[diagnostic_indices],
+                        )
+                        pre_kl = diagonal_gaussian_kl(
+                            old_mu_batch[diagnostic_indices], old_sigma_batch[diagnostic_indices],
+                            pre_aux[0], pre_aux[1],
+                        )
+                        post_kl = diagonal_gaussian_kl(
+                            old_mu_batch[diagnostic_indices], old_sigma_batch[diagnostic_indices],
+                            post_aux[0], post_aux[1],
+                        )
+                        latent_diagnostics.add("ppo/policy_kl_post_aux", post_kl[:, None])
+                        latent_diagnostics.add(
+                            "ppo/policy_kl_aux_only",
+                            diagonal_gaussian_kl(pre_aux[0], pre_aux[1], post_aux[0], post_aux[1])[:, None],
+                        )
+                        latent_diagnostics.add("ppo/policy_kl_aux_delta", (post_kl - pre_kl)[:, None])
                 
                 timers["enc_step"] += time.perf_counter() - t0
 
@@ -410,28 +641,31 @@ class PPO_PACT_Pos:
                 torch.cuda.synchronize()
                 t0 = time.perf_counter()
 
-                # Log the decode targets and recons for computing boot-probability
-                with torch.no_grad():
-                    x = decode_targets * terminated_batch
-                    r = recons * terminated_batch
+                if self.is_hard_pact_pos:
+                    valid_boot_statistics.add(
+                        decode_targets, recons,
+                        torch.ones(decode_targets.shape[0], device=decode_targets.device, dtype=torch.bool),
+                    )
+                else:
+                    with torch.no_grad():
+                        x = decode_targets * terminated_batch
+                        r = recons * terminated_batch
+                        # flatten batch dimension only; keep feature dim
+                        # assumes x shape [B, D]
+                        if boot_sum_x is None:
+                            boot_sum_x = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
+                            boot_sum_x2 = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
 
-                    # flatten batch dimension only; keep feature dim
-                    # assumes x shape [B, D]
-                    if boot_sum_x is None:
-                        boot_sum_x = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
-                        boot_sum_x2 = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float64)
+                        x64 = x.to(torch.float64)
+                        r64 = r.to(torch.float64)
 
-                    x64 = x.to(torch.float64)
-                    r64 = r.to(torch.float64)
+                        boot_sum_x += x64.sum(dim=0)
+                        boot_sum_x2 += (x64 * x64).sum(dim=0)
 
-                    boot_sum_x += x64.sum(dim=0)
-                    boot_sum_x2 += (x64 * x64).sum(dim=0)
+                        # scalar sum over all elements
+                        boot_sum_recon_sqerr += ((r64 - x64) ** 2).sum().item()
 
-                    # scalar sum over all elements
-                    boot_sum_recon_sqerr += ((r64 - x64) ** 2).sum().item()
-
-                    boot_count += x.shape[0]
-
+                        boot_count += x.shape[0]
 
                 timers["boot_stats"] += time.perf_counter() - t0
 
@@ -441,6 +675,12 @@ class PPO_PACT_Pos:
                 mean_recon_loss += recon_error.item()
                 mean_kld_loss += kl_div.item()
                 mean_decoder_loss += dec_loss.item()
+                for name, value in auxiliary_metrics.items():
+                    auxiliary_metric_sums[name] = (
+                        auxiliary_metric_sums.get(
+                            name, torch.zeros_like(value.detach())
+                        ) + value.detach()
+                    )
 
             # Keeps the interaction of incoming data with layer wieghts below the threashold that 
             #     saturates the tanh activation function.
@@ -458,6 +698,26 @@ class PPO_PACT_Pos:
         mean_kld_loss /= (num_updates * self.num_enc_epochs)
         mean_vel_loss /= (num_updates * self.num_enc_epochs)
         mean_recon_loss /= (num_updates * self.num_enc_epochs)
+        auxiliary_denominator = num_updates * self.num_enc_epochs
+        self.last_auxiliary_metrics = {
+            name: value / auxiliary_denominator
+            for name, value in auxiliary_metric_sums.items()
+        }
+        if self._grf_diagnostics is not None:
+            self.last_auxiliary_metrics.update(self._grf_diagnostics.finalize())
+        self._grf_diagnostics = None
+        if self._grf_swing_metrics is not None:
+            self.last_auxiliary_metrics.update(self._grf_swing_metrics.finalize())
+        self._grf_swing_metrics = None
+        if self._contact_diagnostics is not None:
+            self.last_auxiliary_metrics.update(
+                self._contact_diagnostics.finalize()
+            )
+        self._contact_diagnostics = None
+        if latent_diagnostics is not None:
+            self.last_latent_diagnostics.update(latent_diagnostics.finalize())
+        else:
+            self.last_latent_diagnostics = {}
 
 
         torch.cuda.synchronize()
@@ -470,25 +730,28 @@ class PPO_PACT_Pos:
         # ratio = mean_pred_error / (actual_pred_error * self.boot_mult)
         # pboot = np.tanh(ratio)
 
-        # total number of scalar elements per sample vector
-        feat_dim = boot_sum_x.shape[0]
+        if self.is_hard_pact_pos:
+            valid_boot_statistics.update_boot(self)
+        else:
+            # total number of scalar elements per sample vector
+            feat_dim = boot_sum_x.shape[0]
 
-        mean_pred = boot_sum_x / boot_count                     # [D]
-        ex2 = boot_sum_x2 / boot_count                          # [D]
-        var = torch.clamp(ex2 - mean_pred**2, min=0.0)          # [D]
+            mean_pred = boot_sum_x / boot_count                     # [D]
+            ex2 = boot_sum_x2 / boot_count                          # [D]
+            var = torch.clamp(ex2 - mean_pred**2, min=0.0)          # [D]
 
-        mean_pred_error = var.mean().item()
+            mean_pred_error = var.mean().item()
 
-        actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
+            actual_pred_error = boot_sum_recon_sqerr / (boot_count * feat_dim)
 
-        ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
-        pboot = np.tanh(ratio)
+            ratio = mean_pred_error / (actual_pred_error * self.boot_mult + 1e-8)
+            pboot = np.tanh(ratio)
 
-        timers["boot_prob"] += time.perf_counter() - t0
+            timers["boot_prob"] += time.perf_counter() - t0
 
-        # Use the (scaled) ratio of mean-prediction performance to actual prediction performance
-        #     to determine if encoder bootstrapping is performed.
-        self.use_boot = random.random() < pboot
+            # Use the (scaled) ratio of mean-prediction performance to actual prediction performance
+            #     to determine if encoder bootstrapping is performed.
+            self.use_boot = random.random() < pboot
         print("Use bootstrapped Encoder Dynamics: ", self.use_boot)
 
         self.storage.clear()
@@ -510,11 +773,24 @@ class PPO_PACT_Pos:
                          old_sigma_batch, old_mu_batch,
                          old_actions_log_prob_batch,
                          advantages_batch, target_values_batch, returns_batch,
-                         action_func, fb_func, default_pose, dt, qvel_scale):
-        if self.use_boot:
-            self.actor_critic.act(obs_batch, obs_hist_batch)
+                         action_func, fb_func, default_pose, dt, qvel_scale,
+                         latent_noise=None, latent_boot_mask=None):
+        if self.is_hard_pact_pos:
+            if latent_noise is None or latent_boot_mask is None:
+                raise RuntimeError("HardPACT PPO replay requires stored latent noise and boot mask")
+            # Freeze only the draw, not the current encoder's mu/logvar.
+            self.actor_critic.act(
+                obs_batch, obs_hist_batch, latent_noise=latent_noise.detach(),
+                latent_boot_mask=latent_boot_mask,
+            )
+        elif self.use_boot:
+            self.actor_critic.act(
+                obs_batch, obs_hist_batch, latent_noise=latent_noise
+            )
         else:
-            self.actor_critic.act_bootmask(obs_batch, obs_hist_batch)
+            self.actor_critic.act_bootmask(
+                obs_batch, obs_hist_batch, latent_noise=latent_noise
+            )
 
         # Pull out the current actions for use later
         current_actions = torch.cat([self.actor_critic.mean_pos, self.actor_critic.mean_tau], dim=-1)
@@ -548,6 +824,10 @@ class PPO_PACT_Pos:
 
         # PPO Surrogate loss
         ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
+        if self._latent_diagnostics_due:
+            self._ppo_log_ratio = (
+                actions_log_prob_batch - old_actions_log_prob_batch.reshape(-1)
+            ).detach()
         surrogate = -torch.squeeze(advantages_batch) * ratio
         surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
         surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
@@ -586,11 +866,86 @@ class PPO_PACT_Pos:
 
         return ppo_loss, surrogate_loss, value_loss, current_actions, tau_clone_loss
 
-    def _compute_vae_loss(self, obs_hist_batch, grf_target, 
-                          obs_target, explicit_labels_batch, terminated_batch):
+    @staticmethod
+    def _masked_mse(prediction, target, valid):
+        per_sample = (prediction - target).square().mean(dim=-1)
+        weights = valid.reshape(-1).to(per_sample.dtype)
+        return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
+
+    @staticmethod
+    def _masked_explicit_loss(
+        prediction, contact_logits, target, valid,
+        contact_probability_loss_weight=1.0,
+    ):
+        """Combine continuous MSE with independently weighted contact BCE."""
+        if prediction.shape[-1] != 11 or target.shape[-1] != 11:
+            raise ValueError("HardPACTPos explicit estimates and labels must be 11-D")
+        target = target.detach()
+        continuous_loss = torch.cat((
+            (prediction[:, :3] - target[:, :3]).square(),
+            (prediction[:, 7:11] - target[:, 7:11]).square(),
+        ), dim=-1).mean(dim=-1)
+        contact_loss = F.binary_cross_entropy_with_logits(
+            contact_logits, target[:, 3:7], reduction="none"
+        ).mean(dim=-1)
+        weights = valid.reshape(-1).to(continuous_loss.dtype)
+        denominator = weights.sum().clamp_min(1.0)
+        return (
+            ((continuous_loss
+              + float(contact_probability_loss_weight) * contact_loss)
+             * weights).sum() / denominator
+        )
+
+    @staticmethod
+    def _masked_bce(prediction, target, valid):
+        per_sample = F.binary_cross_entropy_with_logits(
+            prediction, target.detach(), reduction="none"
+        ).mean(dim=-1)
+        weights = valid.reshape(-1).to(per_sample.dtype)
+        return (per_sample * weights).sum() / weights.sum().clamp_min(1.0)
+
+    def _vae_beta_for_iteration(self, iteration):
+        """Return the cosine-warmed KL weight for an absolute PPO iteration."""
+        return cosine_vae_beta(iteration,self.vae_kl_initial_weight,self.vae_beta,
+                               self.vae_kl_warmup_start,self.vae_kl_warmup_iterations)
+
+    def _compute_vae_loss(self, obs_hist_batch, grf_target,
+                          obs_target, explicit_labels_batch, terminated_batch,
+                          executed_torque_target=None, wrench_target=None,
+                          wrench_active_mask=None):
         vae_loss = None
+        if self.is_hard_pact_pos:
+            rows = terminated_batch.reshape(-1).bool()
+            # Compact before the network forward as well as loss arithmetic;
+            # zero upstream gradients cannot sanitize NaN activations.
+            obs_hist_batch = obs_hist_batch[rows]
+            grf_target = grf_target.detach()[rows]
+            obs_target = obs_target.detach()[rows]
+            explicit_labels_batch = explicit_labels_batch.detach()[rows]
+            executed_torque_target = executed_torque_target.detach()[rows] if executed_torque_target is not None else None
+            wrench_target = wrench_target.detach()[rows] if wrench_target is not None else None
+            wrench_active_mask = wrench_active_mask[rows] if wrench_active_mask is not None else None
+            terminated_batch = terminated_batch[rows]
+            if obs_hist_batch.shape[0] == 0:
+                zero = obs_target.new_zeros(())
+                width = self.actor_critic.context_encoder.ce_out_mean.out_features + 11
+                return (zero, zero, zero, zero,
+                        obs_target.new_empty((0, width)), obs_target, obs_target,
+                        {name: zero for name in (
+                            "total", "privileged_reconstruction", "kl", "explicit",
+                            "grf", "wrench_active", "wrench_neutral",
+                            "explicit_base_linear_velocity", "explicit_contact_probabilities",
+                            "explicit_foot_clearance",
+                        )})
         
-        mean_latent, logvar_latent, cenet_latent, cenet_torso_velo = self.actor_critic.context_encoder(obs_hist_batch)
+        mean_latent, logvar_latent, features = (
+            self.actor_critic.context_encoder.encode_with_features(obs_hist_batch)
+        )
+        cenet_latent = self.actor_critic.context_encoder.reparameterization_trick(
+            mean_latent, logvar_latent
+        )
+        estimator = self.actor_critic.explicit_estimator(features)
+        cenet_torso_velo = estimator.explicit_for_policy
         
         dec_input = torch.cat((cenet_latent, cenet_torso_velo), dim=-1)
         enc_update_obs_decode = None
@@ -605,10 +960,143 @@ class PPO_PACT_Pos:
         decode_target = obs_target
         explicit_labels_batch.requires_grad = False
 
-        vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
-        recon_error    = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
-        kl_div         = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
+        if self.is_hard_pact_pos:
+            # Inputs are compacted to valid rows. MSE divides by N_valid * D;
+            # KL sums latent coordinates, then divides by N_valid.
+            vel_pred_error = F.mse_loss(cenet_torso_velo, explicit_labels_batch)
+            recon_error = F.mse_loss(enc_update_obs_decode, decode_target)
+            kl_div = -0.5 * (
+                1 + logvar_latent - mean_latent.square() - logvar_latent.exp()
+            ).sum(dim=-1).mean()
+        else:
+            vel_pred_error = F.mse_loss(cenet_torso_velo*terminated_batch,explicit_labels_batch*terminated_batch)
+            recon_error = F.mse_loss(enc_update_obs_decode*terminated_batch,decode_target*terminated_batch)
+            kl_div = -0.5*torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)*terminated_batch.squeeze(-1).float())
         # kl_div         = -0.5*torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp())
-        vae_loss = vel_pred_error + recon_error + self.vae_beta*kl_div
+        auxiliary_metrics = {
+            "total": vel_pred_error + recon_error + self.current_vae_beta * kl_div,
+            "privileged_reconstruction": recon_error,
+            "kl": kl_div,
+            "explicit": vel_pred_error,
+        }
+
+        if self.is_hard_pact_pos:
+            if any(value is None for value in (
+                    executed_torque_target, wrench_target,
+                    wrench_active_mask)):
+                raise RuntimeError("HardPACTPos auxiliary physics labels are missing")
+            valid = terminated_batch.bool()
+            vel_pred_error = self._masked_explicit_loss(
+                cenet_torso_velo, estimator.contact_logits,
+                explicit_labels_batch, valid,
+                self.contact_probability_loss_weight,
+            )
+            heads = self.actor_critic.physics_heads(
+                cenet_latent, cenet_torso_velo,
+                executed_torque_target.detach(),
+            )
+            grf_loss = normalized_grf_huber_loss(
+                heads.grf_normalized, grf_target.detach(), valid,
+            )
+            if self._grf_diagnostics is not None:
+                self._grf_diagnostics.update(
+                    heads.grf_normalized,
+                    grf_target,
+                    explicit_labels_batch[:, 3:7],
+                    valid,
+                )
+            active = valid & wrench_active_mask.bool()
+            neutral = valid & ~wrench_active_mask.bool()
+            wrench_active_loss = normalized_wrench_huber_loss(
+                heads.wrench_raw_normalized, wrench_target.detach(), active,
+            )
+            wrench_neutral_loss = normalized_wrench_huber_loss(
+                heads.wrench_raw_normalized, wrench_target.detach(), neutral,
+            )
+            explicit_linear = self._masked_mse(
+                cenet_torso_velo[:, :3], explicit_labels_batch[:, :3], valid
+            )
+            explicit_contact = self._masked_bce(
+                estimator.contact_logits, explicit_labels_batch[:, 3:7], valid
+            )
+            explicit_clearance = self._masked_mse(
+                cenet_torso_velo[:, 7:11], explicit_labels_batch[:, 7:11], valid
+            )
+            vae_loss = (
+                self.privileged_loss_weight * recon_error
+                + self.current_vae_beta * kl_div
+                + self.explicit_loss_weight * vel_pred_error
+                + self.grf_loss_weight * grf_loss
+                + self.active_wrench_loss_weight * wrench_active_loss
+                + self.neutral_wrench_loss_weight * wrench_neutral_loss
+            )
+            physics = self.actor_critic.physics_estimator
+            if physics.grf_swing.active:
+                # A second GRF-only forward is necessary here: reusing heads
+                # above would propagate the new loss into the shared encoder.
+                swing_loss, statistics = physics.swing_grf_auxiliary(
+                    cenet_latent, cenet_torso_velo, executed_torque_target,
+                    heads.grf_normalized, valid,
+                )
+                vae_loss = vae_loss + swing_loss
+                auxiliary_metrics["grf_swing_consistency_loss"] = swing_loss
+                accumulator = getattr(self, "_grf_swing_metrics", None)
+                if accumulator is not None:
+                    accumulator.add(statistics)
+            auxiliary_metrics.update({
+                "total": vae_loss,
+                "explicit": vel_pred_error,
+                "grf": grf_loss,
+                "wrench_active": wrench_active_loss,
+                "wrench_neutral": wrench_neutral_loss,
+                "explicit_base_linear_velocity": explicit_linear,
+                "explicit_contact_probabilities": explicit_contact,
+                "explicit_foot_clearance": explicit_clearance,
+            })
+            if self._contact_diagnostics is None:
+                auxiliary_metrics.update(contact_estimator_metrics(
+                    estimator, explicit_labels_batch[:, 3:7],
+                    self.actor_critic.explicit_estimator.contact_epsilon, valid,
+                ))
+            else:
+                self._contact_diagnostics.update(
+                    estimator, explicit_labels_batch[:, 3:7], valid
+                )
+            if self.force_decoder_diagnostics_enabled:
+                auxiliary_metrics.update(wrench_regression_metrics(
+                    heads.wrench_raw_normalized, wrench_target.detach(), valid,
+                    self.actor_critic.physics_estimator.wrench_scale,
+                    self.actor_critic.physics_estimator.wrench_qp_clip,
+                ))
+                active_diagnostics = wrench_regression_metrics(
+                    heads.wrench_raw_normalized, wrench_target.detach(), active,
+                    self.actor_critic.physics_estimator.wrench_scale,
+                    self.actor_critic.physics_estimator.wrench_qp_clip,
+                )
+                neutral_diagnostics = wrench_regression_metrics(
+                    heads.wrench_raw_normalized, wrench_target.detach(), neutral,
+                    self.actor_critic.physics_estimator.wrench_scale,
+                    self.actor_critic.physics_estimator.wrench_qp_clip,
+                )
+                auxiliary_metrics.update({
+                    "wrench_active_mae_physical": active_diagnostics[
+                        "wrench_raw_mae_physical"
+                    ],
+                    "wrench_active_rmse_physical": active_diagnostics[
+                        "wrench_raw_rmse_physical"
+                    ],
+                    "wrench_neutral_mae_physical": neutral_diagnostics[
+                        "wrench_raw_mae_physical"
+                    ],
+                    "wrench_neutral_rmse_physical": neutral_diagnostics[
+                        "wrench_raw_rmse_physical"
+                    ],
+                })
+        else:
+            vae_loss = auxiliary_metrics["total"]
         
-        return vae_loss, kl_div, recon_error, vel_pred_error, dec_input.clone().detach(), decode_target.detach(), enc_update_obs_decode.detach()
+        return (
+            vae_loss, kl_div, recon_error, vel_pred_error,
+            dec_input.clone().detach(), decode_target.detach(),
+            enc_update_obs_decode.detach(), auxiliary_metrics,
+        )

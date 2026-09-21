@@ -33,15 +33,28 @@ import time
 import os
 from collections import deque
 import statistics
+import platform
+import subprocess
+import json
+from importlib import metadata as importlib_metadata
 import numpy as np
 
 from torch.utils.tensorboard import SummaryWriter
 import torch
 
-from rsl_rl.algorithms import PPO_PACT
-from rsl_rl.modules import ActorCritic_PACT, ContextDecoder
+from rsl_rl.algorithms import PPO_PACT, PPO_HardPACT
+from rsl_rl.modules import ActorCritic_PACT, ActorCritic_HardPACT, ContextDecoder
 from rsl_rl.env import VecEnv
 from rsl_rl.utils import pretty_print_module
+from legged_gym.envs.go2.go2_hard_pact.deployment import (
+    RECONSTRUCTION_DIM,
+    RECONSTRUCTION_INDICES,
+    build_deployment_contract,
+    calculate_physics_head_gains,
+    write_deployment_contract_once,
+)
+from legged_gym.envs.go2.go2_hard_pact.ablations import resolve_hard_pact_features
+from rsl_rl.hard_pact_logging import collect_hard_pact_scalars
 
 
 
@@ -58,10 +71,19 @@ class OnPolicyRunnerPACT:
                  train_cfg,
                  log_dir=None,
                  device='cpu'):
-        torch.autograd.set_detect_anomaly(True)
         self.cfg=train_cfg["runner"]
+        self.train_cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
+        # Preserve legacy PACT's historical anomaly checking. HardPACT opts
+        # out explicitly because it synchronizes every backward operation and
+        # is unsuitable for normal throughput measurements/training.
+        torch.autograd.set_detect_anomaly(bool(
+            self.alg_cfg.get(
+                "detect_anomaly",
+                self.cfg.get("algorithm_class_name") != "PPO_HardPACT",
+            )
+        ))
         
         self.device = device
         self.env = env
@@ -76,6 +98,36 @@ class OnPolicyRunnerPACT:
             num_critic_obs *= self.env.num_crit_obs_stack
 
         actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
+        self.is_hard_pact = actor_critic_class is ActorCritic_HardPACT
+        gain_spec = None
+        actor_extra_kwargs = {}
+        reconstruction_indices = None
+        reconstruction_dim = self.env.num_privileged_obs
+        if self.is_hard_pact:
+            if self.alg_cfg.get("ppo_qp_sampling_seed") is None:
+                # Stateless epoch partitioning derives from the run seed and
+                # iteration, so resumed runs need no additional RNG payload.
+                self.alg_cfg["ppo_qp_sampling_seed"] = int(
+                    self.train_cfg.get("seed", 1)
+                )
+            self.hard_pact_features = resolve_hard_pact_features(
+                self.alg_cfg.get("ablation_variant", "full")
+            )
+            gain_spec = calculate_physics_head_gains(self.env.cfg)
+            from rsl_rl.modules.hard_pact_physics import GRFSwingConfig
+            actor_extra_kwargs = {
+                "cenet_explicit_layers": self.policy_cfg["cenet_explicit_layers"],
+                "grf_decoder_layers": self.policy_cfg["grf_decoder_layers"],
+                "wrench_decoder_layers": self.policy_cfg["wrench_decoder_layers"],
+                "grf_scale_n": gain_spec.grf_scale_n,
+                "wrench_scale": gain_spec.wrench_scale_n_nm,
+                "wrench_qp_clip": gain_spec.wrench_qp_clip_n_nm,
+                "grf_swing": GRFSwingConfig.from_task(self.env.cfg),
+                "contact_epsilon": self.policy_cfg["contact_epsilon"],
+                "ablation_features": self.hard_pact_features,
+            }
+            reconstruction_indices = RECONSTRUCTION_INDICES
+            reconstruction_dim = RECONSTRUCTION_DIM
         
         cenet_input_dim = self.env.num_obs * self.env.num_obs_hist
 
@@ -89,7 +141,8 @@ class OnPolicyRunnerPACT:
                                                                self.policy_cfg["cenet_velo_dim"],
                                                                self.policy_cfg["cenet_enc_layers"],
                                                                self.policy_cfg["activation"],
-                                                               self.policy_cfg["init_noise_std"]).to(self.device)
+                                                               self.policy_cfg["init_noise_std"],
+                                                               **actor_extra_kwargs).to(self.device)
                 
         decoder = ContextDecoder(self.policy_cfg["cenet_dec_input_dim"],
                                  self.policy_cfg["cenet_dec_layers"],
@@ -106,9 +159,33 @@ class OnPolicyRunnerPACT:
         # print(actor_critic)
         # print(decoder)
 
+<<<<<<< HEAD
         print("Created Actor-Critic Model")
         pretty_print_module(actor_critic)
         pretty_print_module(decoder)
+=======
+        self.console_debug = bool(self.cfg.get("console_debug", False))
+        self.console_iteration = bool(self.cfg.get("console_iteration", True))
+        self.console_model_summary = bool(
+            self.cfg.get("console_model_summary", not self.is_hard_pact)
+        )
+        self.console_reward_terms = bool(
+            self.cfg.get("console_reward_terms", not self.is_hard_pact)
+        )
+        self.console_detailed_losses = bool(
+            self.cfg.get("console_detailed_losses", not self.is_hard_pact)
+        )
+        self.console_pinn_timing = bool(
+            self.cfg.get("console_pinn_timing", True)
+        )
+        self.console_qp_timing = bool(
+            self.cfg.get("console_qp_timing", True)
+        )
+        if self.console_model_summary:
+            print("Created Parallel Actor-Critic Model")
+            pretty_print_module(actor_critic)
+            pretty_print_module(decoder)
+>>>>>>> aligned_iclr_2027_qp_pinn
 
         self._init_entropy_coef = self.alg_cfg["entropy_coef"]
         self.use_adaptive_entropy = self.alg_cfg["use_adaptive_entropy"]
@@ -120,6 +197,7 @@ class OnPolicyRunnerPACT:
                                        pinn_lambda=self.policy_cfg["pinn_loss_weight"], 
                                        pinn_warmup=self.policy_cfg["pinn_warmup"], 
                                        pinn_init_steps=self.policy_cfg["pinn_init_steps"],
+                                       reconstruction_indices=reconstruction_indices,
                                        device=self.device, **self.alg_cfg)
         
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
@@ -127,10 +205,35 @@ class OnPolicyRunnerPACT:
 
         # init storage and model
         self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], \
-                              [self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
+                              [reconstruction_dim], [self.env.num_obs_hist*self.env.num_obs], \
                               [2*self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]], [self.env.wb_dim])
+        if self.is_hard_pact:
+            delay_range = self.env.cfg.domain_rand.ctrl_delay_step_range
+            self.alg.storage.configure_action_replay(int(delay_range[1]))
+            # Limits are backend properties, not learned transition data.
+            # Bind them once so PPO minibatches carry only the previous torque
+            # needed by the rate constraint, minimizing persistent GPU memory.
+            # One configured rate for QP, deployment, and execution without QP.
+            from dataclasses import replace
+            self.alg.qp_config = replace(self.alg.qp_config,
+                torque_rate_limit_nm_s=self.env.cfg.control.torque_rate_limit_nm_s)
+            self.alg_cfg["hard_pact_qp"]["torque_rate_limit_nm_s"] = self.alg.qp_config.torque_rate_limit_nm_s
+            if self.hard_pact_features.execution_qp:
+                simulator = self.env.simulator
+                self.alg.configure_hard_pact_qp(
+                    simulator.torque_limits,
+                    simulator.dof_pos_limits_hard,
+                    simulator.dof_vel_limits,
+                )
+                # Reuse the same BARD model and qpth layer for rollout and PPO;
+                # duplicating either would waste substantial GPU memory.
+                self.env.configure_hard_pact_substep_qp(
+                    self.alg.actor_critic,
+                    self.alg.physics_dynamics,
+                    self.alg.hard_pact_qp,
+                )
 
-        if "pretrained_path" in self.policy_cfg.keys():
+        if self.policy_cfg.get("pretrained_path"):
             self._load_pretrained_model()
 
         # Log
@@ -139,6 +242,26 @@ class OnPolicyRunnerPACT:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+
+        if gain_spec is not None:
+            self.deployment_contract = build_deployment_contract(
+                self.env.cfg, self.alg.actor_critic, gain_spec
+            )
+            qp_mode = self.alg.qp_config.qp_update_mode
+            from legged_gym.envs.go2.go2_hard_pact.deployment import qp_update_contract
+            self.deployment_contract["qp_update"] = qp_update_contract(
+                qp_mode, int(self.env.cfg.control.decimation),
+                self.alg.qp_config.warmup_iterations,
+                qp_config=self.alg.qp_config,
+                clip_torque_rate_without_qp=self.env.cfg.control.clip_torque_rate_without_qp,
+            )
+            if self.alg.hard_pact_qp is not None:
+                qp = self.alg.hard_pact_qp
+                self.deployment_contract["qp_update"]["physical_joint_limits"] = {
+                    name: getattr(qp, name).detach().cpu().tolist()
+                    for name in ("torque_limits", "position_lower", "position_upper", "velocity_limits")
+                }
+            write_deployment_contract_once(self.log_dir, self.deployment_contract)
 
         self.env.create_async_pino_workers()
 
@@ -159,6 +282,7 @@ class OnPolicyRunnerPACT:
         # initialize writer
         if self.log_dir is not None and self.writer is None:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+            self._log_hard_pact_run_metadata()
 
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
@@ -183,7 +307,22 @@ class OnPolicyRunnerPACT:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
+            qp_profile = None
+            if self.is_hard_pact:
+                self.env._terrain_curriculum_iteration = it
+                self.env.begin_command_curriculum_iteration()
+                self._set_hard_pact_qp_iteration(it)
+                if self.alg.hard_pact_qp is not None:
+                    self.alg.hard_pact_qp.begin_iteration_diagnostics("rollout")
+                    qp_profile = self.alg.hard_pact_qp.profiles["rollout"]
+                    qp_collection_token = qp_profile.begin(obs)
+            if self.is_hard_pact and self.alg.profile_bard_timing and torch.cuda.is_available():
+                torch.cuda.synchronize(self.device)
             start = time.time()
+            self._rollout_disturbance_active_sum = torch.zeros(
+                (), device=self.device
+            )
+            self._rollout_disturbance_metric_count = 0
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
@@ -195,18 +334,30 @@ class OnPolicyRunnerPACT:
                     pprev_obs, pprev_obs_hist = pprev_obs.to(self.device), pprev_obs_hist.to(self.device)
 
                     # Call the algorithms act() method to store current transition data and predict actions
-                    with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                    with torch.inference_mode(), torch.amp.autocast(
+                        device_type="cuda", dtype=torch.bfloat16
+                    ):
                         actions = self.alg.act(obs, critic_obs, obs_hist, prev_obs, prev_obs_hist, pprev_obs, pprev_obs_hist) # obs_t, (obs_t-1)
                          
                     # Submit the predicted action and extract the resulting state... 
                     obs, privileged_obs, obs_hist, exp_labels, rewards, dones, infos, grfs = self.env.step(actions)  # obs_t+1  (obs_t)
+                    self._accumulate_rollout_qp_metrics(infos)
                     
                     # Create privileged obs
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     
                     # get the PINN specific data
                     gt_forces, mass_mats, bias_vecs, torso_acc = self.env.get_pinn_wb_dynamics()
-                    gt_forces, mass_mats, bias_vecs, torso_acc = gt_forces.to(self.device), mass_mats.to(self.device), bias_vecs.to(self.device), torso_acc.to(self.device)
+                    gt_forces = gt_forces.to(self.device)
+                    if not self.is_hard_pact:
+                        mass_mats = mass_mats.to(self.device)
+                        bias_vecs = bias_vecs.to(self.device)
+                        torso_acc = torso_acc.to(self.device)
+                    else:
+                        # HardPACT builds its own detached mechanics cache;
+                        # these legacy rollout tensors must not be copied or
+                        # transferred into storage.
+                        mass_mats = bias_vecs = torso_acc = None
 
                     # move everything to the correct device
                     obs, critic_obs, obs_hist, exp_labels, rewards, dones, grfs = obs.to(self.device), critic_obs.to(self.device), \
@@ -228,8 +379,15 @@ class OnPolicyRunnerPACT:
                         cur_reward_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
 
+                if self.is_hard_pact and self.alg.profile_bard_timing and torch.cuda.is_available():
+                    torch.cuda.synchronize(self.device)
                 stop = time.time()
                 collection_time = stop - start
+                if qp_profile is not None:
+                    qp_profile.end("total_collection", qp_collection_token)
+                    # Keep this timer in the rollout profile: update() clears
+                    # the PPO diagnostics at entry, but this spans all PPO work.
+                    qp_update_token = qp_profile.begin(obs)
 
                 # Learning step
                 start = stop
@@ -238,16 +396,24 @@ class OnPolicyRunnerPACT:
             mean_value_loss, mean_surrogate_loss, mean_autoenc_loss, mean_decoder_loss, mean_vel_loss, \
                     mean_recon_loss, mean_kld_loss, mean_pinn_loss \
                     = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, it, self.env.simulator.default_dof_pos, self.env.obs_scales.dof_vel)
+            if qp_profile is not None:
+                qp_profile.end("total_update", qp_update_token)
 
             # self.env.step_tradeoff_curriculum()
-            print("Avg - Curriculum Step: ", torch.mean(self.env.tradeoff_step_ctr).item())
-            print("Max - self.feedforward_tau_weight: ", torch.max(self.env.simulator.feedforward_tau_weight).item())
-            print("Min - self.feedforward_tau_weight: ", torch.min(self.env.simulator.feedforward_tau_weight).item())
-            print("Avg - self.feedforward_tau_weight: ", torch.mean(self.env.simulator.feedforward_tau_weight).item())
-            print("Max - self.feedback_tau_weight: ", torch.max(self.env.simulator.feedback_tau_weight).item())
-            print("Min - self.feedback_tau_weight: ", torch.min(self.env.simulator.feedback_tau_weight).item())
-            print("Avg - self.feedback_tau_weight: ", torch.mean(self.env.simulator.feedback_tau_weight).item())
+            if self.console_debug:
+                print("Avg - Curriculum Step: ", torch.mean(self.env.tradeoff_step_ctr).item())
+                print("Max - self.feedforward_tau_weight: ", torch.max(self.env.simulator.feedforward_tau_weight).item())
+                print("Min - self.feedforward_tau_weight: ", torch.min(self.env.simulator.feedforward_tau_weight).item())
+                print("Avg - self.feedforward_tau_weight: ", torch.mean(self.env.simulator.feedforward_tau_weight).item())
+                print("Max - self.feedback_tau_weight: ", torch.max(self.env.simulator.feedback_tau_weight).item())
+                print("Min - self.feedback_tau_weight: ", torch.min(self.env.simulator.feedback_tau_weight).item())
+                print("Avg - self.feedback_tau_weight: ", torch.mean(self.env.simulator.feedback_tau_weight).item())
             
+            if self.is_hard_pact:
+                self.env.finish_command_curriculum_iteration(it)
+                if self.writer is not None:
+                    for key,value in getattr(self.env,"command_curriculum_metrics",{}).items():
+                        self.writer.add_scalar("curriculum/commands/"+key,value,it)
             # Step the reward curriculum if we are doing that
             if self.env.use_reward_curriculum:
                 self.env.step_reward_curriculum(it)
@@ -266,8 +432,18 @@ class OnPolicyRunnerPACT:
                         vals.append(v.float().mean().to(self.device))
 
                 # mean_reward = statistics.mean(rewbuffer) if len(rewbuffer) > 0 else None
-                mean_tracking_lin_vel = torch.stack(vals).mean().item()
-                self.env.simulator._step_domian_rand(it, mean_tracking_lin_vel)
+                if len(ep_infos) > 0 and "rew_tracking_lin_vel" in ep_infos[0] and vals:
+                    mean_tracking_lin_vel = torch.stack(vals).mean().item()
+                if self.is_hard_pact and hasattr(
+                    self.env, "step_domain_rand_curriculum"
+                ):
+                    self.env.step_domain_rand_curriculum(
+                        it, mean_tracking_lin_vel
+                    )
+                else:
+                    self.env.simulator._step_domian_rand(
+                        it, mean_tracking_lin_vel
+                    )
 
                 if self.env.simulator.domain_rand_reward_ema is not None:
                     self.writer.add_scalar('Values/domain_rand_reward_ema',self.env.simulator.domain_rand_reward_ema,it) 
@@ -300,7 +476,8 @@ class OnPolicyRunnerPACT:
                 }
             
                 entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
-                print(entropy)
+                if self.console_debug:
+                    print(entropy)
                 self.writer.add_scalar('Values/entropy',entropy,it)
 
             # entropy_coef = self._init_entropy_coef
@@ -321,6 +498,8 @@ class OnPolicyRunnerPACT:
             # if self.env.cfg.rewards.only_positive_rewards and it > 1000:
             #     self.env.cfg.rewards.only_positive_rewards = False
             
+            if self.is_hard_pact and self.alg.profile_bard_timing and torch.cuda.is_available():
+                torch.cuda.synchronize(self.device)
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:
@@ -334,6 +513,149 @@ class OnPolicyRunnerPACT:
 
         # Learning is done, shutdown the async. pinocchio workers
         self.env.shutdown_asynic_pino_workers()
+        if self.is_hard_pact and hasattr(self.alg.physics_dynamics, "shutdown"):
+            self.alg.physics_dynamics.shutdown()
+
+    def _set_hard_pact_qp_iteration(self, iteration):
+        """Set both rollout and PPO gates before collecting this iteration."""
+        self.alg._qp_training_iteration = int(iteration)
+        self.env.set_hard_pact_qp_enabled(self.alg.qp_enabled_at_iteration())
+        qp = self.alg.hard_pact_qp
+        if qp is not None:
+            qp.diagnostics_scheduled = (qp.cfg.tensorboard_diagnostics_enabled
+                and qp.cfg.tensorboard_diagnostics_interval > 0
+                and iteration % qp.cfg.tensorboard_diagnostics_interval == 0)
+            for owner in (qp, *qp._backend_instances.values()):
+                for profile in getattr(owner,"profiles",{}).values():
+                    profile.enabled = qp.cfg.cuda_event_profiling and qp.diagnostics_scheduled
+
+    def _log_qp_metrics(self, iteration):
+        """Transfer only aggregated QP scalars to TensorBoard."""
+        metrics = {}
+        qp = getattr(self.alg, "hard_pact_qp", None)
+        if qp is not None and not getattr(qp, "diagnostics_scheduled", True):
+            return
+        if qp is not None:
+            reference = qp.torque_limits
+            for phase in ("rollout", "ppo"):
+                metrics.update(qp.iteration_metrics(phase, reference))
+            if reference.is_cuda:
+                # PyTorch allocator only: excludes cuPIQP/CuPy and simulator allocations.
+                for name, fn in (("allocated_bytes",torch.cuda.memory_allocated),
+                                 ("reserved_bytes",torch.cuda.memory_reserved),
+                                 ("peak_allocated_since_reset_bytes",torch.cuda.max_memory_allocated)):
+                    metrics[f"qp/rollout/memory/torch_cuda_{name}"] = reference.new_tensor(fn(reference.device))
+            update_time = metrics.pop("qp/rollout/profiling/total_update_ms", None)
+            if update_time is not None:
+                metrics["qp/ppo/profiling/total_update_ms"] = update_time
+        for name, value in getattr(self.alg, "last_qp_metrics", {}).items():
+            # Sampling/warmup are already iteration aggregates. Do not export
+            # last-minibatch solve fractions over the authoritative totals.
+            if not name.startswith(("qp/minimal/sampling/", "qp/minimal/warmup/", "qp/full/gradient_")):
+                continue
+            metrics[name.replace("qp/", "qp/ppo/", 1)] = value
+        for name, value in metrics.items():
+            if not isinstance(value, torch.Tensor) or value.numel() != 1:
+                raise ValueError(
+                    f"QP runner metric {name!r} must be one scalar tensor"
+                )
+        # One aggregate device-to-host transfer, not one synchronization per tag.
+        if metrics:
+            if qp is None:
+                reference = next(iter(metrics.values()))
+            scalars = torch.stack([value.detach().to(reference).reshape(()) for value in metrics.values()]).cpu().tolist()
+            for name, value in zip(metrics, scalars):
+                self.writer.add_scalar(name, value, iteration)
+        self._last_qp_iteration_metrics = metrics
+
+    def _accumulate_rollout_qp_metrics(self, infos):
+        """Reduce per-environment rollout QP diagnostics on the live device."""
+        transition = infos.get("hard_pact_transition") if isinstance(infos, dict) else None
+        if transition and "sustained_wrench_active_mask" in transition:
+            self._rollout_disturbance_active_sum += transition[
+                "sustained_wrench_active_mask"
+            ].float().mean()
+            self._rollout_disturbance_metric_count += 1
+        # Solver statistics are accumulated at actual solve calls. Interval
+        # averages include held substeps and cannot be used as solve counts.
+
+    @staticmethod
+    def _scalar(value):
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                raise ValueError("HardPACT logging accepts aggregated scalars only")
+            return value.item()
+        return float(value)
+
+    def _log_hard_pact_run_metadata(self):
+        """Write immutable provenance once; no per-iteration synchronization."""
+        if not hasattr(self, "hard_pact_features"):
+            return
+        try:
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=os.path.dirname(__file__),
+                text=True, stderr=subprocess.DEVNULL,
+            ).strip()
+        except Exception:
+            sha = "unknown"
+        metadata = {
+            "variant": self.hard_pact_features.variant_id,
+            "backend": self.cfg.get("task_backend", "unknown"),
+            "seed": str(self.train_cfg.get("seed", "configured-by-task")),
+            "git_sha": sha,
+            "torch_version": torch.__version__,
+            "python_version": platform.python_version(),
+            "dtype": str(next(self.alg.actor_critic.parameters()).dtype),
+            "hardware": torch.cuda.get_device_name(self.device)
+            if str(self.device).startswith("cuda") and torch.cuda.is_available()
+            else platform.processor() or "cpu",
+        }
+        backend = metadata["backend"]
+        distribution = {
+            "genesis": "genesis-world", "isaacgym": "isaacgym",
+            "isaaclab": "isaaclab",
+        }.get(backend, backend)
+        try:
+            metadata["backend_version"] = importlib_metadata.version(distribution)
+        except importlib_metadata.PackageNotFoundError:
+            metadata["backend_version"] = "unknown"
+        for key, value in metadata.items():
+            self.writer.add_text(f"system/{key}", str(value), 0)
+        self.writer.add_text(
+            "system/config", json.dumps(self.train_cfg, sort_keys=True, default=str), 0
+        )
+
+    def _log_stable_hard_pact_metrics(self, locs):
+        if not hasattr(self, "hard_pact_features"):
+            return
+        metrics = collect_hard_pact_scalars(self.alg, self.hard_pact_features)
+        metrics = {key: value for key, value in metrics.items()
+                   if not key.startswith(("qp/minimal/", "qp/physical/", "qp/full/"))}
+        disturbance_count = getattr(self, "_rollout_disturbance_metric_count", 0)
+        if disturbance_count:
+            metrics["disturbance/persistent_active_fraction"] = (
+                self._rollout_disturbance_active_sum / disturbance_count
+            )
+        simulator = self.env.simulator
+        for attr, key in (
+            ("domain_rand_joint_dynamics_progress", "domain_rand/joint_dynamics_progress"),
+            ("domain_rand_mass_com_progress", "domain_rand/mass_com_progress"),
+            ("domain_rand_disturbance_progress", "domain_rand/disturbance_progress"),
+        ):
+            if hasattr(simulator, attr):
+                value = getattr(simulator, attr)
+                metrics[key] = value.float().mean() if isinstance(
+                    value, torch.Tensor
+                ) and value.numel() != 1 else value
+        metrics["system/timesteps"] = float(self.tot_timesteps)
+        metrics["system/wall_time_s"] = float(self.tot_time)
+        metrics["system/iteration_time_s"] = float(
+            locs["collection_time"] + locs["learn_time"]
+        )
+        for name, enabled in self.hard_pact_features.scalar_flags().items():
+            metrics[f"system/features/{name}"] = enabled
+        for name, value in metrics.items():
+            self.writer.add_scalar(name, self._scalar(value), locs["it"])
 
     def log(self, locs, width=80, pad=35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
@@ -341,6 +663,7 @@ class OnPolicyRunnerPACT:
         iteration_time = locs['collection_time'] + locs['learn_time']
 
         ep_string = f''
+        stable_episode_values = {}
         if locs['ep_infos']:
             for key in locs['ep_infos'][0]:
                 infotensor = torch.tensor([], device=self.device)
@@ -352,8 +675,31 @@ class OnPolicyRunnerPACT:
                         ep_info[key] = ep_info[key].unsqueeze(0)
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 value = torch.mean(infotensor)
+                stable_episode_values[key] = value
                 self.writer.add_scalar('Episode/' + key, value, locs['it'])
-                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+                # Stable reward/tracking namespaces coexist with legacy keys.
+                stable_prefix = "tracking" if "tracking" in key else "reward"
+                self.writer.add_scalar(f"{stable_prefix}/{key}", value, locs['it'])
+                if "success" in key:
+                    self.writer.add_scalar("train/success", value, locs['it'])
+                if self.console_reward_terms:
+                    ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+        # These keys never disappear when an episode boundary is absent.
+        canonical_episode = {
+            "train/success": ("success",),
+            "tracking/linear_velocity": ("rew_tracking_lin_vel", "tracking_lin_vel"),
+            "tracking/angular_velocity": ("rew_tracking_ang_vel", "tracking_ang_vel"),
+            "tracking/terrain_level": ("terrain_level",),
+        }
+        for output_key, candidates in canonical_episode.items():
+            value = next((stable_episode_values[name] for name in candidates
+                          if name in stable_episode_values), float("nan"))
+            self.writer.add_scalar(output_key, value, locs['it'])
+        # Reward-scale names are configuration-stable across all variants.
+        for reward_name in getattr(self.env, "reward_scales", {}):
+            episode_key = f"rew_{reward_name}"
+            value = stable_episode_values.get(episode_key, float("nan"))
+            self.writer.add_scalar(f"reward/{reward_name}", value, locs['it'])
         
         mean_std = self.alg.actor_critic.std.mean()
         
@@ -367,6 +713,27 @@ class OnPolicyRunnerPACT:
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
         self.writer.add_scalar('Loss/pinn_loss', locs['mean_pinn_loss'], locs['it'])
+        for name, value in getattr(
+            self.alg, "last_inverse_dynamics_metrics", {}
+        ).items():
+            self.writer.add_scalar(name, value.item(), locs['it'])
+        for name, value in getattr(
+            self.alg, "last_rollout_dynamics_metrics", {}
+        ).items():
+            self.writer.add_scalar(name, value.item(), locs['it'])
+        for name, value in getattr(
+            self.alg, "last_physics_gradient_metrics", {}
+        ).items():
+            self.writer.add_scalar(name, value.item(), locs['it'])
+        # HardPACT QP exposes only already-aggregated device scalars. The
+        # runner never receives per-environment residuals or solver matrices;
+        # this is the sole device-to-host transfer for QP diagnostics.
+        self._log_qp_metrics(locs['it'])
+        self._log_stable_hard_pact_metrics(locs)
+        for name, value in getattr(self.alg, "last_auxiliary_metrics", {}).items():
+            self.writer.add_scalar(f"Loss/auxiliary_{name}", value.item(), locs['it'])
+        if self.is_hard_pact:
+            self.writer.add_scalar("Loss/vae_kl_effective_weight",self.alg.current_vae_beta,locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
@@ -377,20 +744,34 @@ class OnPolicyRunnerPACT:
             self.writer.add_scalar('Train/mean_episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
             self.writer.add_scalar('Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
             self.writer.add_scalar('Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
+            self.writer.add_scalar('train/return', statistics.mean(locs['rewbuffer']), locs['it'])
+            self.writer.add_scalar('train/episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
+        else:
+            self.writer.add_scalar('train/return', float("nan"), locs['it'])
+            self.writer.add_scalar('train/episode_length', float("nan"), locs['it'])
 
         str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
+
+        detailed = ""
+        pinn_label = (
+            "PINN loss (unweighted):" if self.is_hard_pact else "PINN loss:"
+        )
+        if self.console_detailed_losses:
+            detailed = (
+                f"{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"
+                f"{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"
+                f"{'Reconstruction loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"
+                f"{'KL Divergence loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"
+                f"{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"
+            )
 
         if len(locs['rewbuffer']) > 0:
             log_string = (f"""{'#' * width}\n"""
                           f"""{str.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'PINN loss:':>{pad}} {locs['mean_pinn_loss']:.4f}\n"""
-                          f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
-                          f"""{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"""
-                          f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
-                          f"""{'KL Divergence    loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"""
-                          f"""{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"""
+                          f"""{pinn_label:>{pad}} {locs['mean_pinn_loss']:.4f}\n"""
+                          f"""{detailed}"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
@@ -403,15 +784,60 @@ class OnPolicyRunnerPACT:
                           f"""{str.center(width, ' ')}\n\n"""
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'PINN loss:':>{pad}} {locs['mean_pinn_loss']:.4f}\n"""
-                          f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
-                          f"""{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"""
-                          f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
-                          f"""{'KL Divergence    loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"""
-                          f"""{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"""
+                          f"""{pinn_label:>{pad}} {locs['mean_pinn_loss']:.4f}\n"""
+                          f"""{detailed}"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean pos action noise std:':>{pad}} {mean_std.item():.2f}\n""")
+
+        if (self.console_pinn_timing
+                and getattr(self.alg, "profile_bard_timing", False)):
+            timings = self.alg.last_physics_loss_metrics
+            for loss_name in ("inverse", "rollout", "auxiliary", "pcgrad"):
+                total = timings.get(
+                    f"physics/timing/{loss_name}_forward_ms_per_update"
+                )
+                per_minibatch = timings.get(
+                    f"physics/timing/{loss_name}_forward_ms_per_minibatch"
+                )
+                if total is not None and per_minibatch is not None:
+                    label = {
+                        "inverse": "Dynamics inverse forward:",
+                        "rollout": "Dynamics rollout forward:",
+                        "auxiliary": "Auxiliary update:",
+                        "pcgrad": "PCGrad backward:",
+                    }[loss_name]
+                    log_string += (
+                        f"{label:>{pad}} "
+                        f"{total.item():.3f} ms/update "
+                        f"({per_minibatch.item():.3f} ms/minibatch)\n"
+                    )
+            dynamics_total = timings.get(
+                "physics/timing/dynamics_total_ms_per_update"
+            )
+            transfer = timings.get(
+                "physics/timing/pinocchio_transfer_ms_per_update"
+            )
+            if dynamics_total is not None:
+                log_string += (
+                    f"{'Dynamics total:':>{pad}} {dynamics_total.item():.3f} ms/update\n"
+                )
+            if transfer is not None:
+                log_string += (
+                    f"{'Pinocchio transfer:':>{pad}} {transfer.item():.3f} ms/update\n"
+                )
+
+        if self.console_qp_timing and hasattr(self, "hard_pact_features"):
+            if getattr(getattr(self.alg, "qp_config", None), "cuda_event_profiling", False):
+                for phase in ("rollout", "ppo"):
+                    value = getattr(self, "_last_qp_iteration_metrics", {}).get(
+                        f"qp/{phase}/profiling/solve_ms"
+                    )
+                    if value is not None:
+                        log_string += (
+                            f"{('QP solver ' + phase + ':'):>{pad}} "
+                            f"{value.item():.3f} ms/iteration\n"
+                        )
 
         log_string += ep_string
         log_string += (f"""{'-' * width}\n"""
@@ -420,10 +846,11 @@ class OnPolicyRunnerPACT:
                        f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
                        f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
-        print(log_string)
+        if self.console_iteration:
+            print(log_string)
 
     def save(self, path, infos=None):
-        torch.save({
+        checkpoint = {
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'act_optimizer_state_dict': self.alg.act_optimizer.optimizer.state_dict(),
             'enc_optimizer_state_dict': self.alg.enc_optimizer.state_dict(),
@@ -431,7 +858,23 @@ class OnPolicyRunnerPACT:
             'decoder_opt_state_dict': self.alg.decoder_optimizer.state_dict(),
             'iter': self.current_learning_iteration,
             'infos': infos,
-            }, path)
+        }
+        if self.is_hard_pact:
+            # The legacy runner counter advances only after learn() finishes.
+            checkpoint['hard_pact_command_curriculum'] = self.env.command_curriculum_state_dict()
+            # Save the next iteration for HardPACT periodic checkpoints too,
+            # so resuming cannot accidentally repeat its QP warmup.
+            checkpoint['iter'] = max(
+                self.current_learning_iteration,
+                getattr(self.alg, "_last_completed_iteration", -1) + 1,
+            )
+        if self.is_hard_pact and hasattr(
+            self.env, "domain_rand_curriculum_state_dict"
+        ):
+            checkpoint["hard_pact_domain_rand_curriculum"] = (
+                self.env.domain_rand_curriculum_state_dict()
+            )
+        torch.save(checkpoint, path)
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
@@ -439,13 +882,30 @@ class OnPolicyRunnerPACT:
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Load optimizer(s)
         if load_optimizer:
-            self.alg.act_optimizer.optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
-            self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
-            self.alg.decoder_optimizer.load_state_dict(loaded_dict['decoder_opt_state_dict'])
+            if self.is_hard_pact:
+                self.alg.load_actor_optimizer_state(loaded_dict['act_optimizer_state_dict'])
+                self.alg.load_auxiliary_optimizer_states(
+                    loaded_dict['enc_optimizer_state_dict'], loaded_dict['decoder_opt_state_dict'])
+            else:
+                self.alg.act_optimizer.optimizer.load_state_dict(loaded_dict['act_optimizer_state_dict'])
+                self.alg.enc_optimizer.load_state_dict(loaded_dict['enc_optimizer_state_dict'])
+                self.alg.decoder_optimizer.load_state_dict(loaded_dict['decoder_opt_state_dict'])
         # Load the VAE decoder model...
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']
-        self.current_learning_iteration = 0
+        curriculum = loaded_dict.get("hard_pact_domain_rand_curriculum")
+        if curriculum is not None and hasattr(
+            self.env, "load_domain_rand_curriculum_state_dict"
+        ):
+            self.env.load_domain_rand_curriculum_state_dict(curriculum)
+        else:
+            # Preserve the historical PACT resume behavior for legacy tasks.
+            self.current_learning_iteration = 0
+        if self.is_hard_pact:
+            self.alg._last_completed_iteration = self.current_learning_iteration - 1
+            if 'hard_pact_command_curriculum' in loaded_dict:
+                self.env.load_command_curriculum_state_dict(loaded_dict['hard_pact_command_curriculum'])
+            self._set_hard_pact_qp_iteration(self.current_learning_iteration)
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):

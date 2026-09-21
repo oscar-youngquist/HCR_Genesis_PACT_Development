@@ -79,7 +79,10 @@ class Terrain:
         self.tot_cols = int(cfg.num_cols * self.width_per_env_pixels) + 2 * self.border
 
         self.height_field_raw = np.zeros((self.tot_rows , self.tot_cols), dtype=np.int16)
+<<<<<<< HEAD
         # edge mask to indicate the edge points of the terrain, for use in rewards
+=======
+>>>>>>> aligned_iclr_2027_qp_pinn
         self.edge_mask = np.zeros((self.tot_rows, self.tot_cols), dtype=bool)
         self.terrain_meshes = []
         self.terrain_curriculum_difficulty = cfg.terrain_curriculum_difficulty
@@ -93,8 +96,24 @@ class Terrain:
             self.selected_terrain()
         else:
             print("Generating randomized terrain...")
+<<<<<<< HEAD
             self.randomized_terrain()
 
+=======
+            self.randomized_terrain()   
+
+        # Mark cells adjacent to a height discontinuity for edge-aware rewards.
+        edge_threshold = max(1, int(0.04 / self.cfg.vertical_scale))
+        height_delta_x = np.abs(np.diff(self.height_field_raw.astype(np.int32), axis=0))
+        height_delta_y = np.abs(np.diff(self.height_field_raw.astype(np.int32), axis=1))
+        x_edges = height_delta_x > edge_threshold
+        y_edges = height_delta_y > edge_threshold
+        self.edge_mask[:-1, :] |= x_edges
+        self.edge_mask[1:, :] |= x_edges
+        self.edge_mask[:, :-1] |= y_edges
+        self.edge_mask[:, 1:] |= y_edges
+        
+>>>>>>> aligned_iclr_2027_qp_pinn
         self.heightsamples = self.height_field_raw
         if self.type=="trimesh":
             self._add_terrain_border()
@@ -169,6 +188,7 @@ class Terrain:
                                 length=self.length_per_env_pixels,
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
+<<<<<<< HEAD
         slope = eval(self.terrain_curriculum_difficulty["slope"])
         step_height = eval(self.terrain_curriculum_difficulty["step_height"])
         discrete_obstacles_height = eval(self.terrain_curriculum_difficulty["discrete_height"])
@@ -180,6 +200,29 @@ class Terrain:
         # get params if exist
         high_platform_params = self.terrain_curriculum_difficulty.get("high_platform_params", None)
         high_platform_gaps_params = self.terrain_curriculum_difficulty.get("high_platform_gaps_params", None)
+=======
+        slope = difficulty * 0.4
+        wave_amp = 0.20*difficulty
+        rough_height = 0.02 + 0.08 * difficulty
+        step_height = 0.04  + 0.21 * difficulty
+        discrete_obstacles_height = 0.04 + difficulty * 0.16
+        # slope = difficulty * 0.4
+        # wave_amp = 0.20*difficulty
+        # rough_height = 0.08 * difficulty
+        # step_height = 0.20 * difficulty
+        # discrete_obstacles_height = 0.20*difficulty
+
+        # slope = difficulty * 0.4
+        # wave_amp = 0.20*difficulty
+        # rough_height = 0.12 * difficulty
+        # step_height = 0.25 * difficulty
+        # discrete_obstacles_height = 0.20*difficulty
+
+        stepping_stones_size = 1.5 * (1.05 - difficulty)
+        stone_distance = 0.05 if difficulty==0 else 0.1
+        gap_size = 1. * difficulty
+        pit_depth = 0.3 * difficulty
+>>>>>>> aligned_iclr_2027_qp_pinn
         if choice < self.proportions[0]:
             if choice < self.proportions[0]/ 2: # slope
                 slope *= -1

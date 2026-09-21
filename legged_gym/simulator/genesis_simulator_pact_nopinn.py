@@ -1304,6 +1304,8 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
                 self._num_envs, len(self._feet_indices) * 3, dtype=torch.float, device=self._device, requires_grad=False)
             self._height_around_feet = torch.zeros(
                 self._num_envs, len(self._feet_indices), 9, dtype=torch.float, device=self._device, requires_grad=False)
+            self._max_height_ahead_feet = torch.zeros(
+                self._num_envs, len(self._feet_indices), dtype=torch.float, device=self._device, requires_grad=False)
 
         if self._cfg.env.debug_draw_swing_planes:
             self._viz_feet_normal_vector = torch.zeros(self._num_envs, len(self._feet_indices), 3, device=self._device, dtype=torch.float)
@@ -1474,6 +1476,8 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         # Calculate height around feet
         for i in range(9):
             self._height_around_feet[:, :, i] = eval(f'heights{i+1}').view(self._num_envs, -1)[:] * self._cfg.terrain.vertical_scale
+
+        self._update_max_height_ahead_feet(px, py)
         
         if self._cfg.env.debug_draw_swing_planes:
             ###
@@ -1510,6 +1514,52 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
                     gy * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size
                 )
                 self._viz_terrain_points_around_feet[:, :, j, 2] = self._height_around_feet[:, :, j]
+
+    def _update_max_height_ahead_feet(self, px, py):
+        """Update the forward-looking terrain-height target for each foot."""
+        direction_base = torch.cat((self._base_lin_vel[:, :2], torch.zeros(self._num_envs, 1, device=self._device)), dim=-1)
+        direction_world = quat_apply_yaw(self._base_quat, direction_base)[:, :2]
+        direction_norm = torch.linalg.norm(direction_world, dim=-1, keepdim=True)
+        heading_world = quat_apply_yaw(
+            self._base_quat,
+            torch.tensor([1.0, 0.0, 0.0], device=self._device, dtype=self._base_quat.dtype).repeat(self._num_envs, 1),
+        )[:, :2]
+        direction_world = torch.where(
+            (direction_norm.squeeze(-1) > 1e-4).unsqueeze(-1),
+            direction_world / direction_norm.clamp_min(1e-6),
+            heading_world,
+        )
+        forward = direction_world.repeat_interleave(len(self._feet_indices), dim=0)
+        lateral = torch.stack((-forward[:, 1], forward[:, 0]), dim=-1)
+        max_height = None
+        for fwd in self._cfg.rewards.edge_clearance_forward_cells:
+            for lat in self._cfg.rewards.edge_clearance_lateral_cells:
+                offset = torch.round(forward * fwd + lateral * lat).long()
+                sx = (px + offset[:, 0]).clamp(0, self._height_samples.shape[0] - 1)
+                sy = (py + offset[:, 1]).clamp(0, self._height_samples.shape[1] - 1)
+                sample = self._height_samples[sx, sy]
+                max_height = sample if max_height is None else torch.maximum(max_height, sample)
+        self._max_height_ahead_feet[:] = max_height.view(self._num_envs, -1) * self._cfg.terrain.vertical_scale
+
+    def calc_feet_near_edge(self):
+        """Return a mask of feet within the configured distance of a terrain edge."""
+        if self._cfg.terrain.mesh_type == "plane":
+            return torch.zeros((self._num_envs, len(self._feet_indices)), device=self._device, dtype=torch.bool)
+        feet_xy = self._feet_pos[:, :, :2]
+        points = ((feet_xy + self._cfg.terrain.border_size) / self._cfg.terrain.horizontal_scale).long()
+        px = points[:, :, 0].clamp(0, self._edge_mask.shape[0] - 1)
+        py = points[:, :, 1].clamp(0, self._edge_mask.shape[1] - 1)
+        near_edge = torch.zeros_like(px, dtype=torch.bool)
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                ex = (px + dx).clamp(0, self._edge_mask.shape[0] - 1)
+                ey = (py + dy).clamp(0, self._edge_mask.shape[1] - 1)
+                edge_xy = torch.stack((
+                    ex.float() * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size,
+                    ey.float() * self._cfg.terrain.horizontal_scale - self._cfg.terrain.border_size,
+                ), dim=-1)
+                near_edge |= self._edge_mask[ex, ey] & (torch.norm(feet_xy - edge_xy, dim=-1) < self._cfg.rewards.feet_edge_threshold)
+        return near_edge
 
 
 
@@ -1798,6 +1848,7 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         )
         self._height_samples = torch.tensor(self._terrain.heightsamples).view(
             self._terrain.tot_rows, self._terrain.tot_cols).to(self._device)
+        self._edge_mask = torch.as_tensor(self._terrain.edge_mask, device=self._device, dtype=torch.bool)
     
     def _create_trimesh(self):
         """ Adds a trimesh terrain to the simulation, sets parameters based on the cfg.
@@ -1821,6 +1872,7 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
         # save height samples for height sampling
         self._height_samples = torch.tensor(self._terrain.heightsamples).view(
             self._terrain.tot_rows, self._terrain.tot_cols).to(self._device)
+        self._edge_mask = torch.as_tensor(self._terrain.edge_mask, device=self._device, dtype=torch.bool)
 
     def _setup_depth_camera(self):
         ''' Set camera position and direction

@@ -44,6 +44,11 @@ class RolloutStoragePACTPos:
             self.explicit_labels = None  # same timestep as observations, used by encoder output
             self.grf_targets = None  # next time-step from observations, used by decoder output
             self.obs_targets = None  # next time-step from observations, used by decoder output
+            # HardPACTPos-only supervised deployment-head labels. Legacy
+            # PACTPos leaves these unset and allocates no additional storage.
+            self.executed_torque_targets = None
+            self.wrench_targets = None
+            self.wrench_active_masks = None
 
             self.actions = None
             self.rewards = None
@@ -51,6 +56,8 @@ class RolloutStoragePACTPos:
             self.actions_log_prob = None
             self.action_mean = None
             self.action_sigma = None
+            self.latent_noise = None
+            self.latent_boot_mask = None
             
             self.hidden_states = None
         
@@ -58,7 +65,7 @@ class RolloutStoragePACTPos:
             self.__init__()
 
     # We want all of the actions and associated data formatted in the Model kinematic definition - [FR, FL, RR, RL]
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, device="cpu"):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, critic_obs_shape, sinle_critc_obs_shape, obs_hist_shape, actions_shape, explicit_shape, grf_shape, device="cpu", hard_pact_auxiliary=False, latent_noise_dim=None):
 
         self.device = device
 
@@ -76,6 +83,22 @@ class RolloutStoragePACTPos:
         self.explicit_labels = torch.zeros(num_transitions_per_env, num_envs, *explicit_shape, device=self.device)
         self.grf_targets = torch.zeros(num_transitions_per_env, num_envs, *grf_shape, device=self.device)
         self.observation_targets = torch.zeros(num_transitions_per_env, num_envs, *sinle_critc_obs_shape, device=self.device)
+        self.hard_pact_auxiliary = bool(hard_pact_auxiliary)
+        if self.hard_pact_auxiliary:
+            self.executed_torque_targets = torch.zeros(
+                num_transitions_per_env, num_envs, 12, device=self.device
+            )
+            self.wrench_targets = torch.zeros(
+                num_transitions_per_env, num_envs, 6, device=self.device
+            )
+            self.wrench_active_masks = torch.zeros(
+                num_transitions_per_env, num_envs, 1,
+                device=self.device, dtype=torch.bool,
+            )
+        else:
+            self.executed_torque_targets = None
+            self.wrench_targets = None
+            self.wrench_active_masks = None
 
         
         # For PPO
@@ -88,6 +111,18 @@ class RolloutStoragePACTPos:
         self.advantages       = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.mu               = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.sigma            = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+        self.latent_noise = (
+            torch.zeros(
+                num_transitions_per_env, num_envs, int(latent_noise_dim),
+                device=self.device,
+            ) if latent_noise_dim is not None else None
+        )
+        self.current_latent_noise_batch = None
+        self.latent_boot_mask = (
+            torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device, dtype=torch.bool)
+            if latent_noise_dim is not None else None
+        )
+        self.current_latent_boot_mask_batch = None
 
         #  Shared
         self.num_transitions_per_env = num_transitions_per_env
@@ -113,6 +148,14 @@ class RolloutStoragePACTPos:
         self.explicit_labels[self.step].copy_(transition.explicit_labels)
         self.grf_targets[self.step].copy_(transition.grf_targets)
         self.observation_targets[self.step].copy_(transition.obs_targets)
+        if self.hard_pact_auxiliary:
+            self.executed_torque_targets[self.step].copy_(
+                transition.executed_torque_targets
+            )
+            self.wrench_targets[self.step].copy_(transition.wrench_targets)
+            self.wrench_active_masks[self.step].copy_(
+                transition.wrench_active_masks
+            )
         
         # Need a set for each "task"
         #  - Position Control
@@ -122,6 +165,13 @@ class RolloutStoragePACTPos:
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
         self.mu[self.step].copy_(transition.action_mean)
         self.sigma[self.step].copy_(transition.action_sigma)
+        if self.latent_noise is not None:
+            if transition.latent_noise is None:
+                raise RuntimeError("HardPACT PPO replay requires stored latent noise")
+            self.latent_noise[self.step].copy_(transition.latent_noise)
+            if transition.latent_boot_mask is None:
+                raise RuntimeError("HardPACT PPO replay requires rollout boot conditioning")
+            self.latent_boot_mask[self.step].copy_(transition.latent_boot_mask)
 
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
@@ -181,6 +231,18 @@ class RolloutStoragePACTPos:
         explicit_labels = self.explicit_labels.flatten(0,1)
         grf_labels = self.grf_targets.flatten(0,1)
         obs_targets = self.observation_targets.flatten(0,1)
+        executed_torque_targets = (
+            self.executed_torque_targets.flatten(0, 1)
+            if self.hard_pact_auxiliary else None
+        )
+        wrench_targets = (
+            self.wrench_targets.flatten(0, 1)
+            if self.hard_pact_auxiliary else None
+        )
+        wrench_active_masks = (
+            self.wrench_active_masks.flatten(0, 1)
+            if self.hard_pact_auxiliary else None
+        )
 
         actions = self.actions.flatten(0, 1)
         values = self.values.flatten(0, 1)
@@ -189,6 +251,10 @@ class RolloutStoragePACTPos:
         advantages = self.advantages.flatten(0, 1)
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
+        latent_noise = (
+            self.latent_noise.flatten(0, 1)
+            if self.latent_noise is not None else None
+        )
 
         dones = self.dones.flatten(0, 1)
 
@@ -198,6 +264,13 @@ class RolloutStoragePACTPos:
                 start = i*mini_batch_size
                 end = (i+1)*mini_batch_size
                 batch_idx = indices[start:end]
+                self.current_latent_noise_batch = (
+                    latent_noise[batch_idx] if latent_noise is not None else None
+                )
+                self.current_latent_boot_mask_batch = (
+                    self.latent_boot_mask.flatten(0, 1)[batch_idx]
+                    if self.latent_boot_mask is not None else None
+                )
 
                 # Baseline PPO stuff
                 obs_batch = observations[batch_idx]
@@ -219,8 +292,10 @@ class RolloutStoragePACTPos:
                 old_sigma_batch = old_sigma[batch_idx]
 
                 terminated_batch = 1.0 - dones[batch_idx]
-                
                 yield terminated_batch, obs_batch, critic_observations_batch, obs_hist_batch, explicit_labels_batch, \
                         grf_labels_batch, obs_labels_batch, actions_batch, target_values_batch, \
                         advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, \
-                        old_sigma_batch
+                        old_sigma_batch, \
+                        (executed_torque_targets[batch_idx] if self.hard_pact_auxiliary else None), \
+                        (wrench_targets[batch_idx] if self.hard_pact_auxiliary else None), \
+                        (wrench_active_masks[batch_idx] if self.hard_pact_auxiliary else None)

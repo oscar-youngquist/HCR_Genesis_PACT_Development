@@ -1,6 +1,9 @@
 import numpy as np
 import torch
-import genesis.utils.mesh as mu  # adjust if your import path differs
+try:
+    import genesis.utils.mesh as mu
+except ImportError:
+    mu = None
 import trimesh
 
 
@@ -120,4 +123,6 @@ def _create_sample_point_mesh(radius=0.008, color=(1.0, 0.0, 0.0, 1.0)):
     """
     Create a small sphere mesh for visualizing sampled terrain points.
     """
+    if mu is None:
+        raise RuntimeError("Genesis visualization requested without Genesis installed")
     return mu.create_sphere(radius=radius, color=color)

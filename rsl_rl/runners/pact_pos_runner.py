@@ -39,9 +39,21 @@ from torch.utils.tensorboard import SummaryWriter
 import torch
 
 from rsl_rl.algorithms import PPO_PACT_Pos
-from rsl_rl.modules import ActorCritic_PACT_Pos, ContextDecoder
+from rsl_rl.modules import ActorCritic_PACT_Pos, ActorCritic_HardPACT_Pos, ContextDecoder
 from rsl_rl.env import VecEnv
 from rsl_rl.utils import pretty_print_module
+from rsl_rl.hard_pact_logging import (
+    collect_contact_estimator_scalars,
+    collect_force_decoder_scalars,
+    collect_latent_diagnostics_scalars,
+)
+from legged_gym.envs.go2.go2_hard_pact.deployment import (
+    RECONSTRUCTION_DIM,
+    RECONSTRUCTION_INDICES,
+    build_deployment_contract,
+    calculate_physics_head_gains,
+    write_deployment_contract_once,
+)
 
 
 # ---------------- 4090 / Ada Lovelace performance knobs ----------------
@@ -50,6 +62,51 @@ torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 torch.backends.cudnn.benchmark = True
 
+
+def build_hard_pact_start_checkpoint(
+    pos_actor_state_dict,
+    decoder_state_dict,
+    iteration,
+    infos=None,
+):
+    """Convert HardPACTPos weights into a strict HardPACT bootstrap.
+
+    The actor, critic, encoder, estimators, and physics heads share identical
+    keys and shapes. HardPACT's only state-dict shape difference is ``std``:
+    position pretraining samples 12 actions, while HardPACT samples 12
+    position plus 12 feed-forward-torque actions. The HardPACT exploration
+    standard deviation is deliberately reset to a fresh 24-D vector of ones.
+
+    Optimizer states are intentionally omitted because this artifact starts a
+    new HardPACT run rather than resuming the HardPACTPos optimizer.
+    """
+    if "std" not in pos_actor_state_dict:
+        raise KeyError("HardPACTPos actor state dict is missing 'std'")
+    pos_std = pos_actor_state_dict["std"]
+    if pos_std.ndim != 1 or pos_std.numel() != 12:
+        raise ValueError(
+            "HardPACTPos exploration std must have shape (12,), got "
+            f"{tuple(pos_std.shape)}"
+        )
+
+    model_state = type(pos_actor_state_dict)(
+        (key, value.detach().clone())
+        for key, value in pos_actor_state_dict.items()
+    )
+    model_state["std"] = pos_std.new_ones(24)
+    decoder_state = type(decoder_state_dict)(
+        (key, value.detach().clone())
+        for key, value in decoder_state_dict.items()
+    )
+    return {
+        "model_state_dict": model_state,
+        "decoder_state_dict": decoder_state,
+        "iter": int(iteration),
+        "infos": infos,
+        "hard_pact_start": True,
+        "source_task": "go2_hard_pact_pos",
+    }
+
 class OnPolicyRunnerPACTPos:
 
     def __init__(self,
@@ -57,10 +114,17 @@ class OnPolicyRunnerPACTPos:
                  train_cfg,
                  log_dir=None,
                  device='cpu'):
-        torch.autograd.set_detect_anomaly(True)
         self.cfg=train_cfg["runner"]
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
+        # Keep legacy PACTPos diagnostics intact, but give HardPACTPos the
+        # same throughput-safe anomaly/debug defaults as HardPACT.
+        torch.autograd.set_detect_anomaly(bool(
+            self.alg_cfg.get(
+                "detect_anomaly",
+                self.cfg.get("policy_class_name") != "ActorCritic_HardPACT_Pos",
+            )
+        ))
         
         self.device = device
         self.env = env
@@ -75,6 +139,37 @@ class OnPolicyRunnerPACTPos:
             num_critic_obs *= self.env.num_crit_obs_stack
 
         actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
+        self.is_hard_pact_pos = actor_critic_class is ActorCritic_HardPACT_Pos
+        self.console_debug = bool(self.cfg.get("console_debug", False))
+        self.console_iteration = bool(self.cfg.get("console_iteration", True))
+        self.console_model_summary = bool(
+            self.cfg.get("console_model_summary", not self.is_hard_pact_pos)
+        )
+        self.console_reward_terms = bool(
+            self.cfg.get("console_reward_terms", not self.is_hard_pact_pos)
+        )
+        self.console_detailed_losses = bool(
+            self.cfg.get("console_detailed_losses", not self.is_hard_pact_pos)
+        )
+        gain_spec = None
+        actor_extra_kwargs = {}
+        reconstruction_indices = None
+        reconstruction_dim = self.env.num_privileged_obs
+        if actor_critic_class is ActorCritic_HardPACT_Pos:
+            gain_spec = calculate_physics_head_gains(self.env.cfg)
+            from rsl_rl.modules.hard_pact_physics import GRFSwingConfig
+            actor_extra_kwargs = {
+                "cenet_explicit_layers": self.policy_cfg["cenet_explicit_layers"],
+                "grf_decoder_layers": self.policy_cfg["grf_decoder_layers"],
+                "wrench_decoder_layers": self.policy_cfg["wrench_decoder_layers"],
+                "grf_scale_n": gain_spec.grf_scale_n,
+                "wrench_scale": gain_spec.wrench_scale_n_nm,
+                "wrench_qp_clip": gain_spec.wrench_qp_clip_n_nm,
+                "grf_swing": GRFSwingConfig.from_task(self.env.cfg),
+                "contact_epsilon": self.policy_cfg["contact_epsilon"],
+            }
+            reconstruction_indices = RECONSTRUCTION_INDICES
+            reconstruction_dim = RECONSTRUCTION_DIM
         
         cenet_input_dim = self.env.num_obs * self.env.num_obs_hist
 
@@ -88,7 +183,8 @@ class OnPolicyRunnerPACTPos:
                                                                 self.policy_cfg["cenet_velo_dim"],
                                                                 self.policy_cfg["cenet_enc_layers"],
                                                                 self.policy_cfg["activation"],
-                                                                self.policy_cfg["init_noise_std"]).to(self.device)
+                                                                self.policy_cfg["init_noise_std"],
+                                                                **actor_extra_kwargs).to(self.device)
                         
         decoder = ContextDecoder(self.policy_cfg["cenet_dec_input_dim"],
                                  self.policy_cfg["cenet_dec_layers"],
@@ -96,9 +192,10 @@ class OnPolicyRunnerPACTPos:
                                  ).to(self.device)
         
 
-        print("Created Parallel Actor-Critic Model")
-        pretty_print_module(actor_critic)
-        pretty_print_module(decoder)
+        if self.console_model_summary:
+            print("Created Parallel Actor-Critic Model")
+            pretty_print_module(actor_critic)
+            pretty_print_module(decoder)
 
         self._init_entropy_coef = self.alg_cfg["entropy_coef"]
         self.use_adaptive_entropy = self.alg_cfg["use_adaptive_entropy"]
@@ -110,6 +207,7 @@ class OnPolicyRunnerPACTPos:
         self.alg: PPO_PACT_Pos = alg_class(actor_critic, 
                                            decoder, 
                                            self.env.num_privileged_obs,
+                                           reconstruction_indices=reconstruction_indices,
                                            device=self.device, 
                                            **self.alg_cfg)
         
@@ -118,10 +216,10 @@ class OnPolicyRunnerPACTPos:
 
         # init storage and model
         self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], \
-                              [self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], \
+                              [reconstruction_dim], [self.env.num_obs_hist*self.env.num_obs], \
                               [self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]])
 
-        if "pretrained_path" in self.policy_cfg.keys():
+        if self.policy_cfg.get("pretrained_path"):
             self._load_pretrained_model()
 
         # Log
@@ -130,6 +228,12 @@ class OnPolicyRunnerPACTPos:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+
+        if gain_spec is not None:
+            self.deployment_contract = build_deployment_contract(
+                self.env.cfg, self.alg.actor_critic, gain_spec
+            )
+            write_deployment_contract_once(self.log_dir, self.deployment_contract)
 
         # self.env.create_async_pino_workers()
 
@@ -140,12 +244,13 @@ class OnPolicyRunnerPACTPos:
     def _load_pretrained_model(self):
         pretrained_path = self.policy_cfg["pretrained_path"]
         pretrained_std = self.policy_cfg["pretrained_std"]
-        print(pretrained_path)
+        if self.console_model_summary:
+            print(pretrained_path)
         loaded_dict = torch.load(pretrained_path)
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Reset the 
-        self.alg.actor_critic._init_std(pretrained_std)
+        # self.alg.actor_critic._init_std(pretrained_std)
         # Load the pretrained decoder network
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
 
@@ -178,6 +283,9 @@ class OnPolicyRunnerPACTPos:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
+            if self.is_hard_pact_pos:
+                self.env._terrain_curriculum_iteration = it
+                self.env.begin_command_curriculum_iteration()
             start = time.time()
             # Rollout
             with torch.inference_mode():
@@ -222,6 +330,11 @@ class OnPolicyRunnerPACTPos:
                     mean_recon_loss, mean_kld_loss, mean_tau_loss \
                     = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, it, self.env.simulator.default_dof_pos, self.env.obs_scales.dof_vel)
             
+            if self.is_hard_pact_pos:
+                self.env.finish_command_curriculum_iteration(it)
+                if self.writer is not None:
+                    for key,value in getattr(self.env,"command_curriculum_metrics",{}).items():
+                        self.writer.add_scalar("curriculum/commands/"+key,value,it)
             # Step the reward curriculum if we are doing that
             if self.env.use_reward_curriculum:
                 self.env.step_reward_curriculum(it)
@@ -240,8 +353,18 @@ class OnPolicyRunnerPACTPos:
                         vals.append(v.float().mean().to(self.device))
 
                 # mean_reward = statistics.mean(rewbuffer) if len(rewbuffer) > 0 else None
-                mean_tracking_lin_vel = torch.stack(vals).mean().item()
-                self.env.simulator._step_domian_rand(it, mean_tracking_lin_vel)
+                if len(ep_infos) > 0 and "rew_tracking_lin_vel" in ep_infos[0] and vals:
+                    mean_tracking_lin_vel = torch.stack(vals).mean().item()
+                if self.is_hard_pact_pos and hasattr(
+                    self.env, "step_domain_rand_curriculum"
+                ):
+                    self.env.step_domain_rand_curriculum(
+                        it, mean_tracking_lin_vel
+                    )
+                else:
+                    self.env.simulator._step_domian_rand(
+                        it, mean_tracking_lin_vel
+                    )
 
                 if self.env.simulator.domain_rand_reward_ema is not None:
                     self.writer.add_scalar('Values/domain_rand_reward_ema',self.env.simulator.domain_rand_reward_ema,it) 
@@ -273,7 +396,8 @@ class OnPolicyRunnerPACTPos:
                 }
             
                 entropy = self.alg.update_adaptive_entropy_coef(performance_metrics)
-                print(entropy)
+                if self.console_debug:
+                    print(entropy)
                 self.writer.add_scalar('Values/entropy',entropy,it)
             
             # entropy_coef = 0.01
@@ -307,7 +431,18 @@ class OnPolicyRunnerPACTPos:
             ep_infos.clear()
         
         self.current_learning_iteration += num_learning_iterations
-        self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+        final_checkpoint = os.path.join(
+            self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)
+        )
+        self.save(final_checkpoint)
+        if self.is_hard_pact_pos and self.cfg.get(
+            "export_hard_pact_start", True
+        ):
+            filename = self.cfg.get(
+                "hard_pact_start_filename",
+                "hard_pact_start_model_{iteration}.pt",
+            ).format(iteration=self.current_learning_iteration)
+            self.save_hard_pact_start(os.path.join(self.log_dir, filename))
 
         # Learning is done, shutdown the async. pinocchio workers
         # self.env.shutdown_asynic_pino_workers()
@@ -330,7 +465,8 @@ class OnPolicyRunnerPACTPos:
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 value = torch.mean(infotensor)
                 self.writer.add_scalar('Episode/' + key, value, locs['it'])
-                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+                if self.console_reward_terms:
+                    ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         
         mean_std = self.alg.actor_critic.std.mean()
         
@@ -339,16 +475,66 @@ class OnPolicyRunnerPACTPos:
         self.writer.add_scalar('Loss/velo_pred', locs['mean_vel_loss'], locs['it'])
         self.writer.add_scalar('Loss/recon', locs['mean_recon_loss'], locs['it'])
         self.writer.add_scalar('Loss/kl_div', locs['mean_kld_loss'], locs['it'])
+        self.writer.add_scalar(
+            'Loss/vae_kl_effective_weight',
+            self.alg.current_vae_beta,
+            locs['it'],
+        )
         self.writer.add_scalar('Loss/decoder_function', locs['mean_decoder_loss'], locs['it'])
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
         self.writer.add_scalar('Loss/tau_loss', locs['mean_tau_loss'], locs['it'])
+        if self.is_hard_pact_pos:
+            # Keep the legacy aggregate key above and add stable, descriptive
+            # component keys for the combined HardPACTPos auxiliary update.
+            self.writer.add_scalar(
+                'Loss/autoencoder_total', locs['mean_autoenc_loss'], locs['it']
+            )
+            for name, value in self.alg.last_auxiliary_metrics.items():
+                if name == "total":
+                    continue
+                self.writer.add_scalar(
+                    f'Loss/autoencoder_{name}', value, locs['it']
+                )
+            self.writer.add_scalar(
+                "physics/force_decoder_diagnostics_enabled",
+                float(self.alg.force_decoder_diagnostics_enabled), locs['it'],
+            )
+            for name, value in collect_force_decoder_scalars(
+                self.alg.last_auxiliary_metrics
+            ).items():
+                self.writer.add_scalar(name, value, locs['it'])
+            for name, value in collect_contact_estimator_scalars(
+                self.alg.last_auxiliary_metrics
+            ).items():
+                self.writer.add_scalar(name, value, locs['it'])
+            if self.alg.ppo_latent_diagnostics_enabled:
+                for name, value in collect_latent_diagnostics_scalars(
+                    self.alg.last_latent_diagnostics
+                ).items():
+                    self.writer.add_scalar(name, value, locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
         self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
         
+        detailed = ""
+        if self.console_detailed_losses:
+            detailed = (
+                f"{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"
+                f"{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"
+                f"{'Reconstruction loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"
+                f"{'KL Divergence loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"
+                f"{'Effective VAE KL weight:':>{pad}} {self.alg.current_vae_beta:.6f}\n"
+                f"{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"
+            )
+            if self.is_hard_pact_pos:
+                for name, value in self.alg.last_auxiliary_metrics.items():
+                    detailed += (
+                        f"{('Aux ' + name + ':'):>{pad}} {float(value):.4f}\n"
+                    )
+
         if len(locs['rewbuffer']) > 0:
             self.writer.add_scalar('Train/mean_reward', statistics.mean(locs['rewbuffer']), locs['it'])
             self.writer.add_scalar('Train/mean_episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
@@ -363,11 +549,7 @@ class OnPolicyRunnerPACTPos:
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                           f"""{'Tau loss:':>{pad}} {locs['mean_tau_loss']:.4f}\n"""
-                          f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
-                          f"""{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"""
-                          f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
-                          f"""{'KL Divergence    loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"""
-                          f"""{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"""
+                          f"""{detailed}"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
@@ -381,11 +563,7 @@ class OnPolicyRunnerPACTPos:
                           f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                           f"""{'Tau loss:':>{pad}} {locs['mean_tau_loss']:.4f}\n"""
-                          f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
-                          f"""{'Torso Velo. Pred loss:':>{pad}} {locs['mean_vel_loss']:.4f}\n"""
-                          f"""{'Reconstruction   loss:':>{pad}} {locs['mean_recon_loss']:.4f}\n"""
-                          f"""{'KL Divergence    loss:':>{pad}} {locs['mean_kld_loss']:.4f}\n"""
-                          f"""{'Decoder function loss:':>{pad}} {locs['mean_decoder_loss']:.4f}\n"""
+                          f"""{detailed}"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Mean pos action noise std:':>{pad}} {mean_std.item():.2f}\n""")
@@ -397,10 +575,11 @@ class OnPolicyRunnerPACTPos:
                        f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
                        f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
-        print(log_string)
+        if self.console_iteration:
+            print(log_string)
 
     def save(self, path, infos=None):
-        torch.save({
+        checkpoint = {
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'act_optimizer_state_dict': self.alg.act_optimizer.optimizer.state_dict(),
             'enc_optimizer_state_dict': self.alg.enc_optimizer.state_dict(),
@@ -408,7 +587,28 @@ class OnPolicyRunnerPACTPos:
             'decoder_opt_state_dict': self.alg.decoder_optimizer.state_dict(),
             'iter': self.current_learning_iteration,
             'infos': infos,
-            }, path)
+        }
+        if self.is_hard_pact_pos and hasattr(
+            self.env, "domain_rand_curriculum_state_dict"
+        ):
+            checkpoint["hard_pact_domain_rand_curriculum"] = (
+                self.env.domain_rand_curriculum_state_dict()
+            )
+        if self.is_hard_pact_pos:
+            checkpoint['hard_pact_command_curriculum'] = self.env.command_curriculum_state_dict()
+            checkpoint['iter'] = max(checkpoint['iter'],getattr(self.env,'_command_curriculum_last_iteration',-1)+1)
+        torch.save(checkpoint, path)
+
+    def save_hard_pact_start(self, path, infos=None):
+        """Write a strict-loadable HardPACT weight initialization checkpoint."""
+        checkpoint = build_hard_pact_start_checkpoint(
+            self.alg.actor_critic.state_dict(),
+            self.alg.decoder.state_dict(),
+            self.current_learning_iteration,
+            infos=infos,
+        )
+        torch.save(checkpoint, path)
+        return path
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
@@ -422,7 +622,15 @@ class OnPolicyRunnerPACTPos:
         # Load the VAE decoder model...
         self.alg.decoder.load_state_dict(loaded_dict['decoder_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']
-        self.current_learning_iteration = 0
+        curriculum = loaded_dict.get("hard_pact_domain_rand_curriculum")
+        if curriculum is not None and hasattr(
+            self.env, "load_domain_rand_curriculum_state_dict"
+        ):
+            self.env.load_domain_rand_curriculum_state_dict(curriculum)
+        else:
+            self.current_learning_iteration = 0
+        if self.is_hard_pact_pos and 'hard_pact_command_curriculum' in loaded_dict:
+            self.env.load_command_curriculum_state_dict(loaded_dict['hard_pact_command_curriculum'])
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):

@@ -1,0 +1,257 @@
+"""Regressions for the live Isaac Lab contact-index and zero inverse-gate bugs."""
+import ast
+import inspect
+from types import SimpleNamespace
+from unittest.mock import patch
+from contextlib import nullcontext
+
+import torch
+import pytest
+
+from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
+from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
+from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos import Go2HardPACTPos
+from rsl_rl.algorithms.hard_pact_bard import measured_contact_generalized_force
+from rsl_rl.algorithms.ppo_hard_pact import _yaw_local_to_world
+from test_hard_pact_auxiliary import make_algorithm
+from test_go2_hard_pact_bard import BardGo2Dynamics, URDF
+
+
+def test_support_contacts_use_sensor_order_and_match_pos():
+    contact = torch.tensor([[1, 1, 1, 1], [1, 0, 0, 1], [1, 0, 0, 0], [0, 0, 0, 0]])
+    forces = torch.zeros(4, 8, 3)
+    forces[:, [0, 2, 4, 6], 2] = contact * 30.
+    sim = SimpleNamespace(
+        base_pos=torch.zeros(4, 3),
+        feet_pos=torch.tensor([[[.2, -.15, 0], [.2, .15, 0], [-.2, -.15, 0], [-.2, .15, 0]]]).repeat(4, 1, 1),
+        feet_vel=torch.ones(4, 4, 3),
+        link_contact_forces=forces, feet_indices=[1, 3, 5, 7],
+        feet_contact_indices=[0, 2, 4, 6],
+    )
+    cfg = SimpleNamespace(rewards=SimpleNamespace(
+        support_polygon_sigma=.01, contact_force_threshold=5., max_contact_force=20.,
+    ))
+    for cls in (Go2HardPACT, Go2HardPACTPos):
+        env = cls.__new__(cls)
+        env.simulator, env.cfg = sim, cfg
+        torch.testing.assert_close(env._reward_support_polygon(), torch.tensor([1., 1., 0., 0.]))
+        torch.testing.assert_close(env._reward_foot_slip(), 4. * contact.sum(1))
+        torch.testing.assert_close(env._reward_feet_contact_forces(), 10. * contact.sum(1))
+        torch.testing.assert_close(env._feet_contact_mask(), contact.bool())
+    # Genesis aliases the two index spaces: identical canonical input yields
+    # exactly the same reward, with no articulation indexing changes needed.
+    sim.feet_indices = sim.feet_contact_indices
+    torch.testing.assert_close(env._reward_support_polygon(), torch.tensor([1., 1., 0., 0.]))
+
+
+def test_every_inherited_contact_tensor_access_uses_sensor_indices():
+    # Includes critic contacts, support/air-time/slip/stumble, VHIP and edge
+    # helpers, not just the reward that initially exposed the bug.
+    tree = ast.parse(inspect.getsource(Go2PACT))
+    accesses = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute):
+            if node.value.attr in ("link_contact_forces", "_link_contact_forces", "link_contact_states"):
+                names = {x.attr for x in ast.walk(node.slice) if isinstance(x, ast.Attribute)}
+                assert "feet_indices" not in names
+                accesses.append(names)
+    assert sum("feet_contact_indices" in names for names in accesses) >= 16
+
+
+def test_measured_contact_projection_frame_scale_order_and_detachment():
+    # Nonidentity yaw: normalized FR Fx becomes world Fy. Nonuniform scale
+    # catches accidental critic scaling; distinct feet/J columns catch order.
+    q = torch.tensor([[0., 0., 0., 0., 0., 2**-.5, 2**-.5]])
+    labels = torch.arange(1., 13.).reshape(1, 4, 3).requires_grad_()
+    scale = torch.tensor([100., 200., 300.])
+    world = _yaw_local_to_world(labels * scale, q[:, 3:7])
+    expected_world = torch.stack((-labels[..., 1]*200., labels[..., 0]*100., labels[..., 2]*300.), -1)
+    torch.testing.assert_close(world, expected_world, rtol=1e-6, atol=1e-3)
+    jac = torch.zeros(1, 4, 3, 18)
+    for foot in range(4):
+        jac[:, foot, :, 6+3*foot:9+3*foot] = torch.eye(3)
+    jac.requires_grad_()
+    actual = measured_contact_generalized_force(jac, world)
+    torch.testing.assert_close(actual[:, 6:], expected_world.flatten(1), rtol=1e-6, atol=1e-3)
+    assert not actual.requires_grad and labels.grad is None and jac.grad is None
+
+
+@pytest.mark.parametrize("qp_mode", [None, "every_substep", "random_one_substep"])
+def test_real_ppo_inverse_update_ignores_zero_legacy_buffer_and_trains_heads(qp_mode):
+    if qp_mode is not None and not torch.cuda.is_available():
+        pytest.skip("cuPIQP replay requires CUDA")
+    device="cuda" if qp_mode is not None else "cpu"
+    with torch.device(device):
+        _run_owned_update(qp_mode,device)
+
+
+def _run_owned_update(qp_mode,device):
+    alg = make_algorithm(num_learning_epochs=1, num_mini_batches=1,device=device)
+    alg.bard_enabled = alg.bard_inverse_enabled = True
+    alg.bard_rollout_enabled = True
+    # Exercise the live run's positive-weight (unbalanced) PCGrad path.
+    alg.pinn_init, alg.pinn_weight_final = -1, .01
+    alg.pinn_warmup_steps, alg.num_pinn_updates = 1, 1
+    alg.physics_dynamics = BardGo2Dynamics(URDF, device=device, batch_capacity=4)
+    if qp_mode is not None:
+        from test_hard_pact_reduced_qp import solver
+        alg.hard_pact_qp = solver(qp_update_mode=qp_mode,qp_solver="cupiqp")
+        alg.qp_config = alg.hard_pact_qp.cfg
+    alg.init_storage(4, 2, [57], [95], [133], [1140], [24], [11], [12], [18])
+    storage = alg.storage
+    storage.max_action_delay = 0
+    zeros = lambda width: torch.zeros(2, 4, width)
+    q = zeros(19)
+    q[..., 2], q[..., 6] = .4, 1.
+    q[..., 7:] = torch.tensor([0., .8, -1.5] * 4)
+    fields = {
+        "pre_q": q, "pre_v": zeros(18), "post_v": zeros(18),
+        "control_dt": torch.full((2, 4, 1), .02),
+        # Rows represent bounded non-QP, successful-QP, and fallback commands;
+        # they must reach both PINNs unchanged, not become raw replay torques.
+        "interval_executed_torque": torch.tensor([.1, .2, .25, -.25]).reshape(1, 4, 1).expand(2, 4, 12).clone(),
+        "control_kp": torch.full((2, 4, 12), 3.),
+        "control_kd": torch.full((2, 4, 12), .2),
+        "control_motor_strength": torch.full((2, 4, 1), 1.2),
+        "control_feedback_weight": torch.full((2, 4, 1), .9),
+        "control_feedforward_weight": torch.full((2, 4, 1), .7),
+        "control_torque_limits": torch.full((2, 4, 12), 2.),
+        "standardized_action_noise": zeros(24),
+        "delayed_action_source_valid": torch.ones(2, 4, 1, dtype=torch.bool),
+        "realized_added_mass": zeros(1), "realized_com_shift_body": zeros(3),
+        "joint_armature": zeros(12), "joint_friction": zeros(12),
+        "joint_stiffness": zeros(12), "joint_damping": zeros(12),
+        "equivalent_mass_com_wrench_world": zeros(6),
+        "total_external_wrench_label_yaw_normalized": zeros(6),
+        "sustained_wrench_active_mask": zeros(1).bool(),
+        **{name: zeros(1).bool() for name in ("push_event_mask", "reset_mask", "timeout_mask", "teleport_mask")},
+    }
+    storage.hard_pact_fields = fields
+    if qp_mode is not None:
+        fields.update(
+            sampled_qp_q=q.clone(), sampled_qp_v=zeros(18),
+            sampled_qp_grf_conditioning_q=q[..., 7:].clone(),
+            sampled_qp_grf_conditioning_v=zeros(12),
+            sampled_qp_previous_torque=zeros(12),
+            sampled_qp_valid=torch.ones(2,4,1,dtype=torch.bool),
+            sampled_qp_substep_index=torch.arange(4).reshape(1,4,1).expand(2,4,1).clone(),
+            physics_dt=torch.full((2,4,1),.005),
+        )
+    for t in range(2):
+        obs, hist, critic = torch.randn(4, 57), torch.randn(4, 1140), torch.randn(4, 95)
+        with torch.no_grad():
+            alg.act(obs, critic, hist, obs, hist, obs, hist)
+        tr = alg.transition
+        for name, value in (
+            ("observations", obs), ("observation_history", hist), ("critic_observations", critic),
+            ("actions", tr.actions), ("actions_log_prob", tr.actions_log_prob[:, None]),
+            ("mu", tr.action_mean), ("sigma", tr.action_sigma),
+            ("latent_noise", tr.latent_noise), ("latent_boot_mask", tr.latent_boot_mask),
+        ):
+            getattr(storage, name)[t].copy_(value)
+    storage.advantages.normal_()
+    storage.grf_targets[..., 2::3] = .3
+    assert not storage.wb_contact_forces.any()  # The real Isaac Lab failure condition.
+    measured, gradients = [], []
+    from rsl_rl.algorithms.hard_pact_bard import (
+        corrected_bard_inverse_dynamics_loss, differentiable_bard_rollout_loss,
+    )
+    inverse_torques, rollout_torques, grf_torques, inverse_grfs = [], [], [], []
+    actor_weights = [alg.actor_critic.act_pos_out.weight, alg.actor_critic.act_tau_out.weight]
+    predict_grf = alg.actor_critic.physics_estimator.predict_grf
+    replay_action_path = alg._replay_action_path
+    replayed_nominal = []
+    projection_checks = []
+    versions = {p:p._version for p in alg.ppo_parameters+alg.auxiliary_parameters}
+    auxiliary_backwards = []
+    auxiliary_backward = alg._auxiliary_pcgrad_step
+
+    def checked_auxiliary_backward(*args,**kwargs):
+        # No parameter is stepped until every owner's QP VJP is complete.
+        assert all(p._version==version for p,version in versions.items())
+        auxiliary_backwards.append(args[0])
+        return auxiliary_backward(*args,**kwargs)
+    from rsl_rl.algorithms.hard_pact_qp import projection_loss
+
+    def checked_projection(*args, **kwargs):
+        result = projection_loss(*args, **kwargs)
+        assert args[4].any(), "Tiny replay must include certified rows"
+        weights = actor_weights + [alg.actor_critic.context_encoder.ce_out_mean.weight,
+            alg.actor_critic.physics_estimator.grf_head[-1].weight,
+            alg.actor_critic.physics_estimator.wrench_head[-1].weight]
+        grads = torch.autograd.grad(result[0], weights, retain_graph=True, allow_unused=True)
+        assert all(g is not None and g.isfinite().all() and g.abs().sum()>0 for g in grads)
+        projection_checks.append(True)
+        return result
+
+    def checked_replay(*args, **kwargs):
+        result = replay_action_path(*args, **kwargs)
+        replayed_nominal.append(result["nominal_torque"].detach().clone())
+        return result
+
+    def checked_grf(latent, explicit, torque):
+        # Both PINNs share the first nominal-conditioned prediction; later
+        # calls belong to the independent auxiliary update phases.
+        grf_torques.append((torque.detach().clone(), torque.requires_grad))
+        return predict_grf(latent, explicit, torque)
+
+    def checked_loss(**kwargs):
+        inverse_torques.append(kwargs["interval_executed_torque"].detach().clone())
+        inverse_grfs.append(kwargs["interval_grf_world"].detach().clone())
+        measured.append(kwargs["measured_generalized_contact_force"])
+        result = corrected_bard_inverse_dynamics_loss(**kwargs)
+        weights = [alg.actor_critic.context_encoder.ce_out_mean.weight,
+                   alg.actor_critic.physics_estimator.grf_head[-1].weight,
+                   alg.actor_critic.physics_estimator.wrench_head[-1].weight]
+        weights = [p for p in weights if p.requires_grad]
+        grads = torch.autograd.grad(result.loss, weights, retain_graph=True, allow_unused=True)
+        gradients.extend(g.detach() for g in grads if g is not None)
+        actor_grads = torch.autograd.grad(result.loss, actor_weights, retain_graph=True, allow_unused=True)
+        assert all(g is None or not g.count_nonzero() for g in actor_grads)
+        assert result.loss > 0 and torch.isfinite(result.loss)
+        return result
+
+    def checked_rollout(**kwargs):
+        assert not kwargs["control_torque"].requires_grad
+        # PPO, encoder and decoder phases each share one GRF between PINNs.
+        torch.testing.assert_close(kwargs["interval_grf_world"], inverse_grfs[-1], rtol=0, atol=0)
+        rollout_torques.append(kwargs["control_torque"].detach().clone())
+        result = differentiable_bard_rollout_loss(**kwargs)
+        actor_grads = torch.autograd.grad(result.loss, actor_weights, retain_graph=True, allow_unused=True)
+        assert all(g is None or not g.count_nonzero() for g in actor_grads)
+        # Direct actuation is detached, while physics heads/encoder remain live.
+        force_weights = [alg.actor_critic.context_encoder.ce_out_mean.weight,
+                         alg.actor_critic.physics_estimator.grf_head[-1].weight,
+                         alg.actor_critic.physics_estimator.wrench_head[-1].weight]
+        force_weights = [p for p in force_weights if p.requires_grad]
+        force_grads = torch.autograd.grad(result.loss, force_weights, retain_graph=True,allow_unused=True)
+        assert any(g is not None for g in force_grads)
+        assert all(g.isfinite().all() and g.abs().sum() > 0 for g in force_grads if g is not None)
+        return result
+
+    solve_context = (patch.object(alg.hard_pact_qp,"solve",wraps=alg.hard_pact_qp.solve)
+                     if qp_mode is not None else nullcontext())
+    with solve_context as solve_calls, \
+         patch.object(alg,"_auxiliary_pcgrad_step",side_effect=checked_auxiliary_backward), \
+         patch("rsl_rl.algorithms.ppo_hard_pact.corrected_bard_inverse_dynamics_loss", side_effect=checked_loss), \
+         patch("rsl_rl.algorithms.ppo_hard_pact.differentiable_bard_rollout_loss", side_effect=checked_rollout), \
+         patch.object(alg.actor_critic.physics_estimator, "predict_grf", side_effect=checked_grf), \
+         patch("rsl_rl.algorithms.ppo_hard_pact.projection_loss", side_effect=checked_projection), \
+         patch.object(alg, "_replay_action_path", side_effect=checked_replay):
+        alg.update(lambda a: (a[:, :12], a[:, 12:]), lambda q, p, v: q-p-v,
+                   .02, 0, torch.zeros(12), 1.)
+    assert bool(projection_checks) == (qp_mode is not None)
+    assert auxiliary_backwards == [alg.encoder_pcgrad,alg.decoder_pcgrad]
+    if qp_mode is not None:
+        assert solve_calls.call_count == 1  # Not one new solve per optimizer.
+    assert measured and all(x.abs().sum() > 0 and not x.requires_grad for x in measured)
+    assert gradients and all(torch.isfinite(g).all() and g.abs().sum() > 0 for g in gradients)
+    expected_torques = fields["interval_executed_torque"].flatten(0, 1).sort(dim=0).values
+    expected_all = expected_torques.repeat(2,1).sort(dim=0).values
+    torch.testing.assert_close(torch.cat(inverse_torques).sort(dim=0).values, expected_all)
+    torch.testing.assert_close(torch.cat(rollout_torques).sort(dim=0).values, expected_all,
+                               rtol=0, atol=0)
+    pinn_torques = [t for t,requires_grad in grf_torques if not requires_grad]
+    assert pinn_torques
+    torch.testing.assert_close(pinn_torques[0], replayed_nominal[0], rtol=0, atol=0)
+    assert not torch.equal(pinn_torques[0].sort(dim=0).values, expected_torques)
