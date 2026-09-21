@@ -55,7 +55,7 @@ def test_config_weights_applied_once_in_each_owned_objective():
         contact_probability_loss_weight=.2,grf_loss_weight=1.7,
         active_wrench_loss_weight=2.1,neutral_wrench_loss_weight=.4,
         lambda_inverse=.3,lambda_rollout=.8,lambda_projection=.05)
-    alg.vae_beta=.6
+    alg.current_vae_beta=.6
     with alg._frozen_auxiliary_decoders():
         enc=alg._compute_auxiliary_loss(*make_batch(),return_decoder_inputs=True)
     expected=.7*enc['privileged']+.6*enc['kl']+1.3*enc['explicit']+1.7*enc['grf']+2.1*enc['wrench_active']+.4*enc['wrench_neutral']
@@ -237,6 +237,8 @@ def test_decoder_phase_ignores_appended_invalid_nan_rows():
 @pytest.mark.parametrize("valid_rows", [0, 2])
 def test_real_ppo_update_runs_encoder_then_three_decoders(diagnostics, valid_rows):
     alg = make_algorithm(num_learning_epochs=1, num_mini_batches=1,
+                         vae_kl_initial_weight=.1,vae_kld_weight=.9,
+                         vae_kl_warmup_iterations=10,
                          ppo_latent_diagnostics_enabled=diagnostics,
                          ppo_latent_diagnostics_sample_count=2)
     alg.init_storage(3, 1, [57], [95], [133], [1140], [24], [11], [12], [18])
@@ -278,7 +280,8 @@ def test_real_ppo_update_runs_encoder_then_three_decoders(diagnostics, valid_row
         stages.append("encoder" if not stages else "decoders")
         return result
 
-    with patch.object(alg, "spectral_normalization"), \
+    with patch.object(alg,"_vae_beta_for_iteration",wraps=alg._vae_beta_for_iteration) as beta_schedule, \
+         patch.object(alg, "spectral_normalization"), \
          patch.object(alg.act_optimizer, "step"), \
          patch.object(alg.auxiliary_optimizer, "step", side_effect=checked_step), \
          patch.object(alg.decoder_optimizer, "step", side_effect=checked_step), \
@@ -287,6 +290,8 @@ def test_real_ppo_update_runs_encoder_then_three_decoders(diagnostics, valid_row
         losses = alg.update(lambda a: (a[:, :12], a[:, 12:]),
                             lambda q, p, v: q - p - v, .02, 0, torch.zeros(12), 1.)
     assert stages == (["encoder", "decoders"] if valid_rows else [])
+    beta_schedule.assert_called_once_with(0)
+    assert alg.current_vae_beta == .1
     assert decoder_phase.call_count == bool(valid_rows)
     assert all(torch.isfinite(torch.as_tensor(x)) for x in losses)
     if valid_rows:

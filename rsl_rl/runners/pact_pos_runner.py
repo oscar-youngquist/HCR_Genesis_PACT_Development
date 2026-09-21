@@ -285,6 +285,7 @@ class OnPolicyRunnerPACTPos:
         for it in range(self.current_learning_iteration, tot_iter):
             if self.is_hard_pact_pos:
                 self.env._terrain_curriculum_iteration = it
+                self.env.begin_command_curriculum_iteration()
             start = time.time()
             # Rollout
             with torch.inference_mode():
@@ -329,6 +330,11 @@ class OnPolicyRunnerPACTPos:
                     mean_recon_loss, mean_kld_loss, mean_tau_loss \
                     = self.alg.update(self.env._get_pinn_actions, self.env._get_pinn_feedback, self.env.dt, it, self.env.simulator.default_dof_pos, self.env.obs_scales.dof_vel)
             
+            if self.is_hard_pact_pos:
+                self.env.finish_command_curriculum_iteration(it)
+                if self.writer is not None:
+                    for key,value in getattr(self.env,"command_curriculum_metrics",{}).items():
+                        self.writer.add_scalar("curriculum/commands/"+key,value,it)
             # Step the reward curriculum if we are doing that
             if self.env.use_reward_curriculum:
                 self.env.step_reward_curriculum(it)
@@ -588,6 +594,9 @@ class OnPolicyRunnerPACTPos:
             checkpoint["hard_pact_domain_rand_curriculum"] = (
                 self.env.domain_rand_curriculum_state_dict()
             )
+        if self.is_hard_pact_pos:
+            checkpoint['hard_pact_command_curriculum'] = self.env.command_curriculum_state_dict()
+            checkpoint['iter'] = max(checkpoint['iter'],getattr(self.env,'_command_curriculum_last_iteration',-1)+1)
         torch.save(checkpoint, path)
 
     def save_hard_pact_start(self, path, infos=None):
@@ -620,6 +629,8 @@ class OnPolicyRunnerPACTPos:
             self.env.load_domain_rand_curriculum_state_dict(curriculum)
         else:
             self.current_learning_iteration = 0
+        if self.is_hard_pact_pos and 'hard_pact_command_curriculum' in loaded_dict:
+            self.env.load_command_curriculum_state_dict(loaded_dict['hard_pact_command_curriculum'])
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):

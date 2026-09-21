@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+import math
 import time
 
 import torch
@@ -43,6 +44,25 @@ class Go2HardPACT(Go2PACT):
     """Legacy Go2 PACT with GRF and persistent external-wrench targets."""
 
     _legacy_task_class = Go2PACT
+
+    def _reward_dof_vel_limits(self):
+        """Sum soft speed-limit excess (rad/s), capped at 1 rad/s per joint.
+
+        Asset limits and simulator velocities use the canonical joint order.
+        This is a reward only; it does not clip velocity or alter QP limits.
+        """
+        velocity = self.simulator.dof_vel
+        limits = getattr(self, "_reward_velocity_limits", None)
+        if limits is None:
+            limits = torch.as_tensor(
+                self.cfg.asset.dof_vel_limits, device=velocity.device,
+                dtype=velocity.dtype,
+            )
+            if limits.shape != velocity.shape[1:]:
+                raise ValueError("asset.dof_vel_limits must contain one limit per joint")
+            self._reward_velocity_limits = limits
+        excess = velocity.abs() - limits * self.cfg.rewards.soft_dof_vel_limit
+        return excess.clamp(min=0., max=1.).sum(dim=1)
 
     def _reward_torque_limits(self):
         requested = getattr(self, "_hard_pact_requested_torque", None)
@@ -477,6 +497,68 @@ class Go2HardPACT(Go2PACT):
         self.domain_rand_capability_report = self.domain_rand_curriculum.report(
             capabilities.get("features", {})
         )
+
+    def _update_command_curriculum(self, env_ids):
+        """Zero patience retains the original reset-triggered curriculum."""
+        if self.cfg.commands.curriculum_patience_iterations == 0:
+            return self._legacy_task_class._update_command_curriculum(self, env_ids)
+
+    def begin_command_curriculum_iteration(self):
+        patience = int(self.cfg.commands.curriculum_patience_iterations)
+        if patience < 0:
+            raise ValueError("commands.curriculum_patience_iterations must be >= 0")
+        self._command_tracking_collect = bool(self.cfg.commands.curriculum and patience > 0)
+        if not self._command_tracking_collect:
+            return
+        self._command_tracking_sum = torch.zeros((),device=self.device)
+        self._command_tracking_count = 0
+
+    def _reward_tracking_lin_vel(self):
+        # Preserve the inherited reward exactly; observe its raw [0,1] value
+        # before reward weight/curriculum scaling, with no second reward pass.
+        reward = self._legacy_task_class._reward_tracking_lin_vel(self)
+        if getattr(self,"_command_tracking_collect",False):
+            self._command_tracking_sum.add_(reward.detach().sum())
+            self._command_tracking_count += reward.numel()
+        return reward
+
+    def finish_command_curriculum_iteration(self, iteration):
+        self._command_tracking_collect = False
+        if self.cfg.commands.curriculum_patience_iterations == 0:
+            return
+        if not self.cfg.commands.curriculum or iteration <= getattr(self,"_command_curriculum_last_iteration",-1):
+            return
+        patience = int(self.cfg.commands.curriculum_patience_iterations)
+        if patience < 0:
+            raise ValueError("commands.curriculum_patience_iterations must be >= 0")
+        last = getattr(self,"_command_curriculum_last_iteration",-1)
+        streak = getattr(self,"_command_curriculum_streak",0) if iteration == last+1 else 0
+        count = getattr(self,"_command_tracking_count",0)
+        score = self._command_tracking_sum.item()/count if count else float("nan")
+        streak = streak+1 if math.isfinite(score) and score > self.cfg.commands.curriculum_threshold else 0
+        self._command_curriculum_last_iteration = int(iteration)
+        expanded = streak >= patience
+        if expanded:
+            # Preserve legacy expansion increments and axis/max-cap semantics.
+            cap = self.cfg.commands.max_curriculum
+            for key in ("lin_vel_x","lin_vel_y","ang_vel_yaw"):
+                lo,hi = self.command_ranges[key]
+                self.command_ranges[key] = [max(-cap,min(0.,lo-.5)),min(cap,max(0.,hi+.5))]
+            streak = 0  # Require a new streak at the new command difficulty.
+        self._command_curriculum_streak = streak
+        self.command_curriculum_metrics = {"tracking_mean":score,"streak":streak,
+            "patience_iterations":patience,"bounds_expanded":float(expanded)}
+
+    def command_curriculum_state_dict(self):
+        return {"streak":getattr(self,"_command_curriculum_streak",0),
+                "last_iteration":getattr(self,"_command_curriculum_last_iteration",-1),
+                "ranges":{key:list(self.command_ranges[key]) for key in ("lin_vel_x","lin_vel_y","ang_vel_yaw")}}
+
+    def load_command_curriculum_state_dict(self, state):
+        self._command_curriculum_streak = int(state["streak"])
+        self._command_curriculum_last_iteration = int(state["last_iteration"])
+        for key,value in state["ranges"].items():
+            self.command_ranges[key] = list(value)
 
     def step_domain_rand_curriculum(self, iteration, mean_reward=None):
         """Advance once per PPO iteration and update backend reset ranges."""

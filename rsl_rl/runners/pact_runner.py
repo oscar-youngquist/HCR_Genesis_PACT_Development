@@ -298,6 +298,7 @@ class OnPolicyRunnerPACT:
             qp_profile = None
             if self.is_hard_pact:
                 self.env._terrain_curriculum_iteration = it
+                self.env.begin_command_curriculum_iteration()
                 self._set_hard_pact_qp_iteration(it)
                 if self.alg.hard_pact_qp is not None:
                     self.alg.hard_pact_qp.begin_iteration_diagnostics("rollout")
@@ -396,6 +397,11 @@ class OnPolicyRunnerPACT:
                 print("Min - self.feedback_tau_weight: ", torch.min(self.env.simulator.feedback_tau_weight).item())
                 print("Avg - self.feedback_tau_weight: ", torch.mean(self.env.simulator.feedback_tau_weight).item())
             
+            if self.is_hard_pact:
+                self.env.finish_command_curriculum_iteration(it)
+                if self.writer is not None:
+                    for key,value in getattr(self.env,"command_curriculum_metrics",{}).items():
+                        self.writer.add_scalar("curriculum/commands/"+key,value,it)
             # Step the reward curriculum if we are doing that
             if self.env.use_reward_curriculum:
                 self.env.step_reward_curriculum(it)
@@ -714,6 +720,8 @@ class OnPolicyRunnerPACT:
         self._log_stable_hard_pact_metrics(locs)
         for name, value in getattr(self.alg, "last_auxiliary_metrics", {}).items():
             self.writer.add_scalar(f"Loss/auxiliary_{name}", value.item(), locs['it'])
+        if self.is_hard_pact:
+            self.writer.add_scalar("Loss/vae_kl_effective_weight",self.alg.current_vae_beta,locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
@@ -841,6 +849,7 @@ class OnPolicyRunnerPACT:
         }
         if self.is_hard_pact:
             # The legacy runner counter advances only after learn() finishes.
+            checkpoint['hard_pact_command_curriculum'] = self.env.command_curriculum_state_dict()
             # Save the next iteration for HardPACT periodic checkpoints too,
             # so resuming cannot accidentally repeat its QP warmup.
             checkpoint['iter'] = max(
@@ -882,6 +891,8 @@ class OnPolicyRunnerPACT:
             self.current_learning_iteration = 0
         if self.is_hard_pact:
             self.alg._last_completed_iteration = self.current_learning_iteration - 1
+            if 'hard_pact_command_curriculum' in loaded_dict:
+                self.env.load_command_curriculum_state_dict(loaded_dict['hard_pact_command_curriculum'])
             self._set_hard_pact_qp_iteration(self.current_learning_iteration)
         return loaded_dict['infos']
 

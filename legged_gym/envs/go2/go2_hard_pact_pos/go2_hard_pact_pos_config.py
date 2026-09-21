@@ -409,6 +409,8 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
+        curriculum_threshold = 0.8
+        curriculum_patience_iterations = 10  # consecutive PPO rollouts; 0 = legacy reset-based updates
         max_curriculum = 1.0
         num_commands = 4
         resampling_time = 10.0

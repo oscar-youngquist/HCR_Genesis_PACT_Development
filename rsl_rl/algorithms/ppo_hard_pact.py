@@ -66,6 +66,7 @@ from legged_gym.dynamics import (
 from rsl_rl.hard_pact_ablations import resolve_hard_pact_features
 
 from .pc_grad import PCGrad
+from .vae_kl_schedule import cosine_vae_beta
 from .hard_pact_boot_statistics import ValidBootStatistics
 from .hard_pact_bard import corrected_bard_inverse_dynamics_loss
 from .hard_pact_bard import differentiable_bard_rollout_loss
@@ -297,6 +298,9 @@ class PPO_HardPACT:
                  pinn_init_steps=500,
                  num_encoder_epochs=1, # number of epochs for hybrid encoder via supervised learning
                  vae_kld_weight=2.0,   # weight of KL divergence loss in VAE
+                 vae_kl_initial_weight=0.0,
+                 vae_kl_warmup_start=0,
+                 vae_kl_warmup_iterations=0,
                  use_adaptive_entropy=True,
                  adaptive_ent_bounds=[0.01, 0.001],
                  adaptive_ent_lin_threshold=0.75,
@@ -356,7 +360,13 @@ class PPO_HardPACT:
         self.learning_rate = learning_rate
 
         self.num_enc_epochs = num_encoder_epochs
-        self.vae_beta = vae_kld_weight
+        self.vae_beta = float(vae_kld_weight)  # final KL weight
+        self.vae_kl_initial_weight = float(vae_kl_initial_weight)
+        self.vae_kl_warmup_start = int(vae_kl_warmup_start)
+        self.vae_kl_warmup_iterations = int(vae_kl_warmup_iterations)
+        if self.vae_kl_warmup_iterations < 0:
+            raise ValueError("vae_kl_warmup_iterations must be nonnegative")
+        self.current_vae_beta = self.vae_beta
         self.privileged_loss_weight = float(privileged_loss_weight)
         self.explicit_loss_weight = float(explicit_loss_weight)
         self.contact_probability_loss_weight = float(
@@ -1071,6 +1081,9 @@ class PPO_HardPACT:
         }
 
         self._update_pinn_weight_for_iteration(itr)
+        # Absolute iteration gives resume-exact beta, constant across all
+        # minibatches/passes. This does not alter PPO's policy desired_kl.
+        self.current_vae_beta = self._vae_beta_for_iteration(itr)
 
         qp_iteration_ready = self.qp_enabled_at_iteration()
         if self.hard_pact_qp is not None and hasattr(self.hard_pact_qp, "begin_iteration_diagnostics"):
@@ -2020,7 +2033,7 @@ class PPO_HardPACT:
         )
         loss = (
             self.privileged_loss_weight * privileged
-            + self.vae_beta * kl
+            + self.current_vae_beta * kl
             + self.explicit_loss_weight * explicit_loss
             + self.grf_loss_weight * grf
             + self.active_wrench_loss_weight * wrench_active
@@ -2096,6 +2109,10 @@ class PPO_HardPACT:
         return feedforward_torque + fb_func(
             desired_position, joint_position, joint_velocity
         )
+
+    def _vae_beta_for_iteration(self, iteration):
+        return cosine_vae_beta(iteration,self.vae_kl_initial_weight,self.vae_beta,
+                               self.vae_kl_warmup_start,self.vae_kl_warmup_iterations)
 
     def _unweighted_pinn_loss(
         self, inverse_loss, rollout_loss, soft_constraint_loss=None,

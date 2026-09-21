@@ -34,7 +34,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch import linalg as LA
 import time
-import math
+from .vae_kl_schedule import cosine_vae_beta
 
 import numpy as np
 import random
@@ -906,16 +906,8 @@ class PPO_PACT_Pos:
 
     def _vae_beta_for_iteration(self, iteration):
         """Return the cosine-warmed KL weight for an absolute PPO iteration."""
-        if self.vae_kl_warmup_iterations == 0:
-            return self.vae_beta
-        progress = (
-            (float(iteration) - self.vae_kl_warmup_start)
-            / self.vae_kl_warmup_iterations
-        )
-        progress = min(max(progress, 0.0), 1.0)
-        return self.vae_kl_initial_weight + 0.5 * (
-            self.vae_beta - self.vae_kl_initial_weight
-        ) * (1.0 - math.cos(math.pi * progress))
+        return cosine_vae_beta(iteration,self.vae_kl_initial_weight,self.vae_beta,
+                               self.vae_kl_warmup_start,self.vae_kl_warmup_iterations)
 
     def _compute_vae_loss(self, obs_hist_batch, grf_target,
                           obs_target, explicit_labels_batch, terminated_batch,

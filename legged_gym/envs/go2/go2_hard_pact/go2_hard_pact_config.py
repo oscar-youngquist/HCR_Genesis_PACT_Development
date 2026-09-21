@@ -177,7 +177,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         recovery_ratio = 0.9
         step_interval = 10
         reward_ema_alpha = 0.05
-        min_reward_to_step = 0.6
+        min_reward_to_step = 0.50
         joint_dynamics_progress_delta = 0.02
         mass_com_progress_delta = 0.01
         disturbance_progress_delta = 0.01
@@ -197,9 +197,9 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         # The disturbance curriculum expands uniform [-max, +max] sampling
         # after push_warmup and the joint-dynamics/mass-CoM phases. Existing
         # events finish their waveform; only new events use expanded bounds.
-        persistent_force_min_n = 10.0
+        persistent_force_min_n = 4.0
         persistent_force_max_n = 40.0
-        persistent_torque_min_nm = 3.0
+        persistent_torque_min_nm = 2.0
         persistent_torque_max_nm = 12.0
 
     class noise(LeggedRobotCfg.noise):
@@ -286,6 +286,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
 
     class rewards(LeggedRobotCfg.rewards):
         soft_dof_pos_limit = 0.9
+        soft_dof_vel_limit = 0.9  # fraction of asset.dof_vel_limits (rad/s)
         soft_torque_limit = 0.9
 
         base_height_target = 0.38
@@ -327,6 +328,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             termination = 0.0
             collision = -1.0
             dof_pos_limits = -2.0
+            dof_vel_limits = -0.1  # 0 disables the soft joint-speed penalty
             dof_close_to_default = -0.01
             torque_limits = -0.01
             pd_target_torque_limit = 0.0
@@ -338,11 +340,11 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             dof_pos_stand_still = -0.1
 
             tracking_lin_vel = 1.0
-            tracking_ang_vel = 0.5
-            dof_tracking = 0.1
+            tracking_ang_vel = 0.50
+            dof_tracking = 0.40
 
-            torque_conflict_symmetric = -0.01
-            torque_alignment = 0.01
+            torque_conflict_symmetric = -0.0
+            torque_alignment = 0.00
             ff_ratio = 0.0
             torque_cancellation = -0.2
 
@@ -359,11 +361,11 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             action_rate = 0.0
             action_smoothness = 0.0
 
-            pos_action_rate = -0.001
-            pos_action_smoothness = -0.001
+            pos_action_rate = -0.01
+            pos_action_smoothness = -0.01
 
-            tau_action_rate = -0.002
-            tau_action_smoothness = -0.002
+            tau_action_rate = -0.02
+            tau_action_smoothness = -0.02
 
             feedforward_torques_scaled = -1e-05
             feedback_torques = -2e-05
@@ -401,7 +403,9 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                 'pos_action_smoothness', 
                                 'tau_action_rate', 
                                 'tau_action_smoothness',
-                                'dof_acc']
+                                'dof_vel_limits',
+                                # 'dof_acc'
+                                ]
             curr_reward_bounds = {'ang_vel_xy': [-0.01, -0.1], 
                                   'lin_vel_z':[-0.5, -1.0],
                                   'orientation': [-0.2, -1.0], 
@@ -411,14 +415,18 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                   'pos_action_smoothness': [-0.001, -0.01], 
                                   'tau_action_rate': [-0.002, -0.02], 
                                   'tau_action_smoothness': [-0.002, -0.02],
-                                  'dof_acc':[-2.5e-08, -2.5e-07]}
-            curr_steps = 1000
-            warmup_steps = 6000
+                                  'dof_vel_limits':[-0.01, -0.1],
+                                #   'dof_acc':[-2.5e-08, -2.5e-07]
+                                  }
+            curr_steps = 6000
+            warmup_steps = 0
 
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
-        max_curriculum = 1.0
+        curriculum_threshold = 0.8  # raw linear-tracking mean, not weighted reward
+        curriculum_patience_iterations = 10  # consecutive PPO rollouts; 0 = legacy reset-based updates
+        max_curriculum = 1.2
         num_commands = 4
         resampling_time = 10.0
         heading_command = True
@@ -485,7 +493,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         max_grad_norm = 1.0
 
         entropy_coef = 0.01
-        use_adaptive_entropy = False
+        use_adaptive_entropy = True
         adaptive_ent_bounds = [0.005, 0.01]
         adaptive_ent_lin_threshold = 0.75
         adaptive_ent_ang_threshold = 0.35
@@ -495,6 +503,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         auxiliary_learning_rate = 0.0002
         # Weight beta on the latent KL term in the combined auxiliary loss.
         vae_kld_weight = 1.0
+        vae_kl_initial_weight = 0.01
+        vae_kl_warmup_start = 0  # absolute PPO iteration (also on resume)
+        vae_kl_warmup_iterations = 1000  # 0 disables the curriculum
 
         privileged_loss_weight = 1.0
         explicit_loss_weight = 1.0
@@ -645,7 +656,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         policy_class_name = 'ActorCritic_HardPACT'
         algorithm_class_name = 'PPO_HardPACT'
         num_steps_per_env = 24
-        max_iterations = 10000
+        max_iterations = 12000
         grf_dim = 12
         run_name = 'hardpact_50hz_noboot'
         experiment_name = 'go2_pact_rough'
@@ -661,3 +672,14 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         console_detailed_losses = False
         console_pinn_timing = True
         console_qp_timing = True
+
+
+# conda activate lr_lab_cupiqp
+
+# SIMULATOR=isaaclab PYTHONPATH=. \
+# python legged_gym/scripts/play_go2_hard_pact_pos.py \
+#   --task go2_hard_pact_baseline_isaaclab \
+#   --load_run Sep16_13-19-27_hard_pact_full_isaaclab \
+#   --ckpt -1 \
+#   --num_envs 10 \
+#   --gpu cuda:0
