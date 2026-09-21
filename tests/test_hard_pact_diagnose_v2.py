@@ -47,16 +47,37 @@ def test_projection_gap_acceptance_and_padding(tmp_path):
 def test_original_joint_constraints_and_recovery_slack(tmp_path):
     qp,d,m,p=packet(tmp_path,True)
     p["data"]["joint_position"][:,0]=3.
-    z=torch.zeros(2,36,dtype=torch.float64);z[:,24]=2.
+    z=torch.zeros(2,48,dtype=torch.float64);z[:,24]=2.
     r=candidate_assessment(p,z)
     joint=r["joint"]
     assert joint["empty"][:,0].all()
-    assert joint["upper_family"][:,0].eq(2).all()
+    assert joint["upper_family"][:,0].eq(1).all()
     assert joint["violations"]["position_rad"][:,0].eq(1).all()
     assert joint["slack_rad_s2"][:,0].eq(2*m.variable_scale[24]).all()
     assert not r["original_hard_joint_satisfied"].any()
     assert "post_projection/physical/joint_soft" in r["groups"]
     torch.testing.assert_close(joint["lower"],joint["lower_by_family"].max(-1).values)
+
+
+def test_v3_recovery_rate_slack_and_v2_acceleration_interpretation(tmp_path):
+    qp,d,m,p=packet(tmp_path,True)
+    x=torch.zeros_like(m.p);x[:,:12]=12.;x[:,36:48]=2.
+    r=candidate_assessment(p,x/m.variable_scale)
+    assert r['production_accepted'].all()
+    assert not r['original_hard_rate_satisfied'].any()
+    assert r['joint']['rate_slack_nm'].eq(2).all()
+    assert r['joint']['rate_violation_nm'].eq(2).all()
+    assert 'acceleration_rad_s2' not in r['joint']['violations']
+    assert 'post_projection/physical/rate_soft' in r['groups']
+    # Historical captures retain the old independent cap in reported limits;
+    # do not reconstruct their matrices using the new formulation.
+    _,_,old_m,old=packet(tmp_path)
+    old['schema_version']=2
+    old['config']['joint_acceleration_limits_rad_s2']=(100.,)*12
+    old['joint_limits']['acceleration']=torch.ones(12)*100.
+    historical=candidate_assessment(old,torch.zeros_like(old_m.p))
+    assert historical['joint']['interval_family_order']==['acceleration','velocity','position']
+    assert historical['joint']['upper'].eq(100).all()
 
 
 def test_coverage_reservations_budget_counts_and_row_selection(tmp_path):

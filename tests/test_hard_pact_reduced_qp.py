@@ -137,12 +137,11 @@ def test_swing_zero_nonredundant_constraints_and_native_pack(pattern):
 
 @pytest.mark.parametrize("beta",[.5,1.])
 def test_joint_specific_intersections_and_exact_torque_rate(beta):
-    qp=solver(position_integration_coefficient=beta,joint_acceleration_limits_rad_s2=tuple(range(10,22)))
+    qp=solver(position_integration_coefficient=beta)
     d=inputs();d["tau_nom"].fill_(100); d["joint_position"][:,0]=1.999
     d["joint_velocity"][:,1]=29.99
     m=qp._build(d)
-    expected=torch.minimum(torch.arange(10,22,dtype=torch.float64),
-        torch.minimum((30-d["joint_velocity"])/d["dt"],(2-d["joint_position"]-d["dt"]*d["joint_velocity"])/(beta*d["dt"].square())))
+    expected=torch.minimum((30-d["joint_velocity"])/d["dt"],(2-d["joint_position"]-d["dt"]*d["joint_velocity"])/(beta*d["dt"].square()))
     torch.testing.assert_close(m.qdd_upper,expected)
     # Keep the velocity test inside position limits for actual feasibility.
     d["joint_position"][:,1]=-1.

@@ -207,6 +207,11 @@ class OnPolicyRunnerPACT:
             # Limits are backend properties, not learned transition data.
             # Bind them once so PPO minibatches carry only the previous torque
             # needed by the rate constraint, minimizing persistent GPU memory.
+            # One configured rate for QP, deployment, and execution without QP.
+            from dataclasses import replace
+            self.alg.qp_config = replace(self.alg.qp_config,
+                torque_rate_limit_nm_s=self.env.cfg.control.torque_rate_limit_nm_s)
+            self.alg_cfg["hard_pact_qp"]["torque_rate_limit_nm_s"] = self.alg.qp_config.torque_rate_limit_nm_s
             if self.hard_pact_features.execution_qp:
                 simulator = self.env.simulator
                 self.alg.configure_hard_pact_qp(
@@ -242,6 +247,7 @@ class OnPolicyRunnerPACT:
                 qp_mode, int(self.env.cfg.control.decimation),
                 self.alg.qp_config.warmup_iterations,
                 qp_config=self.alg.qp_config,
+                clip_torque_rate_without_qp=self.env.cfg.control.clip_torque_rate_without_qp,
             )
             if self.alg.hard_pact_qp is not None:
                 qp = self.alg.hard_pact_qp

@@ -3,6 +3,17 @@
 Run in the existing cuPIQP-compatible Isaac Lab environment, from repository root.
 Only load trusted local checkpoints/packets.
 
+Focused constraint/replay/control/deployment tests (no simulator training):
+```bash
+env SIMULATOR=isaaclab PYTHONPATH=.:tests conda run --no-capture-output -n lr_lab_cupiqp \
+  python -m pytest -q \
+  tests/test_hard_pact_rate_recovery.py tests/test_hard_pact_reduced_qp.py \
+  tests/test_hard_pact_qp_modes.py tests/test_hard_pact_joint_diagnostics.py \
+  tests/test_hard_pact_soft_joint_recovery.py tests/test_hard_pact_qp_diagnose.py \
+  tests/test_hard_pact_diagnose_v2.py tests/test_hard_pact_replay_csv.py \
+  tests/test_go2_hard_pact_physics_heads.py
+```
+
 ```bash
 python scripts/diagnose_hard_pact_qp.py capture \
   --checkpoint /path/to/original/run/model_1234.pt \
@@ -79,8 +90,43 @@ in v1 are explicitly marked. Deterministic VJPs test production-accepted-only
 and alternating-row masks; failed rows get zero upstream gradients, and nonfinite
 backward results are reported rather than hidden. JSON null means unavailable.
 
-Per-joint reports include original position/velocity/acceleration intervals, ties
-(acceleration, then velocity, then position), limiting family, empty intersections,
+Schema v3 records position/velocity-derived acceleration intervals only (no
+independent acceleration cap). Ties choose velocity before position. Older v1/v2
+packets retain their captured matrices and acceleration-limit interpretation.
+Recovery is now 48 variables: torque, force, joint-envelope slack [rad/s²], and
+torque-rate slack [Nm], twelve each. Absolute torque and friction remain hard;
+accepted recovery commands are not projected back into the hard rate box.
+CSV includes `recovery_rate_slack_nm` and `rate_violation_nm` alongside joint slack.
+Deployment schema 16 rejects old controller metadata; re-export the contract.
+Capture explicitly records removal of an old resolved-config acceleration cap;
+legacy solver rate settings migrate into `control.torque_rate_limit_nm_s` when
+the old environment config has no rate field. Offline replay does not migrate
+captured matrices.
+
+Current task configuration (both HardPACT and Pos):
+```python
+class control(...):
+    clip_torque_rate_without_qp = False  # True: disabled/warmup/unsolved substeps too
+    torque_rate_limit_nm_s = 1000.0      # one source for execution and QP
+```
+HardPACT `algorithm.hard_pact_qp` recovery settings:
+```python
+soft_joint_recovery_weight = 200.0
+soft_joint_recovery_scale_rad_s2 = 100.0
+soft_rate_recovery_weight = 200.0
+soft_rate_recovery_scale_nm = 10.0
+recovery_projection_weight = 1.0
+recovery_projection_slack_weight = 1.0
+recovery_projection_rate_slack_weight = 1.0
+```
+Each inner penalty is `weight * sum((slack/scale)**2)`. The outer recovery
+loss is `recovery_projection_weight * mean(torque_correction_squared +
+recovery_projection_slack_weight*normalized_joint_slack_squared +
+recovery_projection_rate_slack_weight*normalized_rate_slack_squared)` over
+valid accepted recovery rows, with the existing outer `lambda_projection`.
+Final rejected-QP fallback always rate-clips, regardless of the control flag.
+
+Per-joint reports include limiting family, empty intersections,
 predicted acceleration/position/velocity, and recovery slack. Raw/post residual
 groups retain normalized and physical units. Original hard-joint violations are
 separate from softened recovery feasibility. Distributions use real finite

@@ -17,7 +17,8 @@ RECONSTRUCTION_INDICES = tuple(range(61)) + tuple(range(73, 288))
 RECONSTRUCTION_DIM = len(RECONSTRUCTION_INDICES)
 
 
-def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None):
+def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None,
+                       clip_torque_rate_without_qp=False):
     """Execution metadata using the same schedule and projection as rollout."""
     from rsl_rl.algorithms.hard_pact_qp import qp_substep_anchors
     from dataclasses import asdict
@@ -45,14 +46,15 @@ def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None):
         "grf_conditioning": "bounded k=0 total nominal PD/feedforward torque; store k=0 joint q/v and actuator parameters; recompute using current replayed actions",
         "nominal_torque": "fresh bounded total PD/feedforward each substep, actuator effects exactly once",
         "unsolved_execution_helper": "rsl_rl.algorithms.hard_pact_qp.project_nominal_torque",
-        "unsolved_execution": "project fresh nominal torque on actuator magnitude/rate intersection; no held correction",
+        "clip_torque_rate_without_qp": bool(clip_torque_rate_without_qp),
+        "unsolved_execution": "hard magnitude bounds; optional rate clipping around previous executed torque; no held correction; rejected-QP final fallback always rate clipped",
         "previous_torque": "previous actually applied torque, zero on reset",
         "joint_contact_certification": "stage 0: hard QP; stage 1: soft-joint recovery, no hard joint certificate; stage 2/unsolved: actuator-only",
-        "soft_joint_recovery": "optional 36-D [tau12, masked-force12, nonnegative joint-slack12(rad/s²)]; quadratic normalized slack cost; torque/rate/friction/swing-zero stay hard; certified softened replay has a separately weighted torque-correction/slack loss and implicit VJP; failed rows excluded",
+        "soft_joint_recovery": "48-D [tau12, masked-force12, nonnegative joint-slack12(rad/s²), nonnegative rate-slack12(Nm)]; separately normalized quadratic inner/outer costs; absolute torque/friction/swing-zero stay hard; rate/joint feasibility is softened; accepted commands bypass deterministic rate clipping; failed rows excluded from VJP",
         "ppo_anchor_selection": "one balanced uniform executed QP substep per environment in both modes",
         "ppo_projection_loss_multiplier": 1,
         "frames": "world forces and world-aligned wrench about the existing base-Jacobian point; yaw-local head outputs rotated once",
-        "limits": "canonical joint-specific magnitude/position/velocity limits from backend; acceleration/rate and objective scales in solver_and_objective_settings",
+        "limits": "canonical joint-specific magnitude/position/velocity limits from backend; no independent acceleration cap; joint envelope derived from position/velocity; rate and objective scales in solver_and_objective_settings",
     }
     return result
 
@@ -115,7 +117,14 @@ def build_deployment_contract(cfg, actor, gain_spec):
     explicit_dim = actor.explicit_estimator.network[-1].out_features
     swing_config = GRFSwingConfig.from_task(cfg)
     contract = {
-        "schema_version": 15,
+        "schema_version": 16,
+        "actuator_execution": {
+            "clip_torque_rate_without_qp": bool(getattr(cfg.control,"clip_torque_rate_without_qp",False)),
+            "torque_rate_limit_nm_s": float(getattr(cfg.control,"torque_rate_limit_nm_s",1000.0)),
+            "rate_reference": "immediately previous executed total torque; physics timestep; reset rows zero",
+            "accepted_qp": "absolute limits enforced; no deterministic rate clip after accepted recovery",
+            "rejected_qp": "deterministic magnitude/rate fallback, no joint certificate",
+        },
         "grf_swing_gating": {
             "enabled": swing_config.enabled,
             "contact_probability_threshold": swing_config.threshold,
@@ -323,7 +332,7 @@ def write_deployment_contract_once(log_dir, contract):
 
 def validate_qp_deployment_contract(contract):
     """Reject old held/active execution contracts rather than reinterpret them."""
-    if contract.get("schema_version") != 15:
+    if contract.get("schema_version") != 16:
         raise ValueError("Incompatible HardPACT deployment schema; re-export using the current controller")
     update = contract.get("qp_update")
     if update is not None:

@@ -100,7 +100,7 @@ def test_capture_integration_primary_recovery_and_history(tmp_path):
     assert [p["stage"] for p in packets]==["primary","recovery"]
     assert "primary" in packets[1]["preceding_updates"][0]["packet_file"]
     assert packets[0]["raw_primal"].shape[-1]==24
-    assert packets[1]["raw_primal"].shape[-1]==36
+    assert packets[1]["raw_primal"].shape[-1]==48
 
 
 def test_backend_capture_owned_status_iterations_and_disabled_fast_exit():

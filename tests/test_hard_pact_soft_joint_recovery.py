@@ -13,11 +13,12 @@ def test_soft_joint_recovery_preserves_hard_constraints_and_isolates_gradients(f
     d = inputs(3, device="cuda")
     # Row 1 has an impossible joint envelope: q>qmax requires a<-100.
     if failure == 'empty_joint_interval':
-        d['joint_position'][1,0] = 2.02
+        d['joint_position'][1,0] = 2.4
     else:
         # Joint interval [-100,100] is nonempty, but bounded torque cannot
         # offset this bias: a_joint=tau-200. Contact J is zero in this fixture.
         d['bias'][1,6] = 200
+        d['joint_velocity'][1,0] = -29.9
     d['contact_probability'][:,1] = 0
     d['tau_nom'].requires_grad_()
     settings = dict(qp_solver='cupiqp',solver_dtype='float64',
@@ -29,7 +30,7 @@ def test_soft_joint_recovery_preserves_hard_constraints_and_isolates_gradients(f
     assert torch.isfinite(out.tau_safe).all()
     assert out.force_world[:,1].eq(0).all()
     bounds = min(23.5,qp.cfg.torque_rate_limit_nm_s*.01)
-    assert out.tau_safe.abs().max() <= bounds
+    assert out.tau_safe.abs().max() <= 23.5
     f = out.force_world
     assert f[:,:,2].min() >= -1e-6
     assert (f[:,:,:2].abs()-qp.cfg.friction_coefficient*f[:,:,2,None]).max() <= 1e-6
@@ -46,7 +47,7 @@ def test_soft_joint_recovery_preserves_hard_constraints_and_isolates_gradients(f
     # Recovery-only exception still reaches deterministic bounded fallback.
     real_solve = qp._backend_solve
     def fail_recovery(m):
-        if m.p.shape[1] == 36:
+        if m.p.shape[1] == 48:
             raise RuntimeError('forced recovery failure')
         return real_solve(m)
     with patch.object(qp,'_backend_solve',side_effect=fail_recovery):
@@ -82,6 +83,7 @@ def test_recovery_outer_loss_heads_retained_backward_masks_and_weights():
     loss,per_row=recovery_projection_loss(out,d['tau_nom'],limits,valid,qp.cfg)
     expected=((out.tau_safe[0]-d['tau_nom'][0])/limits).square().sum()
     expected+=(out.recovery_slack[0]/qp.cfg.soft_joint_recovery_scale_rad_s2).square().sum()
+    expected+=(out.recovery_rate_slack[0]/qp.cfg.soft_rate_recovery_scale_nm).square().sum()
     torch.testing.assert_close(loss,expected)
     assert per_row[1]==0 and loss.isfinite() and loss>0
     # Repeated VJPs exercise the solver's retained-graph ownership, as PCGrad does.

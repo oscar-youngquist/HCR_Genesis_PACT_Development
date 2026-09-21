@@ -25,7 +25,8 @@ class Heads(torch.nn.Module):
 def fixture(mode,n=8):
     task=Go2HardPACT.__new__(Go2HardPACT)
     task.num_envs=n;task.device=torch.device("cpu")
-    task.cfg=SimpleNamespace(sim=SimpleNamespace(dt=.01),control=SimpleNamespace(decimation=4))
+    task.cfg=SimpleNamespace(sim=SimpleNamespace(dt=.01),control=SimpleNamespace(decimation=4,
+        clip_torque_rate_without_qp=True,torque_rate_limit_nm_s=10.))
     q=torch.zeros(n,12);v=q.clone();quat=torch.tensor([0.,0.,0.,1.]).expand(n,-1).clone()
     task._canonical_joint_state=lambda:(q,v)
     task._canonical_configuration=lambda *_:torch.cat((torch.zeros(n,3),quat,q),1)
@@ -112,7 +113,7 @@ def test_control_reset_bounds_no_held_correction_and_current_parameter_replay(mo
 def test_contract_rejects_retired_modes_and_partition_preserved():
     assert HardPACTQPConfig().qp_update_mode=="random_one_substep"
     for mode in ("every_substep","random_one_substep"):
-        c={"schema_version":14,"qp_update":qp_update_contract(mode,4)}
+        c={"schema_version":16,"qp_update":qp_update_contract(mode,4)}
         assert validate_qp_deployment_contract(c) is c
         assert c["qp_update"]["ppo_projection_loss_multiplier"]==1
     for mode in ("active_constraint_update","two_anchor_held_correction","single_anchor_held_correction"):

@@ -42,7 +42,7 @@ class QPCapture:
         self.counts, self.coverage, self.coverage_bytes = Counter(), Counter(), Counter()
 
     def summary(self):
-        return dict(schema_version=2, captures=self.count, bytes_written=self.bytes_written,
+        return dict(schema_version=3, captures=self.count, bytes_written=self.bytes_written,
                     dropped_for_budget=self.dropped, counts=dict(self.counts), coverage=dict(self.coverage))
 
     def before(self, owner, m, data, stage, rows):
@@ -59,14 +59,14 @@ class QPCapture:
             return stub
         G,h,lo,hi = owner._cupiqp_native_pack(m) if owner._active_solver == "cupiqp" else (m.G,m.h,None,None)
         torque_limit, qmin, qmax, vmax = owner._limits(m.p)
-        packet = {"schema_version": 2, "identity": self.identity,
+        packet = {"schema_version": 3, "identity": self.identity,
             "config": asdict(owner.cfg), "solver": owner._active_solver,
             "phase": owner._diagnostics_phase, "stage": stage,
             "differentiable": owner._active_differentiable,
             "iteration": getattr(owner, "diagnostic_iteration", lambda: None)(),
             "rows": rows, "data": data,
             "joint_limits": dict(position_lower=qmin,position_upper=qmax,velocity=vmax,
-                acceleration=m.p.new_tensor(owner.cfg.joint_acceleration_limits_rad_s2),
+                acceleration=None,  # v3: position/velocity envelope only.
                 torque_magnitude=torque_limit,
                 torque_rate_lower=data["previous_torque"]-owner.cfg.torque_rate_limit_nm_s*data["dt"].reshape(-1,1),
                 torque_rate_upper=data["previous_torque"]+owner.cfg.torque_rate_limit_nm_s*data["dt"].reshape(-1,1),
@@ -228,7 +228,10 @@ def candidate_assessment(packet, raw, gap=None, relative=None, cfg=None, differe
     """
     from types import SimpleNamespace
     from .hard_pact_qp import HardPACTQPConfig, HardPACTDifferentiableQP, production_gap_pass
-    cfg = cfg or HardPACTQPConfig.from_dict(packet["config"])
+    config = dict(packet["config"])
+    if packet.get("schema_version",1) < 3:
+        config.pop("joint_acceleration_limits_rad_s2",None)
+    cfg = cfg or HardPACTQPConfig.from_dict(config)
     diff = packet["differentiable"] if differentiable is None else differentiable
     n = packet["tensors"]["p"].shape[0]
     raw = raw.detach()[:n]
@@ -263,8 +266,12 @@ def candidate_assessment(packet, raw, gap=None, relative=None, cfg=None, differe
     for label,x in (("raw",physical),("post_projection",post)):
         for units,G,h in (("normalized",p["G"],p["h"]),("physical",p["physical_G"],p["physical_h"])):
             residual = (G@(x/p["variable_scale"] if units=="normalized" else x)[...,None]).squeeze(-1)-h
-            for name,sl in (("actuator_rate",slice(0,24)),("joint_soft" if packet["stage"]=="recovery" else "joint",slice(24,48)),
-                            ("friction",slice(48,68)),("slack",slice(68,None))):
+            groups=[("actuator_absolute" if post.shape[1]==48 else "actuator_rate",slice(0,24)),
+                    ("joint_soft" if packet["stage"]=="recovery" else "joint",slice(24,48)),
+                    ("friction",slice(48,68))]
+            groups += ([("rate_soft",slice(68,92)),("joint_slack",slice(92,104)),("rate_slack",slice(104,116))]
+                       if post.shape[1]==48 else [("slack",slice(68,None))])
+            for name,sl in groups:
                 values=residual[:,sl].clamp_min(0)
                 result["groups"][f"{label}/{units}/{name}"] = dict(all=distribution(values),accepted=distribution(values[accepted]))
     limits = packet.get("joint_limits")
@@ -274,27 +281,40 @@ def candidate_assessment(packet, raw, gap=None, relative=None, cfg=None, differe
     d=packet["data"]
     q,v,dt=(d[k].to(raw) for k in ("joint_position","joint_velocity","dt"))
     dt=dt.reshape(-1,1)
-    qmin,qmax,vmax,amax=(limits[k].to(raw) for k in ("position_lower","position_upper","velocity","acceleration"))
+    qmin,qmax,vmax=(limits[k].to(raw) for k in ("position_lower","position_upper","velocity"))
+    amax = limits.get("acceleration")
+    amax = amax.to(raw) if amax is not None else None
     beta=cfg.position_integration_coefficient
-    lower=torch.stack((-amax.expand_as(q),(-vmax-v)/dt,(qmin-q-dt*v)/(beta*dt.square())),-1)
-    upper=torch.stack((amax.expand_as(q),(vmax-v)/dt,(qmax-q-dt*v)/(beta*dt.square())),-1)
+    lows=[(-vmax-v)/dt,(qmin-q-dt*v)/(beta*dt.square())]
+    highs=[(vmax-v)/dt,(qmax-q-dt*v)/(beta*dt.square())]
+    if amax is not None:
+        lows.insert(0,-amax.expand_as(q)); highs.insert(0,amax.expand_as(q))
+    lower,upper=torch.stack(lows,-1),torch.stack(highs,-1)
     lo,li=lower.max(-1);hi,ui=upper.min(-1)
     a=(p["acceleration_map"]@post[...,None]).squeeze(-1)[:,6:]+p["acceleration_offset"][:,6:]
     vn=v+dt*a;qn=q+dt*v+beta*dt.square()*a
     violations=dict(position_rad=torch.maximum(qmin-qn,qn-qmax).clamp_min(0),
-        velocity_rad_s=(vn.abs()-vmax).clamp_min(0),acceleration_rad_s2=(a.abs()-amax).clamp_min(0))
-    result["joint"] = dict(names=limits["names"],interval_family_order=["acceleration","velocity","position"],
+        velocity_rad_s=(vn.abs()-vmax).clamp_min(0))
+    if amax is not None:
+        violations["acceleration_rad_s2"]=(a.abs()-amax).clamp_min(0)
+    rate_violation=torch.maximum(limits["torque_rate_lower"].to(raw)-post[:,:12],
+        post[:,:12]-limits["torque_rate_upper"].to(raw)).clamp_min(0)
+    result["original_hard_rate_satisfied"] = (rate_violation<=1e-6).all(-1)
+    result["joint"] = dict(names=limits["names"],interval_family_order=(
+        ["velocity","position"] if amax is None else ["acceleration","velocity","position"]),
         tie_rule="first family",lower_by_family=lower,upper_by_family=upper,lower=lo,upper=hi,
         empty=lo>hi,conflict_rad_s2=(lo-hi).clamp_min(0),lower_family=li,upper_family=ui,
         largest_conflict_joint=(lo-hi).argmax(-1),acceleration=a,q_next=qn,dq_next=vn,
-        slack_rad_s2=post[:,24:] if post.shape[1]>24 else torch.zeros_like(a),violations=violations,
+        slack_rad_s2=post[:,24:36] if post.shape[1]>24 else torch.zeros_like(a),
+        rate_slack_nm=post[:,36:48] if post.shape[1]==48 else torch.zeros_like(a),
+        rate_violation_nm=rate_violation,violations=violations,
         statistics={name:{scope:dict(aggregate=distribution(value[mask]),
                     per_joint=[distribution(value[mask,j]) for j in range(12)])
                     for scope,mask in (("all",torch.ones_like(accepted)),("accepted",accepted))}
                     for name,value in violations.items()})
     result["original_hard_joint_satisfied"] = (torch.isfinite(a).all(-1) &
         (violations["position_rad"]<=1e-5).all(-1) & (violations["velocity_rad_s"]<=1e-4).all(-1) &
-        (violations["acceleration_rad_s2"]<=1e-3).all(-1))
+        (torch.ones_like(accepted) if amax is None else (violations["acceleration_rad_s2"]<=1e-3).all(-1)))
     return result
 
 

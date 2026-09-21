@@ -89,6 +89,16 @@ def capture_run(args):
     activation = int(saved["iter"]) + args.warmup_iterations
     overrides = {"warmup_iterations": activation, "runner.resume": False, "policy.pretrained_path": None,
                  "runtime_observers":"CUDA event timing; gradient hooks only in capture mode"}
+    # New captures use current constraints, while offline replay always retains
+    # old packets' exact matrices. Record this explicit resolved-config upgrade.
+    if "joint_acceleration_limits_rad_s2" in settings:
+        overrides["removed_joint_acceleration_limits_rad_s2"] = settings.pop("joint_acceleration_limits_rad_s2")
+    old_control = document["environment"]["resolved"].get("control", {})
+    if "torque_rate_limit_nm_s" not in old_control and "torque_rate_limit_nm_s" in settings:
+        env_cfg.control.torque_rate_limit_nm_s = settings["torque_rate_limit_nm_s"]
+        overrides["control.torque_rate_limit_nm_s"] = env_cfg.control.torque_rate_limit_nm_s
+    overrides["constraint_schema_version"] = 2
+    settings["constraint_schema_version"] = 2
     settings["warmup_iterations"] = activation
     # Our bounded recorder handles exceptions too; avoid a second unbudgeted
     # legacy snapshot (and any writes to the original configured directory).
@@ -183,7 +193,10 @@ def replay_one(packet, device, change, row=None, kkt_rows=0):
     from rsl_rl.algorithms.hard_pact_qp import HardPACTQPConfig
     from rsl_rl.algorithms.hard_pact_qp_backends import create_backend
     from rsl_rl.algorithms.hard_pact_qp_diagnose import independent_checks, candidate_assessment, distribution, conditioning_audit
-    cfg = HardPACTQPConfig.from_dict(packet["config"])
+    config = dict(packet["config"])
+    if packet.get("schema_version",1) < 3:
+        config.pop("joint_acceleration_limits_rad_s2",None)
+    cfg = HardPACTQPConfig.from_dict(config)
     diff = bool(packet["differentiable"])
     prefix = "ppo" if diff else "rollout"
     if change == "other_tolerances":
@@ -260,7 +273,7 @@ def replay_one(packet, device, change, row=None, kkt_rows=0):
     if status is not None:status=status[:out.solution.shape[0]]
     audit_packet = dict(packet,assessment=assessment,accepted=production_mask,
                         failing_rows=(~production_mask).nonzero().flatten())
-    return dict(schema_version=2,stage=packet["stage"],phase=packet["phase"],variant=change,row=row,
+    return dict(schema_version=3,stage=packet["stage"],phase=packet["phase"],variant=change,row=row,
         row_identity=packet.get("rows"),captured_acceptance=packet.get("accepted"),assessment=assessment,
         conditioning=conditioning_audit(audit_packet,out.solution,kkt_rows) if kkt_rows else None,
         dtype=str(out.solution.dtype),differentiable=diff,
@@ -317,8 +330,11 @@ def replay_csv_row(report):
         if hard is not None:scalar(prefix+"/original_hard_satisfied_rows",hard[mask].sum())
         for key,unit_name in (("acceleration","acceleration_rad_s2"),("q_next","q_next_rad"),
                              ("dq_next","dq_next_rad_s"),("slack_rad_s2","recovery_slack_rad_s2"),
+                             ("rate_slack_nm","recovery_rate_slack_nm"),("rate_violation_nm","rate_violation_nm"),
                              ("conflict_rad_s2","conflict_rad_s2"),("lower","acceleration_lower_rad_s2"),
                              ("upper","acceleration_upper_rad_s2")):
+            if key not in joint:  # Historical reports lack torque-rate slack.
+                continue
             values=joint[key][mask]
             stats(prefix+"/"+unit_name,distribution(values))
             for j,name in enumerate(names):
@@ -348,7 +364,7 @@ def replay_run(args):
     reports = []
     for path in args.packets:
         packet = torch.load(path,map_location="cpu",weights_only=True)
-        if packet.get("schema_version") not in (1,2) or "problem" not in packet:
+        if packet.get("schema_version") not in (1,2,3) or "problem" not in packet:
             raise ValueError("Unsupported packet; use diagnose_hard_pact_qp capture")
         packet["preceding_updates"] = [torch.load(path.parent/p["packet_file"],map_location="cpu",weights_only=True)
             if "packet_file" in p else p for p in packet.get("preceding_updates",[])]

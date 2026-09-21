@@ -261,6 +261,8 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                           30.1, 30.1, 15.7]
 
     class control(LeggedRobotCfg.control):
+        clip_torque_rate_without_qp = False
+        torque_rate_limit_nm_s = 1000.0  # Shared by QP, fallback, and optional non-QP clipping.
         stiffness = {'joint': 30.0}
         damping = {'joint': 0.75}
         action_scale = 0.25
@@ -559,7 +561,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
                         # at absolute iteration N. Zero keeps current behavior.
-                        'warmup_iterations': 10000,
+                        'warmup_iterations': 8000,
                         'exception_capture_enabled': True,
                         'exception_capture_limit': 1,
                         'exception_capture_dir': '/tmp/hard_pact_qp_failures',
@@ -596,7 +598,6 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
                         'qpth_warm_start': True, 
                         'friction_coefficient': 0.6, 
-                        'torque_rate_limit_nm_s': 1000.0,  # update
                         'interior_margin': 0.001, 
 
                         'force_scale_n': 250.0,            # update
@@ -609,6 +610,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'soft_joint_recovery_enabled': True,
                         'soft_joint_recovery_weight': 200.0,
                         'soft_joint_recovery_scale_rad_s2': 100.0,
+                        'soft_rate_recovery_weight': 200.0,
+                        'soft_rate_recovery_scale_nm': 10.0,
+                        'recovery_projection_rate_slack_weight': 1.0,
                         # Outer recovery loss is also multiplied by lambda_projection.
                         'recovery_projection_weight': 1.0,
                         'recovery_projection_slack_weight': 1.0,
@@ -617,8 +621,6 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'attitude_acceleration_scale_rad_s2': 20.0,
                         'attitude_kp': 20.0,
                         'attitude_kd': 5.0,
-                        # FR/FL/RR/RL hip/thigh/calf acceleration limits [rad/s^2].
-                        'joint_acceleration_limits_rad_s2': (100.0,) * 12,
                         'torque_tracking_weight': 20.0, 
                         'force_tracking_weight': 1.0,
                         'q_regularization': 1e-07, 
@@ -687,4 +689,3 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 #   --ckpt -1 \
 #   --num_envs 10 \
 #   --gpu cuda:0
-

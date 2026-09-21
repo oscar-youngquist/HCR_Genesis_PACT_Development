@@ -89,11 +89,12 @@ def test_real_solve_path_keeps_rejected_primary_and_accepted_recovery_metrics():
     from rsl_rl.algorithms.hard_pact_qp_backends import QPBackendResult
     d = inputs(1)
     d["bias"][:,6] = 200  # nonempty envelope, impossible with hard torque limits
+    d["joint_velocity"][:,0] = -29.9
     qp = solver(diagnostics_level="physical", soft_joint_recovery_enabled=True)
     def candidate(m):
         x = torch.zeros_like(m.p)
-        if x.shape[1] == 36:
-            x[:,24:] = 200  # recovery can satisfy its own softened inequalities
+        if x.shape[1] == 48:
+            x[:,24:36] = 200  # recovery can satisfy its own softened inequalities
         return QPBackendResult(x / m.variable_scale)
     with patch.object(qp, "_backend_solve", side_effect=candidate):
         out = qp.solve(differentiable=False, **d)
@@ -101,6 +102,6 @@ def test_real_solve_path_keeps_rejected_primary_and_accepted_recovery_metrics():
     metrics = qp.iteration_diagnostics["rollout"].finalize(d["tau_nom"])
     for stage, status in (("primary", "rejected"), ("recovery", "accepted")):
         p = f"model_candidate/{stage}/{status}/"
-        assert metrics[p+"acceleration_rad_s2/max"] == 100
+        assert torch.isclose(metrics[p+"velocity_rad_s/max"], torch.tensor(1.9,dtype=torch.float64))
         assert metrics[p+"nonempty_envelope_fraction"] == 1
         assert metrics[p+"rows"] == 1

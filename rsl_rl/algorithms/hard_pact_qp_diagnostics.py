@@ -82,10 +82,11 @@ class QPIterationDiagnostics:
         """
         q, v = data["joint_position"].detach(), data["joint_velocity"].detach()
         dt = data["dt"].detach().reshape(-1, 1)
-        low = torch.stack((-amax.expand_as(q), (-vmax-v)/dt,
-                           (qmin-q-dt*v)/(beta*dt.square())), -1)
-        high = torch.stack((amax.expand_as(q), (vmax-v)/dt,
-                            (qmax-q-dt*v)/(beta*dt.square())), -1)
+        lows = [(-vmax-v)/dt, (qmin-q-dt*v)/(beta*dt.square())]
+        highs = [(vmax-v)/dt, (qmax-q-dt*v)/(beta*dt.square())]
+        if amax is not None:  # Historical packet diagnostics only.
+            lows.insert(0, -amax.expand_as(q)); highs.insert(0, amax.expand_as(q))
+        low, high = torch.stack(lows,-1), torch.stack(highs,-1)
         finite = torch.isfinite(low).all(-1) & torch.isfinite(high).all(-1)
         lower, li = low.max(-1)
         upper, ui = high.min(-1)
@@ -94,7 +95,7 @@ class QPIterationDiagnostics:
         self.add_values(prefix + "/nonfinite_row_fraction", (~finite.all(-1)).float())
         self.add_values(prefix + "/empty_row_fraction", (conflict>0).any(-1).float(), finite.all(-1))
         self._candidate_summary(prefix + "/conflict_rad_s2", conflict, finite)
-        families = ("acceleration", "velocity", "position")
+        families = ("velocity", "position") if amax is None else ("acceleration", "velocity", "position")
         for i, name in enumerate(families):
             self.add_values(prefix + "/lower/" + name, (li==i).float(), finite)
             self.add_values(prefix + "/upper/" + name, (ui==i).float(), finite)
@@ -118,8 +119,10 @@ class QPIterationDiagnostics:
         dt = data["dt"].detach().reshape(-1, 1)
         qnext, vnext = q + dt*v + beta*dt.square()*a, v + dt*a
         finite = torch.isfinite(torch.cat((qnext, vnext, a), -1)).all(-1)
-        lo = torch.maximum(-amax, torch.maximum((-vmax-v)/dt, (qmin-q-dt*v)/(beta*dt.square())))
-        hi = torch.minimum(amax, torch.minimum((vmax-v)/dt, (qmax-q-dt*v)/(beta*dt.square())))
+        lo = torch.maximum((-vmax-v)/dt, (qmin-q-dt*v)/(beta*dt.square()))
+        hi = torch.minimum((vmax-v)/dt, (qmax-q-dt*v)/(beta*dt.square()))
+        if amax is not None:
+            lo, hi = torch.maximum(-amax,lo), torch.minimum(amax,hi)
         empty = (lo>hi).any(-1)
         for status, selected in (("accepted", accepted), ("rejected", ~accepted)):
             prefix = f"model_candidate/{stage}/{status}"
@@ -129,10 +132,12 @@ class QPIterationDiagnostics:
             self.add_values(prefix + "/nonfinite_fraction", (~finite).float(), selected)
             self.add_values(prefix + "/empty_envelope_fraction", empty.float(), selected & finite)
             self.add_values(prefix + "/nonempty_envelope_fraction", (~empty).float(), selected & finite)
-            for name, excess, threshold in (
+            violations = [
                 ("position_rad", torch.maximum(qmin-qnext, qnext-qmax).clamp_min(0), 1e-5),
-                ("velocity_rad_s", (vnext.abs()-vmax).clamp_min(0), 1e-4),
-                ("acceleration_rad_s2", (a.abs()-amax).clamp_min(0), 1e-3)):
+                ("velocity_rad_s", (vnext.abs()-vmax).clamp_min(0), 1e-4)]
+            if amax is not None:
+                violations.append(("acceleration_rad_s2", (a.abs()-amax).clamp_min(0), 1e-3))
+            for name, excess, threshold in violations:
                 key = prefix + "/" + name
                 mask = (selected & finite)[:, None]
                 self._candidate_summary(key, excess, mask)
@@ -166,7 +171,10 @@ class QPIterationDiagnostics:
                 self.add_values(f"attempt/{name}/{gap}_mean", values, attempted)
         # Reduce per-row physical values directly, not means of chunk means.
         for key, value in diag.items():
-            if key == "soft_joint/slack_max_rad_s2":
+            if key in ("soft_joint/slack_max_rad_s2", "soft_joint/rate_slack_max_nm",
+                       "soft_joint/original_rate_violation_max_nm",
+                       "soft_joint/original_joint_violation_max_rad_s2",
+                       "soft_joint/original_hard_satisfied"):
                 self.add_values(key + "_mean", value, stage == 1)
             if key.startswith("physical/"):
                 for status, mask in (("certified", result.differentiated_mask),

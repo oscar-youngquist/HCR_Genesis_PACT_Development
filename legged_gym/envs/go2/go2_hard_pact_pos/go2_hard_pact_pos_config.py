@@ -259,6 +259,8 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         contact_state_link_names = ['thigh', 'calf', 'foot', 'base', 'hip']
 
     class control(LeggedRobotCfg.control):
+        clip_torque_rate_without_qp = False
+        torque_rate_limit_nm_s = 1000.0
         stiffness = {'joint': 30.0}
         damping = {'joint': 0.75}
         action_scale = 0.25

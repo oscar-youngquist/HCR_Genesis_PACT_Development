@@ -883,6 +883,8 @@ class Go2HardPACT(Go2PACT):
             and getattr(self, "_hard_pact_policy_context_ready", False)
         ):
             self._solve_hard_pact_rollout_qp_substep(quat, mass_com_wrench)
+        else:
+            self._apply_non_qp_torque_rate_clip()
         # `_torques` is now the exact safe command about to be sent to
         # Genesis.  The interval value remains the authoritative BARD torque.
         if hasattr(self, "_interval_executed_torque_sum"):
@@ -922,6 +924,25 @@ class Go2HardPACT(Go2PACT):
         self._qp_control_wrench = heads.wrench_to_qp_physical(
             self._hard_pact_wrench_raw_normalized).detach()
 
+    def _apply_non_qp_torque_rate_clip(self):
+        """Pos/disabled/warmup shared path; no dynamics or QP object required.
+
+        Called before execution, never after an accepted recovery command.
+        The callback records the resulting actual torque for the next substep.
+        """
+        if not getattr(self.cfg.control, "clip_torque_rate_without_qp", False):
+            return
+        getter = getattr(self.simulator, "hard_pact_executed_torque", None)
+        nominal = getter() if getter is not None else self.simulator._torques
+        safe = project_nominal_torque(nominal,self._hard_pact_previous_substep_torque,
+            self.simulator.torque_limits.to(nominal),self.cfg.control.torque_rate_limit_nm_s,
+            float(self.cfg.sim.dt))
+        setter = getattr(self.simulator, "hard_pact_set_executed_torque", None)
+        if setter is None:
+            self.simulator._torques = safe
+        else:
+            setter(safe)
+
     def _solve_hard_pact_rollout_qp_substep(self, quat, mass_com_wrench):
         """Fresh PD/rate projection every substep; no held QP corrections.
 
@@ -938,8 +959,11 @@ class Go2HardPACT(Go2PACT):
                        else self._hard_pact_tau_ff+self._get_pinn_feedback(self._hard_pact_q_d,qj,vj))
             previous = self._hard_pact_previous_substep_torque
             dt = float(self.cfg.sim.dt)
-            safe = project_nominal_torque(tau_nom,previous,qp.torque_limits.to(tau_nom),
-                                         qp.cfg.torque_rate_limit_nm_s,dt)
+            limits = qp.torque_limits.to(tau_nom)
+            safe = (project_nominal_torque(tau_nom,previous,limits,
+                        qp.cfg.torque_rate_limit_nm_s,dt)
+                    if getattr(self.cfg.control,"clip_torque_rate_without_qp",False)
+                    else torch.nan_to_num(tau_nom).clamp(-limits,limits))
             selected = qp_substep_mask(qp.cfg.qp_update_mode,self._qp_substep,
                                        self._qp_sampled_substep_index)
             rows = selected.nonzero(as_tuple=True)[0]

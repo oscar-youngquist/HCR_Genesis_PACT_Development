@@ -862,7 +862,9 @@ class DeploymentContractTests(unittest.TestCase):
                 self.assertEqual(stream.read(), first_text)
             loaded = json.loads(first_text)
 
-        self.assertEqual(loaded["schema_version"], 14)
+        self.assertEqual(loaded["schema_version"], 16)
+        self.assertFalse(loaded["actuator_execution"]["clip_torque_rate_without_qp"])
+        self.assertEqual(loaded["actuator_execution"]["torque_rate_limit_nm_s"], cfg.control.torque_rate_limit_nm_s)
         self.assertEqual(loaded["torque_convention"]["conversion_helper"],
                          "rsl_rl.modules.hard_pact_control.bounded_nominal_torque")
         self.assertIn("nominal_torque_tracking", loaded["qp_objective"]["terms"])

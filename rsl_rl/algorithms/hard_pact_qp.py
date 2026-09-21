@@ -63,16 +63,20 @@ class HardPACTQPConfig:
     """
 
     enabled: bool = True  # Master rollout/PPO projection switch.
+    constraint_schema_version: int = 2  # position/velocity envelope; dual-slack recovery
     # Train normally without rollout/replay QPs until this absolute PPO
     # iteration. Zero preserves immediate projection; independent of PINN.
     warmup_iterations: int = 0
     soft_joint_recovery_enabled: bool = True
     soft_joint_recovery_weight: float = 200.0
     soft_joint_recovery_scale_rad_s2: float = 100.0
+    soft_rate_recovery_weight: float = 200.0
+    soft_rate_recovery_scale_nm: float = 10.0
     # Outer recovery loss, relative to lambda_projection. Zero disables its
     # contribution, without changing the recovery QP objective/execution.
     recovery_projection_weight: float = 1.0
     recovery_projection_slack_weight: float = 1.0
+    recovery_projection_rate_slack_weight: float = 1.0
     qp_update_mode: str = "random_one_substep"
     # One canonical QP and fallback cascade can be solved by any registered
     # numerical backend. Overrides are diagnostics-only and require an
@@ -120,7 +124,6 @@ class HardPACTQPConfig:
     attitude_acceleration_scale_rad_s2: float = 20.0
     attitude_kp: float = 20.0
     attitude_kd: float = 5.0
-    joint_acceleration_limits_rad_s2: tuple = (100.0,) * 12
     interior_margin: float = 1.0e-3  # Strict-feasibility epsilon for contact rows.
     force_scale_n: float = 250.0  # D diagonal/reference normalization for GRF.
     torque_scale_nm: float = 40.0  # D diagonal for safe torque variables.
@@ -192,6 +195,8 @@ class HardPACTQPConfig:
         return cls(**dict(values))
 
     def __post_init__(self):
+        if self.constraint_schema_version != 2:
+            raise ValueError("Unsupported HardPACT constraint schema; expected version 2")
         qp_substep_anchors(self.qp_update_mode,4)
         if self.cupiqp_rollout_cache_size < 1 or self.cupiqp_ppo_pool_size < 0:
             raise ValueError("cuPIQP cache size must be positive and pool size nonnegative")
@@ -212,6 +217,7 @@ class HardPACTQPResult:
     metrics: Mapping[str, torch.Tensor] | None = None  # Aggregated GPU scalars.
     recovery_mask: torch.Tensor | None = None  # Certified softened, NOT hard-joint certified.
     recovery_slack: torch.Tensor | None = None  # [B,12], rad/s²; differentiable in PPO.
+    recovery_rate_slack: torch.Tensor | None = None  # [B,12], Nm; not a torque-limit relaxation.
 
 
 @dataclass
@@ -240,6 +246,8 @@ class _QPBuild:
     acceleration_map: torch.Tensor
     acceleration_offset: torch.Tensor
     mechanics_valid: torch.Tensor
+    rate_lower: torch.Tensor | None = None
+    rate_upper: torch.Tensor | None = None
 
     def __iter__(self):
         # Preserve the legacy seven-value private test/debug unpacking API.
@@ -260,7 +268,7 @@ def production_gap_pass(gap, relative, profile, reference):
 def select_problem(m, rows):
     """Index only batch-dependent mechanics/matrices; share immutable scales."""
     return replace(m, **{f.name:getattr(m,f.name).index_select(0,rows)
-                         for f in fields(m) if f.name!="variable_scale"})
+                         for f in fields(m) if f.name!="variable_scale" and getattr(m,f.name) is not None})
 
 
 def _dtype_from_name(name: str, reference=None):
@@ -352,9 +360,11 @@ class HardPACTDifferentiableQP:
         self.position_lower = torch.as_tensor(position_lower).reshape(12).detach()
         self.position_upper = torch.as_tensor(position_upper).reshape(12).detach()
         self.velocity_limits = torch.as_tensor(velocity_limits).reshape(12).detach()
-        if min(config.soft_joint_recovery_weight, config.soft_joint_recovery_scale_rad_s2) <= 0:
+        if min(config.soft_joint_recovery_weight, config.soft_joint_recovery_scale_rad_s2,
+               config.soft_rate_recovery_weight, config.soft_rate_recovery_scale_nm) <= 0:
             raise ValueError("soft-joint recovery weight and scale must be positive")
-        if min(config.recovery_projection_weight, config.recovery_projection_slack_weight) < 0:
+        if min(config.recovery_projection_weight, config.recovery_projection_slack_weight,
+               config.recovery_projection_rate_slack_weight) < 0:
             raise ValueError("recovery projection weights must be nonnegative")
         # D must be invertible, hence every variable scale is strictly positive.
         if min(config.force_scale_n, config.torque_scale_nm,
@@ -365,8 +375,6 @@ class HardPACTDifferentiableQP:
         if min(config.contact_acceleration_weight, config.attitude_weight,
                config.attitude_kp, config.attitude_kd) < 0:
             raise ValueError("soft objective weights and gains must be nonnegative")
-        if len(config.joint_acceleration_limits_rad_s2) != 12 or min(config.joint_acceleration_limits_rad_s2) <= 0:
-            raise ValueError("12 positive canonical joint acceleration limits required")
         if not 0 <= config.contact_threshold <= 1:
             raise ValueError("contact_threshold must be in [0,1]")
         if min(config.friction_coefficient, config.torque_rate_limit_nm_s, config.q_regularization) <= 0:
@@ -671,10 +679,9 @@ class HardPACTDifferentiableQP:
         lower = torch.maximum(-limits, previous - self.cfg.torque_rate_limit_nm_s * dt)
         upper = torch.minimum(limits, previous + self.cfg.torque_rate_limit_nm_s * dt)
         q, v = data["joint_position"].detach(), data["joint_velocity"].detach()
-        amax = ref.new_tensor(self.cfg.joint_acceleration_limits_rad_s2).reshape(1,12)
         beta = self.cfg.position_integration_coefficient
-        alower = torch.maximum(-amax, torch.maximum((-vmax-v)/dt, (qmin-q-dt*v)/(beta*dt.square())))
-        aupper = torch.minimum(amax, torch.minimum((vmax-v)/dt, (qmax-q-dt*v)/(beta*dt.square())))
+        alower = torch.maximum((-vmax-v)/dt, (qmin-q-dt*v)/(beta*dt.square()))
+        aupper = torch.minimum((vmax-v)/dt, (qmax-q-dt*v)/(beta*dt.square()))
         joint_map, joint_offset = mechanics_map[:,6:], offset[:,6:]
         # Torque 24 rows, acceleration intersection 24 rows. beta=1 matches
         # semi-implicit Genesis/PhysX; beta=.5 is the constant-a convention.
@@ -706,7 +713,9 @@ class HardPACTDifferentiableQP:
         native_lower[:,:12], native_upper[:,:12] = lower/scale[:12], upper/scale[:12]
         return _QPBuild(Q,p,G,h,A,b,scale,physical_G,physical_h,physical_A,physical_b,
                         es,gs,lower,upper,alower,aupper,native_lower,native_upper,
-                        mechanics_map,offset,mechanics_valid)
+                        mechanics_map,offset,mechanics_valid,
+                        previous-self.cfg.torque_rate_limit_nm_s*dt,
+                        previous+self.cfg.torque_rate_limit_nm_s*dt)
 
     @staticmethod
     def _cupiqp_native_pack(m):
@@ -716,34 +725,45 @@ class HardPACTDifferentiableQP:
         return m.G[:,24:], m.h[:,24:], m.native_lower, m.native_upper
 
     def _soft_joint_problem(self, m):
-        """Recovery only: y=[tau, f_tilde, s], s>=0 in rad/s².
+        """Recovery: [tau, f, joint_slack(rad/s²), rate_slack(Nm)].
 
-        Relax the combined joint envelope to lower-s <= a_joint <= upper+s.
-        This softens acceleration and predicted position/velocity limits, NOT
-        actuator/rate, friction or exact physical swing-force elimination.
-        Add w*||s/scale||²; the original 24-D objective remains unchanged.
+        Only the position/velocity envelope and torque slew are softened.
+        Absolute actuator bounds and friction stay hard. The primary rate-box
+        inequalities use the actual previous executed torque, not the
+        magnitude/rate intersection that is packed as primary native bounds.
         """
         batch = m.p.shape[0]
-        scale = m.variable_scale.new_full((12,), self.cfg.soft_joint_recovery_scale_rad_s2)
-        variable_scale = torch.cat((m.variable_scale, scale))
-        Q = m.Q.new_zeros(batch,36,36)
+        variable_scale = torch.cat((m.variable_scale,
+            m.p.new_full((12,), self.cfg.soft_joint_recovery_scale_rad_s2),
+            m.p.new_full((12,), self.cfg.soft_rate_recovery_scale_nm)))
+        Q = m.Q.new_zeros(batch,48,48)
         Q[:,:24,:24] = m.Q
         eye = torch.eye(12,device=Q.device,dtype=Q.dtype)
-        Q[:,24:,24:] = (2*self.cfg.soft_joint_recovery_weight+self.cfg.q_regularization)*eye
-        physical_G = m.G.new_zeros(batch,80,36)
+        Q[:,24:36,24:36] = (2*self.cfg.soft_joint_recovery_weight+self.cfg.q_regularization)*eye
+        Q[:,36:48,36:48] = (2*self.cfg.soft_rate_recovery_weight+self.cfg.q_regularization)*eye
+        physical_G = m.G.new_zeros(batch,116,48)
         physical_G[:,:68,:24] = m.physical_G
-        physical_G[:,24:36,24:] = -eye
-        physical_G[:,36:48,24:] = -eye
-        physical_G[:,68:,24:] = -eye
-        physical_h = torch.cat((m.physical_h,m.p.new_zeros(batch,12)),1)
+        physical_G[:,24:36,24:36] = -eye
+        physical_G[:,36:48,24:36] = -eye
+        # Retain rate rows separately; never pack them as native hard bounds.
+        physical_G[:,68:92,:24] = m.physical_G[:,:24]
+        physical_G[:,68:80,36:48] = -eye
+        physical_G[:,80:92,36:48] = -eye
+        physical_G[:,92:104,24:36] = -eye
+        physical_G[:,104:116,36:48] = -eye
+        limits = self.torque_limits.to(m.p).expand(batch,-1)
+        physical_h = torch.cat((limits, limits, m.physical_h[:,24:],
+                               m.rate_upper, -m.rate_lower, m.p.new_zeros(batch,24)),1)
         G,h,row_scale = _row_scale(physical_G*variable_scale,physical_h)
-        empty = m.A.new_zeros(batch,0,36)
-        return replace(m,Q=Q,p=torch.cat((m.p,m.p.new_zeros(batch,12)),1),
+        empty = m.A.new_zeros(batch,0,48)
+        native_lower = m.p.new_full((batch,48),-torch.inf)
+        native_upper = -native_lower
+        native_lower[:,:12], native_upper[:,:12] = -limits/variable_scale[:12], limits/variable_scale[:12]
+        return replace(m,Q=Q,p=torch.cat((m.p,m.p.new_zeros(batch,24)),1),
             G=G,h=h,A=empty,physical_A=empty,physical_G=physical_G,physical_h=physical_h,
             variable_scale=variable_scale,inequality_row_scale=row_scale,
-            native_lower=torch.cat((m.native_lower,m.p.new_full((batch,12),-torch.inf)),1),
-            native_upper=torch.cat((m.native_upper,m.p.new_full((batch,12),torch.inf)),1),
-            acceleration_map=torch.cat((m.acceleration_map,m.p.new_zeros(batch,18,12)),2))
+            tau_lower=-limits,tau_upper=limits,native_lower=native_lower,native_upper=native_upper,
+            acceleration_map=torch.cat((m.acceleration_map,m.p.new_zeros(batch,18,24)),2))
 
     @staticmethod
     def _maximum(value):
@@ -763,7 +783,7 @@ class HardPACTDifferentiableQP:
     def _joint_candidate_diagnostics(self, stage, m, x, data, accepted):
         aggregate = self.iteration_diagnostics[self._diagnostics_phase]
         _, qmin, qmax, vmax = self._limits(x)
-        amax = x.new_tensor(self.cfg.joint_acceleration_limits_rad_s2)
+        amax = None  # No independent acceleration cap in the current formulation.
         acceleration = (m.acceleration_map @ x[..., None]).squeeze(-1) + m.acceleration_offset
         aggregate.joint_candidate(stage, data, acceleration, accepted, qmin, qmax,
                                   vmax, amax, self.cfg.position_integration_coefficient)
@@ -969,7 +989,7 @@ class HardPACTDifferentiableQP:
                 _, qmin, qmax, vmax = self._limits(ref)
                 self.iteration_diagnostics[self._diagnostics_phase].joint_envelope(
                     part, qmin, qmax, vmax,
-                    ref.new_tensor(self.cfg.joint_acceleration_limits_rad_s2),
+                    None,
                     self.cfg.position_integration_coefficient)
             diag["failure/empty_qdd_intersection"][rows] = empty_a
             diag["failure/mechanics"][rows] = ~m.mechanics_valid
@@ -1050,11 +1070,16 @@ class HardPACTDifferentiableQP:
         # rollout/stopgrad remain graph-free. Failed rows get zero solver VJPs.
         soft_ok = torch.zeros_like(ok)
         recovery_slack = ref.new_zeros(n,12)
+        recovery_rate_slack = ref.new_zeros(n,12)
         recovered = primal.detach().clone()
         recovered_qdd = qdd.detach().clone()
         diag["soft_joint/attempted"] = torch.zeros_like(ok)
         diag["soft_joint/solver_exception"] = torch.zeros_like(ok)
         diag["soft_joint/slack_max_rad_s2"] = ref.new_full((n,),float("nan"))
+        diag["soft_joint/rate_slack_max_nm"] = ref.new_full((n,),float("nan"))
+        diag["soft_joint/original_rate_violation_max_nm"] = ref.new_full((n,),float("nan"))
+        diag["soft_joint/original_joint_violation_max_rad_s2"] = ref.new_full((n,),float("nan"))
+        diag["soft_joint/original_hard_satisfied"] = ref.new_full((n,),float("nan"))
         if self.cfg.soft_joint_recovery_enabled:
             try:
                 self._active_differentiable = bool(differentiable)
@@ -1109,10 +1134,18 @@ class HardPACTDifferentiableQP:
                                 {k:v[rows] for k,v in values.items()}, accepted)
                         x = _CertifiedRows.apply(torch.nan_to_num(x,nan=0.,posinf=0.,neginf=0.),accepted)
                         recovered = recovered.index_copy(0,rows,torch.where(accepted[:,None],x[:,:24],recovered[rows]))
-                        recovery_slack = recovery_slack.index_copy(0,rows,torch.where(accepted[:,None],x[:,24:],torch.zeros_like(x[:,24:])))
+                        recovery_slack = recovery_slack.index_copy(0,rows,torch.where(accepted[:,None],x[:,24:36],torch.zeros_like(x[:,24:36])))
+                        recovery_rate_slack = recovery_rate_slack.index_copy(0,rows,torch.where(accepted[:,None],x[:,36:48],torch.zeros_like(x[:,36:48])))
                         a = (m.acceleration_map@x[...,None]).squeeze(-1)+m.acceleration_offset
                         recovered_qdd = recovered_qdd.index_copy(0,rows,torch.where(accepted[:,None],a,recovered_qdd[rows]))
-                        diag["soft_joint/slack_max_rad_s2"][rows] = x[:,24:].detach().amax(-1)
+                        diag["soft_joint/slack_max_rad_s2"][rows] = x[:,24:36].detach().amax(-1)
+                        diag["soft_joint/rate_slack_max_nm"][rows] = x[:,36:48].detach().amax(-1)
+                        with torch.no_grad():
+                            rate_error = torch.maximum(m.rate_lower-x[:,:12],x[:,:12]-m.rate_upper).clamp_min(0).amax(-1)
+                            joint_error = torch.maximum(m.qdd_lower-a[:,6:],a[:,6:]-m.qdd_upper).clamp_min(0).amax(-1)
+                            diag["soft_joint/original_rate_violation_max_nm"][rows] = rate_error
+                            diag["soft_joint/original_joint_violation_max_rad_s2"][rows] = joint_error
+                            diag["soft_joint/original_hard_satisfied"][rows] = ((rate_error<=1e-6)&(joint_error<=1e-3)).to(ref.dtype)
                         diag["selected/equality_max"][rows] = er
                         diag["selected/inequality_max"][rows] = ir
             finally:
@@ -1135,7 +1168,7 @@ class HardPACTDifferentiableQP:
         result = HardPACTQPResult(qdd.to(reference.dtype),
             primal[:,12:].reshape(n,4,3).to(reference.dtype),
             primal[:,:12].to(reference.dtype),stage,ok,diag,metrics,
-            soft_ok,recovery_slack.to(reference.dtype))
+            soft_ok,recovery_slack.to(reference.dtype),recovery_rate_slack.to(reference.dtype))
         self.iteration_diagnostics[self._diagnostics_phase].add_result(result,differentiable)
         return result
 
@@ -1144,14 +1177,17 @@ def recovery_projection_loss(result, tau_nom, torque_limit, physics_valid, cfg):
     """Mean over valid softened solves; outer lambda_projection applies in PPO.
 
     L_rec = w_rec * mean(||(tau_soft-tau_nom)/tau_limit||²
-                        + w_slack ||s_soft/s_scale||²).
+                        + w_joint ||s_joint/[rad/s² scale]||²
+                        + w_rate ||s_rate/[Nm scale]||²).
     Select rows before arithmetic; failed/analytic rows receive no supervision.
     The original hard-QP loss and its denominator are unchanged.
     """
     valid = physics_valid.reshape(-1).bool() & result.recovery_mask
     torque = ((result.tau_safe[valid]-tau_nom[valid])/torque_limit).square().sum(-1)
     slack = (result.recovery_slack[valid]/cfg.soft_joint_recovery_scale_rad_s2).square().sum(-1)
-    per_valid = cfg.recovery_projection_weight*(torque+cfg.recovery_projection_slack_weight*slack)
+    rate_slack = (result.recovery_rate_slack[valid]/cfg.soft_rate_recovery_scale_nm).square().sum(-1)
+    per_valid = cfg.recovery_projection_weight*(torque+cfg.recovery_projection_slack_weight*slack
+        + cfg.recovery_projection_rate_slack_weight*rate_slack)
     per_row = tau_nom.new_zeros(tau_nom.shape[0]).masked_scatter(valid,per_valid)
     return per_valid.sum()/valid.sum().clamp_min(1),per_row
 
