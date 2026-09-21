@@ -586,12 +586,12 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'rollout_duality_gap_rel': 0.001, 
                         'rollout_duality_gap_policy': 'report', 
 
-                        'ppo_eps_abs': 3e-06, 
-                        'ppo_eps_rel': 3e-06, 
+                        'ppo_eps_abs': 0.0001, 
+                        'ppo_eps_rel': 0.0001, 
                         'ppo_max_iter': 30, 
                         'ppo_feasibility_tolerance': 0.001, 
-                        'ppo_duality_gap_abs': 3e-06, 
-                        'ppo_duality_gap_rel': 3e-06, 
+                        'ppo_duality_gap_abs': 0.001, 
+                        'ppo_duality_gap_rel': 0.001, 
                         'ppo_duality_gap_policy': 'require', 
 
                         'qpth_warm_start': True, 
@@ -601,6 +601,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
                         'force_scale_n': 250.0,            # update
                         'torque_scale_nm': 40.0,           # update
+                        
                         # x=[total torque12; world GRF12]; no acceleration/slack variables.
                         'contact_threshold': 0.5,
                         'contact_acceleration_weight': 1.0,

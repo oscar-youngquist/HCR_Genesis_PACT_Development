@@ -247,6 +247,16 @@ class _QPBuild:
                      self.variable_scale))
 
 
+def production_gap_pass(gap, relative, profile, reference):
+    """Shared production/replay gap policy; no status-based inference."""
+    if profile["gap_policy"] != "require":
+        return torch.ones_like(reference, dtype=torch.bool)
+    if gap is None or relative is None:
+        return torch.zeros_like(reference, dtype=torch.bool)
+    return (torch.isfinite(gap) & torch.isfinite(relative)
+            & ((gap <= profile["gap_abs"]) | (relative <= profile["gap_rel"])))
+
+
 def select_problem(m, rows):
     """Index only batch-dependent mechanics/matrices; share immutable scales."""
     return replace(m, **{f.name:getattr(m,f.name).index_select(0,rows)
@@ -1008,9 +1018,7 @@ class HardPACTDifferentiableQP:
                 if value is not None:
                     diag["full/"+key][rows] = value.detach()
             if self._active_solver=="cupiqp" and profile["gap_policy"]=="require":
-                gap,rel = result.duality_gap,result.duality_gap_rel
-                accepted &= (torch.isfinite(gap)&torch.isfinite(rel)
-                             & ((gap<=profile["gap_abs"])|(rel<=profile["gap_rel"]))) if gap is not None and rel is not None else False
+                accepted &= production_gap_pass(result.duality_gap, result.duality_gap_rel, profile, accepted)
             diag["selected/equality_max"][rows],diag["selected/inequality_max"][rows]=er,ir
             if capture is not None:
                 capture.after(packet, result, accepted)
@@ -1092,9 +1100,7 @@ class HardPACTDifferentiableQP:
                         # Retain separate rollout/PPO numerical and gap policies.
                         recovery_profile = self._profile(differentiable)
                         if self._active_solver=="cupiqp" and recovery_profile["gap_policy"]=="require":
-                            gap,rel = result.duality_gap,result.duality_gap_rel
-                            accepted &= (torch.isfinite(gap)&torch.isfinite(rel)&
-                                ((gap<=recovery_profile["gap_abs"])|(rel<=recovery_profile["gap_rel"]))) if gap is not None and rel is not None else False
+                            accepted &= production_gap_pass(result.duality_gap, result.duality_gap_rel, recovery_profile, accepted)
                         soft_ok[rows] = accepted
                         if capture is not None:
                             capture.after(packet, result, accepted)

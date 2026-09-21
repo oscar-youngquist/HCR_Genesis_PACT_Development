@@ -17,17 +17,19 @@ sys.path.insert(0, str(ROOT))
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
-    capture = sub.add_parser("capture")
+    capture = sub.add_parser("capture", aliases=["timing"])
     capture.add_argument("--checkpoint", type=Path, required=True)
     capture.add_argument("--resolved-config", type=Path, help="defaults to checkpoint sibling JSON")
     capture.add_argument("--backend", choices=("isaaclab", "genesis"), default="isaaclab")
     capture.add_argument("--iteration-limit", type=int, default=3)
-    capture.add_argument("--capture-limit", type=int, default=8)
-    capture.add_argument("--byte-limit-mib", type=int, default=512)
+    capture.add_argument("--warmup-iterations", type=int, default=2)
+    capture.add_argument("--capture-limit", type=int, default=32)
+    capture.add_argument("--byte-limit-mib", type=int, default=2048)
     capture.add_argument("--torque-violation-trigger", type=float, default=1000.)
     replay = sub.add_parser("replay")
     replay.add_argument("packets", type=Path, nargs="+")
     replay.add_argument("--individual-row-limit", type=int, default=4)
+    replay.add_argument("--kkt-row-limit", type=int, default=0)
     for p in (capture, replay):
         p.add_argument("--device", default="cuda:0")
         p.add_argument("--output-dir", type=Path, required=True)
@@ -37,7 +39,18 @@ def parse_args():
             parser.error(key + " must be positive")
     if getattr(args, "individual_row_limit", 0) < 0:
         parser.error("individual-row-limit must be nonnegative")
+    if getattr(args,"warmup_iterations",0)<0 or not 0<=getattr(args,"kkt_row_limit",0)<=16:
+        parser.error("warmup must be nonnegative; kkt-row-limit must be 0..16")
     return args
+
+
+def configure_diagnostic_warmup(runner, count):
+    """Absolute offset, shared rollout/PPO gate; never reset the resumed epoch."""
+    activation = runner.current_learning_iteration + count
+    runner.alg.qp_config = replace(runner.alg.qp_config,warmup_iterations=activation)
+    runner.alg.hard_pact_qp.cfg = replace(runner.alg.hard_pact_qp.cfg,warmup_iterations=activation)
+    runner._set_hard_pact_qp_iteration(runner.current_learning_iteration)
+    return activation
 
 
 def capture_run(args):
@@ -72,8 +85,11 @@ def capture_run(args):
     if settings.get("qp_solver", "qpth") != "cupiqp" or any(
             settings.get(k) not in (None, "cupiqp") for k in ("rollout_qp_solver", "ppo_qp_solver")):
         raise ValueError("Capture requires original cuPIQP configuration")
-    overrides = {"warmup_iterations": 0, "runner.resume": False, "policy.pretrained_path": None}
-    settings["warmup_iterations"] = 0  # explicit diagnostic activation, not a production default
+    saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    activation = int(saved["iter"]) + args.warmup_iterations
+    overrides = {"warmup_iterations": activation, "runner.resume": False, "policy.pretrained_path": None,
+                 "runtime_observers":"CUDA event timing; gradient hooks only in capture mode"}
+    settings["warmup_iterations"] = activation
     # Our bounded recorder handles exceptions too; avoid a second unbudgeted
     # legacy snapshot (and any writes to the original configured directory).
     settings["exception_capture_enabled"] = False
@@ -91,12 +107,12 @@ def capture_run(args):
         "resolved_config":document, "config_sha256":sha_file(config_path),
         "commit":subprocess.check_output(["git","rev-parse","HEAD"],cwd=ROOT,text=True).strip(),
         "dependencies":dependency_versions(), "seed":env_cfg.seed, "overrides":overrides}
+    identity["joint_names"] = list(env_cfg.asset.dof_names)
     env, _ = task_registry.make_env(task, launch_args, env_cfg=env_cfg)
     try:
         runner, _ = task_registry.make_alg_runner(env, task, launch_args, train_cfg=train_cfg, log_root=str(output / "run"))
         if not runner.alg.hard_pact_features.execution_qp:
             raise ValueError("Resolved ablation disables QP; refusing to silently change it")
-        saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
         keys = ("act_optimizer_state_dict", "enc_optimizer_state_dict", "decoder_opt_state_dict")
         runner.load(str(checkpoint), load_optimizer=all(k in saved for k in keys))
         # Some historical checkpoints omit curriculum metadata; normal load
@@ -121,16 +137,26 @@ def capture_run(args):
         if qp is None:
             raise ValueError("Resolved configuration did not construct a QP; capture cannot continue")
         qp.diagnostic_iteration = lambda: getattr(env, "_terrain_curriculum_iteration", runner.current_learning_iteration)
-        qp.diagnostic_capture = recorder
-        for backend in qp._backend_instances.values():
-            backend.capture_details_enabled = True
+        activation = configure_diagnostic_warmup(runner,args.warmup_iterations)
+        identity["periods"] = dict(warmup_start=runner.current_learning_iteration,qp_activation=activation,
+            post_warmup_end=activation+args.iteration_limit,mode=args.mode)
+        overrides["warmup_iterations"] = activation
+        from rsl_rl.algorithms.hard_pact_qp_diagnose_runtime import diagnostic_runtime
         save_hard_pact_resolved_config(output, task, env_cfg, train_cfg, effective_train_cfg=runner.train_cfg)
         write_json(output / "identity.json", identity)
-        runner.learn(args.iteration_limit, init_at_random_ep_len=False)
-        runner.save(str(output / "diagnostic_checkpoint.pt"))
-        write_json(output / "capture_summary.json", dict(captures=recorder.count,
-            bytes_written=recorder.bytes_written, dropped_for_budget=recorder.dropped,
-            iterations=args.iteration_limit))
+        with diagnostic_runtime(runner,output,gradients=args.mode!="timing") as runtime:
+            try:
+                for offset in range(args.warmup_iterations+args.iteration_limit):
+                    warmup = offset < args.warmup_iterations
+                    period = "warmup_qp_disabled" if warmup else (
+                        "steady_state_capture_disabled" if args.mode=="timing" else "capture_overhead_included")
+                    if not warmup and args.mode!="timing":
+                        qp.diagnostic_capture = recorder
+                        for backend in qp._backend_instances.values(): backend.capture_details_enabled=True
+                    runtime.run_iteration(period)
+                runner.save(str(output / "diagnostic_checkpoint.pt"))
+            finally:
+                write_json(output / "capture_summary.json",recorder.summary())
     finally:
         app = getattr(getattr(env.simulator, "_app_launcher", None), "app", None)
         if app is not None:
@@ -145,14 +171,18 @@ def sliced(packet, row):
                          for k,v in packet["problem"].items()}
     if packet.get("raw_primal") is not None:
         result["raw_primal"] = packet["raw_primal"][row:row+1]
+    if "data" in packet: result["data"]={k:v[row:row+1] for k,v in packet["data"].items()}
+    for key in ("rows","accepted"):
+        if hasattr(packet.get(key), "shape"):
+            result[key]=packet[key][row:row+1]
     return result
 
 
-def replay_one(packet, device, change, row=None):
+def replay_one(packet, device, change, row=None, kkt_rows=0):
     import torch
     from rsl_rl.algorithms.hard_pact_qp import HardPACTQPConfig
     from rsl_rl.algorithms.hard_pact_qp_backends import create_backend
-    from rsl_rl.algorithms.hard_pact_qp_diagnose import independent_checks
+    from rsl_rl.algorithms.hard_pact_qp_diagnose import independent_checks, candidate_assessment, distribution, conditioning_audit
     cfg = HardPACTQPConfig.from_dict(packet["config"])
     diff = bool(packet["differentiable"])
     prefix = "ppo" if diff else "rollout"
@@ -192,46 +222,62 @@ def replay_one(packet, device, change, row=None):
         packet = sliced(packet, row)
     out, tensors = solve(packet, diff)
     checks = independent_checks(packet, out.solution)
+    assessment = candidate_assessment(packet,out.solution,out.duality_gap,out.duality_gap_rel,cfg,diff)
+    production_mask = assessment["production_accepted"]
     backward = {}
     if diff:
         # Same deterministic upstream across variants. Test both all certified
         # rows and a mixed keep/drop mask. Failed-row adjoints are zero BEFORE VJP.
         upstream = torch.arange(1,out.solution.shape[-1]+1,device=device,dtype=out.solution.dtype)[None].expand_as(out.solution)
-        for name, mask in (("certified",checks["certified"]),
-                           ("mixed",checks["certified"] & (torch.arange(out.solution.shape[0],device=device)%2==0))):
+        for name, mask in (("production_accepted",production_mask),
+                           ("mixed",production_mask & (torch.arange(out.solution.shape[0],device=device)%2==0))):
             names = ("Q", "p", "G", "h", "A", "b")
-            gradients = torch.autograd.grad(out.solution, [tensors[k] for k in names],
-                grad_outputs=torch.where(mask[:,None],upstream,0.), retain_graph=True, allow_unused=True)
+            backward[name+"_vjp_rows"] = int(mask.sum())
+            try:
+                gradients = torch.autograd.grad(out.solution, [tensors[k] for k in names],
+                    grad_outputs=torch.where(mask[:,None],upstream,0.), retain_graph=True, allow_unused=True)
+            except Exception as error:
+                backward[name+"_backward_exception"] = repr(error)
+                continue
             backward[name+"_finite"] = all(g is None or bool(torch.isfinite(g).all()) for g in gradients)
             backward[name+"_excluded_zero"] = all(g is None or bool((g[~mask]==0).all()) for g in gradients)
             for k,g in zip(names,gradients):
                 backward[name+"_"+k+"_gradient_max"] = None if g is None or not g.numel() else float(g.abs().max())
+                backward[name+"_"+k+"_gradient_distribution"] = None if g is None else distribution(g.abs())
     reference = packet.get("raw_primal")
     reference_valid = None
     difference = None
     if reference is not None:
         reference = reference.to(out.solution)
-        reference_valid = independent_checks(packet,reference)["certified"]
-        joint = reference_valid & checks["certified"]
+        reference_valid = independent_checks(packet,reference)["primal_feasible"]
+        joint = reference_valid & checks["primal_feasible"]
         if bool(joint.any()):
             difference = float((reference[joint]-out.solution.detach()[joint]).abs().max())
     info = out.snapshot or {}
     iterations = info.get("iter")
     status = info.get("status")
-    return dict(stage=packet["stage"],phase=packet["phase"],variant=change,row=row,
+    if iterations is not None:iterations=iterations[:out.solution.shape[0]]
+    if status is not None:status=status[:out.solution.shape[0]]
+    audit_packet = dict(packet,assessment=assessment,accepted=production_mask,
+                        failing_rows=(~production_mask).nonzero().flatten())
+    return dict(schema_version=2,stage=packet["stage"],phase=packet["phase"],variant=change,row=row,
+        row_identity=packet.get("rows"),captured_acceptance=packet.get("accepted"),assessment=assessment,
+        conditioning=conditioning_audit(audit_packet,out.solution,kkt_rows) if kkt_rows else None,
         dtype=str(out.solution.dtype),differentiable=diff,
         effective_eps_abs=getattr(cfg,("ppo" if diff else "rollout")+"_eps_abs"),
         effective_max_iter=getattr(cfg,("ppo" if diff else "rollout")+"_max_iter"),
         effective_gap_policy=getattr(cfg,("ppo" if diff else "rollout")+"_duality_gap_policy"),
-        real_rows=out.solution.shape[0],certified_rows=int(checks["certified"].sum()),
+        real_rows=out.solution.shape[0],primal_feasible_rows=int(checks["primal_feasible"].sum()),
+        production_accepted_rows=int(production_mask.sum()),
         finite_rows=int(checks["finite"].sum()),raw_torque_violation_nm=float(checks["torque_violation_nm"].max()),
         equality_residual=float(checks["equality_residual"].max()),inequality_residual=float(checks["inequality_residual"].max()),
         gap=None if out.duality_gap is None else float(out.duality_gap.max()),
+        relative_gap=None if out.duality_gap_rel is None else float(out.duality_gap_rel.max()),
         status=status,iterations=iterations,
         iterations_max=None if iterations is None else int(iterations.max()),
         numerical_failure_rows=None if status is None else int((status==4).sum()),
         reuse_history_complete=False,
-        reference_primal_certified_rows=None if reference_valid is None else int(reference_valid.sum()),
+        reference_primal_feasible_rows=None if reference_valid is None else int(reference_valid.sum()),
         reference_solution_difference=difference,reference_is_ground_truth=False,**backward)
 
 
@@ -242,18 +288,21 @@ def replay_run(args):
     reports = []
     for path in args.packets:
         packet = torch.load(path,map_location="cpu",weights_only=True)
-        if packet.get("schema_version") != 1 or "problem" not in packet:
+        if packet.get("schema_version") not in (1,2) or "problem" not in packet:
             raise ValueError("Unsupported packet; use diagnose_hard_pact_qp capture")
-        for row in [None]+list(range(min(args.individual_row_limit,packet["tensors"]["p"].shape[0]))):
+        packet["preceding_updates"] = [torch.load(path.parent/p["packet_file"],map_location="cpu",weights_only=True)
+            if "packet_file" in p else p for p in packet.get("preceding_updates",[])]
+        from rsl_rl.algorithms.hard_pact_qp_diagnose import select_replay_rows
+        for row in [None]+select_replay_rows(packet,args.individual_row_limit):
             for change in ("baseline","other_tolerances","gap_toggle","iterations_x2","gradient_toggle","fresh","reuse_sequence","float64"):
                 try:
-                    result = replay_one(packet,args.device,change,row)
+                    result = replay_one(packet,args.device,change,row,args.kkt_row_limit)
                 except Exception as error:
                     result = dict(stage=packet["stage"],phase=packet["phase"],variant=change,row=row,error=repr(error))
                 reports.append(dict(packet=str(path),**result))
     write_json(args.output_dir/"replay.json",reports)
     # CSV contains scalar summaries; full status arrays remain in JSON.
-    keys = sorted(set().union(*(r.keys() for r in reports))-{"status","iterations"})
+    keys = sorted({k for r in reports for k,v in r.items() if v is None or isinstance(v,(str,int,float,bool))})
     with (args.output_dir/"replay.csv").open("w") as stream:
         writer=csv.DictWriter(stream,fieldnames=keys,extrasaction="ignore")
         writer.writeheader();writer.writerows(reports)
@@ -262,4 +311,4 @@ def replay_run(args):
 
 if __name__ == "__main__":
     args = parse_args()
-    (capture_run if args.mode == "capture" else replay_run)(args)
+    (replay_run if args.mode == "replay" else capture_run)(args)

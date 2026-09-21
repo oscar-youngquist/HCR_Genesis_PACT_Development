@@ -25,6 +25,7 @@ dist/
 target/
 dist/
 
+**/diagnostics/*
 **/exp_data*/*
 **.csv
 **/exp_data/*
