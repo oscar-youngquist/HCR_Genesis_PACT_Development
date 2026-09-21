@@ -345,7 +345,10 @@ class KLIterationUpdateTests(unittest.TestCase):
                 raw_kl, loss, iteration, use_rate_band=False,
                 use_cosine_warmup=True,
             )
-            self.assertEqual(metrics["kl_rate_band_enabled"].item(), 0.0)
+            self.assertEqual(set(metrics), set(controller.metric_names(False)))
+            self.assertNotIn("kl_ema", metrics)
+            self.assertNotIn("kl_lambda_low", metrics)
+            self.assertNotIn("kl_rate_band_enabled", metrics)
             self.assertEqual(metrics["kl_warmup_enabled"].item(), 1.0)
 
     def test_standard_kl_can_disable_cosine_warmup(self):
@@ -366,9 +369,10 @@ class KLIterationUpdateTests(unittest.TestCase):
                 raw_kl, loss, iteration, use_rate_band=False,
                 use_cosine_warmup=False,
             )
-            self.assertEqual(metrics["kl_rate_band_enabled"].item(), 0.0)
+            self.assertEqual(set(metrics), set(controller.metric_names(False)))
+            self.assertNotIn("kl_rate_band_enabled", metrics)
             self.assertEqual(metrics["kl_warmup_enabled"].item(), 0.0)
-            self.assertEqual(metrics["kl_band_active"].item(), 0.0)
+            self.assertNotIn("kl_band_active", metrics)
             self.assertAlmostEqual(metrics["kl_effective_coef"].item(), 0.25)
 
     def test_rate_band_without_base_warmup_starts_its_own_ramp_at_zero(self):

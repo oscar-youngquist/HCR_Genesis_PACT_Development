@@ -5,7 +5,7 @@ import time
 from collections import deque
 
 import torch
-from rsl_rl.utils.simulator_diagnostics import log_grf_metrics, domain_rand_state, load_domain_rand_state
+from rsl_rl.utils.simulator_diagnostics import domain_rand_state, load_domain_rand_state
 from torch.utils.tensorboard import SummaryWriter
 
 from legged_gym.envs.b1z1.force_task_utils import (
@@ -331,7 +331,6 @@ class OnPolicyRunnerUniFP:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
     def log(self, locs, width=80, pad=35):
-        log_grf_metrics(self.writer, self.env.simulator, locs["it"])
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
         self.tot_time += locs["collection_time"] + locs["learn_time"]
         iteration_time = locs["collection_time"] + locs["learn_time"]

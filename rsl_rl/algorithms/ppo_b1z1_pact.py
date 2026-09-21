@@ -863,7 +863,7 @@ class PPO_B1Z1PACT:
             "pinn_inverse_dynamics", "pinn_rollout",
             "pinn_rollout_base_linear", "pinn_rollout_base_angular",
             "pinn_rollout_leg", "pinn_rollout_arm", "film_identity",
-            *KLRateBandController.METRIC_NAMES,
+            *KLRateBandController.metric_names(self.use_kl_rate_band),
         )}
         updates = 0
         raw_kl_sum = 0.0
@@ -1028,7 +1028,7 @@ class PPO_B1Z1PACT:
                 iteration, self.use_kl_rate_band,
                 self.use_cosine_kl_warmup,
             )
-            for name in KLRateBandController.METRIC_NAMES:
+            for name in KLRateBandController.metric_names(self.use_kl_rate_band):
                 if name not in ("kl_raw", "kl_reg_loss"):
                     mean_metrics[name] = controller_metrics[name].item()
         diagnostics["lr_after_update"] = self.learning_rate

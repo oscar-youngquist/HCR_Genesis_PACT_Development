@@ -103,13 +103,30 @@ once per PPO iteration. Updated mass (including gripper), CoM and joint-dynamics
 bounds are sampled on the next episode reset. Friction and armature retain their
 configured fixed ranges. Base/EE command-force curricula remain independent.
 
+When `use_domainrand_curriculum = False`, Lab samples the final physical ranges
+once during construction, regardless of `isaacgym_use_final_domain_rand_ranges`.
+Mass/inertia, CoM, material friction, armature and native joint friction,
+stiffness and damping then remain fixed for that simulator's lifetime. Resets
+skip physical-property setters and their CPU transfers. As in Gym, PD-gain and
+motor-strength multipliers still resample at reset when enabled; control delay
+and external-force schedules are unchanged. A new simulator construction draws
+new physical samples, including when starting from a policy checkpoint.
+
 All B1Z1 runners save/restore optional `domain_rand_curriculum_state`, including
 reward EMA/history, current phase/progress and last processed iteration. Older
 checkpoints without it retain initial state. Existing `Values/domain_rand_*`
 logs continue to report progression. The implementation reuses B1Z1's existing
 phase/gating equations rather than substituting Go2-specific ranges or pushes.
 
-GRF processing reuses HardPACT's `IntervalGRFProcessor`: each physics substep
+`sim.grf.use_substep_filtering = False` is now the default in all three B1Z1
+configs. Lab reads the final contact-sensor sample and applies the original
+B1Z1 deadband, clipping and EMA once per control step into `_grfs_buf`.
+Only physics-substep filtering and interval accumulation are disabled; contact
+thresholds and observation scales are unchanged. The shared sensor update
+lifecycle is retained for other contact consumers.
+
+With `use_substep_filtering = True`, GRF processing reuses HardPACT's
+`IntervalGRFProcessor`: each physics substep
 reads world-frame contact-sensor forces, rejects the entire XYZ vector when
 vertical force is inside the deadband, clips it, and updates its EMA. The
 control-interval average uses clipped forces, not EMA forces. `_grfs_buf` keeps
@@ -125,17 +142,16 @@ all sensor forces into articulation order for `_link_contact_forces` and existin
 reward/termination consumers. `_feet_indices` indexes only articulation-ordered
 tensors. Both mappings are resolved by configured link names.
 
-TensorBoard `GRF/*` reports per-foot world-Z forces and mean vector norms for
-raw, deadbanded, clipped, EMA and interval-average stages, plus contact fraction.
-These are snapshots of the latest control interval at logging time, not averages
-over the PPO rollout. They remain enabled with normal force/contact logging when
-`enable_additional_diagnostics` is false. No QP controller, Go2 policy layout,
+The added TensorBoard `GRF/*` stage logging has been removed from all three
+runners. Existing episode, force and contact logs remain unchanged. Reset-time
+physical-property randomization is also unchanged by this GRF switch.
+No QP controller, Go2 policy layout,
 Go2-specific force normalization or additional PINN objective is transplanted.
 
 Validation: the B1Z1 PACT-Pos two-environment GPU-1 smoke test advanced the
 curriculum, resampled physical properties at reset, verified randomized inertia,
 collected one force sample per physics substep, and completed a short PPO update.
-CPU tests cover sensor-name permutation, filter stages, selective reset, logging,
+CPU tests cover sensor-name permutation, control-rate/substep filtering, selective reset,
 duplicate-iteration protection and curriculum state restoration. The separately
 run existing Go2 GRF suite has a target-scale mismatch in
 `test_alias_step_returns_interval_target_and_keeps_ema_separate`; its expected

@@ -34,6 +34,15 @@ class KLRateBandController:
         "kl_base_beta", "kl_band_active",
         "kl_rate_band_enabled", "kl_warmup_enabled",
     )
+    STANDARD_METRIC_NAMES = (
+        "kl_raw", "kl_reg_loss", "kl_warmup_beta", "kl_effective_coef",
+        "kl_base_beta", "kl_warmup_enabled",
+    )
+
+    @classmethod
+    def metric_names(cls, use_rate_band=True):
+        """Do not create empty rate-band plots when only standard KL is used."""
+        return cls.METRIC_NAMES if use_rate_band else cls.STANDARD_METRIC_NAMES
 
     def __init__(
         self, *, warmup_iters, warmup_beta_max, rate_min, rate_max,
@@ -132,19 +141,10 @@ class KLRateBandController:
         if not use_rate_band:
             values = {
                 "kl_raw": rate,
-                "kl_ema": rate,
                 "kl_reg_loss": float(reg_loss.detach().item()),
                 "kl_warmup_beta": base_beta,
-                "kl_band_warmup_scale": 0.0,
-                "kl_low_violation": 0.0,
-                "kl_high_violation": 0.0,
-                "kl_lambda_low": 0.0,
-                "kl_lambda_high": 0.0,
-                "kl_dual_effective_beta": 0.0,
                 "kl_effective_coef": base_beta,
                 "kl_base_beta": self.warmup_beta_max,
-                "kl_band_active": 0.0,
-                "kl_rate_band_enabled": 0.0,
                 "kl_warmup_enabled": float(use_cosine_warmup),
             }
             return {name: raw_kl.new_tensor(value) for name, value in values.items()}

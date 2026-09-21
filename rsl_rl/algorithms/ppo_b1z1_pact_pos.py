@@ -505,7 +505,7 @@ class PPO_B1Z1PACTPos:
         metrics = {name: 0.0 for name in (
             "value", "surrogate", "base_velo", "ee_position", "base_wrench", "ee_force", "foot_contact", "foot_height",
             "privileged_force", "privileged_decoder", "torque_clone", "film_identity",
-            *KLRateBandController.METRIC_NAMES,
+            *KLRateBandController.metric_names(self.use_kl_rate_band),
         )}
         updates = 0
         raw_kl_sum = 0.0
@@ -570,7 +570,7 @@ class PPO_B1Z1PACTPos:
                 iteration, self.use_kl_rate_band,
                 self.use_cosine_kl_warmup,
             )
-            for name in KLRateBandController.METRIC_NAMES:
+            for name in KLRateBandController.metric_names(self.use_kl_rate_band):
                 if name not in ("kl_raw", "kl_reg_loss"):
                     mean_metrics[name] = controller_metrics[name].item()
         diagnostics["lr_after_update"] = self.learning_rate

@@ -347,7 +347,7 @@ class PPO_UniFP:
             si = si + length
             mean_adaptation_losses[label] = 0
         mean_adaptation_losses["next_privileged_loss"] = 0
-        for name in KLRateBandController.METRIC_NAMES:
+        for name in KLRateBandController.metric_names(self.use_kl_rate_band):
             mean_adaptation_losses[name] = 0
 
         ppo_diagnostics = {}
@@ -582,7 +582,7 @@ class PPO_UniFP:
                 iteration, self.use_kl_rate_band,
                 self.use_cosine_kl_warmup,
             )
-            for name in KLRateBandController.METRIC_NAMES:
+            for name in KLRateBandController.metric_names(self.use_kl_rate_band):
                 if name not in ("kl_raw", "kl_reg_loss"):
                     mean_adaptation_losses[name] = controller_metrics[name].item()
 

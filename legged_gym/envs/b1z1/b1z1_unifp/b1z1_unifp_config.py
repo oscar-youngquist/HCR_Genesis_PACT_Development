@@ -250,6 +250,8 @@ class B1Z1UniFPCfg:
         use_gpu_pipeline = True
 
         class grf:
+            # IsaacLab: False applies deadband/clipping/EMA once per control step.
+            use_substep_filtering = True
             # Per-foot force conditioning in physical Newtons. The vertical
             # component gates the whole XYZ vector before clipping and EMA.
             deadband = 15.0
@@ -471,22 +473,22 @@ class B1Z1UniFPCfg:
         kd_range = [0.8, 1.2]
      
         randomize_motor_strength = True
-        motor_strength_range = [0.85, 1.15]
+        motor_strength_range = [0.90, 1.10]
         
         randomize_joint_armature = True
         joint_armature_range = [0.0, 0.03]
         
         randomize_joint_friction = True
-        joint_friction_range_start = [0.0, 0.02]
-        joint_friction_range_end = [0.0, 0.04]
+        joint_friction_range_start = [0.0, 0.20]
+        joint_friction_range_end = [0.0, 0.05]
         
-        randomize_joint_stiffness = False
-        joint_stiffness_range_start = [0.0, 0.0]
-        joint_stiffness_range_end = [0.0, 0.0]
+        randomize_joint_stiffness = True
+        joint_stiffness_range_start = [0.0, 0.02]
+        joint_stiffness_range_end = [0.0, 0.005]
         
         randomize_joint_damping = True
-        joint_damping_range_start = [0.30, 0.40]
-        joint_damping_range_end = [0.30, 0.60]
+        joint_damping_range_start = [0.20, 0.60]
+        joint_damping_range_end = [0.00, 0.80]
         
         num_push_steps = 500
         push_warmup = 30000
@@ -829,13 +831,14 @@ class B1Z1UniFPCfgPPO:
         # The shared UniFP adaptation path is variational for both B1 and
         # B1Z1: reconstruct one next privileged frame and regularize q(z|h).
         adaptation_privileged_weight = 1.0
-        adaptation_kl_weight = 0.1
+        adaptation_kl_weight = 1.0
         # False selects fixed standard KL: kl_warmup_beta_max * raw_KL.
-        use_kl_rate_band = True
+        use_kl_rate_band = False
         # Independently cosine-ramp the base KL coefficient to its maximum.
         use_cosine_kl_warmup = True
         kl_warmup_iters = 1000
         kl_warmup_beta_max = adaptation_kl_weight
+
         kl_band_warmup_iters = 500
         kl_r_min = 2.00
         kl_r_max = 6.00

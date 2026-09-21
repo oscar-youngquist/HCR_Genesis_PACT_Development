@@ -38,10 +38,10 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
 
     def _parse_cfg(self):
         super()._parse_cfg()
-        # Lab can update physical properties at reset; an enabled curriculum
-        # must begin at its initial bounds, not Gym's immutable final bounds.
+        # Enabled curricula begin at initial bounds. Without a curriculum,
+        # sample final physical ranges once at construction, as in Gym.
         active = self._cfg.domain_rand.use_domainrand_curriculum
-        _IsaacGymSimulatorB1Z1._parse_b1z1_cfg(self, use_final_ranges=False if active else None)
+        _IsaacGymSimulatorB1Z1._parse_b1z1_cfg(self, use_final_ranges=not active)
         self._domain_rand_last_iteration = -1
 
     _init_domain_rand_curriculum_state = _IsaacGymSimulatorB1Z1._init_domain_rand_curriculum_state
@@ -433,21 +433,24 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self._dof_tau = torch.zeros_like(self._torques)
         self._grfs_buf = torch.zeros(n, self._grf_dim, device=device)
         self._configure_grf_processing()
-        self._grf_processor = IntervalGRFProcessor(
-            n, len(self._feet_names), device, self._grfs_buf.dtype,
-            GRFProcessingConfig(
-                vertical_deadband_n=self._grf_deadband,
-                clip_min_n=self._grf_clip_min, clip_max_n=self._grf_clip_max,
-                ema_alpha=self._grf_ema_alpha,
-                contact_threshold_n=self._foot_contact_force_threshold,
-            ),
-        )
-        # Keep existing B1Z1 diagnostics/labels as views of the shared processor.
-        self._grfs_raw_buf = self._grf_processor.raw.flatten(1)
-        self._grfs_deadband_buf = self._grf_processor.complete.flatten(1)
-        self._grfs_clipped_buf = self._grf_processor.clipped.flatten(1)
-        self._grfs_smoothed_buf = self._grf_processor.ema.flatten(1)
-        self._grfs_interval_buf = self._grf_processor.interval_average.flatten(1)
+        self._use_substep_grf_filtering = bool(getattr(self._cfg.sim.grf, "use_substep_filtering", False))
+        self._grf_processor = None
+        if self._use_substep_grf_filtering:
+            self._grf_processor = IntervalGRFProcessor(
+                n, len(self._feet_names), device, self._grfs_buf.dtype,
+                GRFProcessingConfig(
+                    vertical_deadband_n=self._grf_deadband,
+                    clip_min_n=self._grf_clip_min, clip_max_n=self._grf_clip_max,
+                    ema_alpha=self._grf_ema_alpha,
+                    contact_threshold_n=self._foot_contact_force_threshold,
+                ),
+            )
+            # Keep existing B1Z1 diagnostics/labels as views of the shared processor.
+            self._grfs_raw_buf = self._grf_processor.raw.flatten(1)
+            self._grfs_deadband_buf = self._grf_processor.complete.flatten(1)
+            self._grfs_clipped_buf = self._grf_processor.clipped.flatten(1)
+            self._grfs_smoothed_buf = self._grf_processor.ema.flatten(1)
+            self._grfs_interval_buf = self._grf_processor.interval_average.flatten(1)
         self._feet_pos = torch.zeros(n, 4, 3, device=device)
         self._feet_vel = torch.zeros_like(self._feet_pos)
         self._last_feet_vel = torch.zeros_like(self._feet_pos)
@@ -489,7 +492,8 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self._last_dof_vel.copy_(self._robot.data.joint_vel)
         self.first_loop = True
         self._apply_external_forces()
-        self._grf_processor.begin_interval()
+        if self._use_substep_grf_filtering:
+            self._grf_processor.begin_interval()
         for _ in range(self._cfg.control.decimation):
             torque = self._compute_torques(actions)
             self.executed_torques = torch.clamp(torque, -1.1 * self.torque_limits, 1.1 * self.torque_limits)
@@ -501,9 +505,10 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
             self._contact_sensors.update(self._sim_params["dt"])
             # Sensor order is independent of articulation order. Read with
             # sensor indices exactly once, preserving configured FR/FL/RR/RL.
-            self._grf_processor.update_substep(self._sensor_foot_forces_world())
-        self._grf_processor.end_interval()
-        self._grfs_buf.copy_(self._grfs_smoothed_buf)
+            if self._use_substep_grf_filtering:
+                self._grf_processor.update_substep(self._sensor_foot_forces_world())
+        if self._use_substep_grf_filtering:
+            self._grf_processor.end_interval()
         if not self._headless:
             self._sim.render()
 
@@ -532,7 +537,7 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
                 self._link_contact_forces[:, self._contact_state_link_indices].norm(dim=-1)
                 > self._foot_contact_force_threshold
             ).float()
-        # GRFs were conditioned at physics rate in step(); do not EMA twice.
+        self._refresh_grf_buffer()
         # Projected joint forces are solver-reported; applied_torque is only
         # the command and would change force-manipulability reward semantics.
         self._dof_tau.copy_(
@@ -550,8 +555,9 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
             return
         self._robot.reset(env_ids)
         self._contact_sensors.reset(env_ids)
-        # Install current curriculum bounds only at episode boundaries.
-        self._randomize_physical_properties(env_ids)
+        # Avoid CPU transfers and PhysX property writes for fixed-range runs.
+        if self.use_domainrand_curriculum:
+            self._randomize_physical_properties(env_ids)
         if self._cfg.domain_rand.randomize_pd_gain:
             self._randomize_pd_gain(env_ids)
         if self._cfg.domain_rand.randomize_motor_strength:
@@ -564,23 +570,20 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self._last_feet_vel[env_ids] = 0
         self._dof_tau[env_ids] = 0
         self._reset_grf_buffer(env_ids)
-        self._grf_processor.reset(env_ids)
+        if self._grf_processor is not None:
+            self._grf_processor.reset(env_ids)
 
     def _sensor_foot_forces_world(self):
         return self._contact_sensors.data.net_forces_w[:, self._feet_contact_indices]
 
-    def get_grf_metrics(self):
-        """Current control-interval force diagnostics, in world-frame Newtons."""
-        metrics = {}
-        for stage, forces in self._grf_processor.flattened_stages().items():
-            if stage == "complete":
-                continue  # Alias of deadbanded.
-            feet = forces.reshape(self._num_envs, len(self._feet_names), 3)
-            metrics[f"GRF/{stage}_norm_mean"] = feet.norm(dim=-1).mean()
-            for index, name in enumerate(self._feet_names):
-                metrics[f"GRF/{stage}_{name}_fz"] = feet[:, index, 2].mean()
-        metrics["GRF/contact_fraction"] = self._grf_processor.contacts.float().mean()
-        return metrics
+    def _refresh_grf_buffer(self):
+        """Keep physical Newtons and foot order unchanged in either mode."""
+        if self._use_substep_grf_filtering:
+            self._grfs_buf.copy_(self._grf_processor.ema.flatten(1))
+        else:
+            # Legacy B1Z1 behavior: condition only the final sensor sample,
+            # once per control step, with no substep accumulation.
+            self._update_grf_buffer(self._sensor_foot_forces_world())
 
     def reset_dofs(self, env_ids, dof_pos, dof_vel):
         self._robot.write_joint_state_to_sim(dof_pos, dof_vel, self._dof_indices, env_ids)

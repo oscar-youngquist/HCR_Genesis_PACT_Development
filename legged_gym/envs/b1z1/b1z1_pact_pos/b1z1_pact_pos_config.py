@@ -254,6 +254,8 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         use_gpu_pipeline = True
 
         class grf:
+            # IsaacLab: False applies deadband/clipping/EMA once per control step.
+            use_substep_filtering = False
             # Per-foot force conditioning in physical Newtons. The vertical
             # component gates the whole XYZ vector before clipping and EMA.
             deadband = 15.0
