@@ -974,6 +974,9 @@ class HardPACTDifferentiableQP:
             aggregate=self.iteration_diagnostics[self._diagnostics_phase]
             aggregate.add_sum("backend/dispatch_count",rows.new_tensor(1))
             aggregate.add_sum("backend/dispatched_rows",rows.new_tensor(rows.numel()))
+            capture = getattr(self, "diagnostic_capture", None)
+            packet = capture.before(self, m, {k:v.index_select(0,local) for k,v in part.items()},
+                                    "primary", rows) if capture is not None else None
             try:
                 with event_profile.measure("solve",ref):
                     result = self._backend_solve(m)
@@ -981,6 +984,8 @@ class HardPACTDifferentiableQP:
             except QPBackendUnavailable:
                 raise
             except Exception as error:
+                if capture is not None:
+                    capture.after(packet, error=error)
                 G,h,lo,hi = self._cupiqp_native_pack(m) if self._active_solver=="cupiqp" else (m.G,m.h,None,None)
                 capture_failure(self,error,dict(Q=m.Q,p=m.p,G=G,h=h,A=m.A,b=m.b,
                                                 native_lower=lo,native_upper=hi))
@@ -1007,6 +1012,8 @@ class HardPACTDifferentiableQP:
                 accepted &= (torch.isfinite(gap)&torch.isfinite(rel)
                              & ((gap<=profile["gap_abs"])|(rel<=profile["gap_rel"]))) if gap is not None and rel is not None else False
             diag["selected/equality_max"][rows],diag["selected/inequality_max"][rows]=er,ir
+            if capture is not None:
+                capture.after(packet, result, accepted)
             if self._physical_enabled():
                 physical = self._physical_diagnostics(m,x,{k:v.index_select(0,local) for k,v in part.items()})
                 self._joint_candidate_diagnostics("primary", m, x,
@@ -1061,11 +1068,16 @@ class HardPACTDifferentiableQP:
                         aggregate=self.iteration_diagnostics[self._diagnostics_phase]
                         aggregate.add_sum("backend/dispatch_count",rows.new_tensor(1))
                         aggregate.add_sum("backend/dispatched_rows",rows.new_tensor(rows.numel()))
+                        capture = getattr(self, "diagnostic_capture", None)
+                        packet = capture.before(self, m, {k:v[rows] for k,v in values.items()},
+                                                "recovery", rows) if capture is not None else None
                         try:
                             result = self._backend_solve(m)
                         except QPBackendUnavailable:
                             raise
                         except Exception as error:
+                            if capture is not None:
+                                capture.after(packet, error=error)
                             capture_failure(self,error,dict(Q=m.Q,p=m.p,G=m.G,h=m.h,A=m.A,b=m.b))
                             diag["soft_joint/solver_exception"][rows] = True
                             continue
@@ -1084,6 +1096,8 @@ class HardPACTDifferentiableQP:
                             accepted &= (torch.isfinite(gap)&torch.isfinite(rel)&
                                 ((gap<=recovery_profile["gap_abs"])|(rel<=recovery_profile["gap_rel"]))) if gap is not None and rel is not None else False
                         soft_ok[rows] = accepted
+                        if capture is not None:
+                            capture.after(packet, result, accepted)
                         if self._physical_enabled():
                             self._joint_candidate_diagnostics("recovery", m, x,
                                 {k:v[rows] for k,v in values.items()}, accepted)

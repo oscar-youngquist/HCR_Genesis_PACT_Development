@@ -15,7 +15,7 @@ from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCf
 @pytest.mark.parametrize('error_type', [RuntimeError, OSError])
 def test_exception_capture_is_bounded_and_replays(tmp_path, error_type):
     qp = make_qp(exception_capture_enabled=True, exception_capture_dir=str(tmp_path))
-    with patch('rsl_rl.algorithms.hard_pact_qp.QPFunction', side_effect=error_type('forced backend failure')):
+    with patch.object(qp, '_backend_solve', side_effect=error_type('forced backend failure')):
         with pytest.warns(UserWarning, match='forced backend failure'):
             first = qp.solve(**qp_data())
         qp.solve(**qp_data())
@@ -31,7 +31,7 @@ def test_exception_capture_is_bounded_and_replays(tmp_path, error_type):
 
 def test_disabled_capture_has_no_disk_output(tmp_path):
     qp = make_qp(exception_capture_enabled=False, exception_capture_dir=str(tmp_path))
-    with patch('rsl_rl.algorithms.hard_pact_qp.QPFunction', side_effect=ValueError('forced')):
+    with patch.object(qp, '_backend_solve', side_effect=ValueError('forced')):
         qp.solve(**qp_data())
     assert not list(tmp_path.iterdir())
 

@@ -596,10 +596,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
                         'qpth_warm_start': True, 
                         'friction_coefficient': 0.6, 
-                        'torque_rate_limit_nm_s': 1000.0, 
+                        'torque_rate_limit_nm_s': 1000.0,  # update
                         'interior_margin': 0.001, 
-                        'force_scale_n': 250.0, 
-                        'torque_scale_nm': 40.0, 
+
+                        'force_scale_n': 250.0,            # update
+                        'torque_scale_nm': 40.0,           # update
                         # x=[total torque12; world GRF12]; no acceleration/slack variables.
                         'contact_threshold': 0.5,
                         'contact_acceleration_weight': 1.0,

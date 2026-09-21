@@ -36,9 +36,35 @@ class QPBackendResult:
     solution: torch.Tensor
     duality_gap: torch.Tensor | None = None
     duality_gap_rel: torch.Tensor | None = None
-    # Owned, unpreconditioned cuPIQP variables. Rollout active-set seeding
-    # only: these must never be reused as an implicit-backward context.
-    snapshot: dict[str, torch.Tensor] | None = None
+    # Opt-in owned diagnostic values/metadata, never a backward context.
+    snapshot: dict | None = None
+
+
+def _capture_solver_details(backend, solver, reference, rows, reused):
+    """Opt-in owned snapshots; never retain solver buffers or backward state."""
+    if not getattr(backend, "capture_details_enabled", False):
+        return
+    result = solver.result
+    details = {"requested_rows": rows, "capacity_rows": result.x.shape[0],
+               "reused": reused, "initialization": "internal cuPIQP initialization; not exported",
+               "padding": "duplicate last real row", "unavailable": []}
+    details["status"] = torch.as_tensor(result.info.status_value.copy()).clone()
+    for group, names in ((result, ("x", "y", "z_u", "z_l", "z_bu", "z_bl", "s_u", "s_l", "s_bu", "s_bl")),
+                         (result.info, ("iter", "primal_res", "dual_res", "duality_gap", "duality_gap_rel"))):
+        for name in names:
+            value = getattr(group, name, None)
+            if value is None:
+                details["unavailable"].append(name)
+            else:
+                try:
+                    # Preserve integer status rather than casting to float.
+                    details[name] = torch.utils.dlpack.from_dlpack(value).detach().clone()
+                except (TypeError, AttributeError):
+                    try:
+                        details[name] = torch.as_tensor(value).clone()
+                    except (TypeError, ValueError):
+                        details["unavailable"].append(name)
+    backend.last_capture_details = details
 
 
 class SolverLease:
@@ -334,6 +360,7 @@ class CuPIQPFunction(torch.autograd.Function):
                 gap = _as_torch_zero_copy(lease.solver.result.info.duality_gap, p).clone()
                 gap_rel = _as_torch_zero_copy(lease.solver.result.info.duality_gap_rel, p).clone()
                 backend.record_iterations(phase, lease.solver, p, Q.shape[0])
+                _capture_solver_details(backend, lease.solver, p, Q.shape[0], hit)
             except Exception:
                 ctx.lease.healthy = False
                 ctx.lease.release()
@@ -423,7 +450,8 @@ class SolverBackend:
                     self.config.cupiqp_mode == "dense", self.config.verbose,
                     self.config, self,
                 )
-                return QPBackendResult(solution, gap, gap_rel)
+                return QPBackendResult(solution, gap, gap_rel,
+                    getattr(self, "last_capture_details", None) if getattr(self, "capture_details_enabled", False) else None)
             return self._solve_cupiqp_rollout(
                 Q, p, G, h, A, b, native_lower, native_upper,
                 constant_hessian=constant_hessian,
@@ -470,6 +498,7 @@ class SolverBackend:
         # Smallest fitting power-of-two bucket, capped by chunk size. Never
         # promote a small request to a previously seen large batch capacity.
         solver = self._rollout_cache.get(key)
+        capture_reused = solver is not None
         self.record(phase, pool_hits=int(solver is not None), pool_misses=int(solver is None),
                     requested_rows=batch, capacity_rows=capacity, padded_rows=capacity-batch)
         packing_token = profile_timer.begin(Q)
@@ -580,6 +609,7 @@ class SolverBackend:
         self._rollout_cache[key] = solver
         self._rollout_hessians[key] = source_Q if constant_hessian else None
         self.record_iterations(phase, solver, p, batch)
+        _capture_solver_details(self, solver, p, batch, capture_reused)
         return QPBackendResult(
             # The solver owns mutable buffers. Consumers may hold an earlier
             # result while this same capacity is reused; return owned slices.
@@ -588,7 +618,7 @@ class SolverBackend:
             _as_torch_zero_copy(
                 solver.result.info.duality_gap_rel, p
             )[:batch].clone(),
-            None,  # No rollout active-set snapshots/factors are retained.
+            getattr(self, "last_capture_details", None) if getattr(self, "capture_details_enabled", False) else None,
         )
 
     def _solve_moreau(self, Q, p, G, h, A, b, *, differentiable):
