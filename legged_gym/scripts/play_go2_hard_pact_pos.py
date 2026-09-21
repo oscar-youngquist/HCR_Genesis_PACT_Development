@@ -106,7 +106,7 @@ def play(args):
     env_cfg.viewer.rendered_envs_idx = list(range(10))
     env_cfg.commands.curriculum = False
     env_cfg.commands.heading_command = False
-    env_cfg.commands.resampling_time = 2.0
+    env_cfg.commands.resampling_time = 10.0
     env_cfg.commands.ranges.lin_vel_x = [-1.0, 1.0]
     env_cfg.commands.ranges.lin_vel_y = [-0.5, 0.5]
     env_cfg.commands.ranges.ang_vel_yaw = [-1.0, 1.0]
@@ -133,7 +133,7 @@ def play(args):
     runner.load(checkpoint, load_optimizer=False)
     policy = runner.get_inference_policy(device=env.device)
     obs, obs_history, _, _ = env.get_observations()
-    print(f"Playing {checkpoint} with 10 robots; velocity commands resample every 2 s.")
+    print(f"Playing {checkpoint} with 10 robots.")
 
     # Roughly ten episodes; Ctrl-C can be used to switch checkpoints sooner.
     # The environment override is useful for automated smoke checks.

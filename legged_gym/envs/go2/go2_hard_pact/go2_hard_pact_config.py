@@ -679,7 +679,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 # SIMULATOR=isaaclab PYTHONPATH=. \
 # python legged_gym/scripts/play_go2_hard_pact_pos.py \
 #   --task go2_hard_pact_baseline_isaaclab \
-#   --load_run Sep16_13-19-27_hard_pact_full_isaaclab \
+#   --load_run Sep17_14-33-42_hard_pact_full_isaaclab \
 #   --ckpt -1 \
 #   --num_envs 10 \
 #   --gpu cuda:0
+
