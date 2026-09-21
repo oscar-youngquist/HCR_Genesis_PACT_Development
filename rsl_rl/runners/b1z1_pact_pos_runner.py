@@ -39,6 +39,9 @@ class B1Z1PACTPosRunner:
             explicit_decoder_layers=policy_cfg["explicit_decoder_layers"],
             explicit_dim=env.num_exp_labels,
             film_hidden_dim=policy_cfg["film_hidden_dim"], activation=policy_cfg["activation"],
+            force_decoder_layers=policy_cfg["force_decoder_layers"],
+            grf_decoder_layers=policy_cfg["grf_decoder_layers"],
+            grf_torque_scale=policy_cfg["grf_torque_scale"],
             init_noise_std=policy_cfg["init_noise_std"],
             min_noise_std=policy_cfg["min_noise_std"],
             max_noise_std=policy_cfg["max_noise_std"],
@@ -47,12 +50,14 @@ class B1Z1PACTPosRunner:
         self.privileged_decoder = B1Z1PACTDecoder(
             # Decode the next non-terrain privileged state from z. Terrain
             # heights remain available to the critic but are not reconstructed.
-            policy_cfg["cenet_latent_dim"], env.cfg.env.num_privileged_recon_obs,
+            policy_cfg["cenet_latent_dim"], env.cfg.env.num_privileged_recon_obs
+            - env.cfg.env.privileged_force_start - env.cfg.env.num_privileged_force_obs,
             hidden=policy_cfg["privileged_decoder_layers"],
             activation=policy_cfg["activation"],
         ).to(device)
 
         merged = dict(algorithm_cfg)
+        merged["grf_decoder_weight"] = policy_cfg.get("grf_decoder_weight", 1.0)
         merged.update({
             "dt": env.dt, "position_action_scale": env.cfg.control.action_scale,
             "torque_action_scale": env.cfg.control.torque_scale,
@@ -145,7 +150,12 @@ class B1Z1PACTPosRunner:
                         self.actor_critic.record_rollout_diagnostics(
                             actions, self.env.cfg.normalization.clip_actions
                         )
+                    # Clone with controller parameters from action time, before reset randomization.
+                    torque_clone_state = self.env.get_pact_pos_torque_clone_state().detach().to(self.device).clone()
                     next_obs, next_privileged, next_history, next_explicit, reward, dones, infos, _ = self.env.step(actions)
+                    # B1Z1 has no QP: bounded commanded total torque is nominal.
+                    # Capture the final substep command paired with the next GRF.
+                    self.alg.transition.nominal_torque = self.env.simulator.executed_torques.detach().to(self.device).clone()
                     storage_start = rollout_timer.start("transition_storage") if rollout_timer is not None else None
                     next_obs, next_privileged, next_history, next_explicit, reward, dones = (
                         value.to(self.device) for value in (next_obs, next_privileged, next_history, next_explicit, reward, dones)
@@ -157,7 +167,7 @@ class B1Z1PACTPosRunner:
                         next_privileged[:, -self.env.num_privileged_obs:][
                             :, :self.env.cfg.env.num_privileged_recon_obs
                         ],
-                        self.env.get_pact_pos_torque_clone_state().to(self.device),
+                        torque_clone_state,
                     )
                     running_reward += reward.view(-1, 1)
                     running_length += 1

@@ -820,6 +820,10 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
 
         cenet_enc_layers = [512, 256, 128]
         explicit_decoder_layers = [128, 64]
+        force_decoder_layers = [128, 128]
+        grf_decoder_layers = [128, 128]
+        grf_torque_scale = 100.0  # Divide detached physical Nm before GRF conditioning.
+        grf_decoder_weight = 1.0
         cenet_latent_dim = 64
         cenet_base_vel_dim = 3
         cenet_base_wrench_dim = 6

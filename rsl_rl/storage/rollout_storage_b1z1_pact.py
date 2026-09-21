@@ -24,6 +24,9 @@ class RolloutStorageB1Z1PACT:
             self.next_privileged = None
             self.dynamics_state = None
             self.rollout_initial_state = None
+            self.latent_noise = None
+            self.nominal_torque = None
+            self.physics_source = None
 
         def clear(self):
             self.__init__()
@@ -31,7 +34,7 @@ class RolloutStorageB1Z1PACT:
     def __init__(
         self, num_envs, steps, obs_dim, critic_dim, history_dim, action_dim,
         explicit_dim, next_privileged_dim, state_dim,
-        policy_distribution_dim=None, rollout_state_dim=0, device="cpu",
+        policy_distribution_dim=None, rollout_state_dim=0, device="cpu", latent_dim=64,
     ):
         self.device, self.num_envs, self.steps, self.step = device, num_envs, steps, 0
         def zeros(dim): return torch.zeros(steps, num_envs, dim, device=device)
@@ -41,6 +44,8 @@ class RolloutStorageB1Z1PACT:
         # PPO statistics remain defined only for the stochastic position half.
         distribution_dim = action_dim if policy_distribution_dim is None else policy_distribution_dim
         self.actions = zeros(action_dim)
+        # Replay the same reparameterization noise for PPO likelihood ratios.
+        self.latent_noise, self.nominal_torque = zeros(latent_dim), zeros(19)
         self.mu, self.sigma = zeros(distribution_dim), zeros(distribution_dim)
         self.values, self.rewards, self.returns, self.advantages = zeros(1), zeros(1), zeros(1), zeros(1)
         self.log_probs, self.dones = zeros(1), torch.zeros(steps, num_envs, 1, dtype=torch.bool, device=device)
@@ -57,6 +62,10 @@ class RolloutStorageB1Z1PACT:
         self.rollout_initial_state = (
             zeros(rollout_state_dim) if rollout_state_dim else None
         )
+        self.physics_source = (
+            zeros(obs_dim + history_dim + latent_dim + action_dim + 1)
+            if rollout_state_dim else None
+        )
 
     def add(self, transition):
         if self.step >= self.steps:
@@ -65,7 +74,7 @@ class RolloutStorageB1Z1PACT:
         # later, but every PINN field must remain paired with its own action_t.
         for name in (
             "observations", "critic_observations", "histories", "actions", "mu", "sigma", "values",
-            "log_probs", "explicit_targets",
+            "log_probs", "explicit_targets", "latent_noise", "nominal_torque",
             "next_privileged", "dynamics_state",
         ):
             getattr(self, name)[self.step].copy_(getattr(transition, name))
@@ -73,6 +82,14 @@ class RolloutStorageB1Z1PACT:
             self.rollout_initial_state[self.step].copy_(
                 transition.rollout_initial_state
             )
+            # Direct algorithm tests can omit delay replay; runners always supply it.
+            source = transition.physics_source
+            if source is None:
+                source = torch.cat((transition.observations, transition.histories,
+                    transition.latent_noise,
+                    (transition.actions - transition.mu) / transition.sigma.clamp_min(1e-8),
+                    torch.ones_like(transition.mu[:, :1])), dim=-1)
+            self.physics_source[self.step].copy_(source)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1).bool())
         self.step += 1
@@ -103,11 +120,12 @@ class RolloutStorageB1Z1PACT:
         # to actions, transition states, privileged labels, and terminal masks.
         flat = {name: getattr(self, name).flatten(0, 1) for name in (
             "observations", "critic_observations", "histories", "actions", "mu", "sigma", "values", "returns", "advantages",
-            "log_probs", "dones", "explicit_targets",
+            "log_probs", "dones", "explicit_targets", "latent_noise", "nominal_torque",
             "next_privileged", "dynamics_state",
         )}
         if self.rollout_initial_state is not None:
             flat["rollout_initial_state"] = self.rollout_initial_state.flatten(0, 1)
+            flat["physics_source"] = self.physics_source.flatten(0, 1)
         for _ in range(epochs):
             for mini_batch in range(mini_batches):
                 start = mini_batch * batch_size

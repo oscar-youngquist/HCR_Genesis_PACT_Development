@@ -126,8 +126,9 @@ class PPO_B1Z1PACTPos:
         # The first decoder measurement initializes the EMA; starting at
         # infinity would keep the reliability gate permanently closed.
 
-    def init_storage(self, *args):
-        self.storage = RolloutStorageB1Z1PACT(*args, device=self.device)
+    def init_storage(self, *args, **kwargs):
+        kwargs.setdefault("latent_dim", self.actor_critic.context_encoder.latent_mean.out_features)
+        self.storage = RolloutStorageB1Z1PACT(*args, device=self.device, **kwargs)
 
     def update_adaptive_entropy_coef(self, performance_metrics):
         """Increase exploration when tracking or terrain progress is below target."""
@@ -163,6 +164,7 @@ class PPO_B1Z1PACTPos:
         self.transition.log_probs = self.actor_critic.get_actions_log_prob(position_actions).detach().unsqueeze(-1)
         self.transition.mu, self.transition.sigma = self.actor_critic.action_mean.detach(), self.actor_critic.action_std.detach()
         self.transition.explicit_targets = explicit_labels.detach().clone()
+        self.transition.latent_noise = self.actor_critic.last_context["latent_noise"].detach().clone()
         return actions
 
     def process_env_step(self, rewards, dones, infos, next_privileged, dynamics_state):
@@ -249,7 +251,21 @@ class PPO_B1Z1PACTPos:
     def compute_returns(self, critic_obs):
         self.storage.compute_returns(self.actor_critic.evaluate(critic_obs).detach(), self.gamma, self.lam)
 
-    def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid, iteration):
+    def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid, iteration, nominal_torque):
+        # HardPACT timing: discard reset transitions before decoder arithmetic.
+        rows = valid.reshape(-1).bool()
+        obs_hist_batch, obs_target, labels, nominal_torque = (
+            value[rows] for value in (obs_hist_batch, obs_target, labels, nominal_torque)
+        )
+        valid = valid[rows]
+        if not rows.any():
+            return {key: obs_target.new_zeros(()) for key in (
+                "base_velocity", "ee_position", "base_wrench", "ee_force",
+                "foot_contact", "foot_height", "privileged_force", "privileged_decoder",
+                "grf_decoder", "kl_raw", "kl_reg_loss",
+            )}
+        force_start = self.cfg["privileged_force_start"]
+        recon_start = force_start + self.cfg["privileged_force_dim"]
         # Recompute the auxiliary graph after the actor update. The PPO
         # graph was consumed by PCGrad and sharing it here would either
         # fail on a second backward pass or retain an unnecessarily large
@@ -257,9 +273,10 @@ class PPO_B1Z1PACTPos:
         aux_context = self.actor_critic.decode_context(
             self.actor_critic.context_encoder(obs_hist_batch, sample=True)
         )
-        # Match UniFP's z-only next-frame decoder. Its target now includes the
-        # normalized force block that previously had a dedicated decoder.
+        # The z-only next-frame decoder excludes dedicated explicit/physics targets.
         aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
+        grf_prediction = self.actor_critic.predict_grf(aux_context, nominal_torque)
+        grf_loss = F.mse_loss(grf_prediction, obs_target[:, force_start:force_start + 12])
 
         base_velo_label    = None
         ee_pos_label       = None
@@ -300,6 +317,8 @@ class PPO_B1Z1PACTPos:
         )
 
         # VAE recon + KL losses
+        # Explicit state and the dedicated force/GRF blocks are not reconstructed twice.
+        priv_recon_target = priv_recon_target[:, recon_start:]
         privileged_error = (aux_privileged_prediction - priv_recon_target).square() * valid
         aux_privileged_loss = privileged_error.sum() / (
             valid.sum().clamp_min(1.0) * aux_privileged_prediction.shape[-1]
@@ -318,6 +337,7 @@ class PPO_B1Z1PACTPos:
             aux_explicit
             + self.cfg["privileged_decoder_weight"] * aux_privileged_loss
             + kl_reg_loss
+            + self.cfg.get("grf_decoder_weight", 1.0) * grf_loss
         )
         self.auxiliary_optimizer.zero_grad()
 
@@ -340,7 +360,8 @@ class PPO_B1Z1PACTPos:
             "ee_force": pred_ee_force_loss,
             "foot_contact": pred_foot_contact_loss,
             "foot_height": pred_foot_height_loss,
-            "privileged_force": self._masked_force_slice_mse(aux_privileged_prediction, obs_target, valid),
+            "privileged_force": grf_loss,
+            "grf_decoder": grf_loss,
             "privileged_decoder": aux_privileged_loss,
             "kl_raw": aux_kl,
             "kl_reg_loss": kl_reg_loss,
@@ -355,7 +376,7 @@ class PPO_B1Z1PACTPos:
             ), dim=-1).detach(),
             "explicit_target": labels.detach(),
             "privileged_prediction": aux_privileged_prediction.detach(),
-            "privileged_target": obs_target.detach(),
+            "privileged_target": priv_recon_target.detach(),
             "valid": valid.detach(),
         }
 
@@ -373,7 +394,7 @@ class PPO_B1Z1PACTPos:
         The deterministic predicted explicit context is used for both actor and FiLM.
         """
         self.actor_critic.update_distribution(
-            batch["observations"], batch["histories"], sample_context=False
+            batch["observations"], batch["histories"], latent_noise=batch["latent_noise"]
         )
         position_actions = batch["actions"][:, :self.actor_critic.num_actions]
         actions_log_prob = self.actor_critic.get_actions_log_prob(position_actions)
@@ -436,7 +457,7 @@ class PPO_B1Z1PACTPos:
     def _pre_update_diagnostics(self, batch):
         """Compare the untouched rollout policy with its stored distribution."""
         self.actor_critic.update_distribution(
-            batch["observations"], batch["histories"], sample_context=False
+            batch["observations"], batch["histories"], latent_noise=batch["latent_noise"]
         )
         mu, sigma = self.actor_critic.action_mean, self.actor_critic.action_std
         old_mu, old_sigma = batch["mu"], batch["sigma"]
@@ -504,7 +525,7 @@ class PPO_B1Z1PACTPos:
         self.privileged_decoder.train()
         metrics = {name: 0.0 for name in (
             "value", "surrogate", "base_velo", "ee_position", "base_wrench", "ee_force", "foot_contact", "foot_height",
-            "privileged_force", "privileged_decoder", "torque_clone", "film_identity",
+            "privileged_force", "privileged_decoder", "grf_decoder", "torque_clone", "film_identity",
             *KLRateBandController.metric_names(self.use_kl_rate_band),
         )}
         updates = 0
@@ -537,7 +558,7 @@ class PPO_B1Z1PACTPos:
             aux = self._compute_vae_loss(
                 obs_hist_batch=batch["histories"],
                 obs_target=batch["next_privileged"], labels=batch["explicit_targets"], valid=valid,
-                iteration=iteration,
+                iteration=iteration, nominal_torque=batch["nominal_torque"],
             )
 
             # Log metrics
@@ -547,6 +568,7 @@ class PPO_B1Z1PACTPos:
                               ("foot_contact", aux["foot_contact"]),
                               ("foot_height", aux["foot_height"]),
                               ("privileged_force", aux["privileged_force"]), ("privileged_decoder", aux["privileged_decoder"]),
+                              ("grf_decoder", aux["grf_decoder"]),
                               ("kl_raw", aux["kl_raw"]), ("kl_reg_loss", aux["kl_reg_loss"]),
                               ("torque_clone", torque_clone),
                               ("film_identity", film_identity)):

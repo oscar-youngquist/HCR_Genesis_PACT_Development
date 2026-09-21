@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 from .module_utils import init_weights
+from .b1z1_physics_decoders import B1Z1PhysicsDecoders, decode_context
 
 def _activation(name: str) -> nn.Module:
     return {
@@ -51,15 +52,15 @@ class B1Z1PACTContextEncoder(nn.Module):
         self.latent_mean.apply(init_weights)
 
 
-    def forward(self, history: torch.Tensor, sample: bool = True) -> dict[str, torch.Tensor]:
+    def forward(self, history: torch.Tensor, sample: bool = True, latent_noise=None) -> dict[str, torch.Tensor]:
         feature = self.trunk(history)
         mean, logvar = self.latent_mean(feature), self.latent_logvar(feature)
-        z = mean + torch.exp(0.5 * logvar) * torch.randn_like(mean) if sample else mean
-        return {"mean": mean, "logvar": logvar, "z": z}
+        noise = latent_noise if latent_noise is not None else (torch.randn_like(mean) if sample else torch.zeros_like(mean))
+        z = mean + torch.exp(0.5 * logvar) * noise
+        return {"mean": mean, "logvar": logvar, "z": z, "latent_noise": noise}
 
     def forward_inf(self, history: torch.Tensor):
-        feature = self.trunk(history)
-        return {"z": self.latent_mean(feature)}
+        return self.forward(history, sample=True)
 
 class FiLM(nn.Module):
     """Near-identity DreamFLEX-style modulation of the shared actor state."""
@@ -111,6 +112,9 @@ class ActorCriticB1Z1PACT(nn.Module):
         explicit_decoder_layers=(128, 64),
         explicit_dim: int = 23,
         film_hidden_dim: int = 64,
+        force_decoder_layers=(128, 128),
+        grf_decoder_layers=(128, 128),
+        grf_torque_scale: float = 100.0,
         activation: str = "elu",
         init_noise_std: float | Sequence[float] = 0.65,
         min_noise_std: float | Sequence[float] = 0.20,
@@ -122,7 +126,11 @@ class ActorCriticB1Z1PACT(nn.Module):
         # As in UniFP, all deployment-time explicit estimates are decoded from
         # z rather than branching directly from the history encoder trunk.
         self.explicit_decoder = B1Z1PACTDecoder(
-            latent_dim, explicit_dim, hidden=explicit_decoder_layers, activation=activation
+            latent_dim, 14, hidden=explicit_decoder_layers, activation=activation
+        )
+        self.physics_decoder = B1Z1PhysicsDecoders(
+            latent_dim, force_decoder_layers, grf_decoder_layers, grf_torque_scale,
+            type(_activation(activation)),
         )
         # The actor consumes estimated contact probabilities and foot heights;
         # FiLM intentionally receives neither terrain/contact signal.
@@ -164,19 +172,11 @@ class ActorCriticB1Z1PACT(nn.Module):
 
         Normal.set_default_validate_args = False
 
-    def decode_context(self, context: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Decode and name the 23-D explicit state used by actor and FiLM."""
-        explicit = self.explicit_decoder(context["z"])
-        return {
-            **context,
-            "explicit_prediction": explicit,
-            "base_velocity": explicit[:, 0:3],
-            "ee_position": explicit[:, 3:6],
-            "base_wrench": explicit[:, 6:12],
-            "ee_force": explicit[:, 12:15],
-            "foot_contact_logits": explicit[:, 15:19],
-            "foot_height": explicit[:, 19:23],
-        }
+    def decode_context(self, context):
+        return decode_context(self, context)
+
+    def predict_grf(self, context, nominal_torque):
+        return self.physics_decoder.predict_grf(context["z"], context["explicit_condition"], nominal_torque)
 
     @staticmethod
     def explicit_vector(context: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -252,8 +252,9 @@ class ActorCriticB1Z1PACT(nn.Module):
         obs: torch.Tensor,
         history: torch.Tensor,
         sample_context: bool = True,
+        latent_noise=None,
     ) -> None:
-        context = self.decode_context(self.context_encoder(history, sample=sample_context))
+        context = self.decode_context(self.context_encoder(history, sample=sample_context, latent_noise=latent_noise))
         # Boot masking is intentionally disabled: training and deployment
         # always condition on latent z and every predicted explicit output.
         position, torque = self.actor_forward(obs, context, context)
@@ -269,10 +270,8 @@ class ActorCriticB1Z1PACT(nn.Module):
     def act(
         self, obs: torch.Tensor, history: torch.Tensor,
     ) -> torch.Tensor:
-        # Keep the rollout policy deterministic with respect to its latent
-        # estimate. PPO's stored action distribution then remains comparable
-        # during the update; exploration is supplied by the action Gaussian.
-        self.update_distribution(obs, history, sample_context=False)
+        # PPO stores this latent draw and replays it when reconstructing likelihoods.
+        self.update_distribution(obs, history, sample_context=True)
         return self.distribution.sample()
 
     def act_inference(self, obs: torch.Tensor, history: torch.Tensor) -> torch.Tensor:
@@ -319,7 +318,7 @@ class ActorCriticB1Z1PACT(nn.Module):
             "encoder": [], "encoder_no_decay": [],
         }
         for name, parameter in self.named_parameters():
-            if name.startswith(("context_encoder.", "explicit_decoder.")):
+            if name.startswith(("context_encoder.", "explicit_decoder.", "physics_decoder.")):
                 owner = "encoder"
             elif name.startswith("critic."):
                 owner = "critic"

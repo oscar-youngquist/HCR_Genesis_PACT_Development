@@ -23,6 +23,7 @@ from legged_gym.envs.b1z1.force_task_utils import (
     update_force_curriculum_from_rollout,
 )
 from rsl_rl.algorithms.ppo_b1z1_pact import PPO_B1Z1PACT
+from rsl_rl.storage.b1z1_action_replay import B1Z1ActionReplay
 from rsl_rl.modules.actor_critic_b1z1_pact import ActorCriticB1Z1PACT, B1Z1PACTDecoder
 from rsl_rl.utils import RolloutPhaseTimer, log_startup_metadata, startup_metadata
 
@@ -44,6 +45,9 @@ class B1Z1PACTRunner:
             explicit_decoder_layers=policy_cfg["explicit_decoder_layers"],
             explicit_dim=env.num_exp_labels,
             film_hidden_dim=policy_cfg["film_hidden_dim"], activation=policy_cfg["activation"],
+            force_decoder_layers=policy_cfg["force_decoder_layers"],
+            grf_decoder_layers=policy_cfg["grf_decoder_layers"],
+            grf_torque_scale=policy_cfg["grf_torque_scale"],
             init_noise_std=policy_cfg["init_noise_std"],
             min_noise_std=policy_cfg["min_noise_std"],
             max_noise_std=policy_cfg["max_noise_std"],
@@ -52,7 +56,8 @@ class B1Z1PACTRunner:
         self.privileged_decoder = B1Z1PACTDecoder(
             # Decode the next non-terrain privileged state from z. Terrain
             # heights remain available to the critic but are not reconstructed.
-            policy_cfg["cenet_latent_dim"], env.cfg.env.num_privileged_recon_obs,
+            policy_cfg["cenet_latent_dim"], env.cfg.env.num_privileged_recon_obs
+            - env.cfg.env.privileged_force_start - env.cfg.env.num_privileged_force_obs,
             hidden=policy_cfg["privileged_decoder_layers"],
             activation=policy_cfg["activation"],
         ).to(device)
@@ -91,8 +96,10 @@ class B1Z1PACTRunner:
             )
 
         merged = dict(algorithm_cfg)
+        merged["grf_decoder_weight"] = policy_cfg.get("grf_decoder_weight", 1.0)
         merged.update({
             "dt": env.dt, "position_action_scale": env.cfg.control.action_scale,
+            "clip_actions": env.cfg.normalization.clip_actions,
             "torque_action_scale": env.cfg.control.torque_scale,
             "grf_scale": env.obs_scales.grf,
             "ee_force_scale": env.obs_scales.ee_force,
@@ -130,6 +137,10 @@ class B1Z1PACTRunner:
         )})
 
         self.alg = PPO_B1Z1PACT(self.actor_critic, self.privileged_decoder, self.dynamics, merged, device)
+        self.action_replay = B1Z1ActionReplay(
+            env.cfg.domain_rand.ctrl_delay_step_range[1]
+            if env.cfg.domain_rand.randomize_ctrl_delay else 0
+        )
 
         # Match the original Go2 PACT bootstrap path: initialize model weights
         # from a converted PACT-Pos checkpoint while keeping fresh optimizers,
@@ -216,10 +227,13 @@ class B1Z1PACTRunner:
                 for _ in range(self.steps):
                     policy_start = rollout_timer.start("policy") if rollout_timer is not None else None
                     actions = self.alg.act(obs, privileged, history, explicit)
+                    delay = (self.env.action_delay if self.env.cfg.domain_rand.randomize_ctrl_delay
+                             else torch.zeros(self.env.num_envs, device=self.device, dtype=torch.long))
+                    self.alg.transition.physics_source = self.action_replay.push(self.alg.transition, delay)
                     # Capture x_t after policy inference but before simulator
                     # integration. The tensor is copied into rollout storage.
                     rollout_initial_state = (
-                        self.env.get_pact_rollout_initial_state().to(self.device)
+                        self.env.get_pact_rollout_initial_state().detach().to(self.device).clone()
                     )
                     if rollout_timer is not None:
                         rollout_timer.stop("policy", policy_start)
@@ -228,6 +242,10 @@ class B1Z1PACTRunner:
                             actions, self.env.cfg.normalization.clip_actions
                         )
                     next_obs, next_privileged, next_history, next_explicit, reward, dones, infos, _ = self.env.step(actions)
+                    self.action_replay.reset(dones)
+                    # B1Z1 has no QP: bounded commanded total torque is nominal.
+                    # Capture the final substep command paired with the next GRF.
+                    self.alg.transition.nominal_torque = self.env.simulator.executed_torques.detach().to(self.device).clone()
                     storage_start = rollout_timer.start("transition_storage") if rollout_timer is not None else None
                     next_obs, next_privileged, next_history, next_explicit, reward, dones = (
                         value.to(self.device) for value in (next_obs, next_privileged, next_history, next_explicit, reward, dones)

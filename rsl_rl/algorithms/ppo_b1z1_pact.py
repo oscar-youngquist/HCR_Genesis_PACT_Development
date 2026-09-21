@@ -180,9 +180,8 @@ class PPO_B1Z1PACT:
             },
         ]
 
-        # PPO updates the complete context pathway. Coupled PACT additionally
-        # owns the privileged decoder here because its predicted force block is
-        # part of the differentiable PINN graph.
+        # Preserve optimizer ownership; the separate physics heads now supply
+        # PINN gradients. Unused basic-decoder parameters receive no PPO gradient.
         ppo_enc_groups = [
             {
                 "params": list(group["params"]),
@@ -259,6 +258,7 @@ class PPO_B1Z1PACT:
 
     def init_storage(self, *args, **kwargs):
         # Forward optional rollout-state dimensions supplied by the runner.
+        kwargs.setdefault("latent_dim", self.actor_critic.context_encoder.latent_mean.out_features)
         self.storage = RolloutStorageB1Z1PACT(*args, device=self.device, **kwargs)
 
     def update_adaptive_entropy_coef(self, performance_metrics):
@@ -292,6 +292,7 @@ class PPO_B1Z1PACT:
         self.transition.critic_observations = critic_obs.detach().clone()
         self.transition.histories = history.detach().clone()
         self.transition.explicit_targets = explicit_labels.detach().clone()
+        self.transition.latent_noise = self.actor_critic.last_context["latent_noise"].detach().clone()
         return actions
 
     def process_env_step(
@@ -489,14 +490,10 @@ class PPO_B1Z1PACT:
         )
         predicted_base = predicted_base / wrench_scale
         predicted_ee = predicted_ee / self.cfg["ee_force_scale"]
-        x, y, z, w = base_quat.unbind(dim=-1)
-        yaw = torch.atan2(
-            2.0 * (w * z + x * y),
-            1.0 - 2.0 * (y.square() + z.square()),
-        )
-        c, s = torch.cos(yaw), torch.sin(yaw)
-
-        def yaw_to_world(vectors):
+        def yaw_to_world(vectors, quat):
+            x, y, z, w = quat.unbind(dim=-1)
+            yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y.square() + z.square()))
+            c, s = torch.cos(yaw), torch.sin(yaw)
             shape = vectors.shape
             vectors = vectors.reshape(vectors.shape[0], -1, 3)
             world = torch.stack((
@@ -506,11 +503,12 @@ class PPO_B1Z1PACT:
             ), dim=-1)
             return world.reshape(shape)
 
-        predicted_grfs = yaw_to_world(predicted_grfs)
-        predicted_ee = yaw_to_world(predicted_ee)
+        # GRF supervision is yaw-local at t+1; disturbance estimates are at t.
+        predicted_grfs = yaw_to_world(predicted_grfs, state[:, 3:7])
+        predicted_ee = yaw_to_world(predicted_ee, base_quat)
         predicted_base = torch.cat((
-            yaw_to_world(predicted_base[:, :3]),
-            yaw_to_world(predicted_base[:, 3:6]),
+            yaw_to_world(predicted_base[:, :3], base_quat),
+            yaw_to_world(predicted_base[:, 3:6], base_quat),
         ), dim=-1)
         if self.cfg["predicted_force_detach"]:
             predicted_grfs, predicted_ee, predicted_base = (
@@ -524,6 +522,24 @@ class PPO_B1Z1PACT:
             torch.lerp(measured_ee, predicted_ee, alpha),
             torch.lerp(measured_base, predicted_base, alpha),
         )
+
+    def _physics_actions(self, batch):
+        """Replay the delayed source's latent/action draws, then apply action clipping."""
+        source = batch["physics_source"]
+        widths = (batch["observations"].shape[-1], batch["histories"].shape[-1],
+                  batch["latent_noise"].shape[-1], batch["actions"].shape[-1], 1)
+        obs, history, latent_noise, action_noise, source_valid = source.split(widths, dim=-1)
+        context = self.actor_critic.decode_context(self.actor_critic.context_encoder(
+            history, latent_noise=latent_noise))
+        # Replay must not replace current-transition FiLM diagnostics.
+        saved = (self.actor_critic.last_film_identity_deviation,
+                 self.actor_critic.last_tracking_error_sq)
+        position, torque = self.actor_critic.actor_forward(obs, context, context)
+        (self.actor_critic.last_film_identity_deviation,
+         self.actor_critic.last_tracking_error_sq) = saved
+        actions = torch.cat((position, torque), dim=-1) + self.actor_critic.std * action_noise
+        limit = self.cfg.get("clip_actions", float("inf"))
+        return actions.clamp(-limit, limit), source_valid
 
     def _pinn_loss(self, mean_actions, context, privileged_force_prediction, state, valid):
         """Evaluate the observed-transition whole-body consistency loss.
@@ -556,7 +572,7 @@ class PPO_B1Z1PACT:
         previous_v = state[:, 51:76]
 
         grfs, ee_force, base_wrench = self._resolve_pinn_forces(
-            privileged_force_prediction, state, base_quat
+            privileged_force_prediction, state, context.get("base_quat_t", base_quat)
         )
 
         # The backend reproduces the simulator's mass/COM randomization before
@@ -572,7 +588,10 @@ class PPO_B1Z1PACT:
         # action_t, while previous_v was cached immediately before action_t.
         acceleration = (v - previous_v) / self.cfg["dt"]
 
-        tau = self._coupled_torque(mean_actions, state)
+        # Controller feedback belongs to the start of this transition, not q_(t+1).
+        controller_state = state.clone()
+        controller_state[:, :51] = context["rollout_initial_state"]
+        tau = self._coupled_torque(mean_actions, controller_state)
 
         # S^T tau inserts zeros for the unactuated free-flyer base coordinates.
         generalized_tau = torch.cat((torch.zeros(tau.shape[0], 6, device=tau.device), tau), dim=-1)
@@ -634,7 +653,21 @@ class PPO_B1Z1PACT:
         )
 
 
-    def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid, iteration):
+    def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid, iteration, nominal_torque):
+        # HardPACT timing: discard reset transitions before decoder arithmetic.
+        rows = valid.reshape(-1).bool()
+        obs_hist_batch, obs_target, labels, nominal_torque = (
+            value[rows] for value in (obs_hist_batch, obs_target, labels, nominal_torque)
+        )
+        valid = valid[rows]
+        if not rows.any():
+            return {key: obs_target.new_zeros(()) for key in (
+                "base_velocity", "ee_position", "base_wrench", "ee_force",
+                "foot_contact", "foot_height", "privileged_force", "privileged_decoder",
+                "grf_decoder", "kl_raw", "kl_reg_loss",
+            )}
+        force_start = self.cfg["privileged_force_start"]
+        recon_start = force_start + self.cfg["privileged_force_dim"]
         # Recompute the auxiliary graph after the actor update. The PPO
         # graph was consumed by PCGrad and sharing it here would either
         # fail on a second backward pass or retain an unnecessarily large
@@ -642,11 +675,11 @@ class PPO_B1Z1PACT:
         aux_context = self.actor_critic.decode_context(
             self.actor_critic.context_encoder(obs_hist_batch, sample=True)
         )
-        # One z-only decoder reconstructs the next non-terrain privileged
-        # state, including normalized GRF, base-wrench, and EE-force values in
-        # the same order used by PACT-Pos pretraining.
-        # The critic's terrain-height tail is intentionally absent here.
+        # Reconstruct only the remaining next-state fields; explicit/physics
+        # supervision belongs to the dedicated heads, and terrain stays critic-only.
         aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
+        grf_prediction = self.actor_critic.predict_grf(aux_context, nominal_torque)
+        grf_loss = F.mse_loss(grf_prediction, obs_target[:, force_start:force_start + 12])
 
         with torch.no_grad():
             base_velo_label = labels[:, :3]
@@ -680,6 +713,8 @@ class PPO_B1Z1PACT:
         )
 
         # VAE recon + KL losses
+        # Explicit state and the dedicated force/GRF blocks are not reconstructed twice.
+        privileged_target = privileged_target[:, recon_start:]
         privileged_error = (aux_privileged_prediction - privileged_target).square() * valid
         aux_privileged_loss = privileged_error.sum() / (
             valid.sum().clamp_min(1.0) * aux_privileged_prediction.shape[-1]
@@ -698,6 +733,7 @@ class PPO_B1Z1PACT:
             aux_explicit
             + self.cfg["privileged_decoder_weight"] * aux_privileged_loss
             + kl_reg_loss
+            + self.cfg.get("grf_decoder_weight", 1.0) * grf_loss
         )
 
         self.auxiliary_optimizer.zero_grad()
@@ -720,7 +756,8 @@ class PPO_B1Z1PACT:
             "ee_force": pred_ee_force_loss,
             "foot_contact": pred_foot_contact_loss,
             "foot_height": pred_foot_height_loss,
-            "privileged_force": self._masked_force_slice_mse(aux_privileged_prediction, obs_target, valid),
+            "privileged_force": grf_loss,
+            "grf_decoder": grf_loss,
             "privileged_decoder": aux_privileged_loss,
             "kl_raw": aux_kl,
             "kl_reg_loss": kl_reg_loss,
@@ -735,7 +772,7 @@ class PPO_B1Z1PACT:
             ), dim=-1).detach(),
             "explicit_target": labels.detach(),
             "privileged_prediction": aux_privileged_prediction.detach(),
-            "privileged_target": obs_target.detach(),
+            "privileged_target": privileged_target.detach(),
             "valid": valid.detach(),
         }
 
@@ -753,7 +790,7 @@ class PPO_B1Z1PACT:
         The actor always uses latent z and the decoder-predicted explicit context.
         """
         self.actor_critic.update_distribution(
-            batch["observations"], batch["histories"], sample_context=False
+            batch["observations"], batch["histories"], latent_noise=batch["latent_noise"]
         )
         actions_log_prob = self.actor_critic.get_actions_log_prob(batch["actions"])
         values = self.actor_critic.evaluate(batch["critic_observations"])
@@ -801,19 +838,20 @@ class PPO_B1Z1PACT:
         )
 
         context = self.actor_critic.last_context
-        privileged_prediction = self.privileged_decoder(context["z"])
-        force_start = self.cfg["privileged_force_start"]
-        force_end = force_start + self.cfg["privileged_force_dim"]
+        context["base_quat_t"] = batch["rollout_initial_state"][:, 3:7]
+        context["rollout_initial_state"] = batch["rollout_initial_state"]
+        grf_prediction = self.actor_critic.predict_grf(context, batch["nominal_torque"])
+        force_prediction = torch.cat((grf_prediction, context["base_wrench"], context["ee_force"]), -1)
         return (
             ppo_loss, surrogate_loss, value_loss, film_identity_loss, kl_mean,
-            self.actor_critic.action_mean, context, privileged_prediction[:, force_start:force_end],
+            self.actor_critic.action_mean, context, force_prediction,
         )
 
     @torch.no_grad()
     def _pre_update_diagnostics(self, batch):
         """Compare the untouched rollout policy with its stored distribution."""
         self.actor_critic.update_distribution(
-            batch["observations"], batch["histories"], sample_context=False
+            batch["observations"], batch["histories"], latent_noise=batch["latent_noise"]
         )
         mu, sigma = self.actor_critic.action_mean, self.actor_critic.action_std
         old_mu, old_sigma = batch["mu"], batch["sigma"]
@@ -859,7 +897,7 @@ class PPO_B1Z1PACT:
             self.pinn_updates += 1
         metrics = {name: 0.0 for name in (
             "value", "surrogate", "base_velo", "ee_position", "base_wrench", "ee_force", "foot_contact", "foot_height",
-            "privileged_force", "privileged_decoder", "pinn",
+            "privileged_force", "privileged_decoder", "grf_decoder", "pinn",
             "pinn_inverse_dynamics", "pinn_rollout",
             "pinn_rollout_base_linear", "pinn_rollout_base_angular",
             "pinn_rollout_leg", "pinn_rollout_arm", "film_identity",
@@ -884,11 +922,11 @@ class PPO_B1Z1PACT:
             ppo_loss, surrogate, value, film_identity, _, mean_actions, context, force_prediction = self._compute_rl_loss(batch)
             
             valid = (~batch["dones"].squeeze(-1)).float().unsqueeze(-1)
-            # Both decoder losses use the next simulator state stored with this
-            # action transition. Multiplying by valid masks reset transitions.
+            # Reliability statistics respect each head's supervision timestamp.
             force_start = self.cfg["privileged_force_start"]
-            force_end = force_start + self.cfg["privileged_force_dim"]
-            force_target = batch["next_privileged"][:, force_start:force_end]
+            # GRF is a successor target; external disturbances estimate state_t.
+            force_target = torch.cat((batch["next_privileged"][:, force_start:force_start + 12],
+                                      batch["explicit_targets"][:, 6:15]), -1)
             batch_force_statistics = _event_conditioned_force_statistics(
                 force_prediction,
                 force_target,
@@ -912,10 +950,15 @@ class PPO_B1Z1PACT:
             # The disabled rollout path performs no ABA call and constructs no
             # forward-dynamics graph. Both physics terms remain one PCGrad
             # objective when enabled.
+            physics_actions, source_valid = (
+                self._physics_actions(batch) if self.pinn_weight > 0.0
+                else (mean_actions, torch.ones_like(valid))
+            )
+            physics_valid = valid * source_valid
             inverse_pinn = (
                 self._pinn_loss(
-                    mean_actions, context, force_prediction,
-                    batch["dynamics_state"], valid,
+                    physics_actions, context, force_prediction,
+                    batch["dynamics_state"], physics_valid,
                 )
                 if self.pinn_weight > 0.0 else ppo_loss.new_zeros(())
             )
@@ -925,8 +968,8 @@ class PPO_B1Z1PACT:
             }
             if self.pinn_weight > 0.0 and self.cfg["use_pinn_rollout_loss"]:
                 rollout_pinn, rollout_blocks = self._rollout_pinn_loss(
-                    mean_actions, force_prediction, batch["dynamics_state"],
-                    batch["rollout_initial_state"], valid,
+                    physics_actions, force_prediction, batch["dynamics_state"],
+                    batch["rollout_initial_state"], physics_valid,
                 )
             else:
                 rollout_pinn = ppo_loss.new_zeros(())
@@ -960,7 +1003,7 @@ class PPO_B1Z1PACT:
             aux = self._compute_vae_loss(
                 obs_hist_batch=batch["histories"],
                 obs_target=batch["next_privileged"], labels=batch["explicit_targets"], valid=valid,
-                iteration=iteration,
+                iteration=iteration, nominal_torque=batch["nominal_torque"],
             )
 
             # Log metrics
@@ -970,6 +1013,7 @@ class PPO_B1Z1PACT:
                               ("foot_contact", aux["foot_contact"]),
                               ("foot_height", aux["foot_height"]),
                               ("privileged_force", aux["privileged_force"]), ("privileged_decoder", aux["privileged_decoder"]),
+                              ("grf_decoder", aux["grf_decoder"]),
                               ("kl_raw", aux["kl_raw"]), ("kl_reg_loss", aux["kl_reg_loss"]),
                               ("pinn", physics_loss),
                               ("pinn_inverse_dynamics", inverse_pinn),
