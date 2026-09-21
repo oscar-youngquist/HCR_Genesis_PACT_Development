@@ -281,6 +281,66 @@ def replay_one(packet, device, change, row=None, kkt_rows=0):
         reference_solution_difference=difference,reference_is_ground_truth=False,**backward)
 
 
+def replay_csv_row(report):
+    """Scalar, physical-unit joint summaries; detailed row arrays stay in JSON.
+
+    All/production-accepted populations are separate. Distribution counts and
+    nonfinite counts are explicit; unavailable values become empty CSV cells.
+    """
+    import math
+    import torch
+    from rsl_rl.algorithms.hard_pact_qp_diagnose import distribution
+    row = {k:v for k,v in report.items() if v is None or isinstance(v,(str,int,float,bool))}
+    def scalar(key, value):
+        if torch.is_tensor(value): value = value.item()
+        row[key] = None if isinstance(value,float) and not math.isfinite(value) else value
+    def stats(prefix, values):
+        for key,value in values.items():
+            if key == "percentiles":
+                for i,label in enumerate(("p50","p95","p99")):
+                    scalar(prefix+"/"+label,None if value is None else value[i])
+            else: scalar(prefix+"/"+key,value)
+    assessment=report.get("assessment",{})
+    joint=assessment.get("joint")
+    row["joint_metrics_available"] = joint is not None
+    if joint is None:
+        row["joint_metrics_unavailable_reason"] = assessment.get("joint_unavailable",report.get("error","not recorded"))
+        return row
+    names=joint["names"]
+    accepted=assessment["production_accepted"].bool()
+    for scope,mask in (("all",torch.ones_like(accepted)),("accepted",accepted)):
+        prefix="joint/"+scope
+        scalar(prefix+"/rows",mask.sum())
+        scalar(prefix+"/empty_intersection_rows",joint["empty"][mask].any(-1).sum())
+        scalar(prefix+"/empty_intersection_coordinates",joint["empty"][mask].sum())
+        hard=assessment.get("original_hard_joint_satisfied")
+        if hard is not None:scalar(prefix+"/original_hard_satisfied_rows",hard[mask].sum())
+        for key,unit_name in (("acceleration","acceleration_rad_s2"),("q_next","q_next_rad"),
+                             ("dq_next","dq_next_rad_s"),("slack_rad_s2","recovery_slack_rad_s2"),
+                             ("conflict_rad_s2","conflict_rad_s2"),("lower","acceleration_lower_rad_s2"),
+                             ("upper","acceleration_upper_rad_s2")):
+            values=joint[key][mask]
+            stats(prefix+"/"+unit_name,distribution(values))
+            for j,name in enumerate(names):
+                stats(prefix+"/"+name+"/"+unit_name,distribution(values[:,j]))
+    # Existing violation statistics already use the correct populations and
+    # finite-coordinate reductions. Do not average minibatch means here.
+    for family,populations in joint["statistics"].items():
+        for scope,values in populations.items():
+            prefix="joint/"+scope+"/violation/"+family
+            stats(prefix,values["aggregate"])
+            for name,value in zip(names,values["per_joint"]): stats(prefix+"/"+name,value)
+    return row
+
+
+def write_replay_csv(path, reports):
+    rows=[replay_csv_row(report) for report in reports]
+    keys=sorted(set().union(*(row.keys() for row in rows)))
+    with path.open("w",newline="") as stream:
+        writer=csv.DictWriter(stream,fieldnames=keys)
+        writer.writeheader();writer.writerows(rows)
+
+
 def replay_run(args):
     import torch
     from scripts.eval_hard_pact_frozen import write_json
@@ -301,11 +361,7 @@ def replay_run(args):
                     result = dict(stage=packet["stage"],phase=packet["phase"],variant=change,row=row,error=repr(error))
                 reports.append(dict(packet=str(path),**result))
     write_json(args.output_dir/"replay.json",reports)
-    # CSV contains scalar summaries; full status arrays remain in JSON.
-    keys = sorted({k for r in reports for k,v in r.items() if v is None or isinstance(v,(str,int,float,bool))})
-    with (args.output_dir/"replay.csv").open("w") as stream:
-        writer=csv.DictWriter(stream,fieldnames=keys,extrasaction="ignore")
-        writer.writeheader();writer.writerows(reports)
+    write_replay_csv(args.output_dir/"replay.csv",reports)
     print(f"{len(reports)} replay cases; {sum('error' in r for r in reports)} errors; {args.output_dir}")
 
 

@@ -60,6 +60,14 @@ start fresh and do not inherit full-batch history. cuPIQP's installed public
 `setup/update/solve/backward` APIs are used through the shared backend; no guessed
 warm-start API is invoked.
 
+CSV now includes `joint/{all|accepted}/...` columns: predicted acceleration,
+next position/velocity, acceleration-envelope bounds/conflicts, recovery slack,
+and original-limit exceedances. Aggregate and named per-joint columns include
+finite/nonfinite counts, mean, max, p50/p95/p99. Row counts, empty intersections,
+and original-hard-joint satisfaction are separate from recovery acceptance.
+Units appear in column names. Empty cells mean unavailable (including v1 limits
+or an empty accepted population), not zero. Detailed row arrays remain in JSON.
+
 Independent checks use original canonical normalized constraints and float64
 arithmetic with a fixed `1e-3` primal tolerance across variants. Raw torque
 violations are Nm. Reference differences are in solver coordinates and only
