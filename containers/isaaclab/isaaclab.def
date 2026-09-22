@@ -1,0 +1,59 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+%labels
+    Description "HCR IsaacLab runtime from lr_lab_cupiqp; bind one training checkout"
+    IsaacSim "5.1.0.0"
+    Architecture "linux/amd64"
+
+%files
+    lr_lab_cupiqp.tar.gz /tmp/lr_lab_cupiqp.tar.gz
+    IsaacLab-source.tar.gz /tmp/IsaacLab-source.tar.gz
+    preflight.py /opt/hcr-container/preflight.py
+
+%post
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends ca-certificates git build-essential \
+        libglib2.0-0 libgl1 libegl1 libglu1-mesa libvulkan1 vulkan-tools \
+        libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxcursor1 libxinerama1 \
+        libsm6 libice6 libnss3 libnspr4 libasound2 libgtk-3-0 libgomp1
+    mkdir -p /opt/env /opt/hcr-container /workspace/repo /runtime /output /home/container
+    tar -xzf /tmp/lr_lab_cupiqp.tar.gz -C /opt/env
+    tar -xzf /tmp/IsaacLab-source.tar.gz -C /opt
+    export PATH=/opt/env/bin:$PATH
+    /opt/env/bin/python /opt/env/bin/conda-unpack
+    # Never bake a workstation checkout into the runtime import path.
+    python -m pip uninstall -y LeggedGym-Ex
+    for pkg in isaaclab isaaclab_assets isaaclab_contrib isaaclab_mimic isaaclab_rl isaaclab_tasks; do
+        python -m pip install --no-deps --no-build-isolation -e /opt/IsaacLab/source/$pkg
+    done
+    python -m pip freeze --all > /opt/hcr-container/pip-freeze.txt
+    # Preserve, rather than conceal, the source environment's known conflicts.
+    python -m pip check > /opt/hcr-container/pip-check.txt 2>&1 || true
+    mkdir -p /opt/env/lib/python3.11/site-packages/isaacsim/kit/cache \
+        /opt/env/lib/python3.11/site-packages/isaacsim/kit/data \
+        /opt/env/lib/python3.11/site-packages/isaacsim/kit/logs
+    rm -f /tmp/lr_lab_cupiqp.tar.gz /tmp/IsaacLab-source.tar.gz
+    rm -rf /var/lib/apt/lists/*
+
+%environment
+    export PATH=/opt/env/bin:$PATH
+    export PYTHONNOUSERSITE=1
+    export PYTHONDONTWRITEBYTECODE=1
+    export PYTHONPATH=/workspace/repo
+    export XDG_CACHE_HOME=/runtime/cache
+    export XDG_CONFIG_HOME=/runtime/config
+    export XDG_DATA_HOME=/runtime/data
+    export MPLCONFIGDIR=/runtime/matplotlib
+    export NUMBA_CACHE_DIR=/runtime/numba
+    export TORCH_EXTENSIONS_DIR=/runtime/torch_extensions
+    export WANDB_DIR=/output
+    export HARD_PACT_SKIP_CONDA_ACTIVATE=1
+
+%test
+    /opt/env/bin/python -c 'import importlib.metadata as m; assert m.version("isaacsim") == "5.1.0.0"; assert m.version("torch") == "2.7.0+cu128"; import isaaclab; assert isaaclab.__file__.startswith("/opt/IsaacLab/")'
+
+%runscript
+    exec /opt/env/bin/python "$@"
