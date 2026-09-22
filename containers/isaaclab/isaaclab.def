@@ -7,12 +7,15 @@ From: ubuntu:22.04
     Architecture "linux/amd64"
 
 %files
-    lr_lab_cupiqp.tar.gz /tmp/lr_lab_cupiqp.tar.gz
-    IsaacLab-source.tar.gz /tmp/IsaacLab-source.tar.gz
+    lr_lab_cupiqp.tar.gz /opt/build-inputs/lr_lab_cupiqp.tar.gz
+    IsaacLab-source.tar.gz /opt/build-inputs/IsaacLab-source.tar.gz
     preflight.py /opt/hcr-container/preflight.py
 
 %post
     set -eu
+    # /tmp can be over-mounted during fakeroot builds; stage inputs under /opt.
+    test -s /opt/build-inputs/lr_lab_cupiqp.tar.gz
+    test -s /opt/build-inputs/IsaacLab-source.tar.gz
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y --no-install-recommends ca-certificates git build-essential \
@@ -20,8 +23,8 @@ From: ubuntu:22.04
         libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxcursor1 libxinerama1 \
         libsm6 libice6 libnss3 libnspr4 libasound2 libgtk-3-0 libgomp1
     mkdir -p /opt/env /opt/hcr-container /workspace/repo /runtime /output /home/container
-    tar -xzf /tmp/lr_lab_cupiqp.tar.gz -C /opt/env
-    tar -xzf /tmp/IsaacLab-source.tar.gz -C /opt
+    tar -xzf /opt/build-inputs/lr_lab_cupiqp.tar.gz -C /opt/env
+    tar -xzf /opt/build-inputs/IsaacLab-source.tar.gz -C /opt
     export PATH=/opt/env/bin:$PATH
     /opt/env/bin/python /opt/env/bin/conda-unpack
     # Never bake a workstation checkout into the runtime import path.
@@ -35,7 +38,7 @@ From: ubuntu:22.04
     mkdir -p /opt/env/lib/python3.11/site-packages/isaacsim/kit/cache \
         /opt/env/lib/python3.11/site-packages/isaacsim/kit/data \
         /opt/env/lib/python3.11/site-packages/isaacsim/kit/logs
-    rm -f /tmp/lr_lab_cupiqp.tar.gz /tmp/IsaacLab-source.tar.gz
+    rm -f /opt/build-inputs/lr_lab_cupiqp.tar.gz /opt/build-inputs/IsaacLab-source.tar.gz
     rm -rf /var/lib/apt/lists/*
 
 %environment
