@@ -7,6 +7,8 @@ import legged_gym.envs  # Establish the repository's task/runner import ordering
 from legged_gym.utils import task_registry
 from legged_gym.envs.b1z1.b1z1_unifp_original.b1z1_unifp_original_config import B1Z1UniFPOriginalCfg
 from legged_gym.envs.b1z1.b1z1_unifp_reject.b1z1_unifp_reject import B1Z1UniFPReject
+from legged_gym.envs.b1z1.b1z1_unifp_reject.b1z1_unifp_reject_config import B1Z1UniFPRejectCfg
+from legged_gym.envs.b1z1.b1z1_unifp_reject.rejection_curriculum import RejectionCurriculum
 from rsl_rl.modules.actor_critic_unifp_original import ActorCriticUniFPOriginal
 from rsl_rl.algorithms.ppo_unifp_original import PPO_UniFPOriginal
 from rsl_rl.runners.unifp_original_runner import OnPolicyRunnerUniFPOriginal
@@ -72,7 +74,10 @@ def test_gradients_and_tiny_update():
 def rejection_env():
     env = B1Z1UniFPReject.__new__(B1Z1UniFPReject)
     env.num_envs, env.device, env.dt = 2, "cpu", .02
-    env.cfg = B1Z1UniFPOriginalCfg()
+    env.cfg = B1Z1UniFPRejectCfg()
+    env._staged_force_curriculum = RejectionCurriculum(env.cfg.commands, "cpu")
+    env._staged_force_curriculum.beta = 1.  # Test fully enabled cancellation.
+    env.explicit_labels_buf = torch.zeros(2,20)
     env.cfg.commands.ee_impedance_force_filter_tau = 0.
     env.cfg.commands.base_impedance_force_filter_tau = 0.
     env.obs_scales = SimpleNamespace(ee_force=.1, base_force=.02)
@@ -120,9 +125,11 @@ def test_single_pass_training_and_inference_callback():
     with torch.no_grad():
         runner.alg.act(h,torch.zeros(2,30),torch.zeros(2,12))
     estimate = env.estimated_ee_force_local.clone()
+    samples = env._staged_force_curriculum.samples.clone()
     runner.get_inference_policy()(h)
     assert len(count) == 2
     assert torch.equal(estimate,env.estimated_ee_force_local)
+    assert torch.equal(samples, env._staged_force_curriculum.samples)
     hook.remove()
 
 
@@ -137,3 +144,57 @@ def test_registration_config_and_separate_labels():
     result = rejection_env().original_adaptation_target(labels)
     assert torch.equal(result, labels[:,[0,1,2,3,4,5,9,10,11,6,7,8]])
     assert labels.shape == (2,20)
+
+
+def test_rejection_curriculum_gate_ramps_and_resume():
+    cfg = B1Z1UniFPRejectCfg().commands
+    cfg.reject_warmup_iterations = 2
+    cfg.reject_compensation_ramp_iterations = 2
+    cfg.reject_external_ramp_iterations = 2
+    cfg.reject_min_active_samples = 2
+    cfg.force_curriculum_gate_patience = 2
+    c = RejectionCurriculum(cfg, "cpu")
+    target = torch.ones(2,12)*10
+    def update(i, prediction=target):
+        c.observe(prediction, target, (1.,1.))
+        c.update(i, 0., 0., 1000.)
+    update(0)
+    update(1)
+    assert c.beta == 0 and c.external_scale(1) == .25
+    update(2)
+    assert c.beta == 0
+    update(3)
+    assert c.beta == .5 and c.external_scale(3) == .25
+    update(4)
+    assert c.beta == 1 and c.external_scale(5) == .25
+    assert c.external_scale(6) == .625 and c.external_scale(7) == 1
+    restored = RejectionCurriculum(cfg, "cpu")
+    restored.load_state_dict(c.state_dict())
+    assert restored.state_dict() == c.state_dict()
+    assert restored.external_scale(6) == c.external_scale(6)
+    # Empty active-force data and poor estimates must never enable cancellation.
+    c = RejectionCurriculum(cfg, "cpu")
+    for i in range(10):
+        update(i, torch.zeros_like(target))
+    assert c.beta == 0
+    c = RejectionCurriculum(cfg, "cpu")
+    for i in range(10):
+        c.update(i, 0.,0.,1000.)
+    assert c.beta == 0
+    c = RejectionCurriculum(cfg, "cpu")
+    for i in range(10):
+        c.observe(target, target, (1.,1.))
+        c.update(i, 0.,1.,1000.)  # Accurate estimates do not override instability.
+    assert c.beta == 0
+
+
+def test_rejection_beta_and_privileged_independence():
+    env = rejection_env()
+    pred = torch.ones(2,12)
+    env.set_impedance_force_estimates(pred)
+    for beta in (0., .5, 1.):
+        env._staged_force_curriculum.beta = beta
+        env.explicit_labels_buf.fill_(999.)
+        env._apply_external_impedance_compensation()
+        assert torch.allclose(env.commands[:,9:12], torch.full((2,3),-10*beta))
+        assert torch.allclose(env.commands[:,12:15], torch.full((2,3),-50*beta))

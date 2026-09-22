@@ -36,6 +36,8 @@ class OnPolicyRunnerUniFPOriginal(OnPolicyRunnerUniFP):
 
     def _publish_estimates(self, prediction):
         if self.env.reject_external_forces:
+            if self.alg.actor_critic.training:
+                self.env.record_force_prediction_quality(prediction)
             self.env.set_impedance_force_estimates(prediction)
 
     def get_inference_policy(self, device=None):
