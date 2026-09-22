@@ -54,6 +54,17 @@ class Simulator(ABC):
         self._grfs_clipped_buf = torch.zeros_like(self._grfs_buf)
         self._grfs_smoothed_buf = torch.zeros_like(self._grfs_buf)
 
+    def _begin_b1z1_bard_interval(self):
+        if getattr(self, "collect_b1z1_bard_interval", False):
+            self.bard_interval_grf = torch.zeros_like(self._grfs_buf)
+
+    def _accumulate_b1z1_bard_grf(self, measured):
+        """Condition each physical sample, without changing the observation EMA."""
+        active = measured[..., 2].abs() > self._grf_deadband
+        value = torch.where(active[..., None], measured, torch.zeros_like(measured))
+        value = value.flatten(1).clamp(self._grf_clip_min, self._grf_clip_max)
+        self.bard_interval_grf.add_(value / self._cfg.control.decimation)
+
     def _update_grf_buffer(self, measured_grfs):
         """Deadband, clip, and EMA-filter measured per-foot force vectors."""
         expected_shape = (self._num_envs, self._grfs_buf.shape[-1] // 3, 3)

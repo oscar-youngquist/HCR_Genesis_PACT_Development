@@ -6,6 +6,7 @@ import os
 import time
 import math
 import statistics
+import warnings
 from collections import deque
 
 import torch
@@ -68,6 +69,8 @@ class B1Z1PACTRunner:
         default_pino_capacity = math.ceil(rollout_samples / algorithm_cfg["num_mini_batches"])
         pino_capacity = algorithm_cfg.get("pino_batch_capacity", 0) or default_pino_capacity
         backend_name = algorithm_cfg.get("dynamics_backend", "pinocchio").lower()
+        self.env.bard_mass_wrench_labels = backend_name == "bard"
+        self.env.simulator.collect_b1z1_bard_interval = backend_name == "bard"
         backend_args = (
             urdf, env.cfg.asset.dof_names, env.cfg.asset.foot_name,
             env.cfg.asset.gripper_name, env.cfg.asset.base_name,
@@ -112,7 +115,7 @@ class B1Z1PACTRunner:
         merged.update({key: policy_cfg[key] for key in (
             "film_identity_loss_weight", "film_identity_error_scale",
             "pinn_loss_weight", "pinn_warmup", "pinn_init_steps", "predicted_force_detach",
-            "use_pinn_rollout_loss", "pinn_rollout_weight",
+            "use_pinn_rollout_loss", "pinn_inverse_weight", "pinn_rollout_weight",
             "pinn_rollout_base_linear_scale",
             "pinn_rollout_base_angular_scale",
             "pinn_rollout_leg_velocity_scale",
@@ -235,6 +238,14 @@ class B1Z1PACTRunner:
                     rollout_initial_state = (
                         self.env.get_pact_rollout_initial_state().detach().to(self.device).clone()
                     )
+                    if self.alg.bard_auxiliary:
+                        self.alg.transition.mass_wrench = self.env.get_mass_wrench_label().detach().to(self.device).clone()
+                        # Deployment-available nominal command, not a future measured torque.
+                        nominal = self.alg._coupled_torque(actions.clamp(
+                            -self.env.cfg.normalization.clip_actions, self.env.cfg.normalization.clip_actions),
+                            self.env.get_pact_dynamics_state().to(self.device))
+                        limit = self.env.simulator.torque_limits.to(self.device) * 1.1
+                        self.alg.transition.nominal_torque = nominal.clamp(-limit, limit).detach().clone()
                     if rollout_timer is not None:
                         rollout_timer.stop("policy", policy_start)
                     if self.enable_additional_diagnostics and hasattr(self.actor_critic, "record_rollout_diagnostics"):
@@ -245,11 +256,28 @@ class B1Z1PACTRunner:
                     self.action_replay.reset(dones)
                     # B1Z1 has no QP: bounded commanded total torque is nominal.
                     # Capture the final substep command paired with the next GRF.
-                    self.alg.transition.nominal_torque = self.env.simulator.executed_torques.detach().to(self.device).clone()
+                    if self.alg.bard_auxiliary:
+                        self.alg.transition.interval_torque = self.env.simulator.interval_executed_torque.detach().to(self.device).clone()
+                        displacement = self.env.simulator.base_pos.to(self.device) - rollout_initial_state[:, :3]
+                        expected = rollout_initial_state[:, 26:29] * self.env.dt
+                        self.alg.transition.physics_invalid = ((displacement - expected).norm(dim=-1) > 0.5).float().unsqueeze(-1)
+                    else:
+                        self.alg.transition.nominal_torque = self.env.simulator.executed_torques.detach().to(self.device).clone()
                     storage_start = rollout_timer.start("transition_storage") if rollout_timer is not None else None
                     next_obs, next_privileged, next_history, next_explicit, reward, dones = (
                         value.to(self.device) for value in (next_obs, next_privileged, next_history, next_explicit, reward, dones)
                     )
+                    dynamics_state = self.env.get_pact_dynamics_state().to(self.device)
+                    next_target = next_privileged[:, -self.env.num_privileged_obs:][
+                        :, :self.env.cfg.env.num_privileged_recon_obs].clone()
+                    if self.alg.bard_auxiliary:
+                        from legged_gym.envs.go2.go2_hard_pact.transition import _world_to_yaw_local
+                        grf = self.env.simulator.bard_interval_grf.to(self.device)
+                        dynamics_state[:, 76:88] = grf
+                        quat = dynamics_state[:, None, 3:7].expand(-1, 4, -1).reshape(-1, 4)
+                        local = _world_to_yaw_local(grf.reshape(-1, 3), quat).reshape(-1, 12)
+                        start = self.env.cfg.env.privileged_force_start
+                        next_target[:, start:start+12] = local * self.env.obs_scales.grf
                     self.alg.process_env_step(
                         # Preserve the complete transition-aligned 180-D packet:
                         # unlike PACT-pos, the active PINN consumes its floating
@@ -257,10 +285,8 @@ class B1Z1PACTRunner:
                         reward, dones, infos,
                         # The final stacked frame is [state, terrain heights].
                         # Store only state as the next-frame decoder target.
-                        next_privileged[:, -self.env.num_privileged_obs:][
-                            :, :self.env.cfg.env.num_privileged_recon_obs
-                        ],
-                        self.env.get_pact_dynamics_state().to(self.device),
+                        next_target,
+                        dynamics_state,
                         rollout_initial_state,
                     )
                     running_reward += reward.view(-1, 1)
@@ -460,6 +486,8 @@ class B1Z1PACTRunner:
             "privileged_decoder_state_dict": self.privileged_decoder.state_dict(),
             "actor_optimizer": self.alg.actor_optimizer.optimizer.state_dict(),
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
+            "decoder_optimizer": self.alg.decoder_optimizer.state_dict(),
+            "optimizer_partition_version": 2,
             "iteration": saved_iteration, "force_ema": self.alg.force_ema,
             "force_gate_active": self.alg.force_gate_active, "force_gate_count": self.alg.force_gate_count,
             "force_metric_emas": self.alg.force_metric_emas,
@@ -477,8 +505,8 @@ class B1Z1PACTRunner:
         self.actor_critic.load_state_dict(checkpoint["model_state_dict"])
         self.privileged_decoder.load_state_dict(checkpoint["privileged_decoder_state_dict"])
         if load_optimizer:
-            self.alg.actor_optimizer.optimizer.load_state_dict(checkpoint["actor_optimizer"])
-            self.alg.auxiliary_optimizer.load_state_dict(checkpoint["auxiliary_optimizer"])
+            from rsl_rl.algorithms.b1z1_bard_pinn import restore_optimizers
+            restore_optimizers(self.alg, checkpoint)
         self.current_learning_iteration = checkpoint.get("iteration", 0)
         if hasattr(self.env, "set_training_iteration"):
             self.env.set_training_iteration(self.current_learning_iteration)

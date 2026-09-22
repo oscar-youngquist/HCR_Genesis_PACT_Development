@@ -338,6 +338,8 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
         self.post_physics_step()
 
     def step(self, actions):
+        self.interval_executed_torque = torch.zeros_like(self._torques)
+        self._begin_b1z1_bard_interval()
         self._render()
         self._last_base_lin_vel.copy_(self._base_lin_vel)
         self._last_base_ang_vel.copy_(self._base_ang_vel)
@@ -352,6 +354,7 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
             limits = self.torque_limits
             self.executed_torques = torch.clamp(torques_cfg, -1.1 * limits, 1.1 * limits)
             self._torques.copy_(self.executed_torques)
+            self.interval_executed_torque.add_(self.executed_torques / self._cfg.control.decimation)
             self._actuation_torques.zero_()
             self._actuation_torques[:, self._dof_indices_tensor] = self.executed_torques
             self._gym.set_dof_actuation_force_tensor(
@@ -361,6 +364,9 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
             self._gym.simulate(self._sim)
             self._gym.fetch_results(self._sim, True)
             self._gym.refresh_dof_state_tensor(self._sim)
+            if getattr(self, "collect_b1z1_bard_interval", False):
+                self._gym.refresh_net_contact_force_tensor(self._sim)
+                self._accumulate_b1z1_bard_grf(self._link_contact_forces[:, self._feet_indices])
 
     def post_physics_step(self):
         super().post_physics_step()

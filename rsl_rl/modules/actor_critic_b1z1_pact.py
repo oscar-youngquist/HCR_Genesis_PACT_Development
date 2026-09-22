@@ -253,8 +253,12 @@ class ActorCriticB1Z1PACT(nn.Module):
         history: torch.Tensor,
         sample_context: bool = True,
         latent_noise=None,
+        detach_context=False,
     ) -> None:
         context = self.decode_context(self.context_encoder(history, sample=sample_context, latent_noise=latent_noise))
+        if detach_context:
+            # PPO cannot train auxiliary modules through actor conditioning.
+            context = {name: value.detach() for name, value in context.items()}
         # Boot masking is intentionally disabled: training and deployment
         # always condition on latent z and every predicted explicit output.
         position, torque = self.actor_forward(obs, context, context)

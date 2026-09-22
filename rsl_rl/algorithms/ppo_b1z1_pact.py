@@ -180,51 +180,9 @@ class PPO_B1Z1PACT:
             },
         ]
 
-        # Preserve optimizer ownership; the separate physics heads now supply
-        # PINN gradients. Unused basic-decoder parameters receive no PPO gradient.
-        ppo_enc_groups = [
-            {
-                "params": list(group["params"]),
-                "weight_decay": group.get("weight_decay", 0.0),
-                "name": f"ppo_{group['name']}",
-            }
-            for group in auxiliary_groups
-        ]
-        auxiliary_enc_groups = [
-            {
-                "params": list(group["params"]),
-                "weight_decay": group.get("weight_decay", 0.0),
-                "name": f"auxiliary_{group['name']}",
-            }
-            for group in auxiliary_groups
-        ]
-
-        self.actor_optimizer = PCGrad(
-            optim.Adam([*actor_groups, *ppo_enc_groups], lr=cfg["learning_rate"]),
-            reduction="sum",
-        )
-        # Clip the same ownership boundary that is stepped by PPO, as UniFP
-        # does, including any PACT decoder participating in the PINN graph.
-        seen_ppo_parameters = set()
-        self.ppo_parameters = []
-        for group in self.actor_optimizer.optimizer.param_groups:
-            for parameter in group["params"]:
-                if id(parameter) not in seen_ppo_parameters:
-                    seen_ppo_parameters.add(id(parameter))
-                    self.ppo_parameters.append(parameter)
-
-        self.auxiliary_optimizer = optim.Adam(
-            [parameter for group in auxiliary_enc_groups for parameter in group["params"]],
-            lr=cfg.get("adaptation_learning_rate", 1.0e-5),
-        )
-
-        seen_enc_parameters = set()
-        self.enc_parameters = []
-        for group in self.auxiliary_optimizer.param_groups:
-            for parameter in group["params"]:
-                if id(parameter) not in seen_enc_parameters:
-                    seen_enc_parameters.add(id(parameter))
-                    self.enc_parameters.append(parameter)
+        # Three disjoint owners in every backend, not a BARD-only override.
+        from .b1z1_bard_pinn import configure_optimizers
+        configure_optimizers(self, actor_groups, auxiliary_groups)
 
         self.kl_controller = KLRateBandController(
             warmup_iters=cfg.get("kl_warmup_iters", 500),
@@ -235,6 +193,8 @@ class PPO_B1Z1PACT:
             augmented_rho=cfg.get("kl_aug_rho", 0.1),
             ema_decay=cfg.get("kl_ema_decay", 0.99),
         )
+        self.bard_auxiliary = cfg.get("dynamics_backend", "pinocchio").lower() == "bard"
+        self.bard_phase_metrics = {}
         self.use_kl_rate_band = bool(cfg.get("use_kl_rate_band", True))
         self.use_cosine_kl_warmup = bool(
             cfg.get("use_cosine_kl_warmup", True)
@@ -653,7 +613,8 @@ class PPO_B1Z1PACT:
         )
 
 
-    def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid, iteration, nominal_torque):
+    def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid, iteration, nominal_torque,
+                          update=False, context_override=None):
         # HardPACT timing: discard reset transitions before decoder arithmetic.
         rows = valid.reshape(-1).bool()
         obs_hist_batch, obs_target, labels, nominal_torque = (
@@ -672,9 +633,12 @@ class PPO_B1Z1PACT:
         # graph was consumed by PCGrad and sharing it here would either
         # fail on a second backward pass or retain an unnecessarily large
         # rollout graph.
-        aux_context = self.actor_critic.decode_context(
-            self.actor_critic.context_encoder(obs_hist_batch, sample=True)
-        )
+        if context_override is None:
+            aux_context = self.actor_critic.decode_context(
+                self.actor_critic.context_encoder(obs_hist_batch, sample=True))
+        else:
+            # All decoder heads are retrained from the same detached latent sample.
+            aux_context = self.actor_critic.decode_context(context_override)
         # Reconstruct only the remaining next-state fields; explicit/physics
         # supervision belongs to the dedicated heads, and terrain stays critic-only.
         aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
@@ -736,20 +700,14 @@ class PPO_B1Z1PACT:
             + self.cfg.get("grf_decoder_weight", 1.0) * grf_loss
         )
 
-        self.auxiliary_optimizer.zero_grad()
-
-        aux.backward()
-
-        torch.nn.utils.clip_grad_norm_(self.enc_parameters, self.max_grad_norm)
-
-        # Match UniFP adaptation training: the auxiliary optimizer steps its
-        # raw reconstruction gradient without a separate clipping pass.
-        self.auxiliary_optimizer.step()
+        if update:
+            raise RuntimeError("Use the shared two-phase auxiliary_step")
 
         # Return unweighted predictions/targets for the reliability gate.  The
         # gate compares raw MSEs, not the task-specific loss weights above, to
         # answer the simple question: does each decoder beat a constant mean?
         return {
+            "loss": aux, "context": aux_context,
             "base_velocity": pred_velo_loss,
             "ee_position": pred_ee_position_loss,
             "base_wrench": pred_base_wrench_loss,
@@ -790,7 +748,7 @@ class PPO_B1Z1PACT:
         The actor always uses latent z and the decoder-predicted explicit context.
         """
         self.actor_critic.update_distribution(
-            batch["observations"], batch["histories"], latent_noise=batch["latent_noise"]
+            batch["observations"], batch["histories"], latent_noise=batch["latent_noise"], detach_context=True
         )
         actions_log_prob = self.actor_critic.get_actions_log_prob(batch["actions"])
         values = self.actor_critic.evaluate(batch["critic_observations"])
@@ -887,13 +845,15 @@ class PPO_B1Z1PACT:
 
 
     def update(self, iteration):
+        self.pinn_metric_sums = {}
         self.actor_critic.train()
         self.privileged_decoder.train()
         # Delay and then ramp the physical constraint. PPO first learns a
         # minimally viable behavior before the residual competes with reward.
         if iteration >= self.cfg["pinn_init_steps"]:
             progress = min(1.0, self.pinn_updates / max(1, self.cfg["pinn_warmup"]))
-            self.pinn_weight = progress * self.cfg["pinn_loss_weight"]
+            # Sign selects projection priority; physics is always minimized.
+            self.pinn_weight = progress * abs(self.cfg["pinn_loss_weight"])
             self.pinn_updates += 1
         metrics = {name: 0.0 for name in (
             "value", "surrogate", "base_velo", "ee_position", "base_wrench", "ee_force", "foot_contact", "foot_height",
@@ -916,6 +876,9 @@ class PPO_B1Z1PACT:
         # Retain the original all-force MSE for pre-gate alpha blending.
         force_overall_statistics = torch.zeros(2, device=self.device)
         diagnostics = {"lr_before_update": self.learning_rate}
+        if self.bard_auxiliary and self.pinn_weight > 0:
+            from .b1z1_bard_pinn import cache_rollout
+            self.bard_mechanics_cache = cache_rollout(self)
         for batch in self.storage.mini_batches(self.mini_batches, self.epochs):
             if updates == 0 and self.enable_additional_diagnostics:
                 diagnostics.update(self._pre_update_diagnostics(batch))
@@ -947,64 +910,18 @@ class PPO_B1Z1PACT:
                 valid.sum() * self.cfg["privileged_force_dim"],
             )).detach()
 
-            # The disabled rollout path performs no ABA call and constructs no
-            # forward-dynamics graph. Both physics terms remain one PCGrad
-            # objective when enabled.
-            physics_actions, source_valid = (
-                self._physics_actions(batch) if self.pinn_weight > 0.0
-                else (mean_actions, torch.ones_like(valid))
-            )
-            physics_valid = valid * source_valid
-            inverse_pinn = (
-                self._pinn_loss(
-                    physics_actions, context, force_prediction,
-                    batch["dynamics_state"], physics_valid,
-                )
-                if self.pinn_weight > 0.0 else ppo_loss.new_zeros(())
-            )
-            rollout_blocks = {
-                name: ppo_loss.new_zeros(())
-                for name in ROLLOUT_VELOCITY_BLOCKS
-            }
-            if self.pinn_weight > 0.0 and self.cfg["use_pinn_rollout_loss"]:
-                rollout_pinn, rollout_blocks = self._rollout_pinn_loss(
-                    physics_actions, force_prediction, batch["dynamics_state"],
-                    batch["rollout_initial_state"], physics_valid,
-                )
-            else:
-                rollout_pinn = ppo_loss.new_zeros(())
-            physics_loss = (
-                inverse_pinn
-                + self.cfg["pinn_rollout_weight"] * rollout_pinn
-            )
-
+            # PPO owns only actor/critic; context is detached during reconstruction.
             self.actor_optimizer.zero_grad()
-
-            # PCGrad resolves conflicts between reward optimization and the
-            # physical-consistency gradient once PINN warmup gives that loss a
-            # nonzero weight. Its projectors require exactly two objectives.
-            if self.pinn_weight <= 0.0:
-                ppo_loss.backward()
-            # elif self.pinn_weight >= self.cfg["pinn_loss_weight"]:
-            #     self.actor_optimizer.pc_backward_ppgrad(
-            #         [ppo_loss, self.pinn_weight * pinn]
-            #     )
-            else:
-                self.actor_optimizer.pc_backward_pinn(
-                    [ppo_loss, self.pinn_weight * physics_loss]
-                )
-
+            ppo_loss.backward()
             nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
             self.actor_optimizer.step()
 
-            # Recompute the auxiliary graph after PCGrad consumes the PPO
-            # graph. The shared optimizer updates encoder and both decoders
-            # exactly once from their combined objective.
-            aux = self._compute_vae_loss(
-                obs_hist_batch=batch["histories"],
-                obs_target=batch["next_privileged"], labels=batch["explicit_targets"], valid=valid,
-                iteration=iteration, nominal_torque=batch["nominal_torque"],
-            )
+            from .b1z1_bard_pinn import auxiliary_step, combined_pinn_loss
+            aux, inverse_pinn, rollout_pinn = auxiliary_step(self, batch, valid, iteration)
+            physics_loss = combined_pinn_loss(inverse_pinn, rollout_pinn, self.cfg)
+            rollout_blocks = {name: ppo_loss.new_zeros(()) for name in ROLLOUT_VELOCITY_BLOCKS}
+            for name, val in self.bard_phase_metrics.items():
+                metrics[name] = metrics.get(name, 0.0) + val.item()
 
             # Log metrics
             for name, val in (("value", value), ("surrogate", surrogate), ("base_velo", aux["base_velocity"]),
@@ -1058,6 +975,7 @@ class PPO_B1Z1PACT:
             )
 
         self.storage.clear()
+        self.bard_mechanics_cache = None
 
         mean_metrics = {key: value / max(1, updates) for key, value in metrics.items()}
         mean_raw_kl = update_duals_from_mean(
@@ -1076,6 +994,20 @@ class PPO_B1Z1PACT:
                 if name not in ("kl_raw", "kl_reg_loss"):
                     mean_metrics[name] = controller_metrics[name].item()
         diagnostics["lr_after_update"] = self.learning_rate
+        # The runner forwards slash-delimited names directly to TensorBoard.
+        if self.pinn_metric_sums:
+            names = list(self.pinn_metric_sums)
+            values = torch.stack([total / max(count, 1)
+                for total, count in self.pinn_metric_sums.values()]).cpu().tolist()
+            diagnostics.update(zip(names, values))
+        diagnostics.update({
+            "PINN/scheduled_weight": self.pinn_weight,
+            "PINN/inverse/component_weight": self.cfg.get("pinn_inverse_weight", 1.0),
+            "PINN/rollout/component_weight": self.cfg["pinn_rollout_weight"],
+            "PINN/rollout/enabled": float(self.cfg["use_pinn_rollout_loss"]),
+            "PINN/combined_loss": mean_metrics["pinn"],
+            "PINN/weighted_combined_loss": self.pinn_weight * mean_metrics["pinn"],
+        })
         # Isaac Gym's Python 3.8 predates the dict-union operator.
         return {
             **mean_metrics,

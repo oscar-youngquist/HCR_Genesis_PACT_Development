@@ -1,6 +1,7 @@
 """Sample replay, decoder detach boundaries and transition-aligned training."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 import pytest
 import torch
 import legged_gym.envs
@@ -49,8 +50,10 @@ def test_sample_replay_and_gradient_boundaries(pos):
     assert any(p.grad is not None for p in model.context_encoder.parameters())
 
 
-@pytest.mark.parametrize("pos", [False, True])
-def test_short_ppo_update_and_auxiliary_targets(pos):
+@pytest.mark.parametrize("pos,bard_active,backend", [
+    (False, False, "bard"), (True, False, "bard"),
+    (False, True, "bard"), (False, -1, "bard"), (False, False, "pinocchio")])
+def test_short_ppo_update_and_auxiliary_targets(pos, bard_active, backend):
     model = make_model(pos)
     config = class_to_dict((B1Z1PACTPosCfgPPO if pos else B1Z1PACTCfgPPO)())
     cfg = {**config["algorithm"], **config["policy"], "num_learning_epochs": 1,
@@ -60,8 +63,21 @@ def test_short_ppo_update_and_auxiliary_targets(pos):
            "grf_scale": .001, "ee_force_scale": .01,
            "base_velocity_scale": [1., 1., 1.], "base_wrench_scale": [1.] * 6}
     decoder = B1Z1PACTDecoder(8, 188, hidden=[16])
+    cfg["dynamics_backend"] = backend
     alg = (PPO_B1Z1PACTPos(model, decoder, cfg, "cpu") if pos else
            PPO_B1Z1PACT(model, decoder, SimpleNamespace(), cfg, "cpu"))
+    if bard_active:
+        def evaluate(*args):
+            n = len(args[0])
+            return SimpleNamespace(mass_matrix=torch.eye(25).repeat(n, 1, 1),
+                bias=torch.zeros(n, 25), foot_jacobians=torch.ones(n, 4, 6, 25),
+                ee_jacobian=torch.ones(n, 6, 25), base_jacobian=torch.ones(n, 6, 25))
+        alg.dynamics_backend = SimpleNamespace(evaluate=evaluate, batch_capacity=3)
+        alg.cfg.update(pinn_init_steps=0, pinn_warmup=1, pinn_loss_weight=.1 * bard_active, use_pinn_rollout_loss=True)
+        alg.pinn_updates = 1
+        projection = "pc_backward_ppgrad" if bard_active < 0 else "pc_backward_pinn"
+        for optimizer in (alg.encoder_pcgrad, alg.decoder_pcgrad):
+            setattr(optimizer, projection, Mock(wraps=getattr(optimizer, projection)))
     alg.init_storage(4, 2, 81, 40, 162, 34, 23, 232, 76 if pos else 180,
                      policy_distribution_dim=17 if pos else 34,
                      rollout_state_dim=0 if pos else 51)
@@ -82,10 +98,38 @@ def test_short_ppo_update_and_auxiliary_targets(pos):
             initial[:, 6] = 1.
             alg.process_env_step(torch.randn(4), torch.zeros(4, dtype=torch.bool), {}, torch.randn(4, 232), state, initial)
     alg.compute_returns(torch.randn(4, 40))
+    # PPO backward has no path into context or decoder parameters.
+    batch = next(alg.storage.mini_batches(1, 1))
+    alg._compute_rl_loss(batch)[0].backward()
+    assert all(p.grad is None for p in alg.enc_parameters + alg.decoder_parameters)
+    alg.actor_optimizer.zero_grad()
+    owners = [set(map(id, parameters)) for parameters in
+              (alg.ppo_parameters, alg.enc_parameters, alg.decoder_parameters)]
+    assert not (owners[0] & owners[1] or owners[0] & owners[2] or owners[1] & owners[2])
+    assert set(map(id, model.context_encoder.parameters())) == owners[1]
     metrics = alg.update(0)
     assert metrics["pre_update_mu_rms"] < 1e-6
     assert metrics["pre_update_logprob_rms"] < 1e-5
     assert metrics["grf_decoder"] >= 0
+    if bard_active:
+        assert alg.pinn_weight == .1
+        for optimizer in (alg.encoder_pcgrad, alg.decoder_pcgrad):
+            getattr(optimizer, projection).assert_called_once()
+        assert metrics["pinn_encoder_inverse"] > 0
+        assert metrics["pinn_decoder_rollout"] > 0
+        for phase in ("", "encoder/", "decoder/"):
+            for name in ("inverse/loss_raw", "rollout/loss_raw",
+                         "inverse/arm_gripper_mae_Nm", "rollout/base_linear_mae_mps"):
+                assert metrics[f"PINN/{phase}{name}"] >= 0
+            for component in ("inverse", "rollout"):
+                prefix = f"PINN/{phase}{component}"
+                raw = metrics[f"{prefix}/loss_unscaled"]
+                assert raw == metrics[f"{prefix}/loss_raw"]
+                weighted = raw * alg.cfg.get(f"pinn_{component}_weight", 1.0)
+                assert metrics[f"{prefix}/loss_component_weighted"] == pytest.approx(weighted)
+                assert metrics[f"{prefix}/loss_scaled"] == pytest.approx(alg.pinn_weight * weighted)
+        assert metrics["PINN/weighted_combined_loss"] == pytest.approx(
+            alg.pinn_weight * metrics["PINN/combined_loss"])
     assert all(torch.isfinite(p).all() for p in model.parameters())
     # Invalid/reset targets are excluded before NaN-bearing decoder arithmetic.
     empty = alg._compute_vae_loss(history, torch.full((4, 232), float("nan")),

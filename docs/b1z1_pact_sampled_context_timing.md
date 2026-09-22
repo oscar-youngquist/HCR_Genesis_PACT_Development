@@ -1,5 +1,10 @@
 # B1Z1 PACT sampled context and timing
 
+For the newer BARD-only analytic PINNs, disjoint update phases, interval torque/GRF
+targets and mass-wrench labels, see [BARD training](b1z1_bard_hardpact_losses.md).
+Those details supersede the final-substep torque and actor-PINN descriptions below
+for BARD; the legacy Pinocchio path is unchanged.
+
 Both PACT variants sample `z = mean + exp(0.5 * logvar) * epsilon`.
 The actor and all decoder branches share that sample within a forward pass.
 PPO stores epsilon and reuses it during distribution reconstruction, rather

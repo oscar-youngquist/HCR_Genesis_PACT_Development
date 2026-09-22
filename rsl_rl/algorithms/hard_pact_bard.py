@@ -103,6 +103,7 @@ def differentiable_bard_rollout_loss(
     *, context, control_torque, interval_grf_world, applied_wrench_world,
     control_dt, push_event_mask, reset_mask, timeout_mask, teleport_mask,
     increment_rate_scales=BARD_ROLLOUT_INCREMENT_RATE_SCALES,
+    additional_generalized_force=None,
 ):
     r"""Integrate one differentiable fixed-mechanics step and score velocity.
 
@@ -188,6 +189,9 @@ def differentiable_bard_rollout_loss(
         control_torque, context.foot_jacobians.detach(), interval_grf_world,
         context.base_jacobian.detach(), applied_wrench_world,
     )
+    # Manipulators add J_EE^T F_EE without changing the quadruped objective.
+    if additional_generalized_force is not None:
+        generalized_force = generalized_force + additional_generalized_force
     # M_eff and b are detached cached mechanics. Only g is differentiable at
     # this boundary; context.rnea(0) already contributed passive forces to b.
     acceleration = context.forward_dynamics(generalized_force)
@@ -220,7 +224,7 @@ def differentiable_bard_rollout_loss(
     objective_blocks = {
         "base_linear": slice(0, 3),
         "base_angular": slice(3, 6),
-        "joints": slice(6, 18),
+        "joints": slice(6, predicted_velocity.shape[-1]),
     }
     block_scores = {}
     normalized_residual_blocks = []
@@ -253,7 +257,7 @@ def differentiable_bard_rollout_loss(
     # old meaning. Normalized MSE now uses the new dt-scaled block envelopes;
     # the optimized relative-RMS value is available as the aggregate loss.
     normalized_square = torch.cat(normalized_residual_blocks, dim=-1).square()
-    metric_blocks = {**objective_blocks, "all": slice(0, 18)}
+    metric_blocks = {**objective_blocks, "all": slice(0, predicted_velocity.shape[-1])}
     metrics = {}
     for name, block in metric_blocks.items():
         metrics[f"rollout_velocity/{name}_mae_physical"] = (
@@ -284,6 +288,7 @@ def corrected_bard_inverse_dynamics_loss(
     reset_mask,
     timeout_mask,
     teleport_mask,
+    additional_generalized_force=None,
 ):
     r"""Form and reduce the corrected inverse-dynamics residual.
 
@@ -360,6 +365,8 @@ def corrected_bard_inverse_dynamics_loss(
     wrench = torch.einsum("bkn,bk->bn", base_jacobian, applied_wrench)
     # r_ID = RNEA(q_t,v_t,v̇_obs;θ_rand) - τ_a - τ_f - τ_W.
     residual = required - actuation - contact - wrench
+    if additional_generalized_force is not None:
+        residual = residual - additional_generalized_force
     valid = physics_valid_mask(
         push_event_mask, reset_mask, timeout_mask, teleport_mask
     ).reshape(-1)
@@ -388,8 +395,8 @@ def corrected_bard_inverse_dynamics_loss(
     blocks = {
         "base_linear": slice(0, 3),
         "base_angular": slice(3, 6),
-        "joints": slice(6, 18),
-        "all": slice(0, 18),
+        "joints": slice(6, required.shape[-1]),
+        "all": slice(0, required.shape[-1]),
     }
     metrics = {}
     for name, block in blocks.items():

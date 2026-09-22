@@ -26,6 +26,8 @@ class GenesisSimulatorB1Z1PACT(Simulator):
     
     #----- Public methods -----#
     def step(self, actions):
+        self.interval_executed_torque = torch.zeros_like(self._torques)
+        self._begin_b1z1_bard_interval()
         self._last_base_lin_vel[:] = self._base_lin_vel[:]
         self._last_base_ang_vel[:] = self._base_ang_vel[:]
         self._last_feet_vel[:] = self._feet_vel[:]
@@ -38,12 +40,15 @@ class GenesisSimulatorB1Z1PACT(Simulator):
 
         for _ in range(self._cfg.control.decimation):
             self._torques = self._compute_torques(actions)
+            self.interval_executed_torque.add_(self._torques / self._cfg.control.decimation)
             
             # return torch.clip(torques, -1.1*self._torque_limits, 1.1*self._torque_limits)
             self._robot.control_dofs_force(self._torques, self._dof_indices)
             
             self._apply_external_forces()
             self._scene.step()
+            if getattr(self, "collect_b1z1_bard_interval", False):
+                self._accumulate_b1z1_bard_grf(self._robot.get_links_net_contact_force()[:, self._feet_indices])
             
             self._dof_pos[:] = self._robot.get_dofs_position(
                 self._dof_indices)

@@ -360,6 +360,8 @@ class B1Z1PACTPosRunner:
             "privileged_decoder_state_dict": self.privileged_decoder.state_dict(),
             "actor_optimizer": self.alg.actor_optimizer.optimizer.state_dict(),
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
+            "decoder_optimizer": self.alg.decoder_optimizer.state_dict(),
+            "optimizer_partition_version": 2,
             "iteration": saved_iteration,
             "entropy_coef": self.alg.current_entropy_coef,
             "kl_controller_state": self.alg.kl_controller.state_dict(),
@@ -374,8 +376,8 @@ class B1Z1PACTPosRunner:
         self.actor_critic.load_state_dict(checkpoint["model_state_dict"])
         self.privileged_decoder.load_state_dict(checkpoint["privileged_decoder_state_dict"])
         if load_optimizer:
-            self.alg.actor_optimizer.optimizer.load_state_dict(checkpoint["actor_optimizer"])
-            self.alg.auxiliary_optimizer.load_state_dict(checkpoint["auxiliary_optimizer"])
+            from rsl_rl.algorithms.b1z1_bard_pinn import restore_optimizers
+            restore_optimizers(self.alg, checkpoint)
         self.current_learning_iteration = checkpoint.get("iteration", 0)
         if hasattr(self.env, "set_training_iteration"):
             self.env.set_training_iteration(self.current_learning_iteration)

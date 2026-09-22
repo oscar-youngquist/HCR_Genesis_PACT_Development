@@ -483,6 +483,8 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self.post_physics_step()
 
     def step(self, actions):
+        self.interval_executed_torque = torch.zeros_like(self._torques)
+        self._begin_b1z1_bard_interval()
         self._last_base_lin_vel.copy_(self._base_lin_vel)
         self._last_base_ang_vel.copy_(self._base_ang_vel)
         self._last_base_world_lin_vel.copy_(self._base_world_lin_vel)
@@ -498,11 +500,14 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
             torque = self._compute_torques(actions)
             self.executed_torques = torch.clamp(torque, -1.1 * self.torque_limits, 1.1 * self.torque_limits)
             self._torques.copy_(self.executed_torques)
+            self.interval_executed_torque.add_(self.executed_torques / self._cfg.control.decimation)
             self._robot.set_joint_effort_target(self.executed_torques, joint_ids=self._dof_indices)
             self._robot.write_data_to_sim()
             self._sim.step(render=False)
             self._robot.update(self._sim_params["dt"])
             self._contact_sensors.update(self._sim_params["dt"])
+            if getattr(self, "collect_b1z1_bard_interval", False):
+                self._accumulate_b1z1_bard_grf(self._sensor_foot_forces_world())
             # Sensor order is independent of articulation order. Read with
             # sensor indices exactly once, preserving configured FR/FL/RR/RL.
             if self._use_substep_grf_filtering:

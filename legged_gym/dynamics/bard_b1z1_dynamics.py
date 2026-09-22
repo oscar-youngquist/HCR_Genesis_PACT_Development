@@ -79,7 +79,6 @@ class BardB1Z1DynamicsBackend(WholeBodyDynamicsBackend):
                 f"Expected floating B1Z1 BARD dimensions nq=26,nv=25; got "
                 f"nq={self.model.nq},nv={self.model.nv}"
             )
-        self.data = bard.create_data(self.model, max_batch_size=self.batch_capacity)
 
         genesis_names = list(genesis_dof_names)
         bard_names = list(self.model.get_joint_names())
@@ -119,6 +118,9 @@ class BardB1Z1DynamicsBackend(WholeBodyDynamicsBackend):
         )
 
         self.model.to(dtype=dtype, device=self.device)
+        # Data inherits model dtype/device; allocating before model.to leaves
+        # stale float64/CPU workspaces in the installed BARD implementation.
+        self.data = bard.create_data(self.model, max_batch_size=self.batch_capacity)
         # BARD consumes URDF order; public tensors remain in simulator order.
         self._genesis_to_bard_joints = torch.tensor(
             [genesis_names.index(name) for name in bard_names],

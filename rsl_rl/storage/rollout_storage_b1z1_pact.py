@@ -27,6 +27,9 @@ class RolloutStorageB1Z1PACT:
             self.latent_noise = None
             self.nominal_torque = None
             self.physics_source = None
+            self.interval_torque = None
+            self.mass_wrench = None
+            self.physics_invalid = None
 
         def clear(self):
             self.__init__()
@@ -46,6 +49,7 @@ class RolloutStorageB1Z1PACT:
         self.actions = zeros(action_dim)
         # Replay the same reparameterization noise for PPO likelihood ratios.
         self.latent_noise, self.nominal_torque = zeros(latent_dim), zeros(19)
+        self.interval_torque, self.mass_wrench, self.physics_invalid = zeros(19), zeros(6), zeros(1)
         self.mu, self.sigma = zeros(distribution_dim), zeros(distribution_dim)
         self.values, self.rewards, self.returns, self.advantages = zeros(1), zeros(1), zeros(1), zeros(1)
         self.log_probs, self.dones = zeros(1), torch.zeros(steps, num_envs, 1, dtype=torch.bool, device=device)
@@ -90,6 +94,10 @@ class RolloutStorageB1Z1PACT:
                     (transition.actions - transition.mu) / transition.sigma.clamp_min(1e-8),
                     torch.ones_like(transition.mu[:, :1])), dim=-1)
             self.physics_source[self.step].copy_(source)
+        for name in ("interval_torque", "mass_wrench", "physics_invalid"):
+            value = getattr(transition, name)
+            if value is not None:
+                getattr(self, name)[self.step].copy_(value)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1).bool())
         self.step += 1
@@ -121,7 +129,7 @@ class RolloutStorageB1Z1PACT:
         flat = {name: getattr(self, name).flatten(0, 1) for name in (
             "observations", "critic_observations", "histories", "actions", "mu", "sigma", "values", "returns", "advantages",
             "log_probs", "dones", "explicit_targets", "latent_noise", "nominal_torque",
-            "next_privileged", "dynamics_state",
+            "next_privileged", "dynamics_state", "interval_torque", "mass_wrench", "physics_invalid",
         )}
         if self.rollout_initial_state is not None:
             flat["rollout_initial_state"] = self.rollout_initial_state.flatten(0, 1)
@@ -131,7 +139,7 @@ class RolloutStorageB1Z1PACT:
                 start = mini_batch * batch_size
                 end = (mini_batch + 1) * batch_size
                 idx = indices[start:end]
-                yield {name: value[idx] for name, value in flat.items()}
+                yield {**{name: value[idx] for name, value in flat.items()}, "indices": idx}
 
     def clear(self):
         self.step = 0

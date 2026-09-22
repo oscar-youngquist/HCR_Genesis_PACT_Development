@@ -56,55 +56,9 @@ class PPO_B1Z1PACTPos:
             },
         ]
 
-        # The encoder receives PPO and representation-learning gradients;
-        # reconstruction also owns
-        # both decoder heads through the shared auxiliary optimizer below.
-        ppo_enc_groups = [
-            {
-                "params": list(group["params"]),
-                "weight_decay": group.get("weight_decay", 0.0),
-                "name": f"ppo_{group['name']}",
-            }
-            for group in context_groups
-        ]
-        auxiliary_enc_groups = [
-            {
-                "params": list(group["params"]),
-                "weight_decay": group.get("weight_decay", 0.0),
-                "name": f"auxiliary_{group['name']}",
-            }
-            for group in auxiliary_groups
-        ]
-
-        self.actor_optimizer = PCGrad(optim.Adam([*actor_groups,*ppo_enc_groups], lr=cfg["learning_rate"]), reduction="sum")
-        # Clip the same ownership boundary that is stepped by PPO, as UniFP
-        # does, including all PACT-position PPO parameter groups.
-        seen_ppo_parameters = set()
-        self.ppo_parameters = []
-        for group in self.actor_optimizer.optimizer.param_groups:
-            for parameter in group["params"]:
-                if id(parameter) not in seen_ppo_parameters:
-                    seen_ppo_parameters.add(id(parameter))
-                    self.ppo_parameters.append(parameter)
-
-        # # # We want to reduce the LR of the critic
-        # for param_group in self.actor_optimizer.optimizer.param_groups:
-        #     # specifically modifies the learning rate of the crtic specific parameters
-        #     if "name" in param_group.keys():
-        #         if "critic" in param_group["name"]:
-        #             param_group['lr'] = (cfg["learning_rate"] / 3.0)
-        self.auxiliary_optimizer = optim.Adam(
-            [parameter for group in auxiliary_enc_groups for parameter in group["params"]],
-            lr=cfg.get("adaptation_learning_rate", 1.0e-5),
-        )
-
-        seen_enc_parameters = set()
-        self.enc_parameters = []
-        for group in self.auxiliary_optimizer.param_groups:
-            for parameter in group["params"]:
-                if id(parameter) not in seen_enc_parameters:
-                    seen_enc_parameters.add(id(parameter))
-                    self.enc_parameters.append(parameter)
+        # Three disjoint owners in every backend, not a BARD-only override.
+        from .b1z1_bard_pinn import configure_optimizers
+        configure_optimizers(self, actor_groups, auxiliary_groups)
 
 
         self.kl_controller = KLRateBandController(
@@ -251,7 +205,8 @@ class PPO_B1Z1PACTPos:
     def compute_returns(self, critic_obs):
         self.storage.compute_returns(self.actor_critic.evaluate(critic_obs).detach(), self.gamma, self.lam)
 
-    def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid, iteration, nominal_torque):
+    def _compute_vae_loss(self, obs_hist_batch, obs_target, labels, valid, iteration, nominal_torque,
+                          update=False, context_override=None):
         # HardPACT timing: discard reset transitions before decoder arithmetic.
         rows = valid.reshape(-1).bool()
         obs_hist_batch, obs_target, labels, nominal_torque = (
@@ -272,7 +227,7 @@ class PPO_B1Z1PACTPos:
         # rollout graph.
         aux_context = self.actor_critic.decode_context(
             self.actor_critic.context_encoder(obs_hist_batch, sample=True)
-        )
+            if context_override is None else context_override)
         # The z-only next-frame decoder excludes dedicated explicit/physics targets.
         aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
         grf_prediction = self.actor_critic.predict_grf(aux_context, nominal_torque)
@@ -339,21 +294,14 @@ class PPO_B1Z1PACTPos:
             + kl_reg_loss
             + self.cfg.get("grf_decoder_weight", 1.0) * grf_loss
         )
-        self.auxiliary_optimizer.zero_grad()
-
-        aux.backward()
-
-        torch.nn.utils.clip_grad_norm_(self.enc_parameters, self.max_grad_norm)
-
-
-        # Match UniFP adaptation training: the auxiliary optimizer steps its
-        # raw reconstruction gradient without a separate clipping pass.
-        self.auxiliary_optimizer.step()
+        if update:
+            raise RuntimeError("Use the shared two-phase auxiliary_step")
 
         # Return unweighted predictions/targets for the reliability gate.  The
         # gate compares raw MSEs, not the task-specific loss weights above, to
         # answer the simple question: does each decoder beat a constant mean?
         return {
+            "loss": aux, "context": aux_context,
             "base_velocity": pred_velo_loss,
             "ee_position": pred_ee_position_loss,
             "base_wrench": pred_base_wrench_loss,
@@ -394,7 +342,7 @@ class PPO_B1Z1PACTPos:
         The deterministic predicted explicit context is used for both actor and FiLM.
         """
         self.actor_critic.update_distribution(
-            batch["observations"], batch["histories"], latent_noise=batch["latent_noise"]
+            batch["observations"], batch["histories"], latent_noise=batch["latent_noise"], detach_context=True
         )
         position_actions = batch["actions"][:, :self.actor_critic.num_actions]
         actions_log_prob = self.actor_critic.get_actions_log_prob(position_actions)
@@ -552,14 +500,9 @@ class PPO_B1Z1PACTPos:
             nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
             self.actor_optimizer.step()
 
-            # Recompute the auxiliary graph after PCGrad consumes the PPO
-            # graph. The shared optimizer updates encoder and both decoders
-            # exactly once from their combined objective.
-            aux = self._compute_vae_loss(
-                obs_hist_batch=batch["histories"],
-                obs_target=batch["next_privileged"], labels=batch["explicit_targets"], valid=valid,
-                iteration=iteration, nominal_torque=batch["nominal_torque"],
-            )
+            # Train encoder and decoder owners in separate PCGrad phases.
+            from .b1z1_bard_pinn import auxiliary_step
+            aux, _, _ = auxiliary_step(self, batch, valid, iteration)
 
             # Log metrics
             for name, val in (("value", value), ("surrogate", surrogate), ("base_velo", aux["base_velocity"]),
