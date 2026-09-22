@@ -38,8 +38,15 @@ class B1Z1PhysicsDecoders(nn.Module):
 
 
 def decode_context(model, context):
-    raw = model.explicit_decoder(context["z"])
-    explicit = torch.cat((raw[:, :6], raw[:, 6:10].sigmoid(), raw[:, 10:14]), -1)
+    if "explicit_condition" in context:
+        # Decoder phase reuses detached encoder outputs, not a second explicit graph.
+        raw = torch.cat((context["base_velocity"], context["ee_position"],
+                         context["foot_contact_logits"], context["foot_height"]), -1)
+        explicit = context["explicit_condition"]
+    else:
+        raw = model.explicit_decoder(context["features"])
+        contact = 0.01 + 0.98 * raw[:, 6:10].sigmoid()
+        explicit = torch.cat((raw[:, :6], contact, raw[:, 10:14]), -1)
     forces = model.physics_decoder.predict_force(context["z"], explicit)
     # Preserve the environment/label contract; forces now have their own head.
     return {**context, "explicit_condition": explicit,

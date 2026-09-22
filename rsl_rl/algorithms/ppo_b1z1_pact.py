@@ -641,11 +641,13 @@ class PPO_B1Z1PACT:
             aux_context = self.actor_critic.decode_context(
                 self.actor_critic.context_encoder(obs_hist_batch, sample=True))
         else:
-            # All decoder heads are retrained from the same detached latent sample.
+            # Physics/reconstruction heads reuse detached latent and explicit values.
             aux_context = self.actor_critic.decode_context(context_override)
         # Reconstruct only the remaining next-state fields; explicit/physics
         # supervision belongs to the dedicated heads, and terrain stays critic-only.
-        aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
+        # Explicit reconstruction gradients reach the deterministic estimator branch.
+        aux_privileged_prediction = self.privileged_decoder(torch.cat(
+            (aux_context["z"], aux_context["explicit_condition"]), dim=-1))
         grf_prediction = self.actor_critic.predict_grf(aux_context, nominal_torque)
         grf_loss = F.mse_loss(grf_prediction, obs_target[:, force_start:force_start + 12])
 

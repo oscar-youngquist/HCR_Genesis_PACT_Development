@@ -177,7 +177,7 @@ def test_enabled_ppo_update_and_snapshot_alignment():
     fixed = template.actor_physics_cache
     backend = SimpleNamespace(batch_capacity=3, ee_position=template.dynamics_backend.ee_position,
         evaluate=lambda *args: SimpleNamespace(**{k: v[:len(args[0])] for k, v in vars(fixed).items()}))
-    a = PPO_B1Z1PACT(template.actor_critic, B1Z1PACTDecoder(8, 188, hidden=[16]), backend, cfg, "cpu")
+    a = PPO_B1Z1PACT(template.actor_critic, B1Z1PACTDecoder(8 + 14, 188, hidden=[16]), backend, cfg, "cpu")
     a.pinn_updates = 1  # Shared half-warmup state, as restored from a checkpoint.
     a.init_storage(3, 2, 81, 40, 162, 34, 23, 232, 180, rollout_state_dim=51)
     for step in range(2):

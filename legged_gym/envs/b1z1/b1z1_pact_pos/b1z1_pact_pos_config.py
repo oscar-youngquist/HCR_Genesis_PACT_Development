@@ -826,7 +826,7 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         max_noise_std = 1.1
 
         cenet_enc_layers = [512, 256, 128]
-        explicit_decoder_layers = [128, 64]
+        explicit_decoder_layers = [128, 128]  # HardPACT deterministic estimator widths.
         force_decoder_layers = [128, 128]
         grf_decoder_layers = [128, 128]
         grf_torque_scale = 100.0  # Divide detached physical Nm before GRF conditioning.
@@ -866,7 +866,7 @@ class B1Z1PACTPosCfgPPO(LeggedRobotCfgPPO):
         kl_dual_lr = 1.0e-3
         kl_aug_rho = 0.1
         kl_ema_decay = 0.99
-        adaptation_learning_rate = 1.0e-5
+        adaptation_learning_rate = 2.0e-4  # Match HardPACT auxiliary optimizers.
 
         torque_clone_target_scale = 0.1
         torque_clone_loss_weight = 1.0

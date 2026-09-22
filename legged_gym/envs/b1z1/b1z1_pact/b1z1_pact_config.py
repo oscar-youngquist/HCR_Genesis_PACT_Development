@@ -349,17 +349,17 @@ class B1Z1PACTCfg(LeggedRobotCfg):
 
         # Shared B1Z1 schedule. PACT has no force-command observation channel,
         # but retains the common command stage before disturbances are enabled.
-        force_curriculum_command_start_iteration = 10000                                 # Iteration starting the shared command-force stage.
-        force_curriculum_command_ramp_iterations = 10000                                 # Command-force ramp duration [PPO iterations].
-        force_curriculum_gate_start_iteration = 20000                                   # Earliest iteration for the external-force performance gate.
-        force_curriculum_external_ramp_iterations = 10000                                # External-force ramp duration after activation [iterations].
+        force_curriculum_command_start_iteration = 0                                    # Iteration starting the shared command-force stage.
+        force_curriculum_command_ramp_iterations = 0                                    # Command-force ramp duration [PPO iterations].
+        force_curriculum_gate_start_iteration = 8000                                    # Earliest iteration for the external-force performance gate.
+        force_curriculum_external_ramp_iterations = 8000                                # External-force ramp duration after activation [iterations].
         force_curriculum_ee_l1_threshold = 0.25                                         # Maximum EE tracking error for force-stage advancement.
         force_curriculum_roll_termination_threshold = 0.05                              # Maximum roll-termination rate for advancement.
         force_curriculum_episode_length_threshold = 950.0                               # Minimum episode length for advancement [control steps].
         force_curriculum_gate_patience = 400                                            # Consecutive qualifying updates before advancement.
         force_curriculum_metric_ema_alpha = 0.05                                        # New-sample weight for force-curriculum metrics.
         force_curriculum_use_latest_start_fallback = True                               # Allow time-based activation if the performance gate stalls.
-        force_curriculum_latest_start_iteration = 20000                                 # Latest allowed external-force start iteration.
+        force_curriculum_latest_start_iteration = 10000                                 # Latest allowed external-force start iteration.
 
         push_gripper_stators = True                                                     # Enable the EE disturbance-event scheduler.
         apply_ee_external_forces = True                                                 # Actually apply scheduled EE forces.
@@ -844,7 +844,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
 
         # Match UniFP's history VAE and latent-only explicit estimator sizes.
         cenet_enc_layers = [512, 256, 128]                                              # History encoder hidden-layer widths.
-        explicit_decoder_layers = [128, 64]                                             # Explicit-state decoder hidden-layer widths.
+        explicit_decoder_layers = [128, 128]                                            # Deterministic history-feature estimator, matching HardPACT.
         force_decoder_layers = [128, 128]                                               # Torso-wrench/EE-force decoder hidden-layer widths.
         grf_decoder_layers = [128, 128]                                                 # Torque-conditioned GRF decoder hidden-layer widths.
         grf_torque_scale = 100.0                                                        # Divide detached physical Nm before GRF conditioning.
@@ -890,7 +890,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         kl_dual_lr = 1.0e-3                                                             # Projected dual-variable step size per PPO update.
         kl_aug_rho = 0.1                                                                # Strength of squared KL-band violations.
         kl_ema_decay = 0.99                                                             # Previous-value weight in the KL-rate EMA.
-        adaptation_learning_rate = 1.0e-5                                               # Auxiliary optimizer learning rate.
+        adaptation_learning_rate = 2.0e-4                                               # HardPACT encoder/decoder learning rate.
 
         pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign: + PINN / - PPGrad; 0 disables.
         pinn_warmup = 400                                                               # Ramp duration after PINN activation [PPO updates].
@@ -940,7 +940,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
     class algorithm:
         # Actor-facing task prediction; independent of representation-PINN weights.
         actor_phys_enabled = True                         # Opt in only for coupled PACT/BARD.
-        actor_phys_coef = 0.01                              # Overall actor auxiliary coefficient.
+        actor_phys_coef = 0.1                              # Overall actor auxiliary coefficient.
         actor_phys_vel_weight = 1.0                         # Reachable planar velocity/yaw tracking.
         actor_phys_ee_weight = 1.0                          # Next scheduled, compliant EE target.
         actor_phys_q_weight = 0.1                           # Joint-position safety barrier.

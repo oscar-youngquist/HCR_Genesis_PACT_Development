@@ -27,16 +27,18 @@ def _mlp(in_dim: int, widths: Sequence[int], out_dim: int, activation: str) -> n
 
 
 class B1Z1PACTContextEncoder(nn.Module):
-    """UniFP-sized history VAE encoder producing only the compact latent."""
+    """Shared deterministic history features with a separate stochastic latent."""
 
     def __init__(self, input_dim: int, latent_dim: int, hidden: Sequence[int], activation: str):
         super().__init__()
         trunk_dim = hidden[-1]
+        self.feature_dim = trunk_dim
         
         self.trunk = nn.Sequential(_mlp(input_dim, hidden[:-1], trunk_dim, activation),
                                    _activation(activation))
-        # Match UniFP: independent linear mean/log-variance projections from
-        # the shared 128-D history feature, with bounded log variance.
+        # HardPACT: independent feature-width hidden layers before each projection.
+        self.mean_hidden = nn.Sequential(nn.Linear(trunk_dim, trunk_dim), _activation(activation))
+        self.logvar_hidden = nn.Sequential(nn.Linear(trunk_dim, trunk_dim), _activation(activation))
         self.latent_mean = nn.Linear(trunk_dim, latent_dim)
         self.latent_logvar = nn.Sequential(
             nn.Linear(trunk_dim, latent_dim), nn.Hardtanh(-5.0, 5.0)
@@ -44,20 +46,21 @@ class B1Z1PACTContextEncoder(nn.Module):
         self._initialize_weights()
 
     def _initialize_weights(self) -> None:
-        """Match UniFP's Xavier initialization order exactly."""
+        """Xavier initialization for shared features and both latent branches."""
         self.trunk.apply(init_weights)
+        self.mean_hidden.apply(init_weights)
+        self.logvar_hidden.apply(init_weights)
         self.latent_logvar.apply(init_weights)
-        # UniFP initializes the mean projection after the log-variance head;
-        # retaining that order also aligns seeded random-number consumption.
         self.latent_mean.apply(init_weights)
 
 
     def forward(self, history: torch.Tensor, sample: bool = True, latent_noise=None) -> dict[str, torch.Tensor]:
         feature = self.trunk(history)
-        mean, logvar = self.latent_mean(feature), self.latent_logvar(feature)
+        mean = self.latent_mean(self.mean_hidden(feature))
+        logvar = self.latent_logvar(self.logvar_hidden(feature))
         noise = latent_noise if latent_noise is not None else (torch.randn_like(mean) if sample else torch.zeros_like(mean))
         z = mean + torch.exp(0.5 * logvar) * noise
-        return {"mean": mean, "logvar": logvar, "z": z, "latent_noise": noise}
+        return {"mean": mean, "logvar": logvar, "z": z, "latent_noise": noise, "features": feature}
 
     def forward_inf(self, history: torch.Tensor):
         return self.forward(history, sample=True)
@@ -109,7 +112,7 @@ class ActorCriticB1Z1PACT(nn.Module):
         actor_layers=(512, 256, 128),
         critic_layers=(1024, 256, 128),
         context_layers=(512, 256, 128),
-        explicit_decoder_layers=(128, 64),
+        explicit_decoder_layers=(128, 128),
         explicit_dim: int = 23,
         film_hidden_dim: int = 64,
         force_decoder_layers=(128, 128),
@@ -123,10 +126,9 @@ class ActorCriticB1Z1PACT(nn.Module):
         super().__init__()
         self.num_actions = num_actions
         self.context_encoder = B1Z1PACTContextEncoder(history_dim, latent_dim, context_layers, activation)
-        # As in UniFP, all deployment-time explicit estimates are decoded from
-        # z rather than branching directly from the history encoder trunk.
+        # HardPACT: explicit estimates bypass latent sampling and the KL bottleneck.
         self.explicit_decoder = B1Z1PACTDecoder(
-            latent_dim, 14, hidden=explicit_decoder_layers, activation=activation
+            self.context_encoder.feature_dim, 14, hidden=explicit_decoder_layers, activation=activation
         )
         self.physics_decoder = B1Z1PhysicsDecoders(
             latent_dim, force_decoder_layers, grf_decoder_layers, grf_torque_scale,
@@ -184,7 +186,7 @@ class ActorCriticB1Z1PACT(nn.Module):
         return torch.cat((
             context["base_velocity"], context["ee_position"],
             context["base_wrench"], context["ee_force"],
-            torch.sigmoid(context["foot_contact_logits"]), context["foot_height"],
+            context["explicit_condition"][:, 6:10], context["foot_height"],
         ), dim=-1)
 
     @staticmethod
@@ -218,7 +220,7 @@ class ActorCriticB1Z1PACT(nn.Module):
         # Retain the six-dimensional tracking error used by FiLM so PPO can
         # regularize modulation strength as a function of tracking quality.
         self.last_tracking_error_sq = torch.cat((base_error, ee_error), dim=-1).square().mean(dim=-1)
-        contact_probability = torch.sigmoid(actor_context["foot_contact_logits"]).detach()
+        contact_probability = actor_context["explicit_condition"][:, 6:10].detach()
         actor_input = torch.cat(
             (
                 obs, actor_context["z"], actor_context["base_velocity"], actor_context["ee_position"],

@@ -108,16 +108,16 @@ def losses(model, context, batch, fixed, cfg, metrics=None):
 
 
 def configure_optimizers(algorithm, actor_groups, auxiliary_groups):
-    """Disjoint actor/critic, history encoder, and all decoder ownership."""
+    """HardPACT ownership: history + explicit branch, separate physics/reconstruction heads."""
     a = algorithm
-    a.decoder_parameters = list(a.privileged_decoder.parameters()) + list(a.actor_critic.physics_decoder.parameters()) + list(a.actor_critic.explicit_decoder.parameters())
+    a.decoder_parameters = list(a.privileged_decoder.parameters()) + list(a.actor_critic.physics_decoder.parameters())
     decoder_ids = {id(p) for p in a.decoder_parameters}
     def groups(decoders):
         return [{**g, "params": selected} for g in auxiliary_groups
                 if (selected := [p for p in g["params"] if (id(p) in decoder_ids) == decoders])]
     a.actor_optimizer = PCGrad(torch.optim.AdamW(actor_groups, lr=a.learning_rate), reduction="sum", owned_only=True)
     a.ppo_parameters = [p for g in actor_groups for p in g["params"]]
-    lr = a.cfg.get("adaptation_learning_rate", 1e-5)
+    lr = a.cfg.get("adaptation_learning_rate", 2e-4)
     a.auxiliary_optimizer = torch.optim.AdamW(groups(False), lr=lr)
     a.decoder_optimizer = torch.optim.AdamW(groups(True), lr=lr)
     a.enc_parameters = [p for g in a.auxiliary_optimizer.param_groups for p in g["params"]]
@@ -133,7 +133,7 @@ def configure_optimizers(algorithm, actor_groups, auxiliary_groups):
 
 def restore_optimizers(algorithm, checkpoint):
     """Old overlapping/encoder-plus-explicit moments cannot map by group order."""
-    if checkpoint.get("optimizer_partition_version") != 2:
+    if checkpoint.get("optimizer_partition_version") != 3:
         warnings.warn("Legacy B1Z1 optimizer partition: restoring weights with fresh optimizer states.")
         return
     algorithm.actor_optimizer.optimizer.load_state_dict(checkpoint["actor_optimizer"])

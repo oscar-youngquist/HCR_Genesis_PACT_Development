@@ -228,8 +228,10 @@ class PPO_B1Z1PACTPos:
         aux_context = self.actor_critic.decode_context(
             self.actor_critic.context_encoder(obs_hist_batch, sample=True)
             if context_override is None else context_override)
-        # The z-only next-frame decoder excludes dedicated explicit/physics targets.
-        aux_privileged_prediction = self.privileged_decoder(aux_context["z"])
+        # The next-frame target still excludes dedicated explicit/physics fields.
+        # Explicit reconstruction gradients reach the deterministic estimator branch.
+        aux_privileged_prediction = self.privileged_decoder(torch.cat(
+            (aux_context["z"], aux_context["explicit_condition"]), dim=-1))
         grf_prediction = self.actor_critic.predict_grf(aux_context, nominal_torque)
         grf_loss = F.mse_loss(grf_prediction, obs_target[:, force_start:force_start + 12])
 

@@ -63,7 +63,7 @@ def test_short_ppo_update_and_auxiliary_targets(pos, bard_active, backend):
            "dof_pos_obs_scale": 1., "dof_vel_obs_scale": 1., "dt": .02,
            "grf_scale": .001, "ee_force_scale": .01,
            "base_velocity_scale": [1., 1., 1.], "base_wrench_scale": [1.] * 6}
-    decoder = B1Z1PACTDecoder(8, 188, hidden=[16])
+    decoder = B1Z1PACTDecoder(8 + 14, 188, hidden=[16])
     cfg["dynamics_backend"] = backend
     alg = (PPO_B1Z1PACTPos(model, decoder, cfg, "cpu") if pos else
            PPO_B1Z1PACT(model, decoder, SimpleNamespace(), cfg, "cpu"))
@@ -107,7 +107,7 @@ def test_short_ppo_update_and_auxiliary_targets(pos, bard_active, backend):
     owners = [set(map(id, parameters)) for parameters in
               (alg.ppo_parameters, alg.enc_parameters, alg.decoder_parameters)]
     assert not (owners[0] & owners[1] or owners[0] & owners[2] or owners[1] & owners[2])
-    assert set(map(id, model.context_encoder.parameters())) == owners[1]
+    assert set(map(id, (*model.context_encoder.parameters(), *model.explicit_decoder.parameters()))) == owners[1]
     metrics = alg.update(0)
     assert metrics["pre_update_mu_rms"] < 1e-6
     assert metrics["pre_update_logprob_rms"] < 1e-5

@@ -56,9 +56,9 @@ class B1Z1PACTRunner:
         ).to(device)
 
         self.privileged_decoder = B1Z1PACTDecoder(
-            # Decode the next non-terrain privileged state from z. Terrain
+            # Decode the next non-terrain state from [z, explicit]. Terrain
             # heights remain available to the critic but are not reconstructed.
-            policy_cfg["cenet_latent_dim"], env.cfg.env.num_privileged_recon_obs
+            policy_cfg["cenet_latent_dim"] + 14, env.cfg.env.num_privileged_recon_obs
             - env.cfg.env.privileged_force_start - env.cfg.env.num_privileged_force_obs,
             hidden=policy_cfg["privileged_decoder_layers"],
             activation=policy_cfg["activation"],
@@ -490,7 +490,7 @@ class B1Z1PACTRunner:
             "actor_optimizer": self.alg.actor_optimizer.optimizer.state_dict(),
             "auxiliary_optimizer": self.alg.auxiliary_optimizer.state_dict(),
             "decoder_optimizer": self.alg.decoder_optimizer.state_dict(),
-            "optimizer_partition_version": 2,
+            "optimizer_partition_version": 3,
             "iteration": saved_iteration, "force_ema": self.alg.force_ema,
             "force_gate_active": self.alg.force_gate_active, "force_gate_count": self.alg.force_gate_count,
             "force_metric_emas": self.alg.force_metric_emas,

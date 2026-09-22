@@ -230,7 +230,9 @@ def backward(a, batch, ppo_loss, actions, context):
             pnorm += p.square().sum()
         if g is not None and p is not None:
             dot += (g*p).sum()
-    unexpected = torch.autograd.grad(loss, a.decoder_parameters, retain_graph=True, allow_unused=True)
+    # Explicit estimation now belongs to the encoder optimizer, not the decoders.
+    heads = list(dict.fromkeys([*a.decoder_parameters, *a.actor_critic.explicit_decoder.parameters()]))
+    unexpected = torch.autograd.grad(loss, heads, retain_graph=True, allow_unused=True)
     metrics.update(actor_gradient_norm=norm.sqrt(), ppo_gradient_cosine=dot / (norm*pnorm).sqrt().clamp_min(1e-12),
                    unintended_estimator_gradient_max=max((g.abs().max() for g in unexpected if g is not None), default=loss.new_zeros(())))
     if metrics["active_fraction"] > 0:

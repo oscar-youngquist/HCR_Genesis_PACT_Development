@@ -93,7 +93,7 @@ def test_analytic_force_gradients_and_mass_cancellation():
 
 def test_disjoint_ownership():
     model = make_model(False)
-    decoder = torch.nn.Linear(8, 188)
+    decoder = torch.nn.Linear(8 + 14, 188)
     actor, context = model.get_optim_groups()
     a = SimpleNamespace(actor_critic=model, privileged_decoder=decoder,
                         learning_rate=.001, cfg={})
@@ -101,8 +101,7 @@ def test_disjoint_ownership():
     owners = [set(map(id, values)) for values in
               (a.ppo_parameters, a.enc_parameters, a.decoder_parameters)]
     assert not (owners[0] & owners[1] or owners[1] & owners[2] or owners[0] & owners[2])
-    assert set(map(id, model.context_encoder.parameters())) == owners[1]
-    assert set(map(id, model.explicit_decoder.parameters())) <= owners[2]
+    assert set(map(id, (*model.context_encoder.parameters(), *model.explicit_decoder.parameters()))) == owners[1]
     assert set(map(id, model.physics_decoder.parameters())) <= owners[2]
     # Save/restore all three independent moment sets under the new partition.
     optimizers = (a.actor_optimizer.optimizer, a.auxiliary_optimizer, a.decoder_optimizer)
@@ -113,7 +112,7 @@ def test_disjoint_ownership():
         optimizer.step()
     states = [optimizer.state_dict() for optimizer in optimizers]
     checkpoint = dict(zip(("actor_optimizer", "auxiliary_optimizer", "decoder_optimizer"), states))
-    checkpoint["optimizer_partition_version"] = 2
+    checkpoint["optimizer_partition_version"] = 3
     for optimizer in optimizers:
         optimizer.state.clear()
     restore_optimizers(a, checkpoint)
