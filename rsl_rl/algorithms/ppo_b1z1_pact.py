@@ -194,6 +194,8 @@ class PPO_B1Z1PACT:
             ema_decay=cfg.get("kl_ema_decay", 0.99),
         )
         self.bard_auxiliary = cfg.get("dynamics_backend", "pinocchio").lower() == "bard"
+        from .b1z1_actor_physics import configure
+        configure(self)
         self.bard_phase_metrics = {}
         self.use_kl_rate_band = bool(cfg.get("use_kl_rate_band", True))
         self.use_cosine_kl_warmup = bool(
@@ -845,6 +847,8 @@ class PPO_B1Z1PACT:
 
 
     def update(self, iteration):
+        from . import b1z1_actor_physics as actor_physics
+        actor_physics.prepare(self)
         self.pinn_metric_sums = {}
         self.actor_critic.train()
         self.privileged_decoder.train()
@@ -912,7 +916,7 @@ class PPO_B1Z1PACT:
 
             # PPO owns only actor/critic; context is detached during reconstruction.
             self.actor_optimizer.zero_grad()
-            ppo_loss.backward()
+            actor_physics.backward(self, batch, ppo_loss, mean_actions, context)
             nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm)
             self.actor_optimizer.step()
 
@@ -1009,6 +1013,7 @@ class PPO_B1Z1PACT:
             "PINN/weighted_combined_loss": self.pinn_weight * mean_metrics["pinn"],
         })
         # Isaac Gym's Python 3.8 predates the dict-union operator.
+        actor_physics.finish(self, diagnostics, updates)
         return {
             **mean_metrics,
             **diagnostics,

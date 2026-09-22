@@ -320,6 +320,19 @@ class BardB1Z1DynamicsBackend(WholeBodyDynamicsBackend):
             mass, bias, contacts, foot_jacobians, ee_jacobian, base_jacobian
         )
 
+    def ee_position(self, state):
+        """Differentiable world EE FK; private data avoids mutating cached PINN state."""
+        positions = []
+        for chunk in state.split(self.batch_capacity):
+            q, v = self._pack_state(chunk[:, :3], chunk[:, 3:7], chunk[:, 7:26],
+                                    chunk[:, 26:29], chunk[:, 29:32], chunk[:, 32:51])
+            data = self.bard.create_data(self.model, max_batch_size=len(chunk))
+            self.bard.update_kinematics(self.model, data, q, v)
+            _, pose = self.bard.jacobian(self.model, data, self.ee_frame_id,
+                                        reference_frame="local", return_pose=True)
+            positions.append(pose[:, :3, 3].clone())
+        return torch.cat(positions)
+
     def forward_dynamics(
         self, base_pos, base_quat_xyzw, dof_pos, base_linear_velocity,
         base_angular_velocity, dof_velocity, generalized_joint_torque,

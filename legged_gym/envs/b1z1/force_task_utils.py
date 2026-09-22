@@ -322,7 +322,7 @@ def _project_force_offset(env, nominal_target, limited_offset, base_yaw_quat, en
     )
 
 
-def _compute_force_adjusted_ee_target(env, env_ids=None):
+def _compute_force_adjusted_ee_target(env, env_ids=None, *, external_force=None, nominal_target=None):
     """Return the capped UniFP impedance-equilibrium EE target.
 
     UniFP contributes its yaw-frame commanded EE force. PACT and PACT-Pos do
@@ -330,8 +330,8 @@ def _compute_force_adjusted_ee_target(env, env_ids=None):
     zero while external-force handling remains otherwise identical.
     """
     base_yaw_quat = env._get_base_yaw_quat(env_ids)
-    external_force = env.ee_force_ext_world
-    nominal_target = env.curr_ee_goal_cart_world
+    external_force = env.ee_force_ext_world if external_force is None else external_force
+    nominal_target = env.curr_ee_goal_cart_world if nominal_target is None else nominal_target
     force_kp = env.gripper_force_kps
     commanded_force = getattr(env, "current_Fxyz_gripper_cmd", None)
 

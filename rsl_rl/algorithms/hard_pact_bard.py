@@ -27,7 +27,7 @@ class RolloutDynamicsResult:
     physics_valid_mask: torch.Tensor
 
 
-BARD_ROLLOUT_INCREMENT_RATE_SCALES = (10.0, 20.0, 100.0)
+BARD_ROLLOUT_INCREMENT_RATE_SCALES = (25.0, 50.0, 200.0)
 
 
 def physics_valid_mask(push_event_mask, reset_mask, timeout_mask, teleport_mask):

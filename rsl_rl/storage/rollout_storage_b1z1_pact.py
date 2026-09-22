@@ -30,6 +30,7 @@ class RolloutStorageB1Z1PACT:
             self.interval_torque = None
             self.mass_wrench = None
             self.physics_invalid = None
+            self.actor_physics = None
 
         def clear(self):
             self.__init__()
@@ -40,6 +41,7 @@ class RolloutStorageB1Z1PACT:
         policy_distribution_dim=None, rollout_state_dim=0, device="cpu", latent_dim=64,
     ):
         self.device, self.num_envs, self.steps, self.step = device, num_envs, steps, 0
+        self.actor_physics = {}  # Allocated only when the optional actor objective is enabled.
         def zeros(dim): return torch.zeros(steps, num_envs, dim, device=device)
         self.observations, self.critic_observations, self.histories = zeros(obs_dim), zeros(critic_dim), zeros(history_dim)
         # Coupled policies normally use one width for stored actions and their
@@ -74,6 +76,14 @@ class RolloutStorageB1Z1PACT:
     def add(self, transition):
         if self.step >= self.steps:
             raise AssertionError("Rollout buffer overflow")
+        if transition.actor_physics is not None:
+            for name, value in transition.actor_physics.items():
+                if name not in self.actor_physics:
+                    # Collection runs in inference_mode; training must save these
+                    # constants for autograd's actor-facing dynamics backward.
+                    with torch.inference_mode(False):
+                        self.actor_physics[name] = value.new_zeros((self.steps, *value.shape))
+                self.actor_physics[name][self.step].copy_(value.detach())
         # Copy rather than keep references: PPO shuffles the flattened rollout
         # later, but every PINN field must remain paired with its own action_t.
         for name in (
@@ -134,6 +144,8 @@ class RolloutStorageB1Z1PACT:
         if self.rollout_initial_state is not None:
             flat["rollout_initial_state"] = self.rollout_initial_state.flatten(0, 1)
             flat["physics_source"] = self.physics_source.flatten(0, 1)
+        flat.update({"actor_phys_" + name: value.flatten(0, 1)
+                     for name, value in self.actor_physics.items()})
         for _ in range(epochs):
             for mini_batch in range(mini_batches):
                 start = mini_batch * batch_size

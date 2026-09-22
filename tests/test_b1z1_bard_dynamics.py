@@ -69,6 +69,7 @@ class B1Z1RolloutPlumbingTests(unittest.TestCase):
             ("values", 1), ("log_probs", 1), ("explicit_targets", 7),
             ("next_privileged", 8), ("dynamics_state", 180),
             ("rollout_initial_state", 51),
+            ("latent_noise", 64), ("nominal_torque", 19),
         ):
             value = torch.zeros(2, width)
             value[:, 0] = torch.arange(2)
@@ -134,6 +135,26 @@ class B1Z1BardIntegrationTests(unittest.TestCase):
             rtol=3e-3,
             atol=3e-3,
         )
+
+    def test_actor_predicted_pose_fk_gradients(self):
+        from rsl_rl.algorithms.b1z1_actor_physics import integrate_pose
+        initial = torch.cat(self._state(), dim=-1)
+        velocity = torch.zeros(2, 25, device=self.device, requires_grad=True)
+        predicted = integrate_pose(initial, velocity, .02)
+        position = self.bard.ee_position(predicted)
+        position.square().sum().backward()
+        self.assertEqual(position.shape, (2, 3))
+        self.assertTrue(torch.isfinite(velocity.grad).all())
+        self.assertGreater(velocity.grad[:, 18:].abs().sum().item(), 0.)
+        # FK and the cached world-aligned Jacobian must refer to the same EE frame.
+        initial.requires_grad_()
+        position = self.bard.ee_position(initial)
+        jacobian = torch.stack([torch.autograd.grad(position[:, k].sum(), initial,
+            retain_graph=True)[0][:, 7:26] for k in range(3)], dim=1)
+        terms = self.bard.evaluate(*self._state(), torch.zeros(2, 4, 3, device=self.device),
+            torch.zeros(2, 3, device=self.device), torch.zeros(2, 6, device=self.device))
+        # Other training imports enable TF32 matmul globally; allow its precision.
+        torch.testing.assert_close(jacobian, terms.ee_jacobian[:, :3, 6:], atol=5e-4, rtol=1e-3)
 
     def test_force_and_torque_paths_preserve_cuda_autograd(self):
         state = self._state()

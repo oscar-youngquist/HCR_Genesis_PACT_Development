@@ -252,6 +252,8 @@ class B1Z1PACTRunner:
                         self.actor_critic.record_rollout_diagnostics(
                             actions, self.env.cfg.normalization.clip_actions
                         )
+                    from rsl_rl.algorithms.b1z1_actor_physics import capture
+                    capture(self)
                     next_obs, next_privileged, next_history, next_explicit, reward, dones, infos, _ = self.env.step(actions)
                     self.action_replay.reset(dones)
                     # B1Z1 has no QP: bounded commanded total torque is nominal.
