@@ -373,7 +373,9 @@ class PPO_B1Z1PACT:
 
         feedback = kp[:, :17] * (target - q[:, :17]) - kd[:, :17] * qd[:, :17]
 
-        feedforward = self.cfg["torque_action_scale"] * feedforward
+        # Match simulator joint units in inverse/rollout and actor-facing physics.
+        feedforward = feedforward * torch.as_tensor(
+            self.cfg["torque_action_scale"], device=feedforward.device, dtype=feedforward.dtype)
 
         controlled = (weights[:, :1] * feedback + weights[:, 1:2] * feedforward) * motor[:, :17]
 
@@ -848,7 +850,6 @@ class PPO_B1Z1PACT:
 
     def update(self, iteration):
         from . import b1z1_actor_physics as actor_physics
-        actor_physics.prepare(self)
         self.pinn_metric_sums = {}
         self.actor_critic.train()
         self.privileged_decoder.train()
@@ -859,6 +860,8 @@ class PPO_B1Z1PACT:
             # Sign selects projection priority; physics is always minimized.
             self.pinn_weight = progress * abs(self.cfg["pinn_loss_weight"])
             self.pinn_updates += 1
+        # Actor task prediction shares this exact delay/ramp and projection sign.
+        actor_physics.prepare(self)
         metrics = {name: 0.0 for name in (
             "value", "surrogate", "base_velo", "ee_position", "base_wrench", "ee_force", "foot_contact", "foot_height",
             "privileged_force", "privileged_decoder", "grf_decoder", "pinn",

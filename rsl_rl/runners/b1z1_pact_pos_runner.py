@@ -9,6 +9,7 @@ import statistics
 from collections import deque
 
 import torch
+from legged_gym.torque_action_scaling import simulator_torque_action_scale
 from rsl_rl.utils.simulator_diagnostics import domain_rand_state, load_domain_rand_state
 from torch.utils.tensorboard import SummaryWriter
 
@@ -60,7 +61,7 @@ class B1Z1PACTPosRunner:
         merged["grf_decoder_weight"] = policy_cfg.get("grf_decoder_weight", 1.0)
         merged.update({
             "dt": env.dt, "position_action_scale": env.cfg.control.action_scale,
-            "torque_action_scale": env.cfg.control.torque_scale,
+            "torque_action_scale": simulator_torque_action_scale(env.simulator).tolist(),
             "dof_pos_obs_scale": env.obs_scales.dof_pos,
             "dof_vel_obs_scale": env.obs_scales.dof_vel,
             "privileged_force_start": env.cfg.env.privileged_force_start,

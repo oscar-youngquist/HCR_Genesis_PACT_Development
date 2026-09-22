@@ -3,6 +3,7 @@ import math
 
 import numpy as np
 import torch
+from legged_gym.torque_action_scaling import simulator_torque_action_scale
 
 from legged_gym.envs.b1z1.force_task_utils import (
     accumulate_ee_force_target_diagnostics,
@@ -723,7 +724,7 @@ class B1Z1PACTPos(LeggedRobot):
                 sin_pos,
                 cos_pos,
                 self.actions[:, :17],
-                self.simulator.feedback_torques[:, :17] * (1.0/float(self.cfg.control.torque_scale)),
+                self.simulator.feedback_torques[:, :17] / simulator_torque_action_scale(self.simulator),
                 self.commands * self.commands_scale,
             ),
             dim=-1,

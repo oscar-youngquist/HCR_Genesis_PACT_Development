@@ -462,7 +462,9 @@ class PPO_B1Z1PACTPos:
         pd_torque = (
             kp[:, :17] * (q_target - q[:, :17]) - kd[:, :17] * qd[:, :17]
         ) * motor[:, :17]
-        predicted_torque = self.cfg["torque_action_scale"] * self.actor_critic.last_torque_mean
+        torque_mean = self.actor_critic.last_torque_mean
+        predicted_torque = torque_mean * torch.as_tensor(
+            self.cfg["torque_action_scale"], device=torque_mean.device, dtype=torque_mean.dtype)
         return F.mse_loss(
             predicted_torque,
             self.cfg["torque_clone_target_scale"] * pd_torque,

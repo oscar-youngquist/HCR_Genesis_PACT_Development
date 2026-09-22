@@ -10,6 +10,7 @@ import warnings
 from collections import deque
 
 import torch
+from legged_gym.torque_action_scaling import simulator_torque_action_scale
 from rsl_rl.utils.simulator_diagnostics import domain_rand_state, load_domain_rand_state
 from torch.utils.tensorboard import SummaryWriter
 
@@ -103,7 +104,7 @@ class B1Z1PACTRunner:
         merged.update({
             "dt": env.dt, "position_action_scale": env.cfg.control.action_scale,
             "clip_actions": env.cfg.normalization.clip_actions,
-            "torque_action_scale": env.cfg.control.torque_scale,
+            "torque_action_scale": simulator_torque_action_scale(env.simulator).tolist(),
             "grf_scale": env.obs_scales.grf,
             "ee_force_scale": env.obs_scales.ee_force,
             "base_velocity_scale": env.base_velocity_scale.tolist(),

@@ -270,36 +270,43 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # Coupled PACT control: the actor emits both position and feedforward
         # torque branches. The simulator combines them before clipping.
         control_type = "P"
-        stiffness = {                                                                   # Joint-name PD proportional gains [N m/rad].
-            "hip": 250.0,
-            "thigh": 250.0,
-            "calf": 400.0,
-            "z1_waist": 64.0,
-            "z1_shoulder": 128.0,
-            "z1_elbow": 64.0,
-            "z1_wrist_angle": 64.0,
-            "z1_forearm_roll": 64.0,
-            "z1_wrist_rotate": 64.0,
-            "z1_jointGripper": 64.0,
-        }
-        damping = {                                                                     # Joint-name PD derivative gains [N m s/rad].
-            "hip": 6.25,
-            "thigh": 6.25,
-            "calf": 10.0,
-            "z1_waist": 1.5,
-            "z1_shoulder": 3.0,
-            "z1_elbow": 1.5,
-            "z1_wrist_angle": 1.5,
-            "z1_forearm_roll": 1.5,
-            "z1_wrist_rotate": 1.5,
-            "z1_jointGripper": 1.5,
-        }
+        # stiffness = {                                                                   # Joint-name PD proportional gains [N m/rad].
+        #     "hip": 250.0,
+        #     "thigh": 250.0,
+        #     "calf": 400.0,
+        #     "z1_waist": 64.0,
+        #     "z1_shoulder": 128.0,
+        #     "z1_elbow": 64.0,
+        #     "z1_wrist_angle": 64.0,
+        #     "z1_forearm_roll": 64.0,
+        #     "z1_wrist_rotate": 64.0,
+        #     "z1_jointGripper": 64.0,
+        # }
+        # damping = {                                                                     # Joint-name PD derivative gains [N m s/rad].
+        #     "hip": 6.25,
+        #     "thigh": 6.25,
+        #     "calf": 10.0,
+        #     "z1_waist": 1.5,
+        #     "z1_shoulder": 3.0,
+        #     "z1_elbow": 1.5,
+        #     "z1_wrist_angle": 1.5,
+        #     "z1_forearm_roll": 1.5,
+        #     "z1_wrist_rotate": 1.5,
+        #     "z1_jointGripper": 1.5,
+        # }
 
-        # stiffness = {"joint":100.0, "z1": 30.0,}
-        # damping = {"joint": 5.0,"z1": 0.70,}
+        stiffness = {"joint":100.0, "z1": 30.0,}
+        damping = {"joint": 5.0,"z1": 0.70,}
 
         action_scale = 0.25                                                             # Convert normalized position actions to joint offsets [rad].
-        torque_scale = 100.0                                                            # Convert normalized feedforward actions to torque [N m].
+        torque_scale = 30.0                                                             # Convert normalized feedforward actions to torque [N m].
+        torque_scale_overrides = {                                                      # Exact learned-joint overrides [N m/action].
+            "z1_waist": 10.0,
+            "z1_shoulder": 10.0,
+            "z1_elbow": 10.0,
+            "z1_wrist_angle": 10.0,
+            "z1_forearm_roll": 10.0,
+        }
         dt = 0.02
         decimation = 4
 
@@ -342,10 +349,10 @@ class B1Z1PACTCfg(LeggedRobotCfg):
 
         # Shared B1Z1 schedule. PACT has no force-command observation channel,
         # but retains the common command stage before disturbances are enabled.
-        force_curriculum_command_start_iteration = 8000                                 # Iteration starting the shared command-force stage.
-        force_curriculum_command_ramp_iterations = 4000                                 # Command-force ramp duration [PPO iterations].
-        force_curriculum_gate_start_iteration = 12000                                   # Earliest iteration for the external-force performance gate.
-        force_curriculum_external_ramp_iterations = 4000                                # External-force ramp duration after activation [iterations].
+        force_curriculum_command_start_iteration = 10000                                 # Iteration starting the shared command-force stage.
+        force_curriculum_command_ramp_iterations = 10000                                 # Command-force ramp duration [PPO iterations].
+        force_curriculum_gate_start_iteration = 20000                                   # Earliest iteration for the external-force performance gate.
+        force_curriculum_external_ramp_iterations = 10000                                # External-force ramp duration after activation [iterations].
         force_curriculum_ee_l1_threshold = 0.25                                         # Maximum EE tracking error for force-stage advancement.
         force_curriculum_roll_termination_threshold = 0.05                              # Maximum roll-termination rate for advancement.
         force_curriculum_episode_length_threshold = 950.0                               # Minimum episode length for advancement [control steps].
@@ -360,7 +367,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         push_gripper_duration_s_ext = [1.0, 3.0]                                        # EE force-event duration range [s].
         gripper_forced_prob_ext = 0.8                                                   # Probability of an active EE force event.
 
-        max_push_force_xyz_gripper_ext = [-60.0, 60.0]                                  # Full-strength per-axis EE force range [N].
+        max_push_force_xyz_gripper_ext = [-50.0, 50.0]                                  # Full-strength per-axis EE force range [N].
         randomize_gripper_force_gains = False                                           # Randomize EE force-feedback gains.
         gripper_force_kp_range = [200.0, 200.0]                                         # EE force proportional-gain range.
         gripper_force_kd_range = [3.0, 3.0]                                             # EE force derivative-gain range.
@@ -746,7 +753,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         class reward_curriculum:
             curr_reward_keys = [                                                        # Reward terms whose coefficients are scheduled.
                                 "torque_limits",
-                                # "dof_pos_limits",
+                                "dof_pos_limits",
+                                # "collision",
                                 # "feet_contact_forces",
                                 # "lin_vel_z",
                                 # "arm_ee_force_manipulability",
@@ -762,19 +770,20 @@ class B1Z1PACTCfg(LeggedRobotCfg):
                                 ]
             curr_reward_bounds = {                                                      # Initial and final coefficients for scheduled rewards.
                 "torque_limits":[-0.001, -1.0],
-                # "dof_pos_limits":[-2.0, -10.0],
+                "dof_pos_limits":[-1.0, -10.0],
+                # "collision":[-0.5, -5.0],
                 # "feet_contact_forces":[-1.0e-5, -1.0e-4],
                 # "lin_vel_z":[-1.00, -2.0],
                 # "arm_ee_force_manipulability":[0.2, 0.5],
                 # "torso_force_wrench_ellipsoid":[0.2, 0.5],
-                "leg_feedback_action_rate":[-0.001, -0.01],
-                "leg_feedback_action_smoothness":[-0.001, -0.01],
-                "arm_feedback_action_rate":[-0.002, -0.02],
-                "arm_feedback_action_smoothness":[-0.002, -0.02],
-                "leg_feedforward_action_rate":[-0.002, -0.02],
-                "leg_feedforward_action_smoothness":[-0.002, -0.02],
-                "arm_feedforward_action_rate":[-0.004, -0.04],
-                "arm_feedforward_action_smoothness":[-0.004, -0.04],
+                "leg_feedback_action_rate":[-0.002, -0.02],
+                "leg_feedback_action_smoothness":[-0.002, -0.02],
+                "arm_feedback_action_rate":[-0.003, -0.03],
+                "arm_feedback_action_smoothness":[-0.003, -0.03],
+                "leg_feedforward_action_rate":[-0.004, -0.04],
+                "leg_feedforward_action_smoothness":[-0.004, -0.04],
+                "arm_feedforward_action_rate":[-0.006, -0.06],
+                "arm_feedforward_action_smoothness":[-0.006, -0.06],
             }
             warmup_steps = 40000                                                        # Reward-curriculum warmup.
             curr_steps = 10000                                                           # Reward-curriculum ramp duration.
@@ -969,8 +978,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         pino_batch_capacity = 0                                                         # Pinocchio batch capacity; zero selects an automatic size.
         pino_worker_start_method = "spawn"                                              # Multiprocessing start method for Pinocchio workers.
         use_spo = False                                                                 # Compatibility option for the alternative policy objective.
-        use_adaptive_entropy = False                                                    # Adapt entropy coefficient from tracking performance.
-        adaptive_ent_bounds = [0.005, 0.01]                                             # Minimum and maximum adaptive entropy coefficients.
+        use_adaptive_entropy = True                                                    # Adapt entropy coefficient from tracking performance.
+        adaptive_ent_bounds = [0.001, 0.01]                                             # Minimum and maximum adaptive entropy coefficients.
         adaptive_ent_lin_threshold = 1.5                                                # Linear-tracking threshold for adaptive entropy.
         adaptive_ent_ang_threshold = 0.70                                               # Angular-tracking threshold for adaptive entropy.
         adaptive_ent_ter_threshold = 6.0                                                # Terrain-related adaptive entropy threshold.

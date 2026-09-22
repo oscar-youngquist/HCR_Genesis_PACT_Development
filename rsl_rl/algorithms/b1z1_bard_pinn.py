@@ -159,9 +159,10 @@ def combined_pinn_loss(inverse, rollout, cfg):
             + cfg.get("pinn_rollout_weight", 1.0) * rollout)
 
 
-def auxiliary_backward(algorithm, optimizer, supervised, physics):
+def auxiliary_backward(algorithm, optimizer, supervised, physics, *, weight=None):
     """Use the configured sign for projection, never for the loss magnitude."""
-    weight = getattr(algorithm, "pinn_weight", 0.0)
+    if weight is None:
+        weight = getattr(algorithm, "pinn_weight", 0.0)
     if weight > 0 and physics.requires_grad:
         project = (optimizer.pc_backward_ppgrad if algorithm.cfg["pinn_loss_weight"] < 0
                    else optimizer.pc_backward_pinn)

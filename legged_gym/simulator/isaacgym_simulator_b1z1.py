@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from legged_gym import SIMULATOR
+from legged_gym.torque_action_scaling import simulator_torque_action_scale
 from legged_gym.utils.math_utils import quat_rotate_inverse, torch_rand_float
 from .isaacgym_simulator import IsaacGymSimulator
 
@@ -724,7 +725,7 @@ class IsaacGymSimulatorB1Z1PACT(_IsaacGymSimulatorB1Z1):
         self.feedforward_torques.zero_()
         self.feedforward_torques[:, :self._num_learned_actions] = (
             torque_actions
-            * self._cfg.control.torque_scale
+            * simulator_torque_action_scale(self)
         )
         self.combined_feedback_torques = self.feedback_tau_weight * self.feedback_torques
         self.combined_feedforward_torques = self.feedforward_tau_weight * self.feedforward_torques

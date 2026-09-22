@@ -57,6 +57,7 @@ def test_short_ppo_update_and_auxiliary_targets(pos, bard_active, backend):
     model = make_model(pos)
     config = class_to_dict((B1Z1PACTPosCfgPPO if pos else B1Z1PACTCfgPPO)())
     cfg = {**config["algorithm"], **config["policy"], "num_learning_epochs": 1,
+           "actor_phys_enabled": False,  # This fixture does not collect task-predictive snapshots.
            "num_mini_batches": 1, "privileged_force_start": 23, "privileged_force_dim": 21,
            "position_action_scale": 0.25, "torque_action_scale": 1.,
            "dof_pos_obs_scale": 1., "dof_vel_obs_scale": 1., "dt": .02,

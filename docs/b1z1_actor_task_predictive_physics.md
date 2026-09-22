@@ -79,8 +79,16 @@ Each component averages its coordinates and then valid samples.
 | `ee_scale`, `q_scale`, `qd_scale` | 0.1 m, 1 rad, 10 rad/s | Normalizers |
 | `require_force_gate` | false | Require existing representation-quality gate |
 
-The actor PCGrad path receives `[L_PPO, actor_phys_coef * L_task]` using its
-PPO-primary, norm-bounded projection. Thus these are the input objectives, not a
+The actor shares `pinn_init_steps`, `pinn_warmup`, and the checkpoint-restored
+`pinn_updates` counter with the representation PINNs. Its effective coefficient
+is `actor_phys_coef * pinn_weight / abs(pinn_loss_weight)`, so it ramps from zero
+to its own configured maximum. A zero `pinn_loss_weight` disables it as well.
+No extra mechanics or actor-physics backward is performed while this weight is zero.
+
+The actor PCGrad path receives `[L_PPO, effective_coefficient * L_task]` through
+the same helper as the encoder/decoder PINNs: positive `pinn_loss_weight` selects
+`pc_backward_pinn`; negative selects the norm-bounded `pc_backward_ppgrad`.
+The sign never makes the task loss negative. These are the input objectives, not a
 promise that projection leaves their unmodified summed gradient. Invalid/reset/
 teleport samples, nonfinite inputs/predictions and singular mechanics are excluded.
 An entirely inactive minibatch falls back to the original PPO backward operation.
@@ -95,7 +103,7 @@ or checkpoint layouts. Mechanics are cached per rollout only when enabled.
 TensorBoard `ActorPhysics/` contains `loss`, `loss_scaled`, `vel`, `ee`, `q`, `qd`,
 `valid_fraction`, `active_fraction`, `velocity_error`, `ee_error_m`,
 `position_violation_rad`, `velocity_violation_radps`, `actor_gradient_norm`,
-`ppo_gradient_cosine`, and `unintended_estimator_gradient_max`. The last is a
+`ppo_gradient_cosine`, `scheduled_coefficient`, and `unintended_estimator_gradient_max`. The last is a
 loss-specific diagnostic VJP, not accumulated auxiliary `.grad` buffers, and
 should be zero. Velocity error combines planar m/s and yaw rad/s as a diagnostic;
 only the normalized Huber values enter the objective. Gradient norm/cosine are

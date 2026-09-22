@@ -1,4 +1,5 @@
 from legged_gym import *
+from legged_gym.torque_action_scaling import simulator_torque_action_scale
 from legged_gym.simulator.simulator import Simulator
 from PIL import Image as im
 import cv2 as cv
@@ -1452,7 +1453,7 @@ class GenesisSimulatorB1Z1PACT(Simulator):
         self.feedforward_torques[:, :self._num_learned_actions] = (
             self._motor_strength[:, :self._num_learned_actions]
             * tau_actions
-            * self._cfg.control.torque_scale
+            * simulator_torque_action_scale(self)
         )
         self.combined_feedback_torques = self.feedback_tau_weight * self.feedback_torques
         self.combined_feedforward_torques = self.feedforward_tau_weight * self.feedforward_torques

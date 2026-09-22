@@ -313,6 +313,13 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
 
         action_scale = 0.25
         torque_scale = 100.0
+        torque_scale_overrides = {  # Match coupled PACT's learned torque-head units.
+            "z1_waist": 10.0,
+            "z1_shoulder": 10.0,
+            "z1_elbow": 10.0,
+            "z1_wrist_angle": 10.0,
+            "z1_forearm_roll": 10.0,
+        }
         dt = 0.02
         decimation = 4
         

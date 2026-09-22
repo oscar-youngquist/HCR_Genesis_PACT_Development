@@ -120,6 +120,42 @@ def test_disabled_exact_backward(flag, coef):
     assert torch.equal(before, torch.random.get_rng_state())
 
 
+@pytest.mark.parametrize("maximum,scheduled,expected", [(2., 0., 0.), (2., 1., .005),
+    (-2., 1., .005), (-2., 2., .01), (0., 0., 0.)])
+def test_shared_schedule(maximum, scheduled, expected):
+    a = SimpleNamespace(cfg={**config(), "pinn_loss_weight": maximum}, pinn_weight=scheduled)
+    assert physics.scheduled_coefficient(a) == pytest.approx(expected)
+
+
+def test_warmup_skips_physics_and_preserves_ppo_backward():
+    a = SimpleNamespace(cfg={**config(), "pinn_loss_weight": -1.}, pinn_weight=0.)
+    physics.prepare(a)  # No storage or backend needed before the common ramp opens.
+    p = torch.tensor(2., requires_grad=True)
+    physics.backward(a, {}, p.square(), None, None)
+    assert p.grad == 4
+
+
+@pytest.mark.parametrize("sign,method", [(1., "pc_backward_pinn"), (-1., "pc_backward_ppgrad")])
+def test_actor_uses_shared_projection(monkeypatch, sign, method):
+    from unittest.mock import Mock
+    a, batch, actions, context = setup()
+    a.cfg["pinn_loss_weight"] = sign
+    a.pinn_weight = .5
+    a.actor_optimizer = Mock()
+    groups, _ = a.actor_critic.get_optim_groups()
+    a.ppo_parameters = [p for group in groups for p in group["params"]]
+    a.decoder_parameters = list(a.actor_critic.explicit_decoder.parameters())
+    a.actor_physics_metrics = {}
+    loss = actions.square().mean()
+    monkeypatch.setattr(physics, "objective", lambda *args: (loss, {"active_fraction": loss.new_tensor(1.)}))
+    ppo = actions.sum()
+    physics.backward(a, batch, ppo, actions, context)
+    assert [call[0] for call in a.actor_optimizer.mock_calls] == [method]
+    objectives = getattr(a.actor_optimizer, method).call_args.args[0]
+    assert objectives[0] is ppo
+    torch.testing.assert_close(objectives[1], .005 * loss)
+
+
 def test_pose_integration_stationary_quaternion_backward():
     initial = torch.zeros(2, 51, dtype=torch.float64)
     initial[:, 6] = 1
@@ -136,11 +172,13 @@ def test_enabled_ppo_update_and_snapshot_alignment():
     full = class_to_dict(B1Z1PACTCfgPPO())
     cfg = {**full["algorithm"], **full["policy"], **config(), "num_learning_epochs": 1,
            "num_mini_batches": 1, "dynamics_backend": "bard", "privileged_force_start": 23,
-           "privileged_force_dim": 21, "pinn_init_steps": 1000}
+           "privileged_force_dim": 21, "pinn_init_steps": 0, "pinn_warmup": 2,
+           "pinn_loss_weight": .1}
     fixed = template.actor_physics_cache
     backend = SimpleNamespace(batch_capacity=3, ee_position=template.dynamics_backend.ee_position,
         evaluate=lambda *args: SimpleNamespace(**{k: v[:len(args[0])] for k, v in vars(fixed).items()}))
     a = PPO_B1Z1PACT(template.actor_critic, B1Z1PACTDecoder(8, 188, hidden=[16]), backend, cfg, "cpu")
+    a.pinn_updates = 1  # Shared half-warmup state, as restored from a checkpoint.
     a.init_storage(3, 2, 81, 40, 162, 34, 23, 232, 180, rollout_state_dim=51)
     for step in range(2):
         a.act(torch.randn(3, 81), torch.randn(3, 40), torch.randn(3, 162), torch.zeros(3, 23))
@@ -159,7 +197,8 @@ def test_enabled_ppo_update_and_snapshot_alignment():
     assert metrics["ActorPhysics/actor_gradient_norm"] > 0
     assert metrics["ActorPhysics/unintended_estimator_gradient_max"] == 0
     assert metrics["ActorPhysics/loss"] > 0
-    assert a.pinn_weight == 0  # Actor task prediction is independent of PINN warmup.
+    assert a.pinn_weight == .05
+    assert metrics["ActorPhysics/scheduled_coefficient"] == cfg["actor_phys_coef"] * .5
     assert all(torch.isfinite(p).all() for p in a.actor_critic.parameters())
 
 

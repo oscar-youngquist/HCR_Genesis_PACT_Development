@@ -13,6 +13,14 @@ def enabled(cfg):
     return cfg.get("actor_phys_enabled", False) and cfg.get("actor_phys_coef", 0.0) > 0
 
 
+def scheduled_coefficient(a):
+    """Reuse the checkpoint-aware PINN ramp, retaining the actor's own maximum."""
+    maximum = abs(a.cfg.get("pinn_loss_weight", 0.0))
+    if not enabled(a.cfg) or maximum == 0:
+        return 0.0
+    return a.cfg["actor_phys_coef"] * min(1.0, max(0.0, a.pinn_weight / maximum))
+
+
 def configure(algorithm):
     """Fail early rather than silently substituting a different physics backend."""
     if not enabled(algorithm.cfg):
@@ -70,7 +78,7 @@ def capture(runner):
 def prepare(a):
     """Cache pre-state mechanics independently of the representation-PINN warmup."""
     a.actor_physics_metrics = {}
-    if not enabled(a.cfg):
+    if scheduled_coefficient(a) == 0:
         return
     from .b1z1_bard_pinn import mechanics
     state = a.storage.actor_physics["state"].flatten(0, 1)
@@ -204,11 +212,12 @@ def objective(a, batch, actions, context):
 
 def backward(a, batch, ppo_loss, actions, context):
     """Actor-owned PCGrad; diagnostic VJPs never accumulate .grad buffers."""
-    if not enabled(a.cfg):
+    weight = scheduled_coefficient(a)
+    if weight == 0:
         ppo_loss.backward()
         return
     loss, metrics = objective(a, batch, actions, context)
-    metrics["loss_scaled"] = a.cfg["actor_phys_coef"] * loss.detach()
+    metrics["loss_scaled"] = weight * loss.detach()
     parameters = a.ppo_parameters
     physics_grad = torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True)
     ppo_grad = torch.autograd.grad(ppo_loss, parameters, retain_graph=True, allow_unused=True)
@@ -225,7 +234,8 @@ def backward(a, batch, ppo_loss, actions, context):
     metrics.update(actor_gradient_norm=norm.sqrt(), ppo_gradient_cosine=dot / (norm*pnorm).sqrt().clamp_min(1e-12),
                    unintended_estimator_gradient_max=max((g.abs().max() for g in unexpected if g is not None), default=loss.new_zeros(())))
     if metrics["active_fraction"] > 0:
-        a.actor_optimizer.pc_backward_ppgrad([ppo_loss, a.cfg["actor_phys_coef"] * loss])
+        from .b1z1_bard_pinn import auxiliary_backward
+        auxiliary_backward(a, a.actor_optimizer, ppo_loss, loss, weight=weight)
     else:
         ppo_loss.backward()
     for name, value in metrics.items():
@@ -236,4 +246,7 @@ def finish(a, metrics, updates):
     if enabled(a.cfg):
         metrics.update({"ActorPhysics/" + k: v.item() / max(updates, 1)
                         for k, v in a.actor_physics_metrics.items()})
+        metrics["ActorPhysics/scheduled_coefficient"] = scheduled_coefficient(a)
+        if scheduled_coefficient(a) == 0:
+            metrics.update({"ActorPhysics/loss_scaled": 0.0, "ActorPhysics/active_fraction": 0.0})
         a.actor_physics_cache = None
