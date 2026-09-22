@@ -117,16 +117,16 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         push_robots = True
         push_interval_max = 10.0
         push_interval_min = 5.0
-        max_push_vel_xy = 0.7
-        min_push_vel_xy = 0.5
+        max_push_vel_xy = 0.5
+        min_push_vel_xy = 0.25
 
-        max_vertical_push = 0.5
+        max_vertical_push = 0.3
         min_vertical_push = 0.1
         vert_interval_max = 10.0
         vert_interval_min = 5.0
 
-        max_push_torque = 0.8
-        min_push_torque = 0.5
+        max_push_torque = 0.5
+        min_push_torque = 0.25
         wrench_timeout_max = 10.0
         wrench_timeout_min = 5.0
 
@@ -178,29 +178,32 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         step_interval = 10
         reward_ema_alpha = 0.05
         min_reward_to_step = 0.50
-        joint_dynamics_progress_delta = 0.02
-        mass_com_progress_delta = 0.01
-        disturbance_progress_delta = 0.01
+        joint_dynamics_progress_delta = 0.01
+        mass_com_progress_delta = 0.002
+        disturbance_progress_delta = 0.002
         use_joint_dynamics_curriculum = True
         use_mass_com_curriculum = True
         use_disturbance_curriculum = True
 
         persistent_disturbance = True
-        persistent_force_probability = 0.2
-        persistent_torque_probability = 0.2
+        persistent_force_probability = 0.4
+        persistent_torque_probability = 0.4
         persistent_force_interval_range_s = [5.0, 15.0]
         persistent_torque_interval_range_s = [5.0, 15.0]
         persistent_force_duration_range_s = [1.0, 5.0]
         persistent_torque_duration_range_s = [1.0, 5.0]
         persistent_ramp_fraction = 0.30
-        # Initial -> final maximum absolute XYZ component, in N / Nm.
-        # The disturbance curriculum expands uniform [-max, +max] sampling
+        # Initial -> final planar FORCE NORM cap (sqrt(Fx²+Fy²)), in N.
+        # The disturbance curriculum expands the planar disk and downward Fz
         # after push_warmup and the joint-dynamics/mass-CoM phases. Existing
         # events finish their waveform; only new events use expanded bounds.
-        persistent_force_min_n = 4.0
-        persistent_force_max_n = 40.0
+        persistent_force_min_n = 6.0
+        persistent_force_max_n = 60.0
+        # Positive magnitudes; actual world Fz is sampled in [-limit, 0].
+        persistent_vertical_force_min_n = 1.0
+        persistent_vertical_force_max_n = 10.0
         persistent_torque_min_nm = 2.0
-        persistent_torque_max_nm = 12.0
+        persistent_torque_max_nm = 14.0
 
     class noise(LeggedRobotCfg.noise):
         add_noise = True

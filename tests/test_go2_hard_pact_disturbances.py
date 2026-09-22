@@ -120,6 +120,57 @@ class PersistentWrenchTests(unittest.TestCase):
 @pytest.mark.parametrize("task_class,config_class", [
     (Go2HardPACT, GO2HardPACTCfg), (Go2HardPACTPos, GO2HardPACTPosCfg),
 ])
+def test_persistent_vertical_force_stays_downward_through_waveform(task_class, config_class):
+    cfg = config_class()
+    cfg.domain_rand.persistent_force_probability = 1.
+    cfg.domain_rand.persistent_torque_probability = 1.
+    cfg.domain_rand.persistent_force_duration_range_s = [.16, .16]
+    cfg.domain_rand.persistent_force_interval_range_s = [10., 10.]
+    task = _persistent_task(32, 1., task_class, cfg)
+    task._persistent_next_event_step.zero_()
+    torch.manual_seed(43)
+    task._update_persistent_wrench(0)
+    target = task._persistent_wrench_target_world.clone()
+    assert (target[:,2] < 0).all()
+    for axis in (0,1,3,4,5):
+        assert (target[:,axis]>0).any() and (target[:,axis]<0).any()
+    duration = int(task._persistent_duration_steps[0,0])
+    for step in range(1,duration+1):
+        task._update_persistent_wrench(step)
+        assert (task._current_sustained_wrench_world[:,2]<=0).all()
+        if step == duration//2:
+            assert (task._current_sustained_wrench_world[:,2]<0).all()
+    assert task._current_sustained_wrench_world[:,2].eq(0).all()
+
+
+@pytest.mark.parametrize("planar,vertical", [(3.,11.), (0.,11.), (3.,0.), (0.,0.)])
+@pytest.mark.parametrize("task_class,config_class", [
+    (Go2HardPACT, GO2HardPACTCfg), (Go2HardPACTPos, GO2HardPACTPosCfg),
+])
+def test_independent_planar_norm_and_downward_vertical_caps(planar,vertical,task_class,config_class):
+    cfg=config_class()
+    d=cfg.domain_rand
+    d.persistent_force_min_n=planar/2;d.persistent_force_max_n=planar
+    d.persistent_vertical_force_min_n=vertical/4;d.persistent_vertical_force_max_n=vertical
+    d.persistent_force_probability=1.
+    for progress in (0.,.5,1.):
+        task=_persistent_task(256,progress,task_class,cfg)
+        task._persistent_next_event_step.zero_()
+        task._start_due_persistent_events(0,0)
+        force=task._persistent_wrench_target_world[:,:3]
+        planar_cap=planar*(.5+.5*progress)
+        vertical_cap=vertical*(.25+.75*progress)
+        assert torch.all(force[:,:2].norm(dim=-1)<=planar_cap+1e-6)
+        assert torch.all(force[:,2]<=0) and torch.all(force[:,2]>=-vertical_cap)
+        if planar:
+            assert force[:,:2].norm(dim=-1).max()>.9*planar_cap
+        if vertical:
+            assert force[:,2].min()<-.9*vertical_cap
+
+
+@pytest.mark.parametrize("task_class,config_class", [
+    (Go2HardPACT, GO2HardPACTCfg), (Go2HardPACTPos, GO2HardPACTPosCfg),
+])
 def test_external_wrench_curriculum_advances_sampling_and_restores(task_class, config_class):
     cfg = config_class()
     d = cfg.domain_rand
@@ -128,6 +179,7 @@ def test_external_wrench_curriculum_advances_sampling_and_restores(task_class, c
     d.push_warmup, d.step_interval = 2, 2
     d.joint_dynamics_progress_delta = d.mass_com_progress_delta = d.disturbance_progress_delta = .5
     d.persistent_force_min_n, d.persistent_force_max_n = 2., 6.
+    d.persistent_vertical_force_min_n, d.persistent_vertical_force_max_n = 2., 6.
     d.persistent_torque_min_nm, d.persistent_torque_max_nm = 1., 3.
     d.persistent_force_probability = d.persistent_torque_probability = 1.
     d.persistent_force_duration_range_s = d.persistent_torque_duration_range_s = [.16, .16]
@@ -152,6 +204,7 @@ def test_external_wrench_curriculum_advances_sampling_and_restores(task_class, c
         value = task._persistent_wrench_target_world.clone()
         scale = torch.tensor([bounds()[0]] * 3 + [bounds()[1]] * 3)
         assert torch.all(value.abs() <= scale)
+        assert torch.all(value[:, 2] <= 0)  # World vertical force is downward.
         assert task._persistent_component_active.all()
         return value, value / scale
 

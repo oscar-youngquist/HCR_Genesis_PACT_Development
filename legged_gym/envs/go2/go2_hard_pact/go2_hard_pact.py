@@ -647,7 +647,9 @@ class Go2HardPACT(Go2PACT):
         The schema interpolates the *maximum absolute magnitude*,
         m(p) = m_initial + p * (m_final - m_initial), p in [0, 1].
         Read the authoritative checkpointed curriculum, not a backend's
-        reporting copy. New events use [-m(p), m(p)]; active events retain
+        reporting copy. New force events use a planar disk of radius m(p)
+        and an independent downward vertical cap; torques remain symmetric.
+        Active events retain
         their sampled target and existing ramp/hold/ramp-down waveform.
         """
         cfg = self.cfg.domain_rand
@@ -695,7 +697,9 @@ class Go2HardPACT(Go2PACT):
             as_tuple=False,
         ).flatten()
         self._schedule_next_persistent_event(due, component, control_step)
-        if due.numel() == 0 or magnitude <= 0.0:
+        vertical_magnitude = (-self.domain_rand_curriculum.schema["persistent_vertical_force"].range_at(
+            self.domain_rand_curriculum.progress["disturbance"])[0] if component == 0 else 0.)
+        if due.numel() == 0 or max(magnitude, vertical_magnitude) <= 0.0:
             return
         selected = due[
             torch.rand(due.numel(), device=self.device) < probability
@@ -707,11 +711,22 @@ class Go2HardPACT(Go2PACT):
         self._persistent_start_step[selected, component] = control_step
         self._persistent_duration_steps[selected, component] = duration
         self._persistent_end_step[selected, component] = control_step + duration
-        self._persistent_wrench_target_world[selected, values] = (
+        sampled = (
             torch.empty(selected.numel(), 3, device=self.device).uniform_(
-                -magnitude, magnitude
+                -1., 1.
             )
         )
+        if component == 0:
+            # Uniform disk: theta~U[-pi,pi], radius=R*sqrt(U[0,1]).
+            # The cap bounds the XY VECTOR norm, not each axis independently.
+            angle = sampled[:, 0] * math.pi
+            radius = magnitude * ((sampled[:, 1]+1.)*.5).sqrt()
+            sampled[:, 0] = radius * angle.cos()
+            sampled[:, 1] = radius * angle.sin()
+            sampled[:, 2] = -vertical_magnitude * sampled[:, 2].abs()
+        else:
+            sampled *= magnitude
+        self._persistent_wrench_target_world[selected, values] = sampled
 
     def _update_persistent_wrench(self, control_step):
         self._current_sustained_wrench_world.zero_()

@@ -36,6 +36,10 @@ def go2_pact_domain_rand_schema(cfg) -> Mapping[str, DomainRandFeature]:
     """Build the immutable schema from the legacy Go2 PACT configuration."""
     d = cfg.domain_rand
     enabled = lambda name: bool(getattr(d, name, False))
+    for name in ("persistent_force_min_n", "persistent_force_max_n",
+                 "persistent_vertical_force_min_n", "persistent_vertical_force_max_n"):
+        if float(getattr(d, name)) < 0:
+            raise ValueError(name + " must be a nonnegative force magnitude")
     return {
         "ground_friction": DomainRandFeature("ground_friction", tuple(d.friction_range), tuple(d.friction_range), "fixed", enabled("randomize_friction"), "reset", "coefficient"),
         "added_base_mass": DomainRandFeature("added_base_mass", (float(d.added_mass_min), float(d.min_added_mass_max)), (float(d.added_mass_min), float(d.max_added_mass_max)), "mass_com", enabled("randomize_base_mass"), "reset", "kg"),
@@ -54,6 +58,7 @@ def go2_pact_domain_rand_schema(cfg) -> Mapping[str, DomainRandFeature]:
         "push_z": DomainRandFeature("push_z", (-float(d.min_vertical_push), 0.0), (-float(d.max_vertical_push), 0.0), "disturbance", enabled("push_robots"), "runtime", "m/s"),
         "push_angular": DomainRandFeature("push_angular", (-float(d.min_push_torque), float(d.min_push_torque)), (-float(d.max_push_torque), float(d.max_push_torque)), "disturbance", enabled("push_robots"), "runtime", "rad/s"),
         "persistent_force": DomainRandFeature("persistent_force", (-float(d.persistent_force_min_n), float(d.persistent_force_min_n)), (-float(d.persistent_force_max_n), float(d.persistent_force_max_n)), "disturbance", enabled("persistent_disturbance"), "runtime", "N"),
+        "persistent_vertical_force": DomainRandFeature("persistent_vertical_force", (-float(d.persistent_vertical_force_min_n), 0.0), (-float(d.persistent_vertical_force_max_n), 0.0), "disturbance", enabled("persistent_disturbance"), "runtime", "N"),
         "persistent_torque": DomainRandFeature("persistent_torque", (-float(d.persistent_torque_min_nm), float(d.persistent_torque_min_nm)), (-float(d.persistent_torque_max_nm), float(d.persistent_torque_max_nm)), "disturbance", enabled("persistent_disturbance"), "runtime", "N*m"),
     }
 
@@ -160,12 +165,16 @@ class HardPACTDomainRandCurriculum:
 
     def report(self, capabilities: Mapping[str, bool]):
         effective = self.effective_ranges()
+        capabilities = dict(capabilities)
+        capabilities.setdefault("persistent_vertical_force", capabilities.get("persistent_force", False))
         return {
             name: {
                 **asdict(spec),
                 "requested_range": effective[name],
                 "effective_range": effective[name] if capabilities.get(name, False) else None,
                 "supported": bool(capabilities.get(name, False)),
+                **({"maximum_planar_norm_n": effective[name][1], "sampling": "uniform world-XY disk"}
+                   if name == "persistent_force" else {}),
             }
             for name, spec in self.schema.items()
         }
