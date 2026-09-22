@@ -105,6 +105,9 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         clip_actions = 50.0
 
     class domain_rand(LeggedRobotCfg.domain_rand):
+        # Isaac Lab: hold each environment's reset-sampled properties for this
+        # many completed episodes. 0/1 = every reset. Changed ranges bypass it.
+        reset_resample_episodes = 25
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000
@@ -197,11 +200,11 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         # The disturbance curriculum expands the planar disk and downward Fz
         # after push_warmup and the joint-dynamics/mass-CoM phases. Existing
         # events finish their waveform; only new events use expanded bounds.
-        persistent_force_min_n = 6.0
-        persistent_force_max_n = 60.0
+        persistent_force_min_n = 4.0
+        persistent_force_max_n = 10.0
         # Positive magnitudes; actual world Fz is sampled in [-limit, 0].
-        persistent_vertical_force_min_n = 1.0
-        persistent_vertical_force_max_n = 10.0
+        persistent_vertical_force_min_n = 10.0
+        persistent_vertical_force_max_n = 60.0
         persistent_torque_min_nm = 2.0
         persistent_torque_max_nm = 14.0
 

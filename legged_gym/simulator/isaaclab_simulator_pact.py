@@ -453,11 +453,18 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
             ).float()
 
     def reset_idx(self, env_ids):
+        cadence = self._reset_sampling_cadence()
+        if cadence is not None:
+            cadence.begin_reset(env_ids)
         if getattr(self._cfg.domain_rand, "randomize_joint_stiffness", False):
-            self._randomize_joint_stiffness(env_ids)
+            ids = self._reset_sample_ids("joint_stiffness", env_ids)
+            if len(ids):
+                self._randomize_joint_stiffness(ids)
         super().reset_idx(env_ids)
         if getattr(self._cfg.domain_rand, "randomize_motor_strength", False):
-            self._randomize_motor_strength(env_ids)
+            ids = self._reset_sample_ids("motor_strength", env_ids)
+            if len(ids):
+                self._randomize_motor_strength(ids)
         self._rand_push_vels[env_ids] = 0.0
         self._rand_wrench_vels[env_ids] = 0.0
         self.push_timeouts[env_ids] = torch.empty(
@@ -562,6 +569,47 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
     # ------------------------------------------------------------------
     # PACT curriculum-compatible realized randomization
     # ------------------------------------------------------------------
+    def _reset_sampling_cadence(self):
+        interval = getattr(self._cfg.domain_rand, "reset_resample_episodes", 0)
+        if int(interval) != interval or interval < 0:
+            raise ValueError("reset_resample_episodes must be a nonnegative integer")
+        if interval <= 1:
+            return None  # Legacy fast path: no additional tensors or random draws.
+        if not hasattr(self, "_reset_cadence"):
+            from .reset_randomization_cadence import ResetRandomizationCadence
+            self._reset_cadence = ResetRandomizationCadence(self._num_envs,self._device,interval)
+        return self._reset_cadence
+
+    def set_reset_randomization_ranges(self, ranges):
+        cadence = self._reset_sampling_cadence()
+        if cadence is None:
+            return
+        cadence.update_ranges({
+            "friction": ranges["ground_friction"],
+            "base_mass": ranges["added_base_mass"],
+            "com_displacement": sum((tuple(ranges["base_com_"+axis]) for axis in "xyz"),()),
+            "joint_armature": ranges["armature"],
+            "joint_friction": ranges["joint_friction"],
+            "joint_damping": ranges["joint_damping"],
+            "joint_stiffness": ranges["joint_stiffness"],
+            "pd_gain": tuple(ranges["kp_scale"])+tuple(ranges["kd_scale"]),
+            "motor_strength": ranges["motor_strength"],
+        })
+
+    def _reset_sample_ids(self, name, env_ids):
+        cadence = self._reset_sampling_cadence()
+        return env_ids if cadence is None else cadence.select(name,env_ids)
+
+    def _reset_domain_randomization(self, env_ids):
+        if self._reset_sampling_cadence() is None:
+            return super()._reset_domain_randomization(env_ids)
+        for name in ("friction","base_mass","com_displacement","joint_armature",
+                     "joint_friction","joint_damping","pd_gain"):
+            if getattr(self._cfg.domain_rand,"randomize_"+name,False):
+                ids = self._reset_sample_ids(name,env_ids)
+                if len(ids):
+                    getattr(self,"_randomize_"+name)(ids)
+
     def _init_domain_params(self):
         super()._init_domain_params()
         self._robot_mass = float(self._robot.data.default_mass[0].sum().item())

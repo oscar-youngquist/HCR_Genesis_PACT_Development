@@ -63,7 +63,7 @@ class IsaacLabSimulator(Simulator):
             if self._cfg.terrain.obtain_terrain_info_around_feet:
                 self._calc_terrain_info_around_feet()
     
-    def reset_idx(self, env_ids):
+    def _reset_domain_randomization(self, env_ids):
         # domain randomization
         if self._cfg.domain_rand.randomize_friction:
             self._randomize_friction(env_ids)
@@ -79,6 +79,9 @@ class IsaacLabSimulator(Simulator):
             self._randomize_joint_damping(env_ids)
         if self._cfg.domain_rand.randomize_pd_gain:
             self._randomize_pd_gain(env_ids)
+
+    def reset_idx(self, env_ids):
+        self._reset_domain_randomization(env_ids)
         
         self._robot.reset(env_ids)
         self._contact_sensors.reset(env_ids)

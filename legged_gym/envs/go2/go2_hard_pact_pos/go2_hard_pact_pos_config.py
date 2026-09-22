@@ -98,6 +98,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         clip_actions = 50.0
 
     class domain_rand(LeggedRobotCfg.domain_rand):
+        reset_resample_episodes = 100  # Isaac Lab, per environment; 0/1 = every reset.
         use_domainrand_curriculum = False
         com_rand_z_positive = False
         num_push_steps = 500

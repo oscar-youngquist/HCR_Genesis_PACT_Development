@@ -461,6 +461,9 @@ class Go2HardPACT(Go2PACT):
         """Publish neutral effective ranges to the backend's reset samplers."""
         ranges = self.domain_rand_curriculum.effective_ranges()
         sim = self.simulator
+        notify = getattr(sim, "set_reset_randomization_ranges", None)
+        if notify is not None:
+            notify(ranges)
         sim.domain_rand_joint_dynamics_progress = self.domain_rand_curriculum.progress["joint_dynamics"]
         sim.domain_rand_mass_com_progress = self.domain_rand_curriculum.progress["mass_com"]
         sim.domain_rand_disturbance_progress = self.domain_rand_curriculum.progress["disturbance"]
