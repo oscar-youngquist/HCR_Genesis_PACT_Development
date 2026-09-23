@@ -909,8 +909,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         adaptation_learning_rate = 2.0e-4                                               # HardPACT encoder/decoder learning rate.
 
         pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign: + PINN / - PPGrad; 0 disables.
-        pinn_warmup = 500                                                               # Ramp duration after PINN activation [PPO updates].
-        pinn_init_steps = 0                                                           # First PPO iteration eligible for the PINN ramp.
+        pinn_warmup = 750                                                               # Ramp duration after PINN activation [PPO updates].
+        pinn_init_steps = 250                                                           # First PPO iteration eligible for the PINN ramp.
         use_pinn_rollout_loss = True                                                    # Enable the rollout term in addition to inverse dynamics.
         pinn_inverse_weight = 0.5                                                       # Inverse-dynamics coefficient inside the combined physics objective.
         pinn_rollout_weight = 0.5                                                       # Rollout coefficient inside the combined physics objective.
@@ -956,7 +956,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
     class algorithm:
         # Actor-facing task prediction; independent of representation-PINN weights.
         actor_phys_enabled = True                         # Opt in only for coupled PACT/BARD.
-        actor_phys_coef = 0.01                              # Overall actor auxiliary coefficient.
+        actor_phys_coef = 0.1                              # Overall actor auxiliary coefficient.
         actor_phys_vel_weight = 1.0                         # Reachable planar velocity/yaw tracking.
         actor_phys_ee_weight = 1.0                          # Next scheduled, compliant EE target.
         actor_phys_q_weight = 0.1                           # Joint-position safety barrier.
