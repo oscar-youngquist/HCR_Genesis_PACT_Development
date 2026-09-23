@@ -7,8 +7,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
     seed = 1                                                                            # Random seed for reproducible initialization.
 
     class env:
-        # num_envs = 4096                                                                # Parallel simulation instances.
-        num_envs = 5120                                                                  # Parallel simulation instances.
+        num_envs = 4096                                                                # Parallel simulation instances.
+        # num_envs = 5120                                                                  # Parallel simulation instances.
         # 2 body-orientation + 3 angular velocity + 17 joint positions +
         # 17 joint velocities + 34 coupled PACT actions + 6 commands. EE pose
         # is estimated from history instead of exposed through an FK error.
@@ -352,12 +352,12 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # but retains the common command stage before disturbances are enabled.
         force_curriculum_command_start_iteration = 0                                    # Iteration starting the shared command-force stage.
         force_curriculum_command_ramp_iterations = 0                                    # Command-force ramp duration [PPO iterations].
-        # force_curriculum_gate_start_iteration = 8000                                    # Earliest iteration for the external-force performance gate.
-        # force_curriculum_external_ramp_iterations = 8000                                # External-force ramp duration after activation [iterations].
+        force_curriculum_gate_start_iteration = 8000                                    # Earliest iteration for the external-force performance gate.
+        force_curriculum_external_ramp_iterations = 8000                                # External-force ramp duration after activation [iterations].
 
 
-        force_curriculum_gate_start_iteration = 6400                                    # Earliest iteration for the external-force performance gate.
-        force_curriculum_external_ramp_iterations = 6400                                # External-force ramp duration after activation [iterations].
+        # force_curriculum_gate_start_iteration = 6400                                    # Earliest iteration for the external-force performance gate.
+        # force_curriculum_external_ramp_iterations = 6400                                # External-force ramp duration after activation [iterations].
 
         force_curriculum_ee_l1_threshold = 0.25                                         # Maximum EE tracking error for force-stage advancement.
         force_curriculum_roll_termination_threshold = 0.05                              # Maximum roll-termination rate for advancement.
@@ -798,10 +798,10 @@ class B1Z1PACTCfg(LeggedRobotCfg):
                 "arm_feedforward_action_rate":[-0.006, -0.06],
                 "arm_feedforward_action_smoothness":[-0.006, -0.06],
             }
-            # warmup_steps = 30000                                                        # Reward-curriculum warmup.
-            # curr_steps = 10000                                                           # Reward-curriculum ramp duration.
-            warmup_steps = 24000                                                        # Reward-curriculum warmup.
-            curr_steps = 8000                                                           # Reward-curriculum ramp duration.
+            warmup_steps = 30000                                                        # Reward-curriculum warmup.
+            curr_steps = 10000                                                           # Reward-curriculum ramp duration.
+            # warmup_steps = 24000                                                        # Reward-curriculum warmup.
+            # curr_steps = 8000                                                           # Reward-curriculum ramp duration.
 
 
     class viewer:
@@ -981,8 +981,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         use_clipped_value_loss = True                                                   # Apply PPO-style clipping to critic updates.
         clip_param = 0.2                                                                # PPO probability-ratio clipping width.
         entropy_coef = 0.01                                                             # Policy entropy bonus coefficient.
-        # learning_rate = 3.0e-4                                                          # Actor/critic optimizer learning rate.
-        learning_rate = 3.75e-4                                                          # Actor/critic optimizer learning rate.
+        learning_rate = 3.0e-4                                                          # Actor/critic optimizer learning rate.
+        # learning_rate = 3.75e-4                                                          # Actor/critic optimizer learning rate.
         # Learning-rate schedule.
         schedule = "adaptive"                                                           # adaptive
         gamma = 0.99                                                                    # Reward discount factor.
@@ -1017,8 +1017,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         num_steps_per_env = 24                                                          # Control transitions collected per environment per update.
         grf_dim = 12                                                                    # Flattened four-foot XYZ force width.
 
-        # max_iterations = 70000                                                          # Total PPO learning iterations.
-        max_iterations = 56000                                                          # Total PPO learning iterations.
+        max_iterations = 70000                                                          # Total PPO learning iterations.
+        # max_iterations = 56000                                                          # Total PPO learning iterations.
 
         save_interval = 1000                                                            # Checkpoint interval [PPO iterations].
         run_name = "b1z1_pact_improved"                                                  # Run label used in output directories.
