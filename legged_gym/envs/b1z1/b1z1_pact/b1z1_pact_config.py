@@ -956,7 +956,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
     class algorithm:
         # Actor-facing task prediction; independent of representation-PINN weights.
         actor_phys_enabled = True                         # Opt in only for coupled PACT/BARD.
-        actor_phys_coef = 0.01                              # Overall actor auxiliary coefficient.
+        actor_phys_coef = 0.1                              # Overall actor auxiliary coefficient.
         actor_phys_vel_weight = 1.0                         # Reachable planar velocity/yaw tracking.
         actor_phys_ee_weight = 1.0                          # Next scheduled, compliant EE target.
         actor_phys_q_weight = 0.1                           # Joint-position safety barrier.
@@ -970,6 +970,12 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_q_scale = 1.0                            # Position-barrier normalization [rad].
         actor_phys_qd_scale = 10.0                          # Velocity-barrier normalization [rad/s].
         actor_phys_require_force_gate = False               # Optional existing force-quality gate.
+
+        actor_phys_pos_fk_enabled = True                   # Direct arm position-command FK objective.
+        actor_phys_pos_fk_weight = 0.1                      # Inside the scheduled actor-physics coefficient.
+        actor_phys_pos_fk_huber_delta = 1.0                 # Huber threshold after EE-error normalization.
+        actor_phys_pos_fk_axis_weights = [1.0, 1.0, 1.0]     # Arm-root Cartesian weights; uses actor_phys_ee_scale.
+        actor_phys_pos_fk_deadband = 0.05                    # Per-axis tolerance [m].
 
         value_loss_coef = 1.0                                                           # Critic regression coefficient.
         use_clipped_value_loss = True                                                   # Apply PPO-style clipping to critic updates.

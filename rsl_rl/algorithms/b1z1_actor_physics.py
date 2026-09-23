@@ -13,6 +13,39 @@ def enabled(cfg):
     return cfg.get("actor_phys_enabled", False) and cfg.get("actor_phys_coef", 0.0) > 0
 
 
+def pos_fk_enabled(cfg):
+    return cfg.get("actor_phys_pos_fk_enabled", False) and cfg.get("actor_phys_pos_fk_weight", 0.) > 0
+
+
+def position_fk(a, actions, data):
+    """Direct command-to-FK graph: no predicted successor or forward dynamics."""
+    ids = torch.as_tensor(a.cfg["actor_phys_arm_indices"], device=actions.device, dtype=torch.long)
+    count = a.cfg["actor_phys_num_actions"]
+    position = actions[:, :count].clamp(-a.cfg["clip_actions"], a.cfg["clip_actions"])
+    scale = actions.new_tensor(a.cfg["position_action_scale"])
+    desired = data["fk_default"].detach()[:, :count] + position * scale
+    joints = data["fk_default"].detach().clone()
+    joints = joints.index_copy(1, ids, desired.index_select(1, ids))
+    prediction, reference = a.dynamics_backend.commanded_ee_in_frame(
+        data["fk_base_pos"].detach(), data["fk_base_quat"].detach(), joints,
+        data["ee_target"].detach(), a.cfg["actor_phys_arm_root_frame"])
+    finite = torch.isfinite(prediction).all(-1) & torch.isfinite(reference).all(-1)
+    error = prediction[finite] - reference[finite]
+    tolerance = a.cfg.get("actor_phys_pos_fk_deadband", 0.)
+    residual = error.sign() * (error.abs() - tolerance).clamp_min(0.)
+    residual = residual * actions.new_tensor(a.cfg.get("actor_phys_pos_fk_axis_weights", [1.,1.,1.])) / a.cfg["actor_phys_ee_scale"]
+    loss = F.huber_loss(residual, torch.zeros_like(residual), reduction="none",
+                        delta=a.cfg.get("actor_phys_pos_fk_huber_delta", 1.)).mean(-1)
+    raw = loss.mean() if finite.any() else actions[torch.isfinite(actions)].sum()*0.
+    weighted = a.cfg["actor_phys_pos_fk_weight"] * raw
+    metrics = {"pos_fk_raw": raw.detach(), "pos_fk_weighted": weighted.detach(),
+               "pos_fk_finite_count": finite.sum(), "pos_fk_nonfinite_count": (~finite).sum(),
+               "pos_fk_error_m": error.norm(dim=-1).mean() if finite.any() else raw.detach()}
+    for i, axis in enumerate("xyz"):
+        metrics[f"pos_fk_error_{axis}_m"] = error[:, i].abs().mean() if finite.any() else raw.detach()
+    return weighted, metrics
+
+
 def scheduled_coefficient(a):
     """Reuse the checkpoint-aware PINN ramp, retaining the actor's own maximum."""
     maximum = abs(a.cfg.get("pinn_loss_weight", 0.0))
@@ -37,6 +70,14 @@ def configure(algorithm):
         value = cfg["actor_phys_" + key]
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"actor_phys_{key} must be finite and nonnegative")
+    if cfg.get("actor_phys_pos_fk_enabled", False):
+        values = [cfg["actor_phys_pos_fk_huber_delta"], cfg["actor_phys_pos_fk_deadband"],
+                  cfg["actor_phys_pos_fk_weight"]]
+        if not all(math.isfinite(v) for v in values) or values[0] <= 0 or min(values[1:]) < 0:
+            raise ValueError("Position-FK requires positive Huber delta and nonnegative deadband")
+        weights = torch.as_tensor(cfg["actor_phys_pos_fk_axis_weights"])
+        if weights.shape != (3,) or not torch.isfinite(weights).all() or (weights < 0).any():
+            raise ValueError("Position-FK axis weights must be three finite nonnegative values")
 
 
 @torch.no_grad()
@@ -71,6 +112,9 @@ def capture(runner):
                   mass_wrench=env.get_mass_wrench_label(),
                   # Resampling next step has no deterministic target available yet.
                   valid=((env.goal_timer + 1) <= env.traj_total_timesteps).unsqueeze(-1))
+    if pos_fk_enabled(a.cfg):
+        values.update(fk_default=env.simulator.default_dof_pos.expand_as(env.simulator.dof_pos),
+                      fk_base_pos=env.simulator.base_pos, fk_base_quat=env.simulator.base_quat)
     a.transition.actor_physics = {k: v.detach().to(a.device).clone() for k, v in values.items()}
 
 
@@ -163,6 +207,10 @@ def objective(a, batch, actions, context):
     metrics = {k: zero.detach() for k in names}
     metrics["valid_fraction"] = valid.float().mean()
     metrics["active_fraction"] = zero.detach()
+    if pos_fk_enabled(a.cfg):
+        metrics.update({"pos_fk_" + name: zero.detach() for name in
+                        ("raw", "weighted", "finite_count", "nonfinite_count",
+                         "error_m", "error_x_m", "error_y_m", "error_z_m")})
     if not valid.any():
         return zero, metrics
     data = {k: v[valid] for k, v in data.items()}
@@ -207,7 +255,14 @@ def objective(a, batch, actions, context):
                         {k: v[finite_ee] for k, v in data.items()}, a.cfg)
     metrics.update({k: v.detach().mean() for k, v in values.items()})
     metrics["active_fraction"] = finite_ee.sum() / len(actions)
-    return values["loss"].mean(), metrics
+    total = values["loss"].mean()
+    if pos_fk_enabled(a.cfg):
+        fk_loss, fk_metrics = position_fk(a, actions[valid][good][finite][finite_ee],
+                                        {k: v[finite_ee] for k, v in data.items()})
+        total = total + fk_loss
+        metrics.update(fk_metrics)
+        metrics["loss"] = total.detach()
+    return total, metrics
 
 
 def backward(a, batch, ppo_loss, actions, context):

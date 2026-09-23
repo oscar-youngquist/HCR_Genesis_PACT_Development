@@ -333,6 +333,29 @@ class BardB1Z1DynamicsBackend(WholeBodyDynamicsBackend):
             positions.append(pose[:, :3, 3].clone())
         return torch.cat(positions)
 
+    def commanded_ee_in_frame(self, base_pos, base_quat, joints, reference, root_frame):
+        """Command FK only; freeze the arm-root transform and world reference."""
+        predictions, references = [], []
+        root_id = self._frame_id(root_frame)
+        for start in range(0, len(joints), self.batch_capacity):
+            sl = slice(start, start + self.batch_capacity)
+            joint = joints[sl]
+            pos, quat = base_pos[sl].detach(), base_quat[sl].detach()
+            q, v = self._pack_state(pos, quat, joint, torch.zeros_like(pos),
+                                    torch.zeros_like(pos), torch.zeros_like(joint))
+            data = self.bard.create_data(self.model, max_batch_size=len(joint))
+            self.bard.update_kinematics(self.model, data, q, v)
+            _, ee = self.bard.jacobian(self.model, data, self.ee_frame_id,
+                                       reference_frame="local", return_pose=True)
+            ee = ee[:, :3, 3].clone()
+            _, root = self.bard.jacobian(self.model, data, root_id,
+                                         reference_frame="local", return_pose=True)
+            root = root.detach()
+            rotation = root[:, :3, :3].transpose(-1, -2)
+            predictions.append((rotation @ (ee-root[:, :3, 3]).unsqueeze(-1)).squeeze(-1))
+            references.append((rotation @ (reference[sl].detach()-root[:, :3, 3]).unsqueeze(-1)).squeeze(-1))
+        return torch.cat(predictions), torch.cat(references)
+
     def forward_dynamics(
         self, base_pos, base_quat_xyzw, dof_pos, base_linear_velocity,
         base_angular_velocity, dof_velocity, generalized_joint_torque,
