@@ -423,7 +423,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                   'pos_action_smoothness': [-0.001, -0.01], 
                                   'tau_action_rate': [-0.002, -0.02], 
                                   'tau_action_smoothness': [-0.002, -0.02],
-                                  'dof_vel_limits':[-0.01, -0.1],
+                                  'dof_vel_limits':[-0.1, -1.0],
                                 #   'dof_acc':[-2.5e-08, -2.5e-07]
                                   }
             curr_steps = 6000
@@ -522,7 +522,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         contact_probability_loss_weight = 0.1
         # Opt-in policy recomputation/latent ablations; basic KL/loss logging
         # remains available without these diagnostic-only forward passes.
-        ppo_latent_diagnostics_enabled = True
+        ppo_latent_diagnostics_enabled = False
         ppo_latent_diagnostics_interval = 100
         ppo_latent_diagnostics_sample_count = 256
         latent_active_unit_variance_threshold = 1e-2
@@ -532,7 +532,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         # Detailed physical GRF/base-wrench TensorBoard reductions. Decoder
         # losses remain logged when this is disabled.
-        force_decoder_diagnostics_enabled = True
+        force_decoder_diagnostics_enabled = False
 
         bard_enabled = True
         dynamics_backend = 'bard'
@@ -554,7 +554,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         # per-module norms/cosines, and nonfinite scans in production.
         pcgrad_diagnostics_enabled = True
         pcgrad_diagnostics_start_iteration = 0
-        pcgrad_diagnostics_interval = 100
+        pcgrad_diagnostics_interval = 500
         cache_rollout_mechanics = True
 
         ppo_qp_sampling = 'disjoint_epoch_partition'
@@ -562,7 +562,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         ppo_qp_shard_percentage = 20.0
         ppo_qp_stratify_by_anchor = True
         ppo_qp_sampling_seed = None
-        ppo_qp_sampling_logging_enabled = True
+        ppo_qp_sampling_logging_enabled = False
 
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
@@ -652,11 +652,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'verbose': 0, 
                         # Always retain primal safety/fallback summaries.
                         # Physical/KKT audits and synchronized timing are opt-in.
-                        'diagnostics_level': 'full',
+                        'diagnostics_level': 'physical',
                         'tensorboard_diagnostics_enabled': True,
-                        'tensorboard_diagnostics_interval': 2,
+                        'tensorboard_diagnostics_interval': 50,
                         # Conservative cadence if 'full' is enabled later.
-                        'full_audit_period': 2,
+                        'full_audit_period': 0,
                         'full_audit_sample_size': 256,
                         'rollout_chunk_size': 4096, 
                         'ppo_chunk_size': 8000, 
