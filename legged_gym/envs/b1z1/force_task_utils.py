@@ -346,6 +346,9 @@ def _compute_force_adjusted_ee_target(env, env_ids=None, *, external_force=None,
 
     force_world = external_force + quat_apply(base_yaw_quat, commanded_force)
     raw_offset = force_world / force_kp
+    # Only the position-only PPO ablation opts out of impedance-shifted targets.
+    if not getattr(env.cfg, "use_force_shifted_target", True):
+        raw_offset = torch.zeros_like(raw_offset)
     raw_norm = torch.linalg.vector_norm(raw_offset, dim=-1, keepdim=True)
     max_offset_value = float(env.cfg.goal_ee.max_ee_force_offset)
     if max_offset_value < 0.0:

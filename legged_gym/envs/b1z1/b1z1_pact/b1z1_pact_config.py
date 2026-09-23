@@ -7,7 +7,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
     seed = 1                                                                            # Random seed for reproducible initialization.
 
     class env:
-        num_envs = 4096                                                                 # Parallel simulation instances.
+        # num_envs = 4096                                                                # Parallel simulation instances.
+        num_envs = 5120                                                                  # Parallel simulation instances.
         # 2 body-orientation + 3 angular velocity + 17 joint positions +
         # 17 joint velocities + 34 coupled PACT actions + 6 commands. EE pose
         # is estimated from history instead of exposed through an FK error.
@@ -351,15 +352,22 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # but retains the common command stage before disturbances are enabled.
         force_curriculum_command_start_iteration = 0                                    # Iteration starting the shared command-force stage.
         force_curriculum_command_ramp_iterations = 0                                    # Command-force ramp duration [PPO iterations].
-        force_curriculum_gate_start_iteration = 8000                                    # Earliest iteration for the external-force performance gate.
-        force_curriculum_external_ramp_iterations = 8000                                # External-force ramp duration after activation [iterations].
+        # force_curriculum_gate_start_iteration = 8000                                    # Earliest iteration for the external-force performance gate.
+        # force_curriculum_external_ramp_iterations = 8000                                # External-force ramp duration after activation [iterations].
+
+
+        force_curriculum_gate_start_iteration = 6400                                    # Earliest iteration for the external-force performance gate.
+        force_curriculum_external_ramp_iterations = 6400                                # External-force ramp duration after activation [iterations].
+
         force_curriculum_ee_l1_threshold = 0.25                                         # Maximum EE tracking error for force-stage advancement.
         force_curriculum_roll_termination_threshold = 0.05                              # Maximum roll-termination rate for advancement.
         force_curriculum_episode_length_threshold = 950.0                               # Minimum episode length for advancement [control steps].
         force_curriculum_gate_patience = 400                                            # Consecutive qualifying updates before advancement.
         force_curriculum_metric_ema_alpha = 0.05                                        # New-sample weight for force-curriculum metrics.
         force_curriculum_use_latest_start_fallback = True                               # Allow time-based activation if the performance gate stalls.
-        force_curriculum_latest_start_iteration = 10000                                 # Latest allowed external-force start iteration.
+        # force_curriculum_latest_start_iteration = 10000                                 # Latest allowed external-force start iteration.
+        force_curriculum_latest_start_iteration = 8000                                 # Latest allowed external-force start iteration.
+
 
         push_gripper_stators = True                                                     # Enable the EE disturbance-event scheduler.
         apply_ee_external_forces = True                                                 # Actually apply scheduled EE forces.
@@ -490,7 +498,9 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         joint_damping_range_end = [0.00, 0.80]                                          # Final passive joint-damping bounds.
 
         num_push_steps = 500
-        push_warmup = 20000                                                             # Warmup before disturbance-curriculum advancement.
+        # push_warmup = 20000                                                             # Warmup before disturbance-curriculum advancement.
+        push_warmup = 13000                                                             # Warmup before disturbance-curriculum advancement.
+
 
         best_reward_window = 200                                                        # Reward-history window for curriculum decisions.
         best_reward_quantile = 0.90                                                     # Reference reward quantile for curriculum advancement.
@@ -631,7 +641,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             # authority by producing large opposing torques on the same joint.
             torque_cancellation = -0.10
 
-            arm_progress_before_torso = 0.0                                             # Style rewards encouraging using the arm
+            arm_progress_before_torso = 0.5                                             # Style rewards encouraging using the arm
             early_torso_tilt = -0.2
             # feet_contact_number = 0.01
             # arm_progress_before_torso = 0.0
@@ -651,6 +661,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             orientation = -0.2
 
             dof_acc           = -2.5e-7                                                 # Legs
+            dof_vel           = -1e-4
             joint_power       = -2.e-5
             joint_power_dist  = -1.e-6
 
@@ -754,6 +765,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             curr_reward_keys = [                                                        # Reward terms whose coefficients are scheduled.
                                 "torque_limits",
                                 "dof_pos_limits",
+                                "dof_vel",
                                 # "collision",
                                 # "feet_contact_forces",
                                 # "lin_vel_z",
@@ -771,6 +783,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             curr_reward_bounds = {                                                      # Initial and final coefficients for scheduled rewards.
                 "torque_limits":[-0.001, -1.0],
                 "dof_pos_limits":[-1.0, -10.0],
+                "dof_vel":[-1e-6, -1e-4],
                 # "collision":[-0.5, -5.0],
                 # "feet_contact_forces":[-1.0e-5, -1.0e-4],
                 # "lin_vel_z":[-1.00, -2.0],
@@ -785,8 +798,11 @@ class B1Z1PACTCfg(LeggedRobotCfg):
                 "arm_feedforward_action_rate":[-0.006, -0.06],
                 "arm_feedforward_action_smoothness":[-0.006, -0.06],
             }
-            warmup_steps = 40000                                                        # Reward-curriculum warmup.
-            curr_steps = 10000                                                           # Reward-curriculum ramp duration.
+            # warmup_steps = 30000                                                        # Reward-curriculum warmup.
+            # curr_steps = 10000                                                           # Reward-curriculum ramp duration.
+            warmup_steps = 24000                                                        # Reward-curriculum warmup.
+            curr_steps = 8000                                                           # Reward-curriculum ramp duration.
+
 
     class viewer:
         ref_env = 0                                                                     # Environment followed by the viewer.
@@ -893,8 +909,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         adaptation_learning_rate = 2.0e-4                                               # HardPACT encoder/decoder learning rate.
 
         pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign: + PINN / - PPGrad; 0 disables.
-        pinn_warmup = 400                                                               # Ramp duration after PINN activation [PPO updates].
-        pinn_init_steps = 100                                                           # First PPO iteration eligible for the PINN ramp.
+        pinn_warmup = 500                                                               # Ramp duration after PINN activation [PPO updates].
+        pinn_init_steps = 0                                                           # First PPO iteration eligible for the PINN ramp.
         use_pinn_rollout_loss = True                                                    # Enable the rollout term in addition to inverse dynamics.
         pinn_inverse_weight = 0.5                                                       # Inverse-dynamics coefficient inside the combined physics objective.
         pinn_rollout_weight = 0.5                                                       # Rollout coefficient inside the combined physics objective.
@@ -940,7 +956,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
     class algorithm:
         # Actor-facing task prediction; independent of representation-PINN weights.
         actor_phys_enabled = True                         # Opt in only for coupled PACT/BARD.
-        actor_phys_coef = 0.1                              # Overall actor auxiliary coefficient.
+        actor_phys_coef = 0.01                              # Overall actor auxiliary coefficient.
         actor_phys_vel_weight = 1.0                         # Reachable planar velocity/yaw tracking.
         actor_phys_ee_weight = 1.0                          # Next scheduled, compliant EE target.
         actor_phys_q_weight = 0.1                           # Joint-position safety barrier.
@@ -959,7 +975,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         use_clipped_value_loss = True                                                   # Apply PPO-style clipping to critic updates.
         clip_param = 0.2                                                                # PPO probability-ratio clipping width.
         entropy_coef = 0.01                                                             # Policy entropy bonus coefficient.
-        learning_rate = 3.0e-4                                                          # Actor/critic optimizer learning rate.
+        # learning_rate = 3.0e-4                                                          # Actor/critic optimizer learning rate.
+        learning_rate = 3.75e-4                                                          # Actor/critic optimizer learning rate.
         # Learning-rate schedule.
         schedule = "adaptive"                                                           # adaptive
         gamma = 0.99                                                                    # Reward discount factor.
@@ -968,6 +985,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         max_grad_norm = 1.0                                                             # Gradient-norm cap per optimizer ownership group.
         num_learning_epochs = 5                                                         # PPO passes over each rollout.
         num_mini_batches = 4                                                            # Minibatches per PPO epoch.
+
+
         # BARD is the differentiable GPU backend; Pinocchio remains available
         # as the numerical reference/fallback.
         dynamics_backend = "bard"                                                       # Select BARD auxiliary PINNs or the legacy Pinocchio path.
@@ -992,7 +1011,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         num_steps_per_env = 24                                                          # Control transitions collected per environment per update.
         grf_dim = 12                                                                    # Flattened four-foot XYZ force width.
 
-        max_iterations = 70000                                                          # Total PPO learning iterations.
+        # max_iterations = 70000                                                          # Total PPO learning iterations.
+        max_iterations = 56000                                                          # Total PPO learning iterations.
 
         save_interval = 1000                                                            # Checkpoint interval [PPO iterations].
         run_name = "b1z1_pact_improved"                                                  # Run label used in output directories.

@@ -2328,7 +2328,7 @@ class B1Z1PACT(LeggedRobot):
         )
 
     def _reward_dof_vel(self):
-        return torch.sum(torch.square(self.simulator.dof_vel[:, :17]), dim=1)
+        return torch.sum(torch.square(self.simulator.dof_vel[:, :12]), dim=1)
 
     def _reward_dof_acc(self):
         return torch.sum(torch.square((self.simulator.last_dof_vel[:, :12] - self.simulator.dof_vel[:, :12]) / self.dt), dim=1)

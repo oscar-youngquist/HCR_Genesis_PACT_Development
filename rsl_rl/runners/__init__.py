@@ -44,6 +44,7 @@ from .unifp_runner import OnPolicyRunnerUniFP
 from .unifp_original_runner import OnPolicyRunnerUniFPOriginal
 from .b1_unifp_runner import OnPolicyRunnerB1UniFP
 from .b1z1_pact_runner import B1Z1PACTRunner
+from .b1z1_ppo_pos_runner import B1Z1PPOPosRunner
 from .b1z1_pact_pos_runner import B1Z1PACTPosRunner
 
 from rsl_rl.utils.runner_registry import runner_registry
@@ -64,3 +65,4 @@ runner_registry.register("UniFPOriginalRunner", OnPolicyRunnerUniFPOriginal)
 runner_registry.register("B1Z1PACTPosRunner", B1Z1PACTPosRunner)
 runner_registry.register("B1UniFPRunner", OnPolicyRunnerB1UniFP)
 runner_registry.register("B1Z1PACTRunner", B1Z1PACTRunner)
+runner_registry.register("B1Z1PPOPosRunner", B1Z1PPOPosRunner)
