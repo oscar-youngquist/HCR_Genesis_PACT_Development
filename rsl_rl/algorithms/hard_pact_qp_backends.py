@@ -280,6 +280,18 @@ def _configure_cupiqp(solver, config, dtype, *, differentiable):
     solver.settings.enable_cuda_graph = bool(config.cupiqp_cuda_graph)
 
 
+def solver_capacity(rows, limit):
+    """Smallest power-of-two bucket, capped by the explicit chunk budget."""
+    return max(rows, min(1 << (rows-1).bit_length(), int(limit)))
+
+
+def pad_solver_rows(value, capacity):
+    """Repeat a real independent QP row; no dummy singular/empty problem."""
+    if value is None or value.shape[0] == capacity:
+        return value
+    return torch.cat((value, value[-1:].expand(capacity-value.shape[0], *value.shape[1:])),0)
+
+
 class CuPIQPFunction(torch.autograd.Function):
     """cuPIQP implicit VJP wrapper; one solver owns each outstanding graph."""
 
@@ -299,6 +311,12 @@ class CuPIQPFunction(torch.autograd.Function):
         # GPU-to-GPU operation and custom backward returns gradients to the
         # corresponding original arguments in the same logical ordering.
         backend = backend or SolverBackend("cupiqp", config)
+        real_rows = Q.shape[0]
+        capacity = real_rows
+        if Q.shape[1] == 48 and getattr(config,"cupiqp_ppo_capacity_reuse",True):
+            capacity = solver_capacity(real_rows,config.chunk_size or config.ppo_chunk_size)
+            Q,p,G,h,A,b,x_l,x_u = tuple(pad_solver_rows(v,capacity) for v in (Q,p,G,h,A,b,x_l,x_u))
+        ctx.real_rows, ctx.capacity = real_rows, capacity
         phase = backend.diagnostics_phase
         profile = backend.profiles[phase]
         def factory():
@@ -314,7 +332,7 @@ class CuPIQPFunction(torch.autograd.Function):
             pool = SolverPool(0)  # fresh-instance numerical reference
         lease, hit = pool.acquire(key, factory)
         backend.record(phase, pool_hits=int(hit), pool_misses=int(not hit),
-                       requested_rows=Q.shape[0], capacity_rows=Q.shape[0])
+                       requested_rows=real_rows, capacity_rows=capacity,padded_rows=capacity-real_rows)
         # One finalizer for the whole ctx lifetime, not one per backward use.
         weakref.finalize(ctx, lease.release)
         ctx.lease, ctx.profile = lease, profile
@@ -356,11 +374,11 @@ class CuPIQPFunction(torch.autograd.Function):
                     backend.record(phase, setup_count=1, reuse_exception_fresh_retry=1)
                     with profile.measure("solve", Q):
                         lease.solver.solve()
-                solution = _as_torch_zero_copy(lease.solver.result.x, Q).clone()
-                gap = _as_torch_zero_copy(lease.solver.result.info.duality_gap, p).clone()
-                gap_rel = _as_torch_zero_copy(lease.solver.result.info.duality_gap_rel, p).clone()
-                backend.record_iterations(phase, lease.solver, p, Q.shape[0])
-                _capture_solver_details(backend, lease.solver, p, Q.shape[0], hit)
+                solution = _as_torch_zero_copy(lease.solver.result.x, Q)[:real_rows].clone()
+                gap = _as_torch_zero_copy(lease.solver.result.info.duality_gap, p)[:real_rows].clone()
+                gap_rel = _as_torch_zero_copy(lease.solver.result.info.duality_gap_rel, p)[:real_rows].clone()
+                backend.record_iterations(phase, lease.solver, p, real_rows)
+                _capture_solver_details(backend, lease.solver, p, real_rows, hit)
             except Exception:
                 ctx.lease.healthy = False
                 ctx.lease.release()
@@ -371,6 +389,9 @@ class CuPIQPFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_x, _grad_gap, _grad_gap_rel):
         Q, p, G, h, A, b = ctx.inputs
+        if ctx.capacity != ctx.real_rows:
+            # Padding has no loss and must never acquire an upstream VJP.
+            grad_x = torch.cat((grad_x,grad_x.new_zeros(ctx.capacity-ctx.real_rows,grad_x.shape[1])),0)
         import cupy as cp
         with cp.cuda.Device(Q.device.index), cp.cuda.ExternalStream(torch.cuda.current_stream(Q.device).cuda_stream):
             try:
@@ -380,7 +401,7 @@ class CuPIQPFunction(torch.autograd.Function):
                     )
                     # Each VJP must own its output: PCGrad can retain these
                     # while another backward overwrites cuPIQP's scratch space.
-                    mapped = tuple(_as_torch_zero_copy(value, ref).clone() for value, ref in zip(
+                    mapped = tuple(_as_torch_zero_copy(value, ref)[:ctx.real_rows].clone() for value, ref in zip(
                         (gradients.P, gradients.c, gradients.G, gradients.h_u, gradients.A, gradients.b),
                         (Q, p, G, h, A, b),
                     ))

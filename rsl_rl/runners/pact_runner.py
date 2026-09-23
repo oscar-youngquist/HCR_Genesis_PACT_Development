@@ -496,6 +496,13 @@ class OnPolicyRunnerPACT:
                 torch.cuda.synchronize(self.device)
             stop = time.time()
             learn_time = stop - start
+            if self.is_hard_pact and self.alg.hard_pact_qp is not None:
+                qp = self.alg.hard_pact_qp
+                for phase,seconds in (("rollout",collection_time),("ppo",learn_time)):
+                    # Existing host wall-clock interval; no additional CUDA
+                    # synchronization. Opt-in events report GPU completion time.
+                    qp.iteration_diagnostics[phase].add_sum("runtime/host_wall_seconds",
+                        qp.torque_limits.new_tensor(seconds))
             if self.log_dir is not None:
                 self.log(locals())
             if it % self.save_interval == 0:

@@ -567,7 +567,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
                         # at absolute iteration N. Zero keeps current behavior.
-                        'warmup_iterations': 8000,
+                        'warmup_iterations': 20,
                         'exception_capture_enabled': True,
                         'exception_capture_limit': 1,
                         'exception_capture_dir': '/tmp/hard_pact_qp_failures',
@@ -582,7 +582,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'cupiqp_cuda_graph': False, 
                         # Reuse bounded rollout/fallback solver capacities.
                         'cupiqp_rollout_capacity_reuse': True,
-                        'cupiqp_rollout_cache_size': 4,  # idle capacity buckets, LRU
+                        'cupiqp_rollout_cache_size': 16,  # idle capacity buckets, LRU
+                        'cupiqp_ppo_capacity_reuse': True,
                         'cupiqp_ppo_reuse': True,  # False: fresh-instance reference
                         'cupiqp_ppo_pool_size': 8,  # busy graphs never evicted
                         'cuda_event_profiling': False,  # opt-in iteration-end sync

@@ -341,8 +341,14 @@ class BardGo2Dynamics:
 
     def _install_inertias(self, batch, parameters):
         inertias = self._nominal_inertias.unsqueeze(0).expand(batch, -1, -1, -1).clone()
-        added = parameters.get("added_base_mass", inertias.new_zeros(batch, 1)).reshape(-1)
-        shift = parameters.get("base_com_shift", inertias.new_zeros(batch, 3))
+        # Avoid allocating zero defaults eagerly when realized values exist.
+        added = parameters.get("added_base_mass")
+        if added is None:
+            added = inertias.new_zeros(batch, 1)
+        added = added.reshape(-1)
+        shift = parameters.get("base_com_shift")
+        if shift is None:
+            shift = inertias.new_zeros(batch, 3)
         if not self.randomize_base_inertia:
             added, shift = torch.zeros_like(added), torch.zeros_like(shift)
         mass = (self.nominal_base_mass + added).clamp_min(1e-6)

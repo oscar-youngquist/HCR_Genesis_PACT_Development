@@ -92,8 +92,9 @@ class HardPACTQPConfig:
     cupiqp_cuda_graph: bool = False
     # Bounded reuse; fresh PPO instances remain an explicit reference mode.
     cupiqp_rollout_capacity_reuse: bool = True
-    cupiqp_rollout_cache_size: int = 4
+    cupiqp_rollout_cache_size: int = 8
     cupiqp_ppo_reuse: bool = True
+    cupiqp_ppo_capacity_reuse: bool = True  # Recovery only; primary batch semantics unchanged.
     cupiqp_ppo_pool_size: int = 8
     cuda_event_profiling: bool = False
     # Independent numerical policies. ``None`` preserves the legacy scalar
@@ -163,6 +164,7 @@ class HardPACTQPConfig:
     diagnostics_level: str = "minimal"
     tensorboard_diagnostics_enabled: bool = True
     tensorboard_diagnostics_interval: int = 50  # Absolute PPO iterations.
+    per_joint_diagnostics: bool = False
     full_audit_period: int = 1000
     full_audit_sample_size: int = 8
     # Legacy chunk_size overrides both paths when not None.
@@ -319,6 +321,16 @@ class _ScaleClipRows(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, gradient):
+        audit = ctx.sink is not None and getattr(ctx.sink, "diagnostics_scheduled", True)
+        if not audit:
+            if ctx.scale == 1.0 and ctx.maximum_norm <= 0.0:
+                return gradient, None, None, None, None
+            scaled = gradient * ctx.scale
+            if ctx.maximum_norm > 0.0:
+                norms = scaled.flatten(1).norm(dim=-1).clamp_min(1e-12)
+                factors = (ctx.maximum_norm/norms).clamp_max(1.)
+                scaled = scaled*factors.reshape((-1,)+(1,)*(scaled.ndim-1))
+            return scaled, None, None, None, None
         raw_norm = gradient.reshape(gradient.shape[0], -1).norm(dim=-1)
         scaled = gradient * ctx.scale
         scaled_norm = scaled.reshape(scaled.shape[0], -1).norm(dim=-1)
@@ -440,19 +452,26 @@ class HardPACTDifferentiableQP:
 
         from .hard_pact_qp_diagnostics import QPIterationDiagnostics
         from .hard_pact_qp_backends import CUDAEventProfile
-        self.iteration_diagnostics = {phase: QPIterationDiagnostics() for phase in ("rollout", "ppo")}
+        self.iteration_diagnostics = {phase: QPIterationDiagnostics(config.per_joint_diagnostics) for phase in ("rollout", "ppo")}
+        self._diagnostics_exported = {phase: True for phase in self.iteration_diagnostics}
         self.profiles = {phase: CUDAEventProfile(config.cuda_event_profiling) for phase in self.iteration_diagnostics}
         self._diagnostics_phase = "rollout"
 
     def begin_iteration_diagnostics(self, phase):
         from .hard_pact_qp_diagnostics import QPIterationDiagnostics
-        self.iteration_diagnostics[phase] = QPIterationDiagnostics()
+        if not self._diagnostics_exported[phase]:
+            self.iteration_diagnostics[phase].add_sum("reporting_iterations", self.torque_limits.new_tensor(1))
+            return
+        self._diagnostics_exported[phase] = False
+        self.iteration_diagnostics[phase] = QPIterationDiagnostics(self.cfg.per_joint_diagnostics)
+        self.iteration_diagnostics[phase].add_sum("reporting_iterations", self.torque_limits.new_tensor(1))
         self.profiles[phase].events.clear()
         for backend in self._backend_instances.values():
             backend.stats[phase].clear()
             backend.profiles[phase].events.clear()
 
     def iteration_metrics(self, phase, reference):
+        self._diagnostics_exported[phase] = True
         metrics = self.iteration_diagnostics[phase].finalize(reference)
         zero = reference.new_zeros((), dtype=torch.float32)
         counts = {}
@@ -586,6 +605,26 @@ class HardPACTDifferentiableQP:
             self._constant_cache[key] = (eye, scale)
         return self._constant_cache[key]
 
+    @torch.inference_mode(False)
+    def _assembly_constants(self, ref):
+        """Immutable blocks only; contact masks, Hessian additions and RHS refresh."""
+        key=("assembly",ref.device,ref.dtype,self.cfg.friction_coefficient,
+             self.cfg.torque_tracking_weight,self.cfg.force_tracking_weight,
+             self.cfg.torque_scale_nm,self.cfg.force_scale_n)
+        if key not in self._constant_cache:
+            selector=ref.new_zeros(18,12);selector[6:]=torch.eye(12,device=ref.device,dtype=ref.dtype)
+            friction=ref.new_zeros(4,5,24)
+            for foot in range(4):
+                col=12+3*foot
+                friction[foot,0,col+2]=-1
+                friction[foot,1,col],friction[foot,2,col]=1,-1
+                friction[foot,3,col+1],friction[foot,4,col+1]=1,-1
+                friction[foot,1:,col+2]=-self.cfg.friction_coefficient
+            _,scale=self._constants(ref)
+            diagonal=2*ref.new_tensor([self.cfg.torque_tracking_weight]*12+[self.cfg.force_tracking_weight]*12)/scale.square()
+            self._constant_cache[key]=(selector,friction,diagonal,torch.diag(diagonal))
+        return self._constant_cache[key]
+
     def _build(self, data):
         r"""Assemble x=[tau_12; f_FR,FL,RR,RL_world_12], and substitute x=D z.
 
@@ -604,8 +643,7 @@ class HardPACTDifferentiableQP:
         bias = data["bias"].detach()
         # M a = [S^T J^T]x + Jb^T W - h. solve_ex reports a singular
         # mechanics row without poisoning all other environments in its batch.
-        selector = ref.new_zeros(18, 12)
-        selector[6:] = torch.eye(12, device=ref.device, dtype=ref.dtype)
+        selector,friction,diagonal,base_Q = self._assembly_constants(ref)
         rhs = torch.cat((selector.expand(batch, -1, -1), J.transpose(1, 2)*force_mask[:,None,:],
                          Jb.transpose(1, 2), bias[..., None]), -1)
         solved, info = torch.linalg.solve_ex(mass, rhs, check_errors=False)
@@ -625,10 +663,7 @@ class HardPACTDifferentiableQP:
         # Raw supervised predictions remain unbounded and unchanged.
         force = torch.where(stance[..., None], force, torch.zeros_like(force)).flatten(1)
         target = torch.cat((tau, force), -1)
-        weights = ref.new_tensor([self.cfg.torque_tracking_weight] * 12
-                                 + [self.cfg.force_tracking_weight] * 12)
-        diagonal = 2 * weights / scale.square()
-        Q = torch.diag(diagonal).expand(batch, -1, -1).clone()
+        Q = base_Q.expand(batch, -1, -1).clone()
         p = -diagonal * target
 
         def add_residual(C, e, weight):
@@ -689,12 +724,7 @@ class HardPACTDifferentiableQP:
              joint_map, -joint_map]
         h = [upper, -lower, aupper-joint_offset, joint_offset-alower]
         for foot in range(4):
-            block = ref.new_zeros(5,24)
-            col = 12+3*foot
-            block[0,col+2] = -1
-            block[1,col], block[2,col] = 1, -1
-            block[3,col+1], block[4,col+1] = 1, -1
-            block[1:,col+2] = -self.cfg.friction_coefficient
+            block = friction[foot]
             # In swing these become 0<=1 after row normalization, not active
             # zero equalities. Stance rows retain the physical friction cone.
             G.append(block.expand(batch,-1,-1)*stance[:,foot,None,None])
@@ -722,7 +752,10 @@ class HardPACTDifferentiableQP:
         # cuPIQP 0.1 setup/update support x_l/x_u. Only the first 24 canonical
         # inequalities are true coordinate bounds. Joint acceleration bounds
         # are coupled affine rows and MUST remain general inequalities.
-        return m.G[:,24:], m.h[:,24:], m.native_lower, m.native_upper
+        # Recovery's last 24 rows are pure slack nonnegativity, represented
+        # exactly by native lower bounds; keep all canonical rows for checks.
+        end = 92 if m.p.shape[1] == 48 else m.G.shape[1]
+        return m.G[:,24:end], m.h[:,24:end], m.native_lower, m.native_upper
 
     def _soft_joint_problem(self, m):
         """Recovery: [tau, f, joint_slack(rad/s²), rate_slack(Nm)].
@@ -759,6 +792,7 @@ class HardPACTDifferentiableQP:
         native_lower = m.p.new_full((batch,48),-torch.inf)
         native_upper = -native_lower
         native_lower[:,:12], native_upper[:,:12] = -limits/variable_scale[:12], limits/variable_scale[:12]
+        native_lower[:,24:48] = 0.
         return replace(m,Q=Q,p=torch.cat((m.p,m.p.new_zeros(batch,24)),1),
             G=G,h=h,A=empty,physical_A=empty,physical_G=physical_G,physical_h=physical_h,
             variable_scale=variable_scale,inequality_row_scale=row_scale,
@@ -976,12 +1010,18 @@ class HardPACTDifferentiableQP:
         tolerance = (profile["feasibility"] if self._active_solver!="qpth"
                      else self._normalized_tolerance(dtype))
         ids = (finite_input & ~empty_tau).nonzero(as_tuple=True)[0]
+        primary_assemblies = []
         for chunk_index, rows in enumerate(ids.split(self._chunk_size(differentiable))):
             if not rows.numel():
                 continue
             part = {k:v.index_select(0,rows) for k,v in values.items()}
             with event_profile.measure("assembly",ref):
                 m = self._build(part)
+            if self.cfg.soft_joint_recovery_enabled:
+                # Keep the ORIGINAL rows, including empty joint intersections
+                # rejected before dispatch. No state/learned-input cache survives
+                # this solve or crosses an optimizer step.
+                primary_assemblies.append((rows,m))
             finite = torch.stack([torch.isfinite(t).flatten(1).all(-1)
                                   for t in (m.Q,m.p,m.G,m.h,m.A,m.b)]).all(0)
             empty_a = (m.qdd_lower>m.qdd_upper).any(-1)
@@ -1008,7 +1048,9 @@ class HardPACTDifferentiableQP:
             packet = capture.before(self, m, {k:v.index_select(0,local) for k,v in part.items()},
                                     "primary", rows) if capture is not None else None
             try:
-                with event_profile.measure("solve",ref):
+                # Inclusive dispatch time is separate from backend numerical
+                # solve, packing and setup/update; never sum it into solve_ms.
+                with event_profile.measure("backend_dispatch_total",ref):
                     result = self._backend_solve(m)
                 z = result.solution
             except QPBackendUnavailable:
@@ -1042,6 +1084,10 @@ class HardPACTDifferentiableQP:
             diag["selected/equality_max"][rows],diag["selected/inequality_max"][rows]=er,ir
             if capture is not None:
                 capture.after(packet, result, accepted)
+            if self.cfg.tensorboard_diagnostics_enabled:
+                _,ql,qu,vl=self._limits(ref)
+                aggregate.compact_candidate("primary",m,x,{k:v[rows] for k,v in values.items()},
+                    accepted,ql,qu,vl,self.cfg.position_integration_coefficient)
             if self._physical_enabled():
                 physical = self._physical_diagnostics(m,x,{k:v.index_select(0,local) for k,v in part.items()})
                 self._joint_candidate_diagnostics("primary", m, x,
@@ -1084,11 +1130,18 @@ class HardPACTDifferentiableQP:
             try:
                 self._active_differentiable = bool(differentiable)
                 with torch.set_grad_enabled(differentiable and torch.is_grad_enabled()):
-                    recovery_ids = (finite_input & ~empty_tau & ~ok).nonzero(as_tuple=True)[0]
-                    for rows in recovery_ids.split(self._chunk_size(differentiable)):
+                    for source_rows, source_m in primary_assemblies:
+                        failed = (~ok[source_rows]).nonzero(as_tuple=True)[0]
+                        rows = source_rows[failed]
                         if not rows.numel():
                             continue
-                        m = self._soft_joint_problem(self._build({k:v[rows] for k,v in values.items()}))
+                        with event_profile.measure("recovery_assembly",ref):
+                            m = select_problem(source_m,failed)
+                            # Private reference switch for parity tests; never
+                            # changes the formulation or solver numerics.
+                            if not getattr(self,"_reuse_primary_assembly",True):
+                                m = self._build({k:v[rows] for k,v in values.items()})
+                            m = self._soft_joint_problem(m)
                         finite = m.mechanics_valid & torch.stack([
                             torch.isfinite(t).flatten(1).all(-1) for t in (m.Q,m.p,m.G,m.h)]).all(0)
                         local = finite.nonzero(as_tuple=True)[0]
@@ -1129,6 +1182,10 @@ class HardPACTDifferentiableQP:
                         soft_ok[rows] = accepted
                         if capture is not None:
                             capture.after(packet, result, accepted)
+                        if self.cfg.tensorboard_diagnostics_enabled:
+                            _,ql,qu,vl=self._limits(ref)
+                            aggregate.compact_candidate("recovery",m,x,{k:v[rows] for k,v in values.items()},
+                                accepted,ql,qu,vl,self.cfg.position_integration_coefficient)
                         if self._physical_enabled():
                             self._joint_candidate_diagnostics("recovery", m, x,
                                 {k:v[rows] for k,v in values.items()}, accepted)

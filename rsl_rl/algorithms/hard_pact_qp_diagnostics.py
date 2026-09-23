@@ -48,12 +48,38 @@ class QPMeasuredMotion:
 
 
 class QPIterationDiagnostics:
-    def __init__(self):
+    def __init__(self, per_joint=False):
+        self.per_joint = per_joint
         self.sums, self.extrema, self.weights = {}, {}, {}
 
     def add_sum(self, key, value):
         value = value.detach()
         self.sums[key] = self.sums.get(key, 0) + value
+
+    @torch.no_grad()
+    def compact_candidate(self, stage, m, x, data, accepted, qmin, qmax, vmax, beta):
+        """Interval-wide real-row summaries, no percentiles/per-joint expansion.
+
+        These are post-projection MODEL predictions, not measured guarantees.
+        Maxima and finite coordinate counts cover every attempted candidate.
+        """
+        a = (m.acceleration_map.detach() @ x.detach()[...,None]).squeeze(-1)+m.acceleration_offset.detach()
+        q,v,dt = data["joint_position"].detach(),data["joint_velocity"].detach(),data["dt"].detach().reshape(-1,1)
+        torque=x.detach()[:,:12]
+        values={"torque_abs_nm":torque.abs(),
+                "correction_abs_nm":(torque-data["tau_nom"].detach()).abs(),
+                "joint_acceleration_abs_rad_s2":a[:,6:].abs(),
+                "position_exceedance_rad":torch.maximum(qmin-q-dt*v-beta*dt.square()*a[:,6:],q+dt*v+beta*dt.square()*a[:,6:]-qmax).clamp_min(0),
+                "velocity_exceedance_rad_s":((v+dt*a[:,6:]).abs()-vmax).clamp_min(0)}
+        if x.shape[1]==48:
+            values.update(joint_slack_rad_s2=x.detach()[:,24:36],rate_slack_nm=x.detach()[:,36:48])
+        finite=torch.isfinite(x).all(-1)&torch.isfinite(a).all(-1)
+        for status,rows in (("accepted",accepted),("rejected",~accepted)):
+            prefix=f"health/{stage}/{status}"
+            self.add_sum(prefix+"/rows",rows.sum())
+            self.add_sum(prefix+"/nonfinite_rows",(rows&~finite).sum())
+            for name,value in values.items():
+                self._candidate_summary(prefix+"/"+name,value,(rows&finite)[:,None])
 
     def add_values(self, key, values, mask=None):
         values = values.detach().float()
@@ -143,7 +169,7 @@ class QPIterationDiagnostics:
                 self._candidate_summary(key, excess, mask)
                 self.add_values(key + "/coordinate_fraction", (excess>threshold).float(), mask)
                 self.add_values(key + "/any_joint_fraction", (excess>threshold).any(-1).float(), mask[:,0])
-                for joint in range(12):
+                for joint in range(12) if self.per_joint else ():
                     self._candidate_summary(key + f"/joint_{joint}", excess[:,joint], mask[:,0])
                     self.add_values(key + f"/joint_{joint}/fraction", (excess[:,joint]>threshold).float(), mask[:,0])
 
