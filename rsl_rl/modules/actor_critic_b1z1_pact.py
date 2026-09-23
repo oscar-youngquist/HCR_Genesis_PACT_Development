@@ -122,9 +122,11 @@ class ActorCriticB1Z1PACT(nn.Module):
         init_noise_std: float | Sequence[float] = 0.65,
         min_noise_std: float | Sequence[float] = 0.20,
         max_noise_std: float | Sequence[float] = 5.0,
+        sac: bool = False,
     ):
         super().__init__()
         self.num_actions = num_actions
+        self.sac = sac
         self.context_encoder = B1Z1PACTContextEncoder(history_dim, latent_dim, context_layers, activation)
         # HardPACT: explicit estimates bypass latent sampling and the KL bottleneck.
         self.explicit_decoder = B1Z1PACTDecoder(
@@ -161,6 +163,15 @@ class ActorCriticB1Z1PACT(nn.Module):
             "_std_clip_upr",
             self._std_config_tensor(max_noise_std, action_dim, "max_noise_std"),
         )
+
+        if sac:
+            self.log_std_head = nn.Linear(actor_layers[-1], action_dim)
+            nn.init.zeros_(self.log_std_head.weight)
+            initial = self.std.detach().clamp_min(1e-8).log().clamp(-9.999, 1.999)
+            with torch.no_grad():
+                self.log_std_head.bias.copy_(torch.atanh((initial + 4.) / 6.))
+            self.std.requires_grad_(False)
+            self.critic.requires_grad_(False)
 
         self.distribution: Normal | None = None
 
@@ -247,6 +258,7 @@ class ActorCriticB1Z1PACT(nn.Module):
         features, magnitude, identity_deviation = self.film(features, film_condition)
         self.last_film_magnitude = magnitude
         self.last_film_identity_deviation = identity_deviation
+        self.last_actor_features = features
         return self.position_head(features), self.torque_head(features)
 
     def update_distribution(
@@ -280,7 +292,31 @@ class ActorCriticB1Z1PACT(nn.Module):
         self.update_distribution(obs, history, sample_context=True)
         return self.distribution.sample()
 
+    def get_mean_and_std(self, obs, history, detach_context=True):
+        # Deterministic context makes the conditional action distribution explicit.
+        context = self.decode_context(self.context_encoder(history, sample=False))
+        if detach_context:
+            context = {k: v.detach() for k, v in context.items()}
+        position, torque = self.actor_forward(obs, context, context)
+        mean = torch.cat((position, torque), -1)
+        std = (-10. + 6. * (1. + self.log_std_head(self.last_actor_features).tanh())).exp()
+        self.last_context = context
+        self.last_position_mean, self.last_torque_mean = position, torque
+        self.distribution = Normal(mean, std)
+        return mean, std
+
+    def sample_squashed(self, obs, history):
+        import math
+        import torch.nn.functional as F
+        mean, std = self.get_mean_and_std(obs, history, detach_context=True)
+        raw = Normal(mean, std).rsample()
+        log_prob = (Normal(mean, std).log_prob(raw)
+                    - 2. * (math.log(2.) - raw - F.softplus(-2. * raw))).sum(-1)
+        return raw.tanh(), log_prob
+
     def act_inference(self, obs: torch.Tensor, history: torch.Tensor) -> torch.Tensor:
+        if self.sac:
+            return self.get_mean_and_std(obs, history)[0].tanh()
         context = self.decode_context(self.context_encoder.forward_inf(history))
         position, torque = self.actor_forward(obs, context, context)
         self.last_position_mean = position
@@ -324,6 +360,8 @@ class ActorCriticB1Z1PACT(nn.Module):
             "encoder": [], "encoder_no_decay": [],
         }
         for name, parameter in self.named_parameters():
+            if not parameter.requires_grad:
+                continue
             if name.startswith(("context_encoder.", "explicit_decoder.", "physics_decoder.")):
                 owner = "encoder"
             elif name.startswith("critic."):

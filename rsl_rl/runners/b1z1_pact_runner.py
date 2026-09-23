@@ -25,6 +25,7 @@ from legged_gym.envs.b1z1.force_task_utils import (
     update_force_curriculum_from_rollout,
 )
 from rsl_rl.algorithms.ppo_b1z1_pact import PPO_B1Z1PACT
+from rsl_rl.algorithms.flash_sac_b1z1_pact import FlashSAC_B1Z1PACT
 from rsl_rl.storage.b1z1_action_replay import B1Z1ActionReplay
 from rsl_rl.modules.actor_critic_b1z1_pact import ActorCriticB1Z1PACT, B1Z1PACTDecoder
 from rsl_rl.utils import RolloutPhaseTimer, log_startup_metadata, startup_metadata
@@ -36,13 +37,19 @@ class B1Z1PACTRunner:
 
         policy_cfg, algorithm_cfg, runner_cfg = train_cfg["policy"], train_cfg["algorithm"], train_cfg["runner"]
 
+        algorithm_name = runner_cfg.get("algorithm_class_name", "PPO_B1Z1PACT")
+        algorithms = {"PPO_B1Z1PACT": PPO_B1Z1PACT, "FlashSAC_B1Z1PACT": FlashSAC_B1Z1PACT}
+        if algorithm_name not in algorithms:
+            raise ValueError(f"Unknown B1Z1 learner: {algorithm_name}")
+        self.is_flash_sac = algorithm_name == "FlashSAC_B1Z1PACT"
+        self.env.flash_sac_final_observations = self.is_flash_sac
         critic_dim = env.num_privileged_obs * env.num_crit_obs_stack
 
         history_dim = env.num_obs * env.num_obs_hist
 
         self.actor_critic = ActorCriticB1Z1PACT(
             env.num_obs, critic_dim, env.num_actions, history_dim,
-            latent_dim=policy_cfg["cenet_latent_dim"], actor_layers=policy_cfg["actor_layers"],
+            sac=self.is_flash_sac, latent_dim=policy_cfg["cenet_latent_dim"], actor_layers=policy_cfg["actor_layers"],
             critic_layers=policy_cfg["critic_layers"], context_layers=policy_cfg["cenet_enc_layers"],
             explicit_decoder_layers=policy_cfg["explicit_decoder_layers"],
             explicit_dim=env.num_exp_labels,
@@ -67,7 +74,8 @@ class B1Z1PACTRunner:
         urdf = env.cfg.asset.file.replace("{LEGGED_GYM_ROOT_DIR}", LEGGED_GYM_ROOT_DIR)
 
         rollout_samples = env.num_envs * runner_cfg["num_steps_per_env"]
-        default_pino_capacity = math.ceil(rollout_samples / algorithm_cfg["num_mini_batches"])
+        default_pino_capacity = (algorithm_cfg.get("sac_batch_size", 2048) if self.is_flash_sac
+                                 else math.ceil(rollout_samples / algorithm_cfg["num_mini_batches"]))
         pino_capacity = algorithm_cfg.get("pino_batch_capacity", 0) or default_pino_capacity
         backend_name = algorithm_cfg.get("dynamics_backend", "pinocchio").lower()
         self.env.bard_mass_wrench_labels = backend_name == "bard"
@@ -100,6 +108,10 @@ class B1Z1PACTRunner:
             )
 
         merged = dict(algorithm_cfg)
+        if self.is_flash_sac:
+            from legged_gym.utils.helpers import class_to_dict
+            merged["actor_phys_goal_ee"] = class_to_dict(env.cfg.goal_ee)
+            merged["actor_phys_force_shift"] = getattr(env.cfg, "use_force_shifted_target", True)
         if algorithm_cfg.get("actor_phys_pos_fk_enabled", False):
             import xml.etree.ElementTree as ET
             arm_ids = [int(i) for i in env.simulator._arm_dof_cfg_ids]
@@ -124,13 +136,13 @@ class B1Z1PACTRunner:
 
         merged.update({key: policy_cfg[key] for key in (
             "film_identity_loss_weight", "film_identity_error_scale",
-            "pinn_loss_weight", "pinn_warmup", "pinn_init_steps", "predicted_force_detach",
+            "pinn_loss_weight", "pinn_warmup_env_steps", "pinn_start_env_step", "predicted_force_detach",
             "use_pinn_rollout_loss", "pinn_inverse_weight", "pinn_rollout_weight",
             "pinn_rollout_base_linear_scale",
             "pinn_rollout_base_angular_scale",
             "pinn_rollout_leg_velocity_scale",
             "pinn_rollout_arm_velocity_scale",
-            "force_gate_ema_alpha", "force_gate_threshold", "force_gate_hysteresis", "force_gate_patience",
+            "force_gate_ema_alpha", "force_gate_threshold", "force_gate_hysteresis", "force_gate_patience_env_steps",
             "force_gate_ee_event_norm_threshold", "force_gate_base_event_norm_threshold",
             "force_gate_grf_threshold", "force_gate_ee_active_threshold",
             "force_gate_ee_neutral_threshold", "force_gate_base_active_threshold",
@@ -144,12 +156,12 @@ class B1Z1PACTRunner:
             "explicit_base_vel_weight", "explicit_ee_position_weight", "explicit_base_wrench_weight", "explicit_ee_force_weight", "explicit_foot_contact_weight",
             "explicit_foot_height_weight",
             "privileged_decoder_weight", "vae_kld_weight",
-            "use_kl_rate_band", "use_cosine_kl_warmup", "kl_warmup_iters", "kl_warmup_beta_max", "kl_r_min", "kl_r_max",
+            "use_kl_rate_band", "use_cosine_kl_warmup", "kl_warmup_env_steps", "kl_band_warmup_env_steps", "kl_warmup_beta_max", "kl_r_min", "kl_r_max",
             "kl_dual_lr", "kl_aug_rho", "kl_ema_decay",
             "adaptation_learning_rate",
         )})
 
-        self.alg = PPO_B1Z1PACT(self.actor_critic, self.privileged_decoder, self.dynamics, merged, device)
+        self.alg = algorithms[algorithm_name](self.actor_critic, self.privileged_decoder, self.dynamics, merged, device)
         self.action_replay = B1Z1ActionReplay(
             env.cfg.domain_rand.ctrl_delay_step_range[1]
             if env.cfg.domain_rand.randomize_ctrl_delay else 0
@@ -172,13 +184,21 @@ class B1Z1PACTRunner:
         self.enable_additional_diagnostics = runner_cfg.get("enable_additional_diagnostics", True)
         self.alg.enable_additional_diagnostics = self.enable_additional_diagnostics
         self.env.enable_additional_diagnostics = self.enable_additional_diagnostics
-        self.use_adaptive_entropy = algorithm_cfg.get("use_adaptive_entropy", False)
+        self.use_adaptive_entropy = not self.is_flash_sac and algorithm_cfg.get("use_adaptive_entropy", False)
 
         self.current_learning_iteration, self.total_timesteps, self.total_time = 0, 0, 0.0
+        self.completed_env_steps = 0
+        self.curriculum_metrics_interval = int(runner_cfg.get("curriculum_metrics_interval_env_steps", 24))
+        if self.curriculum_metrics_interval < 1:
+            raise ValueError("curriculum_metrics_interval_env_steps must be positive")
+        self.curriculum_ep_infos = []
+        self.curriculum_episode_lengths = deque(maxlen=100)
+        self.curriculum_metrics = {}
         self._startup_metadata_logged = False
 
         self.writer = None
         _, _ = self.env.reset()
+        self.env.set_completed_env_steps(self.completed_env_steps)
 
     def _load_pretrained_model(self, pretrained_path):
         """Load a weights-only PACT hot start produced by the conversion notebook."""
@@ -193,7 +213,12 @@ class B1Z1PACTRunner:
         missing = required.difference(checkpoint)
         if missing:
             raise KeyError(f"Hot-start checkpoint is missing keys: {sorted(missing)}")
-        self.actor_critic.load_state_dict(checkpoint["model_state_dict"], strict=True)
+        result = self.actor_critic.load_state_dict(checkpoint["model_state_dict"], strict=not self.is_flash_sac)
+        if self.is_flash_sac:
+            expected = {"log_std_head.weight", "log_std_head.bias"}
+            if set(result.missing_keys) - expected or result.unexpected_keys:
+                raise RuntimeError(f"Unexpected hot-start keys: {result}")
+            print(f"FlashSAC hot-start new keys initialized: {result.missing_keys}; Q/target-Q/temperature initialized fresh")
         self.privileged_decoder.load_state_dict(
             checkpoint["privileged_decoder_state_dict"], strict=True
         )
@@ -219,10 +244,6 @@ class B1Z1PACTRunner:
         self.actor_critic.train()
         final_iteration = self.current_learning_iteration + num_learning_iterations
         for iteration in range(self.current_learning_iteration, final_iteration):
-            # Reward schedules use the true checkpoint-aware PPO iteration,
-            # never an approximation based on environment transitions.
-            if hasattr(self.env, "set_training_iteration"):
-                self.env.set_training_iteration(iteration)
             if self.enable_additional_diagnostics and hasattr(self.actor_critic, "begin_rollout_diagnostics"):
                 self.actor_critic.begin_rollout_diagnostics()
             if self.enable_additional_diagnostics and hasattr(self.env, "begin_rollout_diagnostics"):
@@ -242,7 +263,8 @@ class B1Z1PACTRunner:
                     actions = self.alg.act(obs, privileged, history, explicit)
                     delay = (self.env.action_delay if self.env.cfg.domain_rand.randomize_ctrl_delay
                              else torch.zeros(self.env.num_envs, device=self.device, dtype=torch.long))
-                    self.alg.transition.physics_source = self.action_replay.push(self.alg.transition, delay)
+                    if not self.is_flash_sac:
+                        self.alg.transition.physics_source = self.action_replay.push(self.alg.transition, delay)
                     # Capture x_t after policy inference but before simulator
                     # integration. The tensor is copied into rollout storage.
                     rollout_initial_state = (
@@ -265,7 +287,12 @@ class B1Z1PACTRunner:
                     from rsl_rl.algorithms.b1z1_actor_physics import capture
                     capture(self)
                     next_obs, next_privileged, next_history, next_explicit, reward, dones, infos, _ = self.env.step(actions)
-                    self.action_replay.reset(dones)
+                    # Count only successful control transitions, not resets or optimizer work.
+                    self.completed_env_steps += 1
+                    self.total_timesteps += self.env.num_envs
+                    self.env.set_completed_env_steps(self.completed_env_steps)
+                    if not self.is_flash_sac:
+                        self.action_replay.reset(dones)
                     # B1Z1 has no QP: bounded commanded total torque is nominal.
                     # Capture the final substep command paired with the next GRF.
                     if self.alg.bard_auxiliary:
@@ -282,6 +309,12 @@ class B1Z1PACTRunner:
                     dynamics_state = self.env.get_pact_dynamics_state().to(self.device)
                     next_target = next_privileged[:, -self.env.num_privileged_obs:][
                         :, :self.env.cfg.env.num_privileged_recon_obs].clone()
+                    if self.is_flash_sac and "flash_sac_final" in infos:
+                        final = infos["flash_sac_final"]
+                        rows = dones.flatten().bool()
+                        dynamics_state[rows] = final["dynamics_state"].to(self.device)[rows]
+                        final_frame = final["next_critic_observations"][:, -self.env.num_privileged_obs:]
+                        next_target[rows] = final_frame.to(self.device)[rows, :self.env.cfg.env.num_privileged_recon_obs]
                     if self.alg.bard_auxiliary:
                         from legged_gym.envs.go2.go2_hard_pact.transition import _world_to_yaw_local
                         grf = self.env.simulator.bard_interval_grf.to(self.device)
@@ -300,17 +333,24 @@ class B1Z1PACTRunner:
                         next_target,
                         dynamics_state,
                         rollout_initial_state,
+                        **(dict(next_observations=next_obs, next_histories=next_history,
+                                next_critic_observations=next_privileged) if self.is_flash_sac else {}),
                     )
                     running_reward += reward.view(-1, 1)
                     running_length += 1
                     done_ids = dones.nonzero(as_tuple=False).view(-1)
                     if len(done_ids):
                         rewards.extend(running_reward[done_ids, 0].cpu().tolist())
-                        lengths.extend(running_length[done_ids, 0].cpu().tolist())
+                        completed_lengths = running_length[done_ids, 0].cpu().tolist()
+                        lengths.extend(completed_lengths)
+                        self.curriculum_episode_lengths.extend(completed_lengths)
                         running_reward[done_ids] = 0
                         running_length[done_ids] = 0
-                    if "episode" in infos:
+                    # The environment retains extras between resets; only new
+                    # episode completions may supply curriculum evidence.
+                    if len(done_ids) and "episode" in infos:
                         ep_infos.append(infos["episode"])
+                    self._step_environment_curricula(infos if len(done_ids) else {})
                     obs, history, privileged, explicit = next_obs, next_history, next_privileged, next_explicit
                     if rollout_timer is not None:
                         rollout_timer.stop("transition_storage", storage_start)
@@ -322,7 +362,8 @@ class B1Z1PACTRunner:
                 )
                 # Bootstrap values are rollout targets and the final privileged
                 # observation was assembled under this inference guard.
-                self.alg.compute_returns(privileged)
+                if not self.is_flash_sac:
+                    self.alg.compute_returns(privileged)
                 policy_diagnostics = (
                     self.actor_critic.get_rollout_diagnostics()
                     if self.enable_additional_diagnostics and hasattr(self.actor_critic, "get_rollout_diagnostics") else {}
@@ -332,7 +373,7 @@ class B1Z1PACTRunner:
                     if self.enable_additional_diagnostics and hasattr(self.env, "get_rollout_diagnostics") else {}
                 )
             update_start = time.time()
-            metrics = self.alg.update(iteration)
+            metrics = self.alg.update(self.completed_env_steps)
             learning_time = time.time() - update_start
             if ep_infos and self.use_adaptive_entropy:
                 self.alg.update_adaptive_entropy_coef({
@@ -340,15 +381,8 @@ class B1Z1PACTRunner:
                     "ang_vel_tracking": self._episode_metric_max(ep_infos, "rew_tracking_ang_vel"),
                     "terrain_level": self._episode_metric_max(ep_infos, "terrain_level", "terrain_level_mean"),
                 })
-            if getattr(self.env, "use_reward_curriculum", False):
-                self.env.step_reward_curriculum(iteration)
-            self._step_domain_randomization_curriculum(iteration, ep_infos)
-            metrics.update(update_force_curriculum_from_rollout(
-                self.env,
-                iteration,
-                ep_infos,
-                statistics.mean(lengths) if lengths else None,
-            ))
+            metrics.update(self.curriculum_metrics)
+            metrics["Train/completed_env_steps"] = self.completed_env_steps
             metrics.update(policy_diagnostics)
             metrics.update(environment_diagnostics)
             metrics.update(rollout_timing_metrics)
@@ -359,16 +393,27 @@ class B1Z1PACTRunner:
                 metrics, collection_time, learning_time, rewards, lengths, ep_infos,
             )
             if self.log_dir and iteration % self.save_interval == 0:
-                # Store the next PPO iteration so resumed schedules continue
-                # from the first iteration that has not yet been completed.
+                # Resume logging/checkpoint numbering at the next learning iteration;
+                # curriculum time is saved independently in completed env steps.
                 self.save(os.path.join(self.log_dir, f"model_{iteration}.pt"), iteration=iteration + 1)
             ep_infos.clear()
         self.current_learning_iteration = final_iteration
-        if hasattr(self.env, "set_training_iteration"):
-            self.env.set_training_iteration(self.current_learning_iteration)
         if self.log_dir:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
         self.dynamics.close()
+
+    def _step_environment_curricula(self, infos):
+        """Sample performance on a fixed env-step cadence, independent of rollout size."""
+        if "episode" in infos:
+            self.curriculum_ep_infos.append(infos["episode"])
+        if self.completed_env_steps % self.curriculum_metrics_interval:
+            return
+        self._step_domain_randomization_curriculum(self.completed_env_steps, self.curriculum_ep_infos)
+        self.curriculum_metrics = update_force_curriculum_from_rollout(
+            self.env, self.completed_env_steps, self.curriculum_ep_infos,
+            statistics.mean(self.curriculum_episode_lengths) if self.curriculum_episode_lengths else None,
+        )
+        self.curriculum_ep_infos.clear()
 
     @staticmethod
     def _episode_metric_max(ep_infos, *names):
@@ -380,7 +425,7 @@ class B1Z1PACTRunner:
                 values.append(torch.as_tensor(info[name]).float().mean().item())
         return max(values, default=0.0)
 
-    def _step_domain_randomization_curriculum(self, iteration, ep_infos):
+    def _step_domain_randomization_curriculum(self, completed_env_steps, ep_infos):
         """Mirror UniFP's reward-driven simulator domain-randomization update."""
         simulator = self.env.simulator
         if not getattr(simulator, "use_domainrand_curriculum", False):
@@ -388,14 +433,14 @@ class B1Z1PACTRunner:
         has_tracking = any("rew_tracking_lin_vel_force_world" in info for info in ep_infos)
         tracking = self._episode_metric_max(ep_infos, "rew_tracking_lin_vel_force_world") if has_tracking else None
         if tracking is not None:
-            simulator._step_domian_rand(iteration, tracking)
+            simulator._step_domian_rand(completed_env_steps, tracking)
         if self.writer is not None:
             reward_ema = simulator.domain_rand_reward_ema
-            self.writer.add_scalar("Values/domain_rand_reward_ema", reward_ema if reward_ema is not None else 0.0, iteration)
-            self.writer.add_scalar("Values/required_reward", simulator.required_reward, iteration)
-            self.writer.add_scalar("Values/domain_rand_joint_dynamics_progress", simulator.domain_rand_joint_dynamics_progress, iteration)
-            self.writer.add_scalar("Values/domain_rand_mass_com_progress", simulator.domain_rand_mass_com_progress, iteration)
-            self.writer.add_scalar("Values/domain_rand_disturbance_progress", simulator.domain_rand_disturbance_progress, iteration)
+            self.writer.add_scalar("Values/domain_rand_reward_ema", reward_ema if reward_ema is not None else 0.0, completed_env_steps)
+            self.writer.add_scalar("Values/required_reward", simulator.required_reward, completed_env_steps)
+            self.writer.add_scalar("Values/domain_rand_joint_dynamics_progress", simulator.domain_rand_joint_dynamics_progress, completed_env_steps)
+            self.writer.add_scalar("Values/domain_rand_mass_com_progress", simulator.domain_rand_mass_com_progress, completed_env_steps)
+            self.writer.add_scalar("Values/domain_rand_disturbance_progress", simulator.domain_rand_disturbance_progress, completed_env_steps)
 
     @staticmethod
     def _validate_diagnostics(metrics):
@@ -413,10 +458,12 @@ class B1Z1PACTRunner:
 
     def _log(self, iteration, total_iterations, metrics, collection_time, learning_time, rewards, lengths, ep_infos):
         """Print the shared PACT/UniFP training panel plus B1Z1 diagnostics."""
-        self.total_timesteps += self.steps * self.env.num_envs
         iteration_time = collection_time + learning_time
         self.total_time += iteration_time
         fps = self.steps * self.env.num_envs / max(iteration_time, 1e-6)
+        if self.is_flash_sac:
+            self._log_flash_sac(iteration, metrics, fps, collection_time, learning_time, rewards, lengths, ep_infos)
+            return
         position_std = self.actor_critic.std[:self.env.num_actions].mean().item()
         torque_std = self.actor_critic.std[self.env.num_actions:].mean().item()
         mean_reward = statistics.mean(rewards) if rewards else None
@@ -491,9 +538,33 @@ class B1Z1PACTRunner:
         ))
         print("\n".join(lines))
 
+    def _log_flash_sac(self, iteration, metrics, fps, collection_time, learning_time, rewards, lengths, ep_infos):
+        metrics = dict(metrics)
+        metrics.update({"Perf/total_fps": fps, "Perf/collection_time": collection_time,
+                        "Perf/learning_time": learning_time})
+        if rewards:
+            metrics["Train/mean_reward"] = statistics.mean(rewards)
+        if lengths:
+            metrics["Train/mean_episode_length"] = statistics.mean(lengths)
+        for key in (ep_infos[0] if ep_infos else {}):
+            values = [torch.as_tensor(info[key]).float().mean().item() for info in ep_infos if key in info]
+            metrics["Episode/" + key] = statistics.mean(values)
+        if self.writer:
+            for key, value in metrics.items():
+                self.writer.add_scalar(key if "/" in key else "Loss/" + key, value, iteration)
+        print(f"FlashSAC iteration {iteration}: replay={self.alg.replay.size}, updates={self.alg.update_step}, "
+              f"critic={metrics.get('SAC/critic_loss', 0):.4f}, actor={metrics.get('SAC/actor_loss', 0):.4f}, "
+              f"temperature={self.alg.current_entropy_coef:.5f}, {fps:.0f} steps/s")
+
     def save(self, path, iteration=None):
         saved_iteration = self.current_learning_iteration if iteration is None else int(iteration)
         torch.save({
+            **({"flash_sac": self.alg.state_dict()} if self.is_flash_sac else {}),
+            "curriculum_clock": "completed_env_steps",
+            "curriculum_samples": {"episodes": self.curriculum_ep_infos,
+                                   "lengths": list(self.curriculum_episode_lengths)},
+            "runner_counters": {"total_timesteps": self.total_timesteps, "total_time": self.total_time,
+                                "completed_env_steps": self.completed_env_steps},
             "model_state_dict": self.actor_critic.state_dict(),
             "privileged_decoder_state_dict": self.privileged_decoder.state_dict(),
             "actor_optimizer": self.alg.actor_optimizer.optimizer.state_dict(),
@@ -512,7 +583,30 @@ class B1Z1PACTRunner:
 
     def load(self, path, load_optimizer=True):
         """Restore learned heads and the privileged-force reliability gate."""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        if checkpoint.get("curriculum_clock") != "completed_env_steps":
+            legacy_iterations = int(checkpoint.get("iteration", 0))
+            legacy_steps = checkpoint.get("flash_sac", {}).get("counters", {}).get("env_steps")
+            # Old PPO checkpoints did not record collection counts. Their default
+            # rollout was 24; old SAC checkpoints allow us to infer the actual size.
+            steps_per_iteration = (legacy_steps / legacy_iterations
+                                   if legacy_steps is not None and legacy_iterations > 0 else 24)
+            warnings.warn(f"Migrating legacy PACT curriculum timestamps using "
+                          f"{steps_per_iteration:g} env steps per iteration; legacy durations use 24.")
+            for key in ("trigger_iteration", "last_update_iteration", "gate_patience"):
+                state = checkpoint.get("force_curriculum_state") or {}
+                if state.get(key, -1) >= 0:
+                    state[key] = round(state[key] * steps_per_iteration)
+            state = checkpoint.get("domain_rand_curriculum_state") or {}
+            for key in ("domain_rand_last_step_iter", "last_iteration"):
+                if state.get(key, -1) >= 0:
+                    state[key] = round(state[key] * steps_per_iteration)
+            if "domain_rand_step_interval" in state:
+                state["domain_rand_step_interval"] *= 24
+            checkpoint["force_gate_count"] = round(checkpoint.get("force_gate_count", 0) * steps_per_iteration)
+            counters = checkpoint.setdefault("runner_counters", {})
+            counters["completed_env_steps"] = (legacy_steps if legacy_steps is not None
+                                               else legacy_iterations * 24)
         load_domain_rand_state(self.env.simulator, checkpoint.get("domain_rand_curriculum_state"))
         self.actor_critic.load_state_dict(checkpoint["model_state_dict"])
         self.privileged_decoder.load_state_dict(checkpoint["privileged_decoder_state_dict"])
@@ -520,8 +614,6 @@ class B1Z1PACTRunner:
             from rsl_rl.algorithms.b1z1_bard_pinn import restore_optimizers
             restore_optimizers(self.alg, checkpoint)
         self.current_learning_iteration = checkpoint.get("iteration", 0)
-        if hasattr(self.env, "set_training_iteration"):
-            self.env.set_training_iteration(self.current_learning_iteration)
         load_staged_force_curriculum_state_dict(
             self.env, checkpoint.get("force_curriculum_state")
         )
@@ -532,14 +624,30 @@ class B1Z1PACTRunner:
         self.alg.force_blend_start_ema = checkpoint.get(
             "force_blend_start_ema", self.alg.force_ema
         )
-        self.alg.current_entropy_coef = checkpoint.get("entropy_coef", self.alg.current_entropy_coef)
+        if self.is_flash_sac:
+            self.alg.load_state_dict(checkpoint["flash_sac"], load_optimizer=load_optimizer)
+            # This runner starts a newly reset simulator, not a saved episode.
+            self.alg.reward_normalizer.returns.zero_()
+        else:
+            self.alg.current_entropy_coef = checkpoint.get("entropy_coef", self.alg.current_entropy_coef)
+        for name, value in checkpoint.get("runner_counters", {}).items():
+            setattr(self, name, value)
+        samples = checkpoint.get("curriculum_samples", {})
+        self.curriculum_ep_infos = samples.get("episodes", [])
+        self.curriculum_episode_lengths = deque(samples.get("lengths", []), maxlen=100)
+        self.curriculum_metrics = {}
+        self.alg.schedule_env_steps = self.completed_env_steps
+        self.alg.schedule_step_delta = 0
+        self.env.set_completed_env_steps(self.completed_env_steps)
+        from rsl_rl.algorithms.b1z1_training_clock import prepare_step_schedules
+        prepare_step_schedules(self.alg, self.completed_env_steps)
         self.alg.kl_controller.load_state_dict(checkpoint.get("kl_controller_state"))
         return checkpoint.get("iteration", 0)
 
     def get_inference_policy(self, device=None):
         self.actor_critic.eval()
         if device: self.actor_critic.to(device)
-        return self.actor_critic.act_inference
+        return self.alg.act_inference if self.is_flash_sac else self.actor_critic.act_inference
 
     def __del__(self):
         # Handles interrupted runs before learn() reaches its normal shutdown.

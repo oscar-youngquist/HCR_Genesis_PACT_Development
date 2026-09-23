@@ -48,7 +48,7 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
     _advance_domain_rand_phase = _IsaacGymSimulatorB1Z1._advance_domain_rand_phase
     _update_domain_rand_bounds = _IsaacGymSimulatorB1Z1._update_domain_rand_bounds
     def _step_domian_rand(self, num_iters, mean_reward=None):
-        """Retain B1Z1 reward gating, advancing at most once per PPO iteration."""
+        """Advance once per supplied clock value (completed env steps for PACT)."""
         if num_iters <= self._domain_rand_last_iteration:
             return
         self._domain_rand_last_iteration = num_iters

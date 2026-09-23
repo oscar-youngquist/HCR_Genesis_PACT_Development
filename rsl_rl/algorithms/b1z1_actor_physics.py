@@ -112,10 +112,45 @@ def capture(runner):
                   mass_wrench=env.get_mass_wrench_label(),
                   # Resampling next step has no deterministic target available yet.
                   valid=((env.goal_timer + 1) <= env.traj_total_timesteps).unsqueeze(-1))
+    if hasattr(a, "replay"):
+        # Replay stores measured geometry and nominal references, never a target
+        # derived from an old force prediction. Rebuild that target on sampling.
+        values.pop("ee_target")
+        values.update(ee_nominal=nominal, target_yaw=yaw,
+                      target_center=env.get_ee_goal_spherical_center(yaw),
+                      target_force_kp=env.gripper_force_kps,
+                      target_collision_lower=env.collision_lower_limits.expand(env.num_envs, -1),
+                      target_collision_upper=env.collision_upper_limits.expand(env.num_envs, -1),
+                      target_underground=state.new_full((env.num_envs, 1), env.underground_limit))
     if pos_fk_enabled(a.cfg):
         values.update(fk_default=env.simulator.default_dof_pos.expand_as(env.simulator.dof_pos),
                       fk_base_pos=env.simulator.base_pos, fk_base_quat=env.simulator.base_quat)
     a.transition.actor_physics = {k: v.detach().to(a.device).clone() for k, v in values.items()}
+
+
+
+@torch.no_grad()
+def refresh_replay_target(a, batch):
+    """Use the original workspace projection with fresh, detached force estimates."""
+    if "actor_phys_ee_nominal" not in batch:
+        return
+    from legged_gym.envs.b1z1.force_task_utils import _compute_force_adjusted_ee_target
+    from .b1z1_bard_pinn import yaw_world
+    data = {k[len("actor_phys_"):]: v for k, v in batch.items() if k.startswith("actor_phys_")}
+    context = a.actor_critic.decode_context(a.actor_critic.context_encoder(batch["histories"], sample=False))
+    force = yaw_world(context["ee_force"] / a.cfg["ee_force_scale"], data["state"][:, 3:7])
+    goal = dict(a.cfg["actor_phys_goal_ee"])
+    goal["ranges"] = SimpleNamespace(**goal["ranges"])
+    proxy = SimpleNamespace(
+        cfg=SimpleNamespace(goal_ee=SimpleNamespace(**goal), use_force_shifted_target=a.cfg["actor_phys_force_shift"]),
+        _get_base_yaw_quat=lambda ids: data["target_yaw"],
+        get_ee_goal_spherical_center=lambda yaw, ids: data["target_center"],
+        gripper_force_kps=data["target_force_kp"],
+        collision_lower_limits=data["target_collision_lower"][:, None],
+        collision_upper_limits=data["target_collision_upper"][:, None],
+        underground_limit=data["target_underground"][0, 0].item())
+    batch["actor_phys_ee_target"] = _compute_force_adjusted_ee_target(
+        proxy, external_force=force, nominal_target=data["ee_nominal"]).effective_target
 
 
 @torch.no_grad()

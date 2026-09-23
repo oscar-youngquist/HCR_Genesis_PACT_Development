@@ -172,13 +172,13 @@ def test_enabled_ppo_update_and_snapshot_alignment():
     full = class_to_dict(B1Z1PACTCfgPPO())
     cfg = {**full["algorithm"], **full["policy"], **config(), "num_learning_epochs": 1,
            "num_mini_batches": 1, "dynamics_backend": "bard", "privileged_force_start": 23,
-           "privileged_force_dim": 21, "pinn_init_steps": 0, "pinn_warmup": 2,
+           "privileged_force_dim": 21, "pinn_start_env_step": 0, "pinn_warmup_env_steps": 4,
+           "actor_phys_pos_fk_enabled": False,  # This fixture supplies mechanics, not an FK model.
            "pinn_loss_weight": .1}
     fixed = template.actor_physics_cache
     backend = SimpleNamespace(batch_capacity=3, ee_position=template.dynamics_backend.ee_position,
         evaluate=lambda *args: SimpleNamespace(**{k: v[:len(args[0])] for k, v in vars(fixed).items()}))
     a = PPO_B1Z1PACT(template.actor_critic, B1Z1PACTDecoder(8 + 14, 188, hidden=[16]), backend, cfg, "cpu")
-    a.pinn_updates = 1  # Shared half-warmup state, as restored from a checkpoint.
     a.init_storage(3, 2, 81, 40, 162, 34, 23, 232, 180, rollout_state_dim=51)
     for step in range(2):
         a.act(torch.randn(3, 81), torch.randn(3, 40), torch.randn(3, 162), torch.zeros(3, 23))
@@ -192,7 +192,7 @@ def test_enabled_ppo_update_and_snapshot_alignment():
         snapshots["ee_target"].fill_(99.)
         assert (a.storage.actor_physics["ee_target"][step] == .1).all()
     a.compute_returns(torch.zeros(3, 40))
-    metrics = a.update(0)
+    metrics = a.update(2)  # Two completed control steps: halfway through warmup.
     assert metrics["ActorPhysics/active_fraction"] == 1
     assert metrics["ActorPhysics/actor_gradient_norm"] > 0
     assert metrics["ActorPhysics/unintended_estimator_gradient_max"] == 0

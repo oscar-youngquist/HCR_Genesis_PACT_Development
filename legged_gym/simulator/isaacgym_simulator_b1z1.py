@@ -67,7 +67,7 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
         )
         self.com_rand_z_positive = dr.com_rand_z_positive
         self.num_push_steps = dr.num_push_steps
-        self.push_warmup_step = dr.push_warmup
+        self.push_warmup_step = getattr(dr, "push_warmup_env_steps", getattr(dr, "push_warmup", 0))
 
         self.push_bounds = [dr.min_push_vel_xy, dr.max_push_vel_xy]
         self.vert_bounds = [dr.min_vertical_push, dr.max_vertical_push]
@@ -546,7 +546,7 @@ class _IsaacGymSimulatorB1Z1(IsaacGymSimulator):
         self.domain_rand_best_reward_ema = -float("inf")
         self.domain_rand_recovery_ratio = getattr(dr, "recovery_ratio", 0.70)
         self.domain_rand_min_reward = getattr(dr, "min_reward_to_step", 12.0)
-        self.domain_rand_step_interval = getattr(dr, "step_interval", 100)
+        self.domain_rand_step_interval = getattr(dr, "step_interval_env_steps", getattr(dr, "step_interval", 100))
         self.domain_rand_last_step_iter = -10**9
         self.domain_rand_ema_alpha = getattr(dr, "reward_ema_alpha", 0.05)
         self.domain_rand_reward_ema_hist = deque(maxlen=getattr(dr, "best_reward_window", 500))

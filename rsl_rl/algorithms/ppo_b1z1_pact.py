@@ -185,9 +185,9 @@ class PPO_B1Z1PACT:
         configure_optimizers(self, actor_groups, auxiliary_groups)
 
         self.kl_controller = KLRateBandController(
-            warmup_iters=cfg.get("kl_warmup_iters", 500),
+            warmup_iters=cfg.get("kl_warmup_env_steps", cfg.get("kl_warmup_iters", 500)),
             warmup_beta_max=cfg.get("kl_warmup_beta_max", cfg["vae_kld_weight"]),
-            band_warmup_iters=cfg.get("kl_band_warmup_iters", 500),
+            band_warmup_iters=cfg.get("kl_band_warmup_env_steps", cfg.get("kl_band_warmup_iters", 500)),
             rate_min=cfg.get("kl_r_min", 0.10), rate_max=cfg.get("kl_r_max", 1.00),
             dual_lr=cfg.get("kl_dual_lr", 1.0e-3),
             augmented_rho=cfg.get("kl_aug_rho", 0.1),
@@ -405,7 +405,7 @@ class PPO_B1Z1PACT:
         return min(alpha, 1.0 - 1.0e-6)
 
     def _update_event_conditioned_force_gate(self, errors, sample_counts, force_mse):
-        """Advance all force reliability EMAs and patience once per PPO update."""
+        """Update reliability statistics and accrue completed-step patience."""
         alpha = self.cfg["force_gate_ema_alpha"]
         self.force_ema = force_mse if self.force_ema is None else (
             alpha * force_mse + (1.0 - alpha) * self.force_ema
@@ -433,9 +433,9 @@ class PPO_B1Z1PACT:
             and self.force_metric_emas[name] < self.cfg[f"force_gate_{name}_{suffix}"]
             for name in FORCE_GATE_METRIC_NAMES
         )
-        self.force_gate_count = self.force_gate_count + 1 if reliable else 0
+        self.force_gate_count = self.force_gate_count + getattr(self, "schedule_step_delta", 1) if reliable else 0
         self.force_gate_active = (
-            self.force_gate_count >= self.cfg["force_gate_patience"]
+            self.force_gate_count >= self.cfg.get("force_gate_patience_env_steps", self.cfg.get("force_gate_patience", 1))
         )
 
     def _resolve_pinn_forces(
@@ -850,18 +850,15 @@ class PPO_B1Z1PACT:
         return diagnostics
 
 
-    def update(self, iteration):
+    def update(self, completed_env_steps):
         from . import b1z1_actor_physics as actor_physics
         self.pinn_metric_sums = {}
         self.actor_critic.train()
         self.privileged_decoder.train()
         # Delay and then ramp the physical constraint. PPO first learns a
         # minimally viable behavior before the residual competes with reward.
-        if iteration >= self.cfg["pinn_init_steps"]:
-            progress = min(1.0, self.pinn_updates / max(1, self.cfg["pinn_warmup"]))
-            # Sign selects projection priority; physics is always minimized.
-            self.pinn_weight = progress * abs(self.cfg["pinn_loss_weight"])
-            self.pinn_updates += 1
+        from .b1z1_training_clock import prepare_step_schedules
+        prepare_step_schedules(self, completed_env_steps)
         # Actor task prediction shares this exact delay/ramp and projection sign.
         actor_physics.prepare(self)
         metrics = {name: 0.0 for name in (
@@ -926,7 +923,7 @@ class PPO_B1Z1PACT:
             self.actor_optimizer.step()
 
             from .b1z1_bard_pinn import auxiliary_step, combined_pinn_loss
-            aux, inverse_pinn, rollout_pinn = auxiliary_step(self, batch, valid, iteration)
+            aux, inverse_pinn, rollout_pinn = auxiliary_step(self, batch, valid, completed_env_steps)
             physics_loss = combined_pinn_loss(inverse_pinn, rollout_pinn, self.cfg)
             rollout_blocks = {name: ppo_loss.new_zeros(()) for name in ROLLOUT_VELOCITY_BLOCKS}
             for name, val in self.bard_phase_metrics.items():
@@ -955,7 +952,7 @@ class PPO_B1Z1PACT:
 
             self.spectral_normalization(self.actor_critic, sigma_max=10.0)
 
-        # Gate patience is measured in PPO iterations, not epochs/minibatches.
+        # Gate patience is measured in completed environment steps, not epochs/minibatches.
         # Aggregate the exact masked force MSE over this complete update before
         # advancing its EMA, hysteresis counter, and active state once.
         packed_statistics = torch.cat((
@@ -988,7 +985,7 @@ class PPO_B1Z1PACT:
 
         mean_metrics = {key: value / max(1, updates) for key, value in metrics.items()}
         mean_raw_kl = update_duals_from_mean(
-            self.kl_controller, raw_kl_sum, updates, iteration, self.device,
+            self.kl_controller, raw_kl_sum, updates, completed_env_steps, self.device,
             enabled=self.use_kl_rate_band,
             use_cosine_warmup=self.use_cosine_kl_warmup,
         )
@@ -996,7 +993,7 @@ class PPO_B1Z1PACT:
             controller_metrics = self.kl_controller.metrics(
                 mean_raw_kl,
                 torch.tensor(mean_metrics["kl_reg_loss"], device=self.device),
-                iteration, self.use_kl_rate_band,
+                completed_env_steps, self.use_kl_rate_band,
                 self.use_cosine_kl_warmup,
             )
             for name in KLRateBandController.metric_names(self.use_kl_rate_band):

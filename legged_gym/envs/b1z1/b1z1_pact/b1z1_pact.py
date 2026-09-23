@@ -100,8 +100,8 @@ class B1Z1PACT(LeggedRobot):
             )
         rollout_timer = getattr(self, "_rollout_phase_timer", None)
         force_start = rollout_timer.start("force_events") if rollout_timer is not None else None
-        # External events run from iteration zero. Their sampled range follows
-        # the iteration-based curriculum returned by external_force_scale.
+        # External events run from step zero. Their sampled range follows
+        # the completed-step curriculum returned by external_force_scale.
         if self.cfg.commands.push_gripper_stators:
             self._push_gripper(self.all_env_ids)
         if self.cfg.commands.push_robot_base:
@@ -235,7 +235,7 @@ class B1Z1PACT(LeggedRobot):
     @property
     def external_force_scale(self):
         """Scale all physical disturbances after the performance gate latches."""
-        return self._staged_force_curriculum.external_scale(self.training_iteration)
+        return self._staged_force_curriculum.external_scale(self.completed_env_steps)
 
     def post_physics_step(self):
         # Match the Isaac-Gym UniFP order: refresh simulator state, resample
@@ -269,6 +269,21 @@ class B1Z1PACT(LeggedRobot):
 
         reset_start = rollout_timer.start("resets") if rollout_timer is not None else None
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+        if getattr(self, "flash_sac_final_observations", False):
+            self.extras.pop("flash_sac_final", None)
+            if env_ids.numel():
+                # Preview the true successor before reset. Do not advance history
+                # slots or last-observation buffers a second time.
+                saved = self.obs_buf, self.privileged_obs_buf, self.explicit_labels_buf, self.obs_history
+                self.compute_observations(terminal_preview=True)
+                clip = self.cfg.normalization.clip_observations
+                self.extras["flash_sac_final"] = {
+                    "next_observations": self.obs_buf.clamp(-clip, clip).clone(),
+                    "next_critic_observations": self.privileged_obs_buf.clamp(-clip, clip).clone(),
+                    "next_histories": self.obs_history.clone(),
+                    "dynamics_state": self.get_pact_dynamics_state().clone(),
+                }
+                self.obs_buf, self.privileged_obs_buf, self.explicit_labels_buf, self.obs_history = saved
         self.reset_idx(env_ids)
         if rollout_timer is not None:
             rollout_timer.stop("resets", reset_start)
@@ -690,7 +705,7 @@ class B1Z1PACT(LeggedRobot):
             self.rew_buf += rew
             self.episode_sums["termination"] += rew
 
-    def compute_observations(self):
+    def compute_observations(self, terminal_preview=False):
         """Build UniFP actor, critic, and adaptation-target observations.
 
         Actor input is the stacked noisy proprioceptive history. The adaptation
@@ -700,8 +715,9 @@ class B1Z1PACT(LeggedRobot):
         domain-randomization variables, contact/gait state, and the same current
         policy-facing commands.
         """
-        self.llast_obs_buf.copy_(self.last_obs_buf)
-        self.last_obs_buf.copy_(self.obs_buf)
+        if not terminal_preview:
+            self.llast_obs_buf.copy_(self.last_obs_buf)
+            self.last_obs_buf.copy_(self.obs_buf)
 
         base_yaw_quat = self._get_base_yaw_quat()
         ee_center = self.get_ee_goal_spherical_center(base_yaw_quat)
@@ -867,6 +883,12 @@ class B1Z1PACT(LeggedRobot):
                 f"B1Z1 PACT privileged observation size mismatch: "
                 f"got {critic_obs.shape[1]}, expected {self.cfg.env.num_privileged_obs}"
             )
+        if terminal_preview:
+            critic_slots = self.critic_obs_slots[self._critic_obs_slot + 1:] + self.critic_obs_slots[:self._critic_obs_slot + 1]
+            obs_slots = self.obs_history_slots[self._obs_history_slot + 1:] + self.obs_history_slots[:self._obs_history_slot + 1]
+            self.privileged_obs_buf = torch.cat(critic_slots[1:] + [critic_obs], dim=-1)
+            self.obs_history = torch.cat(obs_slots[1:] + [self.obs_buf], dim=-1)
+            return
         self._critic_obs_slot = (self._critic_obs_slot + 1) % len(self.critic_obs_slots)
         self.critic_obs_slots[self._critic_obs_slot].copy_(critic_obs[:, : self.cfg.env.num_privileged_obs])
         # Preserve deque semantics: concatenate slots in oldest -> newest order.
@@ -1324,20 +1346,21 @@ class B1Z1PACT(LeggedRobot):
         self.ref_dof_pos[:, idx["FL_thigh_joint"]] -= sweep
         self.ref_dof_pos[:, idx["RR_thigh_joint"]] -= sweep
 
-    def set_training_iteration(self, iteration):
-        """Set the checkpoint-aware PPO iteration used by reward schedules."""
-        iteration = int(iteration)
-        if iteration < 0:
-            raise ValueError("training iteration must be nonnegative")
-        self.training_iteration = iteration
+    def set_completed_env_steps(self, completed_env_steps):
+        """Set checkpoint-aware completed control steps per environment."""
+        completed_env_steps = int(completed_env_steps)
+        if completed_env_steps < 0:
+            raise ValueError("completed environment steps must be nonnegative")
+        self.completed_env_steps = completed_env_steps
+        self.step_reward_curriculum(completed_env_steps)
 
     def _get_gait_guidance_multiplier(self, initial, final):
-        """Geometrically decay one gait-guidance multiplier over PPO updates."""
+        """Geometrically decay one gait-guidance multiplier over completed environment steps."""
         if not self.cfg.rewards.gait_guidance_decay_enabled:
             return 1.0
 
-        duration = self.cfg.rewards.gait_guidance_decay_iterations
-        progress = min(max(self.training_iteration / duration, 0.0), 1.0)
+        duration = self.cfg.rewards.gait_guidance_decay_env_steps
+        progress = min(max(self.completed_env_steps / duration, 0.0), 1.0)
         if progress <= 0.0:
             return float(initial)
         if progress >= 1.0:
@@ -1689,14 +1712,14 @@ class B1Z1PACT(LeggedRobot):
                 self.command_ranges[key][0] = np.clip(self.command_ranges[key][0] - 0.2, -self.cfg.commands.max_curriculum, 0.0)
                 self.command_ranges[key][1] = np.clip(self.command_ranges[key][1] + 0.2, 0.0, self.cfg.commands.max_curriculum)
 
-    def step_reward_curriculum(self, num_iters):
+    def step_reward_curriculum(self, completed_env_steps):
         """Cosine-ramp selected reward scales during training."""
         if not self.use_reward_curriculum:
             return
-        if num_iters < self.reward_warmup_steps:
+        if completed_env_steps < self.reward_warmup_steps:
             alpha = 0.0
         else:
-            alpha = np.clip((num_iters - self.reward_warmup_steps) / max(1, self.reward_curr_steps), 0.0, 1.0)
+            alpha = np.clip((completed_env_steps - self.reward_warmup_steps) / max(1, self.reward_curr_steps), 0.0, 1.0)
             alpha = 0.5 * (1.0 - np.cos(np.pi * alpha))
         for key in self.reward_curr_keys:
             if key in self.reward_scales:
@@ -1872,9 +1895,9 @@ class B1Z1PACT(LeggedRobot):
             device=self.device,
         )
         self.explicit_labels_buf = torch.zeros(self.num_envs, self.cfg.env.num_explicit_recon_obs, device=self.device)
-        # Evaluation defaults to iteration zero until the runner supplies the
-        # restored/current PPO iteration.
-        self.training_iteration = 0
+        # Evaluation defaults to step zero until the runner supplies the
+        # restored/current completed environment-step count.
+        self.completed_env_steps = 0
         init_staged_force_curriculum(self)
 
         self.leg_dof_indices = {
@@ -2067,8 +2090,8 @@ class B1Z1PACT(LeggedRobot):
         self.use_reward_curriculum = cfg.rewards.use_reward_curriculum
         self.reward_curr_keys = cfg.rewards.reward_curriculum.curr_reward_keys
         self.reward_curr_bounds = cfg.rewards.reward_curriculum.curr_reward_bounds
-        self.reward_curr_steps = cfg.rewards.reward_curriculum.curr_steps
-        self.reward_warmup_steps = cfg.rewards.reward_curriculum.warmup_steps
+        self.reward_curr_steps = cfg.rewards.reward_curriculum.curr_env_steps
+        self.reward_warmup_steps = cfg.rewards.reward_curriculum.warmup_env_steps
         self.command_ranges = class_to_dict(cfg.commands.ranges)
         self.max_episode_length_s = cfg.env.episode_length_s
         self.max_episode_length = int(np.ceil(self.max_episode_length_s / self.dt))
@@ -2097,8 +2120,8 @@ class B1Z1PACT(LeggedRobot):
             raise ValueError("rewards.sweep_velocity_gain must be nonnegative")
         if cfg.rewards.max_sweep_amplitude < 0.0:
             raise ValueError("rewards.max_sweep_amplitude must be nonnegative")
-        if cfg.rewards.gait_guidance_decay_iterations <= 0:
-            raise ValueError("rewards.gait_guidance_decay_iterations must be positive")
+        if cfg.rewards.gait_guidance_decay_env_steps <= 0:
+            raise ValueError("rewards.gait_guidance_decay_env_steps must be positive")
         if not 0.0 <= cfg.control.pact_weight_bias_min <= cfg.control.pact_weight_bias_max:
             raise ValueError("control PACT weight biases must satisfy 0 <= min <= max")
         if not 0.0 <= cfg.control.pact_balanced_prob <= 1.0:

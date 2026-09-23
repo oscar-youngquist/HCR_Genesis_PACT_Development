@@ -27,7 +27,8 @@ class GenesisSimulatorB1Z1PACT(Simulator):
     
     #----- Public methods -----#
     def step(self, actions):
-        self.interval_executed_torque = torch.zeros_like(self._torques)
+        # The first reset step precedes the first computed torque command.
+        self.interval_executed_torque = torch.zeros_like(self._dof_pos)
         self._begin_b1z1_bard_interval()
         self._last_base_lin_vel[:] = self._base_lin_vel[:]
         self._last_base_ang_vel[:] = self._base_ang_vel[:]
@@ -452,9 +453,6 @@ class GenesisSimulatorB1Z1PACT(Simulator):
         Phase 3: increase external disturbance randomization.
         """
 
-        def _interp(p, low, diff):
-            return p * diff + low
-
         # -----------------------------
         # Reward EMA / recovery gating
         # -----------------------------
@@ -553,6 +551,13 @@ class GenesisSimulatorB1Z1PACT(Simulator):
             if self.domain_rand_disturbance_progress >= 1.0:
                 self._advance_domain_rand_phase()
 
+        self._update_domain_rand_bounds()
+        self._print_domain_rand_values("[DomainRand] Stepped --")
+
+    def _update_domain_rand_bounds(self):
+        def _interp(p, low, diff):
+            return p * diff + low
+
         # -----------------------------
         # Apply mass + COM progress
         # -----------------------------
@@ -618,7 +623,24 @@ class GenesisSimulatorB1Z1PACT(Simulator):
                 self.com_delta_z_value,
             ]
 
-        self._print_domain_rand_values("[DomainRand] Stepped --")
+    def domain_rand_curriculum_state_dict(self):
+        state = {name: value for name, value in vars(self).items()
+                 if name.startswith("domain_rand_") and name != "domain_rand_reward_ema_hist"}
+        state["reward_history"] = list(self.domain_rand_reward_ema_hist)
+        state["required_reward"] = self.required_reward
+        return state
+
+    def load_domain_rand_curriculum_state_dict(self, state):
+        if not state:
+            return
+        for name, value in state.items():
+            if name.startswith("domain_rand_") and hasattr(self, name):
+                setattr(self, name, value)
+        self.domain_rand_reward_ema_hist.clear()
+        self.domain_rand_reward_ema_hist.extend(state["reward_history"])
+        self.required_reward = state["required_reward"]
+        if self.use_domainrand_curriculum:
+            self._update_domain_rand_bounds()
 
     #----- Protected methods -----#
     def _parse_cfg(self):
@@ -651,7 +673,7 @@ class GenesisSimulatorB1Z1PACT(Simulator):
         self.use_domainrand_curriculum = self._cfg.domain_rand.use_domainrand_curriculum
         self.com_rand_z_positive = self._cfg.domain_rand.com_rand_z_positive
         self.num_push_steps = self._cfg.domain_rand.num_push_steps
-        self.push_warmup_step = self._cfg.domain_rand.push_warmup
+        self.push_warmup_step = self._cfg.domain_rand.push_warmup_env_steps
         
         self.push_bounds = [self._cfg.domain_rand.min_push_vel_xy,
                             self._cfg.domain_rand.max_push_vel_xy]
@@ -772,7 +794,7 @@ class GenesisSimulatorB1Z1PACT(Simulator):
         )
         
         self.domain_rand_step_interval = getattr(
-            self._cfg.domain_rand, "step_interval", 100
+            self._cfg.domain_rand, "step_interval_env_steps", 240
         )
         
         self.domain_rand_last_step_iter = -10**9
@@ -1041,12 +1063,23 @@ class GenesisSimulatorB1Z1PACT(Simulator):
         if self._dof_pos_limits.ndim == 3 and self._dof_pos_limits.shape[1] == 2:
             self._dof_pos_limits = self._dof_pos_limits.transpose(1, 2)
         
-        # Genesis don't provide api for accessing vel limits, so we set it here
-        if hasattr(self._cfg.asset, "dof_vel_limits"):
-            self._dof_vel_limits = torch.tensor(self._cfg.asset.dof_vel_limits, device=self._device).unsqueeze(0)
+        # An empty override means use the URDF, as in the other B1Z1 backends.
+        velocity_limits = getattr(self._cfg.asset, "dof_vel_limits", [])
+        if not velocity_limits:
+            import xml.etree.ElementTree as ET
+            joints = {joint.attrib["name"]: joint for joint in ET.parse(asset_path).getroot().findall("joint")}
+            velocity_limits = [float(joints[name].find("limit").attrib["velocity"])
+                               for name in self._cfg.asset.dof_names]
+        self._dof_vel_limits = torch.tensor(velocity_limits, device=self._device).unsqueeze(0)
         
         self._torque_limits = self._robot.get_dofs_force_range(self._dof_indices)[
             1]
+        # Newer Genesis returns identical URDF limits once per environment.
+        # Keep the per-joint contract consumed by B1Z1's existing rewards.
+        if self._torque_limits.ndim == 2:
+            if not torch.equal(self._torque_limits, self._torque_limits[:1].expand_as(self._torque_limits)):
+                raise ValueError("B1Z1 expects shared URDF torque limits across environments")
+            self._torque_limits = self._torque_limits[0].clone()
         
         print(f"{self._cfg.asset.name.upper()} Torque Limits - ", self._torque_limits)
 

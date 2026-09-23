@@ -61,20 +61,23 @@ FORCE_CURRICULUM_LOG_NAMES = (
 
 
 class B1Z1StagedForceCurriculum:
-    """Iteration-level command ramp followed by a performance-gated force ramp."""
+    """Command/force ramps; PACT uses env steps, older tasks retain iterations."""
 
     def __init__(self, cfg):
-        self.command_start = int(cfg.force_curriculum_command_start_iteration)
-        self.command_ramp = int(cfg.force_curriculum_command_ramp_iterations)
-        self.gate_start = int(cfg.force_curriculum_gate_start_iteration)
-        self.external_ramp = int(cfg.force_curriculum_external_ramp_iterations)
+        self.uses_env_steps = hasattr(cfg, "force_curriculum_command_start_env_step")
+        def clock_value(step_key, legacy_key):
+            return int(getattr(cfg, step_key if self.uses_env_steps else legacy_key))
+        self.command_start = clock_value("force_curriculum_command_start_env_step", "force_curriculum_command_start_iteration")
+        self.command_ramp = clock_value("force_curriculum_command_ramp_env_steps", "force_curriculum_command_ramp_iterations")
+        self.gate_start = clock_value("force_curriculum_gate_start_env_step", "force_curriculum_gate_start_iteration")
+        self.external_ramp = clock_value("force_curriculum_external_ramp_env_steps", "force_curriculum_external_ramp_iterations")
         self.ee_l1_threshold = float(cfg.force_curriculum_ee_l1_threshold)
         self.roll_threshold = float(cfg.force_curriculum_roll_termination_threshold)
         self.episode_length_threshold = float(cfg.force_curriculum_episode_length_threshold)
-        self.required_patience = int(cfg.force_curriculum_gate_patience)
+        self.required_patience = clock_value("force_curriculum_gate_patience_env_steps", "force_curriculum_gate_patience")
         self.ema_alpha = float(cfg.force_curriculum_metric_ema_alpha)
         self.use_latest_start = bool(cfg.force_curriculum_use_latest_start_fallback)
-        self.latest_start = int(cfg.force_curriculum_latest_start_iteration)
+        self.latest_start = clock_value("force_curriculum_latest_start_env_step", "force_curriculum_latest_start_iteration")
         if min(self.command_start, self.command_ramp, self.gate_start, self.external_ramp) < 0:
             raise ValueError("force curriculum iteration values must be nonnegative")
         if self.gate_start < self.command_start + self.command_ramp:
@@ -119,12 +122,13 @@ class B1Z1StagedForceCurriculum:
         return sample if current is None else (1.0 - self.ema_alpha) * current + self.ema_alpha * sample
 
     def update(self, iteration, ee_l1=None, roll_termination_rate=None, mean_episode_length=None):
-        """Consume at most one aggregate metric sample for each PPO iteration."""
+        """Consume at most one aggregate sample per clock value (PACT: env steps)."""
         iteration = int(iteration)
         if iteration == self.last_update_iteration:
             return
         if iteration < self.last_update_iteration:
             raise ValueError("force curriculum iterations must be monotonically increasing")
+        elapsed = max(0, iteration - max(0, self.last_update_iteration, self.gate_start)) if self.uses_env_steps else 1
         self.last_update_iteration = iteration
         self.ee_l1_ema = self._update_ema(self.ee_l1_ema, ee_l1)
         self.roll_termination_ema = self._update_ema(
@@ -148,7 +152,7 @@ class B1Z1StagedForceCurriculum:
             and self.episode_length_ema > self.episode_length_threshold
         )
         if not self.gate_latched and iteration >= self.gate_start:
-            self.gate_patience = self.gate_patience + 1 if criteria_met else 0
+            self.gate_patience = self.gate_patience + elapsed if criteria_met else 0
             fallback = self.use_latest_start and iteration >= self.latest_start
             if self.gate_patience >= self.required_patience or fallback:
                 self.gate_latched = True
@@ -176,7 +180,7 @@ class B1Z1StagedForceCurriculum:
             "ForceCurriculum/episode_length_ema": float(self.episode_length_ema or 0.0),
             "ForceCurriculum/gate_patience": float(self.gate_patience),
             "ForceCurriculum/gate_latched": float(self.gate_latched),
-            "ForceCurriculum/trigger_iteration": float(self.trigger_iteration),
+            ("ForceCurriculum/trigger_env_step" if self.uses_env_steps else "ForceCurriculum/trigger_iteration"): float(self.trigger_iteration),
         }
 
     def state_dict(self):

@@ -17,8 +17,8 @@ def make_sim():
     sim = _IsaacLabSimulatorB1Z1.__new__(_IsaacLabSimulatorB1Z1)
     sim._cfg = B1Z1PACTCfg()
     sim._cfg.domain_rand.use_domainrand_curriculum = True
-    sim._cfg.domain_rand.push_warmup = 0
-    sim._cfg.domain_rand.step_interval = 1
+    sim._cfg.domain_rand.push_warmup_env_steps = 0
+    sim._cfg.domain_rand.step_interval_env_steps = 1
     sim._cfg.domain_rand.joint_dynamics_progress_delta = 1.0
     sim._cfg.domain_rand.mass_com_progress_delta = 0.5
     _IsaacGymSimulatorB1Z1._parse_b1z1_cfg(sim, use_final_ranges=False)

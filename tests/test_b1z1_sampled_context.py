@@ -65,6 +65,8 @@ def test_short_ppo_update_and_auxiliary_targets(pos, bard_active, backend):
            "base_velocity_scale": [1., 1., 1.], "base_wrench_scale": [1.] * 6}
     decoder = B1Z1PACTDecoder(8 + 14, 188, hidden=[16])
     cfg["dynamics_backend"] = backend
+    if not bard_active and not pos:
+        cfg["pinn_loss_weight"] = 0.  # This fixture has no physical dynamics model.
     alg = (PPO_B1Z1PACTPos(model, decoder, cfg, "cpu") if pos else
            PPO_B1Z1PACT(model, decoder, SimpleNamespace(), cfg, "cpu"))
     if bard_active:
@@ -74,8 +76,7 @@ def test_short_ppo_update_and_auxiliary_targets(pos, bard_active, backend):
                 bias=torch.zeros(n, 25), foot_jacobians=torch.ones(n, 4, 6, 25),
                 ee_jacobian=torch.ones(n, 6, 25), base_jacobian=torch.ones(n, 6, 25))
         alg.dynamics_backend = SimpleNamespace(evaluate=evaluate, batch_capacity=3)
-        alg.cfg.update(pinn_init_steps=0, pinn_warmup=1, pinn_loss_weight=.1 * bard_active, use_pinn_rollout_loss=True)
-        alg.pinn_updates = 1
+        alg.cfg.update(pinn_start_env_step=0, pinn_warmup_env_steps=1, pinn_loss_weight=.1 * bard_active, use_pinn_rollout_loss=True)
         projection = "pc_backward_ppgrad" if bard_active < 0 else "pc_backward_pinn"
         for optimizer in (alg.encoder_pcgrad, alg.decoder_pcgrad):
             setattr(optimizer, projection, Mock(wraps=getattr(optimizer, projection)))
@@ -108,7 +109,7 @@ def test_short_ppo_update_and_auxiliary_targets(pos, bard_active, backend):
               (alg.ppo_parameters, alg.enc_parameters, alg.decoder_parameters)]
     assert not (owners[0] & owners[1] or owners[0] & owners[2] or owners[1] & owners[2])
     assert set(map(id, (*model.context_encoder.parameters(), *model.explicit_decoder.parameters()))) == owners[1]
-    metrics = alg.update(0)
+    metrics = alg.update(0 if pos else 2)
     assert metrics["pre_update_mu_rms"] < 1e-6
     assert metrics["pre_update_logprob_rms"] < 1e-5
     assert metrics["grf_decoder"] >= 0

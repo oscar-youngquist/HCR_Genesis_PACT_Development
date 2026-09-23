@@ -7,7 +7,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
     seed = 1                                                                            # Random seed for reproducible initialization.
 
     class env:
-        num_envs = 4096                                                                # Parallel simulation instances.
+        num_envs = 1024                                                                # Parallel simulation instances.
         # num_envs = 5120                                                                  # Parallel simulation instances.
         # 2 body-orientation + 3 angular velocity + 17 joint positions +
         # 17 joint velocities + 34 coupled PACT actions + 6 commands. EE pose
@@ -350,23 +350,20 @@ class B1Z1PACTCfg(LeggedRobotCfg):
 
         # Shared B1Z1 schedule. PACT has no force-command observation channel,
         # but retains the common command stage before disturbances are enabled.
-        force_curriculum_command_start_iteration = 0                                    # Iteration starting the shared command-force stage.
-        force_curriculum_command_ramp_iterations = 0                                    # Command-force ramp duration [PPO iterations].
-        force_curriculum_gate_start_iteration = 8000                                    # Earliest iteration for the external-force performance gate.
-        force_curriculum_external_ramp_iterations = 8000                                # External-force ramp duration after activation [iterations].
+        force_curriculum_command_start_env_step = 0  # Start of the shared command-force stage. Units: completed per-environment control steps.
+        force_curriculum_command_ramp_env_steps = 0  # Command-force ramp duration [completed env steps]. Units: completed per-environment control steps.
+        force_curriculum_gate_start_env_step = 192000  # Earliest env step for the external-force performance gate. Units: completed per-environment control steps.
+        force_curriculum_external_ramp_env_steps = 192000  # External-force ramp duration after activation [completed env steps]. Units: completed per-environment control steps.
 
 
-        # force_curriculum_gate_start_iteration = 6400                                    # Earliest iteration for the external-force performance gate.
-        # force_curriculum_external_ramp_iterations = 6400                                # External-force ramp duration after activation [iterations].
 
         force_curriculum_ee_l1_threshold = 0.25                                         # Maximum EE tracking error for force-stage advancement.
         force_curriculum_roll_termination_threshold = 0.05                              # Maximum roll-termination rate for advancement.
         force_curriculum_episode_length_threshold = 950.0                               # Minimum episode length for advancement [control steps].
-        force_curriculum_gate_patience = 400                                            # Consecutive qualifying updates before advancement.
+        force_curriculum_gate_patience_env_steps = 9600  # Consecutive qualifying env steps before advancement. Units: completed per-environment control steps.
         force_curriculum_metric_ema_alpha = 0.05                                        # New-sample weight for force-curriculum metrics.
         force_curriculum_use_latest_start_fallback = True                               # Allow time-based activation if the performance gate stalls.
-        # force_curriculum_latest_start_iteration = 10000                                 # Latest allowed external-force start iteration.
-        force_curriculum_latest_start_iteration = 8000                                 # Latest allowed external-force start iteration.
+        force_curriculum_latest_start_env_step = 192000  # Latest allowed external-force start env step. Units: completed per-environment control steps.
 
 
         push_gripper_stators = True                                                     # Enable the EE disturbance-event scheduler.
@@ -498,14 +495,13 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         joint_damping_range_end = [0.00, 0.80]                                          # Final passive joint-damping bounds.
 
         num_push_steps = 500
-        # push_warmup = 20000                                                             # Warmup before disturbance-curriculum advancement.
-        push_warmup = 13000                                                             # Warmup before disturbance-curriculum advancement.
+        push_warmup_env_steps = 312000  # Warmup before disturbance-curriculum advancement. Units: completed per-environment control steps.
 
 
-        best_reward_window = 200                                                        # Reward-history window for curriculum decisions.
+        best_reward_window = 200                                                        # Reward-metric samples retained for curriculum decisions (fixed env-step cadence).
         best_reward_quantile = 0.90                                                     # Reference reward quantile for curriculum advancement.
         recovery_ratio = 0.90                                                           # Fraction of reference performance required to recover.
-        step_interval = 10                                                              # Curriculum evaluation interval.
+        step_interval_env_steps = 240  # Curriculum evaluation interval. Units: completed per-environment control steps.
         reward_ema_alpha = 0.05                                                         # New-sample weight for smoothed curriculum reward.
         min_reward_to_step = 0.60                                                       # Minimum reward required for curriculum advancement.
         joint_dynamics_progress_delta = 0.02                                            # Joint-dynamics progress increment per stage.
@@ -590,7 +586,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         sweep_velocity_gain = 0.0                                                       # disable the B1-only fore-aft sweep initially
 
         gait_guidance_decay_enabled = False                                             # Decay reference-pose and stance guidance during learning.
-        gait_guidance_decay_iterations = 10000                                          # Duration of gait-guidance multiplier decay [iterations].
+        gait_guidance_decay_env_steps = 240000  # Duration of gait-guidance multiplier decay [completed env steps]. Units: completed per-environment control steps.
         ref_dof_leg_initial_multiplier = 1.0                                            # Initial reference-pose reward multiplier.
         ref_dof_leg_final_multiplier = 0.30                                             # Final reference-pose reward multiplier.
         feet_contact_initial_multiplier = 1.0                                           # Initial stance-matching reward multiplier.
@@ -798,10 +794,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
                 "arm_feedforward_action_rate":[-0.006, -0.06],
                 "arm_feedforward_action_smoothness":[-0.006, -0.06],
             }
-            warmup_steps = 30000                                                        # Reward-curriculum warmup.
-            curr_steps = 10000                                                           # Reward-curriculum ramp duration.
-            # warmup_steps = 24000                                                        # Reward-curriculum warmup.
-            # curr_steps = 8000                                                           # Reward-curriculum ramp duration.
+            warmup_env_steps = 720000  # Reward-curriculum warmup. Units: completed per-environment control steps.
+            curr_env_steps = 240000  # Reward-curriculum ramp duration. Units: completed per-environment control steps.
 
 
     class viewer:
@@ -896,9 +890,9 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         vae_kld_weight = 1.00                                                           # Default VAE KL coefficient, separate from physics PINNs.
 
         use_cosine_kl_warmup = True                                                     # Independently cosine-ramp the base KL coefficient to its maximum.
-        kl_warmup_iters = 1000                                                          # Cosine VAE KL warmup duration [PPO iterations].
+        kl_warmup_env_steps = 24000  # Cosine VAE KL warmup duration [completed env steps]. Units: completed per-environment control steps.
         kl_warmup_beta_max = vae_kld_weight                                             # Baseline VAE KL coefficient after cosine warmup.
-        kl_band_warmup_iters = 500                                                      # Delay before activating the KL-rate band [iterations].
+        kl_band_warmup_env_steps = 12000  # Cosine ramp duration for the KL-rate band after base warmup. Units: completed per-environment control steps.
 
         use_kl_rate_band = False                                                        # Disable the rate band; optional cosine warmup still applies.
         kl_r_min = 2.00                                                                 # Lower target on raw VAE KL rate.
@@ -909,8 +903,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         adaptation_learning_rate = 2.0e-4                                               # HardPACT encoder/decoder learning rate.
 
         pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign: + PINN / - PPGrad; 0 disables.
-        pinn_warmup = 500                                                               # Ramp duration after PINN activation [PPO updates].
-        pinn_init_steps = 0                                                           # First PPO iteration eligible for the PINN ramp.
+        pinn_warmup_env_steps = 12000  # Ramp duration after PINN activation [completed env steps]. Units: completed per-environment control steps.
+        pinn_start_env_step = 0  # Completed control steps before the PINN ramp. Units: completed per-environment control steps.
         use_pinn_rollout_loss = True                                                    # Enable the rollout term in addition to inverse dynamics.
         pinn_inverse_weight = 0.5                                                       # Inverse-dynamics coefficient inside the combined physics objective.
         pinn_rollout_weight = 0.5                                                       # Rollout coefficient inside the combined physics objective.
@@ -929,7 +923,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         force_gate_ema_alpha = 0.05                                                     # New-error weight in force-reliability EMAs.
         force_gate_threshold = 0.075                                                    # Legacy force-blend target for normalized reconstruction MSE.
         force_gate_hysteresis = 0.10                                                    # Legacy aggregate gate setting; event-specific limits govern gating.
-        force_gate_patience = 10                                                        # Qualifying PPO updates required before opening the force gate.
+        force_gate_patience_env_steps = 240  # Qualifying completed env steps required before opening the force gate. Units: completed per-environment control steps.
         # No event mask is stored in the rollout, so normalized target norms
         # identify physical EE/base disturbance events for reliability gating.
         force_gate_ee_event_norm_threshold = 0.05                                       # Normalized EE-force norm separating active/neutral samples.
@@ -954,6 +948,34 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         force_blend_min_alpha = 0.01                                                    # Legacy Pinocchio: minimum predicted-force blend fraction.
 
     class algorithm:
+        # Select PPO_B1Z1PACT in runner.algorithm_class_name for the baseline.
+        sac_position_action_range = 3.0                                                # All 17 position outputs: multiply normalized actions before position_action_scale; finite, positive, <= clip_actions.
+        sac_leg_torque_action_range = 3.0                                              # 12 leg torque outputs: multiply normalized actions before physical torque scales; finite, positive, <= clip_actions.
+        sac_arm_torque_action_range = 2.0                                              # 5 learned arm torque outputs: multiply normalized actions before physical torque scales; finite, positive, <= clip_actions.
+        sac_gamma = 0.95                                                               # Discount per simulator control step; independent of the PPO gamma below.
+        sac_batch_size = 2048                                                          # Replay transitions sampled per gradient update, across all environments.
+        sac_updates_per_step = 2                                                       # Gradient updates per vectorized simulator step after warm-up; accumulated by the runner.
+        sac_actor_period = 2                                                           # Update actor and temperature every this many critic updates, starting at update zero.
+        sac_tau = 0.01                                                                 # Target-Q EMA fraction: target = (1 - tau) * target + tau * online Q.
+        sac_num_bins = 101                                                             # Number of categorical Q-value support bins, including both endpoints.
+        sac_min_v = -5.0                                                               # Lower categorical Q-support endpoint in normalized return units.
+        sac_max_v = 5.0                                                                # Upper Q-support endpoint; also the reward normalizer's maximum-return scale.
+        sac_critic_width = 256                                                         # Hidden feature width of each fused Q critic; does not change the PACT actor.
+        sac_critic_blocks = 2                                                          # Residual blocks per Q critic; online and target critics share this architecture.
+        sac_initial_temperature = 0.01                                                 # Initial learned entropy coefficient alpha; larger values favor exploration.
+        sac_target_sigma = 0.15                                                        # Gaussian std used to derive target entropy H = action_dim/2 * log(2*pi*e*sigma^2).
+        sac_learning_rate = 3e-4                                                       # Initial Adam learning rate for actor, Q critic and temperature; auxiliary rates are separate.
+        sac_lr_end = 1.5e-4                                                            # Final learning rate reached by each SAC optimizer's cosine decay schedule.
+        sac_lr_decay_updates = 1000000                                                 # Cosine decay duration in each optimizer's own steps; delayed actor/temperature advance slower.
+        sac_use_amp = False                                                            # Enable CUDA FP16 autocast/scaling for critic updates; actor PCGrad and physics remain FP32.
+        sac_use_compile = False                                                        # Compile online/target critic forwards with torch.compile; defaults off for correctness checks.
+        replay_capacity = 2500000                                                      # Maximum individual transitions in the ring across all environments; default uses about 634.6 MiB.
+        replay_warmup = 10000                                                          # Stored transitions required before optimization; must be between 1 and replay_capacity.
+        replay_device = "cpu"                                                          # Replay storage device, independent of the learner device; CPU avoids allocating replay on the GPU.
+        replay_pin_memory = True                                                       # Pin CPU replay storage when CUDA is available; ignored for non-CPU storage.
+        replay_persistence = False                                                     # Include replay contents in checkpoints and restore when present; increases checkpoint size.
+        n_step = 1                                                                     # Bellman backup horizon; only 1 is supported to prevent cross-environment n-step mixing.
+
         # Actor-facing task prediction; independent of representation-PINN weights.
         actor_phys_enabled = True                         # Opt in only for coupled PACT/BARD.
         actor_phys_coef = 0.1                              # Overall actor auxiliary coefficient.
@@ -1013,16 +1035,17 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
     class runner:
         enable_additional_diagnostics = True                                            # Disable expensive, non-training rollout and PPO-consistency diagnostics.
         policy_class_name = "ActorCriticB1Z1PACT"                                       # Actor-critic implementation selected by the runner.
-        algorithm_class_name = "PPO_B1Z1PACT"                                           # PPO implementation selected by the runner.
+        algorithm_class_name = "FlashSAC_B1Z1PACT"                                      # Select FlashSAC_B1Z1PACT or PPO_B1Z1PACT for the experimental baseline.
+        curriculum_metrics_interval_env_steps = 24                                      # Completed control steps between reward-gated force/domain-rand decisions; independent of rollout length.
         num_steps_per_env = 24                                                          # Control transitions collected per environment per update.
         grf_dim = 12                                                                    # Flattened four-foot XYZ force width.
 
-        max_iterations = 70000                                                          # Total PPO learning iterations.
-        # max_iterations = 56000                                                          # Total PPO learning iterations.
+        max_iterations = 70000                                                          # Total learning iterations (run length only; curricula use env steps).
+        # max_iterations = 56000                                                          # Total learning iterations (run length only; curricula use env steps).
 
-        save_interval = 1000                                                            # Checkpoint interval [PPO iterations].
+        save_interval = 1000                                                            # Checkpoint interval [learning iterations]; does not advance curricula.
         run_name = "b1z1_pact_improved"                                                  # Run label used in output directories.
-        experiment_name = "b1z1_pact_lab"                                               # Experiment/log directory group.
+        experiment_name = "b1z1_pact_lab_flashsac"                                               # Experiment/log directory group.
         sync_wandb = False                                                              # Synchronize supported logs to Weights & Biases.
         resume = False                                                                  # Resume a previous training checkpoint.
         load_run = "Jul14_11-16-03_unifp_baseline"                                      # Run directory selected when resuming.
