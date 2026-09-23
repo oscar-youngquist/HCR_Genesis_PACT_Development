@@ -111,7 +111,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000
-        push_warmup = 4000
+        push_warmup = 2000
         num_jumps = 10
 
         randomize_friction = True
@@ -135,7 +135,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
 
         randomize_base_mass = True
         min_added_mass_max = 2.0
-        max_added_mass_max = 4.0
+        max_added_mass_max = 3.0
         added_mass_min = -1.0
 
         randomize_com_displacement = True
@@ -182,8 +182,8 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         reward_ema_alpha = 0.05
         min_reward_to_step = 0.50
         joint_dynamics_progress_delta = 0.01
-        mass_com_progress_delta = 0.002
-        disturbance_progress_delta = 0.002
+        mass_com_progress_delta = 0.005
+        disturbance_progress_delta = 0.005
         use_joint_dynamics_curriculum = True
         use_mass_com_curriculum = True
         use_disturbance_curriculum = True
@@ -426,8 +426,8 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                   'dof_vel_limits':[-0.1, -1.0],
                                 #   'dof_acc':[-2.5e-08, -2.5e-07]
                                   }
-            curr_steps = 6000
-            warmup_steps = 0
+            curr_steps = 10000
+            warmup_steps = 2000  
 
 
     class commands(LeggedRobotCfg.commands):
@@ -567,7 +567,25 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
                         # at absolute iteration N. Zero keeps current behavior.
-                        'warmup_iterations': 20,
+                        'warmup_iterations': 7000,
+                        # Execution-only interpolation; full QPs/losses remain active.
+                        'correction_ramp_enabled': True,
+                        'correction_ramp_start_offset': 0,
+                        'correction_ramp_duration': 1000,
+                        'objective_curriculum_enabled': True,
+                        'contact_acceleration_weight_initial': 0.10,  # .25 * final
+                        'contact_acceleration_weight_final': 1.0,  # contact_acceleration_weight
+                        'attitude_weight_initial': 0.10,  # .25 * final
+                        'attitude_weight_final': 1.0,  # attitude_weight
+                        'objective_curriculum_start': None,  # after execution ramp
+                        'objective_curriculum_progress_delta': 0.05,
+                        'objective_curriculum_step_interval': 10,
+                        'objective_curriculum_ema_alpha': 0.05,
+                        'objective_curriculum_window': 200,
+                        'objective_curriculum_quantile': 0.9,
+                        'objective_curriculum_recovery_ratio': 0.9,
+                        'objective_curriculum_min_tracking': 0.5,
+                        'objective_curriculum_min_samples': 1,
                         'exception_capture_enabled': True,
                         'exception_capture_limit': 1,
                         'exception_capture_dir': '/tmp/hard_pact_qp_failures',
@@ -669,7 +687,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         policy_class_name = 'ActorCritic_HardPACT'
         algorithm_class_name = 'PPO_HardPACT'
         num_steps_per_env = 24
-        max_iterations = 12000
+        max_iterations = 16000
         grf_dim = 12
         run_name = 'hardpact_50hz_noboot'
         experiment_name = 'go2_pact_rough'

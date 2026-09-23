@@ -67,6 +67,24 @@ class HardPACTQPConfig:
     # Train normally without rollout/replay QPs until this absolute PPO
     # iteration. Zero preserves immediate projection; independent of PINN.
     warmup_iterations: int = 0
+    # Opt-in here for legacy/config compatibility; training config enables both.
+    correction_ramp_enabled: bool = False
+    correction_ramp_start_offset: int = 0
+    correction_ramp_duration: int = 1000
+    objective_curriculum_enabled: bool = False
+    contact_acceleration_weight_initial: float | None = None  # 25% of final
+    contact_acceleration_weight_final: float | None = None  # configured weight
+    attitude_weight_initial: float | None = None
+    attitude_weight_final: float | None = None
+    objective_curriculum_start: int | None = None  # ramp completion
+    objective_curriculum_progress_delta: float = 0.05
+    objective_curriculum_step_interval: int = 10
+    objective_curriculum_ema_alpha: float = 0.05
+    objective_curriculum_window: int = 200
+    objective_curriculum_quantile: float = 0.9
+    objective_curriculum_recovery_ratio: float = 0.9
+    objective_curriculum_min_tracking: float = 0.5
+    objective_curriculum_min_samples: int = 1
     soft_joint_recovery_enabled: bool = True
     soft_joint_recovery_weight: float = 200.0
     soft_joint_recovery_scale_rad_s2: float = 100.0
@@ -946,7 +964,12 @@ class HardPACTDifferentiableQP:
                     environment_ids=environment_ids,substep_index=substep_index,
                     environment_count=environment_count,**data)
         dtype = self._solve_dtype(reference)
-        if self._backend_config != self.cfg:
+        # Objective weights change numeric Q/p, not structure or solver settings.
+        # Every backend updates Q/p each solve; keep safe existing pool leases.
+        backend_equivalent = replace(self._backend_config,
+            contact_acceleration_weight=self.cfg.contact_acceleration_weight,
+            attitude_weight=self.cfg.attitude_weight)
+        if backend_equivalent != self.cfg:
             # Never carry solver allocations/settings or active/warm snapshots
             # across a runtime settings change.
             self.clear_warm_start()

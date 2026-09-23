@@ -304,8 +304,8 @@ class OnPolicyRunnerPACT:
             qp_profile = None
             if self.is_hard_pact:
                 self.env._terrain_curriculum_iteration = it
-                self.env.begin_command_curriculum_iteration()
                 self._set_hard_pact_qp_iteration(it)
+                self.env.begin_command_curriculum_iteration()
                 if self.alg.hard_pact_qp is not None:
                     self.alg.hard_pact_qp.begin_iteration_diagnostics("rollout")
                     qp_profile = self.alg.hard_pact_qp.profiles["rollout"]
@@ -405,6 +405,7 @@ class OnPolicyRunnerPACT:
             
             if self.is_hard_pact:
                 self.env.finish_command_curriculum_iteration(it)
+                locomotion_score, locomotion_count = self.env.locomotion_curriculum_performance()
                 if self.writer is not None:
                     for key,value in getattr(self.env,"command_curriculum_metrics",{}).items():
                         self.writer.add_scalar("curriculum/commands/"+key,value,it)
@@ -417,7 +418,7 @@ class OnPolicyRunnerPACT:
                 # self.env.simulator._step_domian_rand(it)
                 mean_tracking_lin_vel = None
 
-                if len(ep_infos) > 0 and "rew_tracking_lin_vel" in ep_infos[0]:
+                if not self.is_hard_pact and len(ep_infos) > 0 and "rew_tracking_lin_vel" in ep_infos[0]:
                     vals = []
                     for ep_info in ep_infos:
                         v = ep_info["rew_tracking_lin_vel"]
@@ -426,14 +427,16 @@ class OnPolicyRunnerPACT:
                         vals.append(v.float().mean().to(self.device))
 
                 # mean_reward = statistics.mean(rewbuffer) if len(rewbuffer) > 0 else None
-                if len(ep_infos) > 0 and "rew_tracking_lin_vel" in ep_infos[0] and vals:
+                if not self.is_hard_pact and len(ep_infos) > 0 and "rew_tracking_lin_vel" in ep_infos[0] and vals:
                     mean_tracking_lin_vel = torch.stack(vals).mean().item()
                 if self.is_hard_pact and hasattr(
                     self.env, "step_domain_rand_curriculum"
                 ):
-                    self.env.step_domain_rand_curriculum(
-                        it, mean_tracking_lin_vel
-                    )
+                    # Same raw, rollout-weighted evidence as QP objectives.
+                    # The legacy DR scheduler treats None as permission to
+                    # advance, so do not invoke it without finite evidence.
+                    if locomotion_score is not None:
+                        self.env.step_domain_rand_curriculum(it, locomotion_score)
                 else:
                     self.env.simulator._step_domian_rand(
                         it, mean_tracking_lin_vel
@@ -496,6 +499,11 @@ class OnPolicyRunnerPACT:
                 torch.cuda.synchronize(self.device)
             stop = time.time()
             learn_time = stop - start
+            if self.is_hard_pact and hasattr(self, "qp_curriculum"):
+                self.qp_curriculum.finish(it, locomotion_score, locomotion_count)
+                if self.writer is not None:
+                    for key, value in self.qp_curriculum.metrics().items():
+                        self.writer.add_scalar("curriculum/qp/"+key, value, it)
             if self.is_hard_pact and self.alg.hard_pact_qp is not None:
                 qp = self.alg.hard_pact_qp
                 for phase,seconds in (("rollout",collection_time),("ppo",learn_time)):
@@ -523,6 +531,15 @@ class OnPolicyRunnerPACT:
         self.env.set_hard_pact_qp_enabled(self.alg.qp_enabled_at_iteration())
         qp = self.alg.hard_pact_qp
         if qp is not None:
+            from rsl_rl.algorithms.hard_pact_qp_curriculum import QPCurriculum
+            if not hasattr(self, "qp_curriculum"):
+                self.qp_curriculum = QPCurriculum(qp.cfg)
+            effective, alpha = self.qp_curriculum.begin(iteration)
+            # Same object serves rollout/replay. Settings, dimensions, and
+            # backend leases stay intact; only state-dependent objectives vary.
+            qp.cfg = effective
+            self.env._qp_execution_alpha = alpha
+            self.env._qp_tracking_collect = effective.objective_curriculum_enabled
             qp.diagnostics_scheduled = (qp.cfg.tensorboard_diagnostics_enabled
                 and qp.cfg.tensorboard_diagnostics_interval > 0
                 and iteration % qp.cfg.tensorboard_diagnostics_interval == 0)
@@ -862,6 +879,8 @@ class OnPolicyRunnerPACT:
         }
         if self.is_hard_pact:
             # The legacy runner counter advances only after learn() finishes.
+            if hasattr(self, "qp_curriculum"):
+                checkpoint['hard_pact_qp_curriculum'] = self.qp_curriculum.state_dict()
             checkpoint['hard_pact_command_curriculum'] = self.env.command_curriculum_state_dict()
             # Save the next iteration for HardPACT periodic checkpoints too,
             # so resuming cannot accidentally repeat its QP warmup.
@@ -899,11 +918,18 @@ class OnPolicyRunnerPACT:
             self.env, "load_domain_rand_curriculum_state_dict"
         ):
             self.env.load_domain_rand_curriculum_state_dict(curriculum)
-        else:
+        elif not self.is_hard_pact:
             # Preserve the historical PACT resume behavior for legacy tasks.
             self.current_learning_iteration = 0
         if self.is_hard_pact:
             self.alg._last_completed_iteration = self.current_learning_iteration - 1
+            state = loaded_dict.get('hard_pact_qp_curriculum')
+            if state is not None and self.alg.hard_pact_qp is not None:
+                from rsl_rl.algorithms.hard_pact_qp_curriculum import QPCurriculum
+                self.qp_curriculum = QPCurriculum(self.alg.qp_config)
+                self.qp_curriculum.load_state_dict(state)
+            # Older checkpoints start independent performance history at zero;
+            # ramp timing still derives from the restored absolute iteration.
             if 'hard_pact_command_curriculum' in loaded_dict:
                 self.env.load_command_curriculum_state_dict(loaded_dict['hard_pact_command_curriculum'])
             self._set_hard_pact_qp_iteration(self.current_learning_iteration)

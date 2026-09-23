@@ -2391,7 +2391,10 @@ class PPO_HardPACT:
                 grf_world = pinn_grf(nominal_torque)
             if self.bard_rollout_enabled:
                 # Measured interval-average actuation is a fixed dynamics input,
-                # including final QP/fallback/actuator projection. No straight-
+                # including execution-curriculum blending and final QP/fallback/
+                # actuator projection. Never substitute the full replay QP
+                # candidate here: that remains exclusive to projection loss.
+                # No straight-
                 # through actor or QP edge; GRF/wrench/encoder edges stay live.
                 rollout_control_torque = batch["interval_executed_torque"].detach()
             if self.bard_inverse_enabled or self.bard_rollout_enabled:

@@ -510,7 +510,11 @@ class Go2HardPACT(Go2PACT):
         patience = int(self.cfg.commands.curriculum_patience_iterations)
         if patience < 0:
             raise ValueError("commands.curriculum_patience_iterations must be >= 0")
-        self._command_tracking_collect = bool(self.cfg.commands.curriculum and patience > 0)
+        self._command_tracking_collect = bool((self.cfg.commands.curriculum and patience > 0)
+                                             or getattr(self, "_qp_tracking_collect", False)
+                                             or getattr(getattr(self, "simulator", None),
+                                                        "use_domainrand_curriculum", False))
+        self._command_tracking_count = 0
         if not self._command_tracking_collect:
             return
         self._command_tracking_sum = torch.zeros((),device=self.device)
@@ -524,6 +528,16 @@ class Go2HardPACT(Go2PACT):
             self._command_tracking_sum.add_(reward.detach().sum())
             self._command_tracking_count += reward.numel()
         return reward
+
+    def locomotion_curriculum_performance(self):
+        """Shared raw score: equal weight per environment/control step.
+
+        No episode duration, reward coefficient, or command-range normalization.
+        Missing/nonfinite evidence must pause either performance curriculum.
+        """
+        count = getattr(self, "_command_tracking_count", 0)
+        score = self._command_tracking_sum.item()/count if count else None
+        return (score if score is not None and math.isfinite(score) else None), count
 
     def finish_command_curriculum_iteration(self, iteration):
         self._command_tracking_collect = False
@@ -1015,8 +1029,18 @@ class Go2HardPACT(Go2PACT):
                     joint_position=qj[rows],joint_velocity=vj[rows],
                     dt=tau_nom.new_full((rows.numel(),1),dt))
                 self._qp_interval_timing_ms[rows] += (time.perf_counter()-start)*1000.0
-                safe[rows] = result.tau_safe
-                certified[rows] = result.differentiated_mask
+                from rsl_rl.algorithms.hard_pact_qp_curriculum import execution_torque
+                base = safe[rows]
+                alpha = getattr(self, "_qp_execution_alpha", 1.0)
+                executed = execution_torque(base, result.tau_safe, result.differentiated_mask, alpha)
+                safe[rows] = executed
+                if aggregate is not None:
+                    # Candidate acceptance is NOT a certificate for the blend.
+                    aggregate.add_sum("execution/candidate_correction_abs_sum_nm", (result.tau_safe-base).abs().sum())
+                    aggregate.add_sum("execution/executed_correction_abs_sum_nm", (executed-base).abs().sum())
+                    aggregate.add_sum("execution/correction_coordinates", base.new_tensor(base.numel()))
+                    aggregate.add_sum("execution/partially_corrected_rows", result.differentiated_mask.sum()*int(alpha < 1))
+                certified[rows] = result.differentiated_mask & (alpha == 1.0)
                 zeros = tau_nom.new_zeros(rows.numel())
                 residual = torch.stack((result.diagnostics["selected/equality_max"],
                     result.diagnostics["selected/inequality_max"],
@@ -1046,6 +1070,7 @@ class Go2HardPACT(Go2PACT):
                     "sampled_qp_grf_conditioning_torque":self._qp_grf_conditioning_torque[rows],
                     "sampled_qp_qdd":result.qdd,"sampled_qp_force_world":result.force_world.flatten(1),
                     "sampled_qp_safe_torque":result.tau_safe,
+                    "sampled_qp_executed_torque":executed,
                     "sampled_qp_stage":result.stage[:,None].to(torch.int16),
                     "sampled_qp_differentiated":result.differentiated_mask[:,None],
                     "sampled_qp_residuals":residual}
@@ -1177,6 +1202,7 @@ class Go2HardPACT(Go2PACT):
             # 24-D primal [tau_safe,f] plus derived acceleration for diagnostics.
             "sampled_qp_qdd": shape(18), "sampled_qp_force_world": shape(12),
             "sampled_qp_safe_torque": shape(12),
+            "sampled_qp_executed_torque": shape(12),
             # Compact fallback stage and whether qpth supplied its KKT graph.
             "sampled_qp_stage": torch.zeros(
                 self.num_envs, 1, device=self.device, dtype=torch.int16
