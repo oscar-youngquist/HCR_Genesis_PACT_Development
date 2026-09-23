@@ -956,7 +956,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
     class algorithm:
         # Actor-facing task prediction; independent of representation-PINN weights.
         actor_phys_enabled = True                         # Opt in only for coupled PACT/BARD.
-        actor_phys_coef = 0.1                              # Overall actor auxiliary coefficient.
+        actor_phys_coef = 0.01                              # Overall actor auxiliary coefficient.
         actor_phys_vel_weight = 1.0                         # Reachable planar velocity/yaw tracking.
         actor_phys_ee_weight = 1.0                          # Next scheduled, compliant EE target.
         actor_phys_q_weight = 0.1                           # Joint-position safety barrier.
