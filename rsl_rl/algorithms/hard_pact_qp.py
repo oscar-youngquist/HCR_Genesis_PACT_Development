@@ -140,6 +140,10 @@ class HardPACTQPConfig:
     contact_acceleration_weight: float = 1.0
     contact_acceleration_scale_m_s2: float = 50.0
     attitude_weight: float = 1.0
+    planar_velocity_weight: float = 0.0
+    yaw_rate_weight: float = 0.0
+    planar_velocity_scale_m_s: float = 1.0
+    yaw_rate_scale_rad_s: float = 1.0
     attitude_acceleration_scale_rad_s2: float = 20.0
     attitude_kp: float = 20.0
     attitude_kd: float = 5.0
@@ -378,6 +382,12 @@ class HardPACTDifferentiableQP:
         # Store the immutable numerical/weight specification used by every
         # rollout and PPO solve in this training run.
         self.cfg = config
+        import math
+        for name in ("planar_velocity_weight", "yaw_rate_weight",
+                     "planar_velocity_scale_m_s", "yaw_rate_scale_rad_s"):
+            value = getattr(config, name)
+            if not math.isfinite(value) or value < 0 or ("scale" in name and value == 0):
+                raise ValueError(f"Invalid QP tracking {name}: {value}")
         # Backend limits are labels, never optimization variables. Detaching
         # prevents an accidental gradient edge if a caller supplies tensors.
         self.torque_limits = torch.as_tensor(torque_limits).reshape(12).detach()
@@ -643,6 +653,35 @@ class HardPACTDifferentiableQP:
             self._constant_cache[key]=(selector,friction,diagonal,torch.diag(diagonal))
         return self._constant_cache[key]
 
+    def velocity_tracking_enabled(self):
+        return self.cfg.planar_velocity_weight > 0 or self.cfg.yaw_rate_weight > 0
+
+    def _velocity_tracking_affine(self, data, acceleration_map, offset):
+        """Physical body-frame [vx,vy,wz] prediction C*x+e+command.
+
+        Canonical BARD/Pinocchio free-flyer qdd[:6] = d[v_B,w_B]/dt.
+        Classical world acceleration is R*(qdd_linear + w_B cross v_B).
+        d(R^T v_W)/dt subtracts w_B cross v_B, cancelling that transport
+        term exactly. Likewise w_B cross w_B=0. Thus H selects [0,1,5],
+        c=0 at the root origin, NOT world acceleration or Euler yaw rate.
+        Simulator reward velocities use these same body/root-link axes.
+        W is already in offset=M^-1(Jb^T W-h); never add it a second time.
+        """
+        if "velocity_command" not in data or "base_linear_velocity_world" not in data:
+            raise ValueError("QP velocity tracking requires captured physical velocity_command and base_linear_velocity_world")
+        q = data["base_quaternion"].detach()
+        def body(world):
+            v = world.detach()
+            t = 2*torch.cross(q[:,:3], v, dim=-1)
+            return v-q[:,3:]*t+torch.cross(q[:,:3],t,dim=-1)
+        linear = body(data["base_linear_velocity_world"])
+        angular = body(data["base_angular_velocity_world"])
+        current = torch.cat((linear[:,:2], angular[:,2:3]), -1)
+        dt = data["dt"].detach().reshape(-1,1)
+        C = dt[:,:,None]*acceleration_map[:,[0,1,5],:]
+        e = current + dt*offset[:,[0,1,5]] - data["velocity_command"].detach()
+        return C, e, current
+
     def _build(self, data):
         r"""Assemble x=[tau_12; f_FR,FL,RR,RL_world_12], and substitute x=D z.
 
@@ -725,6 +764,14 @@ class HardPACTDifferentiableQP:
             e = ((H @ offset[...,None]).squeeze(-1) - desired)
             add_residual(C, e / self.cfg.attitude_acceleration_scale_rad_s2,
                          self.cfg.attitude_weight)
+
+        if self.velocity_tracking_enabled():
+            C, e, _ = self._velocity_tracking_affine(data, mechanics_map, offset)
+            for sl, weight, units in ((slice(0,2), self.cfg.planar_velocity_weight,
+                                      self.cfg.planar_velocity_scale_m_s),
+                                     (slice(2,3), self.cfg.yaw_rate_weight,
+                                      self.cfg.yaw_rate_scale_rad_s)):
+                add_residual(C[:,sl]/units, e[:,sl]/units, weight)
 
         limits, qmin, qmax, vmax = self._limits(ref)
         dt = data["dt"].detach().reshape(-1, 1)
@@ -839,6 +886,26 @@ class HardPACTDifferentiableQP:
         acceleration = (m.acceleration_map @ x[..., None]).squeeze(-1) + m.acceleration_offset
         aggregate.joint_candidate(stage, data, acceleration, accepted, qmin, qmax,
                                   vmax, amax, self.cfg.position_integration_coefficient)
+        if self.velocity_tracking_enabled():
+            # Scheduled physical diagnostics only; predictions, never guarantees
+            # for measured motion or a partially blended execution command.
+            C,e,current = self._velocity_tracking_affine(data,m.acceleration_map[:,:,:24],m.acceleration_offset)
+            stance = data["contact_probability"] >= self.cfg.contact_threshold
+            baseline = torch.cat((data["tau_nom"],
+                torch.where(stance[...,None],data["force_pred_world"],0.).flatten(1)),1)
+            errors = {"current":current-data["velocity_command"],
+                      "baseline_nominal_predicted_grf":(C@baseline[...,None]).squeeze(-1)+e,
+                      "full_candidate":(C@x[:,:24,None]).squeeze(-1)+e}
+            for status,mask in (("accepted",accepted),("rejected",~accepted)):
+                prefix=f"model_velocity_tracking/{stage}/{status}/"
+                for source,error in errors.items():
+                    aggregate.add_values(prefix+source+"/planar_rms_m_s",error[:,:2].square().mean(-1).sqrt(),mask)
+                    aggregate.add_values(prefix+source+"/yaw_abs_rad_s",error[:,2].abs(),mask)
+                error=errors["full_candidate"]
+                aggregate.add_values(prefix+"planar_cost",self.cfg.planar_velocity_weight*
+                    (error[:,:2]/self.cfg.planar_velocity_scale_m_s).square().sum(-1),mask)
+                aggregate.add_values(prefix+"yaw_cost",self.cfg.yaw_rate_weight*
+                    (error[:,2]/self.cfg.yaw_rate_scale_rad_s).square(),mask)
 
     @torch.no_grad()
     def _physical_diagnostics(self, m, x, data):
@@ -955,6 +1022,9 @@ class HardPACTDifferentiableQP:
         PPO graphs retain exclusive backend leases through all backward uses.
         """
         reference = data["tau_nom"]
+        if self.velocity_tracking_enabled() and not {
+                "velocity_command", "base_linear_velocity_world"}.issubset(data):
+            raise ValueError("QP velocity tracking requires captured physical commands and base world velocity; old replay cannot supply zero targets")
         if differentiable is None:
             differentiable = torch.is_grad_enabled() and any(
                 data[k].requires_grad for k in ("tau_nom","force_pred_world","wrench_pred_world"))
@@ -968,7 +1038,11 @@ class HardPACTDifferentiableQP:
         # Every backend updates Q/p each solve; keep safe existing pool leases.
         backend_equivalent = replace(self._backend_config,
             contact_acceleration_weight=self.cfg.contact_acceleration_weight,
-            attitude_weight=self.cfg.attitude_weight)
+            attitude_weight=self.cfg.attitude_weight,
+            planar_velocity_weight=self.cfg.planar_velocity_weight,
+            yaw_rate_weight=self.cfg.yaw_rate_weight,
+            planar_velocity_scale_m_s=self.cfg.planar_velocity_scale_m_s,
+            yaw_rate_scale_rad_s=self.cfg.yaw_rate_scale_rad_s)
         if backend_equivalent != self.cfg:
             # Never carry solver allocations/settings or active/warm snapshots
             # across a runtime settings change.

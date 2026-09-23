@@ -334,6 +334,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             dof_pos_limits        = -2.0
             dof_close_to_default  = -0.01
             torque_limits         = -0.0001
+            torque_rate_limits    = -0.01  # Same requested-slew penalty as HardPACT; 0 disables.
 
             alive_bonus           = 0.01
 

@@ -77,6 +77,24 @@ class Go2HardPACT(Go2PACT):
             return self._legacy_task_class._reward_feedback_torques(self)
         return requested.square().sum(dim=1)
 
+    def _reward_torque_rate_limits(self):
+        """Substep-mean sum of squared normalized excess requested slew.
+
+        sum_j relu(|tau_requested-tau_previous_executed|/(rate_limit*dt)-1)^2.
+        Dimensionless, zero within the execution rate box. Requested total
+        PD/feedforward torque is before action/actuator clipping or QP blending.
+        The normal negative reward scale and control-dt scaling apply afterward.
+        """
+        return self._hard_pact_torque_rate_penalty_sum / self._hard_pact_torque_rate_penalty_count.clamp_min(1)
+
+    def _accumulate_torque_rate_penalty(self, requested):
+        allowance = self.cfg.control.torque_rate_limit_nm_s * float(self.cfg.sim.dt)
+        if allowance <= 0:
+            raise ValueError("torque-rate reward requires positive rate limit and physics dt")
+        excess = ((requested-self._hard_pact_previous_substep_torque).abs()/allowance-1).clamp_min(0)
+        self._hard_pact_torque_rate_penalty_sum.add_(excess.detach().square().sum(-1))
+        self._hard_pact_torque_rate_penalty_count.add_(1)
+
     def _reward_feedforward_torques(self):
         requested = getattr(self, "_hard_pact_requested_feedforward", None)
         if requested is None:
@@ -137,6 +155,8 @@ class Go2HardPACT(Go2PACT):
             raw_desired, raw_ff, position, velocity, parameters,
         )
         self._hard_pact_requested_torque = raw
+        if hasattr(self, "_hard_pact_torque_rate_penalty_sum"):
+            self._accumulate_torque_rate_penalty(raw)
         self._hard_pact_requested_feedback = raw_fb
         self._hard_pact_requested_feedforward = raw_ff
         sim.feedback_torques, sim.feedforward_torques = pd, ff
@@ -448,6 +468,8 @@ class Go2HardPACT(Go2PACT):
         for name in ("requested_torque", "requested_feedback", "requested_feedforward",
                      "first_requested_feedback", "bounded_nominal_torque", "executed_torque"):
             setattr(self, "_hard_pact_" + name, torch.zeros(self.num_envs, 12, device=self.device))
+        self._hard_pact_torque_rate_penalty_sum = torch.zeros(self.num_envs, device=self.device)
+        self._hard_pact_torque_rate_penalty_count = torch.zeros(self.num_envs, device=self.device)
         self.simulator._hard_pact_torque_conversion = self._hard_pact_compute_torques
         self._pending_action_replay_transition = None
         self.simulator._hard_pact_pre_physics_substep = (
@@ -1019,7 +1041,11 @@ class Go2HardPACT(Go2PACT):
                 log_qp_swing_grf(aggregate,self._qp_control_grf[rows],contact,
                     getattr(self._hard_pact_actor_critic.physics_estimator,"grf_swing",None))
                 start=time.perf_counter()
+                tracking_inputs = ({"velocity_command": self.commands[rows,:3].detach().clone(),
+                                    "base_linear_velocity_world": v[:,:3]}
+                                   if qp.velocity_tracking_enabled() else {})
                 result = qp.solve(differentiable=False,environment_ids=rows,
+                    **tracking_inputs,
                     mass_matrix=context.mass_matrix,bias=context.bias,
                     foot_jacobians=context.foot_jacobians,base_jacobian=context.base_jacobian,
                     foot_acceleration_bias=context.foot_acceleration_bias,
@@ -1076,6 +1102,8 @@ class Go2HardPACT(Go2PACT):
                     "sampled_qp_residuals":residual}
                 for name,value in fields.items():
                     sample[name][dest] = value[local].detach()
+                if tracking_inputs:
+                    sample["sampled_qp_velocity_command"][dest] = tracking_inputs["velocity_command"][local]
                 sample["sampled_qp_valid"][dest] = True
             # Unsolved rows retain ONLY analytic projection of fresh nominal
             # torque. No previous QP correction/force/certificate is reused.
@@ -1215,6 +1243,8 @@ class Go2HardPACT(Go2PACT):
 
         }
 
+        if self._hard_pact_rollout_qp.velocity_tracking_enabled():
+            self._qp_sampled_transition["sampled_qp_velocity_command"] = shape(3)
         self._prepare_qp_control_predictions()
 
     def _capture_bard_pre_state(self):
@@ -1455,6 +1485,9 @@ class Go2HardPACT(Go2PACT):
 
     def step(self, actions):
         """Run the legacy lifecycle with a control-interval GRF target."""
+        if hasattr(self, "_hard_pact_torque_rate_penalty_sum"):
+            self._hard_pact_torque_rate_penalty_sum.zero_()
+            self._hard_pact_torque_rate_penalty_count.zero_()
         actions = self._pre_sim_step(actions)
         pre_step_base_quat = self.simulator.base_quat.clone()
         disturbances_initialized = hasattr(self, "_persistent_component_active")
@@ -1658,6 +1691,7 @@ class Go2HardPACT(Go2PACT):
             "_hard_pact_requested_feedforward", "_hard_pact_first_requested_feedback",
             "_hard_pact_bounded_nominal_torque", "_hard_pact_executed_torque",
             "_hard_pact_previous_substep_torque",
+            "_hard_pact_torque_rate_penalty_sum", "_hard_pact_torque_rate_penalty_count",
             "_hard_pact_q_d", "_hard_pact_tau_ff",
             "_qp_control_grf", "_qp_control_wrench", "_qp_interval_solve_count",
             "_qp_grf_conditioning_q", "_qp_grf_conditioning_v", "_qp_grf_conditioning_torque",

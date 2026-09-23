@@ -2660,6 +2660,11 @@ class PPO_HardPACT:
                 joint_position=sample_q[:, 7:], joint_velocity=sample_v[:, 6:],
                 dt=sample_dt,
             )
+            if self.hard_pact_qp.velocity_tracking_enabled():
+                if "sampled_qp_velocity_command" not in qp_batch:
+                    raise ValueError("QP tracking enabled but replay lacks sampled physical velocity commands")
+                qp_arguments.update(velocity_command=qp_batch["sampled_qp_velocity_command"].detach(),
+                                    base_linear_velocity_world=sample_v[:,:3].detach())
             if differentiate_qp:
                 qp_result = self.hard_pact_qp.solve(
                     differentiable=True, diagnostics_phase="ppo", **qp_arguments

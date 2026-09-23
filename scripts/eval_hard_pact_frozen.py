@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import traceback
 from types import SimpleNamespace
 
@@ -45,6 +46,8 @@ def parse_args(argv=None):
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--sample-actions", action="store_true", help="seeded latent and action sampling")
     p.add_argument("--smoke", action="store_true", help="small terrain grid and one explicit reset after activation")
+    p.add_argument("--planar-velocity-weight", type=float, default=None)
+    p.add_argument("--yaw-rate-weight", type=float, default=None)
     p.add_argument("--trace-window", type=int, default=10)
     p.add_argument("--packet-limit", type=int, default=10)
     p.add_argument("--variant", choices=VARIANTS, help=argparse.SUPPRESS)
@@ -302,7 +305,7 @@ class Observer:
         result = self._solve(**data)
         rows = data["environment_ids"]
         self.solved_force[rows] = result.force_world.detach()
-        for stage, name in ((0, "full"), (2, "analytic")):
+        for stage, name in ((0, "full"), (1, "recovery"), (2, "analytic")):
             self.metrics.add(f"qp/final_stage/{name}", result.stage == stage)
         self.metrics.add("qp/certified_solver_row", result.differentiated_mask)
         for name, value in result.diagnostics.items():
@@ -493,6 +496,9 @@ def worker(args):
                          qp_update_mode=mode or "every_substep",
                          exception_capture_dir=str(args.output_dir / "exceptions"))
         s = env.simulator
+        overrides = {name: getattr(args,name) for name in ("planar_velocity_weight","yaw_rate_weight")
+                     if getattr(args,name) is not None}
+        qp_cfg = replace(qp_cfg, **overrides)
         qp = HardPACTDifferentiableQP(qp_cfg, s.torque_limits, s.dof_pos_limits_hard[:, 0],
                                      s.dof_pos_limits_hard[:, 1], s.dof_vel_limits)
         dynamics = create_go2_dynamics("bard", cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=ROOT),
@@ -540,6 +546,8 @@ def worker(args):
         env.compute_observations()
         qp.clear_warm_start()
         reset_checked = False
+        torch.cuda.synchronize(args.device)
+        rollout_start = time.perf_counter()
         with torch.no_grad():
             for step in range(steps):
                 observer.step = step
@@ -574,6 +582,8 @@ def worker(args):
                     env.reset_idx(torch.tensor([0], device=env.device))
                     reset_checked = bool(env._action_replay_valid_queue[0].eq(0).all())
                     env.compute_observations()
+        torch.cuda.synchronize(args.device)
+        rollout_seconds = time.perf_counter()-rollout_start
         metrics = observer.metrics.result()
         actual_steps = steps - PREFIX
         expected_calls = actual_steps * (cfg.control.decimation if mode == "every_substep" else min(args.num_envs,4) if mode is not None else 0)
@@ -584,6 +594,7 @@ def worker(args):
         summary = {
             "variant": args.variant, "seed": cfg.seed, "num_envs": args.num_envs,
             "prefix_control_steps": PREFIX, "evaluation_control_steps": actual_steps,
+            "rollout_seconds_including_prefix_and_diagnostics": rollout_seconds,
             "control_dt": env.dt, "physics_dt": cfg.sim.dt,
             "survival_fraction": float(observer.first_episode_censored.float().mean()),
             "first_episode_unended_fraction": float((first < 0).mean()),
@@ -675,6 +686,9 @@ def main(argv=None):
                        "--output-dir", str(destination), "--device", args.device, "--variant", variant,
                        "--packet-limit", str(budget), "--trace-window", str(args.trace_window)]
             command += [flag for flag, enabled in (("--smoke", args.smoke), ("--sample-actions", args.sample_actions)) if enabled]
+            for flag,name in (("--planar-velocity-weight","planar_velocity_weight"),("--yaw-rate-weight","yaw_rate_weight")):
+                if getattr(args,name) is not None:
+                    command += [flag,str(getattr(args,name))]
             with (destination / "console.log").open("w") as stream:
                 result = subprocess.run(command, cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT)
             statuses.append({"seed": seed, "variant": variant, "exit_code": result.returncode, "command": command})

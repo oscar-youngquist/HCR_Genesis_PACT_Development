@@ -60,6 +60,8 @@ class QPCapture:
         G,h,lo,hi = owner._cupiqp_native_pack(m) if owner._active_solver == "cupiqp" else (m.G,m.h,None,None)
         torque_limit, qmin, qmax, vmax = owner._limits(m.p)
         packet = {"schema_version": 3, "identity": self.identity,
+            "velocity_tracking_contract_version": 1,
+            "velocity_tracking_frame": "body vx/vy/omega_z; physical commands in data.velocity_command, never observation-scaled",
             "config": asdict(owner.cfg), "solver": owner._active_solver,
             "phase": owner._diagnostics_phase, "stage": stage,
             "differentiable": owner._active_differentiable,

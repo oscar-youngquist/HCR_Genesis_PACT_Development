@@ -267,7 +267,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                           30.1, 30.1, 15.7]
 
     class control(LeggedRobotCfg.control):
-        clip_torque_rate_without_qp = False
+        clip_torque_rate_without_qp = True
         torque_rate_limit_nm_s = 1000.0  # Shared by QP, fallback, and optional non-QP clipping.
         stiffness = {'joint': 30.0}
         damping = {'joint': 0.75}
@@ -339,6 +339,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             dof_vel_limits = -0.1  # 0 disables the soft joint-speed penalty
             dof_close_to_default = -0.01
             torque_limits = -0.01
+            torque_rate_limits = -0.001  # Substep-mean squared excess / (rate*physics_dt)^2; 0 disables.
             pd_target_torque_limit = 0.0
 
             alive_bonus = 0.001
@@ -571,7 +572,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         # Execution-only interpolation; full QPs/losses remain active.
                         'correction_ramp_enabled': True,
                         'correction_ramp_start_offset': 0,
-                        'correction_ramp_duration': 1000,
+                        'correction_ramp_duration': 3000,
                         'objective_curriculum_enabled': True,
                         'contact_acceleration_weight_initial': 0.10,  # .25 * final
                         'contact_acceleration_weight_final': 1.0,  # contact_acceleration_weight
@@ -643,6 +644,12 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'recovery_projection_slack_weight': 1.0,
                         'contact_acceleration_scale_m_s2': 50.0,
                         'attitude_weight': 1.0,
+                        # Optional soft one-physics-step BODY velocity tracking.
+                        # Independent of stance/attitude and execution curricula.
+                        'planar_velocity_weight': 5.0,
+                        'yaw_rate_weight': 2.0,
+                        'planar_velocity_scale_m_s': 1.0,
+                        'yaw_rate_scale_rad_s': 1.0,
                         'attitude_acceleration_scale_rad_s2': 20.0,
                         'attitude_kp': 20.0,
                         'attitude_kd': 5.0,
