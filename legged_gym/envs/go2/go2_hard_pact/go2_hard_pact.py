@@ -1043,7 +1043,7 @@ class Go2HardPACT(Go2PACT):
                 start=time.perf_counter()
                 tracking_inputs = ({"velocity_command": self.commands[rows,:3].detach().clone(),
                                     "base_linear_velocity_world": v[:,:3]}
-                                   if qp.velocity_tracking_enabled() else {})
+                                   if qp.velocity_tracking_inputs_required() else {})
                 result = qp.solve(differentiable=False,environment_ids=rows,
                     **tracking_inputs,
                     mass_matrix=context.mass_matrix,bias=context.bias,
@@ -1058,14 +1058,15 @@ class Go2HardPACT(Go2PACT):
                 from rsl_rl.algorithms.hard_pact_qp_curriculum import execution_torque
                 base = safe[rows]
                 alpha = getattr(self, "_qp_execution_alpha", 1.0)
-                executed = execution_torque(base, result.tau_safe, result.differentiated_mask, alpha)
+                accepted = result.differentiated_mask | result.recovery_mask
+                executed = execution_torque(base, result.tau_safe, accepted, alpha)
                 safe[rows] = executed
                 if aggregate is not None:
                     # Candidate acceptance is NOT a certificate for the blend.
                     aggregate.add_sum("execution/candidate_correction_abs_sum_nm", (result.tau_safe-base).abs().sum())
                     aggregate.add_sum("execution/executed_correction_abs_sum_nm", (executed-base).abs().sum())
                     aggregate.add_sum("execution/correction_coordinates", base.new_tensor(base.numel()))
-                    aggregate.add_sum("execution/partially_corrected_rows", result.differentiated_mask.sum()*int(alpha < 1))
+                    aggregate.add_sum("execution/partially_corrected_rows", accepted.sum()*int(alpha < 1))
                 certified[rows] = result.differentiated_mask & (alpha == 1.0)
                 zeros = tau_nom.new_zeros(rows.numel())
                 residual = torch.stack((result.diagnostics["selected/equality_max"],
@@ -1243,7 +1244,7 @@ class Go2HardPACT(Go2PACT):
 
         }
 
-        if self._hard_pact_rollout_qp.velocity_tracking_enabled():
+        if self._hard_pact_rollout_qp.velocity_tracking_inputs_required():
             self._qp_sampled_transition["sampled_qp_velocity_command"] = shape(3)
         self._prepare_qp_control_predictions()
 

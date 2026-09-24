@@ -130,6 +130,7 @@ def _run_owned_update(qp_mode,device):
     if qp_mode is not None:
         fields.update(
             sampled_qp_q=q.clone(), sampled_qp_v=zeros(18),
+            sampled_qp_velocity_command=torch.full((2,4,3),.2),
             sampled_qp_grf_conditioning_q=q[..., 7:].clone(),
             sampled_qp_grf_conditioning_v=zeros(12),
             sampled_qp_previous_torque=zeros(12),

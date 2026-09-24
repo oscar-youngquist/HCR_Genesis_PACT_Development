@@ -29,6 +29,7 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 import os
+import math
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -332,6 +333,8 @@ class PPO_HardPACT:
                  lambda_inverse=1.0,
                  lambda_rollout=1.0,
                  lambda_projection=1.0e-3,
+                 lambda_qp_velocity_xy=None,
+                 lambda_qp_velocity_yaw=None,
                  lambda_soft_constraint=1.0e-3,
                  profile_bard_timing=False,
                  console_debug=False,
@@ -498,6 +501,12 @@ class PPO_HardPACT:
         self.lambda_inverse = float(lambda_inverse)
         self.lambda_rollout = float(lambda_rollout)
         self.lambda_projection = float(lambda_projection)
+        self.lambda_qp_velocity_xy = float(lambda_projection if lambda_qp_velocity_xy is None else lambda_qp_velocity_xy)
+        self.lambda_qp_velocity_yaw = float(lambda_projection if lambda_qp_velocity_yaw is None else lambda_qp_velocity_yaw)
+        if not all(math.isfinite(w) and w >= 0 for w in
+                   (self.lambda_qp_velocity_xy,self.lambda_qp_velocity_yaw)):
+            raise ValueError("QP velocity loss weights must be finite and nonnegative")
+        self._actor_qp_velocity_loss = None
         self.lambda_soft_constraint = float(lambda_soft_constraint)
         # Opt-in benchmark instrumentation. CUDA events avoid synchronizing
         # between the shared-context inverse and rollout calculations; one
@@ -569,6 +578,7 @@ class PPO_HardPACT:
         self.qp_config = replace(
             HardPACTQPConfig.from_dict(hard_pact_qp or {}),
             enabled=self.hard_pact_features.execution_qp,
+            velocity_tracking_replay_enabled=(self.lambda_qp_velocity_xy>0 or self.lambda_qp_velocity_yaw>0),
         )
         self.hard_pact_qp = None
         self._qp_training_iteration = 0
@@ -1193,6 +1203,7 @@ class PPO_HardPACT:
                     )
                     qp_target_count.add_(full * expected)
             pinn_loss = None
+            self._actor_qp_velocity_loss = None
             if qp_rows is not None:
                 # One QP graph shared by the three owned VJPs, using the exact
                 # stored-noise policy features from the existing PPO forward.
@@ -1210,7 +1221,8 @@ class PPO_HardPACT:
                 )
             )
             ppo_losses = (
-                [ppo_loss, pinn_loss]
+                [ppo_loss, pinn_loss + (self._actor_qp_velocity_loss
+                                       if self._actor_qp_velocity_loss is not None else 0)]
                 if optimize_physics and pinn_loss is not None
                 else [ppo_loss]
             )
@@ -1845,6 +1857,37 @@ class PPO_HardPACT:
         if not optimize_projection:
             return pinn
         return projection if pinn is None else pinn+projection
+
+    @staticmethod
+    def _actor_only_torque_vjp(loss, nominal, actor_parameters):
+        """Reuse the solver graph, isolating its *direct* nominal-input partial.
+
+        GRF conditioning is a sibling nominal conversion, not a descendant of
+        sampled_nominal. The first VJP therefore holds head references fixed.
+        The second VJP ends at actor-owned weights: no encoder/head surrogate
+        edges, no .grad accumulation, no solver re-forward or optimizer step.
+        Separate existing PCGrad backwards consume this first-order surrogate.
+        """
+        if not loss.requires_grad or not nominal.requires_grad:
+            return loss.detach()
+        gradient = torch.autograd.grad(loss,nominal,retain_graph=True,allow_unused=True)[0]
+        if gradient is None:
+            return loss.detach()
+        params = tuple(p for p in actor_parameters if p.requires_grad)
+        grads = torch.autograd.grad(nominal,params,grad_outputs=gradient.detach(),
+                                    retain_graph=True,allow_unused=True)
+        surrogate = loss.detach()
+        for p,g in zip(params,grads):
+            if g is not None:
+                surrogate = surrogate + ((p-p.detach())*g.detach()).sum()
+        return surrogate
+
+    def _actor_velocity_objective(self, xy, yaw, nominal, differentiable):
+        if not differentiable or not self.hard_pact_features.projection_loss:
+            return None  # stopgrad is metric-only, including these new terms
+        return self._actor_only_torque_vjp(
+            self.lambda_qp_velocity_xy*xy+self.lambda_qp_velocity_yaw*yaw,
+            nominal,self.ppo_parameters)
 
     def _accumulate_auxiliary_gradients(self, accumulated, parameters):
         # Retain only one owned gradient vector, not graphs from auxiliary
@@ -2660,7 +2703,8 @@ class PPO_HardPACT:
                 joint_position=sample_q[:, 7:], joint_velocity=sample_v[:, 6:],
                 dt=sample_dt,
             )
-            if self.hard_pact_qp.velocity_tracking_enabled():
+            if (self.hard_pact_qp.velocity_tracking_inputs_required()
+                    or self.lambda_qp_velocity_xy>0 or self.lambda_qp_velocity_yaw>0):
                 if "sampled_qp_velocity_command" not in qp_batch:
                     raise ValueError("QP tracking enabled but replay lacks sampled physical velocity commands")
                 qp_arguments.update(velocity_command=qp_batch["sampled_qp_velocity_command"].detach(),
@@ -2727,6 +2771,20 @@ class PPO_HardPACT:
             # differ from rollout after policy/head parameters update.
             self.last_qp_metrics = dict(qp_result.metrics or {})
             self.last_qp_metrics["qp/minimal/projection_loss"] = qp_loss.detach()
+            if self.lambda_qp_velocity_xy>0 or self.lambda_qp_velocity_yaw>0:
+                accepted = qp_result.differentiated_mask | qp_result.recovery_mask
+                xy,yaw,count = self.hard_pact_qp.velocity_tracking_losses(
+                    qp_result.qdd,qp_arguments,valid,accepted)
+                self._actor_qp_velocity_loss = self._actor_velocity_objective(
+                    xy,yaw,sampled_nominal,differentiate_qp)
+                aggregate = self.hard_pact_qp.iteration_diagnostics["ppo"]
+                for name,value in (("xy",xy),("yaw",yaw)):
+                    aggregate.add_sum("velocity_loss_"+name+"_sum",value.detach()*count)
+                aggregate.add_sum("velocity_loss_rows",valid.new_tensor(count,dtype=torch.long))
+                aggregate.add_values("lambda_qp_velocity_xy",xy.new_tensor(self.lambda_qp_velocity_xy))
+                aggregate.add_values("lambda_qp_velocity_yaw",yaw.new_tensor(self.lambda_qp_velocity_yaw))
+                self.last_qp_metrics["qp/minimal/velocity_loss_xy"] = xy.detach()
+                self.last_qp_metrics["qp/minimal/velocity_loss_yaw"] = yaw.detach()
             correction = (qp_result.tau_safe - sampled_nominal).detach()
             intervention = correction.abs().amax(dim=-1) > 1.0e-6
             if hasattr(self.hard_pact_qp, "iteration_diagnostics"):

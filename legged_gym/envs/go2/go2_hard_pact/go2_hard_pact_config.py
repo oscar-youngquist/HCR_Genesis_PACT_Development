@@ -434,7 +434,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
     class commands(LeggedRobotCfg.commands):
         curriculum = True
         curriculum_threshold = 0.8  # raw linear-tracking mean, not weighted reward
-        curriculum_patience_iterations = 10  # consecutive PPO rollouts; 0 = legacy reset-based updates
+        curriculum_patience_iterations = 100  # consecutive PPO rollouts; 0 = legacy reset-based updates
         max_curriculum = 1.2
         num_commands = 4
         resampling_time = 10.0
@@ -547,6 +547,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         lambda_inverse = 0.5
         lambda_rollout = 0.5
         lambda_projection = 0.1
+        lambda_qp_velocity_xy = 0.1  # inherit lambda_projection; 0 disables
+        lambda_qp_velocity_yaw = 0.1  # independent nonnegative override
 
         profile_bard_timing = False
         console_debug = False
@@ -568,16 +570,17 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
                         # at absolute iteration N. Zero keeps current behavior.
-                        'warmup_iterations': 7000,
+                        'warmup_iterations': 8000,
                         # Execution-only interpolation; full QPs/losses remain active.
                         'correction_ramp_enabled': True,
                         'correction_ramp_start_offset': 0,
-                        'correction_ramp_duration': 3000,
+                        'correction_ramp_duration': 4000,
                         'objective_curriculum_enabled': True,
                         'contact_acceleration_weight_initial': 0.10,  # .25 * final
                         'contact_acceleration_weight_final': 1.0,  # contact_acceleration_weight
                         'attitude_weight_initial': 0.10,  # .25 * final
                         'attitude_weight_final': 1.0,  # attitude_weight
+                        
                         'objective_curriculum_start': None,  # after execution ramp
                         'objective_curriculum_progress_delta': 0.05,
                         'objective_curriculum_step_interval': 10,
@@ -587,6 +590,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'objective_curriculum_recovery_ratio': 0.9,
                         'objective_curriculum_min_tracking': 0.5,
                         'objective_curriculum_min_samples': 1,
+
                         'exception_capture_enabled': True,
                         'exception_capture_limit': 1,
                         'exception_capture_dir': '/tmp/hard_pact_qp_failures',
@@ -640,14 +644,15 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'soft_rate_recovery_scale_nm': 10.0,
                         'recovery_projection_rate_slack_weight': 1.0,
                         # Outer recovery loss is also multiplied by lambda_projection.
-                        'recovery_projection_weight': 1.0,
+                        'recovery_projection_weight': 0.5,
                         'recovery_projection_slack_weight': 1.0,
                         'contact_acceleration_scale_m_s2': 50.0,
                         'attitude_weight': 1.0,
+
                         # Optional soft one-physics-step BODY velocity tracking.
                         # Independent of stance/attitude and execution curricula.
-                        'planar_velocity_weight': 5.0,
-                        'yaw_rate_weight': 2.0,
+                        'planar_velocity_weight': 6.0,
+                        'yaw_rate_weight': 2.5,
                         'planar_velocity_scale_m_s': 1.0,
                         'yaw_rate_scale_rad_s': 1.0,
                         'attitude_acceleration_scale_rad_s2': 20.0,

@@ -212,6 +212,8 @@ class OnPolicyRunnerPACT:
             self.alg.qp_config = replace(self.alg.qp_config,
                 torque_rate_limit_nm_s=self.env.cfg.control.torque_rate_limit_nm_s)
             self.alg_cfg["hard_pact_qp"]["torque_rate_limit_nm_s"] = self.alg.qp_config.torque_rate_limit_nm_s
+            for key in ("lambda_qp_velocity_xy", "lambda_qp_velocity_yaw"):
+                self.alg_cfg[key] = getattr(self.alg,key)
             if self.hard_pact_features.execution_qp:
                 simulator = self.env.simulator
                 self.alg.configure_hard_pact_qp(

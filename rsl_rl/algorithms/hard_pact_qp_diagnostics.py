@@ -234,6 +234,10 @@ class QPIterationDiagnostics:
     def finalize(self, reference):
         zero = reference.new_zeros((), dtype=torch.float32)
         result = dict(self.sums)
+        for name in ("xy", "yaw"):
+            count = self.sums.get("velocity_loss_rows", zero)
+            if "velocity_loss_"+name+"_sum" in self.sums:
+                result["velocity_loss_"+name] = self.sums["velocity_loss_"+name+"_sum"]/count.clamp_min(1)
         rows = self.sums.get("real_rows", zero)
         result["real_rows"] = rows
         result["solve_calls"] = self.sums.get("solve_calls", zero)

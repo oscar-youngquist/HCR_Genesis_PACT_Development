@@ -141,6 +141,7 @@ class HardPACTQPConfig:
     contact_acceleration_scale_m_s2: float = 50.0
     attitude_weight: float = 1.0
     planar_velocity_weight: float = 0.0
+    velocity_tracking_replay_enabled: bool = False  # outer actor terms need commands even with inner weights zero
     yaw_rate_weight: float = 0.0
     planar_velocity_scale_m_s: float = 1.0
     yaw_rate_scale_rad_s: float = 1.0
@@ -655,6 +656,23 @@ class HardPACTDifferentiableQP:
 
     def velocity_tracking_enabled(self):
         return self.cfg.planar_velocity_weight > 0 or self.cfg.yaw_rate_weight > 0
+
+    def velocity_tracking_inputs_required(self):
+        return self.velocity_tracking_enabled() or self.cfg.velocity_tracking_replay_enabled
+
+    def velocity_tracking_losses(self, qdd, data, physics_valid, accepted):
+        """Full-candidate errors; filter rows BEFORE any potentially invalid math."""
+        mask = physics_valid.reshape(-1).bool() & accepted.reshape(-1).bool()
+        rows = mask.nonzero(as_tuple=True)[0]
+        if rows.numel() == 0:
+            zero = qdd[:0].sum()  # graph-connected, never 0*NaN
+            return zero, zero, rows.numel()
+        selected = {k:v[rows].detach().to(qdd) for k,v in data.items()}
+        _,error,_ = self._velocity_tracking_affine(selected,
+            qdd.new_empty((rows.numel(),18,0)),qdd[rows])
+        xy = (error[:,:2]/self.cfg.planar_velocity_scale_m_s).square().sum(-1).mean()
+        yaw = (error[:,2]/self.cfg.yaw_rate_scale_rad_s).square().mean()
+        return xy, yaw, rows.numel()
 
     def _velocity_tracking_affine(self, data, acceleration_map, offset):
         """Physical body-frame [vx,vy,wz] prediction C*x+e+command.

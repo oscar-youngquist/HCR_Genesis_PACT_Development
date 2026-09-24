@@ -9,11 +9,49 @@
 'yaw_rate_scale_rad_s': 1.0,
 ```
 
-Both default weights are zero. No constraint, acceptance setting, outer loss,
+Both inner weights default to zero. No constraint, acceptance setting,
 curriculum or PCGrad ownership changes. Recovery retains the identical tracking
 quadratic in its 24-variable leading block. Numeric weight/scale changes refresh
 Q/p without invalidating solver pools. Command replay adds three physical values
 per sampled transition only when enabled.
+
+Actor-facing full-candidate losses are configured separately in `algorithm`:
+
+```python
+lambda_projection = 0.1
+lambda_qp_velocity_xy = None   # inherit lambda_projection; 0 disables
+lambda_qp_velocity_yaw = None  # independent nonnegative override
+```
+
+The minimized actor physics objective adds `lambda_qp_velocity_xy*L_xy` and
+`lambda_qp_velocity_yaw*L_yaw` alongside `lambda_projection*L_projection`.
+These are positive error penalties, not rewards for error. The new terms average
+over valid primary/recovery accepted rows together, are independent of execution
+alpha, and exclude invalid/fallback rows before arithmetic. They reuse the QP
+candidate/qdd; actor-only first-order VJPs through the nominal-torque input hold
+force/wrench references fixed. Encoder/decoder projection and PINN gradients are
+unchanged. There is no extra solve, optimizer step, or shared-backward refactor.
+Stopgrad reports losses without their actor VJP. Commands are captured when either
+outer term is enabled even if both inner tracking weights are zero.
+
+Rollout applies `base+alpha*(candidate-base)` to primary **or** recovery accepted
+commands; deterministic fallbacks are untouched. Primary certificates, softened
+recovery acceptance, and execution blends remain distinct. TensorBoard reports
+`qp/ppo/velocity_loss_xy`, `velocity_loss_yaw`, valid row counts, and resolved
+`lambda_qp_velocity_xy/yaw` (count-weighted across replay batches).
+
+Focused actor-routing/blending validation:
+
+```bash
+SIMULATOR=isaaclab PYTHONPATH=.:tests conda run --no-capture-output -n lr_lab_cupiqp \
+python -m pytest -q tests/test_hard_pact_actor_velocity_loss.py \
+tests/test_hard_pact_qp_curriculum.py tests/test_hard_pact_velocity_objective.py \
+tests/test_hard_pact_contact_indexing_and_inverse_gate.py
+```
+
+Result: 35 passed, one dependency deprecation warning, 6.72 s; includes real
+CUDA/cuPIQP PPO backward, estimator-edge isolation, stopgrad, masked NaNs and
+empty batches. No training run.
 
 ## Frames and objective
 
