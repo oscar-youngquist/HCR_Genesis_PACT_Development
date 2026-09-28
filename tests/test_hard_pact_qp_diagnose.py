@@ -16,6 +16,27 @@ def owner():
     return qp
 
 
+def test_bounded_accepted_recovery_record_maxima_keep_complete_batches(tmp_path):
+    qp,d=owner(),inputs(2)
+    d['joint_position'].fill_(2.01)
+    m=qp._soft_joint_problem(qp._build(d))
+    capture=QPCapture(tmp_path,limit=0,byte_limit=16*1024**2,recovery_extremes=True,history_limit=0)
+    for torque in (1.,2.,.5):
+        packet=capture.before(qp,m,d,'recovery',torch.tensor([40,80]))
+        physical=torch.zeros_like(m.p)
+        physical[0,:12]=torque;physical[1,:12]=20.  # larger but REJECTED
+        physical[0,36:48]=torque
+        capture.after(packet,QPBackendResult(physical/m.variable_scale),torch.tensor([True,False]))
+    paths=list(tmp_path.glob('extreme_*.pt'))
+    assert len(paths)==4 and capture.count==0
+    saved=torch.load(tmp_path/'extreme_ppo_torque_correction_nm.pt',weights_only=True)
+    assert saved['accepted_recovery_extreme']['row_identity']==40
+    assert saved['rows'].tolist()==[40,80] and saved['tensors']['Q'].shape==(2,48,48)
+    assert abs(saved['accepted_recovery_extreme']['value']-1.6)<1e-9
+    assert sum(p.stat().st_size for p in paths)<=8*capture.extreme_slot_bytes
+    assert 'predicted_position_violation_rad' in capture.summary()['accepted_recovery_extremes']['ppo/predicted_position_violation_rad']['packet_file']
+
+
 @pytest.mark.parametrize("stage", ["primary", "recovery"])
 def test_roundtrip_extreme_finite_owned_inputs_stage_and_budget(tmp_path, stage):
     qp, d = owner(), inputs(2)

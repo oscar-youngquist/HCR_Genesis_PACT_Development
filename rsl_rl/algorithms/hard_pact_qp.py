@@ -82,7 +82,9 @@ class HardPACTQPConfig:
     objective_curriculum_ema_alpha: float = 0.05
     objective_curriculum_window: int = 200
     objective_curriculum_quantile: float = 0.9
-    objective_curriculum_recovery_ratio: float = 0.9
+    objective_curriculum_recovery_ratio: float = 0.98
+    objective_curriculum_recovery_iterations: int = 50
+    objective_curriculum_baseline_override: float | None = None
     objective_curriculum_min_tracking: float = 0.5
     objective_curriculum_min_samples: int = 1
     soft_joint_recovery_enabled: bool = True
@@ -138,6 +140,7 @@ class HardPACTQPConfig:
     torque_rate_limit_nm_s: float = 1000.0  # dot(tau)_lim [Nm/s].
     contact_threshold: float = 0.5
     contact_acceleration_weight: float = 1.0
+    projection_contact_acceleration_weight: float = 0.10
     contact_acceleration_scale_m_s2: float = 50.0
     attitude_weight: float = 1.0
     planar_velocity_weight: float = 0.0
@@ -384,6 +387,8 @@ class HardPACTDifferentiableQP:
         # rollout and PPO solve in this training run.
         self.cfg = config
         import math
+        if not math.isfinite(config.projection_contact_acceleration_weight) or config.projection_contact_acceleration_weight < 0:
+            raise ValueError('projection_contact_acceleration_weight must be finite and nonnegative')
         for name in ("planar_velocity_weight", "yaw_rate_weight",
                      "planar_velocity_scale_m_s", "yaw_rate_scale_rad_s"):
             value = getattr(config, name)
@@ -1367,7 +1372,7 @@ def recovery_projection_loss(result, tau_nom, torque_limit, physics_valid, cfg):
 def projection_loss(tau_safe, tau_nom, torque_limit, physics_valid, differentiated,
                     *, qdd=None, foot_jacobians=None, foot_acceleration_bias=None,
                     stance_mask=None, contact_weight=0.0, contact_scale=1.0,
-                    return_per_row=False):
+                    return_per_row=False, component_log=None):
     """Certified outer loss: normalized torque correction plus soft stance acceleration.
 
     Mechanics and discrete stance are constants; the certified solution retains
@@ -1376,13 +1381,18 @@ def projection_loss(tau_safe, tau_nom, torque_limit, physics_valid, differentiat
     The existing unit torque coefficient and outer lambda_projection are retained.
     """
     valid = physics_valid.reshape(-1).bool() & differentiated.reshape(-1).bool()
-    per_valid = ((tau_safe[valid]-tau_nom[valid])/torque_limit).square().sum(-1)
-    if contact_weight:
+    torque = ((tau_safe[valid]-tau_nom[valid])/torque_limit).square().sum(-1)
+    per_valid = torque
+    if contact_weight or component_log is not None:
         acceleration = (torch.einsum("bfkn,bn->bfk", foot_jacobians.detach()[valid],
-                                     qdd[valid]) + foot_acceleration_bias.detach()[valid])
+                                     qdd[valid] if contact_weight else qdd.detach()[valid]) + foot_acceleration_bias.detach()[valid])
         stance = stance_mask.detach()[valid].bool()
         acceleration = torch.where(stance[..., None], acceleration, 0.0)
-        per_valid = per_valid + contact_weight * (acceleration/contact_scale).square().sum((1,2))
+        stance_loss = (acceleration/contact_scale).square().sum((1,2))
+        if contact_weight:
+            per_valid = per_valid + contact_weight * stance_loss
+        if component_log is not None:
+            component_log.update(torque=torque.detach(),stance=stance_loss.detach())
     per_row = tau_nom.new_zeros(tau_nom.shape[0]).masked_scatter(valid, per_valid)
     loss = per_valid.sum()/valid.sum().clamp_min(1)
     return (loss, per_row) if return_per_row else loss

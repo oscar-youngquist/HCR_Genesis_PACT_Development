@@ -2736,6 +2736,7 @@ class PPO_HardPACT:
             # For K~Uniform{0,...,D-1}, this direct sampled loss satisfies
             # E[L_K]=(1/D)sum_k L_k. There is no decimation multiplier.
             # Stage-2 rows are excluded because they have no qpth KKT graph.
+            projection_components = {} if getattr(self.hard_pact_qp,'diagnostics_scheduled',True) else None
             qp_loss, projection_per_row = projection_loss(
                 qp_result.tau_safe, sampled_nominal, torque_limits, valid,
                 qp_result.differentiated_mask,
@@ -2743,10 +2744,17 @@ class PPO_HardPACT:
                 foot_jacobians=sampled_mechanics.foot_jacobians,
                 foot_acceleration_bias=sampled_mechanics.foot_acceleration_bias,
                 stance_mask=sample_contact_probability.detach() >= self.hard_pact_qp.cfg.contact_threshold,
-                contact_weight=self.hard_pact_qp.cfg.contact_acceleration_weight,
+                contact_weight=self.hard_pact_qp.cfg.projection_contact_acceleration_weight,
                 contact_scale=self.hard_pact_qp.cfg.contact_acceleration_scale_m_s2,
                 return_per_row=True,
+                component_log=projection_components,
             )
+            if projection_components is not None:
+                aggregate = self.hard_pact_qp.iteration_diagnostics['ppo']
+                for name,value in projection_components.items():
+                    coefficient = (1. if name=='torque' else self.hard_pact_qp.cfg.projection_contact_acceleration_weight)
+                    aggregate.add_values('projection_components/'+name+'_unweighted',value)
+                    aggregate.add_values('projection_components/'+name+'_weighted',value*coefficient*self.lambda_projection)
             recovery_loss, recovery_per_row = recovery_projection_loss(
                 qp_result, sampled_nominal, torque_limits, valid, self.hard_pact_qp.cfg,
             )

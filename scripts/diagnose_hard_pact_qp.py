@@ -24,6 +24,8 @@ def parse_args():
     capture.add_argument("--iteration-limit", type=int, default=3)
     capture.add_argument("--warmup-iterations", type=int, default=2)
     capture.add_argument("--capture-limit", type=int, default=32)
+    capture.add_argument("--capture-recovery-extremes", action="store_true",
+                         help="Reserve half the byte budget for largest accepted recovery examples")
     capture.add_argument("--byte-limit-mib", type=int, default=2048)
     capture.add_argument("--torque-violation-trigger", type=float, default=1000.)
     replay = sub.add_parser("replay")
@@ -142,7 +144,8 @@ def capture_run(args):
         identity["start_iteration"] = runner.current_learning_iteration
         identity["resume_state_limitations"] = "Simulator state, solver caches and training RNG are not restored by normal runner.load"
         recorder = QPCapture(output / "captures", limit=args.capture_limit,
-            byte_limit=args.byte_limit_mib*1024**2, trigger_nm=args.torque_violation_trigger, identity=identity)
+            byte_limit=args.byte_limit_mib*1024**2, trigger_nm=args.torque_violation_trigger, identity=identity,
+            recovery_extremes=getattr(args,'capture_recovery_extremes',False))
         qp = runner.alg.hard_pact_qp
         if qp is None:
             raise ValueError("Resolved configuration did not construct a QP; capture cannot continue")

@@ -35,19 +35,45 @@ class QPCurriculum:
         self.snapshot_iteration = None
         self.snapshot = None
         self.advanced = False
+        self.activation_iteration = int(cfg.warmup_iterations)
+        self.pre_qp_reference = None
+        self.baseline_frozen = False
+        self.recovery_counter = 0
+        self.block_reason = 0
         if (cfg.correction_ramp_duration < 0 or cfg.objective_curriculum_window < 1
                 or cfg.objective_curriculum_step_interval < 1
                 or not 0 < cfg.objective_curriculum_ema_alpha <= 1
                 or not 0 <= cfg.objective_curriculum_quantile <= 1
                 or not 0 < cfg.objective_curriculum_progress_delta <= 1
-                or cfg.objective_curriculum_min_samples < 1):
+                or cfg.objective_curriculum_min_samples < 1
+                or cfg.objective_curriculum_recovery_iterations < 1):
             raise ValueError("Invalid QP curriculum schedule")
+        override = cfg.objective_curriculum_baseline_override
+        if override is not None and (not math.isfinite(override) or override < 0):
+            raise ValueError('QP baseline override must be finite and nonnegative')
+
+    def _freeze_baseline(self):
+        if self.baseline_frozen:
+            return
+        self.baseline_frozen = True
+        self.pre_qp_reference = self.cfg.objective_curriculum_baseline_override
+        if self.pre_qp_reference is None and self.history:
+            ordered = sorted(self.history)
+            self.pre_qp_reference = ordered[int(self.cfg.objective_curriculum_quantile*(len(ordered)-1))]
+        self._set_threshold()
+
+    def _set_threshold(self):
+        self.threshold = (None if self.pre_qp_reference is None else
+            max(self.cfg.objective_curriculum_min_tracking,
+                self.cfg.objective_curriculum_recovery_ratio*self.pre_qp_reference))
 
     def begin(self, iteration):
         """Freeze weights/alpha for the complete rollout plus all PPO epochs."""
         if iteration == self.snapshot_iteration:
             return self.snapshot
         c = self.cfg
+        if iteration >= self.activation_iteration:
+            self._freeze_baseline()  # BEFORE the first QP, even with alpha=0
         alpha = (1.0 if not c.correction_ramp_enabled or c.correction_ramp_duration == 0
                  else min(1.0, max(0.0, (iteration-self.origin)/c.correction_ramp_duration)))
         weights = {}
@@ -67,26 +93,49 @@ class QPCurriculum:
 
     def finish(self, iteration, performance, count):
         """Evidence collected before reward scaling; advance only the next snapshot."""
-        self.advanced = False
         if iteration <= self.last_iteration:
             return
+        self.advanced = False
+        if iteration != self.last_iteration+1:
+            self.recovery_counter = 0
         self.last_iteration = int(iteration)
         c = self.cfg
         if (not c.objective_curriculum_enabled or count < c.objective_curriculum_min_samples
                 or performance is None or not math.isfinite(performance)):
+            self.recovery_counter = 0
+            self.block_reason = 1  # disabled/invalid evidence
             return
         self.ema = (performance if self.ema is None else
                     (1-c.objective_curriculum_ema_alpha)*self.ema+c.objective_curriculum_ema_alpha*performance)
-        self.history.append(self.ema)
-        ordered = sorted(self.history)
-        reference = ordered[int(c.objective_curriculum_quantile*(len(ordered)-1))]
-        self.threshold = max(c.objective_curriculum_min_tracking,
-                             c.objective_curriculum_recovery_ratio*reference)
-        if (iteration >= self.start and iteration-self.last_step >= c.objective_curriculum_step_interval
-                and self.ema >= self.threshold and self.progress < 1):
+        if iteration < self.activation_iteration and not self.baseline_frozen:
+            self.history.append(self.ema)
+            self.block_reason = 2  # collecting pre-QP baseline
+            return
+        self._freeze_baseline()
+        if self.pre_qp_reference is None:
+            self.recovery_counter = 0
+            self.block_reason = 3  # baseline unavailable: explicit override required
+            return
+        if iteration < self.start:
+            self.recovery_counter = 0
+            self.block_reason = 4  # earliest start
+            return
+        if self.ema <= self.threshold:
+            self.recovery_counter = 0
+            self.block_reason = 5  # performance below frozen threshold
+            return
+        self.recovery_counter += 1
+        self.block_reason = 6  # sustained recovery or interval pending
+        if (self.recovery_counter >= c.objective_curriculum_recovery_iterations
+                and iteration-self.last_step >= c.objective_curriculum_step_interval and self.progress < 1):
             self.progress = min(1., self.progress+c.objective_curriculum_progress_delta)
             self.last_step = int(iteration)
             self.advanced = True
+            self.recovery_counter = 0
+            self.block_reason = 0
+        elif self.progress >= 1:
+            self.recovery_counter = 0
+            self.block_reason = 7  # complete
 
     def metrics(self):
         cfg, alpha = self.snapshot
@@ -96,18 +145,35 @@ class QPCurriculum:
                     attitude_weight=cfg.attitude_weight,
                     tracking_ema=float('nan') if self.ema is None else self.ema,
                     tracking_threshold=float('nan') if self.threshold is None else self.threshold,
+                    frozen_pre_qp_reference=float('nan') if self.pre_qp_reference is None else self.pre_qp_reference,
+                    baseline_frozen=int(self.baseline_frozen),
+                    baseline_samples=len(self.history),recovery_counter=self.recovery_counter,
+                    block_reason=self.block_reason,
                     advanced=int(self.advanced))
 
     def state_dict(self):
-        return {"version": 1, **{k: getattr(self, k) for k in
-                ("origin", "start", "progress", "ema", "threshold", "last_iteration", "last_step")},
+        return {"version": 2, **{k: getattr(self, k) for k in
+                ("origin", "start", "progress", "ema", "threshold", "last_iteration", "last_step",
+                 "activation_iteration", "pre_qp_reference", "baseline_frozen", "recovery_counter", "block_reason")},
                 "history": list(self.history)}
 
     def load_state_dict(self, state):
-        if state["version"] != 1:
+        if state["version"] not in (1,2):
             raise ValueError("Unsupported QP curriculum checkpoint version")
         for key in ("origin", "start", "progress", "ema", "threshold", "last_iteration", "last_step"):
             setattr(self, key, state[key])
         self.history.clear()
         self.history.extend(state["history"])
+        if state['version'] == 2:
+            for key in ('activation_iteration','pre_qp_reference','baseline_frozen','recovery_counter','block_reason'):
+                setattr(self,key,state[key])
+        elif self.last_iteration >= self.activation_iteration:
+            # v1 history is contaminated by post-QP performance. Never use it
+            # to manufacture a permissive baseline; retain objective progress.
+            self.history.clear()
+            self.baseline_frozen = True
+            self.pre_qp_reference = None
+        if self.pre_qp_reference is None and self.cfg.objective_curriculum_baseline_override is not None:
+            self.pre_qp_reference = self.cfg.objective_curriculum_baseline_override
+        self._set_threshold()
         self.snapshot_iteration = self.snapshot = None

@@ -31,10 +31,18 @@ def tensor_bytes(value):
 
 class QPCapture:
     def __init__(self, directory, *, limit=32, byte_limit=2048*1024**2,
-                 trigger_nm=1000., healthy_limit=2, history_limit=2, identity=None):
+                 trigger_nm=1000., healthy_limit=2, history_limit=2, identity=None,
+                 recovery_extremes=False):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.limit, self.byte_limit, self.trigger_nm = limit, byte_limit, trigger_nm
+        self.recovery_extremes = recovery_extremes
+        # Reserve half the existing byte budget for eight replaceable maxima:
+        # rollout/PPO x correction/rate slack/position/velocity prediction.
+        self.extreme_slot_bytes = byte_limit//16 if recovery_extremes else 0
+        if recovery_extremes:
+            self.byte_limit = byte_limit//2
+        self.extremes = {}
         self.healthy_limit, self.healthy_count = healthy_limit, 0
         self.count = self.bytes_written = self.dropped = 0
         self.history = deque(maxlen=history_limit)
@@ -43,7 +51,8 @@ class QPCapture:
 
     def summary(self):
         return dict(schema_version=3, captures=self.count, bytes_written=self.bytes_written,
-                    dropped_for_budget=self.dropped, counts=dict(self.counts), coverage=dict(self.coverage))
+                    dropped_for_budget=self.dropped, counts=dict(self.counts), coverage=dict(self.coverage),
+                    accepted_recovery_extremes=self.extremes)
 
     def before(self, owner, m, data, stage, rows):
         group = owner._diagnostics_phase + "/" + stage
@@ -51,7 +60,8 @@ class QPCapture:
         self.counts[group + "/rows"] += rows.numel()
         stub = dict(summary_only=True, phase=owner._diagnostics_phase, stage=stage,
                     problem={k:getattr(m,k).detach() for k in ("variable_scale","tau_lower","tau_upper")})
-        if self.count >= self.limit or self.bytes_written >= self.byte_limit:
+        retain_extreme = self.recovery_extremes and stage == 'recovery'
+        if (self.count >= self.limit or self.bytes_written >= self.byte_limit) and not retain_extreme:
             for backend in owner._backend_instances.values():
                 backend.capture_details_enabled = False
             self.dropped += 1
@@ -78,7 +88,8 @@ class QPCapture:
             "unavailable": ["exact solver initialization/preconditioner/factorization state",
                 "autograd lease overlap before bounded sequence", "solver state preceding bounded sequence"]}
         # Refuse oversized batches explicitly; never silently save a row subset.
-        if tensor_bytes(packet) > self.byte_limit - self.bytes_written:
+        if tensor_bytes(packet) > max(self.byte_limit-self.bytes_written,
+                                     self.extreme_slot_bytes if retain_extreme else 0):
             self.dropped += 1
             self.counts[group + "/budget_drops"] += 1
             return stub
@@ -137,6 +148,8 @@ class QPCapture:
             trigger = bool(bad.any())
             packet["assessment"] = candidate_assessment(packet, raw,
                 packet["duality_gap"],packet["duality_gap_rel"])
+            if self.recovery_extremes and packet['stage']=='recovery' and accepted is not None:
+                self._retain_recovery_extremes(packet,candidate,owned_cpu(accepted))
         else:
             trigger = True
             reasons.append("exception")
@@ -157,7 +170,7 @@ class QPCapture:
         eligible = (novel or self.coverage[group] < max(1,quota//2))
         selected = (trigger or "rejected" in reasons or
                     (healthy and self.coverage[group+"/healthy"] < self.healthy_limit))
-        if selected and eligible and self.coverage[group] < quota:
+        if selected and eligible and self.coverage[group] < quota and self.count < self.limit:
             payload = dict(packet, preceding_updates=[
                 {"packet_file":p["_saved_file"]} if "_saved_file" in p else p for p in self.history],
                 healthy_reference=healthy)
@@ -185,6 +198,44 @@ class QPCapture:
         self.history.append(packet)
         while self.history and tensor_bytes(list(self.history)) > self.byte_limit // 4:
             self.history.popleft()
+
+    def _retain_recovery_extremes(self, packet, candidate, accepted):
+        """Opt-in CPU diagnostic work only; complete batches, not row-only QPs.
+
+        Keep a record maximum per metric/phase under fixed byte ceilings. The
+        original row identity and post-projection production acceptance remain
+        in each replayable packet. Joint violations are MODEL predictions.
+        """
+        joint = packet['assessment'].get('joint')
+        if joint is None or candidate.shape[1] != 48:
+            return
+        scores = {
+            'torque_correction_nm':(candidate[:,:12]-packet['data']['tau_nom']).abs().amax(-1),
+            'rate_slack_nm':candidate[:,36:48].amax(-1),
+            'predicted_position_violation_rad':joint['violations']['position_rad'].amax(-1),
+            'predicted_velocity_violation_rad_s':joint['violations']['velocity_rad_s'].amax(-1),
+        }
+        for metric,score in scores.items():
+            valid = accepted.reshape(-1).bool() & torch.isfinite(score)
+            if not valid.any():
+                continue
+            row = int(score.where(valid,-torch.inf).argmax())
+            value = float(score[row]);key = packet['phase']+'/'+metric
+            if key in self.extremes and value <= self.extremes[key]['value']:
+                continue
+            payload = dict(packet, accepted_recovery_extreme=dict(metric=metric,value=value,
+                local_row=row,row_identity=packet['rows'][row],semantics='post-projection full recovery candidate; joint violations predicted, not measured'),
+                preceding_updates=[{'packet_file':p['_saved_file']} if '_saved_file' in p else p for p in self.history])
+            stream=io.BytesIO();torch.save(payload,stream)
+            if stream.tell()>self.extreme_slot_bytes:
+                self.counts[key+'/byte_budget_drops'] += 1
+                continue
+            path=self.directory/f"extreme_{packet['phase']}_{metric}.pt"
+            # Only replace a file owned by THIS recorder, never prior evidence.
+            with path.open('wb' if key in self.extremes else 'xb') as target:
+                target.write(stream.getbuffer())
+            self.extremes[key]=dict(value=value,bytes=stream.tell(),packet_file=path.name,
+                                    local_row=row,row_identity=int(packet['rows'][row]))
 
 
 @torch.no_grad()

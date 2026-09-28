@@ -13,8 +13,9 @@ from test_hard_pact_reduced_qp import inputs, solver
 
 
 def config(**kw):
-    return replace(HardPACTQPConfig(), correction_ramp_enabled=True,
-                   objective_curriculum_enabled=True, **kw)
+    return replace(HardPACTQPConfig(), **dict(dict(correction_ramp_enabled=True,
+                   objective_curriculum_enabled=True, objective_curriculum_baseline_override=.9,
+                   objective_curriculum_recovery_iterations=1), **kw))
 
 
 def test_ramp_endpoints_and_disabled():
