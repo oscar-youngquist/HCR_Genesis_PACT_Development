@@ -1,12 +1,14 @@
 #!/usr/bin/env sh
+set -e
 
-# Play a trained coupled position/torque B1/Z1 PACT policy with Isaac Gym.
+# Historical filename retained; playback now uses IsaacLab.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 . /home/oyoungquist/anaconda3/etc/profile.d/conda.sh
-conda activate /home/oyoungquist/.conda/envs/lr_gym
+conda activate /home/oyoungquist/.conda/envs/lr_lab_cupiqp
 
-export SIMULATOR=isaacgym_b1z1_pact
+unset CUDA_VISIBLE_DEVICES
+export SIMULATOR=isaaclab_b1z1_pact
 
 cd "$SCRIPT_DIR"
-python play_exp.py --task=b1z1_pact --seed=1 --gpu=cuda:0 "$@"
+python play_b1z1_pact.py --task=b1z1_pact --seed=1 --gpu=cuda:1 "$@"
