@@ -1,4 +1,4 @@
-"""The Lab import workaround must preserve robot physics and mesh geometry."""
+"""Validate mesh preservation and the localized Lab Z1 frame correction."""
 
 import importlib.util
 from pathlib import Path
@@ -22,6 +22,7 @@ def test_cached_conversion_preserves_physics_and_full_meshes(filename):
     original_bytes = source.read_bytes()
     output = Path(assets.prepare_lab_urdf(source))
     original, cached = ET.fromstring(original_bytes), ET.parse(output).getroot()
+    assets._correct_z1_frames(original)
     for mesh in original.iter("mesh"):
         mesh.set("filename", str((source.parent / mesh.attrib["filename"]).resolve()))
     assert [ET.tostring(j) for j in original.findall("joint")] == [
@@ -51,3 +52,43 @@ def test_cached_conversion_preserves_physics_and_full_meshes(filename):
     assert assets.prepare_lab_urdf(source) == str(output)
     assert output.stat().st_mtime_ns == stamp
     assert source.read_bytes() == original_bytes
+
+
+def test_z1_frame_fix_is_local_and_matches_bard_inertias():
+    source = ROOT / "resources/robots/b1z1_current/urdf/b1z1.urdf"
+    before = ET.parse(source).getroot()
+    after = ET.parse(assets.prepare_lab_urdf(source)).getroot()
+    bard = ET.parse(source.with_name("b1z1_genesis.urdf")).getroot()
+    assert [ET.tostring(j) for j in before.findall("joint")] == [ET.tostring(j) for j in after.findall("joint")]
+    bard_links = {l.get("name"): l for l in bard.findall("link")}
+    corrected = 0
+    for old, new in zip(before.findall("link"), after.findall("link")):
+        z1 = any(Path(m.get("filename")).name.startswith("z1_") for m in old.findall("visual/geometry/mesh"))
+        for a,b in zip(old.findall("collision"),new.findall("collision")):
+            if a.find("geometry/mesh") is None:
+                assert ET.tostring(a) == ET.tostring(b)
+        if not z1:
+            assert [ET.tostring(e) for e in old.findall("inertial")] == [
+                ET.tostring(e) for e in new.findall("inertial")
+            ]
+            continue
+        corrected += 1
+        for a,b in zip(old.findall("inertial"),new.findall("inertial")):
+            assert a.find("origin").get("xyz") == b.find("origin").get("xyz")
+            for tag in ("mass","inertia"):
+                assert ET.tostring(a.find(tag)) == ET.tostring(b.find(tag))
+            assert b.find("origin").get("rpy") == bard_links[new.get("name")].find("inertial/origin").get("rpy")
+        for element in new.findall("visual") + new.findall("collision"):
+            mesh = element.find("geometry/mesh")
+            if mesh is not None and Path(mesh.get("filename")).name.startswith("z1_"):
+                assert element.find("origin").get("rpy") == "0 0 0"
+    assert corrected == 9
+
+
+def test_z1_frame_correction_is_idempotent():
+    source = ROOT / "resources/robots/b1z1_current/urdf/b1z1.urdf"
+    root = ET.parse(source).getroot()
+    assets._correct_z1_frames(root)
+    corrected = ET.tostring(root)
+    assets._correct_z1_frames(root)
+    assert ET.tostring(root) == corrected

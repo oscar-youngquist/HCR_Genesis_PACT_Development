@@ -1028,3 +1028,5 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         load_run = "Jul14_11-16-03_unifp_baseline"                                      # Run directory selected when resuming.
         checkpoint = -1                                                                 # Checkpoint index; -1 selects the latest.
         resume_path = None                                                              # Explicit checkpoint path override.
+
+# sh play_b1z1_pact_lab.sh --load_run Sep23_17-35-31_b1z1_pact_improved --ckpt -1
