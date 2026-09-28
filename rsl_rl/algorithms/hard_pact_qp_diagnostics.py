@@ -89,6 +89,125 @@ class QPIterationDiagnostics:
         self.add_sum(key, values.where(finite, 0).sum())
         self.weights[key] = self.weights.get(key, 0) + finite.sum()
 
+    @torch.no_grad()
+    def tracking_conflict(self, stage, data, x, acceleration_map, offset, current,
+                          accepted, cfg, limits, rate_lower, rate_upper, *, real_rows=None):
+        """Scheduled model comparisons on identical real, finite, accepted rows.
+
+        Direction excludes commands <=1e-3 m/s; worsened means >1e-4 m/s
+        increase in planar L2 error. Activity tolerances: 1e-3 Nm/N/rad/s,
+        1e-4 rad. These diagnostics neither certify nor modify a command.
+        All denominators are accumulated before division, including conditional
+        and stance-only subsets. Optional real_rows excludes backend padding.
+        """
+        torque_limit, qmin, qmax, vmax = limits
+        stance = data['contact_probability'] >= cfg.contact_threshold
+        reference_force = torch.where(stance[..., None], data['force_pred_world'], 0.).flatten(1)
+        baseline = torch.cat((data['tau_nom'], reference_force), -1)
+        candidate = x[:, :24]
+        amap = acceleration_map[:, :, :24]
+        a0 = (amap @ baseline[..., None]).squeeze(-1) + offset
+        a1 = (amap @ candidate[..., None]).squeeze(-1) + offset
+        da_tau = (amap[:, :, :12] @ (candidate[:, :12]-baseline[:, :12])[..., None]).squeeze(-1)
+        da_force = (amap[:, :, 12:] @ (candidate[:, 12:]-baseline[:, 12:])[..., None]).squeeze(-1)
+        command = data['velocity_command'][:, :2]
+        speed = command.norm(dim=-1)
+        direction = command / speed.clamp_min(1e-3)[:, None]
+        error_now = current[:, :2]-command
+        finite = torch.isfinite(torch.cat((x, a0, a1, current, command,
+            data['joint_position'], data['joint_velocity'], rate_lower, rate_upper), -1)).all(-1)
+        # Use one paired mask even if a nonfinite reference cancels out of a
+        # particular comparison. Never give different costs different cohorts.
+        for value in (baseline, da_tau, da_force, data['dt'], data['base_quaternion'],
+                      data['base_angular_velocity_world'], data['foot_jacobians'],
+                      data['foot_acceleration_bias'], data['base_jacobian']):
+            finite &= torch.isfinite(value.reshape(x.shape[0], -1)).all(-1)
+        real = torch.ones_like(accepted) if real_rows is None else real_rows.bool()
+        mask = real & accepted & finite
+        prefix = f'model_tracking_conflict/{stage}/accepted/'
+        self.add_sum(prefix+'matched_rows', mask.sum())
+        self.add_sum(prefix+'nonfinite_rows', (real & ~finite).sum())
+        def log(name, value, rows=mask):
+            self.add_values(prefix+name, value, rows)
+        directional = mask & (speed > 1e-3)
+        along = (error_now*direction).sum(-1)
+        for axis, i in (('x', 0), ('y', 1)):
+            log(f'state/body_velocity_{axis}_m_s', current[:, i])
+            log(f'state/command_{axis}_m_s', command[:, i])
+        log('state/error_l2_m_s', error_now.norm(dim=-1))
+        log('state/signed_direction_error_m_s', along, directional)
+        log('state/lateral_error_m_s', (error_now-along[:, None]*direction).norm(dim=-1), directional)
+        log('state/underspeed_fraction', (along < 0).float(), directional)
+        dt = data['dt'].reshape(-1, 1)
+        horizon = dt if cfg.qp_velocity_loss_horizon_s is None else torch.full_like(dt, cfg.qp_velocity_loss_horizon_s)
+        worsened = {}
+        for label, time in (('physics_dt', dt), ('outer_horizon', horizon)):
+            nominal = current[:, :2]+time*a0[:, :2]-command
+            full = current[:, :2]+time*a1[:, :2]-command
+            torque_only = nominal+time*da_tau[:, :2]
+            improvement = nominal.norm(dim=-1)-full.norm(dim=-1)
+            worsened[label] = improvement < -1e-4
+            log(label+'/horizon_s', time[:, 0])
+            for name, error in (('nominal_potentially_infeasible', nominal),
+                                ('full_candidate', full), ('torque_only', torque_only)):
+                log(label+'/'+name+'/error_l2_m_s', error.norm(dim=-1))
+                log(label+'/'+name+'/signed_velocity_change_m_s',
+                    ((error-error_now)*direction).sum(-1), directional)
+            log(label+'/error_improvement_m_s', improvement)
+            log(label+'/worsened_fraction', worsened[label].float())
+            for name, delta in (('torque_correction', da_tau), ('contact_force_change', da_force)):
+                change = time*delta[:, :2]
+                log(label+'/'+name+'/delta_velocity_l2_m_s', change.norm(dim=-1))
+                log(label+'/'+name+'/delta_velocity_along_command_m_s', (change*direction).sum(-1), directional)
+
+        # Objective associations, evaluated at the inner objective's actual dt.
+        # No extra mass solve; fixed wrench cancels in candidate-minus-baseline.
+        q = data['base_quaternion']
+        yaw = torch.atan2(2*(q[:, 3]*q[:, 2]+q[:, 0]*q[:, 1]), 1-2*(q[:, 1].square()+q[:, 2].square()))
+        tilt = torch.stack((-2*(q[:, 1]*q[:, 2]-q[:, 3]*q[:, 0]),
+                            2*(q[:, 0]*q[:, 2]+q[:, 3]*q[:, 1]), torch.zeros_like(yaw)), -1)
+        def costs(a, force):
+            contact = torch.einsum('bfkn,bn->bfk', data['foot_jacobians'], a)+data['foot_acceleration_bias']
+            angular = (data['base_jacobian'][:, 3:6] @ a[..., None]).squeeze(-1)
+            angular = angular+cfg.attitude_kp*tilt+cfg.attitude_kd*data['base_angular_velocity_world']
+            rp = torch.stack((yaw.cos()*angular[:, 0]+yaw.sin()*angular[:, 1],
+                              -yaw.sin()*angular[:, 0]+yaw.cos()*angular[:, 1]), -1)
+            return dict(
+                stance=cfg.contact_acceleration_weight*(contact/cfg.contact_acceleration_scale_m_s2).square().sum(-1).mul(stance).sum(-1),
+                attitude=cfg.attitude_weight*(rp/cfg.attitude_acceleration_scale_rad_s2).square().sum(-1),
+                grf_reference=cfg.force_tracking_weight*((force-reference_force)/cfg.force_scale_n).square().sum(-1),
+                planar_tracking=cfg.planar_velocity_weight*((error_now+dt*a[:, :2])/cfg.planar_velocity_scale_m_s).square().sum(-1))
+        c0, c1 = costs(a0, reference_force), costs(a1, candidate[:, 12:])
+        for name in c0:
+            log('weighted_cost_delta/'+name, c1[name]-c0[name])
+        for label, worse in worsened.items():
+            log(label+'/worse_tracking_better_stance_fraction', (worse & (c1['stance'] < c0['stance'])).float())
+            log(label+'/worse_tracking_better_attitude_fraction', (worse & (c1['attitude'] < c0['attitude'])).float())
+
+        # Proximity to ORIGINAL hard bounds, not recovery-expanded feasibility.
+        q_next = data['joint_position']+dt*data['joint_velocity']+cfg.position_integration_coefficient*dt.square()*a1[:, 6:]
+        v_next = data['joint_velocity']+dt*a1[:, 6:]
+        force = candidate[:, 12:].reshape(-1, 4, 3)
+        margins = {
+            'absolute_torque_nm': (torque_limit-candidate[:, :12].abs(), 1e-3, None),
+            'torque_rate_nm': (torch.minimum(candidate[:, :12]-rate_lower, rate_upper-candidate[:, :12]), 1e-3, None),
+            'joint_position_rad': (torch.minimum(q_next-qmin, qmax-q_next), 1e-4, None),
+            'joint_velocity_rad_s': (vmax-v_next.abs(), 1e-3, None),
+            'friction_n': (cfg.friction_coefficient*force[:, :, 2:]-force[:, :, :2].abs(), 1e-3, stance[..., None]),
+            'unilateral_n': (force[:, :, 2], 1e-3, stance)}
+        for name, (margin, tolerance, active) in margins.items():
+            row_shape = (mask.shape[0],)+(1,)*(margin.ndim-1)
+            eligible = mask.reshape(row_shape).expand_as(margin)
+            if active is not None:
+                eligible = eligible & active
+            log('original_bounds/'+name+'/near_fraction', (margin.abs() <= tolerance).float(), eligible)
+            log('original_bounds/'+name+'/violation_mean', (-margin).clamp_min(0), eligible)
+            for label, worse in worsened.items():
+                log(label+'/worsened/'+name+'/near_fraction', (margin.abs() <= tolerance).float(), eligible & worse.reshape(row_shape))
+        if x.shape[-1] == 48:
+            log('recovery/joint_slack_rad_s2', x[:, 24:36], mask[:, None])
+            log('recovery/rate_slack_nm', x[:, 36:48], mask[:, None])
+
     def _candidate_summary(self, key, values, mask):
         """Coordinate-weighted mean/max and explicit finite denominator."""
         self.add_values(key + "/mean", values, mask)
@@ -275,7 +394,7 @@ class QPIterationDiagnostics:
             /(attempted-exceptions).clamp_min(1))
         for key, weight in self.weights.items():
             result[key] = torch.where(weight > 0, self.sums[key] / weight.clamp_min(1), zero + float("nan"))
-            if key.startswith("model_candidate/"):
+            if key.startswith(("model_candidate/", "model_tracking_conflict/")):
                 result[key + "/samples"] = weight
         for key, value in self.extrema.items():
             result[key] = torch.where(torch.isfinite(value), value, zero + float("nan"))

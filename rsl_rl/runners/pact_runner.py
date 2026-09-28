@@ -881,6 +881,9 @@ class OnPolicyRunnerPACT:
         }
         if self.is_hard_pact:
             # The legacy runner counter advances only after learn() finishes.
+            qp = getattr(self.alg, 'hard_pact_qp', None)
+            if qp is not None:
+                checkpoint['hard_pact_qp_velocity_loss_horizon_s'] = qp.cfg.qp_velocity_loss_horizon_s
             if hasattr(self, "qp_curriculum"):
                 checkpoint['hard_pact_qp_curriculum'] = self.qp_curriculum.state_dict()
             checkpoint['hard_pact_command_curriculum'] = self.env.command_curriculum_state_dict()

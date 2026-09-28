@@ -268,7 +268,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
 
     class control(LeggedRobotCfg.control):
         clip_torque_rate_without_qp = True
-        torque_rate_limit_nm_s = 1000.0  # Shared by QP, fallback, and optional non-QP clipping.
+        torque_rate_limit_nm_s = 2000.0  # Shared by QP, fallback, and optional non-QP clipping.
         stiffness = {'joint': 30.0}
         damping = {'joint': 0.75}
         action_scale = 0.25
@@ -570,16 +570,16 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
                         # at absolute iteration N. Zero keeps current behavior.
-                        'warmup_iterations': 1000,
+                        'warmup_iterations': 500,
                         # Execution-only interpolation; full QPs/losses remain active.
                         'correction_ramp_enabled': True,
                         'correction_ramp_start_offset': 0,
                         'correction_ramp_duration': 1000,
-                        'objective_curriculum_enabled': True,
-                        'contact_acceleration_weight_initial': 0.50,  # .25 * final
-                        'contact_acceleration_weight_final': 1.0,  # contact_acceleration_weight
+                        'objective_curriculum_enabled': False,
+                        'contact_acceleration_weight_initial': 0.10,  # .25 * final
+                        'contact_acceleration_weight_final': 0.10,  # contact_acceleration_weight
                         'attitude_weight_initial': 0.10,  # .25 * final
-                        'attitude_weight_final': 1.0,  # attitude_weight
+                        'attitude_weight_final': 0.1,  # attitude_weight
                         
                         'objective_curriculum_start': None,  # after execution ramp
                         'objective_curriculum_progress_delta': 0.05,
@@ -654,7 +654,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
                         # Optional soft one-physics-step BODY velocity tracking.
                         # Independent of stance/attitude and execution curricula.
-                        'planar_velocity_weight': 10.0,
+                        'planar_velocity_weight': 20.0,
+                        'qp_velocity_loss_horizon_s': 0.020,  # shared outer xy/yaw extrapolation; QP dt unchanged
                         'yaw_rate_weight': 5.0,
                         'planar_velocity_scale_m_s': 1.0,
                         'yaw_rate_scale_rad_s': 1.0,
@@ -663,7 +664,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'attitude_kd': 5.0,
                         'torque_tracking_weight': 20.0, 
                         'force_tracking_weight': 1.0,
+
                         'q_regularization': 1e-07, 
+
                         'gradient_scale_tau': 1.0, 
                         'gradient_scale_grf': 1.0, 
                         'gradient_scale_wrench': 1.0, 
@@ -672,8 +675,10 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'gradient_clip_grf': 0.0, 
                         'gradient_clip_wrench': 0.0, 
                         'gradient_clip_contact': 0.0, 
+
                         'normalized_feasibility_tolerance_float32': 0.001, 
                         'normalized_feasibility_tolerance_float64': 1e-06, 
+
                         'kkt_tolerance': 0.1, 
                         'active_tolerance': 0.1, 
                         'eps_float32': 1e-05, 

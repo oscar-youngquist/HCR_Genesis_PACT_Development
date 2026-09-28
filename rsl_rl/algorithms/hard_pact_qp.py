@@ -145,6 +145,7 @@ class HardPACTQPConfig:
     attitude_weight: float = 1.0
     planar_velocity_weight: float = 0.0
     velocity_tracking_replay_enabled: bool = False  # outer actor terms need commands even with inner weights zero
+    qp_velocity_loss_horizon_s: float | None = None  # outer constant-derivative extrapolation only
     yaw_rate_weight: float = 0.0
     planar_velocity_scale_m_s: float = 1.0
     yaw_rate_scale_rad_s: float = 1.0
@@ -389,6 +390,9 @@ class HardPACTDifferentiableQP:
         import math
         if not math.isfinite(config.projection_contact_acceleration_weight) or config.projection_contact_acceleration_weight < 0:
             raise ValueError('projection_contact_acceleration_weight must be finite and nonnegative')
+        if config.qp_velocity_loss_horizon_s is not None and (
+                not math.isfinite(config.qp_velocity_loss_horizon_s) or config.qp_velocity_loss_horizon_s <= 0):
+            raise ValueError('qp_velocity_loss_horizon_s must be finite and positive or None')
         for name in ("planar_velocity_weight", "yaw_rate_weight",
                      "planar_velocity_scale_m_s", "yaw_rate_scale_rad_s"):
             value = getattr(config, name)
@@ -674,12 +678,13 @@ class HardPACTDifferentiableQP:
             return zero, zero, rows.numel()
         selected = {k:v[rows].detach().to(qdd) for k,v in data.items()}
         _,error,_ = self._velocity_tracking_affine(selected,
-            qdd.new_empty((rows.numel(),18,0)),qdd[rows])
+            qdd.new_empty((rows.numel(),18,0)),qdd[rows],
+            horizon_s=self.cfg.qp_velocity_loss_horizon_s)
         xy = (error[:,:2]/self.cfg.planar_velocity_scale_m_s).square().sum(-1).mean()
         yaw = (error[:,2]/self.cfg.yaw_rate_scale_rad_s).square().mean()
         return xy, yaw, rows.numel()
 
-    def _velocity_tracking_affine(self, data, acceleration_map, offset):
+    def _velocity_tracking_affine(self, data, acceleration_map, offset, *, horizon_s=None):
         """Physical body-frame [vx,vy,wz] prediction C*x+e+command.
 
         Canonical BARD/Pinocchio free-flyer qdd[:6] = d[v_B,w_B]/dt.
@@ -689,6 +694,8 @@ class HardPACTDifferentiableQP:
         c=0 at the root origin, NOT world acceleration or Euler yaw rate.
         Simulator reward velocities use these same body/root-link axes.
         W is already in offset=M^-1(Jb^T W-h); never add it a second time.
+        horizon_s is an OUTER-loss/diagnostic constant-derivative extrapolation,
+        not an integrated rollout. Inner costs/constraints always use actual dt.
         """
         if "velocity_command" not in data or "base_linear_velocity_world" not in data:
             raise ValueError("QP velocity tracking requires captured physical velocity_command and base_linear_velocity_world")
@@ -701,6 +708,8 @@ class HardPACTDifferentiableQP:
         angular = body(data["base_angular_velocity_world"])
         current = torch.cat((linear[:,:2], angular[:,2:3]), -1)
         dt = data["dt"].detach().reshape(-1,1)
+        if horizon_s is not None:
+            dt = torch.full_like(dt, horizon_s)  # Never mutate captured physics dt.
         C = dt[:,:,None]*acceleration_map[:,[0,1,5],:]
         e = current + dt*offset[:,[0,1,5]] - data["velocity_command"].detach()
         return C, e, current
@@ -909,10 +918,13 @@ class HardPACTDifferentiableQP:
         acceleration = (m.acceleration_map @ x[..., None]).squeeze(-1) + m.acceleration_offset
         aggregate.joint_candidate(stage, data, acceleration, accepted, qmin, qmax,
                                   vmax, amax, self.cfg.position_integration_coefficient)
+        if self.velocity_tracking_inputs_required():
+            C, e, current = self._velocity_tracking_affine(data, m.acceleration_map[:,:,:24], m.acceleration_offset)
+            aggregate.tracking_conflict(stage, data, x, m.acceleration_map, m.acceleration_offset,
+                current, accepted, self.cfg, self._limits(x), m.rate_lower, m.rate_upper)
         if self.velocity_tracking_enabled():
             # Scheduled physical diagnostics only; predictions, never guarantees
             # for measured motion or a partially blended execution command.
-            C,e,current = self._velocity_tracking_affine(data,m.acceleration_map[:,:,:24],m.acceleration_offset)
             stance = data["contact_probability"] >= self.cfg.contact_threshold
             baseline = torch.cat((data["tau_nom"],
                 torch.where(stance[...,None],data["force_pred_world"],0.).flatten(1)),1)
@@ -1065,7 +1077,8 @@ class HardPACTDifferentiableQP:
             planar_velocity_weight=self.cfg.planar_velocity_weight,
             yaw_rate_weight=self.cfg.yaw_rate_weight,
             planar_velocity_scale_m_s=self.cfg.planar_velocity_scale_m_s,
-            yaw_rate_scale_rad_s=self.cfg.yaw_rate_scale_rad_s)
+            yaw_rate_scale_rad_s=self.cfg.yaw_rate_scale_rad_s,
+            qp_velocity_loss_horizon_s=self.cfg.qp_velocity_loss_horizon_s)
         if backend_equivalent != self.cfg:
             # Never carry solver allocations/settings or active/warm snapshots
             # across a runtime settings change.
