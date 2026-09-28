@@ -338,10 +338,10 @@ class B1Z1UniFPCfg:
         # Shared B1Z1 schedule: learn nominal motion, introduce force commands,
         # then admit physical disturbances after sustained task competence.
         force_curriculum_command_start_iteration = 8000
-        force_curriculum_command_ramp_iterations = 4000
+        force_curriculum_command_ramp_iterations = 8000
         
-        force_curriculum_gate_start_iteration = 12000     # depreciated
-        force_curriculum_external_ramp_iterations = 4000
+        force_curriculum_gate_start_iteration = 8000     # depreciated
+        force_curriculum_external_ramp_iterations = 8000
         
         force_curriculum_ee_l1_threshold = 0.25
         force_curriculum_roll_termination_threshold = 0.05
@@ -350,7 +350,7 @@ class B1Z1UniFPCfg:
         force_curriculum_gate_patience = 400
         force_curriculum_metric_ema_alpha = 0.05
         force_curriculum_use_latest_start_fallback = True
-        force_curriculum_latest_start_iteration = 20000
+        force_curriculum_latest_start_iteration = 10000
 
         push_gripper_stators = True
         apply_ee_external_forces = True
@@ -363,8 +363,8 @@ class B1Z1UniFPCfg:
         gripper_forced_prob_ext = 0.8
         
         randomize_gripper_force_gains = True
-        max_push_force_xyz_gripper_cmd = [-50.0, 50.0]
-        max_push_force_xyz_gripper_ext = [-50.0, 50.0]
+        max_push_force_xyz_gripper_cmd = [-60.0, 60.0]
+        max_push_force_xyz_gripper_ext = [-60.0, 60.0]
 
         gripper_force_kp_range = [200.0, 200.0]
         gripper_force_kd_range = [3.0, 3.0]
@@ -380,7 +380,7 @@ class B1Z1UniFPCfg:
         push_base_duration_s_ext = [1.0, 3.0]
         base_forced_prob_ext = 0.8
         randomize_base_force_gains = True
-        max_push_force_xyz_base_cmd = [-00.0, 00.0]
+        max_push_force_xyz_base_cmd = [-20.0, 20.0]
         max_push_force_xyz_base_ext = [-20.0, 20.0]
         
         base_force_kp_range = [200.0, 200.0]
@@ -427,12 +427,12 @@ class B1Z1UniFPCfg:
         randomize_base_mass = True
         added_mass_min = -2.0  
         min_added_mass_max = 5.0
-        max_added_mass_max = 15.0
+        max_added_mass_max = 10.0
   
         randomize_gripper_mass = True
         gripper_mass_min = -0.01
-        min_gripper_added_mass_max = 0.1
-        max_gripper_added_mass_max = 0.20
+        min_gripper_added_mass_max = 0.05
+        max_gripper_added_mass_max = 0.10
 
         randomize_com_displacement = True
         com_rand_z_positive = False
@@ -473,7 +473,7 @@ class B1Z1UniFPCfg:
         kd_range = [0.8, 1.2]
      
         randomize_motor_strength = True
-        motor_strength_range = [0.90, 1.10]
+        motor_strength_range = [0.85, 1.15]
         
         randomize_joint_armature = True
         joint_armature_range = [0.0, 0.03]
@@ -483,15 +483,15 @@ class B1Z1UniFPCfg:
         joint_friction_range_end = [0.0, 0.05]
         
         randomize_joint_stiffness = True
-        joint_stiffness_range_start = [0.0, 0.02]
-        joint_stiffness_range_end = [0.0, 0.005]
+        joint_stiffness_range_start = [0.0, 0.00]
+        joint_stiffness_range_end = [0.0, 0.00]
         
         randomize_joint_damping = True
         joint_damping_range_start = [0.20, 0.60]
         joint_damping_range_end = [0.00, 0.80]
         
         num_push_steps = 500
-        push_warmup = 30000
+        push_warmup = 13000
         
         best_reward_window = 200
         best_reward_quantile = 0.90
@@ -599,7 +599,7 @@ class B1Z1UniFPCfg:
             termination = 0.0
             collision = -5.0
             dof_pos_limits = -10.0
-            torque_limits = -0.005
+            torque_limits = -0.01
             dof_close_to_default = 0.0
 
             # Add in close to default reward
@@ -613,12 +613,11 @@ class B1Z1UniFPCfg:
             tracking_ang_vel = 1.0                #
             
             tracking_ee_force_world = 2.0
-            tracking_ee_orientation_default = 0.0
 
             no_physical_progress = -0.50
 
             # Style rewards encouraging using the arm
-            arm_progress_before_torso = 0.0
+            arm_progress_before_torso = 0.5
             early_torso_tilt = -0.2
             # feet_contact_number = 0.01
             # arm_progress_before_torso = 0.0
@@ -730,6 +729,9 @@ class B1Z1UniFPCfg:
 
         class reward_curriculum:
             curr_reward_keys = [
+                                "torque_limits",
+                                "dof_pos_limits",
+                                "dof_vel",
                                 # "collision", 
                                 # "action_rate", 
                                 # "action_rate_arm",
@@ -737,30 +739,27 @@ class B1Z1UniFPCfg:
                                 # "action_smoothness_arm",
                                 # "dof_acc", 
                                 # "dof_acc_arm",
-                                "dof_pos_limits",
-                                "feet_contact_forces",
                                 # "base_height",
-                                "lin_vel_z",
                                 # "arm_ee_force_manipulability",
                                 # "torso_force_wrench_ellipsoid",
                                 ]
             curr_reward_bounds = {
+                "torque_limits":[-0.001, -1.0],
+                "dof_pos_limits":[-1.0, -10.0],
+                "dof_vel":[-1e-6, -1e-4],
                 # "collision": [-2.0, -10.0],
-                # "action_rate": [-0.001, -0.01],
-                # "action_rate_arm": [-0.002, -0.02],
-                # "action_smoothness":[-0.001, -0.01],
-                # "action_smoothness_arm":[-0.002, -0.02],
+                "action_rate": [-0.002, -0.02],
+                "action_rate_arm": [-0.003, -0.03],
+                "action_smoothness":[-0.002, -0.02],
+                "action_smoothness_arm":[-0.003, -0.03],
                 # "dof_acc": [-5.0e-8, -2.5e-7],
                 # "dof_acc_arm": [-1.0e-8, -4.5e-7],
-                "dof_pos_limits":[-2.0, -10.0],
-                "feet_contact_forces":[-1.0e-5, -1.0e-4],
                 # "base_height":[-2.0, -5.0],
-                "lin_vel_z":[-1.00, -2.0],
                 # "arm_ee_force_manipulability":[0.2, 0.5],
                 # "torso_force_wrench_ellipsoid":[0.2, 0.5],
             }
-            warmup_steps = 16000
-            curr_steps = 4000
+            warmup_steps = 0
+            curr_steps = 40000
 
     class viewer:
         ref_env = 0
@@ -816,10 +815,10 @@ class B1Z1UniFPCfgPPO:
         # Increase exploration within these bounds while command tracking or
         # terrain-curriculum progress remains below its configured target.
         entropy_coef = 0.01
-        use_adaptive_entropy = False
+        use_adaptive_entropy = True
         adaptive_ent_bounds = [0.001, 0.01]
-        adaptive_ent_lin_threshold = 0.75
-        adaptive_ent_ang_threshold = 0.35
+        adaptive_ent_lin_threshold = 1.50
+        adaptive_ent_ang_threshold = 0.70
         adaptive_ent_ter_threshold = 6.0
         adaptive_ent_softmax_temp = 2.0
         learning_rate = 3.0e-4
@@ -836,7 +835,7 @@ class B1Z1UniFPCfgPPO:
         use_kl_rate_band = False
         # Independently cosine-ramp the base KL coefficient to its maximum.
         use_cosine_kl_warmup = True
-        kl_warmup_iters = 1000
+        kl_warmup_iters = 500
         kl_warmup_beta_max = adaptation_kl_weight
 
         kl_band_warmup_iters = 500
