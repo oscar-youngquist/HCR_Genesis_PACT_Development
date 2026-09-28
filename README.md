@@ -34,6 +34,8 @@ A [legged_gym](https://github.com/leggedrobotics/legged_gym) based framework for
 
 ## 🛠 Installation and Usage
 
+For this fork’s Go2 DreamWaQ port, see the [self-contained setup and training guide](docs/go2_dreamwaq.md), including IsaacLab installation, configuration, curricula, and the launch script.
+
 Please refer to the [doc of this repo](https://genesis-lr-doc.readthedocs.io/en/latest/).
 
 ## 🖼️ Gallery
