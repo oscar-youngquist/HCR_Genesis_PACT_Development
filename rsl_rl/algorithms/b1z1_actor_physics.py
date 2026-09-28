@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from .hard_pact_bard import differentiable_bard_rollout_loss
+from . import b1z1_ee_stability
 
 
 def enabled(cfg):
@@ -61,6 +62,24 @@ def configure(algorithm):
     if not algorithm.bard_auxiliary:
         raise ValueError("actor_phys_enabled requires dynamics_backend='bard'")
     cfg = algorithm.cfg
+    stability_weight = cfg.get("actor_phys_ee_stability_weight", 0.)
+    if not math.isfinite(stability_weight) or stability_weight < 0:
+        raise ValueError("actor_phys_ee_stability_weight must be finite and nonnegative")
+    if stability_weight > 0:
+        for key in ("position_radius", "rotation_radius"):
+            value = cfg["actor_phys_ee_stability_" + key]
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"EE stability {key} must be positive")
+        for key in ("beta", "twist_weight", "energy_weight", "rho", "energy_slack", "target_speed_threshold"):
+            value = cfg["actor_phys_ee_stability_" + key]
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"EE stability {key} must be nonnegative")
+        if cfg["actor_phys_ee_stability_rho"] > 1:
+            raise ValueError("EE stability rho must be at most one")
+        for key in ("pose_weights", "twist_weights"):
+            value = torch.as_tensor(cfg["actor_phys_ee_stability_" + key])
+            if value.shape != (6,) or not torch.isfinite(value).all() or (value < 0).any():
+                raise ValueError(f"EE stability {key} must contain six finite nonnegative weights")
     for key in ("velocity_time_constant", "softplus_temperature", "huber_delta",
                 "ee_scale", "q_scale", "qd_scale"):
         value = cfg["actor_phys_" + key]
@@ -115,6 +134,20 @@ def capture(runner):
     if pos_fk_enabled(a.cfg):
         values.update(fk_default=env.simulator.default_dof_pos.expand_as(env.simulator.dof_pos),
                       fk_base_pos=env.simulator.base_pos, fk_base_quat=env.simulator.base_quat)
+    if a.cfg.get("actor_phys_ee_stability_weight", 0.) > 0:
+        # Same compliant reference at both times; freeze force and base frame.
+        u0 = (env.goal_timer / env.traj_timesteps).clamp(0, 1)
+        ratio0 = (10*u0**3-15*u0**4+6*u0**5).unsqueeze(-1)
+        sphere0 = env.ee_start_sphere + ratio0*(env.ee_goal_sphere-env.ee_start_sphere)
+        nominal0 = env.get_ee_goal_spherical_center(yaw) + quat_apply(yaw, sphere2cart(sphere0))
+        values["ee_stability_current_target"] = _compute_force_adjusted_ee_target(
+            env, external_force=force, nominal_target=nominal0).effective_target
+        if hasattr(env, "default_ee_local_quat"):
+            from legged_gym.utils.math_utils import quat_mul
+            desired = quat_mul(yaw, env.default_ee_local_quat)
+            axes = torch.eye(3, device=desired.device, dtype=desired.dtype)
+            values["ee_stability_rotation"] = torch.stack([
+                quat_apply(desired, axis.expand(env.num_envs, -1)) for axis in axes], -1)
     a.transition.actor_physics = {k: v.detach().to(a.device).clone() for k, v in values.items()}
 
 
@@ -205,6 +238,9 @@ def objective(a, batch, actions, context):
         valid &= False
     names = ("loss", "vel", "ee", "q", "qd", "velocity_error", "ee_error_m", "position_violation_rad", "velocity_violation_radps")
     metrics = {k: zero.detach() for k in names}
+    # Cheap zero metrics even for invalid batches; no stability FK when disabled.
+    _, stability_metrics = b1z1_ee_stability.objective(None, actions, {}, {})
+    metrics.update(stability_metrics)
     metrics["valid_fraction"] = valid.float().mean()
     metrics["active_fraction"] = zero.detach()
     if pos_fk_enabled(a.cfg):
@@ -256,6 +292,12 @@ def objective(a, batch, actions, context):
     metrics.update({k: v.detach().mean() for k, v in values.items()})
     metrics["active_fraction"] = finite_ee.sum() / len(actions)
     total = values["loss"].mean()
+    stability_loss, stability_metrics = b1z1_ee_stability.objective(
+        a.dynamics_backend, predicted[finite_ee],
+        {k: v[finite_ee] for k, v in data.items()}, a.cfg)
+    total = total + stability_loss
+    metrics.update(stability_metrics)
+    metrics["loss"] = total.detach()
     if pos_fk_enabled(a.cfg):
         fk_loss, fk_metrics = position_fk(a, actions[valid][good][finite][finite_ee],
                                         {k: v[finite_ee] for k, v in data.items()})

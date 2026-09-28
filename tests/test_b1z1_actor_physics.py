@@ -10,7 +10,7 @@ from rsl_rl.algorithms.ppo_b1z1_pact import PPO_B1Z1PACT
 
 
 def config():
-    return dict(actor_phys_enabled=True, actor_phys_coef=.01,
+    return dict(actor_phys_enabled=True, actor_phys_coef=.01, actor_phys_pos_fk_enabled=False,
                 actor_phys_velocity_time_constant=.25, actor_phys_softplus_temperature=.05,
                 actor_phys_huber_delta=1., actor_phys_ee_scale=.1, actor_phys_q_scale=1.,
                 actor_phys_qd_scale=10., actor_phys_q_margin=.05, actor_phys_qd_margin=.5,
@@ -202,9 +202,11 @@ def test_enabled_ppo_update_and_snapshot_alignment():
     assert all(torch.isfinite(p).all() for p in a.actor_critic.parameters())
 
 
-def test_capture_reuses_predicted_force_projection_without_mutating_environment():
+@pytest.mark.parametrize("stability_weight", [0., 1.])
+def test_capture_reuses_predicted_force_projection_without_mutating_environment(stability_weight):
     from test_b1z1_force_target_projection import ForceTargetProjectionTests
     a, batch, _, _ = setup()
+    a.cfg["actor_phys_ee_stability_weight"] = stability_weight
     env = ForceTargetProjectionTests._environment([[.5, 0, 0]]*3, [[100., 0, 0]]*3)
     env.ee_start_sphere = torch.tensor([[.5, 0, 0]]*3)
     env.ee_goal_sphere = torch.tensor([[.7, 0, 0]]*3)
@@ -212,6 +214,7 @@ def test_capture_reuses_predicted_force_projection_without_mutating_environment(
     env.traj_timesteps = torch.full((3,), 2.)
     env.traj_total_timesteps = torch.full((3,), 4.)
     env.commands = torch.zeros(3, 6)
+    env.default_ee_local_quat = torch.tensor([[0., 0., 0., 1.]]*3)
     env.gripper_force_kps.fill_(1000.)
     env.get_pact_dynamics_state = lambda: batch["actor_phys_state"]
     env.get_mass_wrench_label = lambda: torch.zeros(3, 6)
@@ -227,3 +230,10 @@ def test_capture_reuses_predicted_force_projection_without_mutating_environment(
     assert torch.equal(env.goal_timer, torch.zeros(3))
     assert torch.equal(before, torch.random.get_rng_state())
     assert torch.equal(env.ee_force_ext_world, torch.tensor([[100., 0, 0]]*3))
+    if stability_weight:
+        torch.testing.assert_close(a.transition.actor_physics["ee_stability_current_target"],
+                                   torch.tensor([[.501, 0, 0]]*3))
+        torch.testing.assert_close(a.transition.actor_physics["ee_stability_rotation"],
+                                   torch.eye(3).repeat(3, 1, 1))
+    else:
+        assert "ee_stability_current_target" not in a.transition.actor_physics

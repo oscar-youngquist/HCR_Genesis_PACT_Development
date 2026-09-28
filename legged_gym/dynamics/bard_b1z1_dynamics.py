@@ -333,6 +333,23 @@ class BardB1Z1DynamicsBackend(WholeBodyDynamicsBackend):
             positions.append(pose[:, :3, 3].clone())
         return torch.cat(positions)
 
+    def ee_pose_twist(self, state):
+        """Differentiable world pose and world-aligned [linear, angular] twist."""
+        poses, twists = [], []
+        for chunk in state.split(self.batch_capacity):
+            q, v = self._pack_state(chunk[:, :3], chunk[:, 3:7], chunk[:, 7:26],
+                                    chunk[:, 26:29], chunk[:, 29:32], chunk[:, 32:51])
+            data = self.bard.create_data(self.model, max_batch_size=len(chunk))
+            self.bard.update_kinematics(self.model, data, q, v)
+            jac, pose = self.bard.jacobian(self.model, data, self.ee_frame_id,
+                                          reference_frame="local", return_pose=True)
+            local = (jac @ v.unsqueeze(-1)).squeeze(-1)
+            rotation = pose[:, :3, :3]
+            twists.append(torch.cat([(rotation @ part.unsqueeze(-1)).squeeze(-1)
+                                     for part in local.split(3, dim=-1)], -1))
+            poses.append(pose.clone())
+        return torch.cat(poses), torch.cat(twists)
+
     def commanded_ee_in_frame(self, base_pos, base_quat, joints, reference, root_frame):
         """Command FK only; freeze the arm-root transform and world reference."""
         predictions, references = [], []

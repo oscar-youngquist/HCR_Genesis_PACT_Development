@@ -375,7 +375,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         push_gripper_duration_s_ext = [1.0, 3.0]                                        # EE force-event duration range [s].
         gripper_forced_prob_ext = 0.8                                                   # Probability of an active EE force event.
 
-        max_push_force_xyz_gripper_ext = [-50.0, 50.0]                                  # Full-strength per-axis EE force range [N].
+        max_push_force_xyz_gripper_ext = [-60.0, 60.0]                                  # Full-strength per-axis EE force range [N].
         randomize_gripper_force_gains = False                                           # Randomize EE force-feedback gains.
         gripper_force_kp_range = [200.0, 200.0]                                         # EE force proportional-gain range.
         gripper_force_kd_range = [3.0, 3.0]                                             # EE force derivative-gain range.
@@ -959,6 +959,17 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_coef = 0.1                              # Overall actor auxiliary coefficient.
         actor_phys_vel_weight = 1.0                         # Reachable planar velocity/yaw tracking.
         actor_phys_ee_weight = 1.0                          # Next scheduled, compliant EE target.
+        actor_phys_ee_stability_weight = 0.0                # Opt-in near-target task-space damping.
+        actor_phys_ee_stability_position_radius = 0.10      # Near-target gate radius [m].
+        actor_phys_ee_stability_rotation_radius = 0.30      # Near-target gate radius [rad].
+        actor_phys_ee_stability_pose_weights = [100., 100., 100., 4., 4., 4.]  # Inverse squared pose scales [m, rad].
+        actor_phys_ee_stability_twist_weights = [4., 4., 4., 1., 1., 1.]  # Inverse squared twist scales [m/s, rad/s].
+        actor_phys_ee_stability_beta = 0.1                  # Relative kinetic contribution to energy.
+        actor_phys_ee_stability_twist_weight = 1.0          # Direct target-relative damping penalty.
+        actor_phys_ee_stability_energy_weight = 1.0         # Squared energy-decay violation penalty.
+        actor_phys_ee_stability_rho = 0.05                  # Requested energy decay per control step.
+        actor_phys_ee_stability_energy_slack = 0.01         # Allowed normalized energy slack.
+        actor_phys_ee_stability_target_speed_threshold = 0.05  # Disable gate during fast target motion [m/s].
         actor_phys_q_weight = 0.1                           # Joint-position safety barrier.
         actor_phys_qd_weight = 0.1                          # Joint-velocity safety barrier.
         actor_phys_velocity_time_constant = 0.25            # Reachable command response time [s].
