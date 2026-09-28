@@ -59,6 +59,7 @@ class ActorCriticDreamWaQ(nn.Module):
                  decoder_hidden_dims=[256, 128],
                  activation='elu',
                  init_noise_std=1.0,
+                 contact_epsilon=1.e-6,
                  **kwargs):
         if kwargs:
             print("ActorCritic.__init__ got unexpected arguments, which will be ignored: " +
@@ -76,7 +77,8 @@ class ActorCriticDreamWaQ(nn.Module):
                        num_decoder_output=num_decoder_output,
                        activation=activation,
                        encoder_hidden_dims=encoder_hidden_dims,
-                       decoder_hidden_dims=decoder_hidden_dims)
+                       decoder_hidden_dims=decoder_hidden_dims,
+                       contact_epsilon=contact_epsilon)
         
         activation = get_activation(activation)
 
@@ -144,10 +146,10 @@ class ActorCriticDreamWaQ(nn.Module):
 
     def update_distribution(self, observations, obs_history):
         """When inferring the actor, use the current observation and latent"""
-        sampled_out, distribution_params = self.vae.sample(obs_history)
-        z, vel = sampled_out
-        latent_mu, latent_var, vel_mu, vel_var = distribution_params
-        sampled_out = torch.cat((z, vel), dim=-1)
+        # PPO owns only actor/critic/std. Never construct an encoder graph here.
+        with torch.no_grad():
+            sampled_out, _ = self.vae.sample(obs_history)
+            sampled_out = torch.cat(sampled_out, dim=-1)
         mean = self.actor(torch.cat(
             (
             observations, sampled_out
@@ -162,6 +164,7 @@ class ActorCriticDreamWaQ(nn.Module):
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
+    @torch.no_grad()
     def act_inference(self, observations, observation_history, **kwargs):
         mean_out = self.vae.inference(observation_history)
         actions_mean = self.actor(torch.cat(

@@ -74,6 +74,7 @@ class DreamWaQRunner(OnPolicyRunner):
                               [self.env.num_decoder_output], [self.env.num_actions])
     
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
+        self.env.step_reward_curriculum(self.current_learning_iteration)
         self._pre_learn(init_at_random_ep_len)
         obs, privileged_obs, obs_history, explicit_info_labels, next_state = self.env.get_observations()
         obs, privileged_obs, obs_history, explicit_info_labels, next_state = obs.to(self.device), privileged_obs.to(self.device), \
@@ -98,10 +99,10 @@ class DreamWaQRunner(OnPolicyRunner):
                         privileged_obs.to(self.device), obs_history.to(self.device), explicit_info_labels.to(self.device), next_state.to(self.device), rewards.to(self.device), dones.to(self.device)
                     self.alg.process_env_step(rewards, dones, infos, next_state)
 
+                    if 'episode' in infos:
+                        ep_infos.append(infos['episode'])
                     if self.log_dir is not None:
                         # Book keeping
-                        if 'episode' in infos:
-                            ep_infos.append(infos['episode'])
                         cur_reward_sum += rewards
                         cur_episode_length += 1
                         new_ids = (dones > 0).nonzero(as_tuple=False)
@@ -121,16 +122,64 @@ class DreamWaQRunner(OnPolicyRunner):
                 mean_reconstruction_loss, mean_kld_loss = self.alg.update()
             stop = time.time()
             learn_time = stop - start
+            tracking = [torch.as_tensor(info["rew_tracking_lin_vel"]).float().mean().item()
+                        for info in ep_infos if "rew_tracking_lin_vel" in info]
+            self.env.simulator.advance_domain_randomization(
+                it, statistics.mean(tracking) if tracking else None)
+            self.current_learning_iteration = it + 1
+            self.env.step_reward_curriculum(self.current_learning_iteration)
             if self.log_dir is not None:
                 self.log(locals())
-            if it % self.save_interval == 0:
-                self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+                if self.current_learning_iteration % self.save_interval == 0:
+                    self.save(os.path.join(self.log_dir, f'model_{self.current_learning_iteration}.pt'))
             ep_infos.clear()
         
-        self.current_learning_iteration += num_learning_iterations
-        self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+        if self.log_dir is not None:
+            self.save(os.path.join(self.log_dir, f'model_{self.current_learning_iteration}.pt'))
+
+    def save(self, path, infos=None):
+        torch.save({
+            "dreamwaq_format_version": 2,
+            "model_state_dict": self.alg.actor_critic.state_dict(),
+            "optimizer_state_dict": self.alg.optimizer.state_dict(),
+            "vae_optimizer_state_dict": self.alg.vae_optimizer.state_dict(),
+            "domain_rand_curriculum": self.env.simulator.domain_rand_curriculum.state_dict(),
+            "iter": self.current_learning_iteration,
+            "learning_rate": self.alg.learning_rate,
+            "infos": infos,
+        }, path)
+
+    def load(self, path, load_optimizer=True):
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        if checkpoint.get("dreamwaq_format_version") != 2:
+            raise ValueError("Incompatible DreamWaQ checkpoint: expected the 11-output estimator "
+                             "and two-optimizer format. Start a fresh training run.")
+        self.alg.actor_critic.load_state_dict(checkpoint["model_state_dict"])
+        if load_optimizer:
+            self.alg.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            self.alg.vae_optimizer.load_state_dict(checkpoint["vae_optimizer_state_dict"])
+            self.alg.learning_rate = checkpoint["learning_rate"]
+        self.current_learning_iteration = checkpoint["iter"]
+        self.env.simulator.load_domain_randomization(checkpoint["domain_rand_curriculum"])
+        self.env.step_reward_curriculum(self.current_learning_iteration)
+        # Apply restored randomization ranges before collecting resumed rollouts.
+        self.env.reset()
+        return checkpoint.get("infos")
 
     def log(self, locs, width=80, pad=35):
+        for name, value in self.alg.estimation_metrics.items():
+            self.writer.add_scalar('Loss/explicit_' + name, value, locs['it'])
+        curriculum = self.env.simulator.domain_rand_curriculum
+        for name, value in curriculum.progress.items():
+            self.writer.add_scalar('Curriculum/domain_' + name, value, locs['it'])
+        if curriculum.reward_ema is not None:
+            self.writer.add_scalar('Curriculum/tracking_ema', curriculum.reward_ema, locs['it'])
+            self.writer.add_scalar('Curriculum/required_reward', curriculum.required_reward, locs['it'])
+        for name, bounds in curriculum.effective_ranges().items():
+            for label, value in zip(('min', 'max'), bounds):
+                self.writer.add_scalar(f'DomainRand/{name}_{label}', value, locs['it'])
+        for name, value in self.env.reward_scales.items():
+            self.writer.add_scalar('RewardScale/' + name, value / self.env.dt, locs['it'])
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
         self.tot_time += locs['collection_time'] + locs['learn_time']
         iteration_time = locs['collection_time'] + locs['learn_time']
@@ -169,7 +218,7 @@ class DreamWaQRunner(OnPolicyRunner):
             self.writer.add_scalar('Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
             self.writer.add_scalar('Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
 
-        str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
+        str = f" \033[1m Learning iteration {locs['it']}/{locs['tot_iter']} \033[0m "
 
         if len(locs['rewbuffer']) > 0:
             log_string = (f"""{'#' * width}\n"""
@@ -203,5 +252,5 @@ class DreamWaQRunner(OnPolicyRunner):
                        f"""{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"""
                        f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
                        f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
-                               locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
+                               locs['tot_iter'] - locs['it'] - 1):.1f}s\n""")
         print(log_string)

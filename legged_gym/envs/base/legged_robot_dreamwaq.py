@@ -15,9 +15,9 @@ class LeggedRobotDreamwaq(LeggedRobot):
         ), dim=-1)
         
         # Estimator labels
-        self.estimator_labels_buf = torch.cat((
+        self.explicit_labels_buf = torch.cat((
             self.simulator.base_lin_vel * self.obs_scales.lin_vel,         # 3
-            self.simulator.link_contact_states, # contact states of hips, thighs, calfs, feet and base (4+4+4+4+1)=17
+            (torch.linalg.vector_norm(self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices], dim=-1) > 1.).float(),
             torch.clip(self.simulator.feet_pos[:, :, 2] -
             torch.mean(self.simulator.height_around_feet, dim=-1) -
             self.cfg.rewards.foot_height_offset, -1, 1.),  # 4
@@ -31,7 +31,7 @@ class LeggedRobotDreamwaq(LeggedRobot):
             (self.simulator.dof_pos - self.simulator.default_dof_pos) *
             self.obs_scales.dof_pos,  # num_dofs
             self.simulator.dof_vel * self.obs_scales.dof_vel,                         # num_dofs
-            self.actions * self.cfg.control.action_scale,
+            self.actions,
         ), dim=-1)
         
         # Critic observation
@@ -64,6 +64,7 @@ class LeggedRobotDreamwaq(LeggedRobot):
             dim=-1,
         )
     
+    @torch.inference_mode()
     def step(self, actions):
         """ Apply actions, simulate, call self.post_physics_step()
 
@@ -72,6 +73,7 @@ class LeggedRobotDreamwaq(LeggedRobot):
         """
         actions = self._pre_sim_step(actions)
         self.simulator.step(actions)
+        self.extras.pop("episode", None)  # Only report freshly completed episodes.
         self.post_physics_step()
 
         # return clipped obs, clipped states (None), rewards, dones and infos
@@ -84,6 +86,7 @@ class LeggedRobotDreamwaq(LeggedRobot):
         return self.obs_buf, self.privileged_obs_buf, self.obs_history, self.explicit_labels_buf, \
             self.next_state_buf, self.rew_buf, self.reset_buf, self.extras
     
+    @torch.inference_mode()
     def reset(self):
         """ Reset all robots"""
         self.reset_idx(torch.arange(self.num_envs, device=self.device))

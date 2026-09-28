@@ -1,9 +1,57 @@
+import math
 import torch
 
 from legged_gym.envs.base.legged_robot_dreamwaq import LeggedRobotDreamwaq
-from legged_gym.utils.math_utils import wrap_to_pi, quat_apply, torch_rand_float
+from legged_gym.utils.math_utils import wrap_to_pi, quat_apply, torch_rand_float, quat_rotate_inverse
 
 class Go2Dreamwaq(LeggedRobotDreamwaq):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.step_reward_curriculum(0)
+
+    def _init_buffers(self):
+        super()._init_buffers()
+        queue_length = self.action_queue.shape[1] if hasattr(self, 'action_queue') else 1
+        self._raw_action_queue = torch.zeros(
+            self.num_envs, queue_length, self.num_actions, device=self.device)
+
+    def _pre_sim_step(self, actions):
+        delayed_actions = super()._pre_sim_step(actions)
+        # Preserve the pre-clipping request with exactly the same delay as execution.
+        self._raw_action_queue[:, 1:] = self._raw_action_queue[:, :-1].clone()
+        self._raw_action_queue[:, 0] = actions.detach().to(self.device)
+        delay = self.action_delay if self.cfg.domain_rand.randomize_ctrl_delay else 0
+        self.simulator.raw_delayed_actions.copy_(self._raw_action_queue[
+            torch.arange(self.num_envs, device=self.device), delay])
+        return delayed_actions
+
+    def reset_idx(self, env_ids):
+        super().reset_idx(env_ids)
+        self._raw_action_queue[env_ids] = 0
+
+    def _parse_cfg(self, cfg):
+        # Derive critic width from the configured sensors rather than a stale
+        # hard-coded height-grid size. Actor history remains proprioceptive.
+        height_count = (len(cfg.terrain.measured_points_x) * len(cfg.terrain.measured_points_y)
+                        if cfg.terrain.measure_heights else 0)
+        contacts = len(cfg.asset.contact_state_link_names) if cfg.asset.obtain_link_contact_states else 0
+        cfg.env.single_critic_obs_len = cfg.env.num_observations + 31 + 3 + height_count + contacts
+        cfg.env.num_privileged_obs = cfg.env.c_frame_stack * cfg.env.single_critic_obs_len
+        cfg.domain_rand.push_interval_s = cfg.control.decimation * cfg.sim.dt
+        super()._parse_cfg(cfg)
+
+    def step_reward_curriculum(self, iteration):
+        if not self.cfg.rewards.use_reward_curriculum:
+            return
+        curriculum = self.cfg.rewards.reward_curriculum
+        fraction = min(1., max(0., (iteration - curriculum.warmup_steps) / max(curriculum.curr_steps, 1)))
+        ramp = 0.5 * (1 - math.cos(math.pi * fraction))
+        for name, (low, high) in curriculum.curr_reward_bounds.items():
+            if name not in self.reward_scales:
+                raise ValueError(f"Curriculum reward {name!r} must be enabled")
+            self.reward_scales[name] = (low + (high - low) * ramp) * self.dt
+
+
     def compute_observations(self):
         self.obs_buf = torch.cat((
             self.commands[:, :3] * self.commands_scale,                     # 3
@@ -77,16 +125,17 @@ class Go2Dreamwaq(LeggedRobotDreamwaq):
             (self.simulator.dof_pos - self.simulator.default_dof_pos) *
             self.obs_scales.dof_pos,  # num_dofs
             self.simulator.dof_vel * self.obs_scales.dof_vel,                         # num_dofs
-            self.actions * self.cfg.control.action_scale,
+            self.actions,  # same units as the clean proprioceptive observation
         ), dim=-1)
         
         # explicit info labels
         self.explicit_labels_buf = torch.cat((
-            self.simulator.base_lin_vel * self.obs_scales.lin_vel * 0.5,  # 3
-            self.simulator.link_contact_states, # contact states of hips, thighs, calfs, feet and base (4+4+4+4+1)=17
-            torch.clip(self.simulator.feet_pos[:, :, 2] -
+            self.simulator.base_lin_vel * self.obs_scales.lin_vel,  # body-frame velocity, 3
+            (torch.linalg.vector_norm(self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices], dim=-1)
+             > self.cfg.rewards.contact_force_threshold).float(),  # FR, FL, RR, RL
+            self.simulator.feet_pos[:, :, 2] -
                 torch.mean(self.simulator.height_around_feet, dim=-1) -
-                self.cfg.rewards.foot_height_offset, -1, 1.),  # 4
+                self.cfg.rewards.foot_height_offset,  # 4
         ), dim=-1)
     
     def _reset_dofs(self, env_ids):
@@ -136,9 +185,45 @@ class Go2Dreamwaq(LeggedRobotDreamwaq):
         noise_vec[33:45] = 0.  # previous actions
         return noise_vec
     
+    def _reward_dof_vel_limits(self):
+        # Cap each joint's excess at 1 rad/s, as in the base locomotion convention.
+        excess = (self.simulator.dof_vel.abs()
+                  - self.simulator.dof_vel_limits * self.cfg.rewards.soft_dof_vel_limit)
+        return excess.clamp(min=0., max=1.).sum(dim=-1)
+
+    def _reward_front_foot_overreach(self):
+        sim = self.simulator
+        front_x = torch.stack([
+            quat_rotate_inverse(sim.base_quat, sim.feet_pos[:, i] - sim.base_pos)[:, 0]
+            for i in (0, 1)], dim=-1)
+        excess = (front_x - self.cfg.rewards.overreach_x_max).clamp_min(0.)
+        contact = (sim.link_contact_forces[:, sim.feet_contact_indices[:2], 2]
+                   > self.cfg.rewards.overreach_contact_force_threshold)
+        penalty = (contact * excess.square()).sum(dim=-1)
+        # Preserve PACT's payload-dependent front-foot penalty scaling.
+        total_mass = sim._robot_mass + sim._added_base_mass.clamp_min(0.)
+        scale = 1. - .5 * (sim._robot_mass / total_mass).squeeze(-1)
+        return scale * penalty
+
+    def _reward_rear_foot_overreach(self):
+        sim = self.simulator
+        rear_x = torch.stack([
+            quat_rotate_inverse(sim.base_quat, sim.feet_pos[:, i] - sim.base_pos)[:, 0]
+            for i in (2, 3)], dim=-1)
+        excess = ((rear_x - self.cfg.rewards.rear_foot_x_nominal).abs()
+                  - self.cfg.rewards.rear_foot_x_margin).clamp_min(0.)
+        contact = (sim.link_contact_forces[:, sim.feet_contact_indices[2:4], 2]
+                   > self.cfg.rewards.overreach_contact_force_threshold)
+        return (contact * excess.square()).sum(dim=-1)
+
+    def _reward_torque_limits(self):
+        excess = (self.simulator.requested_torques.abs()
+                  - self.simulator.torque_limits * self.cfg.rewards.soft_torque_limit)
+        return excess.clamp_min(0).sum(dim=-1)
+
     def _reward_feet_air_time(self):
         # Reward long steps
-        contact = self.simulator.link_contact_forces[:, self.simulator.feet_indices, 2] > 1.
+        contact = self.simulator.link_contact_forces[:, self.simulator.feet_contact_indices, 2] > 1.
         contact_filt = torch.logical_or(contact, self.last_contacts)
         self.last_contacts = contact
         first_contact = (self.feet_air_time > 0.) * contact_filt

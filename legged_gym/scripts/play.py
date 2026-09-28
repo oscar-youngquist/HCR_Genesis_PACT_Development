@@ -191,7 +191,7 @@ def interaction_loop(env, policy, args):
                     'base_vel_z': env.simulator.base_lin_vel[robot_index, 2].item(),
                     'base_vel_yaw': env.simulator.base_ang_vel[robot_index, 2].item(),
                     'contact_forces_z': env.simulator.link_contact_forces[robot_index, 
-                                                                          env.simulator.feet_indices, 2].cpu().numpy()
+                                                                          env.simulator.feet_contact_indices, 2].cpu().numpy()
                 }
             )
         elif i==stop_state_log:

@@ -63,7 +63,7 @@ class IsaacLabSimulator(Simulator):
             if self._cfg.terrain.obtain_terrain_info_around_feet:
                 self._calc_terrain_info_around_feet()
     
-    def reset_idx(self, env_ids):
+    def _reset_domain_randomization(self, env_ids):
         # domain randomization
         if self._cfg.domain_rand.randomize_friction:
             self._randomize_friction(env_ids)
@@ -79,6 +79,9 @@ class IsaacLabSimulator(Simulator):
             self._randomize_joint_damping(env_ids)
         if self._cfg.domain_rand.randomize_pd_gain:
             self._randomize_pd_gain(env_ids)
+
+    def reset_idx(self, env_ids):
+        self._reset_domain_randomization(env_ids)
         
         self._robot.reset(env_ids)
         self._contact_sensors.reset(env_ids)
@@ -299,7 +302,7 @@ class IsaacLabSimulator(Simulator):
         # Add contact sensors
         contact_sensor_cfg = ContactSensorCfg(
             prim_path="/World/envs/env_.*/" + self._cfg.asset.name + "/.*", # track all links of the robot, but only the ones specified in cfg will be used for termination and penalty
-            update_period=self._control_dt,                      # update every control step
+            update_period=(self._sim_params["dt"] if getattr(self._cfg.sim, "use_dreamwaq_adapter", False) else self._control_dt),                      # update every control step
             history_length=1,                       # keep contact history of last 2 steps
             debug_vis=not self._headless,           # visualize contact points if not headless
         )
@@ -395,7 +398,7 @@ class IsaacLabSimulator(Simulator):
         self._base_link_index = self._robot.body_names.index(self._cfg.asset.base_link_name)
         
         if self._cfg.asset.obtain_link_contact_states:
-            self._contact_state_link_indices = find_link_indices(
+            self._contact_state_link_indices = find_link_contact_indices(
                 self._cfg.asset.contact_state_link_names
             )
         

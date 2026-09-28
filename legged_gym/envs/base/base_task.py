@@ -2,8 +2,6 @@ import sys
 import numpy as np
 import torch
 import time
-from legged_gym.simulator import GenesisSimulator, IsaacGymSimulator, IsaacLabSimulator, GenesisSimulator_PACT, GenesisSimulator_PACT_Pos
-from legged_gym.simulator import GenesisSimulator_PACT_Water, GenesisSimulator_PACT_NoPINN, GenesisSimulator_PACT_PosTau, GenesisSimulator_PACT_RL2AC
 from legged_gym import SIMULATOR
 
 # Base class for RL tasks
@@ -39,23 +37,42 @@ class BaseTask():
 
         self.extras = {}
         
-        if SIMULATOR == "genesis":
+        if getattr(cfg.sim, "use_dreamwaq_adapter", False):
+            if SIMULATOR == "isaaclab":
+                from legged_gym.simulator.isaaclab_simulator_dreamwaq import IsaacLabSimulatorDreamWaQ
+                simulator_cls = IsaacLabSimulatorDreamWaQ
+            elif SIMULATOR == "genesis":
+                from legged_gym.simulator.genesis_simulator_dreamwaq import GenesisSimulatorDreamWaQ
+                simulator_cls = GenesisSimulatorDreamWaQ
+            else:
+                raise ValueError("Go2 DreamWaQ curriculum supports SIMULATOR=isaaclab or genesis")
+            self.simulator = simulator_cls(cfg, sim_params, sim_device, self.headless)
+        elif SIMULATOR == "genesis":
+            from legged_gym.simulator import GenesisSimulator
             self.simulator = GenesisSimulator(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "isaacgym":
+            from legged_gym.simulator import IsaacGymSimulator
             self.simulator = IsaacGymSimulator(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "isaaclab":
+            from legged_gym.simulator import IsaacLabSimulator
             self.simulator = IsaacLabSimulator(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "genesis_pact":
+            from legged_gym.simulator import GenesisSimulator_PACT
             self.simulator = GenesisSimulator_PACT(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "genesis_pact_pos":
+            from legged_gym.simulator import GenesisSimulator_PACT_Pos
             self.simulator = GenesisSimulator_PACT_Pos(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "genesis_pact_water":
+            from legged_gym.simulator import GenesisSimulator_PACT_Water
             self.simulator = GenesisSimulator_PACT_Water(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "genesis_pact_nopinn":
+            from legged_gym.simulator import GenesisSimulator_PACT_NoPINN
             self.simulator = GenesisSimulator_PACT_NoPINN(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "genesis_pact_postau":
+            from legged_gym.simulator import GenesisSimulator_PACT_PosTau
             self.simulator = GenesisSimulator_PACT_PosTau(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "genesis_pact_rl2ac":
+            from legged_gym.simulator import GenesisSimulator_PACT_RL2AC
             self.simulator = GenesisSimulator_PACT_RL2AC(cfg, sim_params, sim_device, self.headless)
         
         else:

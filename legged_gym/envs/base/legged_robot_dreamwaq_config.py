@@ -6,7 +6,7 @@ class LeggedRobotDreamwaqCfg(LeggedRobotCfg):
         frame_stack = 20    # number of frames to stack for obs_history
         num_history_obs = int(num_observations * frame_stack)
         num_latent_dims = 16
-        num_explicit_dims = 24  # base linear velocity
+        num_explicit_dims = 11  # velocity (3), foot contacts (4), foot heights (4)
         num_decoder_output = num_observations
         c_frame_stack = 5
         single_critic_obs_len = num_observations + 31 + 81 + 17 + 3

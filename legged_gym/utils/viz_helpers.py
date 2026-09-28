@@ -1,6 +1,8 @@
 import numpy as np
 import torch
-import genesis.utils.mesh as mu  # adjust if your import path differs
+from legged_gym import SIMULATOR
+if "genesis" in SIMULATOR:
+    import genesis.utils.mesh as mu
 import trimesh
 
 
