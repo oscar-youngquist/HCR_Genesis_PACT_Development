@@ -35,6 +35,7 @@ dist/
 *.csv
 *.pt
 *.json
+**/diagnostics/*
 
 # JetBrains IDE
 .idea/
