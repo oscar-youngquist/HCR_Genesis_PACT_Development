@@ -46,6 +46,14 @@ class LauncherTest(unittest.TestCase):
         self.assertIn("train_hard_pact.py", result.stdout)
         self.assertIn("--qp_solver\ncupiqp", result.stdout)
 
+    def test_temporary_files_use_writable_runtime_mounts(self):
+        result = self.run_launcher("smoke", "b1z1_unifp")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        runtime = Path(self.env["RUN_DIR"]) / "runtime"
+        for directory, target in (("tmp", "/tmp"), ("var-tmp", "/var/tmp")):
+            self.assertTrue((runtime / directory).is_dir())
+            self.assertIn(f"{runtime / directory}:{target}", result.stdout)
+
     def test_reject_device_override_and_multiple_gpus(self):
         self.assertNotEqual(self.run_launcher("train", "b1z1_unifp", "--gpu=cuda:1").returncode, 0)
         self.assertNotEqual(self.run_launcher("smoke", "b1z1_unifp", "--num_envs=4096").returncode, 0)

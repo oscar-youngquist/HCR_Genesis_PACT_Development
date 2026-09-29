@@ -21,7 +21,7 @@ From: ubuntu:22.04
     apt-get install -y --no-install-recommends ca-certificates git build-essential \
         libglib2.0-0 libgl1 libegl1 libglu1-mesa libvulkan1 vulkan-tools \
         libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxcursor1 libxinerama1 \
-        libsm6 libice6 libnss3 libnspr4 libasound2 libgtk-3-0 libgomp1
+        libsm6 libice6 libxt6 libnss3 libnspr4 libasound2 libgtk-3-0 libgomp1
     mkdir -p /opt/env /opt/hcr-container /workspace/repo /runtime /output /home/container
     tar -xzf /opt/build-inputs/lr_lab_cupiqp.tar.gz -C /opt/env
     tar -xzf /opt/build-inputs/IsaacLab-source.tar.gz -C /opt
@@ -56,6 +56,8 @@ From: ubuntu:22.04
     export HARD_PACT_SKIP_CONDA_ACTIVATE=1
 
 %test
+    # MaterialX requires libXt even when Isaac Sim runs headless.
+    /opt/env/bin/python -c 'import ctypes; ctypes.CDLL("libXt.so.6")'
     /opt/env/bin/python -c 'import importlib.metadata as m; assert m.version("isaacsim") == "5.1.0.0"; assert m.version("torch") == "2.7.0+cu128"; import isaaclab; assert isaaclab.__file__.startswith("/opt/IsaacLab/")'
 
 %runscript

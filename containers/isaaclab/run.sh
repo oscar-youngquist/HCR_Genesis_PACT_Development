@@ -62,6 +62,8 @@ runtime=${RUNTIME_DIR:-$RUN_DIR/runtime}
 mkdir -p "$runtime" "$RUN_DIR/logs"
 runtime=$(realpath "$runtime")
 mkdir -p "$runtime"/{home,cache,config,data,matplotlib,numba,torch_extensions,kit-cache,kit-data,kit-logs}
+# USD conversion and extension downloads must not fill the contained /tmp.
+mkdir -p "$runtime"/{tmp,var-tmp}
 # Bind syntax uses colon/comma separators; fail rather than mount the wrong path.
 for path in "$IMAGE" "$REPO" "$RUN_DIR" "$runtime"; do
     [[ "$path" != *:* && "$path" != *,* ]] || { echo "Unsupported bind path: $path" >&2; exit 2; }
@@ -71,10 +73,12 @@ export APPTAINERENV_OMNI_KIT_ACCEPT_EULA=YES
 export APPTAINERENV_SIMULATOR="$simulator"
 export APPTAINERENV_OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
 export APPTAINERENV_WANDB_MODE="${WANDB_MODE:-offline}"
+export APPTAINERENV_TMPDIR=/tmp
 kit=/opt/env/lib/python3.11/site-packages/isaacsim/kit
 options=(exec --nv --cleanenv --containall
     --home "$runtime/home:/home/container"
     --bind "$REPO:/workspace/repo" --bind "$runtime:/runtime"
+    --bind "$runtime/tmp:/tmp" --bind "$runtime/var-tmp:/var/tmp"
     --bind "$RUN_DIR:/output" --bind "$RUN_DIR/logs:/workspace/repo/logs"
     --bind "$runtime/kit-cache:$kit/cache" --bind "$runtime/kit-data:$kit/data"
     --bind "$runtime/kit-logs:$kit/logs" --pwd /workspace/repo/legged_gym/scripts)
