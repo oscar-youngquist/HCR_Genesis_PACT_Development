@@ -572,11 +572,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
                         # at absolute iteration N. Zero keeps current behavior.
-                        'warmup_iterations': 1000,
+                        'warmup_iterations': 2000,
                         # Execution-only interpolation; full QPs/losses remain active.
                         'correction_ramp_enabled': True,
-                        'correction_ramp_start_offset': 0,
-                        'correction_ramp_duration': 1000,
+                        'correction_ramp_start_offset': 100,
+                        'correction_ramp_duration': 100,
                         'objective_curriculum_enabled': False,
                         'contact_acceleration_weight_initial': 0.10,  # .25 * final
                         'contact_acceleration_weight_final': 0.10,  # contact_acceleration_weight
@@ -656,9 +656,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
                         # Optional soft one-physics-step BODY velocity tracking.
                         # Independent of stance/attitude and execution curricula.
-                        'planar_velocity_weight': 20.0,
-                        'qp_velocity_loss_horizon_s': 0.020,  # shared outer xy/yaw extrapolation; QP dt unchanged
-                        'yaw_rate_weight': 5.0,
+                        'planar_velocity_weight': 12.0,
+                        'qp_velocity_loss_horizon_s': 0.02,  # shared outer xy/yaw extrapolation; QP dt unchanged
+                        'yaw_rate_weight': 6.0,
                         'planar_velocity_scale_m_s': 1.0,
                         'yaw_rate_scale_rad_s': 1.0,
                         'attitude_acceleration_scale_rad_s2': 20.0,
