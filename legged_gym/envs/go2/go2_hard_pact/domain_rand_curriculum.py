@@ -36,6 +36,11 @@ def go2_pact_domain_rand_schema(cfg) -> Mapping[str, DomainRandFeature]:
     """Build the immutable schema from the legacy Go2 PACT configuration."""
     d = cfg.domain_rand
     enabled = lambda name: bool(getattr(d, name, False))
+    # Older configs retain the original isotropic torque envelope.
+    yaw_initial = float(getattr(d, "persistent_yaw_torque_min_nm", d.persistent_torque_min_nm))
+    yaw_final = float(getattr(d, "persistent_yaw_torque_max_nm", d.persistent_torque_max_nm))
+    if not 0.0 <= yaw_initial <= yaw_final:
+        raise ValueError("Yaw torque magnitudes must satisfy 0 <= min <= max")
     for name in ("persistent_force_min_n", "persistent_force_max_n",
                  "persistent_vertical_force_min_n", "persistent_vertical_force_max_n"):
         if float(getattr(d, name)) < 0:
@@ -60,6 +65,7 @@ def go2_pact_domain_rand_schema(cfg) -> Mapping[str, DomainRandFeature]:
         "persistent_force": DomainRandFeature("persistent_force", (-float(d.persistent_force_min_n), float(d.persistent_force_min_n)), (-float(d.persistent_force_max_n), float(d.persistent_force_max_n)), "disturbance", enabled("persistent_disturbance"), "runtime", "N"),
         "persistent_vertical_force": DomainRandFeature("persistent_vertical_force", (-float(d.persistent_vertical_force_min_n), 0.0), (-float(d.persistent_vertical_force_max_n), 0.0), "disturbance", enabled("persistent_disturbance"), "runtime", "N"),
         "persistent_torque": DomainRandFeature("persistent_torque", (-float(d.persistent_torque_min_nm), float(d.persistent_torque_min_nm)), (-float(d.persistent_torque_max_nm), float(d.persistent_torque_max_nm)), "disturbance", enabled("persistent_disturbance"), "runtime", "N*m"),
+        "persistent_yaw_torque": DomainRandFeature("persistent_yaw_torque", (-yaw_initial, yaw_initial), (-yaw_final, yaw_final), "disturbance", enabled("persistent_disturbance"), "runtime", "N*m"),
     }
 
 
@@ -167,6 +173,7 @@ class HardPACTDomainRandCurriculum:
         effective = self.effective_ranges()
         capabilities = dict(capabilities)
         capabilities.setdefault("persistent_vertical_force", capabilities.get("persistent_force", False))
+        capabilities.setdefault("persistent_yaw_torque", capabilities.get("persistent_torque", False))
         return {
             name: {
                 **asdict(spec),

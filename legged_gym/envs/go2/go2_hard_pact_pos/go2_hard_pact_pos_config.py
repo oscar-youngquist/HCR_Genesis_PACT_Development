@@ -196,6 +196,8 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         persistent_vertical_force_max_n = 7.0
         persistent_torque_min_nm = 4.0
         persistent_torque_max_nm = 4.0
+        persistent_yaw_torque_min_nm = 4.0  # Initial world-Z torque cap (+/- N*m).
+        persistent_yaw_torque_max_nm = 4.0  # Final cap at full disturbance curriculum.
 
     class noise(LeggedRobotCfg.noise):
         add_noise = True

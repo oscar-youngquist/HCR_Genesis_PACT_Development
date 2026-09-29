@@ -181,6 +181,7 @@ def test_external_wrench_curriculum_advances_sampling_and_restores(task_class, c
     d.persistent_force_min_n, d.persistent_force_max_n = 2., 6.
     d.persistent_vertical_force_min_n, d.persistent_vertical_force_max_n = 2., 6.
     d.persistent_torque_min_nm, d.persistent_torque_max_nm = 1., 3.
+    d.persistent_yaw_torque_min_nm, d.persistent_yaw_torque_max_nm = .2, .8
     d.persistent_force_probability = d.persistent_torque_probability = 1.
     d.persistent_force_duration_range_s = d.persistent_torque_duration_range_s = [.16, .16]
     d.persistent_ramp_fraction = .25
@@ -202,7 +203,8 @@ def test_external_wrench_curriculum_advances_sampling_and_restores(task_class, c
         for component in (0, 1):
             task._start_due_persistent_events(component, 0)
         value = task._persistent_wrench_target_world.clone()
-        scale = torch.tensor([bounds()[0]] * 3 + [bounds()[1]] * 3)
+        yaw = task.domain_rand_curriculum.effective_ranges()["persistent_yaw_torque"][1]
+        scale = torch.tensor([bounds()[0]] * 3 + [bounds()[1]] * 2 + [yaw])
         assert torch.all(value.abs() <= scale)
         assert torch.all(value[:, 2] <= 0)  # World vertical force is downward.
         assert task._persistent_component_active.all()
@@ -243,10 +245,34 @@ def test_external_wrench_curriculum_advances_sampling_and_restores(task_class, c
     final, normalized_final = sample()
     torch.testing.assert_close(normalized_final, normalized_initial, rtol=1e-6, atol=1e-7)
     assert final[:, :3].abs().max() > 4.
-    for name, maximum in (("persistent_force", 6.), ("persistent_torque", 3.)):
+    for name, maximum in (("persistent_force", 6.), ("persistent_torque", 3.),
+                          ("persistent_yaw_torque", .8)):
         report = task.domain_rand_capability_report[name]
         assert report["requested_range"] == report["effective_range"] == (-maximum, maximum)
         assert report["phase"] == "disturbance" and report["update_mode"] == "runtime"
+
+
+@pytest.mark.parametrize("progress", [0., .5, 1.])
+@pytest.mark.parametrize("roll_pitch,yaw", [(0., 2.), (2., 0.)])
+def test_independent_yaw_torque_sampling(progress, roll_pitch, yaw):
+    cfg = GO2HardPACTCfg()
+    d = cfg.domain_rand
+    d.persistent_torque_min_nm = roll_pitch
+    d.persistent_torque_max_nm = 3 * roll_pitch
+    d.persistent_yaw_torque_min_nm = yaw
+    d.persistent_yaw_torque_max_nm = 3 * yaw
+    d.persistent_torque_probability = 1.
+    task = _persistent_task(32, progress, config=cfg)
+    torch.manual_seed(19)
+    task._start_due_persistent_events(1, 0)
+    torque = task._persistent_wrench_target_world[:, 3:]
+    limits = torch.tensor([roll_pitch, roll_pitch, yaw]) * (1 + 2 * progress)
+    assert task._persistent_component_active[:, 1].all()
+    assert torch.all(torque.abs() <= limits)
+    assert torch.all(torque[:, limits == 0] == 0)
+    assert torch.any(torque[:, limits > 0] != 0)
+    assert task.domain_rand_curriculum.effective_ranges()["persistent_yaw_torque"] == (
+        -yaw * (1 + 2 * progress), yaw * (1 + 2 * progress))
 
 
 def test_external_wrench_curriculum_disabled_phase_retains_initial_bounds():

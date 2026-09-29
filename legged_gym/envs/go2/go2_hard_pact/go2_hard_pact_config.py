@@ -135,20 +135,20 @@ class GO2HardPACTCfg(LeggedRobotCfg):
 
         randomize_base_mass = True
         min_added_mass_max = 2.0
-        max_added_mass_max = 3.0
+        max_added_mass_max = 2.0
         added_mass_min = -1.0
 
         randomize_com_displacement = True
         com_displacement_x_min = 0.05
-        com_displacement_x_max = 0.1
+        com_displacement_x_max = 0.15
 
         com_displacement_y_min = 0.05
-        com_displacement_y_max = 0.1
+        com_displacement_y_max = 0.15
 
-        com_displacement_z_positive = False
+        com_displacement_z_positive = True
         com_displacement_z_min_pos = 0.1
         com_displacement_z_min = 0.05
-        com_displacement_z_max = 0.1
+        com_displacement_z_max = 0.15
 
         randomize_ctrl_delay = True
         ctrl_delay_step_range = [0, 1]
@@ -167,7 +167,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         joint_friction_range_end = [0.0, 0.2]
         joint_friction_range_start = [0.0, 0.05]
 
-        randomize_joint_stiffness = False
+        randomize_joint_stiffness = True
         joint_stiffness_range_end = [0.0, 0.02]
         joint_stiffness_range_start = [0.0, 0.005]
 
@@ -203,10 +203,12 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         persistent_force_min_n = 4.0
         persistent_force_max_n = 10.0
         # Positive magnitudes; actual world Fz is sampled in [-limit, 0].
-        persistent_vertical_force_min_n = 10.0
+        persistent_vertical_force_min_n = 15.0
         persistent_vertical_force_max_n = 60.0
         persistent_torque_min_nm = 2.0
-        persistent_torque_max_nm = 14.0
+        persistent_torque_max_nm = 15.0
+        persistent_yaw_torque_min_nm = 1.0  # Initial world-Z torque cap (+/- N*m).
+        persistent_yaw_torque_max_nm = 3.5  # Final cap at full disturbance curriculum.
 
     class noise(LeggedRobotCfg.noise):
         add_noise = True
@@ -570,7 +572,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
                         # at absolute iteration N. Zero keeps current behavior.
-                        'warmup_iterations': 500,
+                        'warmup_iterations': 1000,
                         # Execution-only interpolation; full QPs/losses remain active.
                         'correction_ramp_enabled': True,
                         'correction_ramp_start_offset': 0,

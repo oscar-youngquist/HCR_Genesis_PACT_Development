@@ -738,7 +738,9 @@ class Go2HardPACT(Go2PACT):
         self._schedule_next_persistent_event(due, component, control_step)
         vertical_magnitude = (-self.domain_rand_curriculum.schema["persistent_vertical_force"].range_at(
             self.domain_rand_curriculum.progress["disturbance"])[0] if component == 0 else 0.)
-        if due.numel() == 0 or max(magnitude, vertical_magnitude) <= 0.0:
+        yaw_magnitude = (self.domain_rand_curriculum.schema["persistent_yaw_torque"].range_at(
+            self.domain_rand_curriculum.progress["disturbance"])[1] if component == 1 else 0.)
+        if due.numel() == 0 or max(magnitude, vertical_magnitude, yaw_magnitude) <= 0.0:
             return
         selected = due[
             torch.rand(due.numel(), device=self.device) < probability
@@ -764,7 +766,9 @@ class Go2HardPACT(Go2PACT):
             sampled[:, 1] = radius * angle.sin()
             sampled[:, 2] = -vertical_magnitude * sampled[:, 2].abs()
         else:
-            sampled *= magnitude
+            # World-Z yaw has its own cap, with the same curriculum and waveform.
+            sampled[:, :2] *= magnitude
+            sampled[:, 2] *= yaw_magnitude
         self._persistent_wrench_target_world[selected, values] = sampled
 
     def _update_persistent_wrench(self, control_step):
