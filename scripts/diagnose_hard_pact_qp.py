@@ -317,6 +317,7 @@ def replay_csv_row(report):
                     scalar(prefix+"/"+label,None if value is None else value[i])
             else: scalar(prefix+"/"+key,value)
     assessment=report.get("assessment",{})
+    row['torque_rate_constraints_enabled'] = assessment.get('torque_rate_constraints_enabled')
     joint=assessment.get("joint")
     row["joint_metrics_available"] = joint is not None
     if joint is None:

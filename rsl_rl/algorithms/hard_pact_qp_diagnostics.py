@@ -71,8 +71,10 @@ class QPIterationDiagnostics:
                 "joint_acceleration_abs_rad_s2":a[:,6:].abs(),
                 "position_exceedance_rad":torch.maximum(qmin-q-dt*v-beta*dt.square()*a[:,6:],q+dt*v+beta*dt.square()*a[:,6:]-qmax).clamp_min(0),
                 "velocity_exceedance_rad_s":((v+dt*a[:,6:]).abs()-vmax).clamp_min(0)}
+        if x.shape[1]>24:
+            values.update(joint_slack_rad_s2=x.detach()[:,24:36])
         if x.shape[1]==48:
-            values.update(joint_slack_rad_s2=x.detach()[:,24:36],rate_slack_nm=x.detach()[:,36:48])
+            values.update(rate_slack_nm=x.detach()[:,36:48])
         finite=torch.isfinite(x).all(-1)&torch.isfinite(a).all(-1)
         for status,rows in (("accepted",accepted),("rejected",~accepted)):
             prefix=f"health/{stage}/{status}"
@@ -115,7 +117,9 @@ class QPIterationDiagnostics:
         direction = command / speed.clamp_min(1e-3)[:, None]
         error_now = current[:, :2]-command
         finite = torch.isfinite(torch.cat((x, a0, a1, current, command,
-            data['joint_position'], data['joint_velocity'], rate_lower, rate_upper), -1)).all(-1)
+            data['joint_position'], data['joint_velocity']), -1)).all(-1)
+        if rate_lower is not None:
+            finite &= torch.isfinite(rate_lower).all(-1) & torch.isfinite(rate_upper).all(-1)
         # Use one paired mask even if a nonfinite reference cancels out of a
         # particular comparison. Never give different costs different cohorts.
         for value in (baseline, da_tau, da_force, data['dt'], data['base_quaternion'],
@@ -160,7 +164,9 @@ class QPIterationDiagnostics:
                 log(label+'/'+name+'/delta_velocity_l2_m_s', change.norm(dim=-1))
                 log(label+'/'+name+'/delta_velocity_along_command_m_s', (change*direction).sum(-1), directional)
 
-        # Objective associations, evaluated at the inner objective's actual dt.
+        # Inner-objective cost uses its own horizon; constraints below keep dt.
+        inner_horizon = dt if cfg.qp_velocity_objective_horizon_s is None else torch.full_like(dt,cfg.qp_velocity_objective_horizon_s)
+        log('inner_objective_horizon_s', inner_horizon[:,0])
         # No extra mass solve; fixed wrench cancels in candidate-minus-baseline.
         q = data['base_quaternion']
         yaw = torch.atan2(2*(q[:, 3]*q[:, 2]+q[:, 0]*q[:, 1]), 1-2*(q[:, 1].square()+q[:, 2].square()))
@@ -176,7 +182,7 @@ class QPIterationDiagnostics:
                 stance=cfg.contact_acceleration_weight*(contact/cfg.contact_acceleration_scale_m_s2).square().sum(-1).mul(stance).sum(-1),
                 attitude=cfg.attitude_weight*(rp/cfg.attitude_acceleration_scale_rad_s2).square().sum(-1),
                 grf_reference=cfg.force_tracking_weight*((force-reference_force)/cfg.force_scale_n).square().sum(-1),
-                planar_tracking=cfg.planar_velocity_weight*((error_now+dt*a[:, :2])/cfg.planar_velocity_scale_m_s).square().sum(-1))
+                planar_tracking=cfg.planar_velocity_weight*((error_now+inner_horizon*a[:, :2])/cfg.planar_velocity_scale_m_s).square().sum(-1))
         c0, c1 = costs(a0, reference_force), costs(a1, candidate[:, 12:])
         for name in c0:
             log('weighted_cost_delta/'+name, c1[name]-c0[name])
@@ -190,11 +196,12 @@ class QPIterationDiagnostics:
         force = candidate[:, 12:].reshape(-1, 4, 3)
         margins = {
             'absolute_torque_nm': (torque_limit-candidate[:, :12].abs(), 1e-3, None),
-            'torque_rate_nm': (torch.minimum(candidate[:, :12]-rate_lower, rate_upper-candidate[:, :12]), 1e-3, None),
             'joint_position_rad': (torch.minimum(q_next-qmin, qmax-q_next), 1e-4, None),
             'joint_velocity_rad_s': (vmax-v_next.abs(), 1e-3, None),
             'friction_n': (cfg.friction_coefficient*force[:, :, 2:]-force[:, :, :2].abs(), 1e-3, stance[..., None]),
             'unilateral_n': (force[:, :, 2], 1e-3, stance)}
+        if rate_lower is not None:
+            margins['torque_rate_nm'] = (torch.minimum(candidate[:,:12]-rate_lower,rate_upper-candidate[:,:12]),1e-3,None)
         for name, (margin, tolerance, active) in margins.items():
             row_shape = (mask.shape[0],)+(1,)*(margin.ndim-1)
             eligible = mask.reshape(row_shape).expand_as(margin)
@@ -204,8 +211,9 @@ class QPIterationDiagnostics:
             log('original_bounds/'+name+'/violation_mean', (-margin).clamp_min(0), eligible)
             for label, worse in worsened.items():
                 log(label+'/worsened/'+name+'/near_fraction', (margin.abs() <= tolerance).float(), eligible & worse.reshape(row_shape))
-        if x.shape[-1] == 48:
+        if x.shape[-1] > 24:
             log('recovery/joint_slack_rad_s2', x[:, 24:36], mask[:, None])
+        if x.shape[-1] == 48:
             log('recovery/rate_slack_nm', x[:, 36:48], mask[:, None])
 
     def _candidate_summary(self, key, values, mask):
@@ -316,6 +324,8 @@ class QPIterationDiagnostics:
                 self.add_values(f"attempt/{name}/{gap}_mean", values, attempted)
         # Reduce per-row physical values directly, not means of chunk means.
         for key, value in diag.items():
+            if key == 'torque_rate_constraints_enabled':
+                self.add_values(key, value)
             if key in ("soft_joint/slack_max_rad_s2", "soft_joint/rate_slack_max_nm",
                        "soft_joint/original_rate_violation_max_nm",
                        "soft_joint/original_joint_violation_max_rad_s2",

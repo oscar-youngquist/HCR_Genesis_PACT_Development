@@ -313,7 +313,7 @@ class CuPIQPFunction(torch.autograd.Function):
         backend = backend or SolverBackend("cupiqp", config)
         real_rows = Q.shape[0]
         capacity = real_rows
-        if Q.shape[1] == 48 and getattr(config,"cupiqp_ppo_capacity_reuse",True):
+        if Q.shape[1] in (36,48) and getattr(config,"cupiqp_ppo_capacity_reuse",True):
             capacity = solver_capacity(real_rows,config.chunk_size or config.ppo_chunk_size)
             Q,p,G,h,A,b,x_l,x_u = tuple(pad_solver_rows(v,capacity) for v in (Q,p,G,h,A,b,x_l,x_u))
         ctx.real_rows, ctx.capacity = real_rows, capacity

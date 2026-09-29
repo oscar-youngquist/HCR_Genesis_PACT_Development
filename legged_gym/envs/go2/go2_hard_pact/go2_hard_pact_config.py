@@ -269,7 +269,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                           30.1, 30.1, 15.7]
 
     class control(LeggedRobotCfg.control):
-        clip_torque_rate_without_qp = True
+        clip_torque_rate_without_qp = False
         torque_rate_limit_nm_s = 2000.0  # Shared by QP, fallback, and optional non-QP clipping.
         stiffness = {'joint': 30.0}
         damping = {'joint': 0.75}
@@ -639,9 +639,10 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         
                         # x=[total torque12; world GRF12]; no acceleration/slack variables.
                         'contact_threshold': 0.5,
+                        'torque_rate_constraint_weight': 0.0,  # QP only: zero removes rate rows/slack; positive enables hard rate bound
                         'contact_acceleration_weight': 1.0,
                         'projection_contact_acceleration_weight': 0.10,  # fixed OUTER stance coefficient
-                        # Recovery softens only joint acceleration/position/velocity.
+                        # Recovery softens the position/velocity envelope; rate slack exists only when QP rate enabled.
                         'soft_joint_recovery_enabled': True,
                         'soft_joint_recovery_weight': 200.0,
                         'soft_joint_recovery_scale_rad_s2': 100.0,
@@ -654,10 +655,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'contact_acceleration_scale_m_s2': 50.0,
                         'attitude_weight': 1.0,
 
-                        # Optional soft one-physics-step BODY velocity tracking.
+                        # Soft BODY velocity tracking by constant-derivative extrapolation.
                         # Independent of stance/attitude and execution curricula.
                         'planar_velocity_weight': 12.0,
                         'qp_velocity_loss_horizon_s': 0.02,  # shared outer xy/yaw extrapolation; QP dt unchanged
+                        'qp_velocity_objective_horizon_s': 0.020,  # independent inner xy/yaw extrapolation; constraints keep physics dt
                         'yaw_rate_weight': 6.0,
                         'planar_velocity_scale_m_s': 1.0,
                         'yaw_rate_scale_rad_s': 1.0,

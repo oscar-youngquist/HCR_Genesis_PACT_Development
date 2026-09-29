@@ -63,7 +63,7 @@ class HardPACTQPConfig:
     """
 
     enabled: bool = True  # Master rollout/PPO projection switch.
-    constraint_schema_version: int = 2  # position/velocity envelope; dual-slack recovery
+    constraint_schema_version: int = 2  # position/velocity envelope; rate-slack layout is config-dependent
     # Train normally without rollout/replay QPs until this absolute PPO
     # iteration. Zero preserves immediate projection; independent of PINN.
     warmup_iterations: int = 0
@@ -138,6 +138,7 @@ class HardPACTQPConfig:
     qpth_warm_start: bool = False
     friction_coefficient: float = 0.6  # mu in |fx|,|fy|<=mu*fz.
     torque_rate_limit_nm_s: float = 1000.0  # dot(tau)_lim [Nm/s].
+    torque_rate_constraint_weight: float = 1.0  # 0 removes QP rate constraints; any positive value enables them
     contact_threshold: float = 0.5
     contact_acceleration_weight: float = 1.0
     projection_contact_acceleration_weight: float = 0.10
@@ -146,6 +147,7 @@ class HardPACTQPConfig:
     planar_velocity_weight: float = 0.0
     velocity_tracking_replay_enabled: bool = False  # outer actor terms need commands even with inner weights zero
     qp_velocity_loss_horizon_s: float | None = None  # outer constant-derivative extrapolation only
+    qp_velocity_objective_horizon_s: float | None = None  # inner xy/yaw extrapolation; constraints retain physics dt
     yaw_rate_weight: float = 0.0
     planar_velocity_scale_m_s: float = 1.0
     yaw_rate_scale_rad_s: float = 1.0
@@ -390,9 +392,12 @@ class HardPACTDifferentiableQP:
         import math
         if not math.isfinite(config.projection_contact_acceleration_weight) or config.projection_contact_acceleration_weight < 0:
             raise ValueError('projection_contact_acceleration_weight must be finite and nonnegative')
-        if config.qp_velocity_loss_horizon_s is not None and (
-                not math.isfinite(config.qp_velocity_loss_horizon_s) or config.qp_velocity_loss_horizon_s <= 0):
-            raise ValueError('qp_velocity_loss_horizon_s must be finite and positive or None')
+        for name in ('qp_velocity_loss_horizon_s', 'qp_velocity_objective_horizon_s'):
+            value = getattr(config, name)
+            if value is not None and (not math.isfinite(value) or value <= 0):
+                raise ValueError(name+' must be finite and positive or None')
+        if not math.isfinite(config.torque_rate_constraint_weight) or config.torque_rate_constraint_weight < 0:
+            raise ValueError('torque_rate_constraint_weight must be finite and nonnegative')
         for name in ("planar_velocity_weight", "yaw_rate_weight",
                      "planar_velocity_scale_m_s", "yaw_rate_scale_rad_s"):
             value = getattr(config, name)
@@ -694,8 +699,9 @@ class HardPACTDifferentiableQP:
         c=0 at the root origin, NOT world acceleration or Euler yaw rate.
         Simulator reward velocities use these same body/root-link axes.
         W is already in offset=M^-1(Jb^T W-h); never add it a second time.
-        horizon_s is an OUTER-loss/diagnostic constant-derivative extrapolation,
-        not an integrated rollout. Inner costs/constraints always use actual dt.
+        horizon_s selects a constant-derivative extrapolation, not an integrated
+        rollout. Inner and outer callers supply independent settings; constraints
+        always use captured physics dt, which this helper never modifies.
         """
         if "velocity_command" not in data or "base_linear_velocity_world" not in data:
             raise ValueError("QP velocity tracking requires captured physical velocity_command and base_linear_velocity_world")
@@ -798,7 +804,8 @@ class HardPACTDifferentiableQP:
                          self.cfg.attitude_weight)
 
         if self.velocity_tracking_enabled():
-            C, e, _ = self._velocity_tracking_affine(data, mechanics_map, offset)
+            C, e, _ = self._velocity_tracking_affine(data, mechanics_map, offset,
+                horizon_s=self.cfg.qp_velocity_objective_horizon_s)
             for sl, weight, units in ((slice(0,2), self.cfg.planar_velocity_weight,
                                       self.cfg.planar_velocity_scale_m_s),
                                      (slice(2,3), self.cfg.yaw_rate_weight,
@@ -808,8 +815,11 @@ class HardPACTDifferentiableQP:
         limits, qmin, qmax, vmax = self._limits(ref)
         dt = data["dt"].detach().reshape(-1, 1)
         previous = data["previous_torque"].detach()
-        lower = torch.maximum(-limits, previous - self.cfg.torque_rate_limit_nm_s * dt)
-        upper = torch.minimum(limits, previous + self.cfg.torque_rate_limit_nm_s * dt)
+        rate_enabled = self.cfg.torque_rate_constraint_weight > 0
+        rate_lower = previous-self.cfg.torque_rate_limit_nm_s*dt if rate_enabled else None
+        rate_upper = previous+self.cfg.torque_rate_limit_nm_s*dt if rate_enabled else None
+        lower = torch.maximum(-limits, rate_lower) if rate_enabled else -limits.expand(batch,-1)
+        upper = torch.minimum(limits, rate_upper) if rate_enabled else limits.expand(batch,-1)
         q, v = data["joint_position"].detach(), data["joint_velocity"].detach()
         beta = self.cfg.position_integration_coefficient
         alower = torch.maximum((-vmax-v)/dt, (qmin-q-dt*v)/(beta*dt.square()))
@@ -841,60 +851,70 @@ class HardPACTDifferentiableQP:
         return _QPBuild(Q,p,G,h,A,b,scale,physical_G,physical_h,physical_A,physical_b,
                         es,gs,lower,upper,alower,aupper,native_lower,native_upper,
                         mechanics_map,offset,mechanics_valid,
-                        previous-self.cfg.torque_rate_limit_nm_s*dt,
-                        previous+self.cfg.torque_rate_limit_nm_s*dt)
+                        rate_lower, rate_upper)
 
     @staticmethod
     def _cupiqp_native_pack(m):
         # cuPIQP 0.1 setup/update support x_l/x_u. Only the first 24 canonical
         # inequalities are true coordinate bounds. Joint acceleration bounds
         # are coupled affine rows and MUST remain general inequalities.
-        # Recovery's last 24 rows are pure slack nonnegativity, represented
+        # Recovery's last 12 or 24 rows are slack nonnegativity, represented
         # exactly by native lower bounds; keep all canonical rows for checks.
-        end = 92 if m.p.shape[1] == 48 else m.G.shape[1]
+        end = m.G.shape[1] - (m.p.shape[1]-24)
         return m.G[:,24:end], m.h[:,24:end], m.native_lower, m.native_upper
 
     def _soft_joint_problem(self, m):
-        """Recovery: [tau, f, joint_slack(rad/s²), rate_slack(Nm)].
+        """Recovery: [tau, f, joint_slack(rad/s²), optional rate_slack(Nm)].
 
         Only the position/velocity envelope and torque slew are softened.
         Absolute actuator bounds and friction stay hard. The primary rate-box
         inequalities use the actual previous executed torque, not the
         magnitude/rate intersection that is packed as primary native bounds.
+        Disabled rate constraints yield a real 36-variable/80-row problem;
+        enabled rate constraints retain the legacy 48-variable/116-row layout.
         """
         batch = m.p.shape[0]
-        variable_scale = torch.cat((m.variable_scale,
-            m.p.new_full((12,), self.cfg.soft_joint_recovery_scale_rad_s2),
-            m.p.new_full((12,), self.cfg.soft_rate_recovery_scale_nm)))
-        Q = m.Q.new_zeros(batch,48,48)
+        rate_enabled = m.rate_lower is not None
+        nslack = 24 if rate_enabled else 12
+        nvar = 24+nslack
+        general_end = 92 if rate_enabled else 68
+        scales = [m.variable_scale, m.p.new_full((12,), self.cfg.soft_joint_recovery_scale_rad_s2)]
+        if rate_enabled:
+            scales.append(m.p.new_full((12,), self.cfg.soft_rate_recovery_scale_nm))
+        variable_scale = torch.cat(scales)
+        Q = m.Q.new_zeros(batch,nvar,nvar)
         Q[:,:24,:24] = m.Q
         eye = torch.eye(12,device=Q.device,dtype=Q.dtype)
         Q[:,24:36,24:36] = (2*self.cfg.soft_joint_recovery_weight+self.cfg.q_regularization)*eye
-        Q[:,36:48,36:48] = (2*self.cfg.soft_rate_recovery_weight+self.cfg.q_regularization)*eye
-        physical_G = m.G.new_zeros(batch,116,48)
+        if rate_enabled:
+            Q[:,36:48,36:48] = (2*self.cfg.soft_rate_recovery_weight+self.cfg.q_regularization)*eye
+        physical_G = m.G.new_zeros(batch,general_end+nslack,nvar)
         physical_G[:,:68,:24] = m.physical_G
         physical_G[:,24:36,24:36] = -eye
         physical_G[:,36:48,24:36] = -eye
         # Retain rate rows separately; never pack them as native hard bounds.
-        physical_G[:,68:92,:24] = m.physical_G[:,:24]
-        physical_G[:,68:80,36:48] = -eye
-        physical_G[:,80:92,36:48] = -eye
-        physical_G[:,92:104,24:36] = -eye
-        physical_G[:,104:116,36:48] = -eye
+        if rate_enabled:
+            physical_G[:,68:92,:24] = m.physical_G[:,:24]
+            physical_G[:,68:80,36:48] = -eye
+            physical_G[:,80:92,36:48] = -eye
+            physical_G[:,104:116,36:48] = -eye
+        physical_G[:,general_end:general_end+12,24:36] = -eye
         limits = self.torque_limits.to(m.p).expand(batch,-1)
-        physical_h = torch.cat((limits, limits, m.physical_h[:,24:],
-                               m.rate_upper, -m.rate_lower, m.p.new_zeros(batch,24)),1)
+        bounds = [limits, limits, m.physical_h[:,24:]]
+        if rate_enabled:
+            bounds.extend((m.rate_upper, -m.rate_lower))
+        physical_h = torch.cat((*bounds, m.p.new_zeros(batch,nslack)),1)
         G,h,row_scale = _row_scale(physical_G*variable_scale,physical_h)
-        empty = m.A.new_zeros(batch,0,48)
-        native_lower = m.p.new_full((batch,48),-torch.inf)
+        empty = m.A.new_zeros(batch,0,nvar)
+        native_lower = m.p.new_full((batch,nvar),-torch.inf)
         native_upper = -native_lower
         native_lower[:,:12], native_upper[:,:12] = -limits/variable_scale[:12], limits/variable_scale[:12]
-        native_lower[:,24:48] = 0.
-        return replace(m,Q=Q,p=torch.cat((m.p,m.p.new_zeros(batch,24)),1),
+        native_lower[:,24:] = 0.
+        return replace(m,Q=Q,p=torch.cat((m.p,m.p.new_zeros(batch,nslack)),1),
             G=G,h=h,A=empty,physical_A=empty,physical_G=physical_G,physical_h=physical_h,
             variable_scale=variable_scale,inequality_row_scale=row_scale,
             tau_lower=-limits,tau_upper=limits,native_lower=native_lower,native_upper=native_upper,
-            acceleration_map=torch.cat((m.acceleration_map,m.p.new_zeros(batch,18,24)),2))
+            acceleration_map=torch.cat((m.acceleration_map,m.p.new_zeros(batch,18,nslack)),2))
 
     @staticmethod
     def _maximum(value):
@@ -931,12 +951,16 @@ class HardPACTDifferentiableQP:
             errors = {"current":current-data["velocity_command"],
                       "baseline_nominal_predicted_grf":(C@baseline[...,None]).squeeze(-1)+e,
                       "full_candidate":(C@x[:,:24,None]).squeeze(-1)+e}
+            objective_C, objective_offset, _ = self._velocity_tracking_affine(data,
+                m.acceleration_map[:,:,:24], m.acceleration_offset,
+                horizon_s=self.cfg.qp_velocity_objective_horizon_s)
+            objective_error = (objective_C@x[:,:24,None]).squeeze(-1)+objective_offset
             for status,mask in (("accepted",accepted),("rejected",~accepted)):
                 prefix=f"model_velocity_tracking/{stage}/{status}/"
                 for source,error in errors.items():
                     aggregate.add_values(prefix+source+"/planar_rms_m_s",error[:,:2].square().mean(-1).sqrt(),mask)
                     aggregate.add_values(prefix+source+"/yaw_abs_rad_s",error[:,2].abs(),mask)
-                error=errors["full_candidate"]
+                error = objective_error
                 aggregate.add_values(prefix+"planar_cost",self.cfg.planar_velocity_weight*
                     (error[:,:2]/self.cfg.planar_velocity_scale_m_s).square().sum(-1),mask)
                 aggregate.add_values(prefix+"yaw_cost",self.cfg.yaw_rate_weight*
@@ -956,7 +980,7 @@ class HardPACTDifferentiableQP:
                    "inequality_max":self._maximum(residual.clamp_min(0))}
         for name,sl in (("base_linear",slice(0,3)),("base_angular",slice(3,6)),("joint",slice(6,18))):
             metrics["dynamics/"+name+"_mae"] = dyn[:,sl].abs().mean(-1)
-        for name,sl in (("torque_rate_intersection",slice(0,24)),
+        for name,sl in ((("torque_rate_intersection" if self.cfg.torque_rate_constraint_weight>0 else "torque_magnitude"),slice(0,24)),
                         ("joint_acceleration_intersection",slice(24,48)),
                         ("friction_unilateral",slice(48,None))):
             metrics[name+"/violation_max"] = self._maximum(residual[:,sl].clamp_min(0))
@@ -1078,7 +1102,8 @@ class HardPACTDifferentiableQP:
             yaw_rate_weight=self.cfg.yaw_rate_weight,
             planar_velocity_scale_m_s=self.cfg.planar_velocity_scale_m_s,
             yaw_rate_scale_rad_s=self.cfg.yaw_rate_scale_rad_s,
-            qp_velocity_loss_horizon_s=self.cfg.qp_velocity_loss_horizon_s)
+            qp_velocity_loss_horizon_s=self.cfg.qp_velocity_loss_horizon_s,
+            qp_velocity_objective_horizon_s=self.cfg.qp_velocity_objective_horizon_s)
         if backend_equivalent != self.cfg:
             # Never carry solver allocations/settings or active/warm snapshots
             # across a runtime settings change.
@@ -1104,12 +1129,16 @@ class HardPACTDifferentiableQP:
         ref = values["tau_nom"]
         limits = self._limits(ref)[0]
         dt = values["dt"].detach().reshape(-1,1)
-        # Invalid previous state has no feasible rate claim. Reset/nonfinite
-        # history to zero for deterministic actuator-only fallback and log it.
-        prev = torch.nan_to_num(values["previous_torque"].detach(),nan=0.,posinf=0.,neginf=0.)
-        safe_dt = torch.where(torch.isfinite(dt)&(dt>0),dt,torch.zeros_like(dt))
-        lower = torch.maximum(-limits,prev-self.cfg.torque_rate_limit_nm_s*safe_dt)
-        upper = torch.minimum(limits,prev+self.cfg.torque_rate_limit_nm_s*safe_dt)
+        rate_enabled = self.cfg.torque_rate_constraint_weight > 0
+        if rate_enabled:
+            # Invalid previous state has no feasible rate claim. Preserve the
+            # legacy zero-centered fallback for nonfinite history.
+            prev = torch.nan_to_num(values["previous_torque"].detach(),nan=0.,posinf=0.,neginf=0.)
+            safe_dt = torch.where(torch.isfinite(dt)&(dt>0),dt,torch.zeros_like(dt))
+            lower = torch.maximum(-limits,prev-self.cfg.torque_rate_limit_nm_s*safe_dt)
+            upper = torch.minimum(limits,prev+self.cfg.torque_rate_limit_nm_s*safe_dt)
+        else:
+            lower, upper = -limits.expand(n,-1), limits.expand(n,-1)
         empty_tau = (lower>upper).any(-1)
         # Empty intersection cannot satisfy both claims: actuator limits win,
         # with a distinct failure reason, NEVER a joint/contact certificate.
@@ -1124,8 +1153,9 @@ class HardPACTDifferentiableQP:
         qdd = ref.new_zeros(n,18)
         ok = torch.zeros(n,device=ref.device,dtype=torch.bool)
         finite_input = torch.stack([torch.isfinite(v).reshape(n,-1).all(-1)
-                                    for v in values.values()]).all(0) & (dt[:,0]>0)
-        diag = {"failure/nonfinite_input":~finite_input,
+                                    for k,v in values.items() if rate_enabled or k!='previous_torque']).all(0) & (dt[:,0]>0)
+        diag = {"torque_rate_constraints_enabled":ref.new_full((n,),float(rate_enabled)),
+                "failure/nonfinite_input":~finite_input,
                 "failure/empty_torque_intersection":empty_tau,
                 "failure/empty_qdd_intersection":torch.zeros_like(ok),
                 "failure/mechanics":torch.zeros_like(ok),
@@ -1325,17 +1355,20 @@ class HardPACTDifferentiableQP:
                         x = _CertifiedRows.apply(torch.nan_to_num(x,nan=0.,posinf=0.,neginf=0.),accepted)
                         recovered = recovered.index_copy(0,rows,torch.where(accepted[:,None],x[:,:24],recovered[rows]))
                         recovery_slack = recovery_slack.index_copy(0,rows,torch.where(accepted[:,None],x[:,24:36],torch.zeros_like(x[:,24:36])))
-                        recovery_rate_slack = recovery_rate_slack.index_copy(0,rows,torch.where(accepted[:,None],x[:,36:48],torch.zeros_like(x[:,36:48])))
+                        if rate_enabled:
+                            recovery_rate_slack = recovery_rate_slack.index_copy(0,rows,torch.where(accepted[:,None],x[:,36:48],torch.zeros_like(x[:,36:48])))
                         a = (m.acceleration_map@x[...,None]).squeeze(-1)+m.acceleration_offset
                         recovered_qdd = recovered_qdd.index_copy(0,rows,torch.where(accepted[:,None],a,recovered_qdd[rows]))
                         diag["soft_joint/slack_max_rad_s2"][rows] = x[:,24:36].detach().amax(-1)
-                        diag["soft_joint/rate_slack_max_nm"][rows] = x[:,36:48].detach().amax(-1)
+                        if rate_enabled:
+                            diag["soft_joint/rate_slack_max_nm"][rows] = x[:,36:48].detach().amax(-1)
                         with torch.no_grad():
-                            rate_error = torch.maximum(m.rate_lower-x[:,:12],x[:,:12]-m.rate_upper).clamp_min(0).amax(-1)
+                            rate_error = (torch.maximum(m.rate_lower-x[:,:12],x[:,:12]-m.rate_upper).clamp_min(0).amax(-1)
+                                          if rate_enabled else x.new_full((x.shape[0],),float('nan')))
                             joint_error = torch.maximum(m.qdd_lower-a[:,6:],a[:,6:]-m.qdd_upper).clamp_min(0).amax(-1)
                             diag["soft_joint/original_rate_violation_max_nm"][rows] = rate_error
                             diag["soft_joint/original_joint_violation_max_rad_s2"][rows] = joint_error
-                            diag["soft_joint/original_hard_satisfied"][rows] = ((rate_error<=1e-6)&(joint_error<=1e-3)).to(ref.dtype)
+                            diag["soft_joint/original_hard_satisfied"][rows] = (((rate_error<=1e-6) if rate_enabled else torch.ones_like(accepted))&(joint_error<=1e-3)).to(ref.dtype)
                         diag["selected/equality_max"][rows] = er
                         diag["selected/inequality_max"][rows] = ir
             finally:
@@ -1375,7 +1408,8 @@ def recovery_projection_loss(result, tau_nom, torque_limit, physics_valid, cfg):
     valid = physics_valid.reshape(-1).bool() & result.recovery_mask
     torque = ((result.tau_safe[valid]-tau_nom[valid])/torque_limit).square().sum(-1)
     slack = (result.recovery_slack[valid]/cfg.soft_joint_recovery_scale_rad_s2).square().sum(-1)
-    rate_slack = (result.recovery_rate_slack[valid]/cfg.soft_rate_recovery_scale_nm).square().sum(-1)
+    rate_slack = ((result.recovery_rate_slack[valid]/cfg.soft_rate_recovery_scale_nm).square().sum(-1)
+                  if cfg.torque_rate_constraint_weight > 0 else torch.zeros_like(slack))
     per_valid = cfg.recovery_projection_weight*(torque+cfg.recovery_projection_slack_weight*slack
         + cfg.recovery_projection_rate_slack_weight*rate_slack)
     per_row = tau_nom.new_zeros(tau_nom.shape[0]).masked_scatter(valid,per_valid)
