@@ -17,4 +17,6 @@ command -v apptainer >/dev/null || {
     echo "Load Unity's available Apptainer module before submission." >&2; exit 1;
 }
 # srun sets the step's GPU visibility. Never unset CUDA_VISIBLE_DEVICES here.
-exec srun bash "$LAUNCHER" "${MODE:-smoke}" "$TASK" "$@"
+# Preserve the module environment and avoid PATH-dependent shell resolution.
+export SLURM_EXPORT_ENV=ALL
+exec srun /bin/bash "$LAUNCHER" "${MODE:-smoke}" "$TASK" "$@"

@@ -25,4 +25,6 @@ export RUN_DIR="$PROJECT/training_runs/${SLURM_JOB_ID}"
 export OMNI_KIT_ACCEPT_EULA=YES # Submit only after reviewing/accepting NVIDIA's EULA.
 
 # All mounts, caches, and scheduler GPU visibility are managed by the helper.
-exec srun bash "$TOOLS/run.sh" script "$TRAIN_SCRIPT" "${TRAIN_ARGS[@]}"
+# Preserve the module environment and avoid PATH-dependent shell resolution.
+export SLURM_EXPORT_ENV=ALL
+exec srun /bin/bash "$TOOLS/run.sh" script "$TRAIN_SCRIPT" "${TRAIN_ARGS[@]}"
