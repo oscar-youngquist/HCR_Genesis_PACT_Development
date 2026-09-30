@@ -24,7 +24,8 @@ if [[ "$mode" == script ]]; then
     case "$entry" in
         b1z1_unifp_unity.sh|b1z1_unifp_original_unity.sh|b1z1_unifp_reject_unity.sh)
             simulator=isaaclab_b1z1_unifp ;;
-        b1z1_pact_unity.sh) simulator=isaaclab_b1z1_pact ;;
+        b1z1_pact_unity.sh|b1z1_ppo_pos_unity.sh|b1z1_pact_ab*_unity.sh)
+            simulator=isaaclab_b1z1_pact ;;
         b1z1_pact_pos_unity.sh) simulator=isaaclab_b1z1_pact_pos ;;
         go2_hard_pact_unity.sh) simulator=isaaclab ;;
         *) echo "Unsupported Unity launcher: $entry" >&2; exit 2 ;;
@@ -33,7 +34,7 @@ else
 case "$task" in
     b1z1_unifp|b1z1_unifp_original|b1z1_unifp_reject)
         simulator=isaaclab_b1z1_unifp; entry=train.py ;;
-    b1z1_pact) simulator=isaaclab_b1z1_pact; entry=train.py ;;
+    b1z1_pact|b1z1_ppo_pos|b1z1_pact_ab*) simulator=isaaclab_b1z1_pact; entry=train.py ;;
     b1z1_pact_pos) simulator=isaaclab_b1z1_pact_pos; entry=train.py ;;
     go2_hard_pact*_isaaclab) simulator=isaaclab; entry=train_hard_pact.py ;;
     *) echo "Unsupported IsaacLab task: $task" >&2; exit 2 ;;

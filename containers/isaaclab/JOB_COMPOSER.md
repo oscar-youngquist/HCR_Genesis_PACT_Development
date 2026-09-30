@@ -23,7 +23,21 @@ allocation requires it; the template deliberately does not assume `-q long`.
 | Force-rejection UniFP | `b1z1_unifp_reject_unity.sh` |
 | Coupled PACT | `b1z1_pact_unity.sh` |
 | Position-only PACT | `b1z1_pact_pos_unity.sh` |
+| Position-only PPO | `b1z1_ppo_pos_unity.sh` |
+| Ablation 4: coupled, no conditioning, no PINNs | `b1z1_pact_ab4_coupled_none_unity.sh` |
+| Ablation 5: coupled, concat, no PINNs | `b1z1_pact_ab5_coupled_concat_unity.sh` |
+| Ablation 6: position, FiLM, no PINNs | `b1z1_pact_ab6_position_film_unity.sh` |
+| Ablation 7: position, FiLM, both PINNs | `b1z1_pact_ab7_position_full_unity.sh` |
+| Ablation 8: coupled, FiLM, no PINNs | `b1z1_pact_ab8_coupled_film_unity.sh` |
+| Ablation 9: coupled, FiLM, representation PINN only | `b1z1_pact_ab9_representation_unity.sh` |
+| Ablation 10: coupled, FiLM, actor PINN only | `b1z1_pact_ab10_actor_unity.sh` |
 | Go2 HardPACT | `go2_hard_pact_unity.sh` |
+
+Ablation 11 (full PACT) uses the existing `b1z1_pact_unity.sh`.
+All B1Z1 launchers inherit task configuration, including PINN weights and schedules;
+they do not inject a PINN-weight override. Select one `TRAIN_SCRIPT` per job and
+submit separate jobs for concurrent variants. No container rebuild is needed:
+the launcher uses the code in the mounted checkout.
 
 For Go2, change `REPO` to your aligned-branch checkout. Keep `TOOLS` pointing to
 the checkout containing this container helper. Default Go2 task is
