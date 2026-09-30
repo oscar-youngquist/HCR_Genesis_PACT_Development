@@ -349,7 +349,7 @@ class B1Z1UniFPCfg:
         force_curriculum_gate_patience = 400
         force_curriculum_metric_ema_alpha = 0.05
         force_curriculum_use_latest_start_fallback = True
-        force_curriculum_latest_start_iteration = 10000
+        force_curriculum_latest_start_iteration = force_curriculum_gate_start_iteration  # Fallback cannot precede the gate.
 
         push_gripper_stators = True
         apply_ee_external_forces = True

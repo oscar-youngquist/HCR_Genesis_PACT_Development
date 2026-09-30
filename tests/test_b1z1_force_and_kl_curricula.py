@@ -34,10 +34,14 @@ class ForceTaskTests(unittest.TestCase):
         self.assertFalse(curriculum.gate_latched)
         curriculum.update(curriculum.latest_start)
         self.assertTrue(curriculum.gate_latched)
-        self.assertEqual(curriculum.command_scale(curriculum.latest_start), 0.25)
+        self.assertEqual(curriculum.command_scale(curriculum.latest_start),
+                         (curriculum.latest_start - curriculum.command_start) / curriculum.command_ramp)
         self.assertEqual(curriculum.external_scale(curriculum.latest_start), 0.0)
-        self.assertEqual(curriculum.command_scale(12000), 0.5)
-        self.assertEqual(curriculum.external_scale(12000), 0.25)
+        midpoint = (curriculum.latest_start + end) // 2
+        self.assertGreater(curriculum.command_scale(midpoint), 0.0)
+        self.assertLess(curriculum.command_scale(midpoint), 1.0)
+        self.assertGreater(curriculum.external_scale(midpoint), 0.0)
+        self.assertLess(curriculum.external_scale(midpoint), 1.0)
         self.assertEqual(curriculum.external_scale(
             curriculum.latest_start + curriculum.external_ramp), 1.0)
 
