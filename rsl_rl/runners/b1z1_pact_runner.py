@@ -53,6 +53,8 @@ class B1Z1PACTRunner:
             init_noise_std=policy_cfg["init_noise_std"],
             min_noise_std=policy_cfg["min_noise_std"],
             max_noise_std=policy_cfg["max_noise_std"],
+            action_mode=policy_cfg.get("action_mode", "coupled"),
+            conditioning_mode=policy_cfg.get("conditioning_mode", "film"),
         ).to(device)
 
         self.privileged_decoder = B1Z1PACTDecoder(
@@ -76,7 +78,11 @@ class B1Z1PACTRunner:
             urdf, env.cfg.asset.dof_names, env.cfg.asset.foot_name,
             env.cfg.asset.gripper_name, env.cfg.asset.base_name,
         )
-        if backend_name == "bard":
+        needs_physics = (algorithm_cfg.get("representation_pinn_enabled", True)
+                         or algorithm_cfg.get("actor_phys_enabled", False))
+        if not needs_physics:
+            self.dynamics = None
+        elif backend_name == "bard":
             bard_capacity = (
                 algorithm_cfg.get("bard_batch_capacity", 0)
                 or default_pino_capacity
@@ -100,7 +106,7 @@ class B1Z1PACTRunner:
             )
 
         merged = dict(algorithm_cfg)
-        if algorithm_cfg.get("actor_phys_pos_fk_enabled", False):
+        if algorithm_cfg.get("actor_phys_enabled", False) and algorithm_cfg.get("actor_phys_pos_fk_enabled", False):
             import xml.etree.ElementTree as ET
             arm_ids = [int(i) for i in env.simulator._arm_dof_cfg_ids]
             root_joint = env.cfg.asset.dof_names[arm_ids[0]]
@@ -368,7 +374,8 @@ class B1Z1PACTRunner:
             self.env.set_training_iteration(self.current_learning_iteration)
         if self.log_dir:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
-        self.dynamics.close()
+        if self.dynamics is not None:
+            self.dynamics.close()
 
     @staticmethod
     def _episode_metric_max(ep_infos, *names):
@@ -418,7 +425,8 @@ class B1Z1PACTRunner:
         self.total_time += iteration_time
         fps = self.steps * self.env.num_envs / max(iteration_time, 1e-6)
         position_std = self.actor_critic.std[:self.env.num_actions].mean().item()
-        torque_std = self.actor_critic.std[self.env.num_actions:].mean().item()
+        torque_std = (self.actor_critic.std[self.env.num_actions:].mean().item()
+                      if self.actor_critic.action_mode == "coupled" else 0.0)
         mean_reward = statistics.mean(rewards) if rewards else None
         mean_length = statistics.mean(lengths) if lengths else None
 

@@ -442,10 +442,10 @@ def get_args():
     )
 
     args = parser.parse_args()
-    # Keep omission distinguishable for HardPACT: a parser default must not
+    # Keep omission distinguishable for dynamic ablations: a parser default must not
     # replace the configured weight or switch its PCGrad projection mode.
     # Other tasks retain their historical numeric CLI default unchanged.
-    if args.pinn_loss_weight is None and not args.task.startswith('go2_hard_pact'):
+    if args.pinn_loss_weight is None and not args.task.startswith(('go2_hard_pact', 'b1z1_pact_ab')):
         args.pinn_loss_weight = 0.01
     return configure_runtime_device(args)
 

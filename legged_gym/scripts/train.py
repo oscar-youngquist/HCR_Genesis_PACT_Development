@@ -18,7 +18,23 @@ def train(args):
     log_dir = ppo_runner.log_dir
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
-    if args.task.startswith("go2_hard_pact_"):
+    if args.task.startswith("b1z1_pact_ab"):
+        # Dynamic variants share source files rather than per-task copies.
+        import inspect
+        import json
+        from dataclasses import asdict
+        from legged_gym.utils.helpers import class_to_dict, _json_config_value
+        from rsl_rl.b1z1_pact_ablations import B1Z1_PACT_ABLATIONS
+        from legged_gym.envs.b1z1.b1z1_pact import ablation_configs
+        robot_file_path = inspect.getfile(type(env))
+        robot_config_path = inspect.getfile(ablation_configs)
+        with open(os.path.join(log_dir, "b1z1_pact_resolved_config.json"), "w") as stream:
+            json.dump(_json_config_value({"task": args.task,
+                       "features": asdict(B1Z1_PACT_ABLATIONS[env_cfg.ablation_variant]),
+                       "environment": class_to_dict(env_cfg),
+                       "training": class_to_dict(train_cfg),
+                       "effective_algorithm": ppo_runner.alg.cfg}), stream, indent=2)
+    elif args.task.startswith("go2_hard_pact_"):
         # Ablation task names intentionally have no copied environment files;
         # archive the one shared implementation/config instead.
         robot_file_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", "go2", "go2_hard_pact", "go2_hard_pact.py")

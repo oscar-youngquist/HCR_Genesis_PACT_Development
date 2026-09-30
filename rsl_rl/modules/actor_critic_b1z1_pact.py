@@ -122,9 +122,14 @@ class ActorCriticB1Z1PACT(nn.Module):
         init_noise_std: float | Sequence[float] = 0.65,
         min_noise_std: float | Sequence[float] = 0.20,
         max_noise_std: float | Sequence[float] = 5.0,
+        action_mode: str = "coupled",
+        conditioning_mode: str = "film",
     ):
         super().__init__()
         self.num_actions = num_actions
+        if action_mode not in ("position", "coupled") or conditioning_mode not in ("none", "concat", "film"):
+            raise ValueError("Invalid B1Z1 action or conditioning mode")
+        self.action_mode, self.conditioning_mode = action_mode, conditioning_mode
         self.context_encoder = B1Z1PACTContextEncoder(history_dim, latent_dim, context_layers, activation)
         # HardPACT: explicit estimates bypass latent sampling and the KL bottleneck.
         self.explicit_decoder = B1Z1PACTDecoder(
@@ -137,21 +142,30 @@ class ActorCriticB1Z1PACT(nn.Module):
         # The actor consumes estimated contact probabilities and foot heights;
         # FiLM intentionally receives neither terrain/contact signal.
         actor_input = num_actor_obs + latent_dim + 3 + 3 + 6 + 3 + 4 + 4
+        condition_dim = 6 + 3 + 3 + 3  # Existing wrench, force and tracking-error schema.
+        if conditioning_mode == "concat":
+            actor_input += condition_dim
         self.actor_trunk = nn.Sequential(_mlp(actor_input, actor_layers[:-1], actor_layers[-1], activation),
                                          _activation(activation))
 
 
         # FiLM sees only predicted external disturbances and command errors.
-        self.film = FiLM(6 + 3 + 3 + 3, actor_layers[-1], film_hidden_dim, activation)
+        self.film = FiLM(condition_dim, actor_layers[-1], film_hidden_dim, activation) if conditioning_mode == "film" else None
 
         self.position_head = nn.Linear(actor_layers[-1], num_actions)
-        self.torque_head = nn.Linear(actor_layers[-1], num_actions)
-        nn.init.uniform_(self.torque_head.weight, -1.0e-6, 1.0e-6)
-        nn.init.zeros_(self.torque_head.bias)
+        self.torque_head = nn.Linear(actor_layers[-1], num_actions) if action_mode == "coupled" else None
+        if self.torque_head is not None:
+            nn.init.uniform_(self.torque_head.weight, -1.0e-6, 1.0e-6)
+            nn.init.zeros_(self.torque_head.bias)
 
         self.critic = _mlp(num_critic_obs, critic_layers, 1, activation)
 
-        action_dim = 2 * num_actions
+        action_dim = num_actions * (2 if action_mode == "coupled" else 1)
+        # Keep the inherited position-head exploration profile, without copying it.
+        if action_mode == "position":
+            init_noise_std, min_noise_std, max_noise_std = (
+                value[:num_actions] if torch.as_tensor(value).ndim else value
+                for value in (init_noise_std, min_noise_std, max_noise_std))
         self.std = nn.Parameter(self._std_config_tensor(init_noise_std, action_dim, "init_noise_std"))
         self.register_buffer(
             "_std_clip_lwr",
@@ -243,11 +257,17 @@ class ActorCriticB1Z1PACT(nn.Module):
         film_context: dict[str, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         actor_input, film_condition = self._actor_inputs(obs, actor_context, film_context)
+        if self.conditioning_mode == "concat":
+            actor_input = torch.cat((actor_input, film_condition.detach()), dim=-1)
         features = self.actor_trunk(actor_input)
-        features, magnitude, identity_deviation = self.film(features, film_condition)
+        if self.conditioning_mode == "film":
+            features, magnitude, identity_deviation = self.film(features, film_condition)
+        else:
+            magnitude = identity_deviation = features.new_zeros(len(features))
         self.last_film_magnitude = magnitude
         self.last_film_identity_deviation = identity_deviation
-        return self.position_head(features), self.torque_head(features)
+        position = self.position_head(features)
+        return position, self.torque_head(features) if self.torque_head is not None else torch.zeros_like(position)
 
     def update_distribution(
         self,
@@ -266,7 +286,7 @@ class ActorCriticB1Z1PACT(nn.Module):
         position, torque = self.actor_forward(obs, context, context)
         self.last_position_mean = position
         self.last_torque_mean = torque
-        mean = torch.cat((position, torque), dim=-1)
+        mean = torch.cat((position, torque), dim=-1) if self.action_mode == "coupled" else position
         self.std.data.copy_(
             torch.maximum(torch.minimum(self.std.data, self._std_clip_upr), self._std_clip_lwr)
         )
@@ -285,7 +305,7 @@ class ActorCriticB1Z1PACT(nn.Module):
         position, torque = self.actor_forward(obs, context, context)
         self.last_position_mean = position
         self.last_torque_mean = torque
-        actions = torch.cat((position, torque), dim=-1)
+        actions = torch.cat((position, torque), dim=-1) if self.action_mode == "coupled" else position
         return actions
 
     def evaluate(self, critic_obs: torch.Tensor) -> torch.Tensor:

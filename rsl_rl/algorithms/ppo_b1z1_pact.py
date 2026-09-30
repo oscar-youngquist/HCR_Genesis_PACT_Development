@@ -366,20 +366,24 @@ class PPO_B1Z1PACT:
         motor = state[:, 97:116]
         kp, kd = state[:, 116:135], state[:, 135:154]
         weights = state[:, 154:156]
-        position, feedforward = actions[:, :17], actions[:, 17:34]
+        count = self.actor_critic.num_actions
+        if actions.shape[-1] not in (count, 2 * count):
+            raise ValueError("Expected position-only or coupled policy actions")
+        position = actions[:, :count]
+        feedforward = actions[:, count:] if actions.shape[-1] == 2 * count else torch.zeros_like(position)
         default = state[:, 156:175]
 
-        target = default[:, :17] + self.cfg["position_action_scale"] * position
+        target = default[:, :count] + self.cfg["position_action_scale"] * position
 
-        feedback = kp[:, :17] * (target - q[:, :17]) - kd[:, :17] * qd[:, :17]
+        feedback = kp[:, :count] * (target - q[:, :count]) - kd[:, :count] * qd[:, :count]
 
         # Match simulator joint units in inverse/rollout and actor-facing physics.
         feedforward = feedforward * torch.as_tensor(
             self.cfg["torque_action_scale"], device=feedforward.device, dtype=feedforward.dtype)
 
-        controlled = (weights[:, :1] * feedback + weights[:, 1:2] * feedforward) * motor[:, :17]
+        controlled = (weights[:, :1] * feedback + weights[:, 1:2] * feedforward) * motor[:, :count]
 
-        uncontrolled = kp[:, 17:] * (default[:, 17:] - q[:, 17:]) - kd[:, 17:] * qd[:, 17:]
+        uncontrolled = kp[:, count:] * (default[:, count:] - q[:, count:]) - kd[:, count:] * qd[:, count:]
 
         return torch.cat((controlled, uncontrolled), dim=-1)
 
@@ -885,8 +889,8 @@ class PPO_B1Z1PACT:
         # Retain the original all-force MSE for pre-gate alpha blending.
         force_overall_statistics = torch.zeros(2, device=self.device)
         diagnostics = {"lr_before_update": self.learning_rate}
-        if self.bard_auxiliary and self.pinn_weight > 0:
-            from .b1z1_bard_pinn import cache_rollout
+        from .b1z1_bard_pinn import cache_rollout, representation_enabled
+        if self.bard_auxiliary and self.pinn_weight > 0 and representation_enabled(self.cfg):
             self.bard_mechanics_cache = cache_rollout(self)
         for batch in self.storage.mini_batches(self.mini_batches, self.epochs):
             if updates == 0 and self.enable_additional_diagnostics:

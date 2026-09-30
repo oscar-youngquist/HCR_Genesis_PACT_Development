@@ -10,7 +10,8 @@ class B1Z1PPOPos(B1Z1PACT):
         if cfg.env.num_policy_actions != cfg.env.num_actions:
             raise ValueError("PPO-Pos requires one position action per learned joint")
         super().__init__(cfg, *args, **kwargs)
-        self.simulator.collect_b1z1_bard_interval = False
+        if getattr(cfg, "action_mode", None) != "position":
+            self.simulator.collect_b1z1_bard_interval = False
 
     @property
     def position_history_slice(self):
@@ -27,7 +28,8 @@ class B1Z1PPOPos(B1Z1PACT):
         local_cfg = copy(cfg)
         local_cfg.env = copy(cfg.env)
         local_cfg.env.num_policy_actions = 2 * self.num_actions
-        local_cfg.env.num_obs_hist = 1
+        if getattr(cfg, "action_mode", None) != "position":
+            local_cfg.env.num_obs_hist = 1
         self.cfg = local_cfg
         try:
             super()._init_buffers()

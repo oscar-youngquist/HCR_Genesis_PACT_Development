@@ -129,7 +129,8 @@ class TaskRegistry():
         # Pos retains its existing config-only behavior. HardPACT's parser
         # returns None when omitted, preserving the resolved config (including
         # benchmark overrides); explicit CLI values, including zero, still win.
-        if "pact" in name and "pos" not in name and args.pinn_loss_weight is not None:
+        if ("pact" in name and ("pos" not in name or name.startswith("b1z1_pact_ab"))
+                and args.pinn_loss_weight is not None):
             train_cfg_dict["policy"]["pinn_loss_weight"] = args.pinn_loss_weight
 
         # select runner according to runner_class_name

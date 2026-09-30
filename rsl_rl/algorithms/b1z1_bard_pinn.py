@@ -12,6 +12,11 @@ from rsl_rl.algorithms.hard_pact_bard import (
 )
 
 
+def representation_enabled(cfg):
+    """Independent from the shared schedule, which can still drive actor physics."""
+    return cfg.get("representation_pinn_enabled", True)
+
+
 def yaw_world(value, quaternion):
     x, y, z, w = quaternion.unbind(-1)
     yaw = torch.atan2(2 * (w*z + x*y), 1 - 2 * (y*y + z*z))
@@ -51,6 +56,9 @@ def physical_metrics(kind, loss, residual, metrics):
 
 def losses(model, context, batch, fixed, cfg, metrics=None):
     """Only z/force-head graphs survive; torque, states, labels and mechanics detach."""
+    if not representation_enabled(cfg):
+        zero = context["z"].new_zeros(())
+        return zero, zero
     rows = ~(batch["dones"].bool() | batch["physics_invalid"].bool()).flatten()
     if not rows.any():
         zero = context["base_wrench"].sum() * 0 + model.predict_grf(context, batch["nominal_torque"]).sum() * 0
@@ -183,7 +191,7 @@ def auxiliary_step(a, batch, valid, iteration):
         return a._compute_vae_loss(**arguments), zero, zero
     selected = {name: value[rows] for name, value in batch.items() if name != "indices"}
     fixed = None
-    physics_active = getattr(a, "pinn_weight", 0.0) > 0
+    physics_active = representation_enabled(a.cfg) and getattr(a, "pinn_weight", 0.0) > 0
     if physics_active and a.bard_auxiliary:
         fixed = SimpleNamespace(**{name: value[batch["indices"][rows]]
             for name, value in vars(a.bard_mechanics_cache).items()})
@@ -252,6 +260,8 @@ def auxiliary_step(a, batch, valid, iteration):
 @torch.no_grad()
 def cache_rollout(a):
     """Evaluate bounded BARD batches once; shuffled epochs only index detached terms."""
+    if not representation_enabled(a.cfg):
+        return None
     storage = a.storage
     flat = {name: getattr(storage, name).flatten(0, 1) for name in
             ("rollout_initial_state", "dynamics_state")}

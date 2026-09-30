@@ -211,4 +211,15 @@ task_registry.register("b1z1_unifp_reject", B1Z1UniFPReject, B1Z1UniFPRejectCfg(
 task_registry.register("b1z1_pact", B1Z1PACT, B1Z1PACTCfg(), B1Z1PACTCfgPPO())
 task_registry.register("b1z1_ppo_pos", B1Z1PPOPos, B1Z1PPOPosCfg(), B1Z1PPOPosCfgPPO())
 task_registry.register("b1z1_pact_pos", B1Z1PACTPos, B1Z1PACTPosCfg(), B1Z1PACTPosCfgPPO())
+
+# ID 11 is the existing b1z1_pact registration; IDs 1-3 are unchanged.
+from legged_gym.envs.b1z1.b1z1_pact.ablation_configs import make_b1z1_pact_ablation_configs
+from rsl_rl.b1z1_pact_ablations import B1Z1_PACT_ABLATIONS
+for _variant_id, _features in B1Z1_PACT_ABLATIONS.items():
+    if _variant_id == 11:
+        continue
+    _env_cfg, _ppo_cfg = make_b1z1_pact_ablation_configs(_variant_id)
+    task_registry.register(_features.task_name,
+                           B1Z1PPOPos if _features.action_mode == "position" else B1Z1PACT,
+                           _env_cfg(), _ppo_cfg())
 task_registry.register("b1_unifp", B1UniFP, B1UniFPCfg(), B1UniFPCfgPPO())
