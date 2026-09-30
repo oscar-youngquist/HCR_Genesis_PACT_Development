@@ -61,7 +61,7 @@ FORCE_CURRICULUM_LOG_NAMES = (
 
 
 class B1Z1StagedForceCurriculum:
-    """Iteration-level command ramp followed by a performance-gated force ramp."""
+    """Independent command and performance-gated external ramps may overlap."""
 
     def __init__(self, cfg):
         self.command_start = int(cfg.force_curriculum_command_start_iteration)
@@ -77,8 +77,6 @@ class B1Z1StagedForceCurriculum:
         self.latest_start = int(cfg.force_curriculum_latest_start_iteration)
         if min(self.command_start, self.command_ramp, self.gate_start, self.external_ramp) < 0:
             raise ValueError("force curriculum iteration values must be nonnegative")
-        if self.gate_start < self.command_start + self.command_ramp:
-            raise ValueError("force gate cannot start before the commanded-force ramp finishes")
         if self.required_patience < 1:
             raise ValueError("force_curriculum_gate_patience must be positive")
         if not 0.0 < self.ema_alpha <= 1.0:
@@ -157,16 +155,15 @@ class B1Z1StagedForceCurriculum:
     def metrics(self, iteration):
         command_scale = self.command_scale(iteration)
         external_scale = self.external_scale(iteration)
-        if int(iteration) < self.command_start:
+        # Once triggered, report the external ramp even if the command ramp lags.
+        if self.gate_latched:
+            stage = 3 if external_scale < 1.0 else 4
+        elif int(iteration) < min(self.command_start, self.gate_start):
             stage = 0
         elif int(iteration) < self.gate_start:
             stage = 1
-        elif not self.gate_latched:
-            stage = 2
-        elif external_scale < 1.0:
-            stage = 3
         else:
-            stage = 4
+            stage = 2
         return {
             "ForceCurriculum/command_scale": command_scale,
             "ForceCurriculum/external_scale": external_scale,

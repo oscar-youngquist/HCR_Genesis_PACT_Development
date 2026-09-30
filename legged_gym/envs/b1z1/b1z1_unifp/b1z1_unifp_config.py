@@ -335,12 +335,11 @@ class B1Z1UniFPCfg:
         zero_vel_cmd_prob = 0.2
         zero_vel_cmd_prob_after_force = 0.5
         
-        # Shared B1Z1 schedule: learn nominal motion, introduce force commands,
-        # then admit physical disturbances after sustained task competence.
+        # Command and gated external-force ramps may overlap.
         force_curriculum_command_start_iteration = 8000
         force_curriculum_command_ramp_iterations = 8000
         
-        force_curriculum_gate_start_iteration = 8000     # depreciated
+        force_curriculum_gate_start_iteration = 12000  # Earliest performance-gate evaluation.
         force_curriculum_external_ramp_iterations = 8000
         
         force_curriculum_ee_l1_threshold = 0.25

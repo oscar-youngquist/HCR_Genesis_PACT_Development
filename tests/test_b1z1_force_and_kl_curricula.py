@@ -12,6 +12,7 @@ from legged_gym.envs.b1z1.force_task_utils import (
     zero_velocity_probability,
 )
 from legged_gym.envs.b1z1.b1z1_unifp.b1z1_unifp import B1Z1UniFP
+from legged_gym.envs.b1z1.b1z1_unifp.b1z1_unifp_config import B1Z1UniFPCfg
 from rsl_rl.algorithms.kl_rate_band import (
     KLRateBandController,
     update_duals_from_mean,
@@ -24,6 +25,35 @@ from rsl_rl.algorithms.ppo_b1z1_pact import (
 
 
 class ForceTaskTests(unittest.TestCase):
+    def test_unifp_default_schedule_is_valid(self):
+        curriculum = B1Z1StagedForceCurriculum(B1Z1UniFPCfg.commands)
+        end = curriculum.command_start + curriculum.command_ramp
+        self.assertLess(curriculum.gate_start, end)
+        self.assertGreaterEqual(curriculum.latest_start, curriculum.gate_start)
+        curriculum.update(curriculum.latest_start - 1)
+        self.assertFalse(curriculum.gate_latched)
+        curriculum.update(curriculum.latest_start)
+        self.assertTrue(curriculum.gate_latched)
+        self.assertEqual(curriculum.command_scale(curriculum.latest_start), 0.25)
+        self.assertEqual(curriculum.external_scale(curriculum.latest_start), 0.0)
+        self.assertEqual(curriculum.command_scale(12000), 0.5)
+        self.assertEqual(curriculum.external_scale(12000), 0.25)
+        self.assertEqual(curriculum.external_scale(
+            curriculum.latest_start + curriculum.external_ramp), 1.0)
+
+    def test_performance_gate_can_trigger_before_command_ramp(self):
+        curriculum = B1Z1StagedForceCurriculum(self._curriculum_config(
+            force_curriculum_gate_start_iteration=100,
+            force_curriculum_use_latest_start_fallback=False,
+        ))
+        for iteration in (100, 101, 102):
+            curriculum.update(iteration, 0.1, 0.0, 1000.0)
+        self.assertTrue(curriculum.gate_latched)
+        self.assertEqual(curriculum.trigger_iteration, 102)
+        self.assertEqual(curriculum.command_scale(103), 0.0)
+        self.assertGreater(curriculum.external_scale(103), 0.0)
+        self.assertEqual(curriculum.metrics(103)["ForceCurriculum/stage"], 3.0)
+
     @staticmethod
     def _curriculum_config(**overrides):
         values = {
