@@ -5,7 +5,7 @@ class B1Z1UniFPCfg:
     seed = 1
 
     class env:
-        num_envs = 4096
+        num_envs = 8192
         # Actor frame excludes gait sin/cos; phase remains internal to gait
         # reference, contact scheduling, and guidance rewards.
         num_observations = 71 + 2
@@ -336,11 +336,11 @@ class B1Z1UniFPCfg:
         zero_vel_cmd_prob_after_force = 0.5
         
         # Command and gated external-force ramps may overlap.
-        force_curriculum_command_start_iteration = 8000
-        force_curriculum_command_ramp_iterations = 8000
+        force_curriculum_command_start_iteration = 4000
+        force_curriculum_command_ramp_iterations = 4000
         
-        force_curriculum_gate_start_iteration = 12000  # Earliest performance-gate evaluation.
-        force_curriculum_external_ramp_iterations = 8000
+        force_curriculum_gate_start_iteration = 6000  # Earliest performance-gate evaluation.
+        force_curriculum_external_ramp_iterations = 4000
         
         force_curriculum_ee_l1_threshold = 0.25
         force_curriculum_roll_termination_threshold = 0.05
@@ -758,7 +758,8 @@ class B1Z1UniFPCfg:
                 # "torso_force_wrench_ellipsoid":[0.2, 0.5],
             }
             warmup_steps = 0
-            curr_steps = 40000
+            # curr_steps = 40000
+            curr_steps = 20000
 
     class viewer:
         ref_env = 0
@@ -834,7 +835,7 @@ class B1Z1UniFPCfgPPO:
         use_kl_rate_band = False
         # Independently cosine-ramp the base KL coefficient to its maximum.
         use_cosine_kl_warmup = True
-        kl_warmup_iters = 500
+        kl_warmup_iters = 250
         kl_warmup_beta_max = adaptation_kl_weight
 
         kl_band_warmup_iters = 500
@@ -854,7 +855,7 @@ class B1Z1UniFPCfgPPO:
         algorithm_class_name = "PPO_UniFP"
         num_steps_per_env = 24
         
-        max_iterations = 70000
+        max_iterations = 35000
         
         save_interval = 1000
         
@@ -868,3 +869,16 @@ class B1Z1UniFPCfgPPO:
         load_run = "Aug19_14-34-51_faithful_unifp_baseline"
         checkpoint = -1
         resume_path = None
+
+# ssh unity
+# squeue -u "$USER" -o "%.18i %.30j %.20N"
+
+
+# ssh -J unity \
+#   -i ~/.ssh/unity-privkey.key -o IdentitiesOnly=yes \
+#   oyoungquist_umass_edu@gpu026.unity.rc.umass.edu
+
+# ssh -N -J unity \
+#   -i ~/.ssh/unity-privkey.key -o IdentitiesOnly=yes \
+#   -L 16006:127.0.0.1:6006 \
+#   oyoungquist_umass_edu@gpu026.unity.rc.umass.edu

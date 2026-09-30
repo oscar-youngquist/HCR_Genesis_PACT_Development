@@ -126,7 +126,7 @@ class TaskRegistry():
         train_cfg_dict = class_to_dict(train_cfg)
         sim_device = "cpu" if args.cpu else args.gpu
 
-        # Pos retains its existing config-only behavior. HardPACT's parser
+        # Pos retains its existing config-only behavior. The shared parser
         # returns None when omitted, preserving the resolved config (including
         # benchmark overrides); explicit CLI values, including zero, still win.
         if ("pact" in name and ("pos" not in name or name.startswith("b1z1_pact_ab"))

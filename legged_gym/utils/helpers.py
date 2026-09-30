@@ -392,7 +392,7 @@ def get_args():
     # PACT PINN specific thing.
     parser.add_argument(
         '--pinn_loss_weight', type=float, default=None,
-        help='PINN weight override (HardPACT defaults to its config; legacy tasks default to 0.01)',
+        help='PINN weight override (when omitted, preserve the task configuration)',
     )
     parser.add_argument(
         '--qp_solver', choices=('qpth', 'cupiqp', 'moreau'), default=None,
@@ -442,11 +442,8 @@ def get_args():
     )
 
     args = parser.parse_args()
-    # Keep omission distinguishable for dynamic ablations: a parser default must not
-    # replace the configured weight or switch its PCGrad projection mode.
-    # Other tasks retain their historical numeric CLI default unchanged.
-    if args.pinn_loss_weight is None and not args.task.startswith(('go2_hard_pact', 'b1z1_pact_ab')):
-        args.pinn_loss_weight = 0.01
+    # Preserve None for every task so omission cannot change its configured
+    # PINN weight or signed PCGrad projection mode.
     return configure_runtime_device(args)
 
 # def export_policy_as_jit(actor_critic, path, prefix=None):

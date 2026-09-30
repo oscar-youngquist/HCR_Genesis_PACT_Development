@@ -202,11 +202,15 @@ def test_position_ablation_keeps_pinn_cli_override(monkeypatch):
     assert runner.cfg["policy"]["pinn_loss_weight"] == -.25
 
 
-@pytest.mark.parametrize("explicit", [None, -.25])
-def test_ablation_parser_preserves_configured_pinn_weight(monkeypatch, explicit):
+@pytest.mark.parametrize("task", [
+    "b1z1_pact", "b1z1_pact_pos", "go2_pact", "go2_hard_pact", "b1z1_unifp",
+    B1Z1_PACT_ABLATIONS[7].task_name,
+])
+@pytest.mark.parametrize("explicit", [None, -.25, 0.0, .01])
+def test_ablation_parser_preserves_configured_pinn_weight(monkeypatch, explicit, task):
     import sys
     from legged_gym.utils.helpers import get_args
-    argv = ["train.py", "--task", B1Z1_PACT_ABLATIONS[7].task_name, "--cpu"]
+    argv = ["train.py", "--task", task, "--cpu"]
     if explicit is not None:
         argv += ["--pinn_loss_weight", str(explicit)]
     monkeypatch.setattr(sys, "argv", argv)
