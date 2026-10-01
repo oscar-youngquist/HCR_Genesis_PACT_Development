@@ -910,7 +910,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
 
         pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign: + PINN / - PPGrad; 0 disables.
         pinn_warmup = 300                                                               # Ramp duration after PINN activation [PPO updates].
-        pinn_init_steps = 10                                                           # First PPO iteration eligible for the PINN ramp.
+        pinn_init_steps = 100                                                           # First PPO iteration eligible for the PINN ramp.
         use_pinn_rollout_loss = True                                                    # Enable the rollout term in addition to inverse dynamics.
         pinn_inverse_weight = 0.5                                                       # Inverse-dynamics coefficient inside the combined physics objective.
         pinn_rollout_weight = 0.5                                                       # Rollout coefficient inside the combined physics objective.
