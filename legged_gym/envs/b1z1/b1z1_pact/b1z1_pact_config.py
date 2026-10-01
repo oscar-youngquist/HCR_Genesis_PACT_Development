@@ -8,7 +8,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
 
     class env:
         # num_envs = 4096                                                                # Parallel simulation instances.
-        num_envs = 8192                                                                  # Parallel simulation instances.
+        num_envs = 10240                                                                  # Parallel simulation instances.
         # 2 body-orientation + 3 angular velocity + 17 joint positions +
         # 17 joint velocities + 34 coupled PACT actions + 6 commands. EE pose
         # is estimated from history instead of exposed through an FK error.
@@ -356,8 +356,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # force_curriculum_external_ramp_iterations = 8000                                # External-force ramp duration after activation [iterations].
 
 
-        force_curriculum_gate_start_iteration = 4000                                    # Earliest iteration for the external-force performance gate.
-        force_curriculum_external_ramp_iterations = 4000                                # External-force ramp duration after activation [iterations].
+        force_curriculum_gate_start_iteration = 3200                                    # Earliest iteration for the external-force performance gate.
+        force_curriculum_external_ramp_iterations = 3200                                # External-force ramp duration after activation [iterations].
 
         force_curriculum_ee_l1_threshold = 0.25                                         # Maximum EE tracking error for force-stage advancement.
         force_curriculum_roll_termination_threshold = 0.05                              # Maximum roll-termination rate for advancement.
@@ -366,7 +366,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         force_curriculum_metric_ema_alpha = 0.05                                        # New-sample weight for force-curriculum metrics.
         force_curriculum_use_latest_start_fallback = True                               # Allow time-based activation if the performance gate stalls.
         # force_curriculum_latest_start_iteration = 10000                                 # Latest allowed external-force start iteration.
-        force_curriculum_latest_start_iteration = 8000                                 # Latest allowed external-force start iteration.
+        force_curriculum_latest_start_iteration = 6400                                 # Latest allowed external-force start iteration.
 
 
         push_gripper_stators = True                                                     # Enable the EE disturbance-event scheduler.
@@ -801,7 +801,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             # warmup_steps = 30000                                                        # Reward-curriculum warmup.
             # curr_steps = 10000                                                           # Reward-curriculum ramp duration.
             warmup_steps = 0                                                        # Reward-curriculum warmup.
-            curr_steps = 20000                                                      # Reward-curriculum ramp duration.
+            curr_steps = 16000                                                      # Reward-curriculum ramp duration.
 
 
     class viewer:
@@ -896,7 +896,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         vae_kld_weight = 1.00                                                           # Default VAE KL coefficient, separate from physics PINNs.
 
         use_cosine_kl_warmup = True                                                     # Independently cosine-ramp the base KL coefficient to its maximum.
-        kl_warmup_iters = 250                                                          # Cosine VAE KL warmup duration [PPO iterations].
+        kl_warmup_iters = 200                                                          # Cosine VAE KL warmup duration [PPO iterations].
         kl_warmup_beta_max = vae_kld_weight                                             # Baseline VAE KL coefficient after cosine warmup.
         kl_band_warmup_iters = 500                                                      # Delay before activating the KL-rate band [iterations].
 
@@ -909,7 +909,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         adaptation_learning_rate = 2.0e-4                                               # HardPACT encoder/decoder learning rate.
 
         pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign: + PINN / - PPGrad; 0 disables.
-        pinn_warmup = 375                                                               # Ramp duration after PINN activation [PPO updates].
+        pinn_warmup = 300                                                               # Ramp duration after PINN activation [PPO updates].
         pinn_init_steps = 10                                                           # First PPO iteration eligible for the PINN ramp.
         use_pinn_rollout_loss = True                                                    # Enable the rollout term in addition to inverse dynamics.
         pinn_inverse_weight = 0.5                                                       # Inverse-dynamics coefficient inside the combined physics objective.
@@ -1031,7 +1031,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         grf_dim = 12                                                                    # Flattened four-foot XYZ force width.
 
         # max_iterations = 70000                                                          # Total PPO learning iterations.
-        max_iterations = 35000                                                          # Total PPO learning iterations.
+        max_iterations = 28000                                                          # Total PPO learning iterations.
 
         save_interval = 1000                                                            # Checkpoint interval [PPO iterations].
         run_name = "b1z1_pact_improved"                                                  # Run label used in output directories.
