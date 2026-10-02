@@ -577,8 +577,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'correction_ramp_enabled': True,
                         'correction_ramp_start_offset': 100,
                         'correction_ramp_duration': 100,
-                        'objective_curriculum_enabled': False,
-                        'contact_acceleration_weight_initial': 0.30,  # .25 * final
+                        'objective_curriculum_enabled': True,
+                        'contact_acceleration_weight_initial': 0.25,  # .25 * final
                         'torso_stability_curriculum_enabled': True,  # shares objective performance/progress gate
                         'attitude_weight_initial': None,  # .25 * authoritative attitude_weight
                         'height_weight_initial': None,  # .25 * authoritative height_weight
@@ -640,7 +640,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         # x=[total torque12; world GRF12]; no acceleration/slack variables.
                         'contact_threshold': 0.5,
                         'torque_rate_constraint_weight': 0.0,  # QP only: zero removes rate rows/slack; positive enables hard rate bound
-                        'contact_acceleration_weight': 1.0,
+                        'contact_acceleration_weight': 0.25,
                         'projection_contact_acceleration_weight': 0.10,  # fixed OUTER stance coefficient
                         # Recovery softens the position/velocity envelope; rate slack exists only when QP rate enabled.
                         'soft_joint_recovery_enabled': True,
@@ -654,8 +654,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'recovery_projection_slack_weight': 1.0,
                         'contact_acceleration_scale_m_s2': 50.0,
                         
-                        'attitude_weight': 1.0,
-                        'height_weight': 1.0,
+                        'attitude_weight': 0.5,
+                        'height_weight': 0.1,
                         'height_kp': 20.0,
                         'height_kd': 5.0,
                         
