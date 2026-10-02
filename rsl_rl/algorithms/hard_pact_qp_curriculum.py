@@ -77,15 +77,16 @@ class QPCurriculum:
         alpha = (1.0 if not c.correction_ramp_enabled or c.correction_ramp_duration == 0
                  else min(1.0, max(0.0, (iteration-self.origin)/c.correction_ramp_duration)))
         weights = {}
-        for name in ("contact_acceleration_weight", "attitude_weight"):
-            final = getattr(c, name + "_final")
-            final = getattr(c, name) if final is None else final
+        for name in ("contact_acceleration_weight", "attitude_weight", "height_weight"):
+            # Component weights are authoritative endpoints. Deprecated *_final
+            # fields remain loadable but cannot override the configured objective.
+            final = getattr(c, name)
             initial = getattr(c, name + "_initial")
             initial = .25 * final if initial is None else initial
             if not all(math.isfinite(v) and v >= 0 for v in (initial, final)):
                 raise ValueError("QP curriculum weights must be finite and nonnegative")
-            weights[name] = (initial + self.progress*(final-initial)
-                             if c.objective_curriculum_enabled else getattr(c, name))
+            scheduled=c.objective_curriculum_enabled and (name=='contact_acceleration_weight' or c.torso_stability_curriculum_enabled)
+            weights[name] = (initial + self.progress*(final-initial) if scheduled else final)
         self.snapshot_iteration = int(iteration)
         self.snapshot_progress = self.progress
         self.snapshot = (replace(c, **weights), alpha)
@@ -143,6 +144,10 @@ class QPCurriculum:
                     next_weight_progress=self.progress,
                     contact_acceleration_weight=cfg.contact_acceleration_weight,
                     attitude_weight=cfg.attitude_weight,
+                    height_weight=cfg.height_weight,
+                    **{'torso_stability/attitude_weight':cfg.attitude_weight,
+                       'torso_stability/height_weight':cfg.height_weight,
+                       'torso_stability/progress':self.snapshot_progress},
                     tracking_ema=float('nan') if self.ema is None else self.ema,
                     tracking_threshold=float('nan') if self.threshold is None else self.threshold,
                     frozen_pre_qp_reference=float('nan') if self.pre_qp_reference is None else self.pre_qp_reference,

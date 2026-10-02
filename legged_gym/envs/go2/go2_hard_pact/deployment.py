@@ -44,6 +44,17 @@ def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None,
             "outer_prediction": "body [vx,vy,wz] + H*qdd[0,1,5]; H=None uses captured physics dt; constant-derivative extrapolation, not multi-step rollout; actor-only loss, independent weights",
         },
         "stance_threshold": settings.contact_threshold,
+        "torso_stability": {
+            "height_input_helper":"rsl_rl.modules.hard_pact_physics.estimated_qp_height_inputs",
+            "height_units":"m, terrain-patch-relative; explicit[11]",
+            "velocity":"explicit[:3]/height_velocity_obs_scale rotated body-to-world with xyzw quaternion",
+            "world_vertical_acceleration":"base_jacobian[2] @ qdd + cross(omega_world, estimated_velocity_world)[2]",
+            "height_desired_acceleration":"height_kp*(height_target-estimated_height)-height_kd*estimated_velocity_world_z",
+            "terrain_reference":"fixed per solve; world-vertical damping approximates relative-height damping on changing terrain",
+            "gradients":"height/velocity state detached; supervised estimator training only; existing QP actor/force/wrench paths retained",
+            "curriculum":"attitude and height share existing objective progress/gate; configured component weights are authoritative final targets",
+            "legacy_checkpoints":"11-D cannot load silently into 12-D; use matched height-aware HardPACTPos pretraining or explicit conversion",
+        },
         "stance_selection": "detached probability >= threshold; optimized swing force exactly zero",
         "joint_position_beta": settings.position_integration_coefficient,
         "training_warmup_iterations": warmup_iterations,
@@ -132,7 +143,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
     explicit_dim = actor.explicit_estimator.network[-1].out_features
     swing_config = GRFSwingConfig.from_task(cfg)
     contract = {
-        "schema_version": 16,
+        "schema_version": 17,
         "actuator_execution": {
             "clip_torque_rate_without_qp": bool(getattr(cfg.control,"clip_torque_rate_without_qp",False)),
             "torque_rate_limit_nm_s": float(getattr(cfg.control,"torque_rate_limit_nm_s",1000.0)),
@@ -176,17 +187,22 @@ def build_deployment_contract(cfg, actor, gain_spec):
             "implementation": "rsl_rl.algorithms.hard_pact_qp.HardPACTDifferentiableQP._build",
             "terms": ["nominal_torque_tracking", "predicted_grf_tracking",
                       "stance_acceleration_soft_tracking", "yaw_local_roll_pitch_stabilization",
+                      "world_vertical_height_stabilization_soft_tracking",
                       "positive_definite_regularization"],
             "variables": "x=[total_actuator_torque_12; world_FR_FL_RR_RL_force_12]",
             "acceleration": "a=solve(M,[S^T,Jf^T])x+solve(M,Jb^T W-h)",
             "attitude_frame": "instantaneous yaw-local physical angular acceleration; not Euler-angle acceleration",
             "attitude_target": "-Kp*(z_world cross z_body)_yaw_xy-Kd*omega_yaw_xy",
+            "height_target_default_m": float(cfg.rewards.base_height_target),
+            "height_velocity_obs_scale": float(cfg.normalization.obs_scales.lin_vel),
+            "height_prediction": "explicit[11] metres; explicit[:3] / lin_vel scale rotated body-to-world; no simulator height/linear-velocity truth in height objective",
+            "height_acceleration": "base_jacobian[2]@qdd + cross(omega_world,estimated_velocity_world)[2]; fixed terrain reference during solve",
             "stance": "detached probability >= configured contact_threshold; swing optimized force exactly zero; no swing friction rows",
             "recovery": "sanitized bounded nominal actuator/rate projection; no joint/contact certification or implicit VJP",
             "torque_history": "previous executed torque centers hard torque-rate constraints",
         },
         "explicit_estimator": {
-            "dimension": 11,
+            "dimension": explicit_dim,
             "input": "shared_history_encoder_features",
             "input_dimension": actor.context_encoder.feature_dim,
             "hidden_layers": [
@@ -199,7 +215,8 @@ def build_deployment_contract(cfg, actor, gain_spec):
                 {"name": "base_linear_velocity_body", "dimension": 3, "units": "observation_scaled_m_per_s", "scaling": "obs_scales.lin_vel", "clipping": None},
                 {"name": "foot_contact_probability", "dimension": 4, "order": list(FOOT_ORDER), "units": "probability", "scaling": "epsilon + (1 - 2*epsilon) * sigmoid(contact_logits)", "clipping": None},
                 {"name": "foot_clearance", "dimension": 4, "order": list(FOOT_ORDER), "units": "m", "scaling": 1.0, "clipping": [-1.0, 1.0]},
-            ],
+            ] + ([{"name":"terrain_relative_torso_height","dimension":1,"units":"m","scaling":1.0,"clipping":None,
+                   "label":"mean(base_position_z - measured_terrain_patch_heights)"}] if explicit_dim==12 else []),
         },
         "contact_estimator_supervision": {
             "raw_output": "contact_logits",
@@ -347,7 +364,7 @@ def write_deployment_contract_once(log_dir, contract):
 
 def validate_qp_deployment_contract(contract):
     """Reject old held/active execution contracts rather than reinterpret them."""
-    if contract.get("schema_version") != 16:
+    if contract.get("schema_version") != 17:
         raise ValueError("Incompatible HardPACT deployment schema; re-export using the current controller")
     update = contract.get("qp_update")
     if update is not None:

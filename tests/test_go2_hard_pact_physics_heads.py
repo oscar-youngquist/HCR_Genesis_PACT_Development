@@ -170,14 +170,14 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
                 self.assertEqual(env.env.num_obs_hist, env_cls.env.num_obs_hist)
                 self.assertGreater(env.env.num_obs_hist, 0)
                 self.assertIsInstance(env.env.num_obs_hist, int)
-                self.assertEqual(env.env.num_explicit_recon_obs, 11)
+                self.assertEqual(env.env.num_explicit_recon_obs, 12)
                 self.assertEqual(train.policy.cenet_enc_latent_dim, 16)
-                self.assertEqual(train.policy.cenet_velo_dim, 11)
+                self.assertEqual(train.policy.cenet_velo_dim, 12)
                 self.assertEqual(train.policy.contact_epsilon, 0.01)
                 self.assertEqual(train.policy.cenet_explicit_layers, [128, 128])
                 self.assertEqual(train.policy.grf_decoder_layers, [128, 128])
                 self.assertEqual(train.policy.wrench_decoder_layers, [128, 128])
-                self.assertEqual(train.policy.cenet_dec_input_dim, 27)
+                self.assertEqual(train.policy.cenet_dec_input_dim, train.policy.cenet_enc_latent_dim + 12)
                 self.assertEqual(train.policy.cenet_dec_out_dim, 276)
                 expected_contact_weight = train_cls.algorithm.contact_probability_loss_weight
                 self.assertEqual(
@@ -862,7 +862,7 @@ class DeploymentContractTests(unittest.TestCase):
                 self.assertEqual(stream.read(), first_text)
             loaded = json.loads(first_text)
 
-        self.assertEqual(loaded["schema_version"], 16)
+        self.assertEqual(loaded["schema_version"], 17)
         self.assertFalse(loaded["actuator_execution"]["clip_torque_rate_without_qp"])
         self.assertEqual(loaded["actuator_execution"]["torque_rate_limit_nm_s"], cfg.control.torque_rate_limit_nm_s)
         self.assertEqual(loaded["torque_convention"]["conversion_helper"],

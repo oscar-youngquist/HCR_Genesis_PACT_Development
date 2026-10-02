@@ -74,6 +74,7 @@ class QPCapture:
                            rate_constraints_enabled=owner.cfg.torque_rate_constraint_weight>0),
             "velocity_tracking_contract_version": 3,
             "inner_velocity_objective_horizon_s": owner.cfg.qp_velocity_objective_horizon_s,
+            "height_contract": "terrain-relative explicit[11] metres; detached estimated world velocity; a_z=Jb[2]@qdd+(omega_world cross estimated_velocity_world)[2]; terrain reference fixed per solve",
             "outer_velocity_loss_horizon_s": owner.cfg.qp_velocity_loss_horizon_s,
             "velocity_tracking_frame": "body vx/vy/omega_z; physical commands in data.velocity_command, never observation-scaled",
             "config": asdict(owner.cfg), "solver": owner._active_solver,

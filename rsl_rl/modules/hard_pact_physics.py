@@ -430,16 +430,17 @@ def wrench_regression_metrics(
 
 
 def compose_explicit_estimator_target(
-    scaled_body_linear_velocity, contact_probabilities, clipped_foot_clearances
+    scaled_body_linear_velocity, contact_probabilities, clipped_foot_clearances,
+    terrain_relative_height=None,
 ):
-    """Compose the ordered 11-D HardPACT explicit-estimator target."""
+    """Append terrain-relative torso height in metres; None supports legacy 11-D callers."""
     if scaled_body_linear_velocity.shape[-1] != 3:
         raise ValueError("body linear velocity must be 3-D")
     if contact_probabilities.shape[-1] != 4:
         raise ValueError("contact probabilities must be 4-D")
     if clipped_foot_clearances.shape[-1] != 4:
         raise ValueError("foot clearances must be 4-D")
-    return torch.cat(
+    target = torch.cat(
         (
             scaled_body_linear_velocity,
             contact_probabilities.clamp(0.0, 1.0),
@@ -447,6 +448,29 @@ def compose_explicit_estimator_target(
         ),
         dim=-1,
     )
+    return target if terrain_relative_height is None else torch.cat((target,terrain_relative_height.reshape(-1,1)),dim=-1)
+
+
+def terrain_relative_torso_height(base_position, measured_heights):
+    """Same terrain-patch mean used by the existing base-height reward/termination."""
+    return (base_position[:,2:3]-measured_heights).mean(dim=-1,keepdim=True)
+
+
+def estimated_qp_height_inputs(explicit, quaternion_xyzw, linear_velocity_scale):
+    """Detached deployment state, never simulator height/linear-velocity truth.
+
+    Explicit height is metres; velocity is obs-scaled body m/s. Rotate the
+    de-normalized velocity into world axes using the sampled substep attitude.
+    """
+    if explicit.shape[-1] != 12:
+        raise ValueError('Height QP requires a 12-D estimator; legacy 11-D checkpoints require retraining or explicit conversion')
+    if not math.isfinite(linear_velocity_scale) or linear_velocity_scale <= 0:
+        raise ValueError('linear_velocity_scale must be finite and positive')
+    e,q=explicit.detach(),quaternion_xyzw.detach()
+    v=e[:,:3]/linear_velocity_scale
+    t=2*torch.cross(q[:,:3],v,dim=-1)
+    world=v+q[:,3:4]*t+torch.cross(q[:,:3],t,dim=-1)
+    return dict(estimated_height=e[:,11:12],estimated_base_linear_velocity_world=world)
 
 
 class ExplicitEstimatorOutput(NamedTuple):
@@ -469,7 +493,7 @@ def _explicit_estimator_output(raw, epsilon):
     explicit_for_policy = torch.cat((
         raw[:, :3],
         contact_probability,
-        raw[:, 7:11],
+        raw[:, 7:],
     ), dim=-1)
     return ExplicitEstimatorOutput(
         contact_logits, contact_probability, explicit_for_policy
@@ -482,8 +506,8 @@ class ExplicitEstimatorDecoder(nn.Module):
     def __init__(self, latent_dim=16, hidden_layers=(128, 128), output_dim=11,
                  contact_epsilon=1.0e-2):
         super().__init__()
-        if output_dim != 11:
-            raise ValueError("HardPACT explicit decoding requires 11 outputs")
+        if output_dim not in (11,12):
+            raise ValueError("HardPACT explicit decoding requires 12 outputs (11 only for legacy models)")
         if not hidden_layers:
             raise ValueError("explicit estimator requires at least one hidden layer")
         layers = []
@@ -512,6 +536,12 @@ class ExplicitEstimatorDecoder(nn.Module):
         return _explicit_estimator_output(
             self.network(encoder_features), self.contact_epsilon
         )
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        key=prefix+f'network.{len(self.network)-1}.weight'
+        if key in state_dict and state_dict[key].shape[0] != self.network[-1].out_features:
+            raise RuntimeError('Incompatible HardPACT explicit height layout: 11-D legacy and 12-D height checkpoints cannot be silently interchanged; use matched pretraining or an explicit conversion')
+        return super()._load_from_state_dict(state_dict,prefix,*args,**kwargs)
 
 
 class ContactEstimatorMetricsAccumulator:

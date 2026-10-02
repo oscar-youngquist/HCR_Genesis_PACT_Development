@@ -1393,7 +1393,7 @@ class PPO_HardPACT:
                     # phase, including optional forwards and boot statistics.
                     self.last_auxiliary_metrics = {
                         name: obs_batch.new_zeros(()) for name in (
-                            "privileged", "kl", "explicit", "grf",
+                            "privileged", "kl", "explicit", "explicit_height", "grf",
                             "wrench_active", "wrench_neutral",
                         )
                     }
@@ -1713,15 +1713,15 @@ class PPO_HardPACT:
         contact_probability_loss_weight=1.0,
     ):
         """Combine continuous MSE with independently weighted contact BCE."""
-        if prediction.shape[-1] != 11 or target.shape[-1] != 11:
-            raise ValueError("HardPACT explicit estimates and labels must be 11-D")
+        if prediction.shape[-1] not in (11,12) or target.shape[-1] != prediction.shape[-1]:
+            raise ValueError("HardPACT explicit estimates and labels must match (12-D height or legacy 11-D)")
         rows = mask.reshape(-1).bool()
         prediction = prediction[rows]
         contact_logits = contact_logits[rows]
         target = target.detach()[rows]
         continuous_loss = torch.cat((
             (prediction[:, :3] - target[:, :3]).square(),
-            (prediction[:, 7:11] - target[:, 7:11]).square(),
+            (prediction[:, 7:] - target[:, 7:]).square(),
         ), dim=-1).mean(dim=-1)
         contact_loss = F.binary_cross_entropy_with_logits(
             contact_logits, target[:, 3:7], reduction="none"
@@ -2087,6 +2087,7 @@ class PPO_HardPACT:
             "privileged": privileged,
             "kl": kl,
             "explicit": explicit_loss,
+            "explicit_height": self._masked_mse(explicit[:,11:12],explicit_target[:,11:12],valid) if explicit.shape[-1]==12 else explicit_loss.detach()*0,
             "grf": grf,
             "wrench_active": wrench_active,
             "wrench_neutral": wrench_neutral,
@@ -2703,6 +2704,10 @@ class PPO_HardPACT:
                 joint_position=sample_q[:, 7:], joint_velocity=sample_v[:, 6:],
                 dt=sample_dt,
             )
+            if self.hard_pact_qp.cfg.height_weight > 0:
+                from rsl_rl.modules.hard_pact_physics import estimated_qp_height_inputs
+                qp_arguments.update(estimated_qp_height_inputs(
+                    qp_explicit,sample_q[:,3:7],self.hard_pact_qp.cfg.height_velocity_obs_scale))
             if (self.hard_pact_qp.velocity_tracking_inputs_required()
                     or self.lambda_qp_velocity_xy>0 or self.lambda_qp_velocity_yaw>0):
                 if "sampled_qp_velocity_command" not in qp_batch:

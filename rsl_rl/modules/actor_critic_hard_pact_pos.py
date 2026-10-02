@@ -213,10 +213,10 @@ class ActorCritic_HardPACT_Pos(nn.Module):
                  grf_swing=None):
         super().__init__()
 
-        # The history latent is configurable; the 11-D explicit-estimator
+        # The history latent is configurable; the 12-D explicit-estimator
         # output is the only fixed deployment interface.
-        if cenet_velo_dim != 11:
-            raise ValueError("HardPACT requires an 11-D explicit estimator")
+        if cenet_velo_dim not in (11,12):
+            raise ValueError("HardPACT requires 12 explicit values (11 only for legacy models)")
 
         # Construct the context encoder network
         self.context_encoder = ContextEncoder(context_input_dim=cenet_in_dim,

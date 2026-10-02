@@ -73,9 +73,9 @@ class HardPACTQPConfig:
     correction_ramp_duration: int = 1000
     objective_curriculum_enabled: bool = False
     contact_acceleration_weight_initial: float | None = None  # 25% of final
-    contact_acceleration_weight_final: float | None = None  # configured weight
+    contact_acceleration_weight_final: float | None = None  # deprecated load-only alias; component weight wins
     attitude_weight_initial: float | None = None
-    attitude_weight_final: float | None = None
+    attitude_weight_final: float | None = None  # deprecated load-only alias; component weight wins
     objective_curriculum_start: int | None = None  # ramp completion
     objective_curriculum_progress_delta: float = 0.05
     objective_curriculum_step_interval: int = 10
@@ -144,6 +144,14 @@ class HardPACTQPConfig:
     projection_contact_acceleration_weight: float = 0.10
     contact_acceleration_scale_m_s2: float = 50.0
     attitude_weight: float = 1.0
+    torso_stability_curriculum_enabled: bool = True  # subgroup of existing objective curriculum
+    height_weight_initial: float | None = None
+    height_weight: float = 0.0  # legacy configs: no height objective
+    height_kp: float = 20.0
+    height_kd: float = 5.0
+    height_target: float | None = None  # runner resolves reward target
+    height_acceleration_scale: float = 20.0  # m/s²
+    height_velocity_obs_scale: float = 1.0  # resolved from obs_scales.lin_vel
     planar_velocity_weight: float = 0.0
     velocity_tracking_replay_enabled: bool = False  # outer actor terms need commands even with inner weights zero
     qp_velocity_loss_horizon_s: float | None = None  # outer constant-derivative extrapolation only
@@ -398,6 +406,12 @@ class HardPACTDifferentiableQP:
                 raise ValueError(name+' must be finite and positive or None')
         if not math.isfinite(config.torque_rate_constraint_weight) or config.torque_rate_constraint_weight < 0:
             raise ValueError('torque_rate_constraint_weight must be finite and nonnegative')
+        for name in ('height_weight','height_kp','height_kd','height_acceleration_scale','height_velocity_obs_scale'):
+            value=getattr(config,name)
+            if not math.isfinite(value) or value < 0 or (name.endswith('scale') and value == 0):
+                raise ValueError(name+' must be finite and nonnegative (scales positive)')
+        if config.height_target is not None and not math.isfinite(config.height_target):
+            raise ValueError('height_target must be finite')
         for name in ("planar_velocity_weight", "yaw_rate_weight",
                      "planar_velocity_scale_m_s", "yaw_rate_scale_rad_s"):
             value = getattr(config, name)
@@ -720,6 +734,30 @@ class HardPACTDifferentiableQP:
         e = current + dt*offset[:,[0,1,5]] - data["velocity_command"].detach()
         return C, e, current
 
+    def _height_affine(self, data, acceleration_map, offset):
+        """World-vertical classical acceleration, at the base-Jacobian origin.
+
+        Canonical free-flyer acceleration differentiates body velocity. Thus
+        a_z = e_z^T J_b,linear qdd + (omega_W cross vhat_W)_z. The latter
+        transport term is required even with world-aligned Jacobians. W is
+        already in offset=M^-1(J_b^T W-h); do not add another wrench term.
+        Terrain reference stays fixed within the solve, so world vertical
+        damping only approximates relative-height damping on changing terrain.
+        """
+        if self.cfg.height_target is None:
+            raise ValueError('Resolve height_target from rewards.base_height_target before enabling height QP')
+        if 'estimated_height' not in data or 'estimated_base_linear_velocity_world' not in data:
+            raise ValueError('Height QP requires captured/recomputed 12-D estimator height and velocity; legacy packets cannot invent targets')
+        height=data['estimated_height'].detach().reshape(-1)
+        velocity=data['estimated_base_linear_velocity_world'].detach()
+        angular=data['base_angular_velocity_world'].detach()
+        Jz=data['base_jacobian'][:,2:3].detach()
+        transport=torch.cross(angular,velocity,dim=-1)[:,2]
+        desired=self.cfg.height_kp*(self.cfg.height_target-height)-self.cfg.height_kd*velocity[:,2]
+        C=Jz@acceleration_map
+        e=(Jz@offset[...,None]).flatten()+transport-desired
+        return C,e[:,None],desired
+
     def _build(self, data):
         r"""Assemble x=[tau_12; f_FR,FL,RR,RL_world_12], and substitute x=D z.
 
@@ -811,6 +849,10 @@ class HardPACTDifferentiableQP:
                                      (slice(2,3), self.cfg.yaw_rate_weight,
                                       self.cfg.yaw_rate_scale_rad_s)):
                 add_residual(C[:,sl]/units, e[:,sl]/units, weight)
+
+        if self.cfg.height_weight > 0:
+            C,e,_ = self._height_affine(data,mechanics_map,offset)
+            add_residual(C/self.cfg.height_acceleration_scale,e/self.cfg.height_acceleration_scale,self.cfg.height_weight)
 
         limits, qmin, qmax, vmax = self._limits(ref)
         dt = data["dt"].detach().reshape(-1, 1)
@@ -938,6 +980,20 @@ class HardPACTDifferentiableQP:
         acceleration = (m.acceleration_map @ x[..., None]).squeeze(-1) + m.acceleration_offset
         aggregate.joint_candidate(stage, data, acceleration, accepted, qmin, qmax,
                                   vmax, amax, self.cfg.position_integration_coefficient)
+        if self.cfg.height_weight > 0:
+            C,e,desired=self._height_affine(data,m.acceleration_map,m.acceleration_offset)
+            error=(C@x[...,None]).flatten()+e.flatten()
+            metrics=dict(estimated_height_m=data['estimated_height'].flatten(),
+                height_error_m=self.cfg.height_target-data['estimated_height'].flatten(),
+                vertical_velocity_m_s=data['estimated_base_linear_velocity_world'][:,2],
+                desired_vertical_acceleration_m_s2=desired,
+                predicted_vertical_acceleration_m_s2=error+desired,
+                weighted_cost=self.cfg.height_weight*(error/self.cfg.height_acceleration_scale).square())
+            if 'diagnostic_height_truth' in data:
+                metrics['height_estimation_abs_error_m']=(data['estimated_height']-data['diagnostic_height_truth']).abs().flatten()
+            for status,mask in (('accepted',accepted),('rejected',~accepted)):
+                for name,value in metrics.items():
+                    aggregate.add_values(f'model_height/{stage}/{status}/{name}',value,mask)
         if self.velocity_tracking_inputs_required():
             C, e, current = self._velocity_tracking_affine(data, m.acceleration_map[:,:,:24], m.acceleration_offset)
             aggregate.tracking_conflict(stage, data, x, m.acceleration_map, m.acceleration_offset,
@@ -1098,6 +1154,7 @@ class HardPACTDifferentiableQP:
         backend_equivalent = replace(self._backend_config,
             contact_acceleration_weight=self.cfg.contact_acceleration_weight,
             attitude_weight=self.cfg.attitude_weight,
+            height_weight=self.cfg.height_weight,
             planar_velocity_weight=self.cfg.planar_velocity_weight,
             yaw_rate_weight=self.cfg.yaw_rate_weight,
             planar_velocity_scale_m_s=self.cfg.planar_velocity_scale_m_s,
@@ -1153,7 +1210,7 @@ class HardPACTDifferentiableQP:
         qdd = ref.new_zeros(n,18)
         ok = torch.zeros(n,device=ref.device,dtype=torch.bool)
         finite_input = torch.stack([torch.isfinite(v).reshape(n,-1).all(-1)
-                                    for k,v in values.items() if rate_enabled or k!='previous_torque']).all(0) & (dt[:,0]>0)
+                                    for k,v in values.items() if not k.startswith('diagnostic_') and (rate_enabled or k!='previous_torque')]).all(0) & (dt[:,0]>0)
         diag = {"torque_rate_constraints_enabled":ref.new_full((n,),float(rate_enabled)),
                 "failure/nonfinite_input":~finite_input,
                 "failure/empty_torque_intersection":empty_tau,

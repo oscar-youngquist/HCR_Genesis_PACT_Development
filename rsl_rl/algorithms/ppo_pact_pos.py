@@ -525,7 +525,7 @@ class PPO_PACT_Pos:
                     for name in ("total", "privileged_reconstruction", "kl", "explicit",
                                  "grf", "wrench_active", "wrench_neutral",
                                  "explicit_base_linear_velocity", "explicit_contact_probabilities",
-                                 "explicit_foot_clearance"):
+                                 "explicit_foot_clearance", "explicit_height"):
                         auxiliary_metric_sums.setdefault(name, obs_batch.new_zeros(()))
                     continue
                 ###
@@ -878,12 +878,12 @@ class PPO_PACT_Pos:
         contact_probability_loss_weight=1.0,
     ):
         """Combine continuous MSE with independently weighted contact BCE."""
-        if prediction.shape[-1] != 11 or target.shape[-1] != 11:
-            raise ValueError("HardPACTPos explicit estimates and labels must be 11-D")
+        if prediction.shape[-1] not in (11,12) or target.shape[-1] != prediction.shape[-1]:
+            raise ValueError("HardPACTPos explicit estimates and labels must match (12-D height or legacy 11-D)")
         target = target.detach()
         continuous_loss = torch.cat((
             (prediction[:, :3] - target[:, :3]).square(),
-            (prediction[:, 7:11] - target[:, 7:11]).square(),
+            (prediction[:, 7:] - target[:, 7:]).square(),
         ), dim=-1).mean(dim=-1)
         contact_loss = F.binary_cross_entropy_with_logits(
             contact_logits, target[:, 3:7], reduction="none"
@@ -928,14 +928,14 @@ class PPO_PACT_Pos:
             terminated_batch = terminated_batch[rows]
             if obs_hist_batch.shape[0] == 0:
                 zero = obs_target.new_zeros(())
-                width = self.actor_critic.context_encoder.ce_out_mean.out_features + 11
+                width = self.actor_critic.context_encoder.ce_out_mean.out_features + self.actor_critic.explicit_estimator.network[-1].out_features
                 return (zero, zero, zero, zero,
                         obs_target.new_empty((0, width)), obs_target, obs_target,
                         {name: zero for name in (
                             "total", "privileged_reconstruction", "kl", "explicit",
                             "grf", "wrench_active", "wrench_neutral",
                             "explicit_base_linear_velocity", "explicit_contact_probabilities",
-                            "explicit_foot_clearance",
+                            "explicit_foot_clearance", "explicit_height",
                         )})
         
         mean_latent, logvar_latent, features = (
@@ -1052,6 +1052,7 @@ class PPO_PACT_Pos:
                 "explicit_base_linear_velocity": explicit_linear,
                 "explicit_contact_probabilities": explicit_contact,
                 "explicit_foot_clearance": explicit_clearance,
+                "explicit_height": self._masked_mse(cenet_torso_velo[:,11:12],explicit_labels_batch[:,11:12],valid) if cenet_torso_velo.shape[-1]==12 else vel_pred_error.detach()*0,
             })
             if self._contact_diagnostics is None:
                 auxiliary_metrics.update(contact_estimator_metrics(

@@ -10,7 +10,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         num_observations = 57
         num_privileged_obs = 57 + (50 + 38) + 143 + DISTURBANCE_CRITIC_DIM
         num_priv_stack = 5
-        num_explicit_recon_obs = 11
+        num_explicit_recon_obs = 12
         num_actions = 12
         env_spacing = 0.5
         num_obs_hist = 10
@@ -468,11 +468,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         cenet_enc_layers = [256, 128]
         cenet_enc_latent_dim = 16
-        cenet_velo_dim = 11
+        cenet_velo_dim = 12
 
         # Bounds runtime contact probabilities to [epsilon, 1-epsilon].
         contact_epsilon = 0.01
-        cenet_dec_input_dim = cenet_enc_latent_dim + 11
+        cenet_dec_input_dim = cenet_enc_latent_dim + 12
         cenet_dec_layers = [128, 256, 512]
 
         cenet_dec_out_dim = 276  # 133 retained features + 143 terrain heights
@@ -578,10 +578,10 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'correction_ramp_start_offset': 100,
                         'correction_ramp_duration': 100,
                         'objective_curriculum_enabled': False,
-                        'contact_acceleration_weight_initial': 0.10,  # .25 * final
-                        'contact_acceleration_weight_final': 0.10,  # contact_acceleration_weight
-                        'attitude_weight_initial': 0.10,  # .25 * final
-                        'attitude_weight_final': 0.1,  # attitude_weight
+                        'contact_acceleration_weight_initial': 0.30,  # .25 * final
+                        'torso_stability_curriculum_enabled': True,  # shares objective performance/progress gate
+                        'attitude_weight_initial': None,  # .25 * authoritative attitude_weight
+                        'height_weight_initial': None,  # .25 * authoritative height_weight
                         
                         'objective_curriculum_start': None,  # after execution ramp
                         'objective_curriculum_progress_delta': 0.05,
@@ -653,7 +653,14 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'recovery_projection_weight': 0.5,
                         'recovery_projection_slack_weight': 1.0,
                         'contact_acceleration_scale_m_s2': 50.0,
+                        
                         'attitude_weight': 1.0,
+                        'height_weight': 1.0,
+                        'height_kp': 20.0,
+                        'height_kd': 5.0,
+                        
+                        'height_target': None,  # resolved from rewards.base_height_target
+                        'height_acceleration_scale': 20.0,  # m/s^2
 
                         # Soft BODY velocity tracking by constant-derivative extrapolation.
                         # Independent of stance/attitude and execution curricula.

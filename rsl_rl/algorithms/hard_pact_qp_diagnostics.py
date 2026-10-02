@@ -404,7 +404,7 @@ class QPIterationDiagnostics:
             /(attempted-exceptions).clamp_min(1))
         for key, weight in self.weights.items():
             result[key] = torch.where(weight > 0, self.sums[key] / weight.clamp_min(1), zero + float("nan"))
-            if key.startswith(("model_candidate/", "model_tracking_conflict/")):
+            if key.startswith(("model_candidate/", "model_tracking_conflict/", "model_height/")):
                 result[key + "/samples"] = weight
         for key, value in self.extrema.items():
             result[key] = torch.where(torch.isfinite(value), value, zero + float("nan"))

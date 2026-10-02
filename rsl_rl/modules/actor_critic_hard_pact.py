@@ -220,11 +220,12 @@ class ActorCritic_HardPACT(nn.Module):
 
         # The history latent is an architecture hyperparameter.  Only the
         # deployment estimator contract is fixed: [base velocity (3), contact
-        # probabilities (4), foot clearances (4)] = 11 values.  The decoder's
+        # probabilities (4), foot clearances (4), height (1)] = 12 values;
+        # explicitly configured 11-D legacy models omit height. The decoder's
         # raw contact logits remain available only through its structured
         # result for BCE supervision.
-        if cenet_velo_dim != 11:
-            raise ValueError("HardPACT requires an 11-D explicit estimator")
+        if cenet_velo_dim not in (11,12):
+            raise ValueError("HardPACT requires 12 explicit values (11 only for legacy models)")
 
         # Construct the context encoder network
         self.context_encoder = ContextEncoder(context_input_dim=cenet_in_dim,

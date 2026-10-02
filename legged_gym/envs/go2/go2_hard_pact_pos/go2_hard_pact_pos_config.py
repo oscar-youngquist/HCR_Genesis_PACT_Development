@@ -10,7 +10,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         num_observations = 57
         num_privileged_obs = 57 + (50 + 38) + 143 + DISTURBANCE_CRITIC_DIM
         num_priv_stack = 5
-        num_explicit_recon_obs = 11
+        num_explicit_recon_obs = 12
         num_actions = 12
         env_spacing = 0.5
         # Match full HardPACT so position-pretraining checkpoints have the
@@ -452,10 +452,10 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
 
         cenet_enc_layers = [256, 128]
         cenet_enc_latent_dim = 16
-        cenet_velo_dim = 11
+        cenet_velo_dim = 12
         # Bounds runtime contact probabilities to [epsilon, 1-epsilon].
         contact_epsilon = 0.01
-        cenet_dec_input_dim = cenet_enc_latent_dim + 11
+        cenet_dec_input_dim = cenet_enc_latent_dim + 12
         cenet_dec_layers = [128, 256, 512]
         cenet_dec_out_dim = 276  # 133 retained features + 143 terrain heights
 

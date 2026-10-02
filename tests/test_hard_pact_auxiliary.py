@@ -209,7 +209,7 @@ class HardPACTAuxiliaryTests(unittest.TestCase):
         torch.testing.assert_close(optimized, torch.tensor(1.545))
         for name in ("lambda_inverse", "lambda_rollout", "lambda_projection"):
             with self.subTest(name=name):
-                with self.assertRaisesRegex(ValueError, "must be nonnegative"):
+                with self.assertRaisesRegex(ValueError, "must be (finite and )?nonnegative"):
                     make_algorithm(**{name: -1.0})
 
     def test_hard_pact_ppo_is_self_contained(self):

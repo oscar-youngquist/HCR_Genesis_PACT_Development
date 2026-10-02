@@ -210,8 +210,12 @@ class OnPolicyRunnerPACT:
             # One configured rate for QP, deployment, and execution without QP.
             from dataclasses import replace
             self.alg.qp_config = replace(self.alg.qp_config,
-                torque_rate_limit_nm_s=self.env.cfg.control.torque_rate_limit_nm_s)
+                torque_rate_limit_nm_s=self.env.cfg.control.torque_rate_limit_nm_s,
+                height_target=(self.env.cfg.rewards.base_height_target if self.alg.qp_config.height_target is None else self.alg.qp_config.height_target),
+                height_velocity_obs_scale=self.env.cfg.normalization.obs_scales.lin_vel)
             self.alg_cfg["hard_pact_qp"]["torque_rate_limit_nm_s"] = self.alg.qp_config.torque_rate_limit_nm_s
+            for key in ('height_target','height_velocity_obs_scale'):
+                self.alg_cfg['hard_pact_qp'][key] = getattr(self.alg.qp_config,key)
             for key in ("lambda_qp_velocity_xy", "lambda_qp_velocity_yaw"):
                 self.alg_cfg[key] = getattr(self.alg,key)
             if self.hard_pact_features.execution_qp:

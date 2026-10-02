@@ -14,6 +14,7 @@ from rsl_rl.modules.hard_pact_control import (
 from rsl_rl.modules.hard_pact_physics import (
     log_qp_swing_grf,
     compose_explicit_estimator_target,
+    terrain_relative_torso_height, estimated_qp_height_inputs,
     normalize_grf_target,
     normalize_wrench_target,
 )
@@ -616,6 +617,11 @@ class Go2HardPACT(Go2PACT):
 
     def configure_hard_pact_substep_qp(self, actor_critic, bard_dynamics, qp):
         """Bind shared inference objects without duplicating model memory."""
+        if getattr(qp.cfg,'height_weight',0)>0:
+            from dataclasses import replace
+            qp.cfg=replace(qp.cfg,
+                height_target=self.cfg.rewards.base_height_target if qp.cfg.height_target is None else qp.cfg.height_target,
+                height_velocity_obs_scale=self.obs_scales.lin_vel)
         self._hard_pact_actor_critic = actor_critic
         self._hard_pact_bard_dynamics = bard_dynamics
         self._hard_pact_rollout_qp = qp
@@ -1048,6 +1054,12 @@ class Go2HardPACT(Go2PACT):
                 tracking_inputs = ({"velocity_command": self.commands[rows,:3].detach().clone(),
                                     "base_linear_velocity_world": v[:,:3]}
                                    if qp.velocity_tracking_inputs_required() else {})
+                if qp.cfg.height_weight > 0:
+                    tracking_inputs.update(estimated_qp_height_inputs(
+                        self._hard_pact_policy_explicit[rows],q[:,3:7],qp.cfg.height_velocity_obs_scale))
+                    if qp._physical_enabled():
+                        tracking_inputs['diagnostic_height_truth'] = terrain_relative_torso_height(
+                            self.simulator.base_pos[rows],self.simulator.measured_heights[rows])
                 result = qp.solve(differentiable=False,environment_ids=rows,
                     **tracking_inputs,
                     mass_matrix=context.mass_matrix,bias=context.bias,
@@ -1107,7 +1119,7 @@ class Go2HardPACT(Go2PACT):
                     "sampled_qp_residuals":residual}
                 for name,value in fields.items():
                     sample[name][dest] = value[local].detach()
-                if tracking_inputs:
+                if 'velocity_command' in tracking_inputs:
                     sample["sampled_qp_velocity_command"][dest] = tracking_inputs["velocity_command"][local]
                 sample["sampled_qp_valid"][dest] = True
             # Unsolved rows retain ONLY analytic projection of fresh nominal
@@ -1427,6 +1439,7 @@ class Go2HardPACT(Go2PACT):
             self.simulator.base_lin_vel * self.obs_scales.lin_vel,
             self.grf_processor.contacts.float(),
             clearance,
+            terrain_relative_torso_height(self.simulator.base_pos,self.simulator.measured_heights),
         )
         if getattr(self, "_pending_disturbance_transition", None) is not None:
             disturbance_frame = pack_disturbance_fields(
