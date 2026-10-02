@@ -18,6 +18,35 @@ def pos_fk_enabled(cfg):
     return cfg.get("actor_phys_pos_fk_enabled", False) and cfg.get("actor_phys_pos_fk_weight", 0.) > 0
 
 
+def manipulability_enabled(cfg):
+    return (cfg.get("actor_phys_arm_manipulability_enabled", False)
+            and cfg.get("actor_phys_arm_manipulability_weight", .02) > 0)
+
+
+def arm_manipulability(predicted, cfg):
+    """Penalize small translational singular values, not the force ellipsoid."""
+    zero = predicted.new_zeros(())
+    names = ("raw", "weighted", "sigma_min", "violation_fraction")
+    metrics = {"arm_manipulability_" + name: zero for name in names}
+    if not manipulability_enabled(cfg):
+        return zero, metrics
+    from legged_gym.envs.b1z1.z1_arm_kinematics import compute_z1_arm_jacobian
+    ids = torch.as_tensor(cfg["actor_phys_arm_dof_indices"], device=predicted.device, dtype=torch.long)
+    # Use the live BARD successor, never the detached measured configuration.
+    joints = predicted[:, 7:26].index_select(1, ids)
+    geometry = [predicted.new_tensor(cfg["actor_phys_arm_" + name]).detach()
+                for name in ("joint_offsets", "joint_axes", "link00_offset", "ee_offset")]
+    jacobian = compute_z1_arm_jacobian(joints, *geometry)
+    sigma = torch.linalg.svdvals(jacobian)[..., -1]
+    threshold = cfg["actor_phys_arm_manipulability_sigma_min"]
+    raw = ((threshold - sigma) / threshold).clamp_min(0).square().mean()
+    weighted = cfg["actor_phys_arm_manipulability_weight"] * raw
+    values = (raw, weighted, sigma.mean(), (sigma < threshold).to(predicted.dtype).mean())
+    metrics.update({"arm_manipulability_" + name: value.detach()
+                    for name, value in zip(names, values)})
+    return weighted, metrics
+
+
 def position_fk(a, actions, data):
     """Direct command-to-FK graph: no predicted successor or forward dynamics."""
     ids = torch.as_tensor(a.cfg["actor_phys_arm_indices"], device=actions.device, dtype=torch.long)
@@ -66,7 +95,8 @@ def configure(algorithm):
     if not math.isfinite(stability_weight) or stability_weight < 0:
         raise ValueError("actor_phys_ee_stability_weight must be finite and nonnegative")
     if stability_weight > 0:
-        for key in ("position_radius", "rotation_radius"):
+        orientation = cfg.get("actor_phys_ee_stability_use_orientation", False)
+        for key in (("position_radius", "rotation_radius") if orientation else ("position_radius",)):
             value = cfg["actor_phys_ee_stability_" + key]
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"EE stability {key} must be positive")
@@ -78,8 +108,15 @@ def configure(algorithm):
             raise ValueError("EE stability rho must be at most one")
         for key in ("pose_weights", "twist_weights"):
             value = torch.as_tensor(cfg["actor_phys_ee_stability_" + key])
-            if value.shape != (6,) or not torch.isfinite(value).all() or (value < 0).any():
-                raise ValueError(f"EE stability {key} must contain six finite nonnegative weights")
+            width = 6 if orientation else 3
+            value = value[:width]
+            if value.shape != (width,) or not torch.isfinite(value).all() or (value < 0).any():
+                raise ValueError(f"EE stability {key} must contain {width} finite nonnegative weights")
+    if manipulability_enabled(cfg):
+        for key in ("weight", "sigma_min"):
+            value = cfg["actor_phys_arm_manipulability_" + key]
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"Arm manipulability {key} must be finite and positive")
     for key in ("velocity_time_constant", "softplus_temperature", "huber_delta",
                 "ee_scale", "q_scale", "qd_scale"):
         value = cfg["actor_phys_" + key]
@@ -142,7 +179,7 @@ def capture(runner):
         nominal0 = env.get_ee_goal_spherical_center(yaw) + quat_apply(yaw, sphere2cart(sphere0))
         values["ee_stability_current_target"] = _compute_force_adjusted_ee_target(
             env, external_force=force, nominal_target=nominal0).effective_target
-        if hasattr(env, "default_ee_local_quat"):
+        if a.cfg.get("actor_phys_ee_stability_use_orientation", False) and hasattr(env, "default_ee_local_quat"):
             from legged_gym.utils.math_utils import quat_mul
             desired = quat_mul(yaw, env.default_ee_local_quat)
             axes = torch.eye(3, device=desired.device, dtype=desired.dtype)
@@ -241,6 +278,8 @@ def objective(a, batch, actions, context):
     # Cheap zero metrics even for invalid batches; no stability FK when disabled.
     _, stability_metrics = b1z1_ee_stability.objective(None, actions, {}, {})
     metrics.update(stability_metrics)
+    _, arm_metrics = arm_manipulability(actions, {})
+    metrics.update(arm_metrics)
     metrics["valid_fraction"] = valid.float().mean()
     metrics["active_fraction"] = zero.detach()
     if pos_fk_enabled(a.cfg):
@@ -297,6 +336,9 @@ def objective(a, batch, actions, context):
         {k: v[finite_ee] for k, v in data.items()}, a.cfg)
     total = total + stability_loss
     metrics.update(stability_metrics)
+    arm_loss, arm_metrics = arm_manipulability(predicted[finite_ee], a.cfg)
+    total = total + arm_loss
+    metrics.update(arm_metrics)
     metrics["loss"] = total.detach()
     if pos_fk_enabled(a.cfg):
         fk_loss, fk_metrics = position_fk(a, actions[valid][good][finite][finite_ee],

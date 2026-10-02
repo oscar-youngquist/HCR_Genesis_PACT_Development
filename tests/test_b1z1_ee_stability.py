@@ -16,10 +16,11 @@ def config():
     return {**cfg, "actor_phys_ee_stability_weight": 1., "dt": .02}
 
 
-def pose_twist(state):
+def pose_twist(state, use_orientation=True):
     pose = torch.eye(4, device=state.device, dtype=state.dtype).repeat(len(state), 1, 1)
     pose[:, :3, 3] = state[:, :3] + state[:, 19:22]
-    return pose, state[:, 26:32] + state[:, 32:38]
+    twist = state[:, 26:32] + state[:, 32:38]
+    return (pose, twist) if use_orientation else (pose[:, :3, 3], twist[:, :3])
 
 
 def inputs():
@@ -120,6 +121,9 @@ def test_tiny_bard_pose_twist_smoke():
     state[:, 32:] = .1
     state.requires_grad_()
     pose, twist = backend.ee_pose_twist(state)
+    position, linear = backend.ee_pose_twist(state, use_orientation=False)
+    torch.testing.assert_close(position, pose[:, :3, 3])
+    torch.testing.assert_close(linear, twist[:, :3])
     torch.testing.assert_close(pose[:, :3, 3], backend.ee_position(state))
     # World twist must equal the existing canonical world-aligned Jacobian times v.
     terms = backend.evaluate(state[:, :3], state[:, 3:7], state[:, 7:26],
@@ -127,5 +131,5 @@ def test_tiny_bard_pose_twist_smoke():
                              state.new_zeros(2, 4, 3), state.new_zeros(2, 3), state.new_zeros(2, 6))
     torch.testing.assert_close(twist, (terms.ee_jacobian @ state[:, 26:51, None]).squeeze(-1),
                                atol=1e-5, rtol=1e-4)
-    (pose[:, :3, 3].square().sum()+twist.square().sum()).backward()
+    (position.square().sum()+linear.square().sum()).backward()
     assert torch.isfinite(state.grad).all() and state.grad.abs().sum() > 0

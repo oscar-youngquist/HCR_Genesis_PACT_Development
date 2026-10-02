@@ -106,7 +106,10 @@ class B1Z1PACTRunner:
             )
 
         merged = dict(algorithm_cfg)
-        if algorithm_cfg.get("actor_phys_enabled", False) and algorithm_cfg.get("actor_phys_pos_fk_enabled", False):
+        arm_physics = (algorithm_cfg.get("actor_phys_pos_fk_enabled", False)
+                       or (algorithm_cfg.get("actor_phys_arm_manipulability_enabled", False)
+                           and algorithm_cfg.get("actor_phys_arm_manipulability_weight", .02) > 0))
+        if algorithm_cfg.get("actor_phys_enabled", False) and arm_physics:
             import xml.etree.ElementTree as ET
             arm_ids = [int(i) for i in env.simulator._arm_dof_cfg_ids]
             root_joint = env.cfg.asset.dof_names[arm_ids[0]]
@@ -115,6 +118,11 @@ class B1Z1PACTRunner:
             merged["actor_phys_arm_root_frame"] = joint.find("parent").attrib["link"]
             merged["actor_phys_arm_indices"] = [i for i in arm_ids if i < env.num_actions]
             merged["actor_phys_num_actions"] = env.num_actions
+            # Retain all six arm DOFs in canonical joint order,
+            # including the wrist even when it has no independent policy action.
+            merged["actor_phys_arm_dof_indices"] = arm_ids
+            for name in ("joint_offsets", "joint_axes", "link00_offset", "ee_offset"):
+                merged["actor_phys_arm_" + name] = getattr(env, "z1_" + name).detach().cpu().tolist()
         merged["grf_decoder_weight"] = policy_cfg.get("grf_decoder_weight", 1.0)
         merged.update({
             "dt": env.dt, "position_action_scale": env.cfg.control.action_scale,

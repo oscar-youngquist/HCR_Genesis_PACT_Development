@@ -959,17 +959,18 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_coef = 0.1                              # Overall actor auxiliary coefficient.
         actor_phys_vel_weight = 1.0                         # Reachable planar velocity/yaw tracking.
         actor_phys_ee_weight = 1.0                          # Next scheduled, compliant EE target.
-        actor_phys_ee_stability_weight = 0.0                # Opt-in near-target task-space damping.
-        actor_phys_ee_stability_position_radius = 0.10      # Near-target gate radius [m].
-        actor_phys_ee_stability_rotation_radius = 0.30      # Near-target gate radius [rad].
-        actor_phys_ee_stability_pose_weights = [100., 100., 100., 4., 4., 4.]  # Inverse squared pose scales [m, rad].
-        actor_phys_ee_stability_twist_weights = [4., 4., 4., 1., 1., 1.]  # Inverse squared twist scales [m/s, rad/s].
+        actor_phys_ee_stability_weight = 0.05               # Conservative near-target task-space damping weight.
+        actor_phys_ee_stability_position_radius = 0.05      # Activate primarily within 5 cm of the target.
+        actor_phys_ee_stability_use_orientation = False     # Position-only stability; exclude rotation from energy and gate.
+        actor_phys_ee_stability_rotation_radius = 0.30      # Rotation gate radius [rad], used only when orientation is enabled.
+        actor_phys_ee_stability_pose_weights = [400., 400., 400., 0., 0., 0.]  # Inverse-squared 5 cm position scales.
+        actor_phys_ee_stability_twist_weights = [25., 25., 25., 0., 0., 0.]  # Inverse-squared 0.2 m/s linear-twist scales.
         actor_phys_ee_stability_beta = 0.1                  # Relative kinetic contribution to energy.
         actor_phys_ee_stability_twist_weight = 1.0          # Direct target-relative damping penalty.
         actor_phys_ee_stability_energy_weight = 1.0         # Squared energy-decay violation penalty.
         actor_phys_ee_stability_rho = 0.05                  # Requested energy decay per control step.
-        actor_phys_ee_stability_energy_slack = 0.01         # Allowed normalized energy slack.
-        actor_phys_ee_stability_target_speed_threshold = 0.05  # Disable gate during fast target motion [m/s].
+        actor_phys_ee_stability_energy_slack = 0.0025       # Preserve decay pressure to approximately 1 cm error.
+        actor_phys_ee_stability_target_speed_threshold = 0.05  # Disable stability loss during fast target motion [m/s].
         actor_phys_q_weight = 0.1                           # Joint-position safety barrier.
         actor_phys_qd_weight = 0.1                          # Joint-velocity safety barrier.
         actor_phys_velocity_time_constant = 0.25            # Reachable command response time [s].
@@ -982,11 +983,14 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_qd_scale = 10.0                          # Velocity-barrier normalization [rad/s].
         actor_phys_require_force_gate = False               # Optional existing force-quality gate.
 
+        actor_phys_arm_manipulability_enabled = True      # Optional successor-arm translational singularity barrier.
+        actor_phys_arm_manipulability_weight = 0.02        # Inside the scheduled actor-physics coefficient.
+        actor_phys_arm_manipulability_sigma_min = 0.05     # Minimum translational Jacobian singular value [m/rad].
         actor_phys_pos_fk_enabled = True                   # Direct arm position-command FK objective.
-        actor_phys_pos_fk_weight = 0.1                      # Inside the scheduled actor-physics coefficient.
+        actor_phys_pos_fk_weight = 0.25                      # Inside the scheduled actor-physics coefficient.
         actor_phys_pos_fk_huber_delta = 1.0                 # Huber threshold after EE-error normalization.
         actor_phys_pos_fk_axis_weights = [1.0, 1.0, 1.0]     # Arm-root Cartesian weights; uses actor_phys_ee_scale.
-        actor_phys_pos_fk_deadband = 0.05                    # Per-axis tolerance [m].
+        actor_phys_pos_fk_deadband = 0.01                    # Per-axis tolerance [m].
 
         value_loss_coef = 1.0                                                           # Critic regression coefficient.
         use_clipped_value_loss = True                                                   # Apply PPO-style clipping to critic updates.

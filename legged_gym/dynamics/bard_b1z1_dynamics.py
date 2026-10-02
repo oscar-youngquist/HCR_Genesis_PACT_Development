@@ -333,8 +333,8 @@ class BardB1Z1DynamicsBackend(WholeBodyDynamicsBackend):
             positions.append(pose[:, :3, 3].clone())
         return torch.cat(positions)
 
-    def ee_pose_twist(self, state):
-        """Differentiable world pose and world-aligned [linear, angular] twist."""
+    def ee_pose_twist(self, state, use_orientation=True):
+        """World pose/twist, or position/linear velocity without angular processing."""
         poses, twists = [], []
         for chunk in state.split(self.batch_capacity):
             q, v = self._pack_state(chunk[:, :3], chunk[:, 3:7], chunk[:, 7:26],
@@ -343,11 +343,12 @@ class BardB1Z1DynamicsBackend(WholeBodyDynamicsBackend):
             self.bard.update_kinematics(self.model, data, q, v)
             jac, pose = self.bard.jacobian(self.model, data, self.ee_frame_id,
                                           reference_frame="local", return_pose=True)
-            local = (jac @ v.unsqueeze(-1)).squeeze(-1)
+            # BARD returns a spatial Jacobian; skip its angular rows when unused.
+            local = ((jac if use_orientation else jac[:, :3]) @ v.unsqueeze(-1)).squeeze(-1)
             rotation = pose[:, :3, :3]
             twists.append(torch.cat([(rotation @ part.unsqueeze(-1)).squeeze(-1)
                                      for part in local.split(3, dim=-1)], -1))
-            poses.append(pose.clone())
+            poses.append(pose.clone() if use_orientation else pose[:, :3, 3].clone())
         return torch.cat(poses), torch.cat(twists)
 
     def commanded_ee_in_frame(self, base_pos, base_quat, joints, reference, root_frame):

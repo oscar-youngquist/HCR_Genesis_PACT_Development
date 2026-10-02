@@ -173,7 +173,7 @@ def test_enabled_ppo_update_and_snapshot_alignment():
     cfg = {**full["algorithm"], **full["policy"], **config(), "num_learning_epochs": 1,
            "num_mini_batches": 1, "dynamics_backend": "bard", "privileged_force_start": 23,
            "privileged_force_dim": 21, "pinn_init_steps": 0, "pinn_warmup": 2,
-           "pinn_loss_weight": .1}
+           "pinn_loss_weight": .1, "actor_phys_ee_stability_weight": 0.}
     fixed = template.actor_physics_cache
     backend = SimpleNamespace(batch_capacity=3, ee_position=template.dynamics_backend.ee_position,
         evaluate=lambda *args: SimpleNamespace(**{k: v[:len(args[0])] for k, v in vars(fixed).items()}))
@@ -203,10 +203,12 @@ def test_enabled_ppo_update_and_snapshot_alignment():
 
 
 @pytest.mark.parametrize("stability_weight", [0., 1.])
-def test_capture_reuses_predicted_force_projection_without_mutating_environment(stability_weight):
+@pytest.mark.parametrize("orientation", [False, True])
+def test_capture_reuses_predicted_force_projection_without_mutating_environment(stability_weight, orientation):
     from test_b1z1_force_target_projection import ForceTargetProjectionTests
     a, batch, _, _ = setup()
     a.cfg["actor_phys_ee_stability_weight"] = stability_weight
+    a.cfg["actor_phys_ee_stability_use_orientation"] = orientation
     env = ForceTargetProjectionTests._environment([[.5, 0, 0]]*3, [[100., 0, 0]]*3)
     env.ee_start_sphere = torch.tensor([[.5, 0, 0]]*3)
     env.ee_goal_sphere = torch.tensor([[.7, 0, 0]]*3)
@@ -233,7 +235,10 @@ def test_capture_reuses_predicted_force_projection_without_mutating_environment(
     if stability_weight:
         torch.testing.assert_close(a.transition.actor_physics["ee_stability_current_target"],
                                    torch.tensor([[.501, 0, 0]]*3))
-        torch.testing.assert_close(a.transition.actor_physics["ee_stability_rotation"],
-                                   torch.eye(3).repeat(3, 1, 1))
+        if orientation:
+            torch.testing.assert_close(a.transition.actor_physics["ee_stability_rotation"],
+                                       torch.eye(3).repeat(3, 1, 1))
+        else:
+            assert "ee_stability_rotation" not in a.transition.actor_physics
     else:
         assert "ee_stability_current_target" not in a.transition.actor_physics
