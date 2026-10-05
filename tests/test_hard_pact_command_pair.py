@@ -42,10 +42,10 @@ def test_hold_endpoint_bounds_replay_and_backward():
         feed=torch.ones_like(desired,requires_grad=True)
         d.update(command_pair_inputs(desired,feed,d['joint_position'],d['joint_velocity'],p))
         d['tau_nom']=d['command_nominal'];m=qp._build(d)
-        assert m.Q.shape==(2,24,24) and m.G.shape==(2,140,24)
+        assert m.Q.shape==(2,24,24) and m.G.shape==(2,68,24)
         recovery=qp._soft_joint_problem(m)
-        assert recovery.Q.shape==(2,36,36) and recovery.G.shape==(2,152,36)
-        assert qp._cupiqp_native_pack(recovery)[0].shape==(2,116,36)
+        assert recovery.Q.shape==(2,36,36) and recovery.G.shape==(2,80,36)
+        assert qp._cupiqp_native_pack(recovery)[0].shape==(2,44,36)
         assert (torch.linalg.eigvalsh(m.Q)>0).all()
         out=qp.solve(differentiable=True,**d)
         assert out.differentiated_mask.all()
@@ -62,11 +62,11 @@ def test_hold_endpoint_bounds_replay_and_backward():
             v=v+d['dt']*out.qdd[:,6:]
             torch.testing.assert_close(q,d['joint_position']+t[:,step+1]*d['joint_velocity']+c[:,step+1]*out.qdd[:,6:])
             assert (q.abs()<=2).all() and (v.abs()<=30).all() and (torque.abs()<=23.5).all()
-        # M a = interval-average applied torque + J^T f + Jb^T W - h.
-        expected=torch.cat((torch.zeros_like(v[:,:6]),torch.stack(torques).mean(0)),1)
+        # One-step PD dynamics use the initial application, not hold-average.
+        expected=torch.cat((torch.zeros_like(v[:,:6]),torques[0]),1)
         torch.testing.assert_close(out.qdd,expected,rtol=1e-9,atol=1e-9)
-        lo=torch.stack([torch.maximum((-30-d['joint_velocity'])/t[:,i],
-            (-2-d['joint_position']-t[:,i]*d['joint_velocity'])/c[:,i]) for i in range(1,5)]).amax(0)
+        lo=torch.maximum((-30-d['joint_velocity'])/t[:,1],
+            (-2-d['joint_position']-t[:,1]*d['joint_velocity'])/c[:,1])
         torch.testing.assert_close(m.qdd_lower,lo)
         replay=qp.solve(differentiable=True,**d)
         torch.testing.assert_close(replay.tau_safe,out.tau_safe)
@@ -86,13 +86,13 @@ def test_hold_endpoint_bounds_replay_and_backward():
     assert desired.grad.isfinite().all() and desired.grad[1].eq(0).all()
     from legged_gym.envs.go2.go2_hard_pact.deployment import qp_update_contract,validate_qp_deployment_contract
     contract=qp_update_contract('command_pair',4,qp_config=qp.cfg)
-    assert contract['physics_substep_anchors']==[0]
+    assert contract['physics_substep_anchors']==[0,1,2,3]
     validate_qp_deployment_contract({'schema_version':17,'qp_update':contract})
     # Real control callback: reset, three intervals, one invocation and no
     # extra neural forwards per interval; fresh measured states at each PD.
     from test_hard_pact_qp_modes import fixture
     task,heads,qp,real,counts,q,v,quat,_=fixture('every_substep',n=2)
-    qp.cfg=replace(qp.cfg,qp_update_mode='command_pair',torque_rate_constraint_weight=0.)
+    qp.cfg=replace(qp.cfg,qp_update_mode='command_pair',torque_rate_constraint_weight=0.,command_pair_second_solve_fraction=0.)
     task.cfg.control.clip_torque_rate_without_qp=False
     task._hard_pact_control_parameters=parameters(q)
     task._hard_pact_bounded_nominal_torque=q.clone()
@@ -108,3 +108,70 @@ def test_hold_endpoint_bounds_replay_and_backward():
     assert heads.calls==3
     task.reset_idx(torch.tensor([0]))
     assert task._qp_command_delta_q[0].eq(0).all() and not task._qp_command_accepted[0]
+
+
+def test_sampling_horizons_adaptive_allocation_and_loss_masks():
+    from rsl_rl.modules.hard_pact_control import command_pair_sample,allocation_deviation_loss
+    from rsl_rl.algorithms.hard_pact_qp import qp_substep_mask
+    for fraction in (0.,.5,1.):
+        selected=command_pair_sample(10,fraction,2,'cpu')
+        dispatch=[qp_substep_mask('command_pair',k,selected) for k in range(4)]
+        assert dispatch[0].all() and dispatch[2].sum()==round(10*fraction)
+        assert not dispatch[1].any() and not dispatch[3].any()
+        assert torch.stack(dispatch).sum()==10+round(10*fraction)
+        assert all(qp_substep_mask('command_pair_every_substep',k,selected).all() for k in range(4))
+    qp=solver(qp_update_mode='command_pair',torque_rate_constraint_weight=0.,
+        position_command_lower=(-.1,)*12,position_command_upper=(.1,)*12)
+    d=inputs();p=parameters(d['tau_nom']);target=torch.full_like(d['tau_nom'],.099,requires_grad=True)
+    ff=torch.zeros_like(target,requires_grad=True)
+    bounds=qp.command_inputs(target,ff,d['joint_position'],d['joint_velocity'],p)
+    u=torch.ones_like(target,requires_grad=True)
+    dq,dff,_=allocate_command_correction(u,p,.2,bounds);k,_,f=command_pair_gains(p)
+    torch.testing.assert_close(k*dq+f*dff,u)
+    assert (target+dq<=.1+1e-12).all()
+    loss=allocation_deviation_loss(u,k*dq,torch.ones(12),.2,torch.tensor([True,False]))
+    loss.backward()
+    assert target.grad[0].abs().sum()>0 and target.grad[1].eq(0).all()
+    assert u.grad.isfinite().all() and u.grad[0].abs().sum()>0 and u.grad[1].eq(0).all()
+    assert allocation_deviation_loss(u,k*dq,torch.ones(12),0.,torch.ones(2,dtype=torch.bool))==0
+    assert allocation_deviation_loss(u,k*dq,torch.ones(12),.2,torch.zeros(2,dtype=torch.bool))==0
+    d.update(bounds);d['tau_nom']=bounds['command_nominal']
+    m=qp._build(d);dt=d['dt'].clone()
+    qp.cfg=replace(qp.cfg,constraint_prediction_horizon_s=.01)
+    changed=qp._build(d)
+    assert not torch.equal(m.qdd_lower,changed.qdd_lower)
+    assert torch.equal(m.Q,changed.Q) and torch.equal(d['dt'],dt)
+    # Forced positive correction saturates the POSITION share, not an extra
+    # per-branch motor limit; feedforward receives the residual. Gradients
+    # include both solver u and the command-dependent allocation boundary.
+    dd=inputs();dd['tau_nom'].zero_();dd['joint_position'].fill_(1.99)
+    bounds=qp.command_inputs(target,ff,dd['joint_position'],dd['joint_velocity'],p)
+    dd.update(bounds);dd['tau_nom']=bounds['command_nominal']
+    out=qp.solve(differentiable=True,**dd)
+    correction=out.tau_safe-bounds['command_nominal']
+    aq,aff,_=allocate_command_correction(correction,p,.2,bounds)
+    objective=allocation_deviation_loss(correction,k*aq,qp.torque_limits,.2,
+        out.differentiated_mask|out.recovery_mask)
+    gradients=torch.autograd.grad(objective,(target,ff),allow_unused=True)
+    assert all(g is not None and g.isfinite().all() for g in gradients)
+    assert gradients[0].abs().sum()>0
+    # Shared later index is balanced across three intervals; later corrections
+    # replace originals and the replay state belongs to the actual last solve.
+    from test_hard_pact_qp_modes import fixture
+    task,heads,qp,real,counts,q,v,quat,_=fixture('every_substep',n=8)
+    qp.cfg=replace(qp.cfg,qp_update_mode='command_pair',torque_rate_constraint_weight=0.)
+    task.cfg.control.clip_torque_rate_without_qp=False
+    task._hard_pact_control_parameters=parameters(q);task._hard_pact_bounded_nominal_torque=q.clone()
+    later=[]
+    for iteration in range(3):
+        task._begin_qp_interval();selection=task._qp_sampled_substep_index.clone()
+        later.append(int(selection.max()))
+        for step in range(4):
+            q.fill_(.001*step);v.fill_(.002*step)
+            task._solve_hard_pact_rollout_qp_substep(quat,torch.zeros(8,6))
+            expected=requested_torque_components(task._hard_pact_q_d+task._qp_command_delta_q,
+                task._hard_pact_tau_ff+task._qp_command_delta_ff,q,v,task._hard_pact_control_parameters)[0]
+            torch.testing.assert_close(task.simulator._torques,expected.clamp(-23.5,23.5))
+        assert task._qp_interval_solve_count.sum()==12
+        torch.testing.assert_close(task._qp_sampled_transition['sampled_qp_q'][:,7],selection.float()*.001)
+    assert sorted(later)==[1,2,3] and heads.calls==3

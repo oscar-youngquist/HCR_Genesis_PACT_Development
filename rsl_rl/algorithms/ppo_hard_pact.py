@@ -36,7 +36,7 @@ from dataclasses import dataclass, replace
 
 import torch
 from rsl_rl.modules.hard_pact_control import (bounded_nominal_torque,
-    command_pair_inputs, command_pair_gains, allocate_command_correction)
+    command_pair_inputs, command_pair_gains, allocate_command_correction, allocation_deviation_loss)
 from rsl_rl.modules.hard_pact_physics import (
     log_qp_swing_grf, GRFSwingMetricsAccumulator,
 )
@@ -334,6 +334,7 @@ class PPO_HardPACT:
                  lambda_inverse=1.0,
                  lambda_rollout=1.0,
                  lambda_projection=1.0e-3,
+                 lambda_qp_allocation=0.01,
                  lambda_qp_velocity_xy=None,
                  lambda_qp_velocity_yaw=None,
                  lambda_soft_constraint=1.0e-3,
@@ -502,6 +503,9 @@ class PPO_HardPACT:
         self.lambda_inverse = float(lambda_inverse)
         self.lambda_rollout = float(lambda_rollout)
         self.lambda_projection = float(lambda_projection)
+        self.lambda_qp_allocation=float(lambda_qp_allocation)
+        if not math.isfinite(self.lambda_qp_allocation) or self.lambda_qp_allocation<0:
+            raise ValueError('lambda_qp_allocation must be finite and nonnegative')
         self.lambda_qp_velocity_xy = float(lambda_projection if lambda_qp_velocity_xy is None else lambda_qp_velocity_xy)
         self.lambda_qp_velocity_yaw = float(lambda_projection if lambda_qp_velocity_yaw is None else lambda_qp_velocity_yaw)
         if not all(math.isfinite(w) and w >= 0 for w in
@@ -2618,8 +2622,8 @@ class PPO_HardPACT:
             sampled_nominal, grf_nominal = replay_qp_torques(
                 desired_position[qp_rows],feedforward_torque[qp_rows],qp_batch,fb_func)
             command_inputs = {}
-            if self.hard_pact_qp.cfg.qp_update_mode == 'command_pair':
-                command_inputs = command_pair_inputs(desired_position[qp_rows],feedforward_torque[qp_rows],
+            if self.hard_pact_qp.cfg.qp_update_mode.startswith('command_pair'):
+                command_inputs = self.hard_pact_qp.command_inputs(desired_position[qp_rows],feedforward_torque[qp_rows],
                     sample_q[:,7:],sample_v[:,6:],qp_batch)
                 # Actor-only VJP must use the SAME torque tensor the interval
                 # dynamics depend on, not a separate bounded sibling graph.
@@ -2712,7 +2716,7 @@ class PPO_HardPACT:
                 joint_position=sample_q[:, 7:], joint_velocity=sample_v[:, 6:],
                 dt=sample_dt,
             )
-            if self.hard_pact_qp.cfg.qp_update_mode == 'command_pair':
+            if self.hard_pact_qp.cfg.qp_update_mode.startswith('command_pair'):
                 qp_arguments.update({k:v if differentiate_qp else v.detach()
                                      for k,v in command_inputs.items()})
             if self.hard_pact_qp.cfg.height_weight > 0:
@@ -2736,13 +2740,13 @@ class PPO_HardPACT:
                     qp_result = self.hard_pact_qp.solve(
                         differentiable=False, diagnostics_phase="ppo", **qp_arguments
                     )
-            if self.hard_pact_qp.cfg.qp_update_mode == 'command_pair':
+            if self.hard_pact_qp.cfg.qp_update_mode.startswith('command_pair'):
                 # Analytical allocation is differentiable, with exactly the
                 # same physical units and unsaturated origin as deployment.
                 # Full candidate (no execution alpha) drives projection loss.
                 dq,dff,_ = allocate_command_correction(
                     qp_result.tau_safe-qp_arguments['command_nominal'],qp_batch,
-                    self.hard_pact_qp.cfg.position_correction_share)
+                    self.hard_pact_qp.cfg.position_correction_share,qp_arguments)
                 kp,_,ff_gain = command_pair_gains(qp_batch)
                 reconstructed = qp_arguments['command_nominal']+kp*dq+ff_gain*dff
                 accepted = qp_result.differentiated_mask|qp_result.recovery_mask
@@ -2822,6 +2826,28 @@ class PPO_HardPACT:
                 aggregate.add_values("lambda_qp_velocity_yaw",yaw.new_tensor(self.lambda_qp_velocity_yaw))
                 self.last_qp_metrics["qp/minimal/velocity_loss_xy"] = xy.detach()
                 self.last_qp_metrics["qp/minimal/velocity_loss_yaw"] = yaw.detach()
+            if command_inputs and self.lambda_qp_allocation>0:
+                mask=valid.reshape(-1)&(qp_result.differentiated_mask|qp_result.recovery_mask)
+                alloc=allocation_deviation_loss(qp_result.tau_safe-qp_arguments['command_nominal'],
+                    kp*dq,torque_limits,self.hard_pact_qp.cfg.position_correction_share,mask)
+                if differentiate_qp and self.hard_pact_features.projection_loss and alloc.requires_grad:
+                    # Actor-owned first-order surrogate includes direct command
+                    # bound derivatives as well as the allocator/solver VJP.
+                    # No extra solve, backward update, or estimator ownership.
+                    params=tuple(p for p in self.ppo_parameters if p.requires_grad)
+                    weighted=self.lambda_qp_allocation*alloc
+                    grads=(torch.autograd.grad(weighted,params,retain_graph=True,allow_unused=True)
+                           if params else ())
+                    surrogate=weighted.detach()
+                    for parameter,gradient in zip(params,grads):
+                        if gradient is not None:
+                            surrogate=surrogate+((parameter-parameter.detach())*gradient.detach()).sum()
+                    self._actor_qp_velocity_loss=surrogate+(self._actor_qp_velocity_loss if self._actor_qp_velocity_loss is not None else 0)
+                if self.hard_pact_qp._physical_enabled():
+                    aggregate=self.hard_pact_qp.iteration_diagnostics['ppo']
+                    aggregate.add_sum('allocation/loss_sum',alloc.detach()*mask.sum())
+                    aggregate.add_sum('allocation/weighted_loss_sum',alloc.detach()*self.lambda_qp_allocation*mask.sum())
+                    aggregate.add_sum('allocation/valid_rows',mask.sum())
             correction = (qp_result.tau_safe - sampled_nominal).detach()
             intervention = correction.abs().amax(dim=-1) > 1.0e-6
             if hasattr(self.hard_pact_qp, "iteration_diagnostics"):

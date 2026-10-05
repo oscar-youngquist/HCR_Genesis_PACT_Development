@@ -16,18 +16,33 @@ def command_pair_gains(parameters):
             motor * parameters['control_feedforward_weight'].detach())
 
 
-def command_pair_inputs(desired_position, feedforward, position, velocity, parameters):
+def command_pair_inputs(desired_position, feedforward, position, velocity, parameters,
+                        position_lower=None, position_upper=None, feedforward_limits=None):
     """Compact QP inputs rebuilt identically in rollout and differentiable replay."""
     kp,kd,ff = command_pair_gains(parameters)
-    return dict(command_nominal=requested_torque_components(
+    result = dict(command_nominal=requested_torque_components(
         desired_position,feedforward,position,velocity,parameters)[0],
         command_kp=kp,command_kd=kd,
         command_ff_gain=ff,command_desired_position=desired_position,
         command_feedforward=feedforward,
         command_enabled=((kp.abs()>1e-12)|(ff.abs()>1e-12)))
+    if position_lower is not None:
+        a0=kp*(position_lower-desired_position);a1=kp*(position_upper-desired_position)
+        amin,amax=torch.minimum(a0,a1),torch.maximum(a0,a1)
+        if feedforward_limits is None:
+            bmin=torch.full_like(ff,-torch.inf);bmax=-bmin
+        else:
+            limit=feedforward.new_tensor(feedforward_limits)
+            b0=ff*(-limit-feedforward);b1=ff*(limit-feedforward)
+            bmin,bmax=torch.minimum(b0,b1),torch.maximum(b0,b1)
+        bmin=torch.where(ff.abs()>1e-12,bmin,0.)
+        bmax=torch.where(ff.abs()>1e-12,bmax,0.)
+        result.update(allocation_a_min=amin,allocation_a_max=amax,
+                      allocation_b_min=bmin,allocation_b_max=bmax)
+    return result
 
 
-def allocate_command_correction(u, parameters, position_share):
+def allocate_command_correction(u, parameters, position_share, bounds=None):
     """K delta_q = rho*u, F delta_ff = (1-rho)*u; no action re-scaling.
 
     A disabled branch transfers its share to the other branch. If both gains
@@ -37,9 +52,33 @@ def allocate_command_correction(u, parameters, position_share):
     kp, _, ff = command_pair_gains(parameters)
     pos, feed = kp.abs() > 1e-12, ff.abs() > 1e-12
     rho = torch.where(pos, torch.where(feed, u.new_tensor(position_share), 1.), 0.)
-    delta_q = torch.where(pos, rho*u/torch.where(pos,kp,1.), 0.)
-    delta_ff = torch.where(feed, (1-rho)*u/torch.where(feed,ff,1.), 0.)
+    a=rho*u
+    if bounds is not None:
+        lower=torch.maximum(bounds['allocation_a_min'],u-bounds['allocation_b_max'])
+        upper=torch.minimum(bounds['allocation_a_max'],u-bounds['allocation_b_min'])
+        # Infeasibility is rejected by the QP bounds; keep rejected-row helper
+        # arithmetic finite. Callers must mask failed candidates, never execute it.
+        a=torch.maximum(torch.minimum(position_share*u,upper),lower)
+        a=torch.where(lower<=upper,a,torch.zeros_like(a))
+    delta_q = torch.where(pos, a/torch.where(pos,kp,1.), 0.)
+    delta_ff = torch.where(feed, (u-a)/torch.where(feed,ff,1.), 0.)
     return delta_q, delta_ff, rho
+
+
+def allocation_deviation_loss(u, a, torque_scale, preference, valid):
+    """Full unblended accepted-row mean; endpoint preference disables penalty."""
+    u,a=u[valid],a[valid]
+    if not 0<preference<1 or not u.shape[0]:
+        return (u.sum()+a.sum())*0
+    return ((a-preference*u).square()/(preference*(1-preference)*torque_scale.square())).sum(-1).mean()
+
+
+def command_pair_sample(num_envs, fraction, later_substep, device):
+    """Fixed-size random subset; one shared later dispatch, one replay per row."""
+    selected=torch.zeros(num_envs,device=device,dtype=torch.long)
+    rows=torch.randperm(num_envs,device=device)[:round(num_envs*fraction)]
+    selected[rows]=later_substep
+    return selected
 
 
 def held_command_model(dt, beta, kp, kd, velocity, substeps=4):

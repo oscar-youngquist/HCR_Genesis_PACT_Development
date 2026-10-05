@@ -27,17 +27,19 @@ NUM_VARIABLES = 24
 
 def qp_substep_anchors(mode, decimation):
     """Possible dispatch times, not per-environment solve counts."""
-    if mode not in ("every_substep", "random_one_substep", "command_pair"):
+    if mode not in ("every_substep", "random_one_substep", "command_pair", "command_pair_every_substep"):
         raise ValueError(f"Unsupported qp_update_mode: {mode}")
     if decimation != 4:
         raise ValueError("HardPACT QP execution requires exactly four physics substeps")
-    return (0,) if mode == "command_pair" else (0,1,2,3)
+    return (0,1,2,3)
 
 
 def qp_substep_mask(mode, substep, selected):
     qp_substep_anchors(mode,4)
     if mode == "command_pair":
-        return torch.full_like(selected,substep == 0,dtype=torch.bool)
+        return torch.ones_like(selected,dtype=torch.bool) if substep==0 else selected==substep
+    if mode == 'command_pair_every_substep':
+        return torch.ones_like(selected,dtype=torch.bool)
     return torch.ones_like(selected,dtype=torch.bool) if mode=="every_substep" else selected==substep
 
 
@@ -101,7 +103,12 @@ class HardPACTQPConfig:
     recovery_projection_slack_weight: float = 1.0
     recovery_projection_rate_slack_weight: float = 1.0
     qp_update_mode: str = "random_one_substep"
-    position_correction_share: float = 0.30  # share of physical correction Nm
+    position_correction_share: float = 0.20  # preferred physical correction share
+    command_pair_second_solve_fraction: float = 0.5
+    constraint_prediction_horizon_s: float | None = 0.005
+    position_command_lower: tuple | None = None  # None: canonical joint limits
+    position_command_upper: tuple | None = None
+    feedforward_command_limits_nm: tuple | None = None  # no independent motor box
     # One canonical QP and fallback cascade can be solved by any registered
     # numerical backend. Overrides are diagnostics-only and require an
     # explicit mismatch opt-in so rollout/training cannot diverge silently.
@@ -243,7 +250,18 @@ class HardPACTQPConfig:
         qp_substep_anchors(self.qp_update_mode,4)
         if not 0 <= self.position_correction_share <= 1:
             raise ValueError("position_correction_share must be in [0,1]")
-        if self.qp_update_mode == 'command_pair' and self.torque_rate_constraint_weight != 0:
+        import math
+        if not 0<=self.command_pair_second_solve_fraction<=1:
+            raise ValueError('second solve fraction must be in [0,1]')
+        if self.constraint_prediction_horizon_s is not None and (not math.isfinite(self.constraint_prediction_horizon_s) or self.constraint_prediction_horizon_s<=0):
+            raise ValueError('constraint_prediction_horizon_s must be finite positive or None')
+        if (self.position_command_lower is None)!=(self.position_command_upper is None):
+            raise ValueError('both position command bounds are required')
+        if self.position_command_lower is not None and (len(self.position_command_lower)!=12 or len(self.position_command_upper)!=12 or any(not math.isfinite(l) or not math.isfinite(u) or l>u for l,u in zip(self.position_command_lower,self.position_command_upper))):
+            raise ValueError('position command bounds require 12 finite ordered values')
+        if self.feedforward_command_limits_nm is not None and (len(self.feedforward_command_limits_nm)!=12 or any(not math.isfinite(v) or v<0 for v in self.feedforward_command_limits_nm)):
+            raise ValueError('feedforward limits require 12 finite nonnegative values')
+        if self.qp_update_mode.startswith('command_pair') and self.torque_rate_constraint_weight != 0:
             raise ValueError("command_pair requires torque_rate_constraint_weight=0")
         if self.cupiqp_rollout_cache_size < 1 or self.cupiqp_ppo_pool_size < 0:
             raise ValueError("cuPIQP cache size must be positive and pool size nonnegative")
@@ -767,6 +785,13 @@ class HardPACTDifferentiableQP:
         e=(Jz@offset[...,None]).flatten()+transport-desired
         return C,e[:,None],desired
 
+    def command_inputs(self, desired, feedforward, position, velocity, parameters):
+        from rsl_rl.modules.hard_pact_control import command_pair_inputs
+        lower=(self.position_lower.to(desired) if self.cfg.position_command_lower is None else desired.new_tensor(self.cfg.position_command_lower))
+        upper=(self.position_upper.to(desired) if self.cfg.position_command_upper is None else desired.new_tensor(self.cfg.position_command_upper))
+        return command_pair_inputs(desired,feedforward,position,velocity,parameters,
+            lower,upper,self.cfg.feedforward_command_limits_nm)
+
     def _build(self, data):
         r"""Assemble x=[tau_12; f_FR,FL,RR,RL_world_12], and substitute x=D z.
 
@@ -778,17 +803,19 @@ class HardPACTDifferentiableQP:
         batch = ref.shape[0]
         eye, scale = self._constants(ref)
         mass = data["mass_matrix"].detach()
-        command_pair = self.cfg.qp_update_mode == 'command_pair'
+        command_pair = self.cfg.qp_update_mode.startswith('command_pair')
         origin = (_ScaleClipRows.apply(data['command_nominal'],self.cfg.gradient_scale_tau,
             self.cfg.gradient_clip_tau,self,'tau_nom') if command_pair else None)
         if command_pair:
-            # One frozen-mechanics average-acceleration model of FOUR discrete
-            # PD applications. Controller gains already include branch/motor
-            # scaling. Learned unsaturated tau0 is not an actuator-clipped target.
+            # Freeze mechanics for ONE constraint-horizon application. Held
+            # command duration and velocity-objective horizons are independent.
+            # Gains include branch/motor scaling; tau0 is unsaturated.
             kp, kd = data['command_kp'].detach(), data['command_kd'].detach()
+            horizon=(data['dt'].detach() if self.cfg.constraint_prediction_horizon_s is None
+                     else torch.full_like(data['dt'],self.cfg.constraint_prediction_horizon_s))
             times, coefficients, drift, decay = held_command_model(
-                data['dt'].detach(), self.cfg.position_integration_coefficient,
-                kp,kd,data['joint_velocity'])
+                horizon, self.cfg.position_integration_coefficient,
+                kp,kd,data['joint_velocity'],substeps=1)
             mass = mass.clone()
             mass[:,6:,6:] = mass[:,6:,6:] + torch.diag_embed(decay.mean(1))
         J = data["foot_jacobians"].detach().reshape(batch, 12, 18)
@@ -895,12 +922,15 @@ class HardPACTDifferentiableQP:
             enabled = data['command_enabled'].detach().bool()
             lower = torch.where(enabled,lower,torch.zeros_like(lower))
             upper = torch.where(enabled,upper,torch.zeros_like(upper))
+            if 'allocation_a_min' in data:
+                lower=torch.maximum(lower,data['allocation_a_min']+data['allocation_b_min'])
+                upper=torch.minimum(upper,data['allocation_a_max']+data['allocation_b_max'])
         q, v = data["joint_position"].detach(), data["joint_velocity"].detach()
         beta = self.cfg.position_integration_coefficient
         alower = torch.maximum((-vmax-v)/dt, (qmin-q-dt*v)/(beta*dt.square()))
         aupper = torch.minimum((vmax-v)/dt, (qmax-q-dt*v)/(beta*dt.square()))
         if command_pair:
-            # Intersect ALL endpoint envelopes, not just a 20-ms endpoint.
+            # Single 5-ms (configurable) endpoint, not the 20-ms command hold.
             t,c = times[:,1:], coefficients[:,1:]
             alower = torch.maximum((-vmax-v[:,None])/t,
                 (qmin-q[:,None]-t*v[:,None])/c).amax(1)
@@ -922,7 +952,7 @@ class HardPACTDifferentiableQP:
             # Absolute torque at applications k=1,2,3 stays HARD in recovery.
             # tau_k=origin+u-drift_k-decay_k*a_joint. These coupled rows cannot
             # be replaced by native coordinate bounds or post-allocation clips.
-            for k in range(1,4):
+            for k in range(1,decay.shape[1]):
                 T = eye[:12][None] - decay[:,k,:,None]*joint_map
                 b_tau = origin-drift[:,k]-decay[:,k]*joint_offset
                 G.extend((T,-T)); h.extend((limits-b_tau,limits+b_tau))
@@ -1187,7 +1217,7 @@ class HardPACTDifferentiableQP:
         PPO graphs retain exclusive backend leases through all backward uses.
         """
         reference = data["tau_nom"]
-        command_pair = self.cfg.qp_update_mode == 'command_pair'
+        command_pair = self.cfg.qp_update_mode.startswith('command_pair')
         if command_pair and not {'command_nominal','command_kp','command_kd','command_enabled'} <= data.keys():
             raise ValueError('command_pair replay requires unsaturated command torque and effective controller gains')
         if self.velocity_tracking_enabled() and not {
@@ -1235,6 +1265,9 @@ class HardPACTDifferentiableQP:
         event_profile = self.profiles[self._diagnostics_phase]
         self._last_gradient_metrics = {}
         values = {k: v.to(dtype=dtype) for k,v in data.items()}
+        if command_pair:
+            values['command_constraint_dt']=(values['dt'].detach() if self.cfg.constraint_prediction_horizon_s is None
+                else torch.full_like(values['dt'],self.cfg.constraint_prediction_horizon_s))
         n = reference.shape[0]
         ref = values["tau_nom"]
         limits = self._limits(ref)[0]
@@ -1264,11 +1297,12 @@ class HardPACTDifferentiableQP:
         qdd = ref.new_zeros(n,18)
         ok = torch.zeros(n,device=ref.device,dtype=torch.bool)
         finite_input = torch.stack([torch.isfinite(v).reshape(n,-1).all(-1)
-                                    for k,v in values.items() if not k.startswith('diagnostic_') and (rate_enabled or k!='previous_torque')]).all(0) & (dt[:,0]>0)
+                                    for k,v in values.items() if not k.startswith(('diagnostic_','allocation_')) and (rate_enabled or k!='previous_torque')]).all(0) & (dt[:,0]>0)
         diag = {"torque_rate_constraints_enabled":ref.new_full((n,),float(rate_enabled)),
                 "failure/nonfinite_input":~finite_input,
                 "failure/empty_torque_intersection":empty_tau,
                 "failure/empty_qdd_intersection":torch.zeros_like(ok),
+                "failure/allocation_intersection":torch.zeros_like(ok),
                 "failure/mechanics":torch.zeros_like(ok),
                 "full/attempted":torch.zeros_like(ok),
                 "full/solver_exception":torch.zeros_like(ok),
@@ -1307,7 +1341,10 @@ class HardPACTDifferentiableQP:
                     self.cfg.position_integration_coefficient)
             diag["failure/empty_qdd_intersection"][rows] = empty_a
             diag["failure/mechanics"][rows] = ~m.mechanics_valid
-            local = (finite & m.mechanics_valid & ~empty_a).nonzero(as_tuple=True)[0]
+            allocation_feasible=(m.tau_lower<=m.tau_upper).all(-1)
+            if command_pair:
+                diag['failure/allocation_intersection'][rows]=~allocation_feasible
+            local = (finite & m.mechanics_valid & ~empty_a & allocation_feasible).nonzero(as_tuple=True)[0]
             if not local.numel():
                 continue
             rows = rows[local]
@@ -1416,7 +1453,7 @@ class HardPACTDifferentiableQP:
                             if not getattr(self,"_reuse_primary_assembly",True):
                                 m = self._build({k:v[rows] for k,v in values.items()})
                             m = self._soft_joint_problem(m)
-                        finite = m.mechanics_valid & torch.stack([
+                        finite = m.mechanics_valid & (m.tau_lower<=m.tau_upper).all(-1) & torch.stack([
                             torch.isfinite(t).flatten(1).all(-1) for t in (m.Q,m.p,m.G,m.h)]).all(0)
                         local = finite.nonzero(as_tuple=True)[0]
                         if not local.numel():

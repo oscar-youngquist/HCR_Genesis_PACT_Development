@@ -18,13 +18,13 @@ def main():
     train.algorithm.hard_pact_qp.update(warmup_iterations=0,diagnostics_level="minimal",cuda_event_profiling=False)
     train.runner.resume=False;train.policy.pretrained_path=None
     train.runner.num_steps_per_env=4
-    command_pair = getattr(args,'qp_update_mode',None)=='command_pair'
+    command_pair = str(getattr(args,'qp_update_mode','')).startswith('command_pair')
     if command_pair:
         train.algorithm.num_learning_epochs=1
         train.algorithm.num_mini_batches=1
         train.algorithm.num_encoder_epochs=1
         train.algorithm.ppo_qp_shard_percentage=100.
-        train.algorithm.hard_pact_qp.update(qp_update_mode='command_pair',
+        train.algorithm.hard_pact_qp.update(qp_update_mode=args.qp_update_mode,
             torque_rate_constraint_weight=0.,correction_ramp_enabled=False,
             objective_curriculum_enabled=False)
     env,_=task_registry.make_env(args.task,args,env_cfg=cfg)
@@ -82,13 +82,17 @@ def main():
                 return solve_with_count(**kw)
             qp.solve=replay_checked
             runner.learn(1)
-            assert counts.eq(4).all(),counts
+            expected=(env.num_envs*16 if args.qp_update_mode.endswith('every_substep')
+                      else 4*(env.num_envs+round(env.num_envs*qp.cfg.command_pair_second_solve_fraction)))
+            assert counts.sum()==expected,counts
             assert backward_rows and all(g.isfinite().all() for g in backward_rows)
             assert any(g.abs().sum()>0 for g in backward_rows)
             assert all(p.grad is None or p.grad.isfinite().all() for p in runner.alg.actor_critic.parameters())
             print('COMMAND_PAIR_SMOKE_PASS '+json.dumps(dict(
                 environments=env.num_envs,control_steps=4,primary_invocations_per_environment=counts.tolist(),
-                stages=stages.tolist(),finite_nonzero_qp_backward=True)),flush=True)
+                stages=stages.tolist(),finite_nonzero_qp_backward=True,
+                constraint_horizon_s=qp.cfg.constraint_prediction_horizon_s,
+                inner_velocity_horizon_s=qp.cfg.qp_velocity_objective_horizon_s)),flush=True)
             return
         for mode,expected in (("every_substep",4),("random_one_substep",1)):
             env.set_hard_pact_qp_enabled(False)

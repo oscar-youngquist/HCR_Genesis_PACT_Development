@@ -139,16 +139,16 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         added_mass_min = -1.0
 
         randomize_com_displacement = True
-        com_displacement_x_min = 0.05
+        com_displacement_x_min = 0.10
         com_displacement_x_max = 0.15
 
-        com_displacement_y_min = 0.05
+        com_displacement_y_min = 0.10
         com_displacement_y_max = 0.15
 
         com_displacement_z_positive = True
-        com_displacement_z_min_pos = 0.1
-        com_displacement_z_min = 0.05
-        com_displacement_z_max = 0.15
+        com_displacement_z_min_pos = 0.10
+        com_displacement_z_min = 0.15
+        com_displacement_z_max = 0.20
 
         randomize_ctrl_delay = True
         ctrl_delay_step_range = [0, 1]
@@ -203,7 +203,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         persistent_force_min_n = 4.0
         persistent_force_max_n = 10.0
         # Positive magnitudes; actual world Fz is sampled in [-limit, 0].
-        persistent_vertical_force_min_n = 15.0
+        persistent_vertical_force_min_n = 20.0
         persistent_vertical_force_max_n = 60.0
         persistent_torque_min_nm = 2.0
         persistent_torque_max_nm = 15.0
@@ -549,6 +549,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         lambda_inverse = 0.5
         lambda_rollout = 0.5
         lambda_projection = 0.1
+        lambda_qp_allocation = 0.01  # separate actor objective; not multiplied by lambda_projection
         lambda_qp_velocity_xy = 0.1  # inherit lambda_projection; 0 disables
         lambda_qp_velocity_yaw = 0.1  # independent nonnegative override
 
@@ -601,7 +602,12 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         # Solve held position/feedforward commands at k=0;
                         # every_substep/random_one_substep remain available.
                         'qp_update_mode': 'command_pair',
-                        'position_correction_share': 0.30,  # torque-equivalent; remainder to feedforward
+                        'position_correction_share': 0.20,
+                        'command_pair_second_solve_fraction': 0.5,
+                        'constraint_prediction_horizon_s': 0.005,
+                        'position_command_lower': None,  # canonical joint limits
+                        'position_command_upper': None,
+                        'feedforward_command_limits_nm': None,  # independent command bound, not motor torque limits
                         'qp_solver': 'cupiqp', 
                         'rollout_qp_solver': None, 
                         'ppo_qp_solver': None, 

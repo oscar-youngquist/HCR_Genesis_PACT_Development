@@ -73,8 +73,8 @@ class QPIterationDiagnostics:
                 "velocity_exceedance_rad_s":((v+dt*a[:,6:]).abs()-vmax).clamp_min(0)}
         if getattr(m,'command_origin',None) is not None:
             from rsl_rl.modules.hard_pact_control import held_command_model
-            time,c,drift,decay = held_command_model(dt,beta,
-                data['command_kp'],data['command_kd'],v)
+            time,c,drift,decay = held_command_model(data.get('command_constraint_dt',dt),beta,
+                data['command_kp'],data['command_kd'],v,substeps=1)
             qp = q[:,None]+time[:,1:]*v[:,None]+c[:,1:]*a[:,None,6:]
             vp = v[:,None]+time[:,1:]*a[:,None,6:]
             application = m.command_origin[:,None]+torque[:,None]-drift-decay*a[:,None,6:]
@@ -346,7 +346,7 @@ class QPIterationDiagnostics:
                 for status, mask in (("certified", result.differentiated_mask),
                                      ("rejected", ~result.differentiated_mask)):
                     self.add_values(f"{key}/{status}_mean", value, mask)
-        for name in ("nonfinite_input", "empty_torque_intersection", "empty_qdd_intersection", "mechanics"):
+        for name in ("nonfinite_input", "empty_torque_intersection", "empty_qdd_intersection", "mechanics", "allocation_intersection"):
             if f"failure/{name}" not in diag:
                 continue
             self.add_sum(f"failure/{name}_count", diag[f"failure/{name}"].sum())
@@ -374,6 +374,11 @@ class QPIterationDiagnostics:
     def finalize(self, reference):
         zero = reference.new_zeros((), dtype=torch.float32)
         result = dict(self.sums)
+        if 'allocation/valid_rows' in self.sums:
+            count=self.sums['allocation/valid_rows']
+            for name in ('loss','weighted_loss'):
+                result['allocation/'+name]=torch.where(count>0,
+                    self.sums['allocation/'+name+'_sum']/count.clamp_min(1),zero+float('nan'))
         for name in ("xy", "yaw"):
             count = self.sums.get("velocity_loss_rows", zero)
             if "velocity_loss_"+name+"_sum" in self.sums:
@@ -431,7 +436,7 @@ class QPIterationDiagnostics:
                         for suffix in ("mean", "max", "coordinate_fraction", "any_joint_fraction"):
                             result.setdefault(prefix + "/" + family + "/" + suffix, zero + float("nan"))
                         result.setdefault(prefix + "/" + family + "/count", zero)
-        for name in ("nonfinite_input", "empty_torque_intersection", "empty_qdd_intersection", "mechanics"):
+        for name in ("nonfinite_input", "empty_torque_intersection", "empty_qdd_intersection", "mechanics", "allocation_intersection"):
             result[f"failure/{name}_fraction"] = self.sums.get(f"failure/{name}_count", zero) / rows.clamp_min(1)
         intervals = self.sums.get("environment_control_intervals", zero)
         result["problems_per_environment_control_interval"] = rows / intervals.clamp_min(1)

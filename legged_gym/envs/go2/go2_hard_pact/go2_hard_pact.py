@@ -9,7 +9,7 @@ import time
 import torch
 from rsl_rl.modules.hard_pact_control import (
     bounded_nominal_torque, requested_torque_components,
-    command_pair_inputs, allocate_command_correction,
+    command_pair_inputs, allocate_command_correction, command_pair_sample,
 )
 
 from rsl_rl.modules.hard_pact_physics import (
@@ -1023,7 +1023,7 @@ class Go2HardPACT(Go2PACT):
         with torch.no_grad():
             qp = self._hard_pact_rollout_qp
             qj, vj = self._canonical_joint_state()
-            command_pair = qp.cfg.qp_update_mode == 'command_pair'
+            command_pair = qp.cfg.qp_update_mode.startswith('command_pair')
             tau_nom = (self._hard_pact_bounded_nominal_torque
                        if hasattr(self, "_hard_pact_control_parameters")
                        else self._hard_pact_tau_ff+self._get_pinn_feedback(self._hard_pact_q_d,qj,vj))
@@ -1060,6 +1060,8 @@ class Go2HardPACT(Go2PACT):
             if aggregate is not None:
                 aggregate.add_sum("unsolved/real_rows",(~selected).sum())
                 aggregate.add_sum("substeps/real_rows",selected.new_tensor(self.num_envs,dtype=torch.long))
+                if command_pair and qp._physical_enabled():
+                    aggregate.add_sum('command_pair/'+('first' if self._qp_substep==0 else 'later')+'_solve_rows',selected.sum())
             if rows.numel():
                 # No QP-only context is built for unsolved environments.
                 q = self._canonical_configuration(quat)[rows]
@@ -1079,7 +1081,7 @@ class Go2HardPACT(Go2PACT):
                                     "base_linear_velocity_world": v[:,:3]}
                                    if qp.velocity_tracking_inputs_required() else {})
                 if command_pair:
-                    tracking_inputs.update(command_pair_inputs(
+                    tracking_inputs.update(qp.command_inputs(
                         self._hard_pact_q_d[rows],self._hard_pact_tau_ff[rows],qj[rows],vj[rows],
                         {k:v[rows] for k,v in self._hard_pact_control_parameters.items()}))
                 if qp.cfg.height_weight > 0:
@@ -1108,7 +1110,7 @@ class Go2HardPACT(Go2PACT):
                     parameters = {k:v[rows] for k,v in self._hard_pact_control_parameters.items()}
                     delta_q,delta_ff,rho = allocate_command_correction(
                         result.tau_safe-tracking_inputs['command_nominal'],parameters,
-                        qp.cfg.position_correction_share)
+                        qp.cfg.position_correction_share,tracking_inputs)
                     self._qp_command_delta_q[rows] = torch.where(accepted[:,None],alpha*delta_q,0.)
                     self._qp_command_delta_ff[rows] = torch.where(accepted[:,None],alpha*delta_ff,0.)
                     self._qp_command_accepted[rows] = accepted & (alpha != 0)
@@ -1123,6 +1125,16 @@ class Go2HardPACT(Go2PACT):
                         aggregate.add_values('command_pair/effective_position_share',rho)
                         aggregate.add_values('command_pair/delta_q_abs_rad',self._qp_command_delta_q[rows].abs())
                         aggregate.add_values('command_pair/delta_ff_abs_nm',self._qp_command_delta_ff[rows].abs())
+                        if qp._physical_enabled():
+                            from rsl_rl.modules.hard_pact_control import command_pair_gains
+                            kp,_,_=command_pair_gains(parameters)
+                            u=result.tau_safe-tracking_inputs['command_nominal']
+                            a=kp*delta_q
+                            aggregate.add_values('allocation/reallocated_fraction',
+                                ((a-qp.cfg.position_correction_share*u).abs()>1e-6).float(),accepted[:,None])
+                            lower=tracking_inputs['allocation_a_min']+tracking_inputs['allocation_b_min']
+                            upper=tracking_inputs['allocation_a_max']+tracking_inputs['allocation_b_max']
+                            aggregate.add_values('allocation/feasible_fraction',((u>=lower-1e-5)&(u<=upper+1e-5)).float(),accepted[:,None])
                 safe[rows] = executed
                 if aggregate is not None:
                     # Candidate acceptance is NOT a certificate for the blend.
@@ -1257,8 +1269,18 @@ class Go2HardPACT(Go2PACT):
             self._hard_pact_rollout_qp.cfg, "qp_update_mode", "every_substep"
         )
         qp_substep_anchors(update_mode, decimation)  # validates exactly four substeps
-        self._qp_sampled_substep_index = (torch.zeros(self.num_envs,device=self.device,dtype=torch.long)
-            if update_mode == 'command_pair' else balanced_substep_indices(self.num_envs,decimation,self.device))
+        if update_mode == 'command_pair':
+            # Random permutation cycles balance later indices exactly every
+            # three intervals; subset selection stays independent each interval.
+            cursor=getattr(self,'_qp_later_cursor',0)
+            if cursor%3==0:
+                self._qp_later_order=torch.randperm(3,device=self.device)+1
+            later=self._qp_later_order[cursor%3]
+            self._qp_later_cursor=cursor+1
+            self._qp_sampled_substep_index=command_pair_sample(self.num_envs,
+                self._hard_pact_rollout_qp.cfg.command_pair_second_solve_fraction,later,self.device)
+        else:
+            self._qp_sampled_substep_index=balanced_substep_indices(self.num_envs,decimation,self.device)
         # Clear on every policy interval: no accumulation of command corrections.
         self._qp_command_delta_q = shape(12)
         self._qp_command_delta_ff = shape(12)
