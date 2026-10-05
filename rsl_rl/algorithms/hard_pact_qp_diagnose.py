@@ -69,7 +69,9 @@ class QPCapture:
             return stub
         G,h,lo,hi = owner._cupiqp_native_pack(m) if owner._active_solver == "cupiqp" else (m.G,m.h,None,None)
         torque_limit, qmin, qmax, vmax = owner._limits(m.p)
-        packet = {"schema_version": 4, "identity": self.identity,
+        packet = {"schema_version": 5 if owner.cfg.qp_update_mode=='command_pair' else 4, "identity": self.identity,
+            "command_pair_model": ('frozen mechanics, four PD applications, constant interval-average acceleration; solver x=[u,f]'
+                                   if owner.cfg.qp_update_mode=='command_pair' else None),
             "layout": dict(variables=m.p.shape[1],joint_slack=m.p.shape[1]>24,rate_slack=m.p.shape[1]==48,
                            rate_constraints_enabled=owner.cfg.torque_rate_constraint_weight>0),
             "velocity_tracking_contract_version": 3,
@@ -329,8 +331,13 @@ def candidate_assessment(packet, raw, gap=None, relative=None, cfg=None, differe
             groups=[("actuator_absolute" if post.shape[1]>24 or not rate_enabled else "actuator_rate",slice(0,24)),
                     ("joint_soft" if packet["stage"]=="recovery" else "joint",slice(24,48)),
                     ("friction",slice(48,68))]
-            groups += ([("rate_soft",slice(68,92)),("joint_slack",slice(92,104)),("rate_slack",slice(104,116))]
-                       if post.shape[1]==48 else [("slack",slice(68,None))])
+            if cfg.qp_update_mode=='command_pair':
+                groups += [('later_application_torque_absolute',slice(68,140))]
+                if post.shape[1]>24:
+                    groups += [('joint_slack',slice(140,152))]
+            else:
+                groups += ([("rate_soft",slice(68,92)),("joint_slack",slice(92,104)),("rate_slack",slice(104,116))]
+                           if post.shape[1]==48 else [("slack",slice(68,None))])
             for name,sl in groups:
                 values=residual[:,sl].clamp_min(0)
                 result["groups"][f"{label}/{units}/{name}"] = dict(all=distribution(values),accepted=distribution(values[accepted]))
@@ -347,6 +354,12 @@ def candidate_assessment(packet, raw, gap=None, relative=None, cfg=None, differe
     beta=cfg.position_integration_coefficient
     lows=[(-vmax-v)/dt,(qmin-q-dt*v)/(beta*dt.square())]
     highs=[(vmax-v)/dt,(qmax-q-dt*v)/(beta*dt.square())]
+    if cfg.qp_update_mode=='command_pair':
+        from rsl_rl.modules.hard_pact_control import held_command_model
+        time,c,_,_=held_command_model(dt,beta,d['command_kp'].to(raw),d['command_kd'].to(raw),v)
+        t,c=time[:,1:],c[:,1:]
+        lows=[((-vmax-v[:,None])/t).amax(1),((qmin-q[:,None]-t*v[:,None])/c).amax(1)]
+        highs=[((vmax-v[:,None])/t).amin(1),((qmax-q[:,None]-t*v[:,None])/c).amin(1)]
     if amax is not None:
         lows.insert(0,-amax.expand_as(q)); highs.insert(0,amax.expand_as(q))
     lower,upper=torch.stack(lows,-1),torch.stack(highs,-1)
@@ -355,6 +368,13 @@ def candidate_assessment(packet, raw, gap=None, relative=None, cfg=None, differe
     vn=v+dt*a;qn=q+dt*v+beta*dt.square()*a
     violations=dict(position_rad=torch.maximum(qmin-qn,qn-qmax).clamp_min(0),
         velocity_rad_s=(vn.abs()-vmax).clamp_min(0))
+    if cfg.qp_update_mode=='command_pair':
+        qsteps=q[:,None]+t*v[:,None]+c*a[:,None]
+        vsteps=v[:,None]+t*a[:,None]
+        qn,vn=qsteps[:,-1],vsteps[:,-1]
+        violations=dict(position_rad=torch.maximum(qmin-qsteps,qsteps-qmax).clamp_min(0).amax(1),
+                        velocity_rad_s=(vsteps.abs()-vmax).clamp_min(0).amax(1))
+        result['predicted_substep_endpoints']={'q':qsteps,'dq':vsteps,'units':['rad','rad/s']}
     if amax is not None:
         violations["acceleration_rad_s2"]=(a.abs()-amax).clamp_min(0)
     rate_violation=(torch.maximum(limits["torque_rate_lower"].to(raw)-post[:,:12],

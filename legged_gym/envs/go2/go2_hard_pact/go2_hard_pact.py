@@ -9,6 +9,7 @@ import time
 import torch
 from rsl_rl.modules.hard_pact_control import (
     bounded_nominal_torque, requested_torque_components,
+    command_pair_inputs, allocate_command_correction,
 )
 
 from rsl_rl.modules.hard_pact_physics import (
@@ -638,6 +639,10 @@ class Go2HardPACT(Go2PACT):
             and getattr(self, "_hard_pact_rollout_qp", None) is not None
         )
         if not self._hard_pact_rollout_qp_enabled:
+            if hasattr(self,'_qp_command_accepted'):
+                self._qp_command_accepted.zero_()
+                self._qp_command_delta_q.zero_()
+                self._qp_command_delta_ff.zero_()
             qp = getattr(self, "_hard_pact_rollout_qp", None)
             if qp is not None:
                 qp.clear_warm_start()
@@ -1018,9 +1023,13 @@ class Go2HardPACT(Go2PACT):
         with torch.no_grad():
             qp = self._hard_pact_rollout_qp
             qj, vj = self._canonical_joint_state()
+            command_pair = qp.cfg.qp_update_mode == 'command_pair'
             tau_nom = (self._hard_pact_bounded_nominal_torque
                        if hasattr(self, "_hard_pact_control_parameters")
                        else self._hard_pact_tau_ff+self._get_pinn_feedback(self._hard_pact_q_d,qj,vj))
+            if command_pair:
+                tau_nom = requested_torque_components(self._hard_pact_q_d,
+                    self._hard_pact_tau_ff,qj,vj,self._hard_pact_control_parameters)[0]
             previous = self._hard_pact_previous_substep_torque
             dt = float(self.cfg.sim.dt)
             limits = qp.torque_limits.to(tau_nom)
@@ -1031,8 +1040,23 @@ class Go2HardPACT(Go2PACT):
             selected = qp_substep_mask(qp.cfg.qp_update_mode,self._qp_substep,
                                        self._qp_sampled_substep_index)
             rows = selected.nonzero(as_tuple=True)[0]
+            if command_pair and self._qp_substep > 0:
+                # Hold corrected commands, NOT a torque offset. Fresh q/dq PD
+                # is evaluated on every application; no heads or mechanics here.
+                requested = requested_torque_components(
+                    self._hard_pact_q_d+self._qp_command_delta_q,
+                    self._hard_pact_tau_ff+self._qp_command_delta_ff,
+                    qj,vj,self._hard_pact_control_parameters)[0]
+                held = torch.nan_to_num(requested).clamp(-limits,limits)
+                safe = torch.where(self._qp_command_accepted[:,None],held,safe)
             certified = torch.zeros_like(selected)
             aggregate = getattr(qp,"iteration_diagnostics",{}).get("rollout")
+            if command_pair and aggregate is not None and getattr(qp,'diagnostics_scheduled',False):
+                aggregate.add_sum('command_pair/held_application_rows',
+                    self._qp_command_accepted.sum()*int(self._qp_substep>0))
+                if self._qp_substep>0:
+                    aggregate.add_values('command_pair/measured_saturation_nm',
+                        (requested.abs()-limits).clamp_min(0),self._qp_command_accepted[:,None])
             if aggregate is not None:
                 aggregate.add_sum("unsolved/real_rows",(~selected).sum())
                 aggregate.add_sum("substeps/real_rows",selected.new_tensor(self.num_envs,dtype=torch.long))
@@ -1054,6 +1078,10 @@ class Go2HardPACT(Go2PACT):
                 tracking_inputs = ({"velocity_command": self.commands[rows,:3].detach().clone(),
                                     "base_linear_velocity_world": v[:,:3]}
                                    if qp.velocity_tracking_inputs_required() else {})
+                if command_pair:
+                    tracking_inputs.update(command_pair_inputs(
+                        self._hard_pact_q_d[rows],self._hard_pact_tau_ff[rows],qj[rows],vj[rows],
+                        {k:v[rows] for k,v in self._hard_pact_control_parameters.items()}))
                 if qp.cfg.height_weight > 0:
                     tracking_inputs.update(estimated_qp_height_inputs(
                         self._hard_pact_policy_explicit[rows],q[:,3:7],qp.cfg.height_velocity_obs_scale))
@@ -1076,6 +1104,25 @@ class Go2HardPACT(Go2PACT):
                 alpha = getattr(self, "_qp_execution_alpha", 1.0)
                 accepted = result.differentiated_mask | result.recovery_mask
                 executed = execution_torque(base, result.tau_safe, accepted, alpha)
+                if command_pair:
+                    parameters = {k:v[rows] for k,v in self._hard_pact_control_parameters.items()}
+                    delta_q,delta_ff,rho = allocate_command_correction(
+                        result.tau_safe-tracking_inputs['command_nominal'],parameters,
+                        qp.cfg.position_correction_share)
+                    self._qp_command_delta_q[rows] = torch.where(accepted[:,None],alpha*delta_q,0.)
+                    self._qp_command_delta_ff[rows] = torch.where(accepted[:,None],alpha*delta_ff,0.)
+                    self._qp_command_accepted[rows] = accepted & (alpha != 0)
+                    held = bounded_nominal_torque(
+                        self._hard_pact_q_d[rows]+self._qp_command_delta_q[rows],
+                        self._hard_pact_tau_ff[rows]+self._qp_command_delta_ff[rows],
+                        qj[rows],vj[rows],parameters)
+                    executed = torch.where(accepted[:,None],held,result.tau_safe)
+                    if alpha == 0:
+                        executed = torch.where(accepted[:,None],base,executed)
+                    if aggregate is not None and getattr(qp,'diagnostics_scheduled',False):
+                        aggregate.add_values('command_pair/effective_position_share',rho)
+                        aggregate.add_values('command_pair/delta_q_abs_rad',self._qp_command_delta_q[rows].abs())
+                        aggregate.add_values('command_pair/delta_ff_abs_nm',self._qp_command_delta_ff[rows].abs())
                 safe[rows] = executed
                 if aggregate is not None:
                     # Candidate acceptance is NOT a certificate for the blend.
@@ -1210,7 +1257,12 @@ class Go2HardPACT(Go2PACT):
             self._hard_pact_rollout_qp.cfg, "qp_update_mode", "every_substep"
         )
         qp_substep_anchors(update_mode, decimation)  # validates exactly four substeps
-        self._qp_sampled_substep_index = balanced_substep_indices(self.num_envs,decimation,self.device)
+        self._qp_sampled_substep_index = (torch.zeros(self.num_envs,device=self.device,dtype=torch.long)
+            if update_mode == 'command_pair' else balanced_substep_indices(self.num_envs,decimation,self.device))
+        # Clear on every policy interval: no accumulation of command corrections.
+        self._qp_command_delta_q = shape(12)
+        self._qp_command_delta_ff = shape(12)
+        self._qp_command_accepted = torch.zeros(self.num_envs,device=self.device,dtype=torch.bool)
         aggregate = getattr(self._hard_pact_rollout_qp, "iteration_diagnostics", {}).get("rollout")
         if aggregate is not None:
             aggregate.add_sum("environment_control_intervals", torch.tensor(self.num_envs,device=self.device))
@@ -1653,6 +1705,10 @@ class Go2HardPACT(Go2PACT):
 
     def reset_idx(self, env_ids):
         self._legacy_task_class.reset_idx(self, env_ids)
+        if hasattr(self,'_qp_command_accepted'):
+            self._qp_command_accepted[env_ids] = False
+            self._qp_command_delta_q[env_ids] = 0
+            self._qp_command_delta_ff[env_ids] = 0
         rollout_qp = getattr(self, "_hard_pact_rollout_qp", None)
         if rollout_qp is not None and hasattr(rollout_qp, "clear_warm_start"):
             rollout_qp.clear_warm_start(env_ids)

@@ -35,7 +35,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
 import torch
-from rsl_rl.modules.hard_pact_control import bounded_nominal_torque
+from rsl_rl.modules.hard_pact_control import (bounded_nominal_torque,
+    command_pair_inputs, command_pair_gains, allocate_command_correction)
 from rsl_rl.modules.hard_pact_physics import (
     log_qp_swing_grf, GRFSwingMetricsAccumulator,
 )
@@ -2616,6 +2617,13 @@ class PPO_HardPACT:
                 raise ValueError("QP replay requires delayed physical actions")
             sampled_nominal, grf_nominal = replay_qp_torques(
                 desired_position[qp_rows],feedforward_torque[qp_rows],qp_batch,fb_func)
+            command_inputs = {}
+            if self.hard_pact_qp.cfg.qp_update_mode == 'command_pair':
+                command_inputs = command_pair_inputs(desired_position[qp_rows],feedforward_torque[qp_rows],
+                    sample_q[:,7:],sample_v[:,6:],qp_batch)
+                # Actor-only VJP must use the SAME torque tensor the interval
+                # dynamics depend on, not a separate bounded sibling graph.
+                sampled_nominal = command_inputs['command_nominal']
             sample_grf_normalized = self.actor_critic.physics_estimator.predict_grf(
                 qp_latent, qp_explicit, grf_nominal
             ).reshape(-1, 4, 3)
@@ -2704,6 +2712,9 @@ class PPO_HardPACT:
                 joint_position=sample_q[:, 7:], joint_velocity=sample_v[:, 6:],
                 dt=sample_dt,
             )
+            if self.hard_pact_qp.cfg.qp_update_mode == 'command_pair':
+                qp_arguments.update({k:v if differentiate_qp else v.detach()
+                                     for k,v in command_inputs.items()})
             if self.hard_pact_qp.cfg.height_weight > 0:
                 from rsl_rl.modules.hard_pact_physics import estimated_qp_height_inputs
                 qp_arguments.update(estimated_qp_height_inputs(
@@ -2725,6 +2736,19 @@ class PPO_HardPACT:
                     qp_result = self.hard_pact_qp.solve(
                         differentiable=False, diagnostics_phase="ppo", **qp_arguments
                     )
+            if self.hard_pact_qp.cfg.qp_update_mode == 'command_pair':
+                # Analytical allocation is differentiable, with exactly the
+                # same physical units and unsaturated origin as deployment.
+                # Full candidate (no execution alpha) drives projection loss.
+                dq,dff,_ = allocate_command_correction(
+                    qp_result.tau_safe-qp_arguments['command_nominal'],qp_batch,
+                    self.hard_pact_qp.cfg.position_correction_share)
+                kp,_,ff_gain = command_pair_gains(qp_batch)
+                reconstructed = qp_arguments['command_nominal']+kp*dq+ff_gain*dff
+                accepted = qp_result.differentiated_mask|qp_result.recovery_mask
+                qp_result.tau_safe = torch.where(accepted[:,None],reconstructed,qp_result.tau_safe)
+                if not differentiate_qp:
+                    qp_result.tau_safe = qp_result.tau_safe.detach()
             # m_physics=not(push or reset or timeout or teleport). Sustained
             # wrench and randomized-mass transitions deliberately remain valid.
             valid = ~(

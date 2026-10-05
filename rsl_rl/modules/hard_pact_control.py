@@ -7,6 +7,59 @@ its non-QP controller; QP/held execution retain their separate hard rate box.
 import torch
 
 
+def command_pair_gains(parameters):
+    """Physical gains for already action-scaled q_des [rad], tau_ff [Nm]."""
+    motor = parameters['control_motor_strength'].detach()
+    feedback = parameters['control_feedback_weight'].detach()
+    return (motor * feedback * parameters['control_kp'].detach(),
+            motor * feedback * parameters['control_kd'].detach(),
+            motor * parameters['control_feedforward_weight'].detach())
+
+
+def command_pair_inputs(desired_position, feedforward, position, velocity, parameters):
+    """Compact QP inputs rebuilt identically in rollout and differentiable replay."""
+    kp,kd,ff = command_pair_gains(parameters)
+    return dict(command_nominal=requested_torque_components(
+        desired_position,feedforward,position,velocity,parameters)[0],
+        command_kp=kp,command_kd=kd,
+        command_ff_gain=ff,command_desired_position=desired_position,
+        command_feedforward=feedforward,
+        command_enabled=((kp.abs()>1e-12)|(ff.abs()>1e-12)))
+
+
+def allocate_command_correction(u, parameters, position_share):
+    """K delta_q = rho*u, F delta_ff = (1-rho)*u; no action re-scaling.
+
+    A disabled branch transfers its share to the other branch. If both gains
+    vanish no correction is realizable (the QP fixes that coordinate to zero).
+    Safe denominators prevent NaNs/invalid VJPs at endpoint shares/zero gains.
+    """
+    kp, _, ff = command_pair_gains(parameters)
+    pos, feed = kp.abs() > 1e-12, ff.abs() > 1e-12
+    rho = torch.where(pos, torch.where(feed, u.new_tensor(position_share), 1.), 0.)
+    delta_q = torch.where(pos, rho*u/torch.where(pos,kp,1.), 0.)
+    delta_ff = torch.where(feed, (1-rho)*u/torch.where(feed,ff,1.), 0.)
+    return delta_q, delta_ff, rho
+
+
+def held_command_model(dt, beta, kp, kd, velocity, substeps=4):
+    """Constant interval-average a, with frozen M/J and held commands.
+
+    At endpoint k: v_k=v0+k*dt*a; q_k=q0+k*dt*v0+c_k*a,
+    c_k=dt²[k(k-1)/2+beta*k]. beta=1 is semi-implicit Euler;
+    beta=.5 is constant-acceleration integration. At application k=0..D-1:
+    tau_k=tau0+u-K*k*dt*v0-(K*c_k+Kd*k*dt)*a_joint.
+    Averaging these application torques gives the implicit effective inertia
+    M_eff=M+S^T diag(mean(K*c_k+Kd*k*dt)) S, not M at dt=control_dt.
+    """
+    k = torch.arange(substeps+1,device=dt.device,dtype=dt.dtype)[None,:,None]
+    time = dt.reshape(-1,1,1)*k
+    c = dt.reshape(-1,1,1).square()*(k*(k-1)/2+beta*k)
+    drift = kp[:,None]*time[:,:-1]*velocity.detach()[:,None]
+    decay = kp[:,None]*c[:,:-1]+kd[:,None]*time[:,:-1]
+    return time, c, drift, decay
+
+
 def requested_torque_components(desired_position, feedforward, position, velocity, parameters):
     """Return total, physical feedback/feedforward, and legacy unweighted PD.
 

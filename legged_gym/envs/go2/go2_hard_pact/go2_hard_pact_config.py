@@ -481,7 +481,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         critic_layers = [1024, 256, 128]
 
         pinn_loss_weight = -1.0
-        pinn_warmup = 10
+        pinn_warmup = 100
         pinn_init_steps = 0
 
         # pretrained_path = '../../rsl_rl/modules/pretrained_checkpoints/go2_hard_pact/Sep08_hard_pact_start_model_5000_pos_std_mean_torque.pt'
@@ -598,9 +598,10 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'exception_capture_enabled': True,
                         'exception_capture_limit': 1,
                         'exception_capture_dir': '/tmp/hard_pact_qp_failures',
-                        # One balanced random solve per environment/control interval.
-                        # Use every_substep for four solves (evaluation/deployment).
-                        'qp_update_mode': 'random_one_substep',
+                        # Solve held position/feedforward commands at k=0;
+                        # every_substep/random_one_substep remain available.
+                        'qp_update_mode': 'command_pair',
+                        'position_correction_share': 0.30,  # torque-equivalent; remainder to feedforward
                         'qp_solver': 'cupiqp', 
                         'rollout_qp_solver': None, 
                         'ppo_qp_solver': None, 

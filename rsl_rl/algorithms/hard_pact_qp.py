@@ -15,6 +15,7 @@ from .hard_pact_qp_backends import (
 )
 from .qpth_warm_start import solve_qpth_warm
 from .hard_pact_qp_capture import capture_failure
+from rsl_rl.modules.hard_pact_control import held_command_model
 
 
 # Fixed slices make every Q/P/G/A block visibly correspond to one physical
@@ -26,15 +27,17 @@ NUM_VARIABLES = 24
 
 def qp_substep_anchors(mode, decimation):
     """Possible dispatch times, not per-environment solve counts."""
-    if mode not in ("every_substep", "random_one_substep"):
+    if mode not in ("every_substep", "random_one_substep", "command_pair"):
         raise ValueError(f"Unsupported qp_update_mode: {mode}")
     if decimation != 4:
         raise ValueError("HardPACT QP execution requires exactly four physics substeps")
-    return (0,1,2,3)
+    return (0,) if mode == "command_pair" else (0,1,2,3)
 
 
 def qp_substep_mask(mode, substep, selected):
     qp_substep_anchors(mode,4)
+    if mode == "command_pair":
+        return torch.full_like(selected,substep == 0,dtype=torch.bool)
     return torch.ones_like(selected,dtype=torch.bool) if mode=="every_substep" else selected==substep
 
 
@@ -98,6 +101,7 @@ class HardPACTQPConfig:
     recovery_projection_slack_weight: float = 1.0
     recovery_projection_rate_slack_weight: float = 1.0
     qp_update_mode: str = "random_one_substep"
+    position_correction_share: float = 0.30  # share of physical correction Nm
     # One canonical QP and fallback cascade can be solved by any registered
     # numerical backend. Overrides are diagnostics-only and require an
     # explicit mismatch opt-in so rollout/training cannot diverge silently.
@@ -237,6 +241,10 @@ class HardPACTQPConfig:
         if self.constraint_schema_version != 2:
             raise ValueError("Unsupported HardPACT constraint schema; expected version 2")
         qp_substep_anchors(self.qp_update_mode,4)
+        if not 0 <= self.position_correction_share <= 1:
+            raise ValueError("position_correction_share must be in [0,1]")
+        if self.qp_update_mode == 'command_pair' and self.torque_rate_constraint_weight != 0:
+            raise ValueError("command_pair requires torque_rate_constraint_weight=0")
         if self.cupiqp_rollout_cache_size < 1 or self.cupiqp_ppo_pool_size < 0:
             raise ValueError("cuPIQP cache size must be positive and pool size nonnegative")
         if (self.warmup_iterations < 0
@@ -287,6 +295,7 @@ class _QPBuild:
     mechanics_valid: torch.Tensor
     rate_lower: torch.Tensor | None = None
     rate_upper: torch.Tensor | None = None
+    command_origin: torch.Tensor | None = None  # u=initial total torque-origin
 
     def __iter__(self):
         # Preserve the legacy seven-value private test/debug unpacking API.
@@ -769,11 +778,27 @@ class HardPACTDifferentiableQP:
         batch = ref.shape[0]
         eye, scale = self._constants(ref)
         mass = data["mass_matrix"].detach()
+        command_pair = self.cfg.qp_update_mode == 'command_pair'
+        origin = (_ScaleClipRows.apply(data['command_nominal'],self.cfg.gradient_scale_tau,
+            self.cfg.gradient_clip_tau,self,'tau_nom') if command_pair else None)
+        if command_pair:
+            # One frozen-mechanics average-acceleration model of FOUR discrete
+            # PD applications. Controller gains already include branch/motor
+            # scaling. Learned unsaturated tau0 is not an actuator-clipped target.
+            kp, kd = data['command_kp'].detach(), data['command_kd'].detach()
+            times, coefficients, drift, decay = held_command_model(
+                data['dt'].detach(), self.cfg.position_integration_coefficient,
+                kp,kd,data['joint_velocity'])
+            mass = mass.clone()
+            mass[:,6:,6:] = mass[:,6:,6:] + torch.diag_embed(decay.mean(1))
         J = data["foot_jacobians"].detach().reshape(batch, 12, 18)
         stance = data["contact_probability"].detach() >= self.cfg.contact_threshold
         force_mask = stance.repeat_interleave(3,dim=1).to(ref.dtype)
         Jb = data["base_jacobian"].detach()
         bias = data["bias"].detach()
+        if command_pair:
+            bias = bias.clone()
+            bias[:,6:] = bias[:,6:] + drift.mean(1)
         # M a = [S^T J^T]x + Jb^T W - h. solve_ex reports a singular
         # mechanics row without poisoning all other environments in its batch.
         selector,friction,diagonal,base_Q = self._assembly_constants(ref)
@@ -788,6 +813,8 @@ class HardPACTDifferentiableQP:
         wrench = _ScaleClipRows.apply(data["wrench_pred_world"],
             self.cfg.gradient_scale_wrench, self.cfg.gradient_clip_wrench, self, "wrench")
         offset = (solved[:,:,24:30] @ wrench[...,None]).squeeze(-1)-solved[:,:,30]
+        if command_pair:
+            offset = offset + (mechanics_map[:,:,:12] @ origin[...,None]).squeeze(-1)
         tau = _ScaleClipRows.apply(ref, self.cfg.gradient_scale_tau,
                                   self.cfg.gradient_clip_tau, self, "tau_nom")
         force = _ScaleClipRows.apply(data["force_pred_world"],
@@ -795,7 +822,7 @@ class HardPACTDifferentiableQP:
         # Mask the tilde-f tracking reference; D_m already masks mechanics.
         # Raw supervised predictions remain unbounded and unchanged.
         force = torch.where(stance[..., None], force, torch.zeros_like(force)).flatten(1)
-        target = torch.cat((tau, force), -1)
+        target = torch.cat((torch.zeros_like(tau) if command_pair else tau, force), -1)
         Q = base_Q.expand(batch, -1, -1).clone()
         p = -diagonal * target
 
@@ -862,10 +889,23 @@ class HardPACTDifferentiableQP:
         rate_upper = previous+self.cfg.torque_rate_limit_nm_s*dt if rate_enabled else None
         lower = torch.maximum(-limits, rate_lower) if rate_enabled else -limits.expand(batch,-1)
         upper = torch.minimum(limits, rate_upper) if rate_enabled else limits.expand(batch,-1)
+        if command_pair:
+            lower, upper = lower-origin, upper-origin
+            # An unavailable pair cannot realize a correction on that joint.
+            enabled = data['command_enabled'].detach().bool()
+            lower = torch.where(enabled,lower,torch.zeros_like(lower))
+            upper = torch.where(enabled,upper,torch.zeros_like(upper))
         q, v = data["joint_position"].detach(), data["joint_velocity"].detach()
         beta = self.cfg.position_integration_coefficient
         alower = torch.maximum((-vmax-v)/dt, (qmin-q-dt*v)/(beta*dt.square()))
         aupper = torch.minimum((vmax-v)/dt, (qmax-q-dt*v)/(beta*dt.square()))
+        if command_pair:
+            # Intersect ALL endpoint envelopes, not just a 20-ms endpoint.
+            t,c = times[:,1:], coefficients[:,1:]
+            alower = torch.maximum((-vmax-v[:,None])/t,
+                (qmin-q[:,None]-t*v[:,None])/c).amax(1)
+            aupper = torch.minimum((vmax-v[:,None])/t,
+                (qmax-q[:,None]-t*v[:,None])/c).amin(1)
         joint_map, joint_offset = mechanics_map[:,6:], offset[:,6:]
         # Torque 24 rows, acceleration intersection 24 rows. beta=1 matches
         # semi-implicit Genesis/PhysX; beta=.5 is the constant-a convention.
@@ -878,6 +918,14 @@ class HardPACTDifferentiableQP:
             # zero equalities. Stance rows retain the physical friction cone.
             G.append(block.expand(batch,-1,-1)*stance[:,foot,None,None])
             h.append((~stance[:,foot,None]).to(ref.dtype).expand(-1,5))
+        if command_pair:
+            # Absolute torque at applications k=1,2,3 stays HARD in recovery.
+            # tau_k=origin+u-drift_k-decay_k*a_joint. These coupled rows cannot
+            # be replaced by native coordinate bounds or post-allocation clips.
+            for k in range(1,4):
+                T = eye[:12][None] - decay[:,k,:,None]*joint_map
+                b_tau = origin-drift[:,k]-decay[:,k]*joint_offset
+                G.extend((T,-T)); h.extend((limits-b_tau,limits+b_tau))
         physical_G, physical_h = torch.cat(G,1), torch.cat(h,1)
         physical_A = ref.new_empty(batch,0,24)
         physical_b = ref.new_empty(batch,0)
@@ -893,7 +941,7 @@ class HardPACTDifferentiableQP:
         return _QPBuild(Q,p,G,h,A,b,scale,physical_G,physical_h,physical_A,physical_b,
                         es,gs,lower,upper,alower,aupper,native_lower,native_upper,
                         mechanics_map,offset,mechanics_valid,
-                        rate_lower, rate_upper)
+                        rate_lower, rate_upper, origin)
 
     @staticmethod
     def _cupiqp_native_pack(m):
@@ -919,7 +967,8 @@ class HardPACTDifferentiableQP:
         rate_enabled = m.rate_lower is not None
         nslack = 24 if rate_enabled else 12
         nvar = 24+nslack
-        general_end = 92 if rate_enabled else 68
+        primary_rows = m.G.shape[1]
+        general_end = primary_rows + (24 if rate_enabled else 0)
         scales = [m.variable_scale, m.p.new_full((12,), self.cfg.soft_joint_recovery_scale_rad_s2)]
         if rate_enabled:
             scales.append(m.p.new_full((12,), self.cfg.soft_rate_recovery_scale_nm))
@@ -931,7 +980,7 @@ class HardPACTDifferentiableQP:
         if rate_enabled:
             Q[:,36:48,36:48] = (2*self.cfg.soft_rate_recovery_weight+self.cfg.q_regularization)*eye
         physical_G = m.G.new_zeros(batch,general_end+nslack,nvar)
-        physical_G[:,:68,:24] = m.physical_G
+        physical_G[:,:primary_rows,:24] = m.physical_G
         physical_G[:,24:36,24:36] = -eye
         physical_G[:,36:48,24:36] = -eye
         # Retain rate rows separately; never pack them as native hard bounds.
@@ -942,7 +991,8 @@ class HardPACTDifferentiableQP:
             physical_G[:,104:116,36:48] = -eye
         physical_G[:,general_end:general_end+12,24:36] = -eye
         limits = self.torque_limits.to(m.p).expand(batch,-1)
-        bounds = [limits, limits, m.physical_h[:,24:]]
+        lower,upper = (-limits,limits) if m.command_origin is None else (m.tau_lower,m.tau_upper)
+        bounds = [upper, -lower, m.physical_h[:,24:]]
         if rate_enabled:
             bounds.extend((m.rate_upper, -m.rate_lower))
         physical_h = torch.cat((*bounds, m.p.new_zeros(batch,nslack)),1)
@@ -950,12 +1000,12 @@ class HardPACTDifferentiableQP:
         empty = m.A.new_zeros(batch,0,nvar)
         native_lower = m.p.new_full((batch,nvar),-torch.inf)
         native_upper = -native_lower
-        native_lower[:,:12], native_upper[:,:12] = -limits/variable_scale[:12], limits/variable_scale[:12]
+        native_lower[:,:12], native_upper[:,:12] = lower/variable_scale[:12], upper/variable_scale[:12]
         native_lower[:,24:] = 0.
         return replace(m,Q=Q,p=torch.cat((m.p,m.p.new_zeros(batch,nslack)),1),
             G=G,h=h,A=empty,physical_A=empty,physical_G=physical_G,physical_h=physical_h,
             variable_scale=variable_scale,inequality_row_scale=row_scale,
-            tau_lower=-limits,tau_upper=limits,native_lower=native_lower,native_upper=native_upper,
+            tau_lower=lower,tau_upper=upper,native_lower=native_lower,native_upper=native_upper,
             acceleration_map=torch.cat((m.acceleration_map,m.p.new_zeros(batch,18,nslack)),2))
 
     @staticmethod
@@ -1137,6 +1187,9 @@ class HardPACTDifferentiableQP:
         PPO graphs retain exclusive backend leases through all backward uses.
         """
         reference = data["tau_nom"]
+        command_pair = self.cfg.qp_update_mode == 'command_pair'
+        if command_pair and not {'command_nominal','command_kp','command_kd','command_enabled'} <= data.keys():
+            raise ValueError('command_pair replay requires unsaturated command torque and effective controller gains')
         if self.velocity_tracking_enabled() and not {
                 "velocity_command", "base_linear_velocity_world"}.issubset(data):
             raise ValueError("QP velocity tracking requires captured physical commands and base world velocity; old replay cannot supply zero targets")
@@ -1202,7 +1255,8 @@ class HardPACTDifferentiableQP:
         lower = torch.where(empty_tau[:,None],-limits,lower)
         upper = torch.where(empty_tau[:,None],limits,upper)
         fallback = torch.nan_to_num(ref.detach(),nan=0.,posinf=0.,neginf=0.).clamp(lower,upper)
-        primal = torch.cat((fallback,ref.new_zeros(n,12)),1)
+        origin = values['command_nominal'] if command_pair else torch.zeros_like(ref)
+        primal = torch.cat((fallback-origin.detach(),ref.new_zeros(n,12)),1)
         # Graph-connected zero (also for an all-invalid update), no learned
         # VJP through analytic fallback and no invalid NaN arithmetic.
         primal = primal + sum(torch.nan_to_num(values[k],nan=0.,posinf=0.,neginf=0.).sum()*0
@@ -1245,7 +1299,7 @@ class HardPACTDifferentiableQP:
             finite = torch.stack([torch.isfinite(t).flatten(1).all(-1)
                                   for t in (m.Q,m.p,m.G,m.h,m.A,m.b)]).all(0)
             empty_a = (m.qdd_lower>m.qdd_upper).any(-1)
-            if self._physical_enabled():
+            if self._physical_enabled() and not command_pair:
                 _, qmin, qmax, vmax = self._limits(ref)
                 self.iteration_diagnostics[self._diagnostics_phase].joint_envelope(
                     part, qmin, qmax, vmax,
@@ -1308,7 +1362,7 @@ class HardPACTDifferentiableQP:
                 _,ql,qu,vl=self._limits(ref)
                 aggregate.compact_candidate("primary",m,x,{k:v[rows] for k,v in values.items()},
                     accepted,ql,qu,vl,self.cfg.position_integration_coefficient)
-            if self._physical_enabled():
+            if self._physical_enabled() and not command_pair:
                 physical = self._physical_diagnostics(m,x,{k:v.index_select(0,local) for k,v in part.items()})
                 self._joint_candidate_diagnostics("primary", m, x,
                     {k:v.index_select(0,local) for k,v in part.items()}, accepted)
@@ -1406,7 +1460,7 @@ class HardPACTDifferentiableQP:
                             _,ql,qu,vl=self._limits(ref)
                             aggregate.compact_candidate("recovery",m,x,{k:v[rows] for k,v in values.items()},
                                 accepted,ql,qu,vl,self.cfg.position_integration_coefficient)
-                        if self._physical_enabled():
+                        if self._physical_enabled() and not command_pair:
                             self._joint_candidate_diagnostics("recovery", m, x,
                                 {k:v[rows] for k,v in values.items()}, accepted)
                         x = _CertifiedRows.apply(torch.nan_to_num(x,nan=0.,posinf=0.,neginf=0.),accepted)
@@ -1434,6 +1488,12 @@ class HardPACTDifferentiableQP:
         qdd = torch.where(soft_ok[:,None],recovered_qdd,qdd)
         stage = torch.where(ok,0,2)
         stage = torch.where(soft_ok,1,stage)
+        if command_pair:
+            # Return initial physical total torque for existing projection-loss
+            # consumers; solver/capture coordinates remain [u, force]. Failed
+            # rows retain detached deterministic fallback (no origin shortcut).
+            total = torch.where((ok|soft_ok)[:,None],primal[:,:12]+origin,fallback)
+            primal = torch.cat((total,primal[:,12:]),1)
         metrics = {"qp/minimal/full_fraction":ok.float().mean(),
                    "qp/minimal/soft_joint_fraction":soft_ok.float().mean(),
                    "qp/minimal/fallback_fraction":(stage==2).float().mean(),

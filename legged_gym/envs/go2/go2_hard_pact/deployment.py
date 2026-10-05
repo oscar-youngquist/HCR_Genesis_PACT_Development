@@ -82,6 +82,28 @@ def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None,
         "frames": "world forces and world-aligned wrench about the existing base-Jacobian point; yaw-local head outputs rotated once",
         "limits": "canonical joint-specific magnitude/position/velocity limits from backend; no independent acceleration cap; joint envelope derived from position/velocity; rate and objective scales in solver_and_objective_settings",
     }
+    if mode == 'command_pair':
+        result.update(formulation='command_pair_average_pd_24_v1',
+            variable_ordering=['torque_equivalent_correction_u_12','FR_FL_RR_RL_world_XYZ_tilde_force_12'],
+            matrix_shape='24 variables; 140 canonical inequalities (24 initial torque,24 joint envelope,20 friction,72 later application torques); zero equalities',
+            physics_substep_anchors=[0],execution_selection='all environments at k=0 only',
+            prediction_horizon='four frozen-mechanics substeps, constant interval-average generalized acceleration',
+            nominal_torque='unsaturated physical initial PD/feedforward torque for command reconstruction; bounded nominal still conditions GRF',
+            ppo_anchor_selection='interval-start k=0, no random anchor or decimation multiplier',
+            command_pair={
+                'position_correction_share':settings.position_correction_share,
+                'allocation':'K_eff*delta_q=rho*u; F_eff*delta_ff=(1-rho)*u; unavailable branch transfers share; both unavailable fix u=0',
+                'gain_units':'action-scaled desired radians and feedforward Nm; branch weights and motor strength applied once',
+                'equivalent_branch_penalties':'w/rho and w/(1-rho) on physical branch corrections; endpoint uses only enabled branch; reduced penalty w*||D_tau*u||²',
+                'endpoint_integration':'q_k=q0+k*dt*v0+dt²*(k*(k-1)/2+beta*k)*a_joint; v_k=v0+k*dt*a_joint',
+                'execution':'hold q_des+alpha*delta_q and tau_ff+alpha*delta_ff for k=0..3; fresh measured q/v PD; no additional action clipping; existing absolute actuator saturation remains a safety guard',
+                'helper':'rsl_rl.modules.hard_pact_control.allocate_command_correction',
+                'certificate':'candidate frozen-mechanics prediction only; recovery softens endpoint joint envelope; blends/actual simulator trajectories are not certified',
+                'fallback':'fresh non-QP command per substep with existing deterministic projection; no held failed solution',
+            },
+            recovery_layout={'variables':36,'canonical_inequalities':152,'native_general_inequalities':116},
+            soft_joint_recovery='[u12,masked-force12,joint-envelope-slack12]; all four torque applications and friction remain hard; no rate constraints',
+            unsolved_execution='accepted held command pair recomputes PD; failed rows use deterministic non-QP projection each substep')
     return result
 
 
@@ -368,6 +390,7 @@ def validate_qp_deployment_contract(contract):
         raise ValueError("Incompatible HardPACT deployment schema; re-export using the current controller")
     update = contract.get("qp_update")
     if update is not None:
-        if update.get("mode") not in ("every_substep", "random_one_substep") or update.get("formulation") != "masked_torque_force_24":
+        expected = 'command_pair_average_pd_24_v1' if update.get('mode')=='command_pair' else 'masked_torque_force_24'
+        if update.get("mode") not in ("every_substep", "random_one_substep", "command_pair") or update.get("formulation") != expected:
             raise ValueError("Incompatible HardPACT QP execution contract")
     return contract

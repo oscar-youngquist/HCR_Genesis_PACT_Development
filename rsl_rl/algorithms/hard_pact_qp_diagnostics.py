@@ -71,6 +71,17 @@ class QPIterationDiagnostics:
                 "joint_acceleration_abs_rad_s2":a[:,6:].abs(),
                 "position_exceedance_rad":torch.maximum(qmin-q-dt*v-beta*dt.square()*a[:,6:],q+dt*v+beta*dt.square()*a[:,6:]-qmax).clamp_min(0),
                 "velocity_exceedance_rad_s":((v+dt*a[:,6:]).abs()-vmax).clamp_min(0)}
+        if getattr(m,'command_origin',None) is not None:
+            from rsl_rl.modules.hard_pact_control import held_command_model
+            time,c,drift,decay = held_command_model(dt,beta,
+                data['command_kp'],data['command_kd'],v)
+            qp = q[:,None]+time[:,1:]*v[:,None]+c[:,1:]*a[:,None,6:]
+            vp = v[:,None]+time[:,1:]*a[:,None,6:]
+            application = m.command_origin[:,None]+torque[:,None]-drift-decay*a[:,None,6:]
+            values.update(torque_abs_nm=application.abs().flatten(1),
+                correction_abs_nm=torque.abs(),
+                position_exceedance_rad=torch.maximum(qmin-qp,qp-qmax).clamp_min(0).flatten(1),
+                velocity_exceedance_rad_s=(vp.abs()-vmax).clamp_min(0).flatten(1))
         if x.shape[1]>24:
             values.update(joint_slack_rad_s2=x.detach()[:,24:36])
         if x.shape[1]==48:
