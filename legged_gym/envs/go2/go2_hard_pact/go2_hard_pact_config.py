@@ -111,7 +111,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         use_domainrand_curriculum = True
         com_rand_z_positive = False
         num_push_steps = 1000
-        push_warmup = 6000
+        push_warmup = 10000
         num_jumps = 10
 
         randomize_friction = True
@@ -181,9 +181,9 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         step_interval = 10
         reward_ema_alpha = 0.05
         min_reward_to_step = 0.50
-        joint_dynamics_progress_delta = 0.01
-        mass_com_progress_delta = 0.005
-        disturbance_progress_delta = 0.005
+        joint_dynamics_progress_delta = 0.02
+        mass_com_progress_delta = 0.01
+        disturbance_progress_delta = 0.01
         use_joint_dynamics_curriculum = True
         use_mass_com_curriculum = True
         use_disturbance_curriculum = True
@@ -429,14 +429,14 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                   'dof_vel_limits':[-0.1, -1.0],
                                 #   'dof_acc':[-2.5e-08, -2.5e-07]
                                   }
-            curr_steps = 12000
+            curr_steps = 16000
             warmup_steps = 0  
 
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
         curriculum_threshold = 0.8  # raw linear-tracking mean, not weighted reward
-        curriculum_patience_iterations = 100  # consecutive PPO rollouts; 0 = legacy reset-based updates
+        curriculum_patience_iterations = 200  # consecutive PPO rollouts; 0 = legacy reset-based updates
         max_curriculum = 1.2
         num_commands = 4
         resampling_time = 10.0
@@ -505,9 +505,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         entropy_coef = 0.01
         use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.005, 0.01]
-        adaptive_ent_lin_threshold = 0.75
-        adaptive_ent_ang_threshold = 0.35
+        adaptive_ent_bounds = [0.008, 0.012]
+        adaptive_ent_lin_threshold = 0.80
+        adaptive_ent_ang_threshold = 0.40
         adaptive_ent_ter_threshold = 6.0
         adaptive_ent_softmax_temp = 2.0
 
@@ -572,11 +572,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
                         # at absolute iteration N. Zero keeps current behavior.
-                        'warmup_iterations': 2000,
+                        'warmup_iterations': 200,
                         # Execution-only interpolation; full QPs/losses remain active.
                         'correction_ramp_enabled': True,
-                        'correction_ramp_start_offset': 100,
-                        'correction_ramp_duration': 100,
+                        'correction_ramp_start_offset': 200,
+                        'correction_ramp_duration': 200,
                         'objective_curriculum_enabled': True,
                         'contact_acceleration_weight_initial': 0.25,  # .25 * final
                         'torso_stability_curriculum_enabled': True,  # shares objective performance/progress gate
@@ -655,7 +655,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'contact_acceleration_scale_m_s2': 50.0,
                         
                         'attitude_weight': 0.5,
-                        'height_weight': 0.1,
+                        'height_weight': 0.4,
                         'height_kp': 20.0,
                         'height_kd': 5.0,
                         
@@ -664,7 +664,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
                         # Soft BODY velocity tracking by constant-derivative extrapolation.
                         # Independent of stance/attitude and execution curricula.
-                        'planar_velocity_weight': 12.0,
+                        'planar_velocity_weight': 16.0,
                         'qp_velocity_loss_horizon_s': 0.02,  # shared outer xy/yaw extrapolation; QP dt unchanged
                         'qp_velocity_objective_horizon_s': 0.020,  # independent inner xy/yaw extrapolation; constraints keep physics dt
                         'yaw_rate_weight': 6.0,
@@ -718,7 +718,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         policy_class_name = 'ActorCritic_HardPACT'
         algorithm_class_name = 'PPO_HardPACT'
         num_steps_per_env = 24
-        max_iterations = 16000
+        max_iterations = 20000
         grf_dim = 12
         run_name = 'hardpact_50hz_noboot'
         experiment_name = 'go2_pact_rough'
