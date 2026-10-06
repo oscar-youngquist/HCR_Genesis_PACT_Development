@@ -167,11 +167,13 @@ def test_pose_integration_stationary_quaternion_backward():
 
 
 @pytest.mark.parametrize("rejection_active", [False, True])
-def test_enabled_ppo_update_and_snapshot_alignment(rejection_active):
+@pytest.mark.parametrize("sample_fraction", [1., .5, .2, 0.])
+def test_enabled_ppo_update_and_snapshot_alignment(rejection_active, sample_fraction):
     from test_b1z1_sampled_context import class_to_dict, B1Z1PACTCfgPPO, B1Z1PACTDecoder
     template, batch, _, _ = setup()
     full = class_to_dict(B1Z1PACTCfgPPO())
-    cfg = {**full["algorithm"], **full["policy"], **config(), "num_learning_epochs": 1,
+    cfg = {**full["algorithm"], **full["policy"], **config(), "num_learning_epochs": 5 if sample_fraction == .2 else 2,
+           "actor_phys_sample_fraction": sample_fraction,
            "num_mini_batches": 1, "dynamics_backend": "bard", "privileged_force_start": 23,
            "privileged_force_dim": 21, "pinn_init_steps": 0, "pinn_warmup": 2,
            "pinn_loss_weight": .1, "actor_phys_ee_stability_weight": 0.}
@@ -201,6 +203,12 @@ def test_enabled_ppo_update_and_snapshot_alignment(rejection_active):
         assert (a.storage.actor_physics["ee_target"][step] == .1).all()
     a.compute_returns(torch.zeros(3, 40))
     metrics = a.update(0)
+    assert metrics["ActorPhysics/sample_fraction_realized"] == sample_fraction
+    assert a.actor_physics_cache is None
+    if sample_fraction == 0:
+        assert metrics["ActorPhysics/selected_transitions"] == 0
+        assert all(torch.isfinite(p).all() for p in a.actor_critic.parameters())
+        return
     assert metrics["ActorPhysics/active_fraction"] == 1
     assert metrics["ActorPhysics/actor_gradient_norm"] > 0
     assert metrics["ActorPhysics/unintended_estimator_gradient_max"] == 0

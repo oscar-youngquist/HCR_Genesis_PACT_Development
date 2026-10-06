@@ -79,8 +79,11 @@ class B1Z1PACTRunner:
             urdf, env.cfg.asset.dof_names, env.cfg.asset.foot_name,
             env.cfg.asset.gripper_name, env.cfg.asset.base_name,
         )
+        from rsl_rl.algorithms.b1z1_actor_physics import enabled as actor_physics_enabled
+        from rsl_rl.algorithms.b1z1_actor_sampling import validate_fraction
+        validate_fraction(algorithm_cfg)
         needs_physics = (algorithm_cfg.get("representation_pinn_enabled", True)
-                         or algorithm_cfg.get("actor_phys_enabled", False))
+                         or actor_physics_enabled(algorithm_cfg))
         if not needs_physics:
             self.dynamics = None
         elif backend_name == "bard":
@@ -111,7 +114,7 @@ class B1Z1PACTRunner:
                        or algorithm_cfg.get("actor_phys_arm_rejection_enabled", False)
                        or (algorithm_cfg.get("actor_phys_arm_manipulability_enabled", False)
                            and algorithm_cfg.get("actor_phys_arm_manipulability_weight", .02) > 0))
-        if algorithm_cfg.get("actor_phys_enabled", False) and arm_physics:
+        if actor_physics_enabled(algorithm_cfg) and arm_physics:
             import xml.etree.ElementTree as ET
             arm_ids = [int(i) for i in env.simulator._arm_dof_cfg_ids]
             root_joint = env.cfg.asset.dof_names[arm_ids[0]]

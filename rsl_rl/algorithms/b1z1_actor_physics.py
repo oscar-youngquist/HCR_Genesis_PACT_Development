@@ -8,10 +8,12 @@ import torch.nn.functional as F
 
 from .hard_pact_bard import differentiable_bard_rollout_loss
 from . import b1z1_ee_stability, b1z1_actor_rejection
+from . import b1z1_actor_sampling as sampling
 
 
 def enabled(cfg):
-    return cfg.get("actor_phys_enabled", False) and cfg.get("actor_phys_coef", 0.0) > 0
+    return (cfg.get("actor_phys_enabled", False) and cfg.get("actor_phys_coef", 0.0) > 0
+            and cfg.get("actor_phys_sample_fraction", 1.0) > 0)
 
 
 def pos_fk_enabled(cfg):
@@ -86,6 +88,7 @@ def scheduled_coefficient(a):
 
 def configure(algorithm):
     """Fail early rather than silently substituting a different physics backend."""
+    sampling.validate_fraction(algorithm.cfg)
     if not enabled(algorithm.cfg):
         return
     if not algorithm.bard_auxiliary:
@@ -156,9 +159,10 @@ def configure(algorithm):
 @torch.no_grad()
 def capture(runner):
     """Snapshot only state_t and the next deterministic command, never x_(t+1)."""
-    a, env = runner.alg, runner.env
+    a = runner.alg
     if not enabled(a.cfg):
         return
+    env = runner.env
     from legged_gym.envs.b1z1.force_task_utils import _compute_force_adjusted_ee_target
     from legged_gym.envs.b1z1.b1z1_pact.b1z1_pact import sphere2cart
     from legged_gym.utils.math_utils import quat_apply
@@ -188,6 +192,14 @@ def capture(runner):
     if pos_fk_enabled(a.cfg):
         values.update(fk_default=env.simulator.default_dof_pos.expand_as(env.simulator.dof_pos),
                       fk_base_pos=env.simulator.base_pos, fk_base_quat=env.simulator.base_quat)
+    if "actor_phys_sample_fraction" in a.cfg:
+        # Same physical active-force criterion as actor rejection, captured only for stratification.
+        base = yaw_world(a.actor_critic.last_context["base_wrench"].detach()
+                         / state.new_tensor(a.cfg["base_wrench_scale"]), state[:, 3:7])[:, :3]
+        base = base - values["mass_wrench"][:, :3]
+        threshold = a.cfg.get("actor_phys_rejection_active_force", 1.)
+        values["sampling_active_force"] = ((force.norm(dim=-1) > threshold)
+                                            | (base.norm(dim=-1) > threshold)).unsqueeze(-1)
     if b1z1_actor_rejection.term_weight(a, "base") > 0:
         values["stance"] = env.simulator.foot_contacts
     if a.cfg.get("actor_phys_ee_stability_weight", 0.) > 0:
@@ -208,13 +220,19 @@ def capture(runner):
 
 
 @torch.no_grad()
-def prepare(a):
+def prepare(a, indices=None):
     """Cache pre-state mechanics independently of the representation-PINN warmup."""
-    a.actor_physics_metrics = {}
+    if indices is None:
+        a.actor_physics_metrics = {}
     if scheduled_coefficient(a) == 0:
         return
     from .b1z1_bard_pinn import mechanics
     state = a.storage.actor_physics["state"].flatten(0, 1)
+    if indices is not None:
+        state = state.index_select(0, indices)
+    if not len(state):
+        a.actor_physics_cache = None
+        return
     chunks = {}
     for raw in state.split(a.dynamics_backend.batch_capacity):
         good = torch.isfinite(raw).all(-1) & (raw[:, 3:7].norm(dim=-1) > 1e-6)
@@ -224,6 +242,32 @@ def prepare(a):
         for name, value in vars(fixed).items():
             chunks.setdefault(name, []).append(value)
     a.actor_physics_cache = SimpleNamespace(**{k: torch.cat(v) for k, v in chunks.items()})
+
+
+def start_update(a, iteration):
+    a.actor_physics_metrics = {}
+    a.actor_physics_cache = None
+    sampling.start(a, iteration)
+    if enabled(a.cfg) and a.cfg.get("actor_phys_sample_fraction", 1.) == 1:
+        prepare(a)  # Exact legacy prepare-once path; no extra RNG draws.
+
+
+def start_epoch(a, epoch):
+    selections = getattr(a, "actor_physics_selection", None)
+    if selections is None:
+        return
+    state = a.storage.actor_physics["state"]
+    ids = selections[epoch].to(state.device)
+    mapping = torch.full((a.storage.steps * a.storage.num_envs,), -1, device=state.device, dtype=torch.long)
+    mapping[ids] = torch.arange(len(ids), device=state.device)
+    a.actor_physics_index_map = mapping
+    prepare(a, ids)
+
+
+def end_epoch(a):
+    if getattr(a, "actor_physics_selection", None) is not None:
+        a.actor_physics_cache = None
+        a.actor_physics_index_map = None
 
 
 def integrate_pose(initial, velocity, dt):
@@ -280,8 +324,17 @@ def objective(a, batch, actions, context):
     from .b1z1_bard_pinn import yaw_world
     zero = actions[torch.isfinite(actions)].sum() * 0
     a.actor_physics_paths = None
+    if not enabled(a.cfg):
+        return zero, {"active_fraction": zero.detach()}
+    batch, actions, context = sampling.select(a, batch, actions, context)
+    if not len(actions):
+        return zero, {"active_fraction": zero.detach()}
     data = {k[len("actor_phys_"):]: v.detach() for k, v in batch.items() if k.startswith("actor_phys_")}
-    fixed = {k: v[batch["indices"]].detach() for k, v in vars(a.actor_physics_cache).items()}
+    ids = batch["indices"]
+    mapping = getattr(a, "actor_physics_index_map", None)
+    if mapping is not None:
+        ids = mapping[ids]
+    fixed = {k: v[ids].detach() for k, v in vars(a.actor_physics_cache).items()}
     with torch.no_grad():
         ctx = {k: v.detach() for k, v in context.items()}
         grf = a.actor_critic.predict_grf(ctx, batch["nominal_torque"].detach()).detach()
@@ -382,6 +435,10 @@ def backward(a, batch, ppo_loss, actions, context):
     if weight == 0:
         ppo_loss.backward()
         return
+    mapping = getattr(a, "actor_physics_index_map", None)
+    if mapping is not None and not (mapping[batch["indices"]] >= 0).any():
+        ppo_loss.backward()
+        return
     loss, metrics = objective(a, batch, actions, context)
     metrics["loss_scaled"] = weight * loss.detach()
     parameters = a.ppo_parameters
@@ -410,7 +467,9 @@ def backward(a, batch, ppo_loss, actions, context):
     # Explicit estimation now belongs to the encoder optimizer, not the decoders.
     heads = list(dict.fromkeys([*a.decoder_parameters, *a.actor_critic.explicit_decoder.parameters()]))
     unexpected = torch.autograd.grad(loss, heads, retain_graph=True, allow_unused=True)
-    metrics.update(actor_gradient_norm=norm.sqrt(), ppo_gradient_cosine=dot / (norm*pnorm).sqrt().clamp_min(1e-12),
+    metrics.update(actor_gradient_norm=norm.sqrt(), ppo_gradient_norm=pnorm.sqrt(),
+                   actor_to_ppo_gradient_ratio=norm.sqrt() / pnorm.sqrt().clamp_min(1e-12),
+                   ppo_gradient_cosine=dot / (norm*pnorm).sqrt().clamp_min(1e-12),
                    unintended_estimator_gradient_max=max((g.abs().max() for g in unexpected if g is not None), default=loss.new_zeros(())))
     if metrics["active_fraction"] > 0:
         from .b1z1_bard_pinn import auxiliary_backward
@@ -422,6 +481,7 @@ def backward(a, batch, ppo_loss, actions, context):
 
 
 def finish(a, metrics, updates):
+    metrics.update({"ActorPhysics/" + k: v for k, v in getattr(a, "actor_sampling_metrics", {}).items()})
     if enabled(a.cfg):
         metrics.update({"ActorPhysics/" + k: v.item() / max(updates, 1)
                         for k, v in a.actor_physics_metrics.items()})
@@ -429,3 +489,5 @@ def finish(a, metrics, updates):
         if scheduled_coefficient(a) == 0:
             metrics.update({"ActorPhysics/loss_scaled": 0.0, "ActorPhysics/active_fraction": 0.0})
         a.actor_physics_cache = None
+    a.actor_physics_selection = None
+    a.actor_physics_index_map = None

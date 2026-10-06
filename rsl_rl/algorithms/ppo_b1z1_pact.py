@@ -867,7 +867,7 @@ class PPO_B1Z1PACT:
             self.pinn_weight = progress * abs(self.cfg["pinn_loss_weight"])
             self.pinn_updates += 1
         # Actor task prediction shares this exact delay/ramp and projection sign.
-        actor_physics.prepare(self)
+        actor_physics.start_update(self, iteration)
         metrics = {name: 0.0 for name in (
             "value", "surrogate", "base_velo", "ee_position", "base_wrench", "ee_force", "foot_contact", "foot_height",
             "privileged_force", "privileged_decoder", "grf_decoder", "pinn",
@@ -893,6 +893,8 @@ class PPO_B1Z1PACT:
         if self.bard_auxiliary and self.pinn_weight > 0 and representation_enabled(self.cfg):
             self.bard_mechanics_cache = cache_rollout(self)
         for batch in self.storage.mini_batches(self.mini_batches, self.epochs):
+            if updates % self.mini_batches == 0:
+                actor_physics.start_epoch(self, updates // self.mini_batches)
             if updates == 0 and self.enable_additional_diagnostics:
                 diagnostics.update(self._pre_update_diagnostics(batch))
             ppo_loss, surrogate, value, film_identity, _, mean_actions, context, force_prediction = self._compute_rl_loss(batch)
@@ -958,6 +960,8 @@ class PPO_B1Z1PACT:
             updates += 1
 
             self.spectral_normalization(self.actor_critic, sigma_max=10.0)
+            if updates % self.mini_batches == 0:
+                actor_physics.end_epoch(self)
 
         # Gate patience is measured in PPO iterations, not epochs/minibatches.
         # Aggregate the exact masked force MSE over this complete update before

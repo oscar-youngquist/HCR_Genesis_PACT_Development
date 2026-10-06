@@ -960,6 +960,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         force_blend_min_alpha = 0.01                                                    # Legacy Pinocchio: minimum predicted-force blend fraction.
 
     class algorithm:
+        actor_phys_sample_fraction = 0.2                  # Fraction per PPO epoch; 1 keeps legacy, 0 skips actor physics.
+        # Use 1/num_learning_epochs for once-per-rollout coverage; preserve PPO batch sizes.
         actor_phys_arm_rejection_enabled = True            # Dynamic arm-force projection, scaled by shared p; no reliability gate.
         actor_phys_arm_rejection_weight = 0.1              # Final weight inside the existing actor schedule.
         actor_phys_base_rejection_enabled = True           # Incremental stance-force reaction objective.
