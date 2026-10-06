@@ -3,7 +3,11 @@ import numpy as np
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
 
+from legged_gym.envs.b1z1.rejection_curriculum import RejectionCurriculumDefaults
+
+
 class B1Z1PACTPosCfg(LeggedRobotCfg):
+    use_force_shifted_target = False
     seed = 1
 
     class env:
@@ -330,7 +334,7 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         tradeoff_steps = 10
         tradeoff_threshold = 0.70
 
-    class commands:
+    class commands(RejectionCurriculumDefaults):
         curriculum = False
         max_curriculum = 0.8
         # UniFP convention inside PACT training: the last three slots retain
@@ -357,15 +361,12 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         # channel, but retains the common command stage before disturbances.
         force_curriculum_command_start_iteration = 12000
         force_curriculum_command_ramp_iterations = 4000
-        force_curriculum_gate_start_iteration = 20000
+        # Rejection gate start, patience, and fallback come from RejectionCurriculumDefaults.
         force_curriculum_external_ramp_iterations = 4000
         force_curriculum_ee_l1_threshold = 0.25
         force_curriculum_roll_termination_threshold = 0.05
         force_curriculum_episode_length_threshold = 950.0
-        force_curriculum_gate_patience = 400
         force_curriculum_metric_ema_alpha = 0.05
-        force_curriculum_use_latest_start_fallback = True
-        force_curriculum_latest_start_iteration = 20000
 
         push_gripper_stators = True
         apply_ee_external_forces = True

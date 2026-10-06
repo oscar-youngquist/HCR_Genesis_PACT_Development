@@ -200,7 +200,11 @@ class B1Z1StagedForceCurriculum:
 
 
 def init_staged_force_curriculum(env):
-    env._staged_force_curriculum = B1Z1StagedForceCurriculum(env.cfg.commands)
+    if getattr(env.cfg.commands, "use_shared_rejection_curriculum", False):
+        from .rejection_curriculum import RejectionCurriculum
+        env._staged_force_curriculum = RejectionCurriculum(env.cfg.commands, env.device)
+    else:
+        env._staged_force_curriculum = B1Z1StagedForceCurriculum(env.cfg.commands)
 
 
 def update_staged_force_curriculum(env, iteration, ee_l1, roll_rate, episode_length):
@@ -236,6 +240,21 @@ def update_force_curriculum_from_rollout(env, iteration, ep_infos, mean_episode_
         _mean_episode_metric(ep_infos, "roll_termination_rate"),
         mean_episode_length,
     )
+
+
+@torch.no_grad()
+def observe_pact_rejection_quality(env, context):
+    """Feed the shared gate physical current-time estimates, not actor-PINN losses."""
+    curriculum = getattr(env, "_staged_force_curriculum", None)
+    if not hasattr(curriculum, "observe_forces"):
+        return
+    yaw = env._get_base_yaw_quat()
+    ee = quat_apply(yaw, context["ee_force"].detach().to(env.device) / env.obs_scales.ee_force)
+    base = quat_apply(yaw, context["base_wrench"][:, :3].detach().to(env.device) / env.obs_scales.base_force)
+    # PACT labels include added-mass gravity; compare only applied disturbances.
+    if getattr(env, "bard_mass_wrench_labels", False):
+        base = base - env.get_mass_wrench_label()[:, :3]
+    curriculum.observe_forces(ee, base, env.ee_force_ext_world, env.base_force_ext_world)
 
 
 def _workspace_coordinates(env, targets, base_yaw_quat, env_ids):
@@ -343,7 +362,7 @@ def _compute_force_adjusted_ee_target(env, env_ids=None, *, external_force=None,
 
     force_world = external_force + quat_apply(base_yaw_quat, commanded_force)
     raw_offset = force_world / force_kp
-    # Only the position-only PPO ablation opts out of impedance-shifted targets.
+    # Rejection tasks track nominal targets; Original UniFP retains its shifts.
     if not getattr(env.cfg, "use_force_shifted_target", True):
         raw_offset = torch.zeros_like(raw_offset)
     raw_norm = torch.linalg.vector_norm(raw_offset, dim=-1, keepdim=True)

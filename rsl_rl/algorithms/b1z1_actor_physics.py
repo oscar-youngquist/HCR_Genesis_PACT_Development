@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from .hard_pact_bard import differentiable_bard_rollout_loss
-from . import b1z1_ee_stability
+from . import b1z1_ee_stability, b1z1_actor_rejection
 
 
 def enabled(cfg):
@@ -91,6 +91,23 @@ def configure(algorithm):
     if not algorithm.bard_auxiliary:
         raise ValueError("actor_phys_enabled requires dynamics_backend='bard'")
     cfg = algorithm.cfg
+    for name in ("arm", "base"):
+        if cfg.get(f"actor_phys_{name}_rejection_enabled", False):
+            weight = cfg[f"actor_phys_{name}_rejection_weight"]
+            if not math.isfinite(weight) or weight < 0:
+                raise ValueError("Rejection weights must be finite and nonnegative")
+            scale = cfg[f"actor_phys_{name}_force_scale"]
+            axes = torch.as_tensor(cfg[f"actor_phys_{name}_force_axis_weights"])
+            if not math.isfinite(scale) or scale <= 0 or axes.shape != (3 if name == "arm" else 2,):
+                raise ValueError("Invalid rejection force normalization")
+            if not torch.isfinite(axes).all() or (axes < 0).any():
+                raise ValueError("Rejection axis weights must be finite and nonnegative")
+    if cfg.get("actor_phys_arm_rejection_enabled", False):
+        if not math.isfinite(cfg["actor_phys_rejection_damping"]) or cfg["actor_phys_rejection_damping"] <= 0:
+            raise ValueError("Projection damping must be finite and positive")
+    for key in ("actor_phys_grf_torque_trust_radius", "actor_phys_rejection_active_force"):
+        if key in cfg and (not math.isfinite(cfg[key]) or cfg[key] < 0):
+            raise ValueError(f"{key} must be finite and nonnegative")
     stability_weight = cfg.get("actor_phys_ee_stability_weight", 0.)
     if not math.isfinite(stability_weight) or stability_weight < 0:
         raise ValueError("actor_phys_ee_stability_weight must be finite and nonnegative")
@@ -171,6 +188,8 @@ def capture(runner):
     if pos_fk_enabled(a.cfg):
         values.update(fk_default=env.simulator.default_dof_pos.expand_as(env.simulator.dof_pos),
                       fk_base_pos=env.simulator.base_pos, fk_base_quat=env.simulator.base_quat)
+    if b1z1_actor_rejection.term_weight(a, "base") > 0:
+        values["stance"] = env.simulator.foot_contacts
     if a.cfg.get("actor_phys_ee_stability_weight", 0.) > 0:
         # Same compliant reference at both times; freeze force and base frame.
         u0 = (env.goal_timer / env.traj_timesteps).clamp(0, 1)
@@ -260,6 +279,7 @@ def objective(a, batch, actions, context):
     from legged_gym.utils.math_utils import quat_apply
     from .b1z1_bard_pinn import yaw_world
     zero = actions[torch.isfinite(actions)].sum() * 0
+    a.actor_physics_paths = None
     data = {k[len("actor_phys_"):]: v.detach() for k, v in batch.items() if k.startswith("actor_phys_")}
     fixed = {k: v[batch["indices"]].detach() for k, v in vars(a.actor_physics_cache).items()}
     with torch.no_grad():
@@ -304,8 +324,13 @@ def objective(a, batch, actions, context):
     lever = quat_apply(state[:, 3:7], state[:, 176:179])
     wrench = torch.cat((wrench[:, :3], wrench[:, 3:] + torch.cross(lever, wrench[:, :3], dim=-1)), -1)
     ee = yaw_world(ee[valid][good] / a.cfg["ee_force_scale"], state[:, 3:7])
-    torque = a._coupled_torque(actions[valid][good].clamp(-a.cfg["clip_actions"], a.cfg["clip_actions"]), state)
-    torque = torque.clamp(-data["torque_max"], data["torque_max"])
+    torque = b1z1_actor_rejection.bounded_torque(a, actions[valid][good], state, data["torque_max"])
+    selected_batch = {name: batch[name][valid][good] for name in ("observations", "nominal_torque")
+                      if name in batch}
+    grf, rejection_loss, rejection_metrics = b1z1_actor_rejection.prepare(
+        a, selected_batch, actions[valid][good],
+        {k: v[valid][good] for k, v in ctx.items()}, data, fixed, torque, grf, ee, wrench[:, :3])
+    metrics.update({"rejection_" + name: value for name, value in rejection_metrics.items()})
     # Reuse the existing analytic rollout, discarding its observed-state objective.
     # Dummy post_v is the pre-state: no observed x_next is read anywhere here.
     rollout_context = SimpleNamespace(foot_jacobians=fixed.foot_jacobians, base_jacobian=fixed.base_jacobian,
@@ -330,7 +355,7 @@ def objective(a, batch, actions, context):
                         {k: v[finite_ee] for k, v in data.items()}, a.cfg)
     metrics.update({k: v.detach().mean() for k, v in values.items()})
     metrics["active_fraction"] = finite_ee.sum() / len(actions)
-    total = values["loss"].mean()
+    total = values["loss"].mean() + rejection_loss
     stability_loss, stability_metrics = b1z1_ee_stability.objective(
         a.dynamics_backend, predicted[finite_ee],
         {k: v[finite_ee] for k, v in data.items()}, a.cfg)
@@ -346,6 +371,8 @@ def objective(a, batch, actions, context):
         total = total + fk_loss
         metrics.update(fk_metrics)
         metrics["loss"] = total.detach()
+    if getattr(a, "enable_additional_diagnostics", False) and grf.requires_grad:
+        a.actor_physics_paths = (torque, grf)
     return total, metrics
 
 
@@ -360,6 +387,17 @@ def backward(a, batch, ppo_loss, actions, context):
     parameters = a.ppo_parameters
     physics_grad = torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True)
     ppo_grad = torch.autograd.grad(ppo_loss, parameters, retain_graph=True, allow_unused=True)
+    if getattr(a, "actor_physics_paths", None) is not None:
+        torque, grf = a.actor_physics_paths
+        total_vjp, contact_vjp = torch.autograd.grad(loss, (torque, grf), retain_graph=True, allow_unused=True)
+        if total_vjp is not None and contact_vjp is not None:
+            mediated, = torch.autograd.grad(grf, torque, contact_vjp, retain_graph=True, allow_unused=True)
+            if mediated is not None:
+                for name, vjp in (("direct", total_vjp-mediated), ("grf_mediated", mediated)):
+                    grads = torch.autograd.grad(torque, parameters, vjp, retain_graph=True, allow_unused=True)
+                    metrics[name + "_actor_gradient_norm"] = sum(
+                        (g.square().sum() for g in grads if g is not None), loss.new_zeros(())).sqrt()
+        a.actor_physics_paths = None
     dot = loss.new_zeros(())
     norm, pnorm = dot.clone(), dot.clone()
     for g, p in zip(physics_grad, ppo_grad):

@@ -8,10 +8,10 @@ validation.
 
 | ID | Experiment | Action mode | Conditioning | Representation PINN | Actor PINN | Run script (`TRAIN_SCRIPT`) | Training Running | Training Done | Experiments Running | Experimental Validation Done |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Baseline | Vanilla position-only PPO | Position | Current observation only; no context encoder | Off | Off | `b1z1_ppo_pos_unity.sh` | [x] | [ ] | [ ] | [ ] |
-| Baseline | Original-architecture UniFP tracking | Position | UniFP context; no FiLM | Off | Off | `b1z1_unifp_original_unity.sh` | [x] | [ ] | [ ] | [ ] |
-| Baseline | UniFP-Reject | Position | UniFP context with estimated-force compensation; no FiLM | Off | Off | `b1z1_unifp_reject_unity.sh` | [x] | [ ] | [ ] | [ ] |
-| 4 | Coupled PACT without force/error conditioning | Coupled | Common context only; no FiLM or appended condition | Off | Off | `b1z1_pact_ab4_coupled_none_unity.sh` | [ ] | [ ] | [ ] | [ ] |
+| Baseline | Vanilla position-only PPO | Position | Current observation only; no context encoder | Off | Off | `b1z1_ppo_pos_unity.sh` | [x] | [x] | [ ] | [ ] |
+| Baseline | Original-architecture UniFP tracking | Position | UniFP context; no FiLM | Off | Off | `b1z1_unifp_original_unity.sh` | [x] | [x] | [ ] | [ ] |
+| Baseline | UniFP-Reject | Position | UniFP context with estimated-force compensation; no FiLM | Off | Off | `b1z1_unifp_reject_unity.sh` | [x] | [x] | [ ] | [ ] |
+| 4 | Coupled PACT without force/error conditioning | Coupled | Common context only; no FiLM or appended condition | Off | Off | `b1z1_pact_ab4_coupled_none_unity.sh` | [x] | [ ] | [ ] | [ ] |
 | 5 | Coupled PACT with concatenated conditioning | Coupled | Concat | Off | Off | `b1z1_pact_ab5_coupled_concat_unity.sh` | [ ] | [ ] | [ ] | [ ] |
 | 6 | Position PACT without PINNs | Position | FiLM | Off | Off | `b1z1_pact_ab6_position_film_unity.sh` | [ ] | [ ] | [ ] | [ ] |
 | 7 | Position PACT with both PINNs | Position | FiLM | On | On | `b1z1_pact_ab7_position_full_unity.sh` | [ ] | [ ] | [ ] | [ ] |

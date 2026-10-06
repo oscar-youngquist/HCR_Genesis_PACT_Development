@@ -1,14 +1,16 @@
 import numpy as np
 
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+from legged_gym.envs.b1z1.rejection_curriculum import RejectionCurriculumDefaults
 
 
 class B1Z1PACTCfg(LeggedRobotCfg):
+    use_force_shifted_target = False  # Disturbance rejection tracks nominal trajectories.
     seed = 1                                                                            # Random seed for reproducible initialization.
 
     class env:
-        # num_envs = 4096                                                                # Parallel simulation instances.
-        num_envs = 10240                                                                  # Parallel simulation instances.
+        num_envs = 4096                                                                # Parallel simulation instances.
+        # num_envs = 10240                                                                  # Parallel simulation instances.
         # 2 body-orientation + 3 angular velocity + 17 joint positions +
         # 17 joint velocities + 34 coupled PACT actions + 6 commands. EE pose
         # is estimated from history instead of exposed through an FK error.
@@ -325,7 +327,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         pact_weight_bias_max = 0.20                                                     # Maximum sampled branch-weight bias.
         pact_balanced_prob = 0.25                                                       # Probability of keeping a balanced 1:1 torque split.
 
-    class commands:
+    class commands(RejectionCurriculumDefaults):
         curriculum = False
         max_curriculum = 0.8                                                            # Maximum command-curriculum range.
         # UniFP convention inside PACT training: the last three slots retain
@@ -356,17 +358,14 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # force_curriculum_external_ramp_iterations = 8000                                # External-force ramp duration after activation [iterations].
 
 
-        force_curriculum_gate_start_iteration = 3200                                    # Earliest iteration for the external-force performance gate.
+        # Rejection gate start, patience, and fallback come from RejectionCurriculumDefaults.
         force_curriculum_external_ramp_iterations = 3200                                # External-force ramp duration after activation [iterations].
 
         force_curriculum_ee_l1_threshold = 0.25                                         # Maximum EE tracking error for force-stage advancement.
         force_curriculum_roll_termination_threshold = 0.05                              # Maximum roll-termination rate for advancement.
         force_curriculum_episode_length_threshold = 950.0                               # Minimum episode length for advancement [control steps].
-        force_curriculum_gate_patience = 400                                            # Consecutive qualifying updates before advancement.
         force_curriculum_metric_ema_alpha = 0.05                                        # New-sample weight for force-curriculum metrics.
-        force_curriculum_use_latest_start_fallback = True                               # Allow time-based activation if the performance gate stalls.
         # force_curriculum_latest_start_iteration = 10000                                 # Latest allowed external-force start iteration.
-        force_curriculum_latest_start_iteration = 6400                                 # Latest allowed external-force start iteration.
 
 
         push_gripper_stators = True                                                     # Enable the EE disturbance-event scheduler.
@@ -635,7 +634,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
 
             tracking_ee_force_world = 2.0
             tracking_ee_orientation_default = 0.0
-            impedance_consistency = 0.5
+            impedance_consistency = 0.0
 
             # Discourage the position-PD and direct-torque heads from wasting
             # authority by producing large opposing torques on the same joint.
@@ -799,9 +798,9 @@ class B1Z1PACTCfg(LeggedRobotCfg):
                 "arm_feedforward_action_smoothness":[-0.006, -0.06],
             }
             # warmup_steps = 30000                                                        # Reward-curriculum warmup.
-            # curr_steps = 10000                                                           # Reward-curriculum ramp duration.
+            curr_steps = 40000                                                           # Reward-curriculum ramp duration.
             warmup_steps = 0                                                        # Reward-curriculum warmup.
-            curr_steps = 16000                                                      # Reward-curriculum ramp duration.
+            # curr_steps = 16000                                                      # Reward-curriculum ramp duration.
 
 
     class viewer:
@@ -908,9 +907,16 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         kl_ema_decay = 0.99                                                             # Previous-value weight in the KL-rate EMA.
         adaptation_learning_rate = 2.0e-4                                               # HardPACT encoder/decoder learning rate.
 
+        # VRAM SMOKE TEST: uncomment with the algorithm/runner and shared curriculum blocks.
+        # Keep these in policy: the runner reads PINN timing here, not from algorithm.
+        # No force_blend_min_alpha override is needed: enabled live GRFs use full authority.
+        pinn_init_steps = 10
+        pinn_warmup = 10
+
+
         pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign: + PINN / - PPGrad; 0 disables.
-        pinn_warmup = 300                                                               # Ramp duration after PINN activation [PPO updates].
-        pinn_init_steps = 100                                                           # First PPO iteration eligible for the PINN ramp.
+        # pinn_warmup = 750                                                               # Ramp duration after PINN activation [PPO updates].
+        # pinn_init_steps = 250                                                           # First PPO iteration eligible for the PINN ramp.
         use_pinn_rollout_loss = True                                                    # Enable the rollout term in addition to inverse dynamics.
         pinn_inverse_weight = 0.5                                                       # Inverse-dynamics coefficient inside the combined physics objective.
         pinn_rollout_weight = 0.5                                                       # Rollout coefficient inside the combined physics objective.
@@ -924,7 +930,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
 
         # LEGACYYYYYY BELOWWWW
         # Legacy force mixing controls; BARD trains directly on predicted forces.
-        # Gate statistics may still be logged, but do not gate BARD PINN gradients.
+        # Statistics remain logged; new actor rejection/GRF paths do not consult this gate.
+        # BARD representation PINNs also use predicted forces without this gate.
         predicted_force_detach = False                                                  # Legacy Pinocchio: stop gradients through predicted forces.
         force_gate_ema_alpha = 0.05                                                     # New-error weight in force-reliability EMAs.
         force_gate_threshold = 0.075                                                    # Legacy force-blend target for normalized reconstruction MSE.
@@ -949,17 +956,29 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         force_gate_ee_neutral_min_samples = 32                                          # Minimum neutral-EE samples for a reliability decision.
         force_gate_base_active_min_samples = 32                                         # Minimum active-torso samples for a reliability decision.
         force_gate_base_neutral_min_samples = 32                                        # Minimum neutral-torso samples for a reliability decision.
-        # Minimum predicted-force contribution before reconstruction reaches
-        # the reliability threshold; the remainder comes from measurements.
+        # Legacy Pinocchio measured/predicted mixing only; no effect on the live actor GRF path.
         force_blend_min_alpha = 0.01                                                    # Legacy Pinocchio: minimum predicted-force blend fraction.
 
     class algorithm:
+        actor_phys_arm_rejection_enabled = True            # Dynamic arm-force projection, scaled by shared p; no reliability gate.
+        actor_phys_arm_rejection_weight = 0.1              # Final weight inside the existing actor schedule.
+        actor_phys_base_rejection_enabled = True           # Incremental stance-force reaction objective.
+        actor_phys_base_rejection_weight = 0.1             # Final weight inside the existing actor schedule.
+        actor_phys_rejection_damping = 1e-4                # Damping of J M^-1 J^T before the force solve.
+        actor_phys_arm_force_scale = 20.0                  # Arm residual normalization [N].
+        actor_phys_base_force_scale = 100.0                # Planar stance residual normalization [N].
+        actor_phys_arm_force_axis_weights = [1., 1., 1.]    # World Cartesian residual weights.
+        actor_phys_base_force_axis_weights = [1., 1.]       # World planar residual weights.
+        actor_phys_rejection_active_force = 1.0            # Ignore near-zero disturbance samples [N].
+        actor_phys_rejection_min_contacts = 2              # Minimum measured stance feet for base reaction.
+        actor_phys_live_grf_enabled = True                 # Frozen decoder, full live torque-to-GRF derivative; no reliability gate.
+        actor_phys_grf_torque_trust_radius = 0.0            # Per-joint physical Nm; zero disables clipping.
         # Actor-facing task prediction; independent of representation-PINN weights.
         actor_phys_enabled = True                         # Opt in only for coupled PACT/BARD.
         actor_phys_coef = 0.1                              # Overall actor auxiliary coefficient.
         actor_phys_vel_weight = 1.0                         # Reachable planar velocity/yaw tracking.
         actor_phys_ee_weight = 1.0                          # Next scheduled, compliant EE target.
-        actor_phys_ee_stability_weight = 0.05               # Conservative near-target task-space damping weight.
+        actor_phys_ee_stability_weight = 0.10               # Conservative near-target task-space damping weight.
         actor_phys_ee_stability_position_radius = 0.05      # Activate primarily within 5 cm of the target.
         actor_phys_ee_stability_use_orientation = False     # Position-only stability; exclude rotation from energy and gate.
         actor_phys_ee_stability_rotation_radius = 0.30      # Rotation gate radius [rad], used only when orientation is enabled.
@@ -981,9 +1000,9 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_ee_scale = 0.1                           # EE-error normalization [m].
         actor_phys_q_scale = 1.0                            # Position-barrier normalization [rad].
         actor_phys_qd_scale = 10.0                          # Velocity-barrier normalization [rad/s].
-        actor_phys_require_force_gate = False               # Optional existing force-quality gate.
+        actor_phys_require_force_gate = False               # Legacy whole-objective opt-in gate; keep false for ungated actor physics.
 
-        actor_phys_arm_manipulability_enabled = True      # Optional successor-arm translational singularity barrier.
+        actor_phys_arm_manipulability_enabled = False      # Optional successor-arm translational singularity barrier.
         actor_phys_arm_manipulability_weight = 0.02        # Inside the scheduled actor-physics coefficient.
         actor_phys_arm_manipulability_sigma_min = 0.05     # Minimum translational Jacobian singular value [m/rad].
         actor_phys_pos_fk_enabled = True                   # Direct arm position-command FK objective.
@@ -996,14 +1015,14 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         use_clipped_value_loss = True                                                   # Apply PPO-style clipping to critic updates.
         clip_param = 0.2                                                                # PPO probability-ratio clipping width.
         entropy_coef = 0.01                                                             # Policy entropy bonus coefficient.
-        # learning_rate = 3.0e-4                                                          # Actor/critic optimizer learning rate.
-        learning_rate = 6e-4                                                          # Actor/critic optimizer learning rate.
+        learning_rate = 3.0e-4                                                          # Actor/critic optimizer learning rate.
+        # learning_rate = 6e-4                                                          # Actor/critic optimizer learning rate.
         # Learning-rate schedule.
         schedule = "adaptive"                                                           # adaptive
         gamma = 0.99                                                                    # Reward discount factor.
         lam = 0.95                                                                      # Generalized advantage estimation smoothing factor.
-        # desired_kl = 0.01                                                               # Policy KL target for adaptive learning rate; not VAE KL.
-        desired_kl = 0.013                                                               # Policy KL target for adaptive learning rate; not VAE KL.
+        desired_kl = 0.01                                                               # Policy KL target for adaptive learning rate; not VAE KL.
+        # desired_kl = 0.013                                                               # Policy KL target for adaptive learning rate; not VAE KL.
 
         max_grad_norm = 1.0                                                             # Gradient-norm cap per optimizer ownership group.
         num_learning_epochs = 5                                                         # PPO passes over each rollout.
@@ -1027,6 +1046,18 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         adaptive_ent_ter_threshold = 6.0                                                # Terrain-related adaptive entropy threshold.
         adaptive_ent_softmax_temp = 2.0                                                 # Temperature for adaptive entropy weighting.
 
+        # VRAM SMOKE TEST ONLY: exercise actor physics and both rejection terms.
+        # New rejection/live-GRF paths need no gate bypass; retain existing sample/contact masks.
+        # Keep the legacy whole-objective gate off. Decoder parameters remain frozen.
+        actor_phys_enabled = True
+        actor_phys_coef = 0.1
+        actor_phys_arm_rejection_enabled = True
+        actor_phys_arm_rejection_weight = 0.1
+        actor_phys_base_rejection_enabled = True
+        actor_phys_base_rejection_weight = 0.1
+        actor_phys_live_grf_enabled = True
+        actor_phys_require_force_gate = False
+
     class runner:
         enable_additional_diagnostics = True                                            # Disable expensive, non-training rollout and PPO-consistency diagnostics.
         policy_class_name = "ActorCriticB1Z1PACT"                                       # Actor-critic implementation selected by the runner.
@@ -1034,8 +1065,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         num_steps_per_env = 24                                                          # Control transitions collected per environment per update.
         grf_dim = 12                                                                    # Flattened four-foot XYZ force width.
 
-        # max_iterations = 70000                                                          # Total PPO learning iterations.
-        max_iterations = 28000                                                          # Total PPO learning iterations.
+        max_iterations = 70000                                                          # Total PPO learning iterations.
+        # max_iterations = 28000                                                          # Total PPO learning iterations.
 
         save_interval = 1000                                                            # Checkpoint interval [PPO iterations].
         run_name = "b1z1_pact_improved"                                                  # Run label used in output directories.
@@ -1045,5 +1076,11 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         load_run = "Jul14_11-16-03_unifp_baseline"                                      # Run directory selected when resuming.
         checkpoint = -1                                                                 # Checkpoint index; -1 selects the latest.
         resume_path = None                                                              # Explicit checkpoint path override.
+
+        # VRAM SMOKE TEST: fresh run; keep production env count/horizon/minibatch sizes.
+        # CLI launch arguments can override these settings. Use the full b1z1_pact task.
+        # max_iterations = 35
+        # resume = False
+        run_name = "b1z1_pact_vram_smoke"
 
 # sh play_b1z1_pact_lab.sh --load_run Sep23_17-35-31_b1z1_pact_improved --ckpt -1

@@ -23,6 +23,7 @@ from legged_gym.envs.b1z1.force_task_utils import (
     load_staged_force_curriculum_state_dict,
     staged_force_curriculum_state_dict,
     update_force_curriculum_from_rollout,
+    observe_pact_rejection_quality,
 )
 from rsl_rl.algorithms.ppo_b1z1_pact import PPO_B1Z1PACT
 from rsl_rl.storage.b1z1_action_replay import B1Z1ActionReplay
@@ -107,6 +108,7 @@ class B1Z1PACTRunner:
 
         merged = dict(algorithm_cfg)
         arm_physics = (algorithm_cfg.get("actor_phys_pos_fk_enabled", False)
+                       or algorithm_cfg.get("actor_phys_arm_rejection_enabled", False)
                        or (algorithm_cfg.get("actor_phys_arm_manipulability_enabled", False)
                            and algorithm_cfg.get("actor_phys_arm_manipulability_weight", .02) > 0))
         if algorithm_cfg.get("actor_phys_enabled", False) and arm_physics:
@@ -237,6 +239,8 @@ class B1Z1PACTRunner:
             # never an approximation based on environment transitions.
             if hasattr(self.env, "set_training_iteration"):
                 self.env.set_training_iteration(iteration)
+            # Freeze p throughout collection and its associated PPO update.
+            self.alg.rejection_progress = getattr(self.env._staged_force_curriculum, "beta", 0.)
             if self.enable_additional_diagnostics and hasattr(self.actor_critic, "begin_rollout_diagnostics"):
                 self.actor_critic.begin_rollout_diagnostics()
             if self.enable_additional_diagnostics and hasattr(self.env, "begin_rollout_diagnostics"):
@@ -254,6 +258,7 @@ class B1Z1PACTRunner:
                 for _ in range(self.steps):
                     policy_start = rollout_timer.start("policy") if rollout_timer is not None else None
                     actions = self.alg.act(obs, privileged, history, explicit)
+                    observe_pact_rejection_quality(self.env, self.actor_critic.last_context)
                     delay = (self.env.action_delay if self.env.cfg.domain_rand.randomize_ctrl_delay
                              else torch.zeros(self.env.num_envs, device=self.device, dtype=torch.long))
                     self.alg.transition.physics_source = self.action_replay.push(self.alg.transition, delay)

@@ -166,7 +166,8 @@ def test_pose_integration_stationary_quaternion_backward():
     assert torch.isfinite(v.grad).all()
 
 
-def test_enabled_ppo_update_and_snapshot_alignment():
+@pytest.mark.parametrize("rejection_active", [False, True])
+def test_enabled_ppo_update_and_snapshot_alignment(rejection_active):
     from test_b1z1_sampled_context import class_to_dict, B1Z1PACTCfgPPO, B1Z1PACTDecoder
     template, batch, _, _ = setup()
     full = class_to_dict(B1Z1PACTCfgPPO())
@@ -174,11 +175,18 @@ def test_enabled_ppo_update_and_snapshot_alignment():
            "num_mini_batches": 1, "dynamics_backend": "bard", "privileged_force_start": 23,
            "privileged_force_dim": 21, "pinn_init_steps": 0, "pinn_warmup": 2,
            "pinn_loss_weight": .1, "actor_phys_ee_stability_weight": 0.}
+    if rejection_active:
+        cfg["actor_phys_arm_dof_indices"] = list(range(12, 18))
+        fixed_arm = template.actor_physics_cache.ee_jacobian
+        fixed_arm[:, :3, 18:21] = torch.eye(3)
+        batch["actor_phys_stance"] = torch.ones(3, 4, dtype=torch.bool)
     fixed = template.actor_physics_cache
     backend = SimpleNamespace(batch_capacity=3, ee_position=template.dynamics_backend.ee_position,
         evaluate=lambda *args: SimpleNamespace(**{k: v[:len(args[0])] for k, v in vars(fixed).items()}))
     a = PPO_B1Z1PACT(template.actor_critic, B1Z1PACTDecoder(8 + 14, 188, hidden=[16]), backend, cfg, "cpu")
     a.pinn_updates = 1  # Shared half-warmup state, as restored from a checkpoint.
+    a.rejection_progress = .5 if rejection_active else 0.
+    a.force_gate_active = rejection_active
     a.init_storage(3, 2, 81, 40, 162, 34, 23, 232, 180, rollout_state_dim=51)
     for step in range(2):
         a.act(torch.randn(3, 81), torch.randn(3, 40), torch.randn(3, 162), torch.zeros(3, 23))
@@ -200,6 +208,11 @@ def test_enabled_ppo_update_and_snapshot_alignment():
     assert a.pinn_weight == .05
     assert metrics["ActorPhysics/scheduled_coefficient"] == cfg["actor_phys_coef"] * .5
     assert all(torch.isfinite(p).all() for p in a.actor_critic.parameters())
+    if rejection_active:
+        assert metrics["ActorPhysics/rejection_grf_blend"] == 1.
+        assert metrics["ActorPhysics/rejection_arm_weight"] == pytest.approx(.5 * cfg["actor_phys_arm_rejection_weight"])
+        assert metrics["ActorPhysics/rejection_base_weight"] == pytest.approx(.5 * cfg["actor_phys_base_rejection_weight"])
+        assert "ActorPhysics/grf_mediated_actor_gradient_norm" in metrics
 
 
 @pytest.mark.parametrize("stability_weight", [0., 1.])

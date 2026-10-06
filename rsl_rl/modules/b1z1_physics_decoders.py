@@ -36,6 +36,14 @@ class B1Z1PhysicsDecoders(nn.Module):
             raise ValueError("B1Z1 GRF conditioning requires all 19 joint torques")
         return self.grf(torch.cat((z, explicit.detach(), nominal_torque.detach() / self.torque_scale), -1))
 
+    def predict_grf_actor(self, z, explicit, torque):
+        """Frozen decoder/context with a live physical-torque input for actor VJPs."""
+        from torch.func import functional_call
+        frozen = {name: value.detach() for name, value in self.grf.named_parameters()}
+        frozen.update({name: value.detach().clone() for name, value in self.grf.named_buffers()})
+        inputs = torch.cat((z.detach(), explicit.detach(), torque / self.torque_scale.detach()), -1)
+        return functional_call(self.grf, frozen, (inputs,))
+
 
 def decode_context(model, context):
     if "explicit_condition" in context:

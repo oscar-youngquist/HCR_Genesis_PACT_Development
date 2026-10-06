@@ -17,6 +17,7 @@ from legged_gym.envs.b1z1.force_task_utils import (
     load_staged_force_curriculum_state_dict,
     staged_force_curriculum_state_dict,
     update_force_curriculum_from_rollout,
+    observe_pact_rejection_quality,
 )
 from rsl_rl.algorithms.ppo_b1z1_pact_pos import PPO_B1Z1PACTPos
 from rsl_rl.modules.actor_critic_b1z1_pact_pos import ActorCriticB1Z1PACTPos, B1Z1PACTDecoder
@@ -145,6 +146,7 @@ class B1Z1PACTPosRunner:
                 for _ in range(self.steps):
                     policy_start = rollout_timer.start("policy") if rollout_timer is not None else None
                     actions = self.alg.act(obs, privileged, history, explicit)
+                    observe_pact_rejection_quality(self.env, self.actor_critic.last_context)
                     if rollout_timer is not None:
                         rollout_timer.stop("policy", policy_start)
                     if self.enable_additional_diagnostics and hasattr(self.actor_critic, "record_rollout_diagnostics"):

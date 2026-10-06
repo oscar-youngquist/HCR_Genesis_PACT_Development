@@ -26,6 +26,11 @@ class B1Z1UniFPReject(B1Z1UniFPOriginal):
         self.commands[:, 9:12] = self.current_Fxyz_gripper_cmd
         self.commands[:, 12:15] = self.current_Fxyz_base_cmd
 
+    def _reward_tracking_lin_vel_force_world(self):
+        # Compensation stays in policy inputs, never in the tracking reference.
+        error = (self.commands[:, :2] - self.simulator.base_lin_vel[:, :2]).square().sum(-1)
+        return torch.exp(-error / self.cfg.rewards.tracking_sigma)
+
     @property
     def force_command_stream_enabled(self):
         return False

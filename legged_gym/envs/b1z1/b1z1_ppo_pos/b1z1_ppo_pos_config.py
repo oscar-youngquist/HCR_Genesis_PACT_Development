@@ -7,6 +7,9 @@ class B1Z1PPOPosCfg(B1Z1PACTCfg):
     use_force_compensation = False
     use_force_shifted_target = False
 
+    class commands(B1Z1PACTCfg.commands):
+        reject_require_force_quality = False  # No estimator; retain warmup/performance/patience gate.
+
     class env(B1Z1PACTCfg.env):
         num_policy_actions = B1Z1PACTCfg.env.num_actions
 

@@ -3,19 +3,19 @@ from legged_gym.envs.b1z1.b1z1_unifp_original.b1z1_unifp_original_config import 
 )
 
 
+from legged_gym.envs.b1z1.rejection_curriculum import RejectionCurriculumDefaults
+
+
 class B1Z1UniFPRejectCfg(B1Z1UniFPOriginalCfg):
     def __init__(self):
         super().__init__()
+        self.use_force_shifted_target = False
+        for name, value in vars(RejectionCurriculumDefaults).items():
+            if not name.startswith("_"):
+                setattr(self.commands, name, value)
         self.commands.use_external_impedance_compensation = True
         self.commands.compensate_ee_external_force = True
         self.commands.compensate_base_external_force = True
-        self.commands.reject_initial_external_scale = 0.25
-        self.commands.reject_warmup_iterations = 1600
-        self.commands.reject_compensation_ramp_iterations = 400
-        self.commands.reject_external_ramp_iterations = 3200
-        self.commands.reject_active_force_threshold = 1.0  # N; exclude inactive samples.
-        self.commands.reject_force_nrmse_threshold = 0.25
-        self.commands.reject_min_active_samples = 32  # Per enabled force stream/update.
 
 
 class B1Z1UniFPRejectCfgPPO(B1Z1UniFPOriginalCfgPPO):
