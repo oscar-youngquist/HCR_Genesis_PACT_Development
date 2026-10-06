@@ -203,7 +203,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         persistent_force_min_n = 4.0
         persistent_force_max_n = 10.0
         # Positive magnitudes; actual world Fz is sampled in [-limit, 0].
-        persistent_vertical_force_min_n = 20.0
+        persistent_vertical_force_min_n = 15.0
         persistent_vertical_force_max_n = 60.0
         persistent_torque_min_nm = 2.0
         persistent_torque_max_nm = 15.0
@@ -505,7 +505,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         entropy_coef = 0.01
         use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.008, 0.012]
+        adaptive_ent_bounds = [0.006, 0.010]
         adaptive_ent_lin_threshold = 0.80
         adaptive_ent_ang_threshold = 0.40
         adaptive_ent_ter_threshold = 6.0
@@ -573,11 +573,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {'enabled': True, 
                         # No rollout or PPO QP for iterations [0, N); enable
                         # at absolute iteration N. Zero keeps current behavior.
-                        'warmup_iterations': 200,
+                        'warmup_iterations': 250,
                         # Execution-only interpolation; full QPs/losses remain active.
                         'correction_ramp_enabled': True,
-                        'correction_ramp_start_offset': 200,
-                        'correction_ramp_duration': 200,
+                        'correction_ramp_start_offset': 100,
+                        'correction_ramp_duration': 100,
                         'objective_curriculum_enabled': True,
                         'contact_acceleration_weight_initial': 0.25,  # .25 * final
                         'torso_stability_curriculum_enabled': True,  # shares objective performance/progress gate
@@ -600,8 +600,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'exception_capture_limit': 1,
                         'exception_capture_dir': '/tmp/hard_pact_qp_failures',
                         # Solve held position/feedforward commands at k=0;
-                        # every_substep/random_one_substep remain available.
-                        'qp_update_mode': 'command_pair',
+                        # every_substep/random_one_substep remain available. command_pair_every_substep command_pair
+                        'qp_update_mode': 'command_pair_every_substep',
                         'position_correction_share': 0.20,
                         'command_pair_second_solve_fraction': 0.5,
                         'constraint_prediction_horizon_s': 0.005,
@@ -671,7 +671,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
                         # Soft BODY velocity tracking by constant-derivative extrapolation.
                         # Independent of stance/attitude and execution curricula.
-                        'planar_velocity_weight': 16.0,
+                        'planar_velocity_weight': 12.0,
                         'qp_velocity_loss_horizon_s': 0.02,  # shared outer xy/yaw extrapolation; QP dt unchanged
                         'qp_velocity_objective_horizon_s': 0.020,  # independent inner xy/yaw extrapolation; constraints keep physics dt
                         'yaw_rate_weight': 6.0,
