@@ -12,29 +12,29 @@ class RejectionCurriculumDefaults:
     use_shared_rejection_curriculum = True
     reject_initial_external_scale = 0.25
     reject_warmup_iterations = 1600  # Legacy field; force_curriculum_gate_start_iteration controls gating.
-    # reject_compensation_ramp_iterations = 400
-    # reject_external_ramp_iterations = 3200
-    # force_curriculum_gate_start_iteration = 1600
-    # force_curriculum_gate_patience = 400
-    # force_curriculum_use_latest_start_fallback = True
-    # force_curriculum_latest_start_iteration = 6400
+    reject_compensation_ramp_iterations = 400
+    reject_external_ramp_iterations = 3200
+    force_curriculum_gate_start_iteration = 1600
+    force_curriculum_gate_patience = 400
+    force_curriculum_use_latest_start_fallback = True
+    force_curriculum_latest_start_iteration = 6400
     reject_active_force_threshold = 1.0  # Diagnostic active-force cutoff [N]; not an advancement gate.
     
     reject_force_nrmse_threshold = 0.25  # Legacy field; force accuracy no longer gates advancement.
     reject_min_active_samples = 32
     reject_require_force_quality = False  # Legacy compatibility only; all tasks use the performance gate.
 
-    # VRAM SMOKE TEST: assignments below override normal defaults above.
-    # Comment only these overrides to restore normal timing; keep diagnostics configured.
-    # Also enable the PACT policy/algorithm/runner smoke blocks for a fresh 35-iteration run.
-    # Hold 0.25 for 10 iterations; ramp rejection for 10, then disturbances for 10.
-    # Performance fallback forces the start at 10; force-prediction accuracy is not required.
-    force_curriculum_gate_start_iteration = 10
-    force_curriculum_gate_patience = 1
-    force_curriculum_use_latest_start_fallback = True
-    force_curriculum_latest_start_iteration = 10
-    reject_compensation_ramp_iterations = 10
-    reject_external_ramp_iterations = 10
+    # # VRAM SMOKE TEST: assignments below override normal defaults above.
+    # # Comment only these overrides to restore normal timing; keep diagnostics configured.
+    # # Also enable the PACT policy/algorithm/runner smoke blocks for a fresh 35-iteration run.
+    # # Hold 0.25 for 10 iterations; ramp rejection for 10, then disturbances for 10.
+    # # Performance fallback forces the start at 10; force-prediction accuracy is not required.
+    # force_curriculum_gate_start_iteration = 10
+    # force_curriculum_gate_patience = 1
+    # force_curriculum_use_latest_start_fallback = True
+    # force_curriculum_latest_start_iteration = 10
+    # reject_compensation_ramp_iterations = 10
+    # reject_external_ramp_iterations = 10
 
 
 class RejectionCurriculum(B1Z1StagedForceCurriculum):

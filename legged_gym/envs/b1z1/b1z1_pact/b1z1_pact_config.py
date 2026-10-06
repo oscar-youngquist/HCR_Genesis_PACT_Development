@@ -273,33 +273,33 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # Coupled PACT control: the actor emits both position and feedforward
         # torque branches. The simulator combines them before clipping.
         control_type = "P"
-        # stiffness = {                                                                   # Joint-name PD proportional gains [N m/rad].
-        #     "hip": 250.0,
-        #     "thigh": 250.0,
-        #     "calf": 400.0,
-        #     "z1_waist": 64.0,
-        #     "z1_shoulder": 128.0,
-        #     "z1_elbow": 64.0,
-        #     "z1_wrist_angle": 64.0,
-        #     "z1_forearm_roll": 64.0,
-        #     "z1_wrist_rotate": 64.0,
-        #     "z1_jointGripper": 64.0,
-        # }
-        # damping = {                                                                     # Joint-name PD derivative gains [N m s/rad].
-        #     "hip": 6.25,
-        #     "thigh": 6.25,
-        #     "calf": 10.0,
-        #     "z1_waist": 1.5,
-        #     "z1_shoulder": 3.0,
-        #     "z1_elbow": 1.5,
-        #     "z1_wrist_angle": 1.5,
-        #     "z1_forearm_roll": 1.5,
-        #     "z1_wrist_rotate": 1.5,
-        #     "z1_jointGripper": 1.5,
-        # }
+        stiffness = {                                                                   # Joint-name PD proportional gains [N m/rad].
+            "hip": 200.0,
+            "thigh": 200.0,
+            "calf": 320.0,
+            "z1_waist": 50.0,
+            "z1_shoulder": 100.0,
+            "z1_elbow": 50.0,
+            "z1_wrist_angle": 50.0,
+            "z1_forearm_roll": 50.0,
+            "z1_wrist_rotate": 50.0,
+            "z1_jointGripper": 50.0,
+        }
+        damping = {                                                                     # Joint-name PD derivative gains [N m s/rad].
+            "hip": 5.00,
+            "thigh": 5.00,
+            "calf": 8.0,
+            "z1_waist": 1.2,
+            "z1_shoulder": 2.4,
+            "z1_elbow": 1.2,
+            "z1_wrist_angle": 1.2,
+            "z1_forearm_roll": 1.2,
+            "z1_wrist_rotate": 1.2,
+            "z1_jointGripper": 1.2,
+        }
 
-        stiffness = {"joint":100.0, "z1": 30.0,}
-        damping = {"joint": 5.0,"z1": 0.70,}
+        # stiffness = {"joint":100.0, "z1": 30.0,}
+        # damping = {"joint": 5.0,"z1": 0.70,}
 
         action_scale = 0.25                                                             # Convert normalized position actions to joint offsets [rad].
         torque_scale = 30.0                                                             # Convert normalized feedforward actions to torque [N m].
@@ -548,6 +548,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         use_reward_curriculum = True                                                    # Schedule selected reward coefficients.
 
         tracking_sigma = 0.25                                                           # Velocity tracking error scale.
+        dof_tracking_sigma = 0.04                                                      # Whole-body mean squared position-error scale [rad^2].
         tracking_ee_sigma = 1.00                                                        # EE position tracking error scale.
 
         tracking_ee_orientation_sigma = 0.02                                            # Default EE orientation tracking error scale.
@@ -629,6 +630,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             # tracking
             tracking_lin_vel_force_world = 2.0
             tracking_ang_vel = 1.0
+            tracking_dof_pos = 0.25  # Positive tracking of executed whole-body PD position targets.
 
             no_physical_progress = -0.50
 
@@ -907,16 +909,16 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         kl_ema_decay = 0.99                                                             # Previous-value weight in the KL-rate EMA.
         adaptation_learning_rate = 2.0e-4                                               # HardPACT encoder/decoder learning rate.
 
-        # VRAM SMOKE TEST: uncomment with the algorithm/runner and shared curriculum blocks.
-        # Keep these in policy: the runner reads PINN timing here, not from algorithm.
-        # No force_blend_min_alpha override is needed: enabled live GRFs use full authority.
-        pinn_init_steps = 10
-        pinn_warmup = 10
+        # # VRAM SMOKE TEST: uncomment with the algorithm/runner and shared curriculum blocks.
+        # # Keep these in policy: the runner reads PINN timing here, not from algorithm.
+        # # No force_blend_min_alpha override is needed: enabled live GRFs use full authority.
+        # pinn_init_steps = 10
+        # pinn_warmup = 10
 
 
         pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign: + PINN / - PPGrad; 0 disables.
-        # pinn_warmup = 750                                                               # Ramp duration after PINN activation [PPO updates].
-        # pinn_init_steps = 250                                                           # First PPO iteration eligible for the PINN ramp.
+        pinn_warmup = 1000                                                               # Ramp duration after PINN activation [PPO updates].
+        pinn_init_steps = 0                                                           # First PPO iteration eligible for the PINN ramp.
         use_pinn_rollout_loss = True                                                    # Enable the rollout term in addition to inverse dynamics.
         pinn_inverse_weight = 0.5                                                       # Inverse-dynamics coefficient inside the combined physics objective.
         pinn_rollout_weight = 0.5                                                       # Rollout coefficient inside the combined physics objective.
@@ -963,7 +965,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_sample_fraction = 0.2                  # Fraction per PPO epoch; 1 keeps legacy, 0 skips actor physics.
         # Use 1/num_learning_epochs for once-per-rollout coverage; preserve PPO batch sizes.
         actor_phys_arm_rejection_enabled = True            # Dynamic arm-force projection, scaled by shared p; no reliability gate.
-        actor_phys_arm_rejection_weight = 0.1              # Final weight inside the existing actor schedule.
+        actor_phys_arm_rejection_weight = 0.2              # Final weight inside the existing actor schedule.
+        actor_phys_force_allocation_weight = 0.025        # Effective weight = this * PINN ramp * p^2; coupled arm rejection only.
         actor_phys_base_rejection_enabled = True           # Incremental stance-force reaction objective.
         actor_phys_base_rejection_weight = 0.1             # Final weight inside the existing actor schedule.
         actor_phys_rejection_damping = 1e-4                # Damping of J M^-1 J^T before the force solve.
@@ -978,9 +981,9 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         # Actor-facing task prediction; independent of representation-PINN weights.
         actor_phys_enabled = True                         # Opt in only for coupled PACT/BARD.
         actor_phys_coef = 0.1                              # Overall actor auxiliary coefficient.
-        actor_phys_vel_weight = 1.0                         # Reachable planar velocity/yaw tracking.
+        actor_phys_vel_weight = 0.75                         # Reachable planar velocity/yaw tracking.
         actor_phys_ee_weight = 1.0                          # Next scheduled, compliant EE target.
-        actor_phys_ee_stability_weight = 0.10               # Conservative near-target task-space damping weight.
+        actor_phys_ee_stability_weight = 0.00               # Conservative near-target task-space damping weight.
         actor_phys_ee_stability_position_radius = 0.05      # Activate primarily within 5 cm of the target.
         actor_phys_ee_stability_use_orientation = False     # Position-only stability; exclude rotation from energy and gate.
         actor_phys_ee_stability_rotation_radius = 0.30      # Rotation gate radius [rad], used only when orientation is enabled.
@@ -992,8 +995,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_ee_stability_rho = 0.05                  # Requested energy decay per control step.
         actor_phys_ee_stability_energy_slack = 0.0025       # Preserve decay pressure to approximately 1 cm error.
         actor_phys_ee_stability_target_speed_threshold = 0.05  # Disable stability loss during fast target motion [m/s].
-        actor_phys_q_weight = 0.1                           # Joint-position safety barrier.
-        actor_phys_qd_weight = 0.1                          # Joint-velocity safety barrier.
+        actor_phys_q_weight = 0.0                           # Joint-position safety barrier.
+        actor_phys_qd_weight = 0.0                          # Joint-velocity safety barrier.
         actor_phys_velocity_time_constant = 0.25            # Reachable command response time [s].
         actor_phys_q_margin = 0.05                          # Position safety margin [rad].
         actor_phys_qd_margin = 0.5                          # Velocity safety margin [rad/s].
@@ -1008,7 +1011,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_arm_manipulability_weight = 0.02        # Inside the scheduled actor-physics coefficient.
         actor_phys_arm_manipulability_sigma_min = 0.05     # Minimum translational Jacobian singular value [m/rad].
         actor_phys_pos_fk_enabled = True                   # Direct arm position-command FK objective.
-        actor_phys_pos_fk_weight = 0.25                      # Inside the scheduled actor-physics coefficient.
+        actor_phys_pos_fk_weight = 0.20                      # Inside the scheduled actor-physics coefficient.
         actor_phys_pos_fk_huber_delta = 1.0                 # Huber threshold after EE-error normalization.
         actor_phys_pos_fk_axis_weights = [1.0, 1.0, 1.0]     # Arm-root Cartesian weights; uses actor_phys_ee_scale.
         actor_phys_pos_fk_deadband = 0.01                    # Per-axis tolerance [m].
@@ -1048,17 +1051,17 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         adaptive_ent_ter_threshold = 6.0                                                # Terrain-related adaptive entropy threshold.
         adaptive_ent_softmax_temp = 2.0                                                 # Temperature for adaptive entropy weighting.
 
-        # VRAM SMOKE TEST ONLY: exercise actor physics and both rejection terms.
-        # New rejection/live-GRF paths need no gate bypass; retain existing sample/contact masks.
-        # Keep the legacy whole-objective gate off. Decoder parameters remain frozen.
-        actor_phys_enabled = True
-        actor_phys_coef = 0.1
-        actor_phys_arm_rejection_enabled = True
-        actor_phys_arm_rejection_weight = 0.1
-        actor_phys_base_rejection_enabled = True
-        actor_phys_base_rejection_weight = 0.1
-        actor_phys_live_grf_enabled = True
-        actor_phys_require_force_gate = False
+        # # VRAM SMOKE TEST ONLY: exercise actor physics and both rejection terms.
+        # # New rejection/live-GRF paths need no gate bypass; retain existing sample/contact masks.
+        # # Keep the legacy whole-objective gate off. Decoder parameters remain frozen.
+        # actor_phys_enabled = True
+        # actor_phys_coef = 0.1
+        # actor_phys_arm_rejection_enabled = True
+        # actor_phys_arm_rejection_weight = 0.1
+        # actor_phys_base_rejection_enabled = True
+        # actor_phys_base_rejection_weight = 0.1
+        # actor_phys_live_grf_enabled = True
+        # actor_phys_require_force_gate = False
 
     class runner:
         enable_additional_diagnostics = True                                            # Disable expensive, non-training rollout and PPO-consistency diagnostics.
@@ -1083,6 +1086,6 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         # CLI launch arguments can override these settings. Use the full b1z1_pact task.
         # max_iterations = 35
         # resume = False
-        run_name = "b1z1_pact_vram_smoke"
+        # run_name = "b1z1_pact_vram_smoke"
 
 # sh play_b1z1_pact_lab.sh --load_run Sep23_17-35-31_b1z1_pact_improved --ckpt -1

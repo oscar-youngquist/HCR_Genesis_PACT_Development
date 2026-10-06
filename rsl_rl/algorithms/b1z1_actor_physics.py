@@ -94,6 +94,9 @@ def configure(algorithm):
     if not algorithm.bard_auxiliary:
         raise ValueError("actor_phys_enabled requires dynamics_backend='bard'")
     cfg = algorithm.cfg
+    allocation = cfg.get("actor_phys_force_allocation_weight", 0.)
+    if not math.isfinite(allocation) or allocation < 0:
+        raise ValueError("actor_phys_force_allocation_weight must be finite and nonnegative")
     for name in ("arm", "base"):
         if cfg.get(f"actor_phys_{name}_rejection_enabled", False):
             weight = cfg[f"actor_phys_{name}_rejection_weight"]

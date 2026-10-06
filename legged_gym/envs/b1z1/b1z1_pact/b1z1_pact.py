@@ -464,6 +464,7 @@ class B1Z1PACT(LeggedRobot):
         # Clear action histories, force streams, and estimator state so the next
         # rollout segment starts with a clean UniFP command/force state.
         self.actions[env_ids] = 0.0
+        self.dof_tracking_target[env_ids] = self.simulator.default_dof_pos
         self.last_actions[env_ids] = 0.0
         self.llast_actions[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
@@ -899,6 +900,9 @@ class B1Z1PACT(LeggedRobot):
             self.action_queue[:, 1:] = self.action_queue[:, :-1].clone()
             self.action_queue[:, 0] = actions.clone()
             actions = self.action_queue[self.all_env_ids, self.action_delay].clone()
+        # Track the executed (possibly delayed) PD target, including default-held DOFs.
+        self.dof_tracking_target.copy_(self.simulator.default_dof_pos)
+        self.dof_tracking_target[:, :self.num_actions] += actions[:, :self.num_actions] * self.cfg.control.action_scale
         return actions
 
     def _post_physics_step_callback(self):
@@ -1674,6 +1678,7 @@ class B1Z1PACT(LeggedRobot):
             self.num_envs, self.cfg.env.num_policy_actions, device=self.device
         )
         self.last_actions = torch.zeros_like(self.actions)
+        self.dof_tracking_target = self.simulator.default_dof_pos.expand_as(self.simulator.dof_pos).clone()
         self.llast_actions = torch.zeros_like(self.actions)
         # Random branch biases are always sampled from these clean weights,
         # never from a previously biased reset. The tradeoff curriculum, when
@@ -2066,6 +2071,11 @@ class B1Z1PACT(LeggedRobot):
 
     def _reward_tracking_ang_vel(self):
         return torch.exp(-torch.square(self.commands[:, 2] - self.simulator.base_ang_vel[:, 2]) / self.cfg.rewards.tracking_sigma)
+
+    def _reward_tracking_dof_pos(self):
+        """Positive whole-body PD-target tracking; one at zero joint-position error."""
+        error = (self.simulator.dof_pos - self.dof_tracking_target).square().mean(dim=-1)
+        return torch.exp(-error / self.cfg.rewards.dof_tracking_sigma)
 
     def _reward_tracking_ee_force_world(self):
         target = get_force_adjusted_ee_target(self).effective_target
