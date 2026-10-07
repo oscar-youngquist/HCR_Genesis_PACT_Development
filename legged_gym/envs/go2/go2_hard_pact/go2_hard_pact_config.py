@@ -505,9 +505,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         entropy_coef = 0.01
         use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.008, 0.012]
-        adaptive_ent_lin_threshold = 0.80
-        adaptive_ent_ang_threshold = 0.40
+        adaptive_ent_bounds = [0.006, 0.01]
+        adaptive_ent_lin_threshold = 0.75
+        adaptive_ent_ang_threshold = 0.35
         adaptive_ent_ter_threshold = 6.0
         adaptive_ent_softmax_temp = 2.0
 
