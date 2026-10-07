@@ -576,7 +576,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         # Execution-only interpolation; full QPs/losses remain active.
                         'correction_ramp_enabled': True,
                         'correction_ramp_start_offset': 200,
-                        'correction_ramp_duration': 200,
+                        'correction_ramp_duration': 1000,
                         'objective_curriculum_enabled': True,
                         'contact_acceleration_weight_initial': 0.25,  # .25 * final
                         'torso_stability_curriculum_enabled': True,  # shares objective performance/progress gate
