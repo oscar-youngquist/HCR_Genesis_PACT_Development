@@ -16,7 +16,7 @@ class RejectionCurriculumDefaults:
     # reject_compensation_ramp_iterations = 400
     # reject_external_ramp_iterations = 3200
     # force_curriculum_gate_start_iteration = 1600
-    reject_nominal_tracking_iterations = 3200  # Stage 0: no external disturbances or rejection.
+    reject_nominal_tracking_iterations = 8000  # Stage 0: no external disturbances or rejection.
     reject_compensation_ramp_iterations = 1000
     reject_external_ramp_iterations = 8000
     force_curriculum_gate_start_iteration = 4000  # Relative to the end of stage 0.
