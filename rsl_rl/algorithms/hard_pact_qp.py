@@ -215,6 +215,7 @@ class HardPACTQPConfig:
     # Genesis and PhysX use semi-implicit Euler: q+=dt*v+dt^2*qdd. A backend
     # with constant-acceleration position integration may configure 0.5.
     position_integration_coefficient: float = 1.0
+    endpoint_torque_constraints: bool = False  # enabled by HardPACT; old packets retain their layout
     gradient_scale_tau: float = 1.0
     gradient_scale_grf: float = 1.0
     gradient_scale_wrench: float = 1.0
@@ -762,7 +763,7 @@ class HardPACTDifferentiableQP:
         r"""Assemble x=[tau_12; f_FR,FL,RR,RL_world_12], and substitute x=D z.
 
         x=[tau,tilde_f]; physical f=D_m tilde_f. All contact patterns share
-        68 inequalities (24 actuator, 24 joint, 20 friction), zero equalities.
+        68 base inequalities plus optional 24 hard endpoint-torque rows; zero equalities.
         Positive force curvature fixes otherwise unused swing variables.
         """
         ref = data["tau_nom"]
@@ -878,6 +879,15 @@ class HardPACTDifferentiableQP:
             # zero equalities. Stance rows retain the physical friction cone.
             G.append(block.expand(batch,-1,-1)*stance[:,foot,None,None])
             h.append((~stance[:,foot,None]).to(ref.dtype).expand(-1,5))
+        if self.cfg.endpoint_torque_constraints:
+            # Held PD target/FF, existing constant-acceleration endpoint model;
+            # H is physics dt, NOT either velocity-objective horizon.
+            kp, kd = data['effective_kp'].detach(), data['effective_kd'].detach()
+            factor = kp * beta * dt.square() + kd * dt
+            endpoint_map = eye[:12].expand(batch,-1,-1) - factor[...,None] * joint_map
+            endpoint_offset = -kp * dt * v - factor * joint_offset
+            G.extend((endpoint_map, -endpoint_map))
+            h.extend((limits-endpoint_offset, limits+endpoint_offset))
         physical_G, physical_h = torch.cat(G,1), torch.cat(h,1)
         physical_A = ref.new_empty(batch,0,24)
         physical_b = ref.new_empty(batch,0)
@@ -912,14 +922,15 @@ class HardPACTDifferentiableQP:
         Absolute actuator bounds and friction stay hard. The primary rate-box
         inequalities use the actual previous executed torque, not the
         magnitude/rate intersection that is packed as primary native bounds.
-        Disabled rate constraints yield a real 36-variable/80-row problem;
-        enabled rate constraints retain the legacy 48-variable/116-row layout.
+        Endpoint torque rows remain hard; only joint rows 24:48 receive slack.
+        Row counts follow the primary layout, including optional endpoint rows.
         """
         batch = m.p.shape[0]
         rate_enabled = m.rate_lower is not None
         nslack = 24 if rate_enabled else 12
         nvar = 24+nslack
-        general_end = 92 if rate_enabled else 68
+        primary_rows = m.G.shape[1]
+        general_end = primary_rows + (24 if rate_enabled else 0)
         scales = [m.variable_scale, m.p.new_full((12,), self.cfg.soft_joint_recovery_scale_rad_s2)]
         if rate_enabled:
             scales.append(m.p.new_full((12,), self.cfg.soft_rate_recovery_scale_nm))
@@ -931,15 +942,15 @@ class HardPACTDifferentiableQP:
         if rate_enabled:
             Q[:,36:48,36:48] = (2*self.cfg.soft_rate_recovery_weight+self.cfg.q_regularization)*eye
         physical_G = m.G.new_zeros(batch,general_end+nslack,nvar)
-        physical_G[:,:68,:24] = m.physical_G
+        physical_G[:,:primary_rows,:24] = m.physical_G
         physical_G[:,24:36,24:36] = -eye
         physical_G[:,36:48,24:36] = -eye
         # Retain rate rows separately; never pack them as native hard bounds.
         if rate_enabled:
-            physical_G[:,68:92,:24] = m.physical_G[:,:24]
-            physical_G[:,68:80,36:48] = -eye
-            physical_G[:,80:92,36:48] = -eye
-            physical_G[:,104:116,36:48] = -eye
+            physical_G[:,primary_rows:primary_rows+24,:24] = m.physical_G[:,:24]
+            physical_G[:,primary_rows:primary_rows+12,36:48] = -eye
+            physical_G[:,primary_rows+12:general_end,36:48] = -eye
+            physical_G[:,general_end+12:general_end+24,36:48] = -eye
         physical_G[:,general_end:general_end+12,24:36] = -eye
         limits = self.torque_limits.to(m.p).expand(batch,-1)
         bounds = [limits, limits, m.physical_h[:,24:]]
@@ -1038,7 +1049,8 @@ class HardPACTDifferentiableQP:
             metrics["dynamics/"+name+"_mae"] = dyn[:,sl].abs().mean(-1)
         for name,sl in ((("torque_rate_intersection" if self.cfg.torque_rate_constraint_weight>0 else "torque_magnitude"),slice(0,24)),
                         ("joint_acceleration_intersection",slice(24,48)),
-                        ("friction_unilateral",slice(48,None))):
+                        ("friction_unilateral",slice(48,68)),
+                        *(([("endpoint_torque",slice(68,92))]) if self.cfg.endpoint_torque_constraints else [])):
             metrics[name+"/violation_max"] = self._maximum(residual[:,sl].clamp_min(0))
             metrics[name+"/margin_min"] = (-residual[:,sl]).amin(-1) if residual[:,sl].shape[1] else x.new_full((x.shape[0],),float("nan"))
             metrics[name+"/active_fraction"] = (residual[:,sl].abs()<=self.cfg.active_tolerance).float().mean(-1) if residual[:,sl].shape[1] else x.new_full((x.shape[0],),float("nan"))

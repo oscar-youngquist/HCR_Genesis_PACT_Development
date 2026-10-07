@@ -329,8 +329,13 @@ def candidate_assessment(packet, raw, gap=None, relative=None, cfg=None, differe
             groups=[("actuator_absolute" if post.shape[1]>24 or not rate_enabled else "actuator_rate",slice(0,24)),
                     ("joint_soft" if packet["stage"]=="recovery" else "joint",slice(24,48)),
                     ("friction",slice(48,68))]
-            groups += ([("rate_soft",slice(68,92)),("joint_slack",slice(92,104)),("rate_slack",slice(104,116))]
-                       if post.shape[1]==48 else [("slack",slice(68,None))])
+            end = 92 if cfg.endpoint_torque_constraints else 68
+            if cfg.endpoint_torque_constraints:
+                groups.append(("endpoint_torque",slice(68,92)))
+            if post.shape[1]==48:
+                groups += [("rate_soft",slice(end,end+24)),("joint_slack",slice(end+24,end+36)),("rate_slack",slice(end+36,end+48))]
+            elif post.shape[1]>24:
+                groups.append(("slack",slice(end,None)))
             for name,sl in groups:
                 values=residual[:,sl].clamp_min(0)
                 result["groups"][f"{label}/{units}/{name}"] = dict(all=distribution(values),accepted=distribution(values[accepted]))

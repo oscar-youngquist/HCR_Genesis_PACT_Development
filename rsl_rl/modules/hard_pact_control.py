@@ -7,6 +7,31 @@ its non-QP controller; QP/held execution retain their separate hard rate box.
 import torch
 
 
+def effective_feedback_gains(parameters):
+    """Physical Nm/rad and Nm/(rad/s), including actuator factors once."""
+    gain = parameters['control_motor_strength'].detach() * parameters['control_feedback_weight'].detach()
+    return dict(effective_kp=gain * parameters['control_kp'].detach(),
+                effective_kd=gain * parameters['control_kd'].detach())
+
+
+def execution_feedforward(selected, desired_position, position, velocity, parameters):
+    """Reconstruct selected total Nm without changing the nominal position target.
+
+    Zero-gain coordinates cannot represent an arbitrary torque via feedforward;
+    explicitly retain their selected direct actuator command instead. The mask
+    exposes this fallback (position-only tasks do not call this QP path).
+    Commands are in the existing scaled tau_ff units, not raw actor units.
+    """
+    zero = torch.zeros_like(selected)
+    pd = requested_torque_components(desired_position, zero, position, velocity, parameters)[1]
+    gain = parameters['control_motor_strength'].detach() * parameters['control_feedforward_weight'].detach()
+    available = gain != 0
+    physical = selected - pd
+    command = torch.where(available, physical / torch.where(available, gain, torch.ones_like(gain)), zero)
+    reconstructed = requested_torque_components(desired_position, command, position, velocity, parameters)[0]
+    return torch.where(available, reconstructed, selected), command, physical, available
+
+
 def requested_torque_components(desired_position, feedforward, position, velocity, parameters):
     """Return total, physical feedback/feedforward, and legacy unweighted PD.
 

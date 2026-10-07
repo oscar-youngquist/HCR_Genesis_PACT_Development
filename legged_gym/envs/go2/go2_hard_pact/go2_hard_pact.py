@@ -8,7 +8,7 @@ import time
 
 import torch
 from rsl_rl.modules.hard_pact_control import (
-    bounded_nominal_torque, requested_torque_components,
+    bounded_nominal_torque, requested_torque_components, effective_feedback_gains, execution_feedforward,
 )
 
 from rsl_rl.modules.hard_pact_physics import (
@@ -908,6 +908,10 @@ class Go2HardPACT(Go2PACT):
         )
 
     def _hard_pact_pre_physics_substep(self):
+        # Execution overrides are diagnostic command records, never histories.
+        self._hard_pact_execution_feedforward_command = None
+        self._hard_pact_execution_feedforward_physical = None
+        self._hard_pact_execution_feedforward_available = None
         quat = self._current_base_quat_xyzw()
         mass_com_wrench = added_mass_gravity_wrench_world(
             self._realized_added_mass,
@@ -1060,6 +1064,9 @@ class Go2HardPACT(Go2PACT):
                     if qp._physical_enabled():
                         tracking_inputs['diagnostic_height_truth'] = terrain_relative_torso_height(
                             self.simulator.base_pos[rows],self.simulator.measured_heights[rows])
+                if qp.cfg.endpoint_torque_constraints:
+                    tracking_inputs.update({key: value[rows] for key, value in
+                        effective_feedback_gains(self._hard_pact_control_parameters).items()})
                 result = qp.solve(differentiable=False,environment_ids=rows,
                     **tracking_inputs,
                     mass_matrix=context.mass_matrix,bias=context.bias,
@@ -1124,6 +1131,14 @@ class Go2HardPACT(Go2PACT):
                 sample["sampled_qp_valid"][dest] = True
             # Unsolved rows retain ONLY analytic projection of fresh nominal
             # torque. No previous QP correction/force/certificate is reused.
+            if hasattr(self, '_hard_pact_control_parameters'):
+                # Replace, never accumulate: unsolved rows reconstruct fresh
+                # nominal torque, solved rows reconstruct the selected blend.
+                safe, command, physical, available = execution_feedforward(
+                    safe, self._hard_pact_q_d, qj, vj, self._hard_pact_control_parameters)
+                self._hard_pact_execution_feedforward_command = command
+                self._hard_pact_execution_feedforward_physical = physical
+                self._hard_pact_execution_feedforward_available = available
             setter = getattr(self.simulator,"hard_pact_set_executed_torque",None)
             if setter is None:
                 self.simulator._torques = safe
@@ -1709,6 +1724,8 @@ class Go2HardPACT(Go2PACT):
             "_hard_pact_requested_feedforward", "_hard_pact_first_requested_feedback",
             "_hard_pact_bounded_nominal_torque", "_hard_pact_executed_torque",
             "_hard_pact_previous_substep_torque",
+            "_hard_pact_execution_feedforward_command", "_hard_pact_execution_feedforward_physical",
+            "_hard_pact_execution_feedforward_available",
             "_hard_pact_torque_rate_penalty_sum", "_hard_pact_torque_rate_penalty_count",
             "_hard_pact_q_d", "_hard_pact_tau_ff",
             "_qp_control_grf", "_qp_control_wrench", "_qp_interval_solve_count",

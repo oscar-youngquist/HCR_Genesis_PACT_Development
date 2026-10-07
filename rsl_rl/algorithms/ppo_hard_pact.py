@@ -35,7 +35,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
 import torch
-from rsl_rl.modules.hard_pact_control import bounded_nominal_torque
+from rsl_rl.modules.hard_pact_control import bounded_nominal_torque, effective_feedback_gains
 from rsl_rl.modules.hard_pact_physics import (
     log_qp_swing_grf, GRFSwingMetricsAccumulator,
 )
@@ -2704,6 +2704,8 @@ class PPO_HardPACT:
                 joint_position=sample_q[:, 7:], joint_velocity=sample_v[:, 6:],
                 dt=sample_dt,
             )
+            if self.hard_pact_qp.cfg.endpoint_torque_constraints:
+                qp_arguments.update(effective_feedback_gains(qp_batch))
             if self.hard_pact_qp.cfg.height_weight > 0:
                 from rsl_rl.modules.hard_pact_physics import estimated_qp_height_inputs
                 qp_arguments.update(estimated_qp_height_inputs(

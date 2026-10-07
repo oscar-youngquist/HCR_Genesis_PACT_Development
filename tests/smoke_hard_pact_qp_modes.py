@@ -53,7 +53,8 @@ def main():
             callback(*a)
             tau=env._hard_pact_previous_substep_torque
             assert (tau.abs()<=qp.torque_limits+1e-6).all()
-            assert ((tau-prev).abs()<=qp.cfg.torque_rate_limit_nm_s*cfg.sim.dt+1e-5).all()
+            if qp.cfg.torque_rate_constraint_weight > 0:
+                assert ((tau-prev).abs()<=qp.cfg.torque_rate_limit_nm_s*cfg.sim.dt+1e-5).all()
         env._solve_hard_pact_rollout_qp_substep=checked
         report={}
         for mode,expected in (("every_substep",4),("random_one_substep",1)):

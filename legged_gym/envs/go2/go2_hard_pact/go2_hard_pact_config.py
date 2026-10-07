@@ -710,6 +710,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'full_audit_sample_size': 256,
                         'rollout_chunk_size': 4096, 
                         'ppo_chunk_size': 8000, 
+                        'endpoint_torque_constraints': True,
                         'position_integration_coefficient': 1.0}
 
         action_clip = GO2HardPACTCfg.normalization.clip_actions
