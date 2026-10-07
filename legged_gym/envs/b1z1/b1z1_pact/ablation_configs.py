@@ -1,4 +1,5 @@
-"""Thin dynamic selectors inheriting every task/training value from PACT."""
+"""Thin PACT selectors; position-only variants reuse UniFP PD gains."""
+from legged_gym.envs.b1z1.b1z1_unifp.b1z1_unifp_config import B1Z1UniFPCfg
 from rsl_rl.b1z1_pact_ablations import B1Z1_PACT_ABLATIONS
 from .b1z1_pact_config import B1Z1PACTCfg, B1Z1PACTCfgPPO
 
@@ -12,6 +13,12 @@ def make_b1z1_pact_ablation_configs(variant_id):
 
         class env(B1Z1PACTCfg.env):
             num_policy_actions = B1Z1PACTCfg.env.num_actions * (1 if features.action_mode == "position" else 2)
+
+        if features.action_mode == "position":
+            class control(B1Z1PACTCfg.control):
+                # Only gains come from UniFP; copies keep ablation edits isolated.
+                stiffness = B1Z1UniFPCfg.control.stiffness.copy()
+                damping = B1Z1UniFPCfg.control.damping.copy()
 
     class PPOCfg(B1Z1PACTCfgPPO):
         ablation_variant = variant_id

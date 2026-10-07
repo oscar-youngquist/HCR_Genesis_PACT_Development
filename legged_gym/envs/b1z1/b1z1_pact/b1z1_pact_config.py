@@ -274,21 +274,21 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # torque branches. The simulator combines them before clipping.
         control_type = "P"
         stiffness = {                                                                   # Joint-name PD proportional gains [N m/rad].
-            "hip": 200.0,
-            "thigh": 200.0,
-            "calf": 320.0,
-            "z1_waist": 50.0,
-            "z1_shoulder": 100.0,
-            "z1_elbow": 50.0,
-            "z1_wrist_angle": 50.0,
-            "z1_forearm_roll": 50.0,
-            "z1_wrist_rotate": 50.0,
-            "z1_jointGripper": 50.0,
+            "hip": 100.0,
+            "thigh": 100.0,
+            "calf": 200.0,
+            "z1_waist": 40.0,
+            "z1_shoulder": 80.0,
+            "z1_elbow": 40.0,
+            "z1_wrist_angle": 40.0,
+            "z1_forearm_roll": 40.0,
+            "z1_wrist_rotate": 40.0,
+            "z1_jointGripper": 40.0,
         }
         damping = {                                                                     # Joint-name PD derivative gains [N m s/rad].
             "hip": 5.00,
             "thigh": 5.00,
-            "calf": 8.0,
+            "calf": 10.0,
             "z1_waist": 1.2,
             "z1_shoulder": 2.4,
             "z1_elbow": 1.2,

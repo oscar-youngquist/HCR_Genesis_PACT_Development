@@ -12,12 +12,17 @@ class RejectionCurriculumDefaults:
     use_shared_rejection_curriculum = True
     reject_initial_external_scale = 0.25
     reject_warmup_iterations = 1600  # Legacy field; force_curriculum_gate_start_iteration controls gating.
-    reject_compensation_ramp_iterations = 400
-    reject_external_ramp_iterations = 3200
-    force_curriculum_gate_start_iteration = 1600
+    # reject_nominal_tracking_iterations = 1280  # Stage 0: no external disturbances or rejection.
+    # reject_compensation_ramp_iterations = 400
+    # reject_external_ramp_iterations = 3200
+    # force_curriculum_gate_start_iteration = 1600
+    reject_nominal_tracking_iterations = 3200  # Stage 0: no external disturbances or rejection.
+    reject_compensation_ramp_iterations = 1000
+    reject_external_ramp_iterations = 8000
+    force_curriculum_gate_start_iteration = 4000  # Relative to the end of stage 0.
     force_curriculum_gate_patience = 400
     force_curriculum_use_latest_start_fallback = True
-    force_curriculum_latest_start_iteration = 6400
+    force_curriculum_latest_start_iteration = 16000  # Relative to the end of stage 0.
     reject_active_force_threshold = 1.0  # Diagnostic active-force cutoff [N]; not an advancement gate.
     
     reject_force_nrmse_threshold = 0.25  # Legacy field; force accuracy no longer gates advancement.
@@ -29,6 +34,7 @@ class RejectionCurriculumDefaults:
     # # Also enable the PACT policy/algorithm/runner smoke blocks for a fresh 35-iteration run.
     # # Hold 0.25 for 10 iterations; ramp rejection for 10, then disturbances for 10.
     # # Performance fallback forces the start at 10; force-prediction accuracy is not required.
+    # reject_nominal_tracking_iterations = 0  # Preserve the short 35-iteration VRAM test.
     # force_curriculum_gate_start_iteration = 10
     # force_curriculum_gate_patience = 1
     # force_curriculum_use_latest_start_fallback = True
@@ -41,6 +47,12 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
     def __init__(self, cfg, device):
         super().__init__(cfg)
         self.cfg = cfg
+        self.nominal_iterations = int(getattr(cfg, "reject_nominal_tracking_iterations", 0))
+        if self.nominal_iterations < 0 or self.nominal_iterations != getattr(cfg, "reject_nominal_tracking_iterations", 0):
+            raise ValueError("reject_nominal_tracking_iterations must be a nonnegative integer")
+        # Keep recorded/checkpoint iteration numbers absolute; offset only stage starts.
+        self.gate_start += self.nominal_iterations
+        self.latest_start += self.nominal_iterations
         self.beta = 0.0
         self.full_iteration = -1
         self.force_error_ema = [None, None]
@@ -81,9 +93,11 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
                 torch.where(active, t.square().sum(-1), 0.).sum(), active.sum()))
 
     def command_scale(self, iteration):
-        return self.beta
+        return 0.0 if iteration < self.nominal_iterations else self.beta
 
     def external_scale(self, iteration):
+        if iteration < self.nominal_iterations:
+            return 0.0
         initial = self.cfg.reject_initial_external_scale
         progress = 0.0 if self.full_iteration < 0 else self._linear_ramp(
             iteration, self.full_iteration, self.cfg.reject_external_ramp_iterations)
@@ -117,7 +131,7 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
             "ForceCurriculum/command_scale": self.beta,
             "ForceCurriculum/external_scale": self.external_scale(iteration),
             "Rejection/external_scale": self.external_scale(iteration),
-            "Rejection/stage": 1 if self.beta == 0 else (2 if self.beta < 1 else 3),
+            "Rejection/stage": 0 if iteration < self.nominal_iterations else (1 if self.beta == 0 else (2 if self.beta < 1 else 3)),
             "Rejection/gate_patience": self.gate_patience,
             **{f"Rejection/{name}_active_nrmse_ema": value
                for name, value in zip(("ee", "base"), self.force_error_ema) if value is not None},

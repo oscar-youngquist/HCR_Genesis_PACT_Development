@@ -8,6 +8,7 @@ import legged_gym.envs
 from legged_gym.envs.b1z1.b1z1_pact import B1Z1PACT, B1Z1PACTCfg, B1Z1PACTCfgPPO
 from legged_gym.envs.b1z1.b1z1_ppo_pos.b1z1_ppo_pos import B1Z1PPOPos
 from legged_gym.envs.b1z1.b1z1_pact.ablation_configs import make_b1z1_pact_ablation_configs
+from legged_gym.envs.b1z1.b1z1_unifp.b1z1_unifp_config import B1Z1UniFPCfg
 from legged_gym.utils import task_registry
 from legged_gym.utils.helpers import class_to_dict
 from rsl_rl.b1z1_pact_ablations import B1Z1_PACT_ABLATIONS
@@ -52,7 +53,12 @@ def test_complete_matrix_and_registry():
         assert train.algorithm.representation_pinn_enabled == feature.representation_pinn_enabled
         assert train.algorithm.actor_phys_enabled == feature.actor_phys_enabled
         for key in ("rewards", "commands", "domain_rand", "normalization", "control", "terrain"):
-            assert class_to_dict(env())[key] == original[key]
+            expected_config = original[key]
+            if key == "control" and feature.action_mode == "position":
+                expected_config = {**expected_config,
+                    "stiffness": B1Z1UniFPCfg.control.stiffness,
+                    "damping": B1Z1UniFPCfg.control.damping}
+            assert class_to_dict(env())[key] == expected_config
         if feature.conditioning_mode != "film":
             assert train.policy.film_identity_loss_weight == 0
         names.append(train.runner.run_name)
@@ -61,6 +67,20 @@ def test_complete_matrix_and_registry():
     with pytest.raises(FrozenInstanceError):
         B1Z1_PACT_ABLATIONS[4].action_mode = "position"
     assert class_to_dict(B1Z1PACTCfg()) == original
+
+
+def test_position_gains_follow_unifp_without_shared_mutation(monkeypatch):
+    for name in ("stiffness", "damping"):
+        gains = getattr(B1Z1UniFPCfg.control, name)
+        joint = next(iter(gains))
+        monkeypatch.setitem(gains, joint, gains[joint] + 1.)
+        first, _ = make_b1z1_pact_ablation_configs(6)
+        second, _ = make_b1z1_pact_ablation_configs(7)
+        assert getattr(first.control, name) == gains
+        assert getattr(second.control, name) == gains
+        getattr(first.control, name)[joint] += 10.
+        assert getattr(second.control, name) == gains
+        assert getattr(first.control, name) != gains
 
 
 @pytest.mark.parametrize("mode", ["none", "concat", "film"])

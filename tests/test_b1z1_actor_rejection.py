@@ -18,6 +18,7 @@ from rsl_rl.algorithms import b1z1_actor_rejection as rejection, b1z1_actor_phys
 
 def curriculum_trace(cfg):
     cfg = deepcopy(cfg)
+    cfg.reject_nominal_tracking_iterations = 0
     cfg.reject_warmup_iterations = 2
     cfg.force_curriculum_gate_start_iteration = 2
     cfg.reject_compensation_ramp_iterations = 2
@@ -59,6 +60,7 @@ def test_matched_schedule_all_ablations_and_checkpoint():
 def test_plain_ppo_uses_performance_gate_without_force_samples():
     from legged_gym.envs.b1z1.b1z1_ppo_pos.b1z1_ppo_pos_config import B1Z1PPOPosCfg
     cfg = B1Z1PPOPosCfg().commands
+    cfg.reject_nominal_tracking_iterations = 0
     assert not cfg.reject_require_force_quality
     cfg.reject_warmup_iterations = 0
     cfg.force_curriculum_gate_start_iteration = 0
@@ -75,7 +77,7 @@ def test_shared_rejection_defaults_and_fallback_without_force_gate():
     from legged_gym.envs.b1z1.rejection_curriculum import RejectionCurriculumDefaults
     configurations = [B1Z1UniFPRejectCfg(), B1Z1PACTCfg(), B1Z1PACTPosCfg()]
     configurations += [make_b1z1_pact_ablation_configs(i)[0]() for i in range(4, 12)]
-    fields = ("reject_initial_external_scale", "reject_compensation_ramp_iterations",
+    fields = ("reject_nominal_tracking_iterations", "reject_initial_external_scale", "reject_compensation_ramp_iterations",
               "reject_external_ramp_iterations", "force_curriculum_gate_start_iteration",
               "force_curriculum_gate_patience", "force_curriculum_use_latest_start_fallback",
               "force_curriculum_latest_start_iteration")
@@ -84,7 +86,7 @@ def test_shared_rejection_defaults_and_fallback_without_force_gate():
         for field in fields:
             assert getattr(cfg, field) == getattr(RejectionCurriculumDefaults, field)
         c = RejectionCurriculum(cfg, "cpu")
-        start = cfg.force_curriculum_latest_start_iteration
+        start = cfg.reject_nominal_tracking_iterations + cfg.force_curriculum_latest_start_iteration
         c.update(start - 1)  # Neither performance metrics nor force predictions are available.
         assert not c.gate_latched and c.external_scale(start - 1) == .25
         c.update(start)
@@ -101,6 +103,7 @@ def test_shared_rejection_defaults_and_fallback_without_force_gate():
 def test_rejection_gate_matches_original_with_missing_force_predictions(fallback):
     from legged_gym.envs.b1z1.force_task_utils import B1Z1StagedForceCurriculum
     cfg = deepcopy(B1Z1PACTCfg().commands)
+    cfg.reject_nominal_tracking_iterations = 0
     cfg.force_curriculum_gate_start_iteration = 2
     cfg.force_curriculum_gate_patience = 2
     cfg.force_curriculum_use_latest_start_fallback = fallback
@@ -121,6 +124,7 @@ def test_rejection_gate_matches_original_with_missing_force_predictions(fallback
 
 def test_rejection_no_fallback_waits_for_performance():
     cfg = deepcopy(B1Z1PACTCfg().commands)
+    cfg.reject_nominal_tracking_iterations = 0
     cfg.force_curriculum_gate_start_iteration = 0
     cfg.force_curriculum_latest_start_iteration = 1
     cfg.force_curriculum_use_latest_start_fallback = False
@@ -129,6 +133,49 @@ def test_rejection_no_fallback_waits_for_performance():
         c.update(iteration)
     assert not c.gate_latched and c.beta == 0.
     assert c.external_scale(3) == .25
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_nominal_stage_shifts_remaining_schedule_and_resumes(fallback):
+    cfg = deepcopy(B1Z1PACTCfg().commands)
+    cfg.reject_nominal_tracking_iterations = 3
+    cfg.force_curriculum_gate_start_iteration = 2
+    cfg.force_curriculum_latest_start_iteration = 5
+    cfg.force_curriculum_gate_patience = 2
+    cfg.force_curriculum_use_latest_start_fallback = fallback
+    cfg.reject_compensation_ramp_iterations = 2
+    cfg.reject_external_ramp_iterations = 4
+    shifted = RejectionCurriculum(cfg, "cpu")
+    old_cfg = deepcopy(cfg)
+    old_cfg.reject_nominal_tracking_iterations = 0
+    original = RejectionCurriculum(old_cfg, "cpu")
+    for iteration in range(3):
+        shifted.update(iteration)
+        assert shifted.external_scale(iteration) == shifted.command_scale(iteration) == 0.
+        assert shifted.metrics(iteration)["Rejection/stage"] == 0
+        assert not shifted.gate_latched
+    for iteration in range(12):
+        metrics = (None, None, None) if fallback else (0., 0., 1000.)
+        original.update(iteration, *metrics)
+        shifted.update(iteration + 3, *metrics)
+        assert shifted.beta == original.beta
+        assert shifted.external_scale(iteration + 3) == original.external_scale(iteration)
+        restored = RejectionCurriculum(cfg, "cpu")
+        restored.load_state_dict(shifted.state_dict())
+        assert restored.state_dict() == shifted.state_dict()
+        assert restored.external_scale(iteration + 3) == shifted.external_scale(iteration + 3)
+    assert shifted.trigger_iteration == original.trigger_iteration + 3
+    assert shifted.full_iteration == original.full_iteration + 3
+
+
+def test_current_nominal_stage_boundary():
+    cfg = B1Z1PACTCfg().commands
+    c = RejectionCurriculum(cfg, "cpu")
+    assert cfg.reject_nominal_tracking_iterations == 3200
+    assert c.external_scale(3199) == 0.
+    assert c.external_scale(3200) == .25
+    assert c.gate_start == cfg.force_curriculum_gate_start_iteration + 3200
+    assert c.latest_start == cfg.force_curriculum_latest_start_iteration + 3200
 
 
 def test_nominal_targets_and_original_unifp_unchanged():
