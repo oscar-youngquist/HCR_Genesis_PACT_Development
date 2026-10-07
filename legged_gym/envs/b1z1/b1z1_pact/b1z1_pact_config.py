@@ -9,8 +9,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
     seed = 1                                                                            # Random seed for reproducible initialization.
 
     class env:
-        num_envs = 4096                                                                # Parallel simulation instances.
-        # num_envs = 10240                                                                  # Parallel simulation instances.
+        # num_envs = 4096                                                                # Parallel simulation instances.
+        num_envs = 10240                                                                  # Parallel simulation instances.
         # 2 body-orientation + 3 angular velocity + 17 joint positions +
         # 17 joint velocities + 34 coupled PACT actions + 6 commands. EE pose
         # is estimated from history instead of exposed through an FK error.
@@ -800,9 +800,9 @@ class B1Z1PACTCfg(LeggedRobotCfg):
                 "arm_feedforward_action_smoothness":[-0.002, -0.02],
             }
             # warmup_steps = 30000                                                        # Reward-curriculum warmup.
-            curr_steps = 40000                                                           # Reward-curriculum ramp duration.
+            # curr_steps = 40000                                                           # Reward-curriculum ramp duration.
             warmup_steps = 0                                                        # Reward-curriculum warmup.
-            # curr_steps = 16000                                                      # Reward-curriculum ramp duration.
+            curr_steps = 16000                                                      # Reward-curriculum ramp duration.
 
 
     class viewer:
@@ -917,7 +917,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
 
 
         pinn_loss_weight = 0.1                                                         # Magnitude scales PINNs; sign: + PINN / - PPGrad; 0 disables.
-        pinn_warmup = 1000                                                               # Ramp duration after PINN activation [PPO updates].
+        pinn_warmup = 400                                                               # Ramp duration after PINN activation [PPO updates].
         pinn_init_steps = 0                                                           # First PPO iteration eligible for the PINN ramp.
         use_pinn_rollout_loss = True                                                    # Enable the rollout term in addition to inverse dynamics.
         pinn_inverse_weight = 0.5                                                       # Inverse-dynamics coefficient inside the combined physics objective.
@@ -1020,14 +1020,14 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         use_clipped_value_loss = True                                                   # Apply PPO-style clipping to critic updates.
         clip_param = 0.2                                                                # PPO probability-ratio clipping width.
         entropy_coef = 0.01                                                             # Policy entropy bonus coefficient.
-        learning_rate = 3.0e-4                                                          # Actor/critic optimizer learning rate.
-        # learning_rate = 6e-4                                                          # Actor/critic optimizer learning rate.
+        # learning_rate = 3.0e-4                                                          # Actor/critic optimizer learning rate.
+        learning_rate = 6e-4                                                          # Actor/critic optimizer learning rate.
         # Learning-rate schedule.
         schedule = "adaptive"                                                           # adaptive
         gamma = 0.99                                                                    # Reward discount factor.
         lam = 0.95                                                                      # Generalized advantage estimation smoothing factor.
-        desired_kl = 0.01                                                               # Policy KL target for adaptive learning rate; not VAE KL.
-        # desired_kl = 0.013                                                               # Policy KL target for adaptive learning rate; not VAE KL.
+        # desired_kl = 0.01                                                               # Policy KL target for adaptive learning rate; not VAE KL.
+        desired_kl = 0.013                                                               # Policy KL target for adaptive learning rate; not VAE KL.
 
         max_grad_norm = 1.0                                                             # Gradient-norm cap per optimizer ownership group.
         num_learning_epochs = 5                                                         # PPO passes over each rollout.
@@ -1064,14 +1064,14 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         # actor_phys_require_force_gate = False
 
     class runner:
-        enable_additional_diagnostics = True                                            # Disable expensive, non-training rollout and PPO-consistency diagnostics.
+        enable_additional_diagnostics = False                                            # Disable expensive, non-training rollout and PPO-consistency diagnostics.
         policy_class_name = "ActorCriticB1Z1PACT"                                       # Actor-critic implementation selected by the runner.
         algorithm_class_name = "PPO_B1Z1PACT"                                           # PPO implementation selected by the runner.
         num_steps_per_env = 24                                                          # Control transitions collected per environment per update.
         grf_dim = 12                                                                    # Flattened four-foot XYZ force width.
 
-        max_iterations = 70000                                                          # Total PPO learning iterations.
-        # max_iterations = 28000                                                          # Total PPO learning iterations.
+        # max_iterations = 70000                                                          # Total PPO learning iterations.
+        max_iterations = 28000                                                          # Total PPO learning iterations.
 
         save_interval = 1000                                                            # Checkpoint interval [PPO iterations].
         run_name = "b1z1_pact_improved"                                                  # Run label used in output directories.
