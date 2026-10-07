@@ -106,6 +106,26 @@ def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None,
             recovery_layout={'variables':36,'canonical_inequalities':80,'native_general_inequalities':44},
             soft_joint_recovery='[u12,masked-force12,joint-envelope-slack12]; current application torque/allocation and friction remain hard; no rate constraints',
             unsolved_execution='accepted held command pair recomputes PD; failed rows use deterministic non-QP projection each substep')
+    if mode.startswith('command_pair') and settings.command_correction_mode=='feedforward_only':
+        result.update(formulation='feedforward_pd_trajectory_24_v3',
+            matrix_shape='24 variables; 188 inequalities: initial torque24, joint96, friction20, midpoint/endpoint torque48',
+            recovery_layout={'variables':36,'canonical_inequalities':200,'native_general_inequalities':164},
+            prediction_points='0,H/2,H; two internal integration steps, not extra simulator steps or solves',
+            soft_joint_recovery='one shared nonnegative acceleration-equivalent slack per joint on all 96 joint rows; all sampled motor torques remain hard',
+            command_pair={
+                'execution':'preserve nominal delayed/scaled position target; physical_ff=blended_selected_total-current_physical_PD; divide by effective feedforward gain once; replace held feedforward each solve',
+                'conversion_helper':'rsl_rl.modules.hard_pact_control.feedforward_for_total_torque',
+                'zero_gain':'u fixed to zero on unavailable feedforward branch; infeasible torque trajectory uses existing fallback',
+                'allocation':'dual allocator and allocation loss bypassed, regardless of rho/lambda_qp_allocation',
+                'prediction_helper':'rsl_rl.modules.hard_pact_control.pd_prediction_maps',
+                'integration':'h=H/2; q+=h*v+beta*h²*a_j; v+=h*a_j; recompute affine PD torque and full coupled acceleration each internal step; beta=1 semi-implicit',
+                'frozen':'full mechanics/Jacobians, gains, wrench and contact mode; candidate GRFs held',
+                'certification':'sampled model points only; no continuous-time or unsolved-substep guarantee; recovery joint limits soft; blends not full-candidate certified',
+            })
+    if mode == 'command_pair':
+        result['unsolved_execution']='fresh original delayed/scaled nominal PD/feedforward; existing magnitude and optional non-QP rate clipping; no previous QP correction'
+        result['command_pair']['execution']+='; correction applies ONLY on selected QP substep, discarded before next substep'
+        result['command_pair']['hold_corrections_between_solves']=False
     return result
 
 
@@ -393,6 +413,8 @@ def validate_qp_deployment_contract(contract):
     update = contract.get("qp_update")
     if update is not None:
         expected = 'command_pair_single_step_24_v2' if update.get('mode','').startswith('command_pair') else 'masked_torque_force_24'
+        if update.get('mode','').startswith('command_pair') and update.get('solver_and_objective_settings',{}).get('command_correction_mode')=='feedforward_only':
+            expected='feedforward_pd_trajectory_24_v3'
         if update.get("mode") not in ("every_substep", "random_one_substep", "command_pair", "command_pair_every_substep") or update.get("formulation") != expected:
             raise ValueError("Incompatible HardPACT QP execution contract")
     return contract

@@ -168,10 +168,22 @@ def test_sampling_horizons_adaptive_allocation_and_loss_masks():
         later.append(int(selection.max()))
         for step in range(4):
             q.fill_(.001*step);v.fill_(.002*step)
+            if step>0:
+                # Deliberately stale corrections must never leak into unsolved
+                # rows, regardless of their size or previous accepted status.
+                task._qp_command_delta_q.fill_(.3)
+                task._qp_command_delta_ff.fill_(10.)
+                task._qp_command_accepted.fill_(True)
             task._solve_hard_pact_rollout_qp_substep(quat,torch.zeros(8,6))
             expected=requested_torque_components(task._hard_pact_q_d+task._qp_command_delta_q,
                 task._hard_pact_tau_ff+task._qp_command_delta_ff,q,v,task._hard_pact_control_parameters)[0]
             torch.testing.assert_close(task.simulator._torques,expected.clamp(-23.5,23.5))
+            unsolved=(selection!=step) if step>0 else torch.zeros_like(selection,dtype=torch.bool)
+            nominal=requested_torque_components(task._hard_pact_q_d,task._hard_pact_tau_ff,
+                q,v,task._hard_pact_control_parameters)[0].clamp(-23.5,23.5)
+            torch.testing.assert_close(task.simulator._torques[unsolved],nominal[unsolved],rtol=0,atol=0)
+            assert task._qp_command_delta_q[unsolved].eq(0).all()
+            assert task._qp_command_delta_ff[unsolved].eq(0).all()
         assert task._qp_interval_solve_count.sum()==12
         torch.testing.assert_close(task._qp_sampled_transition['sampled_qp_q'][:,7],selection.float()*.001)
     assert sorted(later)==[1,2,3] and heads.calls==3

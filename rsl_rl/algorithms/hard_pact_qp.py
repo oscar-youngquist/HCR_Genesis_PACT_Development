@@ -15,7 +15,7 @@ from .hard_pact_qp_backends import (
 )
 from .qpth_warm_start import solve_qpth_warm
 from .hard_pact_qp_capture import capture_failure
-from rsl_rl.modules.hard_pact_control import held_command_model
+from rsl_rl.modules.hard_pact_control import held_command_model, pd_prediction_maps
 
 
 # Fixed slices make every Q/P/G/A block visibly correspond to one physical
@@ -104,6 +104,7 @@ class HardPACTQPConfig:
     recovery_projection_rate_slack_weight: float = 1.0
     qp_update_mode: str = "random_one_substep"
     position_correction_share: float = 0.20  # preferred physical correction share
+    command_correction_mode: str = 'dual'  # dual | feedforward_only
     command_pair_second_solve_fraction: float = 0.5
     constraint_prediction_horizon_s: float | None = 0.005
     position_command_lower: tuple | None = None  # None: canonical joint limits
@@ -248,6 +249,8 @@ class HardPACTQPConfig:
         if self.constraint_schema_version != 2:
             raise ValueError("Unsupported HardPACT constraint schema; expected version 2")
         qp_substep_anchors(self.qp_update_mode,4)
+        if self.command_correction_mode not in ('dual','feedforward_only'):
+            raise ValueError('command_correction_mode must be dual or feedforward_only')
         if not 0 <= self.position_correction_share <= 1:
             raise ValueError("position_correction_share must be in [0,1]")
         import math
@@ -314,6 +317,8 @@ class _QPBuild:
     rate_lower: torch.Tensor | None = None
     rate_upper: torch.Tensor | None = None
     command_origin: torch.Tensor | None = None  # u=initial total torque-origin
+    prediction_maps: torch.Tensor | None = None
+    prediction_offsets: torch.Tensor | None = None
 
     def __iter__(self):
         # Preserve the legacy seven-value private test/debug unpacking API.
@@ -789,6 +794,10 @@ class HardPACTDifferentiableQP:
         from rsl_rl.modules.hard_pact_control import command_pair_inputs
         lower=(self.position_lower.to(desired) if self.cfg.position_command_lower is None else desired.new_tensor(self.cfg.position_command_lower))
         upper=(self.position_upper.to(desired) if self.cfg.position_command_upper is None else desired.new_tensor(self.cfg.position_command_upper))
+        if self.cfg.command_correction_mode=='feedforward_only':
+            result=command_pair_inputs(desired,feedforward,position,velocity,parameters)
+            result['command_enabled']=result['command_ff_gain'].abs()>1e-12
+            return result
         return command_pair_inputs(desired,feedforward,position,velocity,parameters,
             lower,upper,self.cfg.feedforward_command_limits_nm)
 
@@ -804,6 +813,7 @@ class HardPACTDifferentiableQP:
         eye, scale = self._constants(ref)
         mass = data["mass_matrix"].detach()
         command_pair = self.cfg.qp_update_mode.startswith('command_pair')
+        pd_aware=command_pair and self.cfg.command_correction_mode=='feedforward_only'
         origin = (_ScaleClipRows.apply(data['command_nominal'],self.cfg.gradient_scale_tau,
             self.cfg.gradient_clip_tau,self,'tau_nom') if command_pair else None)
         if command_pair:
@@ -920,8 +930,8 @@ class HardPACTDifferentiableQP:
             lower, upper = lower-origin, upper-origin
             # An unavailable pair cannot realize a correction on that joint.
             enabled = data['command_enabled'].detach().bool()
-            lower = torch.where(enabled,lower,torch.zeros_like(lower))
-            upper = torch.where(enabled,upper,torch.zeros_like(upper))
+            lower = torch.where(enabled,lower,torch.maximum(lower,torch.zeros_like(lower)))
+            upper = torch.where(enabled,upper,torch.minimum(upper,torch.zeros_like(upper)))
             if 'allocation_a_min' in data:
                 lower=torch.maximum(lower,data['allocation_a_min']+data['allocation_b_min'])
                 upper=torch.minimum(upper,data['allocation_a_max']+data['allocation_b_max'])
@@ -942,6 +952,25 @@ class HardPACTDifferentiableQP:
         G = [eye[:12].expand(batch,-1,-1), -eye[:12].expand(batch,-1,-1),
              joint_map, -joint_map]
         h = [upper, -lower, aupper-joint_offset, joint_offset-alower]
+        prediction_maps=prediction_offsets=None
+        if pd_aware:
+            prediction_maps,prediction_offsets=pd_prediction_maps(mechanics_map,offset,
+                origin,kp,kd,q,v,horizon,beta)
+            # Joint rows are acceleration-equivalent residuals so the existing
+            # shared per-joint recovery slack retains units rad/s² and weights.
+            # 24 native initial-torque rows; 96 joint rows; 20 friction rows;
+            # 48 midpoint/endpoint torque rows = 188 canonical inequalities.
+            G=G[:2];h=h[:2]
+            for k in range(2):
+                t=horizon.reshape(-1,1)*(k+1)/2
+                for index,lo,hi,units in ((k,qmin,qmax,beta*t.square()),
+                                         (k+2,-vmax,vmax,t)):
+                    C=prediction_maps[:,index]/units[:,:,None]
+                    b=prediction_offsets[:,index]
+                    G.extend((C,-C));h.extend(((hi-b)/units,(b-lo)/units))
+            # No constant-acceleration intersection/initial-state veto applies
+            # to the evolving trajectory. Actual row feasibility is certified.
+            alower=torch.full_like(q,-torch.inf);aupper=-alower
         for foot in range(4):
             block = friction[foot]
             # In swing these become 0<=1 after row normalization, not active
@@ -956,6 +985,10 @@ class HardPACTDifferentiableQP:
                 T = eye[:12][None] - decay[:,k,:,None]*joint_map
                 b_tau = origin-drift[:,k]-decay[:,k]*joint_offset
                 G.extend((T,-T)); h.extend((limits-b_tau,limits+b_tau))
+        if pd_aware:
+            for k in (5,6):
+                T,b=prediction_maps[:,k],prediction_offsets[:,k]
+                G.extend((T,-T));h.extend((limits-b,limits+b))
         physical_G, physical_h = torch.cat(G,1), torch.cat(h,1)
         physical_A = ref.new_empty(batch,0,24)
         physical_b = ref.new_empty(batch,0)
@@ -971,7 +1004,7 @@ class HardPACTDifferentiableQP:
         return _QPBuild(Q,p,G,h,A,b,scale,physical_G,physical_h,physical_A,physical_b,
                         es,gs,lower,upper,alower,aupper,native_lower,native_upper,
                         mechanics_map,offset,mechanics_valid,
-                        rate_lower, rate_upper, origin)
+                        rate_lower, rate_upper, origin,prediction_maps,prediction_offsets)
 
     @staticmethod
     def _cupiqp_native_pack(m):
@@ -1013,6 +1046,9 @@ class HardPACTDifferentiableQP:
         physical_G[:,:primary_rows,:24] = m.physical_G
         physical_G[:,24:36,24:36] = -eye
         physical_G[:,36:48,24:36] = -eye
+        if m.prediction_maps is not None:
+            for start in range(24,120,12):
+                physical_G[:,start:start+12,24:36]=-eye
         # Retain rate rows separately; never pack them as native hard bounds.
         if rate_enabled:
             physical_G[:,68:92,:24] = m.physical_G[:,:24]
@@ -1514,6 +1550,9 @@ class HardPACTDifferentiableQP:
                             rate_error = (torch.maximum(m.rate_lower-x[:,:12],x[:,:12]-m.rate_upper).clamp_min(0).amax(-1)
                                           if rate_enabled else x.new_full((x.shape[0],),float('nan')))
                             joint_error = torch.maximum(m.qdd_lower-a[:,6:],a[:,6:]-m.qdd_upper).clamp_min(0).amax(-1)
+                            if m.prediction_maps is not None:
+                                joint_error=((m.physical_G[:,24:120,:24]@x[:,:24,None]).squeeze(-1)
+                                             -m.physical_h[:,24:120]).clamp_min(0).amax(-1)
                             diag["soft_joint/original_rate_violation_max_nm"][rows] = rate_error
                             diag["soft_joint/original_joint_violation_max_rad_s2"][rows] = joint_error
                             diag["soft_joint/original_hard_satisfied"][rows] = (((rate_error<=1e-6) if rate_enabled else torch.ones_like(accepted))&(joint_error<=1e-3)).to(ref.dtype)

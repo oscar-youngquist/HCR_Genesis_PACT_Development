@@ -36,7 +36,8 @@ from dataclasses import dataclass, replace
 
 import torch
 from rsl_rl.modules.hard_pact_control import (bounded_nominal_torque,
-    command_pair_inputs, command_pair_gains, allocate_command_correction, allocation_deviation_loss)
+    command_pair_inputs, command_pair_gains, allocate_command_correction, allocation_deviation_loss,
+    feedforward_for_total_torque)
 from rsl_rl.modules.hard_pact_physics import (
     log_qp_swing_grf, GRFSwingMetricsAccumulator,
 )
@@ -2744,11 +2745,21 @@ class PPO_HardPACT:
                 # Analytical allocation is differentiable, with exactly the
                 # same physical units and unsaturated origin as deployment.
                 # Full candidate (no execution alpha) drives projection loss.
-                dq,dff,_ = allocate_command_correction(
-                    qp_result.tau_safe-qp_arguments['command_nominal'],qp_batch,
-                    self.hard_pact_qp.cfg.position_correction_share,qp_arguments)
                 kp,_,ff_gain = command_pair_gains(qp_batch)
-                reconstructed = qp_arguments['command_nominal']+kp*dq+ff_gain*dff
+                if self.hard_pact_qp.cfg.command_correction_mode=='feedforward_only':
+                    command,_=feedforward_for_total_torque(qp_result.tau_safe,
+                        desired_position[qp_rows],sample_q[:,7:],sample_v[:,6:],qp_batch,
+                        feedforward_torque[qp_rows])
+                    dq=torch.zeros_like(command);dff=command-feedforward_torque[qp_rows]
+                    # Retain the same nominal-input node for actor-only VJPs.
+                    # Physical reconstruction is tested/shared with execution;
+                    # this algebraic form preserves the existing routing.
+                    reconstructed=qp_result.tau_safe
+                else:
+                    dq,dff,_ = allocate_command_correction(
+                        qp_result.tau_safe-qp_arguments['command_nominal'],qp_batch,
+                        self.hard_pact_qp.cfg.position_correction_share,qp_arguments)
+                    reconstructed = qp_arguments['command_nominal']+kp*dq+ff_gain*dff
                 accepted = qp_result.differentiated_mask|qp_result.recovery_mask
                 qp_result.tau_safe = torch.where(accepted[:,None],reconstructed,qp_result.tau_safe)
                 if not differentiate_qp:
@@ -2826,7 +2837,7 @@ class PPO_HardPACT:
                 aggregate.add_values("lambda_qp_velocity_yaw",yaw.new_tensor(self.lambda_qp_velocity_yaw))
                 self.last_qp_metrics["qp/minimal/velocity_loss_xy"] = xy.detach()
                 self.last_qp_metrics["qp/minimal/velocity_loss_yaw"] = yaw.detach()
-            if command_inputs and self.lambda_qp_allocation>0:
+            if command_inputs and self.lambda_qp_allocation>0 and self.hard_pact_qp.cfg.command_correction_mode!='feedforward_only':
                 mask=valid.reshape(-1)&(qp_result.differentiated_mask|qp_result.recovery_mask)
                 alloc=allocation_deviation_loss(qp_result.tau_safe-qp_arguments['command_nominal'],
                     kp*dq,torque_limits,self.hard_pact_qp.cfg.position_correction_share,mask)

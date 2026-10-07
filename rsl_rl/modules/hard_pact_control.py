@@ -7,6 +7,50 @@ its non-QP controller; QP/held execution retain their separate hard rate box.
 import torch
 
 
+def feedforward_for_total_torque(total, desired, position, velocity, parameters, nominal_ff):
+    """Keep q_des untouched. Convert selected physical total Nm exactly once.
+
+    A zero feedforward gain cannot realize an arbitrary correction: preserve
+    that command and report reconstruction availability. The QP fixes its u
+    to zero; impossible motor constraints then use the existing fallback.
+    """
+    kp,kd,gain=command_pair_gains(parameters)
+    pd=kp*(desired-position.detach())-kd*velocity.detach()
+    enabled=gain.abs()>1e-12
+    command=torch.where(enabled,(total-pd)/torch.where(enabled,gain,1.),nominal_ff)
+    return command, enabled
+
+
+def pd_prediction_maps(acceleration_map, acceleration_offset, origin, kp, kd, q, v, horizon, beta):
+    """Frozen full 18-DoF dynamics, x=[u12,f12], two internal H/2 steps.
+
+    At l: tau_l=origin+u-K(q_l-q0)-D(v_l-v0),
+    a_l=a0(x)+M^-1 S^T(tau_l-(origin+u)). Integrate each NEW acceleration:
+    q+=h*v+beta*h²*a_j; v+=h*a_j. beta=1: semi-implicit Euler;
+    beta=.5: local constant-acceleration step. These internal points do not
+    alter simulator time or QP dispatch frequency. Frozen full mechanics
+    retain base/joint/contact coupling; no quaternion relinearization occurs.
+    Returns maps/offsets ordered [q_mid,q_end,v_mid,v_end,tau0,tau_mid,tau_end].
+    """
+    batch=origin.shape[0];h=horizon.reshape(-1,1)/2
+    eye=torch.eye(24,device=origin.device,dtype=origin.dtype)[:12].expand(batch,-1,-1)
+    qm=torch.zeros_like(eye);vm=torch.zeros_like(eye);qo=q.detach();vo=v.detach()
+    tm=eye;to=origin
+    qs=[];vs=[];ts=[(tm,to)]
+    B=acceleration_map[:,:,:12]
+    for _ in range(2):
+        am=acceleration_map+B@(tm-eye)
+        ao=acceleration_offset+(B@(to-origin)[...,None]).squeeze(-1)
+        qm=qm+h[:,:,None]*vm+beta*h.square()[:,:,None]*am[:,6:]
+        qo=qo+h*vo+beta*h.square()*ao[:,6:]
+        vm=vm+h[:,:,None]*am[:,6:];vo=vo+h*ao[:,6:]
+        qs.append((qm,qo));vs.append((vm,vo))
+        tm=eye-kp[:,:,None]*qm-kd[:,:,None]*vm
+        to=origin-kp*(qo-q.detach())-kd*(vo-v.detach())
+        ts.append((tm,to))
+    return torch.stack([m for m,b in qs+vs+ts],1),torch.stack([b for m,b in qs+vs+ts],1)
+
+
 def command_pair_gains(parameters):
     """Physical gains for already action-scaled q_des [rad], tau_ff [Nm]."""
     motor = parameters['control_motor_strength'].detach()

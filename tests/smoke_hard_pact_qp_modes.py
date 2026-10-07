@@ -81,7 +81,11 @@ def main():
                     return out
                 return solve_with_count(**kw)
             qp.solve=replay_checked
+            torch.cuda.synchronize();torch.cuda.reset_peak_memory_stats()
+            start=time.perf_counter()
             runner.learn(1)
+            torch.cuda.synchronize()
+            elapsed=time.perf_counter()-start
             expected=(env.num_envs*16 if args.qp_update_mode.endswith('every_substep')
                       else 4*(env.num_envs+round(env.num_envs*qp.cfg.command_pair_second_solve_fraction)))
             assert counts.sum()==expected,counts
@@ -93,6 +97,9 @@ def main():
                 stages=stages.tolist(),finite_nonzero_qp_backward=True,
                 constraint_horizon_s=qp.cfg.constraint_prediction_horizon_s,
                 inner_velocity_horizon_s=qp.cfg.qp_velocity_objective_horizon_s)),flush=True)
+            print('SMOKE_RESOURCES '+json.dumps(dict(seconds=elapsed,
+                torch_peak_allocated_bytes=torch.cuda.max_memory_allocated(),
+                torch_peak_reserved_bytes=torch.cuda.max_memory_reserved())),flush=True)
             return
         for mode,expected in (("every_substep",4),("random_one_substep",1)):
             env.set_hard_pact_qp_enabled(False)

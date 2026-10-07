@@ -576,8 +576,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'warmup_iterations': 250,
                         # Execution-only interpolation; full QPs/losses remain active.
                         'correction_ramp_enabled': True,
-                        'correction_ramp_start_offset': 100,
-                        'correction_ramp_duration': 100,
+                        'correction_ramp_start_offset': 200,
+                        'correction_ramp_duration': 1000,
                         'objective_curriculum_enabled': True,
                         'contact_acceleration_weight_initial': 0.25,  # .25 * final
                         'torso_stability_curriculum_enabled': True,  # shares objective performance/progress gate
@@ -601,8 +601,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'exception_capture_dir': '/tmp/hard_pact_qp_failures',
                         # Solve held position/feedforward commands at k=0;
                         # every_substep/random_one_substep remain available. command_pair_every_substep command_pair
-                        'qp_update_mode': 'command_pair_every_substep',
+                        'qp_update_mode': 'command_pair',
                         'position_correction_share': 0.20,
+                        'command_correction_mode': 'feedforward_only',  # bypass target allocation and its loss
                         'command_pair_second_solve_fraction': 0.5,
                         'constraint_prediction_horizon_s': 0.005,
                         'position_command_lower': None,  # canonical joint limits

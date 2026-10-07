@@ -84,6 +84,13 @@ class QPIterationDiagnostics:
                 velocity_exceedance_rad_s=(vp.abs()-vmax).clamp_min(0).flatten(1))
         if x.shape[1]>24:
             values.update(joint_slack_rad_s2=x.detach()[:,24:36])
+        if getattr(m,'prediction_maps',None) is not None:
+            prediction=(m.prediction_maps.detach()@x.detach()[:,None,:24,None]).squeeze(-1)+m.prediction_offsets.detach()
+            values.update(torque_abs_nm=prediction[:,4:].abs().flatten(1),
+                position_exceedance_rad=torch.maximum(qmin-prediction[:,:2],prediction[:,:2]-qmax).clamp_min(0).flatten(1),
+                velocity_exceedance_rad_s=(prediction[:,2:4].abs()-vmax).clamp_min(0).flatten(1),
+                initial_position_exceedance_rad=torch.maximum(qmin-q,q-qmax).clamp_min(0),
+                initial_velocity_exceedance_rad_s=(v.abs()-vmax).clamp_min(0))
         if x.shape[1]==48:
             values.update(rate_slack_nm=x.detach()[:,36:48])
         finite=torch.isfinite(x).all(-1)&torch.isfinite(a).all(-1)

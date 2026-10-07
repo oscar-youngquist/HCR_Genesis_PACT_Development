@@ -69,8 +69,9 @@ class QPCapture:
             return stub
         G,h,lo,hi = owner._cupiqp_native_pack(m) if owner._active_solver == "cupiqp" else (m.G,m.h,None,None)
         torque_limit, qmin, qmax, vmax = owner._limits(m.p)
-        packet = {"schema_version": 6 if owner.cfg.qp_update_mode.startswith('command_pair') else 4, "identity": self.identity,
-            "command_pair_model": ('frozen mechanics, one constraint-horizon PD application; solver x=[u,f]'
+        packet = {"schema_version": (7 if m.prediction_maps is not None else 6) if owner.cfg.qp_update_mode.startswith('command_pair') else 4, "identity": self.identity,
+            "command_pair_model": (('frozen full mechanics, evolving PD, two internal H/2 steps; solver x=[u,f]'
+                                    if m.prediction_maps is not None else 'frozen mechanics, one constraint-horizon PD application; solver x=[u,f]')
                                    if owner.cfg.qp_update_mode.startswith('command_pair') else None),
             "layout": dict(variables=m.p.shape[1],joint_slack=m.p.shape[1]>24,rate_slack=m.p.shape[1]==48,
                            rate_constraints_enabled=owner.cfg.torque_rate_constraint_weight>0),
@@ -332,9 +333,13 @@ def candidate_assessment(packet, raw, gap=None, relative=None, cfg=None, differe
                     ("joint_soft" if packet["stage"]=="recovery" else "joint",slice(24,48)),
                     ("friction",slice(48,68))]
             if cfg.qp_update_mode.startswith('command_pair'):
-                end=140 if packet.get('schema_version',5)<6 else 68
+                if p.get('prediction_maps') is not None:
+                    groups=[('actuator_absolute',slice(0,24)),
+                            ('joint_soft' if packet['stage']=='recovery' else 'joint',slice(24,120)),
+                            ('friction',slice(120,140))]
+                end=188 if p.get('prediction_maps') is not None else (140 if packet.get('schema_version',5)<6 else 68)
                 if end>68:
-                    groups += [('later_application_torque_absolute',slice(68,end))]
+                    groups += [('later_application_torque_absolute',slice(140 if p.get('prediction_maps') is not None else 68,end))]
                 if post.shape[1]>24:
                     groups += [('joint_slack',slice(end,end+12))]
             else:
@@ -379,6 +384,19 @@ def candidate_assessment(packet, raw, gap=None, relative=None, cfg=None, differe
         violations=dict(position_rad=torch.maximum(qmin-qsteps,qsteps-qmax).clamp_min(0).amax(1),
                         velocity_rad_s=(vsteps.abs()-vmax).clamp_min(0).amax(1))
         result['predicted_substep_endpoints']={'q':qsteps,'dq':vsteps,'units':['rad','rad/s']}
+    if p.get('prediction_maps') is not None:
+        pred=(p['prediction_maps']@post[:,None,:24,None]).squeeze(-1)+p['prediction_offsets']
+        qsteps,vsteps=pred[:,:2],pred[:,2:4]
+        qn,vn=qsteps[:,-1],vsteps[:,-1]
+        violations=dict(position_rad=torch.maximum(qmin-qsteps,qsteps-qmax).clamp_min(0).amax(1),
+                        velocity_rad_s=(vsteps.abs()-vmax).clamp_min(0).amax(1))
+        H=d.get('command_constraint_dt',dt).to(raw).reshape(-1,1)
+        result['predicted_substep_endpoints']={'q':qsteps,'dq':vsteps,'torque':pred[:,4:],
+            'times_s':torch.cat((torch.zeros_like(H),H/2,H),-1)}
+        # A single constant-acceleration interval would be misleading here.
+        lower=torch.full_like(lower,float('nan'));upper=torch.full_like(upper,float('nan'))
+        lo=torch.full_like(lo,float('nan'));hi=torch.full_like(hi,float('nan'))
+        result['constant_acceleration_envelope_available']=False
     if amax is not None:
         violations["acceleration_rad_s2"]=(a.abs()-amax).clamp_min(0)
     rate_violation=(torch.maximum(limits["torque_rate_lower"].to(raw)-post[:,:12],

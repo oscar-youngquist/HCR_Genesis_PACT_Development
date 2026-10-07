@@ -10,6 +10,7 @@ import torch
 from rsl_rl.modules.hard_pact_control import (
     bounded_nominal_torque, requested_torque_components,
     command_pair_inputs, allocate_command_correction, command_pair_sample,
+    feedforward_for_total_torque,
 )
 
 from rsl_rl.modules.hard_pact_physics import (
@@ -1039,8 +1040,17 @@ class Go2HardPACT(Go2PACT):
                     else torch.nan_to_num(tau_nom).clamp(-limits,limits))
             selected = qp_substep_mask(qp.cfg.qp_update_mode,self._qp_substep,
                                        self._qp_sampled_substep_index)
+            non_qp_base=safe  # original nominal controller, before held correction
             rows = selected.nonzero(as_tuple=True)[0]
-            if command_pair and self._qp_substep > 0:
+            if qp.cfg.qp_update_mode == 'command_pair':
+                # Sampled corrections apply only at the solved substep. Clear
+                # stale commands before selecting rows; unsolved rows retain
+                # fresh nominal PD/feedforward with existing actuator clipping.
+                self._qp_command_delta_q.zero_()
+                self._qp_command_delta_ff.zero_()
+                self._qp_command_accepted.zero_()
+            reuse_held = command_pair and qp.cfg.qp_update_mode != 'command_pair' and self._qp_substep > 0
+            if reuse_held:
                 # Hold corrected commands, NOT a torque offset. Fresh q/dq PD
                 # is evaluated on every application; no heads or mechanics here.
                 requested = requested_torque_components(
@@ -1053,8 +1063,8 @@ class Go2HardPACT(Go2PACT):
             aggregate = getattr(qp,"iteration_diagnostics",{}).get("rollout")
             if command_pair and aggregate is not None and getattr(qp,'diagnostics_scheduled',False):
                 aggregate.add_sum('command_pair/held_application_rows',
-                    self._qp_command_accepted.sum()*int(self._qp_substep>0))
-                if self._qp_substep>0:
+                    self._qp_command_accepted.sum()*int(reuse_held))
+                if reuse_held:
                     aggregate.add_values('command_pair/measured_saturation_nm',
                         (requested.abs()-limits).clamp_min(0),self._qp_command_accepted[:,None])
             if aggregate is not None:
@@ -1102,17 +1112,31 @@ class Go2HardPACT(Go2PACT):
                     dt=tau_nom.new_full((rows.numel(),1),dt))
                 self._qp_interval_timing_ms[rows] += (time.perf_counter()-start)*1000.0
                 from rsl_rl.algorithms.hard_pact_qp_curriculum import execution_torque
-                base = safe[rows]
+                base = (non_qp_base[rows] if command_pair and qp.cfg.command_correction_mode=='feedforward_only'
+                        else safe[rows])
                 alpha = getattr(self, "_qp_execution_alpha", 1.0)
                 accepted = result.differentiated_mask | result.recovery_mask
                 executed = execution_torque(base, result.tau_safe, accepted, alpha)
+                selected_execution=executed
                 if command_pair:
                     parameters = {k:v[rows] for k,v in self._hard_pact_control_parameters.items()}
-                    delta_q,delta_ff,rho = allocate_command_correction(
-                        result.tau_safe-tracking_inputs['command_nominal'],parameters,
-                        qp.cfg.position_correction_share,tracking_inputs)
-                    self._qp_command_delta_q[rows] = torch.where(accepted[:,None],alpha*delta_q,0.)
-                    self._qp_command_delta_ff[rows] = torch.where(accepted[:,None],alpha*delta_ff,0.)
+                    ff_only=qp.cfg.command_correction_mode=='feedforward_only'
+                    if ff_only:
+                        # Reconstruct AFTER total-torque blending; never scale
+                        # PD twice or modify the delayed/scaled position target.
+                        command,available=feedforward_for_total_torque(executed,
+                            self._hard_pact_q_d[rows],qj[rows],vj[rows],parameters,
+                            self._hard_pact_tau_ff[rows])
+                        delta_q=torch.zeros_like(command)
+                        delta_ff=command-self._hard_pact_tau_ff[rows]
+                        rho=torch.zeros_like(command)
+                    else:
+                        delta_q,delta_ff,rho = allocate_command_correction(
+                            result.tau_safe-tracking_inputs['command_nominal'],parameters,
+                            qp.cfg.position_correction_share,tracking_inputs)
+                    branch_alpha=1. if ff_only else alpha
+                    self._qp_command_delta_q[rows] = torch.where(accepted[:,None],branch_alpha*delta_q,0.)
+                    self._qp_command_delta_ff[rows] = torch.where(accepted[:,None],branch_alpha*delta_ff,0.)
                     self._qp_command_accepted[rows] = accepted & (alpha != 0)
                     held = bounded_nominal_torque(
                         self._hard_pact_q_d[rows]+self._qp_command_delta_q[rows],
@@ -1125,7 +1149,11 @@ class Go2HardPACT(Go2PACT):
                         aggregate.add_values('command_pair/effective_position_share',rho)
                         aggregate.add_values('command_pair/delta_q_abs_rad',self._qp_command_delta_q[rows].abs())
                         aggregate.add_values('command_pair/delta_ff_abs_nm',self._qp_command_delta_ff[rows].abs())
-                        if qp._physical_enabled():
+                        if ff_only and qp._physical_enabled():
+                            aggregate.add_values('command_pair/reconstruction_error_nm',
+                                (held-selected_execution).abs(),accepted[:,None])
+                            aggregate.add_values('command_pair/feedforward_unavailable_fraction',(~available).float())
+                        if qp._physical_enabled() and not ff_only:
                             from rsl_rl.modules.hard_pact_control import command_pair_gains
                             kp,_,_=command_pair_gains(parameters)
                             u=result.tau_safe-tracking_inputs['command_nominal']
