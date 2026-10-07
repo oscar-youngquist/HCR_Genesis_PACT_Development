@@ -687,10 +687,10 @@ class B1Z1PACTCfg(LeggedRobotCfg):
 
             # Penalize the two applied torque branches independently so their
             # costs remain visible for leg and arm actuation in TensorBoard.
-            leg_feedback_torques = -2.0e-5
-            arm_feedback_torques = -2.0e-5
-            leg_feedforward_torques = -1.0e-5
-            arm_feedforward_torques = -1.0e-5
+            leg_feedback_torques = -1.0e-5
+            arm_feedback_torques = -1.0e-5
+            leg_feedforward_torques = -0.5e-5
+            arm_feedforward_torques = -0.5e-5
 
             front_foot_overreach = -1.0                                                 # I developed these
             rear_foot_overreach = -1.0
@@ -791,13 +791,13 @@ class B1Z1PACTCfg(LeggedRobotCfg):
                 # "arm_ee_force_manipulability":[0.2, 0.5],
                 # "torso_force_wrench_ellipsoid":[0.2, 0.5],
                 "leg_feedback_action_rate":[-0.002, -0.02],
-                "leg_feedback_action_smoothness":[-0.002, -0.02],
+                "leg_feedback_action_smoothness":[-0.001, -0.01],
                 "arm_feedback_action_rate":[-0.003, -0.03],
-                "arm_feedback_action_smoothness":[-0.003, -0.03],
+                "arm_feedback_action_smoothness":[-0.001, -0.01],
                 "leg_feedforward_action_rate":[-0.004, -0.04],
-                "leg_feedforward_action_smoothness":[-0.004, -0.04],
+                "leg_feedforward_action_smoothness":[-0.002, -0.02],
                 "arm_feedforward_action_rate":[-0.006, -0.06],
-                "arm_feedforward_action_smoothness":[-0.006, -0.06],
+                "arm_feedforward_action_smoothness":[-0.002, -0.02],
             }
             # warmup_steps = 30000                                                        # Reward-curriculum warmup.
             curr_steps = 40000                                                           # Reward-curriculum ramp duration.
