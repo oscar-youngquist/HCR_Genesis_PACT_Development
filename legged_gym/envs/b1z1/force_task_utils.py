@@ -251,9 +251,7 @@ def observe_pact_rejection_quality(env, context):
     yaw = env._get_base_yaw_quat()
     ee = quat_apply(yaw, context["ee_force"].detach().to(env.device) / env.obs_scales.ee_force)
     base = quat_apply(yaw, context["base_wrench"][:, :3].detach().to(env.device) / env.obs_scales.base_force)
-    # PACT labels include added-mass gravity; compare only applied disturbances.
-    if getattr(env, "bard_mass_wrench_labels", False):
-        base = base - env.get_mass_wrench_label()[:, :3]
+    # The estimator directly predicts applied disturbances, excluding gravity.
     curriculum.observe_forces(ee, base, env.ee_force_ext_world, env.base_force_ext_world)
 
 

@@ -10,6 +10,7 @@ import warnings
 from collections import deque
 
 import torch
+from rsl_rl.utils.adaptive_entropy import terrain_entropy_progress
 from legged_gym.torque_action_scaling import simulator_torque_action_scale
 from rsl_rl.utils.simulator_diagnostics import domain_rand_state, load_domain_rand_state
 from torch.utils.tensorboard import SummaryWriter
@@ -73,7 +74,6 @@ class B1Z1PACTRunner:
         default_pino_capacity = math.ceil(rollout_samples / algorithm_cfg["num_mini_batches"])
         pino_capacity = algorithm_cfg.get("pino_batch_capacity", 0) or default_pino_capacity
         backend_name = algorithm_cfg.get("dynamics_backend", "pinocchio").lower()
-        self.env.bard_mass_wrench_labels = backend_name == "bard"
         self.env.simulator.collect_b1z1_bard_interval = backend_name == "bard"
         backend_args = (
             urdf, env.cfg.asset.dof_names, env.cfg.asset.foot_name,
@@ -253,7 +253,7 @@ class B1Z1PACTRunner:
                 if self.enable_additional_diagnostics else None
             )
             self.env._rollout_phase_timer = rollout_timer
-            start = time.time()
+            collection_start = time.perf_counter()
             # Rollout collection never needs autograd. Cover simulation,
             # observation/reward construction, and storage copies as well as
             # policy inference, matching the optimized UniFP/Pact-pos path.
@@ -271,7 +271,6 @@ class B1Z1PACTRunner:
                         self.env.get_pact_rollout_initial_state().detach().to(self.device).clone()
                     )
                     if self.alg.bard_auxiliary:
-                        self.alg.transition.mass_wrench = self.env.get_mass_wrench_label().detach().to(self.device).clone()
                         # Deployment-available nominal command, not a future measured torque.
                         nominal = self.alg._coupled_torque(actions.clamp(
                             -self.env.cfg.normalization.clip_actions, self.env.cfg.normalization.clip_actions),
@@ -310,8 +309,8 @@ class B1Z1PACTRunner:
                         dynamics_state[:, 76:88] = grf
                         quat = dynamics_state[:, None, 3:7].expand(-1, 4, -1).reshape(-1, 4)
                         local = _world_to_yaw_local(grf.reshape(-1, 3), quat).reshape(-1, 12)
-                        start = self.env.cfg.env.privileged_force_start
-                        next_target[:, start:start+12] = local * self.env.obs_scales.grf
+                        force_start = self.env.cfg.env.privileged_force_start
+                        next_target[:, force_start:force_start+12] = local * self.env.obs_scales.grf
                     self.alg.process_env_step(
                         # Preserve the complete transition-aligned 180-D packet:
                         # unlike PACT-pos, the active PINN consumes its floating
@@ -340,7 +339,7 @@ class B1Z1PACTRunner:
                 self.env._rollout_phase_timer = None
                 collection_time = (
                     rollout_timing_metrics["Perf/Rollout/total_collection_ms"] / 1000.0
-                    if rollout_timer is not None else time.time() - start
+                    if rollout_timer is not None else time.perf_counter() - collection_start
                 )
                 # Bootstrap values are rollout targets and the final privileged
                 # observation was assembled under this inference guard.
@@ -353,14 +352,17 @@ class B1Z1PACTRunner:
                     self.env.get_rollout_diagnostics()
                     if self.enable_additional_diagnostics and hasattr(self.env, "get_rollout_diagnostics") else {}
                 )
-            update_start = time.time()
+            update_start = time.perf_counter()
             metrics = self.alg.update(iteration)
-            learning_time = time.time() - update_start
+            learning_time = time.perf_counter() - update_start
             if ep_infos and self.use_adaptive_entropy:
                 self.alg.update_adaptive_entropy_coef({
                     "lin_vel_tracking": self._episode_metric_max(ep_infos, "rew_tracking_lin_vel_force_world"),
                     "ang_vel_tracking": self._episode_metric_max(ep_infos, "rew_tracking_ang_vel"),
-                    "terrain_level": self._episode_metric_max(ep_infos, "terrain_level", "terrain_level_mean"),
+                    "terrain_level": terrain_entropy_progress(
+                        self.env.cfg.terrain,
+                        self._episode_metric_max(ep_infos, "terrain_level", "terrain_level_mean"),
+                        self.alg.ent_terrain_threshold),
                 })
             if getattr(self.env, "use_reward_curriculum", False):
                 self.env.step_reward_curriculum(iteration)

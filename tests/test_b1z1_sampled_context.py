@@ -53,8 +53,11 @@ def test_sample_replay_and_gradient_boundaries(pos):
 @pytest.mark.parametrize("pos,bard_active,backend", [
     (False, False, "bard"), (True, False, "bard"),
     (False, True, "bard"), (False, -1, "bard"), (False, False, "pinocchio")])
-def test_short_ppo_update_and_auxiliary_targets(pos, bard_active, backend):
+def test_short_ppo_update_and_auxiliary_targets(pos, bard_active, backend, monkeypatch):
     model = make_model(pos)
+    # Collection and PPO reconstruction must never enter deployment evaluation.
+    monkeypatch.setattr(model, "act_inference", Mock(side_effect=AssertionError("PPO inference")))
+    monkeypatch.setattr(model.context_encoder, "forward_inf", Mock(side_effect=AssertionError("PPO inference")))
     config = class_to_dict((B1Z1PACTPosCfgPPO if pos else B1Z1PACTCfgPPO)())
     cfg = {**config["algorithm"], **config["policy"], "num_learning_epochs": 1,
            "actor_phys_enabled": False,  # This fixture does not collect task-predictive snapshots.

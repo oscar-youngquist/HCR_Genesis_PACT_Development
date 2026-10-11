@@ -5,6 +5,7 @@ import time
 from collections import deque
 
 import torch
+from rsl_rl.utils.adaptive_entropy import terrain_entropy_progress
 from rsl_rl.utils.simulator_diagnostics import domain_rand_state, load_domain_rand_state
 from torch.utils.tensorboard import SummaryWriter
 
@@ -278,8 +279,10 @@ class OnPolicyRunnerUniFP:
                     ),
                     # B1Z1 emits ``terrain_level`` while older UniFP tasks may
                     # still use ``terrain_level_mean``.
-                    "terrain_level": self._episode_metric_max(
-                        ep_infos, "terrain_level", "terrain_level_mean"
+                    "terrain_level": terrain_entropy_progress(
+                        self.env.cfg.terrain,
+                        self._episode_metric_max(ep_infos, "terrain_level", "terrain_level_mean"),
+                        self.alg.ent_terrain_threshold,
                     ),
                 }
                 self.alg.update_adaptive_entropy_coef(performance_metrics)

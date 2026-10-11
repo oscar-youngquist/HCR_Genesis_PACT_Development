@@ -143,7 +143,7 @@ def test_runner_adapter_and_checkpoint(tmp_path):
     runner = B1Z1PPOPosRunner(env, settings, log_dir=None, device="cpu")
     runner.learn(1)
     assert iterations == [0,1]
-    assert env.bard_mass_wrench_labels == (train.algorithm.dynamics_backend == "bard")
+    assert not hasattr(env, "bard_mass_wrench_labels")
     assert runner.get_inference_policy()(obs).shape == (2,cfg.env.num_actions)
     checkpoint = tmp_path / "ppo_pos.pt"
     runner.save(checkpoint)

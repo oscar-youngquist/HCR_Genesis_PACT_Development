@@ -8,21 +8,18 @@ from legged_gym.envs.b1z1.force_task_utils import B1Z1StagedForceCurriculum
 
 
 class RejectionCurriculumDefaults:
-    """One set of rejection-stage defaults for UniFP-Reject and PACT."""
+    """Matched force exposure for B1Z1 UniFP and PACT variants."""
     use_shared_rejection_curriculum = True
     reject_initial_external_scale = 0.25
     reject_warmup_iterations = 1600  # Legacy field; force_curriculum_gate_start_iteration controls gating.
-    reject_nominal_tracking_iterations = 3200  # Stage 0: no external disturbances or rejection.
-    reject_compensation_ramp_iterations = 400
-    reject_external_ramp_iterations = 3200
-    force_curriculum_gate_start_iteration = 1600
-    # reject_nominal_tracking_iterations = 8000  # Stage 0: no external disturbances or rejection.
-    # reject_compensation_ramp_iterations = 1000
-    # reject_external_ramp_iterations = 8000
-    # force_curriculum_gate_start_iteration = 4000  # Relative to the end of stage 0.
+    reject_nominal_tracking_iterations = 0  # Disable the zero-disturbance stage.
+    reject_initial_progress = 0.2  # Compensation/loss strength during the initial hold.
+    reject_compensation_ramp_iterations = 1000
+    reject_external_ramp_iterations = 8000
+    force_curriculum_gate_start_iteration = 8000  # Hold until this iteration.
     force_curriculum_gate_patience = 400
     force_curriculum_use_latest_start_fallback = True
-    force_curriculum_latest_start_iteration = 16000  # Relative to the end of stage 0.
+    force_curriculum_latest_start_iteration = 8000  # Equal gate/fallback starts enforce fixed timing.
     reject_active_force_threshold = 1.0  # Diagnostic active-force cutoff [N]; not an advancement gate.
     
     reject_force_nrmse_threshold = 0.25  # Legacy field; force accuracy no longer gates advancement.
@@ -32,7 +29,7 @@ class RejectionCurriculumDefaults:
     # # VRAM SMOKE TEST: assignments below override normal defaults above.
     # # Comment only these overrides to restore normal timing; keep diagnostics configured.
     # # Also enable the PACT policy/algorithm/runner smoke blocks for a fresh 35-iteration run.
-    # # Hold 0.25 for 10 iterations; ramp rejection for 10, then disturbances for 10.
+    # # Hold forces at 0.25 and rejection at 0.2 for 10 iterations, then two 10-step ramps.
     # # Performance fallback forces the start at 10; force-prediction accuracy is not required.
     # reject_nominal_tracking_iterations = 0  # Preserve the short 35-iteration VRAM test.
     # force_curriculum_gate_start_iteration = 10
@@ -53,7 +50,10 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
         # Keep recorded/checkpoint iteration numbers absolute; offset only stage starts.
         self.gate_start += self.nominal_iterations
         self.latest_start += self.nominal_iterations
-        self.beta = 0.0
+        self.initial_progress = float(getattr(cfg, "reject_initial_progress", 0.0))
+        if not 0.0 <= self.initial_progress < 1.0:
+            raise ValueError("reject_initial_progress must be in [0, 1)")
+        self.beta = 0.0 if self.nominal_iterations else self.initial_progress
         self.full_iteration = -1
         self.force_error_ema = [None, None]
         # Per stream: squared error, squared target magnitude, active sample count.
@@ -119,10 +119,13 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
                 self.force_error_ema[i] = self._update_ema(self.force_error_ema[i], value)
         # Force-error EMAs are diagnostics only; the shared performance gate owns advancement.
         if self.gate_latched:
-            self.beta = self._linear_ramp(iteration, self.trigger_iteration,
-                                          self.cfg.reject_compensation_ramp_iterations)
+            progress = self._linear_ramp(iteration, self.trigger_iteration,
+                                         self.cfg.reject_compensation_ramp_iterations)
+            self.beta = self.initial_progress + (1.0 - self.initial_progress) * progress
             if self.beta >= 1 and self.full_iteration < 0:
-                self.full_iteration = iteration
+                self.full_iteration = self.trigger_iteration + self.cfg.reject_compensation_ramp_iterations
+        else:
+            self.beta = 0.0 if iteration < self.nominal_iterations else self.initial_progress
 
     def metrics(self, iteration):
         return {
@@ -131,18 +134,18 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
             "ForceCurriculum/command_scale": self.beta,
             "ForceCurriculum/external_scale": self.external_scale(iteration),
             "Rejection/external_scale": self.external_scale(iteration),
-            "Rejection/stage": 0 if iteration < self.nominal_iterations else (1 if self.beta == 0 else (2 if self.beta < 1 else 3)),
+            "Rejection/stage": 0 if iteration < self.nominal_iterations else (1 if not self.gate_latched else (2 if self.beta < 1 else 3)),
             "Rejection/gate_patience": self.gate_patience,
             **{f"Rejection/{name}_active_nrmse_ema": value
                for name, value in zip(("ee", "base"), self.force_error_ema) if value is not None},
         }
 
     def state_dict(self):
-        return dict(super().state_dict(), rejection_version=1, beta=self.beta,
+        return dict(super().state_dict(), rejection_version=2, beta=self.beta,
                     full_iteration=self.full_iteration, force_error_ema=self.force_error_ema)
 
     def load_state_dict(self, state):
-        if not state or state.get("rejection_version") != 1:
+        if not state or state.get("rejection_version") not in (1, 2):
             warnings.warn("No rejection curriculum state; starting estimator warmup.")
             return
         super().load_state_dict(state)
@@ -150,7 +153,7 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
         self.full_iteration = int(state["full_iteration"])
         self.force_error_ema = list(state["force_error_ema"])
         # Resume an older rejection checkpoint without restarting its progress.
-        if self.beta > 0 and not self.gate_latched:
+        if state.get("rejection_version") == 1 and self.beta > 0 and not self.gate_latched:
             self.gate_latched = True
             self.trigger_iteration = self.last_update_iteration - round(
                 self.beta * self.cfg.reject_compensation_ramp_iterations)

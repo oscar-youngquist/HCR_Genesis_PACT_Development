@@ -4,6 +4,7 @@ import statistics
 import time
 from collections import deque
 import torch
+from rsl_rl.utils.adaptive_entropy import terrain_entropy_progress
 from .on_policy_runner import OnPolicyRunner
 from .b1z1_pact_runner import B1Z1PACTRunner
 from rsl_rl.modules.actor_critic_b1z1_ppo_pos import ActorCriticB1Z1PPOPos
@@ -21,7 +22,6 @@ class B1Z1PPOPosRunner(OnPolicyRunner):
 
     def _init_agent_and_algo(self):
         # Preserve PACT's privileged mass/wrench labels without a dynamics model.
-        self.env.bard_mass_wrench_labels = self.alg_cfg["dynamics_backend"] == "bard"
         critic_dim = self.env.num_privileged_obs * self.env.num_crit_obs_stack
         self.actor_critic = ActorCriticB1Z1PPOPos(
             self.env.num_obs, critic_dim, self.env.num_actions, **self.policy_cfg).to(self.device)
@@ -71,7 +71,10 @@ class B1Z1PPOPosRunner(OnPolicyRunner):
                 self.alg.update_adaptive_entropy_coef({
                     "lin_vel_tracking": self._episode_metric_max(ep_infos, "rew_tracking_lin_vel_force_world"),
                     "ang_vel_tracking": self._episode_metric_max(ep_infos, "rew_tracking_ang_vel"),
-                    "terrain_level": self._episode_metric_max(ep_infos, "terrain_level", "terrain_level_mean"),
+                    "terrain_level": terrain_entropy_progress(
+                        self.env.cfg.terrain,
+                        self._episode_metric_max(ep_infos, "terrain_level", "terrain_level_mean"),
+                        self.alg.ent_terrain_threshold),
                 })
             if getattr(self.env, "use_reward_curriculum", False):
                 self.env.step_reward_curriculum(it)

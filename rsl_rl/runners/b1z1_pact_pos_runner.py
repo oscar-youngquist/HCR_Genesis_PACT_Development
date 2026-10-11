@@ -9,6 +9,7 @@ import statistics
 from collections import deque
 
 import torch
+from rsl_rl.utils.adaptive_entropy import terrain_entropy_progress
 from legged_gym.torque_action_scaling import simulator_torque_action_scale
 from rsl_rl.utils.simulator_diagnostics import domain_rand_state, load_domain_rand_state
 from torch.utils.tensorboard import SummaryWriter
@@ -210,7 +211,10 @@ class B1Z1PACTPosRunner:
                 self.alg.update_adaptive_entropy_coef({
                     "lin_vel_tracking": self._episode_metric_max(ep_infos, "rew_tracking_lin_vel_force_world"),
                     "ang_vel_tracking": self._episode_metric_max(ep_infos, "rew_tracking_ang_vel"),
-                    "terrain_level": self._episode_metric_max(ep_infos, "terrain_level", "terrain_level_mean"),
+                    "terrain_level": terrain_entropy_progress(
+                        self.env.cfg.terrain,
+                        self._episode_metric_max(ep_infos, "terrain_level", "terrain_level_mean"),
+                        self.alg.ent_terrain_threshold),
                 })
             if getattr(self.env, "use_reward_curriculum", False):
                 self.env.step_reward_curriculum(iteration)

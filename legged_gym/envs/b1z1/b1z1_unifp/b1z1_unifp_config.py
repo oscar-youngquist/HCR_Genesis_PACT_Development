@@ -1,4 +1,5 @@
 import numpy as np
+from legged_gym.envs.b1z1.rejection_curriculum import RejectionCurriculumDefaults
 
 
 class B1Z1UniFPCfg:
@@ -315,7 +316,7 @@ class B1Z1UniFPCfg:
         tradeoff_steps = 1
         tradeoff_threshold = 1.0
 
-    class commands:
+    class commands(RejectionCurriculumDefaults):
         curriculum = False
         max_curriculum = 0.8
         num_commands = 15
@@ -335,21 +336,17 @@ class B1Z1UniFPCfg:
         zero_vel_cmd_prob = 0.2
         zero_vel_cmd_prob_after_force = 0.6
         
-        # Command and gated external-force ramps may overlap.
+        # Legacy fields retained; the shared rejection schedule controls force scales.
         force_curriculum_command_start_iteration = 3200
         force_curriculum_command_ramp_iterations = 3200
         
-        force_curriculum_gate_start_iteration = 4800  # Earliest performance-gate evaluation.
         force_curriculum_external_ramp_iterations = 3200
         
         force_curriculum_ee_l1_threshold = 0.25
         force_curriculum_roll_termination_threshold = 0.05
         force_curriculum_episode_length_threshold = 950.0
         
-        force_curriculum_gate_patience = 400
         force_curriculum_metric_ema_alpha = 0.05
-        force_curriculum_use_latest_start_fallback = True
-        force_curriculum_latest_start_iteration = force_curriculum_gate_start_iteration  # Fallback cannot precede the gate.
 
         push_gripper_stators = True
         apply_ee_external_forces = True
@@ -424,7 +421,7 @@ class B1Z1UniFPCfg:
         friction_range = [0.3, 2.0]
 
         randomize_base_mass = True
-        added_mass_min = -2.0  
+        added_mass_min = -2.0
         min_added_mass_max = 5.0
         max_added_mass_max = 10.0
   
@@ -478,15 +475,15 @@ class B1Z1UniFPCfg:
         joint_armature_range = [0.0, 0.03]
         
         randomize_joint_friction = True
-        joint_friction_range_start = [0.0, 0.20]
-        joint_friction_range_end = [0.0, 0.05]
+        joint_friction_range_start = [0.0, 0.05]
+        joint_friction_range_end = [0.0, 0.20]
         
-        randomize_joint_stiffness = True
+        randomize_joint_stiffness = False
         joint_stiffness_range_start = [0.0, 0.00]
         joint_stiffness_range_end = [0.0, 0.00]
         
         randomize_joint_damping = True
-        joint_damping_range_start = [0.20, 0.60]
+        joint_damping_range_start = [0.30, 0.40]
         joint_damping_range_end = [0.00, 0.80]
         
         num_push_steps = 500
@@ -598,7 +595,7 @@ class B1Z1UniFPCfg:
             termination = 0.0
             collision = -5.0
             dof_pos_limits = -10.0
-            torque_limits = -0.01
+            torque_limits = -1.00
             dof_close_to_default = 0.0
 
             # Add in close to default reward
@@ -639,7 +636,7 @@ class B1Z1UniFPCfg:
             # Legs
             dof_acc           = -2.5e-7
             action_rate       = -0.02
-            action_smoothness = -0.00
+            action_smoothness = -0.01
             joint_power       = -2.e-5
             joint_power_dist  = -1.e-6
             leg_torques       = -1.0e-5
@@ -743,14 +740,14 @@ class B1Z1UniFPCfg:
                                 # "torso_force_wrench_ellipsoid",
                                 ]
             curr_reward_bounds = {
-                "torque_limits":[-0.001, -1.0],
+                "torque_limits":[-0.01, -1.0],
                 "dof_pos_limits":[-1.0, -10.0],
                 "dof_vel":[-1e-6, -1e-4],
                 # "collision": [-2.0, -10.0],
-                "action_rate": [-0.002, -0.02],
-                "action_rate_arm": [-0.003, -0.03],
-                "action_smoothness":[-0.002, -0.02],
-                "action_smoothness_arm":[-0.003, -0.03],
+                # "action_rate": [-0.002, -0.02],
+                # "action_rate_arm": [-0.003, -0.03],
+                # "action_smoothness":[-0.002, -0.02],
+                # "action_smoothness_arm":[-0.003, -0.03],
                 # "dof_acc": [-5.0e-8, -2.5e-7],
                 # "dof_acc_arm": [-1.0e-8, -4.5e-7],
                 # "base_height":[-2.0, -5.0],
@@ -815,7 +812,7 @@ class B1Z1UniFPCfgPPO:
         # Increase exploration within these bounds while command tracking or
         # terrain-curriculum progress remains below its configured target.
         entropy_coef = 0.01
-        use_adaptive_entropy = True
+        use_adaptive_entropy = False
         adaptive_ent_bounds = [0.001, 0.01]
         adaptive_ent_lin_threshold = 1.50
         adaptive_ent_ang_threshold = 0.70

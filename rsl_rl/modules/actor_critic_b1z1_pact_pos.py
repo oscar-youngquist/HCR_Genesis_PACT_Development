@@ -63,7 +63,8 @@ class B1Z1PACTContextEncoder(nn.Module):
         return {"mean": mean, "logvar": logvar, "z": z, "latent_noise": noise, "features": feature}
 
     def forward_inf(self, history: torch.Tensor):
-        return self.forward(history, sample=True)
+        # Deployment uses the posterior mean; training retains sampled latents.
+        return self.forward(history, sample=False)
 
 class FiLM(nn.Module):
     """Near-identity DreamFLEX-style modulation of the shared actor state."""
@@ -140,8 +141,8 @@ class ActorCriticB1Z1PACTPos(nn.Module):
         self.actor_trunk = nn.Sequential(_mlp(actor_input, actor_layers[:-1], actor_layers[-1], activation),
                                          _activation(activation))
 
-        # FiLM sees only predicted external disturbances and command errors.
-        self.film = FiLM(6 + 3 + 3 + 3, actor_layers[-1], film_hidden_dim, activation)
+        # FiLM sees only base-velocity and spherical EE-position command errors.
+        self.film = FiLM(3 + 3, actor_layers[-1], film_hidden_dim, activation)
 
         self.position_head = nn.Linear(actor_layers[-1], num_actions)
         self.torque_head = nn.Linear(actor_layers[-1], num_actions)
@@ -231,9 +232,8 @@ class ActorCriticB1Z1PACTPos(nn.Module):
             dim=-1,
         )
         # Contact state and foot height are excluded from FiLM by design.
-        film_condition = torch.cat((
-            film_context["base_wrench"].detach(), film_context["ee_force"].detach(), base_error, ee_error,
-        ), dim=-1)
+        # Disturbances remain actor inputs, not FiLM inputs.
+        film_condition = torch.cat((base_error, ee_error), dim=-1)
         return actor_input, film_condition
 
     def actor_forward(

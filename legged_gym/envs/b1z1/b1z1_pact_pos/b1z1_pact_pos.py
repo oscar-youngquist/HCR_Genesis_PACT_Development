@@ -673,6 +673,8 @@ class B1Z1PACTPos(LeggedRobot):
         mass_params.zero_()
         mass_params[:, 0:1] = self.simulator._added_base_mass
         mass_params[:, 1:4] = self.simulator._base_com_bias
+        # Reuse a reserved critic/reconstruction channel for added gripper mass [kg].
+        mass_params[:, 4:5] = self.simulator._added_gripper_mass
         stance_mask = self._get_gait_phase()
 
         # Keep the shared UniFP critic layout explicit and dimension checked.

@@ -189,7 +189,6 @@ def capture(runner):
                   q_min=limits[..., 0], q_max=limits[..., 1],
                   qd_max=expand(env.simulator.dof_vel_limits),
                   torque_max=expand(env.simulator.torque_limits) * 1.1,
-                  mass_wrench=env.get_mass_wrench_label(),
                   # Resampling next step has no deterministic target available yet.
                   valid=((env.goal_timer + 1) <= env.traj_total_timesteps).unsqueeze(-1))
     if pos_fk_enabled(a.cfg):
@@ -199,7 +198,6 @@ def capture(runner):
         # Same physical active-force criterion as actor rejection, captured only for stratification.
         base = yaw_world(a.actor_critic.last_context["base_wrench"].detach()
                          / state.new_tensor(a.cfg["base_wrench_scale"]), state[:, 3:7])[:, :3]
-        base = base - values["mass_wrench"][:, :3]
         threshold = a.cfg.get("actor_phys_rejection_active_force", 1.)
         values["sampling_active_force"] = ((force.norm(dim=-1) > threshold)
                                             | (base.norm(dim=-1) > threshold)).unsqueeze(-1)
@@ -376,7 +374,8 @@ def objective(a, batch, actions, context):
     fixed = SimpleNamespace(**{k: v[good] for k, v in vars(fixed).items()})
     state = data["state"]
     grf = yaw_world(grf[valid][good] / a.cfg["grf_scale"], state[:, 3:7]).reshape(-1, 4, 3)
-    wrench = yaw_world(wrench[valid][good] / state.new_tensor(a.cfg["base_wrench_scale"]), state[:, 3:7]) - data["mass_wrench"]
+    # Predicted wrench is applied-only; gravity is already in the BARD bias.
+    wrench = yaw_world(wrench[valid][good] / state.new_tensor(a.cfg["base_wrench_scale"]), state[:, 3:7])
     lever = quat_apply(state[:, 3:7], state[:, 176:179])
     wrench = torch.cat((wrench[:, :3], wrench[:, 3:] + torch.cross(lever, wrench[:, :3], dim=-1)), -1)
     ee = yaw_world(ee[valid][good] / a.cfg["ee_force_scale"], state[:, 3:7])

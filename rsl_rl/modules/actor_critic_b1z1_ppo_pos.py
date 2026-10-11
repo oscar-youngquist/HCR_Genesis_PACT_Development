@@ -33,13 +33,16 @@ class ActorCriticB1Z1PPOPos(nn.Module):
         self.register_buffer("_std_clip_upr", position_profile(max_noise_std, "max_noise_std"))
         self.distribution = None
 
-    def act_inference(self, observations):
+    def _action_mean(self, observations):
         return self.position_head(self.actor_trunk(observations))
+
+    def act_inference(self, observations):
+        return self._action_mean(observations)
 
     def update_distribution(self, observations):
         with torch.no_grad():
             self.std.copy_(torch.maximum(torch.minimum(self.std, self._std_clip_upr), self._std_clip_lwr))
-        mean = self.act_inference(observations)
+        mean = self._action_mean(observations)
         self.distribution = Normal(mean, mean * 0. + self.std)
 
     def act(self, observations, **kwargs):

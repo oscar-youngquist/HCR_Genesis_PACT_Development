@@ -188,21 +188,6 @@ class B1Z1PACT(LeggedRobot):
             velocity,
         ), dim=-1)
 
-    def get_mass_wrench_label(self):
-        """Label-only added-load gravity wrench, never applied to the simulator.
-
-        Gripper added load is represented at the EE reference point. Subtract
-        this identical label in PINN: realized body inertias already carry it.
-        """
-        from legged_gym.envs.go2.go2_hard_pact.transition import added_mass_gravity_wrench_world
-        sim = self.simulator
-        if not getattr(self, "bard_mass_wrench_labels", False):
-            return sim.base_pos.new_zeros((self.num_envs, 6))
-        wrench = added_mass_gravity_wrench_world(sim._added_base_mass,
-            self.cfg.sim.gravity, sim._base_com_bias, sim.base_quat)
-        force = sim._added_gripper_mass * sim.base_pos.new_tensor(self.cfg.sim.gravity)
-        return wrench + torch.cat((force, torch.cross(sim.ee_pos - sim.base_pos, force, dim=-1)), -1)
-
     def get_privileged_force_observation(self):
         """Return [GRFs, base wrench, EE force], matching PACT-Pos pretraining."""
         base_yaw_quat = self._get_base_yaw_quat()
@@ -215,10 +200,7 @@ class B1Z1PACT(LeggedRobot):
             quat_rotate_inverse(base_yaw_quat, self.base_force_ext_world),
             quat_rotate_inverse(base_yaw_quat, self.base_torque_ext_world),
         ), dim=-1)
-        mass_wrench = self.get_mass_wrench_label()
-        base_wrench_local = base_wrench_local + torch.cat((
-            quat_rotate_inverse(base_yaw_quat, mass_wrench[:, :3]),
-            quat_rotate_inverse(base_yaw_quat, mass_wrench[:, 3:])), -1)
+        # Only applied disturbances are labels; randomized gravity stays in M/h.
         target = torch.cat((
             grfs_local * self.obs_scales.grf,
             base_wrench_local * self.base_wrench_scale,
@@ -648,10 +630,7 @@ class B1Z1PACT(LeggedRobot):
         # Context labels: command-space velocity and EE pose, base wrench, EE force, and
         # four binary foot-contact indicators for the estimator BCE objective.
         # They are privileged during training and predicted from history later.
-        mass_wrench = self.get_mass_wrench_label()
-        base_wrench_local = base_wrench_local + torch.cat((
-            quat_rotate_inverse(base_yaw_quat, mass_wrench[:, :3]),
-            quat_rotate_inverse(base_yaw_quat, mass_wrench[:, 3:])), -1)
+        # Match the privileged force block: no mass/CoM gravity compensation.
         base_velocity = torch.cat(
             (self.simulator.base_lin_vel[:, :2], self.simulator.base_ang_vel[:, 2:3]), dim=-1
         )
@@ -689,6 +668,8 @@ class B1Z1PACT(LeggedRobot):
         mass_params.zero_()
         mass_params[:, 0:1] = self.simulator._added_base_mass
         mass_params[:, 1:4] = self.simulator._base_com_bias
+        # Reuse a reserved critic/reconstruction channel for added gripper mass [kg].
+        mass_params[:, 4:5] = self.simulator._added_gripper_mass
         stance_mask = self._get_gait_phase()
 
         # Keep the shared UniFP critic layout explicit and dimension checked.

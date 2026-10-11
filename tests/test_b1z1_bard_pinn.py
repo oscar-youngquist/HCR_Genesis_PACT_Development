@@ -1,4 +1,4 @@
-"""Analytic B1Z1 force gradients, mass-label cancellation and ownership."""
+"""Analytic B1Z1 applied-force gradients and optimizer ownership."""
 from types import SimpleNamespace
 import pytest
 import torch
@@ -53,7 +53,15 @@ def test_component_weights_and_outer_weight(inverse_weight, rollout_weight):
     torch.testing.assert_close(rollout.grad, torch.tensor(.01 * rollout_weight))
 
 
-def test_analytic_force_gradients_and_mass_cancellation():
+def test_analytic_force_gradients_ignore_obsolete_mass_labels(monkeypatch):
+    from rsl_rl.algorithms import b1z1_bard_pinn as pinn
+    captured = {}
+    for name in ("corrected_bard_inverse_dynamics_loss", "differentiable_bard_rollout_loss"):
+        original_function = getattr(pinn, name)
+        def spy(_name=name, _function=original_function, **kwargs):
+            captured[_name] = kwargs
+            return _function(**kwargs)
+        monkeypatch.setattr(pinn, name, spy)
     model = make_model(False)
     n = 3
     context = model.decode_context(model.context_encoder(torch.randn(n, 162)))
@@ -79,8 +87,13 @@ def test_analytic_force_gradients_and_mass_cancellation():
     assert "rollout/arm_gripper_mae_radps" in measured
     assert all(not value.requires_grad for key, value in measured.items() if key != "valid_samples")
     mass = torch.randn(n, 6)
-    shifted = losses(model, {**context, "base_wrench": context["base_wrench"] + mass},
+    shifted = losses(model, context,
                      {**batch, "mass_wrench": mass}, fixed, cfg)
+    inverse = captured["corrected_bard_inverse_dynamics_loss"]
+    rollout = captured["differentiable_bard_rollout_loss"]
+    torch.testing.assert_close(inverse["total_wrench_world"], context["base_wrench"])
+    assert not inverse["mass_com_wrench_world"].any()
+    torch.testing.assert_close(rollout["applied_wrench_world"], context["base_wrench"])
     for a, b in zip(original, shifted):
         torch.testing.assert_close(a, b)
     sum(original).backward()

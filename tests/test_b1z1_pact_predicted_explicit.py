@@ -38,11 +38,16 @@ class PredictedExplicitTests(unittest.TestCase):
                 actor_input, film_condition = actor._actor_inputs(obs, context, context)
                 self.assertEqual(actor_input.shape[0], obs.shape[0])
                 expected_film = torch.cat((
-                    context["base_wrench"], context["ee_force"],
                     obs[:, -6:-3] - context["base_velocity"],
                     obs[:, -3:] - context["ee_position"],
                 ), dim=-1)
                 self.assertTrue(torch.equal(film_condition, expected_film))
+                self.assertEqual(actor.film.network[0].in_features, 6)
+                changed = dict(context, base_wrench=context["base_wrench"] + 10.,
+                               ee_force=context["ee_force"] - 10.)
+                changed_input, changed_condition = actor._actor_inputs(obs, changed, changed)
+                self.assertTrue(torch.equal(changed_condition, film_condition))
+                self.assertFalse(torch.equal(changed_input, actor_input))
 
 
 if __name__ == "__main__":

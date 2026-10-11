@@ -63,7 +63,8 @@ class B1Z1PACTContextEncoder(nn.Module):
         return {"mean": mean, "logvar": logvar, "z": z, "latent_noise": noise, "features": feature}
 
     def forward_inf(self, history: torch.Tensor):
-        return self.forward(history, sample=True)
+        # Deployment uses the posterior mean; training retains sampled latents.
+        return self.forward(history, sample=False)
 
 class FiLM(nn.Module):
     """Near-identity DreamFLEX-style modulation of the shared actor state."""
@@ -142,14 +143,14 @@ class ActorCriticB1Z1PACT(nn.Module):
         # The actor consumes estimated contact probabilities and foot heights;
         # FiLM intentionally receives neither terrain/contact signal.
         actor_input = num_actor_obs + latent_dim + 3 + 3 + 6 + 3 + 4 + 4
-        condition_dim = 6 + 3 + 3 + 3  # Existing wrench, force and tracking-error schema.
+        condition_dim = 3 + 3  # Base-velocity and spherical EE-position errors only.
         if conditioning_mode == "concat":
-            actor_input += condition_dim
+            actor_input += 6 + 3 + condition_dim  # Preserve the non-FiLM concatenation ablation.
         self.actor_trunk = nn.Sequential(_mlp(actor_input, actor_layers[:-1], actor_layers[-1], activation),
                                          _activation(activation))
 
 
-        # FiLM sees only predicted external disturbances and command errors.
+        # Disturbances remain actor inputs; FiLM sees only command errors.
         self.film = FiLM(condition_dim, actor_layers[-1], film_hidden_dim, activation) if conditioning_mode == "film" else None
 
         self.position_head = nn.Linear(actor_layers[-1], num_actions)
@@ -243,11 +244,7 @@ class ActorCriticB1Z1PACT(nn.Module):
             ),
             dim=-1,
         )
-        # Contact state and foot height are excluded from FiLM by design.
-        film_condition = torch.cat((
-            film_context["base_wrench"].detach(), film_context["ee_force"].detach(),
-            base_error, ee_error,
-        ), dim=-1)
+        film_condition = torch.cat((base_error, ee_error), dim=-1)
         return actor_input, film_condition
 
     def actor_forward(
@@ -258,7 +255,9 @@ class ActorCriticB1Z1PACT(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         actor_input, film_condition = self._actor_inputs(obs, actor_context, film_context)
         if self.conditioning_mode == "concat":
-            actor_input = torch.cat((actor_input, film_condition.detach()), dim=-1)
+            condition_context = actor_context if film_context is None else film_context
+            actor_input = torch.cat((actor_input, condition_context["base_wrench"].detach(),
+                                    condition_context["ee_force"].detach(), film_condition.detach()), dim=-1)
         features = self.actor_trunk(actor_input)
         if self.conditioning_mode == "film":
             features, magnitude, identity_deviation = self.film(features, film_condition)

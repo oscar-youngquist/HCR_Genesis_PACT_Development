@@ -73,10 +73,9 @@ def losses(model, context, batch, fixed, cfg, metrics=None):
     wrench = yaw_world(context["base_wrench"] / grf.new_tensor(cfg["base_wrench_scale"]), initial[:, 3:7])
     ee = yaw_world(context["ee_force"] / cfg["ee_force_scale"], initial[:, 3:7])
     ee_generalized = torch.einsum("bkn,bk->bn", fixed.ee_jacobian[:, :3], ee)
-    mass_wrench = batch["mass_wrench"].detach()
-    # As in HardPACT, shift the applied wrench from randomized torso CoM to
-    # the base Jacobian's origin only after removing the label-only load.
-    applied = wrench - mass_wrench
+    # Shift applied disturbance from torso CoM to the base Jacobian origin.
+    # Randomized load gravity is already represented in fixed.mass_matrix/bias.
+    applied = wrench
     lever = quat_apply(initial[:, 3:7].detach(), state[:, 176:179].detach())
     applied = torch.cat((applied[:, :3], applied[:, 3:] +
                          torch.cross(lever, applied[:, :3], dim=-1)), -1)
@@ -92,8 +91,8 @@ def losses(model, context, batch, fixed, cfg, metrics=None):
     inverse = corrected_bard_inverse_dynamics_loss(
         required_generalized_force=required, foot_jacobians=fixed.foot_jacobians,
         base_jacobian=fixed.base_jacobian, interval_executed_torque=torque,
-        interval_grf_world=grf_world, total_wrench_world=applied + mass_wrench,
-        mass_com_wrench_world=mass_wrench, measured_generalized_contact_force=measured_contact,
+        interval_grf_world=grf_world, total_wrench_world=applied,
+        mass_com_wrench_world=torch.zeros_like(applied), measured_generalized_contact_force=measured_contact,
         additional_generalized_force=ee_generalized, **masks)
     if metrics is not None:
         physical_metrics("inverse", inverse.loss, inverse.residual, metrics)
