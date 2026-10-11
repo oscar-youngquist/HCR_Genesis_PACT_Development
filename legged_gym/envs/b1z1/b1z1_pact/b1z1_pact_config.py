@@ -273,83 +273,83 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # Coupled PACT control: the actor emits both position and feedforward
         # torque branches. The simulator combines them before clipping.
         control_type = "P"
-        stiffness = {                                                                   # Joint-name PD proportional gains [N m/rad].
-            "hip": 100.0,
-            "thigh": 100.0,
-            "calf": 200.0,
-            "z1_waist": 40.0,
-            "z1_shoulder": 80.0,
-            "z1_elbow": 40.0,
-            "z1_wrist_angle": 40.0,
-            "z1_forearm_roll": 40.0,
-            "z1_wrist_rotate": 40.0,
-            "z1_jointGripper": 40.0,
-        }
-        damping = {                                                                     # Joint-name PD derivative gains [N m s/rad].
-            "hip": 5.00,
-            "thigh": 5.00,
-            "calf": 10.0,
-            "z1_waist": 1.2,
-            "z1_shoulder": 2.4,
-            "z1_elbow": 1.2,
-            "z1_wrist_angle": 1.2,
-            "z1_forearm_roll": 1.2,
-            "z1_wrist_rotate": 1.2,
-            "z1_jointGripper": 1.2,
-        }
-        # stiffness = {
-        #     "hip": 250.0,
-        #     "thigh": 250.0,
-        #     "calf": 400.0,
-        #     "z1_waist": 64.0,
-        #     "z1_shoulder": 128.0,
-        #     "z1_elbow": 64.0,
-        #     "z1_wrist_angle": 64.0,
-        #     "z1_forearm_roll": 64.0,
-        #     "z1_wrist_rotate": 64.0,
-        #     "z1_jointGripper": 64.0,
+        # stiffness = {                                                                   # Joint-name PD proportional gains [N m/rad].
+        #     "hip": 100.0,
+        #     "thigh": 100.0,
+        #     "calf": 200.0,
+        #     "z1_waist": 40.0,
+        #     "z1_shoulder": 80.0,
+        #     "z1_elbow": 40.0,
+        #     "z1_wrist_angle": 40.0,
+        #     "z1_forearm_roll": 40.0,
+        #     "z1_wrist_rotate": 40.0,
+        #     "z1_jointGripper": 40.0,
         # }
-        # damping = {
-        #     "hip": 6.25,
-        #     "thigh": 6.25,
+        # damping = {                                                                     # Joint-name PD derivative gains [N m s/rad].
+        #     "hip": 5.00,
+        #     "thigh": 5.00,
         #     "calf": 10.0,
-        #     "z1_waist": 1.5,
-        #     "z1_shoulder": 3.0,
-        #     "z1_elbow": 1.5,
-        #     "z1_wrist_angle": 1.5,
-        #     "z1_forearm_roll": 1.5,
-        #     "z1_wrist_rotate": 1.5,
-        #     "z1_jointGripper": 1.5,
+        #     "z1_waist": 1.2,
+        #     "z1_shoulder": 2.4,
+        #     "z1_elbow": 1.2,
+        #     "z1_wrist_angle": 1.2,
+        #     "z1_forearm_roll": 1.2,
+        #     "z1_wrist_rotate": 1.2,
+        #     "z1_jointGripper": 1.2,
         # }
+        stiffness = {
+            "hip": 250.0,
+            "thigh": 250.0,
+            "calf": 400.0,
+            "z1_waist": 64.0,
+            "z1_shoulder": 128.0,
+            "z1_elbow": 64.0,
+            "z1_wrist_angle": 64.0,
+            "z1_forearm_roll": 64.0,
+            "z1_wrist_rotate": 64.0,
+            "z1_jointGripper": 64.0,
+        }
+        damping = {
+            "hip": 6.25,
+            "thigh": 6.25,
+            "calf": 10.0,
+            "z1_waist": 1.5,
+            "z1_shoulder": 3.0,
+            "z1_elbow": 1.5,
+            "z1_wrist_angle": 1.5,
+            "z1_forearm_roll": 1.5,
+            "z1_wrist_rotate": 1.5,
+            "z1_jointGripper": 1.5,
+        }
 
         # stiffness = {"joint":100.0, "z1": 30.0,}
         # damping = {"joint": 5.0,"z1": 0.70,}
 
         action_scale = 0.25                                                             # Convert normalized position actions to joint offsets [rad].
-        torque_scale = 30.0                                                             # Convert normalized feedforward actions to torque [N m].
+        torque_scale = 20.0                                                             # Convert normalized feedforward actions to torque [N m].
         torque_scale_overrides = {                                                      # Exact learned-joint overrides [N m/action].
-            "z1_waist": 10.0,
-            "z1_shoulder": 10.0,
-            "z1_elbow": 10.0,
-            "z1_wrist_angle": 10.0,
-            "z1_forearm_roll": 10.0,
+            "z1_waist": 7.5,
+            "z1_shoulder": 7.5,
+            "z1_elbow": 7.5,
+            "z1_wrist_angle": 7.5,
+            "z1_forearm_roll": 7.5,
         }
         dt = 0.02
         decimation = 4
 
         use_tradeoff_curriculum = False                                                 # Schedule feedback/feedforward torque-branch weights.
-        tradeoff_init_weights = [0.40, 1.60]                                            # Initial [feedback, feedforward] torque weights.
-        tradeoff_final_weights = [1.0, 1.0]                                             # Final [feedback, feedforward] torque weights.
+        tradeoff_init_weights = [0.60, 1.00]                                            # Initial [feedback, feedforward] torque weights.
+        tradeoff_final_weights = [1.00, 1.00]                                             # Final [feedback, feedforward] torque weights.
         tradeoff_steps = 10                                                             # Number of torque-weight curriculum stages.
-        tradeoff_threshold = 0.70                                                       # Performance threshold for advancing torque weights.
+        tradeoff_threshold = 1.80                                                       # Performance threshold for advancing torque weights.
 
         # This is not a curriculum: each reset slightly biases the coupled
         # output toward either feedback or feedforward torque. A subset stays
         # at the clean 1:1 contribution.
         randomize_pact_weights = True                                                   # Randomize feedback/feedforward balance at reset.
         pact_weight_bias_min = 0.0                                                      # Minimum sampled branch-weight bias.
-        pact_weight_bias_max = 0.20                                                     # Maximum sampled branch-weight bias.
-        pact_balanced_prob = 0.25                                                       # Probability of keeping a balanced 1:1 torque split.
+        pact_weight_bias_max = 0.05                                                     # Maximum sampled branch-weight bias.
+        pact_balanced_prob = 0.50                                                       # Probability of keeping a balanced 1:1 torque split.
 
     class commands(RejectionCurriculumDefaults):
         curriculum = False
@@ -989,8 +989,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_sample_fraction = 0.2                  # Fraction per PPO epoch; 1 keeps legacy, 0 skips actor physics.
         # Use 1/num_learning_epochs for once-per-rollout coverage; preserve PPO batch sizes.
         actor_phys_arm_rejection_enabled = True            # Dynamic arm-force projection, scaled by shared p; no reliability gate.
-        actor_phys_arm_rejection_weight = 0.75             # Final weight inside the existing actor schedule.
-        actor_phys_force_allocation_weight = 0.2           # Effective weight = this * PINN ramp * p^2; coupled arm rejection only.
+        actor_phys_arm_rejection_weight = 0.50             # Final weight inside the existing actor schedule.
+        actor_phys_force_allocation_weight = 0.25           # Effective weight = this * PINN ramp * p^2; coupled arm rejection only.
         actor_phys_base_rejection_enabled = True           # Incremental stance-force reaction objective.
         actor_phys_base_rejection_weight = 0.5             # Final weight inside the existing actor schedule.
         actor_phys_rejection_damping = 1e-4                # Damping of J M^-1 J^T before the force solve.

@@ -13,13 +13,15 @@ class RejectionCurriculumDefaults:
     reject_initial_external_scale = 0.25
     reject_warmup_iterations = 1600  # Legacy field; force_curriculum_gate_start_iteration controls gating.
     reject_nominal_tracking_iterations = 0  # Disable the zero-disturbance stage.
-    reject_initial_progress = 0.2  # Compensation/loss strength during the initial hold.
-    reject_compensation_ramp_iterations = 1000
-    reject_external_ramp_iterations = 8000
-    force_curriculum_gate_start_iteration = 8000  # Hold until this iteration.
+    reject_initial_progress = 0.5  # Compensation/loss strength during the initial hold.
+    reject_compensation_ramp_iterations = 4000
+    reject_external_ramp_iterations = 4000
+    reject_external_step_enabled = True  # Replace the continuous ramp with 50%, 75%, 100%.
+    reject_external_step_hold_iterations = 3000  # Hold each intermediate force level.
+    force_curriculum_gate_start_iteration = 10000  # Hold until this iteration.
     force_curriculum_gate_patience = 400
     force_curriculum_use_latest_start_fallback = True
-    force_curriculum_latest_start_iteration = 8000  # Equal gate/fallback starts enforce fixed timing.
+    force_curriculum_latest_start_iteration = 20000  # Equal gate/fallback starts enforce fixed timing.
     reject_active_force_threshold = 1.0  # Diagnostic active-force cutoff [N]; not an advancement gate.
     
     reject_force_nrmse_threshold = 0.25  # Legacy field; force accuracy no longer gates advancement.
@@ -38,6 +40,7 @@ class RejectionCurriculumDefaults:
     # force_curriculum_latest_start_iteration = 10
     # reject_compensation_ramp_iterations = 10
     # reject_external_ramp_iterations = 10
+    # reject_external_step_hold_iterations = 10  # Used only when stepped mode is enabled.
 
 
 class RejectionCurriculum(B1Z1StagedForceCurriculum):
@@ -67,6 +70,10 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
             raise ValueError("Rejection ramp and minimum sample count must be positive")
         if cfg.reject_active_force_threshold <= 0 or cfg.reject_force_nrmse_threshold <= 0:
             raise ValueError("Rejection force thresholds must be positive")
+        if getattr(cfg, "reject_external_step_enabled", False):
+            hold = getattr(cfg, "reject_external_step_hold_iterations", 3000)
+            if isinstance(hold, bool) or not isinstance(hold, int) or hold < 1:
+                raise ValueError("reject_external_step_hold_iterations must be a positive integer")
 
     @torch.no_grad()
     def observe(self, prediction, target, scales):
@@ -99,6 +106,12 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
         if iteration < self.nominal_iterations:
             return 0.0
         initial = self.cfg.reject_initial_external_scale
+        if getattr(self.cfg, "reject_external_step_enabled", False):
+            if self.full_iteration < 0 or iteration < self.full_iteration:
+                return initial
+            # Anchor steps to completed rejection ramp, including checkpoint resumes.
+            hold = getattr(self.cfg, "reject_external_step_hold_iterations", 3000)
+            return min(1.0, 0.5 + 0.25 * ((iteration - self.full_iteration) // hold))
         progress = 0.0 if self.full_iteration < 0 else self._linear_ramp(
             iteration, self.full_iteration, self.cfg.reject_external_ramp_iterations)
         return initial + (1.0 - initial) * progress

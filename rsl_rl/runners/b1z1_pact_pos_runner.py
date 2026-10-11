@@ -12,6 +12,7 @@ import torch
 from rsl_rl.utils.adaptive_entropy import terrain_entropy_progress
 from legged_gym.torque_action_scaling import simulator_torque_action_scale
 from rsl_rl.utils.simulator_diagnostics import domain_rand_state, load_domain_rand_state
+from rsl_rl.utils.simulator_diagnostics import log_tradeoff_curriculum
 from torch.utils.tensorboard import SummaryWriter
 
 from legged_gym.envs.b1z1.force_task_utils import (
@@ -297,6 +298,7 @@ class B1Z1PACTPosRunner:
         mean_length = statistics.mean(lengths) if lengths else None
 
         if self.writer:
+            log_tradeoff_curriculum(self.writer, self.env, iteration)
             for name, value in metrics.items():
                 if "/" in name:
                     self.writer.add_scalar(name, value, iteration)
