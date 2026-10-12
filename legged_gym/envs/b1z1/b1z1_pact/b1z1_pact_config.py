@@ -573,6 +573,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
 
         tracking_sigma = 0.25                                                           # Velocity tracking error scale.
         dof_tracking_sigma = 0.04                                                      # Whole-body mean squared position-error scale [rad^2].
+        arm_feedforward_tracking_sigma = 0.25                                         # Normalized torque MSE width; r=exp(-MSE/sigma).
         tracking_ee_sigma = 1.00                                                        # EE position tracking error scale.
 
         tracking_ee_orientation_sigma = 0.02                                            # Default EE orientation tracking error scale.
@@ -655,6 +656,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             tracking_lin_vel_force_world = 2.0
             tracking_ang_vel = 1.0
             tracking_dof_pos = 0.25  # Positive tracking of executed whole-body PD position targets.
+            tracking_arm_feedforward = 0.2  # Positive compensation reward; nonzero adds per-step BARD work, independent of PINNs.
 
             no_physical_progress = -0.50
 
@@ -988,11 +990,19 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
     class algorithm:
         actor_phys_sample_fraction = 0.2                  # Fraction per PPO epoch; 1 keeps legacy, 0 skips actor physics.
         # Use 1/num_learning_epochs for once-per-rollout coverage; preserve PPO batch sizes.
-        actor_phys_arm_rejection_enabled = True            # Dynamic arm-force projection, scaled by shared p; no reliability gate.
-        actor_phys_arm_rejection_weight = 0.50             # Final weight inside the existing actor schedule.
-        actor_phys_force_allocation_weight = 0.25           # Effective weight = this * PINN ramp * p^2; coupled arm rejection only.
+        actor_phys_arm_feedforward_enabled = True          # Detached bias/base-motion/applied-EE-force torque teacher.
+        actor_phys_arm_feedforward_weight = 0.50           # Inside actor_phys_coef and its PINN ramp; zero skips all teacher work.
+        # Reuse BARD acceleration; h already includes gravity. Normalize by each joint's torque_action_scale.
+        # No active-force/p gate: gravity guidance is useful even without external disturbances.
+        actor_phys_arm_rejection_enabled = False            # Dynamic arm-force projection, scaled by shared p; no reliability gate.
+        actor_phys_arm_rejection_weight = 0.50             # Zero skips arm projection; base rejection can still need the neutral pass.
+        actor_phys_force_allocation_weight = 0.25           # Zero skips allocation; otherwise weight * PINN ramp * p^2.
         actor_phys_base_rejection_enabled = True           # Incremental stance-force reaction objective.
         actor_phys_base_rejection_weight = 0.5             # Final weight inside the existing actor schedule.
+        actor_phys_base_balance_enabled = True           # Single-pass stance-force teacher; requires live GRFs. Opt in separately.
+        actor_phys_base_balance_weight = 0.50             # Effective: weight * rejection p * actor_phys_coef * PINN ramp.
+        # Reuse base force scale/axis weights, active-force/contact gates, and Huber delta below.
+        # To replace the counterfactual loss, enable balance and disable actor_phys_base_rejection_enabled.
         actor_phys_rejection_damping = 1e-4                # Damping of J M^-1 J^T before the force solve.
         actor_phys_arm_force_scale = 20.0                  # Arm residual normalization [N].
         actor_phys_base_force_scale = 100.0                # Planar stance residual normalization [N].

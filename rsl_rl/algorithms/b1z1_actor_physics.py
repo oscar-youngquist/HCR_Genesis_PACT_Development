@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from .hard_pact_bard import differentiable_bard_rollout_loss
-from . import b1z1_ee_stability, b1z1_actor_rejection
+from . import b1z1_ee_stability, b1z1_actor_rejection, b1z1_actor_feedforward, b1z1_actor_base_balance
 from . import b1z1_actor_sampling as sampling
 
 
@@ -93,6 +93,8 @@ def configure(algorithm):
         return
     if not algorithm.bard_auxiliary:
         raise ValueError("actor_phys_enabled requires dynamics_backend='bard'")
+    b1z1_actor_feedforward.configure(algorithm)
+    b1z1_actor_base_balance.configure(algorithm)
     cfg = algorithm.cfg
     allocation = cfg.get("actor_phys_force_allocation_weight", 0.)
     if not math.isfinite(allocation) or allocation < 0:
@@ -201,7 +203,8 @@ def capture(runner):
         threshold = a.cfg.get("actor_phys_rejection_active_force", 1.)
         values["sampling_active_force"] = ((force.norm(dim=-1) > threshold)
                                             | (base.norm(dim=-1) > threshold)).unsqueeze(-1)
-    if b1z1_actor_rejection.term_weight(a, "base") > 0:
+    if b1z1_actor_rejection.term_weight(a, "base") > 0 or b1z1_actor_base_balance.enabled(a.cfg):
+        # Capture through warmup too, so the optional loss has a stable rollout schema.
         values["stance"] = env.simulator.foot_contacts
     if a.cfg.get("actor_phys_ee_stability_weight", 0.) > 0:
         # Same compliant reference at both times; freeze force and base frame.
@@ -356,6 +359,10 @@ def objective(a, batch, actions, context):
     metrics.update(arm_metrics)
     metrics["valid_fraction"] = valid.float().mean()
     metrics["active_fraction"] = zero.detach()
+    if b1z1_actor_feedforward.enabled(a.cfg, a.actor_critic.action_mode):
+        metrics.update(b1z1_actor_feedforward.zero_metrics(zero))
+    if b1z1_actor_base_balance.enabled(a.cfg):
+        metrics.update(b1z1_actor_base_balance.zero_metrics(zero))
     if pos_fk_enabled(a.cfg):
         metrics.update({"pos_fk_" + name: zero.detach() for name in
                         ("raw", "weighted", "finite_count", "nonfinite_count",
@@ -425,6 +432,25 @@ def objective(a, batch, actions, context):
                                         {k: v[finite_ee] for k, v in data.items()})
         total = total + fk_loss
         metrics.update(fk_metrics)
+        metrics["loss"] = total.detach()
+    if b1z1_actor_feedforward.enabled(a.cfg, a.actor_critic.action_mode):
+        # Same valid rows and existing BARD acceleration; no extra rollout/FK.
+        ff_loss, ff_metrics = b1z1_actor_feedforward.objective(
+            a, actions[valid][good][finite][finite_ee], data["state"][finite_ee],
+            SimpleNamespace(**{k: v[finite][finite_ee] for k, v in vars(fixed).items()}),
+            rollout.acceleration[finite][finite_ee], torque.shape[-1])
+        total = total + ff_loss
+        metrics.update(ff_metrics)
+        metrics["loss"] = total.detach()
+    if b1z1_actor_base_balance.term_weight(a) > 0:
+        # One live GRF prediction and one rollout serve tracking and this teacher.
+        base_loss, base_metrics = b1z1_actor_base_balance.objective(
+            a, actions[valid][good][finite][finite_ee],
+            {k: v[finite_ee] for k, v in data.items()},
+            SimpleNamespace(**{k: v[finite][finite_ee] for k, v in vars(fixed).items()}),
+            rollout.acceleration[finite][finite_ee], grf[finite][finite_ee])
+        total = total + base_loss
+        metrics.update(base_metrics)
         metrics["loss"] = total.detach()
     if getattr(a, "enable_additional_diagnostics", False) and grf.requires_grad:
         a.actor_physics_paths = (torque, grf)

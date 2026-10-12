@@ -34,6 +34,9 @@ def make_b1z1_pact_ablation_configs(variant_id):
             actor_phys_enabled = features.actor_phys_enabled
             if features.action_mode == "position" or not features.actor_phys_enabled:
                 actor_phys_force_allocation_weight = 0.0
+                actor_phys_arm_feedforward_enabled = False
+            if not features.actor_phys_enabled:
+                actor_phys_base_balance_enabled = False
 
         class runner(B1Z1PACTCfgPPO.runner):
             run_name = features.task_name

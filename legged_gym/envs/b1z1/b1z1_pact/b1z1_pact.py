@@ -109,6 +109,9 @@ class B1Z1PACT(LeggedRobot):
         if rollout_timer is not None:
             rollout_timer.stop("force_events", force_start)
 
+        if "tracking_arm_feedforward" in self.reward_scales:
+            from .arm_feedforward_reward import capture
+            capture(self, actions)
         sim_start = rollout_timer.start("simulator") if rollout_timer is not None else None
         self.simulator.step(actions)
         if rollout_timer is not None:
@@ -1576,6 +1579,9 @@ class B1Z1PACT(LeggedRobot):
                 self.reward_scales[key] = (low + (high - low) * alpha) * self.dt
 
     def _prepare_reward_function(self):
+        # Position-only variants have no learned FF command to supervise.
+        if self.cfg.env.num_policy_actions == self.num_actions:
+            self.reward_scales.pop("tracking_arm_feedforward", None)
         for key in list(self.reward_scales.keys()):
             if self.reward_scales[key] == 0:
                 self.reward_scales.pop(key)
@@ -2057,6 +2063,11 @@ class B1Z1PACT(LeggedRobot):
         """Positive whole-body PD-target tracking; one at zero joint-position error."""
         error = (self.simulator.dof_pos - self.dof_tracking_target).square().mean(dim=-1)
         return torch.exp(-error / self.cfg.rewards.dof_tracking_sigma)
+
+    def _reward_tracking_arm_feedforward(self):
+        """RL supervision of the same arm compensation equation as actor physics."""
+        from .arm_feedforward_reward import reward
+        return reward(self)
 
     def _reward_tracking_ee_force_world(self):
         target = get_force_adjusted_ee_target(self).effective_target

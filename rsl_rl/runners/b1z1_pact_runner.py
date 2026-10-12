@@ -82,9 +82,13 @@ class B1Z1PACTRunner:
         )
         from rsl_rl.algorithms.b1z1_actor_physics import enabled as actor_physics_enabled
         from rsl_rl.algorithms.b1z1_actor_sampling import validate_fraction
+        from legged_gym.envs.b1z1.b1z1_pact import arm_feedforward_reward
         validate_fraction(algorithm_cfg)
+        reward_needs_physics = arm_feedforward_reward.enabled(env)
+        if reward_needs_physics and backend_name != "bard":
+            raise ValueError("tracking_arm_feedforward reward requires dynamics_backend='bard'")
         needs_physics = (algorithm_cfg.get("representation_pinn_enabled", True)
-                         or actor_physics_enabled(algorithm_cfg))
+                         or actor_physics_enabled(algorithm_cfg) or reward_needs_physics)
         if not needs_physics:
             self.dynamics = None
         elif backend_name == "bard":
@@ -110,9 +114,12 @@ class B1Z1PACTRunner:
                 "expected 'bard' or 'pinocchio'"
             )
 
+        arm_feedforward_reward.configure(env, self.dynamics)
         merged = dict(algorithm_cfg)
+        from rsl_rl.algorithms.b1z1_actor_feedforward import enabled as feedforward_enabled
         arm_physics = (algorithm_cfg.get("actor_phys_pos_fk_enabled", False)
                        or algorithm_cfg.get("actor_phys_arm_rejection_enabled", False)
+                       or feedforward_enabled(algorithm_cfg, policy_cfg.get("action_mode", "coupled"))
                        or (algorithm_cfg.get("actor_phys_arm_manipulability_enabled", False)
                            and algorithm_cfg.get("actor_phys_arm_manipulability_weight", .02) > 0))
         if actor_physics_enabled(algorithm_cfg) and arm_physics:

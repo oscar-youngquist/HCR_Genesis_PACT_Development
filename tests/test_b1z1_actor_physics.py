@@ -11,6 +11,7 @@ from rsl_rl.algorithms.ppo_b1z1_pact import PPO_B1Z1PACT
 
 def config():
     return dict(actor_phys_enabled=True, actor_phys_coef=.01, actor_phys_pos_fk_enabled=False,
+                actor_phys_arm_feedforward_enabled=False,  # Legacy objective fixture; tested separately.
                 actor_phys_velocity_time_constant=.25, actor_phys_softplus_temperature=.05,
                 actor_phys_huber_delta=1., actor_phys_ee_scale=.1, actor_phys_q_scale=1.,
                 actor_phys_qd_scale=10., actor_phys_q_margin=.05, actor_phys_qd_margin=.5,
@@ -178,6 +179,7 @@ def test_enabled_ppo_update_and_snapshot_alignment(rejection_active, sample_frac
            "privileged_force_dim": 21, "pinn_init_steps": 0, "pinn_warmup": 2,
            "pinn_loss_weight": .1, "actor_phys_ee_stability_weight": 0.}
     if rejection_active:
+        cfg.update(actor_phys_arm_rejection_enabled=True, actor_phys_base_rejection_enabled=True)
         cfg["actor_phys_arm_dof_indices"] = list(range(12, 18))
         fixed_arm = template.actor_physics_cache.ee_jacobian
         fixed_arm[:, :3, 18:21] = torch.eye(3)

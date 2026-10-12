@@ -230,6 +230,8 @@ def configure_actor(a, batch):
                   if k.startswith(("actor_phys_arm_rejection", "actor_phys_base_rejection",
                                    "actor_phys_rejection", "actor_phys_live_grf",
                                    "actor_phys_grf_torque", "actor_phys_arm_force", "actor_phys_base_force"))})
+    # These graph tests explicitly exercise rejection even if the live config disables it.
+    a.cfg.update(actor_phys_arm_rejection_enabled=True, actor_phys_base_rejection_enabled=True)
     a.cfg["actor_phys_arm_dof_indices"] = list(range(12, 18))
     a.force_gate_active = True
     a._force_prediction_blend_alpha = lambda: 1.
