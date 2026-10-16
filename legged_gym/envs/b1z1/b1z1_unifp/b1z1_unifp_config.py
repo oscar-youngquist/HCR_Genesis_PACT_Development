@@ -6,7 +6,7 @@ class B1Z1UniFPCfg:
     seed = 1
 
     class env:
-        num_envs = 4092
+        num_envs = 10240
         # Actor frame excludes gait sin/cos; phase remains internal to gait
         # reference, contact scheduling, and guidance rewards.
         num_observations = 71 + 2
@@ -376,8 +376,8 @@ class B1Z1UniFPCfg:
         push_base_duration_s_ext = [1.0, 3.0]
         base_forced_prob_ext = 0.8
         randomize_base_force_gains = True
-        max_push_force_xyz_base_cmd = [-20.0, 20.0]
-        max_push_force_xyz_base_ext = [-20.0, 20.0]
+        max_push_force_xyz_base_cmd = [-35.0, 35.0]
+        max_push_force_xyz_base_ext = [-35.0, 35.0]
         
         base_force_kp_range = [200.0, 200.0]
         base_force_kd_range = [200.0, 200.0]
@@ -635,6 +635,7 @@ class B1Z1UniFPCfg:
 
             # Legs
             dof_acc           = -2.5e-7
+            dof_vel           = -1e-4
             action_rate       = -0.02
             action_smoothness = -0.01
             joint_power       = -2.e-5
@@ -755,8 +756,8 @@ class B1Z1UniFPCfg:
                 # "torso_force_wrench_ellipsoid":[0.2, 0.5],
             }
             warmup_steps = 0
-            curr_steps = 60000
-            # curr_steps = 16000
+            # curr_steps = 60000
+            curr_steps = 24000
 
     class viewer:
         ref_env = 0
@@ -822,7 +823,7 @@ class B1Z1UniFPCfgPPO:
         schedule = "adaptive"  # adaptive
         gamma = 0.99
         lam = 0.95
-        desired_kl = 0.01
+        desired_kl = 0.015
         max_grad_norm = 1.0
         # The shared UniFP adaptation path is variational for both B1 and
         # B1Z1: reconstruct one next privileged frame and regularize q(z|h).
@@ -852,8 +853,8 @@ class B1Z1UniFPCfgPPO:
         algorithm_class_name = "PPO_UniFP"
         num_steps_per_env = 24
         
-        max_iterations = 70000
-        # max_iterations = 28000
+        # max_iterations = 70000
+        max_iterations = 28000
         
         save_interval = 1000
         
