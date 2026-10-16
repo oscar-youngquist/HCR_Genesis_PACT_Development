@@ -508,11 +508,56 @@ def backward(a, batch, ppo_loss, actions, context):
         a.actor_physics_metrics[name] = a.actor_physics_metrics.get(name, 0) + value.detach()
 
 
+def _logged_component(a, name):
+    """Hide disabled components, not zero-valued samples from enabled objectives."""
+    cfg = a.cfg
+    for component, diagnostic in (("vel", "velocity_error"), ("ee", "ee_error_m"),
+                                  ("q", "position_violation_rad"), ("qd", "velocity_violation_radps")):
+        if name in (component, diagnostic):
+            return cfg.get(f"actor_phys_{component}_weight", 0.) > 0
+    if name.startswith("ee_stability_"):
+        if cfg.get("actor_phys_ee_stability_weight", 0.) <= 0:
+            return False
+        if name == "ee_stability_angular_speed":
+            return cfg.get("actor_phys_ee_stability_use_orientation", False)
+        if name == "ee_stability_twist":
+            return cfg.get("actor_phys_ee_stability_twist_weight", 0.) > 0
+        if name == "ee_stability_energy_violation":
+            return cfg.get("actor_phys_ee_stability_energy_weight", 0.) > 0
+        return True
+    if name.startswith("pos_fk_"):
+        return pos_fk_enabled(cfg)
+    if name.startswith("arm_manipulability_"):
+        return manipulability_enabled(cfg)
+    if name.startswith("arm_feedforward_"):
+        return b1z1_actor_feedforward.enabled(cfg, a.actor_critic.action_mode)
+    if name.startswith("base_balance_"):
+        return b1z1_actor_base_balance.enabled(cfg) and cfg.get("actor_phys_live_grf_enabled", False)
+    # Test configured weights, not scheduled term_weight: keep gate/ramp diagnostics.
+    arm = cfg.get("actor_phys_arm_rejection_enabled", False) and cfg.get("actor_phys_arm_rejection_weight", 0.) > 0
+    base = (cfg.get("actor_phys_base_rejection_enabled", False)
+            and cfg.get("actor_phys_base_rejection_weight", 0.) > 0
+            and cfg.get("actor_phys_live_grf_enabled", False))
+    if name.startswith("rejection_allocation_"):
+        return arm and a.actor_critic.action_mode == "coupled" and cfg.get("actor_phys_force_allocation_weight", 0.) > 0
+    if name.startswith(("rejection_arm_", "rejection_projection_", "rejection_generated_arm_")):
+        return arm
+    if name.startswith(("rejection_base_", "rejection_live_stance_", "rejection_neutral_stance_",
+                        "rejection_incremental_stance_")):
+        return base
+    if name == "rejection_external_force_norm":
+        return arm or base
+    if name in ("rejection_grf_blend", "rejection_trust_clipped_fraction"):
+        # Live GRFs also support ordinary rollout tracking, without rejection losses.
+        return cfg.get("actor_phys_live_grf_enabled", False)
+    return True
+
+
 def finish(a, metrics, updates):
     metrics.update({"ActorPhysics/" + k: v for k, v in getattr(a, "actor_sampling_metrics", {}).items()})
     if enabled(a.cfg):
         metrics.update({"ActorPhysics/" + k: v.item() / max(updates, 1)
-                        for k, v in a.actor_physics_metrics.items()})
+                        for k, v in a.actor_physics_metrics.items() if _logged_component(a, k)})
         metrics["ActorPhysics/scheduled_coefficient"] = scheduled_coefficient(a)
         if scheduled_coefficient(a) == 0:
             metrics.update({"ActorPhysics/loss_scaled": 0.0, "ActorPhysics/active_fraction": 0.0})

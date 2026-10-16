@@ -9,11 +9,47 @@ from legged_gym.envs.b1z1.force_task_utils import (
     init_ee_force_target_diagnostics,
     invalidate_force_adjusted_ee_target_cache,
     reset_ee_force_target_diagnostics,
+    summarize_accumulated_ee_force_target_diagnostics,
+    update_force_curriculum_from_rollout,
 )
 import torch
 
 
 class ForceTargetProjectionTests(unittest.TestCase):
+    def test_axis_tracking_mae_uses_physical_nominal_error_and_resets(self):
+        env = self._environment([[.5, 0., 0.], [.6, 0., 0.]],
+                                [[10., 20., 30.], [-10., -20., -30.]])
+        env.cfg.use_force_shifted_target = False
+        env.enable_additional_diagnostics = False
+        init_ee_force_target_diagnostics(env)
+        offset = torch.tensor([[.1, -.2, .3], [-.1, .2, -.3]])
+        for factor in (1., -2.):
+            env.simulator.ee_pos = env.curr_ee_goal_cart_world + factor * offset
+            accumulate_ee_force_target_diagnostics(env)
+        summary = summarize_accumulated_ee_force_target_diagnostics(env, torch.arange(2))
+        for axis, expected in zip("xyz", (.15, .30, .45)):
+            self.assertAlmostEqual(summary[f"EE/tracking_{axis}_mae_m"].item(), expected, places=6)
+        self.assertAlmostEqual(summary["EE/tracking_l1_mean"].item(), .9, places=6)
+        reset_ee_force_target_diagnostics(env, torch.tensor([0]))
+        for axis, expected in zip("xyz", (.30, .60, .90)):
+            sums = env.ee_force_target_diagnostic_sums[f"EE/tracking_{axis}_mae_m"]
+            self.assertEqual(sums[0].item(), 0.)
+            self.assertAlmostEqual(sums[1].item(), expected, places=6)
+
+    def test_axis_errors_are_forwarded_to_rejection_tags_without_zero_filling(self):
+        calls = []
+        env = types.SimpleNamespace(_staged_force_curriculum=types.SimpleNamespace(
+            update=lambda *args: calls.append(args), metrics=lambda iteration: {"Rejection/stage": 1}))
+        episodes = [{f"EE/tracking_{axis}_mae_m": torch.tensor(value * scale)
+                     for axis, value in zip("xyz", (.1, .2, .3))} for scale in (1., 2.)]
+        logged = update_force_curriculum_from_rollout(env, 7, episodes, 100.)
+        for axis, expected in zip("xyz", (.15, .30, .45)):
+            self.assertAlmostEqual(logged[f"Rejection/ee_tracking_{axis}_mae_m"], expected, places=6)
+        self.assertEqual(calls, [(7, None, None, 100.)])  # New diagnostics do not alter the gate.
+        for episodes in ([], [{"EE/tracking_l1_mean": .6}]):
+            logged = update_force_curriculum_from_rollout(env, 8, episodes, None)
+            self.assertEqual(logged, {"Rejection/stage": 1})
+
     @staticmethod
     def _environment(nominal, force, *, project=True, commanded_force=None):
         nominal = torch.as_tensor(nominal, dtype=torch.float32)

@@ -43,6 +43,9 @@ EE_FORCE_TARGET_DIAGNOSTIC_NAMES = (
     "EE/effective_radius_mean",
     "EE/tracking_l1_mean",
     "EE/tracking_l2_mean",
+    "EE/tracking_x_mae_m",
+    "EE/tracking_y_mae_m",
+    "EE/tracking_z_mae_m",
     "EE/relative_velocity_error_mean",
 )
 
@@ -233,13 +236,19 @@ def update_force_curriculum_from_rollout(env, iteration, ep_infos, mean_episode_
     """Reduce the logged episode metrics once and advance the shared gate."""
     if not hasattr(env, "_staged_force_curriculum"):
         return {}
-    return update_staged_force_curriculum(
+    metrics = update_staged_force_curriculum(
         env,
         iteration,
         _mean_episode_metric(ep_infos, "EE/tracking_l1_mean"),
         _mean_episode_metric(ep_infos, "roll_termination_rate"),
         mean_episode_length,
     )
+    # Both rejection runners log these directly; missing episodes are not zero error.
+    for axis in "xyz":
+        value = _mean_episode_metric(ep_infos, f"EE/tracking_{axis}_mae_m")
+        if value is not None:
+            metrics[f"Rejection/ee_tracking_{axis}_mae_m"] = value
+    return metrics
 
 
 @torch.no_grad()
@@ -501,6 +510,10 @@ def accumulate_ee_force_target_diagnostics(env):
     )
     tracking_error = env.simulator.ee_pos - target.effective_target
     values = _per_env_ee_force_offset_diagnostics(target)
+    # World-frame Cartesian MAE in meters, before any observation/reward scaling.
+    # Rejection tasks use the nominal target; ordinary UniFP retains its shifted target.
+    values.update({f"EE/tracking_{axis}_mae_m": tracking_error[:, i].abs()
+                   for i, axis in enumerate("xyz")})
     values.update(
         {
             "EE/tracking_l1_mean": torch.sum(torch.abs(tracking_error), dim=-1),

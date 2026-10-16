@@ -359,8 +359,8 @@ class B1Z1UniFPCfg:
         gripper_forced_prob_ext = 0.8
         
         randomize_gripper_force_gains = True
-        max_push_force_xyz_gripper_cmd = [-60.0, 60.0]
-        max_push_force_xyz_gripper_ext = [-60.0, 60.0]
+        max_push_force_xyz_gripper_cmd = [-50.0, 50.0]
+        max_push_force_xyz_gripper_ext = [-50.0, 50.0]
 
         gripper_force_kp_range = [200.0, 200.0]
         gripper_force_kd_range = [3.0, 3.0]
@@ -533,7 +533,7 @@ class B1Z1UniFPCfg:
     class rewards:
         force_neutral_threshold = 1.0e-3
         only_positive_rewards = False
-        use_reward_curriculum = False
+        use_reward_curriculum = True
         
         tracking_sigma = 0.25
         tracking_ee_sigma = 1.00
@@ -812,8 +812,8 @@ class B1Z1UniFPCfgPPO:
         # Increase exploration within these bounds while command tracking or
         # terrain-curriculum progress remains below its configured target.
         entropy_coef = 0.01
-        use_adaptive_entropy = False
-        adaptive_ent_bounds = [0.001, 0.01]
+        use_adaptive_entropy = True
+        adaptive_ent_bounds = [0.005, 0.01]
         adaptive_ent_lin_threshold = 1.50
         adaptive_ent_ang_threshold = 0.70
         adaptive_ent_ter_threshold = 6.0

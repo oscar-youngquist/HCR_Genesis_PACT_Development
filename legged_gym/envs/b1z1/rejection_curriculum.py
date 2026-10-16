@@ -12,13 +12,16 @@ class RejectionCurriculumDefaults:
     use_shared_rejection_curriculum = True
     reject_initial_external_scale = 0.25
     reject_warmup_iterations = 1600  # Legacy field; force_curriculum_gate_start_iteration controls gating.
-    reject_nominal_tracking_iterations = 0  # Disable the zero-disturbance stage.
-    reject_initial_progress = 0.5  # Compensation/loss strength during the initial hold.
-    reject_compensation_ramp_iterations = 4000
-    reject_external_ramp_iterations = 4000
-    reject_external_step_enabled = True  # Replace the continuous ramp with 50%, 75%, 100%.
+    reject_nominal_tracking_iterations = 8000  # Zero-disturbance stage; offsets gate/fallback starts.
+    reject_initial_progress = 0.5  # Actor losses start here; compensation waits for nominal tracking to end.
+    
+    reject_compensation_ramp_iterations = 100
+    reject_external_ramp_iterations = 8000
+    
+    reject_external_step_enabled = False  # Replace the continuous ramp with 50%, 75%, 100%.
     reject_external_step_hold_iterations = 3000  # Hold each intermediate force level.
     force_curriculum_gate_start_iteration = 10000  # Hold until this iteration.
+    
     force_curriculum_gate_patience = 400
     force_curriculum_use_latest_start_fallback = True
     force_curriculum_latest_start_iteration = 20000  # Equal gate/fallback starts enforce fixed timing.
@@ -99,6 +102,13 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
                 torch.where(active, (p-t).square().sum(-1), 0.).sum(),
                 torch.where(active, t.square().sum(-1), 0.).sum(), active.sum()))
 
+    @property
+    def actor_progress(self):
+        """Actor-only scaling; never change compensation beta or force exposure."""
+        if not getattr(self.cfg, "actor_rejection_use_curriculum", True):
+            return 1.0
+        return max(self.initial_progress, self.beta)
+
     def command_scale(self, iteration):
         return 0.0 if iteration < self.nominal_iterations else self.beta
 
@@ -144,6 +154,7 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
         return {
             "Rejection/beta": self.beta,
             "Rejection/progress": self.beta,
+            "Rejection/actor_progress": self.actor_progress,
             "ForceCurriculum/command_scale": self.beta,
             "ForceCurriculum/external_scale": self.external_scale(iteration),
             "Rejection/external_scale": self.external_scale(iteration),

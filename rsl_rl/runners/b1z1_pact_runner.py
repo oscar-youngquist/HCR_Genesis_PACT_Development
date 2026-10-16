@@ -250,8 +250,10 @@ class B1Z1PACTRunner:
             # never an approximation based on environment transitions.
             if hasattr(self.env, "set_training_iteration"):
                 self.env.set_training_iteration(iteration)
+            # Actor progress can bypass the rejection ramp without changing force exposure.
             # Freeze p throughout collection and its associated PPO update.
-            self.alg.rejection_progress = getattr(self.env._staged_force_curriculum, "beta", 0.)
+            curriculum = self.env._staged_force_curriculum
+            self.alg.rejection_progress = getattr(curriculum, "actor_progress", getattr(curriculum, "beta", 0.))
             if self.enable_additional_diagnostics and hasattr(self.actor_critic, "begin_rollout_diagnostics"):
                 self.actor_critic.begin_rollout_diagnostics()
             if self.enable_additional_diagnostics and hasattr(self.env, "begin_rollout_diagnostics"):

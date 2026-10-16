@@ -273,66 +273,66 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # Coupled PACT control: the actor emits both position and feedforward
         # torque branches. The simulator combines them before clipping.
         control_type = "P"
-        # stiffness = {                                                                   # Joint-name PD proportional gains [N m/rad].
-        #     "hip": 100.0,
-        #     "thigh": 100.0,
-        #     "calf": 200.0,
-        #     "z1_waist": 40.0,
-        #     "z1_shoulder": 80.0,
-        #     "z1_elbow": 40.0,
-        #     "z1_wrist_angle": 40.0,
-        #     "z1_forearm_roll": 40.0,
-        #     "z1_wrist_rotate": 40.0,
-        #     "z1_jointGripper": 40.0,
+        stiffness = {                                                                   # Joint-name PD proportional gains [N m/rad].
+            "hip": 100.0,
+            "thigh": 100.0,
+            "calf": 100.0,
+            "z1_waist": 40.0,
+            "z1_shoulder": 60.0,
+            "z1_elbow": 40.0,
+            "z1_wrist_angle": 40.0,
+            "z1_forearm_roll": 40.0,
+            "z1_wrist_rotate": 40.0,
+            "z1_jointGripper": 40.0,
+        }
+        damping = {                                                                     # Joint-name PD derivative gains [N m s/rad].
+            "hip": 5.00,
+            "thigh": 5.00,
+            "calf": 5.0,
+            "z1_waist": 0.8,
+            "z1_shoulder": 1.4,
+            "z1_elbow": 0.8,
+            "z1_wrist_angle": 0.8,
+            "z1_forearm_roll": 0.8,
+            "z1_wrist_rotate": 0.8,
+            "z1_jointGripper": 0.8,
+        }
+        # stiffness = {
+        #     "hip": 250.0,
+        #     "thigh": 250.0,
+        #     "calf": 400.0,
+        #     "z1_waist": 64.0,
+        #     "z1_shoulder": 128.0,
+        #     "z1_elbow": 64.0,
+        #     "z1_wrist_angle": 64.0,
+        #     "z1_forearm_roll": 64.0,
+        #     "z1_wrist_rotate": 64.0,
+        #     "z1_jointGripper": 64.0,
         # }
-        # damping = {                                                                     # Joint-name PD derivative gains [N m s/rad].
-        #     "hip": 5.00,
-        #     "thigh": 5.00,
+        # damping = {
+        #     "hip": 6.25,
+        #     "thigh": 6.25,
         #     "calf": 10.0,
-        #     "z1_waist": 1.2,
-        #     "z1_shoulder": 2.4,
-        #     "z1_elbow": 1.2,
-        #     "z1_wrist_angle": 1.2,
-        #     "z1_forearm_roll": 1.2,
-        #     "z1_wrist_rotate": 1.2,
-        #     "z1_jointGripper": 1.2,
+        #     "z1_waist": 1.5,
+        #     "z1_shoulder": 3.0,
+        #     "z1_elbow": 1.5,
+        #     "z1_wrist_angle": 1.5,
+        #     "z1_forearm_roll": 1.5,
+        #     "z1_wrist_rotate": 1.5,
+        #     "z1_jointGripper": 1.5,
         # }
-        stiffness = {
-            "hip": 250.0,
-            "thigh": 250.0,
-            "calf": 400.0,
-            "z1_waist": 64.0,
-            "z1_shoulder": 128.0,
-            "z1_elbow": 64.0,
-            "z1_wrist_angle": 64.0,
-            "z1_forearm_roll": 64.0,
-            "z1_wrist_rotate": 64.0,
-            "z1_jointGripper": 64.0,
-        }
-        damping = {
-            "hip": 6.25,
-            "thigh": 6.25,
-            "calf": 10.0,
-            "z1_waist": 1.5,
-            "z1_shoulder": 3.0,
-            "z1_elbow": 1.5,
-            "z1_wrist_angle": 1.5,
-            "z1_forearm_roll": 1.5,
-            "z1_wrist_rotate": 1.5,
-            "z1_jointGripper": 1.5,
-        }
 
         # stiffness = {"joint":100.0, "z1": 30.0,}
         # damping = {"joint": 5.0,"z1": 0.70,}
 
         action_scale = 0.25                                                             # Convert normalized position actions to joint offsets [rad].
-        torque_scale = 20.0                                                             # Convert normalized feedforward actions to torque [N m].
+        torque_scale = 30.0                                                             # Convert normalized feedforward actions to torque [N m].
         torque_scale_overrides = {                                                      # Exact learned-joint overrides [N m/action].
-            "z1_waist": 7.5,
-            "z1_shoulder": 7.5,
-            "z1_elbow": 7.5,
-            "z1_wrist_angle": 7.5,
-            "z1_forearm_roll": 7.5,
+            "z1_waist": 10.0,
+            "z1_shoulder": 10.0,
+            "z1_elbow": 10.0,
+            "z1_wrist_angle": 10.0,
+            "z1_forearm_roll": 10.0,
         }
         dt = 0.02
         decimation = 4
@@ -352,6 +352,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         pact_balanced_prob = 0.50                                                       # Probability of keeping a balanced 1:1 torque split.
 
     class commands(RejectionCurriculumDefaults):
+        actor_rejection_use_curriculum = False  # Full actor rejection strength; physical-force schedule is unchanged.
         curriculum = False
         max_curriculum = 0.8                                                            # Maximum command-curriculum range.
         # UniFP convention inside PACT training: the last three slots retain
@@ -398,7 +399,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         push_gripper_duration_s_ext = [1.0, 3.0]                                        # EE force-event duration range [s].
         gripper_forced_prob_ext = 0.8                                                   # Probability of an active EE force event.
 
-        max_push_force_xyz_gripper_ext = [-60.0, 60.0]                                  # Full-strength per-axis EE force range [N].
+        max_push_force_xyz_gripper_ext = [-50.0, 50.0]                                  # Full-strength per-axis EE force range [N].
         randomize_gripper_force_gains = False                                           # Randomize EE force-feedback gains.
         gripper_force_kp_range = [200.0, 200.0]                                         # EE force proportional-gain range.
         gripper_force_kd_range = [3.0, 3.0]                                             # EE force derivative-gain range.
@@ -655,8 +656,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             # tracking
             tracking_lin_vel_force_world = 2.0
             tracking_ang_vel = 1.0
-            tracking_dof_pos = 0.25  # Positive tracking of executed whole-body PD position targets.
-            tracking_arm_feedforward = 0.2  # Positive compensation reward; nonzero adds per-step BARD work, independent of PINNs.
+            tracking_dof_pos = 0.20  # Positive tracking of executed whole-body PD position targets.
+            tracking_arm_feedforward = 0.1  # Positive compensation reward; nonzero adds per-step BARD work, independent of PINNs.
 
             no_physical_progress = -0.50
 
@@ -902,7 +903,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         # Encourage FiLM to be an identity transform near a well-tracked
         # command. The pressure decays exponentially with mean squared base
         # velocity and EE-pose tracking error.
-        film_identity_loss_weight = 0.0                                              # Penalty on non-identity FiLM modulation near the target.
+        film_identity_loss_weight = 1.0e-3                                              # Penalty on non-identity FiLM modulation near the target.
         film_identity_error_scale = 1.0                                                 # Tracking-error scale controlling identity-penalty decay.
 
         # Optional weights-only PACT-Pos hot start generated by
@@ -920,7 +921,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         explicit_foot_contact_weight = 0.1                                              # Binary foot-contact BCE coefficient.
         explicit_foot_height_weight = 1.0                                               # Foot-height reconstruction coefficient.
         privileged_decoder_weight = 1.0                                                 # Remaining next-state reconstruction coefficient.
-        vae_kld_weight = 0.001                                                           # Default VAE KL coefficient, separate from physics PINNs.
+        vae_kld_weight = 0.1                                                           # Default VAE KL coefficient, separate from physics PINNs.
 
         use_cosine_kl_warmup = True                                                     # Independently cosine-ramp the base KL coefficient to its maximum.
         kl_warmup_iters = 1000                                                          # Cosine VAE KL warmup duration [PPO iterations].
@@ -942,9 +943,9 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         # pinn_warmup = 10
 
 
-        pinn_loss_weight = 0.1                                                         # Magnitude scales PINNs; sign: + PINN / - PPGrad; 0 disables.
-        pinn_warmup = 700                                                               # Ramp duration after PINN activation [PPO updates].
-        pinn_init_steps = 300                                                          # First PPO iteration eligible for the PINN ramp.
+        pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign: + PINN / - PPGrad; 0 disables.
+        pinn_warmup = 750                                                               # Ramp duration after PINN activation [PPO updates].
+        pinn_init_steps = 250                                                          # First PPO iteration eligible for the PINN ramp.
         use_pinn_rollout_loss = True                                                    # Enable the rollout term in addition to inverse dynamics.
         pinn_inverse_weight = 0.5                                                       # Inverse-dynamics coefficient inside the combined physics objective.
         pinn_rollout_weight = 0.5                                                       # Rollout coefficient inside the combined physics objective.
@@ -991,16 +992,20 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_sample_fraction = 0.2                  # Fraction per PPO epoch; 1 keeps legacy, 0 skips actor physics.
         # Use 1/num_learning_epochs for once-per-rollout coverage; preserve PPO batch sizes.
         actor_phys_arm_feedforward_enabled = True          # Detached bias/base-motion/applied-EE-force torque teacher.
-        actor_phys_arm_feedforward_weight = 0.50           # Inside actor_phys_coef and its PINN ramp; zero skips all teacher work.
+        actor_phys_arm_feedforward_weight = 0.02           # Inside actor_phys_coef and its PINN ramp; zero skips all teacher work.
+        
         # Reuse BARD acceleration; h already includes gravity. Normalize by each joint's torque_action_scale.
         # No active-force/p gate: gravity guidance is useful even without external disturbances.
         actor_phys_arm_rejection_enabled = False            # Dynamic arm-force projection, scaled by shared p; no reliability gate.
         actor_phys_arm_rejection_weight = 0.50             # Zero skips arm projection; base rejection can still need the neutral pass.
         actor_phys_force_allocation_weight = 0.25           # Zero skips allocation; otherwise weight * PINN ramp * p^2.
-        actor_phys_base_rejection_enabled = True           # Incremental stance-force reaction objective.
-        actor_phys_base_rejection_weight = 0.5             # Final weight inside the existing actor schedule.
+        
+        actor_phys_base_rejection_enabled = False           # Incremental stance-force reaction objective.
+        actor_phys_base_rejection_weight = 0.025             # Final weight inside the existing actor schedule.
+        
         actor_phys_base_balance_enabled = True           # Single-pass stance-force teacher; requires live GRFs. Opt in separately.
-        actor_phys_base_balance_weight = 0.50             # Effective: weight * rejection p * actor_phys_coef * PINN ramp.
+        actor_phys_base_balance_weight = 0.01             # Effective: weight * rejection p * actor_phys_coef * PINN ramp.
+        
         # Reuse base force scale/axis weights, active-force/contact gates, and Huber delta below.
         # To replace the counterfactual loss, enable balance and disable actor_phys_base_rejection_enabled.
         actor_phys_rejection_damping = 1e-4                # Damping of J M^-1 J^T before the force solve.
@@ -1012,11 +1017,25 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_rejection_min_contacts = 2              # Minimum measured stance feet for base reaction.
         actor_phys_live_grf_enabled = True                 # Frozen decoder, full live torque-to-GRF derivative; no reliability gate.
         actor_phys_grf_torque_trust_radius = 0.0            # Per-joint physical Nm; zero disables clipping.
+       
         # Actor-facing task prediction; independent of representation-PINN weights.
         actor_phys_enabled = True                          # Opt in only for coupled PACT/BARD.
         actor_phys_coef = 0.1                              # Overall actor auxiliary coefficient.
-        actor_phys_vel_weight = 0.75                       # Reachable planar velocity/yaw tracking.
-        actor_phys_ee_weight = 1.0                          # Next scheduled, compliant EE target.
+        actor_phys_vel_weight = 1.00                       # Reachable planar velocity/yaw tracking.
+        actor_phys_ee_weight = 1.00                          # Next scheduled, compliant EE target.
+        actor_phys_q_weight = 0.01                           # Joint-position safety barrier.
+        actor_phys_qd_weight = 0.001                          # Joint-velocity safety barrier.
+        actor_phys_velocity_time_constant = 0.25            # Reachable command response time [s].
+        actor_phys_q_margin = 0.05                          # Position safety margin [rad].
+        actor_phys_qd_margin = 0.5                          # Velocity safety margin [rad/s].
+        actor_phys_softplus_temperature = 0.05              # Barrier temperature in normalized units.
+        actor_phys_huber_delta = 1.0                        # Huber transition in normalized units.
+
+        actor_phys_ee_scale = 0.1                           # EE-error normalization [m].
+        actor_phys_q_scale = 1.0                            # Position-barrier normalization [rad].
+        actor_phys_qd_scale = 10.0                          # Velocity-barrier normalization [rad/s].
+        actor_phys_require_force_gate = False               # Legacy whole-objective opt-in gate; keep false for ungated actor physics.
+
         actor_phys_ee_stability_weight = 0.00               # Conservative near-target task-space damping weight.
         actor_phys_ee_stability_position_radius = 0.05      # Activate primarily within 5 cm of the target.
         actor_phys_ee_stability_use_orientation = False     # Position-only stability; exclude rotation from energy and gate.
@@ -1029,26 +1048,15 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_ee_stability_rho = 0.05                  # Requested energy decay per control step.
         actor_phys_ee_stability_energy_slack = 0.0025       # Preserve decay pressure to approximately 1 cm error.
         actor_phys_ee_stability_target_speed_threshold = 0.05  # Disable stability loss during fast target motion [m/s].
-        actor_phys_q_weight = 0.001                           # Joint-position safety barrier.
-        actor_phys_qd_weight = 0.001                          # Joint-velocity safety barrier.
-        actor_phys_velocity_time_constant = 0.25            # Reachable command response time [s].
-        actor_phys_q_margin = 0.05                          # Position safety margin [rad].
-        actor_phys_qd_margin = 0.5                          # Velocity safety margin [rad/s].
-        actor_phys_softplus_temperature = 0.05              # Barrier temperature in normalized units.
-        actor_phys_huber_delta = 1.0                        # Huber transition in normalized units.
-        actor_phys_ee_scale = 0.1                           # EE-error normalization [m].
-        actor_phys_q_scale = 1.0                            # Position-barrier normalization [rad].
-        actor_phys_qd_scale = 10.0                          # Velocity-barrier normalization [rad/s].
-        actor_phys_require_force_gate = False               # Legacy whole-objective opt-in gate; keep false for ungated actor physics.
-
         actor_phys_arm_manipulability_enabled = False      # Optional successor-arm translational singularity barrier.
         actor_phys_arm_manipulability_weight = 0.02        # Inside the scheduled actor-physics coefficient.
         actor_phys_arm_manipulability_sigma_min = 0.05     # Minimum translational Jacobian singular value [m/rad].
+        
         actor_phys_pos_fk_enabled = True                   # Direct arm position-command FK objective.
-        actor_phys_pos_fk_weight = 0.25                      # Inside the scheduled actor-physics coefficient.
+        actor_phys_pos_fk_weight = 0.1                      # Inside the scheduled actor-physics coefficient.
         actor_phys_pos_fk_huber_delta = 1.0                 # Huber threshold after EE-error normalization.
         actor_phys_pos_fk_axis_weights = [1.0, 1.0, 1.0]     # Arm-root Cartesian weights; uses actor_phys_ee_scale.
-        actor_phys_pos_fk_deadband = 0.005                    # Per-axis tolerance [m].
+        actor_phys_pos_fk_deadband = 0.025                    # Per-axis tolerance [m].
 
         value_loss_coef = 1.0                                                           # Critic regression coefficient.
         use_clipped_value_loss = True                                                   # Apply PPO-style clipping to critic updates.
@@ -1060,7 +1068,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         schedule = "adaptive"                                                           # adaptive
         gamma = 0.99                                                                    # Reward discount factor.
         lam = 0.95                                                                      # Generalized advantage estimation smoothing factor.
-        desired_kl = 0.02                                                               # Policy KL target for adaptive learning rate; not VAE KL.
+        desired_kl = 0.012                                                              # Policy KL target for adaptive learning rate; not VAE KL.
         # desired_kl = 0.013                                                               # Policy KL target for adaptive learning rate; not VAE KL.
 
         max_grad_norm = 1.0                                                             # Gradient-norm cap per optimizer ownership group.
@@ -1078,8 +1086,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         pino_batch_capacity = 0                                                         # Pinocchio batch capacity; zero selects an automatic size.
         pino_worker_start_method = "spawn"                                              # Multiprocessing start method for Pinocchio workers.
         use_spo = False                                                                 # Compatibility option for the alternative policy objective.
-        use_adaptive_entropy = False                                                    # Adapt entropy coefficient from tracking performance.
-        adaptive_ent_bounds = [0.0005, 0.01]                                             # Minimum and maximum adaptive entropy coefficients.
+        use_adaptive_entropy = True                                                    # Adapt entropy coefficient from tracking performance.
+        adaptive_ent_bounds = [0.005, 0.01]                                             # Minimum and maximum adaptive entropy coefficients.
         adaptive_ent_lin_threshold = 1.5                                                # Linear-tracking threshold for adaptive entropy.
         adaptive_ent_ang_threshold = 0.70                                               # Angular-tracking threshold for adaptive entropy.
         adaptive_ent_ter_threshold = 6.0                                                # Terrain-related adaptive entropy threshold.
