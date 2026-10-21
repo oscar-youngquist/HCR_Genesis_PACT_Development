@@ -10,7 +10,7 @@ import torch
 class PCGrad:
     """Wrap an optimizer and merge gradients from multiple objectives.
 
-    The two PINN entry points preserve the legacy B1Z1 projection rules. The
+    The legacy PINN entry points preserve their original projection rules. The
     packing code additionally records which parameters each objective touched;
     parameters untouched by every objective receive ``grad=None`` so AdamW
     cannot change them through momentum or weight decay.
@@ -68,6 +68,34 @@ class PCGrad:
             self.last_merged_grad = None
             self.last_has_grads = None
         self._set_grad(self._unflatten_grad(merged, shapes[0]), has_any_grad)
+
+    def pc_backward_pinn_conflict_only(self, objectives, *, norm_balance=True,
+                                      record_diagnostics=True):
+        """Keep the reference intact; remove only opposing physics components.
+
+        Unlike symmetric PCGrad, this always sums reference + physics, even
+        when the wrapper's general-purpose reduction is configured as mean.
+        Physics must already include its scheduled, nonnegative loss weight.
+        """
+        def project(grads, has_grads):
+            if len(grads) != 2:
+                raise ValueError("conflict-only projection requires [reference, physics]")
+            reference, physics = grads
+            reference_norm = reference.norm()
+            # Unit-direction form avoids dividing by a near-zero squared norm.
+            direction = reference / reference_norm.clamp_min(torch.finfo(reference.dtype).tiny)
+            projected = physics - torch.dot(direction, physics).clamp_max(0) * direction
+            if norm_balance:
+                physics_norm = projected.norm()
+                beta = torch.where(
+                    physics_norm > reference_norm,
+                    reference_norm / physics_norm.clamp_min(torch.finfo(physics.dtype).tiny),
+                    torch.ones_like(physics_norm),
+                )
+                projected = beta * projected
+            return reference + projected
+
+        self._backward(objectives, project, record_diagnostics)
 
     def _merge(self, projected, shared):
         merged = torch.zeros_like(projected[0])

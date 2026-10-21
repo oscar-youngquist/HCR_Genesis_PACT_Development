@@ -27,6 +27,20 @@ class RejectionCurriculumDefaults:
     force_curriculum_latest_start_iteration = 8000  # Equal gate/fallback starts enforce fixed timing.
     reject_active_force_threshold = 1.0  # Diagnostic active-force cutoff [N]; not an advancement gate.
     
+    # reject_nominal_tracking_iterations = 8000  # Zero-disturbance stage; offsets gate/fallback starts.
+    # reject_initial_progress = 0.10  # Actor losses start here; compensation waits for nominal tracking to end.
+    # force_curriculum_gate_start_iteration = 2000  # Hold until this iteration.
+    # reject_compensation_ramp_iterations = 100
+    # reject_external_ramp_iterations = 8000
+    
+    # reject_external_step_enabled = False  # Replace the continuous ramp with 50%, 75%, 100%.
+    # reject_external_step_hold_iterations = 3000  # Hold each intermediate force level.
+    
+    # force_curriculum_gate_patience = 400
+    # force_curriculum_use_latest_start_fallback = True
+    # force_curriculum_latest_start_iteration = 20000  # Equal gate/fallback starts enforce fixed timing.
+    # reject_active_force_threshold = 1.0  # Diagnostic active-force cutoff [N]; not an advancement gate.
+    
     reject_force_nrmse_threshold = 0.25  # Legacy field; force accuracy no longer gates advancement.
     reject_min_active_samples = 32
     reject_require_force_quality = False  # Legacy compatibility only; all tasks use the performance gate.

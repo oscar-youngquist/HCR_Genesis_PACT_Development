@@ -110,13 +110,11 @@ def test_disabled_skips_teacher(monkeypatch, reason):
     assert not torch.autograd.grad(loss, actions)[0].any()
 
 
-@pytest.mark.parametrize("reason", ["neutral", "contacts", "nonfinite"])
+@pytest.mark.parametrize("reason", ["contacts", "nonfinite"])
 def test_gates_skip_teacher(monkeypatch, reason):
     a, _, actions, _, data = fixture()
     acceleration = torch.zeros_like(a.actor_physics_cache.bias)
-    if reason == "neutral":
-        data["state"][:, 88:97] = 0.
-    elif reason == "contacts":
+    if reason == "contacts":
         data["stance"].zero_()
     else:
         acceleration.fill_(float("nan"))
@@ -133,10 +131,26 @@ def test_stance_mask_and_gated_reduction():
     full, _ = balance.objective(a, actions, data, fixed, acceleration, grf)
     data["stance"][:, 2:] = False
     grf[:, 2:, 0] = 1000.  # Non-stance feet do not contribute.
-    data["state"][1:, 88:97] = 0.
+    data["stance"][1:] = False
     partial, metrics = balance.objective(a, actions, data, fixed, acceleration, grf)
     torch.testing.assert_close(partial, full / len(actions))
     assert metrics["base_balance_active_fraction"] == pytest.approx(1 / len(actions))
+
+
+def test_neutral_force_samples_supervise_nominal_motion():
+    a, _, actions, _, data = fixture()
+    data["state"][:, 88:97] = 0.
+    data["command"][:, 0] = .5
+    fixed = a.actor_physics_cache
+    # Keep an actor-dependent GRF path; the command supplies a nonzero teacher.
+    grf = actions[:, :12].reshape(-1, 4, 3) * .01
+    loss, metrics = balance.objective(a, actions, data, fixed,
+                                     torch.zeros_like(fixed.bias), grf)
+    assert loss > 0
+    assert metrics["base_balance_active_fraction"] == 1
+    assert metrics["base_balance_external_force_norm_n"] == 0
+    grad, = torch.autograd.grad(loss, actions)
+    assert torch.isfinite(grad).all() and grad.abs().sum() > 0
 
 
 def test_target_uses_applied_force_not_prediction_or_next_state():

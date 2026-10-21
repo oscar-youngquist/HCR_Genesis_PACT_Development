@@ -823,7 +823,7 @@ class B1Z1UniFPCfgPPO:
         schedule = "adaptive"  # adaptive
         gamma = 0.99
         lam = 0.95
-        desired_kl = 0.015
+        desired_kl = 0.01
         max_grad_norm = 1.0
         # The shared UniFP adaptation path is variational for both B1 and
         # B1Z1: reconstruct one next privileged frame and regularize q(z|h).

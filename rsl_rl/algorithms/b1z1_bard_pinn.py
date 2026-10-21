@@ -117,6 +117,7 @@ def losses(model, context, batch, fixed, cfg, metrics=None):
 def configure_optimizers(algorithm, actor_groups, auxiliary_groups):
     """HardPACT ownership: history + explicit branch, separate physics/reconstruction heads."""
     a = algorithm
+    validate_projection_mode(a.cfg)
     a.decoder_parameters = list(a.privileged_decoder.parameters()) + list(a.actor_critic.physics_decoder.parameters())
     decoder_ids = {id(p) for p in a.decoder_parameters}
     def groups(decoders):
@@ -166,11 +167,26 @@ def combined_pinn_loss(inverse, rollout, cfg):
             + cfg.get("pinn_rollout_weight", 1.0) * rollout)
 
 
+def validate_projection_mode(cfg):
+    """Old callers retain sign-selected projection unless explicitly opted in."""
+    mode = cfg.get("pinn_projection_mode", "legacy")
+    if mode not in ("legacy", "conflict_only"):
+        raise ValueError(f"Invalid pinn_projection_mode: {mode!r}")
+    return mode
+
+
 def auxiliary_backward(algorithm, optimizer, supervised, physics, *, weight=None):
-    """Use the configured sign for projection, never for the loss magnitude."""
+    """Shared actor/encoder/decoder dispatch; never negate the physics loss."""
+    mode = validate_projection_mode(algorithm.cfg)
     if weight is None:
         weight = getattr(algorithm, "pinn_weight", 0.0)
     if weight > 0 and physics.requires_grad:
+        if mode == "conflict_only":
+            optimizer.pc_backward_pinn_conflict_only(
+                [supervised, weight * physics],
+                norm_balance=algorithm.cfg.get("pinn_projection_norm_balance", True),
+            )
+            return
         project = (optimizer.pc_backward_ppgrad if algorithm.cfg["pinn_loss_weight"] < 0
                    else optimizer.pc_backward_pinn)
         project([supervised, weight * physics])

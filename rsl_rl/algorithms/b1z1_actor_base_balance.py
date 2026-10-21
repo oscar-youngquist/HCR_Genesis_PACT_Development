@@ -92,9 +92,8 @@ def objective(a, actions, data, fixed, acceleration, grf):
         return zero, metrics
     state, command = data["state"].detach(), data["command"].detach()
     stance = data["stance"].detach().bool()
-    threshold = a.cfg["actor_phys_rejection_active_force"]
-    gate = (state[:, 88:91].norm(dim=-1) > threshold) | (state[:, 91:94].norm(dim=-1) > threshold)
-    gate &= stance.sum(-1) >= a.cfg["actor_phys_rejection_min_contacts"]
+    # Supervise nominal coupled motion too; external disturbances are not required.
+    gate = stance.sum(-1) >= a.cfg["actor_phys_rejection_min_contacts"]
     for value in (state, command, acceleration, grf, *vars(fixed).values()):
         gate &= torch.isfinite(value.detach()).flatten(1).all(-1)
     if not gate.any():

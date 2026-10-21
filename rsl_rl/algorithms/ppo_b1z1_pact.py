@@ -863,10 +863,10 @@ class PPO_B1Z1PACT:
         # minimally viable behavior before the residual competes with reward.
         if iteration >= self.cfg["pinn_init_steps"]:
             progress = min(1.0, self.pinn_updates / max(1, self.cfg["pinn_warmup"]))
-            # Sign selects projection priority; physics is always minimized.
+            # Only legacy mode uses the sign for projection; magnitude is unchanged.
             self.pinn_weight = progress * abs(self.cfg["pinn_loss_weight"])
             self.pinn_updates += 1
-        # Actor task prediction shares this exact delay/ramp and projection sign.
+        # Actor task prediction shares this delay/ramp and projection selector.
         actor_physics.start_update(self, iteration)
         metrics = {name: 0.0 for name in (
             "value", "surrogate", "base_velo", "ee_position", "base_wrench", "ee_force", "foot_contact", "foot_height",

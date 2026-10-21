@@ -921,7 +921,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         explicit_foot_contact_weight = 0.1                                              # Binary foot-contact BCE coefficient.
         explicit_foot_height_weight = 1.0                                               # Foot-height reconstruction coefficient.
         privileged_decoder_weight = 1.0                                                 # Remaining next-state reconstruction coefficient.
-        vae_kld_weight = 0.03                                                           # Default VAE KL coefficient, separate from physics PINNs.
+        vae_kld_weight = 0.05                                                           # Default VAE KL coefficient, separate from physics PINNs.
 
         use_cosine_kl_warmup = True                                                     # Independently cosine-ramp the base KL coefficient to its maximum.
         # kl_warmup_iters = 1000                                                          # Cosine VAE KL warmup duration [PPO iterations].
@@ -944,9 +944,9 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         # pinn_warmup = 10
 
 
-        pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign: + PINN / - PPGrad; 0 disables.
-        pinn_warmup = 300                                                               # Ramp duration after PINN activation [PPO updates].
-        pinn_init_steps = 100                                                          # First PPO iteration eligible for the PINN ramp.
+        pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign selects projection only in legacy mode.
+        pinn_warmup = 2000                                                               # Ramp duration after PINN activation [PPO updates].
+        pinn_init_steps = 000                                                          # First PPO iteration eligible for the PINN ramp.
         use_pinn_rollout_loss = True                                                    # Enable the rollout term in addition to inverse dynamics.
         pinn_inverse_weight = 0.5                                                       # Inverse-dynamics coefficient inside the combined physics objective.
         pinn_rollout_weight = 0.5                                                       # Rollout coefficient inside the combined physics objective.
@@ -990,10 +990,12 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         force_blend_min_alpha = 0.01                                                    # Legacy Pinocchio: minimum predicted-force blend fraction.
 
     class algorithm:
+        pinn_projection_mode = "conflict_only"             # One-way conflict removal; "legacy" uses the PINN weight sign.
+        pinn_projection_norm_balance = True                # Cap projected physics norm at reference norm (new mode only).
         actor_phys_sample_fraction = 0.2                  # Fraction per PPO epoch; 1 keeps legacy, 0 skips actor physics.
         # Use 1/num_learning_epochs for once-per-rollout coverage; preserve PPO batch sizes.
         actor_phys_arm_feedforward_enabled = True          # Detached bias/base-motion/applied-EE-force torque teacher.
-        actor_phys_arm_feedforward_weight = 0.025           # Inside actor_phys_coef and its PINN ramp; zero skips all teacher work.
+        actor_phys_arm_feedforward_weight = 0.05           # Inside actor_phys_coef and its PINN ramp; zero skips all teacher work.
         
         # Reuse BARD acceleration; h already includes gravity. Normalize by each joint's torque_action_scale.
         # No active-force/p gate: gravity guidance is useful even without external disturbances.
@@ -1005,7 +1007,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_base_rejection_weight = 0.025             # Final weight inside the existing actor schedule.
         
         actor_phys_base_balance_enabled = True           # Single-pass stance-force teacher; requires live GRFs. Opt in separately.
-        actor_phys_base_balance_weight = 0.0125             # Effective: weight * rejection p * actor_phys_coef * PINN ramp.
+        actor_phys_base_balance_weight = 0.03             # Effective: weight * rejection p * actor_phys_coef * PINN ramp.
         
         # Reuse base force scale/axis weights, active-force/contact gates, and Huber delta below.
         # To replace the counterfactual loss, enable balance and disable actor_phys_base_rejection_enabled.
@@ -1021,9 +1023,9 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
        
         # Actor-facing task prediction; independent of representation-PINN weights.
         actor_phys_enabled = True                          # Opt in only for coupled PACT/BARD.
-        actor_phys_coef = 0.1                              # Overall actor auxiliary coefficient.
+        actor_phys_coef = 1.0                              # Overall actor auxiliary coefficient.
         actor_phys_vel_weight = 1.00                       # Reachable planar velocity/yaw tracking.
-        actor_phys_ee_weight = 1.20                          # Next scheduled, compliant EE target.
+        actor_phys_ee_weight = 1.25                          # Next scheduled, compliant EE target.
         actor_phys_q_weight = 0.01                           # Joint-position safety barrier.
         actor_phys_qd_weight = 0.001                          # Joint-velocity safety barrier.
         actor_phys_velocity_time_constant = 0.25            # Reachable command response time [s].
@@ -1069,8 +1071,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         schedule = "adaptive"                                                           # adaptive
         gamma = 0.99                                                                    # Reward discount factor.
         lam = 0.95                                                                      # Generalized advantage estimation smoothing factor.
-        desired_kl = 0.018                                                              # Policy KL target for adaptive learning rate; not VAE KL.
-        # desired_kl = 0.013                                                               # Policy KL target for adaptive learning rate; not VAE KL.
+        # desired_kl = 0.018                                                              # Policy KL target for adaptive learning rate; not VAE KL.
+        desired_kl = 0.012                                                               # Policy KL target for adaptive learning rate; not VAE KL.
 
         max_grad_norm = 1.0                                                             # Gradient-norm cap per optimizer ownership group.
         num_learning_epochs = 5                                                         # PPO passes over each rollout.
