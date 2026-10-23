@@ -24,7 +24,8 @@ class OnPolicyRunnerUniFPOriginal(OnPolicyRunnerUniFP):
         history_dim = env.num_obs * env.num_obs_hist
         critic_dim = env.num_privileged_obs * env.num_crit_obs_stack
         model = ActorCriticUniFPOriginal(history_dim, critic_dim, env.num_pred_obs,
-                                        env.num_obs, env.num_actions).to(device)
+                                        env.num_obs, env.num_actions,
+                                        min_noise_std=self.policy_cfg.get("min_noise_std")).to(device)
         self.alg = PPO_UniFPOriginal(model, device=device,
                                     decision_callback=self._publish_estimates, **self.alg_cfg)
         self.alg.init_storage(env.num_envs, self.num_steps_per_env, [history_dim],

@@ -47,14 +47,17 @@ def test_model_architecture_and_optimizer():
 def test_configuration_inheritance_and_registration():
     cfg, train, _ = build()
     original = B1Z1PACTCfg()
-    for name in ("rewards", "control", "terrain", "commands", "domain_rand", "normalization"):
+    for name in ("rewards", "terrain", "commands", "domain_rand", "normalization"):
         assert class_to_dict(getattr(cfg, name)) == class_to_dict(getattr(original, name))
     assert cfg.env.num_policy_actions == cfg.env.num_actions
     assert original.env.num_policy_actions == 2 * original.env.num_actions
-    for name, value in class_to_dict(B1Z1PACTCfgPPO().algorithm).items():
-        assert getattr(train.algorithm, name) == value
+    assert train.runner_class_name == "B1Z1PACTRunner"
+    assert train.policy.action_mode == "position"
+    assert train.policy.conditioning_mode == "film"
+    assert not train.algorithm.representation_pinn_enabled
+    assert not train.algorithm.actor_phys_enabled
     assert cfg.commands.apply_ee_external_forces and cfg.commands.apply_base_external_forces
-    assert not cfg.use_force_compensation and not cfg.use_force_shifted_target
+    assert not cfg.use_force_shifted_target
     assert task_registry.task_classes["b1z1_ppo_pos"] is B1Z1PPOPos
     assert task_registry.task_classes["b1z1_pact"] is B1Z1PACT
 
@@ -68,13 +71,16 @@ def test_action_contract_and_history(monkeypatch):
     env.last_actions = env.actions.clone()
     env.llast_actions = env.actions.clone()
     pos = torch.randn(2, env.num_actions)
+    env.dof_tracking_target = torch.zeros_like(pos)
+    env.simulator = SimpleNamespace(default_dof_pos=torch.zeros_like(pos))
     execution = env._pre_sim_step(pos)
     assert torch.equal(execution[:, env.position_history_slice], pos)
     assert execution[:, env.torque_history_slice].count_nonzero() == 0
     with pytest.raises(ValueError):
         env._pre_sim_step(execution)
     torque = torch.randn_like(pos)
-    env.simulator = SimpleNamespace(_torques=torque, _cfg=cfg, dof_pos=pos)
+    env.simulator = SimpleNamespace(_torques=torque, _cfg=cfg, dof_pos=pos,
+                                    default_dof_pos=torch.zeros_like(pos))
     monkeypatch.setattr(B1Z1PACT, "post_physics_step", lambda self: None)
     env.post_physics_step()
     assert torch.equal(env.actions[:, env.position_history_slice], pos)

@@ -30,7 +30,8 @@ class B1Z1UniFPOriginalCfgPPO:
     def __init__(self):
         self.__dict__.update(vars(copy_sections(B1Z1UniFPCfgPPO)))
         self.runner_class_name = "UniFPOriginalRunner"
-        self.policy = SimpleNamespace()  # Deliberately fixed upstream architecture.
+        # Preserve the fixed architecture while sharing B1Z1 exploration floors.
+        self.policy = SimpleNamespace(min_noise_std=self.policy.min_noise_std)
         allowed = {"learning_rate", "clip_param", "gamma", "lam", "value_loss_coef",
                    "entropy_coef", "max_grad_norm", "use_clipped_value_loss", "desired_kl",
                    "schedule", "num_learning_epochs", "num_mini_batches", "num_encoder_epochs",

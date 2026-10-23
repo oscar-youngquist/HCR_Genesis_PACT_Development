@@ -22,7 +22,7 @@ class ActorCriticUniFPOriginal(nn.Module):
     adaptation_weights = (.2, .2, 1., 1.)
 
     def __init__(self, num_obs, num_privileged_obs, num_obs_pred=12,
-                 num_single_obs=73, num_actions=17):
+                 num_single_obs=73, num_actions=17, min_noise_std=None):
         super().__init__()
         if (num_obs, num_single_obs, num_obs_pred, num_actions) != (2336, 73, 12, 17):
             raise ValueError("Original UniFP requires history=32*73, labels=12, actions=17")
@@ -32,10 +32,17 @@ class ActorCriticUniFPOriginal(nn.Module):
         self.actor_body = mlp([137, 512, 256, 128, 17])
         self.critic_body = mlp([num_privileged_obs, 512, 256, 128, 1])
         self.std = nn.Parameter(torch.ones(17))
+        minimum = torch.zeros(num_actions) if min_noise_std is None else torch.as_tensor(min_noise_std, dtype=self.std.dtype).expand(num_actions).clone()
+        if not torch.isfinite(minimum).all() or (minimum < 0).any():
+            raise ValueError("min_noise_std must contain finite nonnegative values")
+        # Nonpersistent bounds keep existing checkpoints compatible.
+        self.register_buffer("_std_clip_lwr", minimum, persistent=False)
         self.distribution = None
         self.last_prediction = None
 
     def update_distribution(self, history):
+        with torch.no_grad():
+            self.std.copy_(torch.maximum(self.std, self._std_clip_lwr))
         z = self.adaptation_encoder_module(history)
         # Estimation never conditions the actor; cache it for the external adapter.
         self.last_prediction = self.adaptation_decoder_module(z)

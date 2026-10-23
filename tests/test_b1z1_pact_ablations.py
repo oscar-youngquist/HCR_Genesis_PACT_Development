@@ -75,9 +75,18 @@ def test_position_pact_gains_follow_pact(monkeypatch):
         assert getattr(second.control, name) == gains
 
 
-def test_basic_ppo_control_remains_inherited():
-    from legged_gym.envs.b1z1.b1z1_ppo_pos.b1z1_ppo_pos_config import B1Z1PPOPosCfg
-    assert B1Z1PPOPosCfg.control is B1Z1PACTCfg.control
+def test_basic_ppo_matches_position_pact_with_unifp_gains():
+    from legged_gym.envs.b1z1.b1z1_ppo_pos.b1z1_ppo_pos_config import B1Z1PPOPosCfg, B1Z1PPOPosCfgPPO
+    from legged_gym.envs.b1z1.b1z1_unifp.b1z1_unifp_config import B1Z1UniFPCfg
+    env, train = make_b1z1_pact_ablation_configs(6)
+    expected = class_to_dict(env())
+    for name in ("stiffness", "damping"):
+        expected["control"][name] = getattr(B1Z1UniFPCfg.control, name)
+        assert getattr(B1Z1PPOPosCfg.control, name) is not getattr(B1Z1UniFPCfg.control, name)
+    assert class_to_dict(B1Z1PPOPosCfg()) == expected
+    expected = class_to_dict(train())
+    expected["runner"].update(experiment_name="b1z1_ppo_pos", run_name="position_only")
+    assert class_to_dict(B1Z1PPOPosCfgPPO()) == expected
 
 
 @pytest.mark.parametrize("mode", ["none", "concat", "film"])
