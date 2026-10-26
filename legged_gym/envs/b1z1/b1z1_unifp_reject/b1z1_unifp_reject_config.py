@@ -10,6 +10,7 @@ class B1Z1UniFPRejectCfg(B1Z1UniFPOriginalCfg):
     def __init__(self):
         super().__init__()
         self.use_force_shifted_target = False
+        self.commands.command_force_follow_external_scale = False  # Preserve estimator-compensation beta.
         for name, value in vars(RejectionCurriculumDefaults).items():
             if not name.startswith("_"):
                 setattr(self.commands, name, value)

@@ -13,33 +13,33 @@ class RejectionCurriculumDefaults:
     reject_initial_external_scale = 0.25
     reject_warmup_iterations = 1600  # Legacy field; force_curriculum_gate_start_iteration controls gating.
     
-    reject_nominal_tracking_iterations = 3200  # Zero-disturbance stage; offsets gate/fallback starts.
-    reject_initial_progress = 0.10  # Actor losses start here; compensation waits for nominal tracking to end.
-    force_curriculum_gate_start_iteration = 800  # Hold until this iteration.
-    reject_compensation_ramp_iterations = 40
-    reject_external_ramp_iterations = 3200
-    
-    reject_external_step_enabled = False  # Replace the continuous ramp with 50%, 75%, 100%.
-    reject_external_step_hold_iterations = 3000  # Hold each intermediate force level.
-    
-    force_curriculum_gate_patience = 160
-    force_curriculum_use_latest_start_fallback = True
-    force_curriculum_latest_start_iteration = 8000  # Equal gate/fallback starts enforce fixed timing.
-    reject_active_force_threshold = 1.0  # Diagnostic active-force cutoff [N]; not an advancement gate.
-    
-    # reject_nominal_tracking_iterations = 8000  # Zero-disturbance stage; offsets gate/fallback starts.
+    # reject_nominal_tracking_iterations = 3200  # Zero-disturbance stage; offsets gate/fallback starts.
     # reject_initial_progress = 0.10  # Actor losses start here; compensation waits for nominal tracking to end.
-    # force_curriculum_gate_start_iteration = 2000  # Hold until this iteration.
-    # reject_compensation_ramp_iterations = 100
-    # reject_external_ramp_iterations = 8000
+    # force_curriculum_gate_start_iteration = 800  # Hold until this iteration.
+    # reject_compensation_ramp_iterations = 40
+    # reject_external_ramp_iterations = 3200
     
     # reject_external_step_enabled = False  # Replace the continuous ramp with 50%, 75%, 100%.
     # reject_external_step_hold_iterations = 3000  # Hold each intermediate force level.
     
-    # force_curriculum_gate_patience = 400
+    # force_curriculum_gate_patience = 160
     # force_curriculum_use_latest_start_fallback = True
-    # force_curriculum_latest_start_iteration = 20000  # Equal gate/fallback starts enforce fixed timing.
+    # force_curriculum_latest_start_iteration = 8000  # Equal gate/fallback starts enforce fixed timing.
     # reject_active_force_threshold = 1.0  # Diagnostic active-force cutoff [N]; not an advancement gate.
+    
+    reject_nominal_tracking_iterations = 8000  # Zero-disturbance stage; offsets gate/fallback starts.
+    reject_initial_progress = 0.10  # Actor losses start here; compensation waits for nominal tracking to end.
+    force_curriculum_gate_start_iteration = 2000  # Hold until this iteration.
+    reject_compensation_ramp_iterations = 100
+    reject_external_ramp_iterations = 8000
+    
+    reject_external_step_enabled = False  # Replace the continuous ramp with 50%, 75%, 100%.
+    reject_external_step_hold_iterations = 3000  # Hold each intermediate force level.
+    
+    force_curriculum_gate_patience = 400
+    force_curriculum_use_latest_start_fallback = True
+    force_curriculum_latest_start_iteration = 20000  # Equal gate/fallback starts enforce fixed timing.
+    reject_active_force_threshold = 1.0  # Diagnostic active-force cutoff [N]; not an advancement gate.
     
     reject_force_nrmse_threshold = 0.25  # Legacy field; force accuracy no longer gates advancement.
     reject_min_active_samples = 32
@@ -124,6 +124,10 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
         return max(self.initial_progress, self.beta)
 
     def command_scale(self, iteration):
+        # Original UniFP can train matched command/disturbance ranges; rejection
+        # compensation still uses beta independently of physical exposure.
+        if getattr(self.cfg, "command_force_follow_external_scale", False):
+            return self.external_scale(iteration)
         return 0.0 if iteration < self.nominal_iterations else self.beta
 
     def external_scale(self, iteration):
@@ -169,7 +173,7 @@ class RejectionCurriculum(B1Z1StagedForceCurriculum):
             "Rejection/beta": self.beta,
             "Rejection/progress": self.beta,
             "Rejection/actor_progress": self.actor_progress,
-            "ForceCurriculum/command_scale": self.beta,
+            "ForceCurriculum/command_scale": self.command_scale(iteration),
             "ForceCurriculum/external_scale": self.external_scale(iteration),
             "Rejection/external_scale": self.external_scale(iteration),
             "Rejection/stage": 0 if iteration < self.nominal_iterations else (1 if not self.gate_latched else (2 if self.beta < 1 else 3)),

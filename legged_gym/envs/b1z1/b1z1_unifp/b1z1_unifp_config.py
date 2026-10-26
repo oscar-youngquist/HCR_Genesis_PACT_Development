@@ -6,7 +6,8 @@ class B1Z1UniFPCfg:
     seed = 1
 
     class env:
-        num_envs = 10240
+        # num_envs = 10240
+        num_envs = 4096
         # Actor frame excludes gait sin/cos; phase remains internal to gait
         # reference, contact scheduling, and guidance rewards.
         num_observations = 71 + 2
@@ -756,8 +757,8 @@ class B1Z1UniFPCfg:
                 # "torso_force_wrench_ellipsoid":[0.2, 0.5],
             }
             warmup_steps = 0
-            # curr_steps = 60000
-            curr_steps = 24000
+            curr_steps = 60000
+            # curr_steps = 24000
 
     class viewer:
         ref_env = 0
@@ -803,7 +804,7 @@ class B1Z1UniFPCfgPPO:
         # Preserve the successful B1 leg exploration while retaining the
         # previous 0.65 initialization for the five controlled arm joints.
         init_noise_std = [0.80, 1.00, 1.00] * 4 + [0.85] * 5
-        min_noise_std = [0.15, 0.25, 0.25] * 4 + [0.15] * 5
+        min_noise_std = [0.15, 0.25, 0.25] * 4 + [0.25] * 5  # Match PACT's position-action floors.
         max_noise_std = 1.1
 
     class algorithm:
@@ -813,7 +814,7 @@ class B1Z1UniFPCfgPPO:
         # Increase exploration within these bounds while command tracking or
         # terrain-curriculum progress remains below its configured target.
         entropy_coef = 0.01
-        use_adaptive_entropy = True
+        use_adaptive_entropy = False
         adaptive_ent_bounds = [0.005, 0.01]
         adaptive_ent_lin_threshold = 1.50
         adaptive_ent_ang_threshold = 0.70
@@ -853,8 +854,8 @@ class B1Z1UniFPCfgPPO:
         algorithm_class_name = "PPO_UniFP"
         num_steps_per_env = 24
         
-        # max_iterations = 70000
-        max_iterations = 28000
+        max_iterations = 70000
+        # max_iterations = 28000
         
         save_interval = 1000
         

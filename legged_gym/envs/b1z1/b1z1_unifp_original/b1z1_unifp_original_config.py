@@ -24,6 +24,7 @@ class B1Z1UniFPOriginalCfg:
         self.env.num_priv_stack = 3
         self.env.num_pred_obs = 12
         self.commands.use_external_impedance_compensation = False
+        self.commands.command_force_follow_external_scale = True
 
 
 class B1Z1UniFPOriginalCfgPPO:

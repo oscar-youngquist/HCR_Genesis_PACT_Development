@@ -9,6 +9,34 @@ from legged_gym.envs.b1z1.b1z1_unifp_reject.b1z1_unifp_reject_config import B1Z1
 from legged_gym.envs.b1z1.b1z1_pact.b1z1_pact_config import B1Z1PACTCfg
 from legged_gym.envs.b1z1.b1z1_pact_pos.b1z1_pact_pos_config import B1Z1PACTPosCfg
 from legged_gym.envs.b1z1.b1z1_pact.ablation_configs import make_b1z1_pact_ablation_configs
+from legged_gym.envs.b1z1.b1z1_unifp_original.b1z1_unifp_original_config import B1Z1UniFPOriginalCfg
+
+
+@pytest.mark.parametrize("stepped", [False, True])
+def test_original_commands_follow_disturbances_and_resume(stepped):
+    cfg = B1Z1UniFPOriginalCfg().commands
+    cfg.reject_nominal_tracking_iterations = 2
+    cfg.force_curriculum_gate_start_iteration = 2
+    cfg.force_curriculum_latest_start_iteration = 2
+    cfg.reject_compensation_ramp_iterations = 2
+    cfg.reject_external_ramp_iterations = 4
+    cfg.reject_external_step_hold_iterations = 2
+    cfg.reject_external_step_enabled = stepped
+    c = RejectionCurriculum(cfg, "cpu")
+    for iteration in range(12):
+        c.update(iteration)
+        expected = (0. if iteration < 2 else .25 if iteration < 6 else
+                    min(1., .5 + .25 * ((iteration-6)//2)) if stepped else
+                    .25 + .75 * min((iteration-6)/4, 1.))
+        assert c.command_scale(iteration) == pytest.approx(expected)
+        assert c.external_scale(iteration) == pytest.approx(expected)
+        assert c.metrics(iteration)["ForceCurriculum/command_scale"] == pytest.approx(expected)
+        resumed = RejectionCurriculum(cfg, "cpu")
+        resumed.load_state_dict(c.state_dict())
+        assert resumed.command_scale(iteration) == pytest.approx(expected)
+        c = resumed
+    assert not B1Z1UniFPRejectCfg().commands.command_force_follow_external_scale
+    assert not getattr(B1Z1PACTCfg().commands, "command_force_follow_external_scale", False)
 
 
 @pytest.mark.parametrize("cls", [B1Z1UniFPCfg, B1Z1UniFPRejectCfg, B1Z1PACTCfg,
