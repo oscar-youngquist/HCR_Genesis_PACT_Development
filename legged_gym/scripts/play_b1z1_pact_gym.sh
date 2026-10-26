@@ -11,4 +11,4 @@ unset CUDA_VISIBLE_DEVICES
 export SIMULATOR=isaaclab_b1z1_pact
 
 cd "$SCRIPT_DIR"
-python play_b1z1_pact.py --task=b1z1_pact --seed=1 --gpu=cuda:1 "$@"
+python play_b1z1_pact.py --task=b1z1_pact --seed=2222 --gpu=cuda:1 "$@"
