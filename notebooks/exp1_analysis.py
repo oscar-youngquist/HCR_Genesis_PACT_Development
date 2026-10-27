@@ -11,11 +11,14 @@ import pandas as pd
 VERSION = 1
 CONDITIONS = ("nominal", "ee-disturbance", "combined-disturbance")
 MAIN = ("ee_error_m", "planar_velocity_error_m_s", "yaw_error_rad_s", "S_track", "failure_rate")
+SPLIT_TRACK = ("S_track_velocity", "S_track_manipulation")
 LIMITS = {"actuator_saturation_pct": "saturation", "position_violation_pct": "position_violation",
           "velocity_violation_pct": "velocity_violation"}
 UNITS = dict(zip(MAIN, ("m", "m/s", "rad/s", "fraction", "fraction")))
 UNITS.update({k: "%" for k in LIMITS})
+UNITS.update({k: "fraction" for k in SPLIT_TRACK})
 UNITS.update(ee_peak_m="m", recovery_time_s="s", recovery_fraction="fraction", ee_iae_m_s="m*s",
+             recovery_fraction_ee="fraction", recovery_fraction_velocity="fraction",
              torso_angular_acceleration_rms="rad/s^2", ee_linear_acceleration_rms="m/s^2")
 REQUIRED = ("trial_id", "step", "successor_time_seconds", "dt", "alive_for_metrics", "valid",
             "physical_failure", "artificial_reset", "ee_position_world", "ee_reference_world",
@@ -145,6 +148,10 @@ def trial_metrics(data, trial, meta, smoothness=False):
     vel = np.linalg.norm(d["base_velocity_body"][:, :2] - d["command_nominal"][:, :2], axis=-1)
     yaw = np.abs(d["base_angular_velocity_body"][:, 2] - d["command_nominal"][:, 2])
     valid = d["alive_for_metrics"].astype(bool) & d["valid"] & ~d["physical_failure"] & ~d["artificial_reset"]
+    alive = valid.copy()
+    # Independent task scores: only the relevant errors must be finite/in tolerance.
+    velocity_pass = valid & np.isfinite(vel) & np.isfinite(yaw) & (vel <= cfg["velocity_tolerance_m_s"]) & (yaw <= cfg["yaw_tolerance_rad_s"])
+    manipulation_pass = valid & np.isfinite(ee) & (ee <= cfg["ee_tolerance_m"])
     finite = np.isfinite(ee) & np.isfinite(vel) & np.isfinite(yaw)
     valid &= finite
     passes = valid & (ee <= cfg["ee_tolerance_m"]) & (vel <= cfg["velocity_tolerance_m_s"]) & (yaw <= cfg["yaw_tolerance_rad_s"])
@@ -153,6 +160,11 @@ def trial_metrics(data, trial, meta, smoothness=False):
                   missing_steps=int(steps[-1] + 1 - len(steps)), nonfinite_tracking_rows=int((d["alive_for_metrics"] & ~finite).sum()),
                   ee_error_m=mean(ee[valid]), planar_velocity_error_m_s=mean(vel[valid]),
                   yaw_error_rad_s=mean(yaw[valid]), S_track=float(passes.sum() / K), failure_rate=float(failed))
+    # Full prescribed horizon, including zero credit for failed/missing future steps.
+    result.update(S_track_velocity=float(velocity_pass.sum() / K),
+                  S_track_manipulation=float(manipulation_pass.sum() / K),
+                  velocity_tracking_pass_steps=int(velocity_pass.sum()),
+                  manipulation_tracking_pass_steps=int(manipulation_pass.sum()))
     substeps = int(meta["resolved_environment"]["control"]["decimation"])
     result["limits"] = {}
     for metric, prefix in LIMITS.items():
@@ -171,22 +183,30 @@ def trial_metrics(data, trial, meta, smoothness=False):
         elapsed = time - start
         window = valid & (elapsed >= 0) & (elapsed < cfg["recovery_window_seconds"])
         indices = np.flatnonzero(window)
-        dwell, recovery, previous = 0, None, None
         dwell_steps = max(1, math.ceil(cfg["recovery_dwell_seconds"] / dt))
-        for j in indices:
-            dwell = dwell + 1 if passes[j] and previous == steps[j] - 1 else int(passes[j])
-            previous = steps[j]
-            if recovery is None and dwell >= dwell_steps:
-                recovery = max(0., float(elapsed[j] - (dwell_steps - 1) * dt))
-        if failed:
-            recovery = None  # Online convention: trial failure censors ALL its event recoveries.
+        def recovery_for(pass_mask, valid_mask):
+            # Same dwell/window and whole-trial failure censoring for all three criteria.
+            if failed:
+                return None
+            dwell, previous = 0, None
+            for j in np.flatnonzero(valid_mask & (elapsed >= 0) & (elapsed < cfg["recovery_window_seconds"])):
+                dwell = dwell + 1 if pass_mask[j] and previous == steps[j] - 1 else int(pass_mask[j])
+                previous = steps[j]
+                if dwell >= dwell_steps:
+                    return max(0., float(elapsed[j] - (dwell_steps - 1) * dt))
+            return None
+        recovery = recovery_for(passes, valid)
+        recovery_ee = recovery_for(manipulation_pass, alive & np.isfinite(ee))
+        recovery_velocity = recovery_for(velocity_pass, alive & np.isfinite(vel) & np.isfinite(yaw))
         complete = len(indices) >= math.ceil(cfg["recovery_window_seconds"] / dt)
         peak, iae = (float(ee[window].max()), float(ee[window].sum() * dt)) if len(indices) else (None, None)
         events.append(dict(event_type=("onset" if i == 0 else "removal" if not np.any(event["load"]) else "change"),
                            start=start, eligible=bool(event["changed"] and start < K*dt), complete_window=complete,
                            observed_samples=len(indices), observed_peak_m=peak, observed_iae_m_s=iae,
                            peak_m=peak if complete else None, iae_m_s=iae if complete else None,
-                           recovery_time_s=recovery, recovered=recovery is not None))
+                           recovery_time_s=recovery, recovered=recovery is not None,
+                           recovery_time_ee_s=recovery_ee, recovered_ee=recovery_ee is not None,
+                           recovery_time_velocity_s=recovery_velocity, recovered_velocity=recovery_velocity is not None))
     result["events"] = events
     if smoothness:
         for metric, field in (("torso_angular_acceleration_rms", "base_angular_velocity_world"),
@@ -342,24 +362,30 @@ def summarize(config):
             if not rows:
                 continue
             events = [e for r in rows for e in r["events"] if e["eligible"]]
-            values = {key: mean([r[key] for r in rows]) for key in MAIN}
+            values = {key: mean([r[key] for r in rows]) for key in MAIN + SPLIT_TRACK}
             totals = {key: dict(count=sum(r["limits"][key]["count"] for r in rows),
                                 denominator=sum(r["limits"][key]["denominator"] for r in rows)) for key in LIMITS}
             values.update({key: 100*t["count"]/t["denominator"] if t["denominator"] else None for key, t in totals.items()})
             values.update(ee_peak_m=mean([e["peak_m"] for e in events]), ee_iae_m_s=mean([e["iae_m_s"] for e in events]),
                           recovery_time_s=mean([e["recovery_time_s"] for e in events if e["recovered"]]),
-                          recovery_fraction=sum(e["recovered"] for e in events)/len(events) if events else None)
+                          recovery_fraction=sum(e["recovered"] for e in events)/len(events) if events else None,
+                          recovery_fraction_ee=sum(e["recovered_ee"] for e in events)/len(events) if events else None,
+                          recovery_fraction_velocity=sum(e["recovered_velocity"] for e in events)/len(events) if events else None)
             if smoothness:
                 for key in ("torso_angular_acceleration_rms", "ee_linear_acceleration_rms"):
                     values[key] = mean([r[key] for r in rows])
-            counts = {key: sum(r.get(key) is not None for r in rows) for key in MAIN}
+            counts = {key: sum(r.get(key) is not None for r in rows) for key in MAIN + SPLIT_TRACK}
             counts.update({key: sum(r["limits"][key]["denominator"] > 0 for r in rows) for key in LIMITS})
             entry = dict(seed=seed, condition=condition, load_range=load_range, motion=motion, values=values,
                          attempted_trials=len(rows), metric_trial_counts=counts, valid_steps=sum(r["valid_steps"] for r in rows),
                          eligible_events=len(events), recovered_events=sum(e["recovered"] for e in events),
+                         recovered_ee_events=sum(e["recovered_ee"] for e in events),
+                         recovered_velocity_events=sum(e["recovered_velocity"] for e in events),
                          complete_windows=sum(e["complete_window"] for e in events), limit_totals=totals)
             entry["event_types"] = {kind: dict(eligible=sum(e["event_type"] == kind for e in events),
                 recovered=sum(e["event_type"] == kind and e["recovered"] for e in events),
+                recovered_ee=sum(e["event_type"] == kind and e["recovered_ee"] for e in events),
+                recovered_velocity=sum(e["event_type"] == kind and e["recovered_velocity"] for e in events),
                 peak_m=mean([e["peak_m"] for e in events if e["event_type"] == kind]),
                 recovery_time_s=mean([e["recovery_time_s"] for e in events if e["event_type"] == kind and e["recovered"]]))
                 for kind in ("onset", "change", "removal")}
@@ -389,7 +415,7 @@ def summarize(config):
             aggregate.append(dict(condition=condition, load_range=load_range, motion=motion, metric=key, unit=UNITS[key],
                                   **seed_statistics([r["values"][key] for r in rows]),
                                   attempted_trials=sum(r["attempted_trials"] for r in rows),
-                                  contributing_trials=sum(r["metric_trial_counts"].get(key, 0) for r in rows) if key in MAIN or key in LIMITS else None))
+                                  contributing_trials=sum(r["metric_trial_counts"].get(key, 0) for r in rows) if key in MAIN + SPLIT_TRACK or key in LIMITS else None))
     for condition in CONDITIONS:
         if not any(r["condition"] == condition for r in per_seed):
             diagnostics.append(f"Missing condition: {condition}")
@@ -414,7 +440,8 @@ LABELS = {"ee_error_m": "EE [m]", "planar_velocity_error_m_s": "Velocity [m/s]",
           "yaw_error_rad_s": "Yaw [rad/s]", "S_track": "Tracking [%]", "failure_rate": "Failure [%]",
           "actuator_saturation_pct": "Saturation [%]", "position_violation_pct": "Position [%]",
           "velocity_violation_pct": "Velocity [%]", "ee_peak_m": "Peak EE [m]",
-          "recovery_time_s": "Recovery [s]", "recovery_fraction": "Recovered [%]"}
+          "recovery_time_s": "Recovery [s]", "recovery_fraction": "Recovered [%]",
+          "recovery_fraction_ee": "EE recovered [%]", "recovery_fraction_velocity": "Velocity recovered [%]"}
 
 
 def formatted(row):
@@ -423,6 +450,82 @@ def formatted(row):
     scale = 100 if row["unit"] == "fraction" else 1
     sd = "\u2014" if row["sd"] is None else f"{scale*row['sd']:.3f}"
     return f"{scale*row['mean']:.3f} \u00b1 {sd}"
+
+
+def motion_modes_table(summaries, config, names, diagnostics):
+    """Read mode-specific aggregates; never derive a mode from combined results."""
+    condition = config.get("motion_modes_condition", "combined-disturbance")
+    if condition not in CONDITIONS:
+        raise ValueError("Invalid motion_modes_condition")
+    load_range = config["load_range"]
+    focused = config.get("focused_methods", ["b1z1_pact", "b1z1_unifp_original", "b1z1_ppo_pos"])
+    if len(set(focused)) != len(focused):
+        raise ValueError("Duplicate focused methods")
+    metrics = ("ee_error_m", "planar_velocity_error_m_s", "yaw_error_rad_s", "S_track",
+               "S_track_velocity", "S_track_manipulation", "failure_rate")
+    labels = ("Mean EE position error [m] \u2193", "Planar velocity error [m/s] \u2193",
+              "Yaw-rate error [rad/s] \u2193", "S_track [%] \u2191", "Velocity S_track [%] \u2191",
+              "Manipulation S_track [%] \u2191", "Failure rate [%] \u2193")
+    rows, index, numeric = [], [], []
+    for mode, group in (("stationary", "Stationary manipulation"),
+                        ("locomotion", "Locomotion with manipulation")):
+        coverage = None
+        for task in focused:
+            summary = summaries.get(task, {})
+            seeds = sorted(r["seed"] for r in summary.get("per_seed", []) if
+                           (r["condition"], r["load_range"], r["motion"]) == (condition, load_range, mode))
+            if seeds:
+                if coverage is not None and coverage != seeds:
+                    raise ValueError(f"Unequal seed coverage for motion_modes/{mode}: {task}")
+                coverage = seeds
+            name = names.get(task, config.get("display_names", {}).get(task, task))
+            index.append((group, name))
+            cells = []
+            for metric in metrics:
+                matches = [r for r in summary.get("aggregates", []) if
+                           (r["condition"], r["load_range"], r["motion"], r["metric"]) ==
+                           (condition, load_range, mode, metric)]
+                if len(matches) > 1:
+                    raise ValueError("Duplicate aggregate metric")
+                row = matches[0] if matches and seeds else None
+                if row is None or row["mean"] is None:
+                    diagnostics.append(f"Missing {task}/{condition}/{load_range}/{mode}/{metric}")
+                    if metric in SPLIT_TRACK:
+                        diagnostics.append(f"{task}: rerun summarization to calculate split S_track from transitions")
+                cells.append(formatted(row))
+                # CSV stores display units, converting fractional mean AND SD exactly once.
+                scale = 100 if UNITS[metric] == "fraction" else 1
+                record = dict(row or {})
+                record.update(task=task, method=name, group=group, condition=condition,
+                              load_range=load_range, motion=mode, metric=metric,
+                              unit="%" if scale == 100 else UNITS[metric], evaluation_seeds=json.dumps(seeds),
+                              mean=None if row is None or row["mean"] is None else row["mean"] * scale,
+                              sd=None if row is None or row["sd"] is None else row["sd"] * scale)
+                record.setdefault("contributing_seeds", 0)
+                record.setdefault("contributing_trials", 0)
+                numeric.append(record)
+            rows.append(cells)
+    table = pd.DataFrame(rows, index=pd.MultiIndex.from_tuples(index, names=["Motion", "Method"]), columns=labels)
+    out = Path(config["output_dir"])
+    pd.DataFrame(numeric).to_csv(out / "motion_modes.csv", index=False)
+    # Group labels are explicit rows, avoiding an extra multirow LaTeX dependency.
+    tex = table.droplevel("Motion").to_latex(escape=True)
+    body = tex.split("\\midrule\n", 1)[1].split("\\bottomrule", 1)[0].splitlines()
+    grouped = []
+    for i, line in enumerate(body):
+        if i % len(focused) == 0:
+            group = index[i][0]
+            grouped.append(r"\multicolumn{" + str(len(metrics) + 1) + r"}{l}{\textit{" + group + r"}} \\")
+        grouped.append(line)
+    tex = tex.split("\\midrule\n", 1)[0] + "\\midrule\n" + "\n".join(grouped) + "\n\\bottomrule\n\\end{tabular}\n"
+    tex = tex.replace("\u00b1", r"$\pm$").replace("\u2014", "---").replace("\u2193", r"$\downarrow$").replace("\u2191", r"$\uparrow$")
+    caption = (f"Motion-mode comparison, {condition}, {load_range}-range loads. "
+               r"Equal-weight evaluation-seed means $\pm$ sample SD; missing results are ---.")
+    (out / "motion_modes.tex").write_text(
+        "% Requires booktabs and graphicx\n\\begin{table}[t]\n\\centering\n"
+        + "\\caption{" + caption + "}\n\\label{tab:exp1_motion_modes}\n"
+        + "\\resizebox{\\columnwidth}{!}{%\n" + tex + "}\n\\end{table}\n")
+    return table
 
 
 def compare(config):
@@ -518,9 +621,12 @@ def compare(config):
                         index=[names.get(t, config.get("display_names", {}).get(t, t)) for t in methods], columns=columns)
     export_table("main_table", main, True)
     tables = {"main": main}
+    if config.get("motion_modes_table", True):
+        tables["motion_modes"] = motion_modes_table(summaries, config, names, missing)
     groups = {"physical_limits": list(LIMITS)}
     if config.get("response_table", True):
-        groups["disturbance_response"] = ["ee_peak_m", "recovery_time_s", "recovery_fraction"]
+        groups["disturbance_response"] = ["ee_peak_m", "recovery_time_s", "recovery_fraction",
+                                          "recovery_fraction_ee", "recovery_fraction_velocity"]
     if config.get("optional_metrics"):
         groups["optional_metrics"] = config["optional_metrics"]
     for name, metrics in groups.items():

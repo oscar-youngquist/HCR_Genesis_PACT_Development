@@ -231,10 +231,19 @@ def test_notebooks_end_to_end(tmp_path, monkeypatch):
         s = a.read_json(tmp_path / "summaries" / task / "summary.json")
         row = next(r for r in s["aggregates"] if r["condition"] == "nominal" and r["motion"] == "locomotion" and r["metric"] == "ee_error_m")
         assert row["mean"] == pytest.approx(.08)
+        # Add an explicit, analytically specified stationary stratum to the portable fixture.
+        for key in ("per_seed", "aggregates"):
+            stationary = [dict(r, motion="stationary") for r in s[key] if r["motion"] == "locomotion"]
+            if key == "aggregates":
+                for r in stationary:
+                    if r["metric"] == "ee_error_m":
+                        r.update(mean=.04, sd=.01)
+            s[key].extend(stationary)
+        a.write_json(tmp_path / "summaries" / task / "summary.json", s)
     # No raw files remain accessible: comparison must use portable exports only.
     (tmp_path / "raw").rename(tmp_path / "hidden_raw")
     compare = dict(summary_roots=[str(tmp_path / "summaries")], output_dir=str(tmp_path / "comparison"),
-                   method_order=tasks, focused_methods=tasks, load_range="in", motion="locomotion", response_table=True)
+                   method_order=tasks, focused_methods=tasks, load_range="in", motion="combined", response_table=True)
     path = tmp_path / "compare_config.json"
     a.write_json(path, compare)
     monkeypatch.setenv("EXP1_COMPARE_CONFIG", str(path))
@@ -245,13 +254,167 @@ def test_notebooks_end_to_end(tmp_path, monkeypatch):
         "assert np.isclose(figure.axes[0].patches[1].get_height(), 100 * 5 / 6)"))
     nbclient.NotebookClient(notebook, timeout=120, kernel_name="python3").execute(cwd=str(ROOT))
     nbformat.write(notebook, tmp_path / "executed_comparison.ipynb")
-    for name in ("main_table.csv", "main_table.tex", "physical_limits.tex", "disturbance_response.csv", "ee_distributions.pdf", "ee_distributions.png",
+    for name in ("motion_modes.csv", "motion_modes.tex", "main_table.csv", "main_table.tex", "physical_limits.tex", "disturbance_response.csv", "ee_distributions.pdf", "ee_distributions.png",
                  "ee_step.pdf", "ee_step.png", "ee_ecdf.pdf", "ee_ecdf.png", "ee_box.pdf", "ee_box.png", "ee_ecdf_data.csv", "ee_box_data.csv"):
         assert (tmp_path / "comparison" / name).stat().st_size > 0
     comparison = a.read_json(tmp_path / "comparison/comparison.json")
+    response = a.pd.read_csv(tmp_path / "comparison/disturbance_response.csv")
+    assert {"EE recovered [%]", "Velocity recovered [%]"} <= set(response.columns)
+    modes = a.pd.read_csv(tmp_path / "comparison/motion_modes.csv")
+    assert len(modes) == 42
+    stationary = modes[(modes.motion == "stationary") & (modes.metric == "ee_error_m")]
+    assert np.allclose(stationary["mean"], .04) and np.allclose(stationary.sd, .01)
+    latex = (tmp_path / "comparison/motion_modes.tex").read_text()
+    assert latex.index("Stationary manipulation") < latex.index("Locomotion with manipulation")
     assert comparison["seed_coverage"]["nominal"] == [0, 1, 2]
     plotted = a.pd.read_csv(tmp_path / "comparison/ee_distribution_data.csv")
     row = plotted[(plotted.task == "b1z1_pact") & (plotted.condition == "nominal") &
                   (plotted.axis == "x") & (plotted.bin_index == 1)].iloc[0]
     assert row.probability_mean == pytest.approx(5/6)  # Mean of seed masses 1, 1, 0.5, not pooled rows.
     assert row.outside_fraction == pytest.approx(1/6)
+
+
+def test_motion_modes_strata_and_exports(tmp_path):
+    summaries = {}
+    for task in ("pact", "unifp", "pos"):
+        rows, seeds = [], []
+        for mode, offset in (("stationary", 0.), ("locomotion", .1), ("combined", .8)):
+            for seed in range(3):
+                seeds.append(dict(seed=seed, condition="combined-disturbance", load_range="in", motion=mode))
+            for metric, value in (("ee_error_m", .02), ("planar_velocity_error_m_s", .03),
+                                  ("yaw_error_rad_s", .04), ("S_track", .6),
+                                  ("S_track_velocity", .7), ("S_track_manipulation", .8), ("failure_rate", .2)):
+                rows.append(dict(condition="combined-disturbance", load_range="in", motion=mode,
+                                 metric=metric, unit=a.UNITS[metric], mean=value+offset, sd=.0123,
+                                 contributing_seeds=3, contributing_trials=42))
+        summaries[task] = dict(aggregates=rows, per_seed=seeds)
+    cfg = dict(output_dir=str(tmp_path), load_range="in", motion="combined",
+               focused_methods=list(summaries), motion_modes_condition="combined-disturbance")
+    before = copy.deepcopy(summaries)
+    diagnostics = []
+    table = a.motion_modes_table(summaries, cfg, dict(pact="PILOT", unifp="UniFP", pos="Pos"), diagnostics)
+    assert list(table.index) == [(mode, name) for mode in (
+        "Stationary manipulation", "Locomotion with manipulation") for name in ("PILOT", "UniFP", "Pos")]
+    assert table.iloc[0, 1] == "0.030 \u00b1 0.012"
+    assert table.iloc[3, 1] == "0.130 \u00b1 0.012"
+    assert table.iloc[0, 2] == "0.040 \u00b1 0.012"
+    assert table.iloc[0, 3] == "60.000 \u00b1 1.230"
+    assert table.iloc[0, 4] == "70.000 \u00b1 1.230"
+    assert table.iloc[0, 5] == "80.000 \u00b1 1.230"
+    assert table.iloc[3, 0] == "0.120 \u00b1 0.012"
+    csv = a.pd.read_csv(tmp_path / "motion_modes.csv")
+    assert set(csv.motion) == {"stationary", "locomotion"}
+    assert set(csv.contributing_trials) == {42}
+    assert set(csv.contributing_seeds) == {3}
+    assert csv.iloc[0]["mean"] == .02 and csv.iloc[0].sd == .0123
+    assert csv.iloc[1]["mean"] == .03 and csv.iloc[1].sd == .0123
+    assert csv.iloc[1].unit == "m/s"
+    assert csv.iloc[2]["mean"] == .04 and csv.iloc[2].unit == "rad/s"
+    assert csv.iloc[3]["mean"] == 60. and csv.iloc[3].sd == 1.23
+    tex = (tmp_path / "motion_modes.tex").read_text()
+    assert "\\begin{table}[t]" in tex and "\\begin{table*}" not in tex
+    assert "\\label{tab:exp1_motion_modes}" in tex
+    assert tex.count("\\multicolumn{8}") == 2 and "\\toprule" in tex
+    assert "combined-disturbance, in-range" in tex and "sample SD" in tex
+    assert summaries == before and cfg["motion"] == "combined" and not diagnostics
+    summaries["pos"]["per_seed"] = [r for r in summaries["pos"]["per_seed"] if r["motion"] != "stationary"]
+    diagnostics = []
+    table = a.motion_modes_table(summaries, cfg, {}, diagnostics)
+    assert all(cell == "\u2014" for cell in table.iloc[2]) and diagnostics
+    del summaries["pos"]
+    table = a.motion_modes_table(summaries, cfg, {}, diagnostics)
+    assert all(cell == "\u2014" for cell in table.iloc[5])
+    summaries["unifp"]["per_seed"] = [r for r in summaries["unifp"]["per_seed"] if not (
+        r["motion"] == "locomotion" and r["seed"] == 2)]
+    with pytest.raises(ValueError, match="seed coverage.*locomotion"):
+        a.motion_modes_table(summaries, cfg, {}, [])
+
+
+def test_motion_table_preserves_combined_outputs(tmp_path):
+    make_fixture(tmp_path / "raw")
+    a.summarize(config(tmp_path / "raw", tmp_path / "summaries"))
+    cfg = dict(summary_roots=[str(tmp_path / "summaries")], output_dir=str(tmp_path / "comparison"),
+               focused_methods=["b1z1_pact"], load_range="in", motion="combined", additional_plots=[])
+    off, fig, _ = a.compare(dict(cfg, motion_modes_table=False))
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+    old = {name: (tmp_path / "comparison" / name).read_bytes() for name in (
+        "main_table.csv", "physical_limits.csv", "disturbance_response.csv", "ee_distribution_data.csv")}
+    on, fig, _ = a.compare(dict(cfg, motion_modes_table=True))
+    plt.close(fig)
+    assert list(on)[:2] == ["main", "motion_modes"]
+    for name, table in off.items():
+        a.pd.testing.assert_frame_equal(table, on[name])
+    for name, content in old.items():
+        assert (tmp_path / "comparison" / name).read_bytes() == content
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_independent_tracking_scores(failed):
+    d, t = trial_data([.01, .3, .01, .01], failed)
+    d["base_velocity_body"][2, 0] = .3
+    d["base_angular_velocity_body"][3, 2] = .4
+    result, *_ = a.trial_metrics(d, t, metadata())
+    # EE fails only step 1; planar velocity fails step 2 and yaw fails step 3.
+    assert result["S_track"] == .25
+    assert result["S_track_velocity"] == .5
+    assert result["S_track_manipulation"] == (.5 if failed else .75)
+    assert result["velocity_tracking_pass_steps"] == 2
+    d, t = trial_data([9.], True)
+    result, *_ = a.trial_metrics(d, t, metadata())
+    assert result["S_track_velocity"] == result["S_track_manipulation"] == 0.
+
+
+def test_split_scores_export_equal_seed_statistics(tmp_path):
+    make_fixture(tmp_path / "raw")
+    summary = a.summarize(config(tmp_path / "raw", tmp_path / "out"))
+    rows = {r["metric"]: r for r in summary["aggregates"] if
+            r["condition"] == "nominal" and r["motion"] == "locomotion"}
+    # Seed 1 has one pre-failure step across two trials (scores .25 and 0).
+    expected = [1., .125, 1.]
+    assert rows["S_track_velocity"]["mean"] == pytest.approx(np.mean(expected))
+    assert rows["S_track_velocity"]["sd"] == pytest.approx(np.std(expected, ddof=1))
+    assert rows["S_track_velocity"]["contributing_trials"] == 6
+    assert rows["S_track_manipulation"]["mean"] == rows["S_track"]["mean"]
+
+
+@pytest.mark.parametrize("bad_ee,bad_velocity,bad_yaw,expected", [
+    (True, False, False, (False, True)), (False, True, False, (True, False)),
+    (False, False, True, (True, False)), (False, False, False, (True, True)),
+])
+def test_split_recovery_criteria(bad_ee, bad_velocity, bad_yaw, expected):
+    d, t = trial_data([.3 if bad_ee else .01]*4)
+    d["base_velocity_body"][:, 0] = .3 if bad_velocity else 0.
+    d["base_angular_velocity_body"][:, 2] = .4 if bad_yaw else 0.
+    result, *_ = a.trial_metrics(d, t, metadata())
+    for event in result["events"]:
+        assert (event["recovered_ee"], event["recovered_velocity"]) == expected
+        assert event["recovered"] == all(expected)
+    t["physical_failure"] = True
+    d["physical_failure"][-1] = True
+    d["alive_for_metrics"][-1] = False
+    result, *_ = a.trial_metrics(d, t, metadata())
+    assert all(not e["recovered_ee"] and not e["recovered_velocity"] for e in result["events"])
+
+
+def test_split_recovery_dwell_gaps_and_seed_counts(tmp_path):
+    d, t = trial_data([.01]*4)
+    d = {k: v[[0, 2, 3]] for k, v in d.items()}
+    meta = metadata()
+    meta["evaluation"].update(recovery_window_seconds=3., recovery_dwell_seconds=2.)
+    result, *_ = a.trial_metrics(d, t, meta)
+    assert not result["events"][0]["recovered_ee"]
+    assert not result["events"][0]["recovered_velocity"]
+    make_fixture(tmp_path / "raw")
+    summary = a.summarize(config(tmp_path / "raw", tmp_path / "out"))
+    rows = [r for r in summary["per_seed"] if r["condition"] == "combined-disturbance" and r["motion"] == "locomotion"]
+    assert [r["eligible_events"] for r in rows] == [6, 6, 6]
+    assert [r["recovered_velocity_events"] for r in rows] == [6, 0, 6]
+    assert [r["recovered_ee_events"] for r in rows] == [6, 0, 3]
+    agg = {r["metric"]: r for r in summary["aggregates"] if r["condition"] == "combined-disturbance" and r["motion"] == "locomotion"}
+    assert agg["recovery_fraction_velocity"]["mean"] == pytest.approx(2/3)
+    assert agg["recovery_fraction_velocity"]["sd"] == pytest.approx(np.std([1., 0., 1.], ddof=1))
+    assert agg["recovery_fraction_ee"]["mean"] == .5
+    nominal = next(r for r in summary["per_seed"] if r["condition"] == "nominal")
+    assert nominal["values"]["recovery_fraction_ee"] is None
+    assert nominal["values"]["recovery_fraction_velocity"] is None
