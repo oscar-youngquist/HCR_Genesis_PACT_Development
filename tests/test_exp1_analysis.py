@@ -155,6 +155,64 @@ def test_duplicate_run_rejected(tmp_path):
         a.summarize(config(tmp_path / "raw", tmp_path / "out"))
 
 
+@pytest.mark.parametrize("field", ["evaluator_sha256", "checkpoint_sha256"])
+def test_compatibility_error_identifies_changed_source_or_checkpoint(tmp_path, field):
+    make_fixture(tmp_path / "raw")
+    path = next((tmp_path / "raw").rglob("metadata.json"))
+    meta = a.read_json(path)
+    meta[field] = "different-version"
+    a.write_json(path, meta)
+    with pytest.raises(ValueError, match="Mixed checkpoint versions") as error:
+        a.summarize(config(tmp_path / "raw", tmp_path / "out"))
+    message = str(error.value)
+    assert str(path.parent) in message and "different-version" in message
+    assert ("Differing protocol fields: evaluator_sha256" if field == "evaluator_sha256"
+            else "Found 2 checkpoint hash(es)") in message
+
+
+def test_compatibility_error_reports_nested_protocol_field():
+    first, second = metadata(), metadata(seed=1)
+    second["evaluation"]["ee_tolerance_m"] = .2
+    message = a.compatibility_error([(Path("first"), first), (Path("second"), second)])
+    assert "evaluation.ee_tolerance_m" in message
+    assert "0.1" in message and "0.2" in message
+
+
+def test_ignore_evaluator_source_hash_preserves_provenance(tmp_path):
+    make_fixture(tmp_path / "raw")
+    path = next((tmp_path / "raw").rglob("metadata.json"))
+    meta = a.read_json(path)
+    meta["evaluator_sha256"] = "changed-evaluator"
+    a.write_json(path, meta)
+    original = path.read_bytes()
+    cfg = dict(config(tmp_path / "raw", tmp_path / "out"), ignore_evaluator_source_hash=True)
+    with pytest.warns(RuntimeWarning, match="Evaluator-source hash validation disabled"):
+        summary = a.summarize(cfg)
+    assert summary["analysis"]["ignore_evaluator_source_hash"] is True
+    assert "evaluator_sha256" not in summary["protocol"]
+    assert summary["protocol_hash"] == a.fingerprint(summary["protocol"])
+    assert {p["evaluator_sha256"] for p in summary["provenance"]} == {
+        "fixture-evaluator", "changed-evaluator"}
+    assert any("validation disabled" in message for message in summary["diagnostics"])
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("field", ["checkpoint_sha256", "utilities_sha256", "evaluation", "resolved_environment"])
+def test_ignore_evaluator_source_hash_keeps_other_checks(tmp_path, field):
+    make_fixture(tmp_path / "raw")
+    path = next((tmp_path / "raw").rglob("metadata.json"))
+    meta = a.read_json(path)
+    if field == "evaluation":
+        meta[field]["ee_tolerance_m"] = .2
+    elif field == "resolved_environment":
+        meta[field]["control"]["decimation"] = 4
+    else:
+        meta[field] = "changed"
+    a.write_json(path, meta)
+    with pytest.raises(ValueError, match="Mixed checkpoint|Effective environment"):
+        a.summarize(dict(config(tmp_path / "raw", tmp_path / "out"), ignore_evaluator_source_hash=True))
+
+
 def test_comparison_rejects_incompatible_seeds_and_units(tmp_path):
     for task in ("pact", "pos"):
         make_fixture(tmp_path / "raw", task)

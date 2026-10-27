@@ -111,11 +111,12 @@ def apply_overrides(cfg, overrides, prefix=""):
             setattr(cfg, key, value)
 
 
-def configure(cfg, args):
+def configure(cfg, args, config=None):
+    config = EVAL_CONFIG if config is None else config
     cfg = util.materialize(cfg)
-    apply_overrides(cfg, EVAL_CONFIG["overrides"])
+    apply_overrides(cfg, config["overrides"])
     if hasattr(cfg.control, "randomize_pact_weights"):
-        apply_overrides(cfg.control, EVAL_CONFIG["branch_weight_overrides"], "control.")
+        apply_overrides(cfg.control, config["branch_weight_overrides"], "control.")
     cfg.env.num_envs = args.num_envs
     cfg.seed = args.seed
     cfg.commands.curriculum = False
@@ -127,7 +128,7 @@ def configure(cfg, args):
         if hasattr(cfg.control, key):
             setattr(cfg.control, key, False)
     if hasattr(cfg.control, "randomize_pact_weights"):
-        cfg.control.randomize_pact_weights = EVAL_CONFIG["randomize_branch_weights"]
+        cfg.control.randomize_pact_weights = config["randomize_branch_weights"]
     for key in ("use_reward_curriculum", "use_force_shifted_target"):
         if hasattr(cfg.rewards, key):
             setattr(cfg.rewards, key, False)
@@ -142,7 +143,7 @@ def configure(cfg, args):
         setattr(cfg.commands, key, True)
     # Keep terrain dimensions/height observation schema, not training curricula.
     cfg.env.episode_length_s = args.horizon_seconds + 10.
-    for requested, name in zip(EVAL_CONFIG["velocity_ranges"], ("lin_vel_x", "lin_vel_y", "ang_vel_yaw")):
+    for requested, name in zip(config["velocity_ranges"], ("lin_vel_x", "lin_vel_y", "ang_vel_yaw")):
         lo, hi = getattr(cfg.commands.ranges, name)
         if requested[0] < lo or requested[1] > hi:
             raise ValueError(f"Evaluation {name} range {requested} exceeds configured training range {[lo, hi]}")
@@ -501,12 +502,17 @@ def numpy_value(value):
     return value.detach().cpu().numpy()
 
 
-def main(argv=None):
-    args = parser().parse_args(argv)
-    validate_experiment(EVAL_CONFIG)
+def main(argv=None, experiment=None):
+    # Opt-in evaluation protocol hooks; Experiment 1 retains its original defaults.
+    args = (parser() if experiment is None else experiment.parser()).parse_args(argv)
+    config = EVAL_CONFIG if experiment is None else experiment.config
+    if experiment is None:
+        validate_experiment(config)
+    else:
+        experiment.validate(config, args)
     if args.horizon_seconds <= 0 or args.seed < 0:
         raise ValueError("horizon must be positive and seed nonnegative")
-    list(util.batches(args.episodes, args.num_envs))
+    trial_batches = list(util.batches(args.episodes, args.num_envs) if experiment is None else experiment.batches(args))
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         raise FileExistsError("Use an empty output directory; evaluation never overwrites records")
     os.environ["SIMULATOR"] = simulator_family(args.task)
@@ -519,7 +525,7 @@ def main(argv=None):
     if args.task not in task_registry.task_classes:
         raise ValueError(f"Unregistered task {args.task}; choose a registered b1z1 task name")
     training = util.materialize(task_registry.train_cfgs[args.task])
-    cfg = configure(task_registry.env_cfgs[args.task], args)
+    cfg = configure(task_registry.env_cfgs[args.task], args, config)
     env_class = task_registry.get_task_class(args.task)
     reject = args.task in ("b1z1_unifp_original", "b1z1_unifp_reject")
     if reject:
@@ -536,7 +542,7 @@ def main(argv=None):
     state = torch.load(path, map_location="cpu", weights_only=False)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     env = None
-    writer = util.NumericWriter(args.output_dir, EVAL_CONFIG["chunk_rows"])
+    writer = util.NumericWriter(args.output_dir, config["chunk_rows"])
     trials = []
     progress = None
     try:
@@ -556,8 +562,9 @@ def main(argv=None):
             privileged_decoder.load_state_dict(state["privileged_decoder_state_dict"], strict=True)
             privileged_decoder.eval().requires_grad_(False)
         if reject:
-            env._staged_force_curriculum.beta = EVAL_CONFIG["reject_beta"]
-        adapter = EvaluationAdapter(env, EVAL_CONFIG, args.seed)
+            env._staged_force_curriculum.beta = config["reject_beta"]
+        adapter_class = EvaluationAdapter if experiment is None else experiment.Adapter
+        adapter = adapter_class(env, config, args.seed)
         s = env.simulator
         steps = math.ceil(args.horizon_seconds / env.dt)
         metadata = dict(schema_version=1, task=args.task, runner=training.runner_class_name,
@@ -565,7 +572,7 @@ def main(argv=None):
                         checkpoint_iteration=state.get("iter", state.get("iteration")), checkpoint_training_seed=None,
                         evaluation_seed=args.seed, backend=os.environ["SIMULATOR"],
                         resolved_environment=class_to_dict(cfg), resolved_training=class_to_dict(training),
-                        evaluation=EVAL_CONFIG, arguments={**vars(args), "output_dir": str(args.output_dir)},
+                        evaluation=config, arguments={**vars(args), "output_dir": str(args.output_dir)},
                         dt=env.dt, physics_dt=env.dt / cfg.control.decimation, prescribed_steps=steps,
                         git_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                         git_dirty=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
@@ -595,6 +602,10 @@ def main(argv=None):
         converted = Path(s._robot.cfg.spawn.asset_path)
         metadata["converted_urdf"] = str(converted)
         metadata["converted_urdf_sha256"] = util.file_hash(converted)
+        if experiment is not None:
+            metadata.update(experiment.metadata(env, args, config, state))
+            if metadata["checkpoint_training_seed"] is not None:
+                metadata["unavailable"].remove("checkpoint_training_seed (not stored in checkpoint)")
         def save_json(name, data):
             (args.output_dir / name).write_text(json.dumps(data, indent=2, default=lambda x: x.tolist() if hasattr(x, "tolist") else str(x), allow_nan=False))
         save_json("metadata.json", metadata)
@@ -602,8 +613,9 @@ def main(argv=None):
             from tqdm import tqdm
             progress = tqdm(total=args.episodes, unit="episode", dynamic_ncols=True,
                             desc=f"{args.task} | {args.condition} | seed {args.seed}")
-            for ids in util.batches(args.episodes, args.num_envs):
-                scenarios = [util.Scenario(args.seed, trial, args.condition, args.load_range, args.motion_mode, EVAL_CONFIG) for trial in ids]
+            for ids in trial_batches:
+                scenarios = [(util.Scenario(args.seed, trial, args.condition, args.load_range, args.motion_mode, config)
+                              if experiment is None else experiment.scenario(args, trial)) for trial in ids]
                 adapter.reset(scenarios)
                 # Mechanics are fixed within a trial: store full body properties once,
                 # avoiding repeated host PhysX queries in the control loop.
@@ -625,7 +637,8 @@ def main(argv=None):
                         canonical["base_position_relative_origin"] = numpy_value(s.base_pos[slot] - s._env_origins[slot]).tolist()
                         initial["initial_state_hash"] = util.digest(canonical)
                         stream.write(json.dumps(initial, allow_nan=False) + "\n")
-                metrics = [util.TrialMetrics(steps, env.dt, scenario, EVAL_CONFIG) for scenario in scenarios]
+                metric_class = util.TrialMetrics if experiment is None else experiment.TrialMetrics
+                metrics = [metric_class(steps, env.dt, scenario, config) for scenario in scenarios]
                 alive = [True] * len(ids)
                 reasons = [""] * len(ids)
                 peak_loads = np.zeros((len(ids), 9))
@@ -703,6 +716,8 @@ def main(argv=None):
                     data["joint_position_min"] = stacks["joint_position"].amin(0)
                     data["joint_position_max"] = stacks["joint_position"].amax(0)
                     data["ee_reference_velocity_world"] = (data["ee_reference_world"] - current["ee_reference_t_world"]) / env.dt
+                    if experiment is not None:
+                        experiment.augment_data(adapter, stacks, data)
                     for slot, trial in enumerate(ids):
                         if not alive[slot]:
                             continue
@@ -731,6 +746,11 @@ def main(argv=None):
                                    joint_velocity_limits=numpy_value(s.dof_vel_limits),
                                    nominal_kp=numpy_value(s._p_gains), nominal_kd=numpy_value(s._d_gains),
                                    environment_origin_world=numpy_value(s._env_origins[slot]))
+                        if experiment is not None:
+                            experiment.augment_row(row, scenarios[slot], step * env.dt, (step + 1) * env.dt)
+                            # Exp2 scores changing commands at the successor timestamp;
+                            # commands_t and interval-start references remain untouched.
+                            command, phase = row["command_nominal"], int(row["task_stage_successor"])
                         # Physical terminal transitions are retained, but not counted as
                         # alive tolerance passes or finite pre-failure error statistics.
                         metrics[slot].add((step + 1) * env.dt, row["ee_position_world"] - row["ee_reference_world"],
@@ -761,7 +781,7 @@ def main(argv=None):
         if not metadata["weights_unchanged"]:
             raise RuntimeError("Frozen evaluation changed policy parameters/buffers")
         save_json("metadata.json", metadata)
-        save_json("seed_summary.json", util.aggregate_seed(trials))
+        save_json("seed_summary.json", (util.aggregate_seed(trials) if experiment is None else experiment.aggregate_seed(trials)))
         scalar_keys = [key for key, value in trials[0].items() if not isinstance(value, (list, dict))]
         with (args.output_dir / "trials.csv").open("w") as stream:
             table = csv.DictWriter(stream, fieldnames=scalar_keys, extrasaction="ignore")

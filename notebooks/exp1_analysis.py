@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 import math
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -60,16 +61,19 @@ def seed_statistics(values):
                 contributing_seeds=len(values))
 
 
-def protocol(meta):
+def protocol(meta, ignore_evaluator_source_hash=False):
     evaluation = copy.deepcopy(meta["evaluation"])
     evaluation.pop("chunk_rows", None)  # Buffering does not change the physical protocol.
-    return dict(evaluation=evaluation, dt=meta["dt"], physics_dt=meta["physics_dt"],
+    result = dict(evaluation=evaluation, dt=meta["dt"], physics_dt=meta["physics_dt"],
                 # PACT/UniFP backend family names differ, but use the same engine.
                 horizon_steps=meta["prescribed_steps"], backend=meta["backend"].split("_b1z1_")[0],
                 evaluator_sha256=meta.get("evaluator_sha256"), utilities_sha256=meta.get("utilities_sha256"),
                 failure_reason_bits=meta["failure_reason_bits"],
                 failure_definition="persistent" if "failure_patience_seconds" in evaluation else "immediate",
                 conventions={k: meta["conventions"][k] for k in ("quaternion", "world", "joint")})
+    if ignore_evaluator_source_hash:
+        result.pop("evaluator_sha256")  # Ignore only this source fingerprint, not protocol settings.
+    return result
 
 
 def discover(roots, filename):
@@ -80,6 +84,39 @@ def discover(roots, filename):
             raise FileNotFoundError(root)
         paths.update([root] if root.is_file() and root.name == filename else root.rglob(filename))
     return sorted(paths)
+
+
+def compatibility_error(runs):
+    """Explain incompatible cohorts without weakening source/protocol checks."""
+    groups = {}
+    for directory, meta in runs:
+        p = protocol(meta)
+        key = (meta["checkpoint_sha256"], fingerprint(p))
+        groups.setdefault(key, dict(protocol=p, paths=[]))["paths"].append(str(directory))
+
+    def flatten(value, prefix=""):
+        if isinstance(value, dict):
+            return {key: item for name, child in value.items()
+                    for key, item in flatten(child, f"{prefix}.{name}" if prefix else name).items()}
+        return {prefix: value}
+
+    fields = [flatten(group["protocol"]) for group in groups.values()]
+    differing = [key for key in sorted(set().union(*(set(f) for f in fields)))
+                 if len({json.dumps(f[key], sort_keys=True) if key in f else "<missing>"
+                         for f in fields}) > 1]
+    lines = ["Mixed checkpoint versions or incompatible evaluation protocols",
+             f"Found {len({key[0] for key in groups})} checkpoint hash(es) and "
+             f"{len({key[1] for key in groups})} protocol hash(es).",
+             "Differing protocol fields: " + (", ".join(differing) or "none")]
+    for (checkpoint, digest), group in groups.items():
+        lines.append(f"Checkpoint {checkpoint}; protocol {digest} ({len(group['paths'])} runs):")
+        flat = flatten(group["protocol"])
+        lines.extend(f"  {key} = {flat.get(key, '<missing>')!r}" for key in differing)
+        lines.extend(f"  {path}" for path in group["paths"])
+    lines.append("Use input_roots selecting one compatible cohort, or rerun mismatched evaluations "
+                 "with the same evaluator/utilities and settings. checkpoint_sha256 filters weights "
+                 "only; it does not resolve evaluator-source differences. Do not edit recorded hashes.")
+    return "\n".join(lines)
 
 
 def load_records(directory, smoothness=False):
@@ -285,6 +322,9 @@ def summarize(config):
     if frame not in ("yaw", "world"):
         raise ValueError("histogram_frame must be yaw or world")
     diagnostics, runs, identities, hashes, protocols = [], [], set(), set(), {}
+    ignore_source = config.get("ignore_evaluator_source_hash", False)
+    if not isinstance(ignore_source, bool):
+        raise ValueError("ignore_evaluator_source_hash must be a boolean")
     for path in discover(config["input_roots"], "metadata.json"):
         meta = read_json(path)
         if meta.get("task") != config["task"]:
@@ -308,13 +348,13 @@ def summarize(config):
             raise ValueError(f"Duplicate seed/condition/range: {identity}")
         identities.add(identity)
         hashes.add(meta["checkpoint_sha256"])
-        p = protocol(meta)
+        p = protocol(meta, ignore_evaluator_source_hash=ignore_source)
         protocols[fingerprint(p)] = p
         runs.append((directory, meta))
     if not runs:
         raise ValueError("No completed evaluations matched task/checkpoint selection")
     if len(hashes) != 1 or len(protocols) != 1:
-        raise ValueError("Mixed checkpoint versions or incompatible evaluation protocols")
+        raise ValueError(compatibility_error(runs))
     effective = set()
     for _, meta in runs:
         cfg = copy.deepcopy(meta["resolved_environment"])
@@ -324,6 +364,11 @@ def summarize(config):
         effective.add(fingerprint(cfg))
     if len(effective) != 1:
         raise ValueError("Effective environment configuration differs within this approach")
+    if ignore_source:
+        message = ("Evaluator-source hash validation disabled by ignore_evaluator_source_hash=True; "
+                   "evaluation-code equivalence has not been verified. Original hashes are retained in provenance.")
+        diagnostics.append(message)
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
     per_seed, all_trials, histograms, provenance = [], [], [], []
     box_samples = {}
     smoothness = config.get("acceleration_metrics", False)
@@ -400,6 +445,7 @@ def summarize(config):
                 histograms.extend(histogram_rows(e, edges, seed, condition, load_range, motion))
                 box_samples.setdefault((condition, load_range, motion), []).append(e)
         provenance.append(dict(directory=str(directory), task=meta["task"], checkpoint=meta["checkpoint"],
+                               evaluator_sha256=meta.get("evaluator_sha256"), utilities_sha256=meta.get("utilities_sha256"),
                                checkpoint_sha256=meta["checkpoint_sha256"], training_seed=meta.get("checkpoint_training_seed"),
                                evaluation_seed=seed, backend=meta["backend"], git_commit=meta.get("git_commit"), git_dirty=meta.get("git_dirty"),
                                scenario_hashes=[t.get("scenario_hash") for t in trials], resolved_environment=meta["resolved_environment"]))
@@ -422,6 +468,7 @@ def summarize(config):
     summary = dict(schema_version=VERSION, status="complete", task=config["task"], display_name=config["display_name"],
                    checkpoint_sha256=next(iter(hashes)), protocol=next(iter(protocols.values())), protocol_hash=next(iter(protocols)),
                    units=UNITS, provenance=provenance, analysis=dict(histogram_frame=frame, histogram_edges=edges.tolist(),
+                   ignore_evaluator_source_hash=ignore_source,
                    acceleration_metrics=smoothness, acceleration_processing="backward difference; no filter; contiguous valid endpoints; per-trial RMS then equal-trial/seed means",
                    include_combined=config.get("include_combined", False), expected_seeds=config.get("expected_seeds", [0, 1, 2])),
                    per_seed=per_seed, aggregates=aggregate, trials=all_trials, diagnostics=diagnostics,
