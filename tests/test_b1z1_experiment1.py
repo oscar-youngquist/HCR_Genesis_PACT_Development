@@ -148,7 +148,9 @@ def test_registered_inference_contracts_and_strict_loading(monkeypatch):
         a = evaluation.inference(actor, obs, history)
         if hasattr(actor, "decode_context"):
             # Same deterministic extra pass used for logging; it cannot affect actions.
-            actor.decode_context(actor.context_encoder.forward_inf(history))
+            context = actor.decode_context(actor.context_encoder.forward_inf(history))
+            if hasattr(actor, "predict_grf"):
+                actor.predict_grf(context, torch.zeros(2, len(env.cfg.asset.dof_names)))
         b = evaluation.inference(actor, obs, history)
         assert a.shape == (2, getattr(c, "num_policy_actions", c.num_actions)), task
         assert torch.equal(a, b) and torch.equal(rng, torch.random.get_rng_state()), task
@@ -170,7 +172,8 @@ def test_checkpoint_selection(tmp_path, monkeypatch):
         evaluation.resolve_checkpoint(str(run), "99", "unused")
 
 
-def test_motor_scaling_and_substep_clipping_record():
+@pytest.mark.parametrize("family", ["coupled", "position", "unifp"])
+def test_motor_scaling_and_substep_clipping_record(family):
     import torch
     from types import SimpleNamespace as NS
     a = evaluation.EvaluationAdapter.__new__(evaluation.EvaluationAdapter)
@@ -185,19 +188,74 @@ def test_motor_scaling_and_substep_clipping_record():
     s.combined_feedback_torques = s.feedback_torques * .8
     s.combined_feedforward_torques = s.feedforward_torques * 1.2
     s.unclipped_torques = s.combined_feedback_torques + s.combined_feedforward_torques
+    if family != "coupled":
+        s.feedforward_torques.zero_()
+        s.combined_feedforward_torques.zero_()
+        s.unclipped_torques = s.feedback_torques.clone()
+        s.combined_feedback_torques = s.feedback_torques.clone() if family == "position" else torch.zeros_like(s.feedback_torques)
     s._sensor_foot_forces_world = lambda: torch.ones(1, 4, 3)
     a.sim, a.substeps = s, []
     a.body_masses = torch.ones(1, 4)
     a.compute_torques = lambda actions: s.unclipped_torques * s._motor_strength
     a.sensor_update = lambda *args, **kwargs: None
-    requested = a.torque(torch.ones(1, 4))
+    requested = a.torque(torch.ones(1, 4 if family == "coupled" else 2))
     s.executed_torques = requested.clamp(-1.1 * s.torque_limits, 1.1 * s.torque_limits)
     a.contact_update(.005)
     row = a.substeps[0]
-    torch.testing.assert_close(row["torque_request_motor_scaled"], torch.tensor([[28., 6.8]]))
-    torch.testing.assert_close(row["executed_torque"], torch.tensor([[11., 6.8]]))
+    expected = torch.tensor([[28., 6.8]]) if family == "coupled" else torch.tensor([[20., 10.]])
+    torch.testing.assert_close(row["torque_request_motor_scaled"], expected)
+    torch.testing.assert_close(row["executed_torque"], expected.clamp(-1.1 * s.torque_limits, 1.1 * s.torque_limits))
     torch.testing.assert_close(row["pd_weighted_motor"] + row["ff_weighted_motor"], requested)
     assert row["saturation"].tolist() == [[True, False]]
+
+
+@pytest.mark.parametrize("criterion", ["torso_contact", "height", "roll", "pitch"])
+def test_immediate_physical_failure(criterion):
+    import torch
+    from types import SimpleNamespace as NS
+    a = evaluation.EvaluationAdapter.__new__(evaluation.EvaluationAdapter)
+    a.config = evaluation.EVAL_CONFIG
+    a.env = NS(cfg=NS(terrain=NS(mesh_type="plane")), dt=.02)
+    a.torso_indices = [0]
+    a.sim = NS(base_pos=torch.tensor([[0., 0., .6]]), measured_heights=torch.zeros(1, 1),
+               base_euler=torch.zeros(1, 3), link_contact_forces=torch.zeros(1, 1, 3), dof_pos=torch.zeros(1, 2))
+    assert a.failures() == [""]
+    if criterion == "torso_contact":
+        a.sim.link_contact_forces[0, 0, 2] = 11.
+    elif criterion == "height":
+        a.sim.base_pos[0, 2] = 0.
+    else:
+        a.sim.base_euler[0, 0 if criterion == "roll" else 1] = 1.
+    assert a.failures() == [criterion]  # One bad endpoint is sufficient.
+
+
+@pytest.mark.parametrize("magnitude", [.1, 100.])
+@pytest.mark.parametrize("delay", [0, 2])
+@pytest.mark.parametrize("position_only", [False, True])
+def test_grf_nominal_matches_runner(magnitude, delay, position_only):
+    import torch
+    from types import SimpleNamespace as NS
+    from rsl_rl.algorithms.ppo_b1z1_pact import PPO_B1Z1PACT
+    state = torch.zeros(2, 180)
+    state[:, 7:26], state[:, 32:51] = .1, .2
+    state[:, 97:116], state[:, 116:135], state[:, 135:154] = 1.3, 30., 2.
+    state[:, 154:156] = torch.tensor([.7, 1.2])
+    actor = NS(num_actions=17)
+    env = NS(cfg=NS(control=NS(action_scale=.4), normalization=NS(clip_actions=2.),
+                    domain_rand=NS(randomize_ctrl_delay=bool(delay))),
+             simulator=NS(_torque_action_scale=torch.full((17,), 10.), torque_limits=torch.full((19,), 8.)),
+             action_delay=torch.full((2,), delay), get_pact_dynamics_state=lambda: state)
+    training = NS(runner_class_name="B1Z1PACTRunner", algorithm=NS(dynamics_backend="bard"))
+    action = torch.full((2, 17 if position_only else 34), magnitude)
+    owner = NS(actor_critic=actor, cfg=dict(position_action_scale=.4, torque_action_scale=[10.] * 17))
+    expected = PPO_B1Z1PACT._coupled_torque(owner, action.clamp(-2., 2.), state).clamp(-8.8, 8.8)
+    before = action.clone()
+    torch.testing.assert_close(evaluation.grf_conditioning_before_step(env, training, actor, action), expected)
+    torch.testing.assert_close(action, before)
+    training.runner_class_name = "B1Z1PACTPosRunner"
+    assert evaluation.grf_conditioning_before_step(env, training, actor, action) is None
+    training.runner_class_name, training.algorithm.dynamics_backend = "B1Z1PACTRunner", "pinocchio"
+    assert evaluation.grf_conditioning_before_step(env, training, actor, action) is None
 
 
 def test_nominal_target_and_application_flags(monkeypatch):

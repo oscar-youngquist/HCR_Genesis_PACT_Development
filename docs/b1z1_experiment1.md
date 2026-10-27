@@ -1,5 +1,8 @@
 # B1Z1 Experiment 1: frozen disturbance rejection
 
+CPU-only summary/comparison notebooks and metric conventions are documented in
+[b1z1_experiment1_analysis.md](b1z1_experiment1_analysis.md).
+
 Run in the existing Isaac Lab Python environment, from any working directory:
 
 ```bash
@@ -105,6 +108,15 @@ Experiments 2–3 offline; those experiment schedules/figures are not implemente
 
 `*_interval_mean` averages **raw substep** samples; filtered GRFs have a separate
 field. PD and FF torques are recorded before and after branch/motor weighting.
+UniFP uses its actual feedback torque, not the allocated-but-unused combined-PD
+buffer; its FF contribution is zero. Weighted motor-scaled PD plus FF equals
+the pre-clipping requested total for every controller family.
+`prediction_grf_torque_input_nm` follows the registered training runner: BARD
+PACT uses the clipped current action and pre-step dynamics state, with configured
+gains, branch weights, motor scaling and 1.1-times-rated clipping. As in training,
+this nominal input does **not** apply action delay. Legacy PACT-Pos and non-BARD
+PACT instead use the final executed substep torque (which includes delay).
+These decoder inputs are distinct from requested/executed interval averages.
 `torque_request_pre_motor` is not the actual actuator request: motor scaling
 follows it. Actual clipping uses **1.1 times rated limits**. Saturation and joint
 limit frequencies use substep-by-DOF denominators, not control-step maxima.
@@ -114,6 +126,9 @@ Applied wrench points are body CoMs, recorded in world coordinates. Robot CoM
 and ground-support moment are derived from measured masses/CoMs and raw GRFs;
 they are not assumed equal to the torso origin or filtered-contact wrench.
 
+Physical failure is immediate at the first evaluated control endpoint with
+disallowed torso contact, terrain-relative height, or roll/pitch violation.
+There is no persistence/patience requirement; horizon completion alone is not failure.
 Errors use finite **pre-failure** samples. Terminal rows remain in the recording,
 including failure coinciding with horizon completion. `valid` means finite data;
 `alive_for_metrics` excludes the failure transition. `S_track` is the conjunction

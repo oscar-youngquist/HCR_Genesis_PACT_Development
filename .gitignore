@@ -37,6 +37,8 @@ dist/
 *.pt
 *.json
 **eval/*
+**evaluation/*
+**analysis/*
 *.csv
 *.pt
 *.json

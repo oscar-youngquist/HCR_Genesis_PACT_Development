@@ -44,7 +44,7 @@ def main():
                 "m['EVAL_CONFIG'].update(event_times=[0.02,0.04,0.06],transition_seconds=0.02,"
                 "recovery_window_seconds=0.02,recovery_dwell_seconds=0.02); ")
         if name == "forced_failure":
-            code += "m['EVAL_CONFIG'].update(height_min_m=5.,height_max_m=6.,failure_patience_seconds=0.02); "
+            code += "m['EVAL_CONFIG'].update(height_min_m=5.,height_max_m=6.); "
         if name == "ab6_position":
             code += ("m['EVAL_CONFIG']['overrides']['noise']['add_noise']=True; "
                      "m['EVAL_CONFIG']['overrides']['domain_rand'].update(randomize_pd_gain=True,"
@@ -76,6 +76,11 @@ def main():
             assert all(value > bound for value, bound in zip(max_loads, (50, 35, 10)))
         metadata = json.loads((output / "metadata.json").read_text())
         assert metadata["weights_unchanged"]
+        np.testing.assert_allclose(data["pd_weighted_motor_interval_mean"] + data["ff_weighted_motor_interval_mean"],
+                                   data["torque_request_motor_scaled_interval_mean"], rtol=1e-5, atol=1e-4)
+        if name == "original_reject":
+            assert np.any(data["pd_weighted_motor_interval_mean"])
+            assert not np.any(data["ff_weighted_motor_interval_mean"])
         if name == "forced_failure":
             assert data["physical_failure"].all() and data["horizon_complete"].all()
         if "position" in name or name == "pos_ee":

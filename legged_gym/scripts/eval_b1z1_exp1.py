@@ -25,22 +25,21 @@ spec.loader.exec_module(util)
 # All times are seconds; Cartesian quantities use SI units. Spherical EE entries
 # are [radius in m, elevation in rad, azimuth in rad], in the native yaw frame.
 EVAL_CONFIG = {
-    "event_times": [2., 5., 8.],  # onset, changed load, removal (overlap on both bodies)
+    "event_times": [3., 7., 11.],  # onset, changed load, removal (overlap on both bodies)
     "transition_seconds": 1.,
     "velocity_ranges": [[0.2, 0.6], [-0.4, 0.4], [-0.6, 0.6]],
     "ee_center_sphere": [0.5, 0.1, 0.],
     "ee_amplitude_sphere": [0.04, 0.1, 0.15], "ee_period": 6.,
-    "ee_tolerance_m": 0.05, "velocity_tolerance_m_s": 0.10, "yaw_tolerance_rad_s": 0.20,
+    "ee_tolerance_m": 0.10, "velocity_tolerance_m_s": 0.20, "yaw_tolerance_rad_s": 0.30,
     "recovery_window_seconds": 2., 
-    "recovery_dwell_seconds": 0.3,
+    "recovery_dwell_seconds": 0.5,
     "height_min_m": 0.3, 
     "height_max_m": 1.1, 
     "tilt_limit_rad": 0.9,
     "torso_contact_threshold_n": 10., 
-    "failure_patience_seconds": 0.06,
     "torso_body_names": ["base", "trunk"],  # Resolve articulation/contact order by name.
     "reject_beta": 1.,  # Frozen estimator-only compensation; never restore curriculum.
-    "chunk_rows": 128,
+    "chunk_rows": 2048,
     "initial_joint_jitter_rad": 0.02, 
     "initial_yaw_range_rad": [-0.2, 0.2],
     # Strict nested overrides: unknown fields fail instead of silently being ignored.
@@ -68,7 +67,7 @@ EVAL_CONFIG = {
             "randomize_joint_armature": True, "joint_armature_range": [0.015, 0.015],
             "randomize_joint_friction": True, "joint_friction_range_end": [0.1, 0.1],
             "randomize_joint_stiffness": False, "joint_stiffness_range_end": [0., 0.],
-            "randomize_joint_damping": False, "joint_damping_range_end": [0.40, 0.40],
+            "randomize_joint_damping": True, "joint_damping_range_end": [0.40, 0.40],
         },
     },
     "randomize_branch_weights": False,  # PACT-only; native configured ranges apply.
@@ -86,7 +85,7 @@ def parser():
     p.add_argument("--load-range", choices=("in", "out"), default="in")
     p.add_argument("--num-envs", type=int, default=2)
     p.add_argument("--episodes", type=int, default=4)
-    p.add_argument("--horizon-seconds", type=float, default=12.)
+    p.add_argument("--horizon-seconds", type=float, default=15.)
     p.add_argument("--motion-mode", choices=("stationary", "locomotion", "mixed"), default="mixed")
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--headless", action="store_true")
@@ -158,7 +157,7 @@ def validate_experiment(config):
     if not 0 <= config["reject_beta"] <= 1:
         raise ValueError("reject_beta must lie in [0,1]")
     for key in ("ee_period", "ee_tolerance_m", "velocity_tolerance_m_s", "yaw_tolerance_rad_s",
-                "recovery_window_seconds", "recovery_dwell_seconds", "failure_patience_seconds", "chunk_rows"):
+                "recovery_window_seconds", "recovery_dwell_seconds", "chunk_rows"):
         if not math.isfinite(config[key]) or config[key] <= 0:
             raise ValueError(f"{key} must be finite and positive")
     for ranges in (config["velocity_ranges"], [config["initial_yaw_range_rad"]]):
@@ -260,6 +259,28 @@ def model_hash(actor):
     return h.hexdigest()
 
 
+def grf_conditioning_before_step(env, training, actor, actions):
+    """Match the runner's nominal Nm input, without building a learner/optimizer."""
+    if (training.runner_class_name != "B1Z1PACTRunner" or
+            getattr(training.algorithm, "dynamics_backend", "pinocchio").lower() != "bard"):
+        return None
+    from types import SimpleNamespace
+    from legged_gym.torque_action_scaling import simulator_torque_action_scale
+    from rsl_rl.algorithms.ppo_b1z1_pact import PPO_B1Z1PACT
+    # Reuse the exact runner helper, including its passive-DOF convention.
+    # Training deliberately uses action_t, NOT the delay-buffer action; x_t is
+    # captured before integration. This is distinct from executed interval torque.
+    owner = SimpleNamespace(actor_critic=actor, cfg={
+        "position_action_scale": env.cfg.control.action_scale,
+        "torque_action_scale": simulator_torque_action_scale(env.simulator),
+    })
+    clip = env.cfg.normalization.clip_actions
+    nominal = PPO_B1Z1PACT._coupled_torque(
+        owner, actions.clamp(-clip, clip), env.get_pact_dynamics_state())
+    limit = 1.1 * env.simulator.torque_limits
+    return nominal.clamp(-limit, limit).detach().clone()
+
+
 class EvaluationAdapter:
     """Instance-only hooks: no training class is modified and no automatic reset occurs."""
     def __init__(self, env, config, seed):
@@ -298,7 +319,6 @@ class EvaluationAdapter:
         self.sim._contact_sensors.update = self.contact_update
         self.pending = None
         self.body_masses = None
-        self.fail_counters = torch.zeros((env.num_envs, 4), dtype=torch.long, device=env.device)
         self.torso_indices = [self.sim._body_names.index(name) for name in config["torso_body_names"]
                               if name in self.sim._body_names]
         if not self.torso_indices:
@@ -315,8 +335,13 @@ class EvaluationAdapter:
                         "torque_request_pre_motor": s.unclipped_torques.detach().clone(),
                         "pd_torque": s.feedback_torques.detach().clone(),
                         "ff_torque": getattr(s, "feedforward_torques", torch.zeros_like(requested)).detach().clone()}
-        self.pending["pd_weighted_motor"] = (getattr(s, "combined_feedback_torques", s.feedback_torques) * s._motor_strength).clone()
-        self.pending["ff_weighted_motor"] = (getattr(s, "combined_feedforward_torques", torch.zeros_like(requested)) * s._motor_strength).clone()
+        # Position controllers (including UniFP) have no learned FF contribution.
+        # UniFP allocates combined_* buffers but never fills them; use its actual PD.
+        position_only = actions.shape[-1] == s._num_learned_actions
+        pd = s.feedback_torques if position_only else s.combined_feedback_torques
+        ff = torch.zeros_like(requested) if position_only else s.combined_feedforward_torques
+        self.pending["pd_weighted_motor"] = (pd * s._motor_strength).clone()
+        self.pending["ff_weighted_motor"] = (ff * s._motor_strength).clone()
         return requested
 
     def contact_update(self, *args, **kwargs):
@@ -432,7 +457,6 @@ class EvaluationAdapter:
         e.commands.zero_()
         self.publish_targets(0.)
         self.observations()
-        self.fail_counters.zero_()
         e.reset_buf.zero_()
         self.substeps.clear()
 
@@ -464,8 +488,8 @@ class EvaluationAdapter:
         contact = (s.link_contact_forces[:, self.torso_indices].norm(dim=-1) > c["torso_contact_threshold_n"]).any(-1)
         bad = torch.stack((contact, (height < c["height_min_m"]) | (height > c["height_max_m"]),
                            tilt[:, 0] > c["tilt_limit_rad"], tilt[:, 1] > c["tilt_limit_rad"]), -1)
-        self.fail_counters = torch.where(bad, self.fail_counters + 1, 0)
-        triggered = self.fail_counters >= max(1, math.ceil(c["failure_patience_seconds"] / self.env.dt))
+        # Common physical failures terminate immediately at this control endpoint.
+        triggered = bad
         finite = torch.isfinite(s.dof_pos).all(-1) & torch.isfinite(s.base_pos).all(-1)
         reasons = []
         for row, ok in zip(triggered.cpu().tolist(), finite.cpu().tolist()):
@@ -514,6 +538,7 @@ def main(argv=None):
     env = None
     writer = util.NumericWriter(args.output_dir, EVAL_CONFIG["chunk_rows"])
     trials = []
+    progress = None
     try:
         with isolated_rng(args.seed, args.gpu):
             env = env_class(cfg, class_to_dict(cfg.sim), args.gpu, args.headless)
@@ -551,6 +576,11 @@ def main(argv=None):
                                      "grf_raw_world": "interval mean of raw sensor samples, not filtered",
                                      "prediction": "native normalized decoder units; unavailable fields omitted",
                                      "torque_request_pre_motor": "before motor strength; actual clip=1.1*rated",
+                                     "prediction_grf_torque_input_nm": (
+                                         "clipped pre-step nominal action torque; no action delay"
+                                         if training.runner_class_name == "B1Z1PACTRunner" and
+                                         getattr(training.algorithm, "dynamics_backend", "pinocchio").lower() == "bard"
+                                         else "final executed substep torque, including action delay; field omitted without GRF decoder"),
                                      "EE_reference": "nominal yaw-aligned workspace target evaluated at successor"},
                         dof_names=list(cfg.asset.dof_names), foot_indices=s.feet_indices.tolist(),
                         body_names=list(s._body_names), sensor_body_names=list(s._contact_sensors.body_names),
@@ -569,6 +599,9 @@ def main(argv=None):
             (args.output_dir / name).write_text(json.dumps(data, indent=2, default=lambda x: x.tolist() if hasattr(x, "tolist") else str(x), allow_nan=False))
         save_json("metadata.json", metadata)
         with torch.no_grad():
+            from tqdm import tqdm
+            progress = tqdm(total=args.episodes, unit="episode", dynamic_ncols=True,
+                            desc=f"{args.task} | {args.condition} | seed {args.seed}")
             for ids in util.batches(args.episodes, args.num_envs):
                 scenarios = [util.Scenario(args.seed, trial, args.condition, args.load_range, args.motion_mode, EVAL_CONFIG) for trial in ids]
                 adapter.reset(scenarios)
@@ -630,6 +663,7 @@ def main(argv=None):
                                "ee_position_t_world": s.ee_pos.clone(), "ee_velocity_t_world": s._ee_vel.clone(),
                                "ee_reference_t_world": env.curr_ee_goal_cart_world.clone(),
                                "commands_t": env.commands.clone()}
+                    grf_nominal = grf_conditioning_before_step(env, training, actor, action) if hasattr(actor, "predict_grf") else None
                     adapter.loads(step * env.dt)
                     adapter.substeps.clear()
                     env.step(action)
@@ -650,8 +684,11 @@ def main(argv=None):
                             "contacts": s.foot_contacts.clone(), "grf_filtered_world": s._grfs_buf.reshape(env.num_envs, -1, 3).clone(),
                             "obs_next": env.obs_buf.clone(), "history_next": env.obs_history.clone()}
                     if predictions and hasattr(actor, "predict_grf"):
-                        data["prediction_grf"] = actor.predict_grf(context, stacks["torque_request_motor_scaled"][0]).clone()
-                        data["prediction_grf_torque_input_nm"] = stacks["torque_request_motor_scaled"][0].clone()
+                        # Legacy/non-BARD runners condition on the final executed
+                        # substep, including delay; BARD uses the pre-step nominal.
+                        grf_input = stacks["executed_torque"][-1] if grf_nominal is None else grf_nominal
+                        data["prediction_grf"] = actor.predict_grf(context, grf_input).clone()
+                        data["prediction_grf_torque_input_nm"] = grf_input.clone()
                     body_com = s._robot.data.body_com_pos_w
                     mass = masses
                     data["robot_com_world"] = (body_com * mass[..., None]).sum(1) / mass.sum(1, keepdim=True)
@@ -702,6 +739,9 @@ def main(argv=None):
                                           violations=tuple(int(row[k + "_substep_count"].sum()) for k in ("position_violation", "velocity_violation", "saturation")),
                                           denominators=(cfg.control.decimation * s.dof_pos.shape[1],) * 3)
                         writer.append(row)
+                        # Count each trial once, at failure or horizon, not per robot step.
+                        if failure or step == steps - 1:
+                            progress.update(1)
                         if failure:
                             alive[slot], reasons[slot] = False, failures[slot]
                     if not any(alive):
@@ -713,7 +753,6 @@ def main(argv=None):
                     result["loaded_event_observed"] = bool(peaks.any())
                     trials.append(result)
                 save_json("trials.json", trials)
-                print(f"Completed {len(trials)}/{args.episodes} trials", flush=True)
         metadata["weights_unchanged"] = before == model_hash(actor)
         metadata["prediction_fields_available"] = [k for k in writer.schema if k.startswith("prediction_")]
         for key in ("prediction_z", "prediction_explicit", "prediction_grf", "prediction_privileged"):
@@ -738,6 +777,8 @@ def main(argv=None):
         (args.output_dir / "ERROR.txt").write_text(report)
         raise
     finally:
+        if progress is not None:
+            progress.close()
         writer.close()
         if env is not None:
             env.simulator._app_launcher.app.close()

@@ -2,9 +2,11 @@
 set -euo pipefail
 
 # Activate Isaac Lab first. Edit these paths before running.
-RUN=""   # Trained run directory or registered run name.
-CKPT=""  # Fixed checkpoint number or model file (not -1).
-OUTPUT_ROOT="evaluation/exp1/b1z1_unifp_original/combined_in"
+RUN="Oct23_15-25-20_upstream_architecture"   # Trained run directory or registered run name.
+CKPT="70000"  # Fixed checkpoint number or model file (not -1).
+OUTPUT_BASE="${3:-evaluation/exp1/b1z1_unifp_original}"
+OUTPUT_ROOT="$OUTPUT_BASE/nominal"
+
 
 # Explicit evaluation seeds; 100 episodes per seed across 10 robots on cuda:0.
 SEEDS=(0 1 2)
@@ -24,6 +26,44 @@ for SEED in "${SEEDS[@]}"; do
         --num-envs 10 \
         --episodes 100 \
         --horizon-seconds 12 \
+        --condition nominal \
+        --load-range in \
+        --motion-mode mixed \
+        --gpu cuda:0 \
+        --headless \
+        --output-dir "$OUTPUT_ROOT/seed_${SEED}"
+done
+
+OUTPUT_ROOT="$OUTPUT_BASE/ee_only_in"
+for SEED in "${SEEDS[@]}"; do
+    echo "Evaluating b1z1_unifp_original: seed=$SEED, episodes=100, robots=10"
+    bash "$HERE/eval_b1z1_exp1.sh" \
+        --task b1z1_unifp_original \
+        --run "$RUN" \
+        --ckpt "$CKPT" \
+        --seed "$SEED" \
+        --num-envs 10 \
+        --episodes 100 \
+        --horizon-seconds 12 \
+        --condition ee-disturbance \
+        --load-range in \
+        --motion-mode mixed \
+        --gpu cuda:0 \
+        --headless \
+        --output-dir "$OUTPUT_ROOT/seed_${SEED}"
+done
+
+OUTPUT_ROOT="$OUTPUT_BASE/combine_in"
+for SEED in "${SEEDS[@]}"; do
+    echo "Evaluating b1z1_unifp_original: seed=$SEED, episodes=100, robots=10"
+    bash "$HERE/eval_b1z1_exp1.sh" \
+        --task b1z1_unifp_original \
+        --run "$RUN" \
+        --ckpt "$CKPT" \
+        --seed "$SEED" \
+        --num-envs 10 \
+        --episodes 100 \
+        --horizon-seconds 12 \
         --condition combined-disturbance \
         --load-range in \
         --motion-mode mixed \
@@ -31,3 +71,8 @@ for SEED in "${SEEDS[@]}"; do
         --headless \
         --output-dir "$OUTPUT_ROOT/seed_${SEED}"
 done
+
+# conda activate lr_lab_cupiqp
+# bash legged_gym/scripts/eval_b1z1_unifp_original_three_seeds.sh \
+#     "logs/b1z1/b1z1_pact_lab/Oct23_15-25-20_upstream_architecture" \
+#     70000
