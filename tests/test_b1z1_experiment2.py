@@ -17,6 +17,29 @@ def scenario(profile="pushing", loading="loaded", trial=0):
     return u.Scenario(42, trial, profile, loading, c)
 
 
+@pytest.mark.parametrize("index_type", ["list", "tuple", "numpy", "tensor"])
+def test_metadata_index_containers(index_type):
+    import json
+    from types import SimpleNamespace
+
+    factories = {"list": list, "tuple": tuple, "numpy": np.asarray}
+    factory = pytest.importorskip("torch").tensor if index_type == "tensor" else factories[index_type]
+    simulator = SimpleNamespace(
+        _body_names=["base", "foot_a", "arm", "foot_b"],
+        feet_indices=factory([3, 1]),
+        _contact_indices=factory([2, 0, 3, 1]),
+        _dof_indices=factory([6, 11, 16, 7]),
+    )
+    metadata = e.Experiment2.metadata(
+        SimpleNamespace(dt=.02, simulator=simulator),
+        SimpleNamespace(horizon_seconds=c["finish_s"]), c, {"training_seed": 42},
+    )
+    assert metadata["nonfoot_body_indices"] == [0, 2]
+    assert metadata["articulation_to_contact_sensor_indices"] == [2, 0, 3, 1]
+    assert metadata["configured_to_articulation_dof_indices"] == [6, 11, 16, 7]
+    assert json.loads(json.dumps(metadata))["configured_to_articulation_dof_indices"] == [6, 11, 16, 7]
+
+
 @pytest.mark.parametrize("profile,velocity,start,end", [
     ("pushing", .4, .50, .60), ("pulling", -.4, .60, .45), ("carrying", .4, .50, None)])
 def test_profile_endpoints(profile, velocity, start, end):
@@ -168,18 +191,100 @@ def test_substep_recorder_moments_sensor_order_and_torque_identity():
     torch.testing.assert_close(stats["opposing_channel_cancellation_mean"], torch.tensor([[5., 2.]]))
 
 
-def test_exp1_configuration_and_scenarios_unchanged():
+def test_exp1_deterministic_fixture_and_config_isolation(monkeypatch):
+    config = e.exp1.EVAL_CONFIG
+    assert config["event_times"] == [3., 7., 11.]
+    assert [config[k] for k in ("ee_tolerance_m", "velocity_tolerance_m_s", "yaw_tolerance_rad_s")] == [.10, .20, .30]
+    # Fixed seed/trial fixture guards event stream, force layout, and boundary timing.
+    fixture = [
+        [63.17778810695938, 32.087173650893504, 60.71882727394734,
+         -51.727168394006085, -27.24916517958675, 22.012232262025407,
+         12.572858131991339, 12.435928384640444, -4.815043768655327],
+        [22.75408388833121, .11191258734464782, 51.49359186040597,
+         54.408304238663746, 40.717752940380706, -42.652819053745375,
+         -14.149447091300186, -13.247084293112387, 1.7796455766230501],
+        [0.]*9,
+    ]
+    s = e.exp1.util.Scenario(1, 2, "combined-disturbance", "out", "mixed", config)
+    np.testing.assert_array_equal(s.at(1.5)[0], [0., 0., 0.])
+    np.testing.assert_allclose(s.at(1.5)[1], [.54, .20, .15])
+    for i, time in enumerate((3., 7., 11.)):
+        np.testing.assert_allclose(s.at(time-1e-6)[2], fixture[i-1] if i else np.zeros(9))
+        np.testing.assert_allclose(s.at(time)[2], fixture[i])
+        np.testing.assert_allclose(s.at(time+1e-6)[2], fixture[i])
+    before = copy.deepcopy(config)
+    monkeypatch.setitem(e.EVAL_CONFIG["overrides"]["noise"], "noise_level", 99.)
+    monkeypatch.setitem(e.EVAL_CONFIG["overrides"]["domain_rand"], "friction_range", [9., 10.])
+    assert e.exp1.EVAL_CONFIG == before  # Exp2 edits cannot mutate Exp1 nested settings.
+    local = copy.deepcopy(config)
+    isolated = e.exp1.util.Scenario(1, 2, "combined-disturbance", "out", "mixed", local)
+    local["event_times"][0] = 99.
+    np.testing.assert_allclose(isolated.at(3.)[2], fixture[0])
+
+
+def limit_trials(experiment, counts, seed=42):
+    """Synthetic saved-trial records with deliberately unequal exposure lengths."""
+    result = []
+    for i, (count, denominator) in enumerate(counts):
+        if experiment == 2:
+            s = scenario(trial=i)
+            metric = u.TrialMetrics(1400, .02, s, c)
+        else:
+            s = e.exp1.util.Scenario(seed, i, "nominal", "in", "stationary", e.exp1.EVAL_CONFIG)
+            metric = e.exp1.util.TrialMetrics(100, .02, s, e.exp1.EVAL_CONFIG)
+        row = metric.finish("height" if i else "")
+        row.update(seed=seed, S_track=.2 if i == 0 else .8, ee_error_m=.1 if i == 0 else .9)
+        for name in ("position_violation", "velocity_violation", "actuator_saturation"):
+            row[name+"_count"], row[name+"_denominator"] = count, denominator
+            row[name+"_frequency"] = count/denominator if denominator else None
+        result.append(row)
+    return result
+
+
+@pytest.mark.parametrize("experiment", [1, 2])
+@pytest.mark.parametrize("counts,expected", [([(10, 100), (10, 10)], 20/110),
+                                             ([(0, 0), (10, 10)], 1.), ([(0, 0), (0, 0)], None)])
+def test_pooled_physical_limits_and_seed_weighting(experiment, counts, expected):
+    aggregate = e.exp1.util.aggregate_seed if experiment == 1 else u.aggregate_seed
+    summary = aggregate(limit_trials(experiment, counts))
+    row = next(iter(summary.values()))
+    assert row["S_track"] == .5 and row["ee_error_m"] == .5
+    assert row["physical_failure_rate"] == .5
+    for name in ("position_violation", "velocity_violation", "actuator_saturation"):
+        assert row[name+"_frequency"] == expected
+        assert row[name+"_count"] == sum(n for n, d in counts)
+        assert row[name+"_denominator"] == sum(d for n, d in counts)
+        assert row[name+"_frequency_trial_count"] == sum(d > 0 for n, d in counts)
+    other_seed = aggregate(limit_trials(experiment, [(0, 1000)], seed=43))
+    across = next(iter(e.exp1.util.aggregate_across_seeds([summary, other_seed]).values()))
+    # Across seeds, do NOT pool the 1000 exposures from the second seed.
+    assert across["actuator_saturation_frequency"]["mean"] == (expected/2 if expected is not None else 0.)
+    assert across["actuator_saturation_frequency"]["seeds"] == (2 if expected is not None else 1)
+
+
+@pytest.mark.parametrize("experiment", [1, 2])
+def test_summary_regeneration_without_raw_changes(tmp_path, experiment):
+    import json
     import subprocess
-    from types import ModuleType
-    baseline = ModuleType("exp1_head")
-    baseline.__file__ = str(ROOT / "legged_gym/scripts/eval_b1z1_exp1.py")
-    source = subprocess.check_output(["git", "show", "HEAD:legged_gym/scripts/eval_b1z1_exp1.py"], cwd=ROOT, text=True)
-    exec(compile(source, baseline.__file__, "exec"), baseline.__dict__)
-    assert baseline.EVAL_CONFIG == e.exp1.EVAL_CONFIG
-    for condition in ("nominal", "ee-disturbance", "combined-disturbance"):
-        old = baseline.util.Scenario(1, 2, condition, "out", "mixed", baseline.EVAL_CONFIG)
-        new = e.exp1.util.Scenario(1, 2, condition, "out", "mixed", e.exp1.EVAL_CONFIG)
-        assert old.metadata == new.metadata
-        for time in (0, 3, 7, 11, 12):
-            for x, y in zip(old.at(time), new.at(time)):
-                np.testing.assert_array_equal(x, y)
+    import sys
+    trials = limit_trials(experiment, [(10, 100), (10, 10)])
+    (tmp_path / "trials.json").write_text(json.dumps(trials))
+    (tmp_path / "metadata.json").write_text(json.dumps({} if experiment == 1 else {"experiment": 2}))
+    (tmp_path / "COMPLETE").write_text("2 trials")
+    (tmp_path / "transitions-000000.npz").write_bytes(b"raw sentinel: never read or rewritten")
+    (tmp_path / "records.json").write_text("raw schema sentinel")
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    (tmp_path / "seed_summary.json").write_text('{"old_frequency": 0.55}')
+    subprocess.run([sys.executable, str(ROOT / "legged_gym/utils/b1z1_experiment.py"), str(tmp_path)], check=True)
+    summary = json.loads((tmp_path / "seed_summary.json").read_text())
+    row = next(iter(summary.values()))
+    assert row["actuator_saturation_frequency"] == 20/110
+    assert ("stages" in row) == (experiment == 2)
+    assert {p.name for p in tmp_path.iterdir()} == set(before) | {"seed_summary.json"}
+    assert all((tmp_path / name).read_bytes() == content for name, content in before.items())
+    # Failed regeneration must not replace the last valid summary.
+    last = (tmp_path / "seed_summary.json").read_bytes()
+    (tmp_path / "COMPLETE").unlink()
+    with pytest.raises(ValueError, match="incomplete"):
+        e.exp1.util.regenerate_seed_summary(tmp_path)
+    assert (tmp_path / "seed_summary.json").read_bytes() == last

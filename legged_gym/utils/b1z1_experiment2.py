@@ -177,6 +177,8 @@ class TrialMetrics(common.TrialMetrics):
 
 
 def aggregate_seed(trials):
+    # Shared helper pools physical-limit counts/exposure within each seed;
+    # tracking keeps equal trial weights. Only stage summaries are Exp2-specific.
     summary = common.aggregate_seed(trials)
     for key, result in summary.items():
         rows = [t for t in trials if "/".join(str(t[k]) for k in ("seed", "condition", "load_range", "motion_mode")) == key]

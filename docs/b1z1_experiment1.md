@@ -143,6 +143,27 @@ are not computed online; velocities and reset-safe time indices support them off
 
 ## Focused checks
 
+### Regenerating seed summaries
+
+Physical-limit frequencies pool each seed's trial violation counts and valid
+joint-substep denominators, not trial percentages. Zero total exposure yields
+`null`; aggregate `*_count` and `*_denominator` fields retain the audit trail.
+Tracking errors, S_track and failure rate retain equal trial weighting, and
+across-seed summaries retain equal seed weighting.
+
+Rebuild older Exp1 **or Exp2** summaries without a simulator using completed run
+directories (not approach parent directories):
+
+```bash
+python legged_gym/utils/b1z1_experiment.py \
+  /path/to/exp1/seed_0 /path/to/exp2/seed_0
+```
+
+This reads `metadata.json` and `trials.json`, requires `COMPLETE`, and atomically
+replaces only `seed_summary.json`. No raw recordings, trials, or metadata are
+modified. Exp2 is selected from its metadata and retains its stage summaries.
+Re-export any downstream summaries separately if they used old online frequencies.
+
 ```bash
 SIMULATOR=isaaclab_b1z1_pact python -m pytest tests/test_b1z1_experiment1.py -q
 python tests/smoke_b1z1_experiment1.py \

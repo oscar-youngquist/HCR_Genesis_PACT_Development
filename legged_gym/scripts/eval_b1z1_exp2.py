@@ -128,14 +128,16 @@ class Experiment2:
         if any(not math.isclose(t/env.dt, round(t/env.dt), abs_tol=1e-6) for t in boundaries):
             raise ValueError("Experiment 2 task boundaries must align with the control timestep")
         s = env.simulator
+        # Simulator index mappings may be lists or tensors; serialize native ints.
+        foot_indices = {int(i) for i in s.feet_indices}
         return dict(experiment=2, task_stages=dict(enumerate(tasks.STAGES)), attribution_tasks=tasks.ATTRIBUTION,
                     checkpoint_training_seed=state.get("training_seed", state.get("seed")),
                     exp2_evaluator_sha256=exp1.util.file_hash(__file__),
                     exp2_utilities_sha256=exp1.util.file_hash(HERE.parent / "utils/b1z1_experiment2.py"),
                     shortened_sequence=args.horizon_seconds < config["finish_s"],
-                    nonfoot_body_indices=[i for i in range(len(s._body_names)) if i not in s.feet_indices.tolist()],
-                    articulation_to_contact_sensor_indices=s._contact_indices.tolist(),
-                    configured_to_articulation_dof_indices=s._dof_indices.tolist(),
+                    nonfoot_body_indices=[i for i in range(len(s._body_names)) if i not in foot_indices],
+                    articulation_to_contact_sensor_indices=[int(i) for i in s._contact_indices],
+                    configured_to_articulation_dof_indices=[int(i) for i in s._dof_indices],
                     experiment2_conventions={
                         "task_force_frame": "initial reset heading, world z up; constant for each trial",
                         "EE_trajectory": "native yaw-aligned workspace; position reference follows current base yaw/translation",

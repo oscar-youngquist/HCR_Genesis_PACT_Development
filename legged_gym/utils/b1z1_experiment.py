@@ -206,7 +206,7 @@ class TrialMetrics:
 
 
 def aggregate_seed(trials):
-    """Equal weight per trial, within this evaluation seed, separated by motion mode."""
+    """Equal-trial tracking; pooled valid joint-substep physical limits per seed."""
     groups = {}
     for trial in trials:
         key = "/".join(str(trial[k]) for k in ("seed", "condition", "load_range", "motion_mode"))
@@ -220,11 +220,19 @@ def aggregate_seed(trials):
                            recovery_fraction=sum(e["recovered"] for e in events) / len(events) if events else None,
                            complete_response_windows=sum(e["complete_window"] for e in events))
         for name in ("S_track", "ee_error_m", "planar_velocity_error_m_s", "yaw_error_rad_s",
-                     "ee_signed_x_m", "ee_signed_y_m", "ee_signed_z_m", "position_violation_frequency",
-                     "velocity_violation_frequency", "actuator_saturation_frequency"):
+                     "ee_signed_x_m", "ee_signed_y_m", "ee_signed_z_m"):
             values = [row[name] for row in rows if row[name] is not None]
             result[key][name] = float(np.mean(values)) if values else None
             result[key][name + "_trial_count"] = len(values)
+        # Pool exposure, not trial percentages: short failed trials must not
+        # receive the same physical-limit weight as long valid trials.
+        for name in ("position_violation", "velocity_violation", "actuator_saturation"):
+            count = sum(int(row[name + "_count"]) for row in rows)
+            denominator = sum(int(row[name + "_denominator"]) for row in rows)
+            result[key][name + "_count"] = count
+            result[key][name + "_denominator"] = denominator
+            result[key][name + "_frequency"] = count / denominator if denominator else None
+            result[key][name + "_frequency_trial_count"] = sum(row[name + "_denominator"] > 0 for row in rows)
         result[key]["phases"] = {}
         for phase in ("0", "1", "2"):
             present = [r["phase_statistics"][phase] for r in rows if r["phase_statistics"][phase]["count"]]
@@ -245,6 +253,50 @@ def aggregate_across_seeds(seed_summaries):
                 raise ValueError(f"Duplicate evaluation seed {seed} in {group}")
             groups[group][seed] = row
     return {group: {metric: dict(mean=float(np.mean(values)), std=float(np.std(values)), seeds=len(values))
-                    for metric in ("S_track", "ee_error_m", "planar_velocity_error_m_s", "yaw_error_rad_s", "physical_failure_rate")
-                    for values in [[r[metric] for r in rows.values() if r[metric] is not None]] if values}
+                    for metric in ("S_track", "ee_error_m", "planar_velocity_error_m_s", "yaw_error_rad_s", "physical_failure_rate",
+                                   "position_violation_frequency", "velocity_violation_frequency", "actuator_saturation_frequency")
+                    # Physical limits are pooled WITHIN seeds, then seeds are equal-weighted.
+                    for values in [[r[metric] for r in rows.values() if r.get(metric) is not None]] if values}
             for group, rows in groups.items()}
+
+
+def regenerate_seed_summary(directory):
+    """Rebuild only seed_summary.json from a completed run's saved trial counts."""
+    import importlib.util
+    import os
+    import tempfile
+    directory = Path(directory)
+    if not (directory / "COMPLETE").is_file():
+        raise ValueError(f"Refusing to summarize an incomplete run: {directory}")
+    metadata = json.loads((directory / "metadata.json").read_text())
+    trials = json.loads((directory / "trials.json").read_text())
+    experiment = metadata.get("experiment", 1)  # Original Exp1 metadata has no experiment key.
+    if experiment == 2:
+        spec = importlib.util.spec_from_file_location("exp2_summary", Path(__file__).with_name("b1z1_experiment2.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        summary = module.aggregate_seed(trials)
+    elif experiment == 1:
+        summary = aggregate_seed(trials)
+    else:
+        raise ValueError(f"Unsupported experiment: {experiment}")
+    payload = json.dumps(summary, indent=2, allow_nan=False)
+    target = directory / "seed_summary.json"
+    # Atomic replacement keeps a failed regeneration from damaging an existing summary.
+    with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(payload)
+            stream.close()
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return target
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Regenerate Exp1/Exp2 seed summaries from saved trials, without simulation.")
+    parser.add_argument("directories", nargs="+", type=Path, help="Completed evaluation run directories")
+    for directory in parser.parse_args().directories:
+        print(regenerate_seed_summary(directory))

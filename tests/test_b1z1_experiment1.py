@@ -44,15 +44,18 @@ def test_cli_and_family():
 def test_scenario_bounds(condition, load_range):
     s = scenario(condition=condition, load_range=load_range)
     bounds = np.array([50] * 3 + [35] * 3 + [10] * 3) if load_range == "in" else np.array([70] * 3 + [55] * 3 + [20] * 3)
-    for time in (0., 2., 5., 8., 10.):
+    for time in (0., 3.-1e-6, 3., 3.+1e-6, 7.-1e-6, 7., 7.+1e-6, 11.-1e-6, 11., 11.+1e-6):
         load = s.at(time)[2]
         assert (np.abs(load) <= bounds).all()
-        if condition == "nominal" or time < 2 or time >= 8:
+        if condition == "nominal" or time < 3 or time >= 11:
             assert not load.any()
         elif condition == "ee-disturbance":
             assert not load[3:].any() and load[:3].any()
         else:
             assert load[:3].any() and load[3:6].any() and load[6:].any()
+        event_index = sum(time >= t for t in (3., 7., 11.))-1
+        expected = np.zeros(9) if event_index < 0 else s.metadata["events"][event_index]["load"]
+        np.testing.assert_array_equal(load, expected)
     if load_range == "out" and condition != "nominal":
         assert any(s.metadata["events"][0]["exceeds_training_bounds"])
 
@@ -71,7 +74,7 @@ def test_metric_denominators_and_censored_recovery():
     m.add(2., [.1, 0., 0.], [0., 0.], 0., 1)
     m.add(3., [9., 9., 9.], [9., 9.], 9., 1, valid=False)
     result = m.finish("height")
-    assert result["S_track"] == .1
+    assert result["S_track"] == .2  # EE tolerance is inclusive at 0.10 m.
     assert result["ee_error_m"] == .05 and result["valid_steps"] == 2
     assert result["actuator_saturation_frequency"] == .3
     assert result["event_metrics"][0]["iae_m_s"] is None
@@ -276,8 +279,18 @@ def test_recovery_dwell_and_full_window():
     c = copy.deepcopy(evaluation.EVAL_CONFIG)
     c.update(recovery_dwell_seconds=.2, recovery_window_seconds=.4)
     m = u.TrialMetrics(100, .1, scenario(), c)
-    for time, error in ((2., .2), (2.1, 0.), (2.2, 0.), (2.3, 0.)):
+    for time, error in ((3., .2), (3.1, 0.), (3.2, 0.), (3.3, 0.)):
         m.add(time, [error, 0, 0], [0, 0], 0, 1)
     e = m.finish("")["event_metrics"][0]
     assert e["recovered"] and e["recovery"] == pytest.approx(.1)
     assert e["iae_m_s"] == pytest.approx(.02)
+
+
+@pytest.mark.parametrize("axis,limit", [("ee", .10), ("velocity", .20), ("yaw", .30)])
+def test_inclusive_tracking_tolerances(axis, limit):
+    for delta, expected in ((-1e-6, 1.), (0., 1.), (1e-6, 0.)):
+        m = u.TrialMetrics(1, 1., scenario(), evaluation.EVAL_CONFIG)
+        m.add(1., [limit+delta if axis == "ee" else 0., 0., 0.],
+              [limit+delta if axis == "velocity" else 0., 0.],
+              limit+delta if axis == "yaw" else 0., 0)
+        assert m.finish("")["S_track"] == expected

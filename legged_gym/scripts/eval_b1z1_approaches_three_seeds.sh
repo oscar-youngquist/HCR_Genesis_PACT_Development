@@ -5,12 +5,23 @@ set -euo pipefail
 # Each child collects 3 conditions x 3 seeds x 100 trials with 10 parallel robots.
 # Existing PACT and UniFP collections are intentionally not repeated here.
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+# SCRIPTS=(
+#     eval_b1z1_ppo_pos_three_seeds.sh
+#     eval_b1z1_pact_ab4_coupled_none_three_seeds.sh
+#     eval_b1z1_pact_ab5_coupled_concat_three_seeds.sh
+#     eval_b1z1_pact_ab8_coupled_film_three_seeds.sh
+#     eval_b1z1_pact_ab6_position_film_three_seeds.sh
+# )
+
 SCRIPTS=(
+    eval_b1z1_pact_three_seeds.sh
     eval_b1z1_ppo_pos_three_seeds.sh
-    eval_b1z1_pact_ab4_coupled_none_three_seeds.sh
-    eval_b1z1_pact_ab5_coupled_concat_three_seeds.sh
-    eval_b1z1_pact_ab8_coupled_film_three_seeds.sh
-    eval_b1z1_pact_ab6_position_film_three_seeds.sh
+    eval_b1z1_unifp_original_three_seeds.sh
+    # eval_b1z1_ppo_pos_three_seeds.sh
+    # eval_b1z1_pact_ab4_coupled_none_three_seeds.sh
+    # eval_b1z1_pact_ab5_coupled_concat_three_seeds.sh
+    # eval_b1z1_pact_ab8_coupled_film_three_seeds.sh
+    # eval_b1z1_pact_ab6_position_film_three_seeds.sh
 )
 
 for INDEX in "${!SCRIPTS[@]}"; do

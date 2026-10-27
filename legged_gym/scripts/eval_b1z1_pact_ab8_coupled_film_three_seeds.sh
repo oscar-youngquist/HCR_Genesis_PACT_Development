@@ -32,7 +32,7 @@ for INDEX in "${!CONDITIONS[@]}"; do
             --seed "$SEED" \
             --num-envs 10 \
             --episodes 100 \
-            --horizon-seconds 12 \
+            --horizon-seconds 15 \
             --condition "${CONDITIONS[$INDEX]}" \
             --load-range in \
             --motion-mode mixed \

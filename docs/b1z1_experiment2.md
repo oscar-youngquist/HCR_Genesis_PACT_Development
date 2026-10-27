@@ -165,6 +165,12 @@ Additional fields include:
 
 ## Validation
 
+Physical-limit seed frequencies inherit Experiment 1's pooled violation counts /
+valid joint-substep exposure (null for zero exposure); tracking remains equal-trial.
+To correct existing summaries without simulation, run
+`python legged_gym/utils/b1z1_experiment.py /path/to/completed/exp2/run`.
+Only `seed_summary.json` is replaced; stage summaries and raw recordings are preserved.
+
 CPU tests:
 
 ```bash
