@@ -25,6 +25,7 @@ class RolloutStorageB1Z1PACT:
             self.dynamics_state = None
             self.rollout_initial_state = None
             self.latent_noise = None
+            self.film_tracking_history = None
             self.nominal_torque = None
             self.physics_source = None
             self.interval_torque = None
@@ -38,6 +39,7 @@ class RolloutStorageB1Z1PACT:
         self, num_envs, steps, obs_dim, critic_dim, history_dim, action_dim,
         explicit_dim, next_privileged_dim, state_dim,
         policy_distribution_dim=None, rollout_state_dim=0, device="cpu", latent_dim=64,
+        film_history_dim=0,
     ):
         self.device, self.num_envs, self.steps, self.step = device, num_envs, steps, 0
         self.actor_physics = {}  # Allocated only when the optional actor objective is enabled.
@@ -50,6 +52,7 @@ class RolloutStorageB1Z1PACT:
         self.actions = zeros(action_dim)
         # Replay the same reparameterization noise for PPO likelihood ratios.
         self.latent_noise, self.nominal_torque = zeros(latent_dim), zeros(19)
+        self.film_tracking_history = zeros(film_history_dim) if film_history_dim else None
         self.interval_torque, self.physics_invalid = zeros(19), zeros(1)
         self.mu, self.sigma = zeros(distribution_dim), zeros(distribution_dim)
         self.values, self.rewards, self.returns, self.advantages = zeros(1), zeros(1), zeros(1), zeros(1)
@@ -68,13 +71,15 @@ class RolloutStorageB1Z1PACT:
             zeros(rollout_state_dim) if rollout_state_dim else None
         )
         self.physics_source = (
-            zeros(obs_dim + history_dim + latent_dim + action_dim + 1)
+            zeros(obs_dim + history_dim + latent_dim + action_dim + 1 + film_history_dim)
             if rollout_state_dim else None
         )
 
     def add(self, transition):
         if self.step >= self.steps:
             raise AssertionError("Rollout buffer overflow")
+        if self.film_tracking_history is not None:
+            self.film_tracking_history[self.step].copy_(transition.film_tracking_history)
         if transition.actor_physics is not None:
             for name, value in transition.actor_physics.items():
                 if name not in self.actor_physics:
@@ -102,6 +107,8 @@ class RolloutStorageB1Z1PACT:
                     transition.latent_noise,
                     (transition.actions - transition.mu) / transition.sigma.clamp_min(1e-8),
                     torch.ones_like(transition.mu[:, :1])), dim=-1)
+                if self.film_tracking_history is not None:
+                    source = torch.cat((source, transition.film_tracking_history), -1)
             self.physics_source[self.step].copy_(source)
         for name in ("interval_torque", "physics_invalid"):
             value = getattr(transition, name)
@@ -143,6 +150,8 @@ class RolloutStorageB1Z1PACT:
         if self.rollout_initial_state is not None:
             flat["rollout_initial_state"] = self.rollout_initial_state.flatten(0, 1)
             flat["physics_source"] = self.physics_source.flatten(0, 1)
+        if self.film_tracking_history is not None:
+            flat["film_tracking_history"] = self.film_tracking_history.flatten(0, 1)
         flat.update({"actor_phys_" + name: value.flatten(0, 1)
                      for name, value in self.actor_physics.items()})
         for _ in range(epochs):

@@ -221,6 +221,7 @@ class PPO_B1Z1PACT:
     def init_storage(self, *args, **kwargs):
         # Forward optional rollout-state dimensions supplied by the runner.
         kwargs.setdefault("latent_dim", self.actor_critic.context_encoder.latent_mean.out_features)
+        kwargs.setdefault("film_history_dim", self.actor_critic.film_history_dim)
         self.storage = RolloutStorageB1Z1PACT(*args, device=self.device, **kwargs)
 
     def update_adaptive_entropy_coef(self, performance_metrics):
@@ -255,6 +256,8 @@ class PPO_B1Z1PACT:
         self.transition.histories = history.detach().clone()
         self.transition.explicit_targets = explicit_labels.detach().clone()
         self.transition.latent_noise = self.actor_critic.last_context["latent_noise"].detach().clone()
+        if self.actor_critic.film_v02_enabled:
+            self.transition.film_tracking_history = self.actor_critic.last_context["film_tracking_history"].detach().clone()
         return actions
 
     def process_env_step(
@@ -496,9 +499,14 @@ class PPO_B1Z1PACT:
         source = batch["physics_source"]
         widths = (batch["observations"].shape[-1], batch["histories"].shape[-1],
                   batch["latent_noise"].shape[-1], batch["actions"].shape[-1], 1)
+        film_history = None
+        if self.actor_critic.film_v02_enabled:
+            source, film_history = source.split((sum(widths), self.actor_critic.film_history_dim), dim=-1)
         obs, history, latent_noise, action_noise, source_valid = source.split(widths, dim=-1)
         context = self.actor_critic.decode_context(self.actor_critic.context_encoder(
             history, latent_noise=latent_noise))
+        if film_history is not None:
+            context["film_tracking_history"] = film_history.detach()
         # Replay must not replace current-transition FiLM diagnostics.
         saved = (self.actor_critic.last_film_identity_deviation,
                  self.actor_critic.last_tracking_error_sq)
@@ -758,7 +766,8 @@ class PPO_B1Z1PACT:
         The actor always uses latent z and the decoder-predicted explicit context.
         """
         self.actor_critic.update_distribution(
-            batch["observations"], batch["histories"], latent_noise=batch["latent_noise"], detach_context=True
+            batch["observations"], batch["histories"], latent_noise=batch["latent_noise"], detach_context=True,
+            film_tracking_history=batch.get("film_tracking_history"),
         )
         actions_log_prob = self.actor_critic.get_actions_log_prob(batch["actions"])
         values = self.actor_critic.evaluate(batch["critic_observations"])
@@ -819,7 +828,8 @@ class PPO_B1Z1PACT:
     def _pre_update_diagnostics(self, batch):
         """Compare the untouched rollout policy with its stored distribution."""
         self.actor_critic.update_distribution(
-            batch["observations"], batch["histories"], latent_noise=batch["latent_noise"]
+            batch["observations"], batch["histories"], latent_noise=batch["latent_noise"],
+            film_tracking_history=batch.get("film_tracking_history"),
         )
         mu, sigma = self.actor_critic.action_mean, self.actor_critic.action_std
         old_mu, old_sigma = batch["mu"], batch["sigma"]

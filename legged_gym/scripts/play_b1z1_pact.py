@@ -111,6 +111,7 @@ def main():
     try:
         with torch.inference_mode():
             env.reset()
+            runner.actor_critic.reset()
             obs, history, _, _ = env.get_observations()
             for _ in range(options.play_steps):
                 if joystick is not None:
@@ -123,7 +124,8 @@ def main():
                     obs[:,-cmd.shape[-1]:] = cmd
                     history[:,-cmd.shape[-1]:] = cmd
                 actions = policy(obs, history)
-                obs, _, history, _, _, _, _, _ = env.step(actions)
+                obs, _, history, _, _, dones, _, _ = env.step(actions)
+                runner.actor_critic.reset(dones)
                 if args.follow_robot and not args.headless:
                     base = env.simulator.base_pos[0].detach().cpu().numpy()
                     env.set_viewer_camera(base + np.asarray(cfg.viewer.pos),

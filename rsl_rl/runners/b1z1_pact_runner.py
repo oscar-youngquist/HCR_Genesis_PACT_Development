@@ -58,6 +58,8 @@ class B1Z1PACTRunner:
             max_noise_std=policy_cfg["max_noise_std"],
             action_mode=policy_cfg.get("action_mode", "coupled"),
             conditioning_mode=policy_cfg.get("conditioning_mode", "film"),
+            film_v02_enabled=policy_cfg.get("film_v02_enabled", False),
+            film_history_steps=policy_cfg.get("film_history_steps", 5),
         ).to(device)
 
         self.privileged_decoder = B1Z1PACTDecoder(

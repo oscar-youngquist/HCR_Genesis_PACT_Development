@@ -243,6 +243,8 @@ def recorded_inference(actor, obs, history):
     def modulation(module, inputs, output):
         gamma, beta = output.chunk(2, dim=-1)
         records.update(film_gamma_t=gamma.detach().clone(), film_beta_t=beta.detach().clone())
+        if getattr(actor, "film_v02_enabled", False):
+            records["film_condition_normalized_t"] = inputs[0].detach().clone()
 
     def features(module, inputs, output):
         # Native dimensionless features; gamma is residual scale, NOT 1+gamma.
@@ -613,7 +615,7 @@ def main(argv=None, experiment=None):
                                      "forces": "world N", "joint": "configured order, rad and rad/s",
                                      "grf_raw_world": "interval mean of raw sensor samples, not filtered",
                                      "prediction": "native normalized decoder units; unavailable fields omitted",
-                                     "film": "action_t inference pass: post=pre*(1+gamma)+beta; dimensionless actor features; condition in native normalized units; fields omitted without FiLM",
+                                     "film": "action_t pass: post=pre*(1+gamma)+beta; V01 actor-trunk features, V02 latent z; V02 condition is oldest-to-newest tracking history, normalized per frame; auxiliary z stays unmodulated",
                                      "torque_request_pre_motor": "before motor strength; actual clip=1.1*rated",
                                      "prediction_grf_torque_input_nm": (
                                          "clipped pre-step nominal action torque; no action delay"
@@ -649,6 +651,8 @@ def main(argv=None, experiment=None):
                 scenarios = [(util.Scenario(args.seed, trial, args.condition, args.load_range, args.motion_mode, config)
                               if experiment is None else experiment.scenario(args, trial)) for trial in ids]
                 adapter.reset(scenarios)
+                if getattr(actor, "film_v02_enabled", False):
+                    actor.reset()
                 # Mechanics are fixed within a trial: store full body properties once,
                 # avoiding repeated host PhysX queries in the control loop.
                 masses = s._robot.root_physx_view.get_masses().to(env.device)

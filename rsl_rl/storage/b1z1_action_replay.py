@@ -15,6 +15,9 @@ class B1Z1ActionReplay:
             (transition.actions - transition.mu) / transition.sigma.clamp_min(1e-8),
             torch.ones_like(transition.mu[:, :1]),
         ), dim=-1).detach()
+        film_history = getattr(transition, "film_tracking_history", None)
+        if film_history is not None:
+            current = torch.cat((current, film_history.detach()), -1)
         if self.queue is None:
             self.queue = current.new_zeros(current.shape[0], self.length, current.shape[1])
         self.queue[:, 1:] = self.queue[:, :-1].clone()

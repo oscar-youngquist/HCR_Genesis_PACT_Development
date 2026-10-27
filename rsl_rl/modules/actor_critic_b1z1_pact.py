@@ -69,8 +69,10 @@ class B1Z1PACTContextEncoder(nn.Module):
 class FiLM(nn.Module):
     """Near-identity DreamFLEX-style modulation of the shared actor state."""
 
-    def __init__(self, condition_dim: int, feature_dim: int, hidden_dim: int, activation: str):
+    def __init__(self, condition_dim: int, feature_dim: int, hidden_dim: int, activation: str, normalize_dim=None):
         super().__init__()
+        self.normalize_dim = normalize_dim
+        self.condition_norm = nn.LayerNorm(normalize_dim) if normalize_dim else nn.Identity()
         self.network = _mlp(condition_dim, [hidden_dim, hidden_dim], 2 * feature_dim, activation)
 
         self.network.apply(init_weights)
@@ -80,6 +82,8 @@ class FiLM(nn.Module):
         nn.init.zeros_(final.bias)
 
     def forward(self, features: torch.Tensor, condition: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.normalize_dim:
+            condition = self.condition_norm(condition.reshape(len(condition), -1, self.normalize_dim)).flatten(1)
         gamma, beta = self.network(condition).chunk(2, dim=-1)
         # gamma=0 and beta=0 are exactly the identity feature transform.
         identity_deviation = gamma.square().mean(dim=-1) + beta.square().mean(dim=-1)
@@ -125,12 +129,20 @@ class ActorCriticB1Z1PACT(nn.Module):
         max_noise_std: float | Sequence[float] = 5.0,
         action_mode: str = "coupled",
         conditioning_mode: str = "film",
+        film_v02_enabled: bool = False,
+        film_history_steps: int = 5,
     ):
         super().__init__()
         self.num_actions = num_actions
         if action_mode not in ("position", "coupled") or conditioning_mode not in ("none", "concat", "film"):
             raise ValueError("Invalid B1Z1 action or conditioning mode")
         self.action_mode, self.conditioning_mode = action_mode, conditioning_mode
+        self.film_v02_enabled = bool(film_v02_enabled and conditioning_mode == "film")
+        if film_history_steps < 1 or int(film_history_steps) != film_history_steps:
+            raise ValueError("film_history_steps must be a positive integer")
+        self.film_history_steps = int(film_history_steps)
+        self.film_history_dim = self.film_history_steps * 6 if self.film_v02_enabled else 0
+        self._film_history = None  # Per-environment episode state, not checkpoint parameters.
         self.context_encoder = B1Z1PACTContextEncoder(history_dim, latent_dim, context_layers, activation)
         # HardPACT: explicit estimates bypass latent sampling and the KL bottleneck.
         self.explicit_decoder = B1Z1PACTDecoder(
@@ -151,7 +163,9 @@ class ActorCriticB1Z1PACT(nn.Module):
 
 
         # Disturbances remain actor inputs; FiLM sees only command errors.
-        self.film = FiLM(condition_dim, actor_layers[-1], film_hidden_dim, activation) if conditioning_mode == "film" else None
+        self.film = FiLM(self.film_history_dim or condition_dim,
+                         latent_dim if self.film_v02_enabled else actor_layers[-1],
+                         film_hidden_dim, activation, condition_dim if self.film_v02_enabled else None) if conditioning_mode == "film" else None
 
         self.position_head = nn.Linear(actor_layers[-1], num_actions)
         self.torque_head = nn.Linear(actor_layers[-1], num_actions) if action_mode == "coupled" else None
@@ -254,14 +268,19 @@ class ActorCriticB1Z1PACT(nn.Module):
         film_context: dict[str, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         actor_input, film_condition = self._actor_inputs(obs, actor_context, film_context)
+        if self.film_v02_enabled:
+            # Only the policy sees modulated z; never mutate decoder/auxiliary context.
+            history = actor_context["film_tracking_history"].detach()
+            z, magnitude, identity_deviation = self.film(actor_context["z"], history)
+            actor_input, _ = self._actor_inputs(obs, {**actor_context, "z": z}, film_context)
         if self.conditioning_mode == "concat":
             condition_context = actor_context if film_context is None else film_context
             actor_input = torch.cat((actor_input, condition_context["base_wrench"].detach(),
                                     condition_context["ee_force"].detach(), film_condition.detach()), dim=-1)
         features = self.actor_trunk(actor_input)
-        if self.conditioning_mode == "film":
+        if self.conditioning_mode == "film" and not self.film_v02_enabled:
             features, magnitude, identity_deviation = self.film(features, film_condition)
-        else:
+        elif self.conditioning_mode != "film":
             magnitude = identity_deviation = features.new_zeros(len(features))
         self.last_film_magnitude = magnitude
         self.last_film_identity_deviation = identity_deviation
@@ -275,11 +294,14 @@ class ActorCriticB1Z1PACT(nn.Module):
         sample_context: bool = True,
         latent_noise=None,
         detach_context=False,
+        film_tracking_history=None,
+        advance_film_history=False,
     ) -> None:
         context = self.decode_context(self.context_encoder(history, sample=sample_context, latent_noise=latent_noise))
         if detach_context:
             # PPO cannot train auxiliary modules through actor conditioning.
             context = {name: value.detach() for name, value in context.items()}
+        self._condition_history(obs, context, film_tracking_history, advance_film_history)
         # Boot masking is intentionally disabled: training and deployment
         # always condition on latent z and every predicted explicit output.
         position, torque = self.actor_forward(obs, context, context)
@@ -296,14 +318,16 @@ class ActorCriticB1Z1PACT(nn.Module):
         self, obs: torch.Tensor, history: torch.Tensor,
     ) -> torch.Tensor:
         # PPO stores this latent draw and replays it when reconstructing likelihoods.
-        self.update_distribution(obs, history, sample_context=True)
+        self.update_distribution(obs, history, sample_context=True, advance_film_history=True)
         return self.distribution.sample()
 
     def act_inference(self, obs: torch.Tensor, history: torch.Tensor) -> torch.Tensor:
         context = self.decode_context(self.context_encoder.forward_inf(history))
+        self._condition_history(obs, context, None, True)
         position, torque = self.actor_forward(obs, context, context)
         self.last_position_mean = position
         self.last_torque_mean = torque
+        self.last_context = context
         actions = torch.cat((position, torque), dim=-1) if self.action_mode == "coupled" else position
         return actions
 
@@ -325,8 +349,30 @@ class ActorCriticB1Z1PACT(nn.Module):
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
         return self.distribution.log_prob(actions).sum(dim=-1)
 
+    def _condition_history(self, obs, context, stored, advance):
+        if not self.film_v02_enabled:
+            return
+        if stored is None:
+            if not advance:
+                raise ValueError("V02 PPO reconstruction requires stored film_tracking_history")
+            # Oldest -> newest; missing pre-reset samples are zero, not another episode.
+            error = self._actor_inputs(obs, context)[1].detach()
+            with torch.inference_mode(False):
+                shape = (len(obs), self.film_history_steps, error.shape[-1])
+                if self._film_history is None or self._film_history.shape != shape:
+                    self._film_history = torch.zeros(shape, device=obs.device, dtype=obs.dtype)
+                self._film_history = torch.cat((self._film_history[:, 1:], error[:, None]), 1).detach().clone()
+            stored = self._film_history.flatten(1).clone()
+        if stored.shape != (len(obs), self.film_history_dim):
+            raise ValueError("Invalid FiLM tracking-history shape")
+        context["film_tracking_history"] = stored.detach()
+
     def reset(self, dones=None) -> None:
-        return None
+        if self._film_history is not None:
+            if dones is None:
+                self._film_history = None
+            else:
+                self._film_history[dones.flatten().bool()] = 0
 
     def get_optim_groups(self, weight_decay: float = 1e-6, strong_decay: float = 1e-1):
         """Return disjoint AdamW groups for this B1/Z1 actor-critic.

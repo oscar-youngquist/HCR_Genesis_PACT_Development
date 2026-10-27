@@ -9,8 +9,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
     seed = 1                                                                            # Random seed for reproducible initialization.
 
     class env:
-        # num_envs = 4096                                                                # Parallel simulation instances.
-        num_envs = 10240                                                                  # Parallel simulation instances.
+        num_envs = 4096                                                                # Parallel simulation instances.
+        # num_envs = 10240                                                                  # Parallel simulation instances.
         # 2 body-orientation + 3 angular velocity + 17 joint positions +
         # 17 joint velocities + 34 coupled PACT actions + 6 commands. EE pose
         # is estimated from history instead of exposed through an FK error.
@@ -648,7 +648,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             dof_close_to_default = 0.0
 
             # Add in close to default reward
-            stand_still         = -0.5
+            stand_still         = -1.0
             stand_still_contact = 0.5
 
             alive = 1.00
@@ -704,13 +704,13 @@ class B1Z1PACTCfg(LeggedRobotCfg):
             leg_feedback_action_smoothness = -0.01
 
             arm_feedback_action_rate = -0.045
-            arm_feedback_action_smoothness = -0.01
+            arm_feedback_action_smoothness = -0.02
 
-            leg_feedforward_action_rate = -0.02
-            leg_feedforward_action_smoothness = -0.01
+            leg_feedforward_action_rate = -0.04
+            leg_feedforward_action_smoothness = -0.02
 
-            arm_feedforward_action_rate = -0.045
-            arm_feedforward_action_smoothness = -0.01
+            arm_feedforward_action_rate = -0.065
+            arm_feedforward_action_smoothness = -0.04
 
             # Penalize the two applied torque branches independently so their
             # costs remain visible for leg and arm actuation in TensorBoard.
@@ -827,9 +827,9 @@ class B1Z1PACTCfg(LeggedRobotCfg):
                 # "arm_feedforward_action_smoothness":[-0.002, -0.02],
             }
             # warmup_steps = 30000                                                        # Reward-curriculum warmup.
-            # curr_steps = 60000                                                           # Reward-curriculum ramp duration.
+            curr_steps = 60000                                                           # Reward-curriculum ramp duration.
             warmup_steps = 0                                                        # Reward-curriculum warmup.
-            curr_steps = 24000                                                      # Reward-curriculum ramp duration.
+            # curr_steps = 24000                                                      # Reward-curriculum ramp duration.
 
 
     class viewer:
@@ -900,6 +900,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         # Dedicated explicit/force heads are excluded from this reconstruction.
         privileged_decoder_layers = [128, 256, 512]                                     # Hidden widths for non-overlapping privileged reconstruction.
         film_hidden_dim = 64                                                            # FiLM conditioning-network hidden width.
+        film_v02_enabled = True                                                         # Modulate actor z using normalized tracking-error history.
+        film_history_steps = 5                                                          # V02 error frames, oldest to newest; reset padding is zero.
         # Encourage FiLM to be an identity transform near a well-tracked
         # command. The pressure decays exponentially with mean squared base
         # velocity and EE-pose tracking error.
@@ -921,11 +923,11 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         explicit_foot_contact_weight = 0.1                                              # Binary foot-contact BCE coefficient.
         explicit_foot_height_weight = 1.0                                               # Foot-height reconstruction coefficient.
         privileged_decoder_weight = 1.0                                                 # Remaining next-state reconstruction coefficient.
-        vae_kld_weight = 0.05                                                           # Default VAE KL coefficient, separate from physics PINNs.
+        vae_kld_weight = 0.01                                                           # Default VAE KL coefficient, separate from physics PINNs.
 
         use_cosine_kl_warmup = True                                                     # Independently cosine-ramp the base KL coefficient to its maximum.
         # kl_warmup_iters = 1000                                                          # Cosine VAE KL warmup duration [PPO iterations].
-        kl_warmup_iters = 400
+        kl_warmup_iters = 5000
         kl_warmup_beta_max = vae_kld_weight                                             # Baseline VAE KL coefficient after cosine warmup.
         kl_band_warmup_iters = 500                                                      # Delay before activating the KL-rate band [iterations].
 
@@ -945,11 +947,11 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
 
 
         pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign selects projection only in legacy mode.
-        pinn_warmup = 2000                                                               # Ramp duration after PINN activation [PPO updates].
+        pinn_warmup = 5000                                                               # Ramp duration after PINN activation [PPO updates].
         pinn_init_steps = 000                                                          # First PPO iteration eligible for the PINN ramp.
         use_pinn_rollout_loss = True                                                    # Enable the rollout term in addition to inverse dynamics.
-        pinn_inverse_weight = 0.5                                                       # Inverse-dynamics coefficient inside the combined physics objective.
-        pinn_rollout_weight = 0.5                                                       # Rollout coefficient inside the combined physics objective.
+        pinn_inverse_weight = 0.2                                                       # Inverse-dynamics coefficient inside the combined physics objective.
+        pinn_rollout_weight = 0.8                                                       # Rollout coefficient inside the combined physics objective.
 
         # Legacy velocity-loss scales only. BARD uses dt * [10, 20, 100]
         # for base translation, rotation, and all joints; these four are unused there.
@@ -1024,7 +1026,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         # Actor-facing task prediction; independent of representation-PINN weights.
         actor_phys_enabled = True                          # Opt in only for coupled PACT/BARD.
         actor_phys_coef = 1.0                              # Overall actor auxiliary coefficient.
-        actor_phys_vel_weight = 1.00                       # Reachable planar velocity/yaw tracking.
+        actor_phys_vel_weight = 1.50                       # Reachable planar velocity/yaw tracking.
         actor_phys_ee_weight = 1.25                          # Next scheduled, compliant EE target.
         actor_phys_q_weight = 0.01                           # Joint-position safety barrier.
         actor_phys_qd_weight = 0.001                          # Joint-velocity safety barrier.
@@ -1115,8 +1117,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         num_steps_per_env = 24                                                          # Control transitions collected per environment per update.
         grf_dim = 12                                                                    # Flattened four-foot XYZ force width.
 
-        # max_iterations = 70000                                                          # Total PPO learning iterations.
-        max_iterations = 28000                                                          # Total PPO learning iterations.
+        max_iterations = 70000                                                          # Total PPO learning iterations.
+        # max_iterations = 28000                                                          # Total PPO learning iterations.
 
         save_interval = 1000                                                            # Checkpoint interval [PPO iterations].
         run_name = "b1z1_pact_improved"                                                  # Run label used in output directories.
