@@ -233,6 +233,37 @@ def inference(actor, obs, history):
     return actor.act_inference({"obs": history}, {})
 
 
+def recorded_inference(actor, obs, history):
+    """Capture native FiLM activations from action_t's pass, not a second forward."""
+    film = getattr(actor, "film", None)
+    if film is None or getattr(actor, "conditioning_mode", "film") != "film":
+        return inference(actor, obs, history), {}
+    records = {}
+
+    def modulation(module, inputs, output):
+        gamma, beta = output.chunk(2, dim=-1)
+        records.update(film_gamma_t=gamma.detach().clone(), film_beta_t=beta.detach().clone())
+
+    def features(module, inputs, output):
+        # Native dimensionless features; gamma is residual scale, NOT 1+gamma.
+        records.update(film_features_pre_t=inputs[0].detach().clone(),
+                       film_features_post_t=output[0].detach().clone(),
+                       film_condition_t=inputs[1].detach().clone())
+
+    handles = []
+    try:
+        handles.append(film.network.register_forward_hook(modulation))
+        handles.append(film.register_forward_hook(features))
+        action = inference(actor, obs, history)
+        if not records:
+            raise RuntimeError("FiLM-enabled actor did not execute FiLM during inference")
+        return action, records
+    finally:
+        # No hooks persist into other decoder calls, playback, or training.
+        for handle in handles:
+            handle.remove()
+
+
 @contextmanager
 def isolated_rng(seed, device):
     """Native reset/property setters may draw randomness; restore every RNG afterward."""
@@ -582,6 +613,7 @@ def main(argv=None, experiment=None):
                                      "forces": "world N", "joint": "configured order, rad and rad/s",
                                      "grf_raw_world": "interval mean of raw sensor samples, not filtered",
                                      "prediction": "native normalized decoder units; unavailable fields omitted",
+                                     "film": "action_t inference pass: post=pre*(1+gamma)+beta; dimensionless actor features; condition in native normalized units; fields omitted without FiLM",
                                      "torque_request_pre_motor": "before motor strength; actual clip=1.1*rated",
                                      "prediction_grf_torque_input_nm": (
                                          "clipped pre-step nominal action torque; no action delay"
@@ -647,7 +679,7 @@ def main(argv=None, experiment=None):
                     adapter.step_index = step
                     obs, history, privileged, _ = env.get_observations()
                     obs, history, privileged = obs.clone(), history.clone(), privileged.clone()
-                    action = inference(actor, obs, history)
+                    action, film_records = recorded_inference(actor, obs, history)
                     if reject:
                         env.set_impedance_force_estimates(actor.last_prediction.detach())
                     # Prediction recording is deterministic and never used as privileged
@@ -682,7 +714,7 @@ def main(argv=None, experiment=None):
                     env.step(action)
                     failures = adapter.failures()
                     stacks = {key: torch.stack([r[key] for r in adapter.substeps]) for key in adapter.substeps[0]}
-                    data = {**current, **predictions,
+                    data = {**current, **predictions, **film_records,
                             **{key + "_interval_mean": value.float().mean(0) for key, value in stacks.items() if value.dtype != torch.bool},
                             "action_clipped": action.clamp(-cfg.normalization.clip_actions, cfg.normalization.clip_actions),
                             "commands_effective": env.commands.clone(), "ee_position_world": s.ee_pos.clone(),
@@ -775,6 +807,9 @@ def main(argv=None, experiment=None):
                 save_json("trials.json", trials)
         metadata["weights_unchanged"] = before == model_hash(actor)
         metadata["prediction_fields_available"] = [k for k in writer.schema if k.startswith("prediction_")]
+        metadata["film_fields_available"] = [k for k in writer.schema if k.startswith("film_")]
+        if not metadata["film_fields_available"]:
+            metadata["unavailable"].append("FiLM features/modulation (model does not use FiLM conditioning)")
         for key in ("prediction_z", "prediction_explicit", "prediction_grf", "prediction_privileged"):
             if key not in writer.schema:
                 metadata["unavailable"].append(key + " (not exposed by this model/checkpoint)")

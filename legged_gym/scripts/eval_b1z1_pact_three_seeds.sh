@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# bash legged_gym/scripts/play_b1z1_exp2.sh \
+#   --approach pact --profile pushing \
+#   --run Oct21_00-46-21_b1z1_pact_improved --ckpt 70000 --gpu "${EVAL_GPU:-cuda:0}"
+
 # Activate Isaac Lab first. Pin one checkpoint for every seed and experiment.
 # Optional arguments: RUN_DIRECTORY CHECKPOINT_NUMBER OUTPUT_BASE
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -23,61 +27,61 @@ OUTPUT_ROOT="$OUTPUT_BASE/nominal"
 # Explicit evaluation seeds; all use the same trained checkpoint.
 SEEDS=(0 1 2)
 
-# for SEED in "${SEEDS[@]}"; do
-#     echo "Evaluating B1Z1 PACT Nominal: seed=$SEED, episodes=100, robots=10"
-#     bash "$HERE/eval_b1z1_exp1.sh" \
-#         --task b1z1_pact \
-#         --run "$RUN" \
-#         --ckpt "$CKPT" \
-#         --seed "$SEED" \
-#         --num-envs 10 \
-#         --episodes 100 \
-#         --horizon-seconds 15 \
-#         --condition nominal \
-#         --load-range in \
-#         --motion-mode mixed \
-#         --gpu cuda:0 \
-#         --headless \
-#         --output-dir "$OUTPUT_ROOT/seed_${SEED}"
-# done
+for SEED in "${SEEDS[@]}"; do
+    echo "Evaluating B1Z1 PACT Nominal: seed=$SEED, episodes=100, robots=10"
+    bash "$HERE/eval_b1z1_exp1.sh" \
+        --task b1z1_pact \
+        --run "$RUN" \
+        --ckpt "$CKPT" \
+        --seed "$SEED" \
+        --num-envs 10 \
+        --episodes 100 \
+        --horizon-seconds 15 \
+        --condition nominal \
+        --load-range in \
+        --motion-mode mixed \
+        --gpu "${EVAL_GPU:-cuda:0}" \
+        --headless \
+        --output-dir "$OUTPUT_ROOT/seed_${SEED}"
+done
 
-# OUTPUT_ROOT="$OUTPUT_BASE/ee_only_in"
-# for SEED in "${SEEDS[@]}"; do
-#     echo "Evaluating B1Z1 PACT EE-Only-In: seed=$SEED, episodes=100, robots=10"
-#     bash "$HERE/eval_b1z1_exp1.sh" \
-#         --task b1z1_pact \
-#         --run "$RUN" \
-#         --ckpt "$CKPT" \
-#         --seed "$SEED" \
-#         --num-envs 10 \
-#         --episodes 100 \
-#         --horizon-seconds 15 \
-#         --condition ee-disturbance \
-#         --load-range in \
-#         --motion-mode mixed \
-#         --gpu cuda:0 \
-#         --headless \
-#         --output-dir "$OUTPUT_ROOT/seed_${SEED}"
-# done
+OUTPUT_ROOT="$OUTPUT_BASE/ee_only_in"
+for SEED in "${SEEDS[@]}"; do
+    echo "Evaluating B1Z1 PACT EE-Only-In: seed=$SEED, episodes=100, robots=10"
+    bash "$HERE/eval_b1z1_exp1.sh" \
+        --task b1z1_pact \
+        --run "$RUN" \
+        --ckpt "$CKPT" \
+        --seed "$SEED" \
+        --num-envs 10 \
+        --episodes 100 \
+        --horizon-seconds 15 \
+        --condition ee-disturbance \
+        --load-range in \
+        --motion-mode mixed \
+        --gpu "${EVAL_GPU:-cuda:0}" \
+        --headless \
+        --output-dir "$OUTPUT_ROOT/seed_${SEED}"
+done
 
-# OUTPUT_ROOT="$OUTPUT_BASE/combine_in"
-# for SEED in "${SEEDS[@]}"; do
-#     echo "Evaluating B1Z1 PACT Combined-In: seed=$SEED, episodes=100, robots=10"
-#     bash "$HERE/eval_b1z1_exp1.sh" \
-#         --task b1z1_pact \
-#         --run "$RUN" \
-#         --ckpt "$CKPT" \
-#         --seed "$SEED" \
-#         --num-envs 10 \
-#         --episodes 100 \
-#         --horizon-seconds 15 \
-#         --condition combined-disturbance \
-#         --load-range in \
-#         --motion-mode mixed \
-#         --gpu cuda:0 \
-#         --headless \
-#         --output-dir "$OUTPUT_ROOT/seed_${SEED}"
-# done
+OUTPUT_ROOT="$OUTPUT_BASE/combine_in"
+for SEED in "${SEEDS[@]}"; do
+    echo "Evaluating B1Z1 PACT Combined-In: seed=$SEED, episodes=100, robots=10"
+    bash "$HERE/eval_b1z1_exp1.sh" \
+        --task b1z1_pact \
+        --run "$RUN" \
+        --ckpt "$CKPT" \
+        --seed "$SEED" \
+        --num-envs 10 \
+        --episodes 100 \
+        --horizon-seconds 15 \
+        --condition combined-disturbance \
+        --load-range in \
+        --motion-mode mixed \
+        --gpu "${EVAL_GPU:-cuda:0}" \
+        --headless \
+        --output-dir "$OUTPUT_ROOT/seed_${SEED}"
+done
 
 
 # conda activate lr_lab_cupiqp
@@ -107,7 +111,7 @@ for PROFILE in "${EXP2_PROFILES[@]}"; do
             --num-envs 10 \
             --episodes 50 \
             --horizon-seconds 28 \
-            --gpu cuda:0 \
+            --gpu "${EVAL_GPU:-cuda:0}" \
             --headless \
             --output-dir "$EXP2_OUTPUT_BASE/$PROFILE/loaded/seed_${SEED}"
     done

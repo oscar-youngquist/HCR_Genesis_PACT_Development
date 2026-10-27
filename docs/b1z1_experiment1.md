@@ -177,3 +177,14 @@ The smoke harness runs isolated five-step cases, plus a one-step forced-failure
 case, and checks actual loads, finite shapes, successor alignment, exact trial
 counts, frozen weights, flush, and completion. Ablation smoke cases reuse
 architecture-compatible checkpoints to test dispatch only, not performance.
+# FiLM activation records
+
+Exp1 and Exp2 transition chunks additionally capture `film_features_pre_t`,
+`film_features_post_t`, `film_gamma_t`, `film_beta_t`, and `film_condition_t`
+for FiLM-enabled methods. They are detached snapshots of the actual action_t
+inference pass, with no extra forward or RNG draws. The dimensionless transform
+is `post = pre * (1 + gamma) + beta` (gamma is a residual scale); the condition
+uses native normalized model inputs. Dimensions are inferred from the model and
+listed in `records.json`. `metadata.json:film_fields_available` lists available
+fields; non-FiLM methods omit them and report unavailability. Existing recordings
+without these fields remain valid but cannot recover these activations directly.

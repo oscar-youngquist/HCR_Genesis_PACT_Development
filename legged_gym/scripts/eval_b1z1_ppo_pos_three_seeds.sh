@@ -19,29 +19,29 @@ fi
 
 SEEDS=(0 1 2)
 
-# CONDITIONS=(nominal ee-disturbance combined-disturbance)
-# FOLDERS=(nominal ee_only_in combine_in)
-# COLLECTION=0
-# for INDEX in "${!CONDITIONS[@]}"; do
-#     for SEED in "${SEEDS[@]}"; do
-#         COLLECTION=$((COLLECTION + 1))
-#         echo "[Collection $COLLECTION/9] b1z1_ppo_pos: ${CONDITIONS[$INDEX]}, seed=$SEED; 100 episodes, 10 robots"
-#         bash "$HERE/eval_b1z1_exp1.sh" \
-#             --task b1z1_ppo_pos \
-#             --run "$RUN" \
-#             --ckpt "$CKPT" \
-#             --seed "$SEED" \
-#             --num-envs 10 \
-#             --episodes 100 \
-#             --horizon-seconds 15 \
-#             --condition "${CONDITIONS[$INDEX]}" \
-#             --load-range in \
-#             --motion-mode mixed \
-#             --gpu cuda:0 \
-#             --headless \
-#             --output-dir "$OUTPUT_BASE/${FOLDERS[$INDEX]}/seed_${SEED}"
-#     done
-# done
+CONDITIONS=(nominal ee-disturbance combined-disturbance)
+FOLDERS=(nominal ee_only_in combine_in)
+COLLECTION=0
+for INDEX in "${!CONDITIONS[@]}"; do
+    for SEED in "${SEEDS[@]}"; do
+        COLLECTION=$((COLLECTION + 1))
+        echo "[Collection $COLLECTION/9] b1z1_ppo_pos: ${CONDITIONS[$INDEX]}, seed=$SEED; 100 episodes, 10 robots"
+        bash "$HERE/eval_b1z1_exp1.sh" \
+            --task b1z1_ppo_pos \
+            --run "$RUN" \
+            --ckpt "$CKPT" \
+            --seed "$SEED" \
+            --num-envs 10 \
+            --episodes 100 \
+            --horizon-seconds 15 \
+            --condition "${CONDITIONS[$INDEX]}" \
+            --load-range in \
+            --motion-mode mixed \
+            --gpu "${EVAL_GPU:-cuda:0}" \
+            --headless \
+            --output-dir "$OUTPUT_BASE/${FOLDERS[$INDEX]}/seed_${SEED}"
+    done
+done
 
 # From the repository root:
 # conda activate lr_lab_cupiqp
@@ -66,7 +66,7 @@ for PROFILE in "${EXP2_PROFILES[@]}"; do
             --num-envs 10 \
             --episodes 50 \
             --horizon-seconds 28 \
-            --gpu cuda:0 \
+            --gpu "${EVAL_GPU:-cuda:0}" \
             --headless \
             --output-dir "$EXP2_OUTPUT_BASE/$PROFILE/loaded/seed_${SEED}"
     done

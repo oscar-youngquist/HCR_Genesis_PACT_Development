@@ -26,18 +26,21 @@ tasks = load_module("exp2_profiles", HERE.parent / "utils/b1z1_experiment2.py")
 EVAL_CONFIG = {
     **copy.deepcopy(exp1.EVAL_CONFIG),
     "move_start_s": 3., "velocity_ramp_s": .5,
-    "load_times_s": [7., 11., 15., 23.], "loads_n": [25., 45., 65., 0.],
-    "stop_s": 19., "finish_s": 28.,
-    "elevation_rad": .10, "azimuth_rad": 0.,
-    "velocity_ranges": [[-.4, .4], [0., 0.], [0., 0.]],
+    "load_times_s": [8., 13., 18., 23.], "loads_n": [25., 55., 35., 0.],
+    "stop_s": 20., "finish_s": 28.,
+    "azimuth_rad": 0.0,
+    # Hold reset heading (zero relative yaw); map +/-pi error to yaw-rate bounds.
+    "heading_command": True,
+    "velocity_ranges": [[-.4, .4], [0., 0.], [-.6, .6]],
     "ee_tolerance_m": .10, "velocity_tolerance_m_s": .20, "yaw_tolerance_rad_s": .30,
     "recovery_window_seconds": 2., "recovery_dwell_seconds": .5,
     # Common validation envelope, NOT a clipping operation or proof of reachability.
-    "workspace_sphere_bounds": [[.3, .75], [-.5, .8], [-.8, .8]],
+    "workspace_sphere_bounds": [[.25, .75], [-.8, .8], [-.8, .8]],
     "profiles": {
-        "pushing": dict(velocity_m_s=.4, radius_start=.50, radius_end=.60, force_direction_task=[-1., 0., 0.]),
-        "pulling": dict(velocity_m_s=-.4, radius_start=.60, radius_end=.45, force_direction_task=[1., 0., 0.]),
-        "carrying": dict(velocity_m_s=.4, radius_start=.50, cartesian_offset_m=[.08, .05, 0.], force_direction_task=[0., 0., -1.]),
+        # Native spherical elevation [rad]; carrying uses this for its starting pose.
+        "pushing": dict(velocity_m_s=.4, radius_start=.40, radius_end=.60, elevation_rad=0.40, force_direction_task=[-1., 0., 0.]),
+        "pulling": dict(velocity_m_s=-.4, radius_start=.45, radius_end=.25, elevation_rad=0.40, force_direction_task=[1., 0., 0.]),
+        "carrying": dict(velocity_m_s=.4, radius_start=.50, elevation_rad=0.40, cartesian_offset_m=[.08, .05, 0.], force_direction_task=[0., 0., -1.]),
     },
 }
 # These Exp1-only trajectory keys are deliberately not used by the task profiles.
@@ -64,12 +67,19 @@ def parser():
 
 
 class Adapter(exp1.EvaluationAdapter):
-    def reset(self, scenarios):
-        super().reset(scenarios)
-        import numpy as np
-        for slot, scenario in enumerate(scenarios):
-            x, y, z, w = exp1.numpy_value(self.sim.base_quat[slot])
-            scenario.set_heading(np.arctan2(2*(w*z+x*y), 1.-2*(y*y+z*z)))
+    def publish_targets(self, time):
+        import torch
+        # Reset calls this AFTER refreshing physics and BEFORE building history.
+        # Capture once at reset; desired heading never follows the moving torso.
+        yaw = tasks.quaternion_yaw(self.sim.base_quat, xp=torch)
+        if self.step_index == -1:
+            for slot, scenario in enumerate(self.scenarios):
+                scenario.set_heading(float(yaw[slot]))
+        super().publish_targets(time)
+        if self.config.get("heading_command", False):
+            initial = yaw.new_tensor([s.heading for s in self.scenarios])
+            self.env.commands[:len(self.scenarios), 2] = tasks.heading_yaw_rate(
+                yaw[:len(self.scenarios)], initial, self.config, xp=torch)
 
     def contact_update(self, *args, **kwargs):
         result = super().contact_update(*args, **kwargs)
@@ -142,6 +152,7 @@ class Experiment2:
                         "task_force_frame": "initial reset heading, world z up; constant for each trial",
                         "EE_trajectory": "native yaw-aligned workspace; position reference follows current base yaw/translation",
                         "velocity_command": "native body-frame forward m/s, lateral m/s, yaw rad/s",
+                        "heading_command": "zero relative to reset heading; wrapped heading error/pi mapped to yaw-rate bounds at each control endpoint",
                         "reference_timing": "commands_t/ee_reference_t_world consumed by actor; command_nominal/ee_reference_world at successor",
                         "task_stage": "task_stage_interval labels applied interval; task_stage_successor labels scored endpoint",
                         "body_contact_forces_raw_world_interval_mean": "N; articulation order resolved through sensor indices, includes non-foot contacts",
@@ -173,6 +184,10 @@ class Experiment2:
         import numpy as np
         c0, s0, _, stage0 = scenario.at(start)
         c1, s1, _, stage1 = scenario.at(end)
+        if scenario.config.get("heading_command", False):
+            # Score the successor feedback reference; retain actor-time reference separately.
+            c0[2] = tasks.heading_yaw_rate(tasks.quaternion_yaw(row["base_quaternion_t"]), scenario.heading, scenario.config)
+            c1[2] = tasks.heading_yaw_rate(tasks.quaternion_yaw(row["base_quaternion_xyzw"]), scenario.heading, scenario.config)
         row.update(command_nominal_t=c0, command_nominal=c1, ee_reference_sphere_t=s0,
                    ee_reference_sphere=s1, task_stage_interval=np.int64(stage0),
                    task_stage_successor=np.int64(stage1),

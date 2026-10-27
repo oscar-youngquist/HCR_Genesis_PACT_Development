@@ -20,6 +20,22 @@ can hide a Python failure behind a zero exit status.
 
 ## Protocol
 
+FiLM-enabled methods additionally record `film_features_pre_t`,
+`film_features_post_t`, `film_gamma_t`, `film_beta_t`, and `film_condition_t`
+in transition chunks. These come from the actual action-producing pass at time t,
+not the successor or a second inference. Features are dimensionless and
+`post = pre * (1 + gamma) + beta`; the condition retains native normalized units.
+`metadata.json:film_fields_available` lists captured fields. Non-FiLM methods omit
+them and explicitly report unavailability, rather than recording artificial zeros.
+
+Heading feedback is enabled for all profiles, including stationary phases, in both
+collection and visual playback. Each robot holds **zero relative to its measured
+reset heading**, not world yaw zero. `heading_command` in `EVAL_CONFIG` enables it;
+wrapped heading error divided by pi maps to `velocity_ranges[2]` (default
+[-0.6, 0.6] rad/s), following the native PACT/UniFP convention. Actor-time and
+successor nominal commands record their respective feedback yaw rates. Load
+directions remain fixed to the initial heading. Experiment 1 is unchanged.
+
 `EVAL_CONFIG` in `eval_b1z1_exp2.py` is the editable block. It deep-copies Experiment
 1 initialization, observation noise, physical randomization and failure settings,
 then overrides only the task schedule and tolerances. Currently these include

@@ -45,11 +45,13 @@ class Scenario:
         self.config = copy.deepcopy(config)
         self.profile, self.loading, self.heading = profile, loading, 0.
         c, p = self.config, self.config["profiles"][profile]
-        self.start_sphere = np.array([p["radius_start"], c["elevation_rad"], c["azimuth_rad"]])
+        self.start_sphere = np.array([p["radius_start"], p["elevation_rad"], c["azimuth_rad"]])
         self.end_cart = sphere_to_cart(self.start_sphere) + np.array(p.get("cartesian_offset_m", [0., 0., 0.]))
         motion = dict(profile=profile, parameters={k: v for k, v in p.items() if k != "force_direction_task"},
-                      elevation=c["elevation_rad"], azimuth=c["azimuth_rad"],
+                      elevation=p["elevation_rad"], azimuth=c["azimuth_rad"],
                       start=c["move_start_s"], ramp=c["velocity_ramp_s"], trajectory=c["load_times_s"][:2], stop=c["stop_s"])
+        if c.get("heading_command", False):
+            motion["heading_control"] = dict(reference="initial_heading", yaw_rate_bounds=c["velocity_ranges"][2])
         pair = dict(seed=seed, trial_id=trial, motion=motion, overrides=c["overrides"],
                     joint_jitter=c["initial_joint_jitter_rad"], yaw=c["initial_yaw_range_rad"],
                     branch_weights=c["branch_weight_overrides"], randomize_branch_weights=c["randomize_branch_weights"])
@@ -88,7 +90,7 @@ class Scenario:
         c, p = self.config, self.config["profiles"][self.profile]
         command = np.array([p["velocity_m_s"] * smooth((time-c["move_start_s"])/c["velocity_ramp_s"])
                             * (1.-smooth((time-c["stop_s"])/c["velocity_ramp_s"])), 0., 0.])
-        blend = smooth((time-c["load_times_s"][0])/(c["load_times_s"][1]-c["load_times_s"][0]))
+        blend = smooth((time-c["load_times_s"][0])/(c["load_times_s"][2]-c["load_times_s"][0]))
         sphere = self.start_sphere.copy()
         if "radius_end" in p:
             sphere[0] += blend * (p["radius_end"]-sphere[0])
@@ -103,8 +105,25 @@ class Scenario:
         return command, sphere, np.r_[magnitude*world, np.zeros(6)], self.stage(time)
 
 
+def quaternion_yaw(quaternion, xp=np):
+    """Heading of body x in world XY; simulator quaternion ordering is xyzw."""
+    x, y, z, w = (quaternion[..., i] for i in range(4))
+    return xp.arctan2(2*(w*z+x*y), 1.-2*(y*y+z*z))
+
+
+def heading_yaw_rate(yaw, initial_heading, config, xp=np):
+    """Native PACT/UniFP heading mapping: radians -> bounded rad/s, no deadband."""
+    error = ((initial_heading - yaw + math.pi) % (2*math.pi) - math.pi) / math.pi
+    low, high = config["velocity_ranges"][2]
+    return xp.where(error >= 0., error * high, -error * low)
+
+
 def validate(config, horizon):
     c = config
+    if c.get("heading_command", False):
+        low, high = c["velocity_ranges"][2]
+        if not np.isfinite([low, high]).all() or not low < 0 < high:
+            raise ValueError("Heading control requires finite yaw-rate bounds spanning zero")
     times = [0., c["move_start_s"], c["move_start_s"]+c["velocity_ramp_s"], *c["load_times_s"][:3],
              c["stop_s"], c["stop_s"]+c["velocity_ramp_s"], c["load_times_s"][3], c["finish_s"]]
     if len(c["load_times_s"]) != 4 or not np.isfinite(times).all() or np.any(np.diff(times) <= 0):

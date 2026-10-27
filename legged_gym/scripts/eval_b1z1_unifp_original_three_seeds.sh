@@ -22,61 +22,61 @@ OUTPUT_ROOT="$OUTPUT_BASE/nominal"
 # Explicit evaluation seeds; 100 episodes per seed across 10 robots on cuda:0.
 SEEDS=(0 1 2)
 
-# for SEED in "${SEEDS[@]}"; do
-#     echo "Evaluating b1z1_unifp_original: seed=$SEED, episodes=100, robots=10"
-#     bash "$HERE/eval_b1z1_exp1.sh" \
-#         --task b1z1_unifp_original \
-#         --run "$RUN" \
-#         --ckpt "$CKPT" \
-#         --seed "$SEED" \
-#         --num-envs 10 \
-#         --episodes 100 \
-#         --horizon-seconds 15 \
-#         --condition nominal \
-#         --load-range in \
-#         --motion-mode mixed \
-#         --gpu cuda:0 \
-#         --headless \
-#         --output-dir "$OUTPUT_ROOT/seed_${SEED}"
-# done
+for SEED in "${SEEDS[@]}"; do
+    echo "Evaluating b1z1_unifp_original: seed=$SEED, episodes=100, robots=10"
+    bash "$HERE/eval_b1z1_exp1.sh" \
+        --task b1z1_unifp_original \
+        --run "$RUN" \
+        --ckpt "$CKPT" \
+        --seed "$SEED" \
+        --num-envs 10 \
+        --episodes 100 \
+        --horizon-seconds 15 \
+        --condition nominal \
+        --load-range in \
+        --motion-mode mixed \
+        --gpu "${EVAL_GPU:-cuda:0}" \
+        --headless \
+        --output-dir "$OUTPUT_ROOT/seed_${SEED}"
+done
 
-# OUTPUT_ROOT="$OUTPUT_BASE/ee_only_in"
-# for SEED in "${SEEDS[@]}"; do
-#     echo "Evaluating b1z1_unifp_original: seed=$SEED, episodes=100, robots=10"
-#     bash "$HERE/eval_b1z1_exp1.sh" \
-#         --task b1z1_unifp_original \
-#         --run "$RUN" \
-#         --ckpt "$CKPT" \
-#         --seed "$SEED" \
-#         --num-envs 10 \
-#         --episodes 100 \
-#         --horizon-seconds 15 \
-#         --condition ee-disturbance \
-#         --load-range in \
-#         --motion-mode mixed \
-#         --gpu cuda:0 \
-#         --headless \
-#         --output-dir "$OUTPUT_ROOT/seed_${SEED}"
-# done
+OUTPUT_ROOT="$OUTPUT_BASE/ee_only_in"
+for SEED in "${SEEDS[@]}"; do
+    echo "Evaluating b1z1_unifp_original: seed=$SEED, episodes=100, robots=10"
+    bash "$HERE/eval_b1z1_exp1.sh" \
+        --task b1z1_unifp_original \
+        --run "$RUN" \
+        --ckpt "$CKPT" \
+        --seed "$SEED" \
+        --num-envs 10 \
+        --episodes 100 \
+        --horizon-seconds 15 \
+        --condition ee-disturbance \
+        --load-range in \
+        --motion-mode mixed \
+        --gpu "${EVAL_GPU:-cuda:0}" \
+        --headless \
+        --output-dir "$OUTPUT_ROOT/seed_${SEED}"
+done
 
-# OUTPUT_ROOT="$OUTPUT_BASE/combine_in"
-# for SEED in "${SEEDS[@]}"; do
-#     echo "Evaluating b1z1_unifp_original: seed=$SEED, episodes=100, robots=10"
-#     bash "$HERE/eval_b1z1_exp1.sh" \
-#         --task b1z1_unifp_original \
-#         --run "$RUN" \
-#         --ckpt "$CKPT" \
-#         --seed "$SEED" \
-#         --num-envs 10 \
-#         --episodes 100 \
-#         --horizon-seconds 15 \
-#         --condition combined-disturbance \
-#         --load-range in \
-#         --motion-mode mixed \
-#         --gpu cuda:0 \
-#         --headless \
-#         --output-dir "$OUTPUT_ROOT/seed_${SEED}"
-# done
+OUTPUT_ROOT="$OUTPUT_BASE/combine_in"
+for SEED in "${SEEDS[@]}"; do
+    echo "Evaluating b1z1_unifp_original: seed=$SEED, episodes=100, robots=10"
+    bash "$HERE/eval_b1z1_exp1.sh" \
+        --task b1z1_unifp_original \
+        --run "$RUN" \
+        --ckpt "$CKPT" \
+        --seed "$SEED" \
+        --num-envs 10 \
+        --episodes 100 \
+        --horizon-seconds 15 \
+        --condition combined-disturbance \
+        --load-range in \
+        --motion-mode mixed \
+        --gpu "${EVAL_GPU:-cuda:0}" \
+        --headless \
+        --output-dir "$OUTPUT_ROOT/seed_${SEED}"
+done
 
 # conda activate lr_lab_cupiqp
 # bash legged_gym/scripts/eval_b1z1_unifp_original_three_seeds.sh \
@@ -102,7 +102,7 @@ for PROFILE in "${EXP2_PROFILES[@]}"; do
             --num-envs 10 \
             --episodes 50 \
             --horizon-seconds 28 \
-            --gpu cuda:0 \
+            --gpu "${EVAL_GPU:-cuda:0}" \
             --headless \
             --output-dir "$EXP2_OUTPUT_BASE/$PROFILE/loaded/seed_${SEED}"
     done
