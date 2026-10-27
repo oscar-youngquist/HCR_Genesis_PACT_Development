@@ -6,7 +6,7 @@ set -euo pipefail
 export EVAL_GPU="${EVAL_GPU:-cuda:1}"
 
 # Run the selected approaches sequentially using their pinned checkpoints.
-# Each child collects 3 conditions x 3 seeds x 100 trials with 10 parallel robots.
+# Each child collects 3 conditions x 3 seeds x 100 trials with 100 parallel robots.
 # Existing PACT and UniFP collections are intentionally not repeated here.
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 # SCRIPTS=(

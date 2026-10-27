@@ -28,13 +28,13 @@ OUTPUT_ROOT="$OUTPUT_BASE/nominal"
 SEEDS=(0 1 2)
 
 for SEED in "${SEEDS[@]}"; do
-    echo "Evaluating B1Z1 PACT Nominal: seed=$SEED, episodes=100, robots=10"
+    echo "Evaluating B1Z1 PACT Nominal: seed=$SEED, episodes=100, robots=100"
     bash "$HERE/eval_b1z1_exp1.sh" \
         --task b1z1_pact \
         --run "$RUN" \
         --ckpt "$CKPT" \
         --seed "$SEED" \
-        --num-envs 10 \
+        --num-envs 100 \
         --episodes 100 \
         --horizon-seconds 15 \
         --condition nominal \
@@ -47,13 +47,13 @@ done
 
 OUTPUT_ROOT="$OUTPUT_BASE/ee_only_in"
 for SEED in "${SEEDS[@]}"; do
-    echo "Evaluating B1Z1 PACT EE-Only-In: seed=$SEED, episodes=100, robots=10"
+    echo "Evaluating B1Z1 PACT EE-Only-In: seed=$SEED, episodes=100, robots=100"
     bash "$HERE/eval_b1z1_exp1.sh" \
         --task b1z1_pact \
         --run "$RUN" \
         --ckpt "$CKPT" \
         --seed "$SEED" \
-        --num-envs 10 \
+        --num-envs 100 \
         --episodes 100 \
         --horizon-seconds 15 \
         --condition ee-disturbance \
@@ -66,13 +66,13 @@ done
 
 OUTPUT_ROOT="$OUTPUT_BASE/combine_in"
 for SEED in "${SEEDS[@]}"; do
-    echo "Evaluating B1Z1 PACT Combined-In: seed=$SEED, episodes=100, robots=10"
+    echo "Evaluating B1Z1 PACT Combined-In: seed=$SEED, episodes=100, robots=100"
     bash "$HERE/eval_b1z1_exp1.sh" \
         --task b1z1_pact \
         --run "$RUN" \
         --ckpt "$CKPT" \
         --seed "$SEED" \
-        --num-envs 10 \
+        --num-envs 100 \
         --episodes 100 \
         --horizon-seconds 15 \
         --condition combined-disturbance \
@@ -100,7 +100,7 @@ EXP2_COLLECTION=0
 for PROFILE in "${EXP2_PROFILES[@]}"; do
     for SEED in "${SEEDS[@]}"; do
         EXP2_COLLECTION=$((EXP2_COLLECTION + 1))
-        echo "[Experiment 2 $EXP2_COLLECTION/9] b1z1_pact: $PROFILE, loaded, seed=$SEED; 50 episodes, 10 robots"
+        echo "[Experiment 2 $EXP2_COLLECTION/9] b1z1_pact: $PROFILE, loaded, seed=$SEED; 50 episodes, 50 robots"
         bash "$HERE/eval_b1z1_exp2.sh" \
             --task b1z1_pact \
             --run "$RUN" \
@@ -108,7 +108,7 @@ for PROFILE in "${EXP2_PROFILES[@]}"; do
             --seed "$SEED" \
             --profile "$PROFILE" \
             --loading loaded \
-            --num-envs 10 \
+            --num-envs 50 \
             --episodes 50 \
             --horizon-seconds 28 \
             --gpu "${EVAL_GPU:-cuda:0}" \
