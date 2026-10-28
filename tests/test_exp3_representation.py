@@ -146,9 +146,9 @@ def test_saved_native_run_and_contract_separation(tmp_path):
     fixture(tmp_path/"raw"); cfg=config(tmp_path)
     result=a.run_analysis(cfg)
     assert result["recorded_native_only"]
-    assert {r["benchmark"] for r in result["table_summary"]}=={"native_recorded"}
+    assert {r["benchmark"] for r in result["table_summary"]}=={"native_recorded", "shared"}
     assert not any(r["variant"]=="decoded" and r["metric"]=="base_linear_rmse" for r in result["table_summary"])
-    assert (tmp_path/"output/native_recorded_in_table.tex").exists()
+    assert (tmp_path/"output/shared_in_table.tex").exists()
     assert "NaN" not in (tmp_path/"output/summary.json").read_text()
     runs,_=a.discover(cfg);m=runs[0]["meta"];pos=copy.deepcopy(m)
     pos["resolved_environment"]["env"]["num_policy_actions"]=2
@@ -172,13 +172,13 @@ def test_common_transition_dispatch(tmp_path, monkeypatch):
     seen={}
     original=a.metric_rows
     def metrics(entry,method,benchmark,*args):
-        if benchmark.startswith("common:"):
+        if benchmark == "shared":
             seen.setdefault(method,set()).add(entry["transition_id"])
         return original(entry,method,benchmark,*args)
     monkeypatch.setattr(a,"metric_rows",metrics)
     result=a._run_analysis(cfg)
     assert seen["PILOT"]==seen["ab4"] and seen["PILOT"]
-    assert any(r["benchmark"].startswith("common:") for r in result["table_summary"])
+    assert any(r["benchmark"] == "shared" for r in result["table_summary"])
 
 
 def test_torch_checkpoint_native_replay(tmp_path):
@@ -210,12 +210,15 @@ def test_notebook_cpu_saved_prediction_smoke(tmp_path,monkeypatch):
     fixture(tmp_path/"raw", tasks=("b1z1_pact", "b1z1_ppo_pos"))
     cfg = config(tmp_path)
     cfg["methods"] = None
+    from test_exp3_support import fixture as support_fixture
+    support_fixture(tmp_path/"exp2")
+    cfg["exp2_roots"] = [str(tmp_path/"exp2")]
     monkeypatch.setenv("EXP3_CONFIG",json.dumps(cfg))
     nb=nbformat.read(ROOT/"notebooks/exp3_representation_analysis.ipynb",as_version=4)
     nb.cells.append(nbformat.v4.new_code_cell("assert 'torch' not in sys.modules and 'isaaclab' not in sys.modules"))
     nbclient.NotebookClient(nb,timeout=180,kernel_name="python3",resources={"metadata":{"path":str(ROOT)}}).execute()
     nbformat.write(nb,tmp_path/"executed_exp3.ipynb")
-    for name in ("transition_manifest.json","per_seed.csv","summary.csv","native_recorded_in_table.tex","COMPLETE"):
+    for name in ("transition_manifest.json","per_seed.csv","summary.csv","shared_in_table.tex","COMPLETE"):
         assert (tmp_path/"output"/name).stat().st_size>0
 
 
