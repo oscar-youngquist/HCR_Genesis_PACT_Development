@@ -900,7 +900,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         # Dedicated explicit/force heads are excluded from this reconstruction.
         privileged_decoder_layers = [128, 256, 512]                                     # Hidden widths for non-overlapping privileged reconstruction.
         film_hidden_dim = 64                                                            # FiLM conditioning-network hidden width.
-        film_v02_enabled = True                                                         # Modulate actor z using normalized tracking-error history.
+        film_v02_enabled = False                                                         # Modulate actor z using normalized tracking-error history.
         film_history_steps = 5                                                          # V02 error frames, oldest to newest; reset padding is zero.
         # Encourage FiLM to be an identity transform near a well-tracked
         # command. The pressure decays exponentially with mean squared base
@@ -923,11 +923,11 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         explicit_foot_contact_weight = 0.1                                              # Binary foot-contact BCE coefficient.
         explicit_foot_height_weight = 1.0                                               # Foot-height reconstruction coefficient.
         privileged_decoder_weight = 1.0                                                 # Remaining next-state reconstruction coefficient.
-        vae_kld_weight = 0.01                                                           # Default VAE KL coefficient, separate from physics PINNs.
+        vae_kld_weight = 0.001                                                           # Default VAE KL coefficient, separate from physics PINNs.
 
-        use_cosine_kl_warmup = True                                                     # Independently cosine-ramp the base KL coefficient to its maximum.
+        use_cosine_kl_warmup = False                                                     # Independently cosine-ramp the base KL coefficient to its maximum.
         # kl_warmup_iters = 1000                                                          # Cosine VAE KL warmup duration [PPO iterations].
-        kl_warmup_iters = 5000
+        kl_warmup_iters = 500
         kl_warmup_beta_max = vae_kld_weight                                             # Baseline VAE KL coefficient after cosine warmup.
         kl_band_warmup_iters = 500                                                      # Delay before activating the KL-rate band [iterations].
 

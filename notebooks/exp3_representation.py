@@ -70,7 +70,50 @@ def input_contract(meta):
         compensation_checkpoint=meta["checkpoint_sha256"] if "unifp" in family(meta) else None))
 
 
+def resolve_methods(config):
+    """Discover methods from completed Exp1 metadata, never directory-name guesses."""
+    from b1z1_paper_names import DISPLAY_NAMES, LATEX_METHOD_NAMES
+
+    config = dict(config)
+    explicit = config.get("methods")
+    tasks = config.get("tasks")
+    if explicit is not None and tasks is not None:
+        raise ValueError("Select tasks or explicit methods, not both")
+    if explicit is None:
+        available = set()
+        for path in shared.discover(config["recording_roots"], "metadata.json"):
+            if not (path.parent / "COMPLETE").is_file():
+                continue
+            meta = shared.read_json(path)
+            if (meta.get("experiment", 1) == 1
+                    and meta["evaluation_seed"] in config["evaluation_seeds"]
+                    and meta["arguments"]["condition"] in config["conditions"]):
+                available.add(meta["task"])
+        if tasks is not None:
+            if not isinstance(tasks, list) or not tasks or len(set(tasks)) != len(tasks):
+                raise ValueError("tasks must be a nonempty list of unique task IDs")
+            missing = set(tasks) - available
+            if missing:
+                raise ValueError(f"No completed matching Exp1 recordings for {sorted(missing)}")
+        selected = sorted(available) if tasks is None else tasks
+        if not selected:
+            raise ValueError("No completed matching Exp1 recordings")
+        explicit = {task: {"task": task} for task in selected}
+    # Copy specs so discovery and paper labels do not mutate caller configuration.
+    config["methods"] = {name: dict(spec) for name, spec in explicit.items()}
+    config["tasks"] = None  # Resolved mappings can safely pass through discovery again.
+    for spec in config["methods"].values():
+        spec.setdefault("display_name", DISPLAY_NAMES.get(spec["task"], spec["task"]))
+    config["latex_method_names"] = {
+        **{name: LATEX_METHOD_NAMES[spec["task"]] for name, spec in config["methods"].items()
+           if spec["task"] in LATEX_METHOD_NAMES},
+        **config.get("latex_method_names", {}),
+    }
+    return config
+
+
 def discover(config):
+    config = resolve_methods(config)
     runs, notices, checkpoint_hashes = [], [], {}
     identities = set()
     for path in shared.discover(config["recording_roots"], "metadata.json"):
@@ -448,6 +491,7 @@ def run_analysis(config):
 
 
 def _run_analysis(config):
+    config = resolve_methods(config)
     output = Path(config["output_dir"]).expanduser()
     output.mkdir(parents=True, exist_ok=True)
     (output/"COMPLETE").unlink(missing_ok=True)

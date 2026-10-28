@@ -6,7 +6,7 @@ set -euo pipefail
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO="$(CDPATH= cd -- "$HERE/../.." && pwd)"
 RUN="${1:-$REPO/logs/b1z1/b1z1_pact_ab4_coupled_none/Oct24_07-32-06_b1z1_pact_ab4_coupled_none}"
-CKPT="${2:-28000}"
+CKPT="${2:-27000}"
 OUTPUT_BASE="${3:-$REPO/evaluation/exp1/b1z1_pact_ab4_coupled_none}"
 if [[ $# -gt 3 || ! "$CKPT" =~ ^[0-9]+$ ]]; then
     echo "Usage: bash $0 [RUN_DIRECTORY [CHECKPOINT_NUMBER [OUTPUT_BASE]]]" >&2
@@ -24,13 +24,13 @@ COLLECTION=0
 for INDEX in "${!CONDITIONS[@]}"; do
     for SEED in "${SEEDS[@]}"; do
         COLLECTION=$((COLLECTION + 1))
-        echo "[Collection $COLLECTION/9] b1z1_pact_ab4_coupled_none: ${CONDITIONS[$INDEX]}, seed=$SEED; 100 episodes, 100 robots"
+        echo "[Collection $COLLECTION/9] b1z1_pact_ab4_coupled_none: ${CONDITIONS[$INDEX]}, seed=$SEED; 100 episodes, 25 robots"
         bash "$HERE/eval_b1z1_exp1.sh" \
             --task b1z1_pact_ab4_coupled_none \
             --run "$RUN" \
             --ckpt "$CKPT" \
             --seed "$SEED" \
-            --num-envs 100 \
+            --num-envs 25 \
             --episodes 100 \
             --horizon-seconds 15 \
             --condition "${CONDITIONS[$INDEX]}" \
@@ -54,7 +54,7 @@ EXP2_COLLECTION=0
 for PROFILE in "${EXP2_PROFILES[@]}"; do
     for SEED in "${SEEDS[@]}"; do
         EXP2_COLLECTION=$((EXP2_COLLECTION + 1))
-        echo "[Experiment 2 $EXP2_COLLECTION/9] b1z1_pact_ab4_coupled_none: $PROFILE, loaded, seed=$SEED; 50 episodes, 50 robots"
+        echo "[Experiment 2 $EXP2_COLLECTION/9] b1z1_pact_ab4_coupled_none: $PROFILE, loaded, seed=$SEED; 50 episodes, 25 robots"
         bash "$HERE/eval_b1z1_exp2.sh" \
             --task b1z1_pact_ab4_coupled_none \
             --run "$RUN" \
@@ -62,7 +62,7 @@ for PROFILE in "${EXP2_PROFILES[@]}"; do
             --seed "$SEED" \
             --profile "$PROFILE" \
             --loading loaded \
-            --num-envs 50 \
+            --num-envs 25 \
             --episodes 50 \
             --horizon-seconds 28 \
             --gpu "${EVAL_GPU:-cuda:0}" \

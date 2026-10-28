@@ -207,12 +207,48 @@ def test_torch_checkpoint_native_replay(tmp_path):
 
 def test_notebook_cpu_saved_prediction_smoke(tmp_path,monkeypatch):
     nbformat=pytest.importorskip("nbformat");nbclient=pytest.importorskip("nbclient")
-    fixture(tmp_path/"raw")
-    monkeypatch.setenv("EXP3_CONFIG",json.dumps(config(tmp_path)))
+    fixture(tmp_path/"raw", tasks=("b1z1_pact", "b1z1_ppo_pos"))
+    cfg = config(tmp_path)
+    cfg["methods"] = None
+    monkeypatch.setenv("EXP3_CONFIG",json.dumps(cfg))
     nb=nbformat.read(ROOT/"notebooks/exp3_representation_analysis.ipynb",as_version=4)
     nb.cells.append(nbformat.v4.new_code_cell("assert 'torch' not in sys.modules and 'isaaclab' not in sys.modules"))
     nbclient.NotebookClient(nb,timeout=180,kernel_name="python3",resources={"metadata":{"path":str(ROOT)}}).execute()
     nbformat.write(nb,tmp_path/"executed_exp3.ipynb")
     for name in ("transition_manifest.json","per_seed.csv","summary.csv","native_recorded_in_table.tex","COMPLETE"):
         assert (tmp_path/"output"/name).stat().st_size>0
+
+
+def test_method_discovery_and_selection(tmp_path):
+    fixture(tmp_path/"raw", tasks=("b1z1_pact", "b1z1_ppo_pos"))
+    cfg = config(tmp_path)
+    cfg["methods"] = None
+    resolved = a.resolve_methods(cfg)
+    assert set(resolved["methods"]) == {"b1z1_pact", "b1z1_ppo_pos"}
+    assert resolved["methods"]["b1z1_ppo_pos"]["display_name"] == "Pos"
+    assert cfg["methods"] is None
+    cfg["tasks"] = ["b1z1_ppo_pos"]
+    selected = a.resolve_methods(cfg)
+    assert list(selected["methods"]) == cfg["tasks"]
+    assert a.resolve_methods(selected) == selected
+    runs, _ = a.discover(selected)
+    assert {r["meta"]["task"] for r in runs} == {"b1z1_ppo_pos"}
+    assert all(r["checkpoint"].name == "b1z1_ppo_pos.pt" for r in runs)
+    cfg["tasks"] = ["absent"]
+    with pytest.raises(ValueError, match="No completed"):
+        a.resolve_methods(cfg)
+
+
+def test_discovery_excludes_incomplete_and_exp2(tmp_path):
+    root = tmp_path / "raw"
+    for task, experiment, complete in (("pact", 1, True), ("exp2", 2, True), ("partial", 1, False)):
+        path = root / task
+        path.mkdir(parents=True)
+        a.shared.write_json(path / "metadata.json", dict(task=task, experiment=experiment,
+            evaluation_seed=0, arguments=dict(condition="nominal")))
+        if complete:
+            (path / "COMPLETE").touch()
+    cfg = config(tmp_path)
+    cfg["methods"] = None
+    assert list(a.resolve_methods(cfg)["methods"]) == ["pact"]
 

@@ -9,6 +9,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+
+def paper_latex(frame, names, macros, **kwargs):
+    """Escape content normally, inserting manuscript macros only in method labels."""
+    tokens = {names[task]: f"PAPERMETHOD{i}TOKEN" for i, task in enumerate(macros) if task in names}
+    result = frame.rename(index=tokens).to_latex(escape=True, **kwargs)
+    for task, macro in macros.items():
+        if task in names:
+            result = result.replace(tokens[names[task]], macro)
+    return result
+
 VERSION = 1
 CONDITIONS = ("nominal", "ee-disturbance", "combined-disturbance")
 MAIN = ("ee_error_m", "planar_velocity_error_m_s", "yaw_error_rad_s", "S_track", "failure_rate")
@@ -556,7 +566,7 @@ def motion_modes_table(summaries, config, names, diagnostics):
     out = Path(config["output_dir"])
     pd.DataFrame(numeric).to_csv(out / "motion_modes.csv", index=False)
     # Group labels are explicit rows, avoiding an extra multirow LaTeX dependency.
-    tex = table.droplevel("Motion").to_latex(escape=True)
+    tex = paper_latex(table.droplevel("Motion"), names, config.get("latex_method_names", {}))
     body = tex.split("\\midrule\n", 1)[1].split("\\bottomrule", 1)[0].splitlines()
     grouped = []
     for i, line in enumerate(body):
@@ -582,6 +592,7 @@ def compare(config):
     out = Path(config["output_dir"])
     out.mkdir(parents=True, exist_ok=True)
     summaries, histograms = {}, {}
+    summary_paths = {}
     for path in discover(config["summary_roots"], "summary.json"):
         s = read_json(path)
         if s.get("status") != "complete" or not (path.parent / "COMPLETE").exists():
@@ -590,10 +601,12 @@ def compare(config):
             raise ValueError("Unsupported analysis schema")
         task = s["task"]
         if task in summaries:
-            raise ValueError(f"Duplicate approach summary: {task}; narrow summary_roots")
+            raise ValueError(f"Duplicate approach summary: {task}: {summary_paths[task]} and {path}; "
+                             "narrow summary_roots to the intended export folders (do not mix protocols/checkpoints)")
         if s["protocol_hash"] != fingerprint(s["protocol"]):
             raise ValueError("Invalid summary protocol fingerprint")
         summaries[task] = s
+        summary_paths[task] = path
         histograms[task] = pd.read_csv(path.parent / "ee_histograms.csv")
     if not summaries:
         raise ValueError("No completed analysis summaries found")
@@ -657,7 +670,7 @@ def compare(config):
 
     def export_table(name, table, wide=False):
         table.to_csv(out / f"{name}.csv")
-        latex = table.to_latex(escape=True, multicolumn=True, multicolumn_format="c")
+        latex = paper_latex(table, names, config.get("latex_method_names", {}), multicolumn=True, multicolumn_format="c")
         # graphicx/booktabs required; main table spans both publication columns.
         size = r"\textwidth" if wide else r"\columnwidth"
         (out / f"{name}.tex").write_text("% Requires graphicx and booktabs\n" +
