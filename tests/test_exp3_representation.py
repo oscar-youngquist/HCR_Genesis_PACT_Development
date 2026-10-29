@@ -18,7 +18,7 @@ def fixture(root, tasks=("b1z1_pact",), seeds=(0,1)):
     for task in tasks:
         ckpt = root/(task+".pt")
         root.mkdir(parents=True, exist_ok=True)
-        ckpt.write_bytes(b"synthetic saved-prediction audit; not a Torch checkpoint")
+        ckpt.write_bytes(("synthetic saved-prediction audit: "+task).encode())
         for seed in seeds:
             for condition in ("nominal","ee-disturbance","combined-disturbance"):
                 for load in ("in","out"):
@@ -32,6 +32,10 @@ def fixture(root, tasks=("b1z1_pact",), seeds=(0,1)):
                     m["arguments"]["load_range"] = load
                     m["prescribed_steps"] = 8
                     m["resolved_environment"]["env"].update(num_observations=4,num_obs_hist=2,num_actions=2,num_policy_actions=4,num_explicit_recon_obs=23)
+                    if task == "b1z1_ppo_pos":
+                        m["resolved_environment"]["env"]["num_policy_actions"] = 2
+                    if task == "b1z1_unifp_original":
+                        m["runner"] = "UniFPOriginalRunner"
                     m["resolved_environment"]["normalization"] = dict(obs_scales=dict(ee_force=.1,base_force=.01,grf=.001))
                     m["resolved_environment"]["asset"] = dict(foot_name=["FR","FL","RR","RL"])
                     arrays, trials, initial = [], [], []
@@ -58,6 +62,11 @@ def fixture(root, tasks=("b1z1_pact",), seeds=(0,1)):
                         initial.append(dict(trial_id=tid,body_masses_kg=[1.,1.],body_inertias_kg_m2=[np.eye(3).flatten().tolist()]*2,
                                             body_local_com_pose=[[0,0,0,1,0,0,0]]*2))
                     d={k:np.concatenate([v[k] for v in arrays]) for k in arrays[0]}
+                    if task == "b1z1_unifp_original":
+                        d["prediction_explicit"] = np.zeros((len(d["step"]), 12))
+                        d["prediction_explicit"][:, 6] = .6
+                        for key in ("prediction_ee_force", "prediction_base_wrench", "prediction_grf", "prediction_grf_torque_input_nm"):
+                            d.pop(key)
                     idx=np.argsort(d["step"],kind="stable"); d={k:v[idx] for k,v in d.items()}
                     parts=[]
                     for n,start in enumerate(range(0,len(idx),4)):
@@ -146,10 +155,10 @@ def test_saved_native_run_and_contract_separation(tmp_path):
     fixture(tmp_path/"raw"); cfg=config(tmp_path)
     result=a.run_analysis(cfg)
     assert result["recorded_native_only"]
-    assert {r["benchmark"] for r in result["table_summary"]}=={"native_recorded", "shared"}
+    assert {r["benchmark"] for r in result["table_summary"]}=={"native"}
     assert not any(r["variant"]=="decoded" and r["metric"]=="base_linear_rmse" for r in result["table_summary"])
-    assert (tmp_path/"output/shared_in_table.tex").exists()
-    assert "NaN" not in (tmp_path/"output/summary.json").read_text()
+    assert (Path(result["output_dir"])/"native_in_table.tex").exists()
+    assert "NaN" not in (Path(result["output_dir"])/"summary.json").read_text()
     runs,_=a.discover(cfg);m=runs[0]["meta"];pos=copy.deepcopy(m)
     pos["resolved_environment"]["env"]["num_policy_actions"]=2
     assert a.input_contract(m)!=a.input_contract(pos)
@@ -157,28 +166,28 @@ def test_saved_native_run_and_contract_separation(tmp_path):
     assert any("disabled" in r["reason"] for r in result["unavailable"])
 
 
-def test_common_transition_dispatch(tmp_path, monkeypatch):
+def test_native_transition_dispatch(tmp_path, monkeypatch):
     fixture(tmp_path/"raw", tasks=("b1z1_pact","b1z1_pact_ab4"), seeds=(0,))
     cfg=config(tmp_path)
-    cfg.update(recorded_native_only=False, evaluation_seeds=[0], sampling_budget=24)
+    cfg.update(recorded_native_only=False, evaluation_seeds=[0], sampling_budget=24, inference_batch_size=3)
     cfg["methods"]["ab4"] = dict(task="b1z1_pact_ab4")
     # Independent deterministic toy heads test replay routing without Torch/Jupyter.
+    seen = {}
     def infer(model, data, device):
+        assert len(data) <= 3
+        assert all(row["entry"]["source"] == model for row in data)
+        seen.setdefault(model, set()).update(row["entry"]["transition_id"] for row in data)
         n=len(data)
         return dict(prediction_z=np.ones((n,3)), prediction_ee_force=np.tile([.6,0,0],(n,1)),
                     prediction_base_wrench=np.zeros((n,6)), prediction_grf=np.ones((n,12))*.001)
-    monkeypatch.setattr(a,"build_model",lambda *args: object())
+    monkeypatch.setattr(a,"build_model",lambda run, device: run["name"])
     monkeypatch.setattr(a,"infer",infer)
-    seen={}
-    original=a.metric_rows
-    def metrics(entry,method,benchmark,*args):
-        if benchmark == "shared":
-            seen.setdefault(method,set()).add(entry["transition_id"])
-        return original(entry,method,benchmark,*args)
-    monkeypatch.setattr(a,"metric_rows",metrics)
+    monkeypatch.setattr(a,"input_contract",lambda *args: pytest.fail("No compatibility grouping in native analysis"))
+    monkeypatch.setattr(a,"select_manifest",lambda *args, **kwargs: pytest.fail("Full-data default must not sample"))
     result=a._run_analysis(cfg)
-    assert seen["PILOT"]==seen["ab4"] and seen["PILOT"]
-    assert any(r["benchmark"] == "shared" for r in result["table_summary"])
+    assert seen["PILOT"].isdisjoint(seen["ab4"]) and seen["PILOT"]
+    assert result["selection"]["selected"] == sum(map(len, seen.values()))
+    assert all(r["benchmark"] == "native" for r in result["table_summary"])
 
 
 def test_torch_checkpoint_native_replay(tmp_path):
@@ -205,21 +214,26 @@ def test_torch_checkpoint_native_replay(tmp_path):
     assert not any(p.requires_grad for p in model.parameters())
 
 
-def test_notebook_cpu_saved_prediction_smoke(tmp_path,monkeypatch):
+@pytest.mark.parametrize("include_exp2", [False, True])
+def test_notebook_cpu_saved_prediction_smoke(tmp_path,monkeypatch,include_exp2):
     nbformat=pytest.importorskip("nbformat");nbclient=pytest.importorskip("nbclient")
     fixture(tmp_path/"raw", tasks=("b1z1_pact", "b1z1_ppo_pos"))
     cfg = config(tmp_path)
     cfg["methods"] = None
-    from test_exp3_support import fixture as support_fixture
-    support_fixture(tmp_path/"exp2")
+    if include_exp2:
+        from test_exp3_support import fixture as support_fixture
+        support_fixture(tmp_path/"exp2")
     cfg["exp2_roots"] = [str(tmp_path/"exp2")]
     monkeypatch.setenv("EXP3_CONFIG",json.dumps(cfg))
     nb=nbformat.read(ROOT/"notebooks/exp3_representation_analysis.ipynb",as_version=4)
+    if not include_exp2:
+        nb.cells = [cell for cell in nb.cells if not cell.id.startswith("exp3-action")]
     nb.cells.append(nbformat.v4.new_code_cell("assert 'torch' not in sys.modules and 'isaaclab' not in sys.modules"))
     nbclient.NotebookClient(nb,timeout=180,kernel_name="python3",resources={"metadata":{"path":str(ROOT)}}).execute()
     nbformat.write(nb,tmp_path/"executed_exp3.ipynb")
-    for name in ("transition_manifest.json","per_seed.csv","summary.csv","shared_in_table.tex","COMPLETE"):
-        assert (tmp_path/"output"/name).stat().st_size>0
+    for name in ("transition_manifest.json", "transition_manifest.jsonl", "per_seed.csv", "summary.csv", "native_in_table.tex", "COMPLETE"):
+        assert (tmp_path/"output/representation/full_recorded"/name).stat().st_size>0
+    assert (tmp_path/"output/action_support/COMPLETE").exists() == include_exp2
 
 
 def test_method_discovery_and_selection(tmp_path):
@@ -254,4 +268,242 @@ def test_discovery_excludes_incomplete_and_exp2(tmp_path):
     cfg = config(tmp_path)
     cfg["methods"] = None
     assert list(a.resolve_methods(cfg)["methods"]) == ["pact"]
+
+
+def test_full_mode_ignores_sampling_and_matches_in_memory(tmp_path, monkeypatch):
+    fixture(tmp_path/"raw", seeds=(0,))
+    cfg = config(tmp_path)
+    run = a.discover(cfg)[0][0]
+    cfg.update(recording_roots=[str(run["path"])], evaluation_seeds=[0], inference_batch_size=1)
+    entries, _ = a.select_manifest([run], 10000, 0)
+    data = a.selected_data(run, entries)
+    rows = []
+    for row in data:
+        meta = run["meta"]
+        physical = a.physical_predictions({k:v for k,v in row.items() if k.startswith("prediction_")}, meta, row)
+        target = dict(ee_force=row["history_ee_force_world"], base_force=row["history_base_force_world"],
+                      base_moment=row["history_base_moment_world"], grf=row["grf_raw_world_interval_mean"])
+        timing = "new_load" if any(not np.allclose(row[k], row["history_"+k]) for k in a.LOADS) else "sustained"
+        rows += a.metric_rows(row["entry"], "PILOT", "native", "decoded", {k:physical[k]-target[k] for k in physical},
+                              meta["resolved_environment"]["asset"]["foot_name"], meta["dof_names"], timing)
+        error = a.velocity_errors(row, None, None, meta["dt"])
+        rows += a.metric_rows(row["entry"], "PILOT", "native", "constant_velocity", a.velocity_blocks(error, meta["dof_names"]),
+                              [], meta["dof_names"], timing)
+    monkeypatch.setattr(a, "select_manifest", lambda *args, **kwargs: pytest.fail("Default mode called balanced selection"))
+    result = a.run_analysis(cfg)
+    assert result["selection"]["available"] == result["selection"]["selected"] == len(entries)
+    manifest_hash = result["selection"]["transitions_sha256"]
+    _, expected = a.aggregate(rows)
+    def ordered(values):
+        return pd.DataFrame(values).sort_values(a.STRATA).reset_index(drop=True).sort_index(axis=1)
+    pd.testing.assert_frame_equal(ordered(result["breakdown"]), ordered(expected), check_dtype=False)
+    pooled = [dict(row, condition="nominal" if row["condition"] == "nominal" else "disturbed", motion="all", phase="all", load_timing="all") for row in rows]
+    pd.testing.assert_frame_equal(ordered(result["table_summary"]), ordered(a.aggregate(pooled)[1]), check_dtype=False)
+    cfg.update(sampling_budget=0, samples_per_stratum=0, sampling_seed=999, inference_batch_size=100)
+    again = a.run_analysis(cfg)
+    assert again["selection"]["transitions_sha256"] == manifest_hash
+    pd.testing.assert_frame_equal(ordered(result["table_summary"]), ordered(again["table_summary"]), check_dtype=False)
+
+
+def test_balanced_selection_is_per_checkpoint(tmp_path):
+    fixture(tmp_path/"raw", tasks=("b1z1_pact", "b1z1_pact_second"), seeds=(0,))
+    for path in (tmp_path/"raw/b1z1_pact_second").rglob("metadata.json"):
+        meta = a.shared.read_json(path)
+        meta["task"] = "b1z1_pact"
+        a.shared.write_json(path, meta)
+    cfg = config(tmp_path)
+    cfg.update(evaluation_seeds=[0], balanced_resampling=True, sampling_budget=4, inference_batch_size=2,
+        methods={name: dict(task="b1z1_pact", checkpoint=str(tmp_path/"raw"/(task+".pt")))
+                 for name, task in (("first", "b1z1_pact"), ("second", "b1z1_pact_second"))})
+    result = a.run_analysis(cfg)
+    assert result["selection"]["selected"] == 16  # 4 per checkpoint and per range.
+    manifest = [json.loads(line) for line in (Path(result["output_dir"])/"transition_manifest.jsonl").read_text().splitlines()]
+    assert len({row["transition_id"] for row in manifest}) == 16
+    for row in manifest:
+        assert ("b1z1_pact_second" in row["run"]) == (row["source"] == "second")
+    again = a.run_analysis(cfg)
+    assert result["selection"]["transitions_sha256"] == again["selection"]["transitions_sha256"]
+    assert all(c["selected"] <= c["available"] for c in result["coverage"])
+    cfg["sampling_seed"] += 1
+    assert a.run_analysis(cfg)["selection"]["transitions_sha256"] != result["selection"]["transitions_sha256"]
+
+
+def test_mixed_native_families_missing_heads(tmp_path, monkeypatch):
+    fixture(tmp_path/"raw", tasks=("b1z1_pact", "b1z1_ppo_pos", "b1z1_unifp_original"), seeds=(0,))
+    cfg = config(tmp_path)
+    cfg.update(methods=None, evaluation_seeds=[0], inference_batch_size=3)
+    monkeypatch.setattr(a, "input_contract", lambda *args: pytest.fail("No cross-policy compatibility checks"))
+    result = a.run_analysis(cfg)
+    for task in ("b1z1_pact", "b1z1_ppo_pos", "b1z1_unifp_original"):
+        assert any(r["task"] == task and r["metric"] == "ee_force_rmse" and r["mean"] is not None for r in result["comparative_summary"])
+    unifp = [r for r in result["comparative_summary"] if r["task"] == "b1z1_unifp_original"]
+    assert not any(r["metric"] in ("grf_rmse", "base_moment_rmse") for r in unifp)
+    assert not any(r["variant"] == "decoded" and r["metric"] == "base_linear_rmse" for r in unifp)
+    frame = pd.read_csv(Path(result["output_dir"])/"native_in_table.csv", header=[0, 1], index_col=0)
+    assert set(frame.index) == {"PILOT", "Pos", "UniFP"}
+    assert "—" in frame.loc["UniFP"].tolist()
+    assert any(r["component"] == "grf" and r["count"] > 0 for r in result["unavailable"])
+
+
+def test_late_parity_failure_excludes_prior_decoded_batches(tmp_path, monkeypatch):
+    fixture(tmp_path/"raw", seeds=(0,))
+    cfg = config(tmp_path)
+    cfg.update(evaluation_seeds=[0], inference_batch_size=2, recorded_native_only=False)
+    monkeypatch.setattr(a, "build_model", lambda *args: object())
+    def infer(model, data, device):
+        pred = {k:np.stack([r[k] for r in data]) for k in data[0] if k.startswith("prediction_")}
+        if any(r["entry"]["step"] >= 5 for r in data):
+            pred["prediction_z"] += 1
+        return pred
+    monkeypatch.setattr(a, "infer", infer)
+    result = a._run_analysis(cfg)
+    assert any(r["status"] == "failed" for r in result["native_parity"].values())
+    assert {r["variant"] for r in result["table_summary"]} == {"constant_velocity"}
+    assert any(r["component"] == "native parity" for r in result["unavailable"])
+
+
+def test_streamed_run_merge_preserves_trial_weights():
+    base = dict(method="P", benchmark="native", variant="decoded", load_range="in", condition="disturbed",
+                motion="all", phase="all", load_timing="all", metric="ee_force_rmse", axis="all", evaluation_seed=0)
+    seeds, summary = a.merge_seed_statistics([dict(base, mean=1., bias=-1., trials=10, samples=100),
+                                             dict(base, mean=3., bias=3., trials=1, samples=1)])
+    assert seeds[0]["mean"] == pytest.approx(13/11)
+    assert seeds[0]["bias"] == pytest.approx(-7/11)
+    assert summary[0]["contributing_samples"] == 101
+    assert summary[0]["contributing_trials"] == 11
+
+
+def test_offline_bard_import_never_imports_simulator():
+    pytest.importorskip("torch")
+    import subprocess
+    # Fresh interpreter prevents an earlier import/cache from hiding side effects.
+    code = r'''
+import importlib.abc, os, sys
+sys.path.insert(0, "notebooks")
+class NoSimulator(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".")[0] in {"legged_gym", "isaaclab", "isaacsim", "genesis"}:
+            raise AssertionError("Unexpected simulator import: " + fullname)
+sys.meta_path.insert(0, NoSimulator())
+before = os.environ.get("SIMULATOR")
+import exp3_representation as a
+cls = a.offline_bard_class()
+assert cls.__name__ == "BardB1Z1DynamicsBackend"
+assert a.offline_bard_class() is cls
+assert os.environ.get("SIMULATOR") == before
+'''
+    subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True, timeout=60)
+
+
+def test_offline_bard_batches_match_scalar_mechanics():
+    torch = pytest.importorskip("torch")
+    from types import SimpleNamespace
+    calls = []
+    backend = SimpleNamespace(model=None, data=None, ee_frame_id=0)
+    def evaluate(*args):
+        n = len(args[0])
+        calls.append(n)
+        # Vary every row so broadcasting one environment's mechanics cannot pass.
+        mass = args[9][:, 0] + args[10][:, 0] + args[11][:, 0] + 1
+        backend.pose = torch.eye(4).repeat(n, 1, 1)
+        return SimpleNamespace(mass_matrix=mass[:, None, None]*torch.eye(8),
+            bias=args[2].sum(1)[:, None].expand(n, 8).clone(),
+            foot_jacobians=torch.zeros(n, 4, 6, 8),
+            ee_jacobian=torch.zeros(n, 6, 8), base_jacobian=torch.zeros(n, 6, 8))
+    backend.evaluate = evaluate
+    backend.bard = SimpleNamespace(jacobian=lambda *args, **kwargs: (None, backend.pose))
+    bard = object.__new__(a.OfflineBard)
+    bard.backend, bard.device, bard.run = backend, "cpu", {"meta": {}}
+    bard._finish_terms = lambda row, result, pose: result
+    rows = [dict(base_position_t=np.zeros(3), base_quaternion_t=np.array([0,0,0,1]),
+                 joint_position_t=np.full(2, i), base_velocity_world_t=np.zeros(3),
+                 base_angular_velocity_world_t=np.zeros(3), joint_velocity_t=np.zeros(2),
+                 mechanics_added_base_mass=np.array([i]), mechanics_base_com_bias=np.full(3, i/10),
+                 mechanics_added_gripper_mass=np.array([i/2])) for i in range(5)]
+    batched = bard.terms_batch(rows)
+    assert calls == [5]
+    scalar = [bard.terms(row) for row in rows]
+    for left, right in zip(batched, scalar):
+        for field in left:
+            np.testing.assert_array_equal(left[field], right[field])
+    assert bard.terms_batch([]) == []
+
+
+def test_native_dynamics_variants_use_same_rows(tmp_path, monkeypatch):
+    fixture(tmp_path/"raw", seeds=(0,))
+    cfg = config(tmp_path)
+    run = a.discover(cfg)[0][0]
+    cfg.update(evaluation_seeds=[0], dynamics=True, inference_batch_size=3, dynamics_batch_size=2)
+    constructions, batches = [], []
+    class FakeBard:
+        def __init__(self, run, *args, **kwargs):
+            constructions.append(run["name"])
+            self.owner = run["name"]
+        def terms_batch(self, rows):
+            batches.append(len(rows))
+            return [self.terms(row) for row in rows]
+        def terms(self, row):
+            assert row["entry"]["source"] == self.owner
+            assert "executed_torque_interval_mean" in row
+            return dict(mass_matrix=np.eye(8), bias=np.zeros(8), foot_jacobians=np.zeros((4, 6, 8)),
+                        ee_jacobian=np.eye(6, 8), base_jacobian=np.eye(6, 8), base_lever=np.zeros(3), ee_lever=np.zeros(3),
+                        approximation=["synthetic mechanics"])
+    monkeypatch.setattr(a, "OfflineBard", FakeBard)
+    monkeypatch.setattr(a, "build_model", lambda *args: pytest.fail("Saved-prediction mode must not construct actors"))
+    result = a._run_analysis(cfg)
+    values = [r for r in result["table_summary"] if r["metric"] == "base_linear_rmse" and r["axis"] == "all"]
+    assert {r["variant"] for r in values} == {"decoded", "measured_loading", "constant_velocity"}
+    for variant in ("decoded", "measured_loading", "constant_velocity"):
+        assert sum(r["contributing_samples"] for r in values if r["variant"] == variant) == result["selection"]["selected"]
+    assert sum(r["transitions"] for r in result["dynamics_approximations"]) == result["selection"]["selected"]
+    assert constructions == ["PILOT"]
+    assert max(batches) == 2 and sum(batches) == result["selection"]["selected"]
+
+
+def test_prediction_cache_and_output_modes_are_isolated(tmp_path, monkeypatch):
+    fixture(tmp_path/"raw", seeds=(0,))
+    cfg = config(tmp_path)
+    run = a.discover(cfg)[0][0]
+    cfg.update(recording_roots=[str(run["path"])], evaluation_seeds=[0], recorded_native_only=False,
+               inference_batch_size=4, cache_predictions=True)
+    calls = []
+    monkeypatch.setattr(a, "build_model", lambda *args: object())
+    def infer(model, data, device):
+        calls.append(len(data))
+        return {k:np.stack([r[k] for r in data]) for k in data[0] if k.startswith("prediction_")}
+    monkeypatch.setattr(a, "infer", infer)
+    first = a._run_analysis(cfg)
+    n = len(calls)
+    assert n and max(calls) <= 4
+    assert list((Path(first["output_dir"])/"cache").glob("*.npz"))
+    a._run_analysis(cfg)
+    assert len(calls) == n  # Cached batches still undergo native parity checks.
+    cfg.update(balanced_resampling=True, sampling_budget=10000)
+    balanced = a._run_analysis(cfg)
+    assert len(calls) == 2*n
+    assert balanced["output_dir"] != first["output_dir"]
+    cfg.update(recorded_native_only=True, balanced_resampling=False)
+    recorded = a.run_analysis(cfg)
+    assert recorded["output_dir"] not in (first["output_dir"], balanced["output_dir"])
+    assert len(calls) == 2*n
+
+
+def test_nonfinite_output_is_counted_not_zero_filled(tmp_path, monkeypatch):
+    fixture(tmp_path/"raw", seeds=(0,))
+    cfg = config(tmp_path)
+    run = a.discover(cfg)[0][0]
+    cfg.update(recording_roots=[str(run["path"])], evaluation_seeds=[0], inference_batch_size=2)
+    original = a.physical_predictions
+    def physical(pred, meta, row):
+        values = original(pred, meta, row)
+        if row["entry"]["step"] == 2:
+            values["grf"][:] = np.nan
+        return values
+    monkeypatch.setattr(a, "physical_predictions", physical)
+    result = a.run_analysis(cfg)
+    issue = next(r for r in result["unavailable"] if r["component"] == "grf")
+    assert issue["count"] == 2
+    grf = next(r for r in result["table_summary"] if r["metric"] == "grf_rmse" and r["axis"] == "all")
+    assert grf["contributing_samples"] == result["selection"]["selected"]-2
+    assert grf["mean"] == pytest.approx(0.)  # Remaining finite predictions exactly match targets.
 

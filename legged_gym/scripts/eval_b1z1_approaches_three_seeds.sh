@@ -25,8 +25,9 @@ SCRIPTS=(
     # eval_b1z1_pact_ab5_coupled_concat_three_seeds.sh
     # eval_b1z1_pact_ab8_coupled_film_three_seeds.sh
     # eval_b1z1_pact_ab6_position_film_three_seeds.sh
-    eval_b1z1_pact_ab9_representation_three_seeds.sh
-    eval_b1z1_pact_ab10_actor_three_seeds.sh
+    # eval_b1z1_pact_ab9_representation_three_seeds.sh
+    # eval_b1z1_pact_ab10_actor_three_seeds.sh
+    eval_b1z1_pact_ab7_position_full_three_seeds.sh
 )
 
 for INDEX in "${!SCRIPTS[@]}"; do
