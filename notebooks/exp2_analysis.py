@@ -16,6 +16,24 @@ RESPONSE = ("ee_peak_m", "recovery_time_s", "recovery_fraction",
 SMOOTH = ("torso_angular_acceleration_rms", "ee_linear_acceleration_rms")
 
 
+def force_event_label(curves, event_time, dt, profile):
+    """Signed recorded interval load immediately after the event, not a hardcoded schedule."""
+    axis = "Fz" if profile == "carrying" else "Fx"
+    if not curves:
+        return f"{axis} unavailable"
+    data = pd.concat(curves, ignore_index=True)
+    data = data[(data.time_seconds >= event_time-1e-7) & (data.time_seconds < event_time+dt+1e-7)]
+    data = data[np.isfinite(data["mean"])]
+    if data.empty:
+        return f"{axis} unavailable"
+    values = data.loc[np.isclose(data.time_seconds, data.time_seconds.min()), "mean"].to_numpy()
+    if not np.allclose(values, values[0], atol=.1, rtol=1e-4):
+        return f"{axis} varies"
+    value = float(values.mean())
+    magnitude = "0" if abs(value) < 1e-6 else f"{value:+.3g}"
+    return f"{axis},{magnitude}N"
+
+
 def protocol(meta):
     p = shared.protocol(meta)
     p.update(experiment=2, task_stages=meta["task_stages"],
@@ -390,9 +408,10 @@ def compare(config):
     font = "Times New Roman" if "Times New Roman" in {f.name for f in font_manager.fontManager.ttflist} else "DejaVu Serif"
     all_curve_rows = []
     with plt.rc_context({"font.family": font, "font.size": config.get("font_size", 9)}):
-        fig, axes = plt.subplots(3, 3, figsize=config.get("figure_size", [11, 7]), sharex="col", constrained_layout=True)
+        fig, axes = plt.subplots(2, 3, figsize=config.get("figure_size", [11, 5]), sharex="col", constrained_layout=True)
         colors = config.get("colors", ["#0072B2", "#D55E00", "#009E73"])
         for col, profile in enumerate(PROFILES):
+            force_curves = []
             for i, task in enumerate(focused):
                 if task not in summaries:
                     continue
@@ -403,9 +422,12 @@ def compare(config):
                     continue
                 curve = aggregate_curves(raw, config.get("band", "trial_sd"))
                 all_curve_rows.extend(curve.assign(task=task, profile=profile, loading=load).to_dict("records"))
+                force_curves.append(curve[curve.curve == "force"])
                 color = colors[i % len(colors)]
                 for j, field in enumerate(CURVES):
-                    row = min(j, 2)
+                    if field == "force":
+                        continue  # Keep actual loads in the CSV; annotate instead of plotting a load row.
+                    row = 0 if field == "ee_error" else 1
                     d = curve[curve.curve == field].sort_values("step")
                     x, y, sd = d.time_seconds.to_numpy(), d["mean"].to_numpy(dtype=float), d.sd.to_numpy(dtype=float)
                     label = name(task) + (" command" if j == 2 else "")
@@ -418,21 +440,32 @@ def compare(config):
                     if j == 1:
                         n = d.contributing_trials
                         diagnostics.append(f"{name(task)}/{profile}: surviving EE trials {n.min()}..{n.max()} (counts exported)")
-                        axes[row, col].text(.02, .97-i*.12, f"{name(task)} n={n.min()}–{n.max()}", transform=axes[row, col].transAxes, va="top", color=color, fontsize=7)
             cfg = values[0]["protocol"]["evaluation"]
             for ax in axes[:, col]:
-                for t in [cfg["move_start_s"], *cfg["load_times_s"], cfg["stop_s"]]:
+                for t in [cfg["move_start_s"], cfg["stop_s"]]:
                     ax.axvline(t, color=".5", linewidth=.6, linestyle=":")
+                for t in cfg["load_times_s"]:
+                    ax.axvline(t, color="red", linewidth=.8, linestyle=":")
+                    if ax is axes[0, col]:
+                        label = force_event_label(force_curves, t, values[0]["protocol"]["dt"], profile)
+                        # Shared event labels sit outside the data area; both rows retain lines.
+                        ax.annotate(label, xy=(t, 1), xycoords=ax.get_xaxis_transform(),
+                                    xytext=(0, 5), textcoords="offset points", rotation=0,
+                                    va="bottom", ha="center", color="red", fontsize=7,
+                                    annotation_clip=False)
                 ax.grid(alpha=.15)
-            axes[0, col].set_title(profile.title())
-            axes[0, col].set_ylabel("World Fz [N]" if profile == "carrying" else "Initial-heading Fx [N]")
-            axes[1, col].set_ylabel("EE error [m]")
-            axes[2, col].set_ylabel("Body forward velocity [m/s]")
-            axes[2, col].set_xlabel("Trial time [s]")
-        handles, labels = axes[2, 0].get_legend_handles_labels()
+            axes[0, col].set_title(profile.title(), pad=38)
+            axes[0, col].set_ylabel("EE error [m]")
+            axes[1, col].set_ylabel("Body forward velocity [m/s]")
+            axes[1, col].set_xlabel("Trial time [s]")
+        handles, labels = axes[1, 0].get_legend_handles_labels()
         if handles:
             fig.legend(handles, labels, loc="outside lower center", ncol=3, fontsize=8)
-        fig.suptitle(f"{load.title()} task response; bands: {config.get('band', 'trial_sd')} (not confidence intervals)")
+        title = config.get("figure_title")
+        if title is None:
+            title = f"{load.title()} task response; bands: {config.get('band', 'trial_sd')} (not confidence intervals)"
+        if title:
+            fig.suptitle(title)
         for suffix in ("pdf", "png"):
             fig.savefig(output / f"task_response.{suffix}", dpi=config.get("dpi", 200), bbox_inches="tight")
     pd.DataFrame(all_curve_rows).to_csv(output / "task_response.csv", index=False)

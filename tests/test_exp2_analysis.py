@@ -133,13 +133,42 @@ def test_failure_boundaries_and_undefined_samples(length, failed, valid):
         assert all(not e["recovered"] for e in result["events"])
 
 
+def test_comparison_notebook_reloads_cached_helper(tmp_path, monkeypatch):
+    fixture(tmp_path/"raw", seeds=(0,), loads=("loaded",))
+    a.summarize(config(tmp_path))
+    cfg = dict(summary_roots=[str(tmp_path/"summaries")], output_dir=str(tmp_path/"comparison"),
+               method_order=["b1z1_pact"], focused_methods=["b1z1_pact"])
+    # Simulate a notebook kernel still holding the obsolete plotting function.
+    monkeypatch.setattr(a, "compare", lambda _: pytest.fail("Stale helper used"))
+    nb = json.loads((ROOT/"notebooks/exp2_compare_approaches.ipynb").read_text())
+    source = next("".join(c["source"]) for c in nb["cells"] if "analysis.compare(CONFIG)" in "".join(c["source"]))
+    namespace = dict(analysis=a, CONFIG=cfg, Path=Path, display=lambda _: None)
+    exec(compile(source, "comparison-cell", "exec"), namespace)
+    assert len(namespace["figure"].axes) == 6
+
+
 def test_comparison_missing_methods_and_protocols(tmp_path):
     fixture(tmp_path/"raw", loads=("loaded",))
     a.summarize(config(tmp_path))
     cfg = dict(summary_roots=[str(tmp_path/"summaries")], output_dir=str(tmp_path/"comparison"),
                method_order=["missing", "b1z1_pact"], latex_method_names={"b1z1_pact": r"\PILOT{}"},
-               focused_methods=["b1z1_pact", "missing"], display_names={"b1z1_pact":"PILOT"})
+               focused_methods=["b1z1_pact", "missing"], display_names={"b1z1_pact":"PILOT"},
+               figure_title="Custom task comparison")
     tables, fig, diagnostics = a.compare(cfg)
+    assert len(fig.axes) == 6
+    assert fig._suptitle.get_text() == "Custom task comparison"
+    for row in range(2):
+        for col, profile in enumerate(a.PROFILES):
+            ax = fig.axes[row*3+col]
+            labels = [t.get_text() for t in ax.texts]
+            axis = "Fz" if profile == "carrying" else "Fx"
+            sign = "+" if profile == "pulling" else "-"
+            expected = [f"{axis},{sign}{force}N" for force in (25,45,65)]+[f"{axis},0N"]
+            assert labels == (expected if row == 0 else [])
+            if row == 0:
+                assert all(t.xy[1] == 1 and t.get_position()[1] > 0 and t.get_rotation() == 0 for t in ax.texts)
+            assert not any("n=" in text for text in labels)
+            assert sum(line.get_color() == "red" for line in ax.lines) == 4
     assert "—" in tables["response"].loc["missing"].to_string()
     assert any("Missing missing" in d for d in diagnostics)
     assert (tmp_path/"comparison/task_response.pdf").stat().st_size > 1000

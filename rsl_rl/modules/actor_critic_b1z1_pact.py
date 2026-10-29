@@ -72,7 +72,9 @@ class FiLM(nn.Module):
     def __init__(self, condition_dim: int, feature_dim: int, hidden_dim: int, activation: str, normalize_dim=None):
         super().__init__()
         self.normalize_dim = normalize_dim
-        self.condition_norm = nn.LayerNorm(normalize_dim) if normalize_dim else nn.Identity()
+        # V02 bounds each already observation-scaled error independently, preserving
+        # small-error magnitude instead of normalizing it across tracking axes.
+        self.condition_norm = nn.Tanh() if normalize_dim else nn.Identity()
         self.network = _mlp(condition_dim, [hidden_dim, hidden_dim], 2 * feature_dim, activation)
 
         self.network.apply(init_weights)

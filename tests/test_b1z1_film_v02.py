@@ -35,10 +35,26 @@ def test_latent_only_modulation_and_normalization():
     raw_z = m.last_context["z"]
     torch.testing.assert_close(captured["input"][:, 81:89], raw_z*1.5+.2)
     raw_history = m.last_context["film_tracking_history"].reshape(2, 5, 6)
-    torch.testing.assert_close(captured["condition"], m.film.condition_norm(raw_history).flatten(1))
+    torch.testing.assert_close(captured["condition"], raw_history.tanh().flatten(1))
     # Decoder inputs remain the original latent, even after policy modulation.
     assert m.last_context["z"] is raw_z
     assert not raw_history[:, :4].any()
+
+
+def test_v02_component_tanh_preserves_magnitude_and_bounds_outliers():
+    m = model()
+    errors = torch.tensor([[0., .08, -.12, 1e6, -1e6, .5]], requires_grad=True)
+    bounded = m.film.condition_norm(errors)
+    torch.testing.assert_close(bounded, errors.tanh())
+    assert bounded.abs().max() <= 1
+    assert 0 < bounded[0, 1] < bounded[0, 5]
+    changed = errors.detach().clone()
+    changed[0, 3] = 0
+    torch.testing.assert_close(m.film.condition_norm(changed)[:, :3], bounded[:, :3])
+    bounded.sum().backward()
+    assert torch.isfinite(errors.grad).all()
+    assert errors.grad[0, 1] > 0
+    assert not list(m.film.condition_norm.parameters())
 
 
 def test_history_order_reset_and_ppo_replay():

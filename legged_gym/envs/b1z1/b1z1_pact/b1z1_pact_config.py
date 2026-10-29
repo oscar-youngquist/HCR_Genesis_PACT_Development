@@ -900,7 +900,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         # Dedicated explicit/force heads are excluded from this reconstruction.
         privileged_decoder_layers = [128, 256, 512]                                     # Hidden widths for non-overlapping privileged reconstruction.
         film_hidden_dim = 64                                                            # FiLM conditioning-network hidden width.
-        film_v02_enabled = False                                                         # Modulate actor z using normalized tracking-error history.
+        film_v02_enabled = True                                                         # Modulate actor z using component-wise tanh tracking-error history.
         film_history_steps = 5                                                          # V02 error frames, oldest to newest; reset padding is zero.
         # Encourage FiLM to be an identity transform near a well-tracked
         # command. The pressure decays exponentially with mean squared base
