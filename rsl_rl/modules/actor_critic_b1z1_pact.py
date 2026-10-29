@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Iterable, Sequence
+import math
 
 import torch
 import torch.nn as nn
@@ -69,13 +70,23 @@ class B1Z1PACTContextEncoder(nn.Module):
 class FiLM(nn.Module):
     """Near-identity DreamFLEX-style modulation of the shared actor state."""
 
-    def __init__(self, condition_dim: int, feature_dim: int, hidden_dim: int, activation: str, normalize_dim=None):
+    def __init__(self, condition_dim: int, feature_dim: int, hidden_dim: int, activation: str, normalize_dim=None,
+                 base_error_soft_scale: float = 0.10, ee_error_soft_scale: float = 0.05):
         super().__init__()
         self.normalize_dim = normalize_dim
-        # V02 bounds each already observation-scaled error independently, preserving
-        # small-error magnitude instead of normalizing it across tracking axes.
-        self.condition_norm = nn.Tanh() if normalize_dim else nn.Identity()
-        self.network = _mlp(condition_dim, [hidden_dim, hidden_dim], 2 * feature_dim, activation)
+        if normalize_dim and normalize_dim % 2:
+            raise ValueError("FiLM tracking condition must split into base and EE groups")
+        self.base_error_soft_scale = float(base_error_soft_scale)
+        self.ee_error_soft_scale = float(ee_error_soft_scale)
+        if normalize_dim and any(not math.isfinite(s) or s <= 0 for s in
+                                 (self.base_error_soft_scale, self.ee_error_soft_scale)):
+            raise ValueError("FiLM soft scales must be finite and positive")
+        # V02 normalizes base/EE errors independently and appends their two magnitudes.
+        network_condition_dim = condition_dim + 2 * (condition_dim // normalize_dim) if normalize_dim else condition_dim
+        self.network = _mlp(network_condition_dim, [hidden_dim, hidden_dim], 2 * feature_dim, activation)
+        if normalize_dim:
+            # Normalize V02 hidden features, not the explicit direction/magnitude inputs.
+            self.network.insert(1, nn.LayerNorm(hidden_dim))
 
         self.network.apply(init_weights)
 
@@ -83,9 +94,20 @@ class FiLM(nn.Module):
         nn.init.zeros_(final.weight)
         nn.init.zeros_(final.bias)
 
-    def forward(self, features: torch.Tensor, condition: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def prepare_condition(self, condition: torch.Tensor) -> torch.Tensor:
         if self.normalize_dim:
-            condition = self.condition_norm(condition.reshape(len(condition), -1, self.normalize_dim)).flatten(1)
+            error = condition.reshape(len(condition), -1, self.normalize_dim)
+            # Soft L1 normalization attenuates tiny errors; scales use observation units.
+            base_error, ee_error = error.chunk(2, dim=-1)
+            base_l1 = base_error.abs().sum(dim=-1, keepdim=True)
+            ee_l1 = ee_error.abs().sum(dim=-1, keepdim=True)
+            condition = torch.cat((base_error / (base_l1 + self.base_error_soft_scale),
+                                   ee_error / (ee_l1 + self.ee_error_soft_scale),
+                                   base_l1.tanh(), ee_l1.tanh()), dim=-1).flatten(1)
+        return condition
+
+    def forward(self, features: torch.Tensor, condition: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        condition = self.prepare_condition(condition)
         gamma, beta = self.network(condition).chunk(2, dim=-1)
         # gamma=0 and beta=0 are exactly the identity feature transform.
         identity_deviation = gamma.square().mean(dim=-1) + beta.square().mean(dim=-1)
@@ -133,6 +155,8 @@ class ActorCriticB1Z1PACT(nn.Module):
         conditioning_mode: str = "film",
         film_v02_enabled: bool = False,
         film_history_steps: int = 5,
+        film_base_error_soft_scale: float = 0.10,
+        film_ee_error_soft_scale: float = 0.05,
     ):
         super().__init__()
         self.num_actions = num_actions
@@ -167,7 +191,8 @@ class ActorCriticB1Z1PACT(nn.Module):
         # Disturbances remain actor inputs; FiLM sees only command errors.
         self.film = FiLM(self.film_history_dim or condition_dim,
                          latent_dim if self.film_v02_enabled else actor_layers[-1],
-                         film_hidden_dim, activation, condition_dim if self.film_v02_enabled else None) if conditioning_mode == "film" else None
+                         film_hidden_dim, activation, condition_dim if self.film_v02_enabled else None,
+                         film_base_error_soft_scale, film_ee_error_soft_scale) if conditioning_mode == "film" else None
 
         self.position_head = nn.Linear(actor_layers[-1], num_actions)
         self.torque_head = nn.Linear(actor_layers[-1], num_actions) if action_mode == "coupled" else None

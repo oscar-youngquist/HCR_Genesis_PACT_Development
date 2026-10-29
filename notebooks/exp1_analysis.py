@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from b1z1_plot_style import style_figure
 
 
 def paper_latex(frame, names, macros, **kwargs):
@@ -741,6 +742,7 @@ def compare(config):
                     labels.append(label)
         fig.legend(handles, labels, loc="lower center", ncol=1, fontsize=7)
         fig.suptitle(f"{load_range}-range; {motion}; {next(iter(summaries.values()))['analysis']['histogram_frame']} frame", fontsize=8)
+        style_figure(fig, config)
         fig.tight_layout(rect=(0, .13, 1, .95))
         fig.savefig(out / "ee_distributions.pdf", bbox_inches="tight")
         fig.savefig(out / "ee_distributions.png", dpi=300, bbox_inches="tight")
@@ -830,6 +832,7 @@ def plot_alternatives(summaries, histograms, config, names, font):
                 fig.legend(handles, labels, loc="lower center", ncol=1, fontsize=7)
             title = {"step": "Step histograms", "ecdf": "Binned ECDF approximation", "box": "Boxes: 25-75%; whiskers: 5-95%"}[kind]
             fig.suptitle(f"{title}\n{load_range}-range; {motion}", fontsize=8)
+            style_figure(fig, config)
             fig.tight_layout(rect=(0, .13 if kind != "box" else 0, 1, .93))
             for extension in ("pdf", "png"):
                 fig.savefig(out / f"ee_{kind}.{extension}", dpi=300, bbox_inches="tight")

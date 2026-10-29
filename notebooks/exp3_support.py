@@ -363,6 +363,7 @@ def plot_responses(frame, provenance, output, config):
             handles, labels = axes[0, 0].get_legend_handles_labels()
             if handles:
                 fig.legend(handles, labels, loc="upper center", ncol=len(labels))
+            shared.style_figure(fig, config)
             fig.tight_layout(rect=(0, 0, 1, .97))
             for suffix in ("pdf", "png"):
                 fig.savefig(output/f"{name}_{loading}.{suffix}", dpi=160)

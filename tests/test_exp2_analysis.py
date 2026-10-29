@@ -147,26 +147,30 @@ def test_comparison_notebook_reloads_cached_helper(tmp_path, monkeypatch):
     assert len(namespace["figure"].axes) == 6
 
 
-def test_comparison_missing_methods_and_protocols(tmp_path):
+@pytest.mark.parametrize("rotation", [None, 25])
+def test_comparison_missing_methods_and_protocols(tmp_path, rotation):
     fixture(tmp_path/"raw", loads=("loaded",))
     a.summarize(config(tmp_path))
     cfg = dict(summary_roots=[str(tmp_path/"summaries")], output_dir=str(tmp_path/"comparison"),
                method_order=["missing", "b1z1_pact"], latex_method_names={"b1z1_pact": r"\PILOT{}"},
                focused_methods=["b1z1_pact", "missing"], display_names={"b1z1_pact":"PILOT"},
                figure_title="Custom task comparison")
+    if rotation is not None:
+        cfg["force_label_rotation_deg"] = rotation
     tables, fig, diagnostics = a.compare(cfg)
     assert len(fig.axes) == 6
     assert fig._suptitle.get_text() == "Custom task comparison"
     for row in range(2):
         for col, profile in enumerate(a.PROFILES):
             ax = fig.axes[row*3+col]
+            assert ax.get_ylabel() == (("EE error [m]" if row == 0 else "Body forward velocity [m/s]") if col == 0 else "")
             labels = [t.get_text() for t in ax.texts]
             axis = "Fz" if profile == "carrying" else "Fx"
             sign = "+" if profile == "pulling" else "-"
             expected = [f"{axis},{sign}{force}N" for force in (25,45,65)]+[f"{axis},0N"]
             assert labels == (expected if row == 0 else [])
             if row == 0:
-                assert all(t.xy[1] == 1 and t.get_position()[1] > 0 and t.get_rotation() == 0 for t in ax.texts)
+                assert all(t.xy[1] == 1 and t.get_position()[1] > 0 and t.get_rotation() == (rotation or 0) for t in ax.texts)
             assert not any("n=" in text for text in labels)
             assert sum(line.get_color() == "red" for line in ax.lines) == 4
     assert "—" in tables["response"].loc["missing"].to_string()

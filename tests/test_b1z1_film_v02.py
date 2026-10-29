@@ -9,11 +9,11 @@ from rsl_rl.storage.b1z1_action_replay import B1Z1ActionReplay
 from rsl_rl.algorithms.ppo_b1z1_pact import PPO_B1Z1PACT
 
 
-def model(enabled=True, mode="film"):
+def model(enabled=True, mode="film", **kwargs):
     return ActorCriticB1Z1PACT(81, 40, 17, 162, latent_dim=8,
         actor_layers=[32, 16], critic_layers=[32, 16], context_layers=[32, 16],
         explicit_decoder_layers=[16], force_decoder_layers=[16], grf_decoder_layers=[16],
-        film_v02_enabled=enabled, conditioning_mode=mode)
+        film_v02_enabled=enabled, conditioning_mode=mode, **kwargs)
 
 
 def test_latent_only_modulation_and_normalization():
@@ -35,26 +35,60 @@ def test_latent_only_modulation_and_normalization():
     raw_z = m.last_context["z"]
     torch.testing.assert_close(captured["input"][:, 81:89], raw_z*1.5+.2)
     raw_history = m.last_context["film_tracking_history"].reshape(2, 5, 6)
-    torch.testing.assert_close(captured["condition"], raw_history.tanh().flatten(1))
+    base, ee = raw_history.chunk(2, -1)
+    expected = torch.cat((base/(base.abs().sum(-1, keepdim=True)+.10), ee/(ee.abs().sum(-1, keepdim=True)+.05),
+                          base.abs().sum(-1, keepdim=True).tanh(), ee.abs().sum(-1, keepdim=True).tanh()), -1)
+    torch.testing.assert_close(captured["condition"], expected.flatten(1))
+    assert captured["condition"].shape == (2, 40)
     # Decoder inputs remain the original latent, even after policy modulation.
     assert m.last_context["z"] is raw_z
     assert not raw_history[:, :4].any()
 
 
-def test_v02_component_tanh_preserves_magnitude_and_bounds_outliers():
+def test_v02_soft_l1_with_bounded_raw_l1_magnitude():
     m = model()
     errors = torch.tensor([[0., .08, -.12, 1e6, -1e6, .5]], requires_grad=True)
-    bounded = m.film.condition_norm(errors)
-    torch.testing.assert_close(bounded, errors.tanh())
-    assert bounded.abs().max() <= 1
-    assert 0 < bounded[0, 1] < bounded[0, 5]
+    bounded = m.film.prepare_condition(errors)
+    torch.testing.assert_close(bounded[:, :3], errors[:, :3]/(errors[:, :3].abs().sum(-1, keepdim=True)+.10))
+    torch.testing.assert_close(bounded[:, 3:6], errors[:, 3:]/(errors[:, 3:].abs().sum(-1, keepdim=True)+.05))
+    torch.testing.assert_close(bounded[:, 6], errors[:, :3].abs().sum(-1).tanh())
+    torch.testing.assert_close(bounded[:, 7], errors[:, 3:].abs().sum(-1).tanh())
+    assert ((bounded[:, 6:] >= 0) & (bounded[:, 6:] <= 1)).all()
     changed = errors.detach().clone()
-    changed[0, 3] = 0
-    torch.testing.assert_close(m.film.condition_norm(changed)[:, :3], bounded[:, :3])
-    bounded.sum().backward()
+    changed[:, 3:] = torch.tensor([.01, .02, .03])
+    torch.testing.assert_close(m.film.prepare_condition(changed)[:, [0, 1, 2, 6]], bounded[:, [0, 1, 2, 6]])
+    changed = errors.detach().clone()
+    changed[:, :3] *= 20
+    torch.testing.assert_close(m.film.prepare_condition(changed)[:, [3, 4, 5, 7]], bounded[:, [3, 4, 5, 7]])
+    small = torch.full((1, 6), .02, requires_grad=True)
+    assert m.film.prepare_condition(small)[0, 6] < m.film.prepare_condition(small * 2)[0, 6]
+    m.film.prepare_condition(small)[:, -2:].sum().backward()
+    assert (small.grad > 0).all()
+    bounded.square().sum().backward()
     assert torch.isfinite(errors.grad).all()
-    assert errors.grad[0, 1] > 0
-    assert not list(m.film.condition_norm.parameters())
+    assert isinstance(m.film.network[0], torch.nn.Linear)
+    assert isinstance(m.film.network[1], torch.nn.LayerNorm)
+    assert isinstance(m.film.network[2], torch.nn.ELU)
+    assert sum(isinstance(layer, torch.nn.LayerNorm) for layer in m.film.modules()) == 1
+    zero = torch.zeros(1, 6, requires_grad=True)
+    output = m.film.prepare_condition(zero)
+    assert not output.any()
+    output.sum().backward()
+    assert torch.isfinite(zero.grad).all()
+    assert m.film.prepare_condition(torch.full((1, 6), 1e-8)).abs().max() < 1e-6
+
+
+@pytest.mark.parametrize("scale", [0, -1, float("nan"), float("inf")])
+def test_invalid_soft_scales(scale):
+    for key in ("film_base_error_soft_scale", "film_ee_error_soft_scale"):
+        with pytest.raises(ValueError, match="finite and positive"):
+            model(**{key: scale})
+
+
+def test_configured_soft_scales():
+    m = model(film_base_error_soft_scale=.2, film_ee_error_soft_scale=.4)
+    e = torch.tensor([[.2, 0., 0., .4, 0., 0.]])
+    torch.testing.assert_close(m.film.prepare_condition(e)[:, :6], torch.tensor([[.5, 0., 0., .5, 0., 0.]]))
 
 
 def test_history_order_reset_and_ppo_replay():
@@ -118,6 +152,7 @@ def test_nonfilm_ablation_ignores_v02(mode):
 
 def test_legacy_default_has_no_new_checkpoint_keys():
     m = model(False)
+    assert not any(isinstance(layer, torch.nn.LayerNorm) for layer in m.film.modules())
     assert not any("condition_norm" in k for k in m.state_dict())
     assert m.film.network[-1].out_features == 2*16
     m.load_state_dict(m.state_dict(), strict=True)
@@ -147,4 +182,4 @@ def test_v02_eval_capture_and_deterministic_episode_reset():
     assert records["film_condition_t"].shape == (2, 30)
     torch.testing.assert_close(records["film_features_pre_t"], m.last_context["z"])
     torch.testing.assert_close(records["film_condition_normalized_t"],
-        m.film.condition_norm(records["film_condition_t"].reshape(2, 5, 6)).flatten(1))
+        m.film.prepare_condition(records["film_condition_t"]))

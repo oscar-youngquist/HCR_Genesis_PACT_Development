@@ -60,6 +60,8 @@ class B1Z1PACTRunner:
             conditioning_mode=policy_cfg.get("conditioning_mode", "film"),
             film_v02_enabled=policy_cfg.get("film_v02_enabled", False),
             film_history_steps=policy_cfg.get("film_history_steps", 5),
+            film_base_error_soft_scale=policy_cfg.get("film_base_error_soft_scale", 0.10),
+            film_ee_error_soft_scale=policy_cfg.get("film_ee_error_soft_scale", 0.05),
         ).to(device)
 
         self.privileged_decoder = B1Z1PACTDecoder(

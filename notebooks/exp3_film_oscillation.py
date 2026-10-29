@@ -171,43 +171,72 @@ def nominal_torque_delta(actions, unmodulated, d, meta, scales):
     return request-original, np.clip(request, -limit, limit)-np.clip(original, -limit, limit)
 
 
+def spectral_plan(length, dt, cfg):
+    """Shorter segments buy averages, NOT low-frequency resolution or independent replicates."""
+    n = min(int(cfg["nperseg"]), length)
+    minimum = int(cfg.get("min_nperseg", 32))
+    policy = cfg.get("segment_length_policy", "adaptive")
+    if policy not in ("adaptive", "fixed"):
+        raise ValueError("segment_length_policy must be adaptive or fixed")
+    if policy == "fixed":
+        n = int(cfg["nperseg"])
+    def count(k):
+        return 0 if length < k else 1+(length-k)//max(1, k-int(k*cfg["overlap_fraction"]))
+    if policy == "adaptive":
+        while n >= minimum and count(n) < cfg["min_spectral_segments"]:
+            n -= 1
+    valid = n >= minimum and count(n) >= cfg["min_spectral_segments"]
+    resolution = 1/(max(n, 1)*dt)
+    band = cfg.get("frequency_band_hz") or [resolution, .5/dt]
+    low = max(band[0], resolution, cfg.get("minimum_cycles_per_window", 3)/(max(length, 1)*dt))
+    high = min(band[1], .5/dt)
+    valid = valid and low <= high and np.any((np.fft.rfftfreq(max(n, 1), dt) >= low) & (np.fft.rfftfreq(max(n, 1), dt) <= high))
+    return dict(available=bool(valid), duration_seconds=length*dt, nperseg=n,
+                segments=count(max(n, 1)), resolution_hz=resolution,
+                usable_low_hz=low, usable_high_hz=high,
+                reason="available" if valid else "Insufficient averages/segment length or usable frequency bins")
+
+
 def spectrum(x, dt, cfg):
     """Welch on signed columns, constant detrend, Hann window; never vector norms."""
     x = np.asarray(x, dtype=float).reshape(len(x), -1)
-    n = int(cfg["nperseg"])
+    plan = spectral_plan(len(x), dt, cfg)
+    n = plan["nperseg"]
     overlap = int(n*cfg["overlap_fraction"])
     segments = 0 if len(x) < n else 1+(len(x)-n)//(n-overlap)
-    if segments < cfg["min_spectral_segments"]:
+    if not plan["available"]:
         return None
-    f, psd = signal.welch(x, fs=1/dt, nperseg=n, noverlap=overlap, axis=0, detrend="constant", window="hann")
-    band = cfg.get("frequency_band_hz") or [f[1], .5/dt]
-    keep = (f >= band[0]) & (f <= band[1]) & (f > 0)
+    f, psd = signal.welch(x, fs=1/dt, nperseg=n, noverlap=overlap, axis=0, detrend=cfg.get("spectral_detrend", "constant"), window="hann")
+    keep = (f >= plan["usable_low_hz"]) & (f <= plan["usable_high_hz"]) & (f > 0)
     if not keep.any():
         raise ValueError("Oscillation frequency band has no Welch bins")
     power = psd[keep].sum(axis=0)*(f[1]-f[0])
     dominant = f[keep][np.argmax(psd[keep], axis=0)]
     dominant = np.where(power > 1e-20, dominant, np.nan)
     return dict(frequency=f, psd=psd, power=power, dominant=dominant,
-                dominant_mean=float(f[keep][np.argmax(psd[keep].mean(1))]) if power.mean() > 1e-20 else np.nan, segments=segments)
+                dominant_mean=float(f[keep][np.argmax(psd[keep].mean(1))]) if power.mean() > 1e-20 else np.nan, segments=segments, plan=plan)
 
 
 def relationship(x, y, dt, cfg):
     """Positive lag means y follows x. Phase reported only above coherence cutoff."""
     if spectrum(x, dt, cfg) is None:
         return None
-    x, y = np.asarray(x)-np.mean(x), np.asarray(y)-np.mean(y)
+    detrend = cfg.get("spectral_detrend", "constant")
+    x, y = (signal.detrend(np.asarray(v), type=detrend) for v in (x, y))
     if np.std(x) < 1e-10 or np.std(y) < 1e-10:
         return None
-    n = cfg["nperseg"]; overlap = int(n*cfg["overlap_fraction"])
-    kw = dict(fs=1/dt, nperseg=n, noverlap=overlap, window="hann", detrend="constant")
+    plan = spectral_plan(len(x), dt, cfg)
+    n = plan["nperseg"]; overlap = int(n*cfg["overlap_fraction"])
+    kw = dict(fs=1/dt, nperseg=n, noverlap=overlap, window="hann", detrend=detrend)
     f, c = signal.coherence(x, y, **kw)
     _, cross = signal.csd(x, y, **kw)
     lags = signal.correlation_lags(len(y), len(x))*dt
     corr = signal.correlate(y, x, mode="full")/(len(x)*np.std(x)*np.std(y))
     allowed = np.abs(lags) <= cfg["max_lag_seconds"]
     peak = np.flatnonzero(allowed)[np.argmax(np.abs(corr[allowed]))]
-    phase = np.where((c >= cfg["coherence_threshold"]) & (f > 0), np.angle(cross), np.nan)
-    return dict(frequency=f, coherence=c, phase=phase, lag_seconds=lags[peak], correlation=corr[peak])
+    usable = (f >= plan["usable_low_hz"]) & (f <= plan["usable_high_hz"])
+    phase = np.where((c >= cfg["coherence_threshold"]) & usable, np.angle(cross), np.nan)
+    return dict(frequency=f, coherence=c, phase=phase, lag_seconds=lags[peak], correlation=corr[peak], plan=plan)
 
 
 def window_specs(meta, cfg):
@@ -241,6 +270,9 @@ def window_specs(meta, cfg):
         midpoint = (spec["start"]+spec["end"])/2
         spec["motion_phase"] = ("ramp" if any(t <= midpoint < t+e["velocity_ramp_s"] for t in (e["move_start_s"],e["stop_s"]))
                                 else "moving" if e["move_start_s"] <= midpoint < e["stop_s"] else "stationary")
+        index = int(np.searchsorted(e["load_times_s"], midpoint, side="right"))-1
+        spec["load_stage"] = index
+        spec["scheduled_load_n"] = (loads[index] if loads is not None and index >= 0 else 0.) if meta["arguments"]["loading"] == "loaded" else 0.
     return specs
 
 
@@ -262,7 +294,7 @@ def contiguous_segments(rows, dt):
 
 
 def stream_windows(run, cfg):
-    specs = window_specs(run["meta"], cfg)
+    specs = cfg.get("_window_specs", window_specs(run["meta"], cfg))
     fields = [k for k in (*REQUIRED, *OPTIONAL) if k in run["records"]["fields"]]
     pending, done, last, failed = {}, set(), {}, set()
     wanted = cfg.get("trial_ids")
@@ -358,6 +390,46 @@ def summary_stats(x, dt):
                 reversal_fraction=float(np.mean(np.sum(x[1:]*x[:-1], axis=1) < 0)))
 
 
+def joint_groups(meta, cfg):
+    """Resolve recorded names, excluding the gripper; overrides are explicit name lists."""
+    names = meta["dof_names"]
+    overrides = cfg.get("joint_groups", {})
+    groups = {}
+    for group in ("arm", "leg"):
+        selected = overrides.get(group)
+        if selected is None:
+            selected = [name for name in names if
+                        (name.startswith("z1_") and "gripper" not in name.lower() if group == "arm"
+                         else name.startswith(("FR_", "FL_", "RR_", "RL_")))]
+        if any(name not in names for name in selected):
+            raise ValueError(f"Unknown recorded {group} joint name")
+        groups[group] = [names.index(name) for name in selected]
+    return groups
+
+
+def load_projections(d, cfg):
+    """Stable mean world load direction; signed perpendicular basis, never a norm spectrum."""
+    force = d.get("ee_force_applied_world_interval_mean")
+    if force is None:
+        return None
+    force = force[1:]
+    mean = force.mean(0); magnitude = np.linalg.norm(mean)
+    norms = np.linalg.norm(force, axis=1)
+    threshold = cfg.get("load_direction_min_n", 1.)
+    if not np.isfinite(force).all() or magnitude < threshold or np.any(norms < threshold):
+        return None
+    direction = mean/magnitude
+    if np.any((force@direction)/norms < np.cos(np.deg2rad(cfg.get("load_direction_tolerance_deg", 10.)))):
+        return None
+    # Common world frame for error and load; deterministic transverse axes.
+    anchor = np.eye(3)[np.argmin(np.abs(direction))]
+    perp1 = np.cross(direction, anchor); perp1 /= np.linalg.norm(perp1)
+    perp2 = np.cross(direction, perp1)
+    basis = np.column_stack((direction, perp1, perp2))
+    error = d["ee_position_t_world"][1:]-d["ee_reference_t_world"][1:]
+    return error@basis, basis
+
+
 def analyze_window(d, meta, heads, cfg):
     pre, post, gamma, beta = (d[k].astype(float) for k in FILM[1:])
     increment, feature_change, parameter = film_decomposition(pre, post, gamma, beta)
@@ -380,6 +452,8 @@ def analyze_window(d, meta, heads, cfg):
     units = dict(ee_cartesian_error="m (yaw-aligned)", successor_ee_error="m (successor yaw-aligned)",
                  position_film="rad", position_parameter="rad", torque_film="Nm", torque_parameter="Nm")
     unavailable = []
+    if not heads:
+        unavailable.append("FiLM-attributed temporal links unavailable: compatible linear-head weights absent")
     if heads:
         try:
             attrib, neutral, scales = attribute(pre, post, parameter, heads, d["action_raw"], meta,
@@ -402,30 +476,69 @@ def analyze_window(d, meta, heads, cfg):
     for key in ("contacts", "executed_torque_interval_mean", "ee_force_applied_world_interval_mean", "ee_velocity_world"):
         if key in d:
             traces[key] = d[key][1:]
+    groups = joint_groups(meta, cfg)
+    components = {"ee_cartesian_error": list("xyz"), "successor_ee_error": list("xyz"),
+                  "estimated_ee_condition": ["radius", "elevation", "azimuth"],
+                  "measured_ee_condition": ["radius", "elevation", "azimuth"]}
+    for name in ("position_film", "position_parameter", "torque_film", "torque_parameter", "executed_torque_interval_mean"):
+        if name not in traces:
+            continue
+        components[name] = meta["dof_names"][:traces[name].shape[1]]
+        for group, indices in groups.items():
+            indices = [i for i in indices if i < traces[name].shape[1]]
+            if indices:
+                traces[name+"_"+group] = traces[name][:, indices]
+                components[name+"_"+group] = [meta["dof_names"][i] for i in indices]
+            else:
+                unavailable.append(f"{name}: {group} joint grouping unavailable")
+    projection = load_projections(d, cfg) if cfg.get("stationary_window", True) else None
+    if projection is not None:
+        traces["ee_load_parallel_error"] = projection[0][:, :1]
+        traces["ee_load_perpendicular_error"] = projection[0][:, 1:]
+        units["load_projection_basis_world"] = projection[1].tolist()
+    else:
+        unavailable.append("Load projections unavailable: zero/missing/varying load direction or event window")
     units.update({k: "normalized tracking coordinates" for k in traces if "condition" in k or "mismatch" in k})
     units.update(raw_action="normalized action", base_motion="m/s world", contacts="binary",
                  executed_torque_interval_mean="Nm", ee_force_applied_world_interval_mean="N world",
                  ee_velocity_world="m/s world", nominal_requested_delta_nm="Nm (undelayed algebraic)",
                  nominal_clipped_delta_nm="Nm (undelayed algebraic)")
     for key in traces:
-        units.setdefault(key, "checkpoint-native feature units")
+        units.setdefault(key, "rad" if key.startswith("position_") else "Nm" if key.startswith(("torque_", "executed_torque")) else
+                         "m (world load-aligned basis)" if key.startswith("ee_load_") else "checkpoint-native feature units")
+    units["signal_components"] = components
     for key in list(traces):
         if not np.isfinite(traces[key]).all():
             unavailable.append("Nonfinite optional signal excluded: "+key)
             del traces[key]
     metrics, spectra = {}, {}
     dt = meta["dt"]
+    sustained = cfg.get("stationary_window", True)
+    stationary = sustained and np.max(np.ptp(d["ee_reference_sphere_t"], axis=0)) <= cfg.get("reference_stationarity_tolerance", .02)
+    moving = sustained and not stationary and cfg.get("moving_reference_mode", "linear_detrended") == "linear_detrended"
+    analysis_mode = "stationary" if stationary else "moving_reference_detrended" if moving else "event_descriptive"
+    spectral_cfg = {**cfg, "spectral_detrend": "linear" if moving else "constant"}
+    units["temporal_analysis_mode"] = analysis_mode
+    units["spectral_plan"] = spectral_plan(len(parameter), dt, spectral_cfg)
     for name, values in traces.items():
         for stat, value in summary_stats(values, dt).items():
             metrics[name+"/"+stat] = value
         # Preserve signed physical component biases rather than only their RMS.
         if values.shape[1] <= 6:
             metrics.update({f"{name}/bias_axis_{i}": v for i, v in enumerate(values.mean(0))})
-        sp = spectrum(values, dt, cfg)
+        sp = spectrum(values, dt, spectral_cfg)
         if sp is not None:
             spectra[name] = sp
             metrics[name+"/band_power"] = float(np.mean(sp["power"]))
             metrics[name+"/dominant_frequency_hz"] = sp["dominant_mean"]
+        if values.shape[1] <= 6 or name in components:
+            labels = components.get(name, list("xyz") if name in ("ee_cartesian_error", "successor_ee_error") else [str(i) for i in range(values.shape[1])])
+            for i, label in enumerate(labels):
+                prefix = f"{name}/component_{label}/"
+                metrics.update({prefix+k: v for k, v in summary_stats(values[:, i:i+1], dt).items()})
+                metrics[prefix+"signed_bias"] = float(values[:, i].mean())
+                if sp is not None:
+                    metrics[prefix+"band_power"] = float(sp["power"][i])
     denominator = np.sqrt(np.mean(pre[1:]**2))
     metrics["relative_modulation_denominator_rms"] = float(denominator)
     metrics["relative_modulation_rms"] = np.sqrt(np.mean(increment[1:]**2))/denominator if denominator > cfg["feature_epsilon"] else np.nan
@@ -436,37 +549,66 @@ def analyze_window(d, meta, heads, cfg):
     if "saturation_substep_count" in d:
         metrics["saturation_fraction"] = float(d["saturation_substep_count"][1:].sum()/(len(parameter)*len(meta["dof_names"])*meta["resolved_environment"]["control"]["decimation"]))
     relations = []
-    # Choose the most variable signed feature/joint, record its index explicitly.
-    # This is within-window exploratory selection, not a confirmatory p-value.
-    chain = ["ee_cartesian_error", "estimated_ee_condition", "parameter_change", "raw_action"]
-    if "executed_torque_interval_mean" in traces:
-        chain.append("executed_torque_interval_mean")
-    chain.append("ee_velocity_world" if "ee_velocity_world" in traces else "successor_ee_error")
-    stationary = cfg.get("stationary_window", True) and np.max(np.ptp(d["ee_reference_sphere_t"], axis=0)) <= cfg.get("reference_stationarity_tolerance", .02)
-    if not stationary:
+    # Fixed signed coordinates across windows, never independent maximum-variance picks.
+    axis = int(cfg.get("temporal_ee_axis", 0))
+    feature = int(cfg.get("temporal_feature_index", 0))
+    chain = [("ee_cartesian_error", axis), ("estimated_ee_condition", axis),
+             ("parameter_change", feature), ("raw_action", 0)]
+    pairs = list(zip(chain, chain[1:]))
+    target = ("ee_velocity_world" if "ee_velocity_world" in traces else "successor_ee_error", axis)
+    for group, indices in groups.items():
+        requested = cfg.get("temporal_joint_names", {}).get(group)
+        joint = meta["dof_names"].index(requested) if requested in meta["dof_names"] else (indices[0] if indices else None)
+        if requested and (requested not in meta["dof_names"] or joint not in indices):
+            raise ValueError(f"Invalid temporal {group} joint: {requested}")
+        if joint is None:
+            continue
+        executed = ("executed_torque_interval_mean", joint)
+        for name in ("position_film", "position_parameter", "torque_film", "torque_parameter"):
+            if name in traces and joint < traces[name].shape[1]:
+                action = (name, joint)
+                pairs += [(("ee_cartesian_error", axis), action), (("estimated_ee_condition", axis), action),
+                          (("parameter_change", feature), action), (action, target)]
+                if executed[0] in traces:
+                    pairs.append((action, executed))
+        if executed[0] in traces:
+            pairs += [(("raw_action", joint), executed), (executed, target)]
+    if not (stationary or moving):
         unavailable.append("Nonstationary/event window: spectra descriptive only; coherence/lag suppressed")
-        chain = []
-    for left, right in zip(chain, chain[1:]):
+        pairs = []
+    elif moving:
+        unavailable.append("Moving-reference residual coherence is linear-detrended and separate from stationary estimates")
+    for (left, ix), (right, iy) in pairs:
         x, y = traces[left], traces[right]
-        ix, iy = int(np.argmax(np.var(x, axis=0))), int(np.argmax(np.var(y, axis=0)))
-        rel = relationship(x[:, ix], y[:, iy], dt, cfg)
+        if ix >= x.shape[1] or iy >= y.shape[1] or min(ix, iy) < 0:
+            raise ValueError("Temporal component index outside recorded dimensions")
+        rel = relationship(x[:, ix], y[:, iy], dt, spectral_cfg)
         if rel is not None:
             # Successor-labelled signals are sampled one dt later than actor-time channels.
             if right in ("ee_velocity_world", "successor_ee_error"):
                 rel["lag_seconds"] += dt
                 rel["phase"] = np.angle(np.exp(1j*(rel["phase"]-2*np.pi*rel["frequency"]*dt)))
-            relations.append(dict(left=left, right=right, left_axis=ix, right_axis=iy, **rel))
-            band = cfg.get("frequency_band_hz") or [0., .5/dt]
+            relations.append(dict(left=left, right=right, left_axis=ix, right_axis=iy,
+                                  left_component=components.get(left, [str(i) for i in range(x.shape[1])])[ix],
+                                  right_component=components.get(right, [str(i) for i in range(y.shape[1])])[iy],
+                                  analysis_mode=analysis_mode, **rel))
+            band = [rel["plan"]["usable_low_hz"], rel["plan"]["usable_high_hz"]]
             selected = (rel["frequency"] >= band[0]) & (rel["frequency"] <= band[1]) & (rel["frequency"] > 0)
-            label = f"association/{left}_to_{right}/"
+            label = f"association/{analysis_mode}/{left}_{ix}_to_{right}_{iy}/"
             metrics[label+"mean_band_coherence"] = float(rel["coherence"][selected].mean())
             metrics[label+"peak_lag_seconds"] = float(rel["lag_seconds"])
             metrics[label+"peak_correlation"] = float(rel["correlation"])
+    if not spectra:
+        unavailable.append("Insufficient Welch averages/usable frequencies; coherence/spectra unavailable")
+    elif (stationary or moving) and not relations:
+        unavailable.append("No nonconstant valid fixed-component pairs for coherence/lag")
     return metrics, traces, spectra, relations, unavailable, units
 
 
 def aggregate(frame):
     keys = ["task", "checkpoint", "training_seed", "profile", "loading", "kind", "stage", "metric"]
+    if "analysis_mode" in frame:
+        keys.append("analysis_mode")
     # Windows -> trial -> evaluation seed. Never use timesteps as replicates.
     trials = frame.groupby(keys+["evaluation_seed", "trial_id"], dropna=False).value.mean().reset_index()
     seeds = trials.groupby(keys+["evaluation_seed"], dropna=False).value.agg(["mean", "count"]).reset_index()
@@ -490,7 +632,7 @@ def plot_window(d, traces, spectra, relations, identity, output, cfg):
     for key in ("gamma", "beta", "modulation"):
         axes[2].plot(time, np.sqrt(np.mean(traces[key]**2, axis=1)), label=key)
     axes[2].set_ylabel("Feature RMS\n(magnitude)"); axes[2].legend(ncol=3)
-    for key in ("position_film", "torque_film"):
+    for key in ("position_film_arm", "position_film_leg", "torque_film_arm", "torque_film_leg"):
         if key in traces:
             axes[3].plot(time, np.sqrt(np.mean(traces[key]**2, axis=1)), label=key+" ["+("rad" if key.startswith("position") else "Nm")+"]")
     axes[3].set_ylabel("Head effect RMS")
@@ -501,40 +643,115 @@ def plot_window(d, traces, spectra, relations, identity, output, cfg):
         axes[3].set_ylabel("Action RMS\n[normalized]"); axes[3].legend(fontsize=7)
         axes[3].text(.02,.04,"Exact head attribution unavailable",fontsize=7,transform=axes[3].transAxes)
     if "executed_torque_interval_mean" in traces:
-        axes[4].plot(time, np.sqrt(np.mean(traces["executed_torque_interval_mean"]**2, axis=1)), label="executed interval-mean torque")
+        for group in ("arm", "leg"):
+            key = "executed_torque_interval_mean_"+group
+            if key in traces:
+                axes[4].plot(time, np.sqrt(np.mean(traces[key]**2, axis=1)), label=group+" executed interval-mean torque")
+        if axes[4].lines:
+            axes[4].legend()
+        else:
+            axes[4].plot(time, np.sqrt(np.mean(traces["executed_torque_interval_mean"]**2, axis=1)), label="all joints (grouping unavailable)")
     else:
         axes[4].text(.5,.5,"Executed torque recording unavailable",ha="center",transform=axes[4].transAxes)
     axes[4].set_ylabel("Torque [Nm]"); axes[4].set_xlabel("Time relative to event [s]")
     for ax in axes:
         ax.axvline(0, color="grey", linestyle=":"); ax.grid(alpha=.2)
-    fig.suptitle(f"{DISPLAY_NAMES.get(identity['task'], identity['task'])}: {identity['profile']} / trial {identity['trial_id']} / {identity['kind']}")
+    caption = (f"{DISPLAY_NAMES.get(identity['task'], identity['task'])}: {identity['profile']} / {identity['loading']} / stage {identity['stage']}\n"
+               f"{identity['checkpoint'][:8]} / seed {identity['evaluation_seed']} / trial {identity['trial_id']} / "
+               f"{identity['actual_start']:.2f}-{identity['actual_end']:.2f}s / {identity['analysis_mode']}")
+    fig.suptitle(caption)
+    shared.style_figure(fig, cfg)
     fig.tight_layout()
     stem = f"window-{identity['window_id']:05d}"
     for ext in ("pdf", "png"):
         fig.savefig(output/(stem+"-traces."+ext), dpi=160)
     plt.close(fig)
-    fig, axes = plt.subplots(1, 3, figsize=(9, 2.8))
+    fig, axes = plt.subplots(1, 3, figsize=(10, 4.8))
     for key in ("pre", "post", "modulation", "parameter_change"):
         if key in spectra:
-            sp = spectra[key]; axes[0].semilogy(sp["frequency"], sp["psd"].mean(1), label=key)
+            sp = spectra[key]; keep = (sp["frequency"] >= sp["plan"]["usable_low_hz"]) & (sp["frequency"] <= sp["plan"]["usable_high_hz"])
+            axes[0].semilogy(sp["frequency"][keep], sp["psd"].mean(1)[keep], label=key)
     for key in ("ee_cartesian_error", "raw_action", "position_film", "torque_film"):
         if key in spectra:
-            sp = spectra[key]; axes[1].semilogy(sp["frequency"], sp["psd"].mean(1), label=key)
-    for rel in relations:
-        axes[2].plot(rel["frequency"], rel["coherence"], label=rel["left"]+" -> "+rel["right"])
+            sp = spectra[key]; keep = (sp["frequency"] >= sp["plan"]["usable_low_hz"]) & (sp["frequency"] <= sp["plan"]["usable_high_hz"])
+            axes[1].semilogy(sp["frequency"][keep], sp["psd"].mean(1)[keep], label=key)
+    # Plot a bounded labelled subset; all component links remain in relationships.csv.
+    attributed = [r for r in relations if r["left"].startswith(("position_", "torque_"))]
+    plotted_relations = (attributed + [r for r in relations if not r["left"].startswith(("position_", "torque_"))])[:cfg.get("max_plot_relationships", 8)]
+    short = {"ee_cartesian_error":"err", "estimated_ee_condition":"est", "parameter_change":"dparam",
+             "raw_action":"raw", "executed_torque_interval_mean":"tau", "ee_velocity_world":"EE vel",
+             "successor_ee_error":"next err", "position_film":"pos FiLM", "torque_film":"FF FiLM",
+             "position_parameter":"dpos", "torque_parameter":"dFF"}
+    for rel in plotted_relations:
+        keep = (rel["frequency"] >= rel["plan"]["usable_low_hz"]) & (rel["frequency"] <= rel["plan"]["usable_high_hz"])
+        label = f"{short.get(rel['left'],rel['left'])}[{rel['left_axis']}] -> {short.get(rel['right'],rel['right'])}[{rel['right_axis']}]"
+        axes[2].plot(rel["frequency"][keep], rel["coherence"][keep], label=label)
     axes[2].set_ylim(0, 1); axes[2].set_ylabel("Coherence")
     for ax in axes:
         ax.set_xlabel("Frequency [Hz]"); ax.grid(alpha=.2)
         if ax.lines:
-            ax.legend(fontsize=5)
+            ax.legend(fontsize=5, loc="upper center", bbox_to_anchor=(.5, -.28))
         else:
             ax.text(.5,.5,"Unavailable: insufficient averages\nor nonstationary window",ha="center",fontsize=7,transform=ax.transAxes)
     axes[0].set_ylabel("Mean feature PSD [feature²/Hz]")
     axes[1].set_ylabel("PSD [native signal units²/Hz]")
+    fig.suptitle(caption)
+    shared.style_figure(fig, cfg)
     fig.tight_layout()
     for ext in ("pdf", "png"):
         fig.savefig(output/(stem+"-spectra."+ext), dpi=160)
     plt.close(fig)
+
+
+def select_plot_windows(windows, budget):
+    """Greedy deterministic coverage, then severity extremes; no visual cherry-picking."""
+    groups = defaultdict(list)
+    for w in windows:
+        key = tuple(w[k] for k in ("checkpoint", "profile", "loading", "kind", "stage"))
+        groups[key].append(w)
+    candidates = []
+    for group in groups.values():
+        ordered = sorted(group, key=lambda w: (w["oscillation_severity"], w["run"], w["trial_id"], w["actual_start"]))
+        for i, w in enumerate(ordered):
+            candidates.append({**w, "severity_group": "low" if i < (len(ordered)+1)//2 else "high"})
+    def categories(w):
+        return {(name, str(w[name])) for name in ("profile", "loading", "checkpoint", "evaluation_seed", "severity_group")} | {
+            ("stage", str((w["profile"], w["loading"], w["kind"], w["stage"], w["severity_group"])))}
+    all_categories = set().union(*(categories(w) for w in candidates)) if candidates else set()
+    covered, trials, chosen = set(), set(), []
+    while candidates and len(chosen) < budget:
+        fresh = [w for w in candidates if (w["run"], w["trial_id"]) not in trials]
+        pool = fresh or candidates
+        def rank(w):
+            # First cover dimensions, then stage-specific low/high examples.
+            missing = categories(w)-covered
+            score = sum(4 if k != "stage" else 1 for k, _ in missing)
+            extremity = w["oscillation_severity"] * (1 if w["severity_group"] == "high" else -1)
+            return (-score, -extremity, w["run"], w["trial_id"], w["actual_start"])
+        pick = min(pool, key=rank)
+        candidates.remove(pick); chosen.append(pick)
+        covered |= categories(pick); trials.add((pick["run"], pick["trial_id"]))
+    return chosen, [dict(category=k, value=v, reason="plot budget/available-trial coverage") for k, v in sorted(all_categories-covered)]
+
+
+def render_selected(selected, runs, output, cfg):
+    """Second bounded pass: reread only selected trials/windows; no feature histories retained."""
+    for run in runs:
+        picks = [w for w in selected if w["run"] == str(run["path"])]
+        if not picks:
+            continue
+        specs = window_specs(run["meta"], cfg)
+        wanted_specs = [s for s in specs if any(s["start"] == w["start"] and s["kind"] == w["kind"] for w in picks)]
+        heads, _ = load_heads(run["meta"], cfg)
+        for tid, spec, raw in stream_windows(run, {**cfg, "trial_ids": sorted({w["trial_id"] for w in picks}), "_window_specs": wanted_specs}):
+            for segment in contiguous_segments(raw, run["meta"]["dt"]):
+                matches = [w for w in picks if w["trial_id"] == tid and w["start"] == spec["start"]
+                           and w["kind"] == spec["kind"] and np.isclose(w["actual_start"], segment[0]["time_seconds"])]
+                if not matches:
+                    continue
+                d = {k: np.stack([r[k] for r in segment]) for k in segment[0]}
+                _, traces, spectra, relations, _, _ = analyze_window(d, run["meta"], heads, {**cfg, "stationary_window": spec["kind"] == "sustained"})
+                plot_window(d, traces, spectra, relations, matches[0], output, cfg)
 
 
 def run_analysis(config):
@@ -553,10 +770,9 @@ def run_analysis(config):
     if cfg.get("pca_color", "signed_error") not in ("signed_error", "load_stage", "oscillation_phase"):
         raise ValueError("Unknown PCA coloring")
     runs, exclusions = discover(cfg)
-    rows, windows, relations_out, provenance, heads_cache = [], [], [], [], {}
+    rows, windows, provenance, heads_cache = [], [], [], {}
     reservoirs, seen = defaultdict(list), defaultdict(int)
     rng = np.random.default_rng(cfg.get("sampling_seed", 0))
-    plotted = 0
     for run in runs:
         meta = run["meta"]; ckpt = meta["checkpoint_sha256"]
         print(f"FiLM analysis: {run['path']}", flush=True)
@@ -585,25 +801,32 @@ def run_analysis(config):
                 d = {k: np.stack([r[k] for r in segment]) for k in segment[0]}
                 identity = dict(task=meta["task"], checkpoint=ckpt, training_seed=meta.get("checkpoint_training_seed"),
                     evaluation_seed=meta["evaluation_seed"], trial_id=tid, profile=meta["arguments"]["profile"],
-                    loading=meta["arguments"]["loading"], **spec, window_id=len(windows))
+                    loading=meta["arguments"]["loading"], run=str(run["path"]), **spec, window_id=len(windows))
                 try:
                     metrics, traces, spectra, relations, unavailable, units = analyze_window(d, meta, heads, {**cfg, "stationary_window": spec["kind"]=="sustained"})
                 except (ValueError, KeyError) as exc:
                     exclusions.append(dict(**identity, reason=str(exc))); continue
                 complete = len(segment) == len(raw) and len(raw)*meta["dt"] >= spec["end"]-spec["start"]-meta["dt"]*.5
+                identity["analysis_mode"] = units["temporal_analysis_mode"]
                 windows.append(dict(**identity, samples=len(segment), complete=complete,
                     actual_start=float(d["time_seconds"][0]), actual_end=float(d["successor_time_seconds"][-1]),
                     actual_load_mean_n=float(np.linalg.norm(d["ee_force_applied_world_interval_mean"],axis=1).mean()) if "ee_force_applied_world_interval_mean" in d else None,
-                    spectral_available=bool(spectra), units=units))
-                if not spectra:
-                    unavailable.append("Insufficient Welch averages; coherence/spectra unavailable")
+                    spectral_available=bool(spectra), temporal_available=bool(relations),
+                    attribution_available="position_film" in traces,
+                    spectral_plan=units["spectral_plan"], unavailable=unavailable.copy(),
+                    oscillation_severity=metrics["ee_cartesian_error/oscillatory_rms"], units=units))
                 exclusions.extend(dict(**identity, reason=reason) for reason in unavailable)
                 rows.extend(dict(**identity, metric=k, value=v) for k, v in metrics.items())
+                relations_out = []  # Stream frequency rows; do not retain all windows' cross spectra in RAM.
                 for rel in relations:
                     for i, f in enumerate(rel["frequency"]):
                         relations_out.append(dict(**identity, left=rel["left"], right=rel["right"], left_axis=rel["left_axis"], right_axis=rel["right_axis"],
+                            left_component=rel["left_component"], right_component=rel["right_component"],
                             frequency_hz=f, coherence=rel["coherence"][i], phase_rad=rel["phase"][i],
                             lag_seconds=rel["lag_seconds"], lag_correlation=rel["correlation"]))
+                if relations_out:
+                    path = output/"relationships.csv"
+                    pd.DataFrame(relations_out).to_csv(path, mode="a", header=not path.exists(), index=False)
                 # Compact numeric window export makes plots reproducible, without retaining features.
                 arrays = {"time_seconds": d["time_seconds"][1:], "successor_time_seconds": d["successor_time_seconds"][1:]}
                 arrays.update({"trace_"+k: v for k,v in traces.items() if k not in ("pre", "post", "gamma", "beta", "modulation", "parameter_change", "feature_change", "post_change")})
@@ -611,9 +834,10 @@ def run_analysis(config):
                     arrays["rms_"+k] = np.sqrt(np.mean(traces[k]**2, axis=1))
                 for k, sp in spectra.items():
                     arrays["frequency_"+k], arrays["psd_"+k] = sp["frequency"], sp["psd"].mean(1)
+                    # Retain signed component spectra; group means are not spectra of norms.
+                    if k in units["signal_components"] or traces[k].shape[1] <= 6:
+                        arrays["psd_components_"+k] = sp["psd"]
                 np.savez_compressed(output/f"window-{identity['window_id']:05d}.npz", **arrays)
-                if plotted < cfg["max_plot_windows"]:
-                    plot_window(d, traces, spectra, relations, identity, output, cfg); plotted += 1
                 if cfg.get("pca", True):
                     # Bounded paired reservoir, separate feature basis for every checkpoint.
                     signed_error = measured_condition(d, meta)[1][:, 0]
@@ -645,12 +869,37 @@ def run_analysis(config):
         compare_windows(frame, output, cfg)
     else:
         exclusions.append(dict(reason="No usable original actor-feature FiLM windows"))
-    pd.DataFrame(relations_out).to_csv(output/"relationships.csv", index=False)
+    if not (output/"relationships.csv").exists():
+        pd.DataFrame(columns=["left", "right", "analysis_mode", "frequency_hz", "coherence"]).to_csv(output/"relationships.csv", index=False)
+    selected, omitted = select_plot_windows(windows, cfg["max_plot_windows"])
+    pd.DataFrame([{k: v for k, v in w.items() if k not in ("units", "unavailable", "spectral_plan")} for w in selected]).to_csv(output/"plot_selection.csv", index=False)
+    (output/"plot_omitted_categories.json").write_text(json.dumps(clean(omitted), indent=2))
+    render_selected(selected, runs, output, cfg)
+    # Explicit coverage includes every planned stage, even when all trials fail before it.
+    coverage = []
+    for run in runs:
+        for spec in window_specs(run["meta"], cfg):
+            subset = [w for w in windows if w["run"] == str(run["path"]) and w["start"] == spec["start"] and w["kind"] == spec["kind"]]
+            for mode in sorted({w["analysis_mode"] for w in subset}) or ["unavailable"]:
+                part = [w for w in subset if w["analysis_mode"] == mode]
+                coverage.append(dict(run=str(run["path"]), profile=run["meta"]["arguments"]["profile"], loading=run["meta"]["arguments"]["loading"],
+                    evaluation_seed=run["meta"]["evaluation_seed"], **spec, analysis_mode=mode,
+                    windows=len(part), trials=len({w["trial_id"] for w in part}),
+                    spectral_windows=sum(w["spectral_available"] for w in part), temporal_windows=sum(w["temporal_available"] for w in part),
+                    attribution_windows=sum(w["attribution_available"] for w in part),
+                    reason="; ".join(sorted({s for w in part for s in w["unavailable"]})) if part else "No usable samples (failure/gap/selection/run limit)",
+                    min_duration_seconds=min((w["spectral_plan"]["duration_seconds"] for w in part), default=None),
+                    min_segments=min((w["spectral_plan"]["segments"] for w in part), default=None),
+                    max_usable_low_hz=max((w["spectral_plan"]["usable_low_hz"] for w in part), default=None),
+                    min_usable_high_hz=min((w["spectral_plan"]["usable_high_hz"] for w in part), default=None),
+                    max_resolution_hz=max((w["spectral_plan"]["resolution_hz"] for w in part), default=None)))
+    pd.DataFrame(coverage).to_csv(output/"coverage.csv", index=False)
     pca = export_embeddings(reservoirs, output, cfg)
-    result = dict(schema_version=1, complete=True, config=cfg, provenance=provenance, windows=windows,
+    result = dict(schema_version=2, complete=True, config=cfg, provenance=provenance, windows=windows,
+        plot_selection=selected, plot_omitted_categories=omitted, coverage=coverage,
         exclusions=exclusions, summary=summary, pca=pca,
         interpretation="Observational associations only; no causal confirmation or simulated counterfactuals.",
-        preprocessing="No filtering/interpolation; constant-detrended Hann Welch on contiguous signed signals. Parameter increments per step, variation per second.")
+        preprocessing="No filtering/interpolation; Hann Welch with adaptive/fixed segments. Stationary: constant detrend; moving-reference residuals: separate linear-detrended diagnostic; events: descriptive only. Overlapping segments/windows are not independent replicates. Parameter increments per step, variation per second.")
     (output/"summary.json").write_text(json.dumps(clean(result), indent=2, allow_nan=False))
     (output/"COMPLETE").write_text("complete\n")
     return result
@@ -713,6 +962,7 @@ def export_embeddings(reservoirs, output, cfg):
             points = ax.scatter(xy[:,0], xy[:,1], c=colors, s=3, cmap="coolwarm")
             fig.colorbar(points, ax=ax, label=color_label)
             ax.set_title(name.upper()+" (paired pre/post; qualitative)")
+            shared.style_figure(fig, cfg)
             fig.tight_layout()
             for ext in ("pdf", "png"):
                 fig.savefig(output/f"{name}-{ckpt[:12]}.{ext}", dpi=160)

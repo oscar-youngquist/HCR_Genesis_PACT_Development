@@ -408,7 +408,7 @@ def compare(config):
     font = "Times New Roman" if "Times New Roman" in {f.name for f in font_manager.fontManager.ttflist} else "DejaVu Serif"
     all_curve_rows = []
     with plt.rc_context({"font.family": font, "font.size": config.get("font_size", 9)}):
-        fig, axes = plt.subplots(2, 3, figsize=config.get("figure_size", [11, 5]), sharex="col", constrained_layout=True)
+        fig, axes = plt.subplots(2, 3, figsize=config.get("figure_size", [11, 5]), sharex="col")
         colors = config.get("colors", ["#0072B2", "#D55E00", "#009E73"])
         for col, profile in enumerate(PROFILES):
             force_curves = []
@@ -450,22 +450,27 @@ def compare(config):
                         label = force_event_label(force_curves, t, values[0]["protocol"]["dt"], profile)
                         # Shared event labels sit outside the data area; both rows retain lines.
                         ax.annotate(label, xy=(t, 1), xycoords=ax.get_xaxis_transform(),
-                                    xytext=(0, 5), textcoords="offset points", rotation=0,
+                                    xytext=(0, 5), textcoords="offset points",
+                                    rotation=config.get("force_label_rotation_deg", 0),
                                     va="bottom", ha="center", color="red", fontsize=7,
                                     annotation_clip=False)
                 ax.grid(alpha=.15)
             axes[0, col].set_title(profile.title(), pad=38)
-            axes[0, col].set_ylabel("EE error [m]")
-            axes[1, col].set_ylabel("Body forward velocity [m/s]")
+            if col == 0:
+                axes[0, col].set_ylabel("EE error [m]")
+                axes[1, col].set_ylabel("Body forward velocity [m/s]")
             axes[1, col].set_xlabel("Trial time [s]")
         handles, labels = axes[1, 0].get_legend_handles_labels()
         if handles:
-            fig.legend(handles, labels, loc="outside lower center", ncol=3, fontsize=8)
+            fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=8)
         title = config.get("figure_title")
         if title is None:
             title = f"{load.title()} task response; bands: {config.get('band', 'trial_sd')} (not confidence intervals)"
         if title:
             fig.suptitle(title)
+        shared.style_figure(fig, config)
+        # Reserve the bottom band for the figure-level legend; include annotations in layout.
+        fig.tight_layout(rect=(0, .09 if handles else 0, 1, 1))
         for suffix in ("pdf", "png"):
             fig.savefig(output / f"task_response.{suffix}", dpi=config.get("dpi", 200), bbox_inches="tight")
     pd.DataFrame(all_curve_rows).to_csv(output / "task_response.csv", index=False)

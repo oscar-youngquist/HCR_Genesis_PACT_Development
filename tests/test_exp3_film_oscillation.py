@@ -217,8 +217,105 @@ def test_full_synthetic_exports(tmp_path):
 def test_notebook_smoke(tmp_path,monkeypatch):
     nbformat=pytest.importorskip("nbformat")
     from nbclient import NotebookClient
-    fixture(tmp_path); cfg=config(tmp_path)
+    scheduled_fixture(tmp_path); cfg=config(tmp_path)
+    cfg.update(max_windows=None, max_plot_windows=2, pca=False)
     monkeypatch.setenv("FILM_OSCILLATION_CONFIG",json.dumps(cfg))
     nb=nbformat.read(ROOT/"notebooks/exp3_film_oscillation_analysis.ipynb",as_version=4)
     NotebookClient(nb,timeout=180,kernel_name="python3",resources={"metadata":{"path":str(ROOT)}}).execute()
     assert (Path(cfg["output_dir"])/"COMPLETE").exists()
+
+
+def scheduled_fixture(tmp_path):
+    """Recorded 50-Hz schedule, two interleaved environments, late failure in one."""
+    m, old, root = fixture(tmp_path)
+    m["prescribed_steps"] = 1400
+    m["evaluation"].update(move_start_s=3., stop_s=20., velocity_ramp_s=.5,
+                           load_times_s=[8.,13.,18.,23.], loads_n=[25.,55.,35.,0.])
+    m["dof_names"] = ["FR_hip_joint", "z1_arm"]
+    t = np.arange(1400)*.02
+    d = {k: np.resize(v, (len(t), *v.shape[1:])) for k,v in old.items()}
+    d.update(step=np.arange(len(t)), time_seconds=t, successor_time_seconds=t+.02)
+    u = np.clip((t-8)/10,0,1); radius = .5+.1*(3*u*u-2*u*u*u)
+    reference = np.column_stack((radius,np.zeros((len(t),2))))
+    d["ee_reference_sphere_t"] = reference.copy()
+    d["ee_reference_t_world"] = reference.copy(); d["ee_reference_world"] = reference.copy()
+    d["obs_t"][:, -3:] = reference
+    d["ee_position_t_world"] = reference+np.column_stack((.02*np.sin(2*np.pi*3*t),.01*np.sin(2*np.pi*4*t),np.zeros(len(t))))
+    d["ee_position_world"] = d["ee_position_t_world"].copy()
+    d["executed_torque_interval_mean"] = np.column_stack((np.sin(2*np.pi*3*t),2*np.sin(2*np.pi*3*t)))
+    load = np.select([t<8,t<13,t<18,t<23],[0,25,55,35],default=0)
+    d["ee_force_applied_world_interval_mean"] = np.column_stack((-load,np.zeros((len(t),2))))
+    # Two trials interleaved like a vectorized recording, never concatenated for spectra.
+    combined = {k:np.repeat(v,2,axis=0) for k,v in d.items()}
+    combined["trial_id"] = np.tile([0,1],len(t))
+    failed = (combined["trial_id"]==1) & (combined["time_seconds"]>=22)
+    combined["physical_failure"][failed] = True
+    specs=[]
+    for i,start in enumerate(range(0,len(t)*2,197)):
+        part={k:v[start:start+197] for k,v in combined.items()}
+        name=f"scheduled-{i}.npz"; np.savez_compressed(root/name,**part)
+        specs.append(dict(file=name,rows=len(part["step"])))
+    (root/"metadata.json").write_text(json.dumps(m))
+    (root/"records.json").write_text(json.dumps(dict(chunks=specs,fields={k:dict(shape=list(v.shape[1:]),dtype=str(v.dtype)) for k,v in combined.items()})))
+    (root/"trials.json").write_text(json.dumps([dict(trial_id=0),dict(trial_id=1)]))
+    return m,d,root
+
+
+def test_adaptive_loaded_windows_and_coverage(tmp_path):
+    m,d,_=scheduled_fixture(tmp_path); cfg=config(tmp_path)
+    cfg.update(max_windows=None,max_plot_windows=2,pca=False)
+    plan=a.spectral_plan(99,.02,cfg)
+    assert plan["available"] and plan["segments"]>=4 and plan["nperseg"]<64
+    assert plan["usable_low_hz"]>=plan["resolution_hz"]
+    assert not a.spectral_plan(99,.02,{**cfg,"segment_length_policy":"fixed"})["available"]
+    assert a.spectrum(np.ones(30),.02,cfg) is None
+    assert a.spectrum(np.ones(99),.02,{**cfg,"frequency_band_hz":[.1,.2]}) is None
+    result=a.run_analysis(cfg)
+    loaded=[w for w in result["windows"] if w["kind"]=="sustained" and w["scheduled_load_n"]>0]
+    assert {w["load_stage"] for w in loaded}=={0,1,2}
+    assert any(w["temporal_available"] and w["analysis_mode"]=="stationary" for w in loaded)
+    assert any(w["temporal_available"] and w["analysis_mode"]=="moving_reference_detrended" for w in loaded)
+    assert all(not (w["actual_start"]<event<w["actual_end"]) for w in loaded for event in m["evaluation"]["load_times_s"])
+    assert all(w["actual_end"]<=22 for w in result["windows"] if w["trial_id"]==1)
+    assert (Path(cfg["output_dir"])/"coverage.csv").exists()
+    assert len(result["plot_selection"])==2
+    assert len({w["trial_id"] for w in result["plot_selection"]})==2
+
+
+def test_attributed_temporal_links_directions_and_groups(tmp_path):
+    m,d,_=scheduled_fixture(tmp_path); cfg=config(tmp_path)
+    mask=(d["time_seconds"]>=20.75)&(d["time_seconds"]<22.75)
+    d={k:v[mask] for k,v in d.items()}
+    heads={name:(np.array([[1.,.1,.1,.1],[.1,1.,.1,.1]]),np.zeros(2)) for name in ("position","torque")}
+    d["action_raw"]=np.concatenate([d["film_features_post_t"]@w.T+b for w,b in heads.values()],1)
+    metrics,traces,spectra,relations,_,units=a.analyze_window(d,m,heads,cfg)
+    assert a.joint_groups(m,cfg)=={"arm":[1],"leg":[0]}
+    np.testing.assert_allclose(traces["ee_load_parallel_error"][:,0],-(d["ee_position_t_world"]-d["ee_reference_t_world"])[1:,0])
+    for name in ("position_film","position_parameter","torque_film","torque_parameter"):
+        assert name+"_arm" in traces and name+"_leg" in traces
+        assert any(r["right"]==name and r["left"]=="parameter_change" for r in relations)
+        assert any(r["left"]==name and r["right"]=="executed_torque_interval_mean" for r in relations)
+        assert any(r["left"]==name and r["right"]=="successor_ee_error" for r in relations)
+    assert "ee_cartesian_error/component_x/signed_bias" in metrics
+    assert "position_film_arm/component_z1_arm/band_power" in metrics
+    assert spectra["position_film_arm"]["psd"].shape[1]==1
+    assert units["position_film_arm"]=="rad"
+    assert {r["left_axis"] for r in relations if r["left"]=="parameter_change"}=={0}
+    d["ee_force_applied_world_interval_mean"][:]=0
+    assert a.load_projections(d,cfg) is None
+
+
+def test_selection_is_deterministic_and_covers_categories():
+    rows=[]
+    for profile in ("pushing","pulling"):
+        for loading in ("loaded","unloaded"):
+            for tid in range(4):
+                rows.append(dict(profile=profile,loading=loading,kind="sustained" if tid%2 else "load_response",
+                    checkpoint="a" if tid<2 else "b",evaluation_seed=tid%2,stage=tid%2,
+                    oscillation_severity=tid*.01,run=f"{profile}/{loading}",trial_id=tid,actual_start=1.,window_id=len(rows)))
+    chosen,omitted=a.select_plot_windows(rows,8)
+    again,_=a.select_plot_windows(list(reversed(rows)),8)
+    assert [w["window_id"] for w in chosen]==[w["window_id"] for w in again]
+    for field in ("profile","loading","checkpoint","evaluation_seed"):
+        assert {w[field] for w in chosen}=={w[field] for w in rows}
+    assert len({(w["run"],w["trial_id"]) for w in chosen})==8
