@@ -21,7 +21,8 @@ OPTIONAL = ("prediction_base_velocity", "prediction_ee_position", "contacts", "e
     "executed_torque_interval_mean", "saturation_substep_count", "nominal_kp", "nominal_kd",
     "mechanics_kp_scale", "mechanics_kd_scale", "mechanics_motor_strength", "mechanics_feedback_tau_weight",
     "mechanics_feedforward_tau_weight", "joint_position_t", "joint_velocity_t", "actual_clipping_limits",
-    "ee_velocity_world", "ee_velocity_t_world")
+    "ee_velocity_world", "ee_velocity_t_world", "base_position_t", "pd_weighted_motor_interval_mean",
+    "ff_weighted_motor_interval_mean", "opposing_channel_cancellation_mean")
 
 
 def inverse_rotate(v, q, yaw_only=False):
@@ -120,7 +121,41 @@ def load_heads(meta, config):
     return (heads, None) if "position" in heads else (None, "Linear position head unavailable")
 
 
-def attribute(pre, post, parameter, heads, actions, meta, atol=3e-5, rtol=3e-4):
+def reduced_precision_operand(x):
+    """CPU diagnostic: FP32 exponent, 10-bit fraction, nearest/ties-away rounding.
+
+    This matches the recorded head GEMMs, but does not prove the unrecorded GPU
+    precision setting. It is not FP16 storage or a looser allclose tolerance.
+    """
+    bits = np.asarray(x, dtype=np.float32).copy().view(np.uint32)
+    return ((bits + np.uint32(4096)) & np.uint32(0xffffe000)).view(np.float32).astype(float)
+
+
+def head_parity(post, weight, bias, saved, atol, rtol, allow_precision=True):
+    x, w, b = (np.asarray(v, dtype=float) for v in (post, weight, bias))
+    exact = x@w.T+b
+    qx, qw = reduced_precision_operand(x), reduced_precision_operand(w)
+    approximate = qx@qw.T+b
+    error, residual = np.abs(exact-saved), np.abs(approximate-saved)
+    # Bound operand-rounding plus FP32 accumulation, separately for every action.
+    eps = np.finfo(np.float32).eps
+    gamma = (x.shape[1]+2)*eps/(1-(x.shape[1]+2)*eps)
+    bound = np.abs(x-qx)@np.abs(w).T + np.abs(qx)@np.abs(w-qw).T
+    bound += gamma*(np.abs(qx)@np.abs(qw).T+np.abs(b))
+    strict = np.allclose(exact, saved, atol=atol, rtol=rtol)
+    explained = (allow_precision and np.allclose(approximate, saved, atol=atol, rtol=rtol)
+                 and np.all(error <= bound+atol)
+                 and np.sqrt(np.mean(residual**2)) < .1*np.sqrt(np.mean(error**2)))
+    status = "strict" if strict else "approximate_precision_explained" if explained else "unavailable"
+    return dict(status=status, feature_dtype=str(np.asarray(post).dtype),
+                max_abs_error=error.max(0).tolist(), rms_error=np.sqrt(np.mean(error**2,0)).tolist(),
+                precision_residual_max=residual.max(0).tolist(), error_bound_max=bound.max(0).tolist(),
+                model="FP32 operands rounded to 10 fraction bits, nearest/ties-away; FP32 accumulation bound",
+                assumption="Arithmetic model supported by recorded actions, not recorded backend precision metadata")
+
+
+def attribute(pre, post, parameter, heads, actions, meta, atol=3e-5, rtol=3e-4,
+              audit=None, allow_precision=False, fixed=None, allow_unverified=False):
     n = int(meta["resolved_environment"]["env"]["num_actions"])
     control = meta["resolved_environment"]["control"]
     names = meta["dof_names"][:n]
@@ -128,7 +163,7 @@ def attribute(pre, post, parameter, heads, actions, meta, atol=3e-5, rtol=3e-4):
               "torque": np.broadcast_to(control["torque_scale"], (n,)).copy()}
     for name, scale in control.get("torque_scale_overrides", {}).items():
         scales["torque"][names.index(name)] = scale
-    out, reconstructed, neutral = {}, [], []
+    out, reconstructed, neutral, failures = {}, [], [], []
     for head in ("position", "torque"):
         if head not in heads:
             continue
@@ -137,10 +172,29 @@ def attribute(pre, post, parameter, heads, actions, meta, atol=3e-5, rtol=3e-4):
         reconstructed.append(actual); neutral.append(original)
         out[head+"_film"] = ((post-pre)@w.T)*scales[head]
         out[head+"_parameter"] = (parameter@w.T)*scales[head]
+        start = 0 if head == "position" else n
+        check = head_parity(post, w, b, actions[:, start:start+n], atol, rtol, allow_precision)
+        check["joint_names"] = names
+        check["physical_scale"] = scales[head].tolist()
+        if audit is not None:
+            audit[head] = check
+        if check["status"] == "unavailable":
+            if allow_unverified:
+                check["status"] = "unverified_algebraic_only"
+            else:
+                failures.append(f"{head}, max_abs_error={max(check['max_abs_error']):.8g}")
+        if fixed is not None:
+            fixed_action = fixed@w.T+b
+            out[head+"_actual"] = actual*scales[head]
+            out[head+"_fixed"] = fixed_action*scales[head]
+            out[head+"_unmodulated"] = original*scales[head]
+            out[head+"_persistent_effect"] = (fixed_action-original)*scales[head]
+            out[head+"_varying_effect"] = (actual-fixed_action)*scales[head]
     reconstructed = np.concatenate(reconstructed, axis=1)
-    if not np.allclose(reconstructed, actions, atol=atol, rtol=rtol):
-        error = float(np.max(np.abs(reconstructed-actions)))
-        raise ValueError(f"Linear heads do not reconstruct recorded deterministic raw actions: max_abs_error={error:.8g}, atol={atol}, rtol={rtol}")
+    if failures:
+        raise ValueError("Linear heads do not reconstruct recorded deterministic raw actions: "+"; ".join(failures))
+    if reconstructed.shape != actions.shape:
+        raise ValueError("Recorded action/head ordering or dimensions are incompatible")
     # This algebraic unmodulated-feature reference is NOT a simulated trajectory.
     return out, np.concatenate(neutral, axis=1), scales
 
@@ -219,7 +273,7 @@ def spectrum(x, dt, cfg):
 
 def relationship(x, y, dt, cfg):
     """Positive lag means y follows x. Phase reported only above coherence cutoff."""
-    if spectrum(x, dt, cfg) is None:
+    if not spectral_plan(len(x), dt, cfg)["available"]:
         return None
     detrend = cfg.get("spectral_detrend", "constant")
     x, y = (signal.detrend(np.asarray(v), type=detrend) for v in (x, y))
@@ -276,12 +330,12 @@ def window_specs(meta, cfg):
     return specs
 
 
-def contiguous_segments(rows, dt):
+def contiguous_segments(rows, dt, required=REQUIRED):
     groups, current, failed = [], [], False
     for row in rows:
         failed = failed or bool(row["physical_failure"])
         good = row["valid"] and row["alive_for_metrics"] and not failed and not row["artificial_reset"]
-        good = good and all(np.isfinite(row[k]).all() for k in REQUIRED if np.issubdtype(np.asarray(row[k]).dtype, np.number))
+        good = good and all(np.isfinite(row[k]).all() for k in required if np.issubdtype(np.asarray(row[k]).dtype, np.number))
         if not good or (current and (int(row["step"]) != int(current[-1]["step"])+1
                 or not np.isclose(row["time_seconds"]-current[-1]["time_seconds"], dt, atol=1e-7))):
             if current:
@@ -295,7 +349,7 @@ def contiguous_segments(rows, dt):
 
 def stream_windows(run, cfg):
     specs = cfg.get("_window_specs", window_specs(run["meta"], cfg))
-    fields = [k for k in (*REQUIRED, *OPTIONAL) if k in run["records"]["fields"]]
+    fields = [k for k in cfg.get("_fields", (*REQUIRED, *OPTIONAL)) if k in run["records"]["fields"]]
     pending, done, last, failed = {}, set(), {}, set()
     wanted = cfg.get("trial_ids")
     for _, arrays in chunks(run, fields):
@@ -452,15 +506,21 @@ def analyze_window(d, meta, heads, cfg):
     units = dict(ee_cartesian_error="m (yaw-aligned)", successor_ee_error="m (successor yaw-aligned)",
                  position_film="rad", position_parameter="rad", torque_film="Nm", torque_parameter="Nm")
     unavailable = []
+    parity_audit = {}
     if not heads:
         unavailable.append("FiLM-attributed temporal links unavailable: compatible linear-head weights absent")
     if heads:
         try:
+            fixed = (1+gamma.mean(0))*pre+beta.mean(0)
             attrib, neutral, scales = attribute(pre, post, parameter, heads, d["action_raw"], meta,
-                cfg.get("head_parity_atol",3e-5), cfg.get("head_parity_rtol",3e-4))
+                cfg.get("head_parity_atol",3e-5), cfg.get("head_parity_rtol",3e-4), audit=parity_audit,
+                allow_precision=cfg.get("precision_aware_attribution", True), fixed=fixed,
+                allow_unverified=cfg.get("allow_unverified_attribution", False))
         except (KeyError, ValueError) as exc:
             unavailable.append("Exact head attribution unavailable: "+str(exc))
         else:
+            if any(v["status"] == "unverified_algebraic_only" for v in parity_audit.values()):
+                unavailable.append("Head parity unexplained: algebraic attribution exported as UNVERIFIED, not a validated action decomposition")
             for k, v in attrib.items():
                 traces[k] = v if k.endswith("parameter") else v[1:]
             try:
@@ -473,14 +533,21 @@ def analyze_window(d, meta, heads, cfg):
                 unavailable.append("Nominal torque attribution unavailable (mechanics/scales incomplete)")
     traces["raw_action"] = d["action_raw"][1:]
     traces["base_motion"] = d["base_velocity_world_t"][1:]
-    for key in ("contacts", "executed_torque_interval_mean", "ee_force_applied_world_interval_mean", "ee_velocity_world"):
+    for key in ("contacts", "executed_torque_interval_mean", "ee_force_applied_world_interval_mean", "ee_velocity_world",
+                "pd_weighted_motor_interval_mean", "ff_weighted_motor_interval_mean", "joint_velocity_t", "joint_position_t",
+                "opposing_channel_cancellation_mean"):
         if key in d:
             traces[key] = d[key][1:]
+    from exp3_oscillation_physical import motion_signals
+    motion, motion_reason = motion_signals(d)
+    traces.update({k:v[1:] for k,v in motion.items()})
+    if motion_reason:
+        unavailable.append(motion_reason)
     groups = joint_groups(meta, cfg)
     components = {"ee_cartesian_error": list("xyz"), "successor_ee_error": list("xyz"),
                   "estimated_ee_condition": ["radius", "elevation", "azimuth"],
                   "measured_ee_condition": ["radius", "elevation", "azimuth"]}
-    for name in ("position_film", "position_parameter", "torque_film", "torque_parameter", "executed_torque_interval_mean"):
+    for name in [k for k in traces if k.startswith(("position_", "torque_"))]+["executed_torque_interval_mean"]:
         if name not in traces:
             continue
         components[name] = meta["dof_names"][:traces[name].shape[1]]
@@ -507,6 +574,9 @@ def analyze_window(d, meta, heads, cfg):
         units.setdefault(key, "rad" if key.startswith("position_") else "Nm" if key.startswith(("torque_", "executed_torque")) else
                          "m (world load-aligned basis)" if key.startswith("ee_load_") else "checkpoint-native feature units")
     units["signal_components"] = components
+    units["head_parity"] = parity_audit
+    units["recorded_feature_dtype"] = str(d["film_features_post_t"].dtype)
+    units.update({k:"m/s (actor-time yaw frame; arm relative is measured endpoint residual)" for k in motion})
     for key in list(traces):
         if not np.isfinite(traces[key]).all():
             unavailable.append("Nonfinite optional signal excluded: "+key)
@@ -541,6 +611,10 @@ def analyze_window(d, meta, heads, cfg):
                     metrics[prefix+"band_power"] = float(sp["power"][i])
     denominator = np.sqrt(np.mean(pre[1:]**2))
     metrics["relative_modulation_denominator_rms"] = float(denominator)
+    for numerator, denominator_name, name in (("post","pre","post_pre_oscillation_ratio"),
+                                              ("parameter_change","feature_change","parameter_feature_change_ratio")):
+        den=summary_stats(traces[denominator_name],dt)["oscillatory_rms"]
+        metrics[name]=summary_stats(traces[numerator],dt)["oscillatory_rms"]/den if den>cfg["feature_epsilon"] else np.nan
     metrics["relative_modulation_rms"] = np.sqrt(np.mean(increment[1:]**2))/denominator if denominator > cfg["feature_epsilon"] else np.nan
     norm = np.linalg.norm(pre[1:], axis=1)*np.linalg.norm(post[1:], axis=1)
     good = norm > cfg["feature_epsilon"]
@@ -549,36 +623,44 @@ def analyze_window(d, meta, heads, cfg):
     if "saturation_substep_count" in d:
         metrics["saturation_fraction"] = float(d["saturation_substep_count"][1:].sum()/(len(parameter)*len(meta["dof_names"])*meta["resolved_environment"]["control"]["decimation"]))
     relations = []
-    # Fixed signed coordinates across windows, never independent maximum-variance picks.
-    axis = int(cfg.get("temporal_ee_axis", 0))
-    feature = int(cfg.get("temporal_feature_index", 0))
-    chain = [("ee_cartesian_error", axis), ("estimated_ee_condition", axis),
-             ("parameter_change", feature), ("raw_action", 0)]
-    pairs = list(zip(chain, chain[1:]))
-    target = ("ee_velocity_world" if "ee_velocity_world" in traces else "successor_ee_error", axis)
+    # Cartesian x/y/z and native radius/elevation/azimuth are NOT interchangeable.
+    axes = cfg.get("temporal_ee_axes", [0, 1, 2])
+    pairs = [(("ee_cartesian_error", i), ("estimated_ee_condition", j)) for i in axes for j in range(3)]
+    targets = [("ee_velocity_world" if "ee_velocity_world" in traces else "successor_ee_error", i) for i in axes]
     for group, indices in groups.items():
         requested = cfg.get("temporal_joint_names", {}).get(group)
-        joint = meta["dof_names"].index(requested) if requested in meta["dof_names"] else (indices[0] if indices else None)
-        if requested and (requested not in meta["dof_names"] or joint not in indices):
-            raise ValueError(f"Invalid temporal {group} joint: {requested}")
-        if joint is None:
-            continue
-        executed = ("executed_torque_interval_mean", joint)
-        for name in ("position_film", "position_parameter", "torque_film", "torque_parameter"):
-            if name in traces and joint < traces[name].shape[1]:
-                action = (name, joint)
-                pairs += [(("ee_cartesian_error", axis), action), (("estimated_ee_condition", axis), action),
-                          (("parameter_change", feature), action), (action, target)]
-                if executed[0] in traces:
-                    pairs.append((action, executed))
-        if executed[0] in traces:
-            pairs += [(("raw_action", joint), executed), (executed, target)]
+        names = [requested] if isinstance(requested, str) else requested
+        # All arm channels; fixed front-right leg channels represent gait timing by default.
+        selected = (indices if group == "arm" else [i for i in indices if meta["dof_names"][i].startswith("FR_")]) if names is None else [meta["dof_names"].index(name) for name in names]
+        if any(j not in indices for j in selected):
+            raise ValueError(f"Invalid temporal {group} joints")
+        for joint in selected:
+            executed = ("executed_torque_interval_mean", joint)
+            for name in ("position_film", "position_parameter", "torque_film", "torque_parameter"):
+                if name in traces and joint < traces[name].shape[1]:
+                    action = (name, joint)
+                    pairs += [(("ee_cartesian_error", i), action) for i in axes]
+                    pairs += [(("estimated_ee_condition", j), action) for j in range(3)]
+                    pairs += [(action, target) for target in targets]
+                    if executed[0] in traces:
+                        pairs.append((action, executed))
+            for head in ("position", "torque"):
+                if head+"_parameter" in traces and joint < traces[head+"_parameter"].shape[1]:
+                    pairs.append(((head+"_parameter", joint), (head+"_film", joint)))
+            if executed[0] in traces:
+                if joint < traces["raw_action"].shape[1]:
+                    pairs.append((("raw_action", joint), executed))
+                pairs += [(executed, target) for target in targets]
+    # Contact/base periodicity is a competing explanation, conditioned descriptively on stage.
+    for source in ("contacts", "base_motion"):
+        if source in traces:
+            pairs += [((source, j), ("ee_cartesian_error", i)) for j in range(traces[source].shape[1]) for i in axes]
     if not (stationary or moving):
         unavailable.append("Nonstationary/event window: spectra descriptive only; coherence/lag suppressed")
         pairs = []
     elif moving:
         unavailable.append("Moving-reference residual coherence is linear-detrended and separate from stationary estimates")
-    for (left, ix), (right, iy) in pairs:
+    for (left, ix), (right, iy) in dict.fromkeys(pairs):
         x, y = traces[left], traces[right]
         if ix >= x.shape[1] or iy >= y.shape[1] or min(ix, iy) < 0:
             raise ValueError("Temporal component index outside recorded dimensions")
@@ -598,6 +680,28 @@ def analyze_window(d, meta, heads, cfg):
             metrics[label+"mean_band_coherence"] = float(rel["coherence"][selected].mean())
             metrics[label+"peak_lag_seconds"] = float(rel["lag_seconds"])
             metrics[label+"peak_correlation"] = float(rel["correlation"])
+            if "ee_cartesian_error" in spectra:
+                for i in axes:
+                    peak = spectra["ee_cartesian_error"]["dominant"][i]
+                    if np.isfinite(peak):
+                        k = int(np.argmin(np.abs(rel["frequency"]-peak)))
+                        metrics[label+f"coherence_at_ee_{'xyz'[i]}_peak"] = float(rel["coherence"][k])
+                        # Phase is undefined as an explanatory diagnostic without adequate coherence.
+                        metrics[label+f"phase_at_ee_{'xyz'[i]}_peak"] = (float(rel["phase"][k])
+                            if rel["coherence"][k] >= cfg["coherence_threshold"] else np.nan)
+    # Preserve the cross-term: persistent + varying contributions sum in signal, not power.
+    for head in ("position", "torque"):
+        for group in ("arm", "leg"):
+            names = [f"{head}_{ref}_{group}/oscillatory_rms" for ref in ("actual", "fixed", "unmodulated")]
+            if all(k in metrics for k in names):
+                actual, constant, unmodulated = (metrics[k] for k in names)
+                # Paired differences of amplitudes, NOT additive component RMS/energy.
+                metrics[f"{head}_{group}/fixed_minus_unmodulated_rms"] = constant-unmodulated
+                metrics[f"{head}_{group}/actual_minus_fixed_rms"] = actual-constant
+            total, fixed, varying = (f"{head}_{name}_{group}" for name in ("film", "persistent_effect", "varying_effect"))
+            if all(k in spectra for k in (total, fixed, varying)):
+                cross = spectra[total]["power"]-spectra[fixed]["power"]-spectra[varying]["power"]
+                metrics[f"{head}_{group}/persistent_varying_cross_power"] = float(cross.mean())
     if not spectra:
         unavailable.append("Insufficient Welch averages/usable frequencies; coherence/spectra unavailable")
     elif (stationary or moving) and not relations:
@@ -609,6 +713,8 @@ def aggregate(frame):
     keys = ["task", "checkpoint", "training_seed", "profile", "loading", "kind", "stage", "metric"]
     if "analysis_mode" in frame:
         keys.append("analysis_mode")
+    if "attribution_quality" in frame:
+        keys.append("attribution_quality")
     # Windows -> trial -> evaluation seed. Never use timesteps as replicates.
     trials = frame.groupby(keys+["evaluation_seed", "trial_id"], dropna=False).value.mean().reset_index()
     seeds = trials.groupby(keys+["evaluation_seed"], dropna=False).value.agg(["mean", "count"]).reset_index()
@@ -701,6 +807,28 @@ def plot_window(d, traces, spectra, relations, identity, output, cfg):
     for ext in ("pdf", "png"):
         fig.savefig(output/(stem+"-spectra."+ext), dpi=160)
     plt.close(fig)
+    if cfg.get("plot_action_references", True) and "position_actual" in traces:
+        # These head references share the recorded trunk, not simulated alternate trajectories.
+        fig, axes = plt.subplots(2, 2, figsize=(10, 6))
+        for row, head in enumerate(("position", "torque")):
+            for col, group in enumerate(("arm", "leg")):
+                ax = axes[row, col]
+                for reference in ("actual", "fixed", "unmodulated"):
+                    key = f"{head}_{reference}_{group}"
+                    if key in spectra:
+                        sp = spectra[key]; f = sp["frequency"]
+                        keep = (f >= sp["plan"]["usable_low_hz"]) & (f <= sp["plan"]["usable_high_hz"])
+                        ax.semilogy(f[keep], sp["psd"].mean(1)[keep], label=reference)
+                ax.set_title(f"{group}: {head} ({identity.get('attribution_quality', 'unknown')})")
+                ax.set_xlabel("Frequency [Hz]")
+                ax.set_ylabel("PSD ["+("rad" if head == "position" else "Nm")+"²/Hz]")
+                ax.grid(alpha=.2)
+                if ax.lines: ax.legend()
+        fig.suptitle(caption+"\nAlgebraic action references, not executed trajectories")
+        shared.style_figure(fig, cfg); fig.tight_layout()
+        for ext in ("pdf", "png"):
+            fig.savefig(output/(stem+"-action-references."+ext), dpi=160)
+        plt.close(fig)
 
 
 def select_plot_windows(windows, budget):
@@ -808,6 +936,10 @@ def run_analysis(config):
                     exclusions.append(dict(**identity, reason=str(exc))); continue
                 complete = len(segment) == len(raw) and len(raw)*meta["dt"] >= spec["end"]-spec["start"]-meta["dt"]*.5
                 identity["analysis_mode"] = units["temporal_analysis_mode"]
+                statuses=[v["status"] for v in units["head_parity"].values()]
+                identity["attribution_quality"] = ("unverified" if "unverified_algebraic_only" in statuses else
+                    "unavailable" if "unavailable" in statuses or not statuses else
+                    "precision_explained" if "approximate_precision_explained" in statuses else "strict")
                 windows.append(dict(**identity, samples=len(segment), complete=complete,
                     actual_start=float(d["time_seconds"][0]), actual_end=float(d["successor_time_seconds"][-1]),
                     actual_load_mean_n=float(np.linalg.norm(d["ee_force_applied_world_interval_mean"],axis=1).mean()) if "ee_force_applied_world_interval_mean" in d else None,
@@ -894,9 +1026,25 @@ def run_analysis(config):
                     min_usable_high_hz=min((w["spectral_plan"]["usable_high_hz"] for w in part), default=None),
                     max_resolution_hz=max((w["spectral_plan"]["resolution_hz"] for w in part), default=None)))
     pd.DataFrame(coverage).to_csv(output/"coverage.csv", index=False)
+    parity_rows=[]
+    for w in windows:
+        for head,audit in w["units"]["head_parity"].items():
+            for i,joint in enumerate(audit["joint_names"]):
+                parity_rows.append(dict(window_id=w["window_id"],checkpoint=w["checkpoint"],task=w["task"],
+                    evaluation_seed=w["evaluation_seed"],trial_id=w["trial_id"],head=head,joint=joint,status=audit["status"],
+                    **{k:audit[k][i] for k in ("max_abs_error","rms_error","precision_residual_max","error_bound_max","physical_scale")}))
+    pd.DataFrame(parity_rows).to_csv(output/"action_attribution_audit.csv",index=False)
+    physical={}
+    if cfg.get("physical_comparison", False):
+        from exp3_oscillation_physical import analyze
+        physical=analyze(cfg,output/"physical_comparison")
+    evidence=explanatory_report(summary,physical,parity_rows)
+    pd.DataFrame(evidence).to_csv(output/"evidence.csv",index=False)
     pca = export_embeddings(reservoirs, output, cfg)
     result = dict(schema_version=2, complete=True, config=cfg, provenance=provenance, windows=windows,
         plot_selection=selected, plot_omitted_categories=omitted, coverage=coverage,
+        physical_comparison=physical, evidence=evidence,
+        conclusion="Available evidence is observational; no unique mechanism or closed-loop causal attribution established. See matched physical differences and the evidence table before interpreting feature amplification.",
         exclusions=exclusions, summary=summary, pca=pca,
         interpretation="Observational associations only; no causal confirmation or simulated counterfactuals.",
         preprocessing="No filtering/interpolation; Hann Welch with adaptive/fixed segments. Stationary: constant detrend; moving-reference residuals: separate linear-detrended diagnostic; events: descriptive only. Overlapping segments/windows are not independent replicates. Parameter increments per step, variation per second.")
@@ -905,11 +1053,55 @@ def run_analysis(config):
     return result
 
 
+def explanatory_report(summary, physical, parity_rows):
+    """Evidence inventory, not a causal classifier or a winner chosen from correlations."""
+    def spread(metric):
+        values=[r["mean"] for r in summary if r["metric"]==metric and r["kind"]=="sustained" and np.isfinite(r["mean"])]
+        return f"Stratum means range {min(values):.3g}-{max(values):.3g} ({len(values)} strata)" if values else "Unavailable"
+    statuses=sorted({r["status"] for r in parity_rows})
+    def head_evidence(suffix):
+        rows=[r for r in summary if r["metric"].endswith(suffix) and r["kind"]=="sustained"
+              and r.get("attribution_quality") in ("strict", "precision_explained") and np.isfinite(r["mean"])]
+        return (f"Amplitude increases in {sum(r['mean'] > 0 for r in rows)}/{len(rows)} validated head/group/stage strata; see paired RMS differences"
+                if rows else "Validated head-level comparison unavailable; unverified values excluded from evidence")
+    comparison="Matched physical comparison unavailable"
+    f=pd.DataFrame(physical.get("matched",[]))
+    if len(f):
+        f=f[(f.signal=="ee_error")&(f.metric=="oscillatory_rms")&(f.loading=="loaded")&(f.scheduled_load_n>0)]
+        higher=total=0
+        for _,g in f.groupby(["profile","stage","axis","protocol_hash"]):
+            pilot=g[g.task=="b1z1_pact"]
+            if len(pilot)!=1: continue
+            for _,other in g[g.task!="b1z1_pact"].iterrows():
+                total+=1; higher+=int(pilot.iloc[0]["mean"]>other["mean"])
+        comparison=f"PILOT has higher mean RMS in {higher}/{total} matched axis/stage/baseline comparisons; inspect seed SD/counts (not a significance test)"
+    motion=pd.DataFrame(physical.get("matched",[]))
+    transmission="Matched simultaneous velocity decomposition unavailable"
+    if len(motion):
+        terms=motion[(motion.signal=="base_arm")&(motion.metric=="band_cross_term")&(motion.scheduled_load_n>0)]
+        if len(terms):
+            transmission=f"Negative base/relative-arm cross-power in {int((terms['mean']<0).sum())}/{len(terms)} matched axis/stage/method strata (consistent with attenuation); positive values indicate reinforcement"
+    return [dict(candidate="Larger physical EE oscillation",supporting=comparison,
+                 contradictory="Not assumed uniform across axes, stages or baselines",limitations="Survivor-conditioned complete windows; PD gains differ; evaluation seeds are not training replicates"),
+            dict(candidate="Persistent FiLM scaling",supporting=spread("post_pre_oscillation_ratio")+"; "+head_evidence("/fixed_minus_unmodulated_rms"),
+                 contradictory="Feature amplitude is not harmful control gain; use physical-head actual/fixed/unmodulated comparisons",limitations="Offline algebraic references; no alternative trajectory executed"),
+            dict(candidate="Time-varying modulation",supporting=spread("parameter_feature_change_ratio")+"; "+head_evidence("/actual_minus_fixed_rms"),
+                 contradictory="Small parameter-change amplitude or inconsistent high/low differences weaken this mechanism",limitations="Cross-terms retained; high/low EE difference is guaranteed by selection"),
+            dict(candidate="Action-channel behavior",supporting="Attribution statuses: "+(", ".join(statuses) or "unavailable"),
+                 contradictory="Requested channels are not clipped executed torques; unverified attribution cannot support an explanation",limitations="See per-joint arithmetic errors/bounds and gains; persistent/varying effects are not unique compensation torques"),
+            dict(candidate="Locomotion transmission",supporting=transmission,
+                 contradictory="Negative base-arm cross terms suggest attenuation; shared peaks alone do not establish transmission cause",limitations="Measured relative velocity residual assumes consistent base reference point; no independent Jacobian validation or causal intervention"),
+            dict(candidate="Overall conclusion",supporting="Compare physical differences before attributing them to FiLM",
+                 contradictory="No unique mechanism established by this observational analysis",limitations="Available evidence remains inconclusive about closed-loop causation")]
+
+
 def compare_windows(frame, output, cfg):
     keys = ["checkpoint", "evaluation_seed", "trial_id", "profile", "loading", "kind", "stage", "window_id"]
+    strata = [k for k in ("analysis_mode", "attribution_quality") if k in frame]
+    keys += strata
     wide = frame.pivot(index=keys, columns="metric", values="value").reset_index()
     # Descriptive high/low comparison WITHIN task/load/motion stage and checkpoint.
-    groups = ["checkpoint", "profile", "loading", "kind", "stage"]
+    groups = ["checkpoint", "profile", "loading", "kind", "stage"] + strata
     rows = []
     for key, g in wide.groupby(groups, dropna=False):
         if len(g) < cfg["minimum_comparison_windows"]:
@@ -923,11 +1115,17 @@ def compare_windows(frame, output, cfg):
             if selected.oscillation_group.nunique() < 2 or len(selected) < cfg["minimum_comparison_windows"]:
                 continue
             for group, v in selected.groupby("oscillation_group"):
-                for metric in ("ee_cartesian_error/oscillatory_rms", "relative_modulation_rms", "parameter_change/oscillatory_rms", "pre/oscillatory_rms", "ee_estimator_mismatch/rms", "saturation_fraction"):
+                for metric in ("ee_cartesian_error/oscillatory_rms", "relative_modulation_rms", "parameter_change/oscillatory_rms", "pre/oscillatory_rms", "ee_estimator_mismatch/rms", "saturation_fraction",
+                               "position_actual_arm/oscillatory_rms", "position_fixed_arm/oscillatory_rms", "position_unmodulated_arm/oscillatory_rms",
+                               "torque_actual_arm/oscillatory_rms", "torque_fixed_arm/oscillatory_rms", "torque_unmodulated_arm/oscillatory_rms"):
                     if metric in v:
-                        per_trial = v.groupby(["evaluation_seed", "trial_id"])[metric].mean()
+                        per_trial = v.groupby(["evaluation_seed", "trial_id"])[metric].mean().dropna()
+                        seed_values=per_trial.groupby(level=0).mean()
                         rows.append(dict(zip(groups,key), comparison=label, group=group, metric=metric,
-                            mean=per_trial.groupby(level=0).mean().mean(), trials=len(per_trial), windows=len(v)))
+                            mean=seed_values.mean(), sd=seed_values.std(ddof=1), seeds=len(seed_values),
+                            trial_sd=per_trial.std(ddof=1),
+                            trials=len(per_trial), windows=len(v), variability="evaluation-seed SD after trial averaging",
+                            selection_note="EE oscillation differs by construction; other signals are descriptive associations"))
     pd.DataFrame(rows).to_csv(output/"high_low_windows.csv", index=False)
 
 
@@ -959,9 +1157,13 @@ def export_embeddings(reservoirs, output, cfg):
             for a, b in zip(xy[:len(pool)], xy[len(pool):]):
                 ax.plot([a[0],b[0]], [a[1],b[1]], color="grey", alpha=.08, lw=.3)
             colors = np.tile([r[color_index] for r in pool], 2)
-            points = ax.scatter(xy[:,0], xy[:,1], c=colors, s=3, cmap="coolwarm")
+            for offset,marker,label in ((0,"o","pre"),(len(pool),"^","post")):
+                sl=slice(offset,offset+len(pool))
+                points = ax.scatter(xy[sl,0], xy[sl,1], c=colors[sl], s=8, marker=marker,
+                                    cmap="coolwarm",vmin=colors.min(),vmax=colors.max(),label=label)
+            ax.legend()
             fig.colorbar(points, ax=ax, label=color_label)
-            ax.set_title(name.upper()+" (paired pre/post; qualitative)")
+            ax.set_title(name.upper()+f" (paired pre/post; qualitative)\nPCA explained variance: {100*explained.sum():.1f}%")
             shared.style_figure(fig, cfg)
             fig.tight_layout()
             for ext in ("pdf", "png"):

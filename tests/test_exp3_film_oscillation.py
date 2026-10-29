@@ -163,6 +163,7 @@ def test_checkpoint_deserialization_is_frozen_and_simulator_free(tmp_path):
 
 def test_failed_head_parity_retains_feature_analysis(tmp_path):
     m,d,_=fixture(tmp_path); cfg=config(tmp_path)
+    cfg["allow_unverified_attribution"]=False
     heads={k:(np.ones((2,4)),np.ones(2)) for k in ("position","torque")}
     metrics,traces,_,_,unavailable,_=a.analyze_window(d,m,heads,cfg)
     assert "relative_modulation_rms" in metrics and "position_film" not in traces
@@ -293,14 +294,15 @@ def test_attributed_temporal_links_directions_and_groups(tmp_path):
     np.testing.assert_allclose(traces["ee_load_parallel_error"][:,0],-(d["ee_position_t_world"]-d["ee_reference_t_world"])[1:,0])
     for name in ("position_film","position_parameter","torque_film","torque_parameter"):
         assert name+"_arm" in traces and name+"_leg" in traces
-        assert any(r["right"]==name and r["left"]=="parameter_change" for r in relations)
+        assert any(r["right"]==name and r["left"]=="ee_cartesian_error" for r in relations)
         assert any(r["left"]==name and r["right"]=="executed_torque_interval_mean" for r in relations)
         assert any(r["left"]==name and r["right"]=="successor_ee_error" for r in relations)
     assert "ee_cartesian_error/component_x/signed_bias" in metrics
     assert "position_film_arm/component_z1_arm/band_power" in metrics
     assert spectra["position_film_arm"]["psd"].shape[1]==1
     assert units["position_film_arm"]=="rad"
-    assert {r["left_axis"] for r in relations if r["left"]=="parameter_change"}=={0}
+    assert not any(r["left"]=="parameter_change" for r in relations)
+    assert any(r["left"]=="position_parameter" and r["right"]=="position_film" for r in relations)
     d["ee_force_applied_world_interval_mean"][:]=0
     assert a.load_projections(d,cfg) is None
 
@@ -319,3 +321,114 @@ def test_selection_is_deterministic_and_covers_categories():
     for field in ("profile","loading","checkpoint","evaluation_seed"):
         assert {w[field] for w in chosen}=={w[field] for w in rows}
     assert len({(w["run"],w["trial_id"]) for w in chosen})==8
+
+
+def test_precision_explanation_is_not_looser_tolerance():
+    rng=np.random.default_rng(9)
+    x=rng.normal(size=(100,128)).astype('float32'); w=rng.normal(size=(5,128)).astype('float32'); b=np.zeros(5)
+    saved=a.reduced_precision_operand(x)@a.reduced_precision_operand(w).T+b
+    audit=a.head_parity(x,w,b,saved,3e-5,3e-4)
+    assert audit['status']=='approximate_precision_explained'
+    assert max(audit['precision_residual_max'])<1e-10
+    assert np.all(np.array(audit['max_abs_error'])<=audit['error_bound_max'])
+    assert a.head_parity(x,w,b,saved+.1,3e-5,3e-4)['status']=='unavailable'
+    exact=x.astype(float)@w.astype(float).T
+    assert a.head_parity(x,w,b,exact,3e-5,3e-4)['status']=='strict'
+
+
+def test_fixed_varying_modulation_and_permissive_status(tmp_path):
+    m,d,_=fixture(tmp_path); cfg=config(tmp_path)
+    pre=d['film_features_pre_t']; gamma=d['film_gamma_t']; beta=d['film_beta_t']
+    post=(1+gamma)*pre+beta; fixed=(1+gamma.mean(0))*pre+beta.mean(0)
+    heads={k:(np.ones((2,4)),np.zeros(2)) for k in ('position','torque')}
+    _,_,param=a.film_decomposition(pre,post,gamma,beta)
+    actions=np.concatenate([post@w.T+b for w,b in heads.values()],1)
+    out,_,_=a.attribute(pre,post,param,heads,actions,m,fixed=fixed)
+    for head in heads:
+        np.testing.assert_allclose(out[head+'_persistent_effect']+out[head+'_varying_effect'],out[head+'_film'],atol=1e-12)
+    constant=np.tile(gamma.mean(0),(len(pre),1)); bconst=np.tile(beta.mean(0),(len(pre),1))
+    post=(1+constant)*pre+bconst
+    actions=np.concatenate([post@w.T+b for w,b in heads.values()],1)
+    out,_,_=a.attribute(pre,post,np.zeros_like(pre[:-1]),heads,actions,m,fixed=post)
+    assert not out['position_varying_effect'].any()
+    metrics,traces,_,_,notes,units=a.analyze_window(d,m,heads,cfg)
+    assert 'position_film' in traces and any('UNVERIFIED' in note for note in notes)
+    assert units['head_parity']['position']['status']=='unverified_algebraic_only'
+
+
+def test_base_arm_velocity_frames_and_time(tmp_path):
+    from exp3_oscillation_physical import motion_signals
+    m,d,_=fixture(tmp_path)
+    d['base_position_t']=np.zeros_like(d['ee_position_t_world'])
+    d['base_velocity_world_t'][:]=[1,0,0]; d['base_angular_velocity_world_t'][:]=[0,0,2]
+    rotation=np.cross(d['base_angular_velocity_world_t'],d['ee_position_t_world'])
+    relative=np.tile([0,0,.3],(len(rotation),1))
+    d['ee_velocity_t_world']=d['base_velocity_world_t']+rotation+relative
+    traces,reason=motion_signals(d); assert reason is None
+    np.testing.assert_allclose(traces['arm_relative'],relative)
+    np.testing.assert_allclose(traces['base_translation']+traces['base_rotation']+traces['arm_relative'],traces['ee_motion'])
+    d['ee_velocity_world']=np.full_like(relative,999.)  # Successor must not contaminate actor-time identity.
+    np.testing.assert_allclose(motion_signals(d)[0]['arm_relative'],relative)
+    d['base_quaternion_t'][:]=[0,0,np.sin(np.pi/4),np.cos(np.pi/4)]
+    np.testing.assert_allclose(motion_signals(d)[0]['base_translation'],np.tile([0,-1,0],(len(relative),1)),atol=1e-12)
+
+
+def test_matched_physical_methods_and_frequency_contract(tmp_path):
+    import shutil
+    import exp3_oscillation_physical as physical
+    m,d,root=scheduled_fixture(tmp_path)
+    for task in ('b1z1_unifp_original','b1z1_ppo_pos'):
+        dest=root.parent/task; shutil.copytree(root,dest)
+        meta=copy.deepcopy(m); meta['task']=task; meta['checkpoint_sha256']=task
+        meta['resolved_environment']['control']['stiffness']={'hip':250.}
+        (dest/'metadata.json').write_text(json.dumps(meta))
+    cfg=config(tmp_path); cfg.update(comparison_plot_windows=0,comparison_max_windows=None)
+    result=physical.analyze(cfg,tmp_path/'physical')
+    assert {r['task'] for r in result['matched']}==set(cfg['comparison_tasks'])
+    assert len({(w['spectral_plan']['nperseg'],w['spectral_plan']['resolution_hz'],w['spectral_plan']['usable_low_hz'],w['spectral_plan']['usable_high_hz']) for w in result['windows']})==1
+    assert any('No matched unloaded' in s for s in result['diagnostics'])
+    # Different physical protocols never enter the same matched comparison.
+    path=root.parent/'b1z1_ppo_pos'/'metadata.json'; altered=json.loads(path.read_text())
+    altered['evaluation']['loads_n'][0]=40; path.write_text(json.dumps(altered))
+    other=physical.analyze(cfg,tmp_path/'incompatible')
+    assert not other['matched'] and other['summary']
+
+
+def test_reference_amplitudes_and_phase_guard(tmp_path):
+    m,d,_=fixture(tmp_path); cfg=config(tmp_path)
+    d['film_gamma_t'][:]=1.; d['film_beta_t'][:]=0.
+    d['film_features_post_t']=2*d['film_features_pre_t']
+    heads={name:(np.ones((2,4)),np.zeros(2)) for name in ('position','torque')}
+    d['action_raw']=np.concatenate([d['film_features_post_t']@w.T for w,b in heads.values()],1)
+    cfg['coherence_threshold']=1.01  # Deliberately suppress all phase interpretations.
+    metrics,_,_,_,_,_=a.analyze_window(d,m,heads,cfg)
+    assert metrics['position_arm/actual_minus_fixed_rms']==pytest.approx(0.)
+    assert metrics['position_arm/fixed_minus_unmodulated_rms']>0
+    phases=[v for k,v in metrics.items() if '/phase_at_ee_' in k]
+    assert phases and np.isnan(phases).all()
+
+
+def test_high_low_trial_uncertainty_and_mode_isolation(tmp_path):
+    rows=[]
+    for quality in ('strict','unverified'):
+        for mode in ('stationary','moving_reference_residual'):
+            for trial in range(3):
+                for step in range(4):
+                    identity=dict(checkpoint='a',evaluation_seed=0,trial_id=trial,profile='pushing',loading='loaded',kind='sustained',stage=1,
+                                  window_id=len(rows),analysis_mode=mode,attribution_quality=quality)
+                    for metric,value in [('ee_cartesian_error/oscillatory_rms',step),('ee_cartesian_error/rms',.1),('relative_modulation_rms',trial+step)]:
+                        rows.append(dict(**identity,metric=metric,value=value))
+    a.compare_windows(pd.DataFrame(rows),tmp_path,dict(minimum_comparison_windows=2,error_match_bin_m=.02))
+    result=pd.read_csv(tmp_path/'high_low_windows.csv')
+    assert set(result.attribution_quality)=={'strict','unverified'}
+    assert set(result.analysis_mode)=={'stationary','moving_reference_residual'}
+    assert (result.trials==3).all() and (result.seeds==1).all()
+    assert result.sd.isna().all()
+    assert (result[result.metric=='relative_modulation_rms'].trial_sd>0).all()
+
+
+def test_unverified_references_excluded_from_evidence():
+    rows=[dict(metric='position_arm/fixed_minus_unmodulated_rms',kind='sustained',mean=100.,attribution_quality='unverified')]
+    report=a.explanatory_report(rows,{},[])
+    evidence=next(r for r in report if r['candidate']=='Persistent FiLM scaling')
+    assert 'unverified values excluded' in evidence['supporting']
