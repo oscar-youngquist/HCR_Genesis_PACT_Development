@@ -113,7 +113,7 @@ def measured_condition(d, meta):
     return np.column_stack((command[:, :3]-measured, command[:, 3:]-measured_sphere*ee_scale)), error_yaw
 
 
-def load_heads(meta, config):
+def load_heads(meta, config, include_conditioning=False):
     """Only deserialize weights on CPU; do not instantiate actor/runner/simulator."""
     name = meta["checkpoint_sha256"]
     path = Path(config.get("checkpoint_paths", {}).get(name, meta["checkpoint"]))
@@ -137,6 +137,10 @@ def load_heads(meta, config):
         key = head+"_head.weight"
         if key in state:
             heads[head] = (state[key].detach().numpy().copy(), state[head+"_head.bias"].detach().numpy().copy())
+    if include_conditioning:
+        # Offline sensitivity uses the SAVED original MLP, not today's actor class.
+        heads['_conditioning'] = {k.removeprefix('film.network.'):v.detach().numpy().copy()
+                                  for k,v in state.items() if k.startswith('film.network.')}
     return (heads, None) if "position" in heads else (None, "Linear position head unavailable")
 
 

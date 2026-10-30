@@ -21,4 +21,5 @@ B1Z1_PACT_ABLATIONS = MappingProxyType({
     9: B1Z1Ablation("b1z1_pact_ab9_representation", "coupled", "film", True, False),
     10: B1Z1Ablation("b1z1_pact_ab10_actor", "coupled", "film", False, True),
     11: B1Z1Ablation("b1z1_pact", "coupled", "film", True, True),
+    12: B1Z1Ablation("b1z1_pos_baseline", "position", "none", False, False),
 })
