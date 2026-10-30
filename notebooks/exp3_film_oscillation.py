@@ -2,6 +2,7 @@
 from collections import defaultdict
 from pathlib import Path
 import json
+import time
 
 import numpy as np
 import pandas as pd
@@ -11,18 +12,36 @@ import exp1_analysis as shared
 import exp2_analysis as exp2
 from exp3_representation import chunks, file_hash
 from b1z1_paper_names import DISPLAY_NAMES
+from analysis_runtime import NumericCache, numerical_config, data_signature, ordered_work, optional_thread_limits
 
 FILM = ("film_condition_t", "film_features_pre_t", "film_features_post_t", "film_gamma_t", "film_beta_t")
-REQUIRED = (*FILM, "trial_id", "step", "time_seconds", "successor_time_seconds", "valid",
+
+
+def default_config(config):
+    """Keep tuning defaults out of the notebook; existing overrides remain supported."""
+    return dict(dict(tasks=['b1z1_pact'],checkpoints=None,trial_ids=None,
+        evaluation_seeds=[0,1,2],profiles=['pushing','pulling'],loading=['loaded','unloaded'],
+        sustained_window_seconds=4.,event_window_seconds=[-.5,2.],transient_margin_seconds=.25,
+        minimum_window_seconds=1.25,nperseg=64,overlap_fraction=.5,min_spectral_segments=4,
+        min_nperseg=24,minimum_cycles_per_window=3,segment_length_policy='adaptive',
+        frequency_band_hz=[.5,12.],coherence_threshold=.6,max_lag_seconds=.5,feature_epsilon=1e-8,
+        minimum_comparison_windows=6,error_match_bin_m=.02,pca=False,pca_samples=1000,
+        tsne=False,tsne_perplexity=30,max_plot_windows=6,max_windows=None,
+        advanced_diagnostics=False,unmodulated_comparison=False,physical_comparison=True,
+        feature_components=3,feature_basis_samples=2048),**config)
+LEGACY_REQUIRED = (*FILM, "trial_id", "step", "time_seconds", "successor_time_seconds", "valid",
     "alive_for_metrics", "physical_failure", "artificial_reset", "obs_t", "ee_position_t_world",
     "ee_reference_t_world", "ee_reference_sphere_t", "base_quaternion_t", "base_velocity_world_t",
     "base_angular_velocity_world_t", "ee_position_world", "ee_reference_world", "base_quaternion_xyzw", "action_raw")
+REQUIRED = (*FILM,'trial_id','step','time_seconds','successor_time_seconds','valid','alive_for_metrics',
+            'physical_failure','artificial_reset','ee_position_t_world','ee_reference_t_world','base_quaternion_t','action_raw')
 OPTIONAL = ("prediction_base_velocity", "prediction_ee_position", "contacts", "ee_force_applied_world_interval_mean",
     "executed_torque_interval_mean", "saturation_substep_count", "nominal_kp", "nominal_kd",
     "mechanics_kp_scale", "mechanics_kd_scale", "mechanics_motor_strength", "mechanics_feedback_tau_weight",
     "mechanics_feedforward_tau_weight", "joint_position_t", "joint_velocity_t", "actual_clipping_limits",
     "ee_velocity_world", "ee_velocity_t_world", "base_position_t", "pd_weighted_motor_interval_mean",
     "ff_weighted_motor_interval_mean", "opposing_channel_cancellation_mean")
+OPTIONAL += tuple(k for k in LEGACY_REQUIRED if k not in REQUIRED)
 
 
 def inverse_rotate(v, q, yaw_only=False):
@@ -119,6 +138,52 @@ def load_heads(meta, config):
         if key in state:
             heads[head] = (state[key].detach().numpy().copy(), state[head+"_head.bias"].detach().numpy().copy())
     return (heads, None) if "position" in heads else (None, "Linear position head unavailable")
+
+
+def optional_heads(meta, cfg):
+    if not cfg.get("unmodulated_comparison", False) and not cfg.get("advanced_diagnostics", False):
+        return None, None
+    try:
+        return load_heads(meta, cfg)
+    except (ValueError, OSError, RuntimeError) as exc:
+        return None, str(exc)
+
+
+def action_scales(meta):
+    n = int(meta["resolved_environment"]["env"]["num_actions"])
+    control = meta["resolved_environment"]["control"]
+    names = meta["dof_names"][:n]
+    q = np.broadcast_to(control["action_scale"], (n,))
+    tau = np.broadcast_to(control.get("torque_scale", 1.), (n,)).copy()
+    for name, value in control.get("torque_scale_overrides", {}).items():
+        if name in names: tau[names.index(name)] = value
+    return q, tau
+
+
+def fit_feature_bases(runs, cfg):
+    """Bounded seeded pooled pre/post PCA, fixed once per recorded checkpoint."""
+    rng = np.random.default_rng(cfg.get("sampling_seed", 0)); pools = {}
+    cap = cfg.get("feature_basis_samples", 2048)
+    for run in runs:
+        key = run["meta"]["checkpoint_sha256"]
+        for _, data in chunks(run, ["film_features_pre_t", "film_features_post_t", "valid", "alive_for_metrics", "physical_failure", "artificial_reset", "trial_id"]):
+            valid = data["valid"] & data["alive_for_metrics"] & ~data["physical_failure"] & ~data["artificial_reset"]
+            if cfg.get("trial_ids") is not None: valid &= np.isin(data["trial_id"], cfg["trial_ids"])
+            x = np.concatenate([data[name][valid] for name in ("film_features_pre_t", "film_features_post_t")])
+            x = x[np.isfinite(x).all(1)]
+            weights = rng.random(len(x))
+            if key in pools:
+                old, scores = pools[key]; x = np.concatenate([old,x]); weights = np.r_[scores,weights]
+            keep = np.argsort(weights)[:cap]; pools[key] = x[keep], weights[keep]
+    bases = {}
+    for key,(x,_) in pools.items():
+        if len(x)<2: continue
+        center=x.mean(0); _,s,v=np.linalg.svd(x-center, full_matrices=False)
+        axes=v[:cfg.get("feature_components", 3)].copy()
+        axes *= np.where(axes[np.arange(len(axes)),np.argmax(abs(axes),axis=1)]<0,-1,1)[:,None]
+        bases[key]=dict(center=center.tolist(), axes=axes.tolist(), samples=len(x),
+                        explained_variance=(s[:len(axes)]**2/max(float((s*s).sum()),1e-30)).tolist())
+    return bases
 
 
 def reduced_precision_operand(x):
@@ -327,7 +392,7 @@ def window_specs(meta, cfg):
         index = int(np.searchsorted(e["load_times_s"], midpoint, side="right"))-1
         spec["load_stage"] = index
         spec["scheduled_load_n"] = (loads[index] if loads is not None and index >= 0 else 0.) if meta["arguments"]["loading"] == "loaded" else 0.
-    return specs
+    return specs if cfg.get('advanced_diagnostics',False) or cfg.get('include_event_windows',False) else [s for s in specs if s['kind']=='sustained']
 
 
 def contiguous_segments(rows, dt, required=REQUIRED):
@@ -487,11 +552,17 @@ def load_projections(d, cfg):
 def analyze_window(d, meta, heads, cfg):
     pre, post, gamma, beta = (d[k].astype(float) for k in FILM[1:])
     increment, feature_change, parameter = film_decomposition(pre, post, gamma, beta)
-    measured, cart = measured_condition(d, meta)
+    early_notes=[]
+    cart=inverse_rotate(d['ee_position_t_world']-d['ee_reference_t_world'],d['base_quaternion_t'],yaw_only=True)
+    try:
+        measured, cart = measured_condition(d, meta)
+    except (KeyError,ValueError) as exc:
+        measured=np.full((len(pre),6),np.nan)
+        early_notes.append('Measured conditioning unavailable: '+str(exc))
     condition = d["film_condition_t"]
     if condition.shape[1] != 6:
         raise ValueError("Only original six-component tracking-error FiLM is supported")
-    if "prediction_base_velocity" in d and "prediction_ee_position" in d:
+    if cfg.get('advanced_diagnostics',False) and "prediction_base_velocity" in d and "prediction_ee_position" in d and 'obs_t' in d:
         expected = d["obs_t"][:, -6:]-np.concatenate((d["prediction_base_velocity"], d["prediction_ee_position"]), axis=1)
         if not np.allclose(condition, expected, atol=2e-5, rtol=2e-4):
             raise ValueError("Recorded estimator outputs do not reconstruct FiLM conditioning")
@@ -502,14 +573,16 @@ def analyze_window(d, meta, heads, cfg):
         ee_estimator_mismatch=condition[1:, 3:]-measured[1:, 3:], pre=pre[1:], post=post[1:],
         gamma=gamma[1:], beta=beta[1:], modulation=increment[1:], parameter_change=parameter,
         feature_change=feature_change, post_change=np.diff(post,axis=0),
-        successor_ee_error=inverse_rotate(d["ee_position_world"][1:]-d["ee_reference_world"][1:], d["base_quaternion_xyzw"][1:], yaw_only=True))
+        successor_ee_error=(inverse_rotate(d["ee_position_world"][1:]-d["ee_reference_world"][1:], d["base_quaternion_xyzw"][1:], yaw_only=True)
+                           if all(k in d for k in ('ee_position_world','ee_reference_world','base_quaternion_xyzw')) else np.full_like(cart[1:],np.nan)))
     units = dict(ee_cartesian_error="m (yaw-aligned)", successor_ee_error="m (successor yaw-aligned)",
                  position_film="rad", position_parameter="rad", torque_film="Nm", torque_parameter="Nm")
-    unavailable = []
+    unavailable = early_notes
     parity_audit = {}
-    if not heads:
+    advanced = cfg.get("advanced_diagnostics", False)
+    if not heads and cfg.get("unmodulated_comparison", False):
         unavailable.append("FiLM-attributed temporal links unavailable: compatible linear-head weights absent")
-    if heads:
+    if heads and advanced:
         try:
             fixed = (1+gamma.mean(0))*pre+beta.mean(0)
             attrib, neutral, scales = attribute(pre, post, parameter, heads, d["action_raw"], meta,
@@ -532,7 +605,33 @@ def analyze_window(d, meta, heads, cfg):
             else:
                 unavailable.append("Nominal torque attribution unavailable (mechanics/scales incomplete)")
     traces["raw_action"] = d["action_raw"][1:]
-    traces["base_motion"] = d["base_velocity_world_t"][1:]
+    q_scale,tau_scale = action_scales(meta); n = len(q_scale)
+    if d["action_raw"].shape[1] not in (n,2*n):
+        raise ValueError("Unexpected recorded position/torque action layout")
+    traces["position_recorded"] = d["action_raw"][1:,:n]*q_scale
+    if d["action_raw"].shape[1]==2*n:
+        traces["torque_recorded"] = d["action_raw"][1:,n:]*tau_scale
+    if heads and not advanced:
+        for head,scale in (("position",q_scale),("torque",tau_scale)):
+            if head not in heads: continue
+            w,b=heads[head]
+            try:
+                actual,neutral=post@w.T+b,pre@w.T+b
+                recorded=traces[head+"_recorded"]
+                if actual[1:].shape!=recorded.shape: raise ValueError("Head/action shape mismatch")
+                traces[head+"_actual"]=actual[1:]*scale
+                traces[head+"_unmodulated"]=neutral[1:]*scale
+                traces[head+"_film"]=(actual-neutral)[1:]*scale
+                units[head+"_reconstruction_max_error"]=float(np.max(abs(actual[1:]*scale-recorded)))
+            except (ValueError,KeyError) as exc:
+                unavailable.append(head+" comparison unavailable: "+str(exc))
+    basis=cfg.get("feature_bases",{}).get(meta["checkpoint_sha256"])
+    if basis:
+        center,axes=np.asarray(basis["center"]),np.asarray(basis["axes"])
+        traces["pre_projection"]=(pre[1:]-center)@axes.T
+        traces["post_projection"]=(post[1:]-center)@axes.T
+        traces["modulation_projection"]=increment[1:]@axes.T
+    if 'base_velocity_world_t' in d: traces["base_motion"] = d["base_velocity_world_t"][1:]
     for key in ("contacts", "executed_torque_interval_mean", "ee_force_applied_world_interval_mean", "ee_velocity_world",
                 "pd_weighted_motor_interval_mean", "ff_weighted_motor_interval_mean", "joint_velocity_t", "joint_position_t",
                 "opposing_channel_cancellation_mean"):
@@ -584,10 +683,10 @@ def analyze_window(d, meta, heads, cfg):
     metrics, spectra = {}, {}
     dt = meta["dt"]
     sustained = cfg.get("stationary_window", True)
-    stationary = sustained and np.max(np.ptp(d["ee_reference_sphere_t"], axis=0)) <= cfg.get("reference_stationarity_tolerance", .02)
+    stationary = sustained and ('ee_reference_sphere_t' not in d or np.max(np.ptp(d["ee_reference_sphere_t"], axis=0)) <= cfg.get("reference_stationarity_tolerance", .02))
     moving = sustained and not stationary and cfg.get("moving_reference_mode", "linear_detrended") == "linear_detrended"
     analysis_mode = "stationary" if stationary else "moving_reference_detrended" if moving else "event_descriptive"
-    spectral_cfg = {**cfg, "spectral_detrend": "linear" if moving else "constant"}
+    spectral_cfg = {**cfg, "spectral_detrend": "linear" if moving and advanced else "constant"}
     units["temporal_analysis_mode"] = analysis_mode
     units["spectral_plan"] = spectral_plan(len(parameter), dt, spectral_cfg)
     for name, values in traces.items():
@@ -623,6 +722,14 @@ def analyze_window(d, meta, heads, cfg):
     if "saturation_substep_count" in d:
         metrics["saturation_fraction"] = float(d["saturation_substep_count"][1:].sum()/(len(parameter)*len(meta["dof_names"])*meta["resolved_environment"]["control"]["decimation"]))
     relations = []
+    recorded_pairs=[]
+    for head in ("position", "torque"):
+        for name in (head+"_recorded",head+"_actual",head+"_unmodulated",head+"_film"):
+            if name not in traces: continue
+            for j in range(traces[name].shape[1]):
+                recorded_pairs += [((name,j),("ee_cartesian_error",i)) for i in range(3)]
+                recorded_pairs += [((feature,k),(name,j)) for feature in ("pre_projection","post_projection","modulation_projection")
+                                   if feature in traces for k in range(traces[feature].shape[1])]
     # Cartesian x/y/z and native radius/elevation/azimuth are NOT interchangeable.
     axes = cfg.get("temporal_ee_axes", [0, 1, 2])
     pairs = [(("ee_cartesian_error", i), ("estimated_ee_condition", j)) for i in axes for j in range(3)]
@@ -660,6 +767,8 @@ def analyze_window(d, meta, heads, cfg):
         pairs = []
     elif moving:
         unavailable.append("Moving-reference residual coherence is linear-detrended and separate from stationary estimates")
+    if not advanced:
+        pairs=recorded_pairs if stationary or moving else []
     for (left, ix), (right, iy) in dict.fromkeys(pairs):
         x, y = traces[left], traces[right]
         if ix >= x.shape[1] or iy >= y.shape[1] or min(ix, iy) < 0:
@@ -680,18 +789,25 @@ def analyze_window(d, meta, heads, cfg):
             metrics[label+"mean_band_coherence"] = float(rel["coherence"][selected].mean())
             metrics[label+"peak_lag_seconds"] = float(rel["lag_seconds"])
             metrics[label+"peak_correlation"] = float(rel["correlation"])
+            metrics[label+"zero_lag_correlation"] = float(np.corrcoef(signal.detrend(x[:,ix],type=spectral_cfg["spectral_detrend"]), signal.detrend(y[:,iy],type=spectral_cfg["spectral_detrend"]))[0,1])
             if "ee_cartesian_error" in spectra:
                 for i in axes:
                     peak = spectra["ee_cartesian_error"]["dominant"][i]
                     if np.isfinite(peak):
                         k = int(np.argmin(np.abs(rel["frequency"]-peak)))
                         metrics[label+f"coherence_at_ee_{'xyz'[i]}_peak"] = float(rel["coherence"][k])
+                        if left in spectra:
+                            metrics[f"{left}/component_{ix}/power_at_ee_{'xyz'[i]}_peak"] = float(spectra[left]['psd'][k,ix]*rel['plan']['resolution_hz'])
                         # Phase is undefined as an explanatory diagnostic without adequate coherence.
                         metrics[label+f"phase_at_ee_{'xyz'[i]}_peak"] = (float(rel["phase"][k])
                             if rel["coherence"][k] >= cfg["coherence_threshold"] else np.nan)
     # Preserve the cross-term: persistent + varying contributions sum in signal, not power.
     for head in ("position", "torque"):
         for group in ("arm", "leg"):
+            actual_key=f'{head}_actual_{group}/oscillatory_rms'
+            neutral_key=f'{head}_unmodulated_{group}/oscillatory_rms'
+            if actual_key in metrics and neutral_key in metrics:
+                metrics[f'{head}_{group}/modulated_minus_unmodulated_rms']=metrics[actual_key]-metrics[neutral_key]
             names = [f"{head}_{ref}_{group}/oscillatory_rms" for ref in ("actual", "fixed", "unmodulated")]
             if all(k in metrics for k in names):
                 actual, constant, unmodulated = (metrics[k] for k in names)
@@ -719,11 +835,17 @@ def aggregate(frame):
     trials = frame.groupby(keys+["evaluation_seed", "trial_id"], dropna=False).value.mean().reset_index()
     seeds = trials.groupby(keys+["evaluation_seed"], dropna=False).value.agg(["mean", "count"]).reset_index()
     cohorts = seeds.groupby(keys, dropna=False)["mean"].agg(["mean", "std", "count"]).reset_index()
+    counts=seeds.groupby(keys,dropna=False)['count'].sum().rename('trial_seed_pairs').reset_index()
+    cohorts=cohorts.merge(counts,on=keys)
+    windows=frame.groupby(keys,dropna=False).size().rename('windows').reset_index()
+    cohorts=cohorts.merge(windows,on=keys)
     cohorts["variability"] = "evaluation-seed SD within checkpoint (not trained-policy SD)"
     return trials, seeds, cohorts
 
 
 def plot_window(d, traces, spectra, relations, identity, output, cfg):
+    if not cfg.get("advanced_diagnostics",False):
+        return plot_recorded_window(d,traces,spectra,identity,output,cfg)
     import matplotlib.pyplot as plt
     plt.rcParams.update({"font.family": "serif", "font.serif": ["Times New Roman", "DejaVu Serif"], "font.size": 9})
     fig, axes = plt.subplots(5, 1, figsize=(7.0, 8.0), sharex=True)
@@ -831,6 +953,75 @@ def plot_window(d, traces, spectra, relations, identity, output, cfg):
         plt.close(fig)
 
 
+def plot_recorded_window(d,traces,spectra,identity,output,cfg):
+    import matplotlib.pyplot as plt
+    time=d["time_seconds"][1:]
+    fig,axes=plt.subplots(5,1,figsize=(9,10),sharex=True)
+    selections=[("ee_force_applied_world_interval_mean",), ("pre_projection","post_projection"),
+                ("position_recorded_arm","position_recorded_leg"), ("torque_recorded_arm","torque_recorded_leg"), ("ee_cartesian_error",)]
+    labels=["World load [N]","Fixed PCA features","Position offsets [rad]","FF requests [Nm]","EE error [m]"]
+    for ax,names,label in zip(axes,selections,labels):
+        for name in names:
+            if name not in traces: continue
+            # Signed coordinates, not an amplitude norm used as a frequency signal.
+            for j in range(min(traces[name].shape[1],cfg.get("trace_components",3))):
+                ax.plot(time,traces[name][:,j],label=f"{name}[{j}]",alpha=.8)
+        ax.set_ylabel(label); ax.grid(alpha=.2)
+        if ax.lines: ax.legend(fontsize=7,ncol=2)
+    axes[-1].set_xlabel("Actor time [s]")
+    fig.suptitle(f"{DISPLAY_NAMES.get(identity['task'],identity['task'])}: {identity['profile']} / stage {identity['stage']} / trial {identity['trial_id']}")
+    shared.style_figure(fig,cfg); fig.tight_layout()
+    stem=f"window-{identity['window_id']:05d}"
+    for ext in ('pdf','png'): fig.savefig(output/(stem+'-traces.'+ext))
+    plt.close(fig)
+    fig,axes=plt.subplots(1,3,figsize=(12,3.6))
+    for ax,names,unit in zip(axes,[("pre","post","modulation"),("position_recorded_arm","position_actual_arm","position_unmodulated_arm","position_film_arm"),("torque_recorded_arm","torque_actual_arm","torque_unmodulated_arm","torque_film_arm")],['feature²/Hz','rad²/Hz','Nm²/Hz']):
+        for name in names:
+            if name not in spectra: continue
+            sp=spectra[name]; f=sp['frequency']; keep=(f>=sp['plan']['usable_low_hz'])&(f<=sp['plan']['usable_high_hz'])
+            ax.semilogy(f[keep],sp['psd'].mean(1)[keep],label=name)
+        ax.set_xlabel('Frequency [Hz]'); ax.set_ylabel(unit); ax.grid(alpha=.2)
+        if ax.lines: ax.legend(fontsize=7)
+    shared.style_figure(fig,cfg); fig.tight_layout()
+    for ext in ('pdf','png'): fig.savefig(output/(stem+'-spectra.'+ext))
+    plt.close(fig)
+
+
+def recorded_associations(frame,output,cfg):
+    """Trial amplitudes first; correlations stay within checkpoint/stage/seed."""
+    keys=['task','checkpoint','profile','loading','stage','kind','analysis_mode','evaluation_seed','trial_id']
+    wanted=[m for m in frame.metric.unique() if m.endswith('/oscillatory_rms') and not m.startswith('association/')]
+    trial=frame[frame.metric.isin(wanted)].groupby(keys+['metric'],dropna=False).value.mean().unstack('metric').reset_index()
+    rows=[]
+    for key,g in trial.groupby(keys[:-1],dropna=False):
+        for left in ['pre/oscillatory_rms','post/oscillatory_rms','modulation/oscillatory_rms','position_recorded_arm/oscillatory_rms','torque_recorded_arm/oscillatory_rms']:
+            for right in ['position_recorded_arm/oscillatory_rms','position_recorded_leg/oscillatory_rms','torque_recorded_arm/oscillatory_rms','torque_recorded_leg/oscillatory_rms','ee_cartesian_error/oscillatory_rms',*[f'ee_cartesian_error/component_{axis}/oscillatory_rms' for axis in 'xyz']]:
+                if left==right or left not in g or right not in g: continue
+                v=g[[left,right]].dropna()
+                corr=v[left].corr(v[right]) if len(v)>=3 and (v.std()>0).all() else np.nan
+                rows.append(dict(zip(keys[:-1],key),left=left,right=right,correlation=corr,trials=len(v)))
+    table=pd.DataFrame(rows); table.to_csv(output/'amplitude_associations.csv',index=False)
+    if len(table):
+        by=[k for k in keys[:-1] if k!='evaluation_seed']+['left','right']
+        # Equal evaluation-seed weighting; undefined correlations remain missing.
+        pooled=table.groupby(by,dropna=False).agg(mean=('correlation','mean'),std=('correlation','std'),seeds=('correlation','count'),trial_seed_pairs=('trials','sum')).reset_index()
+        pooled.to_csv(output/'amplitude_association_summary.csv',index=False)
+    trial.to_csv(output/'trial_amplitudes.csv',index=False)
+    import matplotlib.pyplot as plt
+    # Each scatter keeps task/load stage and checkpoint distinct; no pooled correlation.
+    for index,(key,g) in enumerate(trial.groupby(keys[:-2],dropna=False)):
+        if index>=cfg.get('max_scatter_plots',6): break
+        x='post/oscillatory_rms'; y='ee_cartesian_error/oscillatory_rms'
+        if x not in g or y not in g: continue
+        fig,ax=plt.subplots(figsize=(5,4))
+        for seed,part in g.groupby('evaluation_seed'): ax.scatter(part[x],part[y],label=f'eval seed {seed}')
+        ax.set(xlabel='Post-feature oscillatory RMS',ylabel='EE oscillatory RMS [m]',title=str(key[1:]))
+        ax.legend(); shared.style_figure(fig,cfg); fig.tight_layout()
+        for ext in ('pdf','png'): fig.savefig(output/f'amplitudes-{index:03d}.{ext}')
+        plt.close(fig)
+    return table.to_dict('records')
+
+
 def select_plot_windows(windows, budget):
     """Greedy deterministic coverage, then severity extremes; no visual cherry-picking."""
     groups = defaultdict(list)
@@ -870,7 +1061,7 @@ def render_selected(selected, runs, output, cfg):
             continue
         specs = window_specs(run["meta"], cfg)
         wanted_specs = [s for s in specs if any(s["start"] == w["start"] and s["kind"] == w["kind"] for w in picks)]
-        heads, _ = load_heads(run["meta"], cfg)
+        heads, _ = optional_heads(run["meta"], cfg)
         for tid, spec, raw in stream_windows(run, {**cfg, "trial_ids": sorted({w["trial_id"] for w in picks}), "_window_specs": wanted_specs}):
             for segment in contiguous_segments(raw, run["meta"]["dt"]):
                 matches = [w for w in picks if w["trial_id"] == tid and w["start"] == spec["start"]
@@ -878,12 +1069,51 @@ def render_selected(selected, runs, output, cfg):
                 if not matches:
                     continue
                 d = {k: np.stack([r[k] for r in segment]) for k in segment[0]}
-                _, traces, spectra, relations, _, _ = analyze_window(d, run["meta"], heads, {**cfg, "stationary_window": spec["kind"] == "sustained"})
+                outcome, _ = cached_window(d, run["meta"], heads, {**cfg, "stationary_window": spec["kind"] == "sustained"})
+                _, traces, spectra, relations, _, _ = outcome
                 plot_window(d, traces, spectra, relations, matches[0], output, cfg)
 
 
+def cached_window(d, meta, heads, cfg):
+    """Only numerical inputs enter this key; plotting choices cannot invalidate it."""
+    cache = NumericCache(cfg)
+    key, result = cache.lookup('film_windows', (d, meta, heads, numerical_config(cfg),
+                                               cfg.get('feature_bases')))
+    if result is None:
+        result = analyze_window(d, meta, heads, cfg)
+        cache.save(key, result)
+    return result, cache.hits
+
+
+def analyze_raw_window(job):
+    # CPU-only worker; optional head weights are plain arrays loaded by the parent.
+    tid, spec, raw, meta, heads, cfg = job
+    results = []
+    for segment in contiguous_segments(raw, meta['dt']):
+        if len(segment)*meta['dt'] < cfg['minimum_window_seconds'] or len(segment) < 4:
+            results.append(None); continue
+        d = {k: np.stack([r[k] for r in segment]) for k in segment[0]}
+        try:
+            result, hits = cached_window(d, meta, heads, {**cfg, 'stationary_window': spec['kind']=='sustained'})
+            results.append(dict(result=result, hits=hits))
+        except (ValueError, KeyError) as exc:
+            results.append(dict(error=str(exc)))
+    return results
+
+
 def run_analysis(config):
-    cfg = dict(config)
+    threads = config.get('cpu_blas_threads',1)
+    if isinstance(threads,bool) or not isinstance(threads,int) or threads < 1:
+        raise ValueError('cpu_blas_threads must be a positive integer')
+    # Bound parent/worker BLAS teams when the optional limiter is available.
+    with optional_thread_limits(limits=threads,user_api='blas'):
+        return _run_analysis(config)
+
+
+def _run_analysis(config):
+    started = time.perf_counter()
+    timings = {}
+    cfg = default_config(config)
     output = Path(cfg["output_dir"])
     if output.exists() and any(output.iterdir()):
         raise ValueError("Use an empty output directory to avoid mixing stale windows/figures")
@@ -898,6 +1128,19 @@ def run_analysis(config):
     if cfg.get("pca_color", "signed_error") not in ("signed_error", "load_stage", "oscillation_phase"):
         raise ValueError("Unknown PCA coloring")
     runs, exclusions = discover(cfg)
+    timings['discovery_seconds'] = time.perf_counter()-started
+    stage_started = time.perf_counter()
+    cache = NumericCache(cfg)
+    key, bases = cache.lookup('film_basis', (data_signature(runs), numerical_config(cfg)))
+    if bases is None:
+        bases = fit_feature_bases(runs,cfg)
+        cache.save(key, bases)
+    cfg["feature_bases"] = bases
+    timings['basis_seconds'] = time.perf_counter()-stage_started
+    timings['basis_cache_hits'] = cache.hits
+    timings['window_cache_hits'] = 0
+    stage_started = time.perf_counter()
+    last_progress = stage_started
     rows, windows, provenance, heads_cache = [], [], [], {}
     reservoirs, seen = defaultdict(list), defaultdict(int)
     rng = np.random.default_rng(cfg.get("sampling_seed", 0))
@@ -905,7 +1148,7 @@ def run_analysis(config):
         meta = run["meta"]; ckpt = meta["checkpoint_sha256"]
         print(f"FiLM analysis: {run['path']}", flush=True)
         if ckpt not in heads_cache:
-            heads_cache[ckpt] = load_heads(meta, cfg)
+            heads_cache[ckpt] = optional_heads(meta, cfg)
         heads, missing = heads_cache[ckpt]
         if missing:
             exclusions.append(dict(run=str(run["path"]), reason=missing))
@@ -919,27 +1162,31 @@ def run_analysis(config):
             dof_names=meta["dof_names"], configuration=meta["resolved_environment"], policy=meta["resolved_training"]["policy"],
             recorded_trials=len(run["trial_ids"]), selected_trial_ids=sorted(run["trial_ids"].intersection(cfg["trial_ids"])) if cfg.get("trial_ids") is not None else sorted(run["trial_ids"]),
             conventions=meta.get("conventions")))
-        for tid, spec, raw in stream_windows(run, cfg):
+        jobs = ((tid,spec,raw,meta,heads,cfg) for tid,spec,raw in stream_windows(run,cfg))
+        for job, prepared in ordered_work(analyze_raw_window, jobs, cfg.get('num_workers',1)):
+            tid, spec, raw = job[:3]
             segments = contiguous_segments(raw, meta["dt"])
             if not segments:
                 exclusions.append(dict(run=str(run["path"]), trial_id=tid, window=spec, reason="No valid pre-failure samples"))
-            for segment in segments:
+            for segment_index, segment in enumerate(segments):
                 if len(segment)*meta["dt"] < cfg["minimum_window_seconds"] or len(segment) < 4:
                     exclusions.append(dict(run=str(run["path"]), trial_id=tid, window=spec, reason="Short/gapped/failed window")); continue
                 d = {k: np.stack([r[k] for r in segment]) for k in segment[0]}
                 identity = dict(task=meta["task"], checkpoint=ckpt, training_seed=meta.get("checkpoint_training_seed"),
                     evaluation_seed=meta["evaluation_seed"], trial_id=tid, profile=meta["arguments"]["profile"],
                     loading=meta["arguments"]["loading"], run=str(run["path"]), **spec, window_id=len(windows))
-                try:
-                    metrics, traces, spectra, relations, unavailable, units = analyze_window(d, meta, heads, {**cfg, "stationary_window": spec["kind"]=="sustained"})
-                except (ValueError, KeyError) as exc:
-                    exclusions.append(dict(**identity, reason=str(exc))); continue
+                outcome = prepared[segment_index]
+                if 'error' in outcome:
+                    exclusions.append(dict(**identity, reason=outcome['error'])); continue
+                metrics, traces, spectra, relations, unavailable, units = outcome['result']
+                timings['window_cache_hits'] += outcome['hits']
                 complete = len(segment) == len(raw) and len(raw)*meta["dt"] >= spec["end"]-spec["start"]-meta["dt"]*.5
                 identity["analysis_mode"] = units["temporal_analysis_mode"]
                 statuses=[v["status"] for v in units["head_parity"].values()]
                 identity["attribution_quality"] = ("unverified" if "unverified_algebraic_only" in statuses else
                     "unavailable" if "unavailable" in statuses or not statuses else
                     "precision_explained" if "approximate_precision_explained" in statuses else "strict")
+                if not cfg.get('advanced_diagnostics',False): identity['attribution_quality']='recorded'
                 windows.append(dict(**identity, samples=len(segment), complete=complete,
                     actual_start=float(d["time_seconds"][0]), actual_end=float(d["successor_time_seconds"][-1]),
                     actual_load_mean_n=float(np.linalg.norm(d["ee_force_applied_world_interval_mean"],axis=1).mean()) if "ee_force_applied_world_interval_mean" in d else None,
@@ -987,26 +1234,38 @@ def run_analysis(config):
                             pool[j] = item
                 if cfg.get("max_windows") and len(windows) >= cfg["max_windows"]:
                     break
+                if cfg.get('progress',True) and time.perf_counter()-last_progress >= 30:
+                    last_progress = time.perf_counter()
+                    print(f"  {len(windows):,} windows; {timings['window_cache_hits']:,} cached; "
+                          f"{(last_progress-stage_started)/60:.1f} min", flush=True)
             if cfg.get("max_windows") and len(windows) >= cfg["max_windows"]:
                 break
         if cfg.get("max_windows") and len(windows) >= cfg["max_windows"]:
             break
+    timings['read_compute_export_seconds'] = time.perf_counter()-stage_started
+    stage_started = time.perf_counter()
     frame = pd.DataFrame(rows)
     summary = []
+    associations = []
     if len(frame):
         trials, seeds, cohorts = aggregate(frame)
         for name, table in (("windows", frame), ("trials", trials), ("seeds", seeds), ("summary", cohorts)):
             table.to_csv(output/(name+".csv"), index=False)
         summary = cohorts.to_dict("records")
         compare_windows(frame, output, cfg)
+        associations = recorded_associations(frame,output,cfg)
+        cohorts[cohorts.metric.str.startswith('association/')].to_csv(output/'temporal_associations.csv',index=False)
     else:
         exclusions.append(dict(reason="No usable original actor-feature FiLM windows"))
     if not (output/"relationships.csv").exists():
         pd.DataFrame(columns=["left", "right", "analysis_mode", "frequency_hz", "coherence"]).to_csv(output/"relationships.csv", index=False)
+    timings['aggregation_and_scatter_seconds'] = time.perf_counter()-stage_started
+    stage_started = time.perf_counter()
     selected, omitted = select_plot_windows(windows, cfg["max_plot_windows"])
     pd.DataFrame([{k: v for k, v in w.items() if k not in ("units", "unavailable", "spectral_plan")} for w in selected]).to_csv(output/"plot_selection.csv", index=False)
     (output/"plot_omitted_categories.json").write_text(json.dumps(clean(omitted), indent=2))
     render_selected(selected, runs, output, cfg)
+    timings['example_figures_seconds'] = time.perf_counter()-stage_started
     # Explicit coverage includes every planned stage, even when all trials fail before it.
     coverage = []
     for run in runs:
@@ -1035,19 +1294,24 @@ def run_analysis(config):
                     **{k:audit[k][i] for k in ("max_abs_error","rms_error","precision_residual_max","error_bound_max","physical_scale")}))
     pd.DataFrame(parity_rows).to_csv(output/"action_attribution_audit.csv",index=False)
     physical={}
+    stage_started = time.perf_counter()
     if cfg.get("physical_comparison", False):
         from exp3_oscillation_physical import analyze
         physical=analyze(cfg,output/"physical_comparison")
-    evidence=explanatory_report(summary,physical,parity_rows)
-    pd.DataFrame(evidence).to_csv(output/"evidence.csv",index=False)
+    timings['physical_comparison_seconds'] = time.perf_counter()-stage_started
+    evidence=explanatory_report(summary,physical,parity_rows) if cfg.get("advanced_diagnostics",False) else []
+    if evidence: pd.DataFrame(evidence).to_csv(output/"evidence.csv",index=False)
     pca = export_embeddings(reservoirs, output, cfg)
+    timings['total_seconds'] = time.perf_counter()-started
+    (output/'timings.json').write_text(json.dumps(timings, indent=2))
     result = dict(schema_version=2, complete=True, config=cfg, provenance=provenance, windows=windows,
+        timings=timings,
         plot_selection=selected, plot_omitted_categories=omitted, coverage=coverage,
-        physical_comparison=physical, evidence=evidence,
-        conclusion="Available evidence is observational; no unique mechanism or closed-loop causal attribution established. See matched physical differences and the evidence table before interpreting feature amplification.",
+        physical_comparison=physical, evidence=evidence, amplitude_associations=associations,
+        conclusion="Recorded within-stage feature, action and EE oscillation associations.",
         exclusions=exclusions, summary=summary, pca=pca,
         interpretation="Observational associations only; no causal confirmation or simulated counterfactuals.",
-        preprocessing="No filtering/interpolation; Hann Welch with adaptive/fixed segments. Stationary: constant detrend; moving-reference residuals: separate linear-detrended diagnostic; events: descriptive only. Overlapping segments/windows are not independent replicates. Parameter increments per step, variation per second.")
+        preprocessing="No filtering/interpolation; core amplitudes and spectra remove window means. Hann Welch with exported segment/band limits. Stage-separated windows average within trials then seeds. Optional advanced moving-reference diagnostics use linear detrending.")
     (output/"summary.json").write_text(json.dumps(clean(result), indent=2, allow_nan=False))
     (output/"COMPLETE").write_text("complete\n")
     return result
@@ -1136,10 +1400,13 @@ def export_embeddings(reservoirs, output, cfg):
         if len(pool) < 3:
             continue
         pre, post = np.stack([r[0] for r in pool]), np.stack([r[1] for r in pool])
-        x = np.concatenate((pre, post)).astype(float); x -= x.mean(0)
-        _, s, vt = np.linalg.svd(x, full_matrices=False)
-        projected = x@vt[:2].T
-        explained = s[:2]**2/max(np.sum(s*s), 1e-30)
+        basis=cfg.get('feature_bases',{}).get(ckpt)
+        if basis is None:
+            result[ckpt]=dict(unavailable='Missing checkpoint-wide fixed PCA basis'); continue
+        from exp3_film_figures import paired_projection
+        projected=np.concatenate(paired_projection(pre,post,basis))
+        explained=np.asarray(basis['explained_variance'][:2])
+        x=np.concatenate((pre,post)).astype(float)-np.asarray(basis['center'])
         color_name = cfg.get("pca_color", "signed_error")
         color_index, color_label = {"signed_error": (2, "Signed task-x EE error [m]"),
                                    "load_stage": (3, "Recorded schedule interval"),

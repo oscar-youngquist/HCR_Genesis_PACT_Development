@@ -3,6 +3,7 @@ import hashlib
 import heapq
 import inspect
 import json
+import pickle
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import exp1_analysis as shared
+from analysis_runtime import NumericCache, ordered_work, timed_read_chunk
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = 3
@@ -31,20 +33,19 @@ def file_hash(path):
 def chunks(run, fields, only=None):
     """Validate and read only requested numeric columns from the recorded manifest."""
     seen = set()
-    for chunk in run["records"]["chunks"]:
-        if only is not None and chunk["file"] not in only:
-            continue
-        path = (run["path"] / chunk["file"]).resolve()
-        if path.parent != run["path"].resolve() or path in seen:
-            raise ValueError("Invalid/duplicate chunk path")
-        seen.add(path)
-        with np.load(path, allow_pickle=False) as arrays:
-            d = {k: arrays[k] for k in fields}
-        for k, v in d.items():
-            spec = run["records"]["fields"][k]
-            if v.shape != (chunk["rows"], *spec["shape"]) or str(v.dtype) != spec["dtype"]:
-                raise ValueError(f"Schema mismatch: {path}/{k}")
-        yield chunk["file"], d
+    def jobs():
+        for chunk in run["records"]["chunks"]:
+            if only is not None and chunk["file"] not in only:
+                continue
+            path = (run["path"] / chunk["file"]).resolve()
+            if path.parent != run["path"].resolve() or path in seen:
+                raise ValueError("Invalid/duplicate chunk path")
+            seen.add(path)
+            yield chunk['file'], path, fields, run['records']['fields'], chunk['rows']
+    # Only decompression/schema checks leave this process, never Torch/BARD work.
+    for _, (filename, d, elapsed) in ordered_work(timed_read_chunk, jobs(), run.get('_num_workers',1)):
+        run['_chunk_read_seconds'] = run.get('_chunk_read_seconds',0.)+elapsed
+        yield filename, d
 
 
 def family(meta):
@@ -129,32 +130,36 @@ def discover(config):
         for name in methods:
             spec = config["methods"][name]
             checkpoint = Path(spec.get("checkpoint") or m["checkpoint"]).expanduser().resolve()
-            if checkpoint not in checkpoint_hashes:
+            if spec.get("checkpoint") and checkpoint.is_file() and checkpoint not in checkpoint_hashes:
                 checkpoint_hashes[checkpoint] = file_hash(checkpoint)
-            if checkpoint_hashes[checkpoint] != m["checkpoint_sha256"]:
+            if spec.get("checkpoint") and checkpoint.is_file() and checkpoint_hashes[checkpoint] != m["checkpoint_sha256"]:
                 if spec.get("checkpoint"):
                     notices.append(f"Different checkpoint cohort skipped: {path.parent}")
                     continue
-                raise ValueError(f"Checkpoint hash mismatch: {checkpoint}")
             if not m.get("weights_unchanged", False):
                 raise ValueError("Recording did not certify frozen inference")
-            for required in ("records.json", "trials.json", "initial_states.jsonl"):
+            for required in ("records.json", "trials.json"):
                 if not (path.parent/required).is_file():
                     raise FileNotFoundError(path.parent/required)
             trials = shared.read_json(path.parent/"trials.json")
-            initial = [json.loads(line) for line in (path.parent/"initial_states.jsonl").read_text().splitlines()]
+            initial_path = path.parent/"initial_states.jsonl"
+            initial = [json.loads(line) for line in initial_path.read_text().splitlines()] if initial_path.exists() else []
             mechanics = {int(row["trial_id"]): row for row in initial}
             if len(mechanics) != len(initial) or len({r["trial_id"] for r in trials}) != len(trials):
                 raise ValueError("Duplicate trial mechanics or identities")
             for row in initial:
-                masses = np.asarray(row["body_masses_kg"])
-                inertia = np.asarray(row["body_inertias_kg_m2"])
-                com = np.asarray(row["body_local_com_pose"])
-                if len(masses) != len(m["body_names"]) or not np.isfinite(inertia).all() or not np.isfinite(com).all() or np.any(masses <= 0):
-                    raise ValueError("Invalid recorded inertial parameters")
-                inertia = inertia.reshape(len(masses),3,3)
-                if not np.allclose(inertia, inertia.swapaxes(-1,-2), atol=1e-6) or np.any(np.linalg.eigvalsh(inertia) < -1e-6):
-                    raise ValueError("Nonphysical recorded inertia tensor")
+                try:
+                    masses = np.asarray(row["body_masses_kg"])
+                    inertia = np.asarray(row["body_inertias_kg_m2"])
+                    com = np.asarray(row["body_local_com_pose"])
+                    if len(masses) != len(m["body_names"]) or not np.isfinite(masses).all() or not np.isfinite(inertia).all() or not np.isfinite(com).all() or np.any(masses <= 0):
+                        raise ValueError("Invalid recorded inertial parameters")
+                    inertia = inertia.reshape(len(masses),3,3)
+                    if not np.allclose(inertia, inertia.swapaxes(-1,-2), atol=1e-6) or np.any(np.linalg.eigvalsh(inertia) < -1e-6):
+                        raise ValueError("Nonphysical recorded inertia tensor")
+                except (KeyError,TypeError,ValueError) as exc:
+                    mechanics.pop(int(row['trial_id']),None)
+                    notices.append(f"{path.parent}, trial {row['trial_id']}: offline mechanics unavailable ({exc}); stored metrics retained")
             key = (name, m["evaluation_seed"], m["arguments"]["condition"], m["arguments"]["load_range"])
             if key in identities:
                 raise ValueError(f"Duplicate run identity {key}")
@@ -182,7 +187,7 @@ def discover(config):
 
 def candidates(run):
     last = {}
-    h = run["meta"]["resolved_environment"]["env"]["num_obs_hist"]
+    h = 2  # Only the preceding executed interval is needed for causal force targets.
     for filename, d in chunks(run, INDEX_FIELDS):
         for row, (tid, step) in enumerate(zip(d["trial_id"], d["step"])):
             tid, step = int(tid), int(step)
@@ -295,7 +300,7 @@ def native_batches(run, batch_size, selection, coverage):
     env = meta["resolved_environment"]["env"]
     width, slots, dt = env["num_observations"], env["num_obs_hist"], meta["dt"]
     fields = [k for k in run["records"]["fields"] if k in INDEX_FIELDS or k in LOADS
-        or k.startswith(("prediction_", "mechanics_")) or k in (
+        or k.startswith(("prediction_", "mechanics_", "dynamics_")) or k in (
             "history_t", "obs_t", "joint_position_t", "joint_velocity_t", "base_position_t", "base_quaternion_t",
             "base_velocity_world_t", "base_angular_velocity_world_t", "base_quaternion_xyzw", "base_velocity_world",
             "base_angular_velocity_world", "joint_velocity", "executed_torque_interval_mean", "grf_raw_world_interval_mean",
@@ -304,8 +309,6 @@ def native_batches(run, batch_size, selection, coverage):
     for filename, arrays in chunks(run, fields):
         # Validate dense numeric contracts once per chunk, not with tiny NumPy
         # dispatches for every transition. Only eligible/selected rows are enforced.
-        finite_history = np.isfinite(arrays["history_t"]).all(axis=1)
-        history_matches = np.isclose(arrays["history_t"][:, -width:], arrays["obs_t"], atol=1e-6).all(axis=1)
         timestamps_match = (np.isclose(arrays["time_seconds"], arrays["step"]*dt)
                             & np.isclose(arrays["successor_time_seconds"], (arrays["step"]+1)*dt))
         for index, (tid, step) in enumerate(zip(arrays["trial_id"], arrays["step"])):
@@ -316,8 +319,8 @@ def native_batches(run, batch_size, selection, coverage):
             good = bool(arrays["valid"][index] and arrays["alive_for_metrics"][index]
                         and not arrays["physical_failure"][index] and not arrays["artificial_reset"][index])
             length = length+1 if good and step == previous+1 else int(good)
-            last[tid] = (step, length, {k: arrays[k][index].copy() for k in LOADS})
-            if length < slots or loads is None or previous != step-1:
+            last[tid] = (step, length, {k: arrays[k][index].copy() for k in LOADS if k in arrays})
+            if length < 2 or loads is None or previous != step-1:
                 continue  # Reset-filled histories and the first unseen interval are not eligible.
             stratum = (meta["arguments"]["load_range"], meta["arguments"]["condition"],
                 run["trials"][tid]["motion_mode"], int(arrays["phase"][index]), meta["evaluation_seed"], run["name"])
@@ -331,16 +334,17 @@ def native_batches(run, batch_size, selection, coverage):
             entry["transition_id"] = shared.fingerprint(entry)
             # Copy selected rows only; views would keep previous chunks alive.
             row = {k: v[index].copy() for k, v in arrays.items()}
-            row.update({"history_"+k: loads[k] for k in LOADS})
+            row.update({"history_"+k: loads[k] for k in LOADS if k in loads})
             row["entry"] = entry
-            if row["history_t"].shape != (width*slots,) or row["obs_t"].shape != (width,):
-                raise ValueError("Invalid native observation/history shape")
-            if finite_history[index] and not history_matches[index]:
-                raise ValueError("Native history ordering/content mismatch")
+            # History validity controls optional inference only, not stored-output metrics.
+            row["inference_ready"] = (length >= slots and "history_t" in row and "obs_t" in row
+                and row["history_t"].shape == (width*slots,) and row["obs_t"].shape == (width,)
+                and np.isfinite(row["history_t"]).all() and np.isfinite(row["obs_t"]).all()
+                and np.allclose(row["history_t"][-width:], row["obs_t"], atol=1e-6))
             if not timestamps_match[index]:
                 raise ValueError("Invalid interval/successor timestamp alignment")
             forbidden = LOADS if stratum[1] == "nominal" else LOADS[1:] if stratum[1] == "ee-disturbance" else ()
-            if any(np.any(np.abs(row[k]) > 1e-5) for k in forbidden):
+            if any(np.any(np.abs(row[k]) > 1e-5) for k in forbidden if k in row):
                 raise ValueError("Applied loads violate the recorded condition")
             batch.append(row)
             if len(batch) == batch_size:
@@ -352,6 +356,8 @@ def native_batches(run, batch_size, selection, coverage):
 
 def build_model(run, device):
     """Same constructors/aliases as eval_b1z1_exp1.build_actor, without registry imports."""
+    if not run["checkpoint"].is_file() or file_hash(run["checkpoint"]) != run["meta"]["checkpoint_sha256"]:
+        raise ValueError("Missing or mismatched fallback checkpoint")
     import torch
     from rsl_rl import modules
     m, env = run["meta"], run["meta"]["resolved_environment"]["env"]
@@ -574,6 +580,27 @@ def velocity_errors(row, values, fixed, dt):
         fixed["foot_jacobians"], fixed["ee_jacobian"], fixed["base_jacobian"], values["grf"], ee, wrench, dt)-post
 
 
+def recorded_dynamics(row):
+    """Optional SI/world-frame terms matching OfflineBard's contract, not velocities.
+
+    The current collector does not save these fields; absence requests offline BARD.
+    Never interpret a current-state decoder velocity as a successor prediction.
+    """
+    keys = ("mass_matrix", "bias", "foot_jacobians", "ee_jacobian", "base_jacobian", "ee_lever", "base_lever")
+    if all("dynamics_"+k in row and np.isfinite(row["dynamics_"+k]).all() for k in keys):
+        return {k:row["dynamics_"+k] for k in keys}
+    return None
+
+
+def stored_successor_error(row, variant):
+    # Only explicit NEXT generalized world-velocity fields qualify; current estimates do not.
+    key='prediction_next_velocity_'+variant
+    fields=('base_velocity_world','base_angular_velocity_world','joint_velocity')
+    if key not in row or not all(k in row for k in fields): return None
+    actual=np.concatenate([row[k] for k in fields]); value=np.asarray(row[key])
+    return value-actual if value.shape==actual.shape and np.isfinite(value).all() else None
+
+
 def velocity_blocks(error, names):
     blocks = dict(base_linear=error[:3], base_angular=error[3:6], joint_velocity=error[6:])
     for label in ("arm", "leg"):
@@ -695,25 +722,18 @@ def run_analysis(config):
 
 
 def _run_with_precision(config):
-    if config.get("recorded_native_only", False) and not config.get("dynamics", True):
-        return _run_analysis(config)
-    import torch
-    precision = config.get("matmul_precision", "high")
-    if precision not in ("highest", "high", "medium"):
-        raise ValueError("Unknown float32 matmul precision")
-    previous = torch.get_float32_matmul_precision()
-    try:
-        torch.set_float32_matmul_precision(precision)
-        return _run_analysis(config)
-    finally:
-        torch.set_float32_matmul_precision(previous)
+    # Recorded metrics must not import Torch or require a CUDA runtime.
+    return _run_analysis(config)
 
 
 def _run_analysis(config):
+    analysis_started = time.perf_counter()
+    timings = dict(decoder_fallback_seconds=0., dynamics_seconds=0., runs=[])
     config = resolve_methods(config)
+    cache = NumericCache(config)
     balanced = bool(config.get("balanced_resampling", False))
     recorded_only = bool(config.get("recorded_native_only", False))
-    mode, source = ("balanced" if balanced else "full"), ("recorded" if recorded_only else "reinferred")
+    mode, source = ("balanced" if balanced else "full"), "recorded_first"
     batch_size = config.get("inference_batch_size", 256)
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
         raise ValueError("inference_batch_size must be a positive integer")
@@ -723,12 +743,13 @@ def _run_analysis(config):
     minimum = config.get("minimum_per_stratum", 8)
     if minimum < 1:
         raise ValueError("minimum_per_stratum must be positive")
-    # Independent namespace prevents full/subsampled and saved/reinferred outputs
-    # or caches from being mistaken for the same analysis.
+    # Keep earlier reinference outputs separate from recorded-first results.
     output = Path(config["output_dir"]).expanduser() / "representation" / f"{mode}_{source}"
     output.mkdir(parents=True, exist_ok=True)
     (output/"COMPLETE").unlink(missing_ok=True)
     runs, notices = discover(config)
+    timings['discovery_seconds'] = time.perf_counter()-analysis_started
+    for run in runs: run['_num_workers'] = config.get('num_workers',1)
     device = config.get("device", "cpu")
     groups = defaultdict(list)
     for run in runs:
@@ -736,7 +757,8 @@ def _run_analysis(config):
     method_runs = {name: group[0] for name, group in groups.items()}
     coverage, issues, assumptions, parity_checks = {}, {}, {}, {}
     all_seeds, all_table_seeds, provenance = [], [], []
-    failed_parity = set()
+    failed_fallback = set()
+    prediction_sources = defaultdict(int)
     selected_count = 0
 
     def report(run, component, reason, entry=None):
@@ -745,9 +767,6 @@ def _run_analysis(config):
                                           reason=reason, count=0, first_transition=entry["transition_id"] if entry else None))
         cell["count"] += 1  # Bounded diagnostic summaries, not millions of error strings.
 
-    code_hash = shared.fingerprint({str(p.relative_to(ROOT)): file_hash(p) for p in
-        [Path(__file__), *sorted((ROOT/"rsl_rl/modules").glob("*b1z1*.py")),
-         ROOT/"rsl_rl/modules/actor_critic_unifp_original.py", ROOT/"rsl_rl/modules/actor_critic_unifp.py"]})
     with (output/"transition_manifest.jsonl").open("w") as manifest_file:
         for name, group in groups.items():
             selection = None
@@ -769,22 +788,9 @@ def _run_analysis(config):
                 meta = run["meta"]
                 stats, table_stats = TrialStatistics(), TrialStatistics(pooled=True)
                 bard = None
-                if config.get("dynamics", True):
-                    try:
-                        # Model/URDF construction is independent of trial mechanics;
-                        # evaluate() refreshes randomized inertias on every batch.
-                        bard_key = shared.fingerprint(dict(urdf=config.get("urdf") or meta.get("urdf_source"),
-                            sha=meta.get("urdf_sha256"), dofs=meta["dof_names"], asset=meta["resolved_environment"]["asset"]))
-                        if cached_bard is None or cached_bard_key != bard_key:
-                            cached_bard = OfflineBard(run, device, config.get("urdf"), batch_capacity=dynamics_batch_size)
-                            cached_bard_key = bard_key
-                        bard = cached_bard
-                        bard.run = run  # Recorded per-trial mechanics/CoM remain run-specific.
-                    except (ImportError, ValueError, RuntimeError, OSError) as exc:
-                        report(run, "BARD", str(exc))
-                else:
-                    report(run, "BARD dynamics", "Explicitly disabled; constant-velocity reference only")
-                parity_state = dict(status="not_requested" if recorded_only else "not_checked", batches=0, samples=0)
+                bard_attempted = False
+                if not config.get('dynamics',True): report(run,'BARD dynamics','Explicitly disabled; constant-velocity reference only')
+                parity_state = dict(status="recorded_first", batches=0, samples=0)
                 parity_checks[str(run["path"])] = parity_state
                 meta_hash, records_hash = file_hash(run["path"]/"metadata.json"), file_hash(run["path"]/"records.json")
                 provenance.append(dict(method=name, path=str(run["path"]), checkpoint=str(run["checkpoint"]),
@@ -794,74 +800,88 @@ def _run_analysis(config):
                     for row in batch:
                         manifest_file.write(json.dumps(row["entry"], separators=(",", ":"), allow_nan=False)+"\n")
                     selected_count += len(batch)
-                    usable = []
-                    for row in batch:
-                        if not np.isfinite(row["history_t"]).all() or not np.isfinite(row["obs_t"]).all():
-                            report(run, "native input", "Nonfinite history/observation; transition excluded", row["entry"])
-                        else:
-                            usable.append(row)
-                    if not usable:
-                        continue
-                    predictions = {}
-                    if recorded_only:
-                        predictions = {k: np.stack([r[k] for r in usable]) for k in usable[0] if k.startswith("prediction_")}
-                    elif name not in failed_parity:
-                        if model is None:
-                            model = build_model(run, device)
-                        cache = None
-                        if config.get("cache_predictions", False):
-                            h = hashlib.sha256()
-                            for row in usable:
-                                for k in ("history_t", "prediction_grf_torque_input_nm"):
-                                    if k in row:
-                                        h.update(np.ascontiguousarray(row[k]).tobytes())
-                            key = shared.fingerprint(dict(code=code_hash, checkpoint=meta["checkpoint_sha256"],
-                                metadata=meta_hash, records=records_hash, inputs=h.hexdigest(),
-                                transitions=[r["entry"]["transition_id"] for r in usable],
-                                device=device, precision=config.get("matmul_precision", "high"), mode=mode, source=source))
-                            cache = output/"cache"/(key+".npz")
-                        if cache is not None and cache.exists():
-                            with np.load(cache, allow_pickle=False) as saved:
-                                predictions = dict(saved)
-                        else:
-                            predictions = infer(model, usable, device)
-                            if cache is not None:
-                                cache.parent.mkdir(exist_ok=True)
-                                np.savez_compressed(cache, **predictions)
+                    usable = batch
+                    # Each field keeps its stored value; inference fills missing fields only.
+                    predictions = [{k:v for k,v in row.items() if k.startswith("prediction_")} for row in usable]
+                    needed = ("prediction_ee_force", "prediction_base_wrench", "prediction_grf") if family(meta).startswith("pact") else ("prediction_explicit",)
+                    missing = [i for i,row in enumerate(usable) if any(k not in predictions[i] for k in needed)
+                               and row.get("inference_ready", False)]
+                    if missing and config.get("fallback_predictions", True) and not recorded_only and name not in failed_fallback:
+                        stage_started = time.perf_counter()
                         try:
-                            parity(predictions, usable, config.get("parity_atol", 2e-5), config.get("parity_rtol", 2e-4))
-                            parity_state.update(status="passed", batches=parity_state["batches"]+1,
-                                                samples=parity_state["samples"]+len(usable))
-                        except ValueError as exc:
-                            failed_parity.add(name)
-                            parity_state.update(status="failed", reason=str(exc))
-                            report(run, "native parity", str(exc), usable[0]["entry"])
-                            predictions = {}
-                    # Keep BARD's temporary GPU memory bounded independently of inference.
-                    fixed_batch = []
-                    if bard is not None:
-                        for start in range(0, len(usable), dynamics_batch_size):
-                            rows = usable[start:start+dynamics_batch_size]
+                            missing_rows = [usable[i] for i in missing]
+                            key, inferred = cache.lookup('decoder_fallback', (meta, missing_rows, device))
+                            if inferred is None:
+                                if model is None:
+                                    model = build_model(run, device)
+                                inferred = infer(model, missing_rows, device)
+                                cache.save(key, inferred)
+                            for j,i in enumerate(missing):
+                                for key,value in inferred.items():
+                                    if key not in predictions[i]:
+                                        predictions[i][key] = value[j]
+                                        prediction_sources["fallback:"+key] += 1
+                        except (ImportError, OSError, ValueError, RuntimeError, KeyError, EOFError, pickle.UnpicklingError, AttributeError, TypeError) as exc:
+                            failed_fallback.add(name)
+                            report(run, "optional decoder fallback", str(exc))
+                        timings['decoder_fallback_seconds'] += time.perf_counter()-stage_started
+                    for row in usable:
+                        for key in row:
+                            if key.startswith("prediction_"):
+                                prediction_sources["stored:"+key] += 1
+                    # BARD is lazy and optional. Complete recorded terms bypass construction.
+                    stage_started = time.perf_counter()
+                    fixed_batch = [recorded_dynamics(row) if config.get('dynamics',True) else None for row in usable]
+                    terms_needed = any(fixed is None and not all(stored_successor_error(row,v) is not None for v in ('decoded','measured_loading')) for fixed,row in zip(fixed_batch,usable))
+                    terms_key, cached_terms = None, None
+                    if config.get('dynamics',True) and terms_needed:
+                        terms_key, cached_terms = cache.lookup('bard_terms', (meta, usable, run['initial'],
+                            config.get('urdf'), device, dynamics_batch_size))
+                        if cached_terms is not None:
+                            fixed_batch = cached_terms
+                            terms_needed = False
+                    dynamics_inputs=('joint_position_t','joint_velocity_t','base_position_t','base_quaternion_t','base_velocity_world_t','base_angular_velocity_world_t','executed_torque_interval_mean')
+                    can_build=any(all(k in row for k in dynamics_inputs) and int(row['trial_id']) in run['initial'] for row in usable)
+                    if config.get("dynamics", True) and terms_needed and not can_build:
+                        report(run,'offline dynamics','Required recorded states or mechanics unavailable')
+                    if config.get("dynamics", True) and terms_needed and can_build and not bard_attempted:
+                        bard_attempted = True
+                        try:
+                            bard_key=shared.fingerprint(dict(urdf=config.get('urdf') or meta.get('urdf_source'),sha=meta.get('urdf_sha256'),dofs=meta['dof_names'],asset=meta['resolved_environment']['asset']))
+                            if cached_bard is None or cached_bard_key!=bard_key:
+                                cached_bard=OfflineBard(run, device, config.get("urdf"), batch_capacity=dynamics_batch_size)
+                                cached_bard_key=bard_key
+                            bard=cached_bard
+                            bard.run=run
+                        except (ImportError, ValueError, RuntimeError, OSError, KeyError) as exc:
+                            report(run, "optional BARD", str(exc))
+                    if bard is not None and terms_needed:
+                        missing_terms=[i for i,row in enumerate(usable) if fixed_batch[i] is None
+                                       and not all(stored_successor_error(row,v) is not None for v in ("decoded","measured_loading"))]
+                        for start in range(0,len(missing_terms),dynamics_batch_size):
+                            indices=missing_terms[start:start+dynamics_batch_size]
+                            rows=[usable[i] for i in indices]
                             try:
-                                fixed_batch.extend(bard.terms_batch(rows))
+                                terms=bard.terms_batch(rows)
                             except (ValueError, RuntimeError, KeyError):
-                                # Exceptional fallback isolates corrupt rows; normal work stays batched.
+                                terms=[]
                                 for row in rows:
-                                    try:
-                                        fixed_batch.append(bard.terms(row))
-                                    except (ValueError, RuntimeError, KeyError) as exc:
-                                        fixed_batch.append(exc)
+                                    try: terms.append(bard.terms(row))
+                                    except (ValueError, RuntimeError, KeyError) as exc: terms.append(exc)
+                            for i,term in zip(indices,terms): fixed_batch[i]=term
+                        if all(isinstance(term,dict) for term in fixed_batch):
+                            cache.save(terms_key, fixed_batch)
+                    timings['dynamics_seconds'] += time.perf_counter()-stage_started
                     for i, row in enumerate(usable):
                         entry = row["entry"]
-                        timing = "new_load" if any(not np.allclose(row[k], row["history_"+k], atol=1e-6) for k in LOADS) else "sustained"
-                        targets = dict(ee_force=row["history_ee_force_world"], base_force=row["history_base_force_world"],
-                                       base_moment=row["history_base_moment_world"], grf=row["grf_raw_world_interval_mean"])
+                        timing = "new_load" if any(not np.allclose(row[k], row["history_"+k], atol=1e-6) for k in LOADS if k in row and "history_"+k in row) else "sustained"
+                        targets = {k:row[field] for k,field in dict(ee_force="history_ee_force_world",base_force="history_base_force_world",base_moment="history_base_moment_world",grf="grf_raw_world_interval_mean").items() if field in row}
                         physical = {}
-                        if predictions:
+                        for field,value in predictions[i].items():
                             try:
-                                physical = physical_predictions({k: v[i] for k, v in predictions.items()}, meta, row)
+                                physical.update(physical_predictions({field:value}, meta, row))
                             except (ValueError, KeyError) as exc:
-                                report(run, "decoded loading", str(exc), entry)
+                                report(run, field, str(exc), entry)
                         for component in targets.keys() - physical.keys():
                             report(run, component, "Decoder output unavailable; no measured substitution", entry)
 
@@ -876,9 +896,10 @@ def _run_analysis(config):
                                 accumulator.add(entry, name, variant, finite,
                                     meta["resolved_environment"]["asset"]["foot_name"], meta["dof_names"], timing)
 
-                        accumulate("decoded", {k: physical[k]-targets[k] for k in physical})
-                        fixed = None
-                        if bard is not None:
+                        accumulate("decoded", {k: physical[k]-targets[k] for k in physical.keys() & targets.keys()})
+                        fixed = recorded_dynamics(row) if config.get("dynamics", True) else None
+                        if fixed is not None: prediction_sources['stored:dynamics_terms']+=1
+                        if fixed is None and fixed_batch[i] is not None:
                             try:
                                 fixed = fixed_batch[i]
                                 if isinstance(fixed, Exception):
@@ -886,20 +907,28 @@ def _run_analysis(config):
                                 notes = tuple(fixed.get("approximation", []))
                                 key = (str(run["path"]), notes)
                                 assumptions[key] = assumptions.get(key, 0)+1
+                                prediction_sources[('cached:' if cached_terms is not None else 'offline:')+'BARD_terms']+=1
                             except (ValueError, RuntimeError, KeyError) as exc:
                                 fixed = None
                                 report(run, "BARD mechanics", str(exc), entry)
                         variants = {"constant_velocity": None}
-                        if fixed is not None:
+                        if fixed is not None and all(k in row for k in (*LOADS,"grf_raw_world_interval_mean")):
                             variants["measured_loading"] = dict(ee_force=row["ee_force_world"], base_force=row["base_force_world"],
                                 base_moment=row["base_moment_world"], grf=row["grf_raw_world_interval_mean"])
-                            if set(physical) == set(targets) and all(np.isfinite(v).all() for v in physical.values()):
+                            if set(physical) == {"ee_force","base_force","base_moment","grf"} and all(np.isfinite(v).all() for v in physical.values()):
                                 variants["decoded"] = physical
+                        if config.get('dynamics',True):
+                            for variant in ('decoded','measured_loading'):
+                                saved_error=stored_successor_error(row,variant)
+                                if saved_error is not None:
+                                    accumulate(variant,velocity_blocks(saved_error,meta['dof_names']))
+                                    variants.pop(variant,None)
+                                    prediction_sources['stored:next_velocity_'+variant]+=1
                         for variant, values in variants.items():
                             try:
                                 error = velocity_errors(row, values, fixed, meta["dt"])
                                 accumulate(variant, velocity_blocks(error, meta["dof_names"]))
-                            except (ValueError, np.linalg.LinAlgError) as exc:
+                            except (ValueError, KeyError, np.linalg.LinAlgError) as exc:
                                 report(run, variant+" dynamics", str(exc), entry)
                     run_count += len(usable)
                     now = time.monotonic()
@@ -908,15 +937,15 @@ def _run_analysis(config):
                         last_progress = now
                 all_seeds.extend(stats.seeds())
                 all_table_seeds.extend(table_stats.seeds())
+                timings['runs'].append(dict(path=str(run['path']), transitions=run_count,
+                    wall_seconds=time.monotonic()-started,
+                    chunk_read_worker_seconds=run.get('_chunk_read_seconds',0.)))
                 del bard
             del model, cached_bard  # At most one checkpoint and one compatible BARD backend.
 
     if not selected_count:
         raise ValueError("No complete, valid native histories within selected recordings")
-    # A later failed parity batch invalidates earlier decoded statistics for that
-    # checkpoint too. Measured-loading and constant-velocity references remain valid.
-    all_seeds = [r for r in all_seeds if r["method"] not in failed_parity or r["variant"] != "decoded"]
-    all_table_seeds = [r for r in all_table_seeds if r["method"] not in failed_parity or r["variant"] != "decoded"]
+    # Optional inference failure never invalidates stored predictions from any batch.
     per_seed, breakdown = merge_seed_statistics(all_seeds)
     table_seeds, table_summary = merge_seed_statistics(all_table_seeds)
     from exp3_support import hierarchy
@@ -930,7 +959,7 @@ def _run_analysis(config):
     balance = [dict(stratum=list(key), available=counts[0], selected=counts[1], minimum=minimum,
                     sufficient=counts[1] >= minimum) for key, counts in sorted(coverage.items())]
     notices.extend(f"Insufficient coverage: {b}" for b in balance if not b["sufficient"])
-    notices.extend(f"{name}: native parity failed; all decoded metrics excluded for this checkpoint" for name in sorted(failed_parity))
+    notices.extend(f"{name}: optional inference unavailable; stored metrics retained" for name in sorted(failed_fallback))
     manifest = dict(schema_version=VERSION, selection_mode=mode, prediction_source=source,
         balanced_resampling=balanced, sampling_seed=config.get("sampling_seed", 0) if balanced else None,
         sampling_budget=config.get("sampling_budget") if balanced else None,
@@ -938,10 +967,12 @@ def _run_analysis(config):
         available=sum(v[0] for v in coverage.values()), selected=selected_count, strata=balance,
         transitions_file="transition_manifest.jsonl", transitions_sha256=file_hash(output/"transition_manifest.jsonl"))
     shared.write_json(output/"transition_manifest.json", manifest)
+    timings.update(total_seconds=time.perf_counter()-analysis_started, cache_hits=cache.hits, cache_misses=cache.misses)
     result = dict(schema_version=VERSION, status="complete", experiment=3, output_dir=str(output),
+        timings=timings,
         protocol=shared.protocol(runs[0]["meta"]), configuration=config,
         selection=manifest, selection_mode=mode, prediction_source=source, recorded_native_only=recorded_only,
-        inference_device=device, matmul_precision=config.get("matmul_precision", "high"), inference_batch_size=batch_size,
+        prediction_sources=dict(prediction_sources), inference_device=device, inference_batch_size=batch_size,
         methods={name: dict(task=spec["task"], checkpoint=str(method_runs[name]["checkpoint"]) if name in method_runs else spec.get("checkpoint"),
             checkpoint_sha256=method_runs[name]["meta"]["checkpoint_sha256"] if name in method_runs else None,
             training_seed=method_runs[name]["meta"].get("checkpoint_training_seed") if name in method_runs else None)
@@ -961,8 +992,10 @@ def _run_analysis(config):
     pd.DataFrame(breakdown).to_csv(output/"breakdown.csv", index=False)
     pd.DataFrame(table_summary).to_csv(output/"summary.csv", index=False)
     comparative.to_csv(output/"checkpoint_summary.csv", index=False)
-    shared.write_json(output/"summary.json", result)
     export_tables(result, config, output)
+    timings['total_seconds'] = time.perf_counter()-analysis_started
+    shared.write_json(output/'timings.json',timings)
+    shared.write_json(output/"summary.json", result)
     (output/"COMPLETE").write_text("Experiment 3 native-trajectory representation analysis complete\n")
     return result
 

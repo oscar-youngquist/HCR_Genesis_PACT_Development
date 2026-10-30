@@ -84,6 +84,58 @@ def config(tmp):
         output_dir=str(tmp/"output"),device="cpu",dynamics=False,recorded_native_only=True)
 
 
+def remove_fields(root, names):
+    for manifest in root.rglob('records.json'):
+        records=json.loads(manifest.read_text())
+        for name in names: records['fields'].pop(name,None)
+        for chunk in records['chunks']:
+            path=manifest.parent/chunk['file']
+            with np.load(path) as saved: arrays={k:saved[k] for k in saved.files if k not in names}
+            np.savez_compressed(path,**arrays)
+        manifest.write_text(json.dumps(records))
+
+
+def test_stored_metrics_need_no_checkpoint_history_or_bard(tmp_path,monkeypatch):
+    fixture(tmp_path/'raw',seeds=(0,))
+    remove_fields(tmp_path/'raw',['history_t','obs_t'])
+    for path in (tmp_path/'raw').glob('*.pt'): path.unlink()
+    for path in (tmp_path/'raw').rglob('initial_states.jsonl'): path.unlink()
+    monkeypatch.setattr(a,'build_model',lambda *args: pytest.fail('Unneeded model'))
+    monkeypatch.setattr(a,'OfflineBard',lambda *args,**kwargs: pytest.fail('Unneeded BARD'))
+    cfg=config(tmp_path); cfg.update(evaluation_seeds=[0],recorded_native_only=False,dynamics=False)
+    result=a.run_analysis(cfg)
+    assert result['selection']['selected']>0
+    assert any(r['metric']=='ee_force_rmse' for r in result['table_summary'])
+    assert any(r['metric']=='grf_rmse' for r in result['table_summary'])
+
+
+def test_current_velocity_is_not_successor():
+    row=dict(prediction_base_velocity=np.ones(3),base_velocity_world=np.zeros(3),base_angular_velocity_world=np.zeros(3),joint_velocity=np.zeros(2))
+    assert a.stored_successor_error(row,'decoded') is None
+    row['prediction_next_velocity_decoded']=np.ones(8)
+    np.testing.assert_array_equal(a.stored_successor_error(row,'decoded'),np.ones(8))
+
+
+def test_recorded_dynamics_avoids_bard_initialization(tmp_path,monkeypatch):
+    fixture(tmp_path/'raw',seeds=(0,))
+    terms=dict(mass_matrix=np.eye(8),bias=np.zeros(8),foot_jacobians=np.zeros((4,6,8)),
+               ee_jacobian=np.eye(6,8),base_jacobian=np.eye(6,8),ee_lever=np.zeros(3),base_lever=np.zeros(3))
+    for manifest in (tmp_path/'raw').rglob('records.json'):
+        records=json.loads(manifest.read_text())
+        for chunk in records['chunks']:
+            path=manifest.parent/chunk['file']
+            with np.load(path) as saved: data=dict(saved)
+            for key,value in terms.items(): data['dynamics_'+key]=np.broadcast_to(value,(len(data['step']),*value.shape))
+            np.savez_compressed(path,**data)
+        for key,value in terms.items(): records['fields']['dynamics_'+key]=dict(shape=list(value.shape),dtype='float64')
+        manifest.write_text(json.dumps(records))
+    monkeypatch.setattr(a,'OfflineBard',lambda *args,**kwargs: pytest.fail('Recorded terms should bypass BARD'))
+    cfg=config(tmp_path); cfg.update(evaluation_seeds=[0],dynamics=True)
+    result=a.run_analysis(cfg)
+    assert result['prediction_sources']['stored:dynamics_terms']==result['selection']['selected']
+    assert {r['variant'] for r in result['table_summary'] if r['metric']=='base_linear_rmse'}=={'decoded','measured_loading','constant_velocity'}
+
+
 def test_sampling_causal_targets_and_missing_histories(tmp_path):
     fixture(tmp_path/"raw"); runs,_=a.discover(config(tmp_path))
     manifest,balance=a.select_manifest(runs,48,3)
@@ -168,6 +220,7 @@ def test_saved_native_run_and_contract_separation(tmp_path):
 
 def test_native_transition_dispatch(tmp_path, monkeypatch):
     fixture(tmp_path/"raw", tasks=("b1z1_pact","b1z1_pact_ab4"), seeds=(0,))
+    remove_fields(tmp_path/'raw',['prediction_grf'])
     cfg=config(tmp_path)
     cfg.update(recorded_native_only=False, evaluation_seeds=[0], sampling_budget=24, inference_batch_size=3)
     cfg["methods"]["ab4"] = dict(task="b1z1_pact_ab4")
@@ -197,6 +250,9 @@ def test_torch_checkpoint_native_replay(tmp_path):
     actor=ActorCriticB1Z1PACT(4,3,2,8,latent_dim=3,context_layers=[8],actor_layers=[8],critic_layers=[8],
         explicit_decoder_layers=[8],force_decoder_layers=[8],grf_decoder_layers=[8]).eval()
     torch.save(dict(model_state_dict=actor.state_dict()),run["checkpoint"])
+    with pytest.raises(ValueError,match='mismatched fallback checkpoint'):
+        a.build_model(run,'cpu')
+    run['meta']['checkpoint_sha256']=a.file_hash(run['checkpoint'])
     model=a.build_model(run,"cpu")
     entries=[e for _,e in a.candidates(run)][:2];d=a.selected_data(run,entries)
     context = actor.decode_context(actor.context_encoder.forward_inf(torch.zeros(1,8)))
@@ -232,7 +288,7 @@ def test_notebook_cpu_saved_prediction_smoke(tmp_path,monkeypatch,include_exp2):
     nbclient.NotebookClient(nb,timeout=180,kernel_name="python3",resources={"metadata":{"path":str(ROOT)}}).execute()
     nbformat.write(nb,tmp_path/"executed_exp3.ipynb")
     for name in ("transition_manifest.json", "transition_manifest.jsonl", "per_seed.csv", "summary.csv", "native_in_table.tex", "COMPLETE"):
-        assert (tmp_path/"output/representation/full_recorded"/name).stat().st_size>0
+        assert (tmp_path/"output/representation/full_recorded_first"/name).stat().st_size>0
     assert (tmp_path/"output/action_support/COMPLETE").exists() == include_exp2
 
 
@@ -345,21 +401,16 @@ def test_mixed_native_families_missing_heads(tmp_path, monkeypatch):
     assert any(r["component"] == "grf" and r["count"] > 0 for r in result["unavailable"])
 
 
-def test_late_parity_failure_excludes_prior_decoded_batches(tmp_path, monkeypatch):
+def test_failed_optional_inference_retains_stored_metrics(tmp_path, monkeypatch):
     fixture(tmp_path/"raw", seeds=(0,))
-    cfg = config(tmp_path)
-    cfg.update(evaluation_seeds=[0], inference_batch_size=2, recorded_native_only=False)
-    monkeypatch.setattr(a, "build_model", lambda *args: object())
-    def infer(model, data, device):
-        pred = {k:np.stack([r[k] for r in data]) for k in data[0] if k.startswith("prediction_")}
-        if any(r["entry"]["step"] >= 5 for r in data):
-            pred["prediction_z"] += 1
-        return pred
-    monkeypatch.setattr(a, "infer", infer)
-    result = a._run_analysis(cfg)
-    assert any(r["status"] == "failed" for r in result["native_parity"].values())
-    assert {r["variant"] for r in result["table_summary"]} == {"constant_velocity"}
-    assert any(r["component"] == "native parity" for r in result["unavailable"])
+    remove_fields(tmp_path/"raw", ["prediction_grf"])
+    cfg=config(tmp_path); cfg.update(evaluation_seeds=[0],recorded_native_only=False)
+    monkeypatch.setattr(a,"build_model",lambda *args: object())
+    monkeypatch.setattr(a,"infer",lambda *args: (_ for _ in ()).throw(RuntimeError("missing optional decoder")))
+    result=a.run_analysis(cfg)
+    assert any(r["metric"]=="ee_force_rmse" for r in result["table_summary"])
+    assert not any(r["metric"]=="grf_rmse" for r in result["table_summary"])
+    assert any(r["component"]=="optional decoder fallback" for r in result["unavailable"])
 
 
 def test_streamed_run_merge_preserves_trial_weights():
@@ -460,32 +511,20 @@ def test_native_dynamics_variants_use_same_rows(tmp_path, monkeypatch):
     assert max(batches) == 2 and sum(batches) == result["selection"]["selected"]
 
 
-def test_prediction_cache_and_output_modes_are_isolated(tmp_path, monkeypatch):
-    fixture(tmp_path/"raw", seeds=(0,))
-    cfg = config(tmp_path)
-    run = a.discover(cfg)[0][0]
-    cfg.update(recording_roots=[str(run["path"])], evaluation_seeds=[0], recorded_native_only=False,
-               inference_batch_size=4, cache_predictions=True)
-    calls = []
-    monkeypatch.setattr(a, "build_model", lambda *args: object())
-    def infer(model, data, device):
-        calls.append(len(data))
-        return {k:np.stack([r[k] for r in data]) for k in data[0] if k.startswith("prediction_")}
-    monkeypatch.setattr(a, "infer", infer)
-    first = a._run_analysis(cfg)
-    n = len(calls)
-    assert n and max(calls) <= 4
-    assert list((Path(first["output_dir"])/"cache").glob("*.npz"))
-    a._run_analysis(cfg)
-    assert len(calls) == n  # Cached batches still undergo native parity checks.
-    cfg.update(balanced_resampling=True, sampling_budget=10000)
-    balanced = a._run_analysis(cfg)
-    assert len(calls) == 2*n
-    assert balanced["output_dir"] != first["output_dir"]
-    cfg.update(recorded_native_only=True, balanced_resampling=False)
-    recorded = a.run_analysis(cfg)
-    assert recorded["output_dir"] not in (first["output_dir"], balanced["output_dir"])
-    assert len(calls) == 2*n
+def test_recorded_first_fallback_preserves_existing_fields(tmp_path,monkeypatch):
+    fixture(tmp_path/"raw",seeds=(0,))
+    cfg=config(tmp_path); cfg.update(evaluation_seeds=[0],recorded_native_only=False)
+    before=a.run_analysis(cfg)
+    remove_fields(tmp_path/"raw",["prediction_grf"])
+    monkeypatch.setattr(a,"build_model",lambda *args: object())
+    monkeypatch.setattr(a,"infer",lambda model,rows,device: dict(prediction_grf=np.ones((len(rows),12))*.001,
+                                                             prediction_ee_force=np.ones((len(rows),3))*999))
+    result=a.run_analysis(cfg)
+    old=[r for r in before["table_summary"] if r["metric"]=="ee_force_rmse"]
+    new=[r for r in result["table_summary"] if r["metric"]=="ee_force_rmse"]
+    assert old==new
+    assert result["prediction_sources"]["fallback:prediction_grf"]>0
+    assert "fallback:prediction_ee_force" not in result["prediction_sources"]
 
 
 def test_nonfinite_output_is_counted_not_zero_filled(tmp_path, monkeypatch):

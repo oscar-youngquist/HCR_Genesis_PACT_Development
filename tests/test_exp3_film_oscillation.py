@@ -21,7 +21,9 @@ def config(tmp):
     # Evaluate only the literal defaults, not notebook imports or execution.
     import ast
     assignment = next(n for n in ast.parse(text).body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id=="CONFIG" for t in n.targets))
-    cfg = eval(compile(ast.Expression(assignment.value), "defaults", "eval"), {"ROOT": tmp})
+    cfg = a.default_config(eval(compile(ast.Expression(assignment.value), "defaults", "eval"), {"ROOT": tmp}))
+    cfg['advanced_diagnostics']=True  # Retain coverage of the optional original diagnostics.
+    cfg.update(pca=True,allow_unverified_attribution=True)
     cfg.update(recording_roots=[str(tmp/"raw")], output_dir=str(tmp/"out"), evaluation_seeds=[0],
                loading=["loaded"], profiles=["pushing"], max_plot_windows=1, pca_samples=20,
                minimum_comparison_windows=2, max_windows=3)
@@ -70,6 +72,26 @@ def fixture(tmp):
     (root/"trials.json").write_text(json.dumps([dict(trial_id=0)]))
     (root/"COMPLETE").write_text("complete")
     return m,d,root
+
+
+def test_recorded_associations_without_heads(tmp_path,monkeypatch):
+    m,d,root=fixture(tmp_path); cfg=config(tmp_path)
+    cfg.update(advanced_diagnostics=False,unmodulated_comparison=False,pca=False,max_windows=None,max_plot_windows=0,physical_comparison=False)
+    monkeypatch.setattr(a,'load_heads',lambda *args: pytest.fail('Recorded analysis must not load a checkpoint'))
+    t=d['time_seconds']; wave=np.sin(2*np.pi*2*t)
+    d['film_features_pre_t'][:,0]=wave
+    d['film_gamma_t'][:]=.5; d['film_beta_t'][:]=0
+    d['film_features_post_t']=1.5*d['film_features_pre_t']
+    d['action_raw'][:,0]=wave
+    cfg['feature_bases']={m['checkpoint_sha256']:dict(center=[0]*4,axes=np.eye(4)[:2].tolist())}
+    metrics,traces,_,relations,_,_=a.analyze_window(d,m,None,cfg)
+    assert 'position_recorded' in traces and 'post_projection' in traces
+    assert any(r['left']=='post_projection' and r['right']=='position_recorded' for r in relations)
+    link=next(r for r in relations if r['left']=='position_recorded' and r['left_axis']==0 and r['right']=='ee_cartesian_error' and r['right_axis']==0)
+    assert link['correlation']==pytest.approx(1.,abs=.01)
+    result=a.run_analysis(cfg)
+    assert result['windows'] and not result['evidence']
+    assert result['config']['feature_bases'][m['checkpoint_sha256']]['samples']>0
 
 
 def test_film_identity_and_temporal_decomposition():
@@ -219,7 +241,7 @@ def test_notebook_smoke(tmp_path,monkeypatch):
     nbformat=pytest.importorskip("nbformat")
     from nbclient import NotebookClient
     scheduled_fixture(tmp_path); cfg=config(tmp_path)
-    cfg.update(max_windows=None, max_plot_windows=2, pca=False)
+    cfg.update(max_windows=None, max_plot_windows=2, pca=False,advanced_diagnostics=False)
     monkeypatch.setenv("FILM_OSCILLATION_CONFIG",json.dumps(cfg))
     nb=nbformat.read(ROOT/"notebooks/exp3_film_oscillation_analysis.ipynb",as_version=4)
     NotebookClient(nb,timeout=180,kernel_name="python3",resources={"metadata":{"path":str(ROOT)}}).execute()
