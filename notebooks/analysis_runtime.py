@@ -96,10 +96,11 @@ def numerical_config(cfg):
 
 class NumericCache:
     """Atomic NPZ+JSON caches. Never load pickled objects from disk."""
-    def __init__(self,cfg):
+    def __init__(self,cfg,signature=None):
         self.enabled=cfg.get('cache_enabled',False)
         self.root=Path(cfg.get('cache_dir') or (Path(cfg['output_dir']).parent/'.exp3_numeric_cache'))
         self.hits=self.misses=0
+        self.signature=signature  # Optional stage-specific dependencies; legacy callers unchanged.
 
     def lookup(self,stage,inputs):
         if not self.enabled: return None,None
@@ -122,7 +123,7 @@ class NumericCache:
             else:
                 encoded=json.dumps(value,sort_keys=True).encode()
                 hasher.update(str(len(encoded)).encode()+b':'+encoded)
-        digest_value((code_signature(),stage,inputs))
+        digest_value((code_signature() if self.signature is None else self.signature,stage,inputs))
         digest=hasher.hexdigest()
         path=self.root/stage/(digest+'.npz')
         if path.exists():

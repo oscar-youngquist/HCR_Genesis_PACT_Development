@@ -107,9 +107,10 @@ def test_bard_cache_bypasses_backend_and_preserves_diagnostics(tmp_path,monkeypa
     cfg=rep_config(tmp_path)
     run=rep.discover(cfg)[0][0]
     cfg.update(recording_roots=[str(run['path'])],evaluation_seeds=[0],dynamics=True,
-               cache_enabled=True,cache_dir=str(tmp_path/'cache'))
+               cache_enabled=True,cache_dir=str(tmp_path/'cache'),cache_completed_runs=False)
+    allowed=[True]
     class Backend:
-        def __init__(self,*a,**kw): pass
+        def __init__(self,*a,**kw): assert allowed[0], 'Cached BARD initialized'
         def terms_batch(self,rows):
             return [dict(mass_matrix=np.eye(8),bias=np.zeros(8),foot_jacobians=np.zeros((4,6,8)),
                          ee_jacobian=np.eye(6,8),base_jacobian=np.eye(6,8),ee_lever=np.zeros(3),
@@ -117,7 +118,7 @@ def test_bard_cache_bypasses_backend_and_preserves_diagnostics(tmp_path,monkeypa
     monkeypatch.setattr(rep,'OfflineBard',Backend)
     first=rep.run_analysis(cfg)
     assert first['prediction_sources'].get('offline:BARD_terms',0)>0
-    monkeypatch.setattr(rep,'OfflineBard',lambda *a,**kw: pytest.fail('Cached BARD initialized'))
+    allowed[0]=False  # Same numerical code signature; only forbid actual construction.
     second=rep.run_analysis(cfg)
     assert second['prediction_sources'].get('cached:BARD_terms',0)>0
     assert second['dynamics_approximations']==first['dynamics_approximations']
@@ -130,16 +131,20 @@ def test_decoder_cache_preserves_stored_fields_without_model_reload(tmp_path,mon
     cfg=rep_config(tmp_path)
     run=rep.discover(cfg)[0][0]
     cfg.update(recording_roots=[str(run['path'])],evaluation_seeds=[0],recorded_native_only=False,
-               cache_enabled=True,cache_dir=str(tmp_path/'cache'))
-    monkeypatch.setattr(rep,'build_model',lambda *a: object())
+               cache_enabled=True,cache_dir=str(tmp_path/'cache'),cache_completed_runs=False)
+    allowed=[True]
+    def build(*args):
+        assert allowed[0], 'Cached decoder initialized'
+        return object()
+    monkeypatch.setattr(rep,'build_model',build)
     def infer(model,rows,device):
+        assert allowed[0], 'Cached inference recomputed'
         return dict(prediction_grf=np.zeros((len(rows),12)),prediction_ee_force=np.full((len(rows),3),1e10))
     monkeypatch.setattr(rep,'infer',infer)
     first=rep.run_analysis(cfg)
     assert first['prediction_sources']['fallback:prediction_grf']>0
     assert 'fallback:prediction_ee_force' not in first['prediction_sources']
-    monkeypatch.setattr(rep,'build_model',lambda *a: pytest.fail('Cached decoder initialized'))
-    monkeypatch.setattr(rep,'infer',lambda *a: pytest.fail('Cached inference recomputed'))
+    allowed[0]=False
     second=rep.run_analysis(cfg)
     assert second['timings']['cache_hits']>0
     pd.testing.assert_frame_equal(pd.DataFrame(first['table_summary']),pd.DataFrame(second['table_summary']))

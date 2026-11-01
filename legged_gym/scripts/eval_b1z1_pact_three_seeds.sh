@@ -9,7 +9,7 @@ set -euo pipefail
 # Optional arguments: RUN_DIRECTORY CHECKPOINT_NUMBER OUTPUT_BASE
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO="$(CDPATH= cd -- "$HERE/../.." && pwd)"
-RUN="${1:-$REPO/logs/b1z1/b1z1_pact_lab/Oct21_00-46-21_b1z1_pact_improved}"
+RUN="${1:-$REPO/logs/b1z1/b1z1_pact_lab/Oct29_15-14-37_b1z1_pact_improved}"
 CKPT="${2:-70000}"
 OUTPUT_BASE="${3:-$REPO/evaluation/exp1/pact}"
 if [[ $# -gt 3 || ! "$CKPT" =~ ^[0-9]+$ ]]; then

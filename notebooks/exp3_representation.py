@@ -5,6 +5,12 @@ import inspect
 import json
 import pickle
 import time
+import gzip
+import shutil
+from concurrent.futures import ProcessPoolExecutor
+from collections import deque
+import multiprocessing
+from contextlib import ExitStack, nullcontext
 from collections import defaultdict
 from pathlib import Path
 
@@ -12,12 +18,16 @@ import numpy as np
 import pandas as pd
 import exp1_analysis as shared
 from analysis_runtime import NumericCache, ordered_work, timed_read_chunk
+from exp3_representation_batch import (pack_terms, unpack_terms, process_batch, pack_job,
+    STATE_KEYS, PREDICTIONS, EXPLICIT_STATE_FIELDS, missing_predictions)
+import exp3_rollout_statistics as rollout_stats
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = 3
+VERSION = 5
 MAIN = ("ee_force_rmse", "base_force_rmse", "base_moment_rmse", "grf_rmse",
-        "base_linear_rmse", "base_angular_rmse", "joint_velocity_rmse")
-UNITS = dict(zip(MAIN, ("N", "N", "Nm", "N", "m/s", "rad/s", "rad/s")))
+        "base_linear_rmse", "base_angular_rmse", "joint_velocity_rmse",
+        "explicit_base_velocity_rmse", "explicit_ee_position_rmse")
+UNITS = dict(zip(MAIN, ("N", "N", "Nm", "N", "m/s", "rad/s", "rad/s", "m/s", "m")))
 LOADS = ("ee_force_world", "base_force_world", "base_moment_world")
 INDEX_FIELDS = ("trial_id", "step", "phase", "valid", "alive_for_metrics", "physical_failure", "artificial_reset")
 
@@ -304,13 +314,30 @@ def native_batches(run, batch_size, selection, coverage):
             "history_t", "obs_t", "joint_position_t", "joint_velocity_t", "base_position_t", "base_quaternion_t",
             "base_velocity_world_t", "base_angular_velocity_world_t", "base_quaternion_xyzw", "base_velocity_world",
             "base_angular_velocity_world", "joint_velocity", "executed_torque_interval_mean", "grf_raw_world_interval_mean",
-            "time_seconds", "successor_time_seconds")]
+            "time_seconds", "successor_time_seconds", *EXPLICIT_STATE_FIELDS)]
+    if run.get('_minimal_fields'):
+        fields=[k for k in fields if not k.startswith('prediction_') or k in PREDICTIONS or k=='prediction_grf_torque_input_nm']
+        # Prefer small named state heads; legacy explicit vectors are only aliases.
+        aliases=('prediction_explicit_condition','prediction_explicit_prediction')
+        keep_alias=next((k for k in aliases if k in fields),None) if any(k not in fields for k in ('prediction_base_velocity','prediction_ee_position')) else None
+        fields=[k for k in fields if k not in aliases or k==keep_alias]
+    if not run.get('_need_history',True):
+        fields=[k for k in fields if k not in ('history_t','obs_t','prediction_grf_torque_input_nm')]
     last, batch = {}, []
     for filename, arrays in chunks(run, fields):
         # Validate dense numeric contracts once per chunk, not with tiny NumPy
         # dispatches for every transition. Only eligible/selected rows are enforced.
         timestamps_match = (np.isclose(arrays["time_seconds"], arrays["step"]*dt)
                             & np.isclose(arrays["successor_time_seconds"], (arrays["step"]+1)*dt))
+        inference_ready=np.zeros(len(timestamps_match),bool)
+        if ('history_t' in arrays and 'obs_t' in arrays and arrays['history_t'].shape[1:]==(width*slots,)
+                and arrays['obs_t'].shape[1:]==(width,)):
+            inference_ready=(np.isfinite(arrays['history_t']).all(1)&np.isfinite(arrays['obs_t']).all(1)
+                &np.isclose(arrays['history_t'][:,-width:],arrays['obs_t'],atol=1e-6).all(1))
+        forbidden=LOADS if meta['arguments']['condition']=='nominal' else LOADS[1:] if meta['arguments']['condition']=='ee-disturbance' else ()
+        loads_valid=np.ones(len(timestamps_match),bool)
+        for k in forbidden:
+            if k in arrays: loads_valid &= ~(abs(arrays[k])>1e-5).any(1)
         for index, (tid, step) in enumerate(zip(arrays["trial_id"], arrays["step"])):
             tid, step = int(tid), int(step)
             previous, length, loads = last.get(tid, (-1, 0, None))
@@ -337,14 +364,10 @@ def native_batches(run, batch_size, selection, coverage):
             row.update({"history_"+k: loads[k] for k in LOADS if k in loads})
             row["entry"] = entry
             # History validity controls optional inference only, not stored-output metrics.
-            row["inference_ready"] = (length >= slots and "history_t" in row and "obs_t" in row
-                and row["history_t"].shape == (width*slots,) and row["obs_t"].shape == (width,)
-                and np.isfinite(row["history_t"]).all() and np.isfinite(row["obs_t"]).all()
-                and np.allclose(row["history_t"][-width:], row["obs_t"], atol=1e-6))
+            row["inference_ready"] = bool(length>=slots and inference_ready[index])
             if not timestamps_match[index]:
                 raise ValueError("Invalid interval/successor timestamp alignment")
-            forbidden = LOADS if stratum[1] == "nominal" else LOADS[1:] if stratum[1] == "ee-disturbance" else ()
-            if any(np.any(np.abs(row[k]) > 1e-5) for k in forbidden if k in row):
+            if not loads_valid[index]:
                 raise ValueError("Applied loads violate the recorded condition")
             batch.append(row)
             if len(batch) == batch_size:
@@ -439,14 +462,16 @@ def parity(predictions, data, atol=2e-5, rtol=2e-4):
 
 def rotate(v, q, yaw_only=False):
     q = np.asarray(q, dtype=float)
-    if not np.isfinite(q).all() or np.linalg.norm(q) <= 0:
+    norm=np.linalg.norm(q,axis=-1,keepdims=True)
+    if not np.isfinite(q).all() or np.any(norm <= 0):
         raise ValueError("Invalid recorded quaternion")
-    q = q / np.linalg.norm(q)
+    q = q / norm
     if yaw_only:
-        x,y,z,w = q
+        x,y,z,w = np.moveaxis(q,-1,0)
         yaw = np.arctan2(2*(w*z+x*y), 1-2*(y*y+z*z))
-        q = np.array([0., 0., np.sin(yaw/2), np.cos(yaw/2)])
-    xyz, w = q[:3], q[3]
+        q = np.stack([np.zeros_like(yaw),np.zeros_like(yaw),np.sin(yaw/2),np.cos(yaw/2)],axis=-1)
+    while q.ndim < np.ndim(v): q=np.expand_dims(q,-2)
+    xyz, w = q[...,:3], q[...,3:4]
     return v + 2*np.cross(xyz, np.cross(xyz, v) + w*v)
 
 
@@ -464,15 +489,16 @@ def physical_predictions(pred, meta, row):
             values["ee_force"] = rotate(pred["prediction_ee_force"]/scale("ee_force"), q, True)
         if "prediction_base_wrench" in pred:
             base = pred["prediction_base_wrench"] / scale("base_force")
-            values.update(base_force=rotate(base[:3], q, True), base_moment=rotate(base[3:], q, True))
+            values.update(base_force=rotate(base[...,:3], q, True), base_moment=rotate(base[...,3:], q, True))
     elif "prediction_explicit" in pred:
         explicit = pred["prediction_explicit"]
         base_slice, ee_slice = (slice(9,12), slice(6,9)) if kind == "unifp_original" else (slice(6,9), slice(9,12))
-        values = dict(ee_force=rotate(explicit[ee_slice]/scale("ee_force"), q, True),
-                      base_force=rotate(explicit[base_slice]/scale("base_force"), q, True))
+        values = dict(ee_force=rotate(explicit[...,ee_slice]/scale("ee_force"), q, True),
+                      base_force=rotate(explicit[...,base_slice]/scale("base_force"), q, True))
     if "prediction_grf" in pred:
         # Training GRF targets are successor-yaw vectors, unlike current force heads.
-        values["grf"] = rotate(pred["prediction_grf"].reshape(-1,3)/scale("grf"), row["base_quaternion_xyzw"], True)
+        grf=pred['prediction_grf']
+        values["grf"] = rotate(grf.reshape(*grf.shape[:-1],-1,3)/scale("grf"), row["base_quaternion_xyzw"], True)
     return values
 
 
@@ -503,13 +529,17 @@ def offline_bard_class():
 
 class OfflineBard:
     def __init__(self, run, device, urdf_override=None, batch_capacity=256):
+        import torch
         BardB1Z1DynamicsBackend = offline_bard_class()
         m, asset = run["meta"], run["meta"]["resolved_environment"]["asset"]
         urdf = Path(urdf_override or m["urdf_source"])
         if file_hash(urdf) != m["urdf_sha256"]:
             raise ValueError("BARD URDF differs from recorded robot model")
-        self.backend = BardB1Z1DynamicsBackend(str(urdf), m["dof_names"], asset["foot_name"],
-            asset["gripper_name"], asset["base_name"], device=device, batch_capacity=batch_capacity)
+        # Triton launches use the current CUDA device, not just tensor placement.
+        # Restore the caller's device afterward; no global training-device change.
+        with torch.cuda.device(device):
+            self.backend = BardB1Z1DynamicsBackend(str(urdf), m["dof_names"], asset["foot_name"],
+                asset["gripper_name"], asset["base_name"], device=device, batch_capacity=batch_capacity)
         self.run, self.device = run, device
 
     def terms(self, row):
@@ -525,7 +555,7 @@ class OfflineBard:
             return []
         b, m = self.backend, self.run["meta"]
         t = lambda key: torch.as_tensor(np.stack([r[key] for r in rows]), dtype=torch.float32, device=self.device).reshape(len(rows),-1)
-        with torch.no_grad():
+        with torch.no_grad(), (torch.cuda.device(self.device) if torch.device(self.device).type=='cuda' else nullcontext()):
             terms = b.evaluate(t("base_position_t"), t("base_quaternion_t"), t("joint_position_t"),
                 t("base_velocity_world_t"), t("base_angular_velocity_world_t"), t("joint_velocity_t"),
                 torch.zeros(len(rows),4,3,device=self.device), torch.zeros(len(rows),3,device=self.device), torch.zeros(len(rows),6,device=self.device),
@@ -619,6 +649,7 @@ def metric_rows(entry, method, benchmark, variant, errors, foot_names, dof_names
             list(dof_names) if field == "joint_velocity" else list("xyz") if error.size == 3 else [str(i) for i in range(error.size)])
         if field in ("arm_velocity", "leg_velocity"):
             labels = [n for n in dof_names if n.startswith("z1_") == (field == "arm_velocity")]
+        if field == 'explicit_base_velocity': labels = ['x','y']
         for axis, value in [("all", None), *zip(labels, error.flatten())]:
             rows.append(dict(**entry, method=method, benchmark=benchmark, variant=variant, metric=field+"_rmse",
                 axis=axis, mse=float(np.mean(error**2)) if value is None else float(value**2),
@@ -650,6 +681,38 @@ class TrialStatistics:
     def __init__(self, pooled=False):
         self.pooled = pooled
         self.sums = {}
+
+    def merge(self,sums):
+        for key,(squared,signed,count,labels) in sums.items():
+            if key not in self.sums: self.sums[key]=[squared.copy(),signed.copy(),count,labels]
+            else:
+                self.sums[key][0]+=squared; self.sums[key][1]+=signed; self.sums[key][2]+=count
+
+    def add_batch(self,entries,method,variant,errors,feet,dofs,timing):
+        groups=defaultdict(list)
+        for i,e in enumerate(entries):
+            key=(e['trial_id'],e['motion'],e['phase'],timing[i]) if not self.pooled else (e['trial_id'],)
+            groups[key].append(i)
+        for field,error in errors.items():
+            values=np.asarray(error,float).reshape(len(entries),-1)
+            if not values.shape[1]: continue
+            valid=np.isfinite(values).all(1)
+            labels=None
+            for ix in groups.values():
+                ids=np.asarray(ix); ids=ids[valid[ids]]
+                if not len(ids): continue
+                e=entries[ids[0]]; x=values[ids]
+                condition=('nominal' if e['condition']=='nominal' else 'disturbed') if self.pooled else e['condition']
+                key=(method,'native',variant,e['load_range'],condition,
+                    'all' if self.pooled else e['motion'],'all' if self.pooled else e['phase'],
+                    'all' if self.pooled else timing[ids[0]],field+'_rmse',e['evaluation_seed'],e['source'],e['run'],e['trial_id'])
+                sq=np.sum(x*x,axis=0); signed=np.sum(x,axis=0)
+                sq=np.r_[sq.mean(),sq]; signed=np.r_[signed.mean(),signed]
+                if key not in self.sums:
+                    if labels is None: labels=[r['axis'] for r in metric_rows(e,method,'native',variant,{field:error[ids[0]]},feet,dofs,timing[ids[0]])]
+                    self.sums[key]=[sq,signed,len(ids),labels]
+                else:
+                    self.sums[key][0]+=sq; self.sums[key][1]+=signed; self.sums[key][2]+=len(ids)
 
     def add(self, entry, method, variant, errors, feet, dofs, timing):
         for field, error in errors.items():
@@ -726,11 +789,40 @@ def _run_with_precision(config):
     return _run_analysis(config)
 
 
+def representation_signatures():
+    """Numerical dependencies only: FiLM plots must not invalidate BARD caches."""
+    from exp3_support import passive_bias
+    import exp3_representation_batch as batch
+    import scipy
+    from importlib.metadata import version,PackageNotFoundError
+    versions={}
+    for package in ('bard-pytorch-dynamics','pin','torch'):
+        try: versions[package]=version(package)
+        except PackageNotFoundError: versions[package]=None
+    physics=shared.fingerprint([inspect.getsource(f) for f in (OfflineBard,rotate,passive_bias)]+
+        [file_hash(ROOT/'legged_gym/dynamics'/f) for f in ('bard_b1z1_dynamics.py','whole_body_dynamics.py')]+[versions,np.__version__])
+    reduction=shared.fingerprint([inspect.getsource(f) for f in (native_batches,physical_predictions,
+        TrialStatistics,recorded_dynamics,stored_successor_error,merge_seed_statistics,select_manifest,candidates,rollout_stats.TrialRMSE)]+
+        [file_hash(Path(batch.__file__)),physics,np.__version__,scipy.__version__])
+    return physics,reduction
+
+
+def recording_signature(run):
+    # Recordings are immutable. Hash small schema/mechanics files once; retain
+    # size/mtime for numeric chunks so changed recordings cannot reuse results.
+    paths=[run['path']/f for f in ('metadata.json','records.json','trials.json','initial_states.jsonl')]
+    return shared.fingerprint(dict(files=[(str(p),file_hash(p) if p.exists() else None) for p in paths],
+        chunks=[(c['file'],(run['path']/c['file']).stat().st_size,(run['path']/c['file']).stat().st_mtime_ns)
+                for c in run['records']['chunks']]))
+
+
 def _run_analysis(config):
     analysis_started = time.perf_counter()
     timings = dict(decoder_fallback_seconds=0., dynamics_seconds=0., runs=[])
     config = resolve_methods(config)
-    cache = NumericCache(config)
+    physics_signature,reduction_signature=representation_signatures()
+    cache = NumericCache(config,signature=reduction_signature)
+    mechanics_cache=NumericCache(config,signature=physics_signature)
     balanced = bool(config.get("balanced_resampling", False))
     recorded_only = bool(config.get("recorded_native_only", False))
     mode, source = ("balanced" if balanced else "full"), "recorded_first"
@@ -743,10 +835,18 @@ def _run_analysis(config):
     minimum = config.get("minimum_per_stratum", 8)
     if minimum < 1:
         raise ValueError("minimum_per_stratum must be positive")
+    metric_workers=config.get('metric_workers',1)
+    if isinstance(metric_workers,bool) or not isinstance(metric_workers,int) or metric_workers<1:
+        raise ValueError('metric_workers must be a positive integer')
+    rollout_stats.options(config)
     # Keep earlier reinference outputs separate from recorded-first results.
     output = Path(config["output_dir"]).expanduser() / "representation" / f"{mode}_{source}"
     output.mkdir(parents=True, exist_ok=True)
     (output/"COMPLETE").unlink(missing_ok=True)
+    # These generated exports are obsolete; never leave old correlations beside
+    # a newly completed RMSE-inference result. Raw recordings/caches are untouched.
+    for suffix in ('trials.csv.gz','seeds.csv','summary.csv','matched_seeds.csv','matched_summary.csv'):
+        (output/('velocity_agreement_'+suffix)).unlink(missing_ok=True)
     runs, notices = discover(config)
     timings['discovery_seconds'] = time.perf_counter()-analysis_started
     for run in runs: run['_num_workers'] = config.get('num_workers',1)
@@ -755,8 +855,35 @@ def _run_analysis(config):
     for run in runs:
         groups[run["name"]].append(run)
     method_runs = {name: group[0] for name, group in groups.items()}
+    selections={}
+    for name,group in groups.items():
+        if balanced:
+            sampled,_=select_manifest(group,config.get('sampling_budget'),config.get('sampling_seed',0),
+                config.get('samples_per_stratum',32) if config.get('sampling_budget') is None else None,minimum)
+            selection=defaultdict(set)
+            for entry in sampled: selection[entry['run']].add((entry['trial_id'],entry['step']))
+            selections[name]=selection
+        else: selections[name]=None
+    def support(run):
+        selected=selections[run['name']]
+        if selected is not None:
+            ids=selected[str(run['path'])]
+        else:
+            key,saved=cache.lookup('rollout_valid_steps',recording_signature(run))
+            if saved is not None: return saved
+            ids=((e['trial_id'],e['step']) for _,e in candidates(run))
+        by_trial=defaultdict(list)
+        for tid,step in ids: by_trial[int(tid)].append(int(step))
+        result={tid:np.sort(np.asarray(steps,dtype=np.int64)) for tid,steps in by_trial.items()}
+        if selected is None: cache.save(key,result)
+        return result
+    preparation=time.perf_counter()
+    plan=rollout_stats.plan_pairs(runs,config['methods'],support)
+    timings['pair_preparation_seconds']=time.perf_counter()-preparation
     coverage, issues, assumptions, parity_checks = {}, {}, {}, {}
     all_seeds, all_table_seeds, provenance = [], [], []
+    all_rmse_trials=[]
+    timings.update(metric_seconds=0.,completed_run_hits=0)
     failed_fallback = set()
     prediction_sources = defaultdict(int)
     selected_count = 0
@@ -767,17 +894,21 @@ def _run_analysis(config):
                                           reason=reason, count=0, first_transition=entry["transition_id"] if entry else None))
         cell["count"] += 1  # Bounded diagnostic summaries, not millions of error strings.
 
-    with (output/"transition_manifest.jsonl").open("w") as manifest_file:
+    with ExitStack() as resources:
+        manifest_file=resources.enter_context((output/'transition_manifest.jsonl').open('w'))
+        trial_file=resources.enter_context(gzip.open(output/'rollout_rmse_trials.csv.gz','wt',compresslevel=1))
+        trial_header=True
+        def save_rmse(records):
+            nonlocal trial_header
+            if not records: return
+            frame=pd.DataFrame(records)
+            frame.to_csv(trial_file,index=False,header=trial_header); trial_header=False
+            all_rmse_trials.extend(r for r in records if r['variant']=='decoded')
+        # One BARD/GPU owner. Only bounded, pruned CPU metric batches go to workers.
+        pool=resources.enter_context(ProcessPoolExecutor(max_workers=metric_workers,
+            mp_context=multiprocessing.get_context('spawn'),initializer=__import__('analysis_runtime').worker_init)) if metric_workers>1 else None
         for name, group in groups.items():
-            selection = None
-            if balanced:
-                # Each method ID is already hash-validated to exactly one checkpoint.
-                # Budget is PER checkpoint and loading range, never shared across policies.
-                sampled, _ = select_manifest(group, config.get("sampling_budget"), config.get("sampling_seed", 0),
-                    config.get("samples_per_stratum", 32) if config.get("sampling_budget") is None else None, minimum)
-                selection = defaultdict(set)
-                for entry in sampled:
-                    selection[entry["run"]].add((entry["trial_id"], entry["step"]))
+            selection=selections[name]
             model = None
             cached_bard, cached_bard_key = None, None
             for run in group:
@@ -787,6 +918,8 @@ def _run_analysis(config):
                     print(f"Exp3: {name}: {run['path']}", flush=True)
                 meta = run["meta"]
                 stats, table_stats = TrialStatistics(), TrialStatistics(pooled=True)
+                rmse=rollout_stats.TrialRMSE()
+                windows=plan['windows'].get(str(run['path']))
                 bard = None
                 bard_attempted = False
                 if not config.get('dynamics',True): report(run,'BARD dynamics','Explicitly disabled; constant-velocity reference only')
@@ -796,21 +929,60 @@ def _run_analysis(config):
                 provenance.append(dict(method=name, path=str(run["path"]), checkpoint=str(run["checkpoint"]),
                     checkpoint_sha256=meta["checkpoint_sha256"], training_seed=meta.get("checkpoint_training_seed"),
                     evaluation_seed=meta["evaluation_seed"], metadata_sha256=meta_hash, records_sha256=records_hash))
+                data_stamp=recording_signature(run)
+                run['_minimal_fields']=True
+                run['_need_history']=(config.get('fallback_predictions',True) and not recorded_only
+                    and bool(missing_predictions(meta,run['records']['fields'])))
+                run_options={k:config.get(k) for k in ('dynamics','fallback_predictions','recorded_native_only','device','urdf')}
+                run_options['rmse_windows']=windows  # Counterpart failures/selection invalidate only dependent reductions.
+                fallback_dependencies=None
+                if run['_need_history']:
+                    fallback_dependencies=shared.fingerprint([inspect.getsource(build_model),inspect.getsource(infer)]+
+                        [file_hash(ROOT/'rsl_rl/modules'/f) for f in ('actor_critic_b1z1_pact.py','actor_critic_b1z1_pact_pos.py','actor_critic_unifp.py','actor_critic_unifp_original.py')])
+                run_key,completed=(cache.lookup('representation_runs',(name,data_stamp,run_options,fallback_dependencies,
+                    None if selection is None else sorted(selection[str(run['path'])]))) if config.get('cache_completed_runs',True) else (None,None))
+                piece=run_key.with_suffix('.jsonl.gz') if run_key is not None else None
+                if completed is not None and piece.is_file():
+                    with gzip.open(piece,'rt') as src: shutil.copyfileobj(src,manifest_file)
+                    all_seeds.extend(completed['seeds']); all_table_seeds.extend(completed['table_seeds']); save_rmse(completed['rmse_trials'])
+                    for k,v in completed['coverage'].items(): coverage[k]=v
+                    for k,v in completed['issues'].items(): issues[k]=v
+                    assumptions.update(completed['assumptions'])
+                    for k,v in completed['prediction_sources'].items(): prediction_sources[k]+=v
+                    parity_checks[str(run['path'])]=completed['parity']
+                    selected_count+=completed['count']; timings['completed_run_hits']+=1
+                    timings['runs'].append(dict(path=str(run['path']),transitions=completed['count'],wall_seconds=time.monotonic()-started,cached=True))
+                    if config.get('progress',True): print(f"  reused {completed['count']:,} transitions and per-trial statistics",flush=True)
+                    continue
+                if piece is not None:
+                    piece.parent.mkdir(parents=True,exist_ok=True)
+                    piece_stream=gzip.open(piece,'wt',compresslevel=1)
+                    resources.callback(piece_stream.close)
+                else: piece_stream=None
+                sources_before=dict(prediction_sources)
+                pending=deque()
+                def consume(result):
+                    stats.merge(result['stats']); table_stats.merge(result['pooled'])
+                    rmse.merge(result['rmse_sums'])
+                    for component,reason,count,entry in result['issues']:
+                        report(run,component,reason,entry); issues[(run['name'],str(run['path']),component,reason)]['count']+=count-1
+                    for k,v in result['sources'].items(): prediction_sources[k]+=v
                 for batch in native_batches(run, batch_size, None if selection is None else selection[str(run["path"])], coverage):
                     for row in batch:
-                        manifest_file.write(json.dumps(row["entry"], separators=(",", ":"), allow_nan=False)+"\n")
+                        line=json.dumps(row["entry"], separators=(",", ":"), allow_nan=False)+"\n"
+                        manifest_file.write(line)
+                        if piece_stream is not None: piece_stream.write(line)
                     selected_count += len(batch)
                     usable = batch
                     # Each field keeps its stored value; inference fills missing fields only.
                     predictions = [{k:v for k,v in row.items() if k.startswith("prediction_")} for row in usable]
-                    needed = ("prediction_ee_force", "prediction_base_wrench", "prediction_grf") if family(meta).startswith("pact") else ("prediction_explicit",)
-                    missing = [i for i,row in enumerate(usable) if any(k not in predictions[i] for k in needed)
+                    missing = [i for i,row in enumerate(usable) if missing_predictions(meta,predictions[i])
                                and row.get("inference_ready", False)]
                     if missing and config.get("fallback_predictions", True) and not recorded_only and name not in failed_fallback:
                         stage_started = time.perf_counter()
                         try:
                             missing_rows = [usable[i] for i in missing]
-                            key, inferred = cache.lookup('decoder_fallback', (meta, missing_rows, device))
+                            key, inferred = cache.lookup('decoder_fallback', (fallback_dependencies,meta, missing_rows, device))
                             if inferred is None:
                                 if model is None:
                                     model = build_model(run, device)
@@ -832,13 +1004,16 @@ def _run_analysis(config):
                     # BARD is lazy and optional. Complete recorded terms bypass construction.
                     stage_started = time.perf_counter()
                     fixed_batch = [recorded_dynamics(row) if config.get('dynamics',True) else None for row in usable]
+                    stored_terms=[f is not None for f in fixed_batch]
                     terms_needed = any(fixed is None and not all(stored_successor_error(row,v) is not None for v in ('decoded','measured_loading')) for fixed,row in zip(fixed_batch,usable))
                     terms_key, cached_terms = None, None
                     if config.get('dynamics',True) and terms_needed:
-                        terms_key, cached_terms = cache.lookup('bard_terms', (meta, usable, run['initial'],
-                            config.get('urdf'), device, dynamics_batch_size))
+                        # The immutable recording signature already covers mechanics
+                        # and states. Do not recursively rehash histories/decoders.
+                        ids=np.array([(r['entry']['trial_id'],r['entry']['step']) for r in usable],dtype=np.int64)
+                        terms_key, cached_terms = mechanics_cache.lookup('bard_batch_v2', (data_stamp,ids,config.get('urdf'),device))
                         if cached_terms is not None:
-                            fixed_batch = cached_terms
+                            fixed_batch = unpack_terms(cached_terms)
                             terms_needed = False
                     dynamics_inputs=('joint_position_t','joint_velocity_t','base_position_t','base_quaternion_t','base_velocity_world_t','base_angular_velocity_world_t','executed_torque_interval_mean')
                     can_build=any(all(k in row for k in dynamics_inputs) and int(row['trial_id']) in run['initial'] for row in usable)
@@ -870,73 +1045,44 @@ def _run_analysis(config):
                                     except (ValueError, RuntimeError, KeyError) as exc: terms.append(exc)
                             for i,term in zip(indices,terms): fixed_batch[i]=term
                         if all(isinstance(term,dict) for term in fixed_batch):
-                            cache.save(terms_key, fixed_batch)
+                            mechanics_cache.save(terms_key, pack_terms(fixed_batch))
                     timings['dynamics_seconds'] += time.perf_counter()-stage_started
-                    for i, row in enumerate(usable):
-                        entry = row["entry"]
-                        timing = "new_load" if any(not np.allclose(row[k], row["history_"+k], atol=1e-6) for k in LOADS if k in row and "history_"+k in row) else "sustained"
-                        targets = {k:row[field] for k,field in dict(ee_force="history_ee_force_world",base_force="history_base_force_world",base_moment="history_base_moment_world",grf="grf_raw_world_interval_mean").items() if field in row}
-                        physical = {}
-                        for field,value in predictions[i].items():
-                            try:
-                                physical.update(physical_predictions({field:value}, meta, row))
-                            except (ValueError, KeyError) as exc:
-                                report(run, field, str(exc), entry)
-                        for component in targets.keys() - physical.keys():
-                            report(run, component, "Decoder output unavailable; no measured substitution", entry)
-
-                        def accumulate(variant, errors):
-                            finite = {}
-                            for component, value in errors.items():
-                                if np.size(value) and np.isfinite(value).all():
-                                    finite[component] = value
-                                else:
-                                    report(run, component, "Nonfinite/empty error; excluded from this metric", entry)
-                            for accumulator in (stats, table_stats):
-                                accumulator.add(entry, name, variant, finite,
-                                    meta["resolved_environment"]["asset"]["foot_name"], meta["dof_names"], timing)
-
-                        accumulate("decoded", {k: physical[k]-targets[k] for k in physical.keys() & targets.keys()})
-                        fixed = recorded_dynamics(row) if config.get("dynamics", True) else None
-                        if fixed is not None: prediction_sources['stored:dynamics_terms']+=1
-                        if fixed is None and fixed_batch[i] is not None:
-                            try:
-                                fixed = fixed_batch[i]
-                                if isinstance(fixed, Exception):
-                                    raise fixed
-                                notes = tuple(fixed.get("approximation", []))
-                                key = (str(run["path"]), notes)
-                                assumptions[key] = assumptions.get(key, 0)+1
-                                prediction_sources[('cached:' if cached_terms is not None else 'offline:')+'BARD_terms']+=1
-                            except (ValueError, RuntimeError, KeyError) as exc:
-                                fixed = None
-                                report(run, "BARD mechanics", str(exc), entry)
-                        variants = {"constant_velocity": None}
-                        if fixed is not None and all(k in row for k in (*LOADS,"grf_raw_world_interval_mean")):
-                            variants["measured_loading"] = dict(ee_force=row["ee_force_world"], base_force=row["base_force_world"],
-                                base_moment=row["base_moment_world"], grf=row["grf_raw_world_interval_mean"])
-                            if set(physical) == {"ee_force","base_force","base_moment","grf"} and all(np.isfinite(v).all() for v in physical.values()):
-                                variants["decoded"] = physical
-                        if config.get('dynamics',True):
-                            for variant in ('decoded','measured_loading'):
-                                saved_error=stored_successor_error(row,variant)
-                                if saved_error is not None:
-                                    accumulate(variant,velocity_blocks(saved_error,meta['dof_names']))
-                                    variants.pop(variant,None)
-                                    prediction_sources['stored:next_velocity_'+variant]+=1
-                        for variant, values in variants.items():
-                            try:
-                                error = velocity_errors(row, values, fixed, meta["dt"])
-                                accumulate(variant, velocity_blocks(error, meta["dof_names"]))
-                            except (ValueError, KeyError, np.linalg.LinAlgError) as exc:
-                                report(run, variant+" dynamics", str(exc), entry)
+                    for i,fixed in enumerate(fixed_batch):
+                        if stored_terms[i]: prediction_sources['stored:dynamics_terms']+=1
+                        elif isinstance(fixed,dict):
+                            key=(str(run['path']),tuple(fixed.get('approximation',[])))
+                            assumptions[key]=assumptions.get(key,0)+1
+                            prediction_sources[('cached:' if cached_terms is not None else 'offline:')+'BARD_terms']+=1
+                        elif isinstance(fixed,Exception):
+                            report(run,'BARD mechanics',str(fixed),usable[i]['entry']); fixed_batch[i]=None
+                    stage_started=time.perf_counter()
+                    fields={'entry','base_quaternion_t','base_quaternion_xyzw','executed_torque_interval_mean',
+                        'grf_raw_world_interval_mean',*STATE_KEYS,*LOADS,*('history_'+k for k in LOADS),*PREDICTIONS[4:6],*EXPLICIT_STATE_FIELDS}
+                    masks=None if windows is None else rollout_stats.batch_windows(windows,[r['entry'] for r in usable])
+                    job=([{k:v for k,v in r.items() if k in fields} for r in usable],predictions,fixed_batch,meta,name,config.get('dynamics',True),masks)
+                    if pool is None: consume(process_batch(job))
+                    else:
+                        pending.append(pool.submit(process_batch,pack_job(job)))
+                        if len(pending)>=2*metric_workers: consume(pending.popleft().result())
+                    timings['metric_seconds']+=time.perf_counter()-stage_started
                     run_count += len(usable)
                     now = time.monotonic()
                     if config.get("progress", True) and now-last_progress >= 30:
                         print(f"  {run_count:,} transitions; {run_count/max(now-started, 1e-9):.1f}/s; {(now-started)/60:.1f} min", flush=True)
                         last_progress = now
-                all_seeds.extend(stats.seeds())
-                all_table_seeds.extend(table_stats.seeds())
+                while pending: consume(pending.popleft().result())
+                if piece_stream is not None: piece_stream.close()
+                run_seeds,run_table=stats.seeds(),table_stats.seeds()
+                run_rmse=rmse.records(run)
+                all_seeds.extend(run_seeds); all_table_seeds.extend(run_table); save_rmse(run_rmse)
+                run_issues={k:v for k,v in issues.items() if k[:2]==(name,str(run['path']))}
+                # Do not freeze failed optional dependencies into reusable results.
+                reusable=not any(k[2] in ('optional BARD','optional decoder fallback','offline dynamics','BARD mechanics') for k in run_issues)
+                if reusable:
+                    cache.save(run_key,dict(seeds=run_seeds,table_seeds=run_table,rmse_trials=run_rmse,count=run_count,
+                        coverage={k:v for k,v in coverage.items() if k[1]==meta['arguments']['condition'] and k[0]==meta['arguments']['load_range'] and k[-2:]==(meta['evaluation_seed'],name)},
+                        issues=run_issues,assumptions={k:v for k,v in assumptions.items() if k[0]==str(run['path'])},
+                        prediction_sources={k:v-sources_before.get(k,0) for k,v in prediction_sources.items()},parity=parity_state))
                 timings['runs'].append(dict(path=str(run['path']), transitions=run_count,
                     wall_seconds=time.monotonic()-started,
                     chunk_read_worker_seconds=run.get('_chunk_read_seconds',0.)))
@@ -967,7 +1113,14 @@ def _run_analysis(config):
         available=sum(v[0] for v in coverage.values()), selected=selected_count, strata=balance,
         transitions_file="transition_manifest.jsonl", transitions_sha256=file_hash(output/"transition_manifest.jsonl"))
     shared.write_json(output/"transition_manifest.json", manifest)
-    timings.update(total_seconds=time.perf_counter()-analysis_started, cache_hits=cache.hits, cache_misses=cache.misses)
+    statistics_started=time.perf_counter()
+    paired=shared.clean(rollout_stats.paired_results(all_rmse_trials,plan,config))
+    pd.DataFrame(paired.pop('trials')).to_csv(output/'paired_rollout_trials.csv.gz',index=False,compression='gzip')
+    pd.DataFrame(plan['audit']).to_csv(output/'paired_rollout_matching.csv',index=False)
+    paired.update(trial_file='paired_rollout_trials.csv.gz',matching_file='paired_rollout_matching.csv',
+        rmse_trial_file='rollout_rmse_trials.csv.gz')
+    timings['paired_statistics_seconds']=time.perf_counter()-statistics_started
+    timings.update(total_seconds=time.perf_counter()-analysis_started, cache_hits=cache.hits+mechanics_cache.hits, cache_misses=cache.misses+mechanics_cache.misses)
     result = dict(schema_version=VERSION, status="complete", experiment=3, output_dir=str(output),
         timings=timings,
         protocol=shared.protocol(runs[0]["meta"]), configuration=config,
@@ -981,14 +1134,18 @@ def _run_analysis(config):
         comparative_summary=comparative.to_dict("records"), native_parity=parity_checks,
         unavailable=list(issues.values()), diagnostics=sorted(set(notices)), coverage=balance,
         dynamics_approximations=[dict(run=run, assumptions=list(notes), transitions=count) for (run, notes), count in assumptions.items()],
+        paired_rollout=paired,
         units={**UNITS, "arm_velocity_rmse":"rad/s", "leg_velocity_rmse":"rad/s"},
         conventions=dict(benchmark="Each checkpoint's own trajectories; matched conditions, different realized transitions; NOT shared-transition comparison.",
             selection="All eligible native transitions" if not balanced else "Deterministic balanced subsampling WITHOUT replacement within checkpoint and loading range",
             force_target="Previous applied interval visible to native history_t; world SI at body CoM",
             grf_target="Raw interval-average world GRFs; recorded own-trajectory nominal torque and successor-yaw conversion",
             dynamics="q_t mechanics, recorded interval-average executed torque; passive damping/armature with labelled friction/stiffness approximations",
+            explicit_state="Current t: common body vx/vy in m/s (PACT's third estimate is yaw rate; UniFP's is vz); spherical EE estimate converted to yaw-workspace Cartesian meters. Componentwise RMSE, prediction minus measurement, not target tracking.",
             missing="Missing heads never replaced by measured loading in the decoded-loading variant"))
     pd.DataFrame(per_seed).to_csv(output/"per_seed.csv", index=False)
+    for level,key in (('seeds','per_seed'),('summary','summary')):
+        pd.DataFrame(paired[key]).to_csv(output/('paired_rollout_'+level+'.csv'),index=False)
     pd.DataFrame(breakdown).to_csv(output/"breakdown.csv", index=False)
     pd.DataFrame(table_summary).to_csv(output/"summary.csv", index=False)
     comparative.to_csv(output/"checkpoint_summary.csv", index=False)
@@ -1019,7 +1176,8 @@ def export_tables(result, config, output):
             if not records:
                 continue
             frame = pd.DataFrame(records).set_index("Method")
-            frame.columns = pd.MultiIndex.from_tuples([(c, f"{m.replace('_rmse','').replace('_',' ')} [{UNITS[m]}]") for c,m in frame.columns])
+            labels={'explicit_base_velocity_rmse':'explicit base velocity (xy)', 'explicit_ee_position_rmse':'explicit ee position (Cartesian)'}
+            frame.columns = pd.MultiIndex.from_tuples([(c, f"{labels.get(m,m.replace('_rmse','').replace('_',' '))} [{UNITS[m]}]") for c,m in frame.columns])
             name = scope.replace(":","_")+"_"+load
             frame.to_csv(output/(name+"_table.csv"))
             macros = config.get("latex_method_names",{})
