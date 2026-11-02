@@ -142,6 +142,9 @@ def discover(config):
             continue
         for name in methods:
             spec = config["methods"][name]
+            # Distinguish checkpoint versions of the same task without loading weights.
+            if spec.get("checkpoint_sha256") and spec["checkpoint_sha256"] != m["checkpoint_sha256"]:
+                continue
             checkpoint = Path(spec.get("checkpoint") or m["checkpoint"]).expanduser().resolve()
             if spec.get("checkpoint") and checkpoint.is_file() and checkpoint not in checkpoint_hashes:
                 checkpoint_hashes[checkpoint] = file_hash(checkpoint)
@@ -181,7 +184,7 @@ def discover(config):
                 records=shared.read_json(path.parent/"records.json"), trials={r["trial_id"]:r for r in trials}, initial=mechanics))
     if not runs:
         raise ValueError("No completed matching Exp1 recordings/checkpoints")
-    if len({shared.fingerprint(shared.protocol(r["meta"])) for r in runs}) != 1:
+    if len({shared.fingerprint(shared.protocol(r["meta"], config.get('ignore_evaluator_source_hash',False))) for r in runs}) != 1:
         raise ValueError("Incompatible recorded protocols; select one protocol cohort")
     if len({(r["meta"].get("urdf_sha256"),r["meta"].get("converted_urdf_sha256")) for r in runs}) != 1:
         raise ValueError("Recorded robot-model hashes differ")
@@ -912,7 +915,7 @@ def _run_analysis(config):
         if selected is None: cache.save(key,result)
         return result
     preparation=time.perf_counter()
-    plan=rollout_stats.plan_pairs(runs,config['methods'],support)
+    plan=rollout_stats.plan_pairs(runs,config['methods'],support,config.get('rmse_pairs'))
     timings['pair_preparation_seconds']=time.perf_counter()-preparation
     coverage, issues, assumptions, parity_checks = {}, {}, {}, {}
     all_seeds, all_table_seeds, provenance = [], [], []
@@ -1144,7 +1147,7 @@ def _run_analysis(config):
     hierarchical_rows = []
     for item in table_seeds:
         meta = method_runs[item["method"]]["meta"]
-        hierarchical_rows.append(dict(item, task=meta["task"], checkpoint=meta["checkpoint_sha256"],
+        hierarchical_rows.append(dict(item, task=item['method'] if config.get('separate_method_ids',False) else meta["task"], checkpoint=meta["checkpoint_sha256"],
             training_seed=meta.get("checkpoint_training_seed"), seed=item["evaluation_seed"], trial=0, value=item["mean"]))
     comparative = hierarchy(pd.DataFrame(hierarchical_rows),
         ["task", "benchmark", "variant", "load_range", "condition", "metric", "axis"])
@@ -1211,7 +1214,9 @@ def export_tables(result, config, output):
             records = []
             seen_tasks = set()
             for method in result["methods"]:
-                task = result["methods"][method]["task"]
+                # Match the aggregation key: distinct checkpoint aliases must
+                # neither fall back to native task IDs nor collapse into one row.
+                task = method if config.get('separate_method_ids',False) else result["methods"][method]["task"]
                 if task in seen_tasks:
                     continue
                 seen_tasks.add(task)

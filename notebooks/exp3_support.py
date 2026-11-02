@@ -312,17 +312,24 @@ def analyze(config):
     (output / "COMPLETE").unlink(missing_ok=True)
     diagnostics, provenance, scalar_frames, curve_frames = [], [], [], []
     identities, protocols, gains = set(), set(), {}
-    selected = config.get("exp2_tasks", TASKS)
+    method_specs = config.get('support_methods')
+    selected = method_specs if method_specs is not None else config.get("exp2_tasks", TASKS)
     for path in shared.discover(config.get("exp2_roots", []), "metadata.json"):
         if not (path.parent / "COMPLETE").is_file():
             continue
         meta = shared.read_json(path)
-        if meta.get("experiment") != 2 or meta["task"] not in selected:
+        if meta.get("experiment") != 2:
             continue
+        # Numerical caches remain recording-based; aliases only label reductions.
+        matched = ([name for name,spec in method_specs.items() if spec['task']==meta['task']
+                    and spec['checkpoint_sha256']==meta['checkpoint_sha256']] if method_specs is not None
+                   else [meta['task']] if meta['task'] in selected else [])
+        if not matched: continue
+        if len(matched)!=1: raise ValueError('Recording matches multiple support method IDs')
         seed, args = meta["evaluation_seed"], meta["arguments"]
         if seed not in config["evaluation_seeds"] or args["loading"] not in config.get("exp2_loading", ["loaded"]):
             continue
-        task, checkpoint, profile, loading = meta["task"], meta["checkpoint_sha256"], args["profile"], args["loading"]
+        task, checkpoint, profile, loading = matched[0], meta["checkpoint_sha256"], args["profile"], args["loading"]
         identity = (task, checkpoint, seed, profile, loading)
         if identity in identities:
             raise ValueError(f"Duplicate Exp2 cohort: {identity}")
@@ -380,10 +387,10 @@ def analyze(config):
                 seeds = {r["evaluation_seed"] for r in provenance if r["task"] == task and r["profile"] == profile and r["loading"] == loading}
                 if seeds != set(config["evaluation_seeds"]):
                     diagnostics.append(f"{task}/{profile}/{loading}: evaluation seeds {sorted(seeds)}, expected {config['evaluation_seeds']}")
-    pairs = [(TASKS[3], TASKS[4]), (TASKS[4], TASKS[0]), (TASKS[5], TASKS[0])]
+    pairs = config.get('support_pairs',[(TASKS[3], TASKS[4]), (TASKS[4], TASKS[0]), (TASKS[5], TASKS[0])])
     comparisons = [dict(left=a, right=b, available=a in seen and b in seen,
         gains_match=gains.get(a) == gains.get(b) if a in gains and b in gains else None) for a, b in pairs]
-    if comparisons[0]["available"] and not comparisons[0]["gains_match"]:
+    if 'support_pairs' not in config and comparisons[0]["available"] and not comparisons[0]["gains_match"]:
         diagnostics.append("A1 versus A3 gains differ: NOT a matched-gain attribution comparison")
     t0 = time.perf_counter()
     scalar = pd.concat(scalar_frames,ignore_index=True) if scalar_frames else pd.DataFrame()
@@ -442,7 +449,10 @@ def plot_responses(frame, provenance, output, config):
         return
     import matplotlib.pyplot as plt
     plt.rcParams.update({"font.family": "serif", "font.serif": ["Times New Roman", "DejaVu Serif"]})
-    main = TASKS[:3]
+    main = config.get('support_plot_methods',TASKS[:3])
+    names = {**DISPLAY_NAMES,**config.get('display_names',{})}
+    colors = {**dict(zip(TASKS, ("#2277AA", "#CC6677", "#228833", "#AA3377", "#EE7733", "#666666"))),
+              **config.get('support_colors',{})}
     channel = ("load_n", "command_geometry_error_m", "ee_error_m", "arm_pd_weighted_motor_mean_nm",
                "arm_ff_weighted_motor_mean_nm", "arm_executed_torque_mean_nm", "leg_pd_weighted_motor_mean_nm",
                "leg_ff_weighted_motor_mean_nm", "leg_executed_torque_mean_nm", "arm_pd_weighted_motor_ms",
@@ -451,10 +461,11 @@ def plot_responses(frame, provenance, output, config):
                "all_support_mx_nm", "all_support_my_nm", "all_support_mz_nm", "ee_error_m", "velocity_error_m_s")
     feet = sorted(set(frame.metric[frame.metric.str.startswith("foot_") & frame.metric.str.endswith("_fz_n")]) - {"foot_support_fz_n"})
     support += tuple(feet)
-    groups = [("channels", main, channel), ("support", main, support),
-              ("support_A6_PILOT", (TASKS[5], TASKS[0]), support)]
-    groups += [(f"channels_{DISPLAY_NAMES[a]}_{DISPLAY_NAMES[b]}", (a, b), channel)
-               for a, b in ((TASKS[3], TASKS[4]), (TASKS[4], TASKS[0]), (TASKS[5], TASKS[0]))]
+    groups = [("channels", main, channel), ("support", main, support)]
+    if 'support_pairs' not in config:
+        groups.append(("support_A6_PILOT", (TASKS[5], TASKS[0]), support))
+    groups += [(f"channels_{names[a]}_{names[b]}", (a, b), channel)
+               for a, b in config.get('support_pairs',((TASKS[3], TASKS[4]), (TASKS[4], TASKS[0]), (TASKS[5], TASKS[0])))]
     for loading in sorted(frame.loading.unique()):
         for name, methods, metrics in groups:
             metrics = [m for m in metrics if m in set(frame.metric)]
@@ -464,7 +475,7 @@ def plot_responses(frame, provenance, output, config):
                 figsize=(config.get("figure_width", 12), 1.65*(len(metrics)+1)), sharex="col", sharey="row")
             for col, profile in enumerate(exp2.PROFILES):
                 for j, task in enumerate(methods):
-                    color = dict(zip(TASKS, ("#2277AA", "#CC6677", "#228833", "#AA3377", "#EE7733", "#666666")))[task]
+                    color = colors[task]
                     for row, metric in enumerate(metrics):
                         d = frame[(frame.task == task) & (frame.profile == profile) & (frame.loading == loading) & (frame.metric == metric)].sort_values("time_seconds")
                         if d.empty:
@@ -477,7 +488,7 @@ def plot_responses(frame, provenance, output, config):
                         # MS curves remain (Nm)^2; do not average per-step RMS as trial RMS.
                         ax = axes[row, col]
                         x, y, sd = d.time_seconds.to_numpy(float), d["mean"].to_numpy(float), d.sd.to_numpy(dtype=float, na_value=np.nan)
-                        ax.plot(x, y, color=color, label=DISPLAY_NAMES[task])
+                        ax.plot(x, y, color=color, label=names[task])
                         ax.fill_between(x, y-sd, y+sd, color=color, alpha=.15)
                         if metric == "ee_error_m":
                             axes[-1, col].plot(x, d.surviving_trials, color=color)
@@ -509,13 +520,17 @@ def plot_compact(frame, provenance, output, config):
     """Reference provenance stays visible; no force-balance superiority claims."""
     if frame.empty: return
     import matplotlib.pyplot as plt
-    colors = dict(zip(TASKS, ('#2277AA','#CC6677','#228833','#AA3377','#EE7733','#666666')))
+    colors = {**dict(zip(TASKS, ('#2277AA','#CC6677','#228833','#AA3377','#EE7733','#666666'))),
+              **config.get('support_colors',{})}
+    names = {**DISPLAY_NAMES,**config.get('display_names',{})}
     rows = [(['load_n','momentum_contact_interaction_n'], 'Interaction force [N]'),
             (['front_normal_support_n','rear_normal_support_n'], 'Normal support [N]'),
             (['arm_pd_weighted_motor_ms','arm_ff_weighted_motor_ms'], 'Arm usage [(Nm)^2]'),
             (['leg_pd_weighted_motor_ms','leg_ff_weighted_motor_ms'], 'Leg usage [(Nm)^2]'),
             (['ee_error_m','command_geometry_error_m'], 'EE error [m]'), (['velocity_error_m_s'], 'Planar velocity error [m/s]')]
-    for name, methods in [('contact_response',TASKS[:3]),('contact_response_A6_PILOT',(TASKS[5],TASKS[0]))]:
+    groups = [('contact_response',config.get('support_plot_methods',TASKS[:3]))]
+    if 'support_pairs' not in config: groups.append(('contact_response_A6_PILOT',(TASKS[5],TASKS[0])))
+    for name, methods in groups:
         if not set(methods)&set(frame.task): continue
         for loading in sorted(frame.loading.unique()):
             fig,axes = plt.subplots(len(rows)+1,3,figsize=(config.get('figure_width',12),11),sharex='col',squeeze=False)
@@ -538,7 +553,7 @@ def plot_compact(frame, provenance, output, config):
                             sd=d.sd.to_numpy(float); gaps=np.flatnonzero(np.diff(d.step)>1)+1
                             x=np.insert(x,gaps,np.nan); y=np.insert(y,gaps,np.nan); sd=np.insert(sd,gaps,np.nan)
                             ax=axes[row,col]
-                            ax.plot(x,y,color=colors[task],ls='-' if j==0 else '--',label=DISPLAY_NAMES[task])
+                            ax.plot(x,y,color=colors[task],ls='-' if j==0 else '--',label=names[task])
                             ax.fill_between(x,y-sd,y+sd,color=colors[task],alpha=.12)
                             if metric=='ee_error_m': axes[-1,col].plot(d.time_seconds,d.surviving_trials,color=colors[task])
                     if col==0: axes[row,col].set_ylabel(label)
@@ -550,7 +565,7 @@ def plot_compact(frame, provenance, output, config):
                 axes[0,col].set_title(profile.title()+(' (world z)' if profile=='carrying' else ' (initial-heading x)'))
                 axes[-1,col].set_xlabel('Sequence time [s]')
             axes[-1,0].set_ylabel('Surviving trials')
-            handles=[plt.Line2D([],[],color=colors[t],label=DISPLAY_NAMES[t]) for t in methods if t in set(frame.task)]
+            handles=[plt.Line2D([],[],color=colors[t],label=names[t]) for t in methods if t in set(frame.task)]
             fig.legend(handles=handles,loc='upper center',ncol=len(handles))
             fig.text(.5,.005,'Solid / dashed: applied EE / momentum contact; front / rear normal support; PD / FF usage; measured / commanded-geometry EE error.',ha='center',fontsize=config.get('annotation_font_size',8))
             shared.style_figure(fig,config); fig.tight_layout(rect=(0,.03,1,.96))

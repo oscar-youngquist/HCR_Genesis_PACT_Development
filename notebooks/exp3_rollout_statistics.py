@@ -69,7 +69,7 @@ def end_step(run,tid):
     return max(0,min(horizon,int(round(time/run['meta']['dt']))-1))
 
 
-def plan_pairs(runs,methods,support):
+def plan_pairs(runs,methods,support,pairs=None):
     """Resolve hashes and exact shared eligible steps once, before any BARD work.
 
     support(run) loads only compact index fields (or the already selected IDs).
@@ -80,14 +80,25 @@ def plan_pairs(runs,methods,support):
     windows=defaultdict(dict); audit=[]; diagnostics=[]; supports={}
     by_method=defaultdict(list)
     for r in runs: by_method[r['name']].append(r)
-    for on_task,off_task,actor_matched in PAIRS:
-        on_ids=[k for k,v in methods.items() if v['task']==on_task and k in by_method]
-        off_ids=[k for k,v in methods.items() if v['task']==off_task and k in by_method]
-        label=DISPLAY_NAMES[on_task]+' vs '+DISPLAY_NAMES[off_task]
+    if pairs is not None:
+        if any(len(pair)!=2 or pair[0]==pair[1] or any(k not in methods for k in pair) for pair in pairs):
+            raise ValueError('rmse_pairs must contain distinct, configured method IDs')
+        if len({tuple(pair) for pair in pairs}) != len(pairs):
+            raise ValueError('Duplicate rmse_pairs')
+    contrasts=PAIRS if pairs is None else [(a,b,False) for a,b in pairs]
+    for on_task,off_task,actor_matched in contrasts:
+        on_ids=([k for k,v in methods.items() if v['task']==on_task and k in by_method] if pairs is None
+                else [on_task] if on_task in by_method else [])
+        off_ids=([k for k,v in methods.items() if v['task']==off_task and k in by_method] if pairs is None
+                 else [off_task] if off_task in by_method else [])
+        label=(DISPLAY_NAMES[on_task]+' vs '+DISPLAY_NAMES[off_task] if pairs is None else
+               methods[on_task].get('display_name',on_task)+' vs '+methods[off_task].get('display_name',off_task))
         if not on_ids and not off_ids: continue
         if not on_ids or not off_ids:
             diagnostics.append(label+': counterpart unavailable.'); continue
-        if not actor_matched: diagnostics.append(label+': both representation and actor PINNs change.')
+        if not actor_matched:
+            diagnostics.append(label+(': both representation and actor PINNs change.' if pairs is None
+                else ': checkpoint/method comparison, not an isolated representation-PINN ablation.'))
         for on_id,off_id in itertools.product(on_ids,off_ids):
             pair_id=json.dumps([on_id,off_id],separators=(',',':'))
             def run_key(r):
@@ -100,7 +111,7 @@ def plan_pairs(runs,methods,support):
                 a,b=on['meta'],off['meta']
                 aa=a.get('resolved_training',{}).get('algorithm',{}).get('actor_phys_enabled')
                 ba=b.get('resolved_training',{}).get('algorithm',{}).get('actor_phys_enabled')
-                verified=(representation_pinn_status(a)[0] is True and representation_pinn_status(b)[0] is False
+                verified=(pairs is None and representation_pinn_status(a)[0] is True and representation_pinn_status(b)[0] is False
                     and model_signature(a)==model_signature(b) and isinstance(aa,bool) and isinstance(ba,bool)
                     and (aa==ba if actor_matched else aa and not ba))
                 for tid in sorted(set(on['trials'])|set(off['trials'])):
@@ -230,17 +241,19 @@ def paired_results(records,plan,config):
         if r['variant']=='decoded': lookup[(r['run'],r['trial_id'],r['scope'],r['pair_id'],r['block'])]=r
     blocks=('base_linear','base_angular','joint_velocity','arm_velocity','leg_velocity','explicit_base_velocity','explicit_ee_position')
     for match in plan['audit']:
-        if not match['matched']: continue
+        # Explicit method comparisons retain rejected pairs as unavailable rows.
+        # Never loosen scenario/initial-state matching just to obtain a CI.
+        if not match['matched'] and config.get('rmse_pairs') is None: continue
         for scope in ('own_pre_failure','common_pre_failure'):
             for block in blocks:
                 pair=match['pair_id'] if scope=='common_pre_failure' else ''
                 on=lookup.get((match['enabled_run'],match['trial_id'],scope,pair,block))
                 off=lookup.get((match['baseline_run'],match['trial_id'],scope,pair,block))
-                row=dict(match,scope=scope,variant='decoded',block=block,unit=unit_for(block))
+                row=dict(match,motion=match.get('motion','unavailable'),scope=scope,variant='decoded',block=block,unit=unit_for(block))
                 row.update(enabled_rmse=on['rmse'] if on else np.nan,baseline_rmse=off['rmse'] if off else np.nan,
                     enabled_samples=on['samples'] if on else 0,baseline_samples=off['samples'] if off else 0)
                 # Nonfinite decoded rows must not create unequal sensitivity supports.
-                usable=on is not None and off is not None
+                usable=match['matched'] and on is not None and off is not None
                 if scope=='common_pre_failure': usable=usable and on['samples']==off['samples']==match['common_selected_steps']
                 row.update(usable=usable,difference=on['rmse']-off['rmse'] if usable else np.nan)
                 pairs.append(row)
@@ -272,4 +285,6 @@ def paired_results(records,plan,config):
     for r in results: r.setdefault('p_holm',np.nan)
     if any(not r['usable'] for r in pairs): diagnostics.append('Missing/nonfinite velocity data or empty shared samples excluded per metric; attempted pairs retained.')
     return dict(summary=results,per_seed=seed_rows,trials=pairs,diagnostics=diagnostics,
-        convention='Difference = PINN minus control RMSE (negative favors PINNs). Equal trials within fixed evaluation-seed strata, then equal seeds; paired trial percentile bootstrap. CIs are pointwise; p_holm adjusts all reported tests. Fixed checkpoint inference, not independent training replication. Shared-time sensitivity does not make physical states identical.')
+        convention=('Difference = first method minus comparator RMSE (negative favors the first method). ' if config.get('rmse_pairs') is not None else
+            'Difference = PINN minus control RMSE (negative favors PINNs). ')+
+            'Equal trials within fixed evaluation-seed strata, then equal seeds; paired trial percentile bootstrap. CIs are pointwise; p_holm adjusts all reported tests. Fixed checkpoint inference, not independent training replication. Shared-time sensitivity does not make physical states identical.')
