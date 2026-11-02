@@ -169,7 +169,8 @@ class MomentumContact:
 
     Windows are non-overlapping, duration-weighted, and reset at stage/load changes
     or gaps. Partial windows are not exported as full-duration comparisons.
-    Unknown non-foot contact status permits TOTAL contact reconstruction only.
+    Unknown non-foot contact status requires an explicit experiment assumption
+    for foot-only attribution; recorded contact evidence always takes precedence.
     """
     def __init__(self, meta, initial, config=None):
         self.meta, self.initial, self.config = meta, initial, config or {}
@@ -182,6 +183,8 @@ class MomentumContact:
             self.gravity = np.full(3,np.nan); self.notes.add('Recorded gravity unavailable; force reference unavailable')
         threshold = float(self.config.get('contact_nonfoot_threshold_n',1e-6))
         if not np.isfinite(threshold) or threshold < 0: raise ValueError('contact_nonfoot_threshold_n must be finite and nonnegative')
+        self.assume_foot_only = self.config.get('contact_assume_foot_only',False)
+        if not isinstance(self.assume_foot_only,bool): raise ValueError('contact_assume_foot_only must be boolean')
 
     def endpoints(self, data):
         n = len(data['trial_id']); velocity = np.full((n, 3), np.nan); mass = np.full(n, np.nan)
@@ -248,6 +251,12 @@ class MomentumContact:
             if 'body_contacts_interval_mean' in data:
                 contact = data['body_contacts_interval_mean'][:, ids]
                 return np.isfinite(contact).all(1) & (contact == 0).all(1)
+        if self.assume_foot_only:
+            # Exp1 lacks these sensor fields. Use the stated experimental
+            # foot-only assumption, not fabricated contact measurements.
+            self.notes.add('Foot-only contact attribution assumed from experiment protocol (non-foot contact status not recorded).')
+            self.counts['assumed_foot_only_rows'] += n
+            return np.ones(n,bool)
         self.notes.add('Non-foot contacts unrecorded: net foot-GRF metric unavailable; total contact reference retained')
         return np.zeros(n, bool)
 

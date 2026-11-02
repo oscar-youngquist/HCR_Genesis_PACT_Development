@@ -78,6 +78,66 @@ def test_windows_do_not_mix_equal_resultant_load_stages():
     assert (out['momentum_window_start'][complete]>=.2).all()
 
 
+def test_explicit_foot_only_assumption_and_observed_contacts():
+    meta,initial,data=fixture(); del data['nonfoot_contact']
+    cfg={'contact_assume_foot_only':True,'contact_window_seconds':.2}
+    model=c.MomentumContact(meta,initial,cfg)
+    predicted=np.tile([0.,0.,98.1],(len(data['trial_id']),1))
+    out=model.process(data,predicted)
+    assert out['momentum_foot_eligible'][2:].all()
+    complete=out['momentum_window_foot_eligible']
+    assert complete.any()
+    np.testing.assert_allclose(out['momentum_window_prediction'][complete],out['momentum_window_reference'][complete])
+    assert model.counts['assumed_foot_only_rows']==len(data['trial_id'])
+    assert any('assumed from experiment protocol' in n for n in model.notes)
+    data['nonfoot_contact']=np.zeros(len(data['trial_id']),bool); data['nonfoot_contact'][4]=True
+    out=c.MomentumContact(meta,initial,cfg).process(data,predicted)
+    assert not out['momentum_foot_eligible'][4]  # Assumption never overrides actual contact evidence.
+    data.pop('base_force_world')
+    assert np.isnan(c.MomentumContact(meta,initial,cfg).process(data)['momentum_contact_world']).all()
+
+
+def test_representation_assumption_primary_table_and_cache(tmp_path,monkeypatch):
+    from test_exp3_representation import fixture as make, config
+    import exp3_representation as a
+    make(tmp_path/'raw',seeds=(0,))
+    path=tmp_path/'raw/b1z1_pact/0-nominal-in'
+    meta=json.loads((path/'metadata.json').read_text())
+    meta['resolved_environment']['sim']={'gravity':[0,0,-9.81]}
+    meta['resolved_environment'].setdefault('domain_rand',{})['push_robots']=False
+    meta.setdefault('conventions',{})['forces']='world N'
+    (path/'metadata.json').write_text(json.dumps(meta))
+    manifest=json.loads((path/'records.json').read_text())
+    manifest['fields']['robot_com_velocity_world']=dict(shape=[3],dtype='float64')
+    for chunk in manifest['chunks']:
+        f=path/chunk['file']
+        with np.load(f) as saved: arrays=dict(saved)
+        arrays['robot_com_velocity_world']=np.zeros((chunk['rows'],3))
+        np.savez_compressed(f,**arrays)
+    (path/'records.json').write_text(json.dumps(manifest))
+    monkeypatch.setattr(a,'build_model',lambda *a,**k: pytest.fail('Unneeded inference'))
+    monkeypatch.setattr(a,'OfflineBard',lambda *a,**k: pytest.fail('Unneeded dynamics'))
+    cfg=config(tmp_path);cfg.update(recording_roots=[str(path)],evaluation_seeds=[0],
+        cache_enabled=True,cache_dir=str(tmp_path/'cache'),fallback_predictions=False)
+    enabled=a.run_analysis(cfg)
+    assert enabled['momentum_reference_policy']['assume_foot_only_when_unrecorded']
+    assert all(any(r['metric']==m and np.isfinite(r['mean']) for r in enabled['table_summary'])
+               for m in ('grf_net_rmse','grf_net_horizontal_rmse','grf_net_window_rmse'))
+    out=Path(enabled['output_dir'])
+    table=pd.read_csv(out/'native_in_table.csv',header=[0,1],index_col=0)
+    assert pd.notna(table.loc['PILOT',('nominal','Momentum Net GRF (xyz) [N]')])
+    assert 'foot-only experimental assumption' in (out/'native_in_table.tex').read_text()
+    reference=json.loads(next((out/'contact_intervals').glob('*/metadata.json')).read_text())
+    assert reference['assume_foot_only_when_unrecorded']
+    disabled=a.run_analysis(dict(cfg,representation_assume_foot_only_contacts=False))
+    assert not any(r['metric'].startswith('grf_net') for r in disabled['table_summary'])
+    assert disabled['timings']['completed_run_hits']==0  # Changed eligibility invalidates old reductions.
+    unchanged=lambda result: [r for r in result['table_summary'] if not r['metric'].startswith('grf_net')]
+    assert unchanged(enabled)==unchanged(disabled)
+    monkeypatch.setattr(a,'chunks',lambda *a,**k: pytest.fail('Warm cache reread'))
+    assert a.run_analysis(cfg)['timings']['completed_run_hits']==1
+
+
 def test_batched_kinematic_com_and_fk(tmp_path):
     path=tmp_path/'test.urdf'
     path.write_text('<robot name="r"><link name="base"/><link name="arm"/>'

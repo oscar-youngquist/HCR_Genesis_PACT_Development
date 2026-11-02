@@ -841,6 +841,7 @@ def export_contact(output, run, files, report):
     contact.export_references(output,run['path'],files,dict(**report,task=meta['task'],
         checkpoint=meta['checkpoint_sha256'],evaluation_seed=meta['evaluation_seed'],
         urdf_sha256=meta.get('urdf_sha256'),nonfoot_threshold_n=run.get('_contact_config',{}).get('contact_nonfoot_threshold_n',1e-6),
+        assume_foot_only_when_unrecorded=run.get('_contact_config',{}).get('contact_assume_foot_only',False),
         window_seconds=run.get('_contact_config',{}).get('contact_window_seconds',.1)))
 
 
@@ -848,6 +849,11 @@ def _run_analysis(config):
     analysis_started = time.perf_counter()
     timings = dict(decoder_fallback_seconds=0., dynamics_seconds=0., runs=[])
     config = resolve_methods(config)
+    # The experiment excludes non-foot ground contact. Keep this assumption
+    # scoped to representation analysis; observed contacts still exclude rows.
+    config.setdefault('representation_assume_foot_only_contacts',True)
+    if not isinstance(config['representation_assume_foot_only_contacts'],bool):
+        raise ValueError('representation_assume_foot_only_contacts must be boolean')
     physics_signature,reduction_signature=representation_signatures()
     cache = NumericCache(config,signature=reduction_signature)
     mechanics_cache=NumericCache(config,signature=physics_signature)
@@ -959,12 +965,12 @@ def _run_analysis(config):
                     evaluation_seed=meta["evaluation_seed"], metadata_sha256=meta_hash, records_sha256=records_hash))
                 data_stamp=recording_signature(run)
                 run['_minimal_fields']=True
-                run['_contact_config']=config
+                run['_contact_config']=dict(config,contact_assume_foot_only=config['representation_assume_foot_only_contacts'])
                 run['_need_history']=(config.get('fallback_predictions',True) and not recorded_only
                     and bool(missing_predictions(meta,run['records']['fields'])))
                 run_options={k:config.get(k) for k in ('dynamics','fallback_predictions','recorded_native_only','device','urdf')}
                 run_options['rmse_windows']=windows  # Counterpart failures/selection invalidate only dependent reductions.
-                run_options['contact'] = ({k:config.get(k) for k in ('contact_window_seconds','contact_nonfoot_threshold_n')},
+                run_options['contact'] = ({k:config.get(k) for k in ('contact_window_seconds','contact_nonfoot_threshold_n','representation_assume_foot_only_contacts')},
                                           contact.model_signature(meta,config.get('urdf')))
                 fallback_dependencies=None
                 if run['_need_history']:
@@ -1175,6 +1181,8 @@ def _run_analysis(config):
         unavailable=list(issues.values()), diagnostics=sorted(set(notices)), coverage=balance,
         dynamics_approximations=[dict(run=run, assumptions=list(notes), transitions=count) for (run, notes), count in assumptions.items()],
         paired_rollout=paired,
+        momentum_reference_policy=dict(assume_foot_only_when_unrecorded=config['representation_assume_foot_only_contacts'],
+            recorded_nonfoot_contacts_excluded=True,reference='Momentum-derived net contact force, not independent contact sensing'),
         units={**UNITS, "arm_velocity_rmse":"rad/s", "leg_velocity_rmse":"rad/s"},
         conventions=dict(benchmark="Each checkpoint's own trajectories; matched conditions, different realized transitions; NOT shared-transition comparison.",
             selection="All eligible native transitions" if not balanced else "Deterministic balanced subsampling WITHOUT replacement within checkpoint and loading range",
@@ -1218,8 +1226,8 @@ def export_tables(result, config, output):
             frame = pd.DataFrame(records).set_index("Method")
             labels={'explicit_base_velocity_rmse':'explicit base velocity (xy)', 'explicit_ee_position_rmse':'explicit ee position (Cartesian)',
                     'grf_rmse':'Error Against Normal-Only Sensor Forces', 'grf_normal_rmse':'per-foot normal GRF',
-                    'grf_net_rmse':'net contact (xyz)', 'grf_net_horizontal_rmse':'net contact (xy)',
-                    'grf_net_window_rmse':'net contact (window)'}
+                    'grf_net_rmse':'Momentum Net GRF (xyz)', 'grf_net_horizontal_rmse':'Momentum Net GRF (xy)',
+                    'grf_net_window_rmse':'Momentum Net GRF (window)'}
             frame.columns = pd.MultiIndex.from_tuples([(c, f"{labels.get(m,m.replace('_rmse','').replace('_',' '))} [{UNITS[m]}]") for c,m in frame.columns])
             name = scope.replace(":","_")+"_"+load
             frame.to_csv(output/(name+"_table.csv"))
@@ -1230,5 +1238,7 @@ def export_tables(result, config, output):
                 if m in result["methods"]:
                     tex=tex.replace(tokens[config["methods"][m].get("display_name",m)],macro)
             tex=tex.replace("±",r"$\pm$").replace("—","---")
-            (output/(name+"_table.tex")).write_text("\\begin{table*}[t]\n\\centering\n\\caption{Native-trajectory representation and one-step velocity RMSE; "+load+". Matched experimental conditions but different realized trajectories, not shared-transition comparisons. Equal trials, evaluation seeds, then checkpoints; sample SD across checkpoints when available, otherwise evaluation-seed SD. Missing heads/failed validation are unavailable.}\n\\resizebox{\\textwidth}{!}{%\n"+tex+"}\n\\end{table*}\n")
+            contact_note = (' Where non-foot contact observations are absent, net GRF uses the stated foot-only experimental assumption.'
+                if config.get('representation_assume_foot_only_contacts',True) else ' Net GRF requires recorded non-foot contact exclusion.')
+            (output/(name+"_table.tex")).write_text("\\begin{table*}[t]\n\\centering\n\\caption{Native-trajectory representation and one-step velocity RMSE; "+load+". Matched experimental conditions but different realized trajectories, not shared-transition comparisons. Equal trials, evaluation seeds, then checkpoints; sample SD across checkpoints when available, otherwise evaluation-seed SD. Missing heads/failed validation are unavailable. Net GRF uses a momentum-derived dynamics-consistency reference, not independent contact sensing."+contact_note+"}\n\\resizebox{\\textwidth}{!}{%\n"+tex+"}\n\\end{table*}\n")
 

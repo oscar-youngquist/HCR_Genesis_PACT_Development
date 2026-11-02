@@ -279,12 +279,18 @@ restart at stage/load changes, gaps, or invalid samples. Partial windows remain
 unavailable. Existing optional sampling selects these diagnostics at the sampled
 interval/window endpoints; window averages use their full contiguous support.
 
-Net **foot**-GRF comparisons require recorded exclusion of non-foot contact.
-Exp1 recordings without these channels therefore retain aggregate-contact
-reconstructions but have unavailable foot-only net metrics. `contact_nonfoot_threshold_n`
-(default `1e-6`) applies to recorded non-foot forces; recorded substep contact
-flags additionally exclude contact intervals. The resultant is never split
-among feet. This is a momentum/dynamics-consistency diagnostic related to rollout
+The representation analysis defaults to `representation_assume_foot_only_contacts=True`,
+using the stated experimental absence of other ground contacts when Exp1 did not
+record contact exclusion channels. Its primary tables include **Momentum Net GRF**
+componentwise RMSE for xyz, xy, and complete windows. The assumption, selected
+counts, and provenance are saved with contact references, the main result JSON,
+and the LaTeX caption. Set the flag to False to restore strict recorded-contact
+exclusion. Changing it invalidates completed reduction caches, not BARD mechanics.
+Recorded non-foot contacts still exclude intervals in either mode;
+`contact_nonfoot_threshold_n` (default `1e-6`) applies to recorded non-foot forces,
+and recorded substep contact flags additionally exclude intervals. The setting
+does not change the Exp2 support analysis. Missing GRF heads remain unavailable.
+The resultant is never split among feet. This is a momentum/dynamics-consistency diagnostic related to rollout
 accuracy, not independent sensing. No reconstructed force is fed into any
 existing joint-level rollout, and its force-balance closure is not a control score.
 
@@ -354,9 +360,11 @@ Both compact PDFs/PNGs were inspected and regenerated from exported curves
 without raw data. The URDF CoM fallback matched recorded CoM endpoint velocity
 on 128 real samples with 2.23e-7 m/s RMS and 1.29e-6 m/s maximum discrepancy.
 An Exp1 smoke scored 512 selected transitions and reconstructed all stream
-endpoints on CPU without Torch/BARD/simulator initialization. Exp1 foot-only
-net-GRF metrics remained unavailable because non-foot contacts were not recorded;
-normal-GRF metrics and aggregate contact references were available.
+endpoints on CPU without Torch/BARD/simulator initialization. With the strict
+contact-exclusion setting used for that smoke, Exp1 foot-only net-GRF metrics
+were unavailable; normal-GRF metrics and aggregate references were available.
+The representation default now uses the explicit experimental foot-only assumption
+above, enabling its net-GRF columns without recollecting contact channels.
 
 The real vertical consistency diagnostic is **not uniformly small**: absolute
 stage-mean discrepancies reach about 45 N under horizontal loading. These are
@@ -366,3 +374,56 @@ independently validated force reference: the calculation assumes the recorded
 world loads are complete/frame-correct. The source of that recording/model
 discrepancy is not resolved here; no frame/force calibration or collection change
 was made. Existing GPU BARD rollouts were not rerun by these real-data smoke tests.
+
+## Compact Carrying Figure and Refinement ZIP
+
+This separate export reuses the Exp3 reader and commanded-geometry FK without
+running representation analysis, momentum reconstruction, inference, or simulation:
+
+```bash
+python notebooks/exp3_carrying_figure.py --root evaluation/exp2 \
+  --output analysis/exp3_carrying_compact --workers 2
+```
+
+It selects completed carrying/loaded recordings for PILOT and A6 by metadata,
+requires one checkpoint per method and matching evaluation-seed coverage, and
+defaults to seeds 0/1/2. Use repeated `--seed` or `--checkpoint task=SHA256` to
+narrow selection. Duplicate cohorts or incompatible protocols fail explicitly.
+The current recordings specify unloaded locomotion at **3.5-8 s**, loads of
+**25/55/35 N at 8/13/18 s**, stopping at **20 s**, and release at **23 s**.
+Numeric metadata, not stale stage names, determines these values.
+
+The 7 x 2.2 inch three-panel figure uses measured front/rear normal-support
+changes, arm/leg requested feedforward RMS changes, and actual/commanded EE
+errors. Normal forces are not complete GRFs. Geometry uses the existing
+FK(mean delayed position target), measured-base-at-t approximation. Force and
+torque use interval-midpoint timestamps; geometry uses t; actual tracking uses
+the successor timestamp/reference. Native intervals are assigned to configurable
+0.25 s bins, split at stage boundaries, without interpolation. Bins spanning
+gaps are excluded; failures are never padded. Trial baselines precede trial-bin
+reductions, equal-trial seed means, then equal-seed means and sample SD.
+
+`analysis/exp3_carrying_compact.zip` contains the standalone renderer, editable
+plot configuration, compressed native scalar/square/count data, provenance,
+per-trial/baseline/seed/aggregate CSVs, and PDF/SVG/300-dpi PNG. It excludes raw
+observations, checkpoints, dynamics/contact caches, and unrelated analyses.
+Unpack elsewhere and run `python render_figure.py`: only NumPy, pandas, and
+Matplotlib are needed. No repository or robot model is needed. Change bin width,
+baseline bounds, fonts, colors, limits, legends, or smoothing in `plot_config.json`.
+Optional smoothing pools sufficient statistics before RMS, never averages RMS.
+Times New Roman is preferred with an explicit DejaVu Serif fallback. The README,
+metadata, and render report document sample counts, units, frames, exclusions,
+and the distinction between evaluation-seed variability and independent training.
+
+Focused tests: `python -m pytest tests/test_exp3_carrying_figure.py -q`.
+
+Validation on the available recordings: 300 trials / 420,000 control intervals
+from six method/seed recordings. The new tests plus `test_exp3_support.py` passed
+19 checks. Against existing Exp3 stage summaries, 1,200 baseline values matched
+within 1.24e-7 and 24 geometry/tracking means within 6.5e-9 m. Direct raw-record
+checks matched 144 plotted-bin values within 5.9e-14 and all 72 tested torque
+denominators exactly. The ZIP was unpacked to an unrelated directory and rendered
+with isolated Python (`python -I render_figure.py`); all four numerical CSVs
+reproduced exactly. The 7 x 2.2 inch PDF was rasterized for visual inspection;
+Times New Roman and mathematical-symbol TrueType subsets were embedded. The ZIP
+includes `validation.json` with the checks and PDF/font inspection results.
