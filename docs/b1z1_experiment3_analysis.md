@@ -242,3 +242,127 @@ python -m pytest tests/test_exp3_representation.py tests/test_exp3_representatio
 The notebook smoke uses synthetic saved predictions and all three Exp2 profiles
 on CPU. Real frozen-network replay needs PyTorch; BARD dynamics additionally needs
 the BARD/Pinocchio/CUDA dependencies. Synthetic success is not simulator validation.
+
+### Momentum Contact and Normal-Force Metrics
+
+Contact sensors in these recordings omit tangential friction. The historical
+`grf_rmse` is retained as **Error Against Normal-Only Sensor Forces**, not total
+GRF ground truth. New `grf_normal_rmse` projects each predicted/raw sensor force
+onto world z on the recorded plane (otherwise recorded surface normals are
+required). Its `all` value is componentwise RMSE across feet; named-foot rows
+retain individual RMSE/bias/counts. Unsupported decoder heads remain unavailable.
+
+`exp3_contact.py` reconstructs **Momentum-Derived Net Contact Force** in world N:
+`m*(v_COM_end-v_COM_start)/duration - m*g - external_force_average`.
+Exp2 uses recorded successor CoM velocity, or mass-weighted recorded body CoM
+velocities. Exp1 uses batched URDF kinematics, recorded root-link/joint states,
+and per-trial PhysX masses/local CoM poses. The URDF hash must match. This path
+requires only NumPy/SciPy, not Torch, BARD, checkpoints, or forward dynamics.
+It never substitutes torso or learned velocity. Unknown mechanics/loads produce
+unavailable references rather than guessed values.
+
+The previous consecutive valid successor supplies the current interval's start
+endpoint. The initial interval is skipped; chunk boundaries/interleaved robots
+are supported, gaps/resets/failures are not crossed. Actual applied interval
+averages take priority. For older Exp1 fields, the inspected collector sets
+`ee_force_world` and `base_force_world` once before each control interval and
+holds them throughout; endpoint commands change, but those loads do not. Absent
+loads are never implicitly zero. Moments do not enter linear momentum balance.
+
+`grf_net_rmse` compares summed decoded feet with this reference; its x/y/z
+breakdowns and `all = sqrt(mean(error_xyz**2))` use N, not norm-RMSE.
+`grf_net_horizontal_rmse` uses x/y only. `grf_net_window_rmse` compares identical
+duration-averaged predicted/reference windows, integrating loads and using
+window endpoint momentum. `contact_window_seconds=0.10` sets the minimum complete
+non-overlapping window duration (rounded up to a control endpoint). Windows
+restart at stage/load changes, gaps, or invalid samples. Partial windows remain
+unavailable. Existing optional sampling selects these diagnostics at the sampled
+interval/window endpoints; window averages use their full contiguous support.
+
+Net **foot**-GRF comparisons require recorded exclusion of non-foot contact.
+Exp1 recordings without these channels therefore retain aggregate-contact
+reconstructions but have unavailable foot-only net metrics. `contact_nonfoot_threshold_n`
+(default `1e-6`) applies to recorded non-foot forces; recorded substep contact
+flags additionally exclude contact intervals. The resultant is never split
+among feet. This is a momentum/dynamics-consistency diagnostic related to rollout
+accuracy, not independent sensing. No reconstructed force is fed into any
+existing joint-level rollout, and its force-balance closure is not a control score.
+
+Exp2 compact `contact_response_loaded.{pdf,png}` and
+`contact_response_A6_PILOT_loaded.{pdf,png}` separate reconstructed interaction
+support from measured front/rear normal redistribution, channel usage, tracking,
+and survivor counts. Mean-square curves are labelled `(Nm)^2`; stage RMS takes
+the square root **after** averaging recorded substep squares. Existing normal-only
+moment cross-products are retained. Total angular-momentum reconstruction remains
+unavailable without a verified complete external angular impulse about the moving
+CoM; requesting `contact_moment_reconstruction=True` reports this without blocking
+force analysis. `support_legacy_figures=True` also regenerates the older large grids.
+
+Each section exports `contact_intervals/<recording-id>/intervals-*.npz` and
+`metadata.json`: trial/step IDs, interval timestamps, whole-CoM endpoint velocity
+in m/s, mass in kg, applied interval force, reference force in N, foot eligibility,
+complete-window reference/prediction/start/duration, counts and provenance.
+NaNs in numeric arrays mean unavailable; metadata JSON is standards-compliant.
+Exp2 also exports `trial_stages.csv`, `per_seed_stages.csv`, `summary.csv`,
+`per_seed_curves.csv`, `curves.csv`, and `timings.json`. Trial/seed/checkpoint
+weighting and all non-GRF representation/rollout definitions are unchanged.
+
+Support is independently runnable after the notebook imports/config cell:
+
+```python
+import exp3_support
+support = exp3_support.analyze(CONFIG)
+```
+
+Bounded `num_workers` now reaches support's chunk readers. FK transforms and
+joint/foot mappings are precomputed, reductions operate on chunk arrays, and
+checkpoint/training-seed metadata is grouped once rather than scanned per
+metric/time bin. Per-recording caches include code, numerical options, URDF
+content, schema/initial-state metadata, and chunk size/mtime signatures. Plotting
+options do not invalidate numerical caches. Memory holds one recording's compact
+derived references plus bounded chunks, not histories/full trajectories.
+
+Focused checks (including CPU notebook smoke execution):
+
+```bash
+python -m pytest tests/test_exp3_contact.py tests/test_exp3_support.py \
+  tests/test_exp3_representation.py tests/test_exp3_representation_speed.py \
+  tests/test_exp3_rollout_statistics.py -q -p no:cacheprovider
+```
+
+### Validation and Benchmark (2026-11-01)
+
+The focused suite passed 57 tests with three optional Torch-dependent checks
+skipped in the base Python environment. Those three checks were run separately
+in `lr_lab_cupiqp` with `CUDA_VISIBLE_DEVICES=''` and passed. Syntax compilation,
+notebook schema validation, and scoped whitespace checks also passed.
+
+On the identical 70,000-row PILOT pushing/loaded/seed-0 recording, unprofiled
+numerical analysis plus exports (figures disabled in **both** versions) took
+213.9 s before versus approximately 5.5 s with an empty analysis cache, about
+39x faster. A warm numerical-cache rerun took 0.93 s. This is not a filesystem
+cache-flushing benchmark. The old single-process peak RSS was 323 MiB; optimized
+peak summed process RSS was approximately 340 MiB including two bounded readers
+(sampled every 20 ms), versus approximately 300 MiB warm. The instrumented old
+run spent 206/259 s in hierarchy aggregation; the optimized grouped aggregation
+takes approximately 0.18 s. Unchanged scalar/curve results agree within 1.6e-8
+(metres for the largest FK difference); counts match exactly.
+
+A real cold smoke processed 12 Exp2 recordings, 840,000 rows, all three profiles
+for PILOT/UniFP/Pos/A6 at evaluation seed 0 in 68.1 s including figures/exports.
+Both compact PDFs/PNGs were inspected and regenerated from exported curves
+without raw data. The URDF CoM fallback matched recorded CoM endpoint velocity
+on 128 real samples with 2.23e-7 m/s RMS and 1.29e-6 m/s maximum discrepancy.
+An Exp1 smoke scored 512 selected transitions and reconstructed all stream
+endpoints on CPU without Torch/BARD/simulator initialization. Exp1 foot-only
+net-GRF metrics remained unavailable because non-foot contacts were not recorded;
+normal-GRF metrics and aggregate contact references were available.
+
+The real vertical consistency diagnostic is **not uniformly small**: absolute
+stage-mean discrepancies reach about 45 N under horizontal loading. These are
+retained in `vertical_support_consistency.csv` and reported above the configurable
+5 N warning threshold. Do not interpret this as a control advantage or an
+independently validated force reference: the calculation assumes the recorded
+world loads are complete/frame-correct. The source of that recording/model
+discrepancy is not resolved here; no frame/force calibration or collection change
+was made. Existing GPU BARD rollouts were not rerun by these real-data smoke tests.

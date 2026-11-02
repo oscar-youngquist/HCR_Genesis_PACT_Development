@@ -136,6 +136,21 @@ def process_batch(job):
         if component not in physical:
             issue(component,'Decoder output unavailable; no measured substitution',np.arange(n))
         else: errors[component]=physical[component]-stack(key)
+    # New sensor-normal and momentum diagnostics do NOT replace physical['grf']
+    # or any loading supplied to the legacy one-step dynamics calculation.
+    if 'grf' in physical:
+        from exp3_contact import normal_errors
+        context={k:stack(k) for k in ('grf_raw_world_interval_mean','surface_normals_world') if all(k in r for r in rows)}
+        normal=normal_errors(physical['grf'],context,meta)
+        if normal is not None: errors['grf_normal']=normal
+        else: issue('grf_normal','Surface normals unavailable for non-flat terrain',np.arange(n))
+        if all('momentum_contact_world' in r for r in rows):
+            eligible=stack('momentum_foot_eligible').astype(bool)
+            net=physical['grf'].sum(1)-stack('momentum_contact_world')
+            net[~eligible]=np.nan
+            errors['grf_net']=net
+            errors['grf_net_horizontal']=net[:,:2]
+            errors['grf_net_window']=stack('momentum_window_prediction')-stack('momentum_window_reference')
     stats,pooled=a.TrialStatistics(),a.TrialStatistics(pooled=True)
     def accumulate(variant,values):
         for component,value in values.items():

@@ -3,6 +3,16 @@ import numpy as np
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 from legged_gym.envs.b1z1.rejection_curriculum import RejectionCurriculumDefaults
 
+# The current Isaac Lab contact-sensor pipeline records only normal contact forces, omitting the 
+# tangential friction forces needed to represent complete ground-reaction forces (GRFs). 
+# On flat terrain, this produces nearly zero horizontal GRF labels despite friction contributing 
+# to the robot’s motion, creating a mismatch between reconstruction supervision and 
+# dynamics-based objectives and limiting horizontal support analysis. 
+# The fix is to retrieve tangential forces from the underlying PhysX contact API, 
+# aggregate them per foot, and combine them with the normal forces at each physics substep. 
+# After validating units, coordinate frames, and force balance, these total GRFs should be 
+# used consistently for training targets, dynamics objectives, observations that consume GRFs, 
+# and evaluation recordings, with support moments updated accordingly.
 
 class B1Z1PACTCfg(LeggedRobotCfg):
     use_force_shifted_target = False  # Disturbance rejection tracks nominal trajectories.

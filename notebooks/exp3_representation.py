@@ -21,6 +21,7 @@ from analysis_runtime import NumericCache, ordered_work, timed_read_chunk
 from exp3_representation_batch import (pack_terms, unpack_terms, process_batch, pack_job,
     STATE_KEYS, PREDICTIONS, EXPLICIT_STATE_FIELDS, missing_predictions)
 import exp3_rollout_statistics as rollout_stats
+import exp3_contact as contact
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = 5
@@ -28,6 +29,8 @@ MAIN = ("ee_force_rmse", "base_force_rmse", "base_moment_rmse", "grf_rmse",
         "base_linear_rmse", "base_angular_rmse", "joint_velocity_rmse",
         "explicit_base_velocity_rmse", "explicit_ee_position_rmse")
 UNITS = dict(zip(MAIN, ("N", "N", "Nm", "N", "m/s", "rad/s", "rad/s", "m/s", "m")))
+MAIN = MAIN[:3] + ('grf_normal_rmse', 'grf_net_rmse', 'grf_net_horizontal_rmse', 'grf_net_window_rmse') + MAIN[3:]
+UNITS.update({k:'N' for k in MAIN if k.startswith('grf_')})
 LOADS = ("ee_force_world", "base_force_world", "base_moment_world")
 INDEX_FIELDS = ("trial_id", "step", "phase", "valid", "alive_for_metrics", "physical_failure", "artificial_reset")
 
@@ -323,8 +326,22 @@ def native_batches(run, batch_size, selection, coverage):
         fields=[k for k in fields if k not in aliases or k==keep_alias]
     if not run.get('_need_history',True):
         fields=[k for k in fields if k not in ('history_t','obs_t','prediction_grf_torque_input_nm')]
+    # Reuse this stream; no second trajectory read or forward-dynamics solve.
+    fields = sorted(set(fields) | (contact.FIELDS & set(run['records']['fields'])))
+    momentum = contact.MomentumContact(meta, run.get('initial',{}), run.get('_contact_config',{}))
+    run['_contact_files'] = []
     last, batch = {}, []
     for filename, arrays in chunks(run, fields):
+        predicted_net = None
+        if 'prediction_grf' in arrays:
+            try: predicted_net = physical_predictions({'prediction_grf':arrays['prediction_grf']},meta,arrays)['grf'].sum(1)
+            except (KeyError,ValueError): pass  # Only this optional metric is unavailable.
+        reconstructed = momentum.process(arrays, predicted_net)
+        if run.get('_contact_dir') is not None:
+            run['_contact_files'].append(contact.save_reference_chunk(run['_contact_dir'],len(run['_contact_files']),
+                {**reconstructed, **{k:arrays[k] for k in ('trial_id','step','time_seconds','successor_time_seconds','phase')}}))
+        arrays.update({k:reconstructed[k] for k in contact.OUTPUT_FIELDS})
+        run['_contact_report'] = dict(eligibility=dict(momentum.counts),notes=sorted(momentum.notes))
         # Validate dense numeric contracts once per chunk, not with tiny NumPy
         # dispatches for every transition. Only eligible/selected rows are enforced.
         timestamps_match = (np.isclose(arrays["time_seconds"], arrays["step"]*dt)
@@ -647,6 +664,8 @@ def metric_rows(entry, method, benchmark, variant, errors, foot_names, dof_names
             continue
         labels = [f"{foot}_{axis}" for foot in foot_names for axis in "xyz"] if field == "grf" else (
             list(dof_names) if field == "joint_velocity" else list("xyz") if error.size == 3 else [str(i) for i in range(error.size)])
+        if field == 'grf_normal': labels = list(foot_names)
+        if field == 'grf_net_horizontal': labels = ['x','y']
         if field in ("arm_velocity", "leg_velocity"):
             labels = [n for n in dof_names if n.startswith("z1_") == (field == "arm_velocity")]
         if field == 'explicit_base_velocity': labels = ['x','y']
@@ -803,7 +822,7 @@ def representation_signatures():
         [file_hash(ROOT/'legged_gym/dynamics'/f) for f in ('bard_b1z1_dynamics.py','whole_body_dynamics.py')]+[versions,np.__version__])
     reduction=shared.fingerprint([inspect.getsource(f) for f in (native_batches,physical_predictions,
         TrialStatistics,recorded_dynamics,stored_successor_error,merge_seed_statistics,select_manifest,candidates,rollout_stats.TrialRMSE)]+
-        [file_hash(Path(batch.__file__)),physics,np.__version__,scipy.__version__])
+        [file_hash(Path(batch.__file__)),file_hash(Path(contact.__file__)),physics,np.__version__,scipy.__version__])
     return physics,reduction
 
 
@@ -814,6 +833,15 @@ def recording_signature(run):
     return shared.fingerprint(dict(files=[(str(p),file_hash(p) if p.exists() else None) for p in paths],
         chunks=[(c['file'],(run['path']/c['file']).stat().st_size,(run['path']/c['file']).stat().st_mtime_ns)
                 for c in run['records']['chunks']]))
+
+
+def export_contact(output, run, files, report):
+    """Small reference arrays, independent of BARD/decoder dynamics and their caches."""
+    meta=run['meta']
+    contact.export_references(output,run['path'],files,dict(**report,task=meta['task'],
+        checkpoint=meta['checkpoint_sha256'],evaluation_seed=meta['evaluation_seed'],
+        urdf_sha256=meta.get('urdf_sha256'),nonfoot_threshold_n=run.get('_contact_config',{}).get('contact_nonfoot_threshold_n',1e-6),
+        window_seconds=run.get('_contact_config',{}).get('contact_window_seconds',.1)))
 
 
 def _run_analysis(config):
@@ -931,10 +959,13 @@ def _run_analysis(config):
                     evaluation_seed=meta["evaluation_seed"], metadata_sha256=meta_hash, records_sha256=records_hash))
                 data_stamp=recording_signature(run)
                 run['_minimal_fields']=True
+                run['_contact_config']=config
                 run['_need_history']=(config.get('fallback_predictions',True) and not recorded_only
                     and bool(missing_predictions(meta,run['records']['fields'])))
                 run_options={k:config.get(k) for k in ('dynamics','fallback_predictions','recorded_native_only','device','urdf')}
                 run_options['rmse_windows']=windows  # Counterpart failures/selection invalidate only dependent reductions.
+                run_options['contact'] = ({k:config.get(k) for k in ('contact_window_seconds','contact_nonfoot_threshold_n')},
+                                          contact.model_signature(meta,config.get('urdf')))
                 fallback_dependencies=None
                 if run['_need_history']:
                     fallback_dependencies=shared.fingerprint([inspect.getsource(build_model),inspect.getsource(infer)]+
@@ -942,6 +973,9 @@ def _run_analysis(config):
                 run_key,completed=(cache.lookup('representation_runs',(name,data_stamp,run_options,fallback_dependencies,
                     None if selection is None else sorted(selection[str(run['path'])]))) if config.get('cache_completed_runs',True) else (None,None))
                 piece=run_key.with_suffix('.jsonl.gz') if run_key is not None else None
+                run['_contact_dir'] = (run_key.with_suffix('') if run_key is not None else
+                    output/'contact_intervals'/shared.fingerprint(str(run['path']))[:16])
+                if completed is not None and not all(Path(f).is_file() for f in completed.get('contact_files',[])): completed = None
                 if completed is not None and piece.is_file():
                     with gzip.open(piece,'rt') as src: shutil.copyfileobj(src,manifest_file)
                     all_seeds.extend(completed['seeds']); all_table_seeds.extend(completed['table_seeds']); save_rmse(completed['rmse_trials'])
@@ -950,6 +984,7 @@ def _run_analysis(config):
                     assumptions.update(completed['assumptions'])
                     for k,v in completed['prediction_sources'].items(): prediction_sources[k]+=v
                     parity_checks[str(run['path'])]=completed['parity']
+                    export_contact(output,run,completed.get('contact_files',[]),completed.get('contact_report',{}))
                     selected_count+=completed['count']; timings['completed_run_hits']+=1
                     timings['runs'].append(dict(path=str(run['path']),transitions=completed['count'],wall_seconds=time.monotonic()-started,cached=True))
                     if config.get('progress',True): print(f"  reused {completed['count']:,} transitions and per-trial statistics",flush=True)
@@ -1057,7 +1092,7 @@ def _run_analysis(config):
                             report(run,'BARD mechanics',str(fixed),usable[i]['entry']); fixed_batch[i]=None
                     stage_started=time.perf_counter()
                     fields={'entry','base_quaternion_t','base_quaternion_xyzw','executed_torque_interval_mean',
-                        'grf_raw_world_interval_mean',*STATE_KEYS,*LOADS,*('history_'+k for k in LOADS),*PREDICTIONS[4:6],*EXPLICIT_STATE_FIELDS}
+                        'grf_raw_world_interval_mean','surface_normals_world',*contact.OUTPUT_FIELDS,*STATE_KEYS,*LOADS,*('history_'+k for k in LOADS),*PREDICTIONS[4:6],*EXPLICIT_STATE_FIELDS}
                     masks=None if windows is None else rollout_stats.batch_windows(windows,[r['entry'] for r in usable])
                     job=([{k:v for k,v in r.items() if k in fields} for r in usable],predictions,fixed_batch,meta,name,config.get('dynamics',True),masks)
                     if pool is None: consume(process_batch(job))
@@ -1071,6 +1106,10 @@ def _run_analysis(config):
                         print(f"  {run_count:,} transitions; {run_count/max(now-started, 1e-9):.1f}/s; {(now-started)/60:.1f} min", flush=True)
                         last_progress = now
                 while pending: consume(pending.popleft().result())
+                export_contact(output,run,run.get('_contact_files',[]),run.get('_contact_report',{}))
+                for note in run.get('_contact_report',{}).get('notes',[]):
+                    if any(word in note for word in ('unavailable','unrecorded','mismatch')):
+                        report(run,'momentum reference',note)
                 if piece_stream is not None: piece_stream.close()
                 run_seeds,run_table=stats.seeds(),table_stats.seeds()
                 run_rmse=rmse.records(run)
@@ -1080,6 +1119,7 @@ def _run_analysis(config):
                 reusable=not any(k[2] in ('optional BARD','optional decoder fallback','offline dynamics','BARD mechanics') for k in run_issues)
                 if reusable:
                     cache.save(run_key,dict(seeds=run_seeds,table_seeds=run_table,rmse_trials=run_rmse,count=run_count,
+                        contact_files=run.get('_contact_files',[]),contact_report=run.get('_contact_report',{}),
                         coverage={k:v for k,v in coverage.items() if k[1]==meta['arguments']['condition'] and k[0]==meta['arguments']['load_range'] and k[-2:]==(meta['evaluation_seed'],name)},
                         issues=run_issues,assumptions={k:v for k,v in assumptions.items() if k[0]==str(run['path'])},
                         prediction_sources={k:v-sources_before.get(k,0) for k,v in prediction_sources.items()},parity=parity_state))
@@ -1139,7 +1179,7 @@ def _run_analysis(config):
         conventions=dict(benchmark="Each checkpoint's own trajectories; matched conditions, different realized transitions; NOT shared-transition comparison.",
             selection="All eligible native transitions" if not balanced else "Deterministic balanced subsampling WITHOUT replacement within checkpoint and loading range",
             force_target="Previous applied interval visible to native history_t; world SI at body CoM",
-            grf_target="Raw interval-average world GRFs; recorded own-trajectory nominal torque and successor-yaw conversion",
+            grf_target="Legacy vector metric: Error Against Normal-Only Sensor Forces. New normal metric projects onto flat-ground z (or recorded surface normals). Net metric: Momentum-Derived Net Contact Force, foot-only eligible intervals/windows; componentwise RMSE, not vector-norm RMSE. Recorded nominal torque and successor-yaw decoder conversion retained.",
             dynamics="q_t mechanics, recorded interval-average executed torque; passive damping/armature with labelled friction/stiffness approximations",
             explicit_state="Current t: common body vx/vy in m/s (PACT's third estimate is yaw rate; UniFP's is vz); spherical EE estimate converted to yaw-workspace Cartesian meters. Componentwise RMSE, prediction minus measurement, not target tracking.",
             missing="Missing heads never replaced by measured loading in the decoded-loading variant"))
@@ -1176,7 +1216,10 @@ def export_tables(result, config, output):
             if not records:
                 continue
             frame = pd.DataFrame(records).set_index("Method")
-            labels={'explicit_base_velocity_rmse':'explicit base velocity (xy)', 'explicit_ee_position_rmse':'explicit ee position (Cartesian)'}
+            labels={'explicit_base_velocity_rmse':'explicit base velocity (xy)', 'explicit_ee_position_rmse':'explicit ee position (Cartesian)',
+                    'grf_rmse':'Error Against Normal-Only Sensor Forces', 'grf_normal_rmse':'per-foot normal GRF',
+                    'grf_net_rmse':'net contact (xyz)', 'grf_net_horizontal_rmse':'net contact (xy)',
+                    'grf_net_window_rmse':'net contact (window)'}
             frame.columns = pd.MultiIndex.from_tuples([(c, f"{labels.get(m,m.replace('_rmse','').replace('_',' '))} [{UNITS[m]}]") for c,m in frame.columns])
             name = scope.replace(":","_")+"_"+load
             frame.to_csv(output/(name+"_table.csv"))
