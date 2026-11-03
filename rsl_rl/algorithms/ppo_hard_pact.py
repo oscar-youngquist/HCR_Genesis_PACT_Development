@@ -972,9 +972,6 @@ class PPO_HardPACT:
                 kind="actual",
                 q=flat["pre_q"], v=flat["pre_v"], parameters=actual,
                 post_v=flat["post_v"],
-                mass_com_wrench_world=flat[
-                    "equivalent_mass_com_wrench_world"
-                ],
             )
         qp_ready = self.qp_enabled_at_iteration()
         if need_qp and qp_ready:
@@ -2352,13 +2349,13 @@ class PPO_HardPACT:
 
         BARD then evaluates RNEA with the realized inertial/passive parameters.
         With actuation ``tau_a=[0_6,tau_exec]``, learned contact force ``F``
-        and applied wrench ``W_applied=W_total-W_mass/CoM``, the residual is
+        and predicted applied external wrench ``W_applied``, the residual is
 
             r_ID = RNEA(q_t,v_t,vdot_obs;theta_rand)
                    - tau_a - J_f^T F - J_b^T W_applied.
 
         Measured quantities and BARD terms are detached; gradients reach only
-        the learned GRF and total-wrench outputs.
+        the learned GRF and applied-wrench outputs.
 
         The rollout objective instead forms
 
@@ -2398,7 +2395,6 @@ class PPO_HardPACT:
         if batch is None:
             raise RuntimeError("HardPACT BARD loss requires named transition fields")
         control_dt = batch["control_dt"].detach().clamp_min(1.0e-8)
-        mass_wrench = batch["equivalent_mass_com_wrench_world"].detach()
         zero = nominal_torque.sum() * 0.0
         if policy_features is None:
             _, _, latent, explicit = self.actor_critic.cenet_enc_forward(
@@ -2409,10 +2405,9 @@ class PPO_HardPACT:
         grf_world = None
         rollout_control_torque = None
         applied_at_base = None
-        total_at_base = None
         wrench_yaw = None
 
-        def world_wrench(q, label_mass_wrench, wrench_prediction, com_shift):
+        def world_wrench(q, wrench_prediction, com_shift):
             total = torch.cat((
                 _yaw_local_to_world(wrench_prediction[:, :3].unsqueeze(1), q[:, 3:7]).squeeze(1),
                 _yaw_local_to_world(wrench_prediction[:, 3:].unsqueeze(1), q[:, 3:7]).squeeze(1),
@@ -2421,8 +2416,9 @@ class PPO_HardPACT:
             com = base + _body_point_to_world(
                 com_shift.detach(), q.detach()
             )
-            applied = wrench_at_point(total - label_mass_wrench, com, base)
-            return applied, applied + label_mass_wrench
+            # Preserve the existing application-point -> base-origin moment shift.
+            # The prediction is applied loading, not an inertial-mismatch estimate.
+            return wrench_at_point(total, com, base)
 
         def pinn_grf(torque):
             # Both PINNs may train the GRF decoder and its latent encoder,
@@ -2459,8 +2455,8 @@ class PPO_HardPACT:
                         latent, explicit
                     )
                 )
-                applied_at_base, total_at_base = world_wrench(
-                    batch["pre_q"], mass_wrench, wrench_yaw,
+                applied_at_base = world_wrench(
+                    batch["pre_q"], wrench_yaw,
                     batch["realized_com_shift_body"],
                 )
 
@@ -2505,7 +2501,6 @@ class PPO_HardPACT:
                 mechanics_root = self._materialize_mechanics_cache(
                     kind="actual", q=batch["pre_q"], v=batch["pre_v"],
                     parameters=actual_parameters, post_v=batch["post_v"],
-                    mass_com_wrench_world=mass_wrench,
                 )
                 self._stop_bard_timing("dynamics", dynamics_timing)
                 mechanics_indices = None
@@ -2550,8 +2545,7 @@ class PPO_HardPACT:
                         base_jacobian=context.base_jacobian,
                         interval_executed_torque=batch["interval_executed_torque"][sl],
                         interval_grf_world=grf_world[sl],
-                        total_wrench_world=total_at_base[sl],
-                        mass_com_wrench_world=chunk.mass_com_wrench_world,
+                        total_wrench_world=applied_at_base[sl],
                         measured_generalized_contact_force=measured_contact_generalized_force(
                             context.foot_jacobians, measured_grf_world[sl]
                         ),
@@ -2637,9 +2631,9 @@ class PPO_HardPACT:
             # Stance/reference gating occurs once in the shared 24-D builder.
             sample_grf_world = _yaw_local_to_world(sample_grf_physical, sample_q[:, 3:7])
             # Projection is a deployment operation: nominal mechanics and the
-            # total predicted wrench are the only quantities available on the
+            # predicted applied wrench are the only quantities available on the
             # robot. In particular, neither realized randomization nor its
-            # label-only mass/CoM wrench enters this path.
+            # diagnostic mass/CoM wrench enters this path.
             qp_wrench_yaw = (
                 sanitize_and_clip_wrench_for_qp(
                     wrench_yaw[qp_rows],

@@ -921,7 +921,10 @@ class Go2HardPACT(Go2PACT):
             self._realized_com_shift_body,
             quat,
         )
-        total_wrench = self._current_sustained_wrench_world + mass_com_wrench
+        # This is the ramped/gated wrench actually passed to the simulator below.
+        # Randomized inertia belongs in M/h, never in the external-wrench target.
+        # Keep historical "total_*" field names and separate mass diagnostics.
+        total_wrench = self._current_sustained_wrench_world
         sustained_yaw_scaled = wrench_world_to_scaled_yaw_local(
             self._current_sustained_wrench_world,
             quat,

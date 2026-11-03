@@ -266,7 +266,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
         },
         "frames_and_units": {
             "grf": {"frame": "yaw_local", "units": "N", "foot_order": list(FOOT_ORDER), "component_order": ["Fx", "Fy", "Fz"], "target": "deadbanded_clipped_control_interval_average"},
-            "base_wrench": {"frame": "yaw_local", "units": ["N", "N", "N", "Nm", "Nm", "Nm"], "order": list(WRENCH_ORDER), "target": "total_external_wrench_label"},
+            "base_wrench": {"frame": "yaw_local", "units": ["N", "N", "N", "Nm", "Nm", "Nm"], "order": list(WRENCH_ORDER), "target": "total_external_wrench_label", "target_semantics": "applied_external_only", "target_semantics_version": 2, "excludes": "randomized mass/CoM gravity; instantaneous velocity kicks"},
         },
         "critic_observation_scales_independent_of_decoders": {
             "grf": float(cfg.normalization.obs_scales.grf),

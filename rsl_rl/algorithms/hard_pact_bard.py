@@ -278,7 +278,7 @@ def corrected_bard_inverse_dynamics_loss(
     interval_executed_torque,
     interval_grf_world,
     total_wrench_world,
-    mass_com_wrench_world,
+    mass_com_wrench_world=None,
     measured_generalized_contact_force,
     push_event_mask,
     reset_mask,
@@ -295,13 +295,10 @@ def corrected_bard_inverse_dynamics_loss(
         = \operatorname{RNEA}(q_t, v_t, \dot v_t^{\mathrm{obs}};
           \theta_{\mathrm{rand}}).
 
-    The learned wrench is the *total* label, so its actually applied component
-    is recovered without counting randomized mass/CoM gravity twice:
-
-    .. math::
-
-        \hat W_{\mathrm{applied}}^W
-        = \hat W_{\mathrm{total}}^W - W_{\mathrm{mass/CoM}}^W.
+    ``total_wrench_world`` retains its historical argument name but now means
+    predicted applied external wrench, already at the base reference point.
+    Randomized inertia is inside RNEA. ``mass_com_wrench_world`` is an ignored
+    compatibility argument, not a correction or an additional force.
 
     Generalized actuation, contact, and base-wrench forces are
 
@@ -346,13 +343,10 @@ def corrected_bard_inverse_dynamics_loss(
     torque = interval_executed_torque.detach()
     foot_jacobians = foot_jacobians.detach()
     base_jacobian = base_jacobian.detach()
-    mass_com = mass_com_wrench_world.detach()
     measured_contact = measured_generalized_contact_force.detach()
     if measured_contact.shape != required.shape:
         raise ValueError("measured generalized contact force must be 18-D")
-    # Ŵ_applied^W = Ŵ_total^W - W_mass/CoM^W. The second term is a
-    # detached label because its inertial effect is already inside RNEA.
-    applied_wrench = total_wrench_world - mass_com
+    applied_wrench = total_wrench_world
     # τ_a = [0₆, τ̄_exec] ∈ ℝ¹⁸.
     actuation = torch.cat((torch.zeros_like(torque[:, :6]), torque), dim=-1)
     # τ_f = Σᵢ (J_fᵢ^W)ᵀ F̂ᵢ^W and τ_W = (J_b^W)ᵀ Ŵ_applied^W.

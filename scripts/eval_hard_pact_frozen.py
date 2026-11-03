@@ -619,6 +619,8 @@ def worker(args):
                            ("torque_violation_nm", "rate_step_violation_nm", "torque_violation", "rate_violation")},
         }
         metadata = {
+            "wrench_label_semantics": {"version": 2, "target": "applied_external_only",
+                                       "excludes": ["randomized mass/CoM gravity", "instantaneous velocity kicks"]},
             "grf_semantics": getattr(env.simulator, "grf_semantics", None),
             "schema_version": 1, "checkpoint": str(args.checkpoint), "checkpoint_sha256": sha_file(args.checkpoint),
             "source_config": document, "effective_environment": class_to_dict(cfg), "solver_settings": asdict(qp_cfg),

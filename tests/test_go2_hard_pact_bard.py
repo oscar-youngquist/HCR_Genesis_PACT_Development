@@ -234,12 +234,12 @@ class CorrectedInverseLossTests(unittest.TestCase):
         self.assertGreater(torque.grad.abs().sum().item(), 0.0)
         self.assertIsNone(explicit.grad)
 
-    def test_mass_com_wrench_is_subtracted_exactly_once(self):
+    def test_mass_com_diagnostic_is_not_subtracted_from_applied_prediction(self):
         data = self.inputs(1)
         mass = torch.tensor([[2., 3., 4., 5., 6., 7.]])
         sustained = torch.tensor([[1., -2., 3., -4., 5., -6.]], requires_grad=True)
         data["mass_com_wrench_world"] = mass
-        data["total_wrench_world"] = sustained + mass
+        data["total_wrench_world"] = sustained
         result_with_mass = corrected_bard_inverse_dynamics_loss(**data)
         data["mass_com_wrench_world"] = torch.zeros_like(mass)
         data["total_wrench_world"] = sustained

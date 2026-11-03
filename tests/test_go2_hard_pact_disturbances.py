@@ -344,10 +344,10 @@ class WrenchLabelTests(unittest.TestCase):
         mass_wrench = torch.tensor([[0., 0., -20., 0., 2., 0.]])
         torch.testing.assert_close(interval["applied_sustained_wrench_world"], sustained)
         torch.testing.assert_close(interval["equivalent_mass_com_wrench_world"], mass_wrench)
-        torch.testing.assert_close(interval["total_external_wrench_label_world"], sustained + mass_wrench)
+        torch.testing.assert_close(interval["total_external_wrench_label_world"], sustained)
         torch.testing.assert_close(
             interval["total_external_wrench_label_yaw_normalized"],
-            (sustained + mass_wrench)
+            sustained
             / torch.tensor([[100., 100., 100., 25., 25., 25.]]),
         )
         self.assertEqual(len(solver.forces), 3)

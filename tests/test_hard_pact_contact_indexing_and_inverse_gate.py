@@ -118,10 +118,11 @@ def _run_owned_update(qp_mode,device):
         "control_torque_limits": torch.full((2, 4, 12), 2.),
         "standardized_action_noise": zeros(24),
         "delayed_action_source_valid": torch.ones(2, 4, 1, dtype=torch.bool),
-        "realized_added_mass": zeros(1), "realized_com_shift_body": zeros(3),
+        "realized_added_mass": zeros(1)+.5, "realized_com_shift_body": zeros(3)+.01,
         "joint_armature": zeros(12), "joint_friction": zeros(12),
         "joint_stiffness": zeros(12), "joint_damping": zeros(12),
-        "equivalent_mass_com_wrench_world": zeros(6),
+        # A stale/invalid diagnostic must not enter either applied-wrench PINN.
+        "equivalent_mass_com_wrench_world": torch.full_like(zeros(6), float("nan")),
         "total_external_wrench_label_yaw_normalized": zeros(6),
         "sustained_wrench_active_mask": zeros(1).bool(),
         **{name: zeros(1).bool() for name in ("push_event_mask", "reset_mask", "timeout_mask", "teleport_mask")},
@@ -158,6 +159,7 @@ def _run_owned_update(qp_mode,device):
         corrected_bard_inverse_dynamics_loss, differentiable_bard_rollout_loss,
     )
     inverse_torques, rollout_torques, grf_torques, inverse_grfs = [], [], [], []
+    inverse_wrenches = []
     actor_weights = [alg.actor_critic.act_pos_out.weight, alg.actor_critic.act_tau_out.weight]
     predict_grf = alg.actor_critic.physics_estimator.predict_grf
     replay_action_path = alg._replay_action_path
@@ -197,6 +199,8 @@ def _run_owned_update(qp_mode,device):
         return predict_grf(latent, explicit, torque)
 
     def checked_loss(**kwargs):
+        assert "mass_com_wrench_world" not in kwargs
+        inverse_wrenches.append(kwargs["total_wrench_world"].detach().clone())
         inverse_torques.append(kwargs["interval_executed_torque"].detach().clone())
         inverse_grfs.append(kwargs["interval_grf_world"].detach().clone())
         measured.append(kwargs["measured_generalized_contact_force"])
@@ -213,6 +217,7 @@ def _run_owned_update(qp_mode,device):
         return result
 
     def checked_rollout(**kwargs):
+        torch.testing.assert_close(kwargs["applied_wrench_world"], inverse_wrenches[-1], rtol=0, atol=0)
         assert not kwargs["control_torque"].requires_grad
         # PPO, encoder and decoder phases each share one GRF between PINNs.
         torch.testing.assert_close(kwargs["interval_grf_world"], inverse_grfs[-1], rtol=0, atol=0)

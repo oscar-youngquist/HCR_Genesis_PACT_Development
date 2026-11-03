@@ -26,7 +26,7 @@ def _world_to_yaw_local(vector_world, base_quat_xyzw):
 def added_mass_gravity_wrench_world(
     added_mass_kg, gravity_world_mps2, com_shift_body_m, base_quat_xyzw
 ):
-    """Equivalent gravity wrench of randomized mass/CoM (label only)."""
+    """Legacy mass/CoM diagnostic only; never part of the applied-wrench label."""
     mass = added_mass_kg.reshape(-1, 1)
     gravity = torch.as_tensor(
         gravity_world_mps2, device=mass.device, dtype=mass.dtype
