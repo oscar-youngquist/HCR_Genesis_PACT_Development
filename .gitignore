@@ -26,8 +26,10 @@ target/
 dist/
 
 **/eval/*
+**/analysis/*
 **/diagnostics/*
-**/exp_data*/*
+**/exp_data*/
+**/evaluation/*
 **.csv
 **/exp_data/*
 **/exp_data_corl**/*
