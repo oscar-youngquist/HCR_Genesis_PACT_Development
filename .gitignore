@@ -37,6 +37,7 @@ dist/
 *.csv
 *.pt
 *.json
+!liquid_collection/*manifest.json
 **/diagnostics/*
 
 # JetBrains IDE

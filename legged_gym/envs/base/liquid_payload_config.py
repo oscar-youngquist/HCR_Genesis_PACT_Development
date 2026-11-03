@@ -13,14 +13,15 @@ def liquid_evaluation_config(robot, mount_height):
             liquid_type = 'water'
             liquid_volume = 4  # nominal legacy fill preset, litres
             liquid_tank = 'default'
-            particle_size = .012  # metres; smaller particles may require more substeps
-            substeps = 2  # internal physics/SPH substeps per control.dt / control.decimation
+            particle_size = .010  # same resolution/contact settings as collection
+            substeps = 8  # internal physics/SPH substeps per control.dt / control.decimation
+            contact_geometry = 'boxes'
             # Internal timestep = control.dt / control.decimation / substeps.
             lid_overlap = .007
             base_link = 'base'
             tank_opacity = .25
             fluid_color = (.05,.35,1.)
-            particle_markers = True
+            particle_markers = True  # actual-position instances avoid rasterizer glass/particle occlusion
 
         class terrain(robot.terrain):
             mesh_type = 'plane'

@@ -37,7 +37,11 @@ A [legged_gym](https://github.com/leggedrobotics/legged_gym) based framework for
 Please refer to the [doc of this repo](https://genesis-lr-doc.readthedocs.io/en/latest/).
 
 For legacy Go1/Go2 liquid transport, see the [liquid-payload simulation guide](docs/liquid_payload_simulation.md)
+and the [liquid-surrogate collection guide](docs/liquid_surrogate_collection.md)
 for the unified launcher, checkpoint/configuration settings, and simulation mechanics.
+
+For collection campaigns, edit the five settings in [launch_liquid_collection.sh](launch_liquid_collection.sh)
+and run `bash launch_liquid_collection.sh` (`--dry-run` previews the plan).
 
 ## 🖼️ Gallery
 

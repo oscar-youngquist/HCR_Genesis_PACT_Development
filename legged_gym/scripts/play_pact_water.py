@@ -58,6 +58,7 @@ def parser():
     p.add_argument('--liquid_volume', type=int, choices=[2,4,6,8,10,12], default=4)
     p.add_argument('--liquid_tank', choices=['default','wide','tall','offset'], default='default')
     p.add_argument('--terrain_type', choices=['plane','rough'], default='plane')
+    p.add_argument('--wall_opacity', type=float, default=.25, help='Container opacity: 0 transparent, 1 opaque')
     p.add_argument('--fixed_cmd', type=float, nargs=3, metavar=('VX','VY','WZ'))
     p.add_argument('--follow_robot', action='store_true')
     p.add_argument('--record_frames', type=Path, metavar='VIDEO_MP4')
@@ -72,6 +73,9 @@ def configure(cfg, args):
     from copy import deepcopy
     from legged_gym.scripts.pact_liquid_checkpoint import set_joint_dynamics_midpoints
     cfg.liquid.joint_dynamics = set_joint_dynamics_midpoints(cfg)
+    if not math.isfinite(args.wall_opacity) or not 0 <= args.wall_opacity <= 1:
+        raise ValueError('--wall_opacity must be between 0 and 1')
+    cfg.liquid.tank_opacity = args.wall_opacity
     cfg.env.num_envs = args.num_envs
     cfg.viewer.rendered_envs_idx = list(range(args.num_envs))
     cfg.viewer.add_camera = args.follow_robot or bool(args.record_frames)
@@ -201,12 +205,10 @@ def main(args):
                                   env.simulator._liquid.get_particles_pos()):
                         assert torch.isfinite(value).all(), 'Nonfinite liquid rollout'
                     from legged_gym.utils.math_utils import quat_rotate_inverse
-                    from legged_gym.simulator.genesis_simulator_pact_liquid import tank_geometry
-                    _,_,xy,_,_,top = tank_geometry(cfg.liquid)
-                    for entity,height in ((env.simulator._bucket,cfg.liquid.mount_height),(env.simulator._lid,top)):
+                    for entity,position_B in env.simulator.liquid_attachment_targets:
                         local = quat_rotate_inverse(env.simulator.base_quat,
                             entity.get_pos()-env.simulator.base_pos)
-                        torch.testing.assert_close(local,local.new_tensor([*xy,height]).expand_as(local),
+                        torch.testing.assert_close(local,local.new_tensor(position_B).expand_as(local),
                             rtol=0,atol=1e-4)
                 if cfg.viewer.add_camera:
                     position = env.simulator.base_pos[0].cpu().numpy()

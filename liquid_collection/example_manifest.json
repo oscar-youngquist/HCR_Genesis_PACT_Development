@@ -1,0 +1,11 @@
+{
+  "policies": [
+    {
+      "id": "go2-dact-8000",
+      "adapter": "dact",
+      "robot": "go2",
+      "checkpoint": "../logs/pact_corl/go2_pact_rough/Aug01_18-27-22_pact_100hz_spec_smartcurr_stricterer/model_8000.pt",
+      "config": "../logs/pact_corl/go2_pact_rough/Aug01_18-27-22_pact_100hz_spec_smartcurr_stricterer/go2_pact_config.py"
+    }
+  ]
+}

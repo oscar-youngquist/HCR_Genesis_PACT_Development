@@ -972,7 +972,7 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
                     fixed=True)
                 )
         elif mesh_type == 'heightfield':
-            self._terrain = Terrain(self._cfg.terrain)
+            self._terrain = getattr(self, '_prepared_terrain', None) or Terrain(self._cfg.terrain)
             self._create_heightfield()
         elif mesh_type == 'trimesh':
             raise NotImplementedError("Trimesh terrain is not validated yet in Genesis, please use heightfield for now.")

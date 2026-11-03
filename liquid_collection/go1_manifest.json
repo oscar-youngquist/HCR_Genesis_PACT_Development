@@ -1,0 +1,11 @@
+{
+  "policies": [
+    {
+      "id": "go1-dact-8000",
+      "adapter": "dact",
+      "robot": "go1",
+      "checkpoint": "../logs/pact_corl/go1_pact_rough/May17_21-20-40_pact_100hz_spec_smartcurr_original_jointrand_hightau/model_8000.pt",
+      "config": "../logs/pact_corl/go1_pact_rough/May17_21-20-40_pact_100hz_spec_smartcurr_original_jointrand_hightau/go1_pact_config.py"
+    }
+  ]
+}

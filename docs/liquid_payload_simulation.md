@@ -24,11 +24,24 @@ bash legged_gym/scripts/play_pact_water.sh \
 
 Both robots accept identical options. `--use_joystick` enables manual commands;
 `--terrain_type plane|rough` selects terrain; `--seed` controls reproducibility.
+`--wall_opacity` controls container opacity (default .25).
 `--steps` overrides duration. `--smoke` checks finite states, tank attachment,
 actual joint properties/default pose, and partial fluid reset.
 
 The older `play_go1_pact_water_exp.sh` and `play_go2_pact_water.sh` launchers
 forward all arguments to this shared interface.
+
+To view a continuously sampled payload using the collection pipeline's bounds:
+
+```bash
+bash legged_gym/scripts/visualize_liquid_collection.sh --num-envs 2
+```
+
+This samples a new configuration on each launch and prints its replay seed.
+Use `--seed 1` to reproduce a sample, `--robot go1` to change robot, or
+`--terrain training` for randomized training terrain. See the
+[collection visual preview](liquid_surrogate_collection.md#visual-preview)
+for camera, opacity and headless frame options.
 
 ## Checkpoints and evaluation settings
 
@@ -74,6 +87,7 @@ Shared resolution, internal substeps, lid overlap and visual settings live in
 [liquid_payload_config.py](../legged_gym/envs/base/liquid_payload_config.py).
 Robot-specific configs set mounting height. Smaller `particle_size` increases
 particle count/cost and may require more internal substeps.
+The current defaults match collection: 10 mm particles and eight substeps.
 
 ```text
 policy interval       = control.dt
@@ -86,11 +100,13 @@ PD torque is held across them; increasing this setting does not increase the
 PD update frequency.
 
 The tank body is 20 × 15 × 20 cm before scaling, with nominal 1.5 cm walls/bottom.
-Rigid tank/lid meshes attach to the torso; a small lid overlap closes the seam.
+Six rigid box parts attach to the torso. Wall corners overlap by 2 mm, the lid
+overlap is 7 mm, and wall density compensates for the extra corner volume.
+Contacts use 2 mm SDF cells and softness equal to half the particle size.
 Genesis SPH particles fill an interior box and interact through fluid dynamics
 and rigid–fluid collision coupling, transmitting loads through the mounted tank.
-This is a closed-tank sloshing simulation. Blue markers show actual particle
-positions; marker color/transparency do not change the fluid material.
+This is a closed-tank sloshing simulation. Translucent walls surround opaque blue
+SPH particles; visual opacity does not change the fluid or contact material.
 
 On episode reset, only affected environments restore their body-relative fluid
 layout at the new robot pose and clear fluid velocity. Other environments retain
