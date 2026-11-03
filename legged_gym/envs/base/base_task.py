@@ -50,7 +50,11 @@ class BaseTask():
         elif SIMULATOR == "genesis_pact_pos":
             self.simulator = GenesisSimulator_PACT_Pos(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "genesis_pact_water":
-            self.simulator = GenesisSimulator_PACT_Water(cfg, sim_params, sim_device, self.headless)
+            if getattr(cfg.env, "liquid_payload", False):
+                from legged_gym.simulator.genesis_simulator_pact_liquid import GenesisSimulator_PACT_Liquid
+                self.simulator = GenesisSimulator_PACT_Liquid(cfg, sim_params, sim_device, self.headless)
+            else:
+                self.simulator = GenesisSimulator_PACT_Water(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "genesis_pact_nopinn":
             self.simulator = GenesisSimulator_PACT_NoPINN(cfg, sim_params, sim_device, self.headless)
         elif SIMULATOR == "genesis_pact_postau":

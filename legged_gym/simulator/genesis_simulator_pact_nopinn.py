@@ -955,6 +955,7 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
                 batch_links_info=self._batch_dofs_links_info,
             ),
             show_viewer=not self._headless,
+            **getattr(self, "_payload_scene_options", lambda: {})(),
         )
 
         # add camera if needed
@@ -1023,6 +1024,9 @@ class GenesisSimulator_PACT_NoPINN(Simulator):
             self._setup_depth_camera()
         
         # build
+        add_payload = getattr(self, "_add_payload", None)
+        if add_payload is not None:
+            add_payload()
         self._scene.build(n_envs=self._num_envs)
 
         self._get_env_origins()
