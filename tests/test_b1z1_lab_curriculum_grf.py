@@ -61,6 +61,9 @@ def test_disabled_curriculum_uses_final_ranges_and_skips_reset_property_writes()
     sim._randomize_pd_gain, sim._randomize_motor_strength = Mock(), Mock()
     sim._reset_grf_buffer = Mock()
     sim._grf_processor = None
+    sim._ground_contacts = None
+    for name in ("_body_ground_normal_w", "_body_ground_total_w", "_body_ground_moment_origin_w"):
+        setattr(sim, name, torch.ones(2, 3, 3))
     sim._cfg.domain_rand.randomize_pd_gain = True
     sim._cfg.domain_rand.randomize_motor_strength = True
     for name in ("_last_dof_vel", "_last_base_lin_vel", "_last_base_ang_vel",
@@ -91,6 +94,8 @@ def test_sensor_order_substep_filter_and_indexed_reset():
     sim._feet_indices = torch.arange(4)
     sim._device = "cpu"
     sim._resolve_contact_indices()
+    sim._body_ground_normal_w = raw[:, sim._contact_indices].clone()
+    sim._body_ground_total_w = sim._body_ground_normal_w.clone()
     assert sim._feet_contact_indices.tolist() == [3, 1, 4, 0]
     forces = sim._sensor_foot_forces_world()
     torch.testing.assert_close(forces[0, :, 2], torch.tensor([10., 20., 30., 40.]))
@@ -124,3 +129,49 @@ def test_sensor_order_substep_filter_and_indexed_reset():
     sim._use_substep_grf_filtering = True
     sim._refresh_grf_buffer()
     torch.testing.assert_close(sim._grfs_buf, processor.ema.flatten(1))
+
+
+def test_contact_logic_uses_normal_not_tangential_force():
+    sim = _IsaacLabSimulatorB1Z1.__new__(_IsaacLabSimulatorB1Z1)
+    sim._feet_indices = torch.tensor([1])
+    sim._foot_contact_force_threshold = 5.
+    sim._body_ground_normal_w = torch.zeros(2, 2, 3)
+    sim._body_ground_total_w = torch.zeros_like(sim._body_ground_normal_w)
+    sim._body_ground_total_w[:, 1, 0] = 100.
+    sim._body_ground_normal_w[1, 1, 0] = 10.  # Sloped/vertical normal, not z support.
+    assert sim.foot_contacts.tolist() == [[False], [True]]
+    torch.testing.assert_close(sim.foot_contact_forces[..., 0], torch.full((2, 1), 100.))
+    torch.testing.assert_close(sim.foot_normal_contact_forces[..., 0], torch.tensor([[0.], [10.]]))
+    processor = IntervalGRFProcessor(2, 1, 'cpu', torch.float32,
+        GRFProcessingConfig(5., -200., 200., 1., 5.))
+    processor.update_substep(sim.foot_contact_forces, sim.foot_normal_contact_forces)
+    assert processor.contacts.tolist() == [[False], [True]]
+    assert processor.clipped[0].count_nonzero() == 0
+    assert processor.clipped[1, 0, 0] == 100.
+
+
+def test_world_wrench_composer_pose_cache_is_refreshed():
+    sim = _IsaacLabSimulatorB1Z1.__new__(_IsaacLabSimulatorB1Z1)
+    sim._cfg = SimpleNamespace(commands=SimpleNamespace(push_gripper_stators=True,
+        apply_ee_external_forces=True, push_robot_base=True, apply_base_external_forces=True,
+        apply_base_external_torques=True))
+    sim._external_force_world, sim._external_torque_world = torch.zeros(2, 2, 3), torch.zeros(2, 2, 3)
+    sim._gripper_index, sim._base_link_index = 1, 0
+    sim._ee_force_world, sim._base_force_world, sim._base_torque_world = [torch.ones(2, 3)*k for k in (2, 3, 4)]
+    composer = Mock()
+    sim._robot = SimpleNamespace(permanent_wrench_composer=composer)
+    sim._apply_external_forces()
+    sim._apply_external_forces()
+    assert [call[0] for call in composer.mock_calls] == ['reset', 'set_forces_and_torques']*2
+    assert composer.set_forces_and_torques.call_args.kwargs['is_global'] is True
+    torch.testing.assert_close(sim._external_force_world[:, 1], sim._ee_force_world)
+
+
+def test_all_b1z1_families_default_to_total_labels():
+    from legged_gym.utils import task_registry
+    names = [name for name in task_registry.env_cfgs if name.startswith('b1z1_pact')]
+    names += ['b1z1_ppo_pos', 'b1z1_unifp', 'b1z1_unifp_original', 'b1z1_unifp_reject']
+    for name in names:
+        grf = task_registry.env_cfgs[name].sim.grf
+        assert grf.force_mode == 'total', name
+        assert grf.contact_capacity_per_body > 0

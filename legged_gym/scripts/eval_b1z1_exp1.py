@@ -348,11 +348,15 @@ class EvaluationAdapter:
         self.sim.collect_b1z1_bard_interval = False
         self.substeps = []
         self.compute_torques = self.sim._compute_torques
-        self.sensor_update = self.sim._contact_sensors.update
+        # Capture after the completed-step normal/friction reduction, not before
+        # the friction query. Physics dt, not policy dt, converts the impulses.
+        self.sensor_update = self.sim._update_ground_contact_forces
         self.sim._compute_torques = self.torque
-        self.sim._contact_sensors.update = self.contact_update
+        self.sim._update_ground_contact_forces = self.contact_update
         self.pending = None
         self.body_masses = None
+        self.nonfoot_indices = [i for i in range(len(self.sim._body_names))
+                                if i not in self.sim.feet_indices.tolist()]
         self.torso_indices = [self.sim._body_names.index(name) for name in config["torso_body_names"]
                               if name in self.sim._body_names]
         if not self.torso_indices:
@@ -376,6 +380,11 @@ class EvaluationAdapter:
         ff = torch.zeros_like(requested) if position_only else s.combined_feedforward_torques
         self.pending["pd_weighted_motor"] = (pd * s._motor_strength).clone()
         self.pending["ff_weighted_motor"] = (ff * s._motor_strength).clone()
+        if hasattr(s, "_robot"):
+            # PhysX position_data=None applies at the link transform, not its CoM.
+            # Keep the pre-substep point; the link can move during integration.
+            self.pending["ee_load_point_world"] = s._robot.data.body_link_pos_w[:, s._gripper_index].clone()
+            self.pending["base_load_point_world"] = s._robot.data.body_link_pos_w[:, s._base_link_index].clone()
         return requested
 
     def contact_update(self, *args, **kwargs):
@@ -390,9 +399,27 @@ class EvaluationAdapter:
             com = (s._robot.data.body_com_pos_w * masses[..., None]).sum(1) / masses.sum(1, keepdim=True)
             feet = s._robot.data.body_link_pos_w[:, s.feet_indices]
             row["support_moment_world"] = torch.linalg.cross(feet - com[:, None], row["grf_raw_world"], dim=-1).sum(1)
-            # The wrench composer applies these world vectors at each body's CoM.
-            row["ee_load_point_world"] = s._robot.data.body_com_pos_w[:, s._gripper_index].clone()
-            row["base_load_point_world"] = s._robot.data.body_com_pos_w[:, s._base_link_index].clone()
+            if hasattr(s, "ground_contact_moments"):
+                row["robot_com_world"] = com
+                row["robot_com_velocity_world"] = (s._robot.data.body_com_vel_w[..., :3] * masses[..., None]).sum(1) / masses.sum(1, keepdim=True)
+                row["grf_normal_world"] = s._normal_foot_forces_world().clone()
+                row["support_moment_world"] = s.ground_contact_moments(com, feet_only=True)
+                row["body_contact_normal_world"] = s._body_ground_normal_w.clone()
+                row["body_contact_forces_raw_world"] = s._body_ground_total_w.clone()
+                row["all_contact_moment_world"] = s.ground_contact_moments(com)
+                # Any nonzero non-foot ground reaction disqualifies a foot-only
+                # balance interpretation; this is NOT a policy termination gate.
+                if hasattr(self, "nonfoot_indices"):
+                    row["nonfoot_contact"] = (s._body_ground_normal_w[:, self.nonfoot_indices].abs().sum(-1) > 0).any(-1)
+                if s._grf_force_mode == "total":
+                    row["body_contact_total_world"] = s._body_ground_total_w.clone()
+                    row["body_contact_tangential_world"] = s._body_ground_tangential_w.clone()
+                    row["grf_tangential_world"] = s._body_ground_tangential_w[:, s.feet_indices].clone()
+                    row["grf_total_world"] = row["grf_raw_world"].clone()
+                    row["support_normal_moment_world"] = s.ground_contact_moments(com, feet_only=True, component="normal")
+                    row["support_tangential_moment_world"] = s.ground_contact_moments(com, feet_only=True, component="tangential")
+            row.setdefault("ee_load_point_world", s._robot.data.body_link_pos_w[:, s._gripper_index].clone())
+            row.setdefault("base_load_point_world", s._robot.data.body_link_pos_w[:, s._base_link_index].clone())
             row["joint_position"] = s.dof_pos.clone()
             row["joint_velocity"] = s.dof_vel.clone()
             limits = s.dof_pos_limits_hard if hasattr(s, "dof_pos_limits_hard") else s.dof_pos_limits
@@ -607,13 +634,17 @@ def main(argv=None, experiment=None):
                         resolved_environment=class_to_dict(cfg), resolved_training=class_to_dict(training),
                         evaluation=config, arguments={**vars(args), "output_dir": str(args.output_dir)},
                         dt=env.dt, physics_dt=env.dt / cfg.control.decimation, prescribed_steps=steps,
+                        grf_semantics=env.simulator.grf_semantics,
                         git_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                         git_dirty=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
                         evaluator_sha256=util.file_hash(__file__),
                         utilities_sha256=util.file_hash(ROOT / "legged_gym/utils/b1z1_experiment.py"),
                         conventions={"quaternion": "xyzw", "world": "z-up", "torque": "Nm",
                                      "forces": "world N", "joint": "configured order, rad and rad/s",
-                                     "grf_raw_world": "interval mean of raw sensor samples, not filtered",
+                                     "grf_raw_world": "interval mean of selected ground-force labels; see grf_semantics; not filtered",
+                                     "grf_components": "normal/tangential/total_world_interval_mean: N, world, configured feet; unavailable components omitted",
+                                     "support_moment_world": "mean of substep contact-point/anchor moments about whole CoM; normal_only mode uses foot-center approximation",
+                                     "load_points": "pre-substep link origins: installed PhysX position_data=None convention; not body CoM",
                                      "prediction": "native normalized decoder units; unavailable fields omitted",
                                      "film": "action_t pass: post=pre*(1+gamma)+beta; V01 actor-trunk features, V02 latent z; V02 condition is oldest-to-newest tracking history, normalized per frame; auxiliary z stays unmodulated",
                                      "torque_request_pre_motor": "before motor strength; actual clip=1.1*rated",
@@ -626,6 +657,7 @@ def main(argv=None, experiment=None):
                         dof_names=list(cfg.asset.dof_names), foot_indices=s.feet_indices.tolist(),
                         body_names=list(s._body_names), sensor_body_names=list(s._contact_sensors.body_names),
                         feet_sensor_indices=s._feet_contact_indices.tolist(),
+                        nonfoot_body_indices=adapter.nonfoot_indices,
                         gripper_index=int(s._gripper_index), base_index=int(s._base_link_index),
                         failure_reason_bits={"torso_contact": 1, "height": 2, "roll": 4, "pitch": 8,
                                              "nonfinite_state": 16, "nonfinite_record": 32},
@@ -742,6 +774,10 @@ def main(argv=None, experiment=None):
                     mass = masses
                     data["robot_com_world"] = (body_com * mass[..., None]).sum(1) / mass.sum(1, keepdim=True)
                     data["support_moment_world"] = stacks["support_moment_world"].mean(0)
+                    if "robot_com_velocity_world" in stacks:
+                        data["robot_com_velocity_world"] = stacks["robot_com_velocity_world"][-1].clone()
+                    if "nonfoot_contact" in stacks:
+                        data["nonfoot_contact"] = stacks["nonfoot_contact"].any(0)
                     for key in ("_motor_strength", "_kp_scale", "_kd_scale", "_added_base_mass", "_base_com_bias", "_added_gripper_mass", "_friction_values", "_joint_armature", "_joint_friction", "_joint_damping", "_joint_stiffness", "feedback_tau_weight", "feedforward_tau_weight"):
                         if hasattr(s, key):
                             data["mechanics_" + key.lstrip("_")] = getattr(s, key).clone()

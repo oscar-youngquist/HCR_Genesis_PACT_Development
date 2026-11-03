@@ -160,7 +160,9 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         from isaaclab.assets import Articulation, ArticulationCfg
         from isaaclab.actuators import ImplicitActuatorCfg
         from isaaclab.sensors import ContactSensor, ContactSensorCfg
-        from pxr import PhysxSchema
+        from pxr import PhysxSchema, UsdPhysics
+        # Import Warp only AFTER Kit has selected its bundled version.
+        from .b1z1_contact_forces import contact_semantics
 
         cfg = self._cfg
         self._cloner = Cloner(self._stage)
@@ -208,10 +210,28 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
             copy_from_source=False, replicate_physics=True,
             base_env_path="/World/envs", enable_env_ids=True,
         )
+        grf = cfg.sim.grf
+        self._grf_force_mode = getattr(grf, "force_mode", "total")
+        if self._grf_force_mode not in ("total", "normal_only"):
+            raise ValueError("sim.grf.force_mode must be total or normal_only")
+        capacity = getattr(grf, "contact_capacity_per_body", 8)
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
+            raise ValueError("sim.grf.contact_capacity_per_body must be a positive integer")
+        # Exact collision prims exclude self/other robots and ground visual prims.
+        # Built-in friction unpacking is disabled; the shared reducer avoids its
+        # per-substep host count transfer and materialized per-contact row indices.
+        ground_filter = GROUND_PATH + "/.*"
+        ground_colliders = [str(p.GetPath()) for p in self._stage.Traverse()
+                            if str(p.GetPath()).startswith(GROUND_PATH + "/") and p.HasAPI(UsdPhysics.CollisionAPI)]
+        if not ground_colliders:
+            raise RuntimeError(f"No ground colliders match {ground_filter}; cannot label ground GRFs")
         self._contact_sensors = ContactSensor(ContactSensorCfg(
             prim_path=f"/World/envs/env_.*/{cfg.asset.name}/.*",
             update_period=self._sim_params["dt"], history_length=2, debug_vis=False,
+            filter_prim_paths_expr=ground_colliders, max_contact_data_count_per_prim=capacity,
         ))
+        self.grf_semantics = contact_semantics(self._grf_force_mode, self._sim_params["dt"], capacity, ground_colliders)
+        self.grf_semantics["ground_colliders"] = ground_colliders
         scene_path = next(
             prim.GetPrimPath().pathString for prim in self._stage.Traverse()
             if prim.HasAPI(PhysxSchema.PhysxSceneAPI)
@@ -433,6 +453,19 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self._dof_tau = torch.zeros_like(self._torques)
         self._grfs_buf = torch.zeros(n, self._grf_dim, device=device)
         self._configure_grf_processing()
+        from .b1z1_contact_forces import GroundContactForces
+        self._ground_contacts = (GroundContactForces(self._contact_sensors.contact_physx_view,
+                                  self._sim_params["dt"], device)
+                                 if self._grf_force_mode == "total" else None)
+        self.grf_semantics["contact_capacity_total"] = self._contact_sensors.contact_physx_view.max_contact_data_count
+        self.grf_semantics["sensor_count"] = self._contact_sensors.contact_physx_view.sensor_count
+        shape = (n, self._num_bodies, 3)
+        self._body_ground_normal_w = torch.zeros(shape, device=device)
+        self._body_ground_tangential_w = torch.zeros_like(self._body_ground_normal_w)
+        self._body_ground_total_w = torch.zeros_like(self._body_ground_normal_w)
+        self._body_ground_moment_origin_w = torch.zeros_like(self._body_ground_normal_w)
+        if self._ground_contacts is None:
+            self._body_ground_tangential_w.fill_(float("nan"))  # Unavailable, not measured zero.
         self._use_substep_grf_filtering = bool(getattr(self._cfg.sim.grf, "use_substep_filtering", False))
         self._grf_processor = None
         if self._use_substep_grf_filtering:
@@ -493,10 +526,10 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         # This buffer is permuted into configured order by last_dof_vel.
         self._last_dof_vel.copy_(self._robot.data.joint_vel)
         self.first_loop = True
-        self._apply_external_forces()
         if self._use_substep_grf_filtering:
             self._grf_processor.begin_interval()
         for _ in range(self._cfg.control.decimation):
+            self._apply_external_forces()
             torque = self._compute_torques(actions)
             self.executed_torques = torch.clamp(torque, -1.1 * self.torque_limits, 1.1 * self.torque_limits)
             self._torques.copy_(self.executed_torques)
@@ -506,12 +539,13 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
             self._sim.step(render=False)
             self._robot.update(self._sim_params["dt"])
             self._contact_sensors.update(self._sim_params["dt"])
+            self._update_ground_contact_forces()
             if getattr(self, "collect_b1z1_bard_interval", False):
-                self._accumulate_b1z1_bard_grf(self._sensor_foot_forces_world())
+                self._accumulate_b1z1_bard_grf(self._sensor_foot_forces_world(), self._normal_foot_forces_world())
             # Sensor order is independent of articulation order. Read with
             # sensor indices exactly once, preserving configured FR/FL/RR/RL.
             if self._use_substep_grf_filtering:
-                self._grf_processor.update_substep(self._sensor_foot_forces_world())
+                self._grf_processor.update_substep(self._sensor_foot_forces_world(), self._normal_foot_forces_world())
         if self._use_substep_grf_filtering:
             self._grf_processor.end_interval()
         if not self._headless:
@@ -537,6 +571,8 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self._ee_quat = data.body_link_quat_w[:, self._gripper_index, (1, 2, 3, 0)]
         self._ee_vel = data.body_link_vel_w[:, self._gripper_index, :3]
         self._link_contact_forces = self._contact_sensors.data.net_forces_w[:, self._contact_indices]
+        # Keep collision/termination/impact logic normal-only. GRF labels and
+        # foot_contact_forces use the separately ground-filtered total buffers.
         if self._cfg.asset.obtain_link_contact_states:
             self._link_contact_states = (
                 self._link_contact_forces[:, self._contact_state_link_indices].norm(dim=-1)
@@ -577,9 +613,60 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self._reset_grf_buffer(env_ids)
         if self._grf_processor is not None:
             self._grf_processor.reset(env_ids)
+        for value in (self._body_ground_normal_w, self._body_ground_total_w, self._body_ground_moment_origin_w):
+            value[env_ids] = 0
+        if self._ground_contacts is not None:
+            self._body_ground_tangential_w[env_ids] = 0
+            sensor_ids = (env_ids[:, None] * self._num_bodies +
+                          torch.arange(self._num_bodies, device=self._body_ground_total_w.device)).flatten()
+            self._ground_contacts.reset(sensor_ids)
+
+    def _update_ground_contact_forces(self):
+        """Completed physics step only; evaluation hooks this after the reduction."""
+        if self._ground_contacts is not None:
+            self._ground_contacts.update()
+            for dest, source in ((self._body_ground_normal_w, self._ground_contacts.normal),
+                                 (self._body_ground_tangential_w, self._ground_contacts.tangential),
+                                 (self._body_ground_total_w, self._ground_contacts.total)):
+                torch.index_select(source.view(self._num_envs, self._num_bodies, 3),
+                                   1, self._contact_indices, out=dest)
+            torch.index_select(self._ground_contacts.moment.view(self._num_envs, self._num_bodies, 3),
+                               1, self._contact_indices, out=self._body_ground_moment_origin_w)
+        else:
+            normal = self._contact_sensors.data.force_matrix_w.sum(dim=2)[:, self._contact_indices]
+            self._body_ground_normal_w.copy_(normal)
+            self._body_ground_total_w.copy_(normal)  # Explicit legacy selected-label buffer, NOT full force.
+            self._body_ground_moment_origin_w.copy_(torch.linalg.cross(self._robot.data.body_link_pos_w, normal))
+
+    def ground_contact_moments(self, com_world, feet_only=False, component="total"):
+        forces, moments = self._body_ground_total_w, self._body_ground_moment_origin_w
+        if component != "total":
+            if self._ground_contacts is None or component not in ("normal", "tangential"):
+                raise ValueError("Component contact moments require total-force mode")
+            forces = getattr(self, "_body_ground_" + component + "_w")
+            moments = getattr(self._ground_contacts, component + "_moment").view(self._num_envs, self._num_bodies, 3)[:, self._contact_indices]
+        if feet_only:
+            forces, moments = forces[:, self._feet_indices], moments[:, self._feet_indices]
+        return (moments - torch.linalg.cross(com_world[:, None], forces, dim=-1)).sum(dim=1)
+
+    def _normal_foot_forces_world(self):
+        return self._body_ground_normal_w[:, self._feet_indices]
+
+    @property
+    def foot_contacts(self):
+        # Normal support, including sloped terrain; tangential drag alone is not contact.
+        return self._normal_foot_forces_world().norm(dim=-1) > self._foot_contact_force_threshold
+
+    @property
+    def foot_contact_forces(self):
+        return self._sensor_foot_forces_world()
+
+    @property
+    def foot_normal_contact_forces(self):
+        return self._normal_foot_forces_world()
 
     def _sensor_foot_forces_world(self):
-        return self._contact_sensors.data.net_forces_w[:, self._feet_contact_indices]
+        return self._body_ground_total_w[:, self._feet_indices]
 
     def _refresh_grf_buffer(self):
         """Keep physical Newtons and foot order unchanged in either mode."""
@@ -588,7 +675,7 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         else:
             # Legacy B1Z1 behavior: condition only the final sensor sample,
             # once per control step, with no substep accumulation.
-            self._update_grf_buffer(self._sensor_foot_forces_world())
+            self._update_grf_buffer(self._sensor_foot_forces_world(), self._normal_foot_forces_world())
 
     def reset_dofs(self, env_ids, dof_pos, dof_vel):
         self._robot.write_joint_state_to_sim(dof_pos, dof_vel, self._dof_indices, env_ids)
@@ -612,6 +699,10 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
             self._external_force_world[:, self._base_link_index] = self._base_force_world
         if commands.push_robot_base and getattr(commands, "apply_base_external_torques", False):
             self._external_torque_world[:, self._base_link_index] = self._base_torque_world
+        # The installed composer caches link poses until reset. Refresh each
+        # physics step; otherwise a nominal world force rotates with an old arm
+        # frame and disagrees with both its supervised label and momentum balance.
+        self._robot.permanent_wrench_composer.reset()
         self._robot.permanent_wrench_composer.set_forces_and_torques(
             forces=self._external_force_world,
             torques=self._external_torque_world,

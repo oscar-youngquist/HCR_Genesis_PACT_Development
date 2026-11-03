@@ -18,6 +18,12 @@ def train(args):
     log_dir = ppo_runner.log_dir
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
+    # Record physical label semantics independently of policy/checkpoint format.
+    grf_semantics = getattr(getattr(env, "simulator", None), "grf_semantics", None)
+    if grf_semantics is not None:
+        import json
+        with open(os.path.join(log_dir, "grf_semantics.json"), "w") as stream:
+            json.dump(grf_semantics, stream, indent=2)
     if args.task.startswith("b1z1_pact_ab"):
         # Dynamic variants share source files rather than per-task copies.
         import inspect

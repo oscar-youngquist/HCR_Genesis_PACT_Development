@@ -92,20 +92,29 @@ class Adapter(exp1.EvaluationAdapter):
         com = (body.body_com_pos_w*mass).sum(1)/mass.sum(1)
         com_velocity = (body.body_com_vel_w[..., :3]*mass).sum(1)/mass.sum(1)
         forces = s._contact_sensors.data.net_forces_w[:, s._contact_indices]
+        normal = forces
+        if hasattr(s, "_body_ground_total_w"):
+            forces, normal = s._body_ground_total_w, s._body_ground_normal_w
         feet = body.body_link_pos_w[:, s.feet_indices]
         ee_force = s._external_force_world[:, s._gripper_index]
-        # Net contact forces lack contact-point/free-moment information. Moments
-        # approximate point forces at link origins; imposed EE loads act at body CoM.
+        # New recordings use ground-filtered forces and actual contact/anchor
+        # moments. Legacy adapters retain the explicitly labeled point approximation.
+        all_moment = (s.ground_contact_moments(com) if hasattr(s, "ground_contact_moments") else
+                      torch.linalg.cross(body.body_link_pos_w-com[:, None], forces, dim=-1).sum(1))
         row.update(robot_com_world=com.clone(), robot_com_velocity_world=com_velocity.clone(),
                    body_link_positions_world=body.body_link_pos_w.clone(),
                    body_com_positions_world=body.body_com_pos_w.clone(),
                    body_com_velocities_world=body.body_com_vel_w.clone(),
                    body_contact_forces_raw_world=forces.clone(),
-                   body_contacts=(forces.norm(dim=-1) > s._foot_contact_force_threshold).float(),
+                   body_contact_normal_world=normal.clone(),
+                   body_contacts=(normal.norm(dim=-1) > s._foot_contact_force_threshold).float(),
                    foot_positions_raw_world=feet.clone(),
                    ee_load_moment_world=torch.linalg.cross(row["ee_load_point_world"]-com, ee_force, dim=-1),
-                   all_contact_moment_world=torch.linalg.cross(body.body_link_pos_w-com[:, None], forces, dim=-1).sum(1),
+                   all_contact_moment_world=all_moment,
                    ee_force_applied_world=ee_force.clone())
+        if getattr(s, "_grf_force_mode", None) == "total":
+            row["body_contact_tangential_world"] = s._body_ground_tangential_w.clone()
+            row["body_contact_total_world"] = forces.clone()
         return result
 
 
@@ -159,13 +168,13 @@ class Experiment2:
                         "body_com_quaternion_wxyz": "successor body inertial-frame rotations, wxyz; other simulator quaternions remain xyzw",
                         "body_com_velocities_world_interval_mean": "world linear m/s then angular rad/s, articulation order",
                         "robot_com_velocity_world_interval_mean": "mass-weighted body CoM linear velocity, m/s",
-                        "support_moment_world": "mean of per-substep cross(foot link origin - whole CoM, raw foot force), N*m; point-force approximation",
-                        "all_contact_moment_world_interval_mean": "same approximation using every articulation body's net sensor force; not contact wrenches",
-                        "ee_load_moment_world_interval_mean": "per-substep cross(gripper CoM - whole CoM, actual applied EE force), N*m",
+                        "support_moment_world": "mean of actual normal-contact/friction-anchor moments about whole CoM, N*m; see grf_semantics for explicit legacy approximation",
+                        "all_contact_moment_world_interval_mean": "same ground-filtered moment including non-foot bodies, not self/other-robot contacts",
+                        "ee_load_moment_world_interval_mean": "per-substep cross(pre-step gripper link origin - successor whole CoM, applied EE force), N*m; moving-point discretization approximation",
                         "torque_mean_square": "per-joint mean of substep squared torques, (N*m)^2, after branch/motor scaling",
                         "opposing_channel_cancellation_mean": "mean((abs(PD)+abs(FF)-abs(PD+FF))/2), N*m, before saturation",
                         "body_properties": "initial_states.jsonl: masses kg, body CoM inertias kg*m^2 (PhysX row-major), raw PhysX local CoM poses xyz+xyzw",
-                        "unavailable": "individual contact-point wrenches, tangential contact moments; net body forces only"})
+                        "unavailable": "individual contact/anchor arrays not persisted; aggregated forces and moments retained"})
 
     @staticmethod
     def augment_data(adapter, stacks, data):

@@ -158,7 +158,8 @@ def test_configuration_validation_isolation_and_dispatch():
         u.validate(bad, 28.)
 
 
-def test_substep_recorder_moments_sensor_order_and_torque_identity():
+@pytest.mark.parametrize('total', [False, True])
+def test_substep_recorder_moments_sensor_order_and_torque_identity(total):
     torch = pytest.importorskip("torch")
     from types import SimpleNamespace as NS
     adapter = e.Adapter.__new__(e.Adapter)
@@ -175,6 +176,21 @@ def test_substep_recorder_moments_sensor_order_and_torque_identity():
            torque_limits=torch.ones(2)*10, executed_torques=torch.tensor([[3., 4.]]))
     s._external_force_world[:, 2, 0] = 25.
     s._sensor_foot_forces_world = lambda: sensors.data.net_forces_w[:, [0]]
+    if total:
+        s._grf_force_mode = 'total'
+        s._body_ground_normal_w = sensors.data.net_forces_w[:, s._contact_indices].clone()
+        s._body_ground_tangential_w = torch.zeros_like(s._body_ground_normal_w)
+        s._body_ground_tangential_w[..., 0] = 3.
+        s._body_ground_total_w = s._body_ground_normal_w + s._body_ground_tangential_w
+        s._sensor_foot_forces_world = lambda: s._body_ground_total_w[:, s.feet_indices]
+        s._normal_foot_forces_world = lambda: s._body_ground_normal_w[:, s.feet_indices]
+        def moments(com, feet_only=False, component='total'):
+            # Distinct actual anchor offsets exercise the non-foot-center path.
+            normal = torch.linalg.cross(pos+.1-com[:, None], s._body_ground_normal_w, dim=-1)
+            friction = torch.linalg.cross(pos+.2-com[:, None], s._body_ground_tangential_w, dim=-1)
+            value = {'normal': normal, 'tangential': friction, 'total': normal+friction}[component]
+            return (value[:, s.feet_indices] if feet_only else value).sum(1)
+        s.ground_contact_moments = moments
     adapter.sim, adapter.body_masses = s, torch.tensor([[2., 1., 1.]])
     adapter.pending = {"torque_request_motor_scaled": torch.tensor([[3., 4.]])}
     adapter.sensor_update = lambda *_: None
@@ -185,7 +201,12 @@ def test_substep_recorder_moments_sensor_order_and_torque_identity():
     torch.testing.assert_close(row["robot_com_world"], com)
     np.testing.assert_allclose(row["ee_load_moment_world"].numpy(), u.point_force_moment(
         pos[:, [2]].numpy(), s._external_force_world[:, [2]].numpy(), com.numpy()))
-    torch.testing.assert_close(row["body_contact_forces_raw_world"], sensors.data.net_forces_w[:, [2, 0, 1]])
+    expected = s._body_ground_total_w if total else sensors.data.net_forces_w[:, [2, 0, 1]]
+    torch.testing.assert_close(row["body_contact_forces_raw_world"], expected)
+    if total:
+        torch.testing.assert_close(row['grf_total_world'], row['grf_normal_world']+row['grf_tangential_world'])
+        torch.testing.assert_close(row['support_moment_world'], row['support_normal_moment_world']+row['support_tangential_moment_world'])
+        torch.testing.assert_close(row['all_contact_moment_world'], moments(com))
     pd, ff = torch.tensor([[[10., -4.]], [[-10., 4.]]]), torch.tensor([[[-5., 2.]], [[5., -2.]]])
     stats = u.torque_statistics(pd, ff, (pd+ff).clamp(-3, 3), xp=torch)
     torch.testing.assert_close(stats["opposing_channel_cancellation_mean"], torch.tensor([[5., 2.]]))

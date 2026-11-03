@@ -47,13 +47,15 @@ class IntervalGRFProcessor:
         self.interval_count.zero_()
         self.interval_average.zero_()
 
-    def update_substep(self, raw_force_n):
+    def update_substep(self, raw_force_n, normal_force_n=None):
         if raw_force_n.shape != self.raw.shape:
             raise ValueError(
                 f"raw GRF expected {tuple(self.raw.shape)}, got {tuple(raw_force_n.shape)}"
             )
         self.raw.copy_(raw_force_n)
-        active = raw_force_n[..., 2].abs() > self.config.vertical_deadband_n
+        # Optional B1Z1 total-force labels retain normal-only contact/noise gating.
+        support = raw_force_n[..., 2].abs() if normal_force_n is None else normal_force_n.norm(dim=-1)
+        active = support > self.config.vertical_deadband_n
         self.complete.copy_(torch.where(
             active.unsqueeze(-1), raw_force_n, torch.zeros_like(raw_force_n)
         ))
@@ -63,7 +65,8 @@ class IntervalGRFProcessor:
         self.ema.mul_(1.0 - self.config.ema_alpha).add_(
             self.clipped, alpha=self.config.ema_alpha
         )
-        self.contacts.copy_(self.clipped[..., 2] > self.config.contact_threshold_n)
+        contact_support = self.clipped[..., 2] if normal_force_n is None else support
+        self.contacts.copy_(contact_support > self.config.contact_threshold_n)
         self.interval_sum.add_(self.clipped)
         self.interval_count.add_(1.0)
         return self.clipped

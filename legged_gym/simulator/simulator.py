@@ -58,14 +58,15 @@ class Simulator(ABC):
         if getattr(self, "collect_b1z1_bard_interval", False):
             self.bard_interval_grf = torch.zeros_like(self._grfs_buf)
 
-    def _accumulate_b1z1_bard_grf(self, measured):
+    def _accumulate_b1z1_bard_grf(self, measured, normal_forces=None):
         """Condition each physical sample, without changing the observation EMA."""
-        active = measured[..., 2].abs() > self._grf_deadband
+        support = measured[..., 2].abs() if normal_forces is None else normal_forces.norm(dim=-1)
+        active = support > self._grf_deadband
         value = torch.where(active[..., None], measured, torch.zeros_like(measured))
         value = value.flatten(1).clamp(self._grf_clip_min, self._grf_clip_max)
         self.bard_interval_grf.add_(value / self._cfg.control.decimation)
 
-    def _update_grf_buffer(self, measured_grfs):
+    def _update_grf_buffer(self, measured_grfs, normal_forces=None):
         """Deadband, clip, and EMA-filter measured per-foot force vectors."""
         expected_shape = (self._num_envs, self._grfs_buf.shape[-1] // 3, 3)
         if tuple(measured_grfs.shape) != expected_shape:
@@ -76,7 +77,8 @@ class Simulator(ABC):
 
         # A foot is rejected as noise based on vertical force; when rejected,
         # all three force components for that foot are zeroed together.
-        active_foot = measured_grfs[..., 2].abs() > self._grf_deadband
+        support = measured_grfs[..., 2].abs() if normal_forces is None else normal_forces.norm(dim=-1)
+        active_foot = support > self._grf_deadband
         deadbanded = torch.where(
             active_foot.unsqueeze(-1), measured_grfs, torch.zeros_like(measured_grfs)
         ).reshape_as(self._grfs_buf)
@@ -562,6 +564,11 @@ class Simulator(ABC):
     def foot_contact_forces(self):
         """Return foot forces in the simulator's configured foot order."""
         return self._link_contact_forces[:, self._feet_indices, :]
+
+    @property
+    def foot_normal_contact_forces(self):
+        """Legacy support input; component-aware backends override this explicitly."""
+        return self.foot_contact_forces
 
     @property
     def foot_contacts(self):

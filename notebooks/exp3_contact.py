@@ -24,7 +24,7 @@ FIELDS = {
     'ee_force_applied_world_interval_mean', 'base_force_applied_world_interval_mean',
     'ee_force_world', 'base_force_world', 'base_moment_world',
     'base_quaternion_xyzw', 'base_velocity_world', 'base_angular_velocity_world',
-    'joint_position', 'joint_velocity', 'grf_raw_world_interval_mean', 'surface_normals_world',
+    'joint_position', 'joint_velocity', 'grf_raw_world_interval_mean', 'grf_normal_world_interval_mean', 'surface_normals_world',
 }
 OUTPUT_FIELDS = ('momentum_contact_world', 'momentum_foot_eligible', 'momentum_window_reference',
                  'momentum_window_prediction', 'momentum_window_duration')
@@ -154,7 +154,8 @@ def flat_ground(meta):
 
 
 def normal_errors(prediction, data, meta):
-    measured = data.get('grf_raw_world_interval_mean')
+    # Version-2 records separate normal support from total (normal + friction).
+    measured = data.get('grf_normal_world_interval_mean', data.get('grf_raw_world_interval_mean'))
     if measured is None: return None
     if flat_ground(meta): return prediction[..., 2] - measured[..., 2]
     normals = data.get('surface_normals_world')

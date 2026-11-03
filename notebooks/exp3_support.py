@@ -148,8 +148,9 @@ def support_values(row, feet):
     values = {}
     if "grf_raw_world_interval_mean" in row:
         grf = np.asarray(row["grf_raw_world_interval_mean"])
+        normal = np.asarray(row.get("grf_normal_world_interval_mean", grf))
         for i, foot in enumerate(feet):
-            values[f"foot_{foot}_fz_n"] = grf[i, 2]
+            values[f"foot_{foot}_fz_n"] = normal[i, 2]
         values.update({f"foot_support_f{a}_n": v for a, v in zip("xyz", grf.sum(0))})
     if "body_contact_forces_raw_world_interval_mean" in row:
         values.update({f"all_support_f{a}_n": v for a, v in zip("xyz", np.asarray(row["body_contact_forces_raw_world_interval_mean"]).sum(0))})
@@ -197,11 +198,12 @@ def _values_batch(data, ids, feet):
             values[region+'_cancellation_nm'] = np.ascontiguousarray(data['opposing_channel_cancellation_mean'][:,joints]).mean(1)
     if 'grf_raw_world_interval_mean' in data:
         force = data['grf_raw_world_interval_mean']
-        values.update({f'foot_{foot}_fz_n':force[:,i,2] for i,foot in enumerate(feet)})
+        normal = data.get('grf_normal_world_interval_mean', force)
+        values.update({f'foot_{foot}_fz_n':normal[:,i,2] for i,foot in enumerate(feet)})
         values.update({f'foot_support_f{axis}_n':force.sum(1)[:,i] for i,axis in enumerate('xyz')})
         for group, prefixes in (('front',('FR','FL')),('rear',('RR','RL'))):
             selected = [i for i,f in enumerate(feet) if f.startswith(prefixes)]
-            if selected: values[group+'_normal_support_n'] = force[:,selected,2].sum(1)
+            if selected: values[group+'_normal_support_n'] = normal[:,selected,2].sum(1)
     if 'body_contact_forces_raw_world_interval_mean' in data:
         force = data['body_contact_forces_raw_world_interval_mean'].sum(1)
         values.update({f'all_support_f{axis}_n':force[:,i] for i,axis in enumerate('xyz')})
@@ -424,7 +426,7 @@ def analyze(config):
         summary=summary.to_dict("records"), conventions={
             "timing": "Loads/channels/support: interval start. Tracking: successor. No failure interpolation.",
             "geometry": "URDF FK(mean executed position target) at measured base_t versus nominal reference_t; approximate under substep delay/base motion.",
-            "support": "Recorded sensor forces/moments are NORMAL-ONLY, not full GRFs. Momentum-Derived Net Contact Force uses whole-CoM endpoint momentum minus gravity and integrated known loads, world N. Foot attribution requires excluded non-foot contacts.",
+            "support": "Legacy sensor forces/moments are normal-only. Version-2 grf_semantics identifies total ground forces and contact-point moments; vertical redistribution uses explicit normal forces. Momentum-Derived Net Contact Force uses whole-CoM endpoint momentum minus gravity and integrated known loads, world N. Foot attribution requires excluded non-foot contacts.",
             "contact_windows": "Non-overlapping complete windows, no gaps/failures/load/stage crossings; timestamps are interval start/end. Partial final windows unavailable.",
             "moments": "Recorded normal-force cross products retained unchanged; total contact moment reconstruction is unavailable (complete external angular impulse not recorded).",
             "reference_assumptions": "Recorded applied world loads must be complete and frame-correct; vertical normal-support consistency is exported, not enforced or calibrated away.",
@@ -502,7 +504,7 @@ def plot_responses(frame, provenance, output, config):
                 axes[-1, col].set_xlabel("Sequence time [s]; dashed event boundaries")
             for row, metric in enumerate(metrics):
                 label = metric.replace('_', ' ')
-                if 'support' in metric or metric.startswith('foot_'): label = 'Normal-only sensor: '+label
+                if 'support' in metric or metric.startswith('foot_'): label = 'Recorded contact: '+label
                 if metric.endswith('_ms'): label += ' [(Nm)^2]'
                 axes[row, 0].set_ylabel(label, fontsize=8)
             axes[-1, 0].set_ylabel("Surviving trials")

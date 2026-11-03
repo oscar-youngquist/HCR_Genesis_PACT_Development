@@ -1101,7 +1101,7 @@ def _run_analysis(config):
                             report(run,'BARD mechanics',str(fixed),usable[i]['entry']); fixed_batch[i]=None
                     stage_started=time.perf_counter()
                     fields={'entry','base_quaternion_t','base_quaternion_xyzw','executed_torque_interval_mean',
-                        'grf_raw_world_interval_mean','surface_normals_world',*contact.OUTPUT_FIELDS,*STATE_KEYS,*LOADS,*('history_'+k for k in LOADS),*PREDICTIONS[4:6],*EXPLICIT_STATE_FIELDS}
+                        'grf_raw_world_interval_mean','grf_normal_world_interval_mean','surface_normals_world',*contact.OUTPUT_FIELDS,*STATE_KEYS,*LOADS,*('history_'+k for k in LOADS),*PREDICTIONS[4:6],*EXPLICIT_STATE_FIELDS}
                     masks=None if windows is None else rollout_stats.batch_windows(windows,[r['entry'] for r in usable])
                     job=([{k:v for k,v in r.items() if k in fields} for r in usable],predictions,fixed_batch,meta,name,config.get('dynamics',True),masks)
                     if pool is None: consume(process_batch(job))
@@ -1190,7 +1190,7 @@ def _run_analysis(config):
         conventions=dict(benchmark="Each checkpoint's own trajectories; matched conditions, different realized transitions; NOT shared-transition comparison.",
             selection="All eligible native transitions" if not balanced else "Deterministic balanced subsampling WITHOUT replacement within checkpoint and loading range",
             force_target="Previous applied interval visible to native history_t; world SI at body CoM",
-            grf_target="Legacy vector metric: Error Against Normal-Only Sensor Forces. New normal metric projects onto flat-ground z (or recorded surface normals). Net metric: Momentum-Derived Net Contact Force, foot-only eligible intervals/windows; componentwise RMSE, not vector-norm RMSE. Recorded nominal torque and successor-yaw decoder conversion retained.",
+            grf_target="Vector metric uses recorded raw forces: legacy normal-only, or total when metadata grf_semantics.mode=total. Normal metric prefers explicit normal-force records, projected onto flat-ground z (or recorded surface normals). Net metric: Momentum-Derived Net Contact Force, foot-only eligible intervals/windows; componentwise RMSE, not vector-norm RMSE. Recorded nominal torque and successor-yaw decoder conversion retained.",
             dynamics="q_t mechanics, recorded interval-average executed torque; passive damping/armature with labelled friction/stiffness approximations",
             explicit_state="Current t: common body vx/vy in m/s (PACT's third estimate is yaw rate; UniFP's is vz); spherical EE estimate converted to yaw-workspace Cartesian meters. Componentwise RMSE, prediction minus measurement, not target tracking.",
             missing="Missing heads never replaced by measured loading in the decoded-loading variant"))
@@ -1230,7 +1230,7 @@ def export_tables(result, config, output):
                 continue
             frame = pd.DataFrame(records).set_index("Method")
             labels={'explicit_base_velocity_rmse':'explicit base velocity (xy)', 'explicit_ee_position_rmse':'explicit ee position (Cartesian)',
-                    'grf_rmse':'Error Against Normal-Only Sensor Forces', 'grf_normal_rmse':'per-foot normal GRF',
+                    'grf_rmse':'Error Against Recorded Sensor Forces (see provenance)', 'grf_normal_rmse':'per-foot normal GRF',
                     'grf_net_rmse':'Momentum Net GRF (xyz)', 'grf_net_horizontal_rmse':'Momentum Net GRF (xy)',
                     'grf_net_window_rmse':'Momentum Net GRF (window)'}
             frame.columns = pd.MultiIndex.from_tuples([(c, f"{labels.get(m,m.replace('_rmse','').replace('_',' '))} [{UNITS[m]}]") for c,m in frame.columns])

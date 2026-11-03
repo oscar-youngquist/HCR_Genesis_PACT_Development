@@ -255,6 +255,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         use_gpu_pipeline = True                                                         # Keep supported simulator tensors on the GPU.
 
         class grf:
+            force_mode = "total"  # Isaac Lab: normal + friction; explicit legacy mode: normal_only.
+            contact_capacity_per_body = 8  # Global capacity = this * bodies * envs; overflow aborts.
             use_substep_filtering = False                                               # IsaacLab: False applies deadband/clipping/EMA once per control step.
             # Per-foot force conditioning in physical Newtons. The vertical
             # component gates the whole XYZ vector before clipping and EMA.

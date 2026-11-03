@@ -252,6 +252,8 @@ class B1Z1UniFPCfg:
         use_gpu_pipeline = True
 
         class grf:
+            force_mode = "total"  # Isaac Lab: normal + friction; explicit legacy mode: normal_only.
+            contact_capacity_per_body = 8  # Global capacity = this * bodies * envs; overflow aborts.
             # IsaacLab: False applies deadband/clipping/EMA once per control step.
             use_substep_filtering = True
             # Per-foot force conditioning in physical Newtons. The vertical

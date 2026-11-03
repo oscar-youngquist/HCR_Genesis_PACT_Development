@@ -140,7 +140,7 @@ def process_batch(job):
     # or any loading supplied to the legacy one-step dynamics calculation.
     if 'grf' in physical:
         from exp3_contact import normal_errors
-        context={k:stack(k) for k in ('grf_raw_world_interval_mean','surface_normals_world') if all(k in r for r in rows)}
+        context={k:stack(k) for k in ('grf_raw_world_interval_mean','grf_normal_world_interval_mean','surface_normals_world') if all(k in r for r in rows)}
         normal=normal_errors(physical['grf'],context,meta)
         if normal is not None: errors['grf_normal']=normal
         else: issue('grf_normal','Surface normals unavailable for non-flat terrain',np.arange(n))

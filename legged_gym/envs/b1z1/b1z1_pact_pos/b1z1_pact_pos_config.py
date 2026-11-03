@@ -258,6 +258,8 @@ class B1Z1PACTPosCfg(LeggedRobotCfg):
         use_gpu_pipeline = True
 
         class grf:
+            force_mode = "total"  # Isaac Lab total ground force; normal_only is explicit legacy mode.
+            contact_capacity_per_body = 8
             # IsaacLab: False applies deadband/clipping/EMA once per control step.
             use_substep_filtering = False
             # Per-foot force conditioning in physical Newtons. The vertical
