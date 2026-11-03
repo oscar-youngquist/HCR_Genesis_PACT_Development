@@ -271,6 +271,9 @@ class StochasticActionReplayTests(unittest.TestCase):
     def test_random_substep_replay_holds_initial_grf_conditioning_but_refreshes_sampled_pd(self):
         self._check_sampled_substep_nominal_and_grf("random_one_substep")
 
+    def test_first_plus_random_replay_holds_initial_grf_conditioning_but_refreshes_sampled_pd(self):
+        self._check_sampled_substep_nominal_and_grf("first_plus_random_substep")
+
     def _check_sampled_substep_nominal_and_grf(self, mode):
         algorithm = make_algorithm(action_clip=1.0)
         observation, _, mean, _, transition = self.replay_inputs(algorithm)
@@ -297,6 +300,7 @@ class StochasticActionReplayTests(unittest.TestCase):
         transition["sampled_qp_q"][:, 7:] = sampled_q
         transition["sampled_qp_v"] = transition["pre_v"].clone()
         transition["sampled_qp_v"][:, 6:] = sampled_qdot
+        transition["sampled_qp_velocity_command"] = torch.zeros(3, 3)
         transition["sampled_qp_grf_conditioning_q"] = transition["pre_q"][:,7:].clone()
         transition["sampled_qp_grf_conditioning_v"] = transition["pre_v"][:,6:].clone()
         rollout = bounded_nominal_torque(
@@ -313,7 +317,8 @@ class StochasticActionReplayTests(unittest.TestCase):
         # Exercise the actual sampled-QP assembly caller; stop at the solver
         # boundary, whose certified solve/backward is covered by QP tests.
         algorithm.hard_pact_qp = SimpleNamespace(
-            cfg=SimpleNamespace(qp_update_mode=mode),
+            cfg=SimpleNamespace(qp_update_mode=mode, endpoint_torque_constraints=False, height_weight=0.),
+            velocity_tracking_inputs_required=lambda: False,
             solve=Mock(side_effect=RuntimeError("captured QP input")))
         heads = algorithm.actor_critic.physics_estimator
         heads.grf_swing = GRFSwingConfig(enabled=True)

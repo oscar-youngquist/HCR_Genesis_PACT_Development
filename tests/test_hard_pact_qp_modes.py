@@ -58,7 +58,7 @@ def fixture(mode,n=8):
     return task,heads,qp,real,counts,q,v,quat,build_rows
 
 
-@pytest.mark.parametrize("mode,per_interval",[("every_substep",4),("random_one_substep",1)])
+@pytest.mark.parametrize("mode,per_interval",[("every_substep",4),("random_one_substep",1),("first_plus_random_substep",2)])
 def test_control_reset_bounds_no_held_correction_and_current_parameter_replay(mode,per_interval):
     task,heads,qp,real,counts,q,v,quat,build_rows=fixture(mode)
     task._begin_qp_interval();task.reset_idx(torch.arange(8));task._hard_pact_q_d.fill_(.05)
@@ -67,7 +67,11 @@ def test_control_reset_bounds_no_held_correction_and_current_parameter_replay(mo
         before=heads.calls
         task._begin_qp_interval()
         bins=torch.bincount(task._qp_sampled_substep_index.long(),minlength=4)
-        assert bins.tolist()==[2]*4
+        if mode != "first_plus_random_substep":
+            assert bins.tolist()==[2]*4
+        else:
+            later_bins=torch.bincount(task._qp_rollout_substep_index.long(),minlength=4)[1:]
+            assert (later_bins.max()-later_bins.min())<=1
         for k in range(4):
             q.fill_(.005*k);v.fill_(.001*k)
             quat[:,2]=torch.sin(torch.tensor(.1*k));quat[:,3]=torch.cos(torch.tensor(.1*k))
@@ -79,15 +83,25 @@ def test_control_reset_bounds_no_held_correction_and_current_parameter_replay(mo
             assert torch.isfinite(tau).all() and not tau.requires_grad
             assert ((tau-prev).abs()<=.100001).all()
             assert (tau.abs()<=qp.torque_limits).all()
-            unsolved=task._qp_sampled_substep_index!=k
-            if mode=="random_one_substep":
+            unsolved=task._qp_rollout_substep_index!=k
+            if mode=="first_plus_random_substep" and k==0:
+                unsolved.zero_()
+            if mode!="every_substep":
                 expected=project_nominal_torque(nominal,prev,qp.torque_limits,10.,.01)
                 torch.testing.assert_close(tau[unsolved],expected[unsolved],rtol=0,atol=0)
+            anchored=task._qp_sampled_substep_index==k
+            packet=task._qp_sampled_transition
+            torch.testing.assert_close(packet["sampled_qp_previous_torque"][anchored],prev[anchored])
+            torch.testing.assert_close(packet["sampled_qp_q"][anchored,7:],q[anchored])
+            torch.testing.assert_close(packet["sampled_qp_v"][anchored,6:],v[anchored])
         assert heads.calls-before==1
         assert counts.tolist()==[per_interval*(interval+1)]*8
         assert task._qp_interval_solve_count.flatten().tolist()==[per_interval]*8
         packet=task._qp_sampled_transition
         assert packet["sampled_qp_valid"].all()
+        # Later solves must not overwrite a k=0 replay record.
+        torch.testing.assert_close(packet["sampled_qp_q"][:,7:],
+            (.005*task._qp_sampled_substep_index.float())[:,None].expand(-1,12))
         desired=task._hard_pact_q_d.clone().requires_grad_();ff=task._hard_pact_tau_ff.clone().requires_grad_()
         nominal,condition=replay_qp_torques(desired,ff,packet,task._get_pinn_feedback)
         torch.testing.assert_close(nominal,packet["sampled_qp_rollout_nominal_torque"],rtol=0,atol=0)
@@ -112,7 +126,7 @@ def test_control_reset_bounds_no_held_correction_and_current_parameter_replay(mo
 
 def test_contract_rejects_retired_modes_and_partition_preserved():
     assert HardPACTQPConfig().qp_update_mode=="random_one_substep"
-    for mode in ("every_substep","random_one_substep"):
+    for mode in ("every_substep","random_one_substep","first_plus_random_substep"):
         c={"schema_version":17,"qp_update":qp_update_contract(mode,4)}
         assert validate_qp_deployment_contract(c) is c
         assert c["qp_update"]["ppo_projection_loss_multiplier"]==1

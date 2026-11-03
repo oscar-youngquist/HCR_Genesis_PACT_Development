@@ -344,6 +344,10 @@ class Go2PACT(BaseTask):
                                     self.actions[:,12:24],                                    # joint torque actions  12
                                     ), dim=-1)                                                # 57
 
+        # HardPACT snapshots clean policy channels for its asymmetric critic;
+        # legacy tasks retain their existing noisy critic inputs.
+        critic_policy_obs = (self._get_critic_policy_observation()
+                             if hasattr(self, "_get_critic_policy_observation") else self.obs_buf)
         # add noise if needed
         if self.add_noise:
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
@@ -389,7 +393,7 @@ class Go2PACT(BaseTask):
 
         critic_obs = torch.cat(
             (
-                self.obs_buf,                                             # 57
+                critic_policy_obs,                                        # 57
                 self.simulator.base_lin_vel * self.obs_scales.lin_vel,                 # 3  - base linear velocity
                 torch.mean(self.simulator.base_pos[:, 2].unsqueeze(1) - 
                            self.simulator.measured_heights, dim=1, keepdim=True),      # 1  - base height

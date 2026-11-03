@@ -19,7 +19,7 @@ from rsl_rl.modules.hard_pact_physics import (
     normalize_wrench_target,
 )
 from rsl_rl.algorithms.hard_pact_qp import (
-    balanced_substep_indices,
+    qp_interval_selection,
     qp_substep_anchors,
     project_nominal_torque, qp_substep_mask,
 )
@@ -1019,7 +1019,7 @@ class Go2HardPACT(Go2PACT):
     def _solve_hard_pact_rollout_qp_substep(self, quat, mass_com_wrench):
         """Fresh PD/rate projection every substep; no held QP corrections.
 
-        Both modes hold neural predictions in yaw-local coordinates at control
+        All modes hold neural predictions in yaw-local coordinates at control
         rate. Their GRF conditioning is the bounded nominal torque at k=0.
         Only selected rows refresh QP mechanics/frames. Outputs are total
         actuator torques, never feedforward terms to which PD is added again.
@@ -1038,7 +1038,7 @@ class Go2HardPACT(Go2PACT):
                     if getattr(self.cfg.control,"clip_torque_rate_without_qp",False)
                     else torch.nan_to_num(tau_nom).clamp(-limits,limits))
             selected = qp_substep_mask(qp.cfg.qp_update_mode,self._qp_substep,
-                                       self._qp_sampled_substep_index)
+                                       self._qp_rollout_substep_index)
             rows = selected.nonzero(as_tuple=True)[0]
             certified = torch.zeros_like(selected)
             aggregate = getattr(qp,"iteration_diagnostics",{}).get("rollout")
@@ -1107,8 +1107,8 @@ class Go2HardPACT(Go2PACT):
                     self._qp_interval_residual_peak[rows],residual)
                 self._qp_interval_stage_counts[rows,result.stage] += 1
                 self._qp_interval_solve_count[rows] += 1
-                # In full mode only the preselected executed solve is stored;
-                # in sampled mode every dispatched row is its replay point.
+                # Store exactly the preselected anchor, even on solver failure.
+                # Other solves never overwrite it or add a second PPO record.
                 local = (self._qp_sampled_substep_index[rows].long()==self._qp_substep).nonzero(as_tuple=True)[0]
                 dest = rows[local]
                 sample = self._qp_sampled_transition
@@ -1201,7 +1201,7 @@ class Go2HardPACT(Go2PACT):
             self._begin_qp_interval()
 
     def _begin_qp_interval(self):
-        """Select one uniform executed replay point; reset control-rate predictions."""
+        """Select rollout solves and one replay point; reset control predictions."""
         # All physical/diagnostic values use float32 on the simulation device.
         shape = lambda width: torch.zeros(
             self.num_envs, width, device=self.device, dtype=torch.float32
@@ -1230,7 +1230,8 @@ class Go2HardPACT(Go2PACT):
             self._hard_pact_rollout_qp.cfg, "qp_update_mode", "every_substep"
         )
         qp_substep_anchors(update_mode, decimation)  # validates exactly four substeps
-        self._qp_sampled_substep_index = balanced_substep_indices(self.num_envs,decimation,self.device)
+        self._qp_rollout_substep_index, self._qp_sampled_substep_index = qp_interval_selection(
+            update_mode, self.num_envs, decimation, self.device)
         aggregate = getattr(self._hard_pact_rollout_qp, "iteration_diagnostics", {}).get("rollout")
         if aggregate is not None:
             aggregate.add_sum("environment_control_intervals", torch.tensor(self.num_envs,device=self.device))
@@ -1443,6 +1444,15 @@ class Go2HardPACT(Go2PACT):
         """Optionally replace the legacy raw GRF input with deployment EMA."""
         if bool(self.cfg.sim.grf.use_ema_grfs_buf):
             self.simulator._grfs_buf.copy_(self.grf_processor.ema.flatten(1))
+
+    def _get_critic_policy_observation(self):
+        """Keep critic frames clean before in-place actor noise/history updates.
+
+        Installed on HardPACTPos by the existing shared-method adapter too.
+        Only sensor-noise injection is excluded; action/history semantics and
+        privileged fields retain their existing definitions and dimensions.
+        """
+        return self.obs_buf.clone() if self.add_noise else self.obs_buf
 
     def compute_observations(self):
         # simulator.post_physics_step() refreshes _grfs_buf immediately before

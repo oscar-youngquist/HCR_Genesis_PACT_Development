@@ -606,6 +606,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
                         'exception_capture_dir': '/tmp/hard_pact_qp_failures',
                         # One balanced random solve per environment/control interval.
                         # Use every_substep for four solves (evaluation/deployment).
+                        # first_plus_random_substep: k=0 plus balanced K in {1,2,3};
+                        # one independent 50/50 replay anchor, unchanged PPO budget.
                         'qp_update_mode': 'random_one_substep',
                         'qp_solver': 'cupiqp', 
                         'rollout_qp_solver': None, 

@@ -68,7 +68,7 @@ def test_execution_scaled_reconstruction_and_gradients(alpha):
     torch.testing.assert_close(total,selected);assert not available.any() and command.eq(0).all()
 
 
-@pytest.mark.parametrize('mode,count',[('every_substep',4),('random_one_substep',1)])
+@pytest.mark.parametrize('mode,count',[('every_substep',4),('random_one_substep',1),('first_plus_random_substep',2)])
 def test_endpoint_control_replay_anchor_and_backward(mode,count):
     from dataclasses import replace
     from test_hard_pact_qp_modes import fixture

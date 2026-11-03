@@ -26,7 +26,7 @@ NUM_VARIABLES = 24
 
 def qp_substep_anchors(mode, decimation):
     """Possible dispatch times, not per-environment solve counts."""
-    if mode not in ("every_substep", "random_one_substep"):
+    if mode not in ("every_substep", "random_one_substep", "first_plus_random_substep"):
         raise ValueError(f"Unsupported qp_update_mode: {mode}")
     if decimation != 4:
         raise ValueError("HardPACT QP execution requires exactly four physics substeps")
@@ -35,7 +35,25 @@ def qp_substep_anchors(mode, decimation):
 
 def qp_substep_mask(mode, substep, selected):
     qp_substep_anchors(mode,4)
+    if mode == "first_plus_random_substep":
+        return (selected == substep) | (substep == 0)
     return torch.ones_like(selected,dtype=torch.bool) if mode=="every_substep" else selected==substep
+
+
+def qp_interval_selection(mode, num_envs, decimation, device, *, generator=None):
+    """Return rollout selection and one replay anchor, before any solver result.
+
+    In first-plus-random mode the rollout index is the later solve (k>0).
+    An independent per-row fair coin picks k=0 or that solve for PPO; storing
+    only this anchor preserves the existing differentiated-row/epoch budget.
+    """
+    qp_substep_anchors(mode, decimation)
+    if mode == "first_plus_random_substep":
+        later = 1 + balanced_substep_indices(num_envs, decimation-1, device, generator=generator)
+        use_later = torch.randint(2, (num_envs,), device=device, generator=generator).bool()
+        return later, torch.where(use_later, later, torch.zeros_like(later))
+    selected = balanced_substep_indices(num_envs, decimation, device, generator=generator)
+    return selected, selected
 
 
 def project_torque_interval(torque, lower, upper):
