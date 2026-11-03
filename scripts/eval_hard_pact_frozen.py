@@ -361,6 +361,11 @@ class Observer:
             self.metrics.add(f"{phase}/{name}", value)
         for foot, name in enumerate(("FR", "FL", "RR", "RL")):
             self.metrics.add(f"{phase}/grf/{name}/predicted_error_n", self.pred_force[:, foot] - measured[:, foot])
+        if getattr(self.sim, "grf_semantics", {}).get("mode") == "total":
+            # Raw completed-substep N, separate from clipped/EMA training targets.
+            for component in ("normal", "tangential", "total"):
+                value = getattr(self.sim, f"ground_{component}_forces_world")[:, self.sim._feet_contact_indices]
+                self.latest[f"measured_{component}_grf_world_n"] = value.detach().clone()
         self.previous_contact.copy_(contact)
         self.substeps.append({k: v[:4].clone() for k, v in self.latest.items()})
         self.k += 1
@@ -614,6 +619,7 @@ def worker(args):
                            ("torque_violation_nm", "rate_step_violation_nm", "torque_violation", "rate_violation")},
         }
         metadata = {
+            "grf_semantics": getattr(env.simulator, "grf_semantics", None),
             "schema_version": 1, "checkpoint": str(args.checkpoint), "checkpoint_sha256": sha_file(args.checkpoint),
             "source_config": document, "effective_environment": class_to_dict(cfg), "solver_settings": asdict(qp_cfg),
             "evaluation_script_sha256": source_hash,

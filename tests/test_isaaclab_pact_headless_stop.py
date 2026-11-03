@@ -19,6 +19,7 @@ def test_pact_constructor_removes_only_headless_stop_subscription(monkeypatch, h
         sim._sim, sim._cfg, sim._headless = context, cfg, is_headless
 
     monkeypatch.setattr(IsaacLabSimulator, "__init__", initialize)
+    monkeypatch.setattr(IsaacLabSimulator_PACT, "_init_ground_contacts", lambda self: None)
     sim = IsaacLabSimulator_PACT(config, {"dt": .005}, "cpu", headless)
     assert sim._sim is context  # Do not clear the live simulator singleton.
     assert config.env.episode_length_s == 20.  # Training timeouts are intentional.

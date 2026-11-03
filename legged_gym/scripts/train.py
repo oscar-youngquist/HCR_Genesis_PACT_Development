@@ -6,6 +6,7 @@ from legged_gym.utils import (
     get_args, init_genesis, save_hard_pact_resolved_config, task_registry,
 )
 import shutil
+import json
 
 def train(args):
     if "genesis" in SIMULATOR:
@@ -40,6 +41,9 @@ def train(args):
         log_dir, args.task, env_cfg, train_cfg,
         effective_train_cfg=getattr(ppo_runner, "train_cfg", None),
     )
+    if hasattr(env.simulator, "grf_semantics"):
+        with open(os.path.join(log_dir, "grf_semantics.json"), "w") as stream:
+            json.dump(env.simulator.grf_semantics, stream, indent=2)
     
     # Start training session
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)

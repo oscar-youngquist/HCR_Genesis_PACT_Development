@@ -682,8 +682,10 @@ class Go2HardPACT(Go2PACT):
         return torch.einsum("bij,bj->bi", rotation, point_body)
 
     def _hard_pact_grf_post_physics_substep(self):
+        normal = getattr(self.simulator, "hard_pact_foot_normal_forces_world", None)
         self.grf_processor.update_substep(
-            self.simulator.hard_pact_foot_forces_world()
+            self.simulator.hard_pact_foot_forces_world(),
+            normal_force_n=normal() if normal is not None else None,
         )
 
     def _persistent_component_settings(self, component):

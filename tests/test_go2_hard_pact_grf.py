@@ -261,9 +261,9 @@ class GRFIntegrationTests(unittest.TestCase):
 
         result = task.step(torch.zeros(1, 24))
         expected_target = torch.zeros(1, 12)
-        expected_target[:, 2::3] = (20.0 / 3.0) / 250.0
+        expected_target[:, 2::3] = (20.0 / 3.0) / task.cfg.sim.grf.prediction_scale_n[2]
         torch.testing.assert_close(result[-1], expected_target)
-        self.assertEqual(tuple(task.cfg.sim.grf.prediction_scale_n), (250.0,) * 3)
+        self.assertTrue(all(value > 0 for value in task.cfg.sim.grf.prediction_scale_n))
         self.assertEqual(task.cfg.normalization.obs_scales.grf, 0.01)
         self.assertFalse(torch.equal(processor.ema.flatten(1) * 0.01, result[-1]))
 

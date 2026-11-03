@@ -19,6 +19,7 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         self.first_loop = True
         self.first_loop_feedback = None
         super().__init__(cfg, sim_params, device, headless)
+        self._init_ground_contacts()
         if headless:
             # Isaac Lab's interactive STOP handler renders until playback
             # resumes. Nobody can press Play in headless training/evaluation,
@@ -71,9 +72,73 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         ), dim=-1)
 
     def hard_pact_foot_forces_world(self):
-        return self._contact_sensors.data.net_forces_w[
-            :, self._feet_contact_indices, :
-        ]
+        return self.ground_total_forces_world[:, self._feet_contact_indices, :]
+
+    def hard_pact_foot_normal_forces_world(self):
+        return self.ground_normal_forces_world[:, self._feet_contact_indices, :]
+
+    def _contact_sensor_options(self):
+        from pxr import Usd, UsdPhysics
+        import omni.usd
+        grf = getattr(self._cfg.sim, "grf", None)
+        self._grf_mode = getattr(grf, "force_mode", "normal_only")
+        if self._grf_mode not in ("total", "normal_only"):
+            raise ValueError("sim.grf.force_mode must be total or normal_only")
+        self._contact_capacity = int(getattr(grf, "contact_capacity_per_body", 8))
+        if self._contact_capacity < 1:
+            raise ValueError("contact_capacity_per_body must be positive")
+        if not hasattr(grf, "force_mode"):
+            # Older non-HardPACT tasks sharing this adapter keep their sensor contract.
+            self._ground_filters = []
+            return {}
+        # Filter actual colliders, not a wildcard matching non-collision USD parents.
+        ground = omni.usd.get_context().get_stage().GetPrimAtPath("/World/ground")
+        self._ground_filters = [str(p.GetPath()) for p in Usd.PrimRange(ground)
+                                if p.HasAPI(UsdPhysics.CollisionAPI)]
+        if not self._ground_filters:
+            raise RuntimeError("No ground colliders found for GRF filtering")
+        return dict(filter_prim_paths_expr=self._ground_filters,
+                    max_contact_data_count_per_prim=self._contact_capacity)
+
+    def _init_ground_contacts(self):
+        # Import Warp only after Kit has selected its bundled, compatible runtime.
+        from .ground_contact_forces import GroundContactForces, contact_semantics
+        self._ground_contacts = (GroundContactForces(
+            self._contact_sensors.contact_physx_view, self._sim_params["dt"], self._device
+        ) if self._grf_mode == "total" else None)
+        shape = (self._num_envs, len(self._contact_sensors.body_names), 3)
+        self.ground_normal_forces_world = torch.zeros(shape, device=self._device)
+        self.ground_tangential_forces_world = torch.full_like(self.ground_normal_forces_world, float("nan"))
+        self.ground_total_forces_world = torch.zeros_like(self.ground_normal_forces_world)
+        self.ground_moments_origin_world = torch.full_like(self.ground_normal_forces_world, float("nan"))
+        if self._ground_contacts is not None:
+            # Same sensor order: expose views, avoiding four device copies per substep.
+            self.ground_normal_forces_world = self._ground_contacts.normal.view(shape)
+            self.ground_tangential_forces_world = self._ground_contacts.tangential.view(shape)
+            self.ground_total_forces_world = self._ground_contacts.total.view(shape)
+            self.ground_moments_origin_world = self._ground_contacts.moment.view(shape)
+        self.grf_semantics = contact_semantics(self._grf_mode, self._sim_params["dt"],
+                                               self._contact_capacity, self._ground_filters)
+        self.grf_semantics["body_order"] = list(self._contact_sensors.body_names)
+        self.grf_semantics["foot_order"] = list(self._feet_names)
+        if not self._ground_filters:
+            self.grf_semantics["source"] = "Legacy unfiltered Isaac Lab normal-only net_forces_w"
+
+    def _update_ground_contacts(self):
+        if self._ground_contacts is None:
+            normal = (self._contact_sensors.data.force_matrix_w.sum(dim=2)
+                      if self._ground_filters else self._contact_sensors.data.net_forces_w)
+            self.ground_normal_forces_world.copy_(normal)
+            self.ground_total_forces_world.copy_(self.ground_normal_forces_world)
+            return
+        self._ground_contacts.update()
+
+    def ground_contact_moment_world(self, reference_world, feet_only=False):
+        """Completed-substep Nm about reference; real contact/anchor points, not foot centers."""
+        force, moment = self.ground_total_forces_world, self.ground_moments_origin_world
+        if feet_only:
+            force, moment = force[:, self._feet_contact_indices], moment[:, self._feet_contact_indices]
+        return (moment - torch.cross(reference_world[:, None].expand_as(force), force, dim=-1)).sum(1)
 
     def hard_pact_executed_torque(self):
         """The effort command sent to Isaac Lab, in canonical order and Nm.
@@ -94,6 +159,8 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
             # Isaac Lab 5.1's composer is the replacement for the deprecated
             # Articulation wrapper. ``set`` (rather than ``add``) guarantees
             # that one HardPACT substep cannot accumulate the previous value.
+            # Its cached link transform otherwise rotates subsequent world loads incorrectly.
+            composer.reset()
             composer.set_forces_and_torques(
                 forces=force, torques=torque,
                 body_ids=[self._base_link_index], is_global=True,
@@ -373,6 +440,7 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
             self._sim.step(render=False)
             self._robot.update(self._sim_params["dt"])
             self._contact_sensors.update(self._sim_params["dt"])
+            self._update_ground_contacts()  # Completed physics step; APIs already return N using physics dt.
             callback = getattr(self, "_hard_pact_grf_post_physics_substep", None)
             if callback is not None:
                 callback()
@@ -477,6 +545,14 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
             len(env_ids), 1, device=self._device
         ).uniform_(self.wrench_timeout_min, self.wrench_timeout_max)
         self._grfs_buf[env_ids] = 0.0
+        if hasattr(self, "_ground_contacts"):
+            for value in (self.ground_normal_forces_world, self.ground_total_forces_world):
+                value[env_ids] = 0
+            if self._ground_contacts is not None:
+                count = len(self._contact_sensors.body_names)
+                self._ground_contacts.reset((env_ids[:, None] * count + torch.arange(count, device=self._device)).flatten())
+                self.ground_tangential_forces_world[env_ids] = 0
+                self.ground_moments_origin_world[env_ids] = 0
         self._last_base_world_lin_vel[env_ids] = 0.0
         self._last_base_world_ang_vel[env_ids] = 0.0
         if self._cfg.asset.obtain_link_contact_states:

@@ -311,6 +311,7 @@ class IsaacLabSimulator(Simulator):
             prim_path="/World/envs/env_.*/" + self._cfg.asset.name + "/.*", # track all links of the robot, but only the ones specified in cfg will be used for termination and penalty
             update_period=self._contact_sensor_update_period(),
             history_length=self._contact_sensor_history_length(),
+            **self._contact_sensor_options(),
             debug_vis=not self._headless,           # visualize contact points if not headless
         )
         
@@ -439,6 +440,10 @@ class IsaacLabSimulator(Simulator):
 
     def _contact_sensor_update_period(self):
         return self._control_dt
+
+    def _contact_sensor_options(self):
+        # Legacy adapters retain their existing unfiltered normal-only sensor.
+        return {}
 
     def _contact_sensor_history_length(self):
         return 1

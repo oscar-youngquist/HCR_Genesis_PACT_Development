@@ -47,13 +47,18 @@ class IntervalGRFProcessor:
         self.interval_count.zero_()
         self.interval_average.zero_()
 
-    def update_substep(self, raw_force_n):
+    def update_substep(self, raw_force_n, normal_force_n=None):
         if raw_force_n.shape != self.raw.shape:
             raise ValueError(
                 f"raw GRF expected {tuple(self.raw.shape)}, got {tuple(raw_force_n.shape)}"
             )
         self.raw.copy_(raw_force_n)
-        active = raw_force_n[..., 2].abs() > self.config.vertical_deadband_n
+        if normal_force_n is not None and normal_force_n.shape != self.raw.shape:
+            raise ValueError("normal GRF shape must match total GRF shape")
+        # Isaac Lab supplies real normal vectors, including on slopes. Other
+        # backends keep the historical z-based gate until they expose normals.
+        normal_magnitude = None if normal_force_n is None else normal_force_n.norm(dim=-1)
+        active = (raw_force_n[..., 2].abs() if normal_magnitude is None else normal_magnitude) > self.config.vertical_deadband_n
         self.complete.copy_(torch.where(
             active.unsqueeze(-1), raw_force_n, torch.zeros_like(raw_force_n)
         ))
@@ -63,7 +68,8 @@ class IntervalGRFProcessor:
         self.ema.mul_(1.0 - self.config.ema_alpha).add_(
             self.clipped, alpha=self.config.ema_alpha
         )
-        self.contacts.copy_(self.clipped[..., 2] > self.config.contact_threshold_n)
+        self.contacts.copy_((self.clipped[..., 2] if normal_magnitude is None else normal_magnitude)
+                            > self.config.contact_threshold_n)
         self.interval_sum.add_(self.clipped)
         self.interval_count.add_(1.0)
         return self.clipped

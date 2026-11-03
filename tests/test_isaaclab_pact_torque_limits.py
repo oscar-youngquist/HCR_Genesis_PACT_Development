@@ -150,10 +150,12 @@ def test_actual_substep_callback_records_the_clipped_effort_command(action_dim, 
     sim._robot.update = lambda dt: None
     sim._sim = SimpleNamespace(step=lambda **kwargs: None)
     sim._contact_sensors = SimpleNamespace(update=lambda dt: None)
+    sim._update_ground_contacts = lambda: None  # This fixture isolates torque execution.
 
     env = Go2HardPACT.__new__(Go2HardPACT)
     env.simulator = sim
-    env.cfg = SimpleNamespace(sim=SimpleNamespace(gravity=[0., 0., -9.81]))
+    env.cfg = SimpleNamespace(sim=SimpleNamespace(gravity=[0., 0., -9.81]),
+                              control=SimpleNamespace(clip_torque_rate_without_qp=False))
     env.obs_scales = SimpleNamespace(base_wrench=.01)
     env._realized_added_mass = torch.zeros(2, 1)
     env._realized_com_shift_body = torch.zeros(2, 3)

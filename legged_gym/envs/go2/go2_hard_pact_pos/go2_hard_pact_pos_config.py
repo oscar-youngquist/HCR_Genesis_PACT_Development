@@ -57,6 +57,8 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         suppress_backend_warnings = True
 
         class grf:
+            force_mode = "total"
+            contact_capacity_per_body = 8
             prediction_scale_n = [100.0, 100.0, 100.0]
             vertical_deadband_n = 3.0
             clip_min_n = -500.0
