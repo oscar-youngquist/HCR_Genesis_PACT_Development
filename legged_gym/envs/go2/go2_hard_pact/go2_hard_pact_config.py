@@ -562,6 +562,10 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         pcgrad_diagnostics_enabled = True
         pcgrad_diagnostics_start_iteration = 0
         pcgrad_diagnostics_interval = 500
+        # Preserve the reference gradient; remove only opposing physics components.
+        # "legacy" restores sign-selected orthogonal/orthogonal-balanced projection.
+        pinn_projection_mode = "conflict_only"
+        pinn_projection_norm_balance = True
         cache_rollout_mechanics = True
 
         ppo_qp_sampling = 'disjoint_epoch_partition'

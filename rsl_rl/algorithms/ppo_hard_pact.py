@@ -341,6 +341,8 @@ class PPO_HardPACT:
                  pcgrad_diagnostics_enabled=False,
                  pcgrad_diagnostics_start_iteration=0,
                  pcgrad_diagnostics_interval=50,
+                 pinn_projection_mode="legacy",
+                 pinn_projection_norm_balance=True,
                  cache_rollout_mechanics=True,
                  ppo_qp_sampling="disjoint_epoch_partition",
                  ppo_qp_passes_per_iteration=1,
@@ -518,6 +520,10 @@ class PPO_HardPACT:
             pcgrad_diagnostics_start_iteration
         )
         self.pcgrad_diagnostics_interval = int(pcgrad_diagnostics_interval)
+        if pinn_projection_mode not in ("legacy", "conflict_only"):
+            raise ValueError("pinn_projection_mode must be legacy or conflict_only")
+        self.pinn_projection_mode = pinn_projection_mode
+        self.pinn_projection_norm_balance = bool(pinn_projection_norm_balance)
         self.cache_rollout_mechanics = bool(cache_rollout_mechanics)
         self.ppo_qp_sampling = str(ppo_qp_sampling)
         self.ppo_qp_passes_per_iteration = int(
@@ -1246,18 +1252,7 @@ class PPO_HardPACT:
             # Actor PCGrad uses reward as primary and QP projection as physics;
             # PINNs are evaluated only in the encoder and decoder phases.
             pcgrad_timing = self._start_bard_timing("pcgrad", obs_batch)
-            if optimize_physics and self.pinn_weight_final >= 0:
-                self.act_optimizer.pc_backward_pinn(
-                    ppo_losses, record_diagnostics=self._pcgrad_audit_ran
-                )
-            elif optimize_physics and self.pinn_weight_final < 0:
-                self.act_optimizer.pc_backward_ppgrad(
-                    ppo_losses, record_diagnostics=self._pcgrad_audit_ran
-                )
-            else:
-                self.act_optimizer.pc_backward(
-                    ppo_losses, record_diagnostics=self._pcgrad_audit_ran
-                )
+            self._physics_pcgrad_backward(self.act_optimizer, ppo_losses)
             self._stop_bard_timing("pcgrad", pcgrad_timing)
             if (
                 self.ppo_qp_sampling_logging_enabled
@@ -1844,9 +1839,26 @@ class PPO_HardPACT:
         merged gradients here; the caller delays all steps until QP VJPs end.
         """
         losses = [supervised] if pinn is None else [supervised,pinn]
+        self._physics_pcgrad_backward(optimizer, losses)
+
+    def _physics_pcgrad_backward(self, optimizer, losses):
+        """One-way projection of already-weighted physics for all three owners.
+
+        Reference-only steps bypass physics. Missing selectors preserve legacy
+        callers; new task configs select conflict-only independent of weight sign.
+        Loss magnitudes, warmup schedules and optimizer ownership stay unchanged.
+        """
         audit = getattr(self,"_pcgrad_audit_ran",False)
-        if pinn is None:
+        mode = getattr(self, "pinn_projection_mode", "legacy")
+        if mode not in ("legacy", "conflict_only"):
+            raise ValueError("pinn_projection_mode must be legacy or conflict_only")
+        if len(losses) == 1:
             optimizer.pc_backward(losses,record_diagnostics=audit)
+        elif mode == "conflict_only":
+            optimizer.pc_backward_pinn_conflict_only(
+                losses, norm_balance=getattr(self, "pinn_projection_norm_balance", True),
+                record_diagnostics=audit,
+            )
         elif self.pinn_weight_final >= 0:
             optimizer.pc_backward_pinn(losses,record_diagnostics=audit)
         else:
