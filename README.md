@@ -36,6 +36,9 @@ A [legged_gym](https://github.com/leggedrobotics/legged_gym) based framework for
 
 Please refer to the [doc of this repo](https://genesis-lr-doc.readthedocs.io/en/latest/).
 
+For legacy Go1/Go2 liquid transport, see the [liquid-payload simulation guide](docs/liquid_payload_simulation.md)
+for the unified launcher, checkpoint/configuration settings, and simulation mechanics.
+
 ## 🖼️ Gallery
 
 | Robot | Sim | Real |
