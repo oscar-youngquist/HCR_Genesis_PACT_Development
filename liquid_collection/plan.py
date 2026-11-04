@@ -36,7 +36,7 @@ def make_plan(manifest, *, seed=1, rounds=1, num_envs=100, episodes=100,
               max_steps=20000, max_seconds=1800., feature_dt=.02, safety_margin=.001,
               chunk_size=128, max_buffer_mb=64, smoke=False, snapshots=0, benchmark=False,
               property_expansion=.10, geometry_expansion=.02, particle_size=.010,
-              substeps=8, contact_geometry='boxes', episode_seconds=None, smoke_step_height=-.16,
+              substeps=4, contact_geometry='boxes', episode_seconds=None, smoke_step_height=-.16,
               save_mode='200hz', episodes_per_env=None):
     if min(rounds, num_envs, episodes, max_steps, chunk_size, max_buffer_mb) < 1:
         raise ValueError('Counts and limits must be positive')
@@ -87,6 +87,8 @@ def make_plan(manifest, *, seed=1, rounds=1, num_envs=100, episodes=100,
                 max_steps=max_steps, max_seconds=max_seconds,
                 feature_dt=feature_dt, safety_margin=safety_margin, particle_size=particle_size,
                 substeps=substeps, contact_geometry=contact_geometry,
+                cavity_coupling='planes' if contact_geometry == 'boxes' else 'sdf',
+                contact_softness_m=.005,
                 episode_seconds=episode_seconds,
                 smoke_step_height=smoke_step_height,
                 property_expansion=property_expansion, geometry_expansion=geometry_expansion,
@@ -127,7 +129,7 @@ def run_plan(plan, output, resume=False):
                 if mode == 'reference':
                     # Existing player's geometry and liquid integration settings,
                     # with the same payload/terrain/commands and domain/reset fixes.
-                    job.update(contact_geometry='mesh', particle_size=.012, substeps=2)
+                    job.update(contact_geometry='mesh', particle_size=.012, substeps=2, cavity_coupling='sdf')
                 atomic_json(attempt/'job.json', job)
                 atomic_json(attempt/'status.json', dict(status='running', started=time.time()))
                 env = dict(os.environ, SIMULATOR='genesis_pact_water', PYTHONUNBUFFERED='1',
@@ -163,9 +165,11 @@ def run_plan(plan, output, resume=False):
                     reference = results['reference']['steady_seconds_per_policy_step']
                     baseline = results['baseline']['steady_seconds_per_policy_step']
                     collected = results['collection']['steady_seconds_per_policy_step']
+                    timing_valid = all(x is not None and x > 0 for x in (reference, baseline, collected))
                     summary = dict(reference_seconds_per_step=reference, baseline_seconds_per_step=baseline,
-                        collection_seconds_per_step=collected, collection_overhead_fraction=collected/baseline-1,
-                        relative_to_original_player=collected/reference, runtime_budget_passed=collected <= reference,
+                        collection_seconds_per_step=collected, collection_overhead_fraction=collected/baseline-1 if timing_valid else None,
+                        relative_to_original_player=collected/reference if timing_valid else None,
+                        runtime_budget_passed=timing_valid and collected <= reference,
                         num_envs=plan['num_envs'], steps=plan['max_steps'])
                     atomic_json(output/f"round-{round_plan['round']:05d}"/'benchmark.json', summary)
                     failed |= not summary['runtime_budget_passed']
@@ -194,7 +198,7 @@ def main():
     p.add_argument('--property-expansion', type=float, default=.10, help='Fractional endpoint expansion; mounts excluded')
     p.add_argument('--geometry-expansion', type=float, default=.02, help='Fractional endpoint expansion; mounts excluded')
     p.add_argument('--particle-size', type=float, default=.010, help='Metres; tuned small-particle starting point')
-    p.add_argument('--substeps', type=int, default=8, help='Internal subdivisions only; policy/PD timing stays unchanged')
+    p.add_argument('--substeps', type=int, default=4, help='Internal subdivisions only; policy/PD timing stays unchanged')
     p.add_argument('--contact-geometry', choices=['mesh', 'boxes'], default='boxes')
     p.add_argument('--smoke', action='store_true', help='Small negative-terrain and partial-reset audit')
     p.add_argument('--smoke-step-height', type=float, default=-.16)

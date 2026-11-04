@@ -59,7 +59,7 @@ class DACTAdapter(PolicyAdapter):
         from legged_gym import gs
         import legged_gym.envs
         from legged_gym.utils import task_registry, init_genesis, class_to_dict
-        from legged_gym.scripts.play_pact_water import parser, load_policy
+        from legged_gym.scripts.play_pact_water import parser, load_policy, apply_reset_termination, PLAY_RESET_TERMINATION
         from legged_gym.scripts.pact_liquid_checkpoint import set_joint_dynamics_midpoints
         from .payload import validate_payload
         self.gs, self.env = gs, None
@@ -85,11 +85,14 @@ class DACTAdapter(PolicyAdapter):
         cfg.liquid.particle_markers = False
         cfg.liquid.collection = True
         cfg.liquid.sampled_payload = selected['payload']
+        cfg.liquid.cavity_coupling = job.get('cavity_coupling', cfg.liquid.cavity_coupling)
+        cfg.liquid.contact_softness_m = job.get('contact_softness_m', cfg.liquid.contact_softness_m)
+        cfg.liquid.contact_sdf_cell_m = job.get('contact_sdf_cell_m', .002)
         cfg.liquid.safety_margin = job['safety_margin']
         cfg.liquid.domain_margin = 3.  # metre margin beyond generated terrain, audited at every sample
         cfg.liquid.particle_size = job['particle_size']
-        cfg.liquid.substeps = job.get('substeps', 2)
-        cfg.liquid.contact_geometry = job.get('contact_geometry', 'mesh')
+        cfg.liquid.substeps = job.get('substeps', cfg.liquid.substeps)
+        cfg.liquid.contact_geometry = job.get('contact_geometry', cfg.liquid.contact_geometry)
         cfg.liquid.property_expansion = job.get('property_expansion', 0.)
         cfg.liquid.geometry_expansion = job.get('geometry_expansion', 0.)
         geom = validate_payload(selected['payload'], cfg.liquid.mount_height,
@@ -109,6 +112,14 @@ class DACTAdapter(PolicyAdapter):
                 step_width=.4, step_height=job.get('smoke_step_height', -.12), platform_size=4.)
             cfg.terrain.border_size = 2.
             cfg.env.episode_length_s = .2
+        if job.get('validation_experiment'):
+            if cfg.terrain.terrain_proportions[2] <= 0 or cfg.terrain.terrain_proportions[3] <= 0:
+                raise ValueError('Validation stairs outside saved terrain support')
+            cfg.terrain.mesh_type = 'heightfield'
+            cfg.terrain.selected = True
+            cfg.terrain.terrain_kwargs = dict(type='terrain_utils.pyramid_stairs_terrain',
+                step_width=.4, step_height=job['validation_step_height'], platform_size=4.)
+            cfg.terrain.border_size = 2.
         if job.get('episode_seconds') is not None:
             cfg.env.episode_length_s = job['episode_seconds']
         if visualization is not None:
@@ -128,6 +139,14 @@ class DACTAdapter(PolicyAdapter):
                 'gap_terrain', 'pit_terrain')}
             if not isinstance(cfg.terrain.terrain_kwargs, dict) or cfg.terrain.terrain_kwargs.get('type') not in allowed:
                 raise ValueError('Saved selected terrain must name a supported terrain_utils generator')
+        apply_reset_termination(cfg)
+        # Explicit collection duration remains the user-selected episode cap.
+        if job.get('episode_seconds') is not None:
+            cfg.env.episode_length_s = job['episode_seconds']
+        import json
+        print('LIQUID_JOINT_DYNAMICS '+json.dumps(cfg.liquid.joint_dynamics), flush=True)
+        print('LIQUID_RESET_TERMINATION '+json.dumps({section:{key:getattr(getattr(cfg,section),key)
+            for key in values} for section,values in PLAY_RESET_TERMINATION.items()}), flush=True)
         self.cfg = cfg
         self.metadata = dict(config=deepcopy(class_to_dict(cfg)), fallbacks=fallbacks,
             geometry=geom, checkpoint=str(self.checkpoint), device='cuda:0',
@@ -150,6 +169,10 @@ class DACTAdapter(PolicyAdapter):
                 self.env.reset_buf |= timed_out
             self.env.check_termination = check_with_time_limit
             self.metadata['effective_episode_seconds'] = limit*self.env.dt
+        if job.get('validation_experiment'):
+            from .validation.commands import install
+            install(self.env, aggressive=job.get('containment_experiment', False))
+            self.validation_commands = True
         self.reset()
         if job.get('episodes_per_env') is not None:
             # The player's reset includes one warmup step, before recording starts.
@@ -158,6 +181,9 @@ class DACTAdapter(PolicyAdapter):
 
     def execute(self):
         obs, history, _, _ = self.env.get_observations()
+        if getattr(self, 'validation_commands', False):
+            import torch
+            torch.testing.assert_close(obs[:, :3], self.env.commands[:, :3]*self.env.commands_scale)
         actions = self.model.act_inference(obs, history)
         return self.env.step(actions)
 

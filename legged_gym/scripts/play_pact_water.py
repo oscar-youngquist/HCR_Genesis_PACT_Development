@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 
 
-# Manual visualization-only overrides for BOTH robots. None retains the saved
+# Shared play/collection overrides for BOTH robots. None retains the saved
 # checkpoint config (or task default when the saved file omits that setting).
 # Heights are terrain-relative metres; angles are radians; durations seconds.
 PLAY_RESET_TERMINATION = {
@@ -88,6 +88,12 @@ def configure(cfg, args):
         cfg.terrain.selected = cfg.terrain.measure_heights = True
         cfg.terrain.terrain_kwargs = dict(type='terrain_utils.random_uniform_terrain',
             min_height=-.05,max_height=.05,step=.005,downsampled_scale=.2)
+    apply_reset_termination(cfg)
+
+
+def apply_reset_termination(cfg):
+    """Keep collection and both visualization entry points on identical rules."""
+    from copy import deepcopy
     for section,values in PLAY_RESET_TERMINATION.items():
         for key,value in values.items():
             if value is not None:

@@ -27,7 +27,7 @@ def capture(path):
     distribution = importlib.metadata.distribution('genesis-world')
     wheel_files = {str(p): p for p in distribution.files or []}
     sources = [('genesis/'+name, genesis/name) for name in GENESIS_FILES]
-    sources += [('repo/'+str(p.relative_to(root)), p) for p in (root/'liquid_collection').glob('*.py')]
+    sources += [('repo/'+str(p.relative_to(root)), p) for p in (root/'liquid_collection').rglob('*.py')]
     sources += [('repo/'+name, root/name) for name in (
         'legged_gym/scripts/play_pact_water.py', 'legged_gym/scripts/pact_liquid_checkpoint.py',
         'legged_gym/scripts/liquid_payload_configs.py', 'legged_gym/envs/base/liquid_payload_config.py',

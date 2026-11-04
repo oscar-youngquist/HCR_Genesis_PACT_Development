@@ -42,6 +42,12 @@ for the unified launcher, checkpoint/configuration settings, and simulation mech
 
 For collection campaigns, edit the five settings in [launch_liquid_collection.sh](launch_liquid_collection.sh)
 and run `bash launch_liquid_collection.sh` (`--dry-run` previews the plan).
+The separate [bounded format-validation experiment](docs/liquid_format_experiment.md)
+compares native and 200 Hz data from the same trajectory without launching a campaign.
+The [corrected-contact validation results](docs/liquid_aggregation_validation_20261103.md)
+summarize storage savings, integrated-loss checks and remaining reconstruction limits.
+The [containment experiment](docs/liquid_containment_experiment.md) tests particle/contact/substep
+profiles and short 50-environment runtime probes.
 
 ## 🖼️ Gallery
 

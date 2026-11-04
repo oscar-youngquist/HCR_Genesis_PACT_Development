@@ -73,11 +73,16 @@ class GenesisSimulator_PACT_Liquid(GenesisSimulator_PACT_NoPINN):
         if getattr(cfg, 'contact_geometry', 'mesh') == 'boxes':
             from liquid_collection.payload import box_parts
             self.liquid_attachment_targets = []
+            cavity_coupling = getattr(cfg, 'cavity_coupling', 'sdf')
+            if cavity_coupling not in ('sdf', 'planes'):
+                raise ValueError('Unknown cavity coupling mode')
+            softness = getattr(cfg, 'contact_softness_m', cfg.particle_size/2)
             self.liquid_contact_parts = box_parts(preset, cfg.mount_height, cfg.lid_overlap)
             for part in self.liquid_contact_parts:
                 entity = self._scene.add_entity(
-                    material=gs.materials.Rigid(rho=part.get('rho', 200.),
-                        coup_softness=cfg.particle_size/2, sdf_cell_size=.002, sdf_min_res=32, sdf_max_res=256),
+                    material=gs.materials.Rigid(rho=part.get('rho', 200.), needs_coup=cavity_coupling == 'sdf',
+                        coup_softness=softness, sdf_cell_size=getattr(cfg, 'contact_sdf_cell_m', .002),
+                        sdf_min_res=32, sdf_max_res=256),
                     morph=gs.morphs.Box(size=tuple(part['size']), pos=tuple(part['pos'])),
                     # Explicit color is required for this Genesis rasterizer to
                     # include opacity when constructing the primitive's RGBA texture.
@@ -86,6 +91,23 @@ class GenesisSimulator_PACT_Liquid(GenesisSimulator_PACT_NoPINN):
                 self.liquid_attachment_targets.append((entity, part['pos']))
             self._bucket = self.liquid_attachment_targets[0][0]
             self._lid = self.liquid_attachment_targets[-1][0]
+            if cavity_coupling == 'planes':
+                # Experimental exact half-space contacts for the fluid only.
+                # The six boxes retain the shell mass, visuals and rigid contacts.
+                # A separate mask bit keeps the analytic planes out of rigid pairs.
+                from liquid_collection.payload import geometry
+                geom = geometry(preset, cfg.mount_height, cfg.lid_overlap)
+                for axis in range(3):
+                    for side, sign in (('lower_B', 1.), ('upper_B', -1.)):
+                        normal = [0., 0., 0.]; normal[axis] = sign
+                        point = list(geom['fill_center_B']); point[axis] = geom[side][axis]
+                        entity = self._scene.add_entity(
+                            material=gs.materials.Rigid(rho=0., needs_coup=True, coup_softness=softness),
+                            morph=gs.morphs.Plane(pos=tuple(point), normal=tuple(normal),
+                                plane_size=(.5, .5), visualization=False, batch_fixed_verts=True,
+                                contype=1 << 30, conaffinity=0))
+                        entity.attach(self._robot, cfg.base_link)
+                        self.liquid_attachment_targets.append((entity, point))
         else:
             self._bucket = self._scene.add_entity(
                 material=gs.materials.Rigid(),

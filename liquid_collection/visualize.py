@@ -44,7 +44,8 @@ def main(args):
                   wall_opacity=args.wall_opacity, terrain=args.terrain)
     print('LIQUID_VISUALIZATION '+json.dumps(dict(seed=seed, selected=job['selected'],
         num_envs=args.num_envs, particle_size=job['particle_size'], substeps=job['substeps'],
-        contact_geometry=job['contact_geometry'], visualization=visual)), flush=True)
+        contact_geometry=job['contact_geometry'], cavity_coupling=job['cavity_coupling'],
+        contact_softness_m=job['contact_softness_m'], visualization=visual)), flush=True)
     if args.dry_run:
         return
     os.environ['SIMULATOR'] = 'genesis_pact_water'

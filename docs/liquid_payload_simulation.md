@@ -87,7 +87,9 @@ Shared resolution, internal substeps, lid overlap and visual settings live in
 [liquid_payload_config.py](../legged_gym/envs/base/liquid_payload_config.py).
 Robot-specific configs set mounting height. Smaller `particle_size` increases
 particle count/cost and may require more internal substeps.
-The current defaults match collection: 10 mm particles and eight substeps.
+The current defaults match collection: 10 mm particles, four substeps, inward-facing
+analytic-plane liquid contacts and 5 mm contact softness. The translucent boxes
+retain the shell mass and rigid-body contacts.
 
 ```text
 policy interval       = control.dt

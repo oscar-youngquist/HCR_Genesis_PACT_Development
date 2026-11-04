@@ -1,3 +1,7 @@
+> Historical validation results below used the settings recorded for each run.
+> Current collection and visualization defaults are 10 mm particles, four substeps,
+> analytic-plane contacts and 5 mm softness; see [containment experiments](liquid_containment_experiment.md).
+
 # Local collection validation
 
 Executed November 3, 2026 on branch `liquid_wrench_surrogate`, using the existing

@@ -14,8 +14,10 @@ def liquid_evaluation_config(robot, mount_height):
             liquid_volume = 4  # nominal legacy fill preset, litres
             liquid_tank = 'default'
             particle_size = .010  # same resolution/contact settings as collection
-            substeps = 8  # internal physics/SPH substeps per control.dt / control.decimation
+            substeps = 4  # internal physics/SPH substeps per control.dt / control.decimation
             contact_geometry = 'boxes'
+            cavity_coupling = 'planes'
+            contact_softness_m = .005
             # Internal timestep = control.dt / control.decimation / substeps.
             lid_overlap = .007
             base_link = 'base'

@@ -54,10 +54,12 @@ def run(path):
             atomic_json(path/'resolved.json', dict(adapter.metadata, domain=sim.liquid_domain,
                 terrain_sha256=terrain_sha256,
                 contact_geometry=adapter.cfg.liquid.contact_geometry,
-                contact_softness_m=adapter.cfg.liquid.particle_size/2 if adapter.cfg.liquid.contact_geometry == 'boxes' else .002,
+                contact_softness_m=float(sim._bucket.geoms[0].coup_softness),
+                cavity_coupling=getattr(adapter.cfg.liquid, 'cavity_coupling', 'sdf'),
                 contact_parts=getattr(sim, 'liquid_contact_parts', None),
                 dry_container_mass_kg=[float(e.get_mass()) for e, _ in sim.liquid_attachment_targets],
-                contact_sdf=[dict(cell_size=float(g.sdf_cell_size), resolution=g.sdf_res.tolist())
+                contact_sdf=[dict(cell_size=float(g.sdf_cell_size), resolution=g.sdf_res.tolist(),
+                    coup_softness_m=float(g.coup_softness))
                     for e, _ in sim.liquid_attachment_targets for g in e.geoms],
                 robot_asset=dict(path=str(asset), sha256=digest(asset)),
                 environment_origins_W=sim.env_origins.cpu().tolist(),
@@ -85,6 +87,12 @@ def run(path):
                     assert (sim._liquid.get_particles_pos()[..., 2].amin(-1) < 0).all(), 'Smoke needs actual liquid below world Z=0'
                 from legged_gym.scripts.play_pact_water import verify_controller_parameters
                 verify_controller_parameters(env, adapter.cfg)
+            if job.get('validation_experiment'):
+                from legged_gym.scripts.play_pact_water import verify_controller_parameters
+                verify_controller_parameters(env, adapter.cfg)
+            if job.get('containment_experiment') and adapter.cfg.liquid.contact_geometry == 'boxes':
+                from .containment import verify_cavity_contacts
+                atomic_json(path/'contact_audit.json', verify_cavity_contacts(sim))
             if not job['baseline']:
                 recorder = NativeRecorder(env, writer, job)
                 if job['snapshots']:
@@ -122,18 +130,22 @@ def run(path):
                 if first_step_seconds is None:
                     torch.cuda.synchronize()
                     first_step_seconds = time.monotonic()-measured
+                if job.get('fail_fast_containment') and recorder is not None and not bool(recorder.episode_supported.all()):
+                    break
                 if budget_reached(completed, job) and not job['benchmark']:
                     break
             torch.cuda.synchronize()
             elapsed = time.monotonic()-measured
             status = 'complete' if budget_reached(completed, job) else 'incomplete'
             metadata = dict(status=status, episodes_per_env=completed.cpu().tolist(), steps=step+1,
+                containment_failed=(not bool(recorder.episode_supported.all())
+                    if job.get('containment_experiment') and recorder is not None else None),
                 requested_episodes_per_env=job.get('episodes_per_env'),
                 selected_episodes_per_env=(completed.clamp_max(job['episodes_per_env']).cpu().tolist()
                     if job.get('episodes_per_env') is not None else completed.cpu().tolist()),
                 initialization_seconds=initialization_seconds, collection_seconds=elapsed,
                 first_step_seconds=first_step_seconds,
-                steady_seconds_per_policy_step=(elapsed-first_step_seconds)/max(1, step),
+                steady_seconds_per_policy_step=(elapsed-first_step_seconds)/step if step else None,
                 seconds_per_policy_step=elapsed/(step+1), torch_peak_allocated_bytes=torch.cuda.max_memory_allocated(),
                 torch_peak_reserved_bytes=torch.cuda.max_memory_reserved(),
                 process_peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,

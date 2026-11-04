@@ -103,7 +103,8 @@ markers are disabled in dataset collection and do not change contact physics.
 view then leaves camera navigation to the viewer. Close the window or press
 Ctrl-C to stop early. `--steps` bounds a quick check; `--dry-run` prints the sample
 without starting Genesis. The existing preset-based Go1/Go2 players also now use
-the box geometry, 10 mm particles and eight substeps.
+the translucent box shell with analytic-plane liquid contacts, 10 mm particles,
+5 mm contact softness and four substeps.
 
 ## Launch and manifest
 
@@ -222,8 +223,10 @@ observation contract come from the selected checkpoint config/weights. Joint
 dynamics retain the existing player's saved-range midpoint convention.
 
 `--substeps` and `--particle-size` expose explicit resolution/runtime experiments.
-Collector and visual-player defaults are eight substeps and .010 m particles with
-the box container, selected from small GPU checks. The benchmark's explicit
+Collector and visual-player defaults are four substeps and .010 m particles with
+inward-facing analytic-plane liquid contacts, .005 m contact softness and a
+translucent box shell. These settings passed repeated ten-second containment trials;
+see [containment experiments](liquid_containment_experiment.md). The benchmark's explicit
 reference profile retains the pre-swap mesh/.012 m/two-substep settings.
 Genesis's viscosity warning alone does not change
 these settings. Increasing internal substeps
@@ -234,7 +237,7 @@ not an automatic response. For a typical DACT checkpoint at the defaults:
 | --- | --- |
 | Policy inference | 10 ms |
 | PD / `scene.step()` | 2 ms (decimation 5) |
-| Internal rigid/SPH interval | 0.25 ms (substeps 8) |
+| Internal rigid/SPH interval | 0.5 ms (substeps 4) |
 | Surrogate target grid | 5 ms |
 | Surrogate held-acceleration feature update | 20 ms, configurable independently |
 
