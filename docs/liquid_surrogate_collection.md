@@ -358,7 +358,15 @@ are recorded rather than assuming exact internal angular-momentum conservation.
 The legacy rigid solver integrates before coupling and receives the reaction for
 its subsequent solve; liquid impulse timestamps are not shifted to hide this lag.
 
-## Preprocessing required by the PDF
+## Historical pointwise/PDF preprocessing diagnostics
+
+The current training formulation is [discrete endpoint/interval-average
+consistency](liquid_discrete_constraints.md), validated separately in the
+[v1 report](liquid_discrete_validation_v1.md). The guidance below describes the
+original continuous/JVP diagnostic objective and is retained for historical
+interpretation; it is not a requirement to reconstruct instantaneous forces or
+accelerations for the revised discrete losses. Historical validity flags remain
+unchanged.
 
 1. Validate chunk hashes including `events/` and `boundaries/`. Merge state and
    boundary rows by `(time_s, record_sequence)`, applying exact-time command and

@@ -77,3 +77,6 @@ wandb
 build
 *debug*
 resources/terrains/*.stl
+
+# Compact discrete-physics validation summary (no trajectories).
+!docs/liquid_discrete_validation_v1.json
