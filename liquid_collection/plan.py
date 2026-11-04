@@ -102,7 +102,10 @@ def make_plan(manifest, *, seed=1, rounds=1, num_envs=100, episodes=100,
     return plan
 
 
-def run_plan(plan, output, resume=False):
+def run_plan(plan, output, resume=False, *, round_index=None):
+    # Select execution only: persist and verify the entire immutable plan.
+    if round_index is not None and not 0 <= round_index < len(plan['rounds']):
+        raise ValueError('Round index outside the plan')
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     # Advisory lock is held by the coordinator for its entire lifetime.
@@ -118,6 +121,8 @@ def run_plan(plan, output, resume=False):
             atomic_json(saved, plan)
         failed = False
         for round_number, round_plan in enumerate(plan['rounds'], 1):
+            if round_index is not None and round_number - 1 != round_index:
+                continue
             modes = ['reference', 'baseline', 'collection'] if plan['benchmark'] else ['collection']
             for mode in modes:
                 directory = output/f"round-{round_plan['round']:05d}"/mode

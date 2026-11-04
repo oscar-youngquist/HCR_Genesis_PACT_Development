@@ -171,6 +171,26 @@ def test_plan_reproducible_multiple_policies_and_resume(tmp_path):
         run_plan(plan, output, resume=True)
 
 
+def test_selected_round_preserves_full_plan_and_resumes(tmp_path):
+    plan = make_plan(manifest(tmp_path), rounds=3)
+    output = tmp_path/'output'
+    with patch('liquid_collection.plan.subprocess.Popen') as popen:
+        popen.return_value.wait.return_value = 2
+        assert run_plan(plan, output, round_index=0) == 2
+        assert run_plan(plan, output, resume=True, round_index=1) == 2
+        assert popen.call_count == 2
+    assert json.loads((output/'plan.json').read_text()) == plan
+    assert not (output/'round-00002').exists()
+    prior = output/'round-00001/collection/attempt-0000'
+    w = ChunkWriter(prior)
+    w.append(dict(x=np.ones(1)))
+    w.finish(dict(status='complete'))
+    with patch('liquid_collection.plan.subprocess.Popen', side_effect=AssertionError('must skip completed')):
+        assert run_plan(plan, output, resume=True, round_index=1) == 0
+    with pytest.raises(ValueError, match='Round index'):
+        run_plan(plan, output, resume=True, round_index=3)
+
+
 def test_incomplete_resume_preserves_previous_attempt(tmp_path):
     plan = make_plan(manifest(tmp_path), rounds=1)
     output = tmp_path/'output'
@@ -433,8 +453,14 @@ def test_campaign_covers_all_platforms_and_resumes_immutable_plans(tmp_path):
     out = tmp_path/'campaign'
     with patch('liquid_collection.launch.run_plan', return_value=0) as runner:
         assert run_campaign(campaign, out) == 0
-        assert runner.call_count == 2
+        assert runner.call_count == 8
+        assert [(call.args[1].name, call.kwargs['round_index']) for call in runner.call_args_list] == [
+            (platform, index) for index in range(4) for platform in platforms]
+        assert [call.kwargs['resume'] for call in runner.call_args_list] == [False, False] + [True]*6
+        runner.reset_mock()
         assert run_campaign(campaign, out, resume=True) == 0
+        assert runner.call_count == 8
+        assert all(call.kwargs['resume'] for call in runner.call_args_list)
     changed = dict(campaign, rounds=10)
     with pytest.raises(ValueError, match='differ'):
         run_campaign(changed, out, resume=True)

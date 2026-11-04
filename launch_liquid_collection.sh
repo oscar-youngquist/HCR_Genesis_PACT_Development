@@ -9,7 +9,7 @@ GPU=1
 PLATFORMS=(go1-dact go2-dact)
 NUM_ENVS=2
 EPISODES_PER_ENV=5
-ROUNDS=500
+ROUNDS=250
 EPISODE_SECONDS=10
 
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

@@ -87,9 +87,13 @@ def run_campaign(campaign, output, resume=False):
         else:
             atomic_json(saved, campaign)
         code = 0
-        for platform, plan in campaign['plans'].items():
-            print(f'Running {platform}: {campaign["rounds"]} rounds; output {output/platform}', flush=True)
-            code |= run_plan(plan, output/platform, resume=resume)
+        for round_index in range(campaign['rounds']):
+            for platform in campaign['platforms']:
+                plan = campaign['plans'][platform]
+                print(f'Running round {round_index+1}/{campaign["rounds"]}: {platform}; '
+                      f'output {output/platform}', flush=True)
+                code |= run_plan(plan, output/platform, resume=resume or round_index > 0,
+                                 round_index=round_index)
         return code
 
 

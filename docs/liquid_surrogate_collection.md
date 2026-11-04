@@ -45,7 +45,11 @@ EPISODE_SECONDS=5
 Every selected platform runs every round. `ROUNDS` is the number of randomly
 sampled payload configurations; the same round's payload is used across selected
 platforms, retaining each robot's mounting height. For two platforms and ten
-rounds there are twenty sequential fresh worker processes. Environments within a
+rounds there are twenty sequential fresh worker processes, ordered by round:
+round 1 Go1 then Go2, round 2 Go1 then Go2, and so on (following `PLATFORMS`
+order). Resume skips completed runs while retaining the full saved plans and
+existing output directories. A running launcher needs restarting to load this
+scheduling change. Environments within a
 worker share the payload and independently sample placements and commands.
 
 The round finishes only when **every environment** has completed its quota.
