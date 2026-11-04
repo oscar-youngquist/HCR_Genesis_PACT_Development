@@ -9,6 +9,7 @@ import traceback
 
 from .storage import ChunkWriter, atomic_json, digest
 from .budget import budget_reached
+from .progress import episode_progress
 
 
 def run(path):
@@ -121,12 +122,17 @@ def run(path):
             torch.cuda.reset_peak_memory_stats()
             measured = time.monotonic()
             completed = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+            atomic_json(path/'progress.json', episode_progress([0]*env.num_envs, job))
+            last_progress = time.monotonic()
             first_step_seconds = None
             for step in range(job['max_steps']):
                 if recorder:
                     recorder.policy_event()
                 result = adapter.execute()
                 completed += result[5].long()
+                if time.monotonic() - last_progress >= 2.:
+                    atomic_json(path/'progress.json', episode_progress(completed.cpu().tolist(), job))
+                    last_progress = time.monotonic()
                 if first_step_seconds is None:
                     torch.cuda.synchronize()
                     first_step_seconds = time.monotonic()-measured
@@ -137,6 +143,7 @@ def run(path):
             torch.cuda.synchronize()
             elapsed = time.monotonic()-measured
             status = 'complete' if budget_reached(completed, job) else 'incomplete'
+            atomic_json(path/'progress.json', episode_progress(completed.cpu().tolist(), job, 'finalizing'))
             metadata = dict(status=status, episodes_per_env=completed.cpu().tolist(), steps=step+1,
                 containment_failed=(not bool(recorder.episode_supported.all())
                     if job.get('containment_experiment') and recorder is not None else None),
@@ -170,6 +177,7 @@ def run(path):
             if recorder:
                 recorder.finish_streams(dict(status=status))
             writer.finish(metadata)
+            atomic_json(path/'progress.json', episode_progress(completed.cpu().tolist(), job, status))
             return 0 if status == 'complete' else 2
     except BaseException:
         atomic_json(path/'failure.json', dict(error=traceback.format_exc(), writer_failed=writer.failed,

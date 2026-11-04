@@ -19,6 +19,21 @@ Edit the five settings at the top of
 bash launch_liquid_collection.sh
 ```
 
+The launcher prints the platform and round number, then an episode progress bar
+for each sampled run (for example, `go1/dact round 2/500`). Each environment
+contributes at most its requested episode quota to the bar; `envs` reports how
+many environments have met that quota. Initialization, collection, and finalization
+are shown separately, and the final attempt status confirms whether saving
+succeeded. Completed episodes include early terminations; this is not a count of
+training-valid histories. Benchmark workers continue to their step budget even
+if the episode bar reaches 100%.
+
+Workers publish `progress.json` in their attempt directory about every two wall
+seconds during collection and at completion. The launcher polls once per second;
+terminals update in place, while redirected output prints only changed progress.
+Detailed simulator output remains in `worker.log`. Already-running launchers must
+be restarted to load this display code.
+
 ```bash
 PLATFORMS=(go1-dact go2-dact)
 NUM_ENVS=2

@@ -13,6 +13,7 @@ import time
 from .payload import sample_payload, supported_bounds
 from .device import worker_device_environment
 from .storage import atomic_json, digest, verified_complete
+from .progress import wait_with_progress
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PYTHON = Path.home()/'.conda/envs/genesis_lr/bin/python'
@@ -116,13 +117,16 @@ def run_plan(plan, output, resume=False):
         else:
             atomic_json(saved, plan)
         failed = False
-        for round_plan in plan['rounds']:
+        for round_number, round_plan in enumerate(plan['rounds'], 1):
             modes = ['reference', 'baseline', 'collection'] if plan['benchmark'] else ['collection']
             for mode in modes:
                 directory = output/f"round-{round_plan['round']:05d}"/mode
                 directory.mkdir(parents=True, exist_ok=True)
                 attempts = sorted(directory.glob('attempt-*'))
+                policy = round_plan['policy']
+                label = f"{policy['robot']}/{policy['adapter']} round {round_number}/{len(plan['rounds'])} ({mode})"
                 if any(verified_complete(p) for p in attempts):
+                    print(f'{label}: already complete; skipping', flush=True)
                     continue
                 attempt = directory/f'attempt-{len(attempts):04d}'
                 attempt.mkdir()
@@ -139,11 +143,12 @@ def run_plan(plan, output, resume=False):
                 env.setdefault('NUMBA_CACHE_DIR', '/tmp/liquid-numba')
                 env.setdefault('MPLCONFIGDIR', '/tmp/liquid-mpl')
                 command = [str(DEFAULT_PYTHON), '-m', 'liquid_collection.worker', str(attempt)]
+                print(f'{label}: starting; log: {attempt}/worker.log', flush=True)
                 with (attempt/'worker.log').open('w') as log:
                     proc = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log,
                                             stderr=subprocess.STDOUT, start_new_session=True)
                     try:
-                        code = proc.wait(timeout=plan['max_seconds'])
+                        code = wait_with_progress(proc, attempt, job, label, plan['max_seconds'])
                         status = 'complete' if code == 0 and verified_complete(attempt) else 'incomplete' if code == 2 else 'failed'
                     except subprocess.TimeoutExpired:
                         terminate_worker(proc)
