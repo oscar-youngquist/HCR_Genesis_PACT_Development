@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 
 from .budget import episode_steps
+from .device import selected_cuda_device
 from .plan import ROOT, make_plan, run_plan
 from .storage import atomic_json
 
@@ -32,7 +33,7 @@ def control_dt(config):
     raise ValueError(f'{config}: an explicit positive control.dt is required for automatic step limits')
 
 
-def campaign_plan(platforms, num_envs, episodes_per_env, rounds, episode_seconds, seed=1, max_seconds=None):
+def campaign_plan(platforms, num_envs, episodes_per_env, rounds, episode_seconds, seed=1, max_seconds=None, gpu=0):
     if not platforms or len(set(platforms)) != len(platforms):
         raise ValueError('Choose a nonempty list of distinct platforms')
     if min(num_envs, episodes_per_env, rounds) < 1:
@@ -43,11 +44,13 @@ def campaign_plan(platforms, num_envs, episodes_per_env, rounds, episode_seconds
         if PLATFORMS[platform] is None:
             raise ValueError('go2-hardpact is reserved: no HardPACT collection adapter/checkpoint is implemented. '
                              'Select go1-dact and/or go2-dact; no DACT fallback will be substituted.')
+    selected_device = selected_cuda_device(gpu)
     plans = {}
     for platform in platforms:
         plan = make_plan(PLATFORMS[platform], seed=seed, rounds=rounds, num_envs=num_envs,
                          episodes=num_envs*episodes_per_env,
                          episodes_per_env=episodes_per_env, episode_seconds=episode_seconds)
+        plan.update(gpu=gpu, cuda_visible_device=selected_device)
         clocks = [control_dt(r['policy']['config']) for r in plan['rounds']]
         steps = max(episode_steps(episode_seconds, dt) for dt in clocks)
         plan['max_steps'] = (steps+2)*episodes_per_env+1
@@ -64,6 +67,7 @@ def campaign_plan(platforms, num_envs, episodes_per_env, rounds, episode_seconds
         for r, shared in zip(plan['rounds'], reference):
             r['payload'] = deepcopy(shared['payload'])
     return dict(schema_version=1, platforms=platforms, num_envs=num_envs,
+                gpu=gpu, cuda_visible_device=selected_device,
                 episodes_per_env=episodes_per_env, rounds=rounds, episode_seconds=episode_seconds,
                 seed=seed, worker_runs=len(platforms)*rounds,
                 requested_episodes=len(platforms)*rounds*num_envs*episodes_per_env, plans=plans)
@@ -92,6 +96,7 @@ def run_campaign(campaign, output, resume=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--platforms', nargs='+', choices=tuple(PLATFORMS), default=['go1-dact', 'go2-dact'])
+    parser.add_argument('--gpu', type=int, default=0, help='CUDA index within inherited visibility; each worker uses only this GPU')
     parser.add_argument('--num-envs', type=int, default=2)
     parser.add_argument('--episodes-per-env', type=int, default=2)
     parser.add_argument('--rounds', type=int, default=1, help='Sampled configs per selected platform')
@@ -106,11 +111,11 @@ def main():
         parser.error('--resume requires --output pointing to the existing campaign')
     try:
         campaign = campaign_plan(args.platforms, args.num_envs, args.episodes_per_env,
-                                 args.rounds, args.episode_seconds, args.seed, args.max_seconds)
+                                 args.rounds, args.episode_seconds, args.seed, args.max_seconds, args.gpu)
         output = args.output or ROOT/'runs/liquid_collection'/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
         print(f'Output: {output.resolve()}', flush=True)
         print(f'{campaign["worker_runs"]} sequential worker runs; {campaign["requested_episodes"]} requested episodes; '
-              '200 Hz saving; genesis_lr; cuda:0', flush=True)
+              f'200 Hz saving; genesis_lr; GPU {args.gpu} (CUDA_VISIBLE_DEVICES={campaign["cuda_visible_device"]}; worker cuda:0)', flush=True)
         if args.dry_run:
             print(json.dumps(campaign, indent=2))
             return 0

@@ -11,6 +11,7 @@ import sys
 import time
 
 from .payload import sample_payload, supported_bounds
+from .device import worker_device_environment
 from .storage import atomic_json, digest, verified_complete
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,6 +135,7 @@ def run_plan(plan, output, resume=False):
                 atomic_json(attempt/'status.json', dict(status='running', started=time.time()))
                 env = dict(os.environ, SIMULATOR='genesis_pact_water', PYTHONUNBUFFERED='1',
                            PYTHONPATH=str(ROOT)+os.pathsep+os.environ.get('PYTHONPATH', ''))
+                env = worker_device_environment(plan, env)
                 env.setdefault('NUMBA_CACHE_DIR', '/tmp/liquid-numba')
                 env.setdefault('MPLCONFIGDIR', '/tmp/liquid-mpl')
                 command = [str(DEFAULT_PYTHON), '-m', 'liquid_collection.worker', str(attempt)]

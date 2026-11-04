@@ -449,3 +449,13 @@ nonzero coordinator exit status. Compare these matched runs, not unrelated
 terrain/payload presets. A
 small-environment result does not establish throughput or memory at 100
 environments; profile progressively before recommending that count.
+
+## Collection GPU selection
+
+Set `GPU=0` (or another CUDA index) in `launch_liquid_collection.sh`, or override
+with `bash launch_liquid_collection.sh --gpu 1`. The index is relative to an
+inherited `CUDA_VISIBLE_DEVICES` list when present. Each worker is isolated to
+the selected GPU before importing Torch/Genesis; both use its local `cuda:0`.
+Campaign plans and resolved metadata retain the selection. This selects one GPU
+for all sequential platform/round workers; it does not distribute a batch across
+multiple GPUs. Use `--dry-run` to inspect the selection without starting collection.

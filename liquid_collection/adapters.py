@@ -150,6 +150,7 @@ class DACTAdapter(PolicyAdapter):
         self.cfg = cfg
         self.metadata = dict(config=deepcopy(class_to_dict(cfg)), fallbacks=fallbacks,
             geometry=geom, checkpoint=str(self.checkpoint), device='cuda:0',
+            requested_gpu=job.get('gpu', 0), cuda_visible_device=job.get('cuda_visible_device'),
             terrain_generator='legged_gym.utils.terrain.Terrain; source snapshotted',
             terrain_difficulty='random choice [0.5,0.75,0.9] from existing generator; smoke step height recorded in terrain_kwargs',
             command_scope='saved literal ranges; training command curriculum disabled')
