@@ -180,6 +180,11 @@ class GenesisSimulator_PACT_Liquid(GenesisSimulator_PACT_NoPINN):
             self._terrain_types = torch.randint(self._cfg.terrain.num_cols,
                 (self._num_envs,), device=self._device)
             self._env_origins[:] = self._terrain_origins[self._terrain_levels, self._terrain_types]
+            if getattr(self._cfg.liquid, 'resample_terrain_on_reset', False):
+                from liquid_collection.terrain_sampling import TerrainCoverage
+                self._terrain_coverage = TerrainCoverage(
+                    (self._terrain_levels*self._cfg.terrain.num_cols+self._terrain_types).cpu(),
+                    self._cfg.terrain.num_rows*self._cfg.terrain.num_cols)
 
     def validate_liquid_spawn(self, env_ids=None, require_rest=False):
         """Audit actual solver positions, including negative terrain and partial resets."""
@@ -224,6 +229,9 @@ class GenesisSimulator_PACT_Liquid(GenesisSimulator_PACT_NoPINN):
                 radius=self._cfg.liquid.particle_size/2,color=(*self._cfg.liquid.fluid_color,1.))
 
     def reset_root_states(self, env_ids, base_pos, base_quat, base_lin_vel, base_ang_vel):
+        if hasattr(self, '_cfg'):
+            from liquid_collection.terrain_sampling import relocate_reset
+            base_pos = relocate_reset(self, env_ids, base_pos)
         super().reset_root_states(env_ids,base_pos,base_quat,base_lin_vel,base_ang_vel)
         local = self._liquid_rest_local[env_ids]
         quat = base_quat[:,None,:].expand(-1,local.shape[1],-1)

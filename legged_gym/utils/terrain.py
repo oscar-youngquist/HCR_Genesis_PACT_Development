@@ -95,12 +95,18 @@ class Terrain:
             #                                                                                 self.cfg.slope_treshold)
     
     def randomized_terrain(self):
+        difficulty_range = getattr(self.cfg, 'randomized_difficulty_range', None)
+        if difficulty_range is not None:
+            low, high = difficulty_range
+            if not (np.isfinite(low) and np.isfinite(high) and 0 <= low <= high <= 1):
+                raise ValueError('Terrain difficulty range must lie within [0, 1]')
         for k in range(self.cfg.num_sub_terrains):
             # Env coordinates in the world
             (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
 
             choice = np.random.uniform(0, 1)
-            difficulty = np.random.choice([0.5, 0.75, 0.9])
+            difficulty = (np.random.uniform(*difficulty_range) if difficulty_range is not None
+                          else np.random.choice([0.5, 0.75, 0.9]))
             terrain = self.make_terrain(choice, difficulty)
             self.add_terrain_to_map(terrain, i, j)
         

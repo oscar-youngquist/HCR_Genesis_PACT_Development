@@ -459,3 +459,39 @@ the selected GPU before importing Torch/Genesis; both use its local `cuda:0`.
 Campaign plans and resolved metadata retain the selection. This selects one GPU
 for all sequential platform/round workers; it does not distribute a batch across
 multiple GPUs. Use `--dry-run` to inspect the selection without starting collection.
+
+## Randomized collection terrain difficulty
+
+Collection samples each randomized terrain tile difficulty uniformly from 0.1 to
+1.0, using the existing terrain-type mixture. The map is generated once per round.
+The range is recorded as `config.terrain.randomized_difficulty_range` in resolved
+metadata. Explicit smoke/validation terrains and flat previews retain their
+explicit geometry. Each subsequent round starts a fresh worker and loads current
+source; an already-running round retains its existing map.
+
+### Terrain subsection selection on episode reset
+
+Normal collection now selects a different terrain tile on every reset (when the
+map has at least two tiles). It prefers each robot's least-visited tiles, then
+those least visited across the batch, with seeded random tie-breaking. Only the
+resetting environments change assignment. The sampled XY spawn jitter and base
+clearance are preserved relative to the new tile origin, including its height;
+the liquid is reset using the same new robot pose.
+
+`terrain_level`, `terrain_type`, and `terrain_origin_W` accompany recorded states,
+including terminal/reset boundary records. The generator still creates one map
+per round. Explicit bounded validation/smoke cases retain fixed assignments.
+An already-running worker keeps its old reset behavior; subsequent round workers
+load the new behavior automatically.
+
+### Consecutive failure termination
+
+Go1 and Go2 now combine configured pose/height violations and base-contact failure
+into one per-step boolean. The failure counter increments once per failing policy
+step and clears on a healthy step. Reset occurs at
+`max(1, ceil(fail_to_terminal_time_s / policy_dt))` consecutive failing steps
+(with a floating-point roundoff allowance at exact integer boundaries).
+Thus the current 0.02 s delay at 100 Hz requires two consecutive failing steps;
+a zero delay terminates on the first failing step, never on a healthy step.
+Timeout and map-boundary resets remain independent. Existing running workers
+retain their imported code; fresh round workers load this correction.

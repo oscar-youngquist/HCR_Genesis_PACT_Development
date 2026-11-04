@@ -84,6 +84,7 @@ class DACTAdapter(PolicyAdapter):
         cfg.viewer.rendered_envs_idx = []
         cfg.liquid.particle_markers = False
         cfg.liquid.collection = True
+        cfg.liquid.resample_terrain_on_reset = not (job.get('smoke') or job.get('validation_experiment'))
         cfg.liquid.sampled_payload = selected['payload']
         cfg.liquid.cavity_coupling = job.get('cavity_coupling', cfg.liquid.cavity_coupling)
         cfg.liquid.contact_softness_m = job.get('contact_softness_m', cfg.liquid.contact_softness_m)
@@ -98,6 +99,7 @@ class DACTAdapter(PolicyAdapter):
         geom = validate_payload(selected['payload'], cfg.liquid.mount_height,
                                 cfg.liquid.particle_size, cfg.liquid.safety_margin, cfg.liquid.lid_overlap,
                                 cfg.liquid.property_expansion, cfg.liquid.geometry_expansion)
+        cfg.terrain.randomized_difficulty_range = (.1, 1.)
         # A small map still samples the policy's existing terrain generator.
         cfg.terrain.num_rows = cfg.terrain.num_cols = max(2, min(10, int(job['num_envs']**.5)))
         if job['smoke']:
@@ -152,7 +154,11 @@ class DACTAdapter(PolicyAdapter):
             geometry=geom, checkpoint=str(self.checkpoint), device='cuda:0',
             requested_gpu=job.get('gpu', 0), cuda_visible_device=job.get('cuda_visible_device'),
             terrain_generator='legged_gym.utils.terrain.Terrain; source snapshotted',
-            terrain_difficulty='random choice [0.5,0.75,0.9] from existing generator; smoke step height recorded in terrain_kwargs',
+            terrain_reset_sampling=('least-visited subsection per robot, global coverage tie-break, random ties; no immediate repeats'
+                if cfg.liquid.resample_terrain_on_reset and cfg.terrain.mesh_type != 'plane' else 'fixed subsection'),
+            terrain_difficulty=('explicit selected terrain_kwargs' if cfg.terrain.selected else
+                                'uniform [0.1,1.0] per terrain tile' if cfg.terrain.mesh_type != 'plane' else
+                                'flat plane; difficulty sampling unused'),
             command_scope='saved literal ranges; training command curriculum disabled')
         init_genesis(args, gs)
         self.env, _ = task_registry.make_env(args.task, args, env_cfg=cfg)

@@ -100,6 +100,10 @@ class NativeRecorder:
                       inside_nominal_cavity=inside_cavity, max_wall_penetration_m=penetration,
                       all_active=active.all(-1), particle_min_B=local.amin(-2), particle_max_B=local.amax(-2),
                       particle_min_W=x.amin(-2), particle_max_W=x.amax(-2))
+        if getattr(self.sim._cfg.liquid, 'resample_terrain_on_reset', False) and self.sim.custom_origins:
+            result.update(terrain_level=self.sim._terrain_levels.clone(),
+                          terrain_type=self.sim._terrain_types.clone(),
+                          terrain_origin_W=self.sim.env_origins.clone())
         if self.job['snapshots'] and self.tick % self.job['snapshots'] == 0:
             # A separate chunk stream keeps the dense schema fixed.
             self.snapshot = dict(tick=np.array(self.tick), pos_W=x.cpu().numpy(), vel_W=u.cpu().numpy(),
