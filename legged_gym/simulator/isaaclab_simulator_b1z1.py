@@ -689,6 +689,20 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
     def apply_base_torque(self, torque_world):
         self._base_torque_world.copy_(torque_world)
 
+    def applied_torso_wrench_source(self):
+        """Pending held interval wrench and its point, in world N/Nm/meters.
+
+        Match _apply_external_forces gates. Installed PhysX uses link transforms
+        when position_data=None; the composer adds no lever moment without an
+        explicit position. This is NOT the randomized CoM or a gravity wrench.
+        No EE, contact, or generic velocity-kick contribution is included.
+        """
+        commands = self._cfg.commands
+        force = self._base_force_world if commands.push_robot_base and commands.apply_base_external_forces else torch.zeros_like(self._base_force_world)
+        couple = self._base_torque_world if commands.push_robot_base and getattr(commands, "apply_base_external_torques", False) else torch.zeros_like(self._base_torque_world)
+        point = self._robot.data.body_link_pos_w[:, self._base_link_index]
+        return force, couple, point
+
     def _apply_external_forces(self):
         commands = self._cfg.commands
         self._external_force_world.zero_()

@@ -289,7 +289,7 @@ def integrate_pose(initial, velocity, dt):
     return torch.cat((pos, quat, joints, velocity), -1)
 
 
-def components(predicted, ee, data, cfg):
+def components(predicted, ee, data, cfg, ee_velocity=None):
     """Normalized per-sample task costs; all references are detached."""
     from legged_gym.utils.math_utils import quat_rotate_inverse
     state = data["state"].detach()
@@ -302,6 +302,17 @@ def components(predicted, ee, data, cfg):
     alpha = -math.expm1(-cfg["dt"] / cfg["actor_phys_velocity_time_constant"])
     reference = (current + alpha * (data["command"].detach() - current)).detach()
     ve, pe = future - reference, ee - data["ee_target"].detach()
+    if "compliance_position" in data:
+        from legged_gym.envs.b1z1.directional_compliance import heading,rotate_yaw,task_position,task_velocity
+        yaw,rate=heading(predicted[:,3:7],predicted[:,29:32])
+        yaw0,rate0=heading(state[:,3:7],state[:,29:32])
+        current=torch.cat((rotate_yaw(state[:,26:29],yaw0,True)[:,:2],rate0[:,None]),-1)
+        future=torch.cat((rotate_yaw(predicted[:,26:29],yaw,True)[:,:2],rate[:,None]),-1)
+        reference=(current+alpha*(data["command"].detach()-current)).detach()
+        ve=future-reference
+        pe=task_position(ee,predicted[:,:3],yaw)-data["compliance_position"].detach()
+        if ee_velocity is None:raise ValueError("Compliant actor objective requires predicted EE velocity")
+        ev=task_velocity(ee,ee_velocity,predicted[:,:3],predicted[:,26:29],yaw,rate)-data["compliance_velocity"].detach()
     delta, temp = cfg["actor_phys_huber_delta"], cfg["actor_phys_softplus_temperature"]
     huber = lambda error: F.huber_loss(error, torch.zeros_like(error), reduction="none", delta=delta).mean(-1)
     lo = data["q_min"].detach() + cfg["actor_phys_q_margin"]
@@ -316,6 +327,9 @@ def components(predicted, ee, data, cfg):
         "qd": barrier(qd_violation / cfg["actor_phys_qd_scale"]).mean(-1),
     }
     values["loss"] = sum(cfg[f"actor_phys_{name}_weight"] * value for name, value in values.items())
+    if "compliance_position" in data:
+        values["ee_velocity"] = huber(ev/cfg["compliance_ee_velocity_scale"])
+        values["loss"] += cfg["compliance_ee_velocity_weight"]*values["ee_velocity"]
     values.update(velocity_error=ve.abs().mean(-1), ee_error_m=pe.norm(dim=-1),
                   position_violation_rad=(F.relu(lo-q)+F.relu(q-hi)).mean(-1),
                   velocity_violation_radps=F.relu(qd_violation).mean(-1))
@@ -409,12 +423,18 @@ def objective(a, batch, actions, context):
         return zero, metrics
     data = {k: v[finite] for k, v in data.items()}
     predicted = predicted[finite]
-    ee_next = a.dynamics_backend.ee_position(predicted)
+    ee_velocity = None
+    if "compliance_position" in data:
+        ee_next,ee_velocity = a.dynamics_backend.ee_pose_twist(predicted,use_orientation=False)
+    else:
+        ee_next = a.dynamics_backend.ee_position(predicted)
     finite_ee = torch.isfinite(ee_next).all(-1)
+    if ee_velocity is not None:finite_ee &= torch.isfinite(ee_velocity).all(-1)
     if not finite_ee.any():
         return zero, metrics
     values = components(predicted[finite_ee], ee_next[finite_ee],
-                        {k: v[finite_ee] for k, v in data.items()}, a.cfg)
+                        {k: v[finite_ee] for k, v in data.items()}, a.cfg,
+                        None if ee_velocity is None else ee_velocity[finite_ee])
     metrics.update({k: v.detach().mean() for k, v in values.items()})
     metrics["active_fraction"] = finite_ee.sum() / len(actions)
     total = values["loss"].mean() + rejection_loss

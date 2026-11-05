@@ -2,8 +2,12 @@ import numpy as np
 
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 from legged_gym.envs.b1z1.rejection_curriculum import RejectionCurriculumDefaults
+from legged_gym.envs.b1z1.directional_compliance import ComplianceCfg
 
 class B1Z1PACTCfg(LeggedRobotCfg):
+    class compliance(ComplianceCfg):
+        enabled = True  # Opt-in: profile-conditioned actor; requires a matching checkpoint.
+
     use_force_shifted_target = False  # Disturbance rejection tracks nominal trajectories.
     seed = 1                                                                            # Random seed for reproducible initialization.
 
@@ -395,6 +399,9 @@ class B1Z1PACTCfg(LeggedRobotCfg):
 
 
         push_gripper_stators = True                                                     # Enable the EE disturbance-event scheduler.
+        # Optional episode coverage [EE-only, torso-only, simultaneous]. None
+        # preserves independent event schedules; magnitudes/ramp shapes stay unchanged.
+        compliance_disturbance_mode_weights = None
         apply_ee_external_forces = True                                                 # Actually apply scheduled EE forces.
         push_gripper_interval_s_ext = [3.5, 9.0]                                        # EE force-event interval range [s].
         push_gripper_duration_s_ext = [1.0, 3.0]                                        # EE force-event duration range [s].
@@ -577,6 +584,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         dof_tracking_sigma = 0.04                                                      # Whole-body mean squared position-error scale [rad^2].
         arm_feedforward_tracking_sigma = 0.25                                         # Normalized torque MSE width; r=exp(-MSE/sigma).
         tracking_ee_sigma = 1.00                                                        # EE position tracking error scale.
+        compliance_ee_velocity_sigma = 0.25  # (m/s)^2
 
         tracking_ee_orientation_sigma = 0.02                                            # Default EE orientation tracking error scale.
         impedance_virtual_mass = [1.0, 1.0, 1.0]                                        # Per-axis virtual inertia in the soft impedance residual.
@@ -642,6 +650,7 @@ class B1Z1PACTCfg(LeggedRobotCfg):
         # penalized by ``_reward_torque_cancellation``.
         torque_cancellation_deadband = 0.03
         class scales:
+            compliance_ee_velocity_weight = 0.5  # Active only with compliant references.
             termination = 0.0                                                           # Constraints
             collision = -5.0
             dof_pos_limits = -10.0
@@ -1005,15 +1014,6 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_arm_feedforward_enabled = True          # Detached bias/base-motion/applied-EE-force torque teacher.
         actor_phys_arm_feedforward_weight = 0.05           # Inside actor_phys_coef and its PINN ramp; zero skips all teacher work.
         
-        # Reuse BARD acceleration; h already includes gravity. Normalize by each joint's torque_action_scale.
-        # No active-force/p gate: gravity guidance is useful even without external disturbances.
-        actor_phys_arm_rejection_enabled = False            # Dynamic arm-force projection, scaled by shared p; no reliability gate.
-        actor_phys_arm_rejection_weight = 0.50             # Zero skips arm projection; base rejection can still need the neutral pass.
-        actor_phys_force_allocation_weight = 0.25           # Zero skips allocation; otherwise weight * PINN ramp * p^2.
-        
-        actor_phys_base_rejection_enabled = False           # Incremental stance-force reaction objective.
-        actor_phys_base_rejection_weight = 0.025             # Final weight inside the existing actor schedule.
-        
         actor_phys_base_balance_enabled = True           # Single-pass stance-force teacher; requires live GRFs. Opt in separately.
         actor_phys_base_balance_weight = 0.03             # Effective: weight * rejection p * actor_phys_coef * PINN ramp.
         
@@ -1034,6 +1034,9 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_coef = 1.0                              # Overall actor auxiliary coefficient.
         actor_phys_vel_weight = 1.50                       # Reachable planar velocity/yaw tracking.
         actor_phys_ee_weight = 1.25                          # Next scheduled, compliant EE target.
+        # Used only for captured compliant targets; no reference-filter parameters here.
+        compliance_ee_velocity_weight = 0.25
+        compliance_ee_velocity_scale = 0.5  # m/s
         actor_phys_q_weight = 0.01                           # Joint-position safety barrier.
         actor_phys_qd_weight = 0.001                          # Joint-velocity safety barrier.
         actor_phys_velocity_time_constant = 0.25            # Reachable command response time [s].
@@ -1046,6 +1049,22 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_q_scale = 1.0                            # Position-barrier normalization [rad].
         actor_phys_qd_scale = 10.0                          # Velocity-barrier normalization [rad/s].
         actor_phys_require_force_gate = False               # Legacy whole-objective opt-in gate; keep false for ungated actor physics.
+        
+        actor_phys_pos_fk_enabled = True                   # Direct arm position-command FK objective.
+        actor_phys_pos_fk_weight = 0.1                      # Inside the scheduled actor-physics coefficient.
+        actor_phys_pos_fk_huber_delta = 1.0                 # Huber threshold after EE-error normalization.
+        actor_phys_pos_fk_axis_weights = [1.0, 1.0, 1.0]     # Arm-root Cartesian weights; uses actor_phys_ee_scale.
+        actor_phys_pos_fk_deadband = 0.025                    # Per-axis tolerance [m].
+
+        # Currently Unused additional features.
+        # Reuse BARD acceleration; h already includes gravity. Normalize by each joint's torque_action_scale.
+        # No active-force/p gate: gravity guidance is useful even without external disturbances.
+        actor_phys_arm_rejection_enabled = False            # Dynamic arm-force projection, scaled by shared p; no reliability gate.
+        actor_phys_arm_rejection_weight = 0.50             # Zero skips arm projection; base rejection can still need the neutral pass.
+        actor_phys_force_allocation_weight = 0.25           # Zero skips allocation; otherwise weight * PINN ramp * p^2.
+        
+        actor_phys_base_rejection_enabled = False           # Incremental stance-force reaction objective.
+        actor_phys_base_rejection_weight = 0.025             # Final weight inside the existing actor schedule.
 
         actor_phys_ee_stability_weight = 0.00               # Conservative near-target task-space damping weight.
         actor_phys_ee_stability_position_radius = 0.05      # Activate primarily within 5 cm of the target.
@@ -1062,12 +1081,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_arm_manipulability_enabled = False      # Optional successor-arm translational singularity barrier.
         actor_phys_arm_manipulability_weight = 0.02        # Inside the scheduled actor-physics coefficient.
         actor_phys_arm_manipulability_sigma_min = 0.05     # Minimum translational Jacobian singular value [m/rad].
-        
-        actor_phys_pos_fk_enabled = True                   # Direct arm position-command FK objective.
-        actor_phys_pos_fk_weight = 0.1                      # Inside the scheduled actor-physics coefficient.
-        actor_phys_pos_fk_huber_delta = 1.0                 # Huber threshold after EE-error normalization.
-        actor_phys_pos_fk_axis_weights = [1.0, 1.0, 1.0]     # Arm-root Cartesian weights; uses actor_phys_ee_scale.
-        actor_phys_pos_fk_deadband = 0.025                    # Per-axis tolerance [m].
+
 
         value_loss_coef = 1.0                                                           # Critic regression coefficient.
         use_clipped_value_loss = True                                                   # Apply PPO-style clipping to critic updates.

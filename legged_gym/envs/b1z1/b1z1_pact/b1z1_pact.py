@@ -62,6 +62,8 @@ class B1Z1PACT(LeggedRobot):
     """
 
     def __init__(self, cfg, sim_params, sim_device, headless):
+        from legged_gym.envs.b1z1.compliance_task import configure, enabled, ComplianceTask
+        configure(cfg)
         self.cfg = cfg
         self.init_done = False
         self._parse_cfg(cfg, sim_device)
@@ -70,6 +72,7 @@ class B1Z1PACT(LeggedRobot):
         # so initialize the shared BaseTask state directly.
         BaseTask.__init__(self, cfg, sim_params, sim_device, headless)
         self._init_buffers()
+        self.compliance = ComplianceTask(self) if enabled(cfg) else None
         self._prepare_reward_function()
         self.init_done = True
 
@@ -112,6 +115,10 @@ class B1Z1PACT(LeggedRobot):
         if "tracking_arm_feedforward" in self.reward_scales:
             from .arm_feedforward_reward import capture
             capture(self, actions)
+        if getattr(self,"compliance",None) is not None:
+            # Actual ramped/gated force has just been published; apply it only
+            # through the existing simulator path. Targets advance once here.
+            self.compliance.begin()
         sim_start = rollout_timer.start("simulator") if rollout_timer is not None else None
         self.simulator.step(actions)
         if rollout_timer is not None:
@@ -423,6 +430,8 @@ class B1Z1PACT(LeggedRobot):
         episode_ee_force_ext_norm = torch.mean(torch.norm(self.ee_force_ext_world[env_ids], dim=1))
         episode_base_force_ext_norm = torch.mean(torch.norm(self.base_force_ext_world[env_ids], dim=1))
         episode_base_torque_ext_norm = torch.mean(torch.norm(self.base_torque_ext_world[env_ids], dim=1))
+        episode_compliance_wrenches = (self.compliance.wrench_statistics(env_ids)
+            if getattr(self, "compliance", None) is not None else {})
         episode_contact_fail_rate = torch.mean(self.contact_fail_buf[env_ids].float())
         episode_ee_offset_diagnostics = summarize_accumulated_ee_force_target_diagnostics(
             self, env_ids
@@ -477,6 +486,8 @@ class B1Z1PACT(LeggedRobot):
         self.last_contacts[env_ids] = False
         
         self._reset_force_events(env_ids)
+        if getattr(self, "compliance", None) is not None:
+            self.compliance.reset(env_ids)
         self._randomize_force_gains(env_ids)
 
         # Force buffers live in the env, but Genesis consumes them in the
@@ -497,6 +508,13 @@ class B1Z1PACT(LeggedRobot):
             critic_slot[env_ids] = 0.0
 
         self.extras["episode"] = {}
+        self.extras["episode"].update(episode_compliance_wrenches)
+        if getattr(self, "compliance", None) is not None:
+            reference = self.compliance.reference
+            family_ids = reference.family_ids[env_ids]
+            self.extras["episode"].update(reference.sampler.statistics(reference.profile[env_ids], family_ids))
+            # Reset-event diagnostics only; never inserted into actor/history inputs.
+            self.extras["compliance_sampling"] = {"env_ids": env_ids.clone(), "family_ids": family_ids.clone()}
         for key in self.episode_sums.keys():
             self.extras["episode"]["rew_" + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
             self.episode_sums[key][env_ids] = 0.0
@@ -611,6 +629,8 @@ class B1Z1PACT(LeggedRobot):
                 sin_pos,
                 cos_pos,
                 self.actions,
+                # Keep nominal commands last for the existing FiLM contract.
+                *([self.compliance.profile] if getattr(self,"compliance",None) is not None else []),
                 self.commands * self.commands_scale,
             ),
             dim=-1,
@@ -706,6 +726,8 @@ class B1Z1PACT(LeggedRobot):
             ("joint_friction", self.simulator._joint_friction),
             ("joint_damping", self.simulator._joint_damping),
         )
+        if getattr(self,"compliance",None) is not None:
+            critic_components += (("compliance_profile",self.compliance.profile),)
         critic_state = torch.cat([value for _, value in critic_components], dim=-1)
         if critic_state.shape[1] != self.cfg.env.num_critic_state_obs:
             layout = ", ".join(
@@ -1445,6 +1467,8 @@ class B1Z1PACT(LeggedRobot):
             self.ee_force_ext_world[env_ids_all] = 0.0
             self.selected_env_ids_gripper_ext[env_ids_all] = False
             self.force_target_gripper_ext[env_ids_all] = 0.0
+        from legged_gym.envs.b1z1.compliance_task import mask_disturbance
+        mask_disturbance(self, self.ee_force_ext_world, env_ids_all, ee=True)
         if hasattr(self.simulator, "apply_ee_force"):
             self.simulator.apply_ee_force(self.ee_force_ext_world)
 
@@ -1473,6 +1497,8 @@ class B1Z1PACT(LeggedRobot):
             self.base_force_ext_world[env_ids_all] = 0.0
             self.selected_env_ids_base_ext[env_ids_all] = False
             self.force_target_base_ext[env_ids_all] = 0.0
+        from legged_gym.envs.b1z1.compliance_task import mask_disturbance
+        mask_disturbance(self, self.base_force_ext_world, env_ids_all, ee=False)
         if hasattr(self.simulator, "apply_base_force"):
             self.simulator.apply_base_force(self.base_force_ext_world)
         if self.cfg.commands.apply_base_external_torques:
@@ -1497,6 +1523,7 @@ class B1Z1PACT(LeggedRobot):
             self.base_torque_ext_world[env_ids_all] = 0.0
             self.selected_env_ids_base_torque_ext[env_ids_all] = False
             self.force_target_base_torque_ext[env_ids_all] = 0.0
+        mask_disturbance(self, self.base_torque_ext_world, env_ids_all, ee=False)
         if hasattr(self.simulator, "apply_base_torque"):
             self.simulator.apply_base_torque(self.base_torque_ext_world)
 
@@ -1579,6 +1606,10 @@ class B1Z1PACT(LeggedRobot):
                 self.reward_scales[key] = (low + (high - low) * alpha) * self.dt
 
     def _prepare_reward_function(self):
+        # Map the configurable weight to the existing reward/log name, once.
+        compliance_weight = self.reward_scales.pop("compliance_ee_velocity_weight", 0.0)
+        if self.cfg.compliance.enabled:
+            self.reward_scales["tracking_compliant_ee_velocity"] = compliance_weight
         # Position-only variants have no learned FF command to supervise.
         if self.cfg.env.num_policy_actions == self.num_actions:
             self.reward_scales.pop("tracking_arm_feedforward", None)
@@ -2053,11 +2084,20 @@ class B1Z1PACT(LeggedRobot):
     def _reward_tracking_lin_vel_force_world(self):
         # No external impedance wrapper: disturbance does not shift velocity
         # commands. The coupled action policy must reject it itself.
-        error = torch.sum(torch.square(self.commands[:, :2] - self.simulator.base_lin_vel[:, :2]), dim=1)
+        if getattr(self,"compliance",None) is not None and self.compliance.target is not None:
+            error = (self.compliance.target.base[:,:2]-self.compliance.measured_base()[:,:2]).square().sum(-1)
+        else:
+            error = torch.sum(torch.square(self.commands[:, :2] - self.simulator.base_lin_vel[:, :2]), dim=1)
         return torch.exp(-error / self.cfg.rewards.tracking_sigma)
 
     def _reward_tracking_ang_vel(self):
+        if getattr(self,"compliance",None) is not None and self.compliance.target is not None:
+            return torch.exp(-(self.compliance.target.base[:,2]-self.compliance.measured_base()[:,2]).square()/self.cfg.rewards.tracking_sigma)
         return torch.exp(-torch.square(self.commands[:, 2] - self.simulator.base_ang_vel[:, 2]) / self.cfg.rewards.tracking_sigma)
+
+    def _reward_tracking_compliant_ee_velocity(self):
+        error=(self.compliance.measured_velocity()-self.compliance.target.velocity).square().sum(-1)
+        return torch.exp(-error/self.cfg.rewards.compliance_ee_velocity_sigma)
 
     def _reward_tracking_dof_pos(self):
         """Positive whole-body PD-target tracking; one at zero joint-position error."""
@@ -3141,7 +3181,8 @@ class B1Z1PACT(LeggedRobot):
 
         # Commands are yaw-frame velocities; compare them with world displacement.
         command_local = torch.zeros(self.num_envs, 3, device=self.device)
-        command_local[:, :2] = self.commands[:, :2]
+        command_local[:, :2] = (self.compliance.target.base[:,:2]
+            if getattr(self,"compliance",None) is not None and self.compliance.target is not None else self.commands[:,:2])
         command_world = quat_apply(
             self._get_base_yaw_quat(),
             command_local,
@@ -3184,7 +3225,9 @@ class B1Z1PACT(LeggedRobot):
 
         minimum_history = max(1, int(round(0.20 / self.dt)))
         history_ready = self.progress_valid_steps >= minimum_history
-        moving_command = torch.norm(self.commands[:, :2], dim=1) > 0.15
+        command = (self.compliance.target.base if getattr(self,"compliance",None) is not None
+                   and self.compliance.target is not None else self.commands[:,:3])
+        moving_command = torch.norm(command[:, :2], dim=1) > 0.15
 
         # Aerial motion and displacement while fallen are not valid locomotion.
         supported = self.simulator.foot_contacts.sum(dim=1) >= 2

@@ -437,6 +437,17 @@ def get_force_adjusted_ee_target(env, env_ids=None, *, use_cache=True):
     full-batch cache. ``use_cache=False`` is available for assertions and tools.
     The underlying computation remains stateless.
     """
+    compliance = getattr(env,"compliance",None)
+    if compliance is not None and compliance.target is not None:
+        # Read-only view: observations/diagnostics must never advance filters.
+        target=compliance.world_target()
+        nominal=env.curr_ee_goal_cart_world
+        if env_ids is not None:target,nominal=target[env_ids],nominal[env_ids]
+        offset=target-nominal
+        zero=offset.new_zeros(len(offset)); flag=zero.bool()
+        yaw=env._get_base_yaw_quat(env_ids) if env_ids is not None else env._get_base_yaw_quat()
+        radius=(target-env.get_ee_goal_spherical_center(yaw,env_ids)).norm(dim=-1)
+        return ForceAdjustedEETarget(target,offset,offset,offset,flag,zero+1,flag,zero,radius,radius)
     if env_ids is not None or not use_cache:
         return _compute_force_adjusted_ee_target(env, env_ids)
     cached = getattr(env, "_force_adjusted_ee_target_cache", None)

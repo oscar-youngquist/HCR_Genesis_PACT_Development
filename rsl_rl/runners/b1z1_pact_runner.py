@@ -38,6 +38,9 @@ class B1Z1PACTRunner:
         self.env, self.cfg, self.device, self.log_dir = env, train_cfg, device, log_dir
 
         policy_cfg, algorithm_cfg, runner_cfg = train_cfg["policy"], train_cfg["algorithm"], train_cfg["runner"]
+        from legged_gym.envs.b1z1.compliance_task import configure_algorithm
+        algorithm_cfg = configure_algorithm(algorithm_cfg, env.cfg)
+        train_cfg["algorithm"] = algorithm_cfg  # Save the resolved objective audit with the run.
 
         critic_dim = env.num_privileged_obs * env.num_crit_obs_stack
 
@@ -300,6 +303,8 @@ class B1Z1PACTRunner:
                     from rsl_rl.algorithms.b1z1_actor_physics import capture
                     capture(self)
                     next_obs, next_privileged, next_history, next_explicit, reward, dones, infos, _ = self.env.step(actions)
+                    from legged_gym.envs.b1z1.compliance_task import attach_transition
+                    attach_transition(self.alg,self.env)
                     self.action_replay.reset(dones)
                     # B1Z1 has no QP: bounded commanded total torque is nominal.
                     # Capture the final substep command paired with the next GRF.
