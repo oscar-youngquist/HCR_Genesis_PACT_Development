@@ -56,7 +56,7 @@ def test_force_sign_zero_residual_and_detached_teacher(device, dtype):
     assert loss > 0 and loss.dtype == dtype and loss.device.type == device
     assert torch.isfinite(grf.grad).all() and (grf.grad[..., 0] < 0).all()
     assert all(v.grad is None for v in (*vars(fixed).values(), acceleration, data["state"], data["command"]))
-    assert metrics["base_balance_effective_weight"] == pytest.approx(.5 * .5 * a.cfg["actor_phys_coef"])
+    assert metrics["base_balance_effective_weight"].item() == pytest.approx(.5 * .5 * a.cfg["actor_phys_coef"])
 
 
 def test_reachable_reference_frames_joint_coupling_and_bias():
@@ -85,12 +85,15 @@ def test_applied_wrench_origin_shift():
     state[:, 88:97] = 0.
     state[:, 91] = 3.
     state[:, 96] = 2.
-    state[:, 177] = 4.  # lever=(0,4,0); lever x force gives tau_z=-12.
+    state[:, 177] = 4.  # Randomized CoM is not an application lever.
     # A synthetic mapping makes the origin-shift convention observable in planar rows.
     fixed.base_jacobian[:, 5, 1] = 1.
     target, external = balance.contact_target(state, data["command"], fixed, torch.zeros_like(fixed.bias), a.cfg)
-    torch.testing.assert_close(external, state.new_tensor([3., -10.]).expand_as(external))
+    torch.testing.assert_close(external, state.new_tensor([3., 2.]).expand_as(external))
     torch.testing.assert_close(target, -external)
+    lever=state.new_tensor([0.,4.,0.]).expand(len(state),-1)
+    _, external = balance.contact_target(state, data["command"], fixed, torch.zeros_like(fixed.bias), a.cfg, lever)
+    torch.testing.assert_close(external, state.new_tensor([3., -10.]).expand_as(external))
 
 
 @pytest.mark.parametrize("reason", ["flag", "weight", "actor", "coefficient", "sampling", "progress", "live_grf"])

@@ -1,13 +1,12 @@
-"""Fixed-cost URDF kinematics and conservative skeleton collision probes.
+"""URDF FK and EE-only sphere guidance against torso/link primitives.
 
-Collision radii are explicit approximations, not mesh collision certificates.
-Torso uses the asset collision box; arm/legs use sampled link capsules enlarged
-by half the sample spacing so a between-sample crossing is not silently missed.
+Not full-arm collision protection: only pairs containing the EE are evaluated.
 """
 import math
 import xml.etree.ElementTree as ET
 
 import torch
+from .ee_collision import point_segment, segment_segment, point_box, segment_box
 
 
 def skew(v):
@@ -103,14 +102,19 @@ class RobotGeometry:
                 order.append(name);p=tensor([0,0,0]);r=torch.eye(3,device=device)
         if order!=self.arm_names:raise ValueError('Arm indices must follow URDF chain order')
         self.arm_tail=p
-        self.samples=torch.linspace(0,1,cfg.collision_segment_samples,device=device)
-        ids=torch.arange(len(self.arm_names),device=device)
-        self.self_excluded=(ids[:,None]-ids[None,:]).abs()<=cfg.self_exclusion_hops
+        excluded=set(cfg.ee_excluded_arm_segments)
+        if any(i<0 or i>=len(self.arm_names) for i in excluded):
+            raise ValueError('Invalid EE attachment-neighbour segment exclusion')
+        # Segments 4/5 are the wrist attachment and own EE segment on Z1.
+        # Exclusions are explicit, not inferred from distances or current pose.
+        self.ee_obstacle_segments=[i for i in range(len(self.arm_names)) if i not in excluded]
         if cfg.compile_geometry and torch.device(device).type=='cuda':
             # No reference state, simulator calls or RNG enters these kernels.
             # Dynamic batch dimensions share code across bounded probe batches.
             self.forward=torch.compile(self.forward,dynamic=True,fullgraph=True)
             self._probe_clearance=torch.compile(self._probe_clearance,dynamic=True,fullgraph=True)
+            self.path_clearance=torch.compile(self.path_clearance,dynamic=True,fullgraph=True)
+            self.point_clearance=torch.compile(self.point_clearance,dynamic=True,fullgraph=True)
 
     def forward(self,q):
         n=len(q); eye=torch.eye(3,device=q.device,dtype=q.dtype).expand(n,3,3)
@@ -144,15 +148,18 @@ class RobotGeometry:
         return torch.stack(points,1)
 
     def clearance(self,q,full_q,legs=None):
+        return self.clearance_pairs(q,full_q,legs).amin(-1)
+
+    def clearance_pairs(self,q,full_q,legs=None):
         shape=q.shape[:-1]
         if legs is None:legs=self.forward(full_q)[3]
         legs=legs.reshape(len(full_q),*([1]*(q.ndim-2)),*legs.shape[1:]).expand(*shape,*legs.shape[1:])
-        # Probe count grows with environments; bound cdist scratch memory while
+        # Probe count grows with environments; bound geometry scratch memory while
         # keeping all per-contact arithmetic on device (no per-robot CPU loop).
         flat=q.reshape(-1,q.shape[-1]);legs=legs.reshape(len(flat),*legs.shape[-3:])
         size=self.cfg.collision_batch_size
         return torch.cat([self._probe_clearance(part,leg)
-                          for part,leg in zip(flat.split(size),legs.split(size))]).reshape(shape)
+                          for part,leg in zip(flat.split(size),legs.split(size))]).reshape(*shape,-1)
 
     def _probe_clearance(self,q,legs):
         return self._clearance_points(self.arm_points(q),legs)
@@ -160,22 +167,27 @@ class RobotGeometry:
     def _clearance_flat(self,full):
         # Unoptimized reference path retained for focused numerical-parity tests.
         _,_,arm,legs=self.forward(full)
-        return self._clearance_points(arm,legs)
+        return self._clearance_points(arm,legs).amin(-1)
 
     def _clearance_points(self,arm,legs):
-        n,segments=arm.shape[0],arm.shape[1]-1
-        s=self.samples
-        points=arm[:,:-1,None]+(arm[:,1:]-arm[:,:-1])[:,:,None]*s[None,None,:,None]
-        padding=(arm[:,1:]-arm[:,:-1]).norm(dim=-1)/(2*(len(s)-1))+self.cfg.arm_radius
-        d=(points-self.box_center).abs()-self.half_size
-        box=d.clamp_min(0).norm(dim=-1)+d.amax(-1).clamp_max(0)
-        box=box.amin(-1)-padding
-        box[:,self.cfg.torso_excluded_arm_segments]=float('inf')
-        lp=legs[:,:,0,None]+(legs[:,:,1]-legs[:,:,0])[:,:,None]*s[None,None,:,None]
-        leg_pad=(legs[:,:,1]-legs[:,:,0]).norm(dim=-1)/(2*(len(s)-1))+self.cfg.leg_radius
-        distance=torch.cdist(points.flatten(1,2),lp.flatten(1,2)).reshape(n,segments,len(s),len(self.leg_segments),len(s))
-        arm_leg=distance.amin((2,4))-padding[:,:,None]-leg_pad[:,None]
-        self_distance=torch.cdist(points.flatten(1,2),points.flatten(1,2)).reshape(n,segments,len(s),segments,len(s)).amin((2,4))
-        self_distance=self_distance-padding[:,:,None]-padding[:,None,:]
-        self_distance=self_distance.masked_fill(self.self_excluded,float('inf'))
-        return torch.minimum(box.amin(-1),torch.minimum(arm_leg.amin((1,2)),self_distance.amin((1,2))))
+        return self.point_clearance(arm[...,-1,:],arm,legs)
+
+    def point_clearance(self,ee,arm,legs):
+        box=point_box(ee,self.box_center,self.half_size)-self.cfg.ee_radius
+        leg=point_segment(ee[...,None,:],legs[...,0,:],legs[...,1,:])-self.cfg.ee_radius-self.cfg.leg_radius
+        ids=self.ee_obstacle_segments
+        other=point_segment(ee[...,None,:],arm[...,:-1,:][...,ids,:],arm[...,1:,:][...,ids,:])-self.cfg.ee_radius-self.cfg.arm_radius
+        return torch.cat((box[...,None],leg,other),-1)
+
+    def path_clearance(self,start,end,arm,legs):
+        """Swept EE sphere over the full requested Cartesian segment.
+
+        Obstacle primitives are frozen at the supplied probe/measurement pose;
+        configuration probes separately check their motion. No IK certificate.
+        """
+        box=segment_box(start,end,self.box_center,self.half_size)-self.cfg.ee_radius
+        ids=self.ee_obstacle_segments
+        leg=segment_segment(start[...,None,:],end[...,None,:],legs[...,0,:],legs[...,1,:])-self.cfg.ee_radius-self.cfg.leg_radius
+        other=segment_segment(start[...,None,:],end[...,None,:],arm[...,:-1,:][...,ids,:],arm[...,1:,:][...,ids,:])-self.cfg.ee_radius-self.cfg.arm_radius
+        swept=torch.cat((box[...,None],leg,other),-1)
+        return torch.minimum(swept,torch.minimum(self.point_clearance(start,arm,legs),self.point_clearance(end,arm,legs)))

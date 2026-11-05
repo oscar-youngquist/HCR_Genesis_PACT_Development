@@ -45,7 +45,7 @@ def zero_metrics(zero):
 
 
 @torch.no_grad()
-def contact_target(state, command, fixed, acceleration, cfg):
+def contact_target(state, command, fixed, acceleration, cfg, torso_lever_world=None):
     """Q_contact,b* = sg(M_bb a_b_ref + M_bj a_j + h_b - Q_external,b).
 
     Return world-planar base rows. Reuse the rollout acceleration for joint and
@@ -71,9 +71,8 @@ def contact_target(state, command, fixed, acceleration, cfg):
 
     # Applied-only world forces from the captured state_t packet, not estimates.
     ee, base = state[:, 88:91], state[:, 91:97]
-    # Match the existing rollout's shift from torso CoM to its Jacobian origin.
-    lever = quat_apply(quat, state[:, 176:179])
-    base = torch.cat((base[:, :3], base[:, 3:] + torch.cross(lever, base[:, :3], dim=-1)), -1)
+    from .b1z1_wrench import about_base
+    base = about_base(base, torso_lever_world)
     external = torch.einsum("bki,bk->bi", fixed.base_jacobian.detach()[:, :, :2], base)
     external = external + torch.einsum("bki,bk->bi", fixed.ee_jacobian.detach()[:, :3, :2], ee)
     return required - external, external
@@ -100,7 +99,9 @@ def objective(a, actions, data, fixed, acceleration, grf):
         return zero, metrics
     from types import SimpleNamespace
     mechanics = SimpleNamespace(**{k: v[gate].detach() for k, v in vars(fixed).items()})
-    target, external = contact_target(state[gate], command[gate], mechanics, acceleration[gate], a.cfg)
+    lever = data.get("torso_lever_world")
+    target, external = contact_target(state[gate], command[gate], mechanics, acceleration[gate], a.cfg,
+                                      None if lever is None else lever[gate])
     prediction = torch.einsum("bfki,bfk->bi", mechanics.foot_jacobians[..., :2],
                               grf[gate] * stance[gate, :, None])
     finite = torch.isfinite(target).all(-1) & torch.isfinite(prediction).all(-1)

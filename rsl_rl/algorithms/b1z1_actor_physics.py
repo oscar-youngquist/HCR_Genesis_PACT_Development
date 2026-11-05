@@ -397,8 +397,8 @@ def objective(a, batch, actions, context):
     grf = yaw_world(grf[valid][good] / a.cfg["grf_scale"], state[:, 3:7]).reshape(-1, 4, 3)
     # Predicted wrench is applied-only; gravity is already in the BARD bias.
     wrench = yaw_world(wrench[valid][good] / state.new_tensor(a.cfg["base_wrench_scale"]), state[:, 3:7])
-    lever = quat_apply(state[:, 3:7], state[:, 176:179])
-    wrench = torch.cat((wrench[:, :3], wrench[:, 3:] + torch.cross(lever, wrench[:, :3], dim=-1)), -1)
+    from .b1z1_wrench import about_base
+    wrench = about_base(wrench, data.get("torso_lever_world"))
     ee = yaw_world(ee[valid][good] / a.cfg["ee_force_scale"], state[:, 3:7])
     torque = b1z1_actor_rejection.bounded_torque(a, actions[valid][good], state, data["torque_max"])
     selected_batch = {name: batch[name][valid][good] for name in ("observations", "nominal_torque")

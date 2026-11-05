@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass
 
 import torch
+from .compliance_bounds import bound_reference
 
 
 class ComplianceCfg:
@@ -53,14 +54,13 @@ class ComplianceCfg:
     collision_gate = True
     collision_margin = 0.035  # m
     collision_probe_steps = 3  # fixed configuration interpolation count
-    arm_radius = 0.035  # conservative link-skeleton primitives, not mesh SDFs
+    ee_radius = 0.025  # EE-only sphere; not full-arm collision protection.
+    arm_radius = 0.035  # Nonadjacent arm obstacle capsules.
     leg_radius = 0.055
-    collision_segment_samples = 5
     collision_batch_size = 8192  # bounded scratch; amortizes launches at 4096 envs
     compile_geometry = True  # CUDA-only pure kernels; one-time compiler warmup
-    # Mount/link neighbours are excluded; distal arm still checked against trunk.
-    torso_excluded_arm_segments = [0, 1]
-    self_exclusion_hops = 2
+    # Zero-based arm skeleton segments: own final segment and wrist neighbour.
+    ee_excluded_arm_segments = [4, 5]
     force_threshold = 0.5  # N; avoids undefined zero-force directions
 
 
@@ -80,8 +80,8 @@ def validate(cfg):
             raise ValueError(key+" must be finite and positive")
     if not 0 <= cfg.progress_full < cfg.progress_onset <= 1:
         raise ValueError("Require 0 <= progress_full < progress_onset <= 1")
-    if cfg.collision_probe_steps < 1 or cfg.collision_segment_samples < 2:
-        raise ValueError("Collision probes require positive steps and at least two segment samples")
+    if cfg.collision_probe_steps < 1 or any(not math.isfinite(r) or r<=0 for r in (cfg.ee_radius,cfg.arm_radius,cfg.leg_radius)):
+        raise ValueError("Collision probes and primitive radii must be positive")
     if cfg.collision_batch_size < 1:
         raise ValueError("collision_batch_size must be positive")
 
@@ -178,19 +178,9 @@ def chart(x, bounds):
     return s
 
 
-def bound_reference(position, velocity, center, bounds):
-    """Project into the original spherical chart and remove outward velocity.
-
-    The caller writes the projected state back to the filter (anti-windup).
-    velocity is relative to this workspace center, in heading coordinates.
-    """
-    s = chart(position-center,bounds)
-    limited = s.clamp(bounds[:,0],bounds[:,1])
-    basis = sphere_basis(limited)
-    rates = (basis*velocity.unsqueeze(-2)).sum(-1)
-    outward = ((limited <= bounds[:,0]+1e-6) & (rates < 0)) | ((limited >= bounds[:,1]-1e-6) & (rates > 0))
-    rates = torch.where(outward,torch.zeros_like(rates),rates)
-    return center+cartesian(limited), (rates.unsqueeze(-1)*basis).sum(-2)
+def collision_approach(start, samples, margin):
+    """Compare each obstacle with itself before taking a maximum across pairs."""
+    return (smooth(1-samples/margin)*(samples < start-1e-6)).amax(-1)
 
 
 def workspace_gate(position, demand, center, bounds, margin):
@@ -246,9 +236,14 @@ class ComplianceReference:
     def __init__(self,cfg,n,device,dtype=torch.float32):
         validate(cfg)
         self.cfg=cfg
+        self.bound_reference=bound_reference
+        if cfg.compile_geometry and torch.device(device).type=='cuda':
+            self.bound_reference=torch.compile(bound_reference,dynamic=True,fullgraph=True)
         self.delta=torch.zeros(n,3,device=device,dtype=dtype)
         self.rate=torch.zeros_like(self.delta)
         self.eta=torch.zeros_like(self.delta)
+        self.accepted=torch.zeros_like(self.delta)
+        self.initialized=torch.zeros(n,device=device,dtype=torch.bool)
         self.profile=torch.zeros(n,12,device=device,dtype=dtype)
         from .compliance_sampling import ProfileSampler
         self.sampler=ProfileSampler(cfg,device,dtype)
@@ -257,12 +252,15 @@ class ComplianceReference:
 
     def reset(self,ids):
         self.delta[ids]=0; self.rate[ids]=0; self.eta[ids]=0
+        self.accepted[ids]=0; self.initialized[ids]=False
         self.profile[ids],self.family_ids[ids]=self.sampler.sample(len(ids))
 
     @torch.no_grad()
     def advance(self,*,nominal,nominal_velocity,center,bounds,force,lever,command,command_limits,
-                q,limits,jacobian,collision_clearance,dt,target_safe=None,measured_position=None,torso_wrench=None):
+                q,limits,jacobian,collision_clearance,dt,target_safe=None,measured_position=None,torso_wrench=None,
+                collision_path_gate=None):
         c=self.cfg
+        previous=torch.where(self.initialized[:,None],self.accepted,nominal)
         demand=signed_response(force,self.profile[:,:6],c.ee_gain)
         active=force.abs()>c.force_threshold
         # Three individual signed axes plus combined demand, regardless of offset rate.
@@ -274,18 +272,21 @@ class ComplianceReference:
         repeated_limits=limits[:,None].expand(-1,probes.shape[1],-1,-1)
         dq,joint,progress=directional_probe(jacobian[:,None].expand(-1,probes.shape[1],-1,-1),
                                           repeated_q,repeated_limits,probes,c)
-        workspace=workspace_gate((nominal+self.delta)[:,None],probes,center[:,None],bounds,c.workspace_margin)
+        workspace=workspace_gate(previous[:,None],probes,center[:,None],bounds,c.workspace_margin)
         if measured_position is not None:
             workspace=torch.maximum(workspace,workspace_gate(measured_position[:,None],probes,
                 center[:,None],bounds,c.workspace_margin))
         collision=torch.zeros_like(workspace)
         if c.collision_gate:
-            start=collision_clearance(q).unsqueeze(-1)
+            start=collision_clearance(q)
+            if start.ndim==1:start=start[:,None]
             fractions=torch.linspace(1/c.collision_probe_steps,1,c.collision_probe_steps,device=q.device)
             probe_q=(repeated_q[:,:,None]+dq[:,:,None]*fractions[None,None,:,None]).flatten(1,2)
-            clear=collision_clearance(probe_q).reshape(len(q),probes.shape[1],-1).amin(-1)
-            # Permit inward recovery from an existing overlap; approaching is gated.
-            collision=smooth(1-clear/c.collision_margin)*(clear < start-1e-6)
+            clear=collision_clearance(probe_q).reshape(len(q),probes.shape[1],c.collision_probe_steps,-1)
+            collision=collision_approach(start[:,None,None],clear,c.collision_margin).amax(-1)
+            if collision_path_gate is not None:
+                directions=torch.cat((torch.diag_embed(demand),demand[:,None]),1)
+                collision=torch.maximum(collision,collision_path_gate(directions))
         pairs=self.profile[:,:6].reshape(-1,3,2)
         gain=torch.where(force>=0,pairs[...,1],pairs[...,0])
         stiffness=smooth(1-gain/c.stiffness_threshold) if c.stiffness_gate else torch.zeros_like(force)
@@ -295,21 +296,26 @@ class ComplianceReference:
             contributions.append(torch.maximum(gate[:,:3],gate[:,3:]) if on else torch.zeros_like(force))
         gates=1-(1-stiffness)*(1-contributions[0])*(1-contributions[1])*(1-contributions[2])
         gates=gates*active
-        equilibrium,_=bound_reference(nominal+demand,torch.zeros_like(demand),center,bounds)
+        equilibrium,_=self.bound_reference(nominal+demand,torch.zeros_like(demand),center,bounds,start=nominal)
+        equilibrium_blocked=torch.zeros(len(q),device=q.device,dtype=torch.bool)
         if target_safe is not None:
-            equilibrium=target_safe(equilibrium,nominal+self.delta)
+            safe=target_safe(equilibrium,previous)
+            equilibrium_blocked=(safe-equilibrium).norm(dim=-1)>1e-7
+            equilibrium=safe
         desired=equilibrium-nominal
         error=self.delta-desired
         b=self.rate+c.omega*error
         decay=math.exp(-c.omega*dt)
         delta=desired+(error+dt*b)*decay
         rate=(self.rate-c.omega*dt*b)*decay
-        position,velocity=bound_reference(nominal+delta,nominal_velocity+rate,center,bounds)
+        position,velocity=self.bound_reference(nominal+delta,nominal_velocity+rate,center,bounds,start=previous)
         if target_safe is not None:
-            safe=target_safe(position,nominal+self.delta)
-            blocked=(safe-position).norm(dim=-1,keepdim=True)>1e-7
+            safe=target_safe(position,previous)
+            blocked=((safe-position).norm(dim=-1)>1e-7)|equilibrium_blocked
+            safe=torch.where(equilibrium_blocked[:,None],previous,safe)
             position=safe
-            velocity=torch.where(blocked,torch.zeros_like(velocity),velocity)
+            velocity=torch.where(blocked[:,None],torch.zeros_like(velocity),velocity)
+        self.accepted.copy_(position);self.initialized.fill_(True)
         self.delta.copy_(position-nominal)
         self.rate.copy_(velocity-nominal_velocity)
         gated=force*gates

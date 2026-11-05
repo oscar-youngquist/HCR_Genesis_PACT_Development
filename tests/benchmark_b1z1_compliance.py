@@ -12,7 +12,7 @@ import torch
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.b1z1.b1z1_pact.b1z1_pact_config import B1Z1PACTCfg
 from legged_gym.envs.b1z1.compliance_geometry import RobotGeometry
-from legged_gym.envs.b1z1.directional_compliance import ComplianceReference,cartesian,directional_probe
+from legged_gym.envs.b1z1.directional_compliance import ComplianceReference,cartesian,directional_probe,collision_approach
 
 
 @torch.no_grad()
@@ -30,7 +30,11 @@ def main():
     arm=[i for i,n in enumerate(names) if n.startswith('z1_') and n!='z1_jointGripper']
     path=cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
     model=RobotGeometry(path,names,arm,cfg.asset.base_name,cfg.asset.gripper_name,cfg.asset.foot_name,cfg.compliance,device)
-    if args.compile_geometry:model._probe_clearance=torch.compile(model._probe_clearance,dynamic=True,fullgraph=True)
+    if args.compile_geometry:
+        model._probe_clearance=torch.compile(model._probe_clearance,dynamic=True,fullgraph=True)
+        model.path_clearance=torch.compile(model.path_clearance,dynamic=True,fullgraph=True)
+        model.point_clearance=torch.compile(model.point_clearance,dynamic=True,fullgraph=True)
+    cfg.compliance.compile_geometry=args.compile_geometry
     if args.compile_full_fk:model.forward=torch.compile(model.forward,dynamic=True,fullgraph=True)
     joints={j.get('name'):j.find('limit') for j in ET.parse(path).getroot().findall('joint')}
     limits=torch.tensor([[float(joints[names[i]].get(k)) for k in ('lower','upper')] for i in arm],device=device)
@@ -43,18 +47,28 @@ def main():
         forces=nominal.new_tensor([30.,20.,-25.]).expand_as(nominal)
         zero=torch.zeros_like(nominal)
         def step():
-            measured,j,_,legs=model.forward(full)
-            clear=lambda x:model.clearance(x,full,legs)
+            measured,j,arm_points,legs=model.forward(full)
+            clear=lambda x:model.clearance_pairs(x,full,legs)
             baseline=clear(q)
+            def path_gate(directions):
+                start=measured[:,None].expand_as(directions)
+                path=model.path_clearance(start,start+directions,arm_points[:,None],legs[:,None])
+                return collision_approach(baseline[:,None],path,cfg.compliance.collision_margin)
             def safe(candidate,previous):
                 dq,_,_=directional_probe(j,q,limits.expand(n,-1,-1),candidate-measured,cfg.compliance)
                 fractions=torch.linspace(1/3,1,3,device=device)
-                margin=clear(q[:,None]+dq[:,None]*fractions[None,:,None]).amin(-1)
-                return torch.where(((margin>=0)|(margin>baseline+1e-6))[:,None],candidate,previous)
+                margin=clear(q[:,None]+dq[:,None]*fractions[None,:,None]).amin(1)
+                allowed=((margin>=0)|(margin>baseline+1e-6)).all(-1)
+                start=torch.stack((measured,previous),1)
+                clearance=model.point_clearance(start,arm_points[:,None],legs[:,None])
+                path=model.path_clearance(start,candidate[:,None].expand_as(start),arm_points[:,None],legs[:,None])
+                end=model.point_clearance(candidate,arm_points,legs)[:,None]
+                allowed &= ((path>=0)|((clearance<0)&(path>=clearance-1e-6)&(end>clearance+1e-6))).all(-1).all(-1)
+                return torch.where(allowed[:,None],candidate,previous)
             return ref.advance(nominal=nominal,nominal_velocity=zero,center=center,bounds=bounds,
                 force=forces,lever=measured,command=zero,command_limits=nominal.new_tensor([[-1.,1.]]*3),
                 q=q,limits=limits.expand(n,-1,-1),jacobian=j,collision_clearance=clear,dt=.02,
-                target_safe=safe,measured_position=measured)
+                target_safe=safe,measured_position=measured,collision_path_gate=path_gate)
         warmup=time.perf_counter()
         for _ in range(3):step()
         torch.cuda.synchronize();torch.cuda.reset_peak_memory_stats()

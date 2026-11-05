@@ -73,12 +73,8 @@ def losses(model, context, batch, fixed, cfg, metrics=None):
     wrench = yaw_world(context["base_wrench"] / grf.new_tensor(cfg["base_wrench_scale"]), initial[:, 3:7])
     ee = yaw_world(context["ee_force"] / cfg["ee_force_scale"], initial[:, 3:7])
     ee_generalized = torch.einsum("bkn,bk->bn", fixed.ee_jacobian[:, :3], ee)
-    # Shift applied disturbance from torso CoM to the base Jacobian origin.
-    # Randomized load gravity is already represented in fixed.mass_matrix/bias.
-    applied = wrench
-    lever = quat_apply(initial[:, 3:7].detach(), state[:, 176:179].detach())
-    applied = torch.cat((applied[:, :3], applied[:, 3:] +
-                         torch.cross(lever, applied[:, :3], dim=-1)), -1)
+    from .b1z1_wrench import about_base
+    applied = about_base(wrench, batch.get("torso_lever_world"))
     measured_contact = measured_contact_generalized_force(fixed.foot_jacobians, state[:, 76:88])
     torque = batch["interval_torque"].detach()
     pre_v, post_v = initial[:, 26:51].detach(), state[:, 26:51].detach()

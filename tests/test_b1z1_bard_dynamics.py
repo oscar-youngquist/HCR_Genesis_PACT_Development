@@ -70,6 +70,7 @@ class B1Z1RolloutPlumbingTests(unittest.TestCase):
             ("next_privileged", 8), ("dynamics_state", 180),
             ("rollout_initial_state", 51),
             ("latent_noise", 64), ("nominal_torque", 19),
+            ("torso_lever_world", 3),
         ):
             value = torch.zeros(2, width)
             value[:, 0] = torch.arange(2)
@@ -81,6 +82,7 @@ class B1Z1RolloutPlumbingTests(unittest.TestCase):
         post_ids = batch["dynamics_state"][:, 0]
         pre_ids = batch["rollout_initial_state"][:, 0]
         self.assertTrue(torch.equal(post_ids, pre_ids))
+        self.assertTrue(torch.equal(batch["torso_lever_world"][:,0], pre_ids))
 
 
 @unittest.skipUnless(HAS_BARD_CUDA, "official BARD and CUDA are required")

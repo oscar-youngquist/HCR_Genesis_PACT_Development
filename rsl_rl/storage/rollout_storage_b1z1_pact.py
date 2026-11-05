@@ -30,6 +30,7 @@ class RolloutStorageB1Z1PACT:
             self.physics_source = None
             self.interval_torque = None
             self.physics_invalid = None
+            self.torso_lever_world = None
             self.actor_physics = None
 
         def clear(self):
@@ -54,6 +55,7 @@ class RolloutStorageB1Z1PACT:
         self.latent_noise, self.nominal_torque = zeros(latent_dim), zeros(19)
         self.film_tracking_history = zeros(film_history_dim) if film_history_dim else None
         self.interval_torque, self.physics_invalid = zeros(19), zeros(1)
+        self.torso_lever_world = zeros(3)
         self.mu, self.sigma = zeros(distribution_dim), zeros(distribution_dim)
         self.values, self.rewards, self.returns, self.advantages = zeros(1), zeros(1), zeros(1), zeros(1)
         self.log_probs, self.dones = zeros(1), torch.zeros(steps, num_envs, 1, dtype=torch.bool, device=device)
@@ -110,7 +112,7 @@ class RolloutStorageB1Z1PACT:
                 if self.film_tracking_history is not None:
                     source = torch.cat((source, transition.film_tracking_history), -1)
             self.physics_source[self.step].copy_(source)
-        for name in ("interval_torque", "physics_invalid"):
+        for name in ("interval_torque", "physics_invalid", "torso_lever_world"):
             value = getattr(transition, name)
             if value is not None:
                 getattr(self, name)[self.step].copy_(value)
@@ -145,7 +147,7 @@ class RolloutStorageB1Z1PACT:
         flat = {name: getattr(self, name).flatten(0, 1) for name in (
             "observations", "critic_observations", "histories", "actions", "mu", "sigma", "values", "returns", "advantages",
             "log_probs", "dones", "explicit_targets", "latent_noise", "nominal_torque",
-            "next_privileged", "dynamics_state", "interval_torque", "physics_invalid",
+            "next_privileged", "dynamics_state", "interval_torque", "physics_invalid", "torso_lever_world",
         )}
         if self.rollout_initial_state is not None:
             flat["rollout_initial_state"] = self.rollout_initial_state.flatten(0, 1)

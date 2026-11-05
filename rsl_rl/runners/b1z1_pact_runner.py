@@ -302,6 +302,14 @@ class B1Z1PACTRunner:
                         )
                     from rsl_rl.algorithms.b1z1_actor_physics import capture
                     capture(self)
+                    # Geometry at state_t, before integration or terminal reset;
+                    # free-couple labels are shifted only inside the PINN paths.
+                    from rsl_rl.algorithms.b1z1_wrench import application_lever
+                    if self.alg.bard_auxiliary or self.alg.transition.actor_physics is not None:
+                        lever = application_lever(self.env.simulator).to(self.device)
+                        self.alg.transition.torso_lever_world = lever
+                        if self.alg.transition.actor_physics is not None:
+                            self.alg.transition.actor_physics["torso_lever_world"] = lever
                     next_obs, next_privileged, next_history, next_explicit, reward, dones, infos, _ = self.env.step(actions)
                     from legged_gym.envs.b1z1.compliance_task import attach_transition
                     attach_transition(self.alg,self.env)

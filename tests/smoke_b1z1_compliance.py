@@ -9,15 +9,17 @@ import json
 import sys
 import legged_gym.envs
 from legged_gym.utils import get_args, task_registry
-from legged_gym.envs.b1z1.directional_compliance import chart
+from legged_gym.envs.b1z1.directional_compliance import chart, heading, rotate_yaw
 
 
 def main():
     parser=argparse.ArgumentParser(add_help=False)
     parser.add_argument('--profile-scenarios',action='store_true')
+    parser.add_argument('--review-collision',action='store_true')
     options,remaining=parser.parse_known_args()
     sys.argv=[sys.argv[0]]+remaining
     args=get_args()
+    options.profile_scenarios |= options.review_collision
     args.num_envs=8 if options.profile_scenarios else 2;args.headless=True
     cfg,_=task_registry.get_cfgs(args.task,args)
     cfg.compliance.enabled=True
@@ -40,6 +42,8 @@ def main():
             profiles[1,3]=.7
             profiles[2,9]=.7
             profiles[3,3]=.7;profiles[3,9]=.7
+            if options.review_collision:
+                profiles[3,:10]=1  # EE yielding, independent yaw disabled.
             profiles[4,9]=.7
             profiles[5,10:]=.7
             profiles[6,4:6]=torch.tensor([.1,.5],device=env.device)
@@ -52,9 +56,21 @@ def main():
             env.simulator.apply_ee_force(load)
         env._push_gripper=apply_load
         for step in range(6):
+            load.zero_()
             load[:,1]=10. if step<3 else 0.
             if options.profile_scenarios:
                 load[6:,1]=0;load[6:,2]=-10. if step<3 else 0.
+            if options.review_collision and step<3:
+                # Diagnostic only: request motion toward a real nonadjacent
+                # arm segment. Use current simulator configuration and frames;
+                # do not alter production force distributions or geometry.
+                from legged_gym.utils.math_utils import quat_apply
+                ee,_,arm,_=env.compliance.geometry.forward(env.simulator.dof_pos)
+                direction=(arm[:,3]+arm[:,4])/2-ee
+                world=quat_apply(env.simulator.base_quat,direction)
+                task=rotate_yaw(world,heading(env.simulator.base_quat),True)
+                force=task/task.new_tensor(cfg.compliance.ee_gain)
+                load[3]=rotate_yaw(force,heading(env.simulator.base_quat))[3]
             action=torch.zeros(args.num_envs,cfg.env.num_policy_actions,device=env.device)
             result=env.step(action)
             assert all(torch.isfinite(x).all() for x in result[:6])
@@ -75,6 +91,10 @@ def main():
                 if step<3:
                     assert ref.base[2,1]>0 and ref.base[4,1]>0
                     assert ref.base[5,2].abs()>0
+                    assert env.compliance.reference.delta[1,1]>0, 'EE-only clearance must permit yielding'
+                    if options.review_collision:
+                        assert ref.collision[3].max()>.9, 'Obstacle approach must recruit base'
+                        assert ref.base[3,:2].abs().sum()>0
                 traces.append(dict(step=step,ee_offset=env.compliance.reference.delta.cpu().tolist(),
                     base_target=ref.base.cpu().tolist(),gates=ref.gates.cpu().tolist()))
         if options.profile_scenarios:

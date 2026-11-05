@@ -53,7 +53,8 @@ def test_component_weights_and_outer_weight(inverse_weight, rollout_weight):
     torch.testing.assert_close(rollout.grad, torch.tensor(.01 * rollout_weight))
 
 
-def test_analytic_force_gradients_ignore_obsolete_mass_labels(monkeypatch):
+@pytest.mark.parametrize('offcenter', [False, True])
+def test_analytic_force_gradients_ignore_obsolete_mass_labels(monkeypatch, offcenter):
     from rsl_rl.algorithms import b1z1_bard_pinn as pinn
     captured = {}
     for name in ("corrected_bard_inverse_dynamics_loss", "differentiable_bard_rollout_loss"):
@@ -71,6 +72,10 @@ def test_analytic_force_gradients_ignore_obsolete_mass_labels(monkeypatch):
     state[:, 6] = 1
     state[:, 26:51] = .1
     state[:, 76:88] = 1
+    state[:, 177] = .15  # Randomized CoM is dynamics-only, never the force lever.
+    lever = torch.zeros(n,3,requires_grad=True)
+    with torch.no_grad():
+        if offcenter:lever[:,1]=.2
     nominal = torch.randn(n, 19, requires_grad=True)
     torque = torch.randn(n, 19, requires_grad=True)
     fixed = SimpleNamespace(mass_matrix=torch.eye(25).repeat(n, 1, 1), bias=torch.zeros(n, 25),
@@ -78,7 +83,7 @@ def test_analytic_force_gradients_ignore_obsolete_mass_labels(monkeypatch):
         base_jacobian=torch.randn(n, 6, 25))
     batch = dict(rollout_initial_state=initial, dynamics_state=state,
         nominal_torque=nominal, interval_torque=torque, mass_wrench=torch.zeros(n, 6),
-        dones=torch.zeros(n, 1), physics_invalid=torch.zeros(n, 1))
+        dones=torch.zeros(n, 1), physics_invalid=torch.zeros(n, 1), torso_lever_world=lever)
     cfg = dict(grf_scale=1., ee_force_scale=1., base_wrench_scale=[1.]*6, dt=.02)
     measured = {}
     original = losses(model, context, batch, fixed, cfg, metrics=measured)
@@ -91,13 +96,16 @@ def test_analytic_force_gradients_ignore_obsolete_mass_labels(monkeypatch):
                      {**batch, "mass_wrench": mass}, fixed, cfg)
     inverse = captured["corrected_bard_inverse_dynamics_loss"]
     rollout = captured["differentiable_bard_rollout_loss"]
-    torch.testing.assert_close(inverse["total_wrench_world"], context["base_wrench"])
+    from rsl_rl.algorithms.b1z1_wrench import about_base
+    expected=about_base(context["base_wrench"],lever)
+    torch.testing.assert_close(inverse["total_wrench_world"], expected)
     assert not inverse["mass_com_wrench_world"].any()
-    torch.testing.assert_close(rollout["applied_wrench_world"], context["base_wrench"])
+    torch.testing.assert_close(rollout["applied_wrench_world"], expected)
     for a, b in zip(original, shifted):
         torch.testing.assert_close(a, b)
     sum(original).backward()
     assert nominal.grad is None and torque.grad is None
+    assert lever.grad is None
     for module in (model.context_encoder, model.physics_decoder.force, model.physics_decoder.grf):
         assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in module.parameters())
         assert all(p.grad is None or torch.isfinite(p.grad).all() for p in module.parameters())

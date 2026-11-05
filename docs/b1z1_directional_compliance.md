@@ -312,13 +312,80 @@ and complete-update throughput measurements remain unverified.
 
 ## Limitations
 
-Collision checks use the URDF torso box and conservative sampled arm/leg
-capsules, not mesh collision certification. Mount and neighboring link pairs
-are excluded explicitly. Probes are local, gain-independent DLS steps, not
-iterative IK or a whole-body feasibility solve. An unsafe candidate retains
-the bounded previous reference; recovery from an already overlapping measured
-configuration is allowed only when probe clearance improves. This does not
+Collision guidance is **EE-only**, not full-arm collision protection. A sphere
+(`ee_radius=0.025` m) is checked against the URDF torso box, leg capsules and
+nonadjacent arm capsules. `ee_excluded_arm_segments=[4,5]` excludes the Z1's
+own terminal segment and wrist attachment neighbour. Analytic sphere/segment
+and sphere/box distances have no sampling-spacing inflation. Each obstacle's
+approach/retreat is checked separately before combining gates. Fixed-count
+joint probes and a swept EE sphere over the complete requested Cartesian path
+are both checked; a short joint probe alone cannot certify a farther target.
+Obstacle geometry is frozen at the measured pose for the Cartesian sweep;
+configuration probes separately approximate its motion. These are primitive
+checks, not mesh certification, iterative IK or whole-body feasibility. An
+unsafe candidate retains the actual previously accepted reference; recovery
+from an overlap is allowed only when no obstacle's penetration worsens. This does not
 certify reachability, nor guarantee collision-free execution or prevent the
 learned robot from overshooting. General effort/damping penalties still trade
 off against motion. These tests validate reference generation and integration,
 not improved task performance of a trained compliant policy.
+
+## Review Corrections
+
+Workspace bounds now enumerate sphere/cone/azimuth-plane intersections and
+clip at the first exit of the requested Cartesian segment, including the
+inner-radius exclusion. Clipping shortens displacement; it cannot redirect
+a lateral-only command into x/z. Outward velocity is stopped rather than
+rotated along a boundary. Equilibrium and integrated state both use these
+bounds, in addition to the original torso-box/underground exclusion.
+
+The generator stores the accepted mixed-coordinate reference across control
+intervals. Rejection holds that position and sets its mixed-coordinate
+velocity to zero, even while the nominal trajectory moves. Anti-windup writes
+`delta=accepted-current_nominal` and `delta_dot=accepted_velocity-nominal_velocity`.
+World conversion still adds base XY translation and yaw transport. Reset
+clears only the resetting rows; the next interval initializes from the actual
+interval-start nominal. Replay copies detached targets without advancing filters.
+
+Actor and representation PINNs now share `b1z1_wrench.about_base`. Rollout
+storage retains `torso_lever_world`, captured before integration/reset. The
+world free couple shifts once by `lever x force`; a base-referenced moment
+uses a zero lever. Predicted loads remain predicted, and randomized mass/CoM
+remain in inertia/bias only. Old packets without geometry explicitly use the
+existing origin-applied convention. No observation or checkpoint dimensions
+change. A 35 N forward origin-applied force therefore has zero yaw moment even
+with 0.15 m lateral CoM randomization; a genuinely offset 0.15 m application
+point instead gives -5.25 Nm.
+Other live backends must expose a verified source accessor; missing application
+semantics now fail explicitly rather than guessing a randomized CoM lever.
+
+Focused regressions are in `tests/test_b1z1_compliance_review.py`. Reproduce
+the GPU-0 yielding/obstacle-handoff smoke without a policy or learning:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 SIMULATOR=isaaclab_b1z1_pact PYTHONPATH=. \
+  python tests/smoke_b1z1_compliance.py --review-collision \
+  --task b1z1_pact --gpu cuda:0 --headless
+```
+
+The diagnostic load aimed at a nonadjacent arm segment is test-only. It does
+not modify the production disturbance distribution or demonstrate learned
+collision avoidance. Use `--task b1z1_pact_ab7_position_full` for position mode.
+
+GPU-0 review benchmark (RTX 4090, 4,096 rows, 10 measured intervals, identical
+fixed poses/loads, compiled FK and geometry): pre-change 9.76 ms/interval,
+revised 9.47 ms/interval. Peak Torch allocation fell from 109.37 to 36.07 MiB.
+This is approximately unchanged runtime (3% faster in this short measurement),
+with 67% less scratch memory, despite the added full-path tests. Revised cold
+compiler warmup was 26.2 s and is excluded from steady-state timing. This is
+the reference-only microbenchmark above, not full-training throughput; simulator,
+reward, PPO and BARD-backward overhead are not measured by it.
+
+Review verification: 149 focused tests passed (CPU and GPU 0), including BARD
+integration, actor gradients, detached application geometry, aligned replay,
+profile sampling and partial resets. Syntax and whitespace checks passed.
+Isaac Lab GPU-0 smoke checks passed with eight environments and six decisions
+each: PACT profile coverage, PACT obstacle approach, position-full ab7 obstacle
+approach, and PACT direct/combined torso-wrench cases. Default-pose EE clearance
+is +0.1752 m with these primitives. No training or trained-policy performance
+evaluation was run, and full-training throughput remains unmeasured.

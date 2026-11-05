@@ -7,8 +7,9 @@ import torch
 
 from .directional_compliance import (ComplianceReference, cartesian, spherical, heading,
     rotate_yaw, task_position, world_position, task_velocity, world_velocity,
-    bound_reference, directional_probe, torso_wrench_heading)
+    directional_probe, torso_wrench_heading, collision_approach)
 from .compliance_geometry import RobotGeometry
+from .ee_collision import segment_box
 
 
 def enabled(cfg):
@@ -90,6 +91,9 @@ class ComplianceTask:
         self.geometry=RobotGeometry(env.cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),
             env.cfg.asset.dof_names,self.arm_ids,env.cfg.asset.base_name,env.cfg.asset.gripper_name,
             env.cfg.asset.foot_name,c,env.device)
+        self.workspace_clearance=segment_box
+        if c.compile_geometry and torch.device(env.device).type=='cuda':
+            self.workspace_clearance=torch.compile(segment_box,dynamic=True,fullgraph=True)
         ranges=env.cfg.goal_ee.ranges
         self.bounds=torch.tensor([ranges.pos_l,ranges.pos_p,ranges.pos_y],device=env.device)
         if not (self.bounds[:,1]>self.bounds[:,0]).all() or self.bounds[0,0]<=0 or self.bounds[2,1]-self.bounds[2,0]>2*torch.pi:
@@ -132,6 +136,11 @@ class ComplianceTask:
     def begin(self):
         env=self.env; sim=env.simulator; c=env.cfg.compliance
         nominal,nominal_velocity=self.nominal(1)
+        # The first accepted reference is the actual interval-start nominal,
+        # not the next nominal reconstructed with yesterday's offset.
+        initial=~self.reference.initialized
+        self.reference.accepted.copy_(torch.where(initial[:,None],self.nominal(0)[0],self.reference.accepted))
+        self.reference.initialized.fill_(True)
         center=self.center()
         yaw=heading(sim.base_quat)
         force=rotate_yaw(env.ee_force_ext_world,yaw,True)
@@ -148,34 +157,65 @@ class ComplianceTask:
         limits=getattr(sim,"dof_pos_limits_hard",sim.dof_pos_limits)
         if limits.ndim==2:limits=limits.unsqueeze(0).expand(env.num_envs,-1,-1)
         limits=limits.index_select(1,self.arm_ids)
-        _,j,_,legs=self.geometry.forward(full)
+        _,j,arm_points,legs=self.geometry.forward(full)
         # URDF Jacobian is torso-relative. Full roll/pitch rotate geometry;
         # only the final force/workspace axes are heading aligned.
         from legged_gym.utils.math_utils import quat_apply
         quat=sim.base_quat[:,None].expand(-1,j.shape[-1],-1).reshape(-1,4)
         j=rotate_yaw(quat_apply(quat,j.transpose(1,2).reshape(-1,3)).reshape(env.num_envs,-1,3),yaw,True).transpose(1,2)
-        clear=lambda arm:self.geometry.clearance(arm,full,legs)
+        clear=lambda arm:self.geometry.clearance_pairs(arm,full,legs)
         measured=task_position(sim.ee_pos,sim.base_pos,yaw)
         start_clear=clear(q)
+
+        from legged_gym.utils.math_utils import quat_rotate_inverse
+        def body(point):
+            if point.ndim==2:
+                return quat_rotate_inverse(sim.base_quat,
+                    world_position(point,sim.base_pos,yaw)-sim.base_pos)
+            world=world_position(point,sim.base_pos[:,None],yaw[:,None])-sim.base_pos[:,None]
+            quat=sim.base_quat[:,None].expand(*point.shape[:-1],4)
+            return quat_rotate_inverse(quat.reshape(-1,4),world.reshape(-1,3)).reshape_as(point)
+
+        def path_clear(start,end):
+            return self.geometry.path_clearance(body(start),body(end),arm_points[:,None],legs[:,None])
+
+        def path_gate(directions):
+            # Test the whole requested Cartesian path, not just the short DLS
+            # configuration probe. Each obstacle retains its own approach test.
+            start=measured[:,None].expand_as(directions)
+            return collision_approach(start_clear[:,None],
+                path_clear(start,start+directions),c.collision_margin)
 
         def safe(candidate,previous):
             # Fixed probes from measured configuration; not an IK feasibility proof.
             demand=candidate-measured
             dq,_,_=directional_probe(j,q,limits,demand,c)
             fractions=torch.linspace(1/c.collision_probe_steps,1,c.collision_probe_steps,device=q.device)
-            minimum=clear(q[:,None]+dq[:,None]*fractions[None,:,None]).amin(-1)
-            allowed=(minimum>=0) | (minimum>start_clear+1e-6)
+            minimum=clear(q[:,None]+dq[:,None]*fractions[None,:,None]).amin(1)
+            allowed=((minimum>=0) | (minimum>start_clear+1e-6)).all(-1)
+            # A short collision-free joint probe cannot certify a farther EE
+            # reference. Sweep the EE sphere against frozen measured obstacles.
+            start=torch.stack((measured,previous),1)
+            clearance=self.geometry.point_clearance(body(start),arm_points[:,None],legs[:,None])
+            path=path_clear(start,candidate[:,None].expand_as(start))
+            end=self.geometry.point_clearance(body(candidate),arm_points,legs)[:,None]
+            allowed &= ((path>=0) | ((clearance<0)&(path>=clearance-1e-6)&(end>clearance+1e-6))).all(-1).all(-1)
             # Retain the existing Cartesian torso-box/underground rejection.
             local=candidate-center
             inside=((local>env.collision_lower_limits)&(local<env.collision_upper_limits)).all(-1)
             allowed &= ~inside & (local[:,2]>=env.underground_limit)
-            previous,_=bound_reference(previous,torch.zeros_like(previous),center,self.bounds)
+            lower,upper=env.collision_lower_limits,env.collision_upper_limits
+            # Retain the legacy workspace exclusion over the accepted path,
+            # not just at its endpoint (straight Z has no hidden low point).
+            old=previous-center
+            swept=self.workspace_clearance(old,local,(lower+upper)/2,(upper-lower)/2)
+            allowed &= swept>=0
             return torch.where(allowed[:,None],candidate,previous)
 
         self.target=self.reference.advance(nominal=nominal,nominal_velocity=nominal_velocity,center=center,
             bounds=self.bounds,force=force,lever=lever,command=env.commands[:,:3],command_limits=self.command_limits,
             q=q,limits=limits,jacobian=j,collision_clearance=clear,dt=env.dt,target_safe=safe,
-            measured_position=measured,torso_wrench=direct)
+            measured_position=measured,torso_wrench=direct,collision_path_gate=path_gate)
         self.wrench_sum+=torch.stack((self.target.torso_wrench,self.target.ee_wrench,self.target.combined_wrench),1)
         self.wrench_count+=1
         target_world=world_position(self.target.position,sim.base_pos,yaw)
