@@ -16,6 +16,33 @@ import torch
 
 
 class ForceTargetProjectionTests(unittest.TestCase):
+    def test_episode_displacement_peak_and_partial_reset(self):
+        env = self._environment([[.5, 0., 0.], [.6, 0., 0.]],
+                                [[0., 0., 0.], [0., 0., 0.]])
+        accepted_offset = torch.zeros(2, 3)
+        # Compliance diagnostics must use the accepted reference, not applied force.
+        env.ee_force_ext_world.fill_(100.)
+        env.compliance = types.SimpleNamespace(
+            target=object(),
+            world_target=lambda: env.curr_ee_goal_cart_world + accepted_offset)
+        init_ee_force_target_diagnostics(env)
+        for offsets in ((.1, .3), (.4, .2), (0., 0.)):
+            accepted_offset[:, 1] = torch.tensor(offsets)
+            accumulate_ee_force_target_diagnostics(env)
+        summary = summarize_accumulated_ee_force_target_diagnostics(env, torch.arange(2))
+        self.assertAlmostEqual(summary["EE/applied_force_offset_norm_mean"].item(), 1./6., places=6)
+        self.assertAlmostEqual(summary["EE/applied_force_offset_norm_max"].item(), .35, places=6)
+        reset_ee_force_target_diagnostics(env, torch.tensor([0]))
+        torch.testing.assert_close(env.ee_force_target_offset_peak, torch.tensor([0., .3]))
+        # Previously captured terminal summary survives reset; new episodes start at zero.
+        self.assertAlmostEqual(summary["EE/applied_force_offset_norm_max"].item(), .35, places=6)
+        accumulate_ee_force_target_diagnostics(env)
+        zero = summarize_accumulated_ee_force_target_diagnostics(env, torch.tensor([0]))
+        self.assertEqual(zero["EE/applied_force_offset_norm_max"].item(), 0.)
+        accepted_offset[0, 1] = .05
+        accumulate_ee_force_target_diagnostics(env)
+        torch.testing.assert_close(env.ee_force_target_offset_peak, torch.tensor([.05, .3]))
+
     def test_axis_tracking_mae_uses_physical_nominal_error_and_resets(self):
         env = self._environment([[.5, 0., 0.], [.6, 0., 0.]],
                                 [[10., 20., 30.], [-10., -20., -30.]])

@@ -186,6 +186,12 @@ means accumulated before terminal reset, plus `interval_count`. Optional coverag
 logging is `compliance_disturbance/{ee_only,torso_only,simultaneous}_fraction`.
 Base forces/couples are never synthesized from the mapped EE reference wrench.
 
+`Episode/EE/applied_force_offset_norm_mean` retains the episode-average accepted
+EE target displacement norm in meters. `Episode/EE/applied_force_offset_norm_max`
+reports the mean of completed episodes' temporal maxima, captured before reset.
+Both measure accepted target minus nominal target, not measured tracking error.
+The runner retains its existing averaging across episode-reset batches.
+
 Validation commands (GPU 0, no learning):
 ```bash
 CUDA_VISIBLE_DEVICES=0 SIMULATOR=isaaclab PYTHONPATH=. python -m pytest -q tests/test_b1z1_torso_compliance.py tests/test_b1z1_compliance_sampling.py tests/test_b1z1_directional_compliance.py tests/test_b1z1_actor_physics.py tests/test_b1z1_bard_dynamics.py

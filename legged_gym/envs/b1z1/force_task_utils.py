@@ -498,6 +498,7 @@ def init_ee_force_target_diagnostics(env):
     env.ee_force_target_diagnostic_steps = torch.zeros(
         env.num_envs, dtype=torch.long, device=env.device
     )
+    env.ee_force_target_offset_peak = torch.zeros(env.num_envs, device=env.device)
     env.previous_projected_ee_target = torch.zeros(
         env.num_envs, 3, device=env.device
     )
@@ -521,6 +522,10 @@ def accumulate_ee_force_target_diagnostics(env):
     )
     tracking_error = env.simulator.ee_pos - target.effective_target
     values = _per_env_ee_force_offset_diagnostics(target)
+    # Peak accepted target displacement (meters), not tracking error or raw demand.
+    torch.maximum(env.ee_force_target_offset_peak,
+                  values["EE/applied_force_offset_norm_mean"],
+                  out=env.ee_force_target_offset_peak)
     # World-frame Cartesian MAE in meters, before any observation/reward scaling.
     # Rejection tasks use the nominal target; ordinary UniFP retains its shifted target.
     values.update({f"EE/tracking_{axis}_mae_m": tracking_error[:, i].abs()
@@ -544,10 +549,13 @@ def accumulate_ee_force_target_diagnostics(env):
 def summarize_accumulated_ee_force_target_diagnostics(env, env_ids):
     """Average diagnostics by each completed episode's actual control steps."""
     steps = env.ee_force_target_diagnostic_steps[env_ids].clamp_min(1).float()
-    return {
+    summary = {
         name: (total[env_ids] / steps).mean()
         for name, total in env.ee_force_target_diagnostic_sums.items()
     }
+    # Average completed episodes' temporal maxima; never divide peaks by duration.
+    summary["EE/applied_force_offset_norm_max"] = env.ee_force_target_offset_peak[env_ids].mean()
+    return summary
 
 
 def reset_ee_force_target_diagnostics(env, env_ids):
@@ -555,6 +563,7 @@ def reset_ee_force_target_diagnostics(env, env_ids):
     for total in env.ee_force_target_diagnostic_sums.values():
         total[env_ids] = 0.0
     env.ee_force_target_diagnostic_steps[env_ids] = 0
+    env.ee_force_target_offset_peak[env_ids] = 0.0
     env.previous_projected_ee_target[env_ids] = get_force_adjusted_ee_target(
         env, env_ids
     ).effective_target
