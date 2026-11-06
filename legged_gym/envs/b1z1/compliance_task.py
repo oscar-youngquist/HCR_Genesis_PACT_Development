@@ -7,9 +7,9 @@ import torch
 
 from .directional_compliance import (ComplianceReference, cartesian, spherical, heading,
     rotate_yaw, task_position, world_position, task_velocity, world_velocity,
-    directional_probe, torso_wrench_heading, collision_approach)
+    torso_wrench_heading)
 from .compliance_geometry import RobotGeometry
-from .ee_collision import segment_box
+from .ee_collision import clip_prefix
 
 
 def enabled(cfg):
@@ -69,12 +69,16 @@ def configure(cfg):
 def configure_algorithm(cfg,env_cfg):
     if not enabled(env_cfg):return cfg
     cfg=dict(cfg)
-    # Fixed-target energy decay / torque teachers conflict with moving admittance.
+    # Retain the existing rigid-rejection/base-balance overrides. Arm FF has
+    # its own explicit teacher selector and must respect the user's enable flag.
     for key in ("actor_phys_arm_rejection_enabled","actor_phys_base_rejection_enabled",
-                "actor_phys_arm_feedforward_enabled","actor_phys_base_balance_enabled"):
+                "actor_phys_base_balance_enabled"):
         cfg[key]=False
     cfg["actor_phys_force_allocation_weight"]=0.
     cfg["actor_phys_ee_stability_weight"]=0.
+    cfg["actor_phys_compliance_enabled"] = True
+    for name in ("omega", "zeta", "dls_damping", "joint_margin"):
+        cfg["actor_phys_compliance_" + name] = getattr(env_cfg.compliance, name)
     # Keep configured actor velocity weights/scales, including ablation overrides.
     return cfg
 
@@ -91,9 +95,6 @@ class ComplianceTask:
         self.geometry=RobotGeometry(env.cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),
             env.cfg.asset.dof_names,self.arm_ids,env.cfg.asset.base_name,env.cfg.asset.gripper_name,
             env.cfg.asset.foot_name,c,env.device)
-        self.workspace_clearance=segment_box
-        if c.compile_geometry and torch.device(env.device).type=='cuda':
-            self.workspace_clearance=torch.compile(segment_box,dynamic=True,fullgraph=True)
         ranges=env.cfg.goal_ee.ranges
         self.bounds=torch.tensor([ranges.pos_l,ranges.pos_p,ranges.pos_y],device=env.device)
         if not (self.bounds[:,1]>self.bounds[:,0]).all() or self.bounds[0,0]<=0 or self.bounds[2,1]-self.bounds[2,0]>2*torch.pi:
@@ -139,6 +140,13 @@ class ComplianceTask:
         # The first accepted reference is the actual interval-start nominal,
         # not the next nominal reconstructed with yesterday's offset.
         initial=~self.reference.initialized
+        local = getattr(self, "capture_local_teacher", False)
+        if local:
+            # Endpoint velocities are in mixed task coordinates, not world twist.
+            start_position = self.reference.accepted.clone()
+            start_velocity = (self.target.velocity.clone() if self.target is not None
+                              else torch.zeros_like(nominal))
+            previous_recovery = self.reference.recovering.clone()
         self.reference.accepted.copy_(torch.where(initial[:,None],self.nominal(0)[0],self.reference.accepted))
         self.reference.initialized.fill_(True)
         center=self.center()
@@ -176,46 +184,63 @@ class ComplianceTask:
             quat=sim.base_quat[:,None].expand(*point.shape[:-1],4)
             return quat_rotate_inverse(quat.reshape(-1,4),world.reshape(-1,3)).reshape_as(point)
 
-        def path_clear(start,end):
-            return self.geometry.path_clearance(body(start),body(end),arm_points[:,None],legs[:,None])
+        def path_gate(directions,previous):
+            # Recruitment is local. The distant equilibrium is a hard travel
+            # limit, not evidence that the arm must immediately hand off.
+            return self.geometry.handoff_paths(directions,previous,measured,arm_points,legs,
+                sim.base_pos,sim.base_quat,yaw,c.collision_margin)
 
-        def path_gate(directions):
-            # Test the whole requested Cartesian path, not just the short DLS
-            # configuration probe. Each obstacle retains its own approach test.
-            start=measured[:,None].expand_as(directions)
-            return collision_approach(start_clear[:,None],
-                path_clear(start,start+directions),c.collision_margin)
+        def make_path(ids=None):
+            # Gather measured geometry once per clipped subset, not once per
+            # refinement. Every probe still uses the matching environment state.
+            def take(value):
+                return value if ids is None else value.index_select(0,ids)
+            q0,j0,limits0=map(take,(q,j,limits))
+            measured0,center0,clear0=map(take,(measured,center,start_clear))
+            arm0,legs0=map(take,(arm_points,legs))
+            pos0,quat0,yaw0=map(take,(sim.base_pos,sim.base_quat,yaw))
+            def allowed_path(candidate,previous):
+                return self.geometry.target_path_allowed(candidate,previous,q0,j0,limits0,measured0,
+                    clear0,arm0,legs0,pos0,quat0,yaw0,center0,
+                    lower=env.collision_lower_limits,upper=env.collision_upper_limits,underground=env.underground_limit)
+            return allowed_path
+
+        allowed_path=make_path()
 
         def safe(candidate,previous):
-            # Fixed probes from measured configuration; not an IK feasibility proof.
-            demand=candidate-measured
-            dq,_,_=directional_probe(j,q,limits,demand,c)
-            fractions=torch.linspace(1/c.collision_probe_steps,1,c.collision_probe_steps,device=q.device)
-            minimum=clear(q[:,None]+dq[:,None]*fractions[None,:,None]).amin(1)
-            allowed=((minimum>=0) | (minimum>start_clear+1e-6)).all(-1)
-            # A short collision-free joint probe cannot certify a farther EE
-            # reference. Sweep the EE sphere against frozen measured obstacles.
-            start=torch.stack((measured,previous),1)
-            clearance=self.geometry.point_clearance(body(start),arm_points[:,None],legs[:,None])
-            path=path_clear(start,candidate[:,None].expand_as(start))
-            end=self.geometry.point_clearance(body(candidate),arm_points,legs)[:,None]
-            allowed &= ((path>=0) | ((clearance<0)&(path>=clearance-1e-6)&(end>clearance+1e-6))).all(-1).all(-1)
-            # Retain the existing Cartesian torso-box/underground rejection.
-            local=candidate-center
-            inside=((local>env.collision_lower_limits)&(local<env.collision_upper_limits)).all(-1)
-            allowed &= ~inside & (local[:,2]>=env.underground_limit)
-            lower,upper=env.collision_lower_limits,env.collision_upper_limits
-            # Retain the legacy workspace exclusion over the accepted path,
-            # not just at its endpoint (straight Z has no hidden low point).
-            old=previous-center
-            swept=self.workspace_clearance(old,local,(lower+upper)/2,(upper-lower)/2)
-            allowed &= swept>=0
-            return torch.where(allowed[:,None],candidate,previous)
+            # Fixed batch shapes avoid late compilation when only one/few rows
+            # first become unsafe. The optional compact path retains old math.
+            return clip_prefix(candidate,previous,allowed_path,
+                select_path=make_path if c.collision_compact_refinement else None)
+
+        def recovery_anchor(nominal,previous,recovering):
+            from .compliance_bounds import feasible
+            # Nominal first. If geometry has moved into it, try a finite set
+            # of already meaningful references; never silently hold an invalid
+            # point. Fallback anchors may require changing disabled coordinates.
+            midpoint=center+cartesian(self.bounds.mean(-1).expand_as(nominal))
+            selected=nominal.clone();found=torch.zeros(len(q),device=q.device,dtype=torch.bool)
+            for point in (nominal,previous,measured,midpoint):
+                local=point-center
+                valid=feasible(point,center,self.bounds)
+                valid &= self.geometry.point_clearance(body(point),arm_points,legs).amin(-1)>=0
+                valid &= ~((local>env.collision_lower_limits)&(local<env.collision_upper_limits)).all(-1)
+                valid &= local[:,2]>=env.underground_limit
+                selected=torch.where((valid&~found)[:,None],point,selected);found |= valid
+            if not (found|~recovering).all():raise RuntimeError('No collision-free compliance recovery anchor; reset affected environment')
+            return selected
+
+        if c.compile_geometry and not getattr(self, '_recovery_geometry_ready', False):
+            # Warm the rare recovery-only 2D signature during the first interval,
+            # not minutes later. This pure query changes no reference/RNG state.
+            self.geometry.point_clearance(body(nominal),arm_points,legs)
+            self._recovery_geometry_ready=True
 
         self.target=self.reference.advance(nominal=nominal,nominal_velocity=nominal_velocity,center=center,
             bounds=self.bounds,force=force,lever=lever,command=env.commands[:,:3],command_limits=self.command_limits,
             q=q,limits=limits,jacobian=j,collision_clearance=clear,dt=env.dt,target_safe=safe,
-            measured_position=measured,torso_wrench=direct,collision_path_gate=path_gate)
+            measured_position=measured,torso_wrench=direct,collision_path_gate=path_gate,
+            recovery_anchor=recovery_anchor,collision_start=start_clear)
         self.wrench_sum+=torch.stack((self.target.torso_wrench,self.target.ee_wrench,self.target.combined_wrench),1)
         self.wrench_count+=1
         target_world=world_position(self.target.position,sim.base_pos,yaw)
@@ -223,6 +248,14 @@ class ComplianceTask:
         self.interval={"compliance_position":self.target.position.clone(),
                        "compliance_velocity":self.target.velocity.clone(),
                        "command":self.target.base.clone(),"ee_target":target_world.clone()}
+        if getattr(self, "capture_feedforward", False):
+            # Sampling/masking has completed, but physics and resets have not.
+            self.interval["feedforward_applied_force"] = env.ee_force_ext_world.clone()
+        if local:
+            self.interval.update(local_ref_position_start=start_position,
+                local_ref_velocity_start=start_velocity,
+                local_ref_acceleration=(self.target.velocity-start_velocity)/env.dt,
+                local_ref_valid=(~initial & ~previous_recovery & ~self.reference.recovering)[:,None])
 
     def wrench_statistics(self, ids):
         # Mean of actual control-interval reference contributions, collected

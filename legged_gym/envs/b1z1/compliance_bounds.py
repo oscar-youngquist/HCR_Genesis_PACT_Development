@@ -7,6 +7,12 @@ through the inner-radius hole, including when both endpoints are admissible.
 import torch
 
 
+def feasible(position, center, bounds):
+    from .directional_compliance import chart
+    s=chart(position-center,bounds)
+    return torch.isfinite(s).all(-1)&((s>=bounds[:,0]-1e-6)&(s<=bounds[:,1]+1e-6)).all(-1)
+
+
 def first_exit(start, end, center, bounds):
     from .directional_compliance import chart
     p, d = start-center, end-start

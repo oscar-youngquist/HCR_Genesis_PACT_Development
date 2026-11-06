@@ -22,6 +22,8 @@ def rotation(axis,angle):
 class RobotGeometry:
     def __init__(self,path,joint_names,arm_indices,base_name,ee_name,feet,cfg,device):
         self.cfg=cfg
+        self.graph_target_checks=(cfg.compile_geometry and torch.device(device).type=='cuda'
+                                  and cfg.collision_compact_refinement)
         self.names=list(joint_names)
         self.arm_ids=torch.as_tensor(arm_indices,device=device,dtype=torch.long)
         self.arm_names=[self.names[i] for i in self.arm_ids.tolist()]
@@ -108,6 +110,7 @@ class RobotGeometry:
         # Segments 4/5 are the wrist attachment and own EE segment on Z1.
         # Exclusions are explicit, not inferred from distances or current pose.
         self.ee_obstacle_segments=[i for i in range(len(self.arm_names)) if i not in excluded]
+        self.probe_fractions=torch.linspace(1/cfg.collision_probe_steps,1,cfg.collision_probe_steps,device=device)
         if cfg.compile_geometry and torch.device(device).type=='cuda':
             # No reference state, simulator calls or RNG enters these kernels.
             # Dynamic batch dimensions share code across bounded probe batches.
@@ -115,6 +118,78 @@ class RobotGeometry:
             self._probe_clearance=torch.compile(self._probe_clearance,dynamic=True,fullgraph=True)
             self.path_clearance=torch.compile(self.path_clearance,dynamic=True,fullgraph=True)
             self.point_clearance=torch.compile(self.point_clearance,dynamic=True,fullgraph=True)
+            # Full-batch refinements prefer predictable latency over graph-tree
+            # capture. Keep the previous bucketed graph path as an opt-in mode.
+            mode='reduce-overhead' if self.graph_target_checks else 'default'
+            self._target_path_allowed=torch.compile(self._target_path_allowed,dynamic=True,fullgraph=True,mode=mode)
+            self.handoff_paths=torch.compile(self.handoff_paths,dynamic=True,fullgraph=True)
+
+    @staticmethod
+    def task_to_body(point,base_pos,base_quat,yaw):
+        """Heading-relative x/y and world-z [m] to the measured torso frame."""
+        from .directional_compliance import world_position
+        from legged_gym.utils.math_utils import quat_rotate_inverse
+        if point.ndim==2:
+            return quat_rotate_inverse(base_quat,world_position(point,base_pos,yaw)-base_pos)
+        world=world_position(point,base_pos[:,None],yaw[:,None])-base_pos[:,None]
+        quat=base_quat[:,None].expand(*point.shape[:-1],4)
+        return quat_rotate_inverse(quat.reshape(-1,4),world.reshape(-1,3)).reshape_as(point)
+
+    def handoff_paths(self,directions,previous,measured,arm,legs,base_pos,base_quat,yaw,margin):
+        from .directional_compliance import collision_approach
+        result=torch.zeros(directions.shape[:2],device=directions.device,dtype=directions.dtype)
+        for origin in (measured,previous):
+            start=origin[:,None].expand_as(directions)
+            p=self.task_to_body(start,base_pos,base_quat,yaw)
+            end=self.task_to_body(start+directions,base_pos,base_quat,yaw)
+            clearance=self.point_clearance(p,arm[:,None],legs[:,None])
+            path=self.path_clearance(p,end,arm[:,None],legs[:,None])
+            result=torch.maximum(result,collision_approach(clearance,path,margin))
+        return result
+
+    def target_path_allowed(self,*rows,lower,upper,underground):
+        # Bound scratch by joint-probe count, including the full-batch first check.
+        size=max(1,self.cfg.collision_batch_size//self.cfg.collision_probe_steps)
+        results=[]
+        for start in range(0,len(rows[0]),size):
+            part=tuple(x[start:start+size] for x in rows)
+            count=len(part[0])
+            if self.graph_target_checks:
+                # CUDA graphs otherwise record a graph for every unsafe-row
+                # count. Power-of-two buckets bound that cache; pad only by
+                # duplicating the final selected row, never by adding safe rows.
+                bucket=min(size,1<<(count-1).bit_length())
+                ids=torch.arange(bucket,device=part[0].device).clamp_max(count-1)
+                part=tuple(x.index_select(0,ids) for x in part)
+            # Own the small boolean output before another replay reuses storage.
+            results.append(self._target_path_allowed(*part,lower,upper,underground)[:count].clone())
+        return torch.cat(results)
+
+    def _target_path_allowed(self,candidate,previous,q,j,limits,measured,start_clear,arm,legs,
+                             base_pos,base_quat,yaw,center,lower,upper,underground):
+        """Fuse the existing predicate, not a cheaper geometric approximation.
+
+        Joint probes and both full Cartesian sweeps keep their original frames,
+        exclusions and approach/retreat tests. Inputs are frozen for this interval.
+        """
+        from .directional_compliance import directional_probe
+        dq,_,_=directional_probe(j,q,limits,candidate-measured,self.cfg)
+        probe=q[:,None]+dq[:,None]*self.probe_fractions[None,:,None]
+        leg_probe=legs[:,None].expand(-1,self.cfg.collision_probe_steps,-1,-1,-1)
+        minimum=self._probe_clearance(probe.flatten(0,1),leg_probe.flatten(0,1)).reshape(
+            len(q),self.cfg.collision_probe_steps,-1).amin(1)
+        allowed=((minimum>=0)|(minimum>start_clear+1e-6)).all(-1)
+        start=torch.stack((measured,previous),1)
+        p=self.task_to_body(start,base_pos,base_quat,yaw)
+        end=self.task_to_body(candidate,base_pos,base_quat,yaw)
+        clearance=self.point_clearance(p,arm[:,None],legs[:,None])
+        path=self.path_clearance(p,end[:,None].expand_as(p),arm[:,None],legs[:,None])
+        end_clearance=self.point_clearance(end,arm,legs)[:,None]
+        allowed &= ((path>=0)|((clearance<0)&(path>=clearance-1e-6)&(end_clearance>clearance+1e-6))).all(-1).all(-1)
+        local=candidate-center
+        allowed &= ~((local>lower)&(local<upper)).all(-1) & (local[:,2]>=underground)
+        swept=segment_box(previous-center,local,(lower+upper)/2,(upper-lower)/2)
+        return allowed & (swept>=0)
 
     def forward(self,q):
         n=len(q); eye=torch.eye(3,device=q.device,dtype=q.dtype).expand(n,3,3)

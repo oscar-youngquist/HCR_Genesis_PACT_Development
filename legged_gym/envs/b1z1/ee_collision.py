@@ -2,6 +2,33 @@
 import torch
 
 
+def clip_prefix(candidate, previous, allowed_path, *, select_path=None):
+    """Four fixed batched refinements; every accepted prefix is swept in full.
+
+    select_path(ids) binds geometry for only the initially unsafe rows once.
+    Two-argument callbacks retain the full-batch compatibility path.
+    This is bounded scalar path clipping, not an IK/optimization solver.
+    """
+    allowed=allowed_path(candidate,previous)
+    if allowed.all():return candidate
+    if select_path is not None:
+        ids=(~allowed).nonzero(as_tuple=True)[0]
+        output=candidate.clone()
+        candidate=candidate.index_select(0,ids)
+        previous=previous.index_select(0,ids)
+        allowed_path=select_path(ids)
+    lo=torch.zeros_like(candidate[...,0]);hi=torch.ones_like(lo)
+    for _ in range(4):
+        mid=(lo+hi)/2
+        ok=allowed_path(previous+mid[...,None]*(candidate-previous),previous)
+        lo=torch.where(ok,mid,lo);hi=torch.where(ok,hi,mid)
+    clipped=previous+lo[...,None]*(candidate-previous)
+    if select_path is not None:
+        output.index_copy_(0,ids,clipped)
+        return output
+    return torch.where(allowed[...,None],candidate,clipped)
+
+
 def point_segment(p, a, b):
     d=b-a
     u=((p-a)*d).sum(-1)/d.square().sum(-1).clamp_min(1e-15)

@@ -333,6 +333,24 @@ class BardB1Z1DynamicsBackend(WholeBodyDynamicsBackend):
             positions.append(pose[:, :3, 3].clone())
         return torch.cat(positions)
 
+    def ee_linear_kinematics(self, state):
+        """Local teacher FK/Jacobian; canonical joint order, world linear rows.
+
+        The teacher constructs floating-base columns explicitly for WORLD
+        generalized velocities; this does not change legacy rollout semantics.
+        """
+        positions, jacobians = [], []
+        for chunk in state.split(self.batch_capacity):
+            q, v = self._pack_state(chunk[:, :3], chunk[:, 3:7], chunk[:, 7:26],
+                                    chunk[:, 26:29], chunk[:, 29:32], chunk[:, 32:51])
+            data = self.bard.create_data(self.model, max_batch_size=len(chunk))
+            self.bard.update_kinematics(self.model, data, q, v)
+            jac, pose = self.bard.jacobian(self.model, data, self.ee_frame_id,
+                                         reference_frame="local", return_pose=True)
+            positions.append(pose[:, :3, 3].clone())
+            jacobians.append((pose[:, :3, :3] @ jac[:, :3]).index_select(-1, self._canonical_from_bard))
+        return torch.cat(positions), torch.cat(jacobians)
+
     def ee_pose_twist(self, state, use_orientation=True):
         """World pose/twist, or position/linear velocity without angular processing."""
         poses, twists = [], []

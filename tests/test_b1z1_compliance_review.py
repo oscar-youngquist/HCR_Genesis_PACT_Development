@@ -43,7 +43,7 @@ def test_pairwise_approach_cannot_be_hidden_by_retreat():
     assert collision_approach(start,torch.tensor([[.0,.03]]),.04)==0
 
 
-def test_adapter_rejects_far_collision_despite_short_joint_probes():
+def actual_urdf_task():
     g,q=geometry();ee,_,arm,_=g.forward(q)
     ref,k=fixture(3);ref.cfg.collision_gate=True;ref.cfg.include_torso_disturbances=False
     # A nominal goal exactly at the current EE isolates the requested offset.
@@ -61,10 +61,95 @@ def test_adapter_rejects_far_collision_despite_short_joint_probes():
     task.center=lambda:base;task.nominal=lambda advance:(ee,torch.zeros_like(ee))
     task.wrench_sum=ee.new_zeros(3,3,3);task.wrench_count=ee.new_zeros(3)
     task.workspace_clearance=segment_box
+    return g,q,ee,task
+
+
+@pytest.mark.parametrize('base_enabled',[True,False])
+def test_adapter_yields_before_progressive_collision_handoff(base_enabled):
+    g,q,ee,task=actual_urdf_task()
+    if not base_enabled:task.reference.profile[:,6:]=0
     task.begin()
-    assert task.target.collision.max()>.99
-    torch.testing.assert_close(task.target.position,ee,rtol=0,atol=0)
+    assert task.target.collision.max()==0
+    assert (task.target.position-ee).norm(dim=-1).min()>0
+    _,_,arm,legs=g.forward(q)
+    initial=task.target.position.clone()
+    for _ in range(90):
+        previous=task.target.position.clone();task.begin()
+        assert g.path_clearance(previous,task.target.position,arm,legs).min()>=-1e-6
+    assert task.target.collision.max()>.5
+    assert (task.target.position-ee).norm(dim=-1).min()>(initial-ee).norm(dim=-1).max()
+    if base_enabled:assert task.target.base.abs().max()>0
+    else:assert task.target.base.eq(0).all()
+    # Reversal and removal recover without crossing an obstacle or retaining
+    # a saturated outward filter velocity.
+    task.env.ee_force_ext_world.neg_();task.begin()
+    assert torch.isfinite(task.target.velocity).all()
+    task.env.ee_force_ext_world.zero_()
+    for _ in range(20):task.begin()
+    assert g.point_clearance(task.target.position,arm,legs).min()>=0
+
+
+def test_workspace_center_recovery_zero_profile_and_repeated_shifts():
+    from legged_gym.envs.b1z1.directional_compliance import cartesian
+    from legged_gym.envs.b1z1.compliance_bounds import feasible
+    m,k=fixture();m.profile.zero_()
+    k['nominal'][:]=cartesian(torch.tensor([.9,-.5,0.]))
+    m.advance(**k);m.rate.fill_(.3)
+    k['center'][:,2]+=.01;k['nominal'][:,2]+=.01
+    assert (m.accepted-k['center']).norm(dim=-1).min()>.904
+    r=m.advance(**k)
+    assert m.recovering.all() and feasible(r.position,k['center'],k['bounds']).all()
+    torch.testing.assert_close(r.position,k['nominal'])
+    assert m.delta.eq(0).all() and m.rate.eq(0).all()
+    for shift in (.01,-.01,-.02,.03,0.):
+        k['center'][:,2]+=shift;k['nominal'][:,2]+=shift
+        r=m.advance(**k)
+        torch.testing.assert_close(r.position,k['nominal'])
+        assert feasible(r.position,k['center'],k['bounds']).all()
+    previous=m.accepted.clone();m.reset(torch.tensor([0]))
+    torch.testing.assert_close(m.accepted[1:],previous[1:])
+
+
+def test_unloaded_rigid_nominal_does_not_inherit_old_offset_velocity():
+    m,k=fixture();m.profile.zero_();m.advance(**k)
+    m.delta[:,1]=.01;m.rate[:,1]=.3
+    k['nominal_velocity'][:,0]=.1
+    k['nominal'][:,0]+=.002
+    r=m.advance(**k)
+    torch.testing.assert_close(r.position,k['nominal'])
+    torch.testing.assert_close(r.velocity,k['nominal_velocity'])
+    assert m.delta.eq(0).all() and m.rate.eq(0).all()
+
+
+def test_workspace_recovery_retains_only_enabled_offset_and_reinitializes_rate():
+    from legged_gym.envs.b1z1.compliance_bounds import feasible
+    m,k=fixture();m.profile.zero_();m.profile[:,3]=1
+    m.accepted[:]=torch.tensor([.9,0.,0.]);m.initialized.fill_(True)
+    m.delta[:]=torch.tensor([.2,.05,.1]);m.rate.fill_(4)
+    k['center'][:,2]=.1
+    r=m.advance(**k)
+    assert m.recovering.all() and feasible(r.position,k['center'],k['bounds']).all()
+    torch.testing.assert_close(m.delta[:,0],torch.zeros(4))
+    torch.testing.assert_close(m.delta[:,2],torch.zeros(4))
+    assert m.delta[:,1].min()>0 and m.rate.eq(0).all()
+
+
+def test_recovery_anchor_checks_geometry_and_reports_no_safe_anchor():
+    from legged_gym.envs.b1z1.compliance_bounds import feasible
+    g,q,ee,task=actual_urdf_task()
+    task.reference.accepted.fill_(-5);task.reference.initialized.fill_(True)
+    task.reference.profile.zero_()
+    # Invalid nominal inside torso cannot be used as a recovery anchor. The
+    # measured EE is the first valid fallback; this is explicit reinitialization.
+    task.nominal=lambda advance:(g.box_center.expand_as(ee),torch.zeros_like(ee))
+    task.begin()
+    torch.testing.assert_close(task.target.position,ee)
+    assert feasible(task.target.position,task.center(),task.bounds).all()
     assert task.target.velocity.eq(0).all()
+    task.reference.accepted.fill_(-5)
+    task.env.underground_limit=100
+    with pytest.raises(RuntimeError,match='No collision-free compliance recovery anchor'):
+        task.begin()
 
 
 def test_lateral_only_boundary_has_no_radial_redirection():

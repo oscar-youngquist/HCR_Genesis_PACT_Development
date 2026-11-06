@@ -1012,6 +1012,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_sample_fraction = 0.2                  # Fraction per PPO epoch; 1 keeps legacy, 0 skips actor physics.
         # Use 1/num_learning_epochs for once-per-rollout coverage; preserve PPO batch sizes.
         actor_phys_arm_feedforward_enabled = True          # Detached bias/base-motion/applied-EE-force torque teacher.
+        actor_phys_arm_feedforward_compliant_local_enabled = False  # Optional local accepted-trajectory teacher; FF-head gradients only.
         actor_phys_arm_feedforward_weight = 0.05           # Inside actor_phys_coef and its PINN ramp; zero skips all teacher work.
         
         actor_phys_base_balance_enabled = True           # Single-pass stance-force teacher; requires live GRFs. Opt in separately.
@@ -1036,7 +1037,6 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_ee_weight = 1.25                          # Next scheduled, compliant EE target.
         # Used only for captured compliant targets; no reference-filter parameters here.
         compliance_ee_velocity_weight = 0.25
-        compliance_ee_velocity_scale = 0.5  # m/s
         actor_phys_q_weight = 0.01                           # Joint-position safety barrier.
         actor_phys_qd_weight = 0.001                          # Joint-velocity safety barrier.
         actor_phys_velocity_time_constant = 0.25            # Reachable command response time [s].
@@ -1048,6 +1048,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         actor_phys_ee_scale = 0.1                           # EE-error normalization [m].
         actor_phys_q_scale = 1.0                            # Position-barrier normalization [rad].
         actor_phys_qd_scale = 10.0                          # Velocity-barrier normalization [rad/s].
+        compliance_ee_velocity_scale = 1.0                  # m/s 
         actor_phys_require_force_gate = False               # Legacy whole-objective opt-in gate; keep false for ungated actor physics.
         
         actor_phys_pos_fk_enabled = True                   # Direct arm position-command FK objective.

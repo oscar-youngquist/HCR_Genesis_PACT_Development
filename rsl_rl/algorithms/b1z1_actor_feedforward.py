@@ -49,7 +49,7 @@ def compensation_target(fixed, acceleration, applied_ee_force_world, arm_ids, do
     return bias + coupling - external, bias, coupling, external
 
 
-def objective(a, actions, state, fixed, acceleration, dof_count):
+def objective(a, actions, state, fixed, acceleration, dof_count, data=None):
     """Only the effective physical FF output is live, never the teacher dynamics."""
     zero = actions[torch.isfinite(actions)].sum() * 0.
     if not enabled(a.cfg, a.actor_critic.action_mode):
@@ -60,15 +60,35 @@ def objective(a, actions, state, fixed, acceleration, dof_count):
     count = a.actor_critic.num_actions
     ids = torch.as_tensor(a.cfg["actor_phys_arm_indices"], device=actions.device, dtype=torch.long)
     state = state.detach()
+    from . import b1z1_local_feedforward as local
+    local_valid = None
     # get_pact_dynamics_state stores applied world-frame EE force in N here.
     # Use the captured pre-action state, never a next-state force or prediction.
-    target, bias, coupling, external = compensation_target(fixed, acceleration, state[:, 88:91], ids, dof_count)
+    if local.enabled(a.cfg, a.actor_critic.action_mode):
+        # Invalid reset/reinitialization rows do not enter any local solve.
+        from types import SimpleNamespace
+        eligible = data["local_ref_valid"].flatten().bool() & fixed.local_kinematic_valid.flatten().bool()
+        metrics["arm_feedforward_local_invalid_fraction"] = (~eligible).to(actions.dtype).mean()
+        if not eligible.any():
+            return zero, metrics
+        actions, state, acceleration = actions[eligible], state[eligible], acceleration[eligible]
+        fixed = SimpleNamespace(**{k:v[eligible] for k,v in vars(fixed).items()})
+        data = {k:v[eligible].detach() for k,v in data.items()}
+        target, bias, coupling, external, local_valid, details = local.target(
+            a, actions, state, fixed, acceleration, ids, dof_count, data)
+        details["local_invalid_fraction"] = 1.-local_valid.to(actions.dtype).sum()/len(eligible)
+        metrics.update({"arm_feedforward_"+k:v for k,v in details.items()})
+    else:
+        applied = state[:, 88:91] if data is None else data.get("feedforward_applied_force", state[:, 88:91])
+        target, bias, coupling, external = compensation_target(fixed, acceleration, applied, ids, dof_count)
     # Match _coupled_torque: motor_strength * w_FF * S_tau * clipped a_tau.
     scale = actions.new_tensor(a.cfg["torque_action_scale"]).expand(count).index_select(0, ids)
     gain = state[:, 97:97 + dof_count].index_select(1, ids) * state[:, 155:156] * scale
     feedforward = actions[:, count:].clamp(-a.cfg["clip_actions"], a.cfg["clip_actions"])
     prediction = feedforward.index_select(1, ids) * gain
     valid = torch.isfinite(target).all(-1) & torch.isfinite(prediction).all(-1)
+    if local_valid is not None:
+        valid &= local_valid
     # A disabled FF actuator cannot learn this teacher; keep its loss at zero.
     valid &= torch.isfinite(gain).all(-1) & (gain.abs() > 1e-8).all(-1)
     metrics["arm_feedforward_valid_fraction"] = valid.to(actions.dtype).mean()

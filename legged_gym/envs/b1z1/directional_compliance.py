@@ -8,7 +8,7 @@ import math
 from dataclasses import dataclass
 
 import torch
-from .compliance_bounds import bound_reference
+from .compliance_bounds import bound_reference, feasible
 
 
 class ComplianceCfg:
@@ -58,7 +58,10 @@ class ComplianceCfg:
     arm_radius = 0.035  # Nonadjacent arm obstacle capsules.
     leg_radius = 0.055
     collision_batch_size = 8192  # bounded scratch; amortizes launches at 4096 envs
-    compile_geometry = True  # CUDA-only pure kernels; one-time compiler warmup
+    compile_geometry = True  # CUDA-only pure kernels; first-use compiler warmup
+    # Stable latency by default: the same full batch on every refinement.
+    # Opt-in compaction saves work but new subset sizes may compile/capture late.
+    collision_compact_refinement = False
     # Zero-based arm skeleton segments: own final segment and wrist neighbour.
     ee_excluded_arm_segments = [4, 5]
     force_threshold = 0.5  # N; avoids undefined zero-force directions
@@ -237,13 +240,18 @@ class ComplianceReference:
         validate(cfg)
         self.cfg=cfg
         self.bound_reference=bound_reference
+        self.directional_probe=directional_probe
+        self.workspace_gate=workspace_gate
         if cfg.compile_geometry and torch.device(device).type=='cuda':
             self.bound_reference=torch.compile(bound_reference,dynamic=True,fullgraph=True)
+            self.directional_probe=torch.compile(directional_probe,dynamic=True,fullgraph=True)
+            self.workspace_gate=torch.compile(workspace_gate,dynamic=True,fullgraph=True)
         self.delta=torch.zeros(n,3,device=device,dtype=dtype)
         self.rate=torch.zeros_like(self.delta)
         self.eta=torch.zeros_like(self.delta)
         self.accepted=torch.zeros_like(self.delta)
         self.initialized=torch.zeros(n,device=device,dtype=torch.bool)
+        self.recovering=torch.zeros_like(self.initialized)
         self.profile=torch.zeros(n,12,device=device,dtype=dtype)
         from .compliance_sampling import ProfileSampler
         self.sampler=ProfileSampler(cfg,device,dtype)
@@ -253,14 +261,29 @@ class ComplianceReference:
     def reset(self,ids):
         self.delta[ids]=0; self.rate[ids]=0; self.eta[ids]=0
         self.accepted[ids]=0; self.initialized[ids]=False
+        self.recovering[ids]=False
         self.profile[ids],self.family_ids[ids]=self.sampler.sample(len(ids))
 
     @torch.no_grad()
     def advance(self,*,nominal,nominal_velocity,center,bounds,force,lever,command,command_limits,
                 q,limits,jacobian,collision_clearance,dt,target_safe=None,measured_position=None,torso_wrench=None,
-                collision_path_gate=None):
+                collision_path_gate=None, recovery_anchor=None, collision_start=None):
         c=self.cfg
         previous=torch.where(self.initialized[:,None],self.accepted,nominal)
+        recovering=~feasible(previous,center,bounds)
+        # A terrain/workspace change is a reference reinitialization, not a
+        # zero-length first-exit step. Preserve only enabled Cartesian offsets.
+        recovered=previous
+        if recovering.any():
+            anchor=nominal if recovery_anchor is None else recovery_anchor(nominal,previous,recovering)
+            if not (feasible(anchor,center,bounds)|~recovering).all():
+                raise RuntimeError('No feasible compliance recovery anchor in current workspace')
+            enabled=self.profile[:,:6].reshape(-1,3,2).amax(-1)>0
+            recovered,_=self.bound_reference(anchor+self.delta*enabled,torch.zeros_like(previous),center,bounds,start=anchor)
+            if target_safe is not None:recovered=target_safe(recovered,anchor)
+            previous=torch.where(recovering[:,None],recovered,previous)
+            self.delta.copy_(torch.where(recovering[:,None],previous-nominal,self.delta))
+            self.rate.copy_(torch.where(recovering[:,None],torch.zeros_like(self.rate),self.rate))
         demand=signed_response(force,self.profile[:,:6],c.ee_gain)
         active=force.abs()>c.force_threshold
         # Three individual signed axes plus combined demand, regardless of offset rate.
@@ -270,23 +293,22 @@ class ComplianceReference:
         probes=torch.cat((axes,combined[:,None]),1)
         repeated_q=q[:,None].expand(-1,probes.shape[1],-1)
         repeated_limits=limits[:,None].expand(-1,probes.shape[1],-1,-1)
-        dq,joint,progress=directional_probe(jacobian[:,None].expand(-1,probes.shape[1],-1,-1),
+        dq,joint,progress=self.directional_probe(jacobian[:,None].expand(-1,probes.shape[1],-1,-1),
                                           repeated_q,repeated_limits,probes,c)
-        workspace=workspace_gate(previous[:,None],probes,center[:,None],bounds,c.workspace_margin)
+        workspace=self.workspace_gate(previous[:,None],probes,center[:,None],bounds,c.workspace_margin)
         if measured_position is not None:
-            workspace=torch.maximum(workspace,workspace_gate(measured_position[:,None],probes,
+            workspace=torch.maximum(workspace,self.workspace_gate(measured_position[:,None],probes,
                 center[:,None],bounds,c.workspace_margin))
         collision=torch.zeros_like(workspace)
         if c.collision_gate:
-            start=collision_clearance(q)
+            start=collision_clearance(q) if collision_start is None else collision_start
             if start.ndim==1:start=start[:,None]
             fractions=torch.linspace(1/c.collision_probe_steps,1,c.collision_probe_steps,device=q.device)
             probe_q=(repeated_q[:,:,None]+dq[:,:,None]*fractions[None,None,:,None]).flatten(1,2)
             clear=collision_clearance(probe_q).reshape(len(q),probes.shape[1],c.collision_probe_steps,-1)
             collision=collision_approach(start[:,None,None],clear,c.collision_margin).amax(-1)
             if collision_path_gate is not None:
-                directions=torch.cat((torch.diag_embed(demand),demand[:,None]),1)
-                collision=torch.maximum(collision,collision_path_gate(directions))
+                collision=torch.maximum(collision,collision_path_gate(probes,previous))
         pairs=self.profile[:,:6].reshape(-1,3,2)
         gain=torch.where(force>=0,pairs[...,1],pairs[...,0])
         stiffness=smooth(1-gain/c.stiffness_threshold) if c.stiffness_gate else torch.zeros_like(force)
@@ -297,24 +319,31 @@ class ComplianceReference:
         gates=1-(1-stiffness)*(1-contributions[0])*(1-contributions[1])*(1-contributions[2])
         gates=gates*active
         equilibrium,_=self.bound_reference(nominal+demand,torch.zeros_like(demand),center,bounds,start=nominal)
-        equilibrium_blocked=torch.zeros(len(q),device=q.device,dtype=torch.bool)
         if target_safe is not None:
-            safe=target_safe(equilibrium,previous)
-            equilibrium_blocked=(safe-equilibrium).norm(dim=-1)>1e-7
-            equilibrium=safe
+            equilibrium=target_safe(equilibrium,previous)
         desired=equilibrium-nominal
         error=self.delta-desired
         b=self.rate+c.omega*error
         decay=math.exp(-c.omega*dt)
         delta=desired+(error+dt*b)*decay
         rate=(self.rate-c.omega*dt*b)*decay
+        nominal_only=(self.profile[:,:6].amax(-1)==0)&(force.abs().amax(-1)==0)
+        # No admittance state should delay a rigid, unloaded nominal command.
+        # Hard path constraints still apply below, so an unsafe goal is not jumped to.
+        delta=torch.where(nominal_only[:,None],torch.zeros_like(delta),delta)
+        rate=torch.where(nominal_only[:,None],torch.zeros_like(rate),rate)
         position,velocity=self.bound_reference(nominal+delta,nominal_velocity+rate,center,bounds,start=previous)
         if target_safe is not None:
             safe=target_safe(position,previous)
-            blocked=((safe-position).norm(dim=-1)>1e-7)|equilibrium_blocked
-            safe=torch.where(equilibrium_blocked[:,None],previous,safe)
+            blocked=(safe-position).norm(dim=-1)>1e-7
             position=safe
             velocity=torch.where(blocked[:,None],torch.zeros_like(velocity),velocity)
+        # A recovery jump has no inherited filter momentum. An exact nominal
+        # recovery resumes nominal velocity; otherwise hold for this interval.
+        position=torch.where(recovering[:,None],recovered,position)
+        recovery_velocity=torch.where(((recovered-nominal).norm(dim=-1)<1e-7)[:,None],nominal_velocity,torch.zeros_like(velocity))
+        velocity=torch.where(recovering[:,None],recovery_velocity,velocity)
+        self.recovering=recovering.detach()
         self.accepted.copy_(position);self.initialized.fill_(True)
         self.delta.copy_(position-nominal)
         self.rate.copy_(velocity-nominal_velocity)

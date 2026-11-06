@@ -124,6 +124,10 @@ class B1Z1PACTRunner:
         arm_feedforward_reward.configure(env, self.dynamics)
         merged = dict(algorithm_cfg)
         from rsl_rl.algorithms.b1z1_actor_feedforward import enabled as feedforward_enabled
+        if getattr(env, "compliance", None) is not None:
+            env.compliance.capture_feedforward = feedforward_enabled(algorithm_cfg, policy_cfg.get("action_mode", "coupled"))
+            env.compliance.capture_local_teacher = (env.compliance.capture_feedforward
+                and algorithm_cfg.get("actor_phys_arm_feedforward_compliant_local_enabled", False))
         arm_physics = (algorithm_cfg.get("actor_phys_pos_fk_enabled", False)
                        or algorithm_cfg.get("actor_phys_arm_rejection_enabled", False)
                        or feedforward_enabled(algorithm_cfg, policy_cfg.get("action_mode", "coupled"))

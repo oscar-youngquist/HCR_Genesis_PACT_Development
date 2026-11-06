@@ -83,8 +83,14 @@ def test_actor_disabled_keeps_only_sampling_diagnostics():
     assert logged == {"ActorPhysics/configured_fraction": 0.}
 
 
-def test_finish_preserves_objective_and_gradients():
+@pytest.mark.parametrize("compliant", [False, True])
+def test_finish_preserves_objective_and_gradients(compliant):
     a, batch, actions, context = setup()
+    if compliant:
+        a.cfg.update(compliance_ee_velocity_weight=.25, compliance_ee_velocity_scale=.5)
+        batch['actor_phys_compliance_position'] = torch.full((3, 3), .2)
+        batch['actor_phys_compliance_velocity'] = torch.full((3, 3), .1)
+        a.dynamics_backend.ee_pose_twist = lambda s, **kw: (s[:, :3]+s[:, 19:22], s[:, 26:29]+s[:, 44:47])
     loss, metrics = physics.objective(a, batch, actions, context)
     before, = torch.autograd.grad(loss, actions, retain_graph=True)
     a.pinn_weight = .1
@@ -95,4 +101,21 @@ def test_finish_preserves_objective_and_gradients():
     after, = torch.autograd.grad(loss, actions)
     torch.testing.assert_close(before, after, rtol=0, atol=0)
     assert logged["ActorPhysics/loss"] == loss.item()
+    if compliant:
+        assert logged["ActorPhysics/ee_velocity"] == metrics["ee_velocity"].item()
+        assert logged["ActorPhysics/ee_velocity_scaled"] == pytest.approx(
+            metrics["ee_velocity"].item() * .25 * a.cfg["actor_phys_coef"])
+    else:
+        assert "ActorPhysics/ee_velocity_scaled" not in logged
     assert not any("ee_stability_" in tag or "arm_manipulability_" in tag for tag in logged)
+
+
+@pytest.mark.parametrize("ramp,component", [(0., .3), (.25, .3), (1., .3), (2., .3), (1., 0.)])
+def test_ee_velocity_scaled_includes_component_coefficient_and_ramp(ramp, component):
+    a = fixture(actor_phys_coef=.7, compliance_ee_velocity_weight=component)
+    a.pinn_weight = .1 * ramp
+    a.actor_physics_metrics = {"ee_velocity": torch.tensor(8.)}
+    logged = {}
+    physics.finish(a, logged, updates=4)
+    assert logged["ActorPhysics/ee_velocity"] == 2.
+    assert logged["ActorPhysics/ee_velocity_scaled"] == pytest.approx(2. * component * .7 * min(ramp, 1.))

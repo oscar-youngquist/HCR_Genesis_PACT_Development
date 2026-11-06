@@ -9,7 +9,7 @@ import json
 import sys
 import legged_gym.envs
 from legged_gym.utils import get_args, task_registry
-from legged_gym.envs.b1z1.directional_compliance import chart, heading, rotate_yaw
+from legged_gym.envs.b1z1.directional_compliance import chart, heading, rotate_yaw, cartesian, task_position
 
 
 def main():
@@ -71,6 +71,32 @@ def main():
                 task=rotate_yaw(world,heading(env.simulator.base_quat),True)
                 force=task/task.new_tensor(cfg.compliance.ee_gain)
                 load[3]=rotate_yaw(force,heading(env.simulator.base_quat))[3]
+                if step==1:
+                    # Initialize a near-obstacle accepted reference to exercise
+                    # handoff without running an untrained robot into contact.
+                    # This is a reference-state diagnostic, not a measured move.
+                    from legged_gym.envs.b1z1.ee_collision import clip_prefix
+                    geometry=env.compliance.geometry
+                    _,_,points,legs=geometry.forward(env.simulator.dof_pos)
+                    end=ee+direction
+                    prefix=clip_prefix(end,ee,lambda candidate,start:
+                        geometry.path_clearance(start,candidate,points,legs).amin(-1)>=0)
+                    near=ee+.85*(prefix-ee)
+                    world_near=quat_apply(env.simulator.base_quat,near)+env.simulator.base_pos
+                    accepted=task_position(world_near,env.simulator.base_pos,heading(env.simulator.base_quat))
+                    state=env.compliance.reference
+                    state.accepted[3]=accepted[3]
+                    state.delta[3]=accepted[3]-env.compliance.nominal(0)[0][3]
+                    state.rate[3]=0
+            if options.review_collision and step==4:
+                # Test-only terrain-height measurement change, not a terrain
+                # teleport or claim of trained-policy terrain performance.
+                sphere=load.new_tensor([.9,-.5,0.])
+                env.ee_start_sphere[0]=sphere;env.ee_goal_sphere[0]=sphere
+                env.compliance.reference.accepted[0]=env.compliance.center()[0]+cartesian(sphere)
+                env.compliance.reference.delta[0]=0
+                env.compliance.reference.rate[0]=.3
+                env.simulator.measured_heights[0]+=.01
             action=torch.zeros(args.num_envs,cfg.env.num_policy_actions,device=env.device)
             result=env.step(action)
             assert all(torch.isfinite(x).all() for x in result[:6])
@@ -93,8 +119,16 @@ def main():
                     assert ref.base[5,2].abs()>0
                     assert env.compliance.reference.delta[1,1]>0, 'EE-only clearance must permit yielding'
                     if options.review_collision:
-                        assert ref.collision[3].max()>.9, 'Obstacle approach must recruit base'
-                        assert ref.base[3,:2].abs().sum()>0
+                        if step==0:
+                            assert ref.collision[3].max()<.1, 'Distant obstacle must not immediately recruit base'
+                        if step==1:
+                            assert ref.collision[3].max()>.5, 'Nearby reference must recruit base'
+                            assert ref.base[3,:2].abs().sum()>0
+                        assert env.compliance.reference.delta[3].norm()>0
+                if options.review_collision and step==4:
+                    assert env.compliance.reference.recovering[0]
+                    assert env.compliance.reference.delta[0].abs().max()<1e-6
+                    assert env.compliance.reference.rate[0].eq(0).all()
                 traces.append(dict(step=step,ee_offset=env.compliance.reference.delta.cpu().tolist(),
                     base_target=ref.base.cpu().tolist(),gates=ref.gates.cpu().tolist()))
         if options.profile_scenarios:

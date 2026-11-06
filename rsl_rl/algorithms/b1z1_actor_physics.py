@@ -238,11 +238,30 @@ def prepare(a, indices=None):
         a.actor_physics_cache = None
         return
     chunks = {}
+    from . import b1z1_local_feedforward as local_teacher
+    local_valid = None
+    if local_teacher.enabled(a.cfg, a.actor_critic.action_mode):
+        local_valid = a.storage.actor_physics["local_ref_valid"].flatten(0, 1).flatten().bool()
+        local_valid = local_valid & a.storage.actor_physics["valid"].flatten().bool()
+        local_valid &= ~a.storage.dones.flatten().bool() & ~a.storage.physics_invalid.flatten().bool()
+        if indices is not None:
+            local_valid = local_valid.index_select(0, indices)
+    offset = 0
     for raw in state.split(a.dynamics_backend.batch_capacity):
         good = torch.isfinite(raw).all(-1) & (raw[:, 3:7].norm(dim=-1) > 1e-6)
         safe = torch.where(good[:, None], raw, torch.zeros_like(raw)).clone()
         safe[~good, 6] = 1
         fixed = mechanics(a.dynamics_backend, {"rollout_initial_state": safe[:, :51], "dynamics_state": safe})
+        if local_valid is not None:
+            eligible = good & local_valid[offset:offset+len(raw)]
+            fixed.local_h = raw.new_zeros((len(raw), 3, fixed.mass_matrix.shape[-1]))
+            fixed.local_s = raw.new_zeros((len(raw), 3))
+            fixed.local_bias = raw.new_zeros((len(raw), 3))
+            fixed.local_kinematic_valid = torch.zeros((len(raw), 1), device=raw.device, dtype=torch.bool)
+            if eligible.any():
+                for name, value in local_teacher.kinematics(a.dynamics_backend, safe[eligible], fixed.ee_jacobian[eligible]).items():
+                    getattr(fixed, name)[eligible] = value
+        offset += len(raw)
         for name, value in vars(fixed).items():
             chunks.setdefault(name, []).append(value)
     a.actor_physics_cache = SimpleNamespace(**{k: torch.cat(v) for k, v in chunks.items()})
@@ -458,7 +477,8 @@ def objective(a, batch, actions, context):
         ff_loss, ff_metrics = b1z1_actor_feedforward.objective(
             a, actions[valid][good][finite][finite_ee], data["state"][finite_ee],
             SimpleNamespace(**{k: v[finite][finite_ee] for k, v in vars(fixed).items()}),
-            rollout.acceleration[finite][finite_ee], torque.shape[-1])
+            rollout.acceleration[finite][finite_ee], torque.shape[-1],
+            data={k: v[finite_ee] for k, v in data.items()})
         total = total + ff_loss
         metrics.update(ff_metrics)
         metrics["loss"] = total.detach()
@@ -579,6 +599,12 @@ def finish(a, metrics, updates):
         metrics.update({"ActorPhysics/" + k: v.item() / max(updates, 1)
                         for k, v in a.actor_physics_metrics.items() if _logged_component(a, k)})
         metrics["ActorPhysics/scheduled_coefficient"] = scheduled_coefficient(a)
+        if "ActorPhysics/ee_velocity" in metrics:
+            # Same update reduction as the raw tag; full scalar loss weight,
+            # before PCGrad/projection. No extra physics or gradient work.
+            metrics["ActorPhysics/ee_velocity_scaled"] = (
+                metrics["ActorPhysics/ee_velocity"] * a.cfg["compliance_ee_velocity_weight"]
+                * metrics["ActorPhysics/scheduled_coefficient"])
         if scheduled_coefficient(a) == 0:
             metrics.update({"ActorPhysics/loss_scaled": 0.0, "ActorPhysics/active_fraction": 0.0})
         a.actor_physics_cache = None

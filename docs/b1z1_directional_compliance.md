@@ -214,12 +214,96 @@ The actor rollout tracks the same references, and commanded-position FK uses
 the captured compliant goal. Safety penalties and randomized BARD mechanics
 remain unchanged. Force estimator labels are not altered.
 
-When enabled, the runner disables rigid-rejection/feedforward torque teachers,
+When enabled, the runner disables rigid-rejection and base-balance torque teachers,
 force allocation, and the old fixed-target EE stability loss. The environment
 disables impedance, arm-before-base/early-tilt, stand-still and nominal gait
 reference/contact shaping objectives that conflict with base recruitment.
 Generic effort, uprightness, contact safety and terrain clearance remain.
 Physics-disabled ablations remain physics-disabled.
+
+### Optional Local Arm Feedforward Teacher
+
+The runner no longer forces `actor_phys_arm_feedforward_enabled=False`.
+The separate `tracking_arm_feedforward` RL reward remains disabled by compliance.
+In the shared PACT **algorithm** config:
+
+```python
+actor_phys_arm_feedforward_enabled = True
+actor_phys_arm_feedforward_compliant_local_enabled = True  # default False
+```
+
+With the existing enable flag off (or weight zero), neither teacher runs. With
+only that flag on, the original load-compensation equations remain unchanged,
+including in compliant training. With both flags on, compliant coupled policies
+use the local teacher exclusively. Noncompliant policies retain the original
+teacher; position-only and physics-disabled ablations remain excluded. The
+existing weight, overall coefficient, warmup and selected-row sampling apply.
+In particular, removing the old override makes the existing default-on original
+teacher active in compliant PACT unless it is explicitly disabled.
+
+The new label is `M_aa a_arm* + M_au a_other + h_a - J_arm^T F_applied - tau_PD`.
+All quantities, including the candidate action's effective PD torque and the
+existing rollout's non-arm acceleration, are detached. Only the effective arm
+FF output receives direct loss gradients. Randomized gains, motor strength and
+branch weights come from the same controller reconstruction used by the actor
+rollout. Torso loads enter through non-arm coupling, not another EE force term.
+This is local inverse-dynamics guidance conditional on predicted non-arm
+acceleration, not a feasible whole-body solution or an execution controller.
+
+The desired task acceleration uses `ComplianceCfg.omega/zeta`, accepted position
+and velocity at interval start, and accepted endpoint velocity change divided
+by the control dt. The endpoint position remains the FK/tracking target. These
+detached snapshots, including the actual post-sampling EE force, are captured
+before physics and survive terminal reset/shuffled replay. First intervals and
+reference reinitializations (including the following interval) are masked.
+Workspace/collision holds therefore supply braking, not stale nominal motion.
+No compliance filter advances in PPO replay.
+
+`H` includes heading-relative horizontal translation/yaw transport and world-z.
+World floating-base tangent columns are explicit; BARD joint columns are reused.
+The cached velocity-dependent bias uses a centred **1 ms kinematic derivative**
+with constant world generalized velocity. This is a numerical approximation,
+tested against independent FK differences, not a second dynamics rollout.
+Its accuracy for extreme angular rates remains a limitation. DLS uses the
+existing `dls_damping` in Cartesian metres/radian. Joint-limit margins and
+one-control-interval position/velocity predictions reject infeasible rows;
+FF action-range or combined execution-limit saturation also excludes a label.
+No clipped/damped solution is claimed to achieve exact task acceleration.
+
+`ActorPhysics/arm_feedforward_local_*` reports invalid, saturated and infeasible
+fractions. With additional diagnostics enabled it also reports acceleration
+residual, inertial/PD norms and PD-FF opposition; existing teacher component
+norms are retained. The local label can correct PD errors, so FF now has a
+broader role even while the position-action FK loss remains active.
+
+Reproducible checks (use the Isaac Lab environment and repository PYTHONPATH):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 SIMULATOR=isaaclab PYTHONPATH=. python -m pytest -q tests/test_b1z1_local_feedforward.py tests/test_b1z1_actor_feedforward.py
+CUDA_VISIBLE_DEVICES=0 SIMULATOR=isaaclab PYTHONPATH=. python tests/benchmark_b1z1_local_feedforward.py --count 4096
+CUDA_VISIBLE_DEVICES=0 SIMULATOR=isaaclab_b1z1_pact PYTHONPATH=. python tests/smoke_b1z1_local_feedforward.py --task b1z1_pact --gpu cuda:0 --headless
+```
+
+The microbenchmark isolates shared mechanics, extra cached kinematics, and
+loss/backward on selected rows. It is not end-to-end training throughput and
+does not establish improved learned-policy performance.
+
+Validation on an RTX 4090 (`cuda:0`): 197 focused tests passed, including
+articulated BARD finite differences with nonidentity base orientation. A
+two-environment/four-step Isaac Lab PPO update produced a finite local loss
+(`raw=0.8983`) with 12.5% valid teacher rows; the untrained random policy caused
+87.5% saturated/invalid labels, correctly excluded. This is integration
+verification, not an estimate of rejection frequency in a trained policy.
+The smoke harness uses single-worker Inductor compilation to avoid a post-Kit
+fork-pool stall; production compiler settings are unchanged.
+
+At 4096 synthetic selected states using randomized BARD mechanics, ten warmed
+repetitions measured shared mechanics at 9.07 ms; disabled/original/local
+loss+backward at 0.24/0.87/2.32 ms; extra local kinematic preparation at 9.57 ms
+per cache build. These use a common cached acceleration and controlled test
+gains, not measured 4096-environment simulation or full PPO throughput. The
+one-millisecond bias approximation, contact/model errors and predicted non-arm
+acceleration remain sources of teacher error. Long training was not run.
 
 ## Verification Commands
 
@@ -323,7 +407,8 @@ are both checked; a short joint probe alone cannot certify a farther target.
 Obstacle geometry is frozen at the measured pose for the Cartesian sweep;
 configuration probes separately approximate its motion. These are primitive
 checks, not mesh certification, iterative IK or whole-body feasibility. An
-unsafe candidate retains the actual previously accepted reference; recovery
+unsafe candidate is shortened to a checked safe prefix (held only if no safe
+prefix is available); recovery
 from an overlap is allowed only when no obstacle's penetration worsens. This does not
 certify reachability, nor guarantee collision-free execution or prevent the
 learned robot from overshooting. General effort/damping penalties still trade
@@ -389,3 +474,156 @@ each: PACT profile coverage, PACT obstacle approach, position-full ab7 obstacle
 approach, and PACT direct/combined torso-wrench cases. Default-pose EE clearance
 is +0.1752 m with these primitives. No training or trained-policy performance
 evaluation was run, and full-training throughput remains unmeasured.
+
+## Moving Workspace And Progressive Handoff
+
+Every update revalidates the accepted reference against the **current** workspace.
+When terrain height moves the workspace around it, ordinary first-exit clipping
+is replaced by explicit reference reinitialization (`reference.recovering`).
+The preferred anchor is the current nominal command. Old compliance offsets
+are retained only on enabled Cartesian axes and shortened along their original
+direction to the first workspace/collision limit. No spherical redirection is
+used. A zero-profile, unloaded reference follows a safe nominal command directly.
+
+Recovery anchors must also satisfy EE geometry and the original torso/underground
+exclusions. If nominal is invalid, the deterministic fallback order is previous
+accepted point, measured EE, then spherical-workspace midpoint. These exceptional
+anchors can change otherwise disabled components. If none is feasible, the code
+raises an explicit error requesting an environment reset rather than silently
+retaining an invalid reference. A recovery jump is not smooth motion: stale
+filter velocity is discarded; exact nominal recovery resumes nominal velocity,
+otherwise the recovered task reference is held for that interval. Accepted
+position, delta and rate are synchronized before the next update.
+
+Collision recruitment uses measured/accepted clearance and short directional
+probes, not the full force-equilibrium distance. Hard travel limiting still
+checks the complete swept path, per obstacle, plus the joint probes. An unsafe
+equilibrium is clipped using four fixed batched prefix refinements; the filter
+may advance toward that safe equilibrium instead of freezing immediately.
+Every retained prefix passes the swept-path predicate (resolution 1/16 of the
+requested segment); the all-safe case returns without refinement. Clipping an
+actual filter update zeros its velocity and feeds the accepted state back for
+anti-windup. Base-disabled profiles still request no base correction.
+
+Numerical regressions on the current URDF:
+
+- Raising workspace/nominal height by 0.01 m changes the stale radius from
+  0.900000 to 0.904837 m; recovery restores 0.8999999 m, with zero stale rate.
+- The tested path starts with 0.175200 m EE clearance and still has 0.148180 m
+  clearance over its first tenth. First-step yielding is 0.001158 m with zero
+  collision recruitment. After 90 further reference updates, yielding is
+  0.174939 m, clearance remains +0.000261 m, and recruitment reaches 1.0.
+- Force reversal/removal, base-disabled profiles, collision-aware recovery
+  fallbacks, inner-radius clipping, partial resets and detached replay are tested.
+
+GPU-0 reference microbenchmark at 4,096 rows / 10 measured intervals: standard
+case 10.83 ms and 36.07 MiB peak Torch allocation; all-rows obstructed-equilibrium
+stress case 23.44 ms and 36.62 MiB. The stress case intentionally exercises the
+bounded refinements. These are reference-only timings, not training throughput.
+Reproduce the stress case with `tests/benchmark_b1z1_compliance.py --counts 4096
+--repeats 10 --compile-geometry --compile-full-fk --collision-limited`.
+
+Optional compact safe-prefix refinement gathers only the initially unsafe
+environments after the full-batch first check. Their measured geometry is
+gathered once and reused for all four refinements; safe rows retain their candidate exactly. Four refinements
+resolve 1/16 of the requested displacement; collision predicates are unchanged.
+The benchmark accepts
+`--blocked-fraction 0.01` and `--full-batch-refinement` for matched comparisons.
+Before reducing eight refinements to four, on GPU 0 (RTX 4090), 4,096 rows
+and 30 warmed intervals with 1% obstructed
+demands measured 23.13 ms/full-batch versus 21.66 ms/compact. This roughly 6%
+reference-only improvement is not a whole-training speedup; fixed launch costs
+remain, and first-use compilation for compact shapes is excluded.
+
+### Compiled Reference Kernels
+
+With `compile_geometry=True`, the complete target-feasibility predicate and
+heading-frame handoff paths now run as fused kernels. Directional/headroom
+probes and workspace gates are compiled too, and the interval's initial
+collision clearance is reused. The original FK matrix arithmetic, geometry,
+three configuration probes, four clipping refinements, and exclusions remain.
+
+The default `collision_compact_refinement=False` runs every refinement on the
+full environment batch, split into fixed bounded geometry chunks. An all-safe
+batch still returns immediately. Safe candidates retain their exact value;
+only unsafe candidates are shortened. Torch compilation stays enabled, but
+the target predicate uses ordinary compiled execution without CUDA-graph
+capture. Thus changing the number of unsafe rows cannot introduce a new
+compiled shape or graph capture. The rare recovery-only point-check signature
+is also queried on the first interval, without advancing filters or RNG.
+
+Set `collision_compact_refinement=True` to restore the previous faster compact
+path, including CUDA-graph replay. Selected rows are bucketed to
+powers of two, capped by `collision_batch_size // collision_probe_steps`;
+padding duplicates only the last selected row and is discarded afterward.
+This bounds graph shapes instead of caching every possible unsafe-row count.
+Each boolean result is copied before subsequent replays can reuse its storage.
+`compile_geometry=False` retains the eager path. First-use compilation/capture
+costs more than warmed execution and may recur when a new bucket is encountered.
+
+Historical matched GPU-0 RTX 4090 reference-only measurements (4096 environments,
+30 warmed intervals, four refinements, compact refinement enabled):
+
+| Obstructed demand fraction | Previous kernels | Optimized kernels |
+| --- | --- | --- |
+| 1% | 15.66 ms | 8.30 ms |
+| 100% | 17.46 ms | 9.92 ms |
+
+Peak Torch allocation in these isolated benchmarks increased from about 36.6
+to 66.3 MiB. These are not PPO/full-training timings. Reproduce with
+`tests/benchmark_b1z1_compliance.py --counts 4096 --repeats 30 --compile-geometry
+--compile-full-fk --collision-limited --blocked-fraction 0.01 --compact-refinement`; add
+`--legacy-kernels` for the unfused comparison. `--profile-output /tmp/trace.json`
+exports a warmed CPU/CUDA trace, but its instrumentation changes the timings.
+Use `SIMULATOR=isaaclab`, `PYTHONPATH=.`, `CUDA_VISIBLE_DEVICES=0`, and the active
+Isaac Lab Python environment; `TORCHINDUCTOR_COMPILE_THREADS=1` avoids forking
+compiler workers after simulator startup.
+
+For the latency-oriented default, omit `--compact-refinement`. Add
+`--vary-blocked-fraction` to exercise changing obstructed populations and report
+median/p95/max interval latency plus new compilation counts after warmup.
+This is not a hard real-time guarantee: other processes (notably concurrent
+Genesis initialization), simulation, and PPO still contribute to iteration
+time. Changes take effect only in a newly started process.
+
+The fixed-batch default measured 16.50 ms/control interval (p95 16.89, max
+17.17 ms) on GPU 0 at 4096 environments with 1% obstructed demands, versus
+10.29 ms for the prior full-batch CUDA-graph path. Changing the obstructed
+population between zero, one, 1%, 10%, 50%, and all environments gave 15.18 ms
+mean, 16.61 ms p95, 16.69 ms maximum and **zero new compilations** after
+warmup (30 intervals). These short reference-only checks ran alongside the
+existing jobs; no complete-training latency guarantee was measured.
+
+Earlier compact-kernel validation: 68 focused CPU/CUDA tests passed, including unfused predicate and
+handoff parity, bounded buckets, partial resets, reference recovery and replay.
+The GPU-0 Isaac Lab `--review-collision` smoke passed with eight robots and six
+control decisions, including load removal and obstacle-triggered handoff. No
+learning or full-training throughput experiment was run for this optimization.
+
+The updated `--review-collision` smoke uses real Isaac Lab robot geometry but
+explicitly initializes a near-obstacle **reference** to test recruitment, and
+changes a terrain-height **measurement** to test recovery. Neither is a claim
+that an untrained/learned robot executed that approach or traversed a terrain
+step. No training or new task-performance evaluation is involved.
+
+Verification for these remaining fixes: 154 focused tests passed, including
+the retained sampling, wrench, BARD, actor-gradient and replay tests. GPU-0
+Isaac Lab smoke passed for PACT (approach/release/terrain measurement) and ab7
+(also explicit near-reference handoff), eight environments and six decisions
+each. Syntax and whitespace checks passed. Long-horizon physical approach,
+learned compliance performance and full-training throughput remain unverified.
+
+### Compliant Velocity Loss Logging
+
+`ActorPhysics/ee_velocity` remains the raw, normalized Huber loss, not an
+EE speed in m/s. `ActorPhysics/ee_velocity_scaled` uses the same update
+averaging and multiplies it by `compliance_ee_velocity_weight` and
+`ActorPhysics/scheduled_coefficient` (overall actor coefficient times PINN
+ramp). It is the scalar objective contribution before gradient projection
+or norm balancing. Logging does not change loss/gradient computation.
+
+The fixed-batch and scaled-log changes passed 70 focused CPU/CUDA-0 tests,
+including kernel parity, changing unsafe populations, one-time recovery warmup,
+reset/replay behavior, inherited defaults, scalar schedule factors and unchanged
+actor gradients. Syntax and changed-file whitespace checks passed. No new
+simulation or full-training run was launched for these latency/logging changes.

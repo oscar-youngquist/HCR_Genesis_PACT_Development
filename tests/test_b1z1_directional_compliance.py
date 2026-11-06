@@ -134,12 +134,14 @@ def test_config_inheritance_disabled_identity_and_model_construction():
     cfg.compliance.enabled=False
     old=class_to_dict(cfg);configure(cfg);assert class_to_dict(cfg)==old
     assert cfg.compliance.compile_geometry is True
+    assert cfg.compliance.collision_compact_refinement is False
     for name in ('ee_velocity_reward_weight', 'ee_velocity_sigma',
                  'actor_ee_velocity_weight', 'actor_ee_velocity_scale'):
         assert not hasattr(ComplianceCfg, name)
     for variant in B1Z1_PACT_ABLATIONS:
         e,p=make_b1z1_pact_ablation_configs(variant);cfg=e();cfg.compliance.enabled=True
         assert cfg.compliance.compile_geometry is True
+        assert cfg.compliance.collision_compact_refinement is False
         assert cfg.compliance.sampling_mode == 'mixture'
         assert cfg.compliance.family_weights == [.20, .20, .15, .20, .15, .10]
         before=cfg.env.num_observations;configure(cfg);configure(cfg)
@@ -149,7 +151,7 @@ def test_config_inheritance_disabled_identity_and_model_construction():
         assert cfg.rewards.scales.compliance_ee_velocity_weight == 0.5
         assert cfg.rewards.compliance_ee_velocity_sigma == 0.25
         assert algorithm['compliance_ee_velocity_weight'] == 0.25
-        assert algorithm['compliance_ee_velocity_scale'] == 0.5
+        assert algorithm['compliance_ee_velocity_scale'] == p.algorithm.compliance_ee_velocity_scale
         cfg.rewards.scales.compliance_ee_velocity_weight = 0.7
         configure(cfg)
         assert cfg.rewards.scales.compliance_ee_velocity_weight == 0.7
