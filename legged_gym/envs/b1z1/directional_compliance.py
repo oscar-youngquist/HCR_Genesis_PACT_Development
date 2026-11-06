@@ -33,7 +33,7 @@ class ComplianceCfg:
     payload_low_range = [0.05, 0.15]
     payload_high_range = [0.40, 0.65]
     payload_planar_range = [0.20, 0.60]
-    ee_gain = [0.003, 0.003, 0.003]  # m/N at compliance=1
+    ee_gain = [0.005, 0.005, 0.005]  # m/N at compliance=1
     base_gain = [0.008, 0.008, 0.015]  # (m/s)/N, (rad/s)/(Nm)
     omega = 6.0  # rad/s; exact critically damped held-input integration
     zeta = 1.0
