@@ -31,8 +31,10 @@ def initialize_action_std(module, size, initial, minimum, maximum):
 
 @torch.no_grad()
 def clip_action_std(module):
-    module.std.copy_(torch.maximum(torch.minimum(module.std, module._std_clip_upr),
-                                   module._std_clip_lwr))
+    # Preserve legacy/B1Z1 projection semantics across repeated policy replay:
+    # this is not an optimizer step between the shared graph's owned backwards.
+    module.std.data.copy_(torch.maximum(torch.minimum(module.std.data, module._std_clip_upr),
+                                        module._std_clip_lwr))
 
 
 @torch.no_grad()

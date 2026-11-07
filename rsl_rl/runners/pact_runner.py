@@ -54,7 +54,7 @@ from legged_gym.envs.go2.go2_hard_pact.deployment import (
     write_deployment_contract_once,
 )
 from legged_gym.envs.go2.go2_hard_pact.ablations import resolve_hard_pact_features
-from rsl_rl.hard_pact_logging import collect_hard_pact_scalars
+from rsl_rl.hard_pact_logging import collect_hard_pact_scalars, log_hard_pact_policy_std
 
 
 
@@ -763,7 +763,17 @@ class OnPolicyRunnerPACT:
             self.writer.add_scalar(f"Loss/auxiliary_{name}", value.item(), locs['it'])
         if self.is_hard_pact:
             self.writer.add_scalar("Loss/vae_kl_effective_weight",self.alg.current_vae_beta,locs['it'])
-        self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        
+            # One small scalar transfer per iteration; independent of the QP
+            # diagnostics interval. No decoder/policy recomputation for logging.
+            actor_losses = getattr(self.alg, "last_actor_loss_metrics", {})
+            if actor_losses:
+                scalars = torch.stack(list(actor_losses.values())).detach().cpu().tolist()
+                for name, value in zip(actor_losses, scalars):
+                    self.writer.add_scalar(name, value, locs['it'])
+        if self.is_hard_pact:
+            log_hard_pact_policy_std(self.writer, self.alg.actor_critic.std, locs['it'])
+        else:
+            self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
         self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])

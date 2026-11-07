@@ -157,7 +157,8 @@ def test_target_capture_pre_reset_body_frame_and_continuous_stance():
 
 @pytest.mark.skipif(not torch.cuda.is_available(),reason='cuPIQP needs CUDA')
 @pytest.mark.parametrize('enabled',[False,True])
-def test_tiny_real_ppo_update_reuses_one_qp_and_disabled_paths_are_not_called(monkeypatch,enabled):
+@pytest.mark.parametrize('diagnostics',[False,True])
+def test_tiny_real_ppo_update_reuses_one_qp_and_disabled_paths_are_not_called(monkeypatch,enabled,diagnostics):
     import test_hard_pact_contact_indexing_and_inverse_gate as live
     import rsl_rl.algorithms.ppo_hard_pact as module
     factory=live.make_algorithm;algorithms=[];calls=[]
@@ -167,6 +168,7 @@ def test_tiny_real_ppo_update_reuses_one_qp_and_disabled_paths_are_not_called(mo
     monkeypatch.setattr(live,'make_algorithm',make)
     update=PPO_HardPACT.update
     def prepare(self,*args,**kwargs):
+        self.qp_config=replace(self.qp_config,tensorboard_diagnostics_enabled=diagnostics)
         if enabled:
             f=self.storage.hard_pact_fields
             f['physics_valid_mask']=~(f['reset_mask']|f['timeout_mask']|f['push_event_mask']|f['teleport_mask'])
@@ -184,5 +186,27 @@ def test_tiny_real_ppo_update_reuses_one_qp_and_disabled_paths_are_not_called(mo
     with torch.device('cuda'):live._run_owned_update('random_one_substep','cuda')
     assert calls==(['load','fk'] if enabled else [])
     metrics=algorithms[0].last_actor_regularizer_metrics
-    assert bool(metrics)==enabled
+    assert bool(metrics)==(enabled and diagnostics)
     assert all(torch.isfinite(value) for value in metrics.values())
+    losses=algorithms[0].last_actor_loss_metrics
+    assert len(losses)==8 and all(torch.isfinite(value) and not value.requires_grad for value in losses.values())
+    assert losses['Loss/actor_pinn/fk']>0 if enabled else losses['Loss/actor_pinn/fk']==0
+    torch.testing.assert_close(losses['Loss/actor_pinn/total_weighted'],losses['Loss/actor_pinn/total_warmed'])
+
+
+def test_actor_losses_log_off_cadence_with_valid_count_weighting_and_no_graph():
+    alg=PPO_HardPACT.__new__(PPO_HardPACT)
+    alg._actor_regularizer_diagnostics_due=False
+    alg._actor_loss_sums={}
+    value=torch.tensor(2.,requires_grad=True)
+    alg._record_actor_regularizer('fk',{'loss':value},1,4)
+    alg._record_actor_regularizer('fk',{'loss':value*3},3,4)
+    alg._record_actor_regularizer('fk',{'loss':value*float('nan')},0,4)
+    alg._finish_actor_loss_logging(torch.tensor(0.))
+    assert alg.last_actor_loss_metrics['Loss/actor_pinn/fk']==5
+    assert alg.last_actor_loss_metrics['Loss/actor_pinn/load']==0
+    assert all(not v.requires_grad for v in alg.last_actor_loss_metrics.values())
+    assert value.grad is None
+    alg._actor_loss_sums={}
+    alg._finish_actor_loss_logging(torch.tensor(0.))
+    assert all(v==0 for v in alg.last_actor_loss_metrics.values())

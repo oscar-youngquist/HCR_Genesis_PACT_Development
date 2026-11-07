@@ -43,6 +43,7 @@ from rsl_rl.modules import ActorCritic_PACT_Pos, ActorCritic_HardPACT_Pos, Conte
 from rsl_rl.env import VecEnv
 from rsl_rl.utils import pretty_print_module
 from rsl_rl.hard_pact_logging import (
+    log_hard_pact_policy_std,
     collect_contact_estimator_scalars,
     collect_force_decoder_scalars,
     collect_latent_diagnostics_scalars,
@@ -516,7 +517,10 @@ class OnPolicyRunnerPACTPos:
                     self.alg.last_latent_diagnostics
                 ).items():
                     self.writer.add_scalar(name, value, locs['it'])
-        self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])        
+        if self.is_hard_pact_pos:
+            log_hard_pact_policy_std(self.writer, self.alg.actor_critic.std, locs['it'])
+        else:
+            self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
         self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])

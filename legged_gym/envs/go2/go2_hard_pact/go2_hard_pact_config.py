@@ -13,7 +13,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         num_explicit_recon_obs = 12
         num_actions = 12
         env_spacing = 0.5
-        num_obs_hist = 10
+        num_obs_hist = 20
         grf_dim = 12
         whole_body_dim = 18
         debug = False
@@ -412,10 +412,10 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                 'orientation', 
                                 'torque_limits',
                                 'hip_pos',
-                                'pos_action_rate', 
-                                'pos_action_smoothness', 
-                                'tau_action_rate', 
-                                'tau_action_smoothness',
+                                # 'pos_action_rate', 
+                                # 'pos_action_smoothness', 
+                                # 'tau_action_rate', 
+                                # 'tau_action_smoothness',
                                 'dof_vel_limits',
                                 # 'dof_acc'
                                 ]
@@ -424,10 +424,10 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                   'orientation': [-0.2, -1.0], 
                                   'torque_limits': [-0.01, -1.0], 
                                   'hip_pos': [-0.2, -0.4], 
-                                  'pos_action_rate': [-0.001, -0.01], 
-                                  'pos_action_smoothness': [-0.001, -0.01], 
-                                  'tau_action_rate': [-0.002, -0.02], 
-                                  'tau_action_smoothness': [-0.002, -0.02],
+                                #   'pos_action_rate': [-0.001, -0.01], 
+                                #   'pos_action_smoothness': [-0.001, -0.01], 
+                                #   'tau_action_rate': [-0.002, -0.02], 
+                                #   'tau_action_smoothness': [-0.002, -0.02],
                                   'dof_vel_limits':[-0.1, -1.0],
                                 #   'dof_acc':[-2.5e-08, -2.5e-07]
                                   }
@@ -438,7 +438,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
     class commands(LeggedRobotCfg.commands):
         curriculum = True
         curriculum_threshold = 0.8  # raw linear-tracking mean, not weighted reward
-        curriculum_patience_iterations = 200  # consecutive PPO rollouts; 0 = legacy reset-based updates
+        curriculum_patience_iterations = 50  # consecutive PPO rollouts; 0 = legacy reset-based updates
         max_curriculum = 1.2
         num_commands = 4
         resampling_time = 10.0
@@ -468,17 +468,17 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         activation = 'elu'
         # Normalized action std: hip/thigh/calf in FR, FL, RR, RL order,
         # repeated independently for position and feedforward outputs.
-        init_noise_std = ([0.80, 1.00, 1.00] * 4) * 2
+        init_noise_std = ([0.80, 1.00, 1.00] * 4 + [0.70, 0.90, 0.90] * 4) * 2
         min_noise_std = ([0.15, 0.25, 0.25] * 4) * 2
         max_noise_std = 1.10
 
         cenet_enc_layers = [256, 128]
-        cenet_enc_latent_dim = 16
+        cenet_enc_latent_dim = 32
         cenet_velo_dim = 12
 
         # Bounds runtime contact probabilities to [epsilon, 1-epsilon].
         contact_epsilon = 0.01
-        cenet_dec_input_dim = cenet_enc_latent_dim + 12
+        cenet_dec_input_dim = cenet_enc_latent_dim + cenet_velo_dim
         cenet_dec_layers = [128, 256, 512]
 
         cenet_dec_out_dim = 276  # 133 retained features + 143 terrain heights
@@ -511,7 +511,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         entropy_coef = 0.01
         use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.005, 0.01]
+        adaptive_ent_bounds = [0.003, 0.01]
         adaptive_ent_lin_threshold = 0.75
         adaptive_ent_ang_threshold = 0.35
         adaptive_ent_ter_threshold = 6.0
@@ -604,149 +604,149 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         hard_pact_qp = {
             # Activation and rollout execution
-            'enabled': True,  # Master QP switch; ablation gates still apply.
-            'warmup_iterations': 200,  # Absolute PPO iteration at which rollout/replay QPs become eligible.
-            'qp_update_mode': 'first_plus_random_substep',  # First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
-            'correction_ramp_enabled': True,  # Blend accepted QP corrections into execution; full QP losses remain unchanged.
-            'correction_ramp_start_offset': 200,  # Iterations after QP activation before the execution ramp starts.
-            'correction_ramp_duration': 1000,  # Iterations to reach full correction; 0 applies full correction immediately.
+            'enabled': True,                                 # Master QP switch; ablation gates still apply.
+            'warmup_iterations': 500,                        # Absolute PPO iteration at which rollout/replay QPs become eligible.
+            'qp_update_mode': 'first_plus_random_substep',   # First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
+            'correction_ramp_enabled': True,                 # Blend accepted QP corrections into execution; full QP losses remain unchanged.
+            'correction_ramp_start_offset': 500,             # Iterations after QP activation before the execution ramp starts.
+            'correction_ramp_duration': 2000,                # Iterations to reach full correction; 0 applies full correction immediately.
 
             # Physical constraints and prediction convention
-            'friction_coefficient': 0.6,  # Friction-pyramid mu: abs(Fx), abs(Fy) <= mu*Fz for stance feet.
-            'contact_threshold': 0.5,  # Detached contact-probability cutoff for the stance mask.
-            'endpoint_torque_constraints': True,  # Enforce hard predicted endpoint PD+FF torque bounds, including recovery.
-            'position_integration_coefficient': 1.0,  # Beta in q_next=q+dt*v+beta*dt^2*a; 1 is semi-implicit Euler.
-            'torque_rate_constraint_weight': 0.0,  # 0 removes QP rate constraints; any positive value enables the hard rate bound.
+            'friction_coefficient': 0.6,                     # Friction-pyramid mu: abs(Fx), abs(Fy) <= mu*Fz for stance feet.
+            'contact_threshold': 0.5,                        # Detached contact-probability cutoff for the stance mask.
+            'endpoint_torque_constraints': True,             # Enforce hard predicted endpoint PD+FF torque bounds, including recovery.
+            'position_integration_coefficient': 1.0,         # Beta in q_next=q+dt*v+beta*dt^2*a; 1 is semi-implicit Euler.
+            'torque_rate_constraint_weight': 0.0,            # 0 removes QP rate constraints; any positive value enables the hard rate bound.
 
             # Inner objective: nominal torque / GRF tracking and stance acceleration
-            'torque_tracking_weight': 20.0,  # Inner normalized total-torque tracking weight.
-            'torque_scale_nm': 40.0,  # Torque variable/reference normalization scale [Nm].
-            'force_tracking_weight': 1.0,  # Inner normalized predicted-GRF tracking weight.
-            'force_scale_n': 250.0,  # Force variable/reference normalization scale [N].
-            'contact_acceleration_weight': 0.25,  # Inner stance-acceleration weight; authoritative final curriculum target.
-            'contact_acceleration_scale_m_s2': 50.0,  # Stance-acceleration residual normalization [m/s^2].
+            'torque_tracking_weight': 15.0,                  # Inner normalized total-torque tracking weight.
+            'torque_scale_nm': 40.0,                         # Torque variable/reference normalization scale [Nm].
+            'force_tracking_weight': 1.0,                    # Inner normalized predicted-GRF tracking weight.
+            'force_scale_n': 250.0,                          # Force variable/reference normalization scale [N].
+            'contact_acceleration_weight': 0.50,             # Inner stance-acceleration weight; authoritative final curriculum target.
+            'contact_acceleration_scale_m_s2': 50.0,         # Stance-acceleration residual normalization [m/s^2].
 
             # Inner objective: torso attitude and terrain-relative height
-            'attitude_weight': 1.0,  # Inner roll/pitch stabilization weight; final curriculum target.
-            'attitude_kp': 20.0,  # Tilt-error gain in desired roll/pitch angular acceleration [1/s^2].
-            'attitude_kd': 5.0,  # Angular-rate damping gain [1/s].
-            'attitude_acceleration_scale_rad_s2': 20.0,  # Roll/pitch acceleration residual normalization [rad/s^2].
-            'height_weight': 1.0,  # Inner height-regulation weight; final curriculum target; 0 skips this objective.
-            'height_kp': 20.0,  # Terrain-relative height-error gain [1/s^2].
-            'height_kd': 5.0,  # Predicted world-vertical velocity damping gain [1/s].
-            'height_target': None,  # Target torso height [m]; None uses rewards.base_height_target.
-            'height_acceleration_scale': 20.0,  # Vertical-acceleration residual normalization [m/s^2].
+            'attitude_weight': 5.0,                          # Inner roll/pitch stabilization weight; final curriculum target.
+            'attitude_kp': 20.0,                             # Tilt-error gain in desired roll/pitch angular acceleration [1/s^2].
+            'attitude_kd': 5.0,                              # Angular-rate damping gain [1/s].
+            'attitude_acceleration_scale_rad_s2': 20.0,      # Roll/pitch acceleration residual normalization [rad/s^2].
+            'height_weight': 5.0,                            # Inner height-regulation weight; final curriculum target; 0 skips this objective.
+            'height_kp': 20.0,                               # Terrain-relative height-error gain [1/s^2].
+            'height_kd': 5.0,                                # Predicted world-vertical velocity damping gain [1/s].
+            'height_target': None,                           # Target torso height [m]; None uses rewards.base_height_target.
+            'height_acceleration_scale': 20.0,               # Vertical-acceleration residual normalization [m/s^2].
 
             # Velocity tracking: independent inner-QP and outer-loss horizons
-            'planar_velocity_weight': 16.0,  # Inner normalized body-frame planar-velocity tracking weight.
-            'yaw_rate_weight': 6.0,  # Inner normalized body-frame yaw-rate tracking weight.
-            'planar_velocity_scale_m_s': 1.0,  # Planar-velocity error normalization [m/s].
-            'yaw_rate_scale_rad_s': 1.0,  # Yaw-rate error normalization [rad/s].
-            'qp_velocity_objective_horizon_s': 0.020,  # Inner xy/yaw constant-derivative horizon [s]; None uses physics dt.
-            'qp_velocity_loss_horizon_s': 0.02,  # Outer xy/yaw loss horizon [s]; independent of inner horizon and constraint dt.
+            'planar_velocity_weight': 20.0,                  # Inner normalized body-frame planar-velocity tracking weight.
+            'yaw_rate_weight': 10.0,                          # Inner normalized body-frame yaw-rate tracking weight.
+            'planar_velocity_scale_m_s': 1.0,                # Planar-velocity error normalization [m/s].
+            'yaw_rate_scale_rad_s': 1.0,                     # Yaw-rate error normalization [rad/s].
+            'qp_velocity_objective_horizon_s': 0.020,        # Inner xy/yaw constant-derivative horizon [s]; None uses physics dt.
+            'qp_velocity_loss_horizon_s': 0.02,              # Outer xy/yaw loss horizon [s]; independent of inner horizon and constraint dt.
 
             # Outer projection losses (overall lambda_projection is configured above)
             'projection_contact_acceleration_weight': 0.10,  # Fixed outer stance-residual coefficient; not scheduled with inner weight.
-            'recovery_projection_weight': 0.5,  # Outer recovery correction/slack multiplier before lambda_projection.
-            'recovery_projection_slack_weight': 1.0,  # Relative outer penalty on normalized joint-envelope recovery slack.
-            'recovery_projection_rate_slack_weight': 1.0,  # Relative outer rate-slack penalty; absent when QP rate constraints are off.
+            'recovery_projection_weight': 0.5,               # Outer recovery correction/slack multiplier before lambda_projection.
+            'recovery_projection_slack_weight': 1.0,         # Relative outer penalty on normalized joint-envelope recovery slack.
+            'recovery_projection_rate_slack_weight': 1.0,    # Relative outer rate-slack penalty; absent when QP rate constraints are off.
 
             # Recovery QP: soften joint envelope / optional rate bounds, not absolute torque
-            'soft_joint_recovery_enabled': True,  # Retry failed primary rows with a softened joint position/velocity envelope.
-            'soft_joint_recovery_weight': 200.0,  # Inner quadratic penalty on normalized joint-envelope slack.
-            'soft_joint_recovery_scale_rad_s2': 100.0,  # Joint-envelope slack normalization in acceleration units [rad/s^2].
-            'soft_rate_recovery_weight': 200.0,  # Inner quadratic rate-slack penalty; used only with QP rate constraints.
-            'soft_rate_recovery_scale_nm': 10.0,  # Torque-rate slack normalization [Nm], not Nm/s.
+            'soft_joint_recovery_enabled': True,             # Retry failed primary rows with a softened joint position/velocity envelope.
+            'soft_joint_recovery_weight': 200.0,             # Inner quadratic penalty on normalized joint-envelope slack.
+            'soft_joint_recovery_scale_rad_s2': 100.0,       # Joint-envelope slack normalization in acceleration units [rad/s^2].
+            'soft_rate_recovery_weight': 200.0,              # Inner quadratic rate-slack penalty; used only with QP rate constraints.
+            'soft_rate_recovery_scale_nm': 10.0,             # Torque-rate slack normalization [Nm], not Nm/s.
 
             # Performance-gated inner stance / torso-stability curriculum
-            'objective_curriculum_enabled': True,  # Schedule inner weights using frozen pre-QP tracking-reference recovery.
-            'torso_stability_curriculum_enabled': True,  # Include attitude/height in the objective curriculum; stance remains independent.
-            'contact_acceleration_weight_initial': 0.25,  # Initial stance weight; None uses 25% of contact_acceleration_weight.
-            'attitude_weight_initial': None,  # Initial attitude weight; None uses 25% of attitude_weight.
-            'height_weight_initial': None,  # Initial height weight; None uses 25% of height_weight.
-            'objective_curriculum_start': None,  # Earliest absolute iteration for progression; None follows execution-ramp completion.
-            'objective_curriculum_progress_delta': 0.05,  # Fraction of initial-to-final weight range added per successful advancement.
-            'objective_curriculum_step_interval': 10,  # Minimum PPO iterations between objective-weight increases.
-            'objective_curriculum_ema_alpha': 0.05,  # Current tracking EMA update coefficient.
-            'objective_curriculum_window': 200,  # Maximum valid pre-QP EMA observations retained for the frozen baseline.
-            'objective_curriculum_quantile': 0.9,  # Quantile of pre-QP EMA history used as the frozen tracking reference.
-            'objective_curriculum_recovery_ratio': 0.90,  # Threshold multiplier on frozen baseline, subject to min_tracking.
+            'objective_curriculum_enabled': True,            # Schedule inner weights using frozen pre-QP tracking-reference recovery.
+            'torso_stability_curriculum_enabled': True,      # Include attitude/height in the objective curriculum; stance remains independent.
+            'contact_acceleration_weight_initial': 0.25,     # Initial stance weight; None uses 25% of contact_acceleration_weight.
+            'attitude_weight_initial': None,                 # Initial attitude weight; None uses 25% of attitude_weight.
+            'height_weight_initial': None,                   # Initial height weight; None uses 25% of height_weight.
+            'objective_curriculum_start': None,              # Earliest absolute iteration for progression; None follows execution-ramp completion.
+            'objective_curriculum_progress_delta': 0.05,     # Fraction of initial-to-final weight range added per successful advancement.
+            'objective_curriculum_step_interval': 10,        # Minimum PPO iterations between objective-weight increases.
+            'objective_curriculum_ema_alpha': 0.05,          # Current tracking EMA update coefficient.
+            'objective_curriculum_window': 200,              # Maximum valid pre-QP EMA observations retained for the frozen baseline.
+            'objective_curriculum_quantile': 0.9,            # Quantile of pre-QP EMA history used as the frozen tracking reference.
+            'objective_curriculum_recovery_ratio': 0.90,     # Threshold multiplier on frozen baseline, subject to min_tracking.
             'objective_curriculum_recovery_iterations': 50,  # Consecutive valid above-threshold iterations required per increase.
             'objective_curriculum_baseline_override': None,  # Explicit frozen tracking reference; needed for resumes missing a baseline.
-            'objective_curriculum_min_tracking': 0.5,  # Absolute lower floor for the tracking recovery threshold.
-            'objective_curriculum_min_samples': 1,  # Minimum tracking evidence count required for a valid iteration.
+            'objective_curriculum_min_tracking': 0.5,        # Absolute lower floor for the tracking recovery threshold.
+            'objective_curriculum_min_samples': 1,           # Minimum tracking evidence count required for a valid iteration.
 
             # Solver selection, precision, and shared numerical regularization
-            'qp_solver': 'cupiqp',  # Default numerical backend for both rollout and PPO.
-            'rollout_qp_solver': None,  # Optional rollout backend override; None inherits qp_solver.
-            'ppo_qp_solver': None,  # Optional differentiable PPO backend override; None inherits qp_solver.
-            'allow_solver_mismatch': False,  # Permit intentionally different rollout/PPO numerical backends.
-            'solver_dtype': 'auto',  # auto selects CUDA float32 / CPU float64; explicit precision may override.
-            'q_regularization': 1e-07,  # Positive solver-space diagonal Hessian ridge for numerical conditioning.
+            'qp_solver': 'cupiqp',                           # Default numerical backend for both rollout and PPO.
+            'rollout_qp_solver': None,                       # Optional rollout backend override; None inherits qp_solver.
+            'ppo_qp_solver': None,                           # Optional differentiable PPO backend override; None inherits qp_solver.
+            'allow_solver_mismatch': False,                  # Permit intentionally different rollout/PPO numerical backends.
+            'solver_dtype': 'auto',                          # auto selects CUDA float32 / CPU float64; explicit precision may override.
+            'q_regularization': 1e-07,                       # Positive solver-space diagonal Hessian ridge for numerical conditioning.
 
             # cuPIQP memory reuse and batching
-            'cupiqp_mode': 'dense',  # cuPIQP matrix representation: dense or sparse.
-            'cupiqp_cuda_graph': False,  # Opt-in cuPIQP CUDA graph execution; disabled on this training path.
-            'cupiqp_rollout_capacity_reuse': True,  # Reuse rollout/fallback solver capacity buckets.
-            'cupiqp_rollout_cache_size': 16,  # Maximum retained rollout capacity-cache entries; idle entries are evictable.
-            'cupiqp_ppo_reuse': True,  # Reuse exclusively leased PPO solvers; False uses fresh instances.
-            'cupiqp_ppo_capacity_reuse': True,  # Capacity-bucket reuse for PPO recovery batches, with padded rows excluded.
-            'cupiqp_ppo_pool_size': 8,  # Bounded PPO solver pool; outstanding autograd leases are not evicted.
-            'rollout_chunk_size': 4096,  # Maximum rows per rollout solver chunk.
-            'ppo_chunk_size': 8000,  # Maximum rows per differentiable PPO solver chunk.
+            'cupiqp_mode': 'dense',                          # cuPIQP matrix representation: dense or sparse.
+            'cupiqp_cuda_graph': False,                      # Opt-in cuPIQP CUDA graph execution; disabled on this training path.
+            'cupiqp_rollout_capacity_reuse': True,           # Reuse rollout/fallback solver capacity buckets.
+            'cupiqp_rollout_cache_size': 16,                 # Maximum retained rollout capacity-cache entries; idle entries are evictable.
+            'cupiqp_ppo_reuse': True,                        # Reuse exclusively leased PPO solvers; False uses fresh instances.
+            'cupiqp_ppo_capacity_reuse': True,               # Capacity-bucket reuse for PPO recovery batches, with padded rows excluded.
+            'cupiqp_ppo_pool_size': 8,                       # Bounded PPO solver pool; outstanding autograd leases are not evicted.
+            'rollout_chunk_size': 4096,                      # Maximum rows per rollout solver chunk.
+            'ppo_chunk_size': 8000,                          # Maximum rows per differentiable PPO solver chunk.
 
             # Rollout solver convergence and acceptance profile
-            'rollout_eps_abs': 0.0001,  # Rollout solver absolute convergence tolerance.
-            'rollout_eps_rel': 0.0001,  # Rollout solver relative convergence tolerance.
-            'rollout_max_iter': 20,  # Rollout numerical-solver iteration cap.
-            'rollout_feasibility_tolerance': 0.001,  # Normalized primal-residual acceptance tolerance for rollout candidates.
-            'rollout_duality_gap_abs': 0.001,  # Absolute duality-gap threshold for rollout gap checks/reporting.
-            'rollout_duality_gap_rel': 0.001,  # Relative duality-gap threshold for rollout gap checks/reporting.
-            'rollout_duality_gap_policy': 'report',  # report logs gap without rejecting on it; require also gates acceptance.
+            'rollout_eps_abs': 0.0001,                       # Rollout solver absolute convergence tolerance.
+            'rollout_eps_rel': 0.0001,                       # Rollout solver relative convergence tolerance.
+            'rollout_max_iter': 20,                          # Rollout numerical-solver iteration cap.
+            'rollout_feasibility_tolerance': 0.001,          # Normalized primal-residual acceptance tolerance for rollout candidates.
+            'rollout_duality_gap_abs': 0.001,                # Absolute duality-gap threshold for rollout gap checks/reporting.
+            'rollout_duality_gap_rel': 0.001,                # Relative duality-gap threshold for rollout gap checks/reporting.
+            'rollout_duality_gap_policy': 'report',          # report logs gap without rejecting on it; require also gates acceptance.
 
             # PPO solver convergence and acceptance profile
-            'ppo_eps_abs': 0.0001,  # Differentiable PPO solver absolute convergence tolerance.
-            'ppo_eps_rel': 0.0001,  # Differentiable PPO solver relative convergence tolerance.
-            'ppo_max_iter': 30,  # Differentiable PPO numerical-solver iteration cap.
-            'ppo_feasibility_tolerance': 0.001,  # Normalized primal-residual acceptance tolerance for PPO candidates.
-            'ppo_duality_gap_abs': 0.001,  # Absolute duality-gap threshold for PPO gap checks.
-            'ppo_duality_gap_rel': 0.001,  # Relative duality-gap threshold for PPO gap checks.
-            'ppo_duality_gap_policy': 'require',  # require gates accepted gradients on gap checks; report only records gaps.
+            'ppo_eps_abs': 0.0001,                           # Differentiable PPO solver absolute convergence tolerance.
+            'ppo_eps_rel': 0.0001,                           # Differentiable PPO solver relative convergence tolerance.
+            'ppo_max_iter': 30,                              # Differentiable PPO numerical-solver iteration cap.
+            'ppo_feasibility_tolerance': 0.001,              # Normalized primal-residual acceptance tolerance for PPO candidates.
+            'ppo_duality_gap_abs': 0.001,                    # Absolute duality-gap threshold for PPO gap checks.
+            'ppo_duality_gap_rel': 0.001,                    # Relative duality-gap threshold for PPO gap checks.
+            'ppo_duality_gap_policy': 'require',             # require gates accepted gradients on gap checks; report only records gaps.
 
             # qpth/reference numerical settings (separate from cuPIQP profiles)
-            'qpth_warm_start': True,  # Enable qpth warm starts and its existing cold-retry path.
-            'eps_float32': 1e-05,  # Dtype-specific qpth convergence tolerance for float32.
-            'eps_float64': 1e-09,  # Dtype-specific qpth convergence tolerance for float64.
-            'max_iter': 30,  # qpth interior-point iteration cap.
-            'not_improved_limit': 6,  # qpth stagnation limit before early termination.
+            'qpth_warm_start': True,                         # Enable qpth warm starts and its existing cold-retry path.
+            'eps_float32': 1e-05,                            # Dtype-specific qpth convergence tolerance for float32.
+            'eps_float64': 1e-09,                            # Dtype-specific qpth convergence tolerance for float64.
+            'max_iter': 30,                                  # qpth interior-point iteration cap.
+            'not_improved_limit': 6,                         # qpth stagnation limit before early termination.
             'normalized_feasibility_tolerance_float32': 0.001,  # Default float32 normalized primal acceptance tolerance (qpth path).
             'normalized_feasibility_tolerance_float64': 1e-06,  # Default float64 normalized primal acceptance tolerance (qpth path).
-            'check_q_spd': True,  # Request qpth positive-definite Hessian validation.
-            'check_equality_rank': True,  # Compatibility flag; current reduced QP has no equality rows.
-            'interior_margin': 0.001,  # Retained compatibility setting; unused by the current reduced assembly.
-            'kkt_tolerance': 0.1,  # Retained compatibility setting; not a current primal-acceptance threshold.
-            'verbose': 0,  # Solver console verbosity; 0 requests quiet output.
+            'check_q_spd': True,                             # Request qpth positive-definite Hessian validation.
+            'check_equality_rank': True,                     # Compatibility flag; current reduced QP has no equality rows.
+            'interior_margin': 0.001,                        # Retained compatibility setting; unused by the current reduced assembly.
+            'kkt_tolerance': 0.1,                            # Retained compatibility setting; not a current primal-acceptance threshold.
+            'verbose': 0,                                    # Solver console verbosity; 0 requests quiet output.
 
             # Implicit-solver input gradients; 0 clipping means no clipping
-            'gradient_scale_tau': 1.0,  # Multiplier on QP gradients into nominal torque.
-            'gradient_scale_grf': 1.0,  # Multiplier on QP gradients into the GRF reference.
-            'gradient_scale_wrench': 1.0,  # Multiplier on QP gradients into the predicted wrench.
-            'gradient_scale_contact': 1.0,  # Compatibility multiplier; current detached binary stance mask has no contact VJP.
-            'gradient_clip_tau': 0.0,  # Per-row nominal-torque gradient norm cap; 0 disables.
-            'gradient_clip_grf': 0.0,  # Per-row GRF-reference gradient norm cap; 0 disables.
-            'gradient_clip_wrench': 0.0,  # Per-row wrench-input gradient norm cap; 0 disables.
-            'gradient_clip_contact': 0.0,  # Compatibility cap; current detached binary stance mask has no contact VJP.
+            'gradient_scale_tau': 1.0,                       # Multiplier on QP gradients into nominal torque.
+            'gradient_scale_grf': 1.0,                       # Multiplier on QP gradients into the GRF reference.
+            'gradient_scale_wrench': 1.0,                    # Multiplier on QP gradients into the predicted wrench.
+            'gradient_scale_contact': 1.0,                   # Compatibility multiplier; current detached binary stance mask has no contact VJP.
+            'gradient_clip_tau': 0.0,                        # Per-row nominal-torque gradient norm cap; 0 disables.
+            'gradient_clip_grf': 0.0,                        # Per-row GRF-reference gradient norm cap; 0 disables.
+            'gradient_clip_wrench': 0.0,                     # Per-row wrench-input gradient norm cap; 0 disables.
+            'gradient_clip_contact': 0.0,                    # Compatibility cap; current detached binary stance mask has no contact VJP.
 
             # Diagnostics, bounded audits, profiling, and failure capture
-            'diagnostics_level': 'minimal',  # minimal acceptance summaries, physical residuals, or full sampled matrix/KKT audits.
-            'tensorboard_diagnostics_enabled': True,  # Enable periodic aggregated QP TensorBoard diagnostics.
-            'tensorboard_diagnostics_interval': 200,  # QP diagnostic reporting interval in PPO iterations.
-            'active_tolerance': 0.1,  # Residual/slack threshold used to classify diagnostically active constraints.
-            'full_audit_period': 0,  # Solver-call interval for full-profile audits; 0 disables expensive audits.
-            'full_audit_sample_size': 256,  # Maximum environments sampled per full audit.
-            'cuda_event_profiling': False,  # Opt-in CUDA event timings with iteration-end synchronization.
-            'exception_capture_enabled': True,  # Save bounded solver exception packets for debugging.
-            'exception_capture_limit': 1,  # Maximum captured exceptions per solver instance.
+            'diagnostics_level': 'minimal',                  # minimal acceptance summaries, physical residuals, or full sampled matrix/KKT audits.
+            'tensorboard_diagnostics_enabled': True,         # Enable periodic aggregated QP TensorBoard diagnostics.
+            'tensorboard_diagnostics_interval': 200,         # QP diagnostic reporting interval in PPO iterations.
+            'active_tolerance': 0.1,                         # Residual/slack threshold used to classify diagnostically active constraints.
+            'full_audit_period': 0,                          # Solver-call interval for full-profile audits; 0 disables expensive audits.
+            'full_audit_sample_size': 256,                   # Maximum environments sampled per full audit.
+            'cuda_event_profiling': False,                   # Opt-in CUDA event timings with iteration-end synchronization.
+            'exception_capture_enabled': True,               # Save bounded solver exception packets for debugging.
+            'exception_capture_limit': 1,                    # Maximum captured exceptions per solver instance.
             'exception_capture_dir': '/tmp/hard_pact_qp_failures',  # Directory for saved solver-failure packets.
         }
 

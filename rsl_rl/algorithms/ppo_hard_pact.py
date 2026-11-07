@@ -524,6 +524,8 @@ class PPO_HardPACT:
         self.actor_regularizers = ActorRegularizerConfig(**(actor_regularizers or {}))
         self._actor_load_loss = None
         self.last_actor_regularizer_metrics = {}
+        self.last_actor_loss_metrics = {}
+        self._actor_loss_sums = None
         self.lambda_soft_constraint = float(lambda_soft_constraint)
         # Opt-in benchmark instrumentation. CUDA events avoid synchronizing
         # between the shared-context inverse and rollout calculations; one
@@ -1097,6 +1099,7 @@ class PPO_HardPACT:
             and itr % self.qp_config.tensorboard_diagnostics_interval == 0)
         self._actor_regularizer_sums = {}
         self.last_actor_regularizer_metrics = {}
+        self._actor_loss_sums = {}
         self._qp_training_iteration = int(itr)
         self.actor_physics_warmup_factor = self._actor_physics_weight_at_iteration(itr)
         valid_boot_statistics = ValidBootStatistics()
@@ -1283,6 +1286,13 @@ class PPO_HardPACT:
                     ppo_losses.append(actor_regularization)
                 else:
                     ppo_losses[1] = ppo_losses[1]+actor_regularization
+            # Cheap detached scalar accounting, independent of diagnostic cadence.
+            # Totals reflect the actual weighted objective before PCGrad, not
+            # gradient norms; each component retains its own valid denominator.
+            actor_total = ppo_losses[1] if len(ppo_losses) > 1 else ppo_loss.detach()*0
+            self._record_actor_loss('total_weighted', actor_total, obs_batch.shape[0])
+            self._record_actor_loss('total_warmed', actor_total*self.actor_physics_warmup_factor,
+                                    obs_batch.shape[0])
             # Full diagnostics measure the real PCGrad backward containing
             # qpth's implicit KKT derivative. qpth does not expose a timer for
             # its backward alone, so this metric is named accordingly. No
@@ -1661,6 +1671,7 @@ class PPO_HardPACT:
                 max(0, self.qp_config.warmup_iterations - int(itr))
             ),
         })
+        self._finish_actor_loss_logging(metric_zero)
         results = torch.stack((
             mean_value_loss, mean_surrogate_loss, mean_autoenc_loss,
             mean_decoder_loss, mean_vel_loss, mean_recon_loss,
@@ -1953,7 +1964,31 @@ class PPO_HardPACT:
                 surrogate = surrogate + ((p-p.detach())*g.detach()).sum()
         return surrogate
 
+    def _record_actor_loss(self, name, value, count):
+        """Accumulate existing scalar losses on-device; no graphs or host reads."""
+        sums = getattr(self, '_actor_loss_sums', None)
+        if sums is None:
+            return
+        value = value.detach()
+        count = torch.as_tensor(count, device=value.device, dtype=value.dtype).detach()
+        numerator, denominator = sums.get(name, (value.new_zeros(()), value.new_zeros(())))
+        sums[name] = (numerator + torch.where(count > 0, value, 0.)*count,
+                      denominator + count)
+
+    def _finish_actor_loss_logging(self, zero):
+        # Disabled/not-evaluated/empty losses are documented zeros, never stale.
+        # Projection includes existing stance/recovery coefficients but excludes
+        # lambda_projection. FK/load/velocity are before their outer coefficients.
+        names = ('projection_primary', 'projection_recovery', 'velocity_xy',
+                 'velocity_yaw', 'fk', 'load', 'total_weighted', 'total_warmed')
+        self.last_actor_loss_metrics = {}
+        for name in names:
+            numerator, denominator = self._actor_loss_sums.get(name, (zero, zero))
+            self.last_actor_loss_metrics['Loss/actor_pinn/'+name] = numerator/denominator.clamp_min(1)
+        self._actor_loss_sums = None
+
     def _record_actor_regularizer(self, name, metrics, valid_count, total_count):
+        self._record_actor_loss(name, metrics['loss'], valid_count)
         if not getattr(self, '_actor_regularizer_diagnostics_due', False):
             return
         # Count-weighted across minibatches; only scalar tensors leave GPU.
@@ -2868,6 +2903,10 @@ class PPO_HardPACT:
             recovery_loss, recovery_per_row = recovery_projection_loss(
                 qp_result, sampled_nominal, torque_limits, valid, self.hard_pact_qp.cfg,
             )
+            self._record_actor_loss('projection_primary', qp_loss,
+                (valid.reshape(-1) & qp_result.differentiated_mask.reshape(-1)).sum())
+            self._record_actor_loss('projection_recovery', recovery_loss,
+                (valid.reshape(-1) & qp_result.recovery_mask.reshape(-1)).sum())
             qp_loss = qp_loss + recovery_loss
             # stopgrad deliberately computes and reports exactly this metric,
             # but neither it nor any QP output participates in optimization.
@@ -2917,6 +2956,8 @@ class PPO_HardPACT:
                 accepted = qp_result.differentiated_mask | qp_result.recovery_mask
                 xy,yaw,count = self.hard_pact_qp.velocity_tracking_losses(
                     qp_result.qdd,qp_arguments,valid,accepted)
+                self._record_actor_loss('velocity_xy', xy, count)
+                self._record_actor_loss('velocity_yaw', yaw, count)
                 self._actor_qp_velocity_loss = self._actor_velocity_objective(
                     xy,yaw,sampled_nominal,differentiate_qp)
                 aggregate = self.hard_pact_qp.iteration_diagnostics["ppo"]

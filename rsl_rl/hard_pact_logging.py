@@ -1,8 +1,29 @@
 """Stable scalar-only TensorBoard schema for HardPACT ablations."""
 
 import math
+import torch
 
 from .hard_pact_ablations import resolve_hard_pact_features
+
+
+def log_hard_pact_policy_std(writer, std, iteration):
+    """Current learned std in normalized action units; one scalar-batch transfer.
+
+    Coupled ordering is [12 position, 12 feedforward]; Pos has only position.
+    Read without clipping or otherwise mutating the policy/distribution.
+    """
+    std = std.detach()
+    if std.ndim != 1 or std.numel() not in (12, 24):
+        raise ValueError("HardPACT policy std must have 12 or 24 entries")
+    metrics = {
+        'Policy/mean_noise_std': std.mean(),
+        'Policy/mean_noise_std_position': std[:12].mean(),
+    }
+    if std.numel() == 24:
+        metrics['Policy/mean_noise_std_feedforward'] = std[12:].mean()
+    values = torch.stack(list(metrics.values())).cpu().tolist()
+    for name, value in zip(metrics, values):
+        writer.add_scalar(name, value, iteration)
 
 
 # NaN means "not computed by this ablation"; zero is reserved for counts,
