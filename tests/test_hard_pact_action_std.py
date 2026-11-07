@@ -21,7 +21,8 @@ def test_policy_profile_bounds_gradient_and_checkpoint_compatibility(pos):
                 min_noise_std=cfg.min_noise_std, max_noise_std=cfg.max_noise_std,
                 grf_scale_n=gains.grf_scale_n, wrench_scale=gains.wrench_scale_n_nm,
                 wrench_qp_clip=gains.wrench_qp_clip_n_nm)
-    torch.testing.assert_close(actor.std, torch.tensor([.8, 1., 1.]* (4 if pos else 8)))
+    assert actor.std.numel() == (12 if pos else 24)
+    torch.testing.assert_close(actor.std, torch.tensor(cfg.init_noise_std))
     assert not any('_std_clip' in k for k in actor.state_dict())
     saved = {k: v.clone() for k, v in actor.state_dict().items()}
     with torch.no_grad():
@@ -43,7 +44,8 @@ def test_policy_profile_bounds_gradient_and_checkpoint_compatibility(pos):
 @pytest.mark.parametrize('variant', HARD_PACT_VARIANTS)
 def test_all_ablations_inherit_profile(variant):
     _, cfg = make_hard_pact_variant_configs(variant, 'isaaclab')
-    assert cfg.policy.init_noise_std == [.8, 1., 1.] * 8
+    assert len(cfg.policy.init_noise_std) == 24
+    assert cfg.policy.init_noise_std == GO2HardPACTCfgPPO.policy.init_noise_std
     assert cfg.policy.min_noise_std == [.15, .25, .25] * 8
     assert cfg.policy.max_noise_std == 1.1
 

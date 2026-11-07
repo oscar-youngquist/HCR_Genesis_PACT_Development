@@ -178,6 +178,8 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         use_joint_dynamics_curriculum = True
         use_mass_com_curriculum = False
         use_disturbance_curriculum = False
+        # Disabled sub-curricula: True uses final bounds; False uses initial bounds.
+        disabled_curriculum_use_final_bounds = False
 
         persistent_disturbance = True
         persistent_force_probability = 0.1

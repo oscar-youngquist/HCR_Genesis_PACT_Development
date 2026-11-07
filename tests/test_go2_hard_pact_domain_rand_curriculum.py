@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+import pytest
 
 os.environ.setdefault("SIMULATOR", "genesis_pact")
 os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_hard_pact_tests")
@@ -37,6 +38,47 @@ def test_schema_endpoints_and_monotonic_interpolation():
     values = [schema["added_base_mass"].range_at(p)[1] for p in (0, .25, .5, 1)]
     assert values == sorted(values)
     assert schema["push_z"].range_at(.5)[1] == 0.0
+
+
+@pytest.mark.parametrize('phase', HardPACTDomainRandCurriculum.phases)
+@pytest.mark.parametrize('use_final', [False, True])
+def test_disabled_phase_endpoint_sampling_and_resume(phase, use_final):
+    config = cfg()
+    setattr(config.domain_rand, 'use_'+phase+'_curriculum', False)
+    config.domain_rand.disabled_curriculum_use_final_bounds = use_final
+    curriculum = HardPACTDomainRandCurriculum(config, seed=7)
+    assert phase not in curriculum.enabled_phases
+    for iteration in range(1, 4):
+        curriculum.advance(iteration, .9)
+    ranges = curriculum.effective_ranges()
+    for name, spec in curriculum.schema.items():
+        if spec.phase != phase:
+            continue
+        expected = spec.final if use_final else spec.initial
+        assert ranges[name] == expected
+        values = curriculum.sample(name, (100,))
+        assert ((values >= expected[0]) & (values <= expected[1])).all()
+    assert curriculum.progress[phase] == float(use_final)
+    state = copy.deepcopy(curriculum.state_dict())
+    resumed = HardPACTDomainRandCurriculum(config, seed=99)
+    resumed.load_state_dict(state)
+    assert resumed.effective_ranges() == ranges
+    # A stale intermediate/old checkpoint cannot override a disabled endpoint.
+    state['progress'][phase] = .37
+    resumed.load_state_dict(state)
+    assert resumed.effective_ranges() == ranges
+    for other in curriculum.enabled_phases:
+        assert resumed.progress[other] == state['progress'][other]
+
+
+def test_disabled_endpoint_flag_does_not_change_enabled_curricula():
+    initial, final = cfg(), cfg()
+    final.domain_rand.disabled_curriculum_use_final_bounds = True
+    left, right = HardPACTDomainRandCurriculum(initial), HardPACTDomainRandCurriculum(final)
+    for iteration in range(1, 8):
+        assert left.advance(iteration, .9) == right.advance(iteration, .9)
+        assert left.progress == right.progress
+        assert left.effective_ranges() == right.effective_ranges()
 
 
 def test_once_per_iteration_and_phase_order():

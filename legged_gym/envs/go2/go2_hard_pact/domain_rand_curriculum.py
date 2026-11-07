@@ -91,6 +91,9 @@ class HardPACTDomainRandCurriculum:
                 d.use_disturbance_curriculum,
             )) if flag
         )
+        self.disabled_curriculum_use_final_bounds = bool(
+            getattr(d, "disabled_curriculum_use_final_bounds", False))
+        self._pin_disabled_phase_bounds()
         self.phase_index = 0
         self.last_iteration = -1
         self.last_step_iteration = -10**9
@@ -100,6 +103,14 @@ class HardPACTDomainRandCurriculum:
         self.reward_history = deque(maxlen=int(d.best_reward_window))
         self.generator = torch.Generator(device="cpu")
         self.generator.manual_seed(int(seed))
+
+    def _pin_disabled_phase_bounds(self):
+        # Use the same progress for backend ranges and persistent-wrench
+        # sampling, which reads phase progress directly. Enabled phases retain
+        # their schedule/checkpoint progress; feature enable flags are untouched.
+        for phase in self.phases:
+            if phase not in self.enabled_phases:
+                self.progress[phase] = float(self.disabled_curriculum_use_final_bounds)
 
     @property
     def phase(self):
@@ -160,6 +171,9 @@ class HardPACTDomainRandCurriculum:
 
     def load_state_dict(self, state):
         self.progress = {k: float(v) for k, v in state["progress"].items()}
+        # Current explicit config chooses disabled endpoints even for older
+        # checkpoints, which did not expose this setting.
+        self._pin_disabled_phase_bounds()
         self.phase_index = int(state["phase_index"])
         self.last_iteration = int(state["last_iteration"])
         self.last_step_iteration = int(state["last_step_iteration"])

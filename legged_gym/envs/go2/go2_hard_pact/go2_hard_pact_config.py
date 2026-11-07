@@ -186,9 +186,11 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         joint_dynamics_progress_delta = 0.02
         mass_com_progress_delta = 0.01
         disturbance_progress_delta = 0.01
-        use_joint_dynamics_curriculum = True
+        use_joint_dynamics_curriculum = False
         use_mass_com_curriculum = True
         use_disturbance_curriculum = True
+        # Disabled sub-curricula: True uses final bounds; False uses initial bounds.
+        disabled_curriculum_use_final_bounds = True
 
         persistent_disturbance = True
         persistent_force_probability = 0.4
@@ -343,7 +345,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             dof_vel_limits = -0.1  # 0 disables the soft joint-speed penalty
             dof_close_to_default = -0.01
             torque_limits = -0.01
-            torque_rate_limits = -0.001  # Substep-mean squared excess / (rate*physics_dt)^2; 0 disables.
+            torque_rate_limits = 0.0  # Substep-mean squared excess / (rate*physics_dt)^2; 0 disables.
             pd_target_torque_limit = 0.0
 
             alive_bonus = 0.001
@@ -468,7 +470,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         activation = 'elu'
         # Normalized action std: hip/thigh/calf in FR, FL, RR, RL order,
         # repeated independently for position and feedforward outputs.
-        init_noise_std = ([0.80, 1.00, 1.00] * 4 + [0.70, 0.90, 0.90] * 4) * 2
+        init_noise_std = [0.80, 1.00, 1.00] * 4 + [0.70, 0.90, 0.90] * 4
         min_noise_std = ([0.15, 0.25, 0.25] * 4) * 2
         max_noise_std = 1.10
 
