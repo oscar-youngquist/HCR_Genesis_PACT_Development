@@ -102,7 +102,9 @@ def collect_latent_diagnostics_scalars(diagnostics):
 
 def collect_hard_pact_scalars(algorithm, features):
     """Merge algorithm summaries into the stable schema without host copies."""
-    spec = resolve_hard_pact_features(features)
+    spec = getattr(algorithm, "hard_pact_features", None)
+    if spec is None:
+        spec = resolve_hard_pact_features(features)
     values = dict(STABLE_HARD_PACT_SCALARS)
     values.update({
         "physics/inverse/enabled": float(spec.inverse_loss),
@@ -143,6 +145,9 @@ def collect_hard_pact_scalars(algorithm, features):
             getattr(algorithm, "last_latent_diagnostics", {})
         ))
     values.update(getattr(algorithm, "last_qp_metrics", {}))
+    values.update(getattr(algorithm, "last_actor_regularizer_metrics", {}))
+    values["physics/actor_loss_warmup_factor"] = getattr(
+        algorithm, "actor_physics_warmup_factor", 1.0)
     gradients = getattr(algorithm, "last_physics_gradient_metrics", {})
     if "physics_gradient/finite_fraction" in gradients:
         finite = gradients["physics_gradient/finite_fraction"]

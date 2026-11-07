@@ -687,6 +687,8 @@ class Go2HardPACT(Go2PACT):
             self.simulator.hard_pact_foot_forces_world(),
             normal_force_n=normal() if normal is not None else None,
         )
+        if getattr(self, '_actor_fk_enabled', False) and hasattr(self, '_actor_fk_stance'):
+            self._actor_fk_stance &= self.grf_processor.contacts
 
     def _persistent_component_settings(self, component):
         """Sample each XYZ component within the current disturbance envelope.
@@ -1289,10 +1291,18 @@ class Go2HardPACT(Go2PACT):
         simulator = self.simulator
         self._bard_pre_q_simulator = self._canonical_configuration().clone()
         self._bard_pre_v_world_simulator = self._canonical_velocity_world().clone()
+        if getattr(self, '_actor_fk_enabled', False):
+            self._actor_fk_stance = self.grf_processor.contacts.clone()
 
     def _capture_bard_post_state(self):
         simulator = self.simulator
         self._bard_post_v_world_simulator = self._canonical_velocity_world().clone()
+        if getattr(self, '_actor_fk_enabled', False):
+            # Capture before post_physics_step can reset/teleport the robot.
+            quat=self._current_base_quat_xyzw()
+            relative=self.simulator.feet_pos-self.simulator.base_pos[:,None,:]
+            self._actor_fk_next_feet_body=quat_rotate_inverse(
+                quat[:,None,:].expand(-1,4,-1).reshape(-1,4),relative.reshape(-1,3)).reshape(-1,4,3).clone()
 
     def _post_physics_step_callback(self):
         """Observe legacy push events without changing legacy push logic."""
@@ -1404,6 +1414,9 @@ class Go2HardPACT(Go2PACT):
         }
         if self._pending_action_replay_transition is not None:
             fields.update(self._pending_action_replay_transition)
+        if getattr(self, '_actor_fk_enabled', False):
+            fields['actor_fk_next_feet_body']=self._actor_fk_next_feet_body.clone()
+            fields['actor_fk_stance']=self._actor_fk_stance.clone()
         if (
             getattr(self, "_hard_pact_rollout_qp_enabled", False)
             and getattr(self, "_hard_pact_policy_context_ready", False)

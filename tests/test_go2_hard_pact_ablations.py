@@ -71,6 +71,26 @@ def make_qp():
 
 
 class HardPACTAblationTests(unittest.TestCase):
+    def test_named_ablations_override_conflicting_pinn_switches(self):
+        for variant, expected in HARD_PACT_ABLATIONS.items():
+            for inverse in (False, True):
+                for rollout in (False, True):
+                    actual = resolve_hard_pact_features(variant,
+                        inverse_enabled=inverse, rollout_enabled=rollout)
+                    self.assertEqual(actual, expected)
+            cfg = task_registry.train_cfgs[f"go2_hard_pact_{variant}_isaaclab"].algorithm
+            self.assertEqual(cfg.bard_inverse_enabled, expected.inverse_loss)
+            self.assertEqual(cfg.bard_rollout_enabled, expected.rollout_loss)
+
+    def test_unselected_base_task_keeps_independent_pinn_switches(self):
+        for inverse in (False, True):
+            for rollout in (False, True):
+                actual = resolve_hard_pact_features(None,
+                    inverse_enabled=inverse, rollout_enabled=rollout)
+                self.assertEqual(actual.inverse_loss, inverse)
+                self.assertEqual(actual.rollout_loss, rollout)
+                self.assertTrue(actual.execution_qp)
+
     def test_exact_immutable_matrix(self):
         self.assertEqual(tuple(EXPECTED), HARD_PACT_VARIANTS)
         for name, expected in EXPECTED.items():
@@ -117,6 +137,8 @@ class HardPACTAblationTests(unittest.TestCase):
             value = copy.deepcopy(value)
             value.pop("ablation_variant")
             value["algorithm"].pop("ablation_variant")
+            value["algorithm"].pop("bard_inverse_enabled")
+            value["algorithm"].pop("bard_rollout_enabled")
             value["runner"].pop("run_name")
             return value
 

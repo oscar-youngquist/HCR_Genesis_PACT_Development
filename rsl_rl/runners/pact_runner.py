@@ -111,7 +111,9 @@ class OnPolicyRunnerPACT:
                     self.train_cfg.get("seed", 1)
                 )
             self.hard_pact_features = resolve_hard_pact_features(
-                self.alg_cfg.get("ablation_variant", "full")
+                self.alg_cfg.get("ablation_variant"),
+                inverse_enabled=self.alg_cfg.get("bard_inverse_enabled", True),
+                rollout_enabled=self.alg_cfg.get("bard_rollout_enabled", True),
             )
             gain_spec = calculate_physics_head_gains(self.env.cfg)
             from rsl_rl.modules.hard_pact_physics import GRFSwingConfig
@@ -203,6 +205,7 @@ class OnPolicyRunnerPACT:
                               [2*self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]], [self.env.wb_dim])
         if self.is_hard_pact:
             delay_range = self.env.cfg.domain_rand.ctrl_delay_step_range
+            self.env._actor_fk_enabled = self.alg.actor_regularizers.lambda_fk > 0
             self.alg.storage.configure_action_replay(int(delay_range[1]))
             # Limits are backend properties, not learned transition data.
             # Bind them once so PPO minibatches carry only the previous torque

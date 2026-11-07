@@ -35,7 +35,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
 import torch
-from rsl_rl.modules.hard_pact_control import bounded_nominal_torque, effective_feedback_gains
+from rsl_rl.modules.hard_pact_control import bounded_nominal_torque, effective_feedback_gains, requested_torque_components
+from .hard_pact_actor_regularizers import (
+    ActorRegularizerConfig, fk_consistency_loss, compensation_demand, load_compensation_loss,
+)
 from rsl_rl.modules.hard_pact_physics import (
     log_qp_swing_grf, GRFSwingMetricsAccumulator,
 )
@@ -335,6 +338,8 @@ class PPO_HardPACT:
                  lambda_projection=1.0e-3,
                  lambda_qp_velocity_xy=None,
                  lambda_qp_velocity_yaw=None,
+                 actor_physics_warmup_iterations=0,
+                 actor_regularizers=None,
                  lambda_soft_constraint=1.0e-3,
                  profile_bard_timing=False,
                  console_debug=False,
@@ -350,7 +355,7 @@ class PPO_HardPACT:
                  ppo_qp_stratify_by_anchor=True,
                  ppo_qp_sampling_seed=1,
                  ppo_qp_sampling_logging_enabled=True,
-                 ablation_variant="full",
+                 ablation_variant=None,
                  hard_pact_qp=None,
                  action_clip=100.0,
                  ):
@@ -493,10 +498,11 @@ class PPO_HardPACT:
 
         self.num_pinn_updates = 0
 
-        self.hard_pact_features = resolve_hard_pact_features(ablation_variant)
-        # The single canonical profile is authoritative. Constructor booleans
-        # remain accepted only for strict compatibility with old checkpoints
-        # and launch configs.
+        self.hard_pact_features = resolve_hard_pact_features(
+            ablation_variant, inverse_enabled=bard_inverse_enabled,
+            rollout_enabled=bard_rollout_enabled)
+        # Named ablations override switches; only the unselected base task
+        # uses configurable representation losses. QP mechanics stay independent.
         self.bard_enabled = self.hard_pact_features.needs_bard
         self.bard_inverse_enabled = self.hard_pact_features.inverse_loss
         self.bard_rollout_enabled = self.hard_pact_features.rollout_loss
@@ -505,10 +511,19 @@ class PPO_HardPACT:
         self.lambda_projection = float(lambda_projection)
         self.lambda_qp_velocity_xy = float(lambda_projection if lambda_qp_velocity_xy is None else lambda_qp_velocity_xy)
         self.lambda_qp_velocity_yaw = float(lambda_projection if lambda_qp_velocity_yaw is None else lambda_qp_velocity_yaw)
+        if (not math.isfinite(actor_physics_warmup_iterations)
+                or actor_physics_warmup_iterations < 0
+                or int(actor_physics_warmup_iterations) != actor_physics_warmup_iterations):
+            raise ValueError("actor_physics_warmup_iterations must be a nonnegative integer")
+        self.actor_physics_warmup_iterations = int(actor_physics_warmup_iterations)
+        self.actor_physics_warmup_factor = 1.0
         if not all(math.isfinite(w) and w >= 0 for w in
                    (self.lambda_qp_velocity_xy,self.lambda_qp_velocity_yaw)):
             raise ValueError("QP velocity loss weights must be finite and nonnegative")
         self._actor_qp_velocity_loss = None
+        self.actor_regularizers = ActorRegularizerConfig(**(actor_regularizers or {}))
+        self._actor_load_loss = None
+        self.last_actor_regularizer_metrics = {}
         self.lambda_soft_constraint = float(lambda_soft_constraint)
         # Opt-in benchmark instrumentation. CUDA events avoid synchronizing
         # between the shared-context inverse and rollout calculations; one
@@ -606,7 +621,9 @@ class PPO_HardPACT:
         if self.dynamics_backend not in ("bard", "pinocchio"):
             raise ValueError("dynamics_backend must be 'bard' or 'pinocchio'")
         self.physics_dynamics = None
-        if self.bard_enabled:
+        if self.actor_regularizers.lambda_fk > 0 and self.dynamics_backend != 'bard':
+            raise ValueError('Actor FK regularization currently requires dynamics_backend="bard"')
+        if self.bard_enabled or self.actor_regularizers.lambda_fk > 0:
             # Configuration paths are repository-relative, while launchers run
             # from legged_gym/scripts. Resolve relative URDFs against the repo
             # root derived from this source file so training is cwd-independent.
@@ -685,6 +702,22 @@ class PPO_HardPACT:
             position_limits[:12, 1],
             velocity_limits[:12],
         )
+
+    def _actor_physics_weight_at_iteration(self, iteration):
+        """Resume-exact cosine ramp from QP activation; zero duration disables it.
+
+        Only the actor's combined secondary PCGrad objective is scaled, after
+        its individual weights. Encoder/decoder PINNs and execution are unchanged.
+        """
+        return cosine_vae_beta(iteration, 0.0, 1.0,
+                               self.qp_config.warmup_iterations,
+                               self.actor_physics_warmup_iterations)
+
+    def _warmup_actor_losses(self, losses):
+        # Keep PPO untouched and avoid even a multiply when warmup is disabled.
+        if len(losses) > 1 and self.actor_physics_warmup_factor != 1.0:
+            return [losses[0], losses[1] * self.actor_physics_warmup_factor]
+        return losses
 
     def qp_enabled_at_iteration(self, iteration=None):
         """One gate for rollout, deployment mechanics, sampling, and replay.
@@ -1056,7 +1089,16 @@ class PPO_HardPACT:
         return self.pinn_weight
 
     def update(self, action_func, fb_func, dt, itr, default_pose, qvel_scale):
+        cfg=self.actor_regularizers
+        self._actor_regularizer_diagnostics_due = (
+            (cfg.lambda_fk > 0 or cfg.lambda_load > 0)
+            and self.qp_config.tensorboard_diagnostics_enabled
+            and self.qp_config.tensorboard_diagnostics_interval > 0
+            and itr % self.qp_config.tensorboard_diagnostics_interval == 0)
+        self._actor_regularizer_sums = {}
+        self.last_actor_regularizer_metrics = {}
         self._qp_training_iteration = int(itr)
+        self.actor_physics_warmup_factor = self._actor_physics_weight_at_iteration(itr)
         valid_boot_statistics = ValidBootStatistics()
         metric_zero = torch.zeros((), device=self.device)
         mean_value_loss = metric_zero.clone()
@@ -1207,6 +1249,7 @@ class PPO_HardPACT:
                     qp_target_count.add_(full * expected)
             pinn_loss = None
             self._actor_qp_velocity_loss = None
+            self._actor_load_loss = None
             if qp_rows is not None:
                 # One QP graph shared by the three owned VJPs, using the exact
                 # stored-noise policy features from the existing PPO forward.
@@ -1229,6 +1272,17 @@ class PPO_HardPACT:
                 if optimize_physics and pinn_loss is not None
                 else [ppo_loss]
             )
+            # Optional actor-only terms share the existing secondary PCGrad
+            # objective; no new optimizer, backward owner, or QP solve.
+            actor_regularization = self._actor_load_loss
+            if self.actor_regularizers.lambda_fk > 0:
+                fk = self._compute_actor_fk_loss(replay, self.storage.current_hard_pact_batch)
+                actor_regularization = fk if actor_regularization is None else actor_regularization+fk
+            if actor_regularization is not None:
+                if len(ppo_losses) == 1:
+                    ppo_losses.append(actor_regularization)
+                else:
+                    ppo_losses[1] = ppo_losses[1]+actor_regularization
             # Full diagnostics measure the real PCGrad backward containing
             # qpth's implicit KKT derivative. qpth does not expose a timer for
             # its backward alone, so this metric is named accordingly. No
@@ -1249,7 +1303,7 @@ class PPO_HardPACT:
             # Actor PCGrad uses reward as primary and QP projection as physics;
             # PINNs are evaluated only in the encoder and decoder phases.
             pcgrad_timing = self._start_bard_timing("pcgrad", obs_batch)
-            self._physics_pcgrad_backward(self.act_optimizer, ppo_losses)
+            self._physics_pcgrad_backward(self.act_optimizer, self._warmup_actor_losses(ppo_losses))
             self._stop_bard_timing("pcgrad", pcgrad_timing)
             if (
                 self.ppo_qp_sampling_logging_enabled
@@ -1868,7 +1922,7 @@ class PPO_HardPACT:
         return projection if pinn is None else pinn+projection
 
     @staticmethod
-    def _actor_only_torque_vjp(loss, nominal, actor_parameters):
+    def _actor_only_torque_vjp(loss, nominal, actor_parameters, branch=None):
         """Reuse the solver graph, isolating its *direct* nominal-input partial.
 
         GRF conditioning is a sibling nominal conversion, not a descendant of
@@ -1882,6 +1936,14 @@ class PPO_HardPACT:
         gradient = torch.autograd.grad(loss,nominal,retain_graph=True,allow_unused=True)[0]
         if gradient is None:
             return loss.detach()
+        if branch is not None:
+            # Isolate a single command channel before reaching shared actor
+            # weights; the sibling command and estimator paths stay frozen.
+            gradient = torch.autograd.grad(nominal,branch,grad_outputs=gradient.detach(),
+                retain_graph=True,allow_unused=True)[0]
+            if gradient is None:
+                return loss.detach()
+            nominal = branch
         params = tuple(p for p in actor_parameters if p.requires_grad)
         grads = torch.autograd.grad(nominal,params,grad_outputs=gradient.detach(),
                                     retain_graph=True,allow_unused=True)
@@ -1890,6 +1952,39 @@ class PPO_HardPACT:
             if g is not None:
                 surrogate = surrogate + ((p-p.detach())*g.detach()).sum()
         return surrogate
+
+    def _record_actor_regularizer(self, name, metrics, valid_count, total_count):
+        if not getattr(self, '_actor_regularizer_diagnostics_due', False):
+            return
+        # Count-weighted across minibatches; only scalar tensors leave GPU.
+        for key,value in metrics.items():
+            count=total_count if key=='valid_fraction' else valid_count
+            tag=f'physics/actor_regularizers/{name}/{key}'
+            numerator,denominator=self._actor_regularizer_sums.get(tag,(value.new_zeros(()),value.new_zeros(())))
+            numerator=numerator+value.detach()*count
+            denominator=denominator+count
+            self._actor_regularizer_sums[tag]=(numerator,denominator)
+            self.last_actor_regularizer_metrics[tag]=numerator/denominator.clamp_min(1)
+
+    def _compute_actor_fk_loss(self, replay, batch):
+        cfg=self.actor_regularizers
+        command=replay['desired_position']
+        valid=batch['physics_valid_mask'].reshape(-1).bool() & batch['delayed_action_source_valid'].reshape(-1).bool()
+        stance=batch['actor_fk_stance'].detach().bool()
+        target=batch['actor_fk_next_feet_body'].detach()
+        valid &= torch.isfinite(command.detach()).all(-1)&torch.isfinite(target).flatten(1).all(-1)
+        rows=(valid&stance.any(-1)).nonzero(as_tuple=True)[0]
+        if rows.numel()==0:
+            zero=command[:0].sum()*0
+            self._record_actor_regularizer('fk',dict(loss=zero.detach(),valid_fraction=zero.detach(),error_m=zero.detach()),0,stance.numel())
+            return zero
+        # No FK on invalid/NaN commands or reset-boundary delay entries.
+        predicted=self.physics_dynamics.foot_positions_body(command[rows])
+        loss,metrics=fk_consistency_loss(predicted,target[rows],stance[rows],valid[rows],cfg)
+        count=stance[rows].sum()
+        metrics['valid_fraction']=count.to(command.dtype)/max(stance.numel(),1)
+        self._record_actor_regularizer('fk',metrics,count,stance.numel())
+        return self._actor_only_torque_vjp(cfg.lambda_fk*loss,command,self.ppo_parameters)
 
     def _actor_velocity_objective(self, xy, yaw, nominal, differentiable):
         if not differentiable or not self.hard_pact_features.projection_loss:
@@ -2620,8 +2715,10 @@ class PPO_HardPACT:
             ).detach()
             if desired_position is None or feedforward_torque is None:
                 raise ValueError("QP replay requires delayed physical actions")
+            qp_desired_position=desired_position[qp_rows]
+            qp_feedforward=feedforward_torque[qp_rows]
             sampled_nominal, grf_nominal = replay_qp_torques(
-                desired_position[qp_rows],feedforward_torque[qp_rows],qp_batch,fb_func)
+                qp_desired_position,qp_feedforward,qp_batch,fb_func)
             sample_grf_normalized = self.actor_critic.physics_estimator.predict_grf(
                 qp_latent, qp_explicit, grf_nominal
             ).reshape(-1, 4, 3)
@@ -2792,6 +2889,30 @@ class PPO_HardPACT:
             # differ from rollout after policy/head parameters update.
             self.last_qp_metrics = dict(qp_result.metrics or {})
             self.last_qp_metrics["qp/minimal/projection_loss"] = qp_loss.detach()
+            if self.actor_regularizers.lambda_load > 0:
+                cfg=self.actor_regularizers
+                accepted=qp_result.differentiated_mask | qp_result.recovery_mask
+                load_valid=valid.reshape(-1)&accepted
+                load_valid &= qp_batch['delayed_action_source_valid'].reshape(-1).bool()
+                stance=sample_contact_probability.detach()>=self.hard_pact_qp.cfg.contact_threshold
+                ff_gain=qp_batch['control_motor_strength'].detach()*qp_batch['control_feedforward_weight'].detach()
+                load_valid &= ((ff_gain!=0).expand(-1,12)|~stance.repeat_interleave(3,dim=-1)).all(-1)
+                demand,feasible=compensation_demand(sampled_mechanics.foot_jacobians,
+                    sampled_mechanics.base_jacobian,sample_applied,
+                    sample_grf_world,stance,cfg,self.hard_pact_qp.cfg.friction_coefficient)
+                requested,_,physical_ff,_=requested_torque_components(qp_desired_position,
+                    qp_feedforward,sample_q[:,7:],sample_v[:,6:],qp_batch)
+                # Existing post-QP command reconstruction on the full accepted
+                # candidate, independent of execution alpha: FF_post=FF_nominal
+                # + total correction. Not a demand-minus-PD target or ratio.
+                post_ff=physical_ff.detach()+qp_result.tau_safe-requested.detach()
+                load,metrics=load_compensation_loss(post_ff,demand,torque_limits,
+                    stance,load_valid,feasible,cfg)
+                self._record_actor_regularizer('load',metrics,
+                    metrics['valid_fraction']*post_ff.shape[0],post_ff.shape[0])
+                if differentiate_qp and self.hard_pact_features.projection_loss:
+                    self._actor_load_loss=self._actor_only_torque_vjp(
+                        cfg.lambda_load*load,sampled_nominal,self.ppo_parameters,branch=qp_feedforward)
             if self.lambda_qp_velocity_xy>0 or self.lambda_qp_velocity_yaw>0:
                 accepted = qp_result.differentiated_mask | qp_result.recovery_mask
                 xy,yaw,count = self.hard_pact_qp.velocity_tracking_losses(

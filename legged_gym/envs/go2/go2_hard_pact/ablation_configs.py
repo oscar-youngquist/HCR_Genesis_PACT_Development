@@ -1,6 +1,6 @@
 """Extremely thin configuration selectors for the shared HardPACT task."""
 
-from .ablations import HARD_PACT_VARIANTS
+from .ablations import HARD_PACT_VARIANTS, resolve_hard_pact_features
 from .go2_hard_pact_config import GO2HardPACTCfg, GO2HardPACTCfgPPO
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg
 from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import (
@@ -37,6 +37,8 @@ def make_hard_pact_variant_configs(variant_id: str, backend: str):
 
         class algorithm(GO2HardPACTCfgPPO.algorithm):
             ablation_variant = variant_id
+            bard_inverse_enabled = resolve_hard_pact_features(variant_id).inverse_loss
+            bard_rollout_enabled = resolve_hard_pact_features(variant_id).rollout_loss
 
         class runner(GO2HardPACTCfgPPO.runner):
             run_name = f"hard_pact_{variant_id}_{backend}"

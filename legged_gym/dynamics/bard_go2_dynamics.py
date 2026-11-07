@@ -330,6 +330,29 @@ class BardGo2Dynamics:
     def _canonical(self, value):
         return value.index_select(-1, self._canonical_from_bard)
 
+    def foot_positions_body(self, joint_position):
+        """Exact FK values and first-order command VJP via existing BARD Jacobians.
+
+        Base pose is identity: foot-frame translations are body-relative metres.
+        No mechanics/estimator graph is retained. Canonical joint permutation
+        is the same as dynamics; chunks obey the existing BARD capacity.
+        """
+        values=[]
+        for command in joint_position.split(self.batch_capacity):
+            with torch.no_grad():
+                q=command.new_zeros(command.shape[0],19);q[:,6]=1.;q[:,7:]=command.detach()
+                qb,vb=simulator_state_to_bard(q,command.new_zeros(command.shape[0],18),
+                    self.simulator_joint_names,self.bard_joint_names)
+                self.bard.update_kinematics(self.model,self.data,qb,vb)
+                positions=[];jacobians=[]
+                for fid in self.foot_frame_ids:
+                    J,pose=self.bard.jacobian(self.model,self.data,fid,reference_frame='local',return_pose=True)
+                    positions.append(pose[:,:3,3].clone())
+                    jacobians.append((pose[:,:3,:3]@J[:,:3]).index_select(-1,self._canonical_from_bard)[:,:,6:].clone())
+                p=torch.stack(positions,1);J=torch.stack(jacobians,1)
+            values.append(p+torch.einsum('bfkj,bj->bfk',J,command-command.detach()))
+        return torch.cat(values) if values else joint_position.new_empty(0,4,3)
+
     def _bard_order(self, value):
         return value.index_select(-1, self._bard_from_canonical)
 

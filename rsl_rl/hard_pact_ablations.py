@@ -1,6 +1,6 @@
 """Dependency-neutral home of the immutable HardPACT ablation matrix."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Mapping
 
@@ -52,7 +52,11 @@ HARD_PACT_VARIANTS = tuple(HARD_PACT_ABLATIONS)
 HARD_PACT_BACKENDS = ("genesis", "isaacgym", "isaaclab")
 
 
-def resolve_hard_pact_features(value="full"):
+def resolve_hard_pact_features(value="full", *, inverse_enabled=True, rollout_enabled=True):
+    """Named ablations override switches; None uses configurable full-task losses."""
+    configurable = value is None
+    if configurable:
+        value = "full"
     if isinstance(value, HardPACTAblationFeatures):
         value = value.variant_id
     elif isinstance(value, Mapping):
@@ -60,7 +64,11 @@ def resolve_hard_pact_features(value="full"):
     elif not isinstance(value, str):
         value = getattr(value, "variant_id", getattr(value, "variant", "full"))
     try:
-        return HARD_PACT_ABLATIONS[str(value)]
+        features = HARD_PACT_ABLATIONS[str(value)]
+        if not configurable or (inverse_enabled and rollout_enabled):
+            return features
+        return replace(features, inverse_loss=features.inverse_loss and bool(inverse_enabled),
+                       rollout_loss=features.rollout_loss and bool(rollout_enabled))
     except KeyError as exc:
         raise ValueError(
             f"Unknown HardPACT ablation {value!r}; expected one of "
