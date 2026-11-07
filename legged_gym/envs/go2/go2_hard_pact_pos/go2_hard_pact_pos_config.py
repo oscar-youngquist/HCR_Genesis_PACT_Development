@@ -450,7 +450,10 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
 
     class policy(LeggedRobotCfgPPO.policy):
         activation = 'elu'
-        init_noise_std = 1.0
+        # B1Z1 leg exploration profile: hip/thigh/calf, FR/FL/RR/RL.
+        init_noise_std = [0.80, 1.00, 1.00] * 4
+        min_noise_std = [0.15, 0.25, 0.25] * 4
+        max_noise_std = 1.10
 
         cenet_enc_layers = [256, 128]
         cenet_enc_latent_dim = 16

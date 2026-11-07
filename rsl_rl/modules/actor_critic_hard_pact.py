@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .hard_pact_action_std import initialize_action_std, clip_action_std, set_std_lower
 
 from .hard_pact_physics import (
     DeploymentPhysicsHeads,
@@ -210,7 +211,9 @@ class ActorCritic_HardPACT(nn.Module):
                  wrench_qp_clip=None,
                  contact_epsilon=1.0e-2,
                  ablation_features="full",
-                 grf_swing=None):
+                 grf_swing=None,
+                 min_noise_std=0.20,
+                 max_noise_std=5.0):
         super().__init__()
 
         # Metadata only: every ablation deliberately constructs the identical
@@ -300,10 +303,9 @@ class ActorCritic_HardPACT(nn.Module):
         self.mean_pos = None
         self.mean_tau = None
 
-        self.std = nn.Parameter(init_noise_std * torch.ones(2*num_actions))
+        initialize_action_std(self, 2*num_actions, init_noise_std, min_noise_std, max_noise_std)
         self.num_actions = num_actions
         
-        self._std_clip_lwr = 0.20
 
         self.distribution = None
         
@@ -513,10 +515,10 @@ class ActorCritic_HardPACT(nn.Module):
     @torch.no_grad
     @torch.jit.ignore
     def _clip_std(self,):
-        self.std.data.clamp_(self._std_clip_lwr, 5.0)
+        clip_action_std(self)
 
     def _set_std_clip_lwr(self, clip_val=0.1):
-        self._std_clip_lwr = clip_val
+        set_std_lower(self, clip_val)
 
     @torch.jit.ignore
     def update_distribution(self, curr_obs):

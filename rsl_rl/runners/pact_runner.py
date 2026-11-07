@@ -118,6 +118,8 @@ class OnPolicyRunnerPACT:
             gain_spec = calculate_physics_head_gains(self.env.cfg)
             from rsl_rl.modules.hard_pact_physics import GRFSwingConfig
             actor_extra_kwargs = {
+                "min_noise_std": self.policy_cfg.get("min_noise_std", 0.20),
+                "max_noise_std": self.policy_cfg.get("max_noise_std", 5.0),
                 "cenet_explicit_layers": self.policy_cfg["cenet_explicit_layers"],
                 "grf_decoder_layers": self.policy_cfg["grf_decoder_layers"],
                 "wrench_decoder_layers": self.policy_cfg["wrench_decoder_layers"],

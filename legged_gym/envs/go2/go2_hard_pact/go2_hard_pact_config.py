@@ -466,7 +466,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
     class policy(LeggedRobotCfgPPO.policy):
         activation = 'elu'
-        init_noise_std = 1.0
+        # Normalized action std: hip/thigh/calf in FR, FL, RR, RL order,
+        # repeated independently for position and feedforward outputs.
+        init_noise_std = ([0.80, 1.00, 1.00] * 4) * 2
+        min_noise_std = ([0.15, 0.25, 0.25] * 4) * 2
+        max_noise_std = 1.10
 
         cenet_enc_layers = [256, 128]
         cenet_enc_latent_dim = 16

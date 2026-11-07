@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .hard_pact_action_std import initialize_action_std, clip_action_std, set_std_lower
 
 from .hard_pact_physics import (
     DeploymentPhysicsHeads,
@@ -210,7 +211,9 @@ class ActorCritic_HardPACT_Pos(nn.Module):
                  wrench_scale=None,
                  wrench_qp_clip=None,
                  contact_epsilon=1.0e-2,
-                 grf_swing=None):
+                 grf_swing=None,
+                 min_noise_std=0.1,
+                 max_noise_std=5.0):
         super().__init__()
 
         # The history latent is configurable; the 12-D explicit-estimator
@@ -291,14 +294,13 @@ class ActorCritic_HardPACT_Pos(nn.Module):
         self.mean_pos = None
         self.mean_tau = None
 
-        self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+        initialize_action_std(self, num_actions, init_noise_std, min_noise_std, max_noise_std)
         self.num_actions = num_actions
         
         self.distribution = None
         
         self.current_obs = None
         
-        self._std_clip_lwr = 0.1
         
         # disable args validation for speedup
         Normal.set_default_validate_args = False
@@ -504,10 +506,10 @@ class ActorCritic_HardPACT_Pos(nn.Module):
     @torch.no_grad
     @torch.jit.ignore
     def _clip_std(self,):
-        self.std.data.clamp_(self._std_clip_lwr, 5.0)
+        clip_action_std(self)
         
     def _set_std_clip_lwr(self, clip_val=0.1):
-        self._std_clip_lwr = clip_val
+        set_std_lower(self, clip_val)
 
     @torch.jit.ignore
     def update_distribution(self, curr_obs):
