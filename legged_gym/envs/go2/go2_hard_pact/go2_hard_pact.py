@@ -527,7 +527,30 @@ class Go2HardPACT(Go2PACT):
     def _update_command_curriculum(self, env_ids):
         """Zero patience retains the original reset-triggered curriculum."""
         if self.cfg.commands.curriculum_patience_iterations == 0:
-            return self._legacy_task_class._update_command_curriculum(self, env_ids)
+            if all(getattr(self.cfg.commands,'max_curriculum_'+key,None) is None
+                   for key in ('lin_vel_x','lin_vel_y','ang_vel_yaw')):
+                return self._legacy_task_class._update_command_curriculum(self, env_ids)
+            if (torch.mean(self.episode_sums['tracking_lin_vel'][env_ids])/self.max_episode_length
+                    > self.cfg.commands.curriculum_threshold*self.reward_scales['tracking_lin_vel']):
+                self._expand_command_curriculum_ranges()
+
+    def _expand_command_curriculum_ranges(self):
+        for key in ('lin_vel_x','lin_vel_y','ang_vel_yaw'):
+            cap = getattr(self.cfg.commands,'max_curriculum_'+key,None)
+            cap = float(self.cfg.commands.max_curriculum if cap is None else cap)
+            if not math.isfinite(cap) or cap < 0:
+                raise ValueError('Command curriculum caps must be finite and nonnegative')
+            lo,hi = self.command_ranges[key]
+            self.command_ranges[key] = [max(-cap,min(0.,lo-.5)),min(cap,max(0.,hi+.5))]
+
+    def _update_curriculum_heading_command(self):
+        if (self.cfg.commands.heading_command and
+                getattr(self.cfg.commands,'max_curriculum_ang_vel_yaw',None) is not None):
+            from legged_gym.utils.math_utils import quat_apply, wrap_to_pi
+            forward = quat_apply(self.simulator.base_quat,self.forward_vec)
+            heading = torch.atan2(forward[:,1],forward[:,0])
+            self.commands[:,2] = (0.5*wrap_to_pi(self.commands[:,3]-heading)).clamp(
+                *self.command_ranges['ang_vel_yaw'])
 
     def begin_command_curriculum_iteration(self):
         patience = int(self.cfg.commands.curriculum_patience_iterations)
@@ -543,14 +566,95 @@ class Go2HardPACT(Go2PACT):
         self._command_tracking_sum = torch.zeros((),device=self.device)
         self._command_tracking_count = 0
 
+    def _relax_tracking_sigma_for_wrench(self, sigma):
+        """At most (1+k) times sigma, using ramped interval-average SI wrench.
+
+        Fixed envelopes: F=sqrt(planar_cap²+vertical_cap²),
+        T=sqrt(2*roll_pitch_cap²+yaw_cap²). Normalize by final F/T;
+        d_min is the initial envelope, d_max the final envelope. No decoder,
+        push, mass/CoM label, current curriculum bound, or command dependence.
+        """
+        cfg = self.cfg.rewards
+        if not getattr(cfg,'wrench_tracking_sigma_enabled',False):
+            return sigma
+        k = float(cfg.wrench_tracking_sigma_gain)
+        if not math.isfinite(k) or k < 0:
+            raise ValueError('wrench_tracking_sigma_gain must be finite and nonnegative')
+        pending = getattr(self,'_pending_disturbance_transition',None)
+        if k == 0 or pending is None:
+            return sigma
+        if not hasattr(self,'_tracking_wrench_envelope'):
+            schema = self.domain_rand_curriculum.schema
+            def envelope(stage):
+                cap = lambda name: max(abs(x) for x in getattr(schema[name],stage))
+                return (math.hypot(cap('persistent_force'),cap('persistent_vertical_force')),
+                        math.sqrt(2*cap('persistent_torque')**2+cap('persistent_yaw_torque')**2))
+            f0,t0 = envelope('initial')
+            f1,t1 = envelope('final')
+            fref,tref = max(f1,1e-8),max(t1,1e-8)
+            self._tracking_wrench_envelope = (fref,tref,math.hypot(f0/fref,t0/tref),
+                                              math.hypot(f1/fref,t1/tref))
+        fref,tref,dmin,dmax = self._tracking_wrench_envelope
+        if dmax <= dmin:
+            return sigma  # No increasing disturbance envelope.
+        wrench = pending['applied_sustained_wrench_world'].detach()
+        finite = torch.isfinite(wrench).all(-1)
+        wrench = torch.where(finite[:,None],wrench,0.)
+        d = (wrench[:,:3].square().sum(-1)/fref**2 + wrench[:,3:].square().sum(-1)/tref**2).sqrt()
+        r = ((d-dmin)/(dmax-dmin)).clamp(0,1)
+        multiplier = 1+k*r.square()*(3-2*r)  # smoothstep; no force -> exactly 1.
+        return sigma*(multiplier[:,None] if sigma.ndim==2 else multiplier)
+
+    def _dynamic_tracking_sigma(self, command, angular=False):
+        """Kite's command/terrain-level relaxation; sigma divides squared error.
+
+        Current simulators expose terrain *columns*. Resolve their families
+        with exactly Terrain.curiculum's choice and make_terrain thresholds.
+        Prefer canonical kind IDs when a backend supplies them.
+        """
+        cfg = self.cfg.rewards
+        base = float(cfg.tracking_sigma)
+        if not self.cfg.terrain.curriculum or getattr(self.simulator,'terrain_levels',None) is None:
+            return self._relax_tracking_sigma_for_wrench(torch.full_like(command,base))
+        spec = cfg.dynamic_sigma
+        lo,hi = (spec['min_ang_vel'],spec['max_ang_vel']) if angular else (spec['min_lin_vel'],spec['max_lin_vel'])
+        if not (math.isfinite(base) and base>0 and math.isfinite(lo) and math.isfinite(hi) and hi>lo):
+            raise ValueError('Dynamic sigma requires positive base sigma and finite increasing command thresholds')
+        if not hasattr(self,'_dynamic_sigma_tables'):
+            from bisect import bisect_right
+            from itertools import accumulate
+            maxima = spec['max_sigma']
+            if len(maxima)<9 or any(not math.isfinite(x) or x<=0 for x in maxima):
+                raise ValueError('dynamic_sigma.max_sigma must contain positive values for all terrain families')
+            thresholds = list(accumulate(self.cfg.terrain.terrain_proportions))[:8]
+            columns = self.cfg.terrain.num_cols
+            column_maxima = [maxima[bisect_right(thresholds,j/columns+.001)] for j in range(columns)]
+            self._dynamic_sigma_tables = (command.new_tensor(maxima),command.new_tensor(column_maxima))
+        kinds = getattr(self.simulator,'terrain_kind_ids',None)
+        target = (self._dynamic_sigma_tables[0][kinds] if kinds is not None else
+                  self._dynamic_sigma_tables[1][self.simulator.terrain_types])
+        level = (torch.exp((self.simulator.terrain_levels.float()+1)/10)-1).clamp(max=1)
+        if command.ndim==2:
+            target,level = target[:,None],level[:,None]
+        fraction = ((command.abs()-lo)/(hi-lo)).clamp(0,1)
+        return self._relax_tracking_sigma_for_wrench(base + level*fraction*(target-base))
+
     def _reward_tracking_lin_vel(self):
-        # Preserve the inherited reward exactly; observe its raw [0,1] value
-        # before reward weight/curriculum scaling, with no second reward pass.
+        # Keep the existing curriculum evidence independent of reward relaxation.
         reward = self._legacy_task_class._reward_tracking_lin_vel(self)
         if getattr(self,"_command_tracking_collect",False):
             self._command_tracking_sum.add_(reward.detach().sum())
             self._command_tracking_count += reward.numel()
+        if getattr(getattr(self.cfg,'rewards',None),'dynamic_tracking_sigma_enabled',False):
+            error = (self.commands[:,:2]-self.simulator.base_lin_vel[:,:2]).square()
+            reward = torch.exp(-(error/self._dynamic_tracking_sigma(self.commands[:,:2])).sum(-1))
         return reward
+
+    def _reward_tracking_ang_vel(self):
+        if not getattr(getattr(self.cfg,'rewards',None),'dynamic_tracking_sigma_enabled',False):
+            return self._legacy_task_class._reward_tracking_ang_vel(self)
+        error = (self.commands[:,2]-self.simulator.base_ang_vel[:,2]).square()
+        return torch.exp(-error/self._dynamic_tracking_sigma(self.commands[:,2],angular=True))
 
     def locomotion_curriculum_performance(self):
         """Shared raw score: equal weight per environment/control step.
@@ -579,11 +683,7 @@ class Go2HardPACT(Go2PACT):
         self._command_curriculum_last_iteration = int(iteration)
         expanded = streak >= patience
         if expanded:
-            # Preserve legacy expansion increments and axis/max-cap semantics.
-            cap = self.cfg.commands.max_curriculum
-            for key in ("lin_vel_x","lin_vel_y","ang_vel_yaw"):
-                lo,hi = self.command_ranges[key]
-                self.command_ranges[key] = [max(-cap,min(0.,lo-.5)),min(cap,max(0.,hi+.5))]
+            self._expand_command_curriculum_ranges()
             streak = 0  # Require a new streak at the new command difficulty.
         self._command_curriculum_streak = streak
         self.command_curriculum_metrics = {"tracking_mean":score,"streak":streak,
@@ -1329,6 +1429,7 @@ class Go2HardPACT(Go2PACT):
             else self.simulator._robot.get_dofs_velocity()[:, :6]
         ).clone()
         self._legacy_task_class._post_physics_step_callback(self)
+        self._update_curriculum_heading_command()
         velocity_after = (
             root_velocity() if root_velocity is not None
             else self.simulator._robot.get_dofs_velocity()[:, :6]

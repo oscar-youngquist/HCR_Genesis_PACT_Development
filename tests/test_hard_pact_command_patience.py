@@ -95,3 +95,43 @@ def test_empty_nonfinite_and_cap(cls):
     for iteration in range(2, 8):
         finish(env, iteration, 1.0)
     assert env.command_ranges["lin_vel_x"] == [-2.0, 2.0]
+
+
+@pytest.mark.parametrize('patience',[0,1])
+@pytest.mark.parametrize('cls',[Go2HardPACT,Go2HardPACTPos])
+def test_independent_axis_caps_reset_and_iteration_modes(cls,patience):
+    env=make_env(cls,patience)
+    env.cfg.commands.max_curriculum_lin_vel_x=3.
+    env.cfg.commands.max_curriculum_lin_vel_y=.75
+    env.cfg.commands.max_curriculum_ang_vel_yaw=1.25
+    for i in range(8):
+        if patience: finish(env,i,1.)
+        else: env._update_command_curriculum(torch.arange(2))
+    assert env.command_ranges==dict(lin_vel_x=[-3.,3.],lin_vel_y=[-.75,.75],ang_vel_yaw=[-1.25,1.25])
+    restored=make_env(cls,patience)
+    restored.load_command_curriculum_state_dict(env.command_curriculum_state_dict())
+    assert restored.command_ranges==env.command_ranges
+
+
+def test_axis_cap_fallback_zero_and_validation():
+    env=make_env(Go2HardPACT,1)
+    env.cfg.commands.max_curriculum_lin_vel_x=None
+    env.cfg.commands.max_curriculum_lin_vel_y=0.
+    for i in range(5): finish(env,i,1.)
+    assert env.command_ranges['lin_vel_x']==[-2.,2.]
+    assert env.command_ranges['lin_vel_y']==[0.,0.]
+    assert env.command_ranges['ang_vel_yaw']==[-2.,2.]
+    env.cfg.commands.max_curriculum_lin_vel_x=float('nan')
+    with pytest.raises(ValueError,match='finite and nonnegative'): env._expand_command_curriculum_ranges()
+
+
+def test_heading_commands_use_current_yaw_curriculum_range():
+    env=make_env(Go2HardPACT)
+    env.cfg.commands.heading_command=True
+    env.cfg.commands.max_curriculum_ang_vel_yaw=1.5
+    env.command_ranges['ang_vel_yaw']=[-1.25,1.25]
+    env.commands=torch.tensor([[0.,0.,0.,3.],[0.,0.,0.,-3.]])
+    env.forward_vec=torch.tensor([[1.,0.,0.]]).expand(2,-1)
+    env.simulator.base_quat=torch.tensor([[0.,0.,0.,1.]]).expand(2,-1)
+    env._update_curriculum_heading_command()
+    torch.testing.assert_close(env.commands[:,2],torch.tensor([1.25,-1.25]))

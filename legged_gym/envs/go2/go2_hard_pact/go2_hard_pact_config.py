@@ -310,6 +310,16 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         base_height_target = 0.38
 
         tracking_sigma = 0.25
+        dynamic_tracking_sigma_enabled = True  # Master switch; False preserves legacy tracking rewards exactly.
+        wrench_tracking_sigma_enabled = True  # Within the master switch; applied persistent wrench only.
+        wrench_tracking_sigma_gain = 0.25  # Maximum fractional sigma increase; 0 disables.
+        # Wrench severity uses fixed final force/torque norm bounds; onset is
+        # derived from initial bounds, not the current curriculum/ramp values.
+        # Terrain order: slope, rough, stairs down/up, discrete, wave,
+        # stepping stones, gap, pit, platforms, platforms+gaps (last two reserved).
+        dynamic_sigma = dict(min_lin_vel=0.5, max_lin_vel=1.2,
+                             min_ang_vel=1.0, max_ang_vel=1.5,
+                             max_sigma=[1/4, 1/4, 1/2, 1/2, 3/4, 5/12, 1, 1, 1, 1, 1])
 
         foot_clearance_target = 0.09
         foot_height_offset = 0.022
@@ -446,6 +456,9 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         curriculum_threshold = 0.8  # raw linear-tracking mean, not weighted reward
         curriculum_patience_iterations = 50  # consecutive PPO rollouts; 0 = legacy reset-based updates
         max_curriculum = 1.2
+        max_curriculum_lin_vel_x = 1.25  # Symmetric curriculum cap [m/s]; None uses max_curriculum.
+        max_curriculum_lin_vel_y = 1.0  # Symmetric curriculum cap [m/s].
+        max_curriculum_ang_vel_yaw = 1.5  # Symmetric curriculum cap [rad/s].
         num_commands = 4
         resampling_time = 10.0
         heading_command = True
@@ -583,7 +596,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'fk_position_scale_m': 0.10,  # Body-relative XYZ normalization [m].
             'fk_deadband_m': 0.02,  # Per-coordinate zero-error band [m].
             
-            'lambda_load': 0.10,  # Full accepted QP candidate, FF-command path only.
+            'lambda_load': 1.00,  # Full accepted QP candidate, FF-command path only.
             'load_preferred_fraction': 0.80,  # Preferred share of compensation demand.
             'load_min_normalized_demand': 0.02,  # Ignore negligible stance-joint RMS demand.
             'load_allocation_regularization': 1e-6,  # Detached 6x6 contact allocation ridge.
