@@ -63,19 +63,41 @@ def compensation_demand(foot_jacobian, base_jacobian, wrench, reference_force, s
             &torch.isfinite(W).all(1)&torch.isfinite(f).flatten(1).all(1))
     J=torch.where(finite[:,None,None,None],J,0.)*stance[:,:,None,None]
     B=torch.where(finite[:,None,None],B,0.);W=torch.where(finite[:,None],W,0.)
+    f=torch.where(finite[:,None,None],f,0.)
     generalized=torch.einsum('bkn,bk->bn',B,W)
     C=J.flatten(1,2)[:,:,:6].transpose(1,2)
     scale=W.new_tensor([cfg.load_force_scale_n]*3+[cfg.load_moment_scale_nm]*3)
     Cn=C/scale[None,:,None]; rhs=-generalized[:,:6]/scale
-    gram=Cn@Cn.transpose(1,2)+cfg.load_allocation_regularization*torch.eye(6,device=W.device,dtype=W.dtype)
-    dual,info=torch.linalg.solve_ex(gram,rhs[...,None])
+    eye=torch.eye(6,device=W.device,dtype=W.dtype)
+    gram=Cn@Cn.transpose(1,2)+cfg.load_allocation_regularization*eye
+    # Finite inputs can still overflow during products/scaling. Invalid rows
+    # enter the factorization as I * 0, never NaN/Inf; they remain ineligible.
+    finite &= (torch.isfinite(generalized).all(-1)
+               &torch.isfinite(Cn).flatten(1).all(-1)
+               &torch.isfinite(gram).flatten(1).all(-1)
+               &torch.isfinite(rhs).all(-1))
+    gram=torch.where(finite[:,None,None],gram,eye)
+    rhs=torch.where(finite[:,None],rhs,0.)
+    Cn=torch.where(finite[:,None,None],Cn,0.)
+    # Cn Cn^T + ridge*I is SPD mathematically. Use its structure instead of
+    # batched LU (cublasSgetrfBatched). Reject numerical factorization failures
+    # without changing the ridge or silently accepting an approximate solve.
+    factor,info=torch.linalg.cholesky_ex(gram,check_errors=False)
+    solved=finite&(info==0)&torch.isfinite(factor).flatten(1).all(-1)
+    factor=torch.where(solved[:,None,None],factor,eye)
+    dual=torch.cholesky_solve(torch.where(solved[:,None],rhs,0.)[...,None],factor)
+    solved &= torch.isfinite(dual).flatten(1).all(-1)
+    dual=torch.where(solved[:,None,None],dual,0.)
     df=(Cn.transpose(1,2)@dual).squeeze(-1).reshape(-1,4,3)
     balance=(Cn@df.flatten(1)[...,None]).squeeze(-1)-rhs
-    balanced=balance.norm(dim=-1)<=cfg.load_balance_relative_tolerance*rhs.norm(dim=-1).clamp_min(cfg.load_epsilon)
+    balance_norm=balance.norm(dim=-1);rhs_norm=rhs.norm(dim=-1)
+    balanced=(torch.isfinite(balance_norm)&torch.isfinite(rhs_norm)
+              &(balance_norm<=cfg.load_balance_relative_tolerance*rhs_norm.clamp_min(cfg.load_epsilon)))
     total=torch.where(stance[...,None],f,0.)+df
     normal=total[:,:,2]
     cone=(normal>=0)&(total[:,:,:2].abs()<=mu*normal[...,None]+1e-6).all(-1)
-    feasible=((~stance)|cone).all(-1)&stance.any(-1)&balanced&finite&(info==0)
+    feasible=(((~stance)|cone).all(-1)&stance.any(-1)&balanced&solved
+              &torch.isfinite(total).flatten(1).all(-1))
     d=-(torch.einsum('bfkn,bfk->bn',J,df)+generalized)[:,6:]
     feasible &= torch.isfinite(d).all(-1)
     return torch.where(feasible[:,None],d,0.), feasible

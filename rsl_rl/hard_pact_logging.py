@@ -6,6 +6,51 @@ import torch
 from .hard_pact_ablations import resolve_hard_pact_features
 
 
+def active_hard_pact_losses(algorithm, iteration):
+    """Logging-only gates matching optimizer activation, not metric values."""
+    features = algorithm.hard_pact_features
+    pinn = algorithm.pinn_weight > 0
+    qp = algorithm.qp_enabled_at_iteration(iteration)
+    actor = algorithm.actor_physics_warmup_factor > 0
+    regularizers = algorithm.actor_regularizers
+    projection = actor and qp and features.projection_loss
+    return {
+        'inverse': pinn and algorithm.bard_inverse_enabled,
+        'rollout': pinn and algorithm.bard_rollout_enabled,
+        'soft_constraint': pinn and features.soft_constraint_penalty,
+        'projection_primary': projection and algorithm.lambda_projection > 0,
+        'projection_recovery': projection and algorithm.lambda_projection > 0
+            and algorithm.qp_config.soft_joint_recovery_enabled,
+        'velocity_xy': projection and algorithm.lambda_qp_velocity_xy > 0,
+        'velocity_yaw': projection and algorithm.lambda_qp_velocity_yaw > 0,
+        'fk': actor and regularizers.lambda_fk > 0,
+        'load': projection and regularizers.lambda_load > 0,
+    }
+
+
+def compact_hard_pact_metrics(algorithm, iteration):
+    """Only unique, actually available summaries; no NaN schema placeholders.
+
+    Episode/, Loss/, Values/, Perf/ and raw inverse/rollout metrics are written
+    elsewhere. Keep optional latent diagnostics and non-loss actor diagnostics.
+    """
+    active = active_hard_pact_losses(algorithm, iteration)
+    values = {}
+    for name, value in getattr(algorithm, 'last_physics_loss_metrics', {}).items():
+        if name.startswith('physics/timing/'):
+            if getattr(algorithm, 'profile_bard_timing', False):
+                values[name] = value
+        elif name.startswith('physics/loss/') and active.get(name.rsplit('/', 1)[-1], False):
+            values[name] = value
+    for name, value in getattr(algorithm, 'last_actor_regularizer_metrics', {}).items():
+        if not name.endswith('/loss') and active.get(name.split('/')[-2], False):
+            values[name] = value
+    values['physics/actor_loss_warmup_factor'] = algorithm.actor_physics_warmup_factor
+    if getattr(algorithm, 'ppo_latent_diagnostics_enabled', False):
+        values.update(collect_latent_diagnostics_scalars(algorithm.last_latent_diagnostics))
+    return values
+
+
 def log_hard_pact_policy_std(writer, std, iteration):
     """Current learned std in normalized action units; one scalar-batch transfer.
 

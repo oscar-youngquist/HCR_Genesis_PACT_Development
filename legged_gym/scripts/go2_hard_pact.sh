@@ -3,6 +3,7 @@
 set -eu
 
 usage() {
+    echo "Config-driven training: $0 --task go2_hard_pact_<genesis|isaacgym|isaaclab> [train arguments]" >&2
     echo "Usage: $0 --task go2_hard_pact_<variant>_<genesis|isaacgym|isaaclab> [train arguments] [--smoke]" >&2
     echo "       $0 --task go2_hard_pact_pos_<genesis|isaaclab> [train arguments] [--smoke]" >&2
     echo "Available HardPACT tasks: variants baseline soft hard full stopgrad soft_penalty inverse rollout" >&2

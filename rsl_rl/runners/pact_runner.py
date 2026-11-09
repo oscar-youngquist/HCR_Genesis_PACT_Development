@@ -54,7 +54,7 @@ from legged_gym.envs.go2.go2_hard_pact.deployment import (
     write_deployment_contract_once,
 )
 from legged_gym.envs.go2.go2_hard_pact.ablations import resolve_hard_pact_features
-from rsl_rl.hard_pact_logging import collect_hard_pact_scalars, log_hard_pact_policy_std
+from rsl_rl.hard_pact_logging import log_hard_pact_policy_std, active_hard_pact_losses, compact_hard_pact_metrics
 
 
 
@@ -562,6 +562,9 @@ class OnPolicyRunnerPACT:
         """Transfer only aggregated QP scalars to TensorBoard."""
         metrics = {}
         qp = getattr(self.alg, "hard_pact_qp", None)
+        if getattr(self, 'is_hard_pact', False) and not self.alg.qp_enabled_at_iteration(iteration):
+            self._last_qp_iteration_metrics = {}
+            return
         if qp is not None and not getattr(qp, "diagnostics_scheduled", True):
             return
         if qp is not None:
@@ -648,41 +651,21 @@ class OnPolicyRunnerPACT:
             metadata["backend_version"] = importlib_metadata.version(distribution)
         except importlib_metadata.PackageNotFoundError:
             metadata["backend_version"] = "unknown"
-        for key, value in metadata.items():
-            self.writer.add_text(f"system/{key}", str(value), 0)
-        self.writer.add_text(
-            "system/config", json.dumps(self.train_cfg, sort_keys=True, default=str), 0
-        )
+        # Provenance belongs beside the resolved config, not dozens of TB tabs.
+        metadata['features'] = self.hard_pact_features.scalar_flags()
+        metadata['config'] = self.train_cfg
+        with open(os.path.join(self.log_dir, 'hard_pact_run_metadata.json'), 'w') as stream:
+            json.dump(metadata, stream, indent=2, sort_keys=True, default=str)
 
     def _log_stable_hard_pact_metrics(self, locs):
         if not hasattr(self, "hard_pact_features"):
             return
-        metrics = collect_hard_pact_scalars(self.alg, self.hard_pact_features)
-        metrics = {key: value for key, value in metrics.items()
-                   if not key.startswith(("qp/minimal/", "qp/physical/", "qp/full/"))}
+        metrics = compact_hard_pact_metrics(self.alg, locs['it'])
         disturbance_count = getattr(self, "_rollout_disturbance_metric_count", 0)
         if disturbance_count:
             metrics["disturbance/persistent_active_fraction"] = (
                 self._rollout_disturbance_active_sum / disturbance_count
             )
-        simulator = self.env.simulator
-        for attr, key in (
-            ("domain_rand_joint_dynamics_progress", "domain_rand/joint_dynamics_progress"),
-            ("domain_rand_mass_com_progress", "domain_rand/mass_com_progress"),
-            ("domain_rand_disturbance_progress", "domain_rand/disturbance_progress"),
-        ):
-            if hasattr(simulator, attr):
-                value = getattr(simulator, attr)
-                metrics[key] = value.float().mean() if isinstance(
-                    value, torch.Tensor
-                ) and value.numel() != 1 else value
-        metrics["system/timesteps"] = float(self.tot_timesteps)
-        metrics["system/wall_time_s"] = float(self.tot_time)
-        metrics["system/iteration_time_s"] = float(
-            locs["collection_time"] + locs["learn_time"]
-        )
-        for name, enabled in self.hard_pact_features.scalar_flags().items():
-            metrics[f"system/features/{name}"] = enabled
         for name, value in metrics.items():
             self.writer.add_scalar(name, self._scalar(value), locs["it"])
 
@@ -707,10 +690,11 @@ class OnPolicyRunnerPACT:
                 stable_episode_values[key] = value
                 self.writer.add_scalar('Episode/' + key, value, locs['it'])
                 # Stable reward/tracking namespaces coexist with legacy keys.
-                stable_prefix = "tracking" if "tracking" in key else "reward"
-                self.writer.add_scalar(f"{stable_prefix}/{key}", value, locs['it'])
-                if "success" in key:
-                    self.writer.add_scalar("train/success", value, locs['it'])
+                if not self.is_hard_pact:
+                    stable_prefix = "tracking" if "tracking" in key else "reward"
+                    self.writer.add_scalar(f"{stable_prefix}/{key}", value, locs['it'])
+                    if "success" in key:
+                        self.writer.add_scalar("train/success", value, locs['it'])
                 if self.console_reward_terms:
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         # These keys never disappear when an episode boundary is absent.
@@ -721,11 +705,15 @@ class OnPolicyRunnerPACT:
             "tracking/terrain_level": ("terrain_level",),
         }
         for output_key, candidates in canonical_episode.items():
+            if self.is_hard_pact and not output_key.startswith("train/"):
+                continue
             value = next((stable_episode_values[name] for name in candidates
                           if name in stable_episode_values), float("nan"))
             self.writer.add_scalar(output_key, value, locs['it'])
         # Reward-scale names are configuration-stable across all variants.
         for reward_name in getattr(self.env, "reward_scales", {}):
+            if self.is_hard_pact:
+                continue
             episode_key = f"rew_{reward_name}"
             value = stable_episode_values.get(episode_key, float("nan"))
             self.writer.add_scalar(f"reward/{reward_name}", value, locs['it'])
@@ -741,15 +729,20 @@ class OnPolicyRunnerPACT:
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
-        self.writer.add_scalar('Loss/pinn_loss', locs['mean_pinn_loss'], locs['it'])
+        active = active_hard_pact_losses(self.alg, locs['it']) if self.is_hard_pact else {}
+        pinn_active = any(active.get(k, False) for k in ('inverse', 'rollout', 'soft_constraint'))
+        if not self.is_hard_pact or pinn_active:
+            self.writer.add_scalar('Loss/pinn_loss', locs['mean_pinn_loss'], locs['it'])
         for name, value in getattr(
             self.alg, "last_inverse_dynamics_metrics", {}
         ).items():
-            self.writer.add_scalar(name, value.item(), locs['it'])
+            if not self.is_hard_pact or active['inverse']:
+                self.writer.add_scalar(name, value.item(), locs['it'])
         for name, value in getattr(
             self.alg, "last_rollout_dynamics_metrics", {}
         ).items():
-            self.writer.add_scalar(name, value.item(), locs['it'])
+            if not self.is_hard_pact or active['rollout']:
+                self.writer.add_scalar(name, value.item(), locs['it'])
         for name, value in getattr(
             self.alg, "last_physics_gradient_metrics", {}
         ).items():
@@ -760,12 +753,19 @@ class OnPolicyRunnerPACT:
         self._log_qp_metrics(locs['it'])
         self._log_stable_hard_pact_metrics(locs)
         for name, value in getattr(self.alg, "last_auxiliary_metrics", {}).items():
+            if self.is_hard_pact and 'pinn' in name and not pinn_active:
+                continue
             self.writer.add_scalar(f"Loss/auxiliary_{name}", value.item(), locs['it'])
         if self.is_hard_pact:
             self.writer.add_scalar("Loss/vae_kl_effective_weight",self.alg.current_vae_beta,locs['it'])
             # One small scalar transfer per iteration; independent of the QP
             # diagnostics interval. No decoder/policy recomputation for logging.
             actor_losses = getattr(self.alg, "last_actor_loss_metrics", {})
+            actor_enabled = any(active.get(k, False) for k in ('projection_primary',
+                'projection_recovery', 'velocity_xy', 'velocity_yaw', 'fk', 'load'))
+            actor_losses = {k:v for k,v in actor_losses.items()
+                            if active.get(k.rsplit('/',1)[-1],
+                                actor_enabled and k.rsplit('/',1)[-1] in ('total_weighted','total_warmed'))}
             if actor_losses:
                 scalars = torch.stack(list(actor_losses.values())).detach().cpu().tolist()
                 for name, value in zip(actor_losses, scalars):
@@ -777,6 +777,10 @@ class OnPolicyRunnerPACT:
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
         self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
+        if self.is_hard_pact:
+            self.writer.add_scalar('Perf/iteration_time', iteration_time, locs['it'])
+            self.writer.add_scalar('Perf/total_time', self.tot_time, locs['it'])
+            self.writer.add_scalar('Perf/total_timesteps', self.tot_timesteps, locs['it'])
         
         if len(locs['rewbuffer']) > 0:
             self.writer.add_scalar('Train/mean_reward', statistics.mean(locs['rewbuffer']), locs['it'])

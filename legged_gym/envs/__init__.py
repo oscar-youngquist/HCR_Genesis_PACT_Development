@@ -118,7 +118,7 @@ from legged_gym.envs.go2.go2_hard_pact.ablations import (
     HARD_PACT_BACKENDS, HARD_PACT_VARIANTS,
 )
 from legged_gym.envs.go2.go2_hard_pact.ablation_configs import (
-    make_hard_pact_variant_configs, make_hard_pact_pos_backend_configs,
+    make_hard_pact_variant_configs, make_hard_pact_backend_configs, make_hard_pact_pos_backend_configs,
 )
 
 from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import GO2HardPACTPosCfg, GO2HardPACTPosCfgPPO
@@ -177,7 +177,8 @@ for _hard_variant in HARD_PACT_VARIANTS:
             Go2HardPACT, _env_cfg(), _ppo_cfg(),
         )
 for _hard_backend in HARD_PACT_BACKENDS:
-    _env_cfg, _ppo_cfg = make_hard_pact_variant_configs("full", _hard_backend)
+    # Normal backend tasks inherit editable config, unlike the explicit full ablation.
+    _env_cfg, _ppo_cfg = make_hard_pact_backend_configs(_hard_backend)
     task_registry.register(
         f"go2_hard_pact_{_hard_backend}",
         Go2HardPACT, _env_cfg(), _ppo_cfg(),

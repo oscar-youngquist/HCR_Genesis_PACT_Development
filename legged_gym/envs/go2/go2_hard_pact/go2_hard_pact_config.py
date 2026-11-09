@@ -348,7 +348,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             torque_rate_limits = 0.0  # Substep-mean squared excess / (rate*physics_dt)^2; 0 disables.
             pd_target_torque_limit = 0.0
 
-            alive_bonus = 0.001
+            alive_bonus = 0.1
 
             dof_vel_stand_still = 0.0
             stand_still_contact = 0.5
@@ -356,7 +356,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
 
             tracking_lin_vel = 1.0
             tracking_ang_vel = 0.50
-            dof_tracking = 0.40
+            dof_tracking = 0.10
 
             torque_conflict_symmetric = -0.0
             torque_alignment = 0.00
@@ -414,10 +414,10 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                 'orientation', 
                                 'torque_limits',
                                 'hip_pos',
-                                # 'pos_action_rate', 
-                                # 'pos_action_smoothness', 
-                                # 'tau_action_rate', 
-                                # 'tau_action_smoothness',
+                                'pos_action_rate', 
+                                'pos_action_smoothness', 
+                                'tau_action_rate', 
+                                'tau_action_smoothness',
                                 'dof_vel_limits',
                                 # 'dof_acc'
                                 ]
@@ -426,10 +426,10 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                   'orientation': [-0.2, -1.0], 
                                   'torque_limits': [-0.01, -1.0], 
                                   'hip_pos': [-0.2, -0.4], 
-                                #   'pos_action_rate': [-0.001, -0.01], 
-                                #   'pos_action_smoothness': [-0.001, -0.01], 
-                                #   'tau_action_rate': [-0.002, -0.02], 
-                                #   'tau_action_smoothness': [-0.002, -0.02],
+                                  'pos_action_rate': [-0.005, -0.01], 
+                                  'pos_action_smoothness': [-0.005, -0.01], 
+                                  'tau_action_rate': [-0.01, -0.02], 
+                                  'tau_action_smoothness': [-0.01, -0.02],
                                   'dof_vel_limits':[-0.1, -1.0],
                                 #   'dof_acc':[-2.5e-08, -2.5e-07]
                                   }
@@ -470,7 +470,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         activation = 'elu'
         # Normalized action std: hip/thigh/calf in FR, FL, RR, RL order,
         # repeated independently for position and feedforward outputs.
-        init_noise_std = [0.80, 1.00, 1.00] * 4 + [0.70, 0.90, 0.90] * 4
+        init_noise_std = [0.80, 1.00, 1.00] * 4 + [0.80, 0.90, 0.90] * 4
         min_noise_std = ([0.15, 0.25, 0.25] * 4) * 2
         max_noise_std = 1.10
 
@@ -553,7 +553,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         bard_batch_capacity = 4096
         # Independent PINN representation-loss switches for encoder/decoder updates.
         # False skips the corresponding loss; QP and supervised losses are unchanged.
-        # Named ablations (including full/backend aliases) override both switches.
+        # Named ablations (including explicit full) override both switches;
+        # normal go2_hard_pact_<backend> tasks inherit these settings unchanged.
         bard_inverse_enabled = False
         bard_rollout_enabled = False
 
@@ -608,7 +609,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             # Activation and rollout execution
             'enabled': True,                                 # Master QP switch; ablation gates still apply.
             'warmup_iterations': 500,                        # Absolute PPO iteration at which rollout/replay QPs become eligible.
-            'qp_update_mode': 'first_plus_random_substep',   # First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
+            'qp_update_mode': 'random_one_substep',   # First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
             'correction_ramp_enabled': True,                 # Blend accepted QP corrections into execution; full QP losses remain unchanged.
             'correction_ramp_start_offset': 500,             # Iterations after QP activation before the execution ramp starts.
             'correction_ramp_duration': 2000,                # Iterations to reach full correction; 0 applies full correction immediately.

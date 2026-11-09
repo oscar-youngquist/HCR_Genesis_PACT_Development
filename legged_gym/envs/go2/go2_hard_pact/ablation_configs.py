@@ -8,10 +8,15 @@ from legged_gym.envs.go2.go2_hard_pact_pos.go2_hard_pact_pos_config import (
 )
 
 
-def make_hard_pact_variant_configs(variant_id: str, backend: str):
-    """Create config subclasses which select metadata and no task logic."""
-    if variant_id not in HARD_PACT_VARIANTS:
+def make_hard_pact_variant_configs(variant_id: str | None, backend: str):
+    """Backend adaptation plus optional flag-only ablation, like B1Z1 PACT.
+
+    None retains the source configuration; named variants explicitly override
+    feature switches without copying task logic, architecture, or loss weights.
+    """
+    if variant_id is not None and variant_id not in HARD_PACT_VARIANTS:
         raise ValueError(variant_id)
+    features = resolve_hard_pact_features(variant_id) if variant_id is not None else None
 
     class EnvCfg(GO2HardPACTCfg):
         ablation_variant = variant_id
@@ -37,16 +42,23 @@ def make_hard_pact_variant_configs(variant_id: str, backend: str):
 
         class algorithm(GO2HardPACTCfgPPO.algorithm):
             ablation_variant = variant_id
-            bard_inverse_enabled = resolve_hard_pact_features(variant_id).inverse_loss
-            bard_rollout_enabled = resolve_hard_pact_features(variant_id).rollout_loss
+            if features is not None:
+                bard_inverse_enabled = features.inverse_loss
+                bard_rollout_enabled = features.rollout_loss
 
         class runner(GO2HardPACTCfgPPO.runner):
-            run_name = f"hard_pact_{variant_id}_{backend}"
+            run_name = f"hard_pact_{variant_id}_{backend}" if variant_id is not None else f"hard_pact_{backend}"
             task_backend = backend
 
-    EnvCfg.__name__ = f"GO2HardPACT{variant_id.title().replace('_', '')}{backend.title()}Cfg"
+    label = variant_id.title().replace('_', '') if variant_id is not None else ''
+    EnvCfg.__name__ = f"GO2HardPACT{label}{backend.title()}Cfg"
     PPOCfg.__name__ = EnvCfg.__name__ + "PPO"
     return EnvCfg, PPOCfg
+
+
+def make_hard_pact_backend_configs(backend: str):
+    """Normal training task: backend identity only, no ablation overrides."""
+    return make_hard_pact_variant_configs(None, backend)
 
 
 def make_hard_pact_pos_backend_configs(backend: str):

@@ -117,7 +117,30 @@ class HardPACTAblationTests(unittest.TestCase):
                 self.assertEqual(task_registry.train_cfgs[name].runner.task_backend, backend)
         for backend in HARD_PACT_BACKENDS:
             alias = f"go2_hard_pact_{backend}"
-            self.assertEqual(task_registry.env_cfgs[alias].ablation_variant, "full")
+            self.assertIsNone(task_registry.env_cfgs[alias].ablation_variant)
+            self.assertIsNone(task_registry.train_cfgs[alias].algorithm.ablation_variant)
+
+    def test_backend_base_configs_inherit_edits_and_resolved_actor_flags(self):
+        from unittest.mock import patch
+        from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCfgPPO
+        from legged_gym.envs.go2.go2_hard_pact.ablation_configs import make_hard_pact_backend_configs
+        for inverse in (False, True):
+            for rollout in (False, True):
+                with patch.object(GO2HardPACTCfgPPO.algorithm, 'bard_inverse_enabled', inverse), \
+                     patch.object(GO2HardPACTCfgPPO.algorithm, 'bard_rollout_enabled', rollout):
+                    for backend in HARD_PACT_BACKENDS:
+                        env, train = make_hard_pact_backend_configs(backend)
+                        alg = train.algorithm
+                        self.assertEqual((alg.bard_inverse_enabled, alg.bard_rollout_enabled), (inverse, rollout))
+                        self.assertNotIn('bard_inverse_enabled', vars(alg))
+                        self.assertNotIn('bard_rollout_enabled', vars(alg))
+                        features = resolve_hard_pact_features(alg.ablation_variant,
+                            inverse_enabled=alg.bard_inverse_enabled, rollout_enabled=alg.bard_rollout_enabled)
+                        self.assertEqual((features.inverse_loss, features.rollout_loss), (inverse, rollout))
+                        self.assertIs(resolve_hard_pact_features(features), features)
+                        if backend == 'isaaclab':
+                            self.assertEqual(env.terrain.mesh_type, 'trimesh')
+                            self.assertTrue(env.sim.use_pact_adapter)
 
     def test_isaaclab_configs_differ_only_by_ablation_selection(self):
         """All Isaac Lab experiments must be controlled ablations."""
@@ -333,6 +356,16 @@ class HardPACTAblationTests(unittest.TestCase):
             self.assertEqual(lines[0], "genesis_pact")
             self.assertEqual(lines[-5:], ["--task", "go2_hard_pact_full_genesis",
                                           "--seed", "19", "--num_envs=7"])
+            # Normal backend tasks use the same launcher, without selecting full.
+            for backend, simulator in (("genesis", "genesis_pact"),
+                                       ("isaaclab", "isaaclab"), ("isaacgym", "isaacgym")):
+                task = f"go2_hard_pact_{backend}"
+                result = subprocess.run([str(launcher), "--task", task, "--seed", "19"],
+                                        env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                lines = output.read_text().splitlines()
+                self.assertEqual(lines[0], simulator)
+                self.assertEqual(lines[-4:], ["--task", task, "--seed", "19"])
             bad = subprocess.run([str(launcher), "--task", "go2"], env=env,
                                  text=True, capture_output=True)
             self.assertEqual(bad.returncode, 2)

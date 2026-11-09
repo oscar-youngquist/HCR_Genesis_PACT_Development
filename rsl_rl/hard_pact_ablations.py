@@ -58,7 +58,8 @@ def resolve_hard_pact_features(value="full", *, inverse_enabled=True, rollout_en
     if configurable:
         value = "full"
     if isinstance(value, HardPACTAblationFeatures):
-        value = value.variant_id
+        # Already-resolved base-task flags must survive runner -> actor handoff.
+        return value
     elif isinstance(value, Mapping):
         value = value.get("variant_id", value.get("variant", "full"))
     elif not isinstance(value, str):
@@ -77,6 +78,8 @@ def resolve_hard_pact_features(value="full", *, inverse_enabled=True, rollout_en
 
 
 def hard_pact_task_names(include_aliases=True):
+    # Keep the historical argument name; unsuffixed backend tasks are now
+    # config-driven base tasks, not aliases that force the full ablation.
     names = [f"go2_hard_pact_{v}_{b}" for v in HARD_PACT_VARIANTS for b in HARD_PACT_BACKENDS]
     if include_aliases:
         names.extend(f"go2_hard_pact_{b}" for b in HARD_PACT_BACKENDS)

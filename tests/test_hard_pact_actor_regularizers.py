@@ -51,6 +51,57 @@ def test_load_hinge_nan_mask_and_gradients():
     assert empty.isfinite() and empty==0
 
 
+@pytest.mark.parametrize('device',['cpu',pytest.param('cuda',marks=pytest.mark.skipif(
+    not torch.cuda.is_available(),reason='CUDA unavailable'))])
+@pytest.mark.parametrize('dtype',[torch.float32,torch.float64])
+def test_compensation_checked_cholesky_matches_lu(device,dtype):
+    cfg=ActorRegularizerConfig()
+    J,B,W,f,stance=[x.to(device) for x in allocation_inputs()]
+    J,B,W,f=[x.to(dtype) for x in (J,B,W,f)]
+    C=J.flatten(1,2)[:,:,:6].transpose(1,2)
+    scale=W.new_tensor([cfg.load_force_scale_n]*3+[cfg.load_moment_scale_nm]*3)
+    C=C/scale[None,:,None]
+    g=torch.einsum('bkn,bk->bn',B,W)
+    gram=C@C.transpose(1,2)+cfg.load_allocation_regularization*torch.eye(6,device=device,dtype=dtype)
+    dual=torch.linalg.solve(gram,(-g[:,:6]/scale)[...,None])
+    df=(C.transpose(1,2)@dual).squeeze(-1).reshape(-1,4,3)
+    expected=-(torch.einsum('bfkn,bfk->bn',J,df)+g)[:,6:]
+    actual,valid=compensation_demand(J,B,W,f,stance,cfg,.6)
+    assert valid.all() and actual.isfinite().all()
+    torch.testing.assert_close(actual,expected,rtol=2e-6 if dtype==torch.float32 else 1e-12,atol=1e-7 if dtype==torch.float32 else 1e-12)
+
+
+@pytest.mark.parametrize('field,value',[(0,float('nan')),(1,float('inf')),
+    (2,float('nan')),(3,float('inf')),(0,1e30),(1,1e30)])
+def test_compensation_rejects_nonfinite_and_overflow_rows(field,value,monkeypatch):
+    cfg=ActorRegularizerConfig()
+    args=[x.float() if x.dtype!=torch.bool else x for x in allocation_inputs()]
+    expected,_=compensation_demand(*args,cfg,.6)
+    args[field][1]=value
+    if field==1 and value==1e30: args[2][1]=1e30
+    original=torch.linalg.cholesky_ex
+    def checked(matrix,**kwargs):
+        assert matrix.isfinite().all()
+        return original(matrix,**kwargs)
+    monkeypatch.setattr(torch.linalg,'cholesky_ex',checked)
+    actual,valid=compensation_demand(*args,cfg,.6)
+    assert valid.tolist()==[True,False,True]
+    assert actual.isfinite().all() and actual[1].eq(0).all()
+    torch.testing.assert_close(actual[[0,2]],expected[[0,2]])
+
+
+def test_compensation_rejects_failed_factor_without_poisoning_neighbors(monkeypatch):
+    original=torch.linalg.cholesky_ex
+    def failed(matrix,**kwargs):
+        factor,info=original(matrix,**kwargs)
+        factor[1]=float('nan');info[1]=1
+        return factor,info
+    monkeypatch.setattr(torch.linalg,'cholesky_ex',failed)
+    demand,valid=compensation_demand(*allocation_inputs(),ActorRegularizerConfig(),.6)
+    assert valid.tolist()==[True,False,True]
+    assert demand.isfinite().all() and demand[1].eq(0).all()
+
+
 def test_fk_masks_deadband_and_target_detachment():
     p=torch.ones(2,4,3,requires_grad=True);target=torch.zeros_like(p,requires_grad=True)
     with torch.no_grad(): target[1]=float('nan')
