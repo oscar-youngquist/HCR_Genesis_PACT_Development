@@ -772,6 +772,11 @@ class OnPolicyRunnerPACT:
                     self.writer.add_scalar(name, value, locs['it'])
         if self.is_hard_pact:
             log_hard_pact_policy_std(self.writer, self.alg.actor_critic.std, locs['it'])
+            usage = getattr(self.alg, 'last_action_channel_usage', {})
+            if usage:
+                scalars = torch.stack(list(usage.values())).detach().cpu().tolist()
+                for name, value in zip(usage, scalars):
+                    self.writer.add_scalar(name, value, locs['it'])
         else:
             self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])

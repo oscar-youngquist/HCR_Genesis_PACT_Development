@@ -221,6 +221,10 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         pos = [2, 2, 2]
         lookat = [0.0, 0, 1.0]
         rendered_envs_idx = [i for i in range(0, 3, 1)]
+        rendered_envs_count = 250  # Isaac Lab random startup subset; None uses rendered_envs_idx.
+        rendered_envs_seed = 0     # Independent display RNG; None chooses a fresh subset each launch.
+        # Isaac Lab: None shows all robots; [] hides all (physics stays active).
+        debug_vis = False  # Isaac Lab contact markers; True shows markers for all sensed robots.
         add_camera = False
 
     class sensor:

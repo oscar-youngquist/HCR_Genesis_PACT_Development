@@ -232,6 +232,12 @@ class IsaacLabSimulator(Simulator):
             self._terrain_y_range[0] = -self._cfg.terrain.plane_length/2+1
             self._terrain_y_range[1] = self._cfg.terrain.plane_length/2-1
         
+    def _configure_viewer_visuals(self):
+        """Subclass hook; legacy tasks retain visibility of all robots."""
+
+    def _contact_sensor_debug_vis(self):
+        return not self._headless
+
     def _create_envs(self):
         """ Creates environments, adds the robot asset to each environment, sets DOF properties and calls callbacks to process rigid shape, rigid body and DOF properties.
         """
@@ -305,6 +311,7 @@ class IsaacLabSimulator(Simulator):
                            replicate_physics=True,
                            base_env_path=f"/World/envs",
                            enable_env_ids=True)
+        self._configure_viewer_visuals()
         
         # Add contact sensors
         contact_sensor_cfg = ContactSensorCfg(
@@ -312,7 +319,7 @@ class IsaacLabSimulator(Simulator):
             update_period=self._contact_sensor_update_period(),
             history_length=self._contact_sensor_history_length(),
             **self._contact_sensor_options(),
-            debug_vis=not self._headless,           # visualize contact points if not headless
+            debug_vis=self._contact_sensor_debug_vis(),
         )
         
         self._contact_sensors = ContactSensor(contact_sensor_cfg)

@@ -317,6 +317,9 @@ class PPO_HardPACT:
                  explicit_loss_weight=1.0,
                  contact_probability_loss_weight=1.0,
                  ppo_latent_diagnostics_enabled=False,
+                 action_channel_usage_enabled=False,
+                 action_channel_usage_interval=100,
+                 action_channel_usage_sample_count=256,
                  ppo_latent_diagnostics_interval=100,
                  ppo_latent_diagnostics_sample_count=256,
                  latent_active_unit_variance_threshold=1.0e-2,
@@ -387,6 +390,12 @@ class PPO_HardPACT:
                 "contact_probability_loss_weight must be nonnegative"
             )
         self.ppo_latent_diagnostics_enabled = bool(ppo_latent_diagnostics_enabled)
+        self.action_channel_usage_enabled = bool(action_channel_usage_enabled)
+        self.action_channel_usage_interval = int(action_channel_usage_interval)
+        self.action_channel_usage_sample_count = int(action_channel_usage_sample_count)
+        if self.action_channel_usage_interval <= 0 or self.action_channel_usage_sample_count <= 0:
+            raise ValueError('Action channel usage interval and sample count must be positive')
+        self.last_action_channel_usage = {}
         self.ppo_latent_diagnostics_interval = int(ppo_latent_diagnostics_interval)
         self.ppo_latent_diagnostics_sample_count = int(ppo_latent_diagnostics_sample_count)
         self.latent_active_unit_variance_threshold = float(latent_active_unit_variance_threshold)
@@ -1091,6 +1100,13 @@ class PPO_HardPACT:
         return self.pinn_weight
 
     def update(self, action_func, fb_func, dt, itr, default_pose, qvel_scale):
+        self.last_action_channel_usage = {}
+        action_usage = None
+        if (self.action_channel_usage_enabled
+                and itr % self.action_channel_usage_interval == 0 and self.storage.step > 0):
+            from .hard_pact_action_channel_diagnostics import ActionChannelUsage
+            action_usage = ActionChannelUsage(self.actor_critic, self.storage,
+                action_func, self.action_clip, self.action_channel_usage_sample_count)
         cfg=self.actor_regularizers
         self._actor_regularizer_diagnostics_due = (
             (cfg.lambda_fk > 0 or cfg.lambda_load > 0)
@@ -1661,6 +1677,8 @@ class PPO_HardPACT:
             print("Use bootstrapped Encoder Dynamics: ", self.use_boot)
 
         self._clear_rollout_mechanics_cache()
+        if action_usage is not None:
+            self.last_action_channel_usage = action_usage.finish(self.actor_critic)
         self.storage.clear()
         # Periodic checkpoints must resume at the next uncollected iteration,
         # not restart a configured QP warmup from an old runner counter.

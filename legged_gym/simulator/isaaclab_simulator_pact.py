@@ -15,6 +15,17 @@ from legged_gym.simulator.isaaclab_simulator import IsaacLabSimulator
 class IsaacLabSimulator_PACT(IsaacLabSimulator):
     """Thin Isaac Lab backend adapter for the shared PACT task logic."""
 
+    def _configure_viewer_visuals(self):
+        from legged_gym.simulator.isaaclab_viewer import configure_robot_visibility, select_rendered_envs
+        self._rendered_envs_idx = select_rendered_envs(self._cfg.viewer, self._num_envs)
+        configure_robot_visibility(self._stage, self._num_envs, self._cfg.asset.name,
+            self._rendered_envs_idx)
+
+    def _contact_sensor_debug_vis(self):
+        # Contact markers are global sensor debug geometry, not robot children.
+        # Explicitly disable them independently of robot USD visibility.
+        return not self._headless and bool(getattr(self._cfg.viewer, "debug_vis", True))
+
     def __init__(self, cfg, sim_params: dict, device, headless):
         self.first_loop = True
         self.first_loop_feedback = None

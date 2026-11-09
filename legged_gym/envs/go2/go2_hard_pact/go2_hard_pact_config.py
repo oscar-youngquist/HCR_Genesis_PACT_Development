@@ -232,6 +232,10 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         pos = [0.5, 1.5, 0.5]
         lookat = [0.0, 0, 0.0]
         rendered_envs_idx = [i for i in range(0, 3, 1)]
+        rendered_envs_count = 250  # Isaac Lab random startup subset; None uses rendered_envs_idx.
+        rendered_envs_seed = 0     # Independent display RNG; None chooses a fresh subset each launch.
+        # Isaac Lab: None shows all robots; [] hides all (physics stays active).
+        debug_vis = False  # Isaac Lab contact markers; True shows markers for all sensed robots.
         add_camera = False
 
     class sensor:
@@ -414,10 +418,10 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                 'orientation', 
                                 'torque_limits',
                                 'hip_pos',
-                                'pos_action_rate', 
-                                'pos_action_smoothness', 
-                                'tau_action_rate', 
-                                'tau_action_smoothness',
+                                # 'pos_action_rate', 
+                                # 'pos_action_smoothness', 
+                                # 'tau_action_rate', 
+                                # 'tau_action_smoothness',
                                 'dof_vel_limits',
                                 # 'dof_acc'
                                 ]
@@ -426,10 +430,10 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                   'orientation': [-0.2, -1.0], 
                                   'torque_limits': [-0.01, -1.0], 
                                   'hip_pos': [-0.2, -0.4], 
-                                  'pos_action_rate': [-0.005, -0.01], 
-                                  'pos_action_smoothness': [-0.005, -0.01], 
-                                  'tau_action_rate': [-0.01, -0.02], 
-                                  'tau_action_smoothness': [-0.01, -0.02],
+                                #   'pos_action_rate': [-0.005, -0.01], 
+                                #   'pos_action_smoothness': [-0.005, -0.01], 
+                                #   'tau_action_rate': [-0.01, -0.02], 
+                                #   'tau_action_smoothness': [-0.01, -0.02],
                                   'dof_vel_limits':[-0.1, -1.0],
                                 #   'dof_acc':[-2.5e-08, -2.5e-07]
                                   }
@@ -470,7 +474,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         activation = 'elu'
         # Normalized action std: hip/thigh/calf in FR, FL, RR, RL order,
         # repeated independently for position and feedforward outputs.
-        init_noise_std = [0.80, 1.00, 1.00] * 4 + [0.80, 0.90, 0.90] * 4
+        init_noise_std = [0.80, 1.00, 1.00] * 4 + [0.40, 0.45, 0.45] * 4
         min_noise_std = ([0.15, 0.25, 0.25] * 4) * 2
         max_noise_std = 1.10
 
@@ -536,8 +540,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         # Opt-in policy recomputation/latent ablations; basic KL/loss logging
         # remains available without these diagnostic-only forward passes.
-        ppo_latent_diagnostics_enabled = False
-        ppo_latent_diagnostics_interval = 100
+        ppo_latent_diagnostics_enabled = True
+        action_channel_usage_enabled = True  # Physical mean-FF usage; no extra forwards when disabled.
+        action_channel_usage_interval = 10   # Compare before/after complete updates at this cadence.
+        action_channel_usage_sample_count = 256  # Fixed bounded rollout sample; deterministic latent mean.
+        ppo_latent_diagnostics_interval = 10
         ppo_latent_diagnostics_sample_count = 256
         latent_active_unit_variance_threshold = 1e-2
 
@@ -563,7 +570,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         lambda_projection = 0.25
         # Cosine 0->1 from QP activation, in absolute PPO iterations; 0 disables.
         # Scales actor projection/velocity/FK/load losses, not encoder/decoder PINNs.
-        actor_physics_warmup_iterations = 4000
+        actor_physics_warmup_iterations = 200
         lambda_qp_velocity_xy = 1.0  # inherit lambda_projection; 0 disables
         lambda_qp_velocity_yaw = 1.0  # independent nonnegative override
 
@@ -576,8 +583,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'fk_position_scale_m': 0.10,  # Body-relative XYZ normalization [m].
             'fk_deadband_m': 0.02,  # Per-coordinate zero-error band [m].
             
-            'lambda_load': 0.05,  # Full accepted QP candidate, FF-command path only.
-            'load_preferred_fraction': 0.75,  # Preferred share of compensation demand.
+            'lambda_load': 0.10,  # Full accepted QP candidate, FF-command path only.
+            'load_preferred_fraction': 0.80,  # Preferred share of compensation demand.
             'load_min_normalized_demand': 0.02,  # Ignore negligible stance-joint RMS demand.
             'load_allocation_regularization': 1e-6,  # Detached 6x6 contact allocation ridge.
             'load_balance_relative_tolerance': 0.05,  # Floating-base balance residual tolerance.
@@ -608,11 +615,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         hard_pact_qp = {
             # Activation and rollout execution
             'enabled': True,                                 # Master QP switch; ablation gates still apply.
-            'warmup_iterations': 500,                        # Absolute PPO iteration at which rollout/replay QPs become eligible.
-            'qp_update_mode': 'random_one_substep',   # First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
+            'warmup_iterations': 0,                        # Absolute PPO iteration at which rollout/replay QPs become eligible.
+            'qp_update_mode': 'first_plus_random_substep',   # first_plus_random_substep - First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
             'correction_ramp_enabled': True,                 # Blend accepted QP corrections into execution; full QP losses remain unchanged.
-            'correction_ramp_start_offset': 500,             # Iterations after QP activation before the execution ramp starts.
-            'correction_ramp_duration': 2000,                # Iterations to reach full correction; 0 applies full correction immediately.
+            'correction_ramp_start_offset': 0,             # Iterations after QP activation before the execution ramp starts.
+            'correction_ramp_duration': 100,                # Iterations to reach full correction; 0 applies full correction immediately.
 
             # Physical constraints and prediction convention
             'friction_coefficient': 0.6,                     # Friction-pyramid mu: abs(Fx), abs(Fy) <= mu*Fz for stance feet.
