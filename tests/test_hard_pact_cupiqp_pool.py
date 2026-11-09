@@ -46,13 +46,13 @@ def test_disabled_profiling_does_not_create_events_or_synchronize():
 def test_final_stages_counts_and_fraction_partition_invariance():
     qp = make_qp()
     data = qp_data(4)
-    data["joint_velocity"][2:] = 1e6  # Empty acceleration intersection: analytic fallback.
+    data["joint_velocity"][2:] = 1e6  # Dynamically infeasible: analytic fallback (no independent acceleration cap).
     result = qp.solve(differentiable=True, diagnostics_phase="ppo", **data)
     metrics = qp.iteration_metrics("ppo", data["tau_nom"])
     for name in ("full", "analytic"):
         assert metrics[f"qp/ppo/final/{name}_count"] == 2
         assert metrics[f"qp/ppo/final/{name}_fraction"] == 0.5
-    assert metrics["qp/ppo/attempt/full_count"] == 2
+    assert metrics["qp/ppo/attempt/full_count"] == 4
     assert metrics["qp/ppo/differentiated_fraction"] == .5
     assert metrics["qp/ppo/selected/equality_max"] == 0
     assert torch.isnan(metrics["qp/ppo/backend/solver_iterations_mean"])

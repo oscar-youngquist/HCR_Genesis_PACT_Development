@@ -284,6 +284,10 @@ class OnPolicyRunnerPACT:
 
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
+        if self.is_hard_pact:
+            self.env._cache_qp_replay_mechanics = bool(
+                self.alg.qp_config.cache_rollout_qp_mechanics
+                and self.alg.hard_pact_features.projection_metric)
         # initialize writer
         if self.log_dir is not None and self.writer is None:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
@@ -971,6 +975,8 @@ class OnPolicyRunnerPACT:
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):
+        if self.is_hard_pact:
+            self.env._cache_qp_replay_mechanics = False
         self.alg.actor_critic.eval() # switch to evaluation mode (dropout for example)
         if device is not None:
             self.alg.actor_critic.to(device)

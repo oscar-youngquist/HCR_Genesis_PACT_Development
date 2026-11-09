@@ -1114,6 +1114,9 @@ class Go2HardPACT(Go2PACT):
                 local = (self._qp_sampled_substep_index[rows].long()==self._qp_substep).nonzero(as_tuple=True)[0]
                 dest = rows[local]
                 sample = self._qp_sampled_transition
+                if getattr(self, '_cache_qp_replay_mechanics', False):
+                    from rsl_rl.algorithms.hard_pact_qp_mechanics_cache import copy_mechanics
+                    copy_mechanics(sample, context, dest, local)
                 fields = {
                     "sampled_qp_q":q,"sampled_qp_v":v,
                     "sampled_qp_previous_torque":previous[rows],
@@ -1246,8 +1249,7 @@ class Go2HardPACT(Go2PACT):
         self._qp_grf_conditioning_torque = shape(12)
         self._qp_control_grf = shape(12).reshape(-1,4,3)
         self._qp_control_wrench = shape(6)
-        # Preallocate exactly one compact sampled row per env. Dynamics/QP
-        # matrices are intentionally absent and reconstructed during PPO.
+        # Exactly one preselected replay row per env; never solver-success selected.
         self._qp_sampled_transition = {
             # Which k generated every stored field below.
             "sampled_qp_substep_index": self._qp_sampled_substep_index[:, None],
@@ -1282,6 +1284,18 @@ class Go2HardPACT(Go2PACT):
             "sampled_qp_residuals": shape(4),
 
         }
+
+        if getattr(self, '_cache_qp_replay_mechanics', False):
+            from rsl_rl.algorithms.hard_pact_qp_mechanics_cache import allocate_mechanics, PREFIX
+            cache = getattr(self, '_qp_replay_mechanics_buffers', None)
+            reference = self._qp_sampled_transition['sampled_qp_q']
+            if (cache is None or cache[PREFIX+'bias'].shape[0] != self.num_envs
+                    or cache[PREFIX+'bias'].device != reference.device
+                    or cache[PREFIX+'bias'].dtype != reference.dtype):
+                cache = allocate_mechanics(self.num_envs, reference)
+                self._qp_replay_mechanics_buffers = cache
+            cache[PREFIX+'valid'].zero_()
+            self._qp_sampled_transition.update(cache)
 
         if self._hard_pact_rollout_qp.velocity_tracking_inputs_required():
             self._qp_sampled_transition["sampled_qp_velocity_command"] = shape(3)

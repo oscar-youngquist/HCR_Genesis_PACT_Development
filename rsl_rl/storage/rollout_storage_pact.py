@@ -275,6 +275,11 @@ class RolloutStoragePACT:
                         *value.shape[1:], device=self.device, dtype=value.dtype,
                     )
                 self.hard_pact_fields[name][self.step].copy_(value)
+            # A disabled/warmup interval must not reuse a previous rollout's
+            # cache-valid bit when optional fields are absent from this packet.
+            cache_valid = 'sampled_qp_mechanics_valid'
+            if cache_valid in self.hard_pact_fields and cache_valid not in hard_pact:
+                self.hard_pact_fields[cache_valid][self.step].zero_()
         
         self._save_hidden_states(transition.hidden_states)
         self.step += 1

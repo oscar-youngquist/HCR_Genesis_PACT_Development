@@ -317,6 +317,7 @@ class CuPIQPFunction(torch.autograd.Function):
             capacity = solver_capacity(real_rows,config.chunk_size or config.ppo_chunk_size)
             Q,p,G,h,A,b,x_l,x_u = tuple(pad_solver_rows(v,capacity) for v in (Q,p,G,h,A,b,x_l,x_u))
         ctx.real_rows, ctx.capacity = real_rows, capacity
+        ctx.selective_backward_copy = getattr(config, 'cupiqp_selective_backward_copy', True)
         phase = backend.diagnostics_phase
         profile = backend.profiles[phase]
         def factory():
@@ -401,10 +402,11 @@ class CuPIQPFunction(torch.autograd.Function):
                     )
                     # Each VJP must own its output: PCGrad can retain these
                     # while another backward overwrites cuPIQP's scratch space.
-                    mapped = tuple(_as_torch_zero_copy(value, ref)[:ctx.real_rows].clone() for value, ref in zip(
-                        (gradients.P, gradients.c, gradients.G, gradients.h_u, gradients.A, gradients.b),
-                        (Q, p, G, h, A, b),
-                    ))
+                    mapped = tuple(
+                        _as_torch_zero_copy(getattr(gradients,name), ref)[:ctx.real_rows].clone()
+                        if (not ctx.selective_backward_copy or ctx.needs_input_grad[i]) else None
+                        for i,(name,ref) in enumerate(zip(
+                            ('P','c','G','h_u','A','b'), (Q,p,G,h,A,b))))
             except Exception:
                 ctx.lease.healthy = False
                 raise

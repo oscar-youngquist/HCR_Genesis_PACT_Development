@@ -25,7 +25,8 @@ def test_interval_counts_and_maxima_survive_unscheduled_iterations():
     m=qp.iteration_metrics('rollout',d['tau_nom'])
     assert m['qp/rollout/real_rows']==6
     assert m['qp/rollout/reporting_iterations']==3
-    assert m['qp/rollout/health/primary/accepted/torque_abs_nm/max']>2.9
+    assert m['qp/rollout/sampled_health/primary/accepted/torque_abs_nm/max']>2.9
+    assert m['qp/rollout/sampled_health/primary/accepted/rows']==2
     qp.begin_iteration_diagnostics('rollout');qp.solve(**d)
     assert qp.iteration_metrics('rollout',d['tau_nom'])['qp/rollout/real_rows']==2
 
@@ -46,7 +47,8 @@ def test_compact_logging_forward_and_gradient_parity():
     for x,y in zip(a[1],b[1]):torch.testing.assert_close(x,y,rtol=0,atol=0)
 
 
-def test_recovery_capacity_padding_vjp_and_exclusive_lease(monkeypatch):
+@pytest.mark.parametrize('selective',[False,True])
+def test_recovery_capacity_padding_vjp_and_exclusive_lease(monkeypatch,selective):
     """CPU API double: exercise actual custom Function and graph lifetime."""
     import gc, sys
     from contextlib import nullcontext
@@ -72,8 +74,10 @@ def test_recovery_capacity_padding_vjp_and_exclusive_lease(monkeypatch):
     monkeypatch.setattr(backend_module,'_cupiqp_dtype',lambda dtype:dtype)
     monkeypatch.setattr(backend_module,'_configure_cupiqp',lambda *a,**k:None)
     monkeypatch.setattr(backend_module,'_as_cupy_zero_copy',lambda x:x)
-    monkeypatch.setattr(backend_module,'_as_torch_zero_copy',lambda x,ref:x)
-    cfg=HardPACTQPConfig(cupiqp_ppo_pool_size=1)
+    converted=[]
+    def convert(x,ref): converted.append(x);return x
+    monkeypatch.setattr(backend_module,'_as_torch_zero_copy',convert)
+    cfg=HardPACTQPConfig(cupiqp_ppo_pool_size=1,cupiqp_selective_backward_copy=selective)
     backend=backend_module.SolverBackend('cupiqp',cfg)
     def forward(rows):
         p=torch.ones(rows,48,requires_grad=True)
@@ -83,7 +87,9 @@ def test_recovery_capacity_padding_vjp_and_exclusive_lease(monkeypatch):
         return x,p
     x,p=forward(3)
     for _ in range(2):
+        converted.clear()
         g=torch.autograd.grad(x.sum(),p,retain_graph=True)[0]
+        assert len(converted)==(1 if selective else 6)
         assert g.eq(-1).all() and gradients[-1].shape==(4,48)
         assert gradients[-1][3].eq(0).all()
     assert not backend._ppo_pool.idle

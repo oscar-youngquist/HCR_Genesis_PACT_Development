@@ -1024,12 +1024,23 @@ class PPO_HardPACT:
             # The deployed projection has no access to realized randomization.
             # Empty parameters mean nominal URDF inertia and zero passive
             # deltas in both BARD and Pinocchio adapters.
-            self._rollout_deployment_qp_mechanics = (
-                self._materialize_mechanics_cache(
-                    kind="deployment", q=sample_q, v=sample_v,
-                    parameters={}, need_qp=True,
-                )
-            )
+            self._rollout_deployment_qp_mechanics = self._deployment_replay_mechanics(sample_q, sample_v, flat)
+
+    def _deployment_replay_mechanics(self, q, v, fields):
+        from .hard_pact_qp_mechanics_cache import read_mechanics
+        cached = (read_mechanics(fields, q) if getattr(getattr(self,'qp_config',None),
+                  'cache_rollout_qp_mechanics',True) else None)
+        if cached is None:
+            return self._materialize_mechanics_cache(kind='deployment', q=q, v=v,
+                parameters={}, need_qp=True)
+        values, valid = cached
+        missing = (~valid).nonzero(as_tuple=True)[0]
+        if missing.numel():
+            fresh = self._materialize_mechanics_cache(kind='deployment', q=q[missing], v=v[missing],
+                parameters={}, need_qp=True)
+            # Do not overwrite the rollout storage or its other minibatch views.
+            values = {k: value.index_copy(0,missing,getattr(fresh,k)) for k,value in values.items()}
+        return _DetachedMechanicsCache(kind='deployment', **values)
 
     def _clear_rollout_mechanics_cache(self):
         self._rollout_actual_mechanics = None
@@ -2806,10 +2817,7 @@ class PPO_HardPACT:
             ), dim=-1)
             flat_indices = (self.storage.current_batch_indices if transition_indices is None else transition_indices)[qp_rows]
             if self._rollout_deployment_qp_mechanics is None:
-                sampled_mechanics = self._materialize_mechanics_cache(
-                    kind="deployment", q=sample_q, v=sample_v,
-                    parameters={}, need_qp=True,
-                )
+                sampled_mechanics = self._deployment_replay_mechanics(sample_q, sample_v, qp_batch)
             else:
                 sampled_mechanics = (
                     self._rollout_deployment_qp_mechanics.index(flat_indices)

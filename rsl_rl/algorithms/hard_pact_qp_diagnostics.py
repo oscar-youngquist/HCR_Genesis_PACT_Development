@@ -57,13 +57,15 @@ class QPIterationDiagnostics:
         self.sums[key] = self.sums.get(key, 0) + value
 
     @torch.no_grad()
-    def compact_candidate(self, stage, m, x, data, accepted, qmin, qmax, vmax, beta):
-        """Interval-wide real-row summaries, no percentiles/per-joint expansion.
+    def compact_candidate(self, stage, m, x, data, accepted, qmin, qmax, vmax, beta, acceleration=None):
+        """Scheduled real-row summaries, no percentiles/per-joint expansion.
 
         These are post-projection MODEL predictions, not measured guarantees.
-        Maxima and finite coordinate counts cover every attempted candidate.
+        Maxima cover sampled iterations ONLY. All-attempt outcome counts are
+        accumulated separately by add_result, including unsampled iterations.
         """
-        a = (m.acceleration_map.detach() @ x.detach()[...,None]).squeeze(-1)+m.acceleration_offset.detach()
+        a = (acceleration.detach() if acceleration is not None else
+             (m.acceleration_map.detach() @ x.detach()[...,None]).squeeze(-1)+m.acceleration_offset.detach())
         q,v,dt = data["joint_position"].detach(),data["joint_velocity"].detach(),data["dt"].detach().reshape(-1,1)
         torque=x.detach()[:,:12]
         values={"torque_abs_nm":torque.abs(),
@@ -77,7 +79,7 @@ class QPIterationDiagnostics:
             values.update(rate_slack_nm=x.detach()[:,36:48])
         finite=torch.isfinite(x).all(-1)&torch.isfinite(a).all(-1)
         for status,rows in (("accepted",accepted),("rejected",~accepted)):
-            prefix=f"health/{stage}/{status}"
+            prefix=f"sampled_health/{stage}/{status}"
             self.add_sum(prefix+"/rows",rows.sum())
             self.add_sum(prefix+"/nonfinite_rows",(rows&~finite).sum())
             for name,value in values.items():

@@ -542,9 +542,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         # remains available without these diagnostic-only forward passes.
         ppo_latent_diagnostics_enabled = True
         action_channel_usage_enabled = True  # Physical mean-FF usage; no extra forwards when disabled.
-        action_channel_usage_interval = 10   # Compare before/after complete updates at this cadence.
+        action_channel_usage_interval = 100   # Compare before/after complete updates at this cadence.
         action_channel_usage_sample_count = 256  # Fixed bounded rollout sample; deterministic latent mean.
-        ppo_latent_diagnostics_interval = 10
+        ppo_latent_diagnostics_interval = 100
         ppo_latent_diagnostics_sample_count = 256
         latent_active_unit_variance_threshold = 1e-2
 
@@ -702,6 +702,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'cupiqp_ppo_reuse': True,                        # Reuse exclusively leased PPO solvers; False uses fresh instances.
             'cupiqp_ppo_capacity_reuse': True,               # Capacity-bucket reuse for PPO recovery batches, with padded rows excluded.
             'cupiqp_ppo_pool_size': 8,                       # Bounded PPO solver pool; outstanding autograd leases are not evicted.
+            'cache_rollout_qp_mechanics': True,              # Own the selected rollout anchor's nominal mechanics for PPO reuse.
+            'scheduled_compact_diagnostics': True,          # Physical health summaries sample diagnostic iterations; outcome counts remain continuous.
+            'cupiqp_selective_backward_copy': True,         # Clone only requested implicit gradients; False is the copy-all reference.
             'rollout_chunk_size': 4096,                      # Maximum rows per rollout solver chunk.
             'ppo_chunk_size': 8000,                          # Maximum rows per differentiable PPO solver chunk.
 

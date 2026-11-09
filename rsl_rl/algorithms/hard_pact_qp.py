@@ -134,6 +134,9 @@ class HardPACTQPConfig:
     cupiqp_ppo_reuse: bool = True
     cupiqp_ppo_capacity_reuse: bool = True  # Recovery only; primary batch semantics unchanged.
     cupiqp_ppo_pool_size: int = 8
+    cupiqp_selective_backward_copy: bool = True
+    cache_rollout_qp_mechanics: bool = True
+    scheduled_compact_diagnostics: bool = True
     cuda_event_profiling: bool = False
     # Independent numerical policies. ``None`` preserves the legacy scalar
     # setting, while the defaults below encode the measured training intent:
@@ -616,8 +619,13 @@ class HardPACTDifferentiableQP:
         return self.cfg.diagnostics_level
 
     def _physical_enabled(self):
-        return (self.diagnostics_level in ("physical", "full")
+        return (self.cfg.tensorboard_diagnostics_enabled and self.diagnostics_level in ("physical", "full")
                 and getattr(self, "diagnostics_scheduled", True))
+
+    def _compact_diagnostics_enabled(self):
+        return self.cfg.tensorboard_diagnostics_enabled and (
+            not self.cfg.scheduled_compact_diagnostics
+            or getattr(self, 'diagnostics_scheduled', True))
 
     def _solve_dtype(self, reference):
         """Resolve auto precision from the live learned input's device."""
@@ -1207,7 +1215,7 @@ class HardPACTDifferentiableQP:
         require_backend(self._active_solver,device=reference.device,dtype=dtype)
         self._solve_count += 1
         audit_remaining = (self._full_audit_sample_size(self.cfg)
-            if self.diagnostics_level=="full" and getattr(self,"diagnostics_scheduled",True) and self._full_audit_period(self.cfg)>0
+            if self._physical_enabled() and self.diagnostics_level=="full" and self._full_audit_period(self.cfg)>0
             and self._solve_count % self._full_audit_period(self.cfg)==0 else 0)
         event_profile = self.profiles[self._diagnostics_phase]
         self._last_gradient_metrics = {}
@@ -1334,10 +1342,6 @@ class HardPACTDifferentiableQP:
             diag["selected/equality_max"][rows],diag["selected/inequality_max"][rows]=er,ir
             if capture is not None:
                 capture.after(packet, result, accepted)
-            if self.cfg.tensorboard_diagnostics_enabled:
-                _,ql,qu,vl=self._limits(ref)
-                aggregate.compact_candidate("primary",m,x,{k:v[rows] for k,v in values.items()},
-                    accepted,ql,qu,vl,self.cfg.position_integration_coefficient)
             if self._physical_enabled():
                 physical = self._physical_diagnostics(m,x,{k:v.index_select(0,local) for k,v in part.items()})
                 self._joint_candidate_diagnostics("primary", m, x,
@@ -1356,9 +1360,14 @@ class HardPACTDifferentiableQP:
                 audit_remaining-=count
             # The backend gets a zero adjoint on each failed row before
             # invoking its implicit solve. Forward NaNs are removed too.
+            raw_candidate = x
             x = _CertifiedRows.apply(torch.nan_to_num(x,nan=0.,posinf=0.,neginf=0.),accepted)
             primal = primal.index_copy(0,rows,torch.where(accepted[:,None],x,primal[rows]))
             derived = (m.acceleration_map @ x[...,None]).squeeze(-1)+m.acceleration_offset
+            if self._compact_diagnostics_enabled():
+                _,ql,qu,vl=self._limits(ref)
+                aggregate.compact_candidate("primary",m,raw_candidate,{k:v[rows] for k,v in values.items()},
+                    accepted,ql,qu,vl,self.cfg.position_integration_coefficient,acceleration=derived)
             qdd = qdd.index_copy(0,rows,torch.where(accepted[:,None],derived,torch.zeros_like(derived)))
             ok[rows]=accepted
         # Recovery has its own certificate and loss, never a hard-joint
@@ -1432,19 +1441,20 @@ class HardPACTDifferentiableQP:
                         soft_ok[rows] = accepted
                         if capture is not None:
                             capture.after(packet, result, accepted)
-                        if self.cfg.tensorboard_diagnostics_enabled:
-                            _,ql,qu,vl=self._limits(ref)
-                            aggregate.compact_candidate("recovery",m,x,{k:v[rows] for k,v in values.items()},
-                                accepted,ql,qu,vl,self.cfg.position_integration_coefficient)
                         if self._physical_enabled():
                             self._joint_candidate_diagnostics("recovery", m, x,
                                 {k:v[rows] for k,v in values.items()}, accepted)
+                        raw_candidate = x
                         x = _CertifiedRows.apply(torch.nan_to_num(x,nan=0.,posinf=0.,neginf=0.),accepted)
                         recovered = recovered.index_copy(0,rows,torch.where(accepted[:,None],x[:,:24],recovered[rows]))
                         recovery_slack = recovery_slack.index_copy(0,rows,torch.where(accepted[:,None],x[:,24:36],torch.zeros_like(x[:,24:36])))
                         if rate_enabled:
                             recovery_rate_slack = recovery_rate_slack.index_copy(0,rows,torch.where(accepted[:,None],x[:,36:48],torch.zeros_like(x[:,36:48])))
                         a = (m.acceleration_map@x[...,None]).squeeze(-1)+m.acceleration_offset
+                        if self._compact_diagnostics_enabled():
+                            _,ql,qu,vl=self._limits(ref)
+                            aggregate.compact_candidate("recovery",m,raw_candidate,{k:v[rows] for k,v in values.items()},
+                                accepted,ql,qu,vl,self.cfg.position_integration_coefficient,acceleration=a)
                         recovered_qdd = recovered_qdd.index_copy(0,rows,torch.where(accepted[:,None],a,recovered_qdd[rows]))
                         diag["soft_joint/slack_max_rad_s2"][rows] = x[:,24:36].detach().amax(-1)
                         if rate_enabled:
