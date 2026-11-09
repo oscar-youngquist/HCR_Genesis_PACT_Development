@@ -1236,7 +1236,8 @@ class Go2HardPACT(Go2PACT):
         )
         qp_substep_anchors(update_mode, decimation)  # validates exactly four substeps
         self._qp_rollout_substep_index, self._qp_sampled_substep_index = qp_interval_selection(
-            update_mode, self.num_envs, decimation, self.device)
+            update_mode, self.num_envs, decimation, self.device,
+            shared_later=getattr(self._hard_pact_rollout_qp.cfg,"qp_shared_later_substep",False))
         aggregate = getattr(self._hard_pact_rollout_qp, "iteration_diagnostics", {}).get("rollout")
         if aggregate is not None:
             aggregate.add_sum("environment_control_intervals", torch.tensor(self.num_envs,device=self.device))

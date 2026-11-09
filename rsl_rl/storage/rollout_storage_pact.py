@@ -490,6 +490,8 @@ class RolloutStoragePACT:
                     self.current_hard_pact_batch = {
                         name: value.flatten(0, 1)[batch_idx]
                         for name, value in self.hard_pact_fields.items()
+                        if not (getattr(self,"direct_qp_mechanics_gather",False)
+                                and name.startswith("sampled_qp_mechanics_"))
                     }
                     if self.action_noise is not None:
                         delay = self.current_hard_pact_batch[

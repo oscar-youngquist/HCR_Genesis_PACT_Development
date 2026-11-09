@@ -7,6 +7,12 @@ PREFIX = 'sampled_qp_mechanics_'
 VERSION = 1  # Canonical deployment mechanics, empty randomized parameters.
 
 
+def gather_mechanics(fields, global_rows):
+    """Gather selected flattened (time, environment) rows, including validity."""
+    return {name:value.flatten(0,1)[global_rows].detach()
+            for name,value in (fields or {}).items() if name.startswith(PREFIX)}
+
+
 def allocate_mechanics(rows, reference):
     result = {PREFIX+k: reference.new_zeros((rows,)+shape)
               for k,shape in MECHANICS_SHAPES.items()}

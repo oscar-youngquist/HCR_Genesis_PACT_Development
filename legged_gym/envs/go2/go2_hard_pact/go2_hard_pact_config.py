@@ -649,7 +649,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
             # Velocity tracking: independent inner-QP and outer-loss horizons
             'planar_velocity_weight': 20.0,                  # Inner normalized body-frame planar-velocity tracking weight.
-            'yaw_rate_weight': 10.0,                          # Inner normalized body-frame yaw-rate tracking weight.
+            'yaw_rate_weight': 10.0,                         # Inner normalized body-frame yaw-rate tracking weight.
             'planar_velocity_scale_m_s': 1.0,                # Planar-velocity error normalization [m/s].
             'yaw_rate_scale_rad_s': 1.0,                     # Yaw-rate error normalization [rad/s].
             'qp_velocity_objective_horizon_s': 0.020,        # Inner xy/yaw constant-derivative horizon [s]; None uses physics dt.
@@ -702,9 +702,15 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'cupiqp_ppo_reuse': True,                        # Reuse exclusively leased PPO solvers; False uses fresh instances.
             'cupiqp_ppo_capacity_reuse': True,               # Capacity-bucket reuse for PPO recovery batches, with padded rows excluded.
             'cupiqp_ppo_pool_size': 8,                       # Bounded PPO solver pool; outstanding autograd leases are not evicted.
+            'cupiqp_primary_bucket_policy': 'power_of_two',  # tight / power_of_two / exact; recovery retains independent power-of-two buckets.
+            'cupiqp_bucket_alignment': 128,                  # 1365 -> 1408; 4900 -> 4992, capped by chunk size.
+            'cupiqp_ppo_primary_capacity_reuse': False,       # Exclusive primary PPO leases; False restores exact-size allocation.
+            'direct_qp_mechanics_gather': True,              # Gather only selected global replay rows, not full minibatches.
+            'compile_tensor_ops': False,                     # Optional Inductor kernels; no CUDA graphs; includes startup overhead.
+            'qp_shared_later_substep': False,                # Optional shared later solve; independent per-env 50/50 replay coins.
             'cache_rollout_qp_mechanics': True,              # Own the selected rollout anchor's nominal mechanics for PPO reuse.
-            'scheduled_compact_diagnostics': True,          # Physical health summaries sample diagnostic iterations; outcome counts remain continuous.
-            'cupiqp_selective_backward_copy': True,         # Clone only requested implicit gradients; False is the copy-all reference.
+            'scheduled_compact_diagnostics': True,           # Physical health summaries sample diagnostic iterations; outcome counts remain continuous.
+            'cupiqp_selective_backward_copy': True,          # Clone only requested implicit gradients; False is the copy-all reference.
             'rollout_chunk_size': 4096,                      # Maximum rows per rollout solver chunk.
             'ppo_chunk_size': 8000,                          # Maximum rows per differentiable PPO solver chunk.
 

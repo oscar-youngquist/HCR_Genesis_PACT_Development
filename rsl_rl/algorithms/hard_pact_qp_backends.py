@@ -280,9 +280,14 @@ def _configure_cupiqp(solver, config, dtype, *, differentiable):
     solver.settings.enable_cuda_graph = bool(config.cupiqp_cuda_graph)
 
 
-def solver_capacity(rows, limit):
-    """Smallest power-of-two bucket, capped by the explicit chunk budget."""
-    return max(rows, min(1 << (rows-1).bit_length(), int(limit)))
+def solver_capacity(rows, limit, policy="power_of_two", alignment=128):
+    """Round independent rows without exceeding the caller's chunk budget."""
+    if policy not in ("tight", "power_of_two", "exact") or alignment < 1:
+        raise ValueError("Invalid cuPIQP bucket policy/alignment")
+    capacity = (rows if policy == "exact" else
+                min(1 << (rows-1).bit_length(), ((rows+alignment-1)//alignment)*alignment) if policy == "tight" else
+                1 << (rows-1).bit_length())
+    return max(rows, min(capacity, int(limit)))
 
 
 def pad_solver_rows(value, capacity):
@@ -313,8 +318,13 @@ class CuPIQPFunction(torch.autograd.Function):
         backend = backend or SolverBackend("cupiqp", config)
         real_rows = Q.shape[0]
         capacity = real_rows
-        if Q.shape[1] in (36,48) and getattr(config,"cupiqp_ppo_capacity_reuse",True):
-            capacity = solver_capacity(real_rows,config.chunk_size or config.ppo_chunk_size)
+        primary = Q.shape[1] == 24
+        reuse = (getattr(config,"cupiqp_ppo_primary_capacity_reuse",True) if primary else
+                 getattr(config,"cupiqp_ppo_capacity_reuse",True))
+        if reuse:
+            capacity = solver_capacity(real_rows,config.chunk_size or config.ppo_chunk_size,
+                getattr(config,"cupiqp_primary_bucket_policy","tight") if primary else "power_of_two",
+                getattr(config,"cupiqp_bucket_alignment",128))
             Q,p,G,h,A,b,x_l,x_u = tuple(pad_solver_rows(v,capacity) for v in (Q,p,G,h,A,b,x_l,x_u))
         ctx.real_rows, ctx.capacity = real_rows, capacity
         ctx.selective_backward_copy = getattr(config, 'cupiqp_selective_backward_copy', True)
@@ -500,13 +510,14 @@ class SolverBackend:
         phase = self.diagnostics_phase
         profile_timer = self.profiles[phase]
         source_Q = Q.detach()  # cache ownership never retains an autograd graph
-        capacity = (1 << (batch - 1).bit_length()
-                    if self.config.cupiqp_rollout_capacity_reuse else batch)
         # Never pad beyond the configured rollout chunk budget (important
         # for non-power-of-two VRAM-tuned limits such as 8000). Direct backend
         # callers may supply larger B; keep those exact rather than shrinking.
         chunk_limit = self.config.chunk_size or self.config.rollout_chunk_size
-        capacity = max(batch, min(capacity, int(chunk_limit)))
+        capacity = solver_capacity(batch,chunk_limit,
+            (getattr(self.config,"cupiqp_primary_bucket_policy","tight") if Q.shape[1]==24
+             else "power_of_two") if self.config.cupiqp_rollout_capacity_reuse else "exact",
+            getattr(self.config,"cupiqp_bucket_alignment",128))
         key = (Q.device, Q.dtype, capacity, Q.shape[1], G.shape[1], A.shape[1])
         profile = (
             self.config.rollout_eps_abs, self.config.rollout_eps_rel,
@@ -518,7 +529,7 @@ class SolverBackend:
             torch.cuda.current_stream(Q.device).cuda_stream,
         )
         key = (sparse,) + key + profile
-        # Smallest fitting power-of-two bucket, capped by chunk size. Never
+        # Smallest fitting configured bucket, capped by chunk size. Never
         # promote a small request to a previously seen large batch capacity.
         solver = self._rollout_cache.get(key)
         capture_reused = solver is not None

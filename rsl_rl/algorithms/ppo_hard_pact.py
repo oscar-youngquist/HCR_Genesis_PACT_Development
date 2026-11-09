@@ -1215,6 +1215,8 @@ class PPO_HardPACT:
         qp_gradient_square_sum = torch.zeros((), device=self.device)
         self._qp_sampling_gradient_inputs = None
 
+        self.storage.direct_qp_mechanics_gather = bool(self.hard_pact_qp is not None and
+            getattr(self.hard_pact_qp.cfg,"direct_qp_mechanics_gather",True))
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for batch_number, (terminated_batch, obs_batch, critic_obs_batch, obs_hist_batch, explicit_labels_batch, \
             grf_target, obs_target, actions_batch, target_values_batch, \
@@ -2817,6 +2819,11 @@ class PPO_HardPACT:
             ), dim=-1)
             flat_indices = (self.storage.current_batch_indices if transition_indices is None else transition_indices)[qp_rows]
             if self._rollout_deployment_qp_mechanics is None:
+                if getattr(self.hard_pact_qp.cfg,"direct_qp_mechanics_gather",True):
+                    # Only chosen global rows: never materialize these large fields
+                    # for a full PPO minibatch. Owned storage remains detached.
+                    from .hard_pact_qp_mechanics_cache import gather_mechanics
+                    qp_batch.update(gather_mechanics(self.storage.hard_pact_fields,flat_indices))
                 sampled_mechanics = self._deployment_replay_mechanics(sample_q, sample_v, qp_batch)
             else:
                 sampled_mechanics = (

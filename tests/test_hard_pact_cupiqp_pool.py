@@ -103,7 +103,8 @@ def raw_solve(qp, data):
 @pytest.mark.parametrize("dtype,tol", [(torch.float64, 2e-6), (torch.float32, 2e-4)])
 def test_reused_ppo_matches_fresh_changed_mechanics_and_all_vjps(dtype, tol):
     options = dict(qp_solver="cupiqp", cupiqp_ppo_pool_size=2)
-    reused, fresh = make_qp(**options), make_qp(**options, cupiqp_ppo_reuse=False)
+    reused, fresh = make_qp(**options), make_qp(**options, cupiqp_ppo_reuse=False,
+        cupiqp_ppo_primary_capacity_reuse=False)
     def evaluate(qp, iteration):
         data = coupled_data(3, dtype, "cuda")
         data["mass_matrix"] *= 1 + .1 * iteration

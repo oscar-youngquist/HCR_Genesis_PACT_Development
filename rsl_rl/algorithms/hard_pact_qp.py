@@ -15,6 +15,7 @@ from .hard_pact_qp_backends import (
 )
 from .qpth_warm_start import solve_qpth_warm
 from .hard_pact_qp_capture import capture_failure
+from .hard_pact_qp_tensor_ops import kernel
 
 
 # Fixed slices make every Q/P/G/A block visibly correspond to one physical
@@ -40,7 +41,7 @@ def qp_substep_mask(mode, substep, selected):
     return torch.ones_like(selected,dtype=torch.bool) if mode=="every_substep" else selected==substep
 
 
-def qp_interval_selection(mode, num_envs, decimation, device, *, generator=None):
+def qp_interval_selection(mode, num_envs, decimation, device, *, generator=None, shared_later=False):
     """Return rollout selection and one replay anchor, before any solver result.
 
     In first-plus-random mode the rollout index is the later solve (k>0).
@@ -49,7 +50,9 @@ def qp_interval_selection(mode, num_envs, decimation, device, *, generator=None)
     """
     qp_substep_anchors(mode, decimation)
     if mode == "first_plus_random_substep":
-        later = 1 + balanced_substep_indices(num_envs, decimation-1, device, generator=generator)
+        later = (torch.randint(1,decimation,(1,),device=device,generator=generator).expand(num_envs)
+                 if shared_later else
+                 1 + balanced_substep_indices(num_envs, decimation-1, device, generator=generator))
         use_later = torch.randint(2, (num_envs,), device=device, generator=generator).bool()
         return later, torch.where(use_later, later, torch.zeros_like(later))
     selected = balanced_substep_indices(num_envs, decimation, device, generator=generator)
@@ -132,8 +135,14 @@ class HardPACTQPConfig:
     cupiqp_rollout_capacity_reuse: bool = True
     cupiqp_rollout_cache_size: int = 8
     cupiqp_ppo_reuse: bool = True
-    cupiqp_ppo_capacity_reuse: bool = True  # Recovery only; primary batch semantics unchanged.
+    cupiqp_ppo_capacity_reuse: bool = True  # Recovery; primary has its own switch below.
     cupiqp_ppo_pool_size: int = 8
+    cupiqp_primary_bucket_policy: str = "tight"  # power_of_two / exact are reference options.
+    cupiqp_bucket_alignment: int = 128
+    cupiqp_ppo_primary_capacity_reuse: bool = True
+    direct_qp_mechanics_gather: bool = True
+    qp_shared_later_substep: bool = False  # Correlates later solves, not replay coins.
+    compile_tensor_ops: bool = False  # Opt-in; startup must be measured separately.
     cupiqp_selective_backward_copy: bool = True
     cache_rollout_qp_mechanics: bool = True
     scheduled_compact_diagnostics: bool = True
@@ -256,6 +265,10 @@ class HardPACTQPConfig:
         return cls(**dict(values))
 
     def __post_init__(self):
+        if self.cupiqp_primary_bucket_policy not in ('tight','power_of_two','exact'):
+            raise ValueError('Unknown cuPIQP primary bucket policy')
+        if self.cupiqp_bucket_alignment < 1 or int(self.cupiqp_bucket_alignment)!=self.cupiqp_bucket_alignment:
+            raise ValueError('cuPIQP bucket alignment must be a positive integer')
         if self.constraint_schema_version != 2:
             raise ValueError("Unsupported HardPACT constraint schema; expected version 2")
         qp_substep_anchors(self.qp_update_mode,4)
@@ -829,8 +842,8 @@ class HardPACTDifferentiableQP:
         def add_residual(C, e, weight):
             # w||C x+e||^2 -> Q += 2w C^T C, p += 2w C^T e.
             nonlocal Q, p
-            Q = Q + 2 * weight * C.transpose(1, 2) @ C
-            p = p + 2 * weight * (C.transpose(1, 2) @ e[..., None]).squeeze(-1)
+            Q,p = kernel("add_residual",self.cfg.compile_tensor_ops)(
+                Q,p,C,e,C.new_tensor(weight) if self.cfg.compile_tensor_ops else weight)
 
         if self.cfg.contact_acceleration_weight:
             contact_J = J*force_mask[:,:,None]
@@ -917,8 +930,9 @@ class HardPACTDifferentiableQP:
         physical_G, physical_h = torch.cat(G,1), torch.cat(h,1)
         physical_A = ref.new_empty(batch,0,24)
         physical_b = ref.new_empty(batch,0)
-        G, h, gs = _row_scale(physical_G * scale, physical_h)
-        A, b, es = _row_scale(physical_A * scale, physical_b)
+        scale_rows = kernel("row_scale",self.cfg.compile_tensor_ops)
+        G, h, gs = scale_rows(physical_G * scale, physical_h)
+        A, b, es = scale_rows(physical_A * scale, physical_b)
         Q = Q * scale[:,None] * scale[None,:]
         Q = .5 * (Q + Q.transpose(1,2))
         Q = Q + self.cfg.q_regularization * eye
@@ -983,7 +997,7 @@ class HardPACTDifferentiableQP:
         if rate_enabled:
             bounds.extend((m.rate_upper, -m.rate_lower))
         physical_h = torch.cat((*bounds, m.p.new_zeros(batch,nslack)),1)
-        G,h,row_scale = _row_scale(physical_G*variable_scale,physical_h)
+        G,h,row_scale = kernel("row_scale",self.cfg.compile_tensor_ops)(physical_G*variable_scale,physical_h)
         empty = m.A.new_zeros(batch,0,nvar)
         native_lower = m.p.new_full((batch,nvar),-torch.inf)
         native_upper = -native_lower
@@ -1003,11 +1017,8 @@ class HardPACTDifferentiableQP:
     def _certificate(self, m, z, tolerance):
         # Certify the EXACT final command after torque projection and exact
         # swing equality enforcement; never certify a different pre-clamp x.
-        eq = (m.A @ z[...,None]).squeeze(-1)-m.b
-        iq = (m.G @ z[...,None]).squeeze(-1)-m.h
-        finite = torch.isfinite(z).all(-1)
-        er, ir = self._maximum(eq.abs()), self._maximum(iq.clamp_min(0))
-        return finite & (er<=tolerance) & (ir<=tolerance), er, ir
+        return kernel("certify",self.cfg.compile_tensor_ops)(
+            m.A,m.b,m.G,m.h,z,z.new_tensor(tolerance) if self.cfg.compile_tensor_ops else tolerance)
 
     @torch.no_grad()
     def _joint_candidate_diagnostics(self, stage, m, x, data, accepted):
