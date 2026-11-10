@@ -126,7 +126,13 @@ def load_compensation_loss(post_ff, demand, torque_scales, stance, valid, feasib
     hinge=(cfg.load_preferred_fraction*required-contribution).clamp_min(0)
     loss=hinge.square().sum()/max(hinge.numel(),1)
     count=hinge.new_tensor(hinge.numel())
+    # Same normalized hinge direction expressed as a physical torque unit
+    # vector. Retain the loss's sqrt(stance-joint count) normalization. With
+    # uniform torque scale T this is approximately hinge*T (epsilon aside).
+    physical_direction_gain=(direction.detach()/scales).norm(dim=-1).clamp_min(cfg.load_epsilon)
+    shortfall_nm=(hinge.detach()/physical_direction_gain).sum()/count.clamp_min(1)
     return loss, {'loss':loss.detach(),'valid_fraction':count/max(post_ff.shape[0],1),
+        'shortfall_nm':shortfall_nm,
         'demand':required.sum()/count.clamp_min(1),
         'contribution':contribution.detach().sum()/count.clamp_min(1),
         'active_hinge_fraction':(hinge.detach()>0).float().sum()/count.clamp_min(1)}

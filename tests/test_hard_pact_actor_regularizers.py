@@ -42,6 +42,8 @@ def test_load_hinge_nan_mask_and_gradients():
     with torch.no_grad(): ff[1]=float('nan')
     valid=torch.tensor([True,False,False])
     loss,metrics=load_compensation_loss(ff,d,torch.ones(12)*20,stance,valid,feasible,cfg)
+    torch.testing.assert_close(metrics['shortfall_nm'],20*loss.detach().sqrt(),rtol=1e-6,atol=1e-6)
+    assert not metrics['shortfall_nm'].requires_grad
     loss.backward()
     assert loss>0 and ff.grad.isfinite().all() and ff.grad[1:].eq(0).all()
     assert ff.grad[0,2::3].gt(0).all()  # descent increases negative compensation
@@ -240,7 +242,17 @@ def test_tiny_real_ppo_update_reuses_one_qp_and_disabled_paths_are_not_called(mo
     assert bool(metrics)==(enabled and diagnostics)
     assert all(torch.isfinite(value) for value in metrics.values())
     losses=algorithms[0].last_actor_loss_metrics
-    assert len(losses)==8 and all(torch.isfinite(value) and not value.requires_grad for value in losses.values())
+    names={'projection_primary','projection_recovery','velocity_xy','velocity_yaw',
+           'fk','load','total_weighted','total_warmed',
+           'projection_primary/torque_correction_mae_nm',
+           'projection_primary/stance_acceleration_error_m_s2',
+           'projection_recovery/torque_correction_mae_nm',
+           'projection_recovery/joint_slack_rad_s2','projection_recovery/rate_slack_nm',
+           'velocity_xy/error_m_s','velocity_yaw/error_rad_s'}
+    if enabled:
+        names.update(('fk/error_m','load/shortfall_nm'))
+    assert set(losses)=={'Loss/actor_pinn/'+name for name in names}
+    assert all(torch.isfinite(value) and not value.requires_grad for value in losses.values())
     assert losses['Loss/actor_pinn/fk']>0 if enabled else losses['Loss/actor_pinn/fk']==0
     torch.testing.assert_close(losses['Loss/actor_pinn/total_weighted'],losses['Loss/actor_pinn/total_warmed'])
 

@@ -317,8 +317,8 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         # derived from initial bounds, not the current curriculum/ramp values.
         # Terrain order: slope, rough, stairs down/up, discrete, wave,
         # stepping stones, gap, pit, platforms, platforms+gaps (last two reserved).
-        dynamic_sigma = dict(min_lin_vel=0.5, max_lin_vel=1.2,
-                             min_ang_vel=1.0, max_ang_vel=1.5,
+        dynamic_sigma = dict(min_lin_vel=0.5, max_lin_vel=1.0,
+                             min_ang_vel=1.0, max_ang_vel=2.0,
                              max_sigma=[1/4, 1/4, 1/2, 1/2, 3/4, 5/12, 1, 1, 1, 1, 1])
 
         foot_clearance_target = 0.09
@@ -456,9 +456,9 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         curriculum_threshold = 0.8  # raw linear-tracking mean, not weighted reward
         curriculum_patience_iterations = 50  # consecutive PPO rollouts; 0 = legacy reset-based updates
         max_curriculum = 1.2
-        max_curriculum_lin_vel_x = 1.25  # Symmetric curriculum cap [m/s]; None uses max_curriculum.
-        max_curriculum_lin_vel_y = 1.0  # Symmetric curriculum cap [m/s].
-        max_curriculum_ang_vel_yaw = 1.5  # Symmetric curriculum cap [rad/s].
+        max_curriculum_lin_vel_x = 1.00    # Symmetric curriculum cap [m/s]; None uses max_curriculum.
+        max_curriculum_lin_vel_y = 1.00    # Symmetric curriculum cap [m/s].
+        max_curriculum_ang_vel_yaw = 2.00  # Symmetric curriculum cap [rad/s].
         num_commands = 4
         resampling_time = 10.0
         heading_command = True
@@ -530,7 +530,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         entropy_coef = 0.01
         use_adaptive_entropy = True
-        adaptive_ent_bounds = [0.003, 0.01]
+        adaptive_ent_bounds = [0.005, 0.01]
         adaptive_ent_lin_threshold = 0.75
         adaptive_ent_ang_threshold = 0.35
         adaptive_ent_ter_threshold = 6.0
@@ -682,8 +682,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'soft_rate_recovery_scale_nm': 10.0,             # Torque-rate slack normalization [Nm], not Nm/s.
 
             # Performance-gated inner stance / torso-stability curriculum
-            'objective_curriculum_enabled': True,            # Schedule inner weights using frozen pre-QP tracking-reference recovery.
-            'torso_stability_curriculum_enabled': True,      # Include attitude/height in the objective curriculum; stance remains independent.
+            'objective_curriculum_enabled': False,            # Schedule inner weights using local-window tracking recovery.
+            'torso_stability_curriculum_enabled': False,      # Include attitude/height in the objective curriculum; stance remains independent.
             'contact_acceleration_weight_initial': 0.25,     # Initial stance weight; None uses 25% of contact_acceleration_weight.
             'attitude_weight_initial': None,                 # Initial attitude weight; None uses 25% of attitude_weight.
             'height_weight_initial': None,                   # Initial height weight; None uses 25% of height_weight.
@@ -691,11 +691,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'objective_curriculum_progress_delta': 0.05,     # Fraction of initial-to-final weight range added per successful advancement.
             'objective_curriculum_step_interval': 10,        # Minimum PPO iterations between objective-weight increases.
             'objective_curriculum_ema_alpha': 0.05,          # Current tracking EMA update coefficient.
-            'objective_curriculum_window': 200,              # Maximum valid pre-QP EMA observations retained for the frozen baseline.
-            'objective_curriculum_quantile': 0.9,            # Quantile of pre-QP EMA history used as the frozen tracking reference.
-            'objective_curriculum_recovery_ratio': 0.90,     # Threshold multiplier on frozen baseline, subject to min_tracking.
+            'objective_curriculum_window': 200,              # Valid EMA samples at current weights required per local response window.
+            'objective_curriculum_quantile': 0.9,            # Local-window quantile; reference held fixed until sustained recovery.
+            'objective_curriculum_recovery_ratio': 0.90,     # Multiplier on held local reference, subject to min_tracking.
             'objective_curriculum_recovery_iterations': 50,  # Consecutive valid above-threshold iterations required per increase.
-            'objective_curriculum_baseline_override': None,  # Explicit frozen tracking reference; needed for resumes missing a baseline.
+            'objective_curriculum_baseline_override': None,  # Optional initial reference; otherwise collect a local window (also on old resumes).
             'objective_curriculum_min_tracking': 0.5,        # Absolute lower floor for the tracking recovery threshold.
             'objective_curriculum_min_samples': 1,           # Minimum tracking evidence count required for a valid iteration.
 
@@ -715,9 +715,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'cupiqp_ppo_reuse': True,                        # Reuse exclusively leased PPO solvers; False uses fresh instances.
             'cupiqp_ppo_capacity_reuse': True,               # Capacity-bucket reuse for PPO recovery batches, with padded rows excluded.
             'cupiqp_ppo_pool_size': 8,                       # Bounded PPO solver pool; outstanding autograd leases are not evicted.
-            'cupiqp_primary_bucket_policy': 'power_of_two',  # tight / power_of_two / exact; recovery retains independent power-of-two buckets.
+            'cupiqp_primary_bucket_policy': 'tight',         # tight / power_of_two / exact; recovery retains independent power-of-two buckets.
             'cupiqp_bucket_alignment': 128,                  # 1365 -> 1408; 4900 -> 4992, capped by chunk size.
-            'cupiqp_ppo_primary_capacity_reuse': False,       # Exclusive primary PPO leases; False restores exact-size allocation.
+            'cupiqp_ppo_primary_capacity_reuse': True,       # Exclusive primary PPO leases; False restores exact-size allocation.
             'direct_qp_mechanics_gather': True,              # Gather only selected global replay rows, not full minibatches.
             'compile_tensor_ops': False,                     # Optional Inductor kernels; no CUDA graphs; includes startup overhead.
             'qp_shared_later_substep': False,                # Optional shared later solve; independent per-env 50/50 replay coins.

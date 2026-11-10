@@ -2013,13 +2013,16 @@ class PPO_HardPACT:
         names = ('projection_primary', 'projection_recovery', 'velocity_xy',
                  'velocity_yaw', 'fk', 'load', 'total_weighted', 'total_warmed')
         self.last_actor_loss_metrics = {}
-        for name in names:
+        for name in dict.fromkeys((*names,*self._actor_loss_sums)):
             numerator, denominator = self._actor_loss_sums.get(name, (zero, zero))
             self.last_actor_loss_metrics['Loss/actor_pinn/'+name] = numerator/denominator.clamp_min(1)
         self._actor_loss_sums = None
 
     def _record_actor_regularizer(self, name, metrics, valid_count, total_count):
         self._record_actor_loss(name, metrics['loss'], valid_count)
+        physical_key = 'error_m' if name=='fk' else 'shortfall_nm'
+        if physical_key in metrics:
+            self._record_actor_loss(name+'/'+physical_key,metrics[physical_key],valid_count)
         if not getattr(self, '_actor_regularizer_diagnostics_due', False):
             return
         # Count-weighted across minibatches; only scalar tensors leave GPU.
@@ -2940,6 +2943,29 @@ class PPO_HardPACT:
                 (valid.reshape(-1) & qp_result.differentiated_mask.reshape(-1)).sum())
             self._record_actor_loss('projection_recovery', recovery_loss,
                 (valid.reshape(-1) & qp_result.recovery_mask.reshape(-1)).sum())
+            # Detached, physical full-candidate diagnostics, NOT measured or
+            # blended execution errors. Discard invalid/failed rows first.
+            with torch.no_grad():
+                for owner,accepted in (('projection_primary',qp_result.differentiated_mask),
+                                       ('projection_recovery',qp_result.recovery_mask)):
+                    mask=valid.reshape(-1).bool() & accepted.reshape(-1).bool()
+                    count=mask.sum()
+                    correction=(qp_result.tau_safe[mask]-sampled_nominal[mask]).abs()
+                    self._record_actor_loss(owner+'/torque_correction_mae_nm',
+                        correction.sum()/(count*12).clamp_min(1),count)
+                    if owner=='projection_primary':
+                        stance=sample_contact_probability.detach()[mask]>=self.hard_pact_qp.cfg.contact_threshold
+                        acceleration=(torch.einsum('bfkn,bn->bfk',sampled_mechanics.foot_jacobians[mask],
+                            qp_result.qdd[mask])+sampled_mechanics.foot_acceleration_bias[mask])
+                        feet=stance.sum()
+                        self._record_actor_loss(owner+'/stance_acceleration_error_m_s2',
+                            acceleration[stance].norm(dim=-1).sum()/feet.clamp_min(1),feet)
+                    else:
+                        self._record_actor_loss(owner+'/joint_slack_rad_s2',
+                            qp_result.recovery_slack[mask].abs().sum()/(count*12).clamp_min(1),count)
+                        if self.hard_pact_qp.cfg.torque_rate_constraint_weight>0:
+                            self._record_actor_loss(owner+'/rate_slack_nm',
+                                qp_result.recovery_rate_slack[mask].abs().sum()/(count*12).clamp_min(1),count)
             qp_loss = qp_loss + recovery_loss
             # stopgrad deliberately computes and reports exactly this metric,
             # but neither it nor any QP output participates in optimization.
@@ -2987,8 +3013,11 @@ class PPO_HardPACT:
                         cfg.lambda_load*load,sampled_nominal,self.ppo_parameters,branch=qp_feedforward)
             if self.lambda_qp_velocity_xy>0 or self.lambda_qp_velocity_yaw>0:
                 accepted = qp_result.differentiated_mask | qp_result.recovery_mask
+                physical_metrics={}
                 xy,yaw,count = self.hard_pact_qp.velocity_tracking_losses(
-                    qp_result.qdd,qp_arguments,valid,accepted)
+                    qp_result.qdd,qp_arguments,valid,accepted,physical_metrics=physical_metrics)
+                for name,value in physical_metrics.items():
+                    self._record_actor_loss(name+('/error_m_s' if name=='velocity_xy' else '/error_rad_s'),value,count)
                 self._record_actor_loss('velocity_xy', xy, count)
                 self._record_actor_loss('velocity_yaw', yaw, count)
                 self._actor_qp_velocity_loss = self._actor_velocity_objective(

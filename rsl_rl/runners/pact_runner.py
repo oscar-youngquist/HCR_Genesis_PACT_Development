@@ -768,7 +768,7 @@ class OnPolicyRunnerPACT:
             actor_enabled = any(active.get(k, False) for k in ('projection_primary',
                 'projection_recovery', 'velocity_xy', 'velocity_yaw', 'fk', 'load'))
             actor_losses = {k:v for k,v in actor_losses.items()
-                            if active.get(k.rsplit('/',1)[-1],
+                            if active.get(k.split('/')[2],
                                 actor_enabled and k.rsplit('/',1)[-1] in ('total_weighted','total_warmed'))}
             if actor_losses:
                 scalars = torch.stack(list(actor_losses.values())).detach().cpu().tolist()

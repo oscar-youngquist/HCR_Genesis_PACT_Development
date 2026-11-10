@@ -138,7 +138,7 @@ class Terrain:
         wave_amp = 0.20*difficulty
         rough_height = 0.02 + 0.08 * difficulty
         step_height = 0.04  + 0.21 * difficulty
-        discrete_obstacles_height = 0.04 + difficulty * 0.30
+        discrete_obstacles_height = 0.04 + difficulty * 0.21
         # slope = difficulty * 0.4
         # wave_amp = 0.20*difficulty
         # rough_height = 0.08 * difficulty

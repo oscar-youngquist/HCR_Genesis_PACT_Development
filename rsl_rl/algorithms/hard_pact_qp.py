@@ -728,7 +728,7 @@ class HardPACTDifferentiableQP:
     def velocity_tracking_inputs_required(self):
         return self.velocity_tracking_enabled() or self.cfg.velocity_tracking_replay_enabled
 
-    def velocity_tracking_losses(self, qdd, data, physics_valid, accepted):
+    def velocity_tracking_losses(self, qdd, data, physics_valid, accepted, physical_metrics=None):
         """Full-candidate errors; filter rows BEFORE any potentially invalid math."""
         mask = physics_valid.reshape(-1).bool() & accepted.reshape(-1).bool()
         rows = mask.nonzero(as_tuple=True)[0]
@@ -741,6 +741,9 @@ class HardPACTDifferentiableQP:
             horizon_s=self.cfg.qp_velocity_loss_horizon_s)
         xy = (error[:,:2]/self.cfg.planar_velocity_scale_m_s).square().sum(-1).mean()
         yaw = (error[:,2]/self.cfg.yaw_rate_scale_rad_s).square().mean()
+        if physical_metrics is not None:
+            physical_metrics.update(velocity_xy=error.detach()[:,:2].norm(dim=-1).mean(),
+                                    velocity_yaw=error.detach()[:,2].abs().mean())
         return xy, yaw, rows.numel()
 
     def _velocity_tracking_affine(self, data, acceleration_map, offset, *, horizon_s=None):

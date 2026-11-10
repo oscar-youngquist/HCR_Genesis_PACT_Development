@@ -46,3 +46,18 @@ def test_only_combined_actor_secondary_gradient_is_scaled(factor):
 def test_invalid_duration(duration):
     with pytest.raises(ValueError, match='actor_physics_warmup_iterations'):
         make_algorithm(actor_physics_warmup_iterations=duration)
+
+
+def test_physical_errors_count_weighted_without_loss_weights():
+    alg=PPO_HardPACT.__new__(PPO_HardPACT)
+    alg._actor_loss_sums={}
+    alg._record_actor_loss('velocity_xy/error_m_s',torch.tensor(2.,requires_grad=True),1)
+    alg._record_actor_loss('velocity_xy/error_m_s',torch.tensor(4.),3)
+    alg._record_actor_loss('velocity_xy/error_m_s',torch.tensor(float('nan')),0)
+    alg._record_actor_regularizer('fk',{'loss':torch.tensor(.5),'error_m':torch.tensor(.02)},4,8)
+    alg._record_actor_regularizer('load',{'loss':torch.tensor(.5),'shortfall_nm':torch.tensor(3.)},2,8)
+    alg._finish_actor_loss_logging(torch.tensor(0.))
+    assert alg.last_actor_loss_metrics['Loss/actor_pinn/velocity_xy/error_m_s']==3.5
+    assert alg.last_actor_loss_metrics['Loss/actor_pinn/fk/error_m']==pytest.approx(.02)
+    assert alg.last_actor_loss_metrics['Loss/actor_pinn/load/shortfall_nm']==3.
+    assert all(not v.requires_grad for v in alg.last_actor_loss_metrics.values())

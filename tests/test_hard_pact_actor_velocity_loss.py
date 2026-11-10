@@ -33,7 +33,10 @@ def test_masks_normalization_and_empty_nonfinite():
     a=torch.zeros(4,18,requires_grad=True)
     with torch.no_grad():a[:,0]=100;a[:,5]=200;a[2:]=float('nan')
     valid=torch.tensor([True,True,True,False]);accepted=torch.tensor([True,True,False,True])
-    xy,yaw,n=qp.velocity_tracking_losses(a,d,valid,accepted)
+    metrics={}
+    xy,yaw,n=qp.velocity_tracking_losses(a,d,valid,accepted,physical_metrics=metrics)
+    assert metrics['velocity_xy']==1 and metrics['velocity_yaw']==2
+    assert all(not value.requires_grad for value in metrics.values())
     assert n==2
     torch.testing.assert_close(xy,torch.tensor(1.,dtype=xy.dtype))
     torch.testing.assert_close(yaw,torch.tensor(4.,dtype=yaw.dtype))

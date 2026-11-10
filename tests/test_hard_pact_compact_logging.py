@@ -84,6 +84,18 @@ def test_legacy_logging_untouched():
     assert 'Train/mean_reward/time' in keys
 
 
+@pytest.mark.parametrize('active', [False, True])
+def test_physical_actor_errors_follow_parent_loss_activation(active):
+    obj = runner(active=active)
+    for name in ('velocity_xy/error_m_s', 'velocity_yaw/error_rad_s', 'load/shortfall_nm'):
+        obj.alg.last_actor_loss_metrics['Loss/actor_pinn/'+name] = torch.tensor(1.)
+    keys = emit(obj)
+    assert ('Loss/actor_pinn/velocity_xy/error_m_s' in keys) == active
+    assert ('Loss/actor_pinn/load/shortfall_nm' in keys) == active
+    assert 'Loss/actor_pinn/velocity_yaw/error_rad_s' not in keys
+    assert len(keys) == len(set(keys))
+
+
 def test_compact_metrics_do_not_create_unavailable_schema_entries():
     alg = runner().alg
     assert compact_hard_pact_metrics(alg, 0) == {'physics/actor_loss_warmup_factor': 0.}
