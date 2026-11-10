@@ -27,6 +27,7 @@ def record(args):
     cfg = copy_sections(task_registry.env_cfgs[args.record_task])
     if args.record_task == "b1z1_facet":
         cfg.facet_reference.enabled = not args.references_disabled
+        cfg.facet_tracking.enabled = args.tracking_enabled
     train = copy_sections(task_registry.train_cfgs[args.record_task])
     cfg.terrain.mesh_type = "plane"
     cfg.terrain.curriculum = False
@@ -115,6 +116,8 @@ def record(args):
             "root", "torques", "pd", "ff", "external_force", "external_moment", "position_target",
             "obs", "privileged", "history", "explicit", "reward")}
         reference_traces = []
+        tracking_traces = []
+        nominal_traces = []
         for step in range(args.steps):
             load[:] = load.new_tensor([5., -3., -10.]) if 1 <= step < args.steps - 1 else 0.
             torso[:] = torso.new_tensor([-2., 4., 0.]) if step >= 2 else 0.
@@ -144,10 +147,46 @@ def record(args):
                 torch.testing.assert_close(virtual["applied_base_force_world"], torso)
                 torch.testing.assert_close(virtual["applied_yaw_moment"], expected_yaw_moment)
                 reference_traces.append({key: value.cpu().numpy() for key, value in virtual.items()})
+            if args.record_task == "b1z1_facet":
+                nominal_traces.append(torch.stack([env.episode_sums[key] for key in
+                    ("tracking_lin_vel_force_world", "tracking_ang_vel", "tracking_ee_force_world")], -1).cpu().numpy().copy())
+            if args.tracking_enabled:
+                snapshot = env.get_facet_tracking()
+                expected_valid = torch.tensor([step+1 >= h for h in cfg.facet_tracking.horizons], device=env.device).expand(2, -1)
+                assert torch.equal(snapshot["valid"], expected_valid)
+                if step < min(cfg.facet_tracking.horizons)-1:
+                    assert snapshot["rewards_unweighted"].count_nonzero() == 0
+                tracking_traces.append({key: value.cpu().numpy() for key, value in snapshot.items()})
             assert values["ff"].count_nonzero() == 0
             for key, value in values.items():
                 traces[key].append(value.detach().cpu().numpy().copy())
         if getattr(env, "facet_reference", None) is not None:
+            if args.tracking_enabled:
+                # Exercise the parent's real timeout/reward/reset order after a
+                # mature bank. Terminal reward must retain valid pre-reset targets.
+                env.episode_length_buf[0] = env.max_episode_length
+                terminal_result = env.step(torch.zeros(2, 17, device=env.device))
+                assert terminal_result[5][0] and not terminal_result[5][1]
+                terminal = env.get_facet_tracking()
+                assert terminal["valid"].all()
+                assert (env.facet_history._ages[0] == -1).all()
+                for name in ("tracking_lin_vel_force_world", "tracking_ang_vel", "tracking_ee_force_world"):
+                    assert "rew_"+name in env.extras["episode"]
+                assert "facet/h32/ee_position_mse" in env.extras["episode"]
+                env.step(torch.zeros(2, 17, device=env.device))
+                assert not env.get_facet_tracking()["valid"][0].any()
+                assert env.get_facet_tracking()["valid"][1].all()
+                # Test-only pose injection exercises physical roll termination,
+                # without relaxing or replacing the production failure criteria.
+                roll = cfg.termination.roll_threshold + .3
+                tilted = root.new_tensor([np.sin(roll/2), 0., 0., np.cos(roll/2)])[None]
+                sim.reset_root_states(ids[1:], sim.base_pos[1:].clone(), tilted,
+                                      torch.zeros_like(root[1:]), torch.zeros_like(root[1:]))
+                physical_result = env.step(torch.zeros(2, 17, device=env.device))
+                assert physical_result[5][1] and not env.time_out_buf[1]
+                assert env.extras["episode"]["roll_termination_rate"] > 0
+                assert env.get_facet_tracking()["valid"][1].all()
+                assert (env.facet_history._ages[1] == -1).all()
             before = env.get_facet_references()
             env.reset_idx(ids[:1])
             after = env.get_facet_references()
@@ -160,10 +199,15 @@ def record(args):
                 torch.testing.assert_close(after[key][:1], expected)
             assert after["elapsed_seconds"][0] == 0
         output.update({key: np.stack(values) for key, values in traces.items()})
-        name = args.record_task + ("_disabled" if args.references_disabled else "")
+        name = args.record_task + ("_disabled" if args.references_disabled else "") + ("_tracking" if args.tracking_enabled else "")
         if reference_traces:
             np.savez_compressed(args.output_dir / "facet_references.npz",
                 **{key: np.stack([row[key] for row in reference_traces]) for key in reference_traces[0]})
+        if tracking_traces:
+            np.savez_compressed(args.output_dir / "facet_tracking.npz",
+                **{key: np.stack([row[key] for row in tracking_traces]) for key in tracking_traces[0]})
+        if nominal_traces:
+            np.savez_compressed(args.output_dir / (name+"_nominal.npz"), sums=np.stack(nominal_traces))
         np.savez_compressed(args.output_dir / (name + ".npz"), **output)
         (args.output_dir / (name + "_config.json")).write_text(
             json.dumps(class_to_dict(cfg), default=lambda x: x.tolist() if hasattr(x, "tolist") else str(x), indent=2))
@@ -179,27 +223,33 @@ def record(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gpu", default="cuda:0")
-    parser.add_argument("--steps", type=int, default=6)
+    parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/facet-smoke"))
     parser.add_argument("--record-task", choices=("b1z1_ppo_pos", "b1z1_facet"))
     parser.add_argument("--references-disabled", action="store_true")
+    parser.add_argument("--tracking-enabled", action="store_true")
     args = parser.parse_args()
+    if (args.tracking_enabled or args.record_task is None) and args.steps < 33:
+        parser.error("Stage 3 smoke requires at least 33 uninterrupted intervals")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.record_task:
         record(args)
         return
     root = Path(__file__).resolve().parents[1]
     environment = dict(os.environ, SIMULATOR="isaaclab_b1z1_pact", PYTHONPATH=str(root))
-    for task, disabled in (("b1z1_ppo_pos", False), ("b1z1_facet", True), ("b1z1_facet", False)):
+    for task, disabled, tracking in (("b1z1_ppo_pos", False, False), ("b1z1_facet", True, False),
+                                     ("b1z1_facet", False, False), ("b1z1_facet", False, True)):
         command = [sys.executable, str(Path(__file__).resolve()), "--record-task", task,
                    "--gpu", args.gpu, "--steps", str(args.steps),
                    "--output-dir", str(args.output_dir.resolve())]
         if disabled:
             command.append("--references-disabled")
-        with (args.output_dir / (task + ("_disabled" if disabled else "") + ".log")).open("w") as log:
+        if tracking:
+            command.append("--tracking-enabled")
+        name = task + ("_disabled" if disabled else "") + ("_tracking" if tracking else "")
+        with (args.output_dir / (name + ".log")).open("w") as log:
             subprocess.run(command, cwd=root, env=environment, stdout=log,
                            stderr=subprocess.STDOUT, check=True, timeout=300)
-        name = task + ("_disabled" if disabled else "")
         if not (args.output_dir / (name + ".npz")).exists():
             raise RuntimeError(f"Simulator did not finish recording; inspect {args.output_dir / (name + '.log')}")
     errors = {}
@@ -220,8 +270,18 @@ def main():
         for key in disabled.files:
             np.testing.assert_array_equal(disabled[key], enabled[key], err_msg=key)
             errors["reference_toggle/" + key] = 0.
+    with np.load(args.output_dir / "b1z1_facet.npz") as stage2, np.load(args.output_dir / "b1z1_facet_tracking.npz") as stage3:
+        for key in stage2.files:
+            if key == "reward":
+                assert not np.array_equal(stage2[key], stage3[key])
+            else:
+                np.testing.assert_array_equal(stage2[key], stage3[key], err_msg=key)
+                errors["tracking_toggle/"+key] = 0.
+    with np.load(args.output_dir / "b1z1_facet_nominal.npz") as stage2, np.load(args.output_dir / "b1z1_facet_tracking_nominal.npz") as stage3:
+        np.testing.assert_array_equal(stage2["sums"], stage3["sums"])
+        errors["nominal_metric_sums"] = 0.
     (args.output_dir / "parity.json").write_text(json.dumps(errors, indent=2))
-    print("FACET Stage 1/2 replay parity passed:", args.output_dir)
+    print("FACET Stage 1/2/3 physics/observation/nominal-metric parity passed; Stage 3 rewards differ:", args.output_dir)
 
 
 if __name__ == "__main__":

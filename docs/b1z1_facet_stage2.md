@@ -1,5 +1,9 @@
 # FACET Stage 2: Coupled References Only
 
+This documents the diagnostic-only mode. [Stage 3](b1z1_facet_stage3.md) now
+defaults to multi-start tracking rewards; set `facet_tracking.enabled=False`
+to retain the Stage 2 behavior described here.
+
 `b1z1_facet` now advances a detached virtual base/EE reference in parallel with
 the unchanged Stage 1 Pos task. **These outputs are not actor inputs, reward
 targets, PINN targets, or a physical controller.** Stage 3 histories/rewards and
