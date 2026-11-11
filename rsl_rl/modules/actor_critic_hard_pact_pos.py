@@ -213,7 +213,8 @@ class ActorCritic_HardPACT_Pos(nn.Module):
                  contact_epsilon=1.0e-2,
                  grf_swing=None,
                  min_noise_std=0.1,
-                 max_noise_std=5.0):
+                 max_noise_std=5.0,
+                 small_torque_head_init=False):
         super().__init__()
 
         # The history latent is configurable; the 12-D explicit-estimator
@@ -304,6 +305,12 @@ class ActorCritic_HardPACT_Pos(nn.Module):
         
         # disable args validation for speedup
         Normal.set_default_validate_args = False
+
+        # Same B1Z1 PACT torque-head initialization for fresh Pos pretraining.
+        # Loading/migration still restores the trained clone head unchanged.
+        if small_torque_head_init:
+            nn.init.uniform_(self.act_tau_out.weight, -1.0e-6, 1.0e-6)
+            nn.init.zeros_(self.act_tau_out.bias)
 
 
     # Currently unused...

@@ -38,6 +38,7 @@ import torch
 from rsl_rl.modules.hard_pact_control import bounded_nominal_torque, effective_feedback_gains, requested_torque_components
 from .hard_pact_actor_regularizers import (
     ActorRegularizerConfig, fk_consistency_loss, compensation_demand, load_compensation_loss,
+    nominal_support_gravity,
 )
 from rsl_rl.modules.hard_pact_physics import (
     log_qp_swing_grf, GRFSwingMetricsAccumulator,
@@ -2020,14 +2021,16 @@ class PPO_HardPACT:
 
     def _record_actor_regularizer(self, name, metrics, valid_count, total_count):
         self._record_actor_loss(name, metrics['loss'], valid_count)
-        physical_key = 'error_m' if name=='fk' else 'shortfall_nm'
+        physical_key = 'error_m' if name=='fk' else 'error_nm'
         if physical_key in metrics:
             self._record_actor_loss(name+'/'+physical_key,metrics[physical_key],valid_count)
         if not getattr(self, '_actor_regularizer_diagnostics_due', False):
             return
         # Count-weighted across minibatches; only scalar tensors leave GPU.
         for key,value in metrics.items():
-            count=total_count if key=='valid_fraction' else valid_count
+            if key=='valid_joint_count':
+                continue
+            count=total_count if key.endswith('fraction') or key=='balance_residual' else valid_count
             tag=f'physics/actor_regularizers/{name}/{key}'
             numerator,denominator=self._actor_regularizer_sums.get(tag,(value.new_zeros(()),value.new_zeros(())))
             numerator=numerator+value.detach()*count
@@ -2995,22 +2998,28 @@ class PPO_HardPACT:
                 stance=sample_contact_probability.detach()>=self.hard_pact_qp.cfg.contact_threshold
                 ff_gain=qp_batch['control_motor_strength'].detach()*qp_batch['control_feedforward_weight'].detach()
                 load_valid &= ((ff_gain!=0).expand(-1,12)|~stance.repeat_interleave(3,dim=-1)).all(-1)
+                # g(q), not velocity-dependent bias h. Nominal inertias avoid
+                # counting payload mass again: its load is already in W.
+                # W/contact predictions change with policy updates, so targets
+                # are deliberately recomputed, never cached across PPO epochs.
+                gravity=nominal_support_gravity(self.physics_dynamics,sample_q)
+                target_metrics={} if self._actor_regularizer_diagnostics_due else None
                 demand,feasible=compensation_demand(sampled_mechanics.foot_jacobians,
                     sampled_mechanics.base_jacobian,sample_applied,
-                    sample_grf_world,stance,cfg,self.hard_pact_qp.cfg.friction_coefficient)
-                requested,_,physical_ff,_=requested_torque_components(qp_desired_position,
+                    gravity,stance,cfg,self.hard_pact_qp.cfg.friction_coefficient,
+                    diagnostics=target_metrics)
+                _,_,physical_ff,_=requested_torque_components(qp_desired_position,
                     qp_feedforward,sample_q[:,7:],sample_v[:,6:],qp_batch)
-                # Existing post-QP command reconstruction on the full accepted
-                # candidate, independent of execution alpha: FF_post=FF_nominal
-                # + total correction. Not a demand-minus-PD target or ratio.
-                post_ff=physical_ff.detach()+qp_result.tau_safe-requested.detach()
-                load,metrics=load_compensation_loss(post_ff,demand,torque_limits,
+                # Nominal physical FF before QP; no candidate/PD subtraction.
+                load,metrics=load_compensation_loss(physical_ff,demand,torque_limits,
                     stance,load_valid,feasible,cfg)
+                if target_metrics is not None:
+                    metrics.update(target_metrics)
                 self._record_actor_regularizer('load',metrics,
-                    metrics['valid_fraction']*post_ff.shape[0],post_ff.shape[0])
+                    metrics['valid_joint_count'],physical_ff.shape[0])
                 if differentiate_qp and self.hard_pact_features.projection_loss:
                     self._actor_load_loss=self._actor_only_torque_vjp(
-                        cfg.lambda_load*load,sampled_nominal,self.ppo_parameters,branch=qp_feedforward)
+                        cfg.lambda_load*load,qp_feedforward,self.ppo_parameters)
             if self.lambda_qp_velocity_xy>0 or self.lambda_qp_velocity_yaw>0:
                 accepted = qp_result.differentiated_mask | qp_result.recovery_mask
                 physical_metrics={}

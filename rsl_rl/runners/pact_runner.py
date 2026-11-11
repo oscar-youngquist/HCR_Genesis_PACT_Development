@@ -55,6 +55,7 @@ from legged_gym.envs.go2.go2_hard_pact.deployment import (
 )
 from legged_gym.envs.go2.go2_hard_pact.ablations import resolve_hard_pact_features
 from rsl_rl.hard_pact_logging import log_hard_pact_policy_std, active_hard_pact_losses, compact_hard_pact_metrics
+from rsl_rl.hard_pact_episode_logging import log_hard_pact_episodes
 
 
 
@@ -119,6 +120,7 @@ class OnPolicyRunnerPACT:
             from rsl_rl.modules.hard_pact_physics import GRFSwingConfig
             actor_extra_kwargs = {
                 "min_noise_std": self.policy_cfg.get("min_noise_std", 0.20),
+                "small_torque_head_init": self.policy_cfg.get("small_torque_head_init", True),
                 "max_noise_std": self.policy_cfg.get("max_noise_std", 5.0),
                 "cenet_explicit_layers": self.policy_cfg["cenet_explicit_layers"],
                 "grf_decoder_layers": self.policy_cfg["grf_decoder_layers"],
@@ -674,6 +676,8 @@ class OnPolicyRunnerPACT:
             self.writer.add_scalar(name, self._scalar(value), locs["it"])
 
     def log(self, locs, width=80, pad=35):
+        if self.is_hard_pact:
+            log_hard_pact_episodes(self.env, self.writer, locs['it'])
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
         self.tot_time += locs['collection_time'] + locs['learn_time']
         iteration_time = locs['collection_time'] + locs['learn_time']

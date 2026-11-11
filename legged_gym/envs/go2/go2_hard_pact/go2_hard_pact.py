@@ -553,6 +553,15 @@ class Go2HardPACT(Go2PACT):
                 *self.command_ranges['ang_vel_yaw'])
 
     def begin_command_curriculum_iteration(self):
+        # Independent of command/QP curricula; reset statistics stay on device
+        # across iterations until the runner's scheduled TensorBoard report.
+        if getattr(getattr(self.cfg, 'env', None), 'episode_diagnostics_enabled', False):
+            if getattr(self, '_episode_diagnostics', None) is None:
+                from rsl_rl.hard_pact_episode_logging import HardPACTEpisodeDiagnostics
+                self._episode_diagnostics = HardPACTEpisodeDiagnostics(self)
+            self._episode_diagnostics.begin_iteration(getattr(self, '_terrain_curriculum_iteration', 0))
+        else:
+            self._episode_diagnostics = None
         patience = int(self.cfg.commands.curriculum_patience_iterations)
         if patience < 0:
             raise ValueError("commands.curriculum_patience_iterations must be >= 0")
@@ -1811,6 +1820,9 @@ class Go2HardPACT(Go2PACT):
         return delayed_action
 
     def reset_idx(self, env_ids):
+        recorder = getattr(self, '_episode_diagnostics', None)
+        if recorder is not None:
+            recorder.record(self, env_ids)  # before terrain advancement/state clearing
         self._legacy_task_class.reset_idx(self, env_ids)
         rollout_qp = getattr(self, "_hard_pact_rollout_qp", None)
         if rollout_qp is not None and hasattr(rollout_qp, "clear_warm_start"):

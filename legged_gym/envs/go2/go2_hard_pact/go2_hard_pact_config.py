@@ -18,6 +18,8 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         whole_body_dim = 18
         debug = False
         debug_viz = False
+        episode_diagnostics_enabled = True  # Reset reasons and completed-episode lengths by terrain/level; TensorBoard only.
+        episode_diagnostics_interval = 50  # PPO iterations per count-weighted report; accumulates all resets between reports.
         lateral_push_only = False
         debug_draw_swing_planes = False
         debug_viz_env = 0
@@ -292,8 +294,8 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         use_tradeoff_curriculum = False
         randomize_pact_weights = True
         pact_weight_bias_min = 0.0
-        pact_weight_bias_max = 0.2
-        pact_balanced_prob = 0.25
+        pact_weight_bias_max = 0.10
+        pact_balanced_prob = 0.50
 
     class termination:
         termination_terms = ['roll', 'pitch', 'height_min', 'height_max']
@@ -370,7 +372,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
 
             tracking_lin_vel = 1.0
             tracking_ang_vel = 0.50
-            dof_tracking = 0.10
+            dof_tracking = 0.20
 
             torque_conflict_symmetric = -0.0
             torque_alignment = 0.00
@@ -458,7 +460,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         max_curriculum = 1.2
         max_curriculum_lin_vel_x = 1.00    # Symmetric curriculum cap [m/s]; None uses max_curriculum.
         max_curriculum_lin_vel_y = 1.00    # Symmetric curriculum cap [m/s].
-        max_curriculum_ang_vel_yaw = 2.00  # Symmetric curriculum cap [rad/s].
+        max_curriculum_ang_vel_yaw = 1.25  # Symmetric curriculum cap [rad/s].
         num_commands = 4
         resampling_time = 10.0
         heading_command = True
@@ -485,6 +487,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
     class policy(LeggedRobotCfgPPO.policy):
         activation = 'elu'
+        small_torque_head_init = True  # Fresh FF head: U(-1e-6,1e-6), zero bias; False uses nn.Linear defaults.
         # Normalized action std: hip/thigh/calf in FR, FL, RR, RL order,
         # repeated independently for position and feedforward outputs.
         init_noise_std = [0.80, 1.00, 1.00] * 4 + [0.40, 0.45, 0.45] * 4
@@ -596,14 +599,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'fk_position_scale_m': 0.10,  # Body-relative XYZ normalization [m].
             'fk_deadband_m': 0.02,  # Per-coordinate zero-error band [m].
             
-            'lambda_load': 1.00,  # Full accepted QP candidate, FF-command path only.
-            'load_preferred_fraction': 0.80,  # Preferred share of compensation demand.
-            'load_min_normalized_demand': 0.02,  # Ignore negligible stance-joint RMS demand.
-            'load_allocation_regularization': 1e-6,  # Detached 6x6 contact allocation ridge.
-            'load_balance_relative_tolerance': 0.05,  # Floating-base balance residual tolerance.
+            'lambda_load': 0.10,  # Direct nominal-FF Huber support supervision; existing actor warmup applies.
+            'load_balance_relative_tolerance': 1e-5,  # Exact support balance relative numerical tolerance; no ridge.
+            'load_balance_absolute_tolerance': 1e-6,  # Absolute tolerance after force/moment row normalization.
             'load_force_scale_n': 100.0,  # Allocation force-row scale [N].
             'load_moment_scale_nm': 25.0,  # Allocation moment-row scale [Nm].
-            'load_epsilon': 1e-8,  # Direction normalization safeguard.
         }
         console_debug = False
 
@@ -642,11 +642,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'torque_rate_constraint_weight': 0.0,            # 0 removes QP rate constraints; any positive value enables the hard rate bound.
 
             # Inner objective: nominal torque / GRF tracking and stance acceleration
-            'torque_tracking_weight': 15.0,                  # Inner normalized total-torque tracking weight.
+            'torque_tracking_weight': 6.0,                  # Inner normalized total-torque tracking weight.
             'torque_scale_nm': 40.0,                         # Torque variable/reference normalization scale [Nm].
             'force_tracking_weight': 1.0,                    # Inner normalized predicted-GRF tracking weight.
             'force_scale_n': 250.0,                          # Force variable/reference normalization scale [N].
-            'contact_acceleration_weight': 0.50,             # Inner stance-acceleration weight; authoritative final curriculum target.
+            'contact_acceleration_weight': 1.00,             # Inner stance-acceleration weight; authoritative final curriculum target.
             'contact_acceleration_scale_m_s2': 50.0,         # Stance-acceleration residual normalization [m/s^2].
 
             # Inner objective: torso attitude and terrain-relative height

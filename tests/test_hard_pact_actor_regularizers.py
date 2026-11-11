@@ -13,95 +13,95 @@ from rsl_rl.algorithms.ppo_hard_pact import PPO_HardPACT
 def allocation_inputs():
     J=torch.zeros(3,4,3,18,dtype=torch.float64)
     J[:,:,:,:3]=torch.eye(3,dtype=J.dtype)
-    for i in range(4): J[:,i,:,6+3*i:9+3*i]=torch.eye(3,dtype=J.dtype)
+    # Point-contact world Jacobians: angular velocity cross foot position.
+    positions=torch.tensor([[.3,-.2,-.4],[.3,.2,-.4],[-.3,-.2,-.4],[-.3,.2,-.4]],dtype=J.dtype)
+    for i,(x,y,z) in enumerate(positions):
+        J[:,i,:,3:6]=torch.tensor([[0,z,-y],[-z,0,x],[y,-x,0]],dtype=J.dtype)
+        J[:,i,:,6+3*i:9+3*i]=torch.eye(3,dtype=J.dtype)
     B=torch.zeros(3,6,18,dtype=J.dtype); B[:,:,:6]=torch.eye(6,dtype=J.dtype)
-    W=torch.zeros(3,6,dtype=J.dtype);W[:,2]=-40
-    f=torch.zeros(3,4,3,dtype=J.dtype); f[:,:,2]=20
+    W=torch.zeros(3,6,dtype=J.dtype)
+    gravity=torch.zeros(3,18,dtype=J.dtype);gravity[:,2]=80
     stance=torch.ones(3,4,dtype=torch.bool)
-    return J,B,W,f,stance
+    return J,B,W,gravity,stance
 
 
-def test_allocation_floating_base_signs_masks_and_detachment():
-    cfg=ActorRegularizerConfig();J,B,W,f,stance=allocation_inputs()
-    stance[1]=False;W[2,3]=100  # no angular balance support in this fixture
-    for x in (J,B,W,f): x.requires_grad_()
-    d,valid=compensation_demand(J,B,W,f,stance,cfg,.6)
-    assert valid.tolist()==[True,False,False] and not d.requires_grad
-    # Upward delta contact force balances downward external load, hence
-    # actuator compensation is negative under this fixture's +J_joint sign.
-    torch.testing.assert_close(d[0].reshape(4,3)[:,2],torch.full((4,),-10.,dtype=d.dtype),atol=.03,rtol=0)
-    assert d[1:].eq(0).all()
-    W2=W.detach().clone();W2[0,0]=1000
-    assert not compensation_demand(J,B,W2,f,stance,cfg,.6)[1][0]  # friction infeasible
+def test_exact_support_gravity_external_load_and_asymmetry():
+    cfg=ActorRegularizerConfig();J,B,W,g,stance=allocation_inputs()
+    W[1,2]=-40
+    g[2,4]=4  # shifted support center: asymmetric front/rear loading
+    for x in (J,B,W,g):x.requires_grad_()
+    target,valid=compensation_demand(J,B,W,g,stance,cfg,.6)
+    assert valid.all() and not target.requires_grad
+    torch.testing.assert_close(target[0,2::3],torch.full((4,),-20.,dtype=g.dtype))
+    torch.testing.assert_close(target[1,2::3],torch.full((4,),-30.,dtype=g.dtype))
+    forces=-target.reshape(3,4,3)
+    torch.testing.assert_close(torch.einsum('bfkn,bfk->bn',J.detach(),forces)[:,:6],
+        (g.detach()-torch.einsum('bkn,bk->bn',B.detach(),W.detach()))[:,:6],atol=1e-10,rtol=1e-10)
+    assert not torch.allclose(target[2,2::3],target[0,2::3])
 
 
-def test_load_hinge_nan_mask_and_gradients():
-    cfg=ActorRegularizerConfig();J,B,W,f,stance=allocation_inputs()
-    d,feasible=compensation_demand(J,B,W,f,stance,cfg,.6)
-    ff=torch.zeros(3,12,dtype=d.dtype,requires_grad=True)
-    with torch.no_grad(): ff[1]=float('nan')
-    valid=torch.tensor([True,False,False])
-    loss,metrics=load_compensation_loss(ff,d,torch.ones(12)*20,stance,valid,feasible,cfg)
-    torch.testing.assert_close(metrics['shortfall_nm'],20*loss.detach().sqrt(),rtol=1e-6,atol=1e-6)
-    assert not metrics['shortfall_nm'].requires_grad
-    loss.backward()
-    assert loss>0 and ff.grad.isfinite().all() and ff.grad[1:].eq(0).all()
-    assert ff.grad[0,2::3].gt(0).all()  # descent increases negative compensation
-    good,_=load_compensation_loss(d,d,torch.ones(12)*20,stance,valid,feasible,cfg)
-    assert good==0 and metrics['active_hinge_fraction']==1
-    empty,_=load_compensation_loss(ff,d*0,torch.ones(12)*20,stance,valid,feasible,cfg)
-    assert empty.isfinite() and empty==0
+def test_two_contact_rank_deficient_achievable_and_infeasible():
+    J,B,W,g,stance=allocation_inputs()
+    stance[:]=False;stance[:,[0,3]]=True  # diagonal support through base
+    g[1,3:6]=torch.tensor([.6,.4,0.],dtype=g.dtype)  # moment along support line: unattainable
+    stance[2]=False
+    target,valid=compensation_demand(J,B,W,g,stance,ActorRegularizerConfig(),.6)
+    assert valid.tolist()==[True,False,False]
+    torch.testing.assert_close(target[0,[2,11]],torch.full((2,),-40.,dtype=g.dtype))
+    assert target[1:].eq(0).all()
+
+
+@pytest.mark.parametrize('bad',[float('nan'),float('inf'),1e300])
+def test_support_invalid_inputs_do_not_poison_neighbors(bad):
+    J,B,W,g,stance=allocation_inputs()
+    J[1]=bad
+    target,valid=compensation_demand(J,B,W,g,stance,ActorRegularizerConfig(),.6)
+    assert valid.tolist()==[True,False,True] and target.isfinite().all()
+
+
+def test_support_friction_rejection_and_no_stale_target():
+    J,B,W,g,stance=allocation_inputs();cfg=ActorRegularizerConfig()
+    original,valid=compensation_demand(J,B,W,g,stance,cfg,.6)
+    W[:,2]=-40
+    changed,_=compensation_demand(J,B,W,g,stance,cfg,.6)
+    assert not torch.equal(original,changed)
+    W[:,0]=10000
+    assert not compensation_demand(J,B,W,g,stance,cfg,.6)[1].any()
+    W.zero_();g[:,2]=-80
+    assert not compensation_demand(J,B,W,g,stance,cfg,.6)[1].any()
 
 
 @pytest.mark.parametrize('device',['cpu',pytest.param('cuda',marks=pytest.mark.skipif(
     not torch.cuda.is_available(),reason='CUDA unavailable'))])
 @pytest.mark.parametrize('dtype',[torch.float32,torch.float64])
-def test_compensation_checked_cholesky_matches_lu(device,dtype):
-    cfg=ActorRegularizerConfig()
-    J,B,W,f,stance=[x.to(device) for x in allocation_inputs()]
-    J,B,W,f=[x.to(dtype) for x in (J,B,W,f)]
-    C=J.flatten(1,2)[:,:,:6].transpose(1,2)
-    scale=W.new_tensor([cfg.load_force_scale_n]*3+[cfg.load_moment_scale_nm]*3)
-    C=C/scale[None,:,None]
-    g=torch.einsum('bkn,bk->bn',B,W)
-    gram=C@C.transpose(1,2)+cfg.load_allocation_regularization*torch.eye(6,device=device,dtype=dtype)
-    dual=torch.linalg.solve(gram,(-g[:,:6]/scale)[...,None])
-    df=(C.transpose(1,2)@dual).squeeze(-1).reshape(-1,4,3)
-    expected=-(torch.einsum('bfkn,bfk->bn',J,df)+g)[:,6:]
-    actual,valid=compensation_demand(J,B,W,f,stance,cfg,.6)
-    assert valid.all() and actual.isfinite().all()
-    torch.testing.assert_close(actual,expected,rtol=2e-6 if dtype==torch.float32 else 1e-12,atol=1e-7 if dtype==torch.float32 else 1e-12)
+def test_full_and_rank_deficient_minimum_norm_parity(device,dtype):
+    J,B,W,g,stance=[x.to(device) for x in allocation_inputs()]
+    J,B,W,g=[x.to(dtype) for x in (J,B,W,g)]
+    stance[1]=False;stance[1,[0,3]]=True
+    diagnostics={}
+    target,valid=compensation_demand(J,B,W,g,stance,ActorRegularizerConfig(),.6,diagnostics)
+    C=(J*stance[:,:,None,None]).flatten(1,2)[:,:,:6].transpose(1,2)
+    expected=torch.linalg.pinv(C.double())@g[:,:6].double()[...,None]
+    torch.testing.assert_close(-target.reshape(3,12).double(),expected.squeeze(-1),
+                              atol=2e-4 if dtype==torch.float32 else 1e-10,rtol=1e-5)
+    assert valid.all() and diagnostics['rank_deficient_fraction']>0
 
 
-@pytest.mark.parametrize('field,value',[(0,float('nan')),(1,float('inf')),
-    (2,float('nan')),(3,float('inf')),(0,1e30),(1,1e30)])
-def test_compensation_rejects_nonfinite_and_overflow_rows(field,value,monkeypatch):
-    cfg=ActorRegularizerConfig()
-    args=[x.float() if x.dtype!=torch.bool else x for x in allocation_inputs()]
-    expected,_=compensation_demand(*args,cfg,.6)
-    args[field][1]=value
-    if field==1 and value==1e30: args[2][1]=1e30
-    original=torch.linalg.cholesky_ex
-    def checked(matrix,**kwargs):
-        assert matrix.isfinite().all()
-        return original(matrix,**kwargs)
-    monkeypatch.setattr(torch.linalg,'cholesky_ex',checked)
-    actual,valid=compensation_demand(*args,cfg,.6)
-    assert valid.tolist()==[True,False,True]
-    assert actual.isfinite().all() and actual[1].eq(0).all()
-    torch.testing.assert_close(actual[[0,2]],expected[[0,2]])
-
-
-def test_compensation_rejects_failed_factor_without_poisoning_neighbors(monkeypatch):
-    original=torch.linalg.cholesky_ex
-    def failed(matrix,**kwargs):
-        factor,info=original(matrix,**kwargs)
-        factor[1]=float('nan');info[1]=1
-        return factor,info
-    monkeypatch.setattr(torch.linalg,'cholesky_ex',failed)
-    demand,valid=compensation_demand(*allocation_inputs(),ActorRegularizerConfig(),.6)
-    assert valid.tolist()==[True,False,True]
-    assert demand.isfinite().all() and demand[1].eq(0).all()
+def test_direct_huber_valid_stance_coordinates_and_gradients():
+    cfg=ActorRegularizerConfig();J,B,W,g,stance=allocation_inputs()
+    target,feasible=compensation_demand(J,B,W,g,stance,cfg,.6)
+    ff=torch.zeros(3,12,dtype=g.dtype,requires_grad=True)
+    with torch.no_grad():ff[1]=float('nan')
+    valid=torch.tensor([True,False,False])
+    loss,metrics=load_compensation_loss(ff,target,torch.ones(12)*20,stance,valid,feasible,cfg)
+    torch.testing.assert_close(loss,torch.tensor(1/6,dtype=g.dtype))
+    loss.backward()
+    assert ff.grad.isfinite().all() and ff.grad[1:].eq(0).all() and ff.grad[0,2::3].gt(0).all()
+    assert metrics['valid_joint_count']==12
+    good,_=load_compensation_loss(target,target,torch.ones(12)*20,stance,valid,feasible,cfg)
+    assert good==0
+    empty,_=load_compensation_loss(ff,target,torch.ones(12)*20,stance,valid&False,feasible,cfg)
+    assert empty.isfinite() and empty==0
 
 
 def test_fk_masks_deadband_and_target_detachment():
@@ -126,30 +126,35 @@ def test_channel_vjp_isolates_ff_from_position_estimator_and_shared_context():
     assert ff.grad!=0 and pos.grad is None and trunk.grad is None and head.grad is None
 
 
-@pytest.mark.parametrize('device,backend',[('cpu','qpth'),pytest.param('cuda','cupiqp',
-    marks=pytest.mark.skipif(not torch.cuda.is_available(),reason='cuPIQP needs CUDA'))])
-def test_load_routes_through_real_accepted_qp_into_ff_only(device,backend):
-    from test_hard_pact_reduced_qp import inputs,solver
-    d=inputs(1,dtype=torch.float64,device=device)
-    cfg=ActorRegularizerConfig();J,B,W,f,stance=allocation_inputs()
-    J,B,W,f,stance=[x[:1].to(device) for x in (J,B,W,f,stance)]
-    pos=torch.nn.Parameter(torch.zeros_like(d['tau_nom']))
-    ff=torch.nn.Parameter(torch.zeros_like(pos))
-    context=torch.nn.Parameter(torch.ones_like(pos))
-    q=pos*context;t=ff*context;nominal=3*q+.8*t
-    f=f.clone().requires_grad_();W=W.clone().requires_grad_()
-    d.update(tau_nom=nominal,foot_jacobians=J,base_jacobian=B,wrench_pred_world=W,force_pred_world=f)
-    qp=solver(qp_solver=backend,solver_dtype='float64',contact_acceleration_weight=0.,torque_rate_constraint_weight=0.)
-    out=qp.solve(differentiable=True,**d)
-    assert out.differentiated_mask.all()
-    demand,feasible=compensation_demand(J,B,W,f,stance,cfg,.6)
-    loss,_=load_compensation_loss(out.tau_safe,demand,qp.torque_limits.to(pos),stance,
-        out.differentiated_mask,feasible,cfg)
-    assert loss>0
-    isolated=PPO_HardPACT._actor_only_torque_vjp(loss,nominal,[pos,ff],branch=t)
-    isolated.backward()
-    assert ff.grad.isfinite().all() and ff.grad.abs().sum()>0
-    assert pos.grad is None and context.grad is None and f.grad is None and W.grad is None
+def test_support_nominal_ff_actor_only_routing_without_qp():
+    J,B,W,g,stance=allocation_inputs()
+    cfg=ActorRegularizerConfig()
+    target,feasible=compensation_demand(J,B,W,g,stance,cfg,.6)
+    pos=torch.nn.Parameter(torch.ones(3,12,dtype=g.dtype))
+    ff=torch.nn.Parameter(torch.full_like(pos,.1));context=torch.nn.Parameter(torch.ones_like(pos))
+    trunk=torch.nn.Parameter(torch.ones_like(pos))
+    command=ff*trunk*context
+    loss,_=load_compensation_loss(.8*command,target,torch.ones(12)*20,stance,
+        torch.ones(3,dtype=torch.bool),feasible,cfg)
+    routed=PPO_HardPACT._actor_only_torque_vjp(loss,command,[pos,ff,trunk])
+    routed.backward()
+    assert ff.grad.abs().sum()>0 and ff.grad.isfinite().all()
+    assert trunk.grad.abs().sum()>0
+    assert pos.grad is None and context.grad is None
+
+
+def test_nominal_gravity_is_not_velocity_bias():
+    from legged_gym.dynamics import BardGo2Dynamics
+    from rsl_rl.algorithms.hard_pact_actor_regularizers import nominal_support_gravity
+    dynamics=BardGo2Dynamics('resources/robots/go2/urdf/go2.urdf',dtype=torch.float64,batch_capacity=2)
+    q=torch.zeros(1,19,dtype=torch.float64);q[:,3]=1
+    q[:,7:]=torch.tensor([.1,.8,-1.5]*4)
+    gravity=nominal_support_gravity(dynamics,q)
+    context=dynamics.build_context(q,torch.zeros(1,18,dtype=q.dtype),parameters={},need_jacobians=False)
+    torch.testing.assert_close(gravity,context.rnea(torch.zeros(1,18,dtype=q.dtype)))
+    context=dynamics.build_context(q,torch.ones(1,18,dtype=q.dtype),parameters={},need_jacobians=False)
+    assert not torch.allclose(gravity,context.rnea(torch.zeros(1,18,dtype=q.dtype)))
+    assert not gravity.requires_grad
 
 
 def test_bard_fk_matches_finite_difference_in_canonical_order():
@@ -250,7 +255,7 @@ def test_tiny_real_ppo_update_reuses_one_qp_and_disabled_paths_are_not_called(mo
            'projection_recovery/joint_slack_rad_s2','projection_recovery/rate_slack_nm',
            'velocity_xy/error_m_s','velocity_yaw/error_rad_s'}
     if enabled:
-        names.update(('fk/error_m','load/shortfall_nm'))
+        names.update(('fk/error_m','load/error_nm'))
     assert set(losses)=={'Loss/actor_pinn/'+name for name in names}
     assert all(torch.isfinite(value) and not value.requires_grad for value in losses.values())
     assert losses['Loss/actor_pinn/fk']>0 if enabled else losses['Loss/actor_pinn/fk']==0

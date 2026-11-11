@@ -2,8 +2,8 @@
 
 Canonical joints/feet are FR, FL, RR, RL. All measured/estimated quantities
 are constants. Shared actor weights can affect both output channels even when
-the loss VJP enters only one channel. Load compensation encourages sufficient
-effort, not an identifiable disturbance-specific incremental torque or PD ratio.
+the loss VJP enters only one channel. Nominal FF is supervised against detached
+gravity/external-load stance support, without a PD/FF ratio or QP traversal.
 """
 from dataclasses import dataclass
 import math
@@ -17,10 +17,12 @@ class ActorRegularizerConfig:
     fk_position_scale_m: float = 0.10
     fk_deadband_m: float = 0.0
     lambda_load: float = 0.0
+    # Accepted only for old resolved configs; no longer affect the support loss.
     load_preferred_fraction: float = 0.75
     load_min_normalized_demand: float = 0.02
     load_allocation_regularization: float = 1e-6
-    load_balance_relative_tolerance: float = 0.05
+    load_balance_relative_tolerance: float = 1e-5
+    load_balance_absolute_tolerance: float = 1e-6
     load_force_scale_n: float = 100.0
     load_moment_scale_nm: float = 25.0
     load_epsilon: float = 1e-8
@@ -48,91 +50,109 @@ def fk_consistency_loss(predicted, target, stance, valid, cfg):
 
 
 @torch.no_grad()
-def compensation_demand(foot_jacobian, base_jacobian, wrench, reference_force, stance, cfg, mu):
-    """Allocate df with C df = -w_base, then d = -(Jc.T df + Jb.T W)_joint.
+def nominal_support_gravity(dynamics, q):
+    """Nominal g(q)=RNEA(q,0,0), never h(q,v), payload, or passive springs.
 
-    Jacobians use world-aligned frame axes at their existing origins, and
-    generalized columns use canonical body-base/joint velocities. No torso
-    joint-block shortcut: the floating-base balance must pass certification.
-    Test the resulting TOTAL reference+df forces against the existing cone.
-    This small regularized 6x6 solve is detached, not another contact QP.
+    Use the existing backend conversion/model, bounded by its batch capacity.
+    Pinocchio's existing worker boundary synchronizes; BARD stays on device.
+    Results are owned because backend workspaces are mutable.
     """
-    J=foot_jacobian.detach(); B=base_jacobian.detach(); W=wrench.detach()
-    stance=stance.detach().bool(); f=reference_force.detach()
+    values=[]
+    for first in range(0,q.shape[0],dynamics.batch_capacity):
+        state=q[first:first+dynamics.batch_capacity].detach()
+        valid=torch.isfinite(state).all(-1)&(state[:,3:7].square().sum(-1)>0)
+        safe=torch.zeros_like(state);safe[:,3]=1  # simulator WXYZ identity
+        state=torch.where(valid[:,None],state,safe)
+        zero=state.new_zeros(state.shape[0],18)
+        context=dynamics.build_context(state,zero,parameters={},need_jacobians=False)
+        result=context.rnea(zero).detach().clone()
+        values.append(torch.where(valid[:,None],result,float('nan')))
+    return torch.cat(values)
+
+
+@torch.no_grad()
+def compensation_demand(foot_jacobian, base_jacobian, wrench, gravity, stance, cfg, mu,
+                        diagnostics=None):
+    """Minimum-norm EXACT stance support, not incremental load allocation.
+
+    M a + g = S.T tau + J.T f + B.T W. World-aligned forces use the
+    same foot/base origins as the QP Jacobians; generalized order is canonical.
+    Row scaling changes neither the exact solution nor its minimum-force norm.
+    No ridge: singular geometry uses a rank-aware Moore-Penrose solution and
+    is accepted only if the requested balance is achievable and cone-feasible.
+    """
+    # Double precision only for this small detached allocation: forming C C^T
+    # squares its condition number, and float32 CUDA can reject achievable
+    # two-contact balance. QP/training precision remains unchanged.
+    output_dtype=gravity.dtype
+    J=foot_jacobian.detach().double(); B=base_jacobian.detach().double()
+    W=wrench.detach().double(); g=gravity.detach().double(); stance=stance.detach().bool()
     finite=(torch.isfinite(J).flatten(1).all(1)&torch.isfinite(B).flatten(1).all(1)
-            &torch.isfinite(W).all(1)&torch.isfinite(f).flatten(1).all(1))
+            &torch.isfinite(W).all(1)&torch.isfinite(g).all(1))
     J=torch.where(finite[:,None,None,None],J,0.)*stance[:,:,None,None]
-    B=torch.where(finite[:,None,None],B,0.);W=torch.where(finite[:,None],W,0.)
-    f=torch.where(finite[:,None,None],f,0.)
-    generalized=torch.einsum('bkn,bk->bn',B,W)
+    B=torch.where(finite[:,None,None],B,0.); W=torch.where(finite[:,None],W,0.)
+    g=torch.where(finite[:,None],g,0.)
+    rhs_full=g-torch.einsum('bkn,bk->bn',B,W)
     C=J.flatten(1,2)[:,:,:6].transpose(1,2)
     scale=W.new_tensor([cfg.load_force_scale_n]*3+[cfg.load_moment_scale_nm]*3)
-    Cn=C/scale[None,:,None]; rhs=-generalized[:,:6]/scale
-    eye=torch.eye(6,device=W.device,dtype=W.dtype)
-    gram=Cn@Cn.transpose(1,2)+cfg.load_allocation_regularization*eye
-    # Finite inputs can still overflow during products/scaling. Invalid rows
-    # enter the factorization as I * 0, never NaN/Inf; they remain ineligible.
-    finite &= (torch.isfinite(generalized).all(-1)
-               &torch.isfinite(Cn).flatten(1).all(-1)
-               &torch.isfinite(gram).flatten(1).all(-1)
-               &torch.isfinite(rhs).all(-1))
-    gram=torch.where(finite[:,None,None],gram,eye)
-    rhs=torch.where(finite[:,None],rhs,0.)
+    Cn=C/scale[None,:,None]; b=rhs_full[:,:6]/scale
+    gram=Cn@Cn.transpose(1,2)
+    finite &= (torch.isfinite(gram).flatten(1).all(1)&torch.isfinite(b).all(1)
+               &torch.isfinite(rhs_full).all(1))
     Cn=torch.where(finite[:,None,None],Cn,0.)
-    # Cn Cn^T + ridge*I is SPD mathematically. Use its structure instead of
-    # batched LU (cublasSgetrfBatched). Reject numerical factorization failures
-    # without changing the ridge or silently accepting an approximate solve.
-    factor,info=torch.linalg.cholesky_ex(gram,check_errors=False)
-    solved=finite&(info==0)&torch.isfinite(factor).flatten(1).all(-1)
-    factor=torch.where(solved[:,None,None],factor,eye)
-    dual=torch.cholesky_solve(torch.where(solved[:,None],rhs,0.)[...,None],factor)
-    solved &= torch.isfinite(dual).flatten(1).all(-1)
-    dual=torch.where(solved[:,None,None],dual,0.)
-    df=(Cn.transpose(1,2)@dual).squeeze(-1).reshape(-1,4,3)
-    balance=(Cn@df.flatten(1)[...,None]).squeeze(-1)-rhs
-    balance_norm=balance.norm(dim=-1);rhs_norm=rhs.norm(dim=-1)
-    balanced=(torch.isfinite(balance_norm)&torch.isfinite(rhs_norm)
-              &(balance_norm<=cfg.load_balance_relative_tolerance*rhs_norm.clamp_min(cfg.load_epsilon)))
-    total=torch.where(stance[...,None],f,0.)+df
-    normal=total[:,:,2]
-    cone=(normal>=0)&(total[:,:,:2].abs()<=mu*normal[...,None]+1e-6).all(-1)
-    feasible=(((~stance)|cone).all(-1)&stance.any(-1)&balanced&solved
-              &torch.isfinite(total).flatten(1).all(-1))
-    d=-(torch.einsum('bfkn,bfk->bn',J,df)+generalized)[:,6:]
-    feasible &= torch.isfinite(d).all(-1)
-    return torch.where(feasible[:,None],d,0.), feasible
+    b=torch.where(finite[:,None],b,0.)
+    gram=torch.where(finite[:,None,None],gram,0.)
+    # Batched spectral rank detection avoids per-row dispatch/synchronization.
+    # eigh on CUDA may synchronize in PyTorch; no explicit host scalar reads.
+    eig,U=torch.linalg.eigh(gram)
+    cutoff=12*torch.finfo(Cn.dtype).eps*eig[:,-1:].clamp_min(0)
+    keep=eig>cutoff
+    full=keep.all(-1)&finite
+    eye=torch.eye(6,device=W.device,dtype=W.dtype)
+    dual,info=torch.linalg.solve_ex(torch.where(full[:,None,None],gram,eye),
+        torch.where(full[:,None],b,0.)[...,None],check_errors=False)
+    inv=torch.where(keep,1/torch.where(keep,eig,1.),0.)
+    pseudo=U@(inv[...,None]*(U.transpose(1,2)@b[...,None]))
+    solved=(~full)|(info==0)
+    dual=torch.where(full[:,None,None],dual,pseudo)
+    force=(Cn.transpose(1,2)@dual).squeeze(-1).reshape(-1,4,3)
+    residual=(Cn@force.flatten(1)[...,None]).squeeze(-1)-b
+    error=residual.norm(dim=-1)
+    balanced=error <= cfg.load_balance_absolute_tolerance+cfg.load_balance_relative_tolerance*b.norm(dim=-1)
+    normal=force[:,:,2]
+    cone=((normal>=0)&(force[:,:,:2].abs()<=mu*normal[...,None]+1e-6).all(-1))
+    friction=((~stance)|cone).all(-1)
+    target=(rhs_full-torch.einsum('bfkn,bfk->bn',J,force))[:,6:].to(output_dtype)
+    finite &= torch.isfinite(target).all(1)&torch.isfinite(force).flatten(1).all(1)&torch.isfinite(error)
+    valid=finite&solved&balanced&friction&stance.any(-1)
+    if diagnostics is not None:
+        diagnostics.update(balance_residual=torch.where(finite,error,0.).mean(),
+            invalid_nonfinite_fraction=(~finite).float().mean(),
+            invalid_solver_fraction=(finite&~solved).float().mean(),
+            invalid_balance_fraction=(finite&~balanced).float().mean(),
+            invalid_friction_fraction=(finite&~friction).float().mean(),
+            empty_stance_fraction=(~stance.any(-1)).float().mean(),
+            rank_deficient_fraction=(~full).float().mean(),
+            valid_target_fraction=valid.float().mean())
+    return torch.where(valid[:,None],target,0.).to(output_dtype),valid
 
 
-def load_compensation_loss(post_ff, demand, torque_scales, stance, valid, feasible, cfg):
-    """Directional hinge, normalized by sqrt(number of stance joints).
+def load_compensation_loss(nominal_ff, demand, torque_scales, stance, valid, feasible, cfg):
+    """Huber on physical nominal FF minus detached FULL support torque.
 
-    No PD subtraction or channel-ratio target occurs in this objective.
-    Feedforward is the existing physical post-QP command, not a raw action.
+    Mean over valid stance joint coordinates (not rows); no PD subtraction,
+    QP path, preferred channel ratio, or minimum-disturbance threshold.
     """
     joints=stance.detach().bool().repeat_interleave(3,dim=-1)
-    mask=valid.detach().bool().reshape(-1)&feasible.detach().bool()
-    mask &= torch.isfinite(post_ff.detach()).all(-1)&torch.isfinite(demand).all(-1)
-    rows=mask.nonzero(as_tuple=True)[0]
-    scales=torch.as_tensor(torque_scales,device=post_ff.device,dtype=post_ff.dtype).detach()
-    # Configuration/controller guarantees positive physical scales.
-    d=(demand.detach()[rows]/scales)*joints[rows]
-    tau=(post_ff[rows]/scales)*joints[rows]
-    norm=d.norm(dim=-1); divisor=joints[rows].sum(-1).clamp_min(1).sqrt()
-    supported=norm/divisor>cfg.load_min_normalized_demand
-    d=d[supported];tau=tau[supported];norm=norm[supported];divisor=divisor[supported]
-    direction=d/(norm[:,None]+cfg.load_epsilon)
-    contribution=(direction*tau).sum(-1)/divisor
-    required=norm/divisor
-    hinge=(cfg.load_preferred_fraction*required-contribution).clamp_min(0)
-    loss=hinge.square().sum()/max(hinge.numel(),1)
-    count=hinge.new_tensor(hinge.numel())
-    # Same normalized hinge direction expressed as a physical torque unit
-    # vector. Retain the loss's sqrt(stance-joint count) normalization. With
-    # uniform torque scale T this is approximately hinge*T (epsilon aside).
-    physical_direction_gain=(direction.detach()/scales).norm(dim=-1).clamp_min(cfg.load_epsilon)
-    shortfall_nm=(hinge.detach()/physical_direction_gain).sum()/count.clamp_min(1)
-    return loss, {'loss':loss.detach(),'valid_fraction':count/max(post_ff.shape[0],1),
-        'shortfall_nm':shortfall_nm,
-        'demand':required.sum()/count.clamp_min(1),
-        'contribution':contribution.detach().sum()/count.clamp_min(1),
-        'active_hinge_fraction':(hinge.detach()>0).float().sum()/count.clamp_min(1)}
+    rows=valid.detach().bool().reshape(-1)&feasible.detach().bool()
+    rows &= torch.isfinite(nominal_ff.detach()).all(-1)&torch.isfinite(demand).all(-1)
+    mask=rows[:,None]&joints
+    scales=torch.as_tensor(torque_scales,device=nominal_ff.device,dtype=nominal_ff.dtype).detach()
+    error=nominal_ff[mask]-demand.detach()[mask]
+    normalized=error/scales.expand_as(nominal_ff)[mask]
+    count=mask.sum()
+    loss=F.smooth_l1_loss(normalized,torch.zeros_like(normalized),reduction='sum')/count.clamp_min(1)
+    return loss,dict(loss=loss.detach(),valid_fraction=rows.float().mean(),
+        valid_joint_count=count.detach(),
+        error_nm=error.detach().abs().sum()/count.clamp_min(1),
+        target_magnitude_nm=demand.detach()[mask].abs().sum()/count.clamp_min(1))

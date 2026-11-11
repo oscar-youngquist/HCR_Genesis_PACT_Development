@@ -48,6 +48,33 @@ def test_all_ablations_inherit_profile(variant):
     assert cfg.policy.init_noise_std == GO2HardPACTCfgPPO.policy.init_noise_std
     assert cfg.policy.min_noise_std == [.15, .25, .25] * 8
     assert cfg.policy.max_noise_std == 1.1
+    assert cfg.policy.small_torque_head_init == GO2HardPACTCfgPPO.policy.small_torque_head_init
+
+
+@pytest.mark.parametrize('pos', [False, True])
+def test_optional_b1z1_torque_head_initialization(pos):
+    cls = ActorCritic_HardPACT_Pos if pos else ActorCritic_HardPACT
+    gains = calculate_physics_head_gains(GO2HardPACTCfg())
+    def make(enabled):
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(71)
+            return cls(actor_layers=[16,16], critic_layers=[16,16],
+                       cenet_enc_layers=[16,16], cenet_in_dim=1140,
+                       grf_scale_n=gains.grf_scale_n, wrench_scale=gains.wrench_scale_n_nm,
+                       wrench_qp_clip=gains.wrench_qp_clip_n_nm, small_torque_head_init=enabled)
+    small, standard = make(True), make(False)
+    assert small.act_tau_out.weight.abs().max() <= 1e-6
+    assert small.act_tau_out.bias.eq(0).all()
+    assert standard.act_tau_out.weight.abs().max() > 1e-3
+    assert standard.act_tau_out.bias.abs().max() > 1e-3
+    assert small.state_dict().keys() == standard.state_dict().keys()
+    for key, value in small.state_dict().items():
+        if not key.startswith('act_tau_out.'):
+            torch.testing.assert_close(value, standard.state_dict()[key], rtol=0, atol=0)
+    # Resuming never reapplies small initialization to the trained torque head.
+    small.load_state_dict(standard.state_dict(), strict=True)
+    torch.testing.assert_close(small.act_tau_out.weight, standard.act_tau_out.weight)
+    torch.testing.assert_close(small.act_tau_out.bias, standard.act_tau_out.bias)
 
 
 @pytest.mark.parametrize('initial,lower,upper', [([1,2], .1, 1.1),

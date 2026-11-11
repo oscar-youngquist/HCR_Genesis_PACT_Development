@@ -42,6 +42,7 @@ from rsl_rl.algorithms import PPO_PACT_Pos
 from rsl_rl.modules import ActorCritic_PACT_Pos, ActorCritic_HardPACT_Pos, ContextDecoder
 from rsl_rl.env import VecEnv
 from rsl_rl.utils import pretty_print_module
+from rsl_rl.hard_pact_episode_logging import log_hard_pact_episodes
 from rsl_rl.hard_pact_logging import (
     log_hard_pact_policy_std,
     collect_contact_estimator_scalars,
@@ -161,6 +162,7 @@ class OnPolicyRunnerPACTPos:
             from rsl_rl.modules.hard_pact_physics import GRFSwingConfig
             actor_extra_kwargs = {
                 "min_noise_std": self.policy_cfg.get("min_noise_std", 0.1),
+                "small_torque_head_init": self.policy_cfg.get("small_torque_head_init", False),
                 "max_noise_std": self.policy_cfg.get("max_noise_std", 5.0),
                 "cenet_explicit_layers": self.policy_cfg["cenet_explicit_layers"],
                 "grf_decoder_layers": self.policy_cfg["grf_decoder_layers"],
@@ -451,6 +453,8 @@ class OnPolicyRunnerPACTPos:
         # self.env.shutdown_asynic_pino_workers()
 
     def log(self, locs, width=80, pad=35):
+        if self.is_hard_pact_pos:
+            log_hard_pact_episodes(self.env, self.writer, locs['it'])
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
         self.tot_time += locs['collection_time'] + locs['learn_time']
         iteration_time = locs['collection_time'] + locs['learn_time']

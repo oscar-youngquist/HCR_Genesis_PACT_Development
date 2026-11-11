@@ -213,7 +213,8 @@ class ActorCritic_HardPACT(nn.Module):
                  ablation_features="full",
                  grf_swing=None,
                  min_noise_std=0.20,
-                 max_noise_std=5.0):
+                 max_noise_std=5.0,
+                 small_torque_head_init=True):
         super().__init__()
 
         # Metadata only: every ablation deliberately constructs the identical
@@ -314,8 +315,11 @@ class ActorCritic_HardPACT(nn.Module):
         # disable args validation for speedup
         Normal.set_default_validate_args = False
 
-        nn.init.uniform_(self.act_tau_out.weight, -1.0e-6, 1.0e-6)
-        nn.init.zeros_(self.act_tau_out.bias)
+        # B1Z1 PACT near-zero mean FF initialization; checkpoint loads overwrite it.
+        # Disabled retains nn.Linear's standard initialization, not exploration std.
+        if small_torque_head_init:
+            nn.init.uniform_(self.act_tau_out.weight, -1.0e-6, 1.0e-6)
+            nn.init.zeros_(self.act_tau_out.bias)
 
     # Currently unused...
     def _init_weights(self):

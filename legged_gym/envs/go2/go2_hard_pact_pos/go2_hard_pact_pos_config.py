@@ -20,6 +20,8 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         whole_body_dim = 18
         debug = False
         debug_viz = False
+        episode_diagnostics_enabled = True  # Same reset/terrain diagnostics as full HardPACT; legacy tasks unaffected.
+        episode_diagnostics_interval = 50  # PPO iterations per TensorBoard report; no per-step host transfer.
         # Match HardPACT's disturbance contract.  False preserves the legacy
         # PACT/PactPos planar push sampling (both world x and y components).
         lateral_push_only = False
@@ -456,6 +458,7 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
 
     class policy(LeggedRobotCfgPPO.policy):
         activation = 'elu'
+        small_torque_head_init = True  # Fresh torque-clone head: U(-1e-6,1e-6), zero bias; checkpoint weights unchanged.
         # B1Z1 leg exploration profile: hip/thigh/calf, FR/FL/RR/RL.
         init_noise_std = [0.80, 1.00, 1.00] * 4
         min_noise_std = [0.15, 0.25, 0.25] * 4
