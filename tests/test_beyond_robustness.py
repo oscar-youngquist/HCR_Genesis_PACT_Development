@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from rsl_rl.beyond_robustness_config import BeyondRobustnessConfig as Config, PHASES
+from rsl_rl.beyond_robustness_schema import BeyondRobustnessInputSchema as Schema
 from rsl_rl.modules import ActorCriticBeyondRobustness as Model
 from rsl_rl.algorithms import PPOBeyondRobustness as Algorithm
 
@@ -31,7 +32,8 @@ def make(phase="teacher_student", **changes):
 
 
 def inputs(n=3):
-    return [torch.randn(n, width) for width in (45, 264, 62, 7)]
+    schema = Schema()
+    return [torch.randn(n, width) for width in (schema.observation_dim, schema.state_dim, schema.parameter_dim, schema.load_dim)]
 
 
 def collect(alg):
@@ -56,8 +58,8 @@ def has_grad(module):
 
 def test_dimensions_normalization_and_student_inputs():
     model = Model(Config(history_length=4))
-    widths = {"actor": [84, 512, 256, 128, 12], "critic": [365, 512, 256, 128, 1],
-              "privileged_encoder": [326, 512, 256, 128, 32],
+    widths = {"actor": [84, 512, 256, 128, 12], "critic": [model.schema.privileged_dim + 39, 512, 256, 128, 1],
+              "privileged_encoder": [model.schema.privileged_dim, 512, 256, 128, 32],
               "history_encoder": [180, 512, 256, 128, 32],
               "load_estimator": [180, 512, 256, 64, 7]}
     for name, expected in widths.items():
@@ -159,7 +161,7 @@ def test_timestamp_copies_partial_resets_and_complete_shuffle():
     a = make()
     snapshots = []
     for k in range(3):
-        values = [torch.full((3, width), float(k + 1)) for width in (45, 264, 62, 7)]
+        values = [torch.full_like(tensor, float(k + 1)) for tensor in inputs()]
         a.act(*values)
         snapshots.append(deepcopy(a.pending))
         for value in values: value.fill_(-900)  # emulate simulator workspace mutation
@@ -282,7 +284,8 @@ def test_phase_switch_checkpoint_and_boundary_guard(tmp_path):
 def test_inherit_allowlisted_config_only():
     cfg = Config()
     algorithm = SimpleNamespace(**cfg.resolved(), hard_pact_qp={"enabled": True}, pinn_loss_weight=900)
-    env = SimpleNamespace(env=SimpleNamespace(num_obs_hist=9, num_envs=123, num_observations=57))
+    env = SimpleNamespace(env=SimpleNamespace(num_obs_hist=9, num_envs=123, num_observations=57),
+                          terrain=SimpleNamespace(measure_heights=True, measured_points_x=[0., 1.], measured_points_y=[0.]))
     policy = SimpleNamespace(init_noise_std=list(range(1, 25)), min_noise_std=.1, max_noise_std=30.)
     train = SimpleNamespace(algorithm=algorithm, policy=policy, runner=SimpleNamespace(num_steps_per_env=11))
     inherited = Config.from_hardpact(env, train)

@@ -4,11 +4,13 @@ No environment, curriculum stage, QP, PCGrad or simulator initialization is owne
 Collection snapshots t inputs before env.step; labels never come from the next/reset state.
 """
 from dataclasses import replace
+import math
 import torch
 from torch import nn
 
 from .ppo import PPO
 from rsl_rl.beyond_robustness_config import PHASES
+from rsl_rl.utils.adaptive_entropy import performance_gap_entropy
 from rsl_rl.modules.hard_pact_action_std import clip_action_std
 from rsl_rl.storage.rollout_storage_beyond_robustness import (
     ProprioceptionHistory, RolloutStorageBeyondRobustness,
@@ -16,7 +18,7 @@ from rsl_rl.storage.rollout_storage_beyond_robustness import (
 
 
 class PPOBeyondRobustness(PPO):
-    checkpoint_version = 1
+    checkpoint_version = 2
 
     def __init__(self, actor_critic, config=None, device="cpu"):
         self.config = config or actor_critic.config
@@ -44,8 +46,9 @@ class PPOBeyondRobustness(PPO):
 
     def init_storage(self, num_envs, num_transitions_per_env):
         self.storage = RolloutStorageBeyondRobustness(num_envs, num_transitions_per_env,
-                                                     self.config.history_length, self.device)
-        self.history = ProprioceptionHistory(num_envs, self.config.history_length, self.device)
+                                                     self.config.history_length, self.device, self.config.input_schema)
+        self.history = ProprioceptionHistory(num_envs, self.config.history_length, self.device,
+                                            self.config.input_schema.observation_dim)
         self.reset_pending = torch.ones(num_envs, device=self.device, dtype=torch.bool)
 
     def set_training_phase(self, phase):
@@ -59,6 +62,32 @@ class PPOBeyondRobustness(PPO):
     def test_mode(self):
         self.actor_critic.eval()
 
+    def apply_phase_schedule(self):
+        """Call only at completed iteration boundaries, before the next rollout."""
+        start = self.config.student_reinforcement_start_iteration
+        if start is not None and self.iteration >= start and self.training_phase == "teacher_student":
+            self.set_training_phase("student_reinforcement")
+
+    @torch.no_grad()
+    def clear_history(self):
+        if self.pending is not None or self.storage.step:
+            raise RuntimeError("Clear history only between complete iterations")
+        self.history.frames.zero_()
+        self.reset_pending.fill_(True)
+        self.returns_ready = False
+
+    def update_adaptive_entropy_coef(self, performance_metrics):
+        """Missing/nonfinite evidence holds the current value; no curriculum coupling."""
+        keys = ("lin_vel_tracking", "ang_vel_tracking", "terrain_level")
+        if not self.config.use_adaptive_entropy or not all(
+                key in performance_metrics and math.isfinite(performance_metrics[key]) for key in keys):
+            return False
+        cfg = self.config
+        self.entropy_coef = performance_gap_entropy(performance_metrics, cfg.adaptive_ent_bounds,
+            (cfg.adaptive_ent_lin_threshold, cfg.adaptive_ent_ang_threshold, cfg.adaptive_ent_ter_threshold),
+            cfg.adaptive_ent_softmax_temp)
+        return True
+
     @torch.no_grad()
     def act(self, observations, state, parameters, load_labels, *, reset_mask=None):
         if self.pending is not None:
@@ -66,10 +95,9 @@ class PPOBeyondRobustness(PPO):
         if self.storage.step == self.storage.num_transitions_per_env:
             raise RuntimeError("Update full rollout before collecting more actions")
         n = self.storage.num_envs
-        for name, value, width in (("observations", observations, 45), ("state", state, 264),
-                                   ("parameters", parameters, 62), ("load_labels", load_labels, 7)):
-            if value.shape != (n, width):
-                raise ValueError(f"{name} must have shape {(n, width)}")
+        for name, value in dict(observations=observations, state=state, parameters=parameters,
+                                load_labels=load_labels).items():
+            self.config.input_schema.validate(name, value, n, self.history.frames.device)
         reset = self.reset_pending if reset_mask is None else self.reset_pending | reset_mask.bool()
         history = self.history.append(observations, reset)
         # Own inputs NOW: simulator tensors and history mutate in place before process_env_step.
@@ -112,14 +140,15 @@ class PPOBeyondRobustness(PPO):
         self.reset_pending.copy_(dones)
 
     @torch.no_grad()
-    def bootstrap_values(self, observations, state, parameters, load_labels):
+    def bootstrap_values(self, observations, state, parameters, load_labels, *, env_ids=None):
         """Value at the next observation without changing history or sampling actions.
 
         For timeouts call BEFORE process_env_step, with pre-reset terminal inputs;
         pass its output as terminal_values. After process_env_step this instead
         respects its pending-reset mask (appropriate for rollout-end bootstrapping).
         """
-        history = self.history.preview(observations, self.reset_pending).flatten(1)
+        reset = self.reset_pending if env_ids is None else self.reset_pending[env_ids]
+        history = self.history.preview(observations, reset, env_ids).flatten(1)
         z = self.actor_critic.latent(history, self.training_phase, state, parameters)
         return self.actor_critic.evaluate(state, parameters, load_labels, z)
 
@@ -146,20 +175,26 @@ class PPOBeyondRobustness(PPO):
             "kl": torch.distributions.kl_divergence(
                 torch.distributions.Normal(batch["mu"], batch["sigma"]), dist).sum(-1).mean().detach()}
 
-    def auxiliary_losses(self, batch):
+    def auxiliary_losses(self, batch, *, return_metrics=False):
         valid = batch["valid"]
         # Filter BEFORE arithmetic; empty batches must not step Adam's existing momentum.
         if not valid.any():
-            return None, None
+            return (None, None, {}) if return_metrics else (None, None)
         h = batch["history"][valid].detach()
         target = batch["load_labels"][valid].detach()
         weights = target.new_tensor((3., 3., 3., 1., 1., 1., 10.))
-        load_loss = ((self.actor_critic.load_estimator(h) - target) * weights).square().sum(-1).mean()
+        error = self.actor_critic.load_estimator(h) - target
+        load_loss = (error * weights).square().sum(-1).mean()
         matching = None
         if self.training_phase == "teacher_student":
             with torch.no_grad():
                 z = self.actor_critic.teacher_latent(batch["state"][valid], batch["parameters"][valid])
             matching = (self.actor_critic.history_encoder(h) - z).square().sum(-1).mean()
+        if return_metrics:
+            # Raw physical-unit component errors; reuse the supervised forward before its step.
+            error = error.detach()
+            metrics = {"load_mae": error.abs().mean(0), "load_mse": error.square().mean(0)}
+            return matching, load_loss, metrics
         return matching, load_loss
 
     def update(self):
@@ -182,7 +217,7 @@ class PPOBeyondRobustness(PPO):
         # PPO ratios in this update therefore never see auxiliary-mutated estimates.
         for batch in self.storage.batches(self.num_mini_batches, self.config.auxiliary_epochs):
             self.actor_critic.zero_grad(set_to_none=True)
-            matching, load = self.auxiliary_losses(batch)
+            matching, load, load_metrics = self.auxiliary_losses(batch, return_metrics=True)
             count = batch["valid"].sum()
             if matching is not None:
                 matching.backward()
@@ -194,10 +229,18 @@ class PPOBeyondRobustness(PPO):
                 nn.utils.clip_grad_norm_(self.actor_critic.load_estimator.parameters(), self.max_grad_norm)
                 self.load_optimizer.step()
                 record("load_estimation", load, count)
+                for key, value in load_metrics.items():
+                    record(key, value, count)
         self.storage.clear()
         self.returns_ready = False
         self.iteration += 1
-        result = {key: (value / counts[key]).item() for key, value in totals.items()}
+        result = {key: (value / counts[key]).item() for key, value in totals.items() if not key.startswith("load_m")}
+        components = ("com_x_m", "com_y_m", "com_z_m", "velocity_x_m_s", "velocity_y_m_s", "velocity_z_m_s", "mass_kg")
+        for metric in ("load_mae", "load_mse"):
+            values = totals[metric] / counts[metric] if metric in totals else torch.full((7,), float("nan"))
+            if metric == "load_mse": values = values.sqrt()
+            for name, value in zip(components, values.tolist()):
+                result[f"{metric.replace('mse', 'rmse')}/{name}"] = value
         for key in ("latent_matching", "load_estimation"):
             result.setdefault(key, 0.)
         return result
@@ -211,6 +254,7 @@ class PPOBeyondRobustness(PPO):
                     model_state_dict=self.actor_critic.state_dict(),
                     optimizer=self.optimizer.state_dict(), history_optimizer=self.history_optimizer.state_dict(),
                     load_optimizer=self.load_optimizer.state_dict(), learning_rate=self.learning_rate,
+                    entropy_coef=self.entropy_coef,
                     history=self.history.frames.clone(), reset_pending=self.reset_pending.clone(),
                     torch_rng=torch.get_rng_state(),
                     cuda_rng=torch.cuda.get_rng_state(self.device) if torch.device(self.device).type == "cuda" else None)
@@ -218,12 +262,15 @@ class PPOBeyondRobustness(PPO):
     def save(self, path):
         torch.save(self.checkpoint_state(), path)
 
-    def load(self, path, *, restore_rng=True):
+    def load(self, path, *, restore_rng=True, restore_history=True):
+        data = torch.load(path, map_location=self.device, weights_only=False)
+        return self.load_checkpoint_state(data, restore_rng=restore_rng, restore_history=restore_history)
+
+    def load_checkpoint_state(self, data, *, restore_rng=True, restore_history=True):
         if self.pending is not None or self.storage.step:
             raise RuntimeError("Load only at update boundaries")
-        data = torch.load(path, map_location=self.device, weights_only=False)
         if data.get("schema_version") != self.checkpoint_version:
-            raise ValueError("Incompatible BR checkpoint schema (HardPACT/TS weights are not BR weights)")
+            raise ValueError("Incompatible BR checkpoint schema: Stage-1 opaque packing requires explicit conversion")
         if data.get("input_contract") != self.actor_critic.input_contract():
             raise ValueError("Incompatible BR input/history/latent/action contract")
         config = type(self.config)(**data["config"])
@@ -234,8 +281,12 @@ class PPOBeyondRobustness(PPO):
         for name in ("optimizer", "history_optimizer", "load_optimizer"):
             getattr(self, name).load_state_dict(data[name])
         self.iteration, self.learning_rate = data["iteration"], data["learning_rate"]
-        self.history.frames.copy_(data["history"])
-        self.reset_pending.copy_(data["reset_pending"])
+        self.entropy_coef = data["entropy_coef"]
+        if restore_history:
+            self.history.frames.copy_(data["history"])
+            self.reset_pending.copy_(data["reset_pending"])
+        else:
+            self.clear_history()
         if restore_rng:
             torch.set_rng_state(data["torch_rng"].cpu())
             if data["cuda_rng"] is not None and torch.device(self.device).type == "cuda":

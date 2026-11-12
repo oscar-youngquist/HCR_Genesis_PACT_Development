@@ -1,8 +1,8 @@
 """BR III-B/D MLPs. No inheritance from HardPACT, VAE, or physics heads.
 
 o: 45 = omega_B(3), gravity_B(3), command_B(3), q(12), dq(12), previous action(12).
-s: 264 = o plus linear velocity, terrain heights, torques, accelerations, foot forces.
-p: 62 simulator randomization parameters. Their detailed packing belongs to Stage 2.
+s: o plus linear velocity, configured terrain heights, torques, accelerations, foot forces.
+p: declared realized randomization fields. Widths come from the versioned schema.
 load: [CoM position_B(3) m, relative velocity_B(3) m/s, mass(1) kg], no friction.
 The critic sees s,p,load truth and the phase's latent. Actors NEVER receive load truth.
 """
@@ -25,19 +25,21 @@ def _mlp(width, hidden, output):
 
 class ActorCriticBeyondRobustness(nn.Module):
     is_recurrent = False
-    observation_dim, state_dim, parameter_dim = 45, 264, 62
     latent_dim, load_dim, num_actions = 32, 7, 12
 
     def __init__(self, config=None):
         super().__init__()
         self.config = config or BeyondRobustnessConfig()
+        self.schema = self.config.input_schema
+        self.observation_dim = self.schema.observation_dim
+        self.state_dim, self.parameter_dim = self.schema.state_dim, self.schema.parameter_dim
         self.history_dim = self.observation_dim * self.config.history_length
         hidden = (512, 256, 128)
         self.privileged_encoder = _mlp(self.state_dim + self.parameter_dim, hidden, 32)
         self.history_encoder = _mlp(self.history_dim, hidden, 32)
         self.load_estimator = _mlp(self.history_dim, (512, 256, 64), 7)
-        self.actor = _mlp(45 + 32 + 7, hidden, 12)
-        self.critic = _mlp(264 + 62 + 32 + 7, hidden, 1)
+        self.actor = _mlp(self.observation_dim + self.latent_dim + self.load_dim, hidden, self.num_actions)
+        self.critic = _mlp(self.schema.privileged_dim + self.latent_dim + self.load_dim, hidden, 1)
         initialize_action_std(self, 12, self.config.init_noise_std,
                               self.config.min_noise_std, self.config.max_noise_std)
 
@@ -80,16 +82,12 @@ class ActorCriticBeyondRobustness(nn.Module):
     def input_contract(self):
         """Versioned semantic boundary, independent of simulator and learning phase.
 
-        The paper does not give the scalar packing of all 264 state / 62 parameter
-        entries. Stage 2 must establish it; these stay separate BR inputs, not a
-        borrowed HardPACT privileged vector. History includes the current frame,
+        The schema declares scalar packing instead of borrowing a HardPACT vector.
+        History includes the current frame,
         resolving the paper's ambiguous inclusive H notation explicitly.
         """
-        return dict(version=1, observation_dim=45, state_dim=264, parameter_dim=62,
+        return dict(schema=self.schema.contract(),
                     history_length=self.config.history_length, history_order="oldest_to_current_zero_reset_padding",
-                    observation_fields=("angular_velocity_B:3", "gravity_B:3", "command_B:3",
-                                        "joint_position:12", "joint_velocity:12", "previous_action:12"),
-                    load_fields=("relative_com_position_B_m:3", "relative_velocity_B_m_s:3", "mass_kg:1"),
                     actor_load="estimated_detached", critic_load="ground_truth",
                     latent_dim=32, teacher_latent_normalized=True, student_latent_normalized=False,
                     action_dim=12, action_type="gaussian_position", likelihood="raw_sample")

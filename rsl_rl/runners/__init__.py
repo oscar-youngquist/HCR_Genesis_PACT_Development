@@ -33,8 +33,7 @@ from .ts_runner import TSRunner
 from .ee_runner import EERunner
 from .cts_runner import CTSRunner
 from .dreamwaq_runner import DreamWaQRunner
-from .pact_runner import OnPolicyRunnerPACT
-from .pact_pos_runner import OnPolicyRunnerPACTPos
+from .beyond_robustness_runner import BeyondRobustnessRunner
 from .postau_runner import OnPolicyRunnerPosTau
 from .rl2ac_runner import OnPolicyRunnerRL2AC
 from .abl1_runner import OnPolicyRunnerABL1
@@ -47,10 +46,25 @@ runner_registry.register("TSRunner", TSRunner)
 runner_registry.register("EERunner", EERunner)
 runner_registry.register("CTSRunner", CTSRunner)
 runner_registry.register("DreamWaQRunner", DreamWaQRunner)
-runner_registry.register("PACTRunner", OnPolicyRunnerPACT)
-runner_registry.register("PACTPosRunner", OnPolicyRunnerPACTPos)
+runner_registry.register("BeyondRobustnessRunner", BeyondRobustnessRunner)
+# These two runners import simulator dynamics. Keep their legacy names/lookup,
+# but do not require a simulator installation just to import the BR CPU runner.
+runner_registry.register_lazy("PACTRunner", "rsl_rl.runners.pact_runner", "OnPolicyRunnerPACT")
+runner_registry.register_lazy("PACTPosRunner", "rsl_rl.runners.pact_pos_runner", "OnPolicyRunnerPACTPos")
 runner_registry.register("PosTauRunner", OnPolicyRunnerPosTau)
 runner_registry.register("RL2ACRunner", OnPolicyRunnerRL2AC)
 runner_registry.register("ABL1Runner", OnPolicyRunnerABL1)
 runner_registry.register("ABL3Runner", OnPolicyRunnerABL3)
 runner_registry.register("KITERunner", OnPolicyRunnerKITE)
+
+__all__ = [name for name in globals() if name.endswith("Runner") or name.startswith("OnPolicyRunner")]
+__all__ += ["OnPolicyRunnerPACT", "OnPolicyRunnerPACTPos"]
+
+
+def __getattr__(name):
+    aliases = {"OnPolicyRunnerPACT": "PACTRunner", "OnPolicyRunnerPACTPos": "PACTPosRunner"}
+    if name in aliases:
+        cls = runner_registry.get_runner_class(aliases[name])
+        globals()[name] = cls
+        return cls
+    raise AttributeError(name)

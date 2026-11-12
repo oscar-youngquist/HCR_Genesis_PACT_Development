@@ -767,26 +767,11 @@ class PPO_HardPACT:
             self.entropy_coef = coef        
         
     def update_adaptive_entropy_coef(self, performance_metrics):
-        lin_vel_tracking = performance_metrics.get('lin_vel_tracking', 0.0)
-        ang_vel_tracking = performance_metrics.get('ang_vel_tracking', 0.0)
-        terrain_level = performance_metrics.get('terrain_level', 0)
-        
-        lin_vel_gap = max(0, self.ent_linvelo_threshold - lin_vel_tracking)
-        ang_vel_gap = max(0, self.ent_angvelo_threshold - ang_vel_tracking)
-        terrain_gap = max(0, self.ent_terrain_threshold - terrain_level)
-        
-        norm_lin_gap = lin_vel_gap /  self.ent_linvelo_threshold if self.ent_linvelo_threshold > 0 else 0
-        norm_ang_gap = ang_vel_gap / self.ent_angvelo_threshold if self.ent_angvelo_threshold > 0 else 0
-        norm_terrain_gap = terrain_gap / self.ent_terrain_threshold if self.ent_terrain_threshold > 0 else 0
-        
-        gaps = torch.tensor([norm_lin_gap, norm_ang_gap, norm_terrain_gap], dtype=torch.float32)
-        
-        weights = F.softmax(gaps / self.ent_softmax_temperature, dim=0)
-        
-        weighted_gap = torch.sum(weights * gaps).item()
-        
-        self.current_entropy_coef = self.entropy_coef_bounds[0] + weighted_gap * (self.entropy_coef_bounds[1] - self.entropy_coef_bounds[0])
-        
+        from rsl_rl.utils.adaptive_entropy import performance_gap_entropy
+        self.current_entropy_coef = performance_gap_entropy(
+            performance_metrics, self.entropy_coef_bounds,
+            (self.ent_linvelo_threshold, self.ent_angvelo_threshold, self.ent_terrain_threshold),
+            self.ent_softmax_temperature)
         return self.current_entropy_coef
     
     def train_mode(self):

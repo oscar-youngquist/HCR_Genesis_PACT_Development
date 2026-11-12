@@ -1,15 +1,17 @@
 """TS-style owned, timestamp-aligned feed-forward storage and reset-safe history."""
 import torch
 from .rollout_storage import RolloutStorage
+from rsl_rl.beyond_robustness_schema import BeyondRobustnessInputSchema
 
 
 class ProprioceptionHistory:
-    def __init__(self, num_envs, length, device):
-        self.frames = torch.zeros(num_envs, length, 45, device=device)
+    def __init__(self, num_envs, length, device, observation_dim=45):
+        self.frames = torch.zeros(num_envs, length, observation_dim, device=device)
 
-    def preview(self, observation, reset):
+    def preview(self, observation, reset, env_ids=None):
         # Zero padding represents unavailable history; never copy the preceding episode.
-        previous = torch.where(reset[:, None, None], 0., self.frames[:, 1:])
+        frames = self.frames if env_ids is None else self.frames[env_ids]
+        previous = torch.where(reset[:, None, None], 0., frames[:, 1:])
         return torch.cat((previous, observation[:, None]), dim=1)
 
     def append(self, observation, reset):
@@ -18,10 +20,11 @@ class ProprioceptionHistory:
 
 
 class RolloutStorageBeyondRobustness(RolloutStorage):
-    def __init__(self, num_envs, steps, history_length, device="cpu"):
-        super().__init__(num_envs, steps, (45,), (326,), (12,), device)
-        self.histories = torch.zeros(steps, num_envs, history_length * 45, device=device)
-        self.load_labels = torch.zeros(steps, num_envs, 7, device=device)
+    def __init__(self, num_envs, steps, history_length, device="cpu", schema=None):
+        self.schema = schema or BeyondRobustnessInputSchema()
+        super().__init__(num_envs, steps, (self.schema.observation_dim,), (self.schema.privileged_dim,), (12,), device)
+        self.histories = torch.zeros(steps, num_envs, history_length * self.schema.observation_dim, device=device)
+        self.load_labels = torch.zeros(steps, num_envs, self.schema.load_dim, device=device)
         self.supervision_valid = torch.ones(steps, num_envs, dtype=torch.bool, device=device)
         self.timeouts = torch.zeros_like(self.dones, dtype=torch.bool)
 
@@ -63,8 +66,8 @@ class RolloutStorageBeyondRobustness(RolloutStorage):
         if not 0 < num_batches <= size:
             raise ValueError("num_mini_batches must be between 1 and rollout row count")
         fields = dict(observations=self.observations, history=self.histories,
-                      state=self.privileged_observations[..., :264],
-                      parameters=self.privileged_observations[..., 264:],
+                      state=self.privileged_observations[..., :self.schema.state_dim],
+                      parameters=self.privileged_observations[..., self.schema.state_dim:],
                       load_labels=self.load_labels, valid=self.supervision_valid,
                       actions=self.actions, values=self.values, returns=self.returns,
                       advantages=self.advantages, log_prob=self.actions_log_prob,
