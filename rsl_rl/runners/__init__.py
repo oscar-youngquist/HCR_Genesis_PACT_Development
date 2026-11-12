@@ -66,3 +66,5 @@ runner_registry.register("B1Z1PACTPosRunner", B1Z1PACTPosRunner)
 runner_registry.register("B1UniFPRunner", OnPolicyRunnerB1UniFP)
 runner_registry.register("B1Z1PACTRunner", B1Z1PACTRunner)
 runner_registry.register("B1Z1PPOPosRunner", B1Z1PPOPosRunner)
+from .b1z1_facet_runner import B1Z1FACETRunner
+runner_registry.register("B1Z1FACETRunner", B1Z1FACETRunner)

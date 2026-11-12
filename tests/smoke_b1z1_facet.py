@@ -25,6 +25,10 @@ def record(args):
                 "--headless", "--num_envs=2"]
     cli = get_args()
     cfg = copy_sections(task_registry.env_cfgs[args.record_task])
+    # Stage 5 intentionally changes FACET gains. Match them explicitly in this
+    # physical replay fixture; do not change the production Pos configuration.
+    cfg.control.stiffness = {name: 40. if name.startswith('z1_') else 100. for name in cfg.asset.dof_names}
+    cfg.control.damping = {name: 1. if name.startswith('z1_') else 2. for name in cfg.asset.dof_names}
     if args.record_task == "b1z1_facet":
         cfg.facet_reference.enabled = not args.references_disabled
         cfg.facet_tracking.enabled = args.tracking_enabled
@@ -52,15 +56,8 @@ def record(args):
         output[name] = value.detach().cpu().numpy().copy()
     try:
         if args.record_task == "b1z1_facet":
-            # Exercise the real registered runner/model, without optimizer steps.
-            train.runner.num_steps_per_env = 2
-            runner, _ = task_registry.make_alg_runner(env, name=args.record_task,
-                args=cli, train_cfg=train, log_root=None)
-            assert runner.dynamics is None
-            obs, history, _, _ = env.get_observations()
-            with torch.no_grad():
-                action = runner.get_inference_policy()(obs, history)
-            assert action.shape == (2, 17) and torch.isfinite(action).all()
+            # Standalone Stage 4 API also supports the references/rewards OFF
+            # parity fixtures; Stage 5 runner is exercised by its own PPO smoke.
             facet_model = None
             if cfg.facet_observations.enabled:
                 from rsl_rl.facet_model import FACETModel
@@ -194,6 +191,11 @@ def record(args):
                 if facet_model is not None:
                     packet = env.get_facet_observations()
                     assert packet['is_init'][0] and not packet['is_init'][1]
+                    terminal_packet = env.get_facet_terminal_observations()
+                    assert terminal_packet['ids'].tolist() == [0]
+                    assert terminal_packet['timeouts'].tolist() == [True]
+                    assert not terminal_packet['is_init'].any()
+                    assert terminal_packet['privileged'][:, 13:].count_nonzero() > 0
                     assert packet['privileged'][0, 13:].count_nonzero() == 0
                     assert env._facet_observations.actions[0].count_nonzero() == 0
                 for name in ("tracking_lin_vel_force_world", "tracking_ang_vel", "tracking_ee_force_world"):

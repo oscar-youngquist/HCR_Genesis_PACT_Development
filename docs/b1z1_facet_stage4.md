@@ -1,7 +1,10 @@
 # FACET Stage 4: Observation Packets and Models
 
-Stage 4 adds a separate ordinary-PyTorch model and observation API. **The existing
-`--task b1z1_facet` training command still uses the legacy Pos runner/model.**
+Historical Stage 4 behavior is described below. **Stage 5 now connects this API
+to the FACET runner**; see [Stage 5](b1z1_facet_stage5.md) for current training.
+
+Stage 4 added a separate ordinary-PyTorch model and observation API. The then-existing
+`--task b1z1_facet` training command used the legacy Pos runner/model.
 Teacher/student PPO, adaptation losses, and collection integration are Stage 5.
 No reference/reward/controller/terrain settings or shared implementations change.
 

@@ -1,4 +1,4 @@
-"""Stage 1 contracts: independent configs and unchanged position-only execution."""
+"""FACET configuration isolation and unchanged position-action plumbing."""
 from types import SimpleNamespace
 
 import numpy as np
@@ -29,10 +29,20 @@ def differences(a, b, prefix=""):
 def test_config_allowlist_and_resolved_layout():
     baseline = copy_sections(B1Z1PPOPosCfg)
     facet = B1Z1FACETCfg()
-    assert differences(class_to_dict(facet), class_to_dict(baseline)) == {"compliance.enabled", "facet_reference", "facet_tracking", "facet_observations"}
+    gain_paths = {f'control.{kind}.{name}' for kind in ('stiffness', 'damping')
+                  for name in set(getattr(facet.control, kind)) | set(getattr(baseline.control, kind))}
+    assert differences(class_to_dict(facet), class_to_dict(baseline)) == {"compliance.enabled", "facet_reference", "facet_tracking", "facet_observations"} | gain_paths
     train, base_train = B1Z1FACETCfgPPO(), copy_sections(B1Z1PPOPosCfgPPO)
-    assert differences(class_to_dict(train), class_to_dict(base_train)) == {
-        "runner.experiment_name", "runner.run_name"}
+    from legged_gym.envs.b1z1.b1z1_pact.b1z1_pact_config import B1Z1PACTCfgPPO
+    from legged_gym.envs.b1z1.b1z1_facet.b1z1_facet_config import COMMON_PPO
+    pilot = copy_sections(B1Z1PACTCfgPPO)
+    for key in COMMON_PPO:
+        assert getattr(train.algorithm, key) == getattr(pilot.algorithm, key)
+    assert train.runner.max_iterations == 70000 and train.runner.save_interval == 1000
+    assert train.runner.num_steps_per_env == 24
+    for name in facet.asset.dof_names:
+        assert facet.control.stiffness[name] == (40 if name.startswith('z1_') else 100)
+        assert facet.control.damping[name] == (1 if name.startswith('z1_') else 2)
     configure(facet)
     configure(baseline)
     # Turning off compliance intentionally avoids its profile slots and its
@@ -45,22 +55,14 @@ def test_config_allowlist_and_resolved_layout():
         "rewards.scales.early_torso_tilt", "rewards.scales.feet_contact_number",
         "rewards.scales.stand_still", "rewards.scales.stand_still_contact",
         "rewards.scales.tracking_arm_feedforward",
-    }
+    } | gain_paths
     for name in ("num_observations", "num_critic_state_obs", "num_privileged_obs", "num_privileged_recon_obs"):
         assert getattr(baseline.env, name) - getattr(facet.env, name) == 12
     assert facet.env.num_observations == 81
     assert facet.env.num_actions == facet.env.num_policy_actions == 17
-    assert train.runner_class_name == base_train.runner_class_name == "B1Z1PACTRunner"
+    assert train.runner_class_name == "B1Z1FACETRunner"
     assert train.policy.action_mode == "position"
-    alg = configure_algorithm(class_to_dict(train.algorithm), facet)
-    base_alg = configure_algorithm(class_to_dict(base_train.algorithm), baseline)
-    assert differences(alg, base_alg) == {
-        "actor_phys_compliance_enabled", "actor_phys_compliance_omega",
-        "actor_phys_compliance_zeta", "actor_phys_compliance_dls_damping",
-        "actor_phys_compliance_joint_margin",
-    }
-    assert not alg["representation_pinn_enabled"] and not alg["actor_phys_enabled"]
-    assert not alg["actor_phys_arm_feedforward_enabled"]
+    assert not any('pinn' in key or 'actor_phys' in key for key in vars(train.algorithm))
     assert not facet.use_force_shifted_target
 
 
@@ -81,7 +83,7 @@ def test_config_isolation():
     cfg.facet_tracking.weights["ee_position"] = 9.
     cfg.facet_observations.noise_seed = 999
     cfg.env.num_observations += 100
-    train.policy.actor_layers[0] = 7
+    train.algorithm.adaptive_ent_bounds[0] = 7
     configure(cfg)
     assert not differences(pristine, class_to_dict(B1Z1FACETCfg()))
     for name, (env, ppo) in before.items():
@@ -148,10 +150,13 @@ def test_registered_runner_initializes_without_physics(monkeypatch):
         base_velocity_scale=torch.ones(3), base_wrench_scale=torch.ones(6),
         simulator=SimpleNamespace(_cfg=cfg, dof_pos=torch.zeros(2, 19)),
         reset=lambda: (obs, critic))
-    runner = B1Z1PACTRunner(env, settings, None, "cpu")
-    assert runner.dynamics is None
-    assert runner.actor_critic.action_mode == "position"
-    assert not runner.alg.cfg["actor_phys_enabled"]
+    from rsl_rl.runners import B1Z1FACETRunner
+    env.get_facet_observations = lambda: dict(observation=torch.zeros(2, 237),
+        privileged=torch.zeros(2, 52), wrench=torch.zeros(2, 9), is_init=torch.ones(2, 1, dtype=torch.bool))
+    monkeypatch.setattr('sys.argv', ['train.py', '--task=b1z1_facet', '--cpu', '--headless'])
+    runner, _ = task_registry.make_alg_runner(env, name='b1z1_facet', args=get_args(), train_cfg=train, log_root=None)
+    assert isinstance(runner, B1Z1FACETRunner)
+    assert not hasattr(runner, 'dynamics')
     with torch.no_grad():
-        actions = runner.get_inference_policy()(obs, history)
+        actions, _ = runner.get_inference_policy()(torch.zeros(2, 237), torch.zeros(2, 128), torch.ones(2, 1, dtype=torch.bool))
     assert actions.shape == (2, 17) and torch.isfinite(actions).all()

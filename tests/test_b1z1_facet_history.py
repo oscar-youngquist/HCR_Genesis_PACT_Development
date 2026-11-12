@@ -7,7 +7,7 @@ import torch
 from legged_gym.envs.b1z1.b1z1_facet import B1Z1FACET, B1Z1FACETCfg
 from legged_gym.envs.b1z1.b1z1_facet.reference import FACETReference, FACETReferenceBank
 from legged_gym.envs.b1z1.b1z1_facet.tracking import (
-    COMPONENTS, LEGACY_TRACKING, CONFLICTING_SHAPING, FACETTrackingCfg, tracking_values,
+    COMPONENTS, LEGACY_TRACKING, CONFLICTING_SHAPING, FF_ONLY, FACETTrackingCfg, tracking_values,
 )
 from legged_gym.envs.b1z1.b1z1_ppo_pos.b1z1_ppo_pos import B1Z1PPOPos
 from legged_gym.utils.helpers import class_to_dict
@@ -158,7 +158,7 @@ def test_stage2_switch_and_schedule_preservation():
     assert env.reward_names == baseline.reward_names
     assert env.reward_scales == baseline.reward_scales
     active = reward_env()
-    for name in set(env.reward_names)-set(LEGACY_TRACKING+CONFLICTING_SHAPING):
+    for name in set(env.reward_names)-set(LEGACY_TRACKING+CONFLICTING_SHAPING+FF_ONLY):
         assert active.reward_scales[name] == env.reward_scales[name]
     active.use_reward_curriculum = True
     active.reward_warmup_steps, active.reward_curr_steps = 0, 10

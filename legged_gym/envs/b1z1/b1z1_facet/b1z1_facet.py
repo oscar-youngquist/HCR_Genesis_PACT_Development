@@ -1,4 +1,4 @@
-"""FACET reference/reward hooks; Pos physics, observations and runners stay intact."""
+"""FACET references, temporal rewards and packets; shared Pos execution stays intact."""
 import torch
 
 from legged_gym.envs.b1z1.b1z1_ppo_pos.b1z1_ppo_pos import B1Z1PPOPos
@@ -9,7 +9,7 @@ from .observations import FACETObservations
 
 
 class B1Z1FACET(B1Z1PPOPos):
-    """Stage 4 packets alongside Stage 3 rewards; new-model PPO wiring is Stage 5."""
+    """FACET packets include terminal successors for the dedicated Stage 5 runner."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -25,6 +25,7 @@ class B1Z1FACET(B1Z1PPOPos):
                 self.facet_history = FACETReferenceBank(self.facet_reference, self.cfg.facet_tracking.horizons)
         self._facet_observations = None
         self._facet_issued_action = None
+        self._facet_terminal = None
         if self.cfg.facet_observations.enabled:
             self._facet_observations = FACETObservations(self)
             self._facet_observations.collect(self, self.all_env_ids, reset=True)
@@ -77,6 +78,7 @@ class B1Z1FACET(B1Z1PPOPos):
 
     @torch.no_grad()
     def _pre_sim_step(self, actions):
+        self._facet_terminal = None
         if getattr(self, '_facet_observations', None) is not None:
             # Capture policy-issued positions before delay or Pos torque bookkeeping.
             limit = self.cfg.normalization.clip_actions
@@ -138,6 +140,11 @@ class B1Z1FACET(B1Z1PPOPos):
         from copy import deepcopy
         return {} if self._facet_observations is None else deepcopy(self._facet_observations.schema)
 
+    def get_facet_terminal_observations(self):
+        """Complete pre-reset successor packets for just the terminal rows."""
+        return None if self._facet_terminal is None else {
+            k: v.detach().clone() for k, v in self._facet_terminal.items()}
+
     def get_facet_references(self):
         """Original Stage 2 single-start diagnostic API; no actor input changes."""
         return {} if self.facet_reference is None else self.facet_reference.read()
@@ -183,6 +190,19 @@ class B1Z1FACET(B1Z1PPOPos):
             for key in LEGACY_TRACKING:
                 self.episode_sums[key] += getattr(super(), "_reward_"+key)()*self.reward_scales[key]
         super().compute_reward()
+        collector = getattr(self, '_facet_observations', None)
+        if collector is not None and self._facet_issued_action is not None:
+            # Parent already refreshed physics/commands and checked termination.
+            # Collect once HERE, before reset clears state/loads/history. The
+            # ordinary post-step hook skips these already-collected alive rows.
+            collector.collect(self, self.all_env_ids, self._facet_issued_action)
+            collector.skip[:] = True
+            ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+            if len(ids):
+                self._facet_terminal = {k: v[ids].detach().clone() for k, v in collector.packet.items()}
+                self._facet_terminal.update(ids=ids.clone(),
+                    timeouts=(self.time_out_buf[ids] & ~self.fail_buf[ids]).clone(),
+                    failures=self.fail_buf[ids].clone())
 
     def get_facet_tracking(self):
         """Last completed transition, including terminal targets after reset; copy-on-read."""

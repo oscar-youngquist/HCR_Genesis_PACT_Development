@@ -10,6 +10,10 @@ LEGACY_TRACKING = ("tracking_lin_vel_force_world", "tracking_ang_vel", "tracking
 CONFLICTING_SHAPING = ("no_physical_progress", "stand_still", "stand_still_contact",
     "ref_dof_leg", "feet_contact_number", "walking_ref_dof", "walking_ref_swing_dof",
     "arm_progress_before_torso", "early_torso_tilt")
+FF_ONLY = ('tracking_arm_feedforward', 'torque_cancellation',
+    'leg_feedforward_action_rate', 'leg_feedforward_action_smoothness',
+    'arm_feedforward_action_rate', 'arm_feedforward_action_smoothness',
+    'leg_feedforward_torques', 'arm_feedforward_torques')
 
 
 @dataclass
@@ -20,7 +24,7 @@ class FACETTrackingCfg:
     bandwidths: dict = field(default_factory=lambda: dict(zip(COMPONENTS, (.25, .25, .25, .25, .10, .25))))
     # Legacy scales remain intact in rewards.scales for diagnostic units and the
     # disabled switch. These terms are excluded when registering the objective.
-    excluded_rewards: tuple = LEGACY_TRACKING + CONFLICTING_SHAPING
+    excluded_rewards: tuple = LEGACY_TRACKING + CONFLICTING_SHAPING + FF_ONLY
 
     def validate(self):
         if not set(LEGACY_TRACKING + CONFLICTING_SHAPING).issubset(self.excluded_rewards):

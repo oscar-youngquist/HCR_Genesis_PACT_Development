@@ -1,4 +1,4 @@
-"""FACET Stage 4, ordinary PyTorch API; not connected to the legacy PPO runner.
+"""FACET ordinary PyTorch API, used by the FACET-only Stage 5 runner.
 
 Ported from btx0424/active-adaptation c0d6f5aa6146814803090b5f6f19aafb8ce6f792
 (ppo_facet.py, common.py, vecnorm.py, distributions.py). See FACET_LICENSE.txt.
@@ -20,7 +20,7 @@ class FACETVecNorm(nn.Module):
     """Upstream decay=1 statistics, including its initial zero pseudo-sample.
 
     Only update() mutates statistics. Evaluation and repeated PPO queries never
-    update, even in train mode; the future collector owns the once/batch update.
+    update, even in train mode; the collector owns the once/batch update.
     """
     def __init__(self, width):
         super().__init__()
