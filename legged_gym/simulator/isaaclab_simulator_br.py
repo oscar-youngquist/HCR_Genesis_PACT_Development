@@ -196,6 +196,16 @@ class IsaacLabSimulatorBR(IsaacLabSimulator_PACT):
         super().step(actions)
         self.payload.update(self._control_dt)
 
+    def _compute_torques(self, actions):
+        torque=super()._compute_torques(actions)
+        # Reward-only request, BEFORE action clipping. Same delayed command
+        # identity and pre-integration state as the last executed PD command.
+        raw=getattr(self,'_br_raw_actions',actions)
+        self.br_requested_torque=self._motor_strength*(self._kp_scale*self._p_gains*
+            (raw*self._cfg.control.action_scale+self.default_dof_pos-self.dof_pos)
+            -self._kd_scale*self._d_gains*self.dof_vel)
+        return torque
+
     def realized_parameters(self):
         """CPU PhysX readbacks at reset only; caller caches this owned GPU pack."""
         robot=self._robot; view=robot.root_physx_view

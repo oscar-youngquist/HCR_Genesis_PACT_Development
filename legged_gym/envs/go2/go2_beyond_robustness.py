@@ -1,8 +1,8 @@
-"""Stage-4 Isaac Lab BR adapter; NOT a production reward/task registration.
+"""Isaac Lab BR adapter; merged rewards, no production task registration.
 
 Pass resolve_beyond_robustness() output and explicitly select
-``reward_mode='smoke_tracking'`` or supply a reward callable. The temporary
-reward is raw planar+yaw tracking, not the paper's reward port.
+``reward_mode='smoke_tracking'`` only for diagnostic tracking-only checks.
+Default rewards are BR adapted with explicitly allowlisted shared additions.
 Native 45-D proprioception uses SI units, absolute joint angles, and the previous
 clipped issued policy action (before delay). Actor noise is cached per timestamp;
 privileged state/load supervision stays clean and unclipped.
@@ -11,11 +11,13 @@ Only simulator-neutral curriculum/disturbance methods are reused from Go2;
 no HardPACT model, loss, QP, or training algorithm is constructed.
 """
 from copy import deepcopy
+from types import SimpleNamespace
 import math
 import torch
 from rsl_rl.beyond_robustness_env import BRObservation, BRStep
 from rsl_rl.beyond_robustness_config import BeyondRobustnessResolvedConfig
 from rsl_rl.beyond_robustness_sensors import BRActorObservationCache
+from rsl_rl.beyond_robustness_rewards import BRRewards, tracking
 from rsl_rl.beyond_robustness_payload import inverse_rotate_wxyz, lost_payload, termination_masks, named_indices
 from legged_gym.simulator.isaaclab_simulator_br import IsaacLabSimulatorBR
 from legged_gym.envs.go2.go2_hard_pact.domain_rand_curriculum import HardPACTDomainRandCurriculum
@@ -41,10 +43,10 @@ class IsaacLabBeyondRobustnessEnv:
 
     def __init__(self, resolved, device='cuda:0', headless=True, *,
                  reward_mode=None, reward_fn=None):
-        if reward_fn is None and reward_mode != 'smoke_tracking':
-            raise ValueError("BR reward port pending: explicitly select smoke_tracking or supply reward_fn")
         if not isinstance(resolved,BeyondRobustnessResolvedConfig):
             raise TypeError('Use resolve_beyond_robustness() for the shared environment/model/storage contract')
+        self.reward_mode=reward_mode or resolved.environment.br_reward['mode']
+        if self.reward_mode not in ('merged','smoke_tracking'): raise ValueError('Unknown BR reward mode')
         cfg=resolved.environment; sim_params=resolved.sim_params
         self.configuration_manifest=deepcopy(resolved.manifest)
         # Shared scripted reset/command samplers require a device string.
@@ -81,6 +83,7 @@ class IsaacLabBeyondRobustnessEnv:
         self.max_episode_length=math.ceil(self.max_episode_length_s/self.dt)
         max_delay=int(cfg.domain_rand.ctrl_delay_step_range[1]) if cfg.domain_rand.randomize_ctrl_delay else 0
         self.action_history=torch.zeros(self.num_envs,max_delay+1,12,device=device)
+        self.raw_action_history=torch.zeros_like(self.action_history)
         self.action_delay=torch.zeros_like(self.episode_steps)
         self.parameters=torch.zeros(self.num_envs,self.input_schema.parameter_dim,device=device)
         self._persistent_wrench_target_world=torch.zeros(self.num_envs,6,device=device)
@@ -96,6 +99,8 @@ class IsaacLabBeyondRobustnessEnv:
         # box support without disabling physical collisions.
         names=list(s._contact_sensors.body_names)
         self.collision_ids=sorted(set(s._termination_contact_indices+[names.index('br_tray')]))
+        self.reward_collision_ids=sorted(set(s._penalized_contact_indices+[names.index('br_tray')]))
+        self.rewards=BRRewards(cfg.br_reward,self.cfg,self.num_envs,device) if self.reward_mode=='merged' and reward_fn is None else None
 
     def _sample_commands(self, ids):
         self._resample_commands(ids)  # Shared three-component 0.2 deadband.
@@ -121,6 +126,7 @@ class IsaacLabBeyondRobustnessEnv:
         s.reset_idx(ids)
         s.reset_payload(ids)
         self.previous_action[ids]=0; self.action_history[ids]=0; self.episode_steps[ids]=0
+        self.raw_action_history[ids]=0
         self.episode_tracking[ids]=0
         self.failure_steps[ids]=0
         # Delay is a reset property, using the same eligible reset cadence.
@@ -137,6 +143,7 @@ class IsaacLabBeyondRobustnessEnv:
         self.parameters[ids]=self.input_schema.pack('parameters',s.realized_parameters())[ids]
         s._torques[ids]=0
         self._refresh_actor_observation(ids)
+        if self.rewards is not None: self.rewards.reset(ids,self._reward_snapshot())
 
     def _reset_command_curriculum(self, ids):
         """Zero patience retains shared reset/global-step cadence, using raw tracking."""
@@ -180,6 +187,29 @@ class IsaacLabBeyondRobustnessEnv:
         valid=torch.isfinite(torch.cat((obs,state,self.parameters,labels),-1)).all(-1)
         return BRObservation(obs,state,self.parameters,labels,valid)
 
+    def _reward_snapshot(self):
+        """Owned endpoint data. Ground-only contacts in contact-sensor order."""
+        s=self.simulator; d=s._robot.data
+        fields=('base_pos','base_quat','projected_gravity','dof_pos','dof_vel',
+            'default_dof_pos','dof_pos_limits','dof_pos_limits_hard','torque_limits',
+            'feet_pos','feet_vel','measured_heights','_height_around_feet',
+            '_max_height_ahead_feet','_normal_vector_around_feet')
+        values={k:getattr(s,k).detach().clone() for k in fields}
+        values.update(base_lin_vel=inverse_rotate_wxyz(d.root_link_quat_w,d.root_link_lin_vel_w).clone(),
+            base_ang_vel=inverse_rotate_wxyz(d.root_link_quat_w,d.root_link_ang_vel_w).clone(),
+            torques=s.hard_pact_executed_torque().detach().clone(),
+            requested_torque=getattr(s,'br_requested_torque',torch.zeros_like(s.dof_pos)).detach().clone(),
+            link_contact_forces=s.ground_total_forces_world.detach().clone(),
+            feet_contact_indices=s.feet_contact_indices,feet_indices=s.feet_indices,
+            penalised_contact_indices=self.reward_collision_ids)
+        for name in ('terrain_levels','terrain_types','terrain_kind_ids'):
+            value=getattr(s,name,None)
+            if value is not None: values[name]=value.detach().clone()
+        if self.rewards is not None and any(self.rewards.coefficients()[k]!=0 for k in
+                ('feet_near_edge','edge_swing_clearance','swing_foot_collision_edge')):
+            values['near_edge']=s.calc_feet_near_edge().clone()
+        return SimpleNamespace(**values)
+
     def step(self, actions):
         if actions.shape != self.previous_action.shape or not torch.isfinite(actions).all():
             raise ValueError('BR expects finite [N,12] position actions')
@@ -187,7 +217,10 @@ class IsaacLabBeyondRobustnessEnv:
         clipped=actions.clamp(-self.cfg.normalization.clip_actions,self.cfg.normalization.clip_actions)
         self.action_history[:,1:]=self.action_history[:,:-1].clone()
         self.action_history[:,0]=clipped
+        self.raw_action_history[:,1:]=self.raw_action_history[:,:-1].clone()
+        self.raw_action_history[:,0]=actions
         delayed=self.action_history[torch.arange(self.num_envs,device=self.device),self.action_delay]
+        s._br_raw_actions=self.raw_action_history[torch.arange(self.num_envs,device=self.device),self.action_delay]
         self._update_persistent_wrench(self.clock)
         s.hard_pact_apply_base_wrench_world(self._current_sustained_wrench_world)
         s.step(delayed); s.post_physics_step()
@@ -197,10 +230,23 @@ class IsaacLabBeyondRobustnessEnv:
         due=self.episode_steps.remainder(max(1,int(self.cfg.commands.resampling_time/self.dt)))==0
         self._sample_commands(due.nonzero().flatten())
         if self.cfg.domain_rand.push_robots: s.push_robots()
+        # A push writes root velocities without advancing physics. Refresh the
+        # cached canonical twist so rewards, observations and gating agree.
+        d=s._robot.data
+        # Isaac Lab's root-velocity writer refreshes root buffers but leaves
+        # cached link velocities stale until the next physics step. At fixed
+        # q/dq, propagate the instantaneous rigid base twist to foot origins.
+        delta_v=d.root_link_lin_vel_w-s._base_world_lin_vel
+        delta_w=d.root_link_ang_vel_w-s._base_world_ang_vel
+        s._feet_vel.add_(delta_v[:,None]+torch.cross(delta_w[:,None].expand(-1,4,-1),
+            s.feet_pos-d.root_link_pos_w[:,None],dim=-1))
+        s._base_lin_vel.copy_(inverse_rotate_wxyz(d.root_link_quat_w,d.root_link_lin_vel_w))
+        s._base_ang_vel.copy_(inverse_rotate_wxyz(d.root_link_quat_w,d.root_link_ang_vel_w))
+        s._base_world_lin_vel.copy_(d.root_link_lin_vel_w)
+        s._base_world_ang_vel.copy_(d.root_link_ang_vel_w)
         self._refresh_actor_observation()
         packet=self.observe()
-        linear=Go2PACT._reward_tracking_lin_vel(self)  # Same raw, unrelaxed curriculum evidence.
-        angular=Go2PACT._reward_tracking_ang_vel(self)
+        linear,angular=tracking(s.base_lin_vel,s.base_ang_vel,self.commands)
         self.episode_tracking+=torch.stack((linear,angular),-1)
         lost=lost_payload(packet.load_labels[:,:3],s.payload_cfg)
         collision=(s.ground_total_forces_world[:,self.collision_ids].norm(dim=-1)>10.).any(-1)
@@ -219,7 +265,11 @@ class IsaacLabBeyondRobustnessEnv:
         failure=lost|~packet.supervision_valid|(self.failure_steps>self.cfg.env.fail_to_terminal_time_s/self.dt)
         done,timeout=termination_masks(failure,self.episode_steps,self.max_episode_length)
         self.last_failure_reasons=dict(payload_lost=lost.clone(),ground_collision=collision.clone(),tilt=tilt.clone())
-        reward=linear+.5*angular if self.reward_fn is None else self.reward_fn(self,packet)
+        if self.rewards is not None:
+            reward=self.rewards.evaluate(self._reward_snapshot(),clipped,delayed,self.commands,
+                packet.load_labels[:,3:6],done,timeout,tracking_context=self)
+        else:
+            reward=linear+.5*angular if self.reward_fn is None else self.reward_fn(self,packet)
         terminal=packet.clone()  # BEFORE any reset/curriculum mutation
         ids=done.nonzero().flatten()
         performance=None
@@ -234,6 +284,7 @@ class IsaacLabBeyondRobustnessEnv:
     def begin_iteration(self, iteration):
         self.iteration=int(iteration)
         self._terrain_curriculum_iteration=self.iteration
+        if self.rewards is not None: self.rewards.begin_iteration(iteration)
 
     def end_iteration(self, iteration, tracking, count):
         if iteration<=self.last_completed_iteration: return
@@ -253,11 +304,12 @@ class IsaacLabBeyondRobustnessEnv:
             command_streak=self.command_streak,**self.domain_rand_curriculum.progress)
 
     def iteration_metrics(self):
-        return {'curriculum/'+key:value for key,value in self.curriculum_metrics.items()}
+        return {**{'curriculum/'+key:value for key,value in self.curriculum_metrics.items()},
+                **(self.rewards.metrics() if self.rewards is not None else {})}
 
     def curriculum_state_dict(self):
         s=self.simulator
-        return deepcopy(dict(version=2,domain=self.domain_rand_curriculum.state_dict(),
+        return deepcopy(dict(version=3,reward=self.rewards.state_dict() if self.rewards else None,domain=self.domain_rand_curriculum.state_dict(),
             command_ranges=self.command_ranges,command_streak=self.command_streak,
             iteration=self.iteration,last_completed_iteration=self.last_completed_iteration,
             sampling=s.sampling_state_dict(),action_delay=self.action_delay.clone(),
@@ -266,7 +318,8 @@ class IsaacLabBeyondRobustnessEnv:
             terrain_levels=s.terrain_levels.clone(),terrain_types=s.terrain_types.clone()))
 
     def load_curriculum_state_dict(self, state):
-        if state['version']!=2: raise ValueError('Incompatible BR physical curriculum state; Stage-3 scene-wide geometry/no-noise resume requires explicit conversion')
+        if state['version']!=3: raise ValueError('Incompatible BR physical/reward contract; older tracking-only checkpoints require explicit migration')
+        if self.rewards is not None: self.rewards.load_state_dict(state['reward'])
         s=self.simulator
         self.domain_rand_curriculum.load_state_dict(state['domain'])
         self.command_ranges=deepcopy(state['command_ranges']); self.command_streak=state['command_streak']
@@ -293,7 +346,7 @@ class IsaacLabBeyondRobustnessEnv:
         from legged_gym.utils.helpers import class_to_dict
         return dict(task=class_to_dict(self.cfg),payload=asdict(self.simulator.payload_cfg),
             observation_units=self.input_schema.contract(),manifest=self.configuration_manifest,
-            reward='external_callable' if self.reward_fn else 'temporary_smoke_tracking',
+            reward='external_callable' if self.reward_fn else self.reward_mode,
             dimensions_lifetime='seeded per-environment size bank, creation-time only',
             geometry=dict(size_bank_m=self.simulator.box_size_bank,
                 assignment='canonical env_id modulo size_bank_count'),

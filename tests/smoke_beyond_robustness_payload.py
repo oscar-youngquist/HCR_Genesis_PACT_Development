@@ -1,7 +1,7 @@
-"""Bounded REAL Isaac Lab Stage-4 validation, explicitly temporary tracking reward.
+"""Bounded REAL Isaac Lab validation, merged BR + shared rewards by default.
 
 SIMULATOR=isaaclab PYTHONPATH=. python tests/smoke_beyond_robustness_payload.py --gpu cuda:0 --num-envs 4
-No production launcher/checkpoint or paper-reward claim. Prints explicit PASS/FAIL
+No production launcher or exact author-reproduction claim. Prints explicit PASS/FAIL
 because Kit shutdown can mask a Python exception in the process exit code.
 """
 import argparse
@@ -20,6 +20,7 @@ from rsl_rl.runners.beyond_robustness_runner import BeyondRobustnessRunner
 parser=argparse.ArgumentParser()
 parser.add_argument('--gpu',default='cuda:0'); parser.add_argument('--num-envs',type=int,default=4)
 parser.add_argument('--steps',type=int,default=8)
+parser.add_argument('--reward-mode',choices=('merged','smoke_tracking'),default='merged')
 parser.add_argument('--physical-checks',action='store_true')
 parser.add_argument('--production-rollout',action='store_true',help='Use live terrain layout, rollout length, PPO/aux epochs and minibatches')
 parser.add_argument('--output-dir',default='/tmp/br_stage4')
@@ -44,7 +45,7 @@ if args.physical_checks:
 # Isolate contact tests from randomized pushes; restore flags for runner smoke.
 env=None
 try:
-    env=IsaacLabBeyondRobustnessEnv(resolved,args.gpu,True,reward_mode='smoke_tracking')
+    env=IsaacLabBeyondRobustnessEnv(resolved,args.gpu,True,reward_mode=args.reward_mode)
     packet=env.reset(); packet.validate(env.input_schema,args.num_envs,args.gpu)
     sim=env.simulator
     # Real simulator property readbacks, reset labels, and noise isolation.
@@ -62,6 +63,11 @@ try:
     assert (sim.dof_pos-sim.default_dof_pos).abs().max()>.01
     checks=dict(per_env_geometry_inertia=True,rotating_reset_labels=True,clean_privileged=True,
         repeated_observe_rng_pure=True,partial_reset_noise_isolation=True,randomized_joint_reset=True)
+    if env.rewards is not None:
+        owned=env._reward_snapshot(); old_position=owned.dof_pos.clone()
+        env._reset(torch.tensor([0],device=args.gpu))
+        torch.testing.assert_close(owned.dof_pos,old_position,rtol=0,atol=0)
+        checks['reward_snapshot_owned']=True
     if args.physical_checks:
         from br_payload_physical_checks import physics_checks
         checks=physics_checks(env)
@@ -69,6 +75,36 @@ try:
     for _ in range(args.steps):
         result=env.step(torch.zeros(args.num_envs,12,device=args.gpu))
         assert torch.isfinite(torch.cat(result.observation.inputs(),-1)).all()
+        assert torch.isfinite(result.rewards).all()
+    # Force one instantaneous push through the real adapter step, not an extra
+    # physics step. Check owned terminal inputs and raw reward/gating evidence.
+    original_push=sim.push_robots
+    adapter_push_enabled=env.cfg.domain_rand.push_robots
+    push_evidence={}
+    def fixed_push():
+        data=sim._robot.data
+        velocity=torch.zeros(args.num_envs,6,device=args.gpu)
+        velocity[:,0]=.2; velocity[:,1]=-.1; velocity[:,5]=.2
+        expected_feet=sim.feet_vel+(velocity[:,:3]-data.root_link_lin_vel_w)[:,None]+torch.cross(
+            (velocity[:,3:]-data.root_link_ang_vel_w)[:,None].expand(-1,4,-1),
+            sim.feet_pos-data.root_link_pos_w[:,None],dim=-1)
+        contact=sim.hard_pact_foot_forces_world()[:,:,2]>1.
+        push_evidence['slip']=(contact*expected_feet[:,:,:2].sum(-1)).square().sum()
+        sim._robot.write_root_link_velocity_to_sim(velocity)
+    sim.push_robots=fixed_push; env.cfg.domain_rand.push_robots=True
+    if env.rewards is not None: env.rewards.begin_iteration(0)
+    result=env.step(torch.zeros(args.num_envs,12,device=args.gpu))
+    terminal=result.terminal
+    expected=torch.exp(-4*(terminal.state[:,6:8]-terminal.state[:,45:47]).square().sum(-1))
+    torch.testing.assert_close(result.curriculum_tracking,expected)
+    if env.rewards is not None:
+        from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
+        expected_reward=Go2HardPACT._reward_tracking_lin_vel(env.rewards._shared_context)
+        torch.testing.assert_close(env.rewards.sums['raw/tracking_lin_vel'],expected_reward.sum())
+        torch.testing.assert_close(env.rewards.sums['raw/foot_slip'],push_evidence['slip'])
+        assert env.rewards.age.ge(0).all()
+    sim.push_robots=original_push; env.cfg.domain_rand.push_robots=adapter_push_enabled
+    checks['push_timestamp_reward_observation_tracking_parity']=True
     # Complete contract comes from the factory; no hand-written schema override.
     runner=BeyondRobustnessRunner(env,resolved.training,log_dir=args.output_dir,device=args.gpu)
     torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats(); start=time.perf_counter()
@@ -77,6 +113,8 @@ try:
     torch.cuda.synchronize(); elapsed=time.perf_counter()-start
     assert all(torch.isfinite(p).all() for p in runner.alg.actor_critic.parameters())
     assert all(torch.isfinite(p.grad).all() for p in runner.alg.actor_critic.parameters() if p.grad is not None)
+    if env.rewards is not None:
+        assert all('reward/total' in log and 'reward/original_br' in log for log in logs)
     with tempfile.TemporaryDirectory(prefix='br_stage3_') as directory:
         path=Path(directory)/'checkpoint.pt'
         runner.save(path)
@@ -86,11 +124,14 @@ try:
         assert runner.alg.iteration==iteration and runner.alg.training_phase==phase
         torch.testing.assert_close(sim.payload_mass,masses,rtol=0,atol=0)
         assert runner.alg.history.frames.eq(0).all()
+        if env.rewards is not None:
+            assert env.rewards.age.eq(0).all() and env.rewards.actions.eq(0).all()
+            assert env.rewards.iteration==iteration-1
         snapshot=env.observe().clone(); root=sim._robot.data.root_link_state_w.clone()
         runner.load(path,resume_mode='fresh')
         torch.testing.assert_close(env.observe().observations,snapshot.observations,rtol=0,atol=0)
         torch.testing.assert_close(sim._robot.data.root_link_state_w,root,rtol=0,atol=0)
-    print('BR_PAYLOAD_SMOKE_PASS',json.dumps(dict(num_envs=args.num_envs,seconds=elapsed,
+    print('BR_PAYLOAD_SMOKE_PASS',json.dumps(dict(num_envs=args.num_envs,seconds=elapsed,reward_mode=args.reward_mode,
         metadata=dict(isaaclab=importlib.metadata.version('isaaclab'),isaacsim=importlib.metadata.version('isaacsim'),
             torch=torch.__version__,gpu=torch.cuda.get_device_name(),cuda=torch.version.cuda),
         transitions_per_second=2*resolved.training.num_steps_per_env*args.num_envs/elapsed,

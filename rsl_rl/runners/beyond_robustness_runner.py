@@ -44,6 +44,8 @@ class BeyondRobustnessRunner:
                     environment=(env.resolved_configuration() if hasattr(env,'resolved_configuration') else None)), indent=2))
             if hasattr(env,'configuration_manifest'):
                 (self.log_dir/'beyond_robustness_inheritance.json').write_text(json.dumps(env.configuration_manifest,indent=2))
+            if getattr(env,'rewards',None) is not None:
+                (self.log_dir/'beyond_robustness_rewards.json').write_text(json.dumps(env.rewards.spec,indent=2))
 
     @property
     def current_learning_iteration(self):

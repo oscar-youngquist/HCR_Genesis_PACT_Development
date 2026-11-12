@@ -3,7 +3,7 @@
 Physical integration (resolved from live shared settings)::
 
     resolved = resolve_beyond_robustness()
-    env = IsaacLabBeyondRobustnessEnv(resolved, reward_mode="smoke_tracking")
+    env = IsaacLabBeyondRobustnessEnv(resolved)  # merged BR + shared additions
     runner = BeyondRobustnessRunner(env, resolved.training, log_dir="logs/br")
     runner.learn(2)  # bounded validation, not a production launcher
 
@@ -12,7 +12,7 @@ phase scheduling and environment-aware resume. Switch phase explicitly at an
 update boundary or set student_reinforcement_start_iteration; neither controls a
 simulator curriculum stage. The factory inherits live optimization/terrain settings.
 Stage-3 physics is opt-in via IsaacLabBeyondRobustnessEnv; this learning
-configuration remains simulator-neutral. Production rewards/launchers are separate.
+configuration remains simulator-neutral. Production launchers remain separate.
 """
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
@@ -160,7 +160,7 @@ class BeyondRobustnessResolvedConfig:
 
 
 def resolve_beyond_robustness(env_cfg=None, train_cfg=None, *, environment_overrides=None,
-                             training_overrides=None, payload_overrides=None):
+                             training_overrides=None, payload_overrides=None, reward_overrides=None):
     """Authoritative physical BR factory. Overrides use explicit dotted field paths.
 
     Whole physical sections below are shared; rewards are NOT inherited. No
@@ -170,6 +170,7 @@ def resolve_beyond_robustness(env_cfg=None, train_cfg=None, *, environment_overr
     """
     from rsl_rl.beyond_robustness_schema import PARAMETER_FIELDS, InputField
     from rsl_rl.beyond_robustness_payload import SlidingPayloadConfig
+    from rsl_rl.beyond_robustness_rewards import PARAMETERS, resolve_reward_spec
     if (env_cfg is None) != (train_cfg is None):
         raise ValueError('Supply both shared configurations or neither')
     if env_cfg is None:
@@ -182,7 +183,7 @@ def resolve_beyond_robustness(env_cfg=None, train_cfg=None, *, environment_overr
                   'fail_to_terminal_time_s','send_timeouts','lateral_push_only','debug','debug_viz')
     control_fields = ('stiffness','damping','action_scale','dt','decimation')
     reward_fields = ('soft_dof_pos_limit','soft_dof_vel_limit','soft_torque_limit',
-                     'edge_clearance_forward_cells','edge_clearance_lateral_cells','feet_edge_threshold')
+                     'edge_clearance_forward_cells','edge_clearance_lateral_cells','feet_edge_threshold') + PARAMETERS
     cfg = SimpleNamespace(**{k:_owned_settings(getattr(env_cfg,k)) for k in sections})
     for section, names in (('env',env_fields),('control',control_fields),('rewards',reward_fields)):
         source = getattr(env_cfg,section)
@@ -207,6 +208,11 @@ def resolve_beyond_robustness(env_cfg=None, train_cfg=None, *, environment_overr
     if 'sim.dt' in overrides and not math.isclose(cfg.sim.dt,dt/decimation):
         raise ValueError('sim.dt must equal control.dt/decimation')
     cfg.sim.dt=dt/decimation
+    cfg.br_reward=resolve_reward_spec(env_cfg.rewards,dt,reward_overrides)
+    cfg.br_reward['parameters']=settings_dict(cfg.rewards)
+    cfg.br_reward['action_scale']=cfg.control.action_scale
+    cfg.br_reward['joint_order']=list(cfg.asset.dof_names)
+    cfg.br_reward['foot_order']=list(cfg.asset.foot_name)
     cfg.terrain.num_subterrains=cfg.terrain.num_rows*cfg.terrain.num_cols
     schema=BeyondRobustnessInputSchema.from_terrain(cfg.terrain,
         parameter_fields=PARAMETER_FIELDS+(InputField('tray_mass',1,'kg'),),
@@ -244,14 +250,14 @@ def resolve_beyond_robustness(env_cfg=None, train_cfg=None, *, environment_overr
         raise ValueError('Override environment sizing/history, not the derived training values')
     payload=SlidingPayloadConfig(**dict({'seed':cfg.seed},**(payload_overrides or {})))
     if payload.seed!=cfg.seed: raise ValueError('Payload seed must match resolved run seed')
-    manifest=dict(version=1,source='live Go2 HardPACT Isaac Lab',inherited_sections=sections,
+    manifest=dict(version=2,source='live Go2 HardPACT Isaac Lab',inherited_sections=sections,
         inherited_fields=dict(env=env_fields,control=control_fields,physical_limits=reward_fields),
         br_specific=dict(actor='45 SI channels; absolute joint angles; cached sensor noise',
             privileged='clean unclipped simulator truth',actions='12 position offsets, clipped before delay',
             depth=False,controller='position PD, no branch weighting or QP',
-            latent=32,load_labels='7 physical values; supervised-only estimator',reward='not ported; smoke_tracking opt-in',
+            latent=32,load_labels='7 physical values; supervised-only estimator',reward=deepcopy(cfg.br_reward),
             resets='shared Go2PACT joint/root reset methods',geometry='seeded size bank; creation-time only',
             gpu_total_aggregate_pairs_capacity=capacity),
-        explicit_overrides=dict(environment=overrides,training=deepcopy(training_overrides or {}),payload=deepcopy(payload_overrides or {})),
+        explicit_overrides=dict(environment=overrides,training=deepcopy(training_overrides or {}),payload=deepcopy(payload_overrides or {}),reward=deepcopy(reward_overrides or {})),
         effective_environment=settings_dict(cfg),effective_training=training.resolved(),payload=asdict(payload))
     return BeyondRobustnessResolvedConfig(cfg,training,payload,manifest)
