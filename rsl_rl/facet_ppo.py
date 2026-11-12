@@ -12,6 +12,7 @@ class FACETPPO:
     def __init__(self, model, cfg):
         self.model, self.cfg = model, cfg
         self.phase, self.transitioned = 'teacher', False
+        self.student_initialized = False  # Separate from phase: adaptation must never recopy it.
         self.learning_rate = cfg['learning_rate']
         self.current_entropy_coef = cfg['entropy_coef']
         self.ema = deepcopy(model.estimator).requires_grad_(False).eval()
@@ -25,6 +26,8 @@ class FACETPPO:
         model.student.requires_grad_(False)
         if not isinstance(cfg['student_start_iteration'], int) or cfg['student_start_iteration'] < 0:
             raise ValueError('student_start_iteration must be a nonnegative integer')
+        if not isinstance(cfg.get('adaptation_iterations', 0), int) or cfg.get('adaptation_iterations', 0) < 0:
+            raise ValueError('adaptation_iterations must be a nonnegative integer')
         if cfg['estimator_teacher_interval'] < 1 or cfg['estimator_epochs'] < 1 or not 0 < cfg['estimator_ema_tau'] <= 1:
             raise ValueError('Invalid FACET estimator cadence/EMA')
 
@@ -79,7 +82,7 @@ class FACETPPO:
         if storage.phase != self.phase:
             raise RuntimeError('Cannot reuse teacher data for student PPO (or vice versa)')
         metrics, count = {}, 0
-        for _ in range(self.cfg['num_learning_epochs']):
+        for _ in range(0 if self.phase == 'adaptation' else self.cfg['num_learning_epochs']):
             for batch in storage.minibatches(self.cfg['num_mini_batches']):
                 loss, values = self.ppo_loss(batch)
                 if self.cfg['schedule'] == 'adaptive' and self.cfg['desired_kl'] is not None:
@@ -99,7 +102,7 @@ class FACETPPO:
                 count += 1
         metrics = {k: float(v/count) for k, v in metrics.items()}
         # Upstream update index starts at zero: supervise updates 0,2,4,... .
-        if self.phase == 'student' or iteration % self.cfg['estimator_teacher_interval'] == 0:
+        if self.phase != 'teacher' or iteration % self.cfg['estimator_teacher_interval'] == 0:
             estimator_metrics, batches = {}, 0
             for _ in range(self.cfg['estimator_epochs']):
                 for batch, h in storage.sequences(self.cfg['num_mini_batches']):
@@ -119,6 +122,11 @@ class FACETPPO:
     @torch.no_grad()
     def switch_to_student(self, copy_actor=True):
         if self.transitioned:
+            if self.phase == 'adaptation':
+                self.phase = 'student'
+                self.model.student.requires_grad_(True)
+                self.model.critic.requires_grad_(True)
+                return True
             return False
         m = self.model
         if copy_actor:
@@ -140,6 +148,16 @@ class FACETPPO:
                 p.grad = None
         m.student.requires_grad_(True)
         self.phase, self.transitioned = 'student', True
+        self.student_initialized = True
+        return True
+
+    def switch_to_adaptation(self):
+        if self.phase != 'teacher':
+            return False
+        self.switch_to_student()
+        self.phase = 'adaptation'
+        self.model.student.requires_grad_(False)
+        self.model.critic.requires_grad_(False)
         return True
 
     def update_entropy(self, linear, angular, terrain):
@@ -157,15 +175,22 @@ class FACETPPO:
     def state_dict(self):
         return dict(model=self.model.state_dict(), ema=self.ema.state_dict(), optimizer=self.optimizer.state_dict(),
             estimator_optimizer=self.estimator_optimizer.state_dict(), phase=self.phase, transitioned=self.transitioned,
+            student_initialized=self.student_initialized,
             learning_rate=self.learning_rate, entropy_coef=self.current_entropy_coef)
 
     def load_state_dict(self, state, load_optimizer=True):
-        if state['phase'] not in ('teacher', 'student') or (state['phase'] == 'student') != state['transitioned']:
+        if state['phase'] not in ('teacher', 'adaptation', 'student') or (state['phase'] != 'teacher') != state['transitioned']:
             raise ValueError('Inconsistent FACET checkpoint phase')
+        if state.get('student_initialized', state['transitioned']) != state['transitioned']:
+            raise ValueError('Inconsistent student initialization status')
         self.model.load_state_dict(state['model'], strict=True)
         self.ema.load_state_dict(state['ema'], strict=True)
-        if state['phase'] == 'student':
+        if state['phase'] != 'teacher':
             self.switch_to_student(copy_actor=False)  # Never overwrite a trained student.
+            if state['phase'] == 'adaptation':
+                self.phase = 'adaptation'
+                self.model.student.requires_grad_(False)
+                self.model.critic.requires_grad_(False)
         elif self.transitioned:
             raise ValueError('Load a teacher checkpoint into a fresh FACET runner')
         if load_optimizer:

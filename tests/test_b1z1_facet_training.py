@@ -30,6 +30,13 @@ class PacketEnv:
         self.packet = dict(observation=torch.randn(4, 7), privileged=torch.randn(4, 5),
                            wrench=torch.randn(4, 9), is_init=torch.ones(4, 1, dtype=torch.bool))
         self.terminal = None
+        self.z1_joint_offsets = self.z1_joint_axes = torch.zeros(6, 3)
+        self.z1_link00_offset = self.z1_ee_offset = torch.zeros(3)
+
+    def get_facet_observation_schema(self):
+        from legged_gym.envs.b1z1.b1z1_facet.observations import JOINTS, ACTION_JOINTS
+        return dict(observed_joint_names=list(JOINTS), action_joint_names=list(ACTION_JOINTS),
+                    observation_blocks=[['test', 7]], privileged_blocks=[['test', 5]])
 
     def get_facet_observations(self):
         return {k: v.clone() for k, v in self.packet.items()}

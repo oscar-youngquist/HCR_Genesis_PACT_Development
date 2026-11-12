@@ -23,6 +23,7 @@ class FACETReferenceCfg:
     yaw_damping: float = 7.2
     alpha: float = 1.0
     seed: int = 1701
+    sampling_mode: str = 'fixed'  # 'fixed' (legacy sample_ranges) or 'upstream_b1z1'.
     # Optional {parameter: [low, high]}; independently uniform at reset only.
     sample_ranges: dict = field(default_factory=dict)
     max_substep_seconds: float = 0.005
@@ -70,12 +71,26 @@ class FACETReference:
         self._initialized = torch.zeros(count, device=device, dtype=torch.bool)
         self._ready = False
         self._rng = torch.Generator(device=device).manual_seed(cfg.seed)
+        mode = getattr(cfg, 'sampling_mode', 'fixed')
+        if mode not in ('fixed', 'upstream_b1z1'):
+            raise ValueError('Unknown FACET impedance sampling mode')
+        if mode == 'upstream_b1z1' and cfg.sample_ranges:
+            raise ValueError('upstream_b1z1 preserves correlated sampling; use fixed for sample_ranges')
+        ranges = dict(cfg.sample_ranges)
+        if mode == 'upstream_b1z1':
+            # Pinned impedance_manip.py: randi(1,4) is upper-exclusive;
+            # virtual_mass_range is stored but not consumed by its kernels.
+            ranges.update(base_mass=(2., 8.), ee_mass=(2., 2.), yaw_inertia=(1.5, 1.5),
+                base_stiffness=(2., 30.), yaw_stiffness=(2., 30.), ee_stiffness=(4., 30.),
+                base_damping=(1.8*math.sqrt(2), 1.8*math.sqrt(30)),
+                yaw_damping=(1.8*math.sqrt(2), 1.8*math.sqrt(30)),
+                ee_damping=(3.6, 1.8*math.sqrt(30)))
         unknown = set(cfg.sample_ranges) - set(PARAMETERS)
         if unknown:
             raise ValueError(f"Unknown FACET parameters: {sorted(unknown)}")
         self._ranges = {}
         for name in PARAMETERS:
-            lo, hi = cfg.sample_ranges.get(name, (getattr(cfg, name),) * 2)
+            lo, hi = ranges.get(name, (getattr(cfg, name),) * 2)
             positive = name in ("base_mass", "ee_mass", "yaw_inertia")
             if not (math.isfinite(lo) and math.isfinite(hi) and lo <= hi and
                     (lo > 0 if positive else lo >= 0) and (name != "alpha" or hi <= 1)):
@@ -103,6 +118,14 @@ class FACETReference:
             values = lo if lo == hi else lo + (hi-lo) * torch.rand(
                 (len(ids), 1), device=self._state.device, dtype=self._state.dtype, generator=self._rng)
             self._parameters[name][ids] = values
+        if getattr(self.cfg, 'sampling_mode', 'fixed') == 'upstream_b1z1':
+            p = self._parameters
+            exponent = torch.randint(1, 4, (len(ids), 1), device=self._state.device, generator=self._rng)
+            p['base_mass'][ids] = 2.**exponent.to(self._state.dtype)
+            p['base_damping'][ids] = 1.8*p['base_stiffness'][ids].sqrt()
+            p['yaw_stiffness'][ids] = p['base_stiffness'][ids]
+            p['yaw_damping'][ids] = p['base_damping'][ids]
+            p['ee_damping'][ids] = 1.8*p['ee_stiffness'][ids].sqrt()
         self._diagnostics[ids] = 0
         self._elapsed[ids] = 0
         self._initialized[ids] = True

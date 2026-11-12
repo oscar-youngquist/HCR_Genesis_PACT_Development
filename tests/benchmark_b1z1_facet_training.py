@@ -21,12 +21,19 @@ def benchmark(n, device):
                   wrench=torch.randn(n, 9, device=device), is_init=torch.zeros(n, 1, dtype=torch.bool, device=device))
     reward, done = torch.ones(n, device=device), torch.zeros(n, dtype=torch.bool, device=device)
     env = SimpleNamespace(cfg=B1Z1FACETCfg(), num_envs=n, device=device,
+        dt=.02, z1_joint_offsets=torch.zeros(6, 3), z1_joint_axes=torch.zeros(6, 3),
+        z1_link00_offset=torch.zeros(3), z1_ee_offset=torch.zeros(3),
         get_facet_observations=lambda: {k: v.clone() for k, v in packet.items()},
         get_facet_terminal_observations=lambda: None,
         step=lambda actions: (None, None, None, None, reward, done, {}, None))
+    from legged_gym.envs.b1z1.b1z1_facet.observations import FACETObservations
+    schema = FACETObservations(env).schema
+    env.get_facet_observation_schema = lambda: schema
     runner = B1Z1FACETRunner(env, class_to_dict(B1Z1FACETCfgPPO()), device=device)
     measurements = {}
-    for phase in ('teacher', 'student'):
+    for phase in ('teacher', 'adaptation', 'student'):
+        if phase == 'adaptation':
+            runner.alg.switch_to_adaptation()
         if phase == 'student':
             runner.alg.switch_to_student()
         rows = []

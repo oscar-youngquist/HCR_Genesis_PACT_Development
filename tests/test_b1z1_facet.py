@@ -153,10 +153,16 @@ def test_registered_runner_initializes_without_physics(monkeypatch):
     from rsl_rl.runners import B1Z1FACETRunner
     env.get_facet_observations = lambda: dict(observation=torch.zeros(2, 237),
         privileged=torch.zeros(2, 52), wrench=torch.zeros(2, 9), is_init=torch.ones(2, 1, dtype=torch.bool))
+    env.get_facet_observation_schema = lambda: dict(observation_blocks=[['test', 237]], privileged_blocks=[['test', 52]])
+    env.z1_joint_offsets = env.z1_joint_axes = torch.zeros(6, 3)
+    env.z1_link00_offset = env.z1_ee_offset = torch.zeros(3)
     monkeypatch.setattr('sys.argv', ['train.py', '--task=b1z1_facet', '--cpu', '--headless'])
     runner, _ = task_registry.make_alg_runner(env, name='b1z1_facet', args=get_args(), train_cfg=train, log_root=None)
     assert isinstance(runner, B1Z1FACETRunner)
     assert not hasattr(runner, 'dynamics')
+    with pytest.raises(RuntimeError, match='not been initialized'):
+        runner.get_inference_policy()
+    runner.alg.switch_to_student()
     with torch.no_grad():
         actions, _ = runner.get_inference_policy()(torch.zeros(2, 237), torch.zeros(2, 128), torch.ones(2, 1, dtype=torch.bool))
     assert actions.shape == (2, 17) and torch.isfinite(actions).all()

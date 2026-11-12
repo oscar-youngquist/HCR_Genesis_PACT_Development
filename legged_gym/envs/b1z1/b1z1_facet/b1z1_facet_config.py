@@ -22,6 +22,7 @@ class B1Z1FACETCfg:
         self.use_force_shifted_target = False
         self.action_mode = "position"  # 17 learned positions, no learned FF head.
         self.facet_reference = FACETReferenceCfg()
+        self.facet_reference.sampling_mode = 'upstream_b1z1'
         self.facet_tracking = FACETTrackingCfg()  # FACET-only registration; physical settings unchanged.
         self.facet_observations = FACETObservationCfg()  # Separate API, not legacy runner input.
         # FACET upstream quadruped.py, pinned c0d6f5a: only import gains, not
@@ -49,6 +50,7 @@ class B1Z1FACETCfgPPO:
         self.algorithm.estimator_teacher_interval = 2
         self.algorithm.estimator_ema_tau = .04
         self.algorithm.student_start_iteration = 60000  # Completed PPO updates, never simulator steps.
+        self.algorithm.adaptation_iterations = 0  # Consumes part of the remaining 10k; no free interactions.
         self.policy = SimpleNamespace(action_mode='position')
         self.runner.policy_class_name = 'FACETModel'
         self.runner.algorithm_class_name = 'FACETPPO'
