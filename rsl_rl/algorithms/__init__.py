@@ -30,11 +30,11 @@
 
 from .ppo import PPO
 from .ppo_ts import PPO_TS
+from .ppo_beyond_robustness import PPOBeyondRobustness
 from .ppo_ee import PPO_EE
 from .ppo_cts import PPO_CTS
 from .ppo_dreamwaq import PPO_DreamWaQ
 from .ppo_pact import PPO_PACT
-from .ppo_hard_pact import PPO_HardPACT
 from .ppo_pact_pos import PPO_PACT_Pos
 from .ppo_kite import PPO_KITE
 
@@ -42,3 +42,16 @@ from .ppo_postau import PPO_PosTau
 from .ppo_rl2ac import PPO_RL2AC
 from .ppo_abl1 import PPO_ABL1
 from .ppo_abl3 import PPO_ABL3
+
+# BR/TS CPU-only imports must not initialize HardPACT's simulator dynamics package.
+# Keep both explicit imports and legacy `from ... import *` runner lookup intact.
+__all__ = [name for name in globals() if name.startswith("PPO")]
+__all__.append("PPO_HardPACT")
+
+
+def __getattr__(name):
+    if name == "PPO_HardPACT":
+        from .ppo_hard_pact import PPO_HardPACT
+        globals()[name] = PPO_HardPACT
+        return PPO_HardPACT
+    raise AttributeError(name)
