@@ -29,7 +29,7 @@ def differences(a, b, prefix=""):
 def test_config_allowlist_and_resolved_layout():
     baseline = copy_sections(B1Z1PPOPosCfg)
     facet = B1Z1FACETCfg()
-    assert differences(class_to_dict(facet), class_to_dict(baseline)) == {"compliance.enabled", "facet_reference", "facet_tracking"}
+    assert differences(class_to_dict(facet), class_to_dict(baseline)) == {"compliance.enabled", "facet_reference", "facet_tracking", "facet_observations"}
     train, base_train = B1Z1FACETCfgPPO(), copy_sections(B1Z1PPOPosCfgPPO)
     assert differences(class_to_dict(train), class_to_dict(base_train)) == {
         "runner.experiment_name", "runner.run_name"}
@@ -39,7 +39,7 @@ def test_config_allowlist_and_resolved_layout():
     # rigid-tracking reward suppression. Stage 3 registration is tested separately;
     # raw nominal coefficients remain available for diagnostic-only bookkeeping.
     assert differences(class_to_dict(facet), class_to_dict(baseline)) == {
-        "compliance.enabled", "facet_reference", "facet_tracking", "env.num_observations", "env.num_critic_state_obs",
+        "compliance.enabled", "facet_reference", "facet_tracking", "facet_observations", "env.num_observations", "env.num_critic_state_obs",
         "env.num_privileged_obs", "env.num_privileged_recon_obs",
         "rewards.scales.arm_progress_before_torso", "rewards.scales.ref_dof_leg",
         "rewards.scales.early_torso_tilt", "rewards.scales.feet_contact_number",
@@ -79,6 +79,7 @@ def test_config_isolation():
     cfg.compliance.family_weights[0] = 0
     cfg.facet_reference.sample_ranges["ee_mass"] = [1., 3.]
     cfg.facet_tracking.weights["ee_position"] = 9.
+    cfg.facet_observations.noise_seed = 999
     cfg.env.num_observations += 100
     train.policy.actor_layers[0] = 7
     configure(cfg)

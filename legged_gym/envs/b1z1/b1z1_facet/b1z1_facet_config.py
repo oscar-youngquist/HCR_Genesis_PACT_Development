@@ -5,6 +5,7 @@ from legged_gym.envs.b1z1.b1z1_ppo_pos.b1z1_ppo_pos_config import (
 from legged_gym.envs.b1z1.b1z1_unifp_original.b1z1_unifp_original_config import copy_sections
 from .reference import FACETReferenceCfg
 from .tracking import FACETTrackingCfg
+from .observations import FACETObservationCfg
 
 
 class B1Z1FACETCfg:
@@ -17,6 +18,7 @@ class B1Z1FACETCfg:
         self.action_mode = "position"  # 17 learned positions, no learned FF head.
         self.facet_reference = FACETReferenceCfg()
         self.facet_tracking = FACETTrackingCfg()  # FACET-only registration; physical settings unchanged.
+        self.facet_observations = FACETObservationCfg()  # Separate API, not legacy runner input.
 
 
 class B1Z1FACETCfgPPO:

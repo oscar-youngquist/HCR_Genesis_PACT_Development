@@ -233,3 +233,7 @@ class FACETReferenceBank:
 
     def read(self):
         return {key: value.detach().clone() for key, value in self._snapshot.items()}
+
+    def read_current(self):
+        """Current-episode view for observations; cleared rows never expose terminal targets."""
+        return {key: value.detach().clone() for key, value in self._select().items()}

@@ -5,10 +5,11 @@ from legged_gym.envs.b1z1.b1z1_ppo_pos.b1z1_ppo_pos import B1Z1PPOPos
 from legged_gym.envs.b1z1.directional_compliance import heading, rotate_yaw, sphere_basis
 from .reference import FACETReference, FACETReferenceBank, applied_loads, measured_reference_state
 from .tracking import COMPONENTS, LEGACY_TRACKING, tracking_values
+from .observations import FACETObservations
 
 
 class B1Z1FACET(B1Z1PPOPos):
-    """Stage 3: same-time multi-start rewards; architecture/teacher-student still pending."""
+    """Stage 4 packets alongside Stage 3 rewards; new-model PPO wiring is Stage 5."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -22,6 +23,11 @@ class B1Z1FACET(B1Z1PPOPos):
             self._reset_facet_reference(self.all_env_ids)
             if self.cfg.facet_tracking.enabled:
                 self.facet_history = FACETReferenceBank(self.facet_reference, self.cfg.facet_tracking.horizons)
+        self._facet_observations = None
+        self._facet_issued_action = None
+        if self.cfg.facet_observations.enabled:
+            self._facet_observations = FACETObservations(self)
+            self._facet_observations.collect(self, self.all_env_ids, reset=True)
 
     def _facet_measured_state(self):
         sim = self.simulator
@@ -58,6 +64,11 @@ class B1Z1FACET(B1Z1PPOPos):
         super().reset_idx(env_ids)
         if getattr(self, "facet_reference", None) is not None and len(env_ids):
             self._reset_facet_reference(env_ids)
+        collector = getattr(self, '_facet_observations', None)
+        if collector is not None and len(env_ids):
+            collector.collect(self, env_ids, reset=True)
+            if self._facet_issued_action is not None:
+                collector.skip[env_ids] = True  # Already collected at this boundary.
         if diagnostics:
             self.extras["episode"].update(diagnostics)
             self._facet_error_sums[env_ids] = 0
@@ -66,6 +77,10 @@ class B1Z1FACET(B1Z1PPOPos):
 
     @torch.no_grad()
     def _pre_sim_step(self, actions):
+        if getattr(self, '_facet_observations', None) is not None:
+            # Capture policy-issued positions before delay or Pos torque bookkeeping.
+            limit = self.cfg.normalization.clip_actions
+            self._facet_issued_action = actions.detach().to(self.device).clamp(-limit, limit).clone()
         executed = super()._pre_sim_step(actions)
         if getattr(self, "facet_reference", None) is None:
             return executed
@@ -108,6 +123,20 @@ class B1Z1FACET(B1Z1PPOPos):
                 self._facet_seed = None
             self._facet_interval = None  # Reads/post-step calls cannot advance twice.
         super().post_physics_step()
+        collector = getattr(self, '_facet_observations', None)
+        if collector is not None and self._facet_issued_action is not None:
+            collector.collect(self, self.all_env_ids[~collector.skip], self._facet_issued_action)
+            collector.skip.zero_()
+            self._facet_issued_action = None
+
+    def get_facet_observations(self):
+        """Cached current-episode packet; no sampling, history advance or normalization."""
+        return {} if self._facet_observations is None else self._facet_observations.read()
+
+    def get_facet_observation_schema(self):
+        """Named block and joint ordering for the separate Stage 4 API."""
+        from copy import deepcopy
+        return {} if self._facet_observations is None else deepcopy(self._facet_observations.schema)
 
     def get_facet_references(self):
         """Original Stage 2 single-start diagnostic API; no actor input changes."""

@@ -28,6 +28,7 @@ def record(args):
     if args.record_task == "b1z1_facet":
         cfg.facet_reference.enabled = not args.references_disabled
         cfg.facet_tracking.enabled = args.tracking_enabled
+        cfg.facet_observations.enabled = not args.observations_disabled
     train = copy_sections(task_registry.train_cfgs[args.record_task])
     cfg.terrain.mesh_type = "plane"
     cfg.terrain.curriculum = False
@@ -60,6 +61,14 @@ def record(args):
             with torch.no_grad():
                 action = runner.get_inference_policy()(obs, history)
             assert action.shape == (2, 17) and torch.isfinite(action).all()
+            facet_model = None
+            if cfg.facet_observations.enabled:
+                from rsl_rl.facet_model import FACETModel
+                packet = env.get_facet_observations()
+                # Test model initialization must not perturb task/reset random draws.
+                with torch.random.fork_rng(devices=[torch.device(env.device).index]):
+                    facet_model = FACETModel(packet['observation'].shape[-1], packet['privileged'].shape[-1]).to(env.device).eval()
+                facet_hidden = torch.zeros(2, 128, device=env.device)
         env.reset_idx(env.all_env_ids)
         ids = env.all_env_ids
         q = sim.default_dof_pos.expand(2, -1).clone()
@@ -150,6 +159,18 @@ def record(args):
             if args.record_task == "b1z1_facet":
                 nominal_traces.append(torch.stack([env.episode_sums[key] for key in
                     ("tracking_lin_vel_force_world", "tracking_ang_vel", "tracking_ee_force_world")], -1).cpu().numpy().copy())
+                if facet_model is not None:
+                    packet = env.get_facet_observations()
+                    assert all(torch.isfinite(v).all() for v in packet.values())
+                    with torch.no_grad():
+                        student, facet_hidden, reconstructed = facet_model.student_action(packet['observation'], facet_hidden, packet['is_init'])
+                        teacher = facet_model.teacher_action(packet['observation'], packet['privileged'], packet['wrench'])
+                        value = facet_model.value(packet['observation'], packet['privileged'], packet['wrench'])
+                    assert student.shape == teacher.shape == (2, 17)
+                    assert reconstructed.shape == (2, 9) and value.shape == (2, 1)
+                    assert all(torch.isfinite(v).all() for v in (student, teacher, reconstructed, value))
+                    assert env._facet_observations.actions.shape == (2, 3, 17)
+                    torch.testing.assert_close(env._facet_observations.actions[:, 0], actions)
             if args.tracking_enabled:
                 snapshot = env.get_facet_tracking()
                 expected_valid = torch.tensor([step+1 >= h for h in cfg.facet_tracking.horizons], device=env.device).expand(2, -1)
@@ -170,6 +191,11 @@ def record(args):
                 terminal = env.get_facet_tracking()
                 assert terminal["valid"].all()
                 assert (env.facet_history._ages[0] == -1).all()
+                if facet_model is not None:
+                    packet = env.get_facet_observations()
+                    assert packet['is_init'][0] and not packet['is_init'][1]
+                    assert packet['privileged'][0, 13:].count_nonzero() == 0
+                    assert env._facet_observations.actions[0].count_nonzero() == 0
                 for name in ("tracking_lin_vel_force_world", "tracking_ang_vel", "tracking_ee_force_world"):
                     assert "rew_"+name in env.extras["episode"]
                 assert "facet/h32/ee_position_mse" in env.extras["episode"]
@@ -199,7 +225,7 @@ def record(args):
                 torch.testing.assert_close(after[key][:1], expected)
             assert after["elapsed_seconds"][0] == 0
         output.update({key: np.stack(values) for key, values in traces.items()})
-        name = args.record_task + ("_disabled" if args.references_disabled else "") + ("_tracking" if args.tracking_enabled else "")
+        name = args.record_task + ("_disabled" if args.references_disabled else "") + ("_tracking" if args.tracking_enabled else "") + ("_no_packets" if args.observations_disabled else "")
         if reference_traces:
             np.savez_compressed(args.output_dir / "facet_references.npz",
                 **{key: np.stack([row[key] for row in reference_traces]) for key in reference_traces[0]})
@@ -228,6 +254,7 @@ def main():
     parser.add_argument("--record-task", choices=("b1z1_ppo_pos", "b1z1_facet"))
     parser.add_argument("--references-disabled", action="store_true")
     parser.add_argument("--tracking-enabled", action="store_true")
+    parser.add_argument("--observations-disabled", action="store_true")
     args = parser.parse_args()
     if (args.tracking_enabled or args.record_task is None) and args.steps < 33:
         parser.error("Stage 3 smoke requires at least 33 uninterrupted intervals")
@@ -237,8 +264,9 @@ def main():
         return
     root = Path(__file__).resolve().parents[1]
     environment = dict(os.environ, SIMULATOR="isaaclab_b1z1_pact", PYTHONPATH=str(root))
-    for task, disabled, tracking in (("b1z1_ppo_pos", False, False), ("b1z1_facet", True, False),
-                                     ("b1z1_facet", False, False), ("b1z1_facet", False, True)):
+    for task, disabled, tracking, no_packets in (("b1z1_ppo_pos", False, False, False), ("b1z1_facet", True, False, False),
+                                     ("b1z1_facet", False, False, False), ("b1z1_facet", False, True, False),
+                                     ("b1z1_facet", False, True, True)):
         command = [sys.executable, str(Path(__file__).resolve()), "--record-task", task,
                    "--gpu", args.gpu, "--steps", str(args.steps),
                    "--output-dir", str(args.output_dir.resolve())]
@@ -246,7 +274,9 @@ def main():
             command.append("--references-disabled")
         if tracking:
             command.append("--tracking-enabled")
-        name = task + ("_disabled" if disabled else "") + ("_tracking" if tracking else "")
+        if no_packets:
+            command.append("--observations-disabled")
+        name = task + ("_disabled" if disabled else "") + ("_tracking" if tracking else "") + ("_no_packets" if no_packets else "")
         with (args.output_dir / (name + ".log")).open("w") as log:
             subprocess.run(command, cwd=root, env=environment, stdout=log,
                            stderr=subprocess.STDOUT, check=True, timeout=300)
@@ -280,8 +310,12 @@ def main():
     with np.load(args.output_dir / "b1z1_facet_nominal.npz") as stage2, np.load(args.output_dir / "b1z1_facet_tracking_nominal.npz") as stage3:
         np.testing.assert_array_equal(stage2["sums"], stage3["sums"])
         errors["nominal_metric_sums"] = 0.
+    with np.load(args.output_dir / "b1z1_facet_tracking.npz") as enabled, np.load(args.output_dir / "b1z1_facet_tracking_no_packets.npz") as disabled:
+        for key in enabled.files:
+            np.testing.assert_array_equal(enabled[key], disabled[key], err_msg=key)
+            errors['observation_api_toggle/'+key] = 0.
     (args.output_dir / "parity.json").write_text(json.dumps(errors, indent=2))
-    print("FACET Stage 1/2/3 physics/observation/nominal-metric parity passed; Stage 3 rewards differ:", args.output_dir)
+    print("FACET Stage 1/2/3/4 physics/observation/nominal-metric parity passed; Stage 3 rewards differ:", args.output_dir)
 
 
 if __name__ == "__main__":
