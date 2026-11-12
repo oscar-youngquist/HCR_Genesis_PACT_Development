@@ -5,6 +5,24 @@ from rsl_rl.beyond_robustness_payload import spawn_state
 
 @torch.no_grad()
 def physics_checks(env):
+    # Deliberately nominal reset fixture for isolated contact experiments only.
+    # The normal Stage-4 smoke separately verifies shared randomized resets.
+    reset_joints,reset_root=env._reset_dofs,env._reset_root_states
+    s=env.simulator
+    def joints(ids):
+        s.reset_dofs(ids,s.default_dof_pos.expand(env.num_envs,-1)[ids],
+                     torch.zeros(len(ids),12,device=env.device))
+    def root(ids):
+        s.reset_root_states(ids,s.base_init_pos.expand(len(ids),-1)+s.env_origins[ids],
+            s.base_init_quat.expand(len(ids),-1),torch.zeros(len(ids),3,device=env.device),
+            torch.zeros(len(ids),3,device=env.device))
+    env._reset_dofs,env._reset_root_states=joints,root
+    try: return _physics_checks(env)
+    finally: env._reset_dofs,env._reset_root_states=reset_joints,reset_root
+
+
+@torch.no_grad()
+def _physics_checks(env):
     s=env.simulator; n=env.num_envs; device=env.device
     assert n>=2
     zeros=torch.zeros(n,12,device=device)
@@ -36,7 +54,7 @@ def physics_checks(env):
         ground.append(s.ground_total_forces_world[:,tray].norm(dim=-1).clone())
     # Stable relative height near floor top; tray receives box reaction while
     # the pair-filtered ground channel excludes that normal support.
-    expected=s.payload_cfg.tray_height+s.payload_cfg.tray_size[2]/2+s.box_size[2]/2
+    expected=s.payload_cfg.tray_height+s.payload_cfg.tray_size[2]/2+s.box_size[:,2]/2
     labels=s.payload_labels(); support=torch.stack(support[-30:]); ground=torch.stack(ground[-30:])
     assert (labels[:,2]-expected).abs().max()<.025, labels
     assert support.mean()<-.2 and ground.max()<.1, (support.mean(),ground.max())

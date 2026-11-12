@@ -2,14 +2,14 @@
 
 No QP, learned controller, or physics-loss code. Tray is an articulation link,
 not a pose follower. Its real mass/inertia are independent of torso mass DR.
-Box dimensions are sampled once per scene BEFORE cloning/collision cooking;
+Box dimensions vary across a seeded bank BEFORE physics initialization;
 mass, inertia, friction and initial conditions change only on eligible resets.
 """
 import torch
 from legged_gym.simulator.isaaclab_simulator_pact import IsaacLabSimulator_PACT
 from legged_gym.simulator.reset_randomization_cadence import ResetRandomizationCadence
 from rsl_rl.beyond_robustness_payload import (SlidingPayloadConfig, cuboid_inertia,
-    load_labels, spawn_state, named_indices, rotate_wxyz)
+    load_labels, spawn_state, named_indices, rotate_wxyz, payload_geometry)
 
 
 class IsaacLabSimulatorBR(IsaacLabSimulator_PACT):
@@ -69,15 +69,44 @@ class IsaacLabSimulatorBR(IsaacLabSimulator_PACT):
         joint.CreateLocalPos0Attr(Gf.Vec3f(0,0,c.tray_height))
         joint.CreateLocalPos1Attr(Gf.Vec3f(0,0,0))
         joint.CreateCollisionEnabledAttr(False)
-        size_rng = torch.Generator().manual_seed(c.seed)
-        self.box_size = (torch.tensor(c.box_size_min)+torch.rand(3,generator=size_rng)*
-                        (torch.tensor(c.box_size_max)-torch.tensor(c.box_size_min))).tolist()
-        shape = sim.CuboidCfg(size=tuple(self.box_size), rigid_props=sim.RigidBodyPropertiesCfg(disable_gravity=False),
+
+    def _replicate_scene_physics(self):
+        # Installed MultiAssetSpawner requires parsing heterogeneous colliders.
+        return False
+
+    def _scene_physx_options(self):
+        return {'gpu_total_aggregate_pairs_capacity':self._cfg.sim.physx.gpu_total_aggregate_pairs_capacity}
+
+    def _create_cloned_scene_components(self, prim_paths):
+        import isaaclab.sim as sim
+        from isaaclab.assets import RigidObject, RigidObjectCfg
+        from pxr import UsdGeom, Gf
+        import math
+        # The legacy cloner places all source copies at zero until first reset.
+        # With heterogeneous bodies this causes O(N²) broadphase pairs during
+        # SimulationContext.reset(). Stage separated assets BEFORE initialization;
+        # normal robot/payload reset still sets the inherited terrain poses.
+        width=math.ceil(math.sqrt(self._num_envs))
+        for i,path in enumerate(prim_paths):
+            xform=UsdGeom.Xformable(self._stage.GetPrimAtPath(path))
+            ops=[op for op in xform.GetOrderedXformOps() if op.GetOpType()==UsdGeom.XformOp.TypeTranslate]
+            op=ops[0] if ops else xform.AddTranslateOp()
+            op.Set(Gf.Vec3d(3*(i//width),3*(i%width),5.))
+        c=self.payload_cfg
+        bank,ids=payload_geometry(c,self._num_envs)
+        self.box_size_bank=bank.tolist(); self.box_size_ids=ids.tolist()
+        self.box_size=bank[ids].to(self._device)
+        shapes=[sim.CuboidCfg(size=tuple(size), rigid_props=sim.RigidBodyPropertiesCfg(disable_gravity=False),
             mass_props=sim.MassPropertiesCfg(mass=c.mass_initial[0]),
             collision_props=sim.CollisionPropertiesCfg(contact_offset=.002,rest_offset=0.),
             physics_material=sim.RigidBodyMaterialCfg(static_friction=c.friction_range[0],
                 dynamic_friction=c.friction_range[0],restitution=0.,friction_combine_mode='multiply'),
-            activate_contact_sensors=True)
+            activate_contact_sensors=True) for size in self.box_size_bank]
+        # Supported pre-initialization spawner copies bank geometry, not runtime
+        # USD scaling. Its deterministic traversal must match canonical env IDs.
+        paths=sim.find_matching_prim_paths('/World/envs/env_.*')
+        if paths!=prim_paths: raise RuntimeError('Unexpected multi-asset environment traversal order')
+        shape=sim.MultiAssetSpawnerCfg(assets_cfg=shapes,random_choice=False)
         self.payload = RigidObject(RigidObjectCfg(prim_path='/World/envs/env_.*/br_box',spawn=shape,
             init_state=RigidObjectCfg.InitialStateCfg(pos=(0,0,1.))))
 
@@ -125,13 +154,13 @@ class IsaacLabSimulatorBR(IsaacLabSimulator_PACT):
             if name=='mass': self.payload_mass[ids] = self._uniform((len(ids),),low,high)
             elif name=='friction': self.payload_friction[ids] = self._uniform((len(ids),),low,high)
             elif name=='displacement':
-                usable = torch.tensor(c.tray_size[:2],device=self._device)/2-c.wall_thickness-torch.tensor(self.box_size[:2],device=self._device)/2-c.spawn_clearance
+                usable = torch.tensor(c.tray_size[:2],device=self._device)/2-c.wall_thickness-self.box_size[ids,:2]/2-c.spawn_clearance
                 self.payload_offset[ids,:2] = self._uniform((len(ids),2),-1.,1.)*usable.clamp(max=high)
             else: self.payload_relative_velocity[ids,:2] = self._uniform((len(ids),2),-high,high)
-        self.payload_offset[env_ids,2] = c.tray_height+c.tray_size[2]/2+self.box_size[2]/2+c.spawn_clearance
+        self.payload_offset[env_ids,2] = c.tray_height+c.tray_size[2]/2+self.box_size[env_ids,2]/2+c.spawn_clearance
         view=self.payload.root_physx_view; cpu_ids=env_ids.cpu()
         masses=view.get_masses().clone(); masses[cpu_ids,0]=self.payload_mass[env_ids].cpu()
-        inertia=view.get_inertias().clone(); inertia[cpu_ids]=cuboid_inertia(self.payload_mass[env_ids],self.box_size).reshape(-1,9).cpu()
+        inertia=view.get_inertias().clone(); inertia[cpu_ids]=cuboid_inertia(self.payload_mass[env_ids],self.box_size[env_ids]).reshape(-1,9).cpu()
         props=view.get_material_properties().clone(); props[cpu_ids,:,:2]=self.payload_friction[env_ids,None,None].cpu(); props[cpu_ids,:,2]=0.
         view.set_masses(masses,cpu_ids); view.set_inertias(inertia,cpu_ids); view.set_material_properties(props,cpu_ids)
         # Return read-back actual values, not desired labels.
@@ -184,7 +213,7 @@ class IsaacLabSimulatorBR(IsaacLabSimulator_PACT):
         """Checkpoint sampled properties, not PhysX contacts/trajectory state."""
         from copy import deepcopy
         view=self._robot.root_physx_view
-        return deepcopy(dict(box_size=self.box_size,rng=self.payload_rng.get_state(),
+        return deepcopy(dict(geometry_version=2,box_size_bank=self.box_size_bank,box_size_ids=self.box_size_ids,rng=self.payload_rng.get_state(),
             payload_cadence=self.payload_cadence.__dict__,
             robot_cadence=self._reset_cadence.__dict__ if hasattr(self,'_reset_cadence') else None,
             tensors={key:getattr(self,key).clone() for key in (
@@ -197,7 +226,8 @@ class IsaacLabSimulatorBR(IsaacLabSimulator_PACT):
 
     def load_sampling_state_dict(self, state):
         from copy import deepcopy
-        if state['box_size']!=self.box_size:
+        if (state.get('geometry_version')!=2 or state.get('box_size_bank')!=self.box_size_bank
+                or state.get('box_size_ids')!=self.box_size_ids):
             raise ValueError('Payload creation-time geometry differs; recreate with checkpoint payload config/seed')
         self.payload_rng.set_state(state['rng'].cpu())
         self.payload_cadence.__dict__.update(deepcopy(state['payload_cadence']))

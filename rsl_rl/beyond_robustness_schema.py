@@ -41,7 +41,8 @@ PARAMETER_FIELDS = (
 
 @dataclass(frozen=True)
 class BeyondRobustnessInputSchema:
-    version: int = 2
+    version: int = 3
+    actor_clip: float = 100.0
     # Explicit Cartesian sample locations, x-major/y-minor, not a paper-sized buffer.
     terrain_points_x: tuple = tuple(round(i / 10, 1) for i in range(-6, 7))
     terrain_points_y: tuple = tuple(round(i / 10, 1) for i in range(-5, 6))
@@ -51,8 +52,10 @@ class BeyondRobustnessInputSchema:
     foot_order: tuple = ("FR", "FL", "RR", "RL")
 
     def __post_init__(self):
-        if self.version != 2:
-            raise ValueError("Unsupported BR schema version; Stage-1 opaque packing needs explicit conversion")
+        if self.version != 3:
+            raise ValueError("Incompatible BR observation schema: Stage 4 uses cached sensor noise and clean privileged truth; explicit checkpoint conversion required")
+        if not math.isfinite(self.actor_clip) or self.actor_clip <= 0:
+            raise ValueError('actor_clip must be finite and positive')
         for name in ("terrain_points_x", "terrain_points_y", "joint_order", "foot_order"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         fields = tuple(InputField(**f) if isinstance(f, dict) else f for f in self.parameter_fields)
@@ -119,6 +122,10 @@ class BeyondRobustnessInputSchema:
 
     def contract(self):
         return dict(**self.resolved(), state_fields=[asdict(f) for f in self.state_fields],
+                    normalization='identity/SI; absolute q, no nominal-angle subtraction',
+                    actor_noise='shared physical noise on omega/gravity/q/dq only; cached per timestamp',
+                    privileged_convention='clean, unclipped physical truth (including proprioception)',
+                    previous_action='previous clipped issued position offset in policy units, before delay',
                     observation_fields=[asdict(f) for f in PROPRIOCEPTION_FIELDS],
                     load_fields=[asdict(f) for f in LOAD_FIELDS],
                     observation_dim=self.observation_dim, state_dim=self.state_dim,

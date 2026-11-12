@@ -42,6 +42,8 @@ class BeyondRobustnessRunner:
             (self.log_dir / "beyond_robustness_resolved_config.json").write_text(
                 json.dumps(dict(config=self.cfg.resolved(), input_contract=model.input_contract(),
                     environment=(env.resolved_configuration() if hasattr(env,'resolved_configuration') else None)), indent=2))
+            if hasattr(env,'configuration_manifest'):
+                (self.log_dir/'beyond_robustness_inheritance.json').write_text(json.dumps(env.configuration_manifest,indent=2))
 
     @property
     def current_learning_iteration(self):
@@ -148,8 +150,10 @@ class BeyondRobustnessRunner:
                     episodes=count, episode_return=completed_returns.item() / count if count else float("nan"),
                     episode_length_steps=completed_lengths.item() / count if count else float("nan")), performance
 
-    def learn(self, num_learning_iterations, *, save_interval=0):
+    def learn(self, num_learning_iterations=None, *, save_interval=None):
         """Run a bounded number of additional iterations; no implicit curriculum steps."""
+        if num_learning_iterations is None: num_learning_iterations=max(0,self.cfg.max_iterations-self.alg.iteration)
+        if save_interval is None: save_interval=self.cfg.save_interval if self.log_dir is not None else 0
         if num_learning_iterations < 0 or save_interval < 0:
             raise ValueError("Iteration counts must be nonnegative")
         self.alg.train_mode()

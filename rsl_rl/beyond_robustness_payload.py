@@ -1,7 +1,7 @@
 """BR rigid-payload contract and tensor math (no simulator imports).
 
-Dimensions are sampled once per scene, shared across clones, before collision
-cooking. Mass/friction/spawn samples persist for the configured per-env reset
+Dimensions use a seeded creation-time size bank across environments, before
+collision cooking. Mass/friction/spawn samples persist for the per-env reset
 cadence; a disturbance-range change makes them due on the next reset. SI units.
 """
 from dataclasses import dataclass
@@ -19,6 +19,7 @@ class SlidingPayloadConfig:
     tray_friction: float = 1.0  # multiply combine => effective mu = box mu
     box_size_min: tuple = (.10, .08, .06)
     box_size_max: tuple = (.14, .12, .10)
+    size_bank_count: int = 16
     mass_initial: tuple = (.20, .40)
     mass_final: tuple = (1., 3.)
     friction_range: tuple = (.10, .60)
@@ -32,6 +33,10 @@ class SlidingPayloadConfig:
     seed: int = 0
 
     def __post_init__(self):
+        for name in ('tray_size','box_size_min','box_size_max','mass_initial','mass_final','friction_range'):
+            object.__setattr__(self,name,tuple(getattr(self,name)))
+        if not isinstance(self.size_bank_count,int) or self.size_bank_count<1:
+            raise ValueError('size_bank_count must be positive')
         for name in ('tray_size','box_size_min','box_size_max'):
             value=getattr(self,name)
             if len(value)!=3 or not all(math.isfinite(x) and x>0 for x in value):
@@ -83,8 +88,12 @@ def load_labels(q, base_origin, base_origin_velocity, angular_velocity_world,
 
 def spawn_state(q, base_origin, base_origin_velocity, angular_velocity_world, relative_pos, relative_vel):
     offset = rotate_wxyz(q, relative_pos)
+    position = base_origin+offset
+    # Use the realized float32 world lever arm, not its pre-addition value.
+    # Otherwise large terrain coordinates introduce a spurious relative twist.
+    offset = position-base_origin
     velocity = base_origin_velocity + torch.cross(angular_velocity_world,offset,dim=-1) + rotate_wxyz(q,relative_vel)
-    return torch.cat((base_origin+offset,q,velocity,angular_velocity_world),-1)
+    return torch.cat((position,q,velocity,angular_velocity_world),-1)
 
 
 def lost_payload(relative_pos, cfg):
@@ -112,3 +121,16 @@ def cuboid_inertia(mass, size):
     size = torch.as_tensor(size, device=mass.device, dtype=mass.dtype)
     squared = size.square()
     return torch.diag_embed(mass[:,None]*(squared.sum(-1,keepdim=True)-squared)/12)
+
+
+def payload_geometry(cfg, num_envs):
+    """Seeded bank, assigned cyclically in canonical environment order.
+
+    Collision dimensions are immutable for the scene lifetime. Using a bank
+    avoids thousands of separately cooked shapes; mass/inertia remain per-env.
+    """
+    rng=torch.Generator().manual_seed(cfg.seed)
+    bank=torch.tensor(cfg.box_size_min)+torch.rand(min(cfg.size_bank_count,num_envs),3,generator=rng)*(
+        torch.tensor(cfg.box_size_max)-torch.tensor(cfg.box_size_min))
+    ids=torch.arange(num_envs)%len(bank)
+    return bank,ids

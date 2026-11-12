@@ -183,6 +183,7 @@ class IsaacLabSimulator(Simulator):
             max_velocity_iteration_count=self._sim_params["physx"]["num_velocity_iterations"],
             bounce_threshold_velocity=self._sim_params["physx"]["bounce_threshold_velocity"],
             gpu_max_rigid_contact_count=self._sim_params["physx"]["max_gpu_contact_pairs"],
+            **self._scene_physx_options(),
         )
         # create simulation context
         sim_cfg = sim_utils.SimulationCfg(device=self._device, 
@@ -309,9 +310,10 @@ class IsaacLabSimulator(Simulator):
         self._cloner.clone(source_prim_path=f"/World/envs/env_0",
                            prim_paths=prim_paths,
                            copy_from_source=False,
-                           replicate_physics=True,
+                           replicate_physics=self._replicate_scene_physics(),
                            base_env_path=f"/World/envs",
                            enable_env_ids=True)
+        self._create_cloned_scene_components(prim_paths)
         self._configure_viewer_visuals()
         
         # Add contact sensors
@@ -445,6 +447,16 @@ class IsaacLabSimulator(Simulator):
         # randomize pd gain
         if self._cfg.domain_rand.randomize_pd_gain:
             self._randomize_pd_gain(torch.arange(self._num_envs))
+
+    def _replicate_scene_physics(self):
+        return True
+
+    def _scene_physx_options(self):
+        return {}
+
+    def _create_cloned_scene_components(self, prim_paths):
+        """Optional heterogeneous assets, before sensors and physics initialization."""
+        pass
 
     def _create_scene_components(self, source_env_path):
         """Optional assets/joints, authored before cloning and physics initialization."""

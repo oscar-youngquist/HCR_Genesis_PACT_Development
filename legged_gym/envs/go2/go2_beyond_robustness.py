@@ -1,10 +1,11 @@
-"""Stage-3 Isaac Lab BR adapter; NOT a production reward/task registration.
+"""Stage-4 Isaac Lab BR adapter; NOT a production reward/task registration.
 
-Pass a resolved Go2 task config (copied here) and explicitly select
+Pass resolve_beyond_robustness() output and explicitly select
 ``reward_mode='smoke_tracking'`` or supply a reward callable. The temporary
 reward is raw planar+yaw tracking, not the paper's reward port.
 Native 45-D proprioception uses SI units, absolute joint angles, and the previous
-clipped issued policy action (before delay). No observation noise is added.
+clipped issued policy action (before delay). Actor noise is cached per timestamp;
+privileged state/load supervision stays clean and unclipped.
 History belongs exclusively to the BR runner. observe() is side-effect free.
 Only simulator-neutral curriculum/disturbance methods are reused from Go2;
 no HardPACT model, loss, QP, or training algorithm is constructed.
@@ -13,7 +14,8 @@ from copy import deepcopy
 import math
 import torch
 from rsl_rl.beyond_robustness_env import BRObservation, BRStep
-from rsl_rl.beyond_robustness_schema import BeyondRobustnessInputSchema, PARAMETER_FIELDS, InputField
+from rsl_rl.beyond_robustness_config import BeyondRobustnessResolvedConfig
+from rsl_rl.beyond_robustness_sensors import BRActorObservationCache
 from rsl_rl.beyond_robustness_payload import inverse_rotate_wxyz, lost_payload, termination_masks, named_indices
 from legged_gym.simulator.isaaclab_simulator_br import IsaacLabSimulatorBR
 from legged_gym.envs.go2.go2_hard_pact.domain_rand_curriculum import HardPACTDomainRandCurriculum
@@ -32,20 +34,31 @@ class IsaacLabBeyondRobustnessEnv:
     _start_due_persistent_events = Go2HardPACT._start_due_persistent_events
     _update_persistent_wrench = Go2HardPACT._update_persistent_wrench
     _update_terrain_curriculum = Go2PACT._update_terrain_curriculum
+    _filter_terrain_move_up = Go2HardPACT._filter_terrain_move_up
+    _reset_dofs = Go2PACT._reset_dofs
+    _reset_root_states = Go2PACT._reset_root_states
+    _resample_commands = Go2PACT._resample_commands
 
-    def __init__(self, cfg, sim_params, device='cuda:0', headless=True, *, payload_cfg=None,
+    def __init__(self, resolved, device='cuda:0', headless=True, *,
                  reward_mode=None, reward_fn=None):
         if reward_fn is None and reward_mode != 'smoke_tracking':
             raise ValueError("BR reward port pending: explicitly select smoke_tracking or supply reward_fn")
-        self.cfg=deepcopy(cfg); self.device=torch.device(device); self.num_envs=cfg.env.num_envs
+        if not isinstance(resolved,BeyondRobustnessResolvedConfig):
+            raise TypeError('Use resolve_beyond_robustness() for the shared environment/model/storage contract')
+        cfg=resolved.environment; sim_params=resolved.sim_params
+        self.configuration_manifest=deepcopy(resolved.manifest)
+        # Shared scripted reset/command samplers require a device string.
+        self.cfg=deepcopy(cfg); self.device=str(torch.device(device)); self.num_envs=cfg.env.num_envs
+        self.num_actions=12
+        import random
+        import numpy as np
+        random.seed(cfg.seed); np.random.seed(cfg.seed); torch.manual_seed(cfg.seed)
         self.cfg.env.num_actions=12; self.cfg.control.control_type='P'
         self.dt=float(cfg.control.dt); self.reward_fn=reward_fn
         if not math.isclose(self.dt,sim_params['dt']*cfg.control.decimation):
             raise ValueError('Physics/control timestep mismatch')
-        self.input_schema=BeyondRobustnessInputSchema.from_terrain(cfg.terrain,
-            parameter_fields=PARAMETER_FIELDS+(InputField('tray_mass',1,'kg'),),
-            joint_order=tuple(cfg.asset.dof_names))
-        self.simulator=IsaacLabSimulatorBR(self.cfg,sim_params,str(device),headless,payload_cfg)
+        self.input_schema=resolved.training.input_schema
+        self.simulator=IsaacLabSimulatorBR(self.cfg,sim_params,str(device),headless,resolved.payload)
         s=self.simulator
         named_indices(s._robot.joint_names,self.input_schema.joint_order)
         named_indices(s._robot.body_names,[f'{leg}_foot' for leg in self.input_schema.foot_order])
@@ -62,7 +75,8 @@ class IsaacLabBeyondRobustnessEnv:
         self.episode_steps=torch.zeros(self.num_envs,dtype=torch.long,device=device)
         self.episode_tracking=torch.zeros(self.num_envs,2,device=device)
         self.failure_steps=torch.zeros_like(self.episode_steps)
-        self._terrain_last_iteration=torch.full_like(self.episode_steps,-1)
+        self.actor_observation_cache=BRActorObservationCache(self.num_envs,device,cfg.noise,
+            self.input_schema.actor_clip,cfg.seed)
         self.max_episode_length_s=float(cfg.env.episode_length_s)
         self.max_episode_length=math.ceil(self.max_episode_length_s/self.dt)
         max_delay=int(cfg.domain_rand.ctrl_delay_step_range[1]) if cfg.domain_rand.randomize_ctrl_delay else 0
@@ -84,31 +98,26 @@ class IsaacLabBeyondRobustnessEnv:
         self.collision_ids=sorted(set(s._termination_contact_indices+[names.index('br_tray')]))
 
     def _sample_commands(self, ids):
-        for i,key in enumerate(('lin_vel_x','lin_vel_y','ang_vel_yaw','heading')):
-            lo,hi=self.command_ranges[key]
-            self.commands[ids,i]=self.simulator._uniform((len(ids),),lo,hi)
-        self.commands[ids,:2]*=(self.commands[ids,:2].norm(dim=-1)>.2)[:,None]
-        self._update_curriculum_heading_command()
+        self._resample_commands(ids)  # Shared three-component 0.2 deadband.
+        self._refresh_heading()
+
+    def _refresh_heading(self):
+        if self.cfg.commands.heading_command:
+            from legged_gym.utils.math_utils import quat_apply, wrap_to_pi
+            forward=quat_apply(self.simulator.base_quat,self.forward_vec)
+            bounds=(self.command_ranges['ang_vel_yaw'] if
+                getattr(self.cfg.commands,'max_curriculum_ang_vel_yaw',None) is not None
+                else self.cfg.commands.ranges.ang_vel_yaw)
+            self.commands[:,2]=(0.5*wrap_to_pi(self.commands[:,3]-torch.atan2(forward[:,1],forward[:,0]))).clamp(*bounds)
 
     def _reset(self, ids):
         if not len(ids): return
         s=self.simulator
         if self.init_done and self.cfg.terrain.curriculum and hasattr(s,'_terrain'):
-            # Terrain changes remain reset-only. An env can finish several
-            # episodes in one rollout, but advances at most once per iteration.
-            terrain_ids=ids[self._terrain_last_iteration[ids]!=self.iteration]
-            if len(terrain_ids):
-                self._update_terrain_curriculum(terrain_ids)
-                self._terrain_last_iteration[terrain_ids]=self.iteration
-        if (self.init_done and self.cfg.commands.curriculum and
-                self.cfg.commands.curriculum_patience_iterations==0 and
-                self.episode_tracking[ids,0].mean()/self.max_episode_length>self.cfg.commands.curriculum_threshold):
-            self._expand_command_curriculum_ranges()
-        pos=s._robot.data.default_root_state[ids,:3]+s.env_origins[ids]
-        quat=torch.tensor(self.cfg.init_state.rot,device=self.device).repeat(len(ids),1)
-        zeros=torch.zeros(len(ids),3,device=self.device)
-        s.reset_dofs(ids,s.default_dof_pos.expand(self.num_envs,-1)[ids],torch.zeros(len(ids),12,device=self.device))
-        s.reset_root_states(ids,pos,quat,zeros,zeros)
+            self._update_terrain_curriculum(ids)
+        self._reset_command_curriculum(ids)
+        self._reset_dofs(ids)
+        self._reset_root_states(ids)
         s.reset_idx(ids)
         s.reset_payload(ids)
         self.previous_action[ids]=0; self.action_history[ids]=0; self.episode_steps[ids]=0
@@ -127,6 +136,14 @@ class IsaacLabBeyondRobustnessEnv:
         self._sample_commands(ids)
         self.parameters[ids]=self.input_schema.pack('parameters',s.realized_parameters())[ids]
         s._torques[ids]=0
+        self._refresh_actor_observation(ids)
+
+    def _reset_command_curriculum(self, ids):
+        """Zero patience retains shared reset/global-step cadence, using raw tracking."""
+        if (self.init_done and self.cfg.commands.curriculum and
+                self.cfg.commands.curriculum_patience_iterations==0 and self.clock%self.max_episode_length==0 and
+                self.episode_tracking[ids,0].mean()/self.max_episode_length>self.cfg.commands.curriculum_threshold):
+            self._expand_command_curriculum_ranges()
 
     def reset(self):
         self._reset(torch.arange(self.num_envs,device=self.device))
@@ -134,18 +151,27 @@ class IsaacLabBeyondRobustnessEnv:
         self.init_done=True
         return self.observe()
 
-    def observe(self):
+    def _clean_proprioception(self):
         s=self.simulator; d=s._robot.data; schema=self.input_schema
         q=d.root_link_quat_w
         omega=inverse_rotate_wxyz(q,d.root_link_ang_vel_w)
-        velocity=inverse_rotate_wxyz(q,d.root_link_lin_vel_w)
         gravity=inverse_rotate_wxyz(q,s._global_gravity)
-        obs=schema.pack('observations',dict(angular_velocity_B=omega,gravity_B=gravity,
+        return schema.pack('observations',dict(angular_velocity_B=omega,gravity_B=gravity,
             command_B=self.commands[:,:3],joint_position=s.dof_pos,joint_velocity=s.dof_vel,
             previous_action=self.previous_action))
+
+    def _refresh_actor_observation(self, ids=None, *, redraw=True):
+        self.actor_observation_cache.refresh(self._clean_proprioception(),ids,redraw=redraw)
+
+    def observe(self):
+        s=self.simulator; d=s._robot.data; schema=self.input_schema
+        q=d.root_link_quat_w
+        velocity=inverse_rotate_wxyz(q,d.root_link_lin_vel_w)
+        clean=self._clean_proprioception()
+        obs=self.actor_observation_cache.values.clone()
         force=s.hard_pact_foot_forces_world()
         force=inverse_rotate_wxyz(q[:,None,:].expand(-1,4,-1),force).reshape(self.num_envs,12)
-        state=dict(proprioception=obs,linear_velocity_B=velocity,
+        state=dict(proprioception=clean,linear_velocity_B=velocity,
             joint_torque=s.hard_pact_executed_torque(),joint_acceleration=d.joint_acc[:,s._dof_indices],
             foot_contact_force_B=force)
         if schema.terrain_points_x and schema.terrain_points_y:
@@ -166,9 +192,15 @@ class IsaacLabBeyondRobustnessEnv:
         s.hard_pact_apply_base_wrench_world(self._current_sustained_wrench_world)
         s.step(delayed); s.post_physics_step()
         self.previous_action.copy_(clipped); self.episode_steps+=1; self.clock+=1
+        # Shared post-physics callback ordering: commands/heading and pushes
+        # precede reward/termination/observation construction, then resets.
+        due=self.episode_steps.remainder(max(1,int(self.cfg.commands.resampling_time/self.dt)))==0
+        self._sample_commands(due.nonzero().flatten())
+        if self.cfg.domain_rand.push_robots: s.push_robots()
+        self._refresh_actor_observation()
         packet=self.observe()
-        linear=torch.exp(-4*(self.commands[:,:2]-s.base_lin_vel[:,:2]).square().sum(-1))
-        angular=torch.exp(-4*(self.commands[:,2]-s.base_ang_vel[:,2]).square())
+        linear=Go2PACT._reward_tracking_lin_vel(self)  # Same raw, unrelaxed curriculum evidence.
+        angular=Go2PACT._reward_tracking_ang_vel(self)
         self.episode_tracking+=torch.stack((linear,angular),-1)
         lost=lost_payload(packet.load_labels[:,:3],s.payload_cfg)
         collision=(s.ground_total_forces_world[:,self.collision_ids].norm(dim=-1)>10.).any(-1)
@@ -196,22 +228,21 @@ class IsaacLabBeyondRobustnessEnv:
             performance=dict(lin_vel_tracking=float(mean[0]),ang_vel_tracking=float(mean[1]),
                 terrain_level=float(s.terrain_levels[ids].float().mean()))
         self._reset(ids)
-        due=(self.episode_steps.remainder(max(1,int(self.cfg.commands.resampling_time/self.dt)))==0)&~done
-        self._sample_commands(due.nonzero().flatten())
-        if self.cfg.domain_rand.push_robots: s.push_robots()
         return BRStep(self.observe(),reward,done,timeout,terminal,done.clone(),
             performance_metrics=performance,curriculum_tracking=linear)
 
     def begin_iteration(self, iteration):
         self.iteration=int(iteration)
+        self._terrain_curriculum_iteration=self.iteration
 
     def end_iteration(self, iteration, tracking, count):
         if iteration<=self.last_completed_iteration: return
+        consecutive=iteration==self.last_completed_iteration+1
         self.last_completed_iteration=int(iteration)
         valid=count>0 and tracking is not None and math.isfinite(tracking)
         c=self.cfg.commands
         if c.curriculum and c.curriculum_patience_iterations>0:
-            self.command_streak=self.command_streak+1 if valid and tracking>c.curriculum_threshold else 0
+            self.command_streak=(self.command_streak if consecutive else 0)+1 if valid and tracking>c.curriculum_threshold else 0
             if self.command_streak>=max(1,c.curriculum_patience_iterations):
                 self._expand_command_curriculum_ranges(); self.command_streak=0
         if valid and self.simulator.use_domainrand_curriculum:
@@ -226,16 +257,16 @@ class IsaacLabBeyondRobustnessEnv:
 
     def curriculum_state_dict(self):
         s=self.simulator
-        return deepcopy(dict(version=1,domain=self.domain_rand_curriculum.state_dict(),
+        return deepcopy(dict(version=2,domain=self.domain_rand_curriculum.state_dict(),
             command_ranges=self.command_ranges,command_streak=self.command_streak,
             iteration=self.iteration,last_completed_iteration=self.last_completed_iteration,
             sampling=s.sampling_state_dict(),action_delay=self.action_delay.clone(),
-            terrain_last_iteration=self._terrain_last_iteration.clone(),
+            noise=self.actor_observation_cache.state_dict(),
             physical_config=self.resolved_configuration(),
             terrain_levels=s.terrain_levels.clone(),terrain_types=s.terrain_types.clone()))
 
     def load_curriculum_state_dict(self, state):
-        if state['version']!=1: raise ValueError('Incompatible BR physical curriculum state')
+        if state['version']!=2: raise ValueError('Incompatible BR physical curriculum state; Stage-3 scene-wide geometry/no-noise resume requires explicit conversion')
         s=self.simulator
         self.domain_rand_curriculum.load_state_dict(state['domain'])
         self.command_ranges=deepcopy(state['command_ranges']); self.command_streak=state['command_streak']
@@ -246,8 +277,12 @@ class IsaacLabBeyondRobustnessEnv:
             raise ValueError('BR physical configuration differs from checkpoint')
         s.load_sampling_state_dict(state['sampling'])
         self.action_delay.copy_(state['action_delay'])
-        self._terrain_last_iteration.copy_(state['terrain_last_iteration'])
+        self.actor_observation_cache.load_state_dict(state['noise'])
+        self._terrain_curriculum_iteration=self.iteration
         self.init_done=False  # Fresh resume is not a completed episode/curriculum event.
+        # Shared heading-mode sampler deadbands using the previous yaw command.
+        # A fresh scene has zero commands; do not inherit the discarded episode.
+        self.commands.zero_()
         self.clock=0; s._push_call_counter=0
         if hasattr(s,'_terrain'):
             s._terrain_levels.copy_(state['terrain_levels']); s._terrain_types.copy_(state['terrain_types'])
@@ -257,11 +292,13 @@ class IsaacLabBeyondRobustnessEnv:
         from dataclasses import asdict
         from legged_gym.utils.helpers import class_to_dict
         return dict(task=class_to_dict(self.cfg),payload=asdict(self.simulator.payload_cfg),
-            observation_units='SI, absolute q, no noise; previous clipped issued action before delay',
+            observation_units=self.input_schema.contract(),manifest=self.configuration_manifest,
             reward='external_callable' if self.reward_fn else 'temporary_smoke_tracking',
-            dimensions_lifetime='creation-time, one seeded size shared across clones',
+            dimensions_lifetime='seeded per-environment size bank, creation-time only',
+            geometry=dict(size_bank_m=self.simulator.box_size_bank,
+                assignment='canonical env_id modulo size_bank_count'),
             friction='multiply: fixed tray mu times sampled box mu; no friction estimator label',
-            curriculum_order='reset-only terrain (at most once/env/iteration); completed-update commands then domain disturbance; new payload ranges at next eligible reset',
+            curriculum_order='terrain every reset with absolute-iteration promotion delay; completed-update commands then domain disturbance; changed payload ranges at next eligible reset',
             exact_physics_resume=False)
 
     def close(self):

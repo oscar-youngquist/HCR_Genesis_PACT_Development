@@ -1,4 +1,4 @@
-"""Bounded REAL Isaac Lab Stage-3 validation, explicitly temporary tracking reward.
+"""Bounded REAL Isaac Lab Stage-4 validation, explicitly temporary tracking reward.
 
 SIMULATOR=isaaclab PYTHONPATH=. python tests/smoke_beyond_robustness_payload.py --gpu cuda:0 --num-envs 4
 No production launcher/checkpoint or paper-reward claim. Prints explicit PASS/FAIL
@@ -11,43 +11,57 @@ import traceback
 import tempfile
 import importlib.metadata
 from pathlib import Path
-from dataclasses import replace
 import torch
-from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCfg, GO2HardPACTCfgPPO
-from legged_gym.envs.go2.go2_hard_pact.ablation_configs import make_hard_pact_backend_configs
-from legged_gym.utils.helpers import class_to_dict
 from legged_gym.envs.go2.go2_beyond_robustness import IsaacLabBeyondRobustnessEnv
-from rsl_rl.beyond_robustness_config import BeyondRobustnessConfig
-from rsl_rl.beyond_robustness_payload import SlidingPayloadConfig
+from rsl_rl.beyond_robustness_config import resolve_beyond_robustness
+from rsl_rl.beyond_robustness_payload import cuboid_inertia
 from rsl_rl.runners.beyond_robustness_runner import BeyondRobustnessRunner
 
 parser=argparse.ArgumentParser()
 parser.add_argument('--gpu',default='cuda:0'); parser.add_argument('--num-envs',type=int,default=4)
 parser.add_argument('--steps',type=int,default=8)
 parser.add_argument('--physical-checks',action='store_true')
+parser.add_argument('--production-rollout',action='store_true',help='Use live terrain layout, rollout length, PPO/aux epochs and minibatches')
+parser.add_argument('--output-dir',default='/tmp/br_stage4')
 args=parser.parse_args()
-torch.manual_seed(8)
-EnvCfg,TrainCfg=make_hard_pact_backend_configs('isaaclab')
-cfg=EnvCfg(); cfg.env.num_envs=args.num_envs
-cfg.terrain.mesh_type='trimesh'; cfg.terrain.num_rows=cfg.terrain.num_cols=2
-cfg.terrain.max_init_terrain_level=0
-cfg.sim.console_debug=False; cfg.sim.suppress_backend_warnings=False
-cfg.viewer.debug_vis=False
+overrides={'env.num_envs':args.num_envs,'sim.console_debug':False,'viewer.debug_vis':False}
+if not args.production_rollout:
+    overrides.update({'terrain.num_rows':2,'terrain.num_cols':2,'terrain.max_init_terrain_level':0})
+training={} if args.production_rollout else dict(num_steps_per_env=args.steps,
+    num_learning_epochs=1,num_mini_batches=1,auxiliary_epochs=1)
+resolved=resolve_beyond_robustness(environment_overrides=overrides,training_overrides=training)
+cfg=resolved.environment
 if args.physical_checks:
     # Flat level-zero trimesh and nominal robot properties isolate the physical
     # checks. Production adapter leaves the supplied terrain/DR config intact.
-    cfg.terrain.terrain_proportions=[1.]+[0.]*10
-    cfg.terrain.curriculum=True; cfg.terrain.num_rows=1
+    overrides.update({'terrain.terrain_proportions':[1.]+[0.]*10,
+        'terrain.curriculum':True,'terrain.num_rows':1,
+        'domain_rand.push_robots':False,'domain_rand.persistent_disturbance':False})
     for name in dir(cfg.domain_rand):
-        if name.startswith('randomize_'): setattr(cfg.domain_rand,name,False)
-    cfg.domain_rand.push_robots=False; cfg.domain_rand.persistent_disturbance=False
+        if name.startswith('randomize_'): overrides['domain_rand.'+name]=False
+    resolved=resolve_beyond_robustness(environment_overrides=overrides,training_overrides=training)
+    cfg=resolved.environment
 # Isolate contact tests from randomized pushes; restore flags for runner smoke.
 env=None
 try:
-    env=IsaacLabBeyondRobustnessEnv(cfg,class_to_dict(cfg.sim),args.gpu,True,reward_mode='smoke_tracking')
+    env=IsaacLabBeyondRobustnessEnv(resolved,args.gpu,True,reward_mode='smoke_tracking')
     packet=env.reset(); packet.validate(env.input_schema,args.num_envs,args.gpu)
     sim=env.simulator
-    checks={}
+    # Real simulator property readbacks, reset labels, and noise isolation.
+    torch.testing.assert_close(sim.payload.root_physx_view.get_inertias().to(args.gpu).reshape(-1,3,3),
+        cuboid_inertia(sim.payload_mass,sim.box_size),rtol=1e-5,atol=1e-7)
+    torch.testing.assert_close(packet.load_labels[:,3:6],sim.payload_relative_velocity,rtol=1e-4,atol=2e-6)
+    torch.testing.assert_close(packet.state[:,:45],env._clean_proprioception(),rtol=0,atol=0)
+    rng=env.actor_observation_cache.generator.get_state().clone()
+    torch.testing.assert_close(packet.observations,env.observe().observations,rtol=0,atol=0)
+    assert torch.equal(rng,env.actor_observation_cache.generator.get_state())
+    before=env.observe().clone(); root=sim._robot.data.root_link_state_w.clone()
+    env._reset(torch.tensor([0],device=args.gpu))
+    torch.testing.assert_close(before.observations[1:],env.observe().observations[1:],rtol=0,atol=0)
+    torch.testing.assert_close(root[1:],sim._robot.data.root_link_state_w[1:],rtol=0,atol=0)
+    assert (sim.dof_pos-sim.default_dof_pos).abs().max()>.01
+    checks=dict(per_env_geometry_inertia=True,rotating_reset_labels=True,clean_privileged=True,
+        repeated_observe_rng_pure=True,partial_reset_noise_isolation=True,randomized_joint_reset=True)
     if args.physical_checks:
         from br_payload_physical_checks import physics_checks
         checks=physics_checks(env)
@@ -55,9 +69,8 @@ try:
     for _ in range(args.steps):
         result=env.step(torch.zeros(args.num_envs,12,device=args.gpu))
         assert torch.isfinite(torch.cat(result.observation.inputs(),-1)).all()
-    train=BeyondRobustnessConfig.from_hardpact(cfg,TrainCfg(),input_schema=env.input_schema,
-        num_steps_per_env=args.steps,num_learning_epochs=1,num_mini_batches=1,auxiliary_epochs=1)
-    runner=BeyondRobustnessRunner(env,train,device=args.gpu)
+    # Complete contract comes from the factory; no hand-written schema override.
+    runner=BeyondRobustnessRunner(env,resolved.training,log_dir=args.output_dir,device=args.gpu)
     torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats(); start=time.perf_counter()
     logs=runner.learn(1)
     runner.set_training_phase('student_reinforcement'); logs+=runner.learn(1)
@@ -73,12 +86,17 @@ try:
         assert runner.alg.iteration==iteration and runner.alg.training_phase==phase
         torch.testing.assert_close(sim.payload_mass,masses,rtol=0,atol=0)
         assert runner.alg.history.frames.eq(0).all()
+        snapshot=env.observe().clone(); root=sim._robot.data.root_link_state_w.clone()
+        runner.load(path,resume_mode='fresh')
+        torch.testing.assert_close(env.observe().observations,snapshot.observations,rtol=0,atol=0)
+        torch.testing.assert_close(sim._robot.data.root_link_state_w,root,rtol=0,atol=0)
     print('BR_PAYLOAD_SMOKE_PASS',json.dumps(dict(num_envs=args.num_envs,seconds=elapsed,
         metadata=dict(isaaclab=importlib.metadata.version('isaaclab'),isaacsim=importlib.metadata.version('isaacsim'),
             torch=torch.__version__,gpu=torch.cuda.get_device_name(),cuda=torch.version.cuda),
-        transitions_per_second=2*args.steps*args.num_envs/elapsed,
+        transitions_per_second=2*resolved.training.num_steps_per_env*args.num_envs/elapsed,
         torch_peak_allocated_bytes=torch.cuda.max_memory_allocated(),
-        load_mass=sim.payload_mass.tolist(),box_size=sim.box_size,
+        load_mass_range=[float(sim.payload_mass.min()),float(sim.payload_mass.max())],box_size_bank=sim.box_size_bank,
+        noise_enabled=cfg.noise.add_noise,physics_dt=cfg.sim.dt,control_dt=cfg.control.dt,
         physical_checks=checks,schema=env.input_schema.contract(),logs=logs)),flush=True)
 except BaseException:
     traceback.print_exc(); print('BR_PAYLOAD_SMOKE_FAIL',flush=True); raise
