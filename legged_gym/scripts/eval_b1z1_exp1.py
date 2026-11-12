@@ -683,7 +683,7 @@ def main(argv=None, experiment=None):
                 scenarios = [(util.Scenario(args.seed, trial, args.condition, args.load_range, args.motion_mode, config)
                               if experiment is None else experiment.scenario(args, trial)) for trial in ids]
                 adapter.reset(scenarios)
-                if getattr(actor, "film_v02_enabled", False):
+                if getattr(actor, "tracking_history_enabled", False):
                     actor.reset()
                 # Mechanics are fixed within a trial: store full body properties once,
                 # avoiding repeated host PhysX queries in the control loop.

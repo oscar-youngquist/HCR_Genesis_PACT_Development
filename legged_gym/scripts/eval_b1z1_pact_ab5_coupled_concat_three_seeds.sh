@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Activate Isaac Lab first. Defaults pin the latest local checkpoint as of 2026-10-27.
-# Optional arguments: RUN_DIRECTORY CHECKPOINT_NUMBER OUTPUT_BASE
+# Corrected concat V2 requires fresh training; never default to a legacy checkpoint.
+# Required arguments: RUN_DIRECTORY CHECKPOINT_NUMBER; optional OUTPUT_BASE.
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO="$(CDPATH= cd -- "$HERE/../.." && pwd)"
-RUN="${1:-$REPO/logs/b1z1/b1z1_pact_ab5_coupled_concat/Oct24_06-31-57_b1z1_pact_ab5_coupled_concat}"
-CKPT="${2:-27000}"
+RUN="${1:-}"
+CKPT="${2:-}"
 OUTPUT_BASE="${3:-$REPO/evaluation/exp1/b1z1_pact_ab5_coupled_concat}"
 if [[ $# -gt 3 || ! "$CKPT" =~ ^[0-9]+$ ]]; then
-    echo "Usage: bash $0 [RUN_DIRECTORY [CHECKPOINT_NUMBER [OUTPUT_BASE]]]" >&2
+    echo "Usage: bash $0 RUN_DIRECTORY CHECKPOINT_NUMBER [OUTPUT_BASE]" >&2
     exit 2
 fi
 if [[ ! -f "$RUN/model_${CKPT}.pt" ]]; then
@@ -44,7 +44,7 @@ done
 
 # From the repository root:
 # conda activate lr_lab_cupiqp
-# bash legged_gym/scripts/eval_b1z1_pact_ab5_coupled_concat_three_seeds.sh
+# bash legged_gym/scripts/eval_b1z1_pact_ab5_coupled_concat_three_seeds.sh /path/to/fresh/run 70000
 
 # Experiment 2 follows all existing Experiment 1 collections.
 # Override EXP2_OUTPUT_BASE in the shell to choose a separate recording directory.

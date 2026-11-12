@@ -35,7 +35,10 @@ def test_complete_matrix_and_registry():
         4: ("coupled", "none", False, False), 5: ("coupled", "concat", False, False),
         6: ("position", "film", False, False), 7: ("position", "film", True, True),
         8: ("coupled", "film", False, False), 9: ("coupled", "film", True, False),
-        10: ("coupled", "film", False, True), 11: ("coupled", "film", True, True)}
+        10: ("coupled", "film", False, True), 11: ("coupled", "film", True, True),
+        12: ("position", "none", False, False),
+        13: ("coupled", "film", True, True), 14: ("coupled", "film", True, True),
+        15: ("coupled", "film", True, True)}
     names = []
     original = class_to_dict(B1Z1PACTCfg())
     for number, feature in B1Z1_PACT_ABLATIONS.items():
@@ -108,13 +111,15 @@ def test_actor_forward(mode, action_mode):
     assert action.shape == (2, e.num_actions * (1 if action_mode == "position" else 2))
     assert torch.isfinite(model.get_actions_log_prob(action)).all()
     common, condition = model._actor_inputs(obs, model.last_context)
-    expected = torch.cat((common, condition), -1) if mode == "concat" else common
+    from rsl_rl.modules.actor_critic_b1z1_pact import prepare_tracking_condition
+    expected = torch.cat((common, prepare_tracking_condition(model.last_context["film_tracking_history"])), -1) if mode == "concat" else common
     torch.testing.assert_close(seen[0], expected)
     if action_mode == "position":
         assert model.torque_head is None
         assert torch.count_nonzero(model.last_torque_mean) == 0
         torch.testing.assert_close(model.std, torch.tensor(B1Z1PACTCfgPPO.policy.init_noise_std[:e.num_actions]))
-    model.update_distribution(obs, history, latent_noise=model.last_context["latent_noise"], detach_context=True)
+    model.update_distribution(obs, history, latent_noise=model.last_context["latent_noise"], detach_context=True,
+                              film_tracking_history=model.last_context.get("film_tracking_history"))
     model.action_mean.square().mean().backward()
     assert all(p.grad is None for p in model.context_encoder.parameters())
     handle.remove()

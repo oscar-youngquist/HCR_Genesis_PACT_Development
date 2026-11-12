@@ -119,7 +119,7 @@ def main(argv=None):
                     break
                 scenario = exp2.tasks.Scenario(args.seed, trial, args.profile, args.loading, config)
                 adapter.reset([scenario])
-                if getattr(actor, "film_v02_enabled", False):
+                if getattr(actor, "tracking_history_enabled", False):
                     actor.reset()
                 last_stage = None
                 for step in range(math.ceil(args.horizon_seconds / env.dt)):

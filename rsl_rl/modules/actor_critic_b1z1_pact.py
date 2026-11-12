@@ -67,6 +67,20 @@ class B1Z1PACTContextEncoder(nn.Module):
         # Deployment uses the posterior mean; training retains sampled latents.
         return self.forward(history, sample=False)
 
+
+def prepare_tracking_condition(condition, base_soft_scale=0.10, ee_soft_scale=0.05, frame_dim=6):
+    """Oldest-first observation-scaled errors -> soft directions and bounded L1 magnitudes.
+
+    Shared by latent FiLM and concat; detach at collection/replay boundaries, not
+    here, so existing FiLM diagnostic derivatives keep their original semantics.
+    """
+    base, ee = condition.reshape(len(condition), -1, frame_dim).chunk(2, dim=-1)
+    base_l1 = base.abs().sum(dim=-1, keepdim=True)
+    ee_l1 = ee.abs().sum(dim=-1, keepdim=True)
+    return torch.cat((base / (base_l1 + base_soft_scale), ee / (ee_l1 + ee_soft_scale),
+                      base_l1.tanh(), ee_l1.tanh()), dim=-1).flatten(1)
+
+
 class FiLM(nn.Module):
     """Near-identity DreamFLEX-style modulation of the shared actor state."""
 
@@ -96,14 +110,8 @@ class FiLM(nn.Module):
 
     def prepare_condition(self, condition: torch.Tensor) -> torch.Tensor:
         if self.normalize_dim:
-            error = condition.reshape(len(condition), -1, self.normalize_dim)
-            # Soft L1 normalization attenuates tiny errors; scales use observation units.
-            base_error, ee_error = error.chunk(2, dim=-1)
-            base_l1 = base_error.abs().sum(dim=-1, keepdim=True)
-            ee_l1 = ee_error.abs().sum(dim=-1, keepdim=True)
-            condition = torch.cat((base_error / (base_l1 + self.base_error_soft_scale),
-                                   ee_error / (ee_l1 + self.ee_error_soft_scale),
-                                   base_l1.tanh(), ee_l1.tanh()), dim=-1).flatten(1)
+            condition = prepare_tracking_condition(condition, self.base_error_soft_scale,
+                                                   self.ee_error_soft_scale, self.normalize_dim)
         return condition
 
     def forward(self, features: torch.Tensor, condition: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -153,6 +161,7 @@ class ActorCriticB1Z1PACT(nn.Module):
         max_noise_std: float | Sequence[float] = 5.0,
         action_mode: str = "coupled",
         conditioning_mode: str = "film",
+        concat_conditioning_version: int = 2,
         film_v02_enabled: bool = False,
         film_history_steps: int = 5,
         film_base_error_soft_scale: float = 0.10,
@@ -163,11 +172,23 @@ class ActorCriticB1Z1PACT(nn.Module):
         if action_mode not in ("position", "coupled") or conditioning_mode not in ("none", "concat", "film"):
             raise ValueError("Invalid B1Z1 action or conditioning mode")
         self.action_mode, self.conditioning_mode = action_mode, conditioning_mode
+        if concat_conditioning_version not in (1, 2):
+            raise ValueError("concat_conditioning_version must be 2 (matched history) or explicit legacy 1")
+        self.concat_conditioning_version = concat_conditioning_version
         self.film_v02_enabled = bool(film_v02_enabled and conditioning_mode == "film")
         if film_history_steps < 1 or int(film_history_steps) != film_history_steps:
             raise ValueError("film_history_steps must be a positive integer")
         self.film_history_steps = int(film_history_steps)
-        self.film_history_dim = self.film_history_steps * 6 if self.film_v02_enabled else 0
+        self.tracking_history_enabled = self.film_v02_enabled or (conditioning_mode == "concat" and concat_conditioning_version == 2)
+        self.film_history_dim = self.film_history_steps * 6 if self.tracking_history_enabled else 0
+        self.base_error_soft_scale, self.ee_error_soft_scale = float(film_base_error_soft_scale), float(film_ee_error_soft_scale)
+        if self.tracking_history_enabled and any(not math.isfinite(s) or s <= 0 for s in
+                                                (self.base_error_soft_scale, self.ee_error_soft_scale)):
+            raise ValueError("Tracking soft scales must be finite and positive")
+        if conditioning_mode == "concat" and concat_conditioning_version == 2:
+            # Only the new concat contract adds checkpoint keys; existing FiLM
+            # and explicit legacy concat state_dicts keep their exact layout.
+            self.register_buffer("_concat_contract", torch.tensor([2, self.film_history_steps]))
         self._film_history = None  # Per-environment episode state, not checkpoint parameters.
         self.context_encoder = B1Z1PACTContextEncoder(history_dim, latent_dim, context_layers, activation)
         # HardPACT: explicit estimates bypass latent sampling and the KL bottleneck.
@@ -183,7 +204,7 @@ class ActorCriticB1Z1PACT(nn.Module):
         actor_input = num_actor_obs + latent_dim + 3 + 3 + 6 + 3 + 4 + 4
         condition_dim = 3 + 3  # Base-velocity and spherical EE-position errors only.
         if conditioning_mode == "concat":
-            actor_input += 6 + 3 + condition_dim  # Preserve the non-FiLM concatenation ablation.
+            actor_input += self.film_history_steps * 8 if concat_conditioning_version == 2 else 6 + 3 + condition_dim
         self.actor_trunk = nn.Sequential(_mlp(actor_input, actor_layers[:-1], actor_layers[-1], activation),
                                          _activation(activation))
 
@@ -301,9 +322,14 @@ class ActorCriticB1Z1PACT(nn.Module):
             z, magnitude, identity_deviation = self.film(actor_context["z"], history)
             actor_input, _ = self._actor_inputs(obs, {**actor_context, "z": z}, film_context)
         if self.conditioning_mode == "concat":
-            condition_context = actor_context if film_context is None else film_context
-            actor_input = torch.cat((actor_input, condition_context["base_wrench"].detach(),
-                                    condition_context["ee_force"].detach(), film_condition.detach()), dim=-1)
+            if self.concat_conditioning_version == 2:
+                condition = prepare_tracking_condition(actor_context["film_tracking_history"].detach(),
+                    self.base_error_soft_scale, self.ee_error_soft_scale)
+                actor_input = torch.cat((actor_input, condition), dim=-1)
+            else:
+                condition_context = actor_context if film_context is None else film_context
+                actor_input = torch.cat((actor_input, condition_context["base_wrench"].detach(),
+                                        condition_context["ee_force"].detach(), film_condition.detach()), dim=-1)
         features = self.actor_trunk(actor_input)
         if self.conditioning_mode == "film" and not self.film_v02_enabled:
             features, magnitude, identity_deviation = self.film(features, film_condition)
@@ -377,11 +403,11 @@ class ActorCriticB1Z1PACT(nn.Module):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def _condition_history(self, obs, context, stored, advance):
-        if not self.film_v02_enabled:
+        if not self.tracking_history_enabled:
             return
         if stored is None:
             if not advance:
-                raise ValueError("V02 PPO reconstruction requires stored film_tracking_history")
+                raise ValueError("Tracking-conditioned PPO reconstruction requires stored film_tracking_history")
             # Oldest -> newest; missing pre-reset samples are zero, not another episode.
             error = self._actor_inputs(obs, context)[1].detach()
             with torch.inference_mode(False):
@@ -400,6 +426,17 @@ class ActorCriticB1Z1PACT(nn.Module):
                 self._film_history = None
             else:
                 self._film_history[dones.flatten().bool()] = 0
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        if self.conditioning_mode == "concat":
+            saved = state_dict.get("_concat_contract")
+            expected = getattr(self, "_concat_contract", None)
+            if ((saved is None) != (expected is None) or
+                    (saved is not None and not torch.equal(saved.cpu(), expected.cpu()))):
+                raise ValueError("Incompatible concat conditioning contract: corrected #5 requires fresh training. "
+                                 "For old checkpoints explicitly set policy.concat_conditioning_version=1 "
+                                 "(legacy loading only), retaining the original observation contract.")
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def get_optim_groups(self, weight_decay: float = 1e-6, strong_decay: float = 1e-1):
         """Return disjoint AdamW groups for this B1/Z1 actor-critic.

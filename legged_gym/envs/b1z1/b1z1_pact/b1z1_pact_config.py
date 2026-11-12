@@ -911,6 +911,7 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         privileged_decoder_layers = [128, 256, 512]                                     # Hidden widths for non-overlapping privileged reconstruction.
         
         conditioning_mode = "film"                                                      # "film", "none", or "concat"
+        concat_conditioning_version = 2                                                # 40-D V02-matched history; explicit 1 loads legacy concat checkpoints.
         film_hidden_dim = 64                                                            # FiLM conditioning-network hidden width.
         film_v02_enabled = True                                                         # Separate base/EE soft L1 normalization + tanh(L1) magnitudes.
         film_base_error_soft_scale = 0.10                                               # V02 base-error soft denominator offset, observation-scaled units.

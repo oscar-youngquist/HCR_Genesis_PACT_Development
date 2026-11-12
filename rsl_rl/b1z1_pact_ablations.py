@@ -10,6 +10,8 @@ class B1Z1Ablation:
     conditioning_mode: str
     representation_pinn_enabled: bool
     actor_phys_enabled: bool
+    recruitment: str = "full"
+    channel_physics_enabled: bool = True
 
 
 B1Z1_PACT_ABLATIONS = MappingProxyType({
@@ -22,4 +24,7 @@ B1Z1_PACT_ABLATIONS = MappingProxyType({
     10: B1Z1Ablation("b1z1_pact_ab10_actor", "coupled", "film", False, True),
     11: B1Z1Ablation("b1z1_pact", "coupled", "film", True, True),
     12: B1Z1Ablation("b1z1_pos_baseline", "position", "none", False, False),
+    13: B1Z1Ablation("b1z1_pact_ab13_workspace", "coupled", "film", True, True, "workspace"),
+    14: B1Z1Ablation("b1z1_pact_ab14_no_ee_recruitment", "coupled", "film", True, True, "none"),
+    15: B1Z1Ablation("b1z1_pact_ab15_no_channel_physics", "coupled", "film", True, True, "full", False),
 })

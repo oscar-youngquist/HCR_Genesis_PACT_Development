@@ -64,6 +64,7 @@ def test_nonfilm_omits_records(mode):
     obs, history = torch.randn(2, 81), torch.randn(2, 162)
     with torch.no_grad():
         baseline = evaluation.inference(actor, obs, history)
+        actor.reset()  # Concat V2 is temporal too; compare the same episode boundary.
         action, records = evaluation.recorded_inference(actor, obs, history)
     assert records == {}
     torch.testing.assert_close(action, baseline, rtol=0, atol=0)

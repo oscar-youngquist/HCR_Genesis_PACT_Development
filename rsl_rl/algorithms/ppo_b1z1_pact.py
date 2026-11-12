@@ -256,7 +256,7 @@ class PPO_B1Z1PACT:
         self.transition.histories = history.detach().clone()
         self.transition.explicit_targets = explicit_labels.detach().clone()
         self.transition.latent_noise = self.actor_critic.last_context["latent_noise"].detach().clone()
-        if self.actor_critic.film_v02_enabled:
+        if self.actor_critic.film_history_dim:
             self.transition.film_tracking_history = self.actor_critic.last_context["film_tracking_history"].detach().clone()
         return actions
 
@@ -500,7 +500,7 @@ class PPO_B1Z1PACT:
         widths = (batch["observations"].shape[-1], batch["histories"].shape[-1],
                   batch["latent_noise"].shape[-1], batch["actions"].shape[-1], 1)
         film_history = None
-        if self.actor_critic.film_v02_enabled:
+        if self.actor_critic.film_history_dim:
             source, film_history = source.split((sum(widths), self.actor_critic.film_history_dim), dim=-1)
         obs, history, latent_noise, action_noise, source_valid = source.split(widths, dim=-1)
         context = self.actor_critic.decode_context(self.actor_critic.context_encoder(

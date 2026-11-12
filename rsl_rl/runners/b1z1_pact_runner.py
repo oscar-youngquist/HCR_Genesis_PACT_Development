@@ -61,6 +61,7 @@ class B1Z1PACTRunner:
             max_noise_std=policy_cfg["max_noise_std"],
             action_mode=policy_cfg.get("action_mode", "coupled"),
             conditioning_mode=policy_cfg.get("conditioning_mode", "film"),
+            concat_conditioning_version=policy_cfg.get("concat_conditioning_version", 2),
             film_v02_enabled=policy_cfg.get("film_v02_enabled", False),
             film_history_steps=policy_cfg.get("film_history_steps", 5),
             film_base_error_soft_scale=policy_cfg.get("film_base_error_soft_scale", 0.10),

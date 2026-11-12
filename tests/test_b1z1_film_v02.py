@@ -91,10 +91,12 @@ def test_configured_soft_scales():
     torch.testing.assert_close(m.film.prepare_condition(e)[:, :6], torch.tensor([[.5, 0., 0., .5, 0., 0.]]))
 
 
-def test_history_order_reset_and_ppo_replay():
-    m = model()
-    with torch.no_grad():
-        m.film.network[-1].weight.normal_(std=.01)
+@pytest.mark.parametrize("mode", ["film", "concat"])
+def test_history_order_reset_and_ppo_replay(mode):
+    m = model(mode=mode)
+    if m.film is not None:
+        with torch.no_grad():
+            m.film.network[-1].weight.normal_(std=.01)
     snapshots = []
     for _ in range(7):
         obs, hist = torch.randn(2, 81), torch.randn(2, 162)
@@ -111,7 +113,9 @@ def test_history_order_reset_and_ppo_replay():
     torch.testing.assert_close(m.get_actions_log_prob(action), logp)
     torch.testing.assert_close(m._film_history, running)
     m.action_mean.square().sum().backward()
-    assert any(p.grad is not None for p in m.film.parameters())
+    assert any(p.grad is not None for p in m.actor_trunk.parameters())
+    if m.film is not None:
+        assert any(p.grad is not None for p in m.film.parameters())
     assert all(p.grad is None for p in m.context_encoder.parameters())
     assert all(p.grad is None for p in m.explicit_decoder.parameters())
     assert all(p.grad is None for p in m.physics_decoder.parameters())
@@ -122,8 +126,9 @@ def test_history_order_reset_and_ppo_replay():
     assert m._film_history is None
 
 
-def test_delayed_action_replays_source_error_history():
-    m, queue = model(), B1Z1ActionReplay(1)
+@pytest.mark.parametrize("mode", ["film", "concat"])
+def test_delayed_action_replays_source_error_history(mode):
+    m, queue = model(mode=mode), B1Z1ActionReplay(1)
     first = None
     for _ in range(2):
         obs, hist = torch.randn(2, 81), torch.randn(2, 162)
@@ -145,9 +150,10 @@ def test_delayed_action_replays_source_error_history():
 
 
 @pytest.mark.parametrize("mode", ["none", "concat"])
-def test_nonfilm_ablation_ignores_v02(mode):
+def test_nonfilm_ablation_has_history_only_for_matched_concat(mode):
     m = model(mode=mode)
-    assert not m.film_v02_enabled and m.film_history_dim == 0 and m.film is None
+    assert not m.film_v02_enabled and m.film is None
+    assert m.film_history_dim == (30 if mode == "concat" else 0)
 
 
 def test_legacy_default_has_no_new_checkpoint_keys():
@@ -159,9 +165,10 @@ def test_legacy_default_has_no_new_checkpoint_keys():
 
 
 @pytest.mark.parametrize("bard_active", [False, True, -1])
-def test_v02_short_ppo_update(monkeypatch, bard_active):
+@pytest.mark.parametrize("mode", ["film", "concat"])
+def test_v02_short_ppo_update(monkeypatch, bard_active, mode):
     import test_b1z1_sampled_context as fixture
-    monkeypatch.setattr(fixture, "make_model", lambda pos: model())
+    monkeypatch.setattr(fixture, "make_model", lambda pos: model(mode=mode))
     # This existing fixture explicitly checks the legacy sign-selected PCGrad methods.
     monkeypatch.setattr(fixture.B1Z1PACTCfgPPO.algorithm, "pinn_projection_mode", "legacy")
     fixture.test_short_ppo_update_and_auxiliary_targets(False, bard_active, "bard", monkeypatch)

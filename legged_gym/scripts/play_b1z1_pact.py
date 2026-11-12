@@ -82,8 +82,10 @@ def main():
     import legged_gym.envs
     from legged_gym.utils import get_args, task_registry
     args = get_args()
-    if SIMULATOR != "isaaclab_b1z1_pact" or args.task != "b1z1_pact":
-        raise ValueError("Use SIMULATOR=isaaclab_b1z1_pact and --task=b1z1_pact")
+    from rsl_rl.b1z1_pact_ablations import B1Z1_PACT_ABLATIONS
+    coupled_tasks = {v.task_name for v in B1Z1_PACT_ABLATIONS.values() if v.action_mode == "coupled"}
+    if SIMULATOR != "isaaclab_b1z1_pact" or args.task not in coupled_tasks:
+        raise ValueError("Use SIMULATOR=isaaclab_b1z1_pact and a registered coupled B1Z1 PACT task")
     options.use_joystick = args.use_joystick
     cfg, train = task_registry.get_cfgs(args.task, args)
     if args.ckpt < -1:

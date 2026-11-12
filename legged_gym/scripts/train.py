@@ -32,6 +32,12 @@ def train(args):
         from legged_gym.utils.helpers import class_to_dict, _json_config_value
         from rsl_rl.b1z1_pact_ablations import B1Z1_PACT_ABLATIONS
         from legged_gym.envs.b1z1.b1z1_pact import ablation_configs
+        from legged_gym.envs.b1z1.b1z1_pact import b1z1_pact_config
+        import rsl_rl.b1z1_pact_ablations as feature_matrix
+        # Archive inherited defaults as well as the small selector. The resolved
+        # JSON below remains authoritative after command-line/runtime overrides.
+        for source in (b1z1_pact_config, feature_matrix):
+            shutil.copy(inspect.getfile(source), log_dir)
         robot_file_path = inspect.getfile(type(env))
         robot_config_path = inspect.getfile(ablation_configs)
         with open(os.path.join(log_dir, "b1z1_pact_resolved_config.json"), "w") as stream:
