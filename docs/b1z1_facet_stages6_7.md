@@ -213,3 +213,76 @@ these outputs at any chosen directory. Baseline checkpoint evaluation through
 the new entry point and full-budget matched-policy performance are still pending;
 this smoke policy is deliberately only six updates old. No monotonic learned
 impedance-response or recovery claim follows from its results.
+
+### Seed, Reporting, and Resume Corrections
+
+FACET launchers follow the other B1Z1 methods' local/container conventions:
+
+```bash
+bash legged_gym/scripts/b1z1_facet_lab.sh --seed 1
+# Inside an allocated Unity Isaac Lab container:
+bash legged_gym/scripts/b1z1_facet_unity.sh --seed 1
+bash legged_gym/scripts/b1z1_facet_unity.sh --resume /path/to/model_60000.pt --seed 1
+```
+
+Both use `train_b1z1_facet.py`, explicitly default to `--seed=1` and headless GPU 0,
+and forward arguments (`--seed`, `--num-envs`, `--max-iterations`, `--gpu`, phase
+overrides, etc.). A forwarded seed overrides the default, including seed 0.
+On resume, pass the checkpoint's seed if it is not 1; conflicting seeds are rejected.
+The local script activates the same environment as `b1z1_pact_lab.sh`; override
+`FACET_CONDA_SH`/`FACET_CONDA_ENV` for another installation. Unity uses container
+Python without changing `CUDA_VISIBLE_DEVICES`. These are training entry scripts,
+not Slurm submission/container setup scripts; the shared container wrapper's
+existing task allowlist is unchanged. No production environment counts or budgets
+are overridden by either script.
+
+The FACET launcher copies the resolved training seed into the environment before
+the registry initializes RNGs. Resume retains the checkpoint's training seed
+(including when an older checkpoint saved a contradictory environment seed);
+an explicitly conflicting seed still fails. Reference/noise RNG seeds are unchanged.
+
+Phase selection uses completed global updates and the resolved schedule before
+collection. A teacher checkpoint past `student_start_iteration + adaptation_iterations`
+enters student directly; skipped adaptation consumes no interactions. Existing
+student weights are never recopied, and no completed phase is reversed.
+
+Evaluation force summaries cover the observed trial up to termination, not an
+extrapolated full horizon. If any force measurement is missing, that channel's
+`force_peak_N`/`base_force_peak_N` and `force_exposure_N_s` entry is null.
+`observed_force_peak_N` and `observed_force_exposure_N_s` retain partial finite
+measurements, ordered EE/base; zero observations produce null, not zero.
+`force_valid_samples`, `force_observed_seconds`, and `force_measurements_complete`
+describe coverage of the observed interval. `wrench_valid_samples` additionally
+counts valid base moments (EE force/base force/base moment order). Failed endpoints
+can contribute finite loads but never tracking credit; failure-inclusive outcomes
+and raw nonfinite transition values/masks are retained. Reference diagnostics have
+their own finite, valid horizon counts. JSON remains strict, with null for unavailable
+measurements, and COMPLETE follows all successful report writes.
+
+Focused reproductions/checks:
+
+```bash
+SIMULATOR=isaaclab PYTHONPATH=.:tests OMP_NUM_THREADS=1 python -m pytest tests/test_b1z1_facet_regressions.py tests/test_b1z1_facet_evaluation.py -q
+python legged_gym/scripts/train_b1z1_facet.py --gpu cuda:0 --headless --seed 2 --num-envs 4 --max-iterations 1 --student-start-iteration 10 --adaptation-iterations 2 --save-interval 1 --log-dir /tmp/facet-f0849-fixes/fresh
+python legged_gym/scripts/train_b1z1_facet.py --resume /tmp/facet-f0849-fixes/fresh/model_1.pt --gpu cuda:0 --headless --num-envs 4 --max-iterations 2 --student-start-iteration 0 --adaptation-iterations 1 --save-interval 1 --log-dir /tmp/facet-f0849-fixes/resumed
+```
+
+The regression suite checks seeds 0/1/2 through the real launcher/parser/registry
+and RNG initializer, replacing only simulator execution and optimizer work. It
+checks same-seed initialization, saved/logged seeds, legacy resume seed handling,
+phase boundaries/overrides, optimizer continuity, and strict report round trips
+with nonfinite loads/states, including first-step failures.
+
+Post-fix validation: 105 CPU tests passed, one CUDA-only skip; the focused
+deployment suite also passed all 12 tests with GPU access. The two real Isaac Lab
+commands above completed on GPU 0: 96 teacher + 96 student transitions, zero
+adaptation transitions. Seed 2 agreed in the initialization log, resolved configs,
+and checkpoints. Collection/update wall time was 1.09 s fresh and 1.04 s resumed
+(four robots, one update each; excludes simulator startup). Machine-readable
+checks are `/tmp/facet-f0849-fixes/validation.json`. Nonfinite failure injection
+was tested on CPU recordings/report writing, not by corrupting simulator state.
+These are integration checks, not trained-policy performance measurements;
+production schedules/settings and protected methods are unchanged.
+Both shell launchers passed syntax/argument-forwarding tests (including resume
+paths with spaces and GPU visibility); the local script also reached `--help`
+through the installed conda environment. Remote Unity execution was not run.

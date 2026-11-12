@@ -164,9 +164,13 @@ class B1Z1FACETRunner:
     def maybe_transition(self):
         start = self.alg.cfg['student_start_iteration']
         adaptation = self.alg.cfg.get('adaptation_iterations', 0)
-        if self.alg.phase == 'student' or self.current_learning_iteration < start:
+        # Resolve the destination BEFORE collection: an overridden schedule may
+        # have skipped the entire adaptation interval. Never reverse a phase.
+        iteration = self.current_learning_iteration
+        destination = 'teacher' if iteration < start else ('adaptation' if iteration < start+adaptation else 'student')
+        if self.alg.phase == 'student' or destination == 'teacher':
             return False
-        if self.alg.phase == 'adaptation' and self.current_learning_iteration < start+adaptation:
+        if self.alg.phase == destination:
             return False
         if not self.normalizers_initialized:
             # Explicit start-at-zero runs still initialize statistics BEFORE
@@ -174,7 +178,7 @@ class B1Z1FACETRunner:
             packet = self.env.get_facet_observations()
             self.model.update_normalizers(*(packet[k].to(self.device) for k in ('observation', 'privileged', 'wrench')))
             self.normalizers_initialized = True
-        if self.alg.phase == 'teacher' and adaptation:
+        if destination == 'adaptation':
             self.alg.switch_to_adaptation()
         else:
             self.alg.switch_to_student()

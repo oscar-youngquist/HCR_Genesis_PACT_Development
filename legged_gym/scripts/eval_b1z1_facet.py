@@ -265,7 +265,8 @@ def main():
                     if not alive[slot]:
                         continue
                     failure = reasons[slot] or ('native_physical_failure' if physical[slot] else '')
-                    finite = np.isfinite(np.r_[ee[slot], velocity[slot], yaw[slot], applied[slot]]).all()
+                    finite = np.isfinite(np.r_[ee[slot], velocity[slot], yaw[slot], applied[slot],
+                                                positions[slot], velocities[slot]]).all()
                     failure = failure or ('' if finite else 'nonfinite')
                     row = dict(trial_id=int(trial_ids[slot]), time=(step+1)*env.dt, interval_start=step*env.dt,
                         ee_error=ee[slot], velocity_error=velocity[slot], yaw_error=yaw[slot], applied_wrench=applied[slot],
@@ -300,10 +301,8 @@ def main():
                 response='Observed motion, not causal displacement; EE error and base velocity error reported separately',
                 overshoot='Signed EE displacement peak beyond observed final 0.25-second plateau mean; not an analytical equilibrium'),
             interpretation='Integration/measurement only; smoke checkpoints are not trained task-performance evidence')
-        for name, value in (('trials.json', trials), ('scenarios.json', initial), ('summary.json', result)):
-            (args.output_dir/name).write_text(json.dumps(value, indent=2, allow_nan=False))
-        (args.output_dir/'COMPLETE').write_text('FACET evaluation complete\n')
-        print(json.dumps(result, default=str), flush=True)
+        write_reports(args.output_dir, trials, initial, result)
+        print(json.dumps(result, allow_nan=False), flush=True)
     except BaseException:
         # Kit shutdown can mask Python exceptions/exit codes. Persist failure
         # before closing it; callers must also require COMPLETE and valid JSON.
@@ -318,6 +317,13 @@ def main():
             env.simulator._app_launcher.app.close()
 
 
+def write_reports(output_dir, trials, scenarios, summary):
+    """Strict summary JSON only; raw transition arrays retain nonfinite values/masks."""
+    for name, value in (('trials.json', trials), ('scenarios.json', scenarios), ('summary.json', summary)):
+        (Path(output_dir)/name).write_text(json.dumps(value, indent=2, allow_nan=False))
+    (Path(output_dir)/'COMPLETE').write_text('FACET evaluation complete\n')
+
+
 def summarize_trial(rows, scenario, steps, dt, config, reason):
     valid = [r for r in rows if r['valid']]
     result = dict(scenario, failed=bool(reason), termination_reason=reason,
@@ -328,9 +334,23 @@ def summarize_trial(rows, scenario, steps, dt, config, reason):
     result.update(ee_error_m=mean('ee_error', True), velocity_error_m_s=mean('velocity_error', True), yaw_error_rad_s=mean('yaw_error'))
     passing = lambda r: np.linalg.norm(r['ee_error']) <= config['ee_tolerance_m'] and np.linalg.norm(r['velocity_error']) <= config['velocity_tolerance_m_s'] and abs(r['yaw_error']) <= config['yaw_tolerance_rad_s']
     result['S_track'] = sum(passing(r) for r in valid)/steps
-    result['force_peak_N'] = float(max((np.linalg.norm(r['applied_wrench'][:3]) for r in rows), default=0))
-    result['base_force_peak_N'] = float(max((np.linalg.norm(r['applied_wrench'][3:6]) for r in rows), default=0))
-    result['force_exposure_N_s'] = (np.sum([np.r_[np.linalg.norm(r['applied_wrench'][:3]), np.linalg.norm(r['applied_wrench'][3:6])] for r in rows], axis=0)*dt).tolist()
+    # Physical exposure includes finite failed endpoints, not the unobserved tail.
+    # A missing EE measurement does not invalidate a finite torso measurement.
+    loads = np.asarray([r['applied_wrench'] for r in rows]).reshape(-1, 3, 3)
+    magnitudes = np.linalg.norm(loads, axis=-1)
+    known = np.isfinite(magnitudes)
+    result['wrench_valid_samples'] = known.sum(0).tolist()  # EE force, base force, base moment.
+    result['force_valid_samples'] = known[:, :2].sum(0).tolist()
+    result['force_observed_seconds'] = (known[:, :2].sum(0)*dt).tolist()
+    result['force_measurements_complete'] = [bool(len(rows) and known[:, i].all()) for i in range(2)]
+    observed = [magnitudes[known[:, i], i] for i in range(2)]
+    peaks = [float(x.max()) if len(x) else None for x in observed]
+    exposure = [float(x.sum()*dt) if len(x) else None for x in observed]
+    result['observed_force_peak_N'] = peaks
+    result['observed_force_exposure_N_s'] = exposure
+    for i, key in enumerate(('force_peak_N', 'base_force_peak_N')):
+        result[key] = peaks[i] if result['force_measurements_complete'][i] else None
+    result['force_exposure_N_s'] = [x if ok else None for x, ok in zip(exposure, result['force_measurements_complete'])]
     result['undesirable_contact_steps'] = sum(r.get('undesirable_contacts', 0) > 0 for r in rows)
     result['contact_observed_steps'] = len(rows)
     result['release_recovery_seconds'] = None
@@ -379,8 +399,11 @@ def summarize_trial(rows, scenario, steps, dt, config, reason):
             result['responses'].append(response)
     facet = [r for r in valid if 'facet_valid' in r]
     if facet:
-        count = np.sum([r['facet_valid'] for r in facet], axis=0)
-        sums = np.sum([np.where(r['facet_valid'][:, None], r['facet_errors_squared'], 0) for r in facet], axis=0)
+        # Invalid virtual-reference diagnostics must not discard finite physical
+        # tracking or leak NaN into JSON; retain per-horizon contributing counts.
+        masks = [r['facet_valid'] & np.isfinite(r['facet_errors_squared']).all(-1) for r in facet]
+        count = np.sum(masks, axis=0)
+        sums = np.sum([np.where(mask[:, None], r['facet_errors_squared'], 0) for r, mask in zip(facet, masks)], axis=0)
         result['facet_horizon_counts'] = count.tolist()
         result['facet_horizon_mse'] = [[float(x) for x in row] if n else [None]*6 for row, n in zip(sums/np.maximum(count[:, None], 1), count)]
     return result

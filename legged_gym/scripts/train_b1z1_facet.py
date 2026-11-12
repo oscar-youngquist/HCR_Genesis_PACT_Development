@@ -51,6 +51,9 @@ def main():
         if a.resume and a.seed != training.seed:
             raise ValueError('Resume retains the checkpoint training-seed identity; omit --seed or use the saved seed')
         training.seed = a.seed
+    # Explicit env_cfg skips the registry's seed-copy path. On resume the saved
+    # training seed, not a legacy environment seed, defines fresh-episode RNGs.
+    cfg.seed = training.seed
     if a.num_envs is not None:
         cfg.env.num_envs = a.num_envs
     sys.argv = [sys.argv[0], '--task=b1z1_facet', '--gpu='+a.gpu, '--num_envs='+str(cfg.env.num_envs), '--seed='+str(training.seed)]
