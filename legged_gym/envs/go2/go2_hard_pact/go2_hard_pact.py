@@ -1167,6 +1167,8 @@ class Go2HardPACT(Go2PACT):
                 wrench = torch.cat((
                     self._yaw_local_to_world(wy[:,:3,None].transpose(1,2),quat[rows]).squeeze(1),
                     self._yaw_local_to_world(wy[:,3:,None].transpose(1,2),quat[rows]).squeeze(1)),1)
+                if not qp.cfg.use_external_wrench:
+                    wrench = torch.zeros_like(wrench)
                 contact = self._hard_pact_policy_explicit[rows,3:7]
                 log_qp_swing_grf(aggregate,self._qp_control_grf[rows],contact,
                     getattr(self._hard_pact_actor_critic.physics_estimator,"grf_swing",None))
@@ -1671,6 +1673,10 @@ class Go2HardPACT(Go2PACT):
 
     def step(self, actions):
         """Run the legacy lifecycle with a control-interval GRF target."""
+        if getattr(self.cfg, 'action_mode', 'coupled') == 'position':
+            # PPO stores/scores only 12 draws. Zero padding is solely the
+            # existing coupled controller/history contract, never a policy draw.
+            actions = torch.cat((actions[:, :12], torch.zeros_like(actions[:, :12])), -1)
         if hasattr(self, "_hard_pact_torque_rate_penalty_sum"):
             self._hard_pact_torque_rate_penalty_sum.zero_()
             self._hard_pact_torque_rate_penalty_count.zero_()

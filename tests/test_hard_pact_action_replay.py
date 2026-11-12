@@ -309,7 +309,7 @@ class StochasticActionReplayTests(unittest.TestCase):
         algorithm.bard_enabled = True
         algorithm.qp_enabled_at_iteration = lambda: True
         algorithm.storage = SimpleNamespace(
-            current_hard_pact_batch=transition, current_batch_indices=torch.arange(3))
+            current_hard_pact_batch=transition, current_batch_indices=torch.arange(3), hard_pact_fields={})
         algorithm._materialize_mechanics_cache = lambda **_: SimpleNamespace(
             mass_matrix=torch.eye(18).expand(3, -1, -1), bias=torch.zeros(3, 18),
             foot_jacobians=torch.zeros(3, 4, 3, 18), base_jacobian=torch.zeros(3, 6, 18),

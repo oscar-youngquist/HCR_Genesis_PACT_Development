@@ -58,6 +58,8 @@ def qp_data(dtype=torch.float64):
         wrench_pred_world=z(1, 6).requires_grad_(),
         contact_probability=torch.full((1, 4), 0.5, dtype=dtype, requires_grad=True),
         previous_torque=z(1, 12), joint_position=z(1, 12),
+        base_quaternion=torch.tensor([[0., 0., 0., 1.]], dtype=dtype),
+        base_angular_velocity_world=z(1, 3),
         joint_velocity=z(1, 12), dt=torch.full((1, 1), 0.02, dtype=dtype),
     )
 
@@ -261,7 +263,7 @@ class HardPACTAblationTests(unittest.TestCase):
         stop = make_qp().solve(differentiable=False, **stop_data)
         for a, b in ((full.qdd, stop.qdd), (full.force_world, stop.force_world),
                      (full.tau_safe, stop.tau_safe),
-                     (full.contact_slack, stop.contact_slack)):
+                     (full.recovery_slack, stop.recovery_slack)):
             torch.testing.assert_close(a, b, atol=1e-10, rtol=1e-10)
         full.tau_safe.square().sum().backward()
         self.assertIsNotNone(full_data["tau_nom"].grad)

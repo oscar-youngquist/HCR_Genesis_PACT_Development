@@ -33,6 +33,8 @@ def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None,
         "matrix_shape": "24 variables; 68 canonical inequalities, zero equalities; cuPIQP native torque bounds plus 44 general inequalities (24 joint,20 friction)",
         "swing_rows": "friction rows 0<=1, not equality padding; positive force tracking curvature retained",
         "solver_and_objective_settings": dict(asdict(settings),qp_update_mode=mode),
+        "external_wrench_enabled": settings.use_external_wrench,
+        "wrench_omission_boundary": "HardPACTDifferentiableQP.solve: zero only QP-model W; preserve supervised and FF-support W",
         "velocity_tracking": {
             "version": 3, "command_order": ["body_vx_m_s", "body_vy_m_s", "body_omega_z_rad_s"],
             "prediction": "y_next=y_body+H_inner*qdd_canonical[0,1,5]; None uses physics_dt; body transport bias cancels",
@@ -153,8 +155,13 @@ def build_deployment_contract(cfg, actor, gain_spec):
     latent_dim = actor.context_encoder.ce_out_mean.out_features
     explicit_dim = actor.explicit_estimator.network[-1].out_features
     swing_config = GRFSwingConfig.from_task(cfg)
+    features = getattr(actor, 'hard_pact_features', None)
     contract = {
         "schema_version": 17,
+        "rss_features": (vars(features) if features is not None and features.variant_id.startswith('rss_') else None),
+        "policy_action_mode": "position" if actor.std.numel() == 12 else "coupled",
+        "policy_action_dimension": actor.std.numel(),
+        "position_only_execution": "12 sampled position actions; append 12 physical zero FF placeholders only for shared controller/history, never likelihood",
         "actuator_execution": {
             "clip_torque_rate_without_qp": bool(getattr(cfg.control,"clip_torque_rate_without_qp",False)),
             "torque_rate_limit_nm_s": float(getattr(cfg.control,"torque_rate_limit_nm_s",1000.0)),

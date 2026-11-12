@@ -162,6 +162,12 @@ task_registry.register("go1_abl3", Go1ABL3, GO1ABL3Cfg(), GO1ABL3CfgPPO())
 task_registry.register("go2_pact_pos", Go2PACTPos, GO2PACTPosCfg(), GO2PACTPosCfgPPO())
 task_registry.register("go2_pact", Go2PACT, GO2PACTCfg(), GO2PACTCfgPPO())
 task_registry.register("go2_hard_pact", Go2HardPACT, GO2HardPACTCfg(), GO2HardPACTCfgPPO())
+from rsl_rl.hard_pact_ablations import RSS_HARD_PACT_ABLATIONS
+from legged_gym.envs.go2.go2_hard_pact.ablation_configs import make_rss_hard_pact_configs
+for _rss_variant in RSS_HARD_PACT_ABLATIONS:
+    _rss_env, _rss_ppo = make_rss_hard_pact_configs(_rss_variant)
+    task_registry.register(f"go2_hard_pact_rss_{_rss_variant}_isaaclab",
+                           Go2HardPACT, _rss_env(), _rss_ppo())
 task_registry.register("go2_hard_pact_pos", Go2HardPACTPos, GO2HardPACTPosCfg(), GO2HardPACTPosCfgPPO())
 
 # All ablations share the exact environment class. Backend suffixes are

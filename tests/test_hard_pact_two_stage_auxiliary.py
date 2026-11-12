@@ -79,6 +79,7 @@ def test_recovery_and_contact_coefficients_are_not_applied_twice():
     alg=make_algorithm(lambda_projection=.07)
     nominal=torch.zeros(1,12)
     result=SimpleNamespace(tau_safe=torch.ones(1,12,requires_grad=True),
+        recovery_rate_slack=torch.zeros(1,12),
         recovery_slack=torch.full((1,12),20.,requires_grad=True),recovery_mask=torch.ones(1,dtype=torch.bool))
     cfg=HardPACTQPConfig(recovery_projection_weight=2.,recovery_projection_slack_weight=3.)
     recovery,_=recovery_projection_loss(result,nominal,torch.full((12,),2.),torch.ones(1,dtype=torch.bool),cfg)

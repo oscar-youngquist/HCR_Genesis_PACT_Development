@@ -38,6 +38,8 @@ def requested_torque_components(desired_position, feedforward, position, velocit
     The desired position is absolute (default pose is already included).
     Measured controller parameters are detached; action gradients are retained.
     """
+    if feedforward.shape[-1] == 0:
+        feedforward = torch.zeros_like(desired_position)  # genuine 12-D policy
     p = {key: parameters[key].detach() for key in (
         "control_kp", "control_kd", "control_motor_strength",
         "control_feedback_weight", "control_feedforward_weight",

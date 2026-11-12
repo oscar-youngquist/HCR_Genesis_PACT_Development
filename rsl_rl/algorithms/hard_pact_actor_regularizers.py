@@ -11,6 +11,21 @@ import torch
 import torch.nn.functional as F
 
 
+def detached_torque_imitation(result, nominal, scales, valid, recovery_weight, *, components=False):
+    """RSS torque-only targets, preserving stage-specific means/coefficients.
+
+    Neither solution nor slack/force/acceleration may introduce an optimizer
+    edge; nominal is live. Empty/failed rows are removed before arithmetic.
+    """
+    terms = []
+    for accepted, weight in ((result.differentiated_mask, 1.0),
+                             (result.recovery_mask, recovery_weight)):
+        mask = valid.reshape(-1).bool() & accepted.reshape(-1).bool()
+        errors = ((nominal[mask] - result.tau_safe.detach()[mask]) / scales).square().sum(-1)
+        terms.append(weight * errors.sum() / mask.sum().clamp_min(1))
+    return tuple(terms) if components else sum(terms)
+
+
 @dataclass(frozen=True)
 class ActorRegularizerConfig:
     lambda_fk: float = 0.0

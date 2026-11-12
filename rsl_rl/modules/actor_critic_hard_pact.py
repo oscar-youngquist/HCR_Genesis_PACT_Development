@@ -304,7 +304,8 @@ class ActorCritic_HardPACT(nn.Module):
         self.mean_pos = None
         self.mean_tau = None
 
-        initialize_action_std(self, 2*num_actions, init_noise_std, min_noise_std, max_noise_std)
+        self.num_policy_actions = num_actions * (1 if self.hard_pact_features.action_mode == "position" else 2)
+        initialize_action_std(self, self.num_policy_actions, init_noise_std, min_noise_std, max_noise_std)
         self.num_actions = num_actions
         
 
@@ -484,7 +485,8 @@ class ActorCritic_HardPACT(nn.Module):
 
         # Now run the final output layers to get both action modalities
         act_pos_act = self.act_pos_out(latent)
-        act_tau_act = self.act_tau_out(latent)
+        act_tau_act = (self.act_tau_out(latent) if self.hard_pact_features.action_mode == "coupled"
+                       else act_pos_act[:, :0])
 
         if torch.isnan(act_pos_act).any():
             with torch.no_grad():

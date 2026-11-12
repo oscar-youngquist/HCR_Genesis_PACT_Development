@@ -7,15 +7,18 @@ usage() {
     echo "Usage: $0 --task go2_hard_pact_<variant>_<genesis|isaacgym|isaaclab> [train arguments] [--smoke]" >&2
     echo "       $0 --task go2_hard_pact_pos_<genesis|isaaclab> [train arguments] [--smoke]" >&2
     echo "Available HardPACT tasks: variants baseline soft hard full stopgrad soft_penalty inverse rollout" >&2
+    echo "RSS (isaaclab): pos_ppo coupled_ppo guided_no_qp qp_no_post qp_imitation full no_fk no_ff no_channels no_qp_wrench" >&2
 }
 
 task=""
 smoke=0
+dry_run=0
 previous=""
 forward=()
 requested_solvers=()
 for argument in "$@"; do
     if [ "$argument" = "--smoke" ]; then smoke=1; continue; fi
+    if [ "$argument" = "--dry-run" ]; then dry_run=1; continue; fi
     forward+=("$argument")
     case "$argument" in --task=*) task="${argument#--task=}" ;; esac
     if [ "$previous" = "--task" ]; then task="$argument"; fi
@@ -31,6 +34,7 @@ for argument in "$@"; do
 done
 
 case "$task" in
+    go2_hard_pact_rss_*_isaaclab) export SIMULATOR=isaaclab; backend=isaaclab ;;
     go2_hard_pact_pos_genesis) export SIMULATOR=genesis_pact_pos; backend=genesis ;;
     go2_hard_pact_genesis|go2_hard_pact_baseline_genesis|go2_hard_pact_soft_genesis|go2_hard_pact_hard_genesis|go2_hard_pact_full_genesis|go2_hard_pact_stopgrad_genesis|go2_hard_pact_soft_penalty_genesis|go2_hard_pact_inverse_genesis|go2_hard_pact_rollout_genesis)
         export SIMULATOR=genesis_pact; backend=genesis ;;
@@ -57,7 +61,10 @@ case "$backend" in
     isaacgym) target_env="${HARD_PACT_ISAACGYM_ENV:-lr_gym}" ;;
     isaaclab) target_env="${HARD_PACT_ISAACLAB_ENV:-lr_lab}" ;;
 esac
-resolved_solvers="$(python "$script_dir/hard_pact_solver_selection.py" "${forward[@]}")"
+python_bin="${HARD_PACT_PYTHON:-python}"
+resolver_python="$python_bin"
+if [ "$dry_run" = 1 ] && ! command -v "$resolver_python" >/dev/null 2>&1; then resolver_python=python3; fi
+resolved_solvers="$("$resolver_python" "$script_dir/hard_pact_solver_selection.py" "${forward[@]}")"
 mapfile -t requested_solvers <<< "$resolved_solvers"
 for solver in "${requested_solvers[@]}"; do
     case "$solver" in
@@ -72,6 +79,14 @@ for solver in "${requested_solvers[@]}"; do
     esac
 done
 target_env="${HARD_PACT_CONDA_ENV:-$target_env}"
+if [ "$dry_run" = 1 ]; then
+    printf 'SIMULATOR=%s conda=%s skip_conda=%s CUDA_VISIBLE_DEVICES=%s solvers=%s\n' \
+        "$SIMULATOR" "$target_env" "${HARD_PACT_SKIP_CONDA_ACTIVATE:-0}" "${CUDA_VISIBLE_DEVICES:-unset}" "$resolved_solvers"
+    printf '%q ' "$python_bin" -u "$script_dir/train_hard_pact.py"
+    if [ "$smoke" = 1 ]; then printf '%q ' --num_envs 8 --max_iterations 1; fi
+    printf '%q ' "${forward[@]}"; printf '\n'
+    exit 0
+fi
 if [ "${HARD_PACT_SKIP_CONDA_ACTIVATE:-0}" != 1 ]; then
     if ! command -v conda >/dev/null 2>&1; then
         echo "Conda is unavailable; cannot activate HardPACT environment '$target_env'." >&2
@@ -86,7 +101,7 @@ echo "HardPACT environment: ${CONDA_DEFAULT_ENV:-$target_env}; simulator: $SIMUL
 if [ "$smoke" -eq 1 ]; then
     # One iteration contains 32 real control steps and a differentiable PPO
     # update. User-provided values later in argv retain normal argparse order.
-    exec python -u "$script_dir/train_hard_pact.py" \
+    exec "$python_bin" -u "$script_dir/train_hard_pact.py" \
         --num_envs 8 --max_iterations 1 "${forward[@]}"
 fi
-exec python -u "$script_dir/train_hard_pact.py" "${forward[@]}"
+exec "$python_bin" -u "$script_dir/train_hard_pact.py" "${forward[@]}"

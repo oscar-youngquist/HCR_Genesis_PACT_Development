@@ -38,7 +38,7 @@ import torch
 from rsl_rl.modules.hard_pact_control import bounded_nominal_torque, effective_feedback_gains, requested_torque_components
 from .hard_pact_actor_regularizers import (
     ActorRegularizerConfig, fk_consistency_loss, compensation_demand, load_compensation_loss,
-    nominal_support_gravity,
+    nominal_support_gravity, detached_torque_imitation,
 )
 from rsl_rl.modules.hard_pact_physics import (
     log_qp_swing_grf, GRFSwingMetricsAccumulator,
@@ -635,7 +635,7 @@ class PPO_HardPACT:
         self.physics_dynamics = None
         if self.actor_regularizers.lambda_fk > 0 and self.dynamics_backend != 'bard':
             raise ValueError('Actor FK regularization currently requires dynamics_backend="bard"')
-        if self.bard_enabled or self.actor_regularizers.lambda_fk > 0:
+        if self.bard_enabled or self.actor_regularizers.lambda_fk > 0 or self.actor_regularizers.lambda_load > 0:
             # Configuration paths are repository-relative, while launchers run
             # from legged_gym/scripts. Resolve relative URDFs against the repo
             # root derived from this source file so training is cwd-independent.
@@ -1308,6 +1308,9 @@ class PPO_HardPACT:
             # Optional actor-only terms share the existing secondary PCGrad
             # objective; no new optimizer, backward owner, or QP solve.
             actor_regularization = self._actor_load_loss
+            if self.hard_pact_features.variant_id.startswith('rss_') and self.actor_regularizers.lambda_load > 0:
+                actor_regularization = self._compute_rss_support_loss(
+                    replay, self.storage.current_hard_pact_batch, policy_features)
             if self.actor_regularizers.lambda_fk > 0:
                 fk = self._compute_actor_fk_loss(replay, self.storage.current_hard_pact_batch)
                 actor_regularization = fk if actor_regularization is None else actor_regularization+fk
@@ -2057,6 +2060,52 @@ class PPO_HardPACT:
         metrics['valid_fraction']=count.to(command.dtype)/max(stance.numel(),1)
         self._record_actor_regularizer('fk',metrics,count,stance.numel())
         return self._actor_only_torque_vjp(cfg.lambda_fk*loss,command,self.ppo_parameters)
+
+    def _compute_rss_support_loss(self, replay, batch, policy_features):
+        """RSS channel guidance: same pre-transition geometry for every variant.
+
+        Eligibility is physics-valid + delay-source-valid + feasible stance
+        support, NOT QP acceptance/activation. Targets are entirely detached;
+        only nominal physical FF and actor-owned weights receive derivatives.
+        Original estimated W is retained even for the QP-wrench ablation.
+        """
+        cfg = self.actor_regularizers
+        q, v = batch['pre_q'].detach(), batch['pre_v'].detach()
+        latent, explicit = policy_features
+        with torch.no_grad():
+            stance = explicit.detach()[:, 3:7] >= self.qp_config.contact_threshold
+            valid = (batch['physics_valid_mask'].reshape(-1).bool()
+                     & batch['delayed_action_source_valid'].reshape(-1).bool())
+            valid &= torch.isfinite(q).all(-1) & torch.isfinite(v).all(-1)
+            # Invalid states never enter kinematics. Fixed nominal state avoids
+            # NaN contamination; validity still excludes those targets.
+            safe_q = torch.where(valid[:, None], q, torch.zeros_like(q))
+            safe_q[:, 6] = torch.where(valid, safe_q[:, 6], torch.ones_like(safe_q[:, 6]))  # canonical xyzw
+            safe_v = torch.where(valid[:, None], v, torch.zeros_like(v))
+            wy = self.actor_critic.physics_estimator.wrench_to_qp_physical(
+                self.actor_critic.physics_estimator.predict_wrench(latent.detach(), explicit.detach()))
+            wrench = torch.cat((_yaw_local_to_world(wy[:, :3, None].transpose(1, 2), safe_q[:, 3:7]).squeeze(1),
+                                _yaw_local_to_world(wy[:, 3:, None].transpose(1, 2), safe_q[:, 3:7]).squeeze(1)), -1)
+            demands, feasibility = [], []
+            # Bounded mechanics workspace; no solver or autograd graph.
+            capacity = min(self.qp_config.ppo_chunk_size, self.physics_dynamics.batch_capacity)
+            for start in range(0, q.shape[0], capacity):
+                sl = slice(start, start + capacity)
+                ctx = self.physics_dynamics.build_context(safe_q[sl], safe_v[sl], parameters={}, need_jacobians=True)
+                gravity = nominal_support_gravity(self.physics_dynamics, safe_q[sl])
+                demand, feasible = compensation_demand(ctx.foot_jacobians, ctx.base_jacobian,
+                    wrench[sl], gravity, stance[sl], cfg, self.qp_config.friction_coefficient)
+                demands.append(demand); feasibility.append(feasible)
+            demand, feasible = torch.cat(demands), torch.cat(feasibility)
+            ff_gain = batch['control_motor_strength'] * batch['control_feedforward_weight']
+            valid &= ((ff_gain != 0).expand(-1, 12) | ~stance.repeat_interleave(3, -1)).all(-1)
+        ff_command = replay['feedforward_torque']
+        physical_ff = requested_torque_components(replay['desired_position'], ff_command,
+            q[:, 7:], v[:, 6:], batch)[2]
+        loss, metrics = load_compensation_loss(physical_ff, demand,
+            batch['control_torque_limits'].detach(), stance, valid, feasible, cfg)
+        self._record_actor_regularizer('load', metrics, metrics['valid_joint_count'], q.shape[0])
+        return self._actor_only_torque_vjp(cfg.lambda_load * loss, ff_command, self.ppo_parameters)
 
     def _actor_velocity_objective(self, xy, yaw, nominal, differentiable):
         if not differentiable or not self.hard_pact_features.projection_loss:
@@ -2823,6 +2872,8 @@ class PPO_HardPACT:
                     qp_wrench_yaw[:, 3:].unsqueeze(1), sample_q[:, 3:7]
                 ).squeeze(1),
             ), dim=-1)
+            if not self.qp_config.use_external_wrench:
+                sample_applied = torch.zeros_like(sample_applied)
             flat_indices = (self.storage.current_batch_indices if transition_indices is None else transition_indices)[qp_rows]
             if self._rollout_deployment_qp_mechanics is None:
                 if getattr(self.hard_pact_qp.cfg,"direct_qp_mechanics_gather",True):
@@ -2902,7 +2953,10 @@ class PPO_HardPACT:
                 # not retain qpth's KKT graph or any physics-head activation.
                 with torch.no_grad():
                     qp_result = self.hard_pact_qp.solve(
-                        differentiable=False, diagnostics_phase="ppo", **qp_arguments
+                        # RSS controls autograd separately from numerical mode:
+                        # use the same PPO solver/tolerances/capacity as full.
+                        differentiable=self.hard_pact_features.variant_id.startswith('rss_'),
+                        diagnostics_phase="ppo", **qp_arguments
                     )
             # m_physics=not(push or reset or timeout or teleport). Sustained
             # wrench and randomized-mass transitions deliberately remain valid.
@@ -2942,6 +2996,11 @@ class PPO_HardPACT:
             recovery_loss, recovery_per_row = recovery_projection_loss(
                 qp_result, sampled_nominal, torque_limits, valid, self.hard_pact_qp.cfg,
             )
+            if self.hard_pact_features.post_qp == 'imitation':
+                # Full stance/slack values above remain diagnostic-only.
+                # Loss/* reports only the actual optimized torque-target terms.
+                qp_loss, recovery_loss = detached_torque_imitation(qp_result, sampled_nominal,
+                    torque_limits, valid, self.hard_pact_qp.cfg.recovery_projection_weight, components=True)
             self._record_actor_loss('projection_primary', qp_loss,
                 (valid.reshape(-1) & qp_result.differentiated_mask.reshape(-1)).sum())
             self._record_actor_loss('projection_recovery', recovery_loss,
@@ -2990,7 +3049,7 @@ class PPO_HardPACT:
             # differ from rollout after policy/head parameters update.
             self.last_qp_metrics = dict(qp_result.metrics or {})
             self.last_qp_metrics["qp/minimal/projection_loss"] = qp_loss.detach()
-            if self.actor_regularizers.lambda_load > 0:
+            if self.actor_regularizers.lambda_load > 0 and not self.hard_pact_features.variant_id.startswith('rss_'):
                 cfg=self.actor_regularizers
                 accepted=qp_result.differentiated_mask | qp_result.recovery_mask
                 load_valid=valid.reshape(-1)&accepted

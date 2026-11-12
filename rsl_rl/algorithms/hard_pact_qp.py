@@ -76,6 +76,7 @@ def project_nominal_torque(tau_nom, previous_torque, torque_limit, torque_rate_l
 
 @dataclass(frozen=True)
 class HardPACTQPConfig:
+    use_external_wrench: bool = True  # RSS omission: QP model only, not supervised/guidance W.
     """Numerics and physical weights exposed by the HardPACT config.
 
     Scales define ``D`` in ``x=Dz``. Tracking/regularization values define
@@ -1189,12 +1190,19 @@ class HardPACTDifferentiableQP:
         PPO graphs retain exclusive backend leases through all backward uses.
         """
         reference = data["tau_nom"]
+        if not self.cfg.use_external_wrench:
+            # Central boundary also covers deployment/capture; never mutate
+            # the caller's wrench used by detached nominal FF support targets.
+            data = dict(data, wrench_pred_world=torch.zeros_like(data["wrench_pred_world"]))
         if self.velocity_tracking_enabled() and not {
                 "velocity_command", "base_linear_velocity_world"}.issubset(data):
             raise ValueError("QP velocity tracking requires captured physical commands and base world velocity; old replay cannot supply zero targets")
         if differentiable is None:
             differentiable = torch.is_grad_enabled() and any(
                 data[k].requires_grad for k in ("tau_nom","force_pred_world","wrench_pred_world"))
+        # RSS metric/imitation forwards retain the PPO numerical profile under
+        # no_grad. Report actual graph availability, not that profile selector.
+        gradients_enabled = bool(differentiable and torch.is_grad_enabled())
         if not differentiable and torch.is_grad_enabled():
             with torch.no_grad():
                 return self.solve(differentiable=False, diagnostics_phase=diagnostics_phase,
@@ -1491,7 +1499,7 @@ class HardPACTDifferentiableQP:
         metrics = {"qp/minimal/full_fraction":ok.float().mean(),
                    "qp/minimal/soft_joint_fraction":soft_ok.float().mean(),
                    "qp/minimal/fallback_fraction":(stage==2).float().mean(),
-                   "qp/minimal/differentiated_fraction":(ok|soft_ok).float().mean()*int(differentiable)}
+                   "qp/minimal/differentiated_fraction":(ok|soft_ok).float().mean()*int(gradients_enabled)}
         # Physical diagnostics are optional, never part of the objective.
         if self._physical_enabled():
             metrics["qp/physical/torque_correction_mean"]=(primal[:,:12].detach()-ref.detach()).abs().mean()
@@ -1503,7 +1511,7 @@ class HardPACTDifferentiableQP:
             primal[:,12:].reshape(n,4,3).to(reference.dtype),
             primal[:,:12].to(reference.dtype),stage,ok,diag,metrics,
             soft_ok,recovery_slack.to(reference.dtype),recovery_rate_slack.to(reference.dtype))
-        self.iteration_diagnostics[self._diagnostics_phase].add_result(result,differentiable)
+        self.iteration_diagnostics[self._diagnostics_phase].add_result(result,gradients_enabled)
         return result
 
 

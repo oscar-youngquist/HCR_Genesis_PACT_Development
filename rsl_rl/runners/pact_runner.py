@@ -206,7 +206,7 @@ class OnPolicyRunnerPACT:
         # init storage and model
         self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_crit_obs_stack*self.env.num_privileged_obs], \
                               [reconstruction_dim], [self.env.num_obs_hist*self.env.num_obs], \
-                              [2*self.env.num_actions], [self.env.num_exp_labels], [self.cfg["grf_dim"]], [self.env.wb_dim])
+                              [getattr(actor_critic, "num_policy_actions", 2*self.env.num_actions)], [self.env.num_exp_labels], [self.cfg["grf_dim"]], [self.env.wb_dim])
         if self.is_hard_pact:
             delay_range = self.env.cfg.domain_rand.ctrl_delay_step_range
             self.env._actor_fk_enabled = self.alg.actor_regularizers.lambda_fk > 0
@@ -659,6 +659,9 @@ class OnPolicyRunnerPACT:
             metadata["backend_version"] = "unknown"
         # Provenance belongs beside the resolved config, not dozens of TB tabs.
         metadata['features'] = self.hard_pact_features.scalar_flags()
+        metadata['resolved_features'] = vars(self.hard_pact_features)
+        metadata['checkpoint_provenance'] = getattr(self, '_checkpoint_provenance',
+                                                   self.policy_cfg.get('pretrained_path') or None)
         metadata['config'] = self.train_cfg
         with open(os.path.join(self.log_dir, 'hard_pact_run_metadata.json'), 'w') as stream:
             json.dump(metadata, stream, indent=2, sort_keys=True, default=str)
@@ -917,6 +920,7 @@ class OnPolicyRunnerPACT:
         }
         if self.is_hard_pact:
             # The legacy runner counter advances only after learn() finishes.
+            checkpoint['hard_pact_features'] = vars(self.hard_pact_features)
             qp = getattr(self.alg, 'hard_pact_qp', None)
             if qp is not None:
                 checkpoint['hard_pact_qp_velocity_loss_horizon_s'] = qp.cfg.qp_velocity_loss_horizon_s
@@ -940,6 +944,7 @@ class OnPolicyRunnerPACT:
         torch.save(checkpoint, path)
 
     def load(self, path, load_optimizer=True):
+        self._checkpoint_provenance = os.path.abspath(path)
         loaded_dict = torch.load(path)
         # Load actor/critic model(s)
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])

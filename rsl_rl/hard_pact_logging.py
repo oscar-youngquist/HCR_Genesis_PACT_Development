@@ -24,7 +24,7 @@ def active_hard_pact_losses(algorithm, iteration):
         'velocity_xy': projection and algorithm.lambda_qp_velocity_xy > 0,
         'velocity_yaw': projection and algorithm.lambda_qp_velocity_yaw > 0,
         'fk': actor and regularizers.lambda_fk > 0,
-        'load': projection and regularizers.lambda_load > 0,
+        'load': (actor if features.variant_id.startswith('rss_') else projection) and regularizers.lambda_load > 0,
     }
 
 
