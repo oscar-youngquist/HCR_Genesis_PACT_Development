@@ -460,7 +460,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         max_curriculum = 1.2
         max_curriculum_lin_vel_x = 1.00    # Symmetric curriculum cap [m/s]; None uses max_curriculum.
         max_curriculum_lin_vel_y = 1.00    # Symmetric curriculum cap [m/s].
-        max_curriculum_ang_vel_yaw = 1.25  # Symmetric curriculum cap [rad/s].
+        max_curriculum_ang_vel_yaw = 1.50  # Symmetric curriculum cap [rad/s].
         num_commands = 4
         resampling_time = 10.0
         heading_command = True
@@ -586,7 +586,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         lambda_projection = 0.25
         # Cosine 0->1 from QP activation, in absolute PPO iterations; 0 disables.
         # Scales actor projection/velocity/FK/load losses, not encoder/decoder PINNs.
-        actor_physics_warmup_iterations = 200
+        actor_physics_warmup_iterations = 1000
         lambda_qp_velocity_xy = 1.0  # inherit lambda_projection; 0 disables
         lambda_qp_velocity_yaw = 1.0  # independent nonnegative override
 
@@ -632,7 +632,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'qp_update_mode': 'first_plus_random_substep',   # first_plus_random_substep - First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
             'correction_ramp_enabled': True,                 # Blend accepted QP corrections into execution; full QP losses remain unchanged.
             'correction_ramp_start_offset': 0,             # Iterations after QP activation before the execution ramp starts.
-            'correction_ramp_duration': 100,                # Iterations to reach full correction; 0 applies full correction immediately.
+            'correction_ramp_duration': 500,                # Iterations to reach full correction; 0 applies full correction immediately.
 
             # Physical constraints and prediction convention
             'friction_coefficient': 0.6,                     # Friction-pyramid mu: abs(Fx), abs(Fy) <= mu*Fz for stance feet.
@@ -642,7 +642,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'torque_rate_constraint_weight': 0.0,            # 0 removes QP rate constraints; any positive value enables the hard rate bound.
 
             # Inner objective: nominal torque / GRF tracking and stance acceleration
-            'torque_tracking_weight': 6.0,                  # Inner normalized total-torque tracking weight.
+            'torque_tracking_weight': 10.0,                  # Inner normalized total-torque tracking weight.
             'torque_scale_nm': 40.0,                         # Torque variable/reference normalization scale [Nm].
             'force_tracking_weight': 1.0,                    # Inner normalized predicted-GRF tracking weight.
             'force_scale_n': 250.0,                          # Force variable/reference normalization scale [N].
@@ -662,7 +662,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
             # Velocity tracking: independent inner-QP and outer-loss horizons
             'planar_velocity_weight': 20.0,                  # Inner normalized body-frame planar-velocity tracking weight.
-            'yaw_rate_weight': 10.0,                         # Inner normalized body-frame yaw-rate tracking weight.
+            'yaw_rate_weight': 12.0,                         # Inner normalized body-frame yaw-rate tracking weight.
             'planar_velocity_scale_m_s': 1.0,                # Planar-velocity error normalization [m/s].
             'yaw_rate_scale_rad_s': 1.0,                     # Yaw-rate error normalization [rad/s].
             'qp_velocity_objective_horizon_s': 0.020,        # Inner xy/yaw constant-derivative horizon [s]; None uses physics dt.
