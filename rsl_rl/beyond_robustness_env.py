@@ -14,6 +14,9 @@ must cover physical state, command/action history, random generators, reset stat
 and curricula. Merely restoring curriculum state is NOT exact continuation.
 Optional curriculum_state_dict/load_curriculum_state_dict allows fresh-state resume
 at the saved curriculum progress. Learning phase never chooses that progress.
+Optional begin_iteration(absolute_iteration)/end_iteration(iteration, raw_tracking,
+valid_count) hooks bracket completed rollout/update iterations. The separate raw
+tracking evidence is finite-sample weighted, never taken from entropy summaries.
 Stages 1/2 of the future box curriculum can therefore retain teacher_student;
 there is no automatic mode change unless explicitly configured by PPO iteration.
 """
@@ -30,6 +33,10 @@ class BRObservation:
     parameters: torch.Tensor
     load_labels: torch.Tensor
     supervision_valid: torch.Tensor
+
+    def clone(self):
+        """Owned snapshot, safe across simulator in-place resets."""
+        return BRObservation(*(x.detach().clone() for x in (*self.inputs(), self.supervision_valid)))
 
     def inputs(self):
         return self.observations, self.state, self.parameters, self.load_labels
@@ -57,6 +64,9 @@ class BRStep:
     # Keys: lin_vel_tracking, ang_vel_tracking, terrain_level. Max across collection
     # matches the PACT runner. Missing/nonfinite complete evidence holds entropy.
     performance_metrics: dict | None = None
+    # Separate from entropy/episode summaries: raw exp(-4*planar_error^2),
+    # equal weight per environment/control step. Missing evidence pauses DR.
+    curriculum_tracking: torch.Tensor | None = None
 
 
 class BeyondRobustnessEnv(Protocol):

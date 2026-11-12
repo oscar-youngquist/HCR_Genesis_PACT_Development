@@ -10,7 +10,8 @@ The Stage-1 algorithm API remains usable directly. The runner adds collection,
 phase scheduling and environment-aware resume. Switch phase explicitly at an
 update boundary or set student_reinforcement_start_iteration; neither controls a
 simulator curriculum stage. The factory inherits live optimization/terrain settings.
-No task registration, reward, box physics or launcher is added.
+Stage-3 physics is opt-in via IsaacLabBeyondRobustnessEnv; this learning
+configuration remains simulator-neutral. Production rewards/launchers are separate.
 """
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field

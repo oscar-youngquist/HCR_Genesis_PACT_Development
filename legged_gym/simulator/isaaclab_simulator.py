@@ -304,6 +304,7 @@ class IsaacLabSimulator(Simulator):
                 soft_joint_pos_limit_factor=self._cfg.rewards.soft_dof_pos_limit
             )
         self._robot = Articulation(articulation_cfg)
+        self._create_scene_components(source_env_path)
         # clone other envs
         self._cloner.clone(source_prim_path=f"/World/envs/env_0",
                            prim_paths=prim_paths,
@@ -444,6 +445,10 @@ class IsaacLabSimulator(Simulator):
         # randomize pd gain
         if self._cfg.domain_rand.randomize_pd_gain:
             self._randomize_pd_gain(torch.arange(self._num_envs))
+
+    def _create_scene_components(self, source_env_path):
+        """Optional assets/joints, authored before cloning and physics initialization."""
+        pass
 
     def _contact_sensor_update_period(self):
         return self._control_dt

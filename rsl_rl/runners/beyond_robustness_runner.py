@@ -40,7 +40,8 @@ class BeyondRobustnessRunner:
                 self.writer = SummaryWriter(str(self.log_dir))
                 self._owns_writer = True
             (self.log_dir / "beyond_robustness_resolved_config.json").write_text(
-                json.dumps(dict(config=self.cfg.resolved(), input_contract=model.input_contract()), indent=2))
+                json.dumps(dict(config=self.cfg.resolved(), input_contract=model.input_contract(),
+                    environment=(env.resolved_configuration() if hasattr(env,'resolved_configuration') else None)), indent=2))
 
     @property
     def current_learning_iteration(self):
@@ -67,6 +68,8 @@ class BeyondRobustnessRunner:
         if self.alg.storage.step or self.alg.pending is not None:
             raise RuntimeError("Complete update before collecting another rollout")
         self.alg.apply_phase_schedule()
+        if hasattr(self.env, 'begin_iteration'):
+            self.env.begin_iteration(self.alg.iteration)
         if self.current is None:
             self._fresh_environment()
         else:
@@ -79,6 +82,8 @@ class BeyondRobustnessRunner:
         completed_count = torch.zeros_like(completed_returns)
         reward_sum = torch.zeros_like(completed_returns)
         performance = {}
+        tracking_sum = torch.zeros((), device=self.device)
+        tracking_count = torch.zeros((), device=self.device, dtype=torch.long)
         for _ in range(self.cfg.num_steps_per_env):
             # Both labels and validity describe t, before any in-place simulator reset.
             valid = self.current.supervision_valid.detach().clone()
@@ -122,6 +127,13 @@ class BeyondRobustnessRunner:
             reward_sum += step.rewards.sum()
             self.interactions += self.env.num_envs
             self.control_steps += 1
+            if step.curriculum_tracking is not None:
+                tracking = step.curriculum_tracking.detach()
+                if tracking.shape != step.rewards.shape or tracking.device != self.device:
+                    raise ValueError('curriculum_tracking must be device-local [N]')
+                finite = torch.isfinite(tracking)
+                tracking_sum += tracking[finite].sum()
+                tracking_count += finite.sum()
             if step.performance_metrics:
                 keys = ("lin_vel_tracking", "ang_vel_tracking", "terrain_level")
                 # One small set of episode summaries; same max-over-rollout convention
@@ -131,6 +143,7 @@ class BeyondRobustnessRunner:
                         performance[key] = max(performance.get(key, 0.), float(step.performance_metrics[key]))
         self.alg.compute_returns(*self.current.inputs())
         count = completed_count.item()
+        self._curriculum_evidence = (tracking_sum.item(), tracking_count.item())
         return dict(reward_mean=(reward_sum / (self.env.num_envs * self.cfg.num_steps_per_env)).item(),
                     episodes=count, episode_return=completed_returns.item() / count if count else float("nan"),
                     episode_length_steps=completed_lengths.item() / count if count else float("nan")), performance
@@ -147,11 +160,16 @@ class BeyondRobustnessRunner:
             phase = self.alg.training_phase
             entropy_used = self.alg.entropy_coef
             losses = self.alg.update()
+            if hasattr(self.env, 'end_iteration'):
+                total, count = self._curriculum_evidence
+                self.env.end_iteration(iteration, total/count if count else None, count)
             entropy_updated = self.alg.update_adaptive_entropy_coef(performance)
             error_keys = ("load_mae/", "load_rmse/")
             metrics = {f"loss/{key}": value for key, value in losses.items() if not key.startswith(error_keys)}
             metrics.update({f"load/{key}": value for key, value in losses.items() if key.startswith(error_keys)})
             metrics.update({f"train/{key}": value for key, value in collection.items()})
+            if hasattr(self.env,'iteration_metrics'):
+                metrics.update(self.env.iteration_metrics())
             metrics.update({"train/learning_rate": self.alg.learning_rate,
                             "train/entropy_coefficient": entropy_used,
                             "train/entropy_coefficient_next": self.alg.entropy_coef,

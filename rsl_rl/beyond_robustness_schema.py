@@ -4,7 +4,9 @@ The paper does not enumerate its 62 parameter scalars. Our declared default uses
 per-joint Kp/Kd/strength, and per-leg-link realized mass/CoM (12 leg links), plus
 base mass/CoM: 88 *meaningful* values, not 62 padded/truncated values. Adapters may
 declare another named layout, but must supply every declared field. Physical link
-name mapping and simulator property extraction remain payload-adapter work.
+name mapping and simulator property extraction are owned by the payload adapter.
+The Stage-3 tray adds one declared realized tray-mass scalar (89 parameters);
+the full schema, not just a width/version, is checked on checkpoint loading.
 """
 from dataclasses import asdict, dataclass
 import math
