@@ -232,9 +232,32 @@ On resume, pass the checkpoint's seed if it is not 1; conflicting seeds are reje
 The local script activates the same environment as `b1z1_pact_lab.sh`; override
 `FACET_CONDA_SH`/`FACET_CONDA_ENV` for another installation. Unity uses container
 Python without changing `CUDA_VISIBLE_DEVICES`. These are training entry scripts,
-not Slurm submission/container setup scripts; the shared container wrapper's
-existing task allowlist is unchanged. No production environment counts or budgets
-are overridden by either script.
+not Slurm submission/container setup scripts. No production environment counts
+or budgets are overridden by either script.
+
+For the existing Slurm script-mode workflow, with `TOOLS` pointing to
+`containers/isaaclab` and the usual `IMAGE`, `REPO`, `RUN_DIR`, scheduler GPU
+visibility, and EULA settings already supplied:
+
+```bash
+TRAIN_SCRIPT=b1z1_facet_unity.sh
+TRAIN_ARGS=(--seed=1 --num_envs=4096 --max_iterations=70000)
+/bin/bash "$TOOLS/run.sh" script "$TRAIN_SCRIPT" "${TRAIN_ARGS[@]}"
+```
+
+FACET is allowlisted only in script mode, using `isaaclab_b1z1_pact` and its
+FACET-specific Python entry point, never generic `train.py`. Both `--num-envs` /
+`--num_envs` and `--max-iterations` / `--max_iterations` share destinations and
+override behavior. Quoted resume paths and explicit seed 0 survive forwarding;
+resume seed validation is unchanged. Do not pass `--gpu` through this container
+wrapper: existing scheduler/device checks still apply. SIF location, cache binds,
+output paths, and the default 60,000 teacher / 10,000 student schedule are unchanged.
+
+Dispatch regression tests execute both real shell scripts and FACET argparse,
+mocking Apptainer and stopping Python before training/backend imports. They test
+both argument spellings/forms, seed/resume forwarding, unchanged mounts and GPU
+visibility, existing PACT dispatch, and rejected unsupported entries/devices.
+This is mocked dispatch validation, not an actual Unity container/job run.
 
 The FACET launcher copies the resolved training seed into the environment before
 the registry initializes RNGs. Resume retains the checkpoint's training seed

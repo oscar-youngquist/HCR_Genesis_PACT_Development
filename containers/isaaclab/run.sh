@@ -24,7 +24,7 @@ if [[ "$mode" == script ]]; then
     case "$entry" in
         b1z1_unifp_unity.sh|b1z1_unifp_original_unity.sh|b1z1_unifp_reject_unity.sh)
             simulator=isaaclab_b1z1_unifp ;;
-        b1z1_pact_unity.sh|b1z1_ppo_pos_unity.sh|b1z1_pact_ab*_unity.sh)
+        b1z1_pact_unity.sh|b1z1_ppo_pos_unity.sh|b1z1_pact_ab*_unity.sh|b1z1_facet_unity.sh)
             simulator=isaaclab_b1z1_pact ;;
         b1z1_pact_pos_unity.sh) simulator=isaaclab_b1z1_pact_pos ;;
         go2_hard_pact_unity.sh) simulator=isaaclab ;;
