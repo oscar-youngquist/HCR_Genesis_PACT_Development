@@ -42,6 +42,17 @@ bounds are rejected, including weights-only loading; no migration is supplied.
 Configuration and stage semantics
 --------------------------------
 
+Production terrain is an owned copy of the complete live Go2 HardPACT Isaac
+Lab terrain section: geometry, type proportions, height samples, initial
+difficulty and curriculum settings. The same simulator origin sampler draws
+initial levels uniformly from 0 through ``max_init_terrain_level`` inclusive
+(currently 0--1), with environments distributed evenly over terrain columns.
+With terrain curriculum disabled, the shared sampler instead uses all levels.
+Nominal-only training does not substitute easier terrain. Only explicit tiny
+``--smoke`` runs use a 2x2, level-0 terrain bank; ordinary ``--num-envs`` changes
+do not change terrain. Resume retains the saved terrain contract and difficulty,
+rather than silently adopting later source-config edits.
+
 The default rolling scene creates four spheres before physics initialization.
 At zero disturbance progress they are inactive/parked; the fixed physical tray
 remains. Shared disturbance progress requests severity and payload activation;
@@ -70,6 +81,57 @@ Fresh fixed-load experiments can explicitly use
 not change optimization phase automatically when auto-transition is disabled.
 Resume never silently overrides physical settings or the saved phase; use
 ``--transition-phase joint_adaptation`` for an explicit forward phase change.
+
+Collection runtime optimizations
+--------------------------------
+
+For batches of at least ``compact_reset_min_envs=1024``, MULE partial resets
+pack observations/critic inputs and estimate foot forces only for resetting
+rows. Smaller batches retain the full-batch path to avoid gather-launch overhead.
+Noise is drawn with the same selected-row generator
+sequence; untouched histories/observations remain unchanged. Full control
+steps still refresh every environment. Reward resets read only joint velocity
+and ground contacts instead of constructing a full transition snapshot. Steps
+without resets reuse the already-owned endpoint packet.
+
+Ball masses and inertias still resample on every ordinary episode reset.
+Transfers are batched across balls; material writes/readbacks occur only for
+cadence-eligible rows, or for the explicit saved-sample resume restoration.
+PhysX readbacks remain authoritative. Physics stepping, periodic mass changes,
+contacts, noise, rewards, and dual-PPO updates are unchanged. Robot-property
+readbacks and parked-ball physics/sensor updates are not removed by this patch.
+
+The runtime-only ``collection_optimizations`` attribute on the MULE environment
+and simulator enables compact refresh/material cadence optimizations by default.
+It is not part of checkpoint compatibility. The bounded smoke's
+``--reference-collection`` switch selects full-batch reset refresh and all-reset
+material transfers; batched mass transfers and owned snapshot semantics remain.
+The optional refresh microbenchmark compares identical selected rows and checks
+packet parity; it is not an end-to-end training speed measurement::
+
+    CUDA_VISIBLE_DEVICES=1 SIMULATOR=isaaclab PYTHONPATH=.:tests OMP_NUM_THREADS=1 \
+      python tests/smoke_mule_payload.py --num-envs 256 --steps 4 \
+      --refresh-timing-repeats 20 --output-dir /tmp/mule_collection
+
+Use the Isaac Lab Python environment and its required library setup. Add
+``--reference-collection`` and a distinct output directory for reference
+collection/update timings. Reports include both phase updates, fresh resume,
+collection/update wall time, and peak PyTorch allocated memory (not total
+PhysX/renderer VRAM). Shared-GPU timings are contention-sensitive.
+
+Validation on physical GPU 1: 197 CPU MULE/BR/checkpoint tests passed (18.45 s).
+The final 16-environment smoke also passed both phases and fresh resume. A
+256-environment, four-step smoke passed both phases, mass/inertia readback,
+partial resets and fresh resume with finite losses (132.9 MiB peak PyTorch
+allocation). The forced compact-refresh microbenchmark was slower at 256 rows
+(9.84 vs 2.02 ms), motivating the small-batch reference path. At 4096 rows,
+refreshing 64 selected rows took 1.36 vs 11.74 ms over 30 repeats. The associated
+two-step updates took 4.00/3.59 s collection and 0.045/0.009 s update, with
+640.3 MiB peak PyTorch allocation. However, that large smoke emitted a PhysX
+aggregate-pair capacity overflow: its physical interactions are NOT validated.
+These short shared-GPU checks do not establish an end-to-end training speedup
+or an optimal batch-size crossover; the threshold is a conservative runtime
+choice, not production autotuning. Solver/physics capacities were not changed.
 
 Local commands (repository root)
 -------------------------------

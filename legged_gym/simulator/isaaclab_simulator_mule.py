@@ -113,23 +113,40 @@ class IsaacLabSimulatorMULE(IsaacLabSimulatorBR):
     def _uniform(self,shape,lo,hi):
         return lo+(hi-lo)*torch.rand(shape,device=self._device,generator=self.payload_rng)
 
-    def _write_ball_properties(self,ids,*,material=False):
+    def _write_ball_properties(self,ids,*,material=False,material_ids=None):
         cpu=ids.cpu()
+        # Materials follow the persistent cadence, whereas mass/inertia MUST
+        # change each episode. Fresh resume explicitly restores both families.
+        material_ids=ids if material_ids is None else material_ids
+        material=material and len(material_ids)>0
+        # Batch GPU/CPU crossings across the four balls; retain PhysX readback
+        # as the authoritative realized mass/material labels.
+        masses_cpu=self.ball_mass[ids].cpu()
+        inertias_cpu=sphere_inertia(self.ball_mass[ids],self.ball_radius[ids]).flatten(-2).cpu()
+        realized_masses=[]; realized_materials=[]
+        if material:
+            material_cpu=material_ids.cpu()
+            friction_cpu=self.ball_friction[material_ids].cpu()
+            restitution_cpu=self.ball_restitution[material_ids].cpu()
         for k,ball in enumerate(self.balls):
             view=ball.root_physx_view
-            mass=view.get_masses().clone(); mass[cpu,0]=self.ball_mass[ids,k].cpu()
+            mass=view.get_masses().clone(); mass[cpu,0]=masses_cpu[:,k]
             inertia=view.get_inertias().clone()
-            inertia[cpu]=sphere_inertia(self.ball_mass[ids,k],self.ball_radius[ids,k]).reshape(-1,9).cpu()
+            inertia[cpu]=inertias_cpu[:,k]
             view.set_masses(mass,cpu); view.set_inertias(inertia,cpu)
             if material:
                 props=view.get_material_properties().clone()
-                props[cpu,:,:2]=self.ball_friction[ids,k,None,None].cpu()
-                props[cpu,:,2]=self.ball_restitution[ids,k,None].cpu()
-                view.set_material_properties(props,cpu)
-            self.ball_mass[ids,k]=view.get_masses()[cpu,0].to(self._device)
-            props=view.get_material_properties()[cpu]
-            self.ball_friction[ids,k]=props[:,0,1].to(self._device)
-            self.ball_restitution[ids,k]=props[:,0,2].to(self._device)
+                props[material_cpu,:,:2]=friction_cpu[:,k,None,None]
+                props[material_cpu,:,2]=restitution_cpu[:,k,None]
+                view.set_material_properties(props,material_cpu)
+            realized_masses.append(view.get_masses()[cpu,0].clone())
+            if material:
+                realized_materials.append(view.get_material_properties()[material_cpu,0,1:3].clone())
+        self.ball_mass[ids]=torch.stack(realized_masses,1).to(self._device)
+        if material:
+            realized=torch.stack(realized_materials,1).to(self._device)
+            self.ball_friction[material_ids]=realized[:,:,0]
+            self.ball_restitution[material_ids]=realized[:,:,1]
 
     def reset_payload(self,ids):
         if not len(ids): return
@@ -152,7 +169,8 @@ class IsaacLabSimulatorMULE(IsaacLabSimulatorBR):
             hi=(c.light_mass_range[1]+severity*(c.reset_mass_range[1]-c.light_mass_range[1])).clamp_min(c.mass_floor_kg)
             self.ball_mass[ids]=lo+(hi-lo)*self._uniform((len(ids),4),0.,1.)
             self.mass_elapsed[ids]=0; self.mass_change_count[ids]=0
-        self._write_ball_properties(ids,material=True)
+        material_ids=ids if getattr(self,'_resume_samples',False) or not getattr(self,'collection_optimizations',True) else due
+        self._write_ball_properties(ids,material=True,material_ids=material_ids)
         d=self._robot.data
         states=ball_spawn_state(d.root_link_quat_w[ids],d.root_link_pos_w[ids],d.root_link_lin_vel_w[ids],
             d.root_link_ang_vel_w[ids],self.ball_offsets[ids],self.ball_relative_velocity[ids],self.ball_relative_omega[ids])
@@ -209,9 +227,10 @@ class IsaacLabSimulatorMULE(IsaacLabSimulatorBR):
             contact.update()
             self.payload_reaction_world.sub_(contact.total.reshape(self._num_envs,3))
 
-    def leg_jacobians_b(self):
-        return canonical_leg_jacobians(self._robot.root_physx_view.get_jacobians(),self._mule_feet,
-            self._dof_indices,self._robot.data.root_link_quat_w,fixed_base=self._robot.is_fixed_base)
+    def leg_jacobians_b(self,ids=None):
+        rows=slice(None) if ids is None else ids
+        return canonical_leg_jacobians(self._robot.root_physx_view.get_jacobians()[rows],self._mule_feet,
+            self._dof_indices,self._robot.data.root_link_quat_w[rows],fixed_base=self._robot.is_fixed_base)
 
     def payload_motion(self):
         if not self.balls:

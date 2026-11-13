@@ -26,6 +26,8 @@ from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
 
 class IsaacLabMULEEnv(Go2MULE):
     supports_exact_resume=False  # No restoration of PhysX contact/solver state.
+    collection_optimizations=True  # Runtime-only reference switch; not a physical contract.
+    compact_reset_min_envs=1024  # Small batches favor fewer gather/kernel launches.
     _reset_dofs=Go2PACT._reset_dofs
     _reset_root_states=Go2PACT._reset_root_states
     _apply_domain_rand_curriculum_state=Go2HardPACT._apply_domain_rand_curriculum_state
@@ -94,28 +96,39 @@ class IsaacLabMULEEnv(Go2MULE):
 
     def _refresh(self,ids=None):
         s=self.simulator; d=s._robot.data; schema=self.input_schema
-        q=d.root_link_quat_w
-        physical=dict(angular_velocity_B=inverse_rotate_wxyz(q,d.root_link_ang_vel_w),
-            gravity_B=inverse_rotate_wxyz(q,s._global_gravity),command_B=self.commands[:,:3],
-            joint_position=s.dof_pos,joint_velocity=s.dof_vel,previous_action=self.previous_action)
+        compact=(self.collection_optimizations and len(self.episode_id)>=self.compact_reset_min_envs
+            and ids is not None and self._packet is not None)
+        rows=ids if compact else slice(None)
+        q=d.root_link_quat_w[rows]
+        physical=dict(angular_velocity_B=inverse_rotate_wxyz(q,d.root_link_ang_vel_w[rows]),
+            gravity_B=inverse_rotate_wxyz(q,s._global_gravity[rows]),command_B=self.commands[rows,:3],
+            joint_position=s.dof_pos[rows],joint_velocity=s.dof_vel[rows],previous_action=self.previous_action[rows])
         clean=schema.pack('actor',physical)
-        self.actor_observation_cache.refresh(clean,ids)
-        velocity=inverse_rotate_wxyz(q,d.root_link_lin_vel_w)
+        if compact:
+            # Reuse the shared cache's selected-row noise/RNG convention. Only
+            # selected clean rows are read; no full-batch packing or SVD.
+            if not hasattr(self,'_reset_clean'): self._reset_clean=torch.empty_like(self.actor_observation_cache.values)
+            self._reset_clean[ids]=clean
+            self.actor_observation_cache.refresh(self._reset_clean,ids)
+        else: self.actor_observation_cache.refresh(clean,ids)
+        velocity=inverse_rotate_wxyz(q,d.root_link_lin_vel_w[rows])
         critic={**physical,'linear_velocity_B':velocity,
-            'disturbance_force_B':inverse_rotate_wxyz(q,s.payload_reaction_world)}
-        if schema.terrain_dim: critic['terrain_heights']=d.root_link_pos_w[:,2,None]-s._measured_heights
+            'disturbance_force_B':inverse_rotate_wxyz(q,s.payload_reaction_world[rows])}
+        if schema.terrain_dim: critic['terrain_heights']=d.root_link_pos_w[rows,2,None]-s._measured_heights[rows]
         critic=schema.pack('critic',critic)
-        force=estimate_foot_forces(s.hard_pact_executed_torque(),s.leg_jacobians_b())
+        jacobians=s.leg_jacobians_b(ids) if compact else s.leg_jacobians_b()
+        force=estimate_foot_forces(s.hard_pact_executed_torque()[rows],jacobians)
         valid=torch.isfinite(torch.cat((clean,critic,velocity),-1)).all(-1)
-        packet=MULEObservation(self.actor_observation_cache.values.clone(),critic,velocity,force,
-            self.episode_id.clone(),valid,self.clock).snapshot()
+        packet=MULEObservation(self.actor_observation_cache.values[rows],critic,velocity,force,
+            self.episode_id[rows],valid,self.clock)
         if ids is not None and self._packet is not None:
             old=self._packet
+            source=slice(None) if compact else ids
             for name in ('actor','critic','velocity_b','episode_id','supervision_valid'):
-                getattr(old,name)[ids]=getattr(packet,name)[ids]
-            old.foot_force_estimate.force_b[ids]=packet.foot_force_estimate.force_b[ids]
-            old.foot_force_estimate.valid[ids]=packet.foot_force_estimate.valid[ids]
-        else: self._packet=packet
+                getattr(old,name)[ids]=getattr(packet,name)[source]
+            old.foot_force_estimate.force_b[ids]=packet.foot_force_estimate.force_b[source]
+            old.foot_force_estimate.valid[ids]=packet.foot_force_estimate.valid[source]
+        else: self._packet=packet.snapshot()  # Own simulator/cache-backed tensors.
 
     def observe(self):
         if self._packet is None: raise RuntimeError('Reset before observing')
@@ -152,7 +165,12 @@ class IsaacLabMULEEnv(Go2MULE):
             lo,hi=self.shared.domain_rand.ctrl_delay_step_range
             self.action_delay[due]=torch.randint(lo,hi+1,(len(due),),device=self.device,generator=self.command_rng)
         self._sample_commands(ids); self._heading(ids); self._refresh(ids)
-        if self.rewards is not None: self.rewards.reset(ids,self._reward_snapshot())
+        if self.rewards is not None:
+            # Reset consumes only dq and ground contacts, not the full owned
+            # reward-transition snapshot (terrain geometry, velocities, etc.).
+            state=NS(dof_vel=s.dof_vel,link_contact_forces=s.ground_total_forces_world,
+                feet_contact_indices=s.feet_contact_indices) if self.collection_optimizations else self._reward_snapshot()
+            self.rewards.reset(ids,state)
         s._resume_samples=False
         return self.observe()
 
@@ -215,7 +233,11 @@ class IsaacLabMULEEnv(Go2MULE):
         result=MULEStep(packet,execution,nominal.clone(),adaptive.clone(),failure.clone(),timeout.clone(),
             packet.snapshot(),done&packet.supervision_valid,failure_reasons={k:v.clone() for k,v in reasons.items()},
             performance_metrics=performance,reward_terms=reward_terms)
-        self.reset(done.nonzero().flatten(),completed=True)
+        reset_ids=done.nonzero().flatten()
+        # The endpoint packet is already owned. No reset means it is also the
+        # next observation; avoid two redundant full-batch observe() snapshots.
+        if self.collection_optimizations and not len(reset_ids): return result
+        self.reset(reset_ids,completed=True)
         return MULEStep(self.observe(),result.execution,result.nominal_reward,result.adaptive_reward,
             result.terminated,result.timed_out,result.terminal,result.terminal_valid,failure_reasons=result.failure_reasons,
             performance_metrics=result.performance_metrics,reward_terms=result.reward_terms)

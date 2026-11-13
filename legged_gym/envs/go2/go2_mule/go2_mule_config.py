@@ -222,6 +222,9 @@ def resolve_go2_mule(env_cfg=None, train_cfg=None, *, environment_overrides=None
     if env_cfg is None:
         from legged_gym.envs.go2.go2_hard_pact.ablation_configs import make_hard_pact_backend_configs
         E,T=make_hard_pact_backend_configs('isaaclab'); env_cfg,train_cfg=E(),T()
+    # Own the complete live terrain section, including initial difficulty and
+    # type proportions. The simulator uses HardPACT's inherited origin sampler;
+    # do not replace these with nominal-stage/payload-specific terrain defaults.
     sections=('terrain','commands','init_state','normalization','noise','domain_rand',
               'termination','asset','sim','viewer','sensor')
     cfg=SimpleNamespace(**{k:_owned_settings(get(env_cfg,k)) for k in sections})

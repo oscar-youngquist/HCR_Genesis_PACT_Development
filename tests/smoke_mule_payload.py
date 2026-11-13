@@ -29,6 +29,8 @@ def main():
     p.add_argument('--physical-checks',action='store_true'); p.add_argument('--output-dir',default='/tmp/mule_payload')
     p.add_argument('--test-reward',action='store_true',help='Use the old diagnostic-only callback')
     p.add_argument('--curriculum-checks',action='store_true',help='Test-local fast shared gate: nominal -> rolling/joint')
+    p.add_argument('--reference-collection',action='store_true',help='Use full-batch reset refresh/material transfers for comparison')
+    p.add_argument('--refresh-timing-repeats',type=int,default=0,help='Bounded matched partial-reset refresh microbenchmark (0 disables)')
     args=p.parse_args(); out=Path(args.output_dir); out.mkdir(parents=True,exist_ok=True)
     overrides={'env.num_envs':args.num_envs,'terrain.num_rows':1,'terrain.num_cols':2,
         'terrain.max_init_terrain_level':0,'terrain.terrain_proportions':[1.]+[0.]*10,
@@ -52,6 +54,7 @@ def main():
     try:
         kwargs=dict(reward_fn=test_only_mule_tracking_reward,reward_contract='test_only_tracking_v1') if args.test_reward else {}
         env=IsaacLabMULEEnv(resolved,args.gpu,True,**kwargs)
+        env.collection_optimizations=env.simulator.collection_optimizations=not args.reference_collection
         packet=env.reset(); s=env.simulator; checks={}
         labels=env.physical_labels()
         assert (labels['realized_robot']['tray_mass']>0).all()
@@ -73,6 +76,30 @@ def main():
         torch.testing.assert_close(before.actor[1:],env.observe().actor[1:],rtol=0,atol=0)
         torch.testing.assert_close(roots[1:],s._robot.data.root_link_state_w[1:],rtol=0,atol=0)
         checks.update(observe_pure=True,partial_reset=True)
+        refresh_timing={}
+        if args.refresh_timing_repeats:
+            if not 1<=args.refresh_timing_repeats<=100: raise ValueError('Timing repeats must be in [1,100]')
+            ids=torch.arange(max(1,args.num_envs//64),device=args.gpu)
+            cache=env.actor_observation_cache
+            saved=(env.observe(),cache.values.clone(),cache.noise.clone(),cache.generator.get_state())
+            min_envs=env.compact_reset_min_envs; env.compact_reset_min_envs=1
+            packets=[]
+            for optimized in (False,True):
+                env.collection_optimizations=optimized
+                cache.generator.set_state(saved[3]); env._refresh(ids); packets.append(env.observe())
+                for _ in range(3): env._refresh(ids)
+                torch.cuda.synchronize(); start=time.perf_counter()
+                for _ in range(args.refresh_timing_repeats): env._refresh(ids)
+                torch.cuda.synchronize()
+                refresh_timing['optimized_ms' if optimized else 'reference_ms']=(time.perf_counter()-start)*1000/args.refresh_timing_repeats
+            for field in ('actor','critic','velocity_b','episode_id','supervision_valid'):
+                torch.testing.assert_close(getattr(packets[0],field),getattr(packets[1],field))
+            torch.testing.assert_close(packets[0].foot_force_estimate.force_b,packets[1].foot_force_estimate.force_b)
+            assert torch.equal(packets[0].foot_force_estimate.valid,packets[1].foot_force_estimate.valid)
+            env._packet=saved[0]; cache.values.copy_(saved[1]); cache.noise.copy_(saved[2]); cache.generator.set_state(saved[3])
+            env.collection_optimizations=not args.reference_collection
+            env.compact_reset_min_envs=min_envs
+            refresh_timing.update(selected_rows=len(ids),total_rows=args.num_envs,repeats=args.refresh_timing_repeats)
         for k,ball in enumerate(s.balls):
             torch.testing.assert_close(ball.root_physx_view.get_inertias().to(args.gpu).reshape(-1,3,3),
                 sphere_inertia(s.ball_mass[:,k],s.ball_radius[:,k]),rtol=1e-5,atol=1e-8)
@@ -141,6 +168,8 @@ def main():
         import warp
         versions['warp_runtime']=warp.__version__
         report=dict(checks=checks,mode=args.mode,num_envs=args.num_envs,steps=args.steps,
+            collection_optimizations=not args.reference_collection,
+            partial_refresh_timing=refresh_timing,
             phases=['nominal_only','joint_adaptation'],logs=logs,elapsed_s=elapsed,
             interactions_per_s=len(logs)*args.steps*args.num_envs/elapsed,
             peak_torch_allocated_bytes=torch.cuda.max_memory_allocated(),
