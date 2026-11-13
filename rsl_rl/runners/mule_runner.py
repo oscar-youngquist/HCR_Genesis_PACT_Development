@@ -13,6 +13,26 @@ from rsl_rl.modules.actor_critic_mule import ActorCriticMULE
 from rsl_rl.algorithms.ppo_mule import PPOMULE
 from rsl_rl.utils.learning_diagnostics import (LearningEpisodeDiagnostics, policy_diagnostics,
     compatible_training_metrics, format_training_summary)
+from rsl_rl.utils.training_checkpoint import atomic_save
+
+
+def training_cuda_rng(data, target_device, *, exact=False, device_count=None):
+    """Select, never mutate, CUDA RNG restoration. Fresh maps the training GPU
+    only; unrelated visible GPUs need not match. CPU/CUDA algorithm differences
+    preclude bitwise continuation across device types, reported by the caller.
+    """
+    states=data.get('cuda_rng'); target=torch.device(target_device)
+    if states is None: return []
+    count=torch.cuda.device_count() if device_count is None else device_count
+    if exact:
+        if states is not None and len(states)!=count: raise ValueError('Exact CUDA RNG device count differs')
+        return [] if states is None else list(enumerate(states))
+    source=torch.device(data['device'])
+    if target.type!='cuda' or source.type!='cuda' or states is None: return []
+    source_index=data.get('training_cuda_index',source.index if source.index is not None else 0)
+    target_index=target.index if target.index is not None else torch.cuda.current_device()
+    if source_index>=len(states) or target_index>=count: raise ValueError('Missing training-device CUDA RNG')
+    return [(target_index,states[source_index])]
 
 
 class MULERunner:
@@ -45,6 +65,8 @@ class MULERunner:
                 from torch.utils.tensorboard import SummaryWriter
                 self.writer=SummaryWriter(str(self.log_dir)); self._owns_writer=True
             manifest = dict(environment=asdict(env.cfg), training=config.resolved(), model_contract=config.contract())
+            if hasattr(env,'physical_contract'): manifest['physical_contract']=env.physical_contract()
+            if hasattr(env,'resolved'): manifest['inheritance']=env.resolved.manifest
             (self.log_dir/'mule_configuration.json').write_text(json.dumps(manifest, indent=2, allow_nan=False))
 
     def _validate_observation(self, observation, *, terminal=False):
@@ -236,7 +258,9 @@ class MULERunner:
         if exact and not all(hasattr(self.env, name) for name in ('state_dict', 'validate_state_dict', 'load_state_dict')):
             raise ValueError('Exact environments must implement state validation/restoration')
         curriculum = self.env.curriculum_state_dict() if hasattr(self.env, 'curriculum_state_dict') else None
-        torch.save(dict(version=1, device=str(self.device), algorithm=algorithm, environment_contract=asdict(self.env.cfg),
+        atomic_save(dict(version=1, device=str(self.device), algorithm=algorithm, environment_contract=asdict(self.env.cfg),
+            physical_contract=self.env.physical_contract() if hasattr(self.env,'physical_contract') else None,
+            training_cuda_index=(self.device.index if self.device.index is not None else torch.cuda.current_device()) if self.device.type=='cuda' else None,
             environment_state=self.env.state_dict() if exact else None, exact_environment=exact,
             curriculum=curriculum, interactions=self.interactions, control_steps=self.control_steps,
             episode_returns=self.episode_returns, episode_lengths=self.episode_lengths,
@@ -254,6 +278,8 @@ class MULERunner:
         data = torch.load(path, map_location=self.device, weights_only=False)
         if data.get('version') != 1 or data.get('environment_contract') != asdict(self.env.cfg):
             raise ValueError('Incompatible MULE runner/environment contract')
+        physical=self.env.physical_contract() if hasattr(self.env,'physical_contract') else None
+        if data.get('physical_contract')!=physical: raise ValueError('Incompatible MULE physical contract')
         self.alg.validate_state_dict(data['algorithm'])
         self.episode_diagnostics.validate_state_dict(data.get('episode_diagnostics'))
         exact = resume_mode == 'exact'
@@ -281,9 +307,8 @@ class MULERunner:
         random.Random().setstate(data['python_rng'])
         np.random.RandomState().set_state(data['numpy_rng'])
         torch.Generator().set_state(data['torch_rng'].cpu())
-        if data['cuda_rng'] is not None:
-            if len(data['cuda_rng']) != torch.cuda.device_count(): raise ValueError('CUDA RNG device count differs')
-            for i, state in enumerate(data['cuda_rng']): torch.Generator(device=f'cuda:{i}').set_state(state.cpu())
+        cuda_restore=training_cuda_rng(data,self.device,exact=exact)
+        for i,state in cuda_restore: torch.Generator(device=f'cuda:{i}').set_state(state.cpu())
         self.alg.load_state_dict(data['algorithm'])
         if data['curriculum'] is not None: self.env.load_curriculum_state_dict(data['curriculum'])
         self.interactions, self.control_steps = data['interactions'], data['control_steps']
@@ -297,5 +322,8 @@ class MULERunner:
             self.episode_diagnostics.load_state_dict(data.get('episode_diagnostics'))
         random.setstate(data['python_rng']); np.random.set_state(data['numpy_rng'])
         torch.set_rng_state(data['torch_rng'].cpu())
-        if data['cuda_rng'] is not None: torch.cuda.set_rng_state_all([s.cpu() for s in data['cuda_rng']])
+        for i,state in cuda_restore: torch.cuda.set_rng_state(state.cpu(),i)
+        self.resume_report=dict(mode=resume_mode,source_device=data['device'],target_device=str(self.device),
+            cuda_rng_restored_indices=[i for i,_ in cuda_restore],
+            portability='Fresh physics; training-GPU RNG mapped only. Different device types/architectures are not bitwise equivalent.' if not exact else 'Exact validated environment/device restoration')
         if not exact: self._fresh_environment()

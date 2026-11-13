@@ -178,7 +178,7 @@ class Go2MULECfg:
 
 
 def resolve_go2_mule_configs(env_cfg=None, train_cfg=None, **learning_overrides):
-    """Owned env/learning contracts, not a runnable physical task yet."""
+    """Owned learning contracts; use resolve_go2_mule for physical settings."""
     if (env_cfg is None)!=(train_cfg is None): raise ValueError('Supply both shared configs or neither')
     if env_cfg is None:
         from legged_gym.envs.go2.go2_hard_pact.ablation_configs import make_hard_pact_backend_configs
@@ -189,3 +189,83 @@ def resolve_go2_mule_configs(env_cfg=None, train_cfg=None, **learning_overrides)
         get(get(env_cfg,'control'),'decimation'), training.action_scale, training.clip_actions,
         tuple(angles[name] for name in training.schema.joint_order))
     return environment,training
+
+
+@dataclass
+class ResolvedGo2MULE:
+    environment: Go2MULECfg
+    training: Go2MULECfgPPO
+    shared: object
+    payload: object
+    manifest: dict
+
+    @property
+    def sim_params(self):
+        from rsl_rl.beyond_robustness_config import settings_dict
+        return settings_dict(self.shared.sim)
+
+
+def resolve_go2_mule(env_cfg=None, train_cfg=None, *, environment_overrides=None,
+                     training_overrides=None, payload_overrides=None):
+    """Physical factory; no task registration, reward import or automatic stages.
+
+    Only generic owned-settings conversion is reused from BR, not its factory,
+    observation schema, payload ranges or learning/reward configuration.
+    """
+    from types import SimpleNamespace
+    from rsl_rl.beyond_robustness_config import _owned_settings, settings_dict
+    from .rolling_payload import RollingPayloadConfig
+    if (env_cfg is None)!=(train_cfg is None): raise ValueError('Supply both shared configs or neither')
+    if env_cfg is None:
+        from legged_gym.envs.go2.go2_hard_pact.ablation_configs import make_hard_pact_backend_configs
+        E,T=make_hard_pact_backend_configs('isaaclab'); env_cfg,train_cfg=E(),T()
+    sections=('terrain','commands','init_state','normalization','noise','domain_rand',
+              'termination','asset','sim','viewer','sensor')
+    cfg=SimpleNamespace(**{k:_owned_settings(get(env_cfg,k)) for k in sections})
+    allow=dict(env=('num_envs','num_obs_hist','episode_length_s','env_spacing','fail_to_terminal_time_s',
+                   'send_timeouts','lateral_push_only','debug','debug_viz'),
+        control=('stiffness','damping','action_scale','dt','decimation'),
+        rewards=('soft_dof_pos_limit','soft_dof_vel_limit','soft_torque_limit',
+                 'edge_clearance_forward_cells','edge_clearance_lateral_cells','feet_edge_threshold'))
+    for group,names in allow.items():
+        setattr(cfg,group,SimpleNamespace(**{k:deepcopy(get(get(env_cfg,group),k)) for k in names}))
+    cfg.seed=int((training_overrides or {}).get('seed',get(train_cfg,'seed')))
+    cfg.env.num_actions=12; cfg.env.num_observations=45
+    cfg.control.control_type='P'; cfg.control.use_tradeoff_curriculum=False; cfg.control.randomize_pact_weights=False
+    cfg.sensor.add_depth=False
+    overrides=deepcopy(environment_overrides or {})
+    for path,value in overrides.items():
+        parts=path.split('.'); node=cfg
+        for part in parts[:-1]: node=getattr(node,part)
+        if not hasattr(node,parts[-1]): raise ValueError('Unknown MULE environment setting: '+path)
+        setattr(node,parts[-1],_owned_settings(value))
+    if overrides.get('domain_rand.persistent_disturbance',False):
+        raise ValueError('MULE rolling stage uses real payloads, not persistent torso wrenches')
+    cfg.domain_rand.persistent_disturbance=False
+    cfg.sim.physx.gpu_total_aggregate_pairs_capacity=getattr(cfg.sim.physx,'gpu_total_aggregate_pairs_capacity',2**22)
+    if cfg.control.control_type!='P' or cfg.env.num_actions!=12 or cfg.env.num_observations!=45 or cfg.sensor.add_depth:
+        raise ValueError('MULE requires native 45-D proprioception and 12-D position PD')
+    if not isinstance(cfg.control.decimation,int) or cfg.control.decimation<1 or not math.isfinite(cfg.control.dt) or cfg.control.dt<=0:
+        raise ValueError('Invalid physics/control timing')
+    dt=cfg.control.dt/cfg.control.decimation
+    if 'sim.dt' in overrides and not math.isclose(cfg.sim.dt,dt): raise ValueError('Mismatched physics dt')
+    cfg.sim.dt=dt; cfg.terrain.num_subterrains=cfg.terrain.num_rows*cfg.terrain.num_cols
+    for gains in (cfg.control.stiffness,cfg.control.damping):
+        if any(not math.isfinite(v) or v<0 for v in gains.values()) or any(not any(k in j for k in gains) for j in cfg.asset.dof_names):
+            raise ValueError('Named PD gains must cover all joints')
+    for v in (cfg.env.episode_length_s,cfg.commands.resampling_time):
+        if not math.isfinite(v) or v<=0: raise ValueError('Positive episode/command periods required')
+    delay=cfg.domain_rand.ctrl_delay_step_range
+    if len(delay)!=2 or any(not isinstance(v,int) or v<0 for v in delay) or delay[1]<delay[0]: raise ValueError('Invalid control delay')
+    environment,training=resolve_go2_mule_configs(cfg,train_cfg,**(training_overrides or {}))
+    if training.num_envs!=cfg.env.num_envs or training.schema.history_length!=cfg.env.num_obs_hist:
+        raise ValueError('Set environment sizing/history through environment_overrides')
+    if tuple(cfg.asset.foot_name)!=tuple(f'{f}_foot' for f in ('FR','FL','RR','RL')):
+        raise ValueError('Canonical named feet required')
+    payload=RollingPayloadConfig(**{'seed':cfg.seed,**(payload_overrides or {})})
+    if payload.seed!=cfg.seed: raise ValueError('Payload seed must match run seed')
+    return ResolvedGo2MULE(environment,training,cfg,payload,dict(version=1,
+        inherited_sections=sections,inherited_fields=allow,shared=settings_dict(cfg),
+        source='live Go2 HardPACT Isaac Lab physical/optimization settings only',
+        overrides=dict(environment=overrides,training=training_overrides or {},payload=payload_overrides or {}),
+        method='MULE native context/dual PPO; no production reward, automatic stage clock or phase transition'))

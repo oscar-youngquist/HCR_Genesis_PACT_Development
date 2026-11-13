@@ -1,6 +1,6 @@
-"""Go2 MULE learning/environment boundary; no physical implementation yet.
+"""Go2 MULE learning/environment boundary.
 
-Future rolling-ball adapter implements this class, not BR's sliding box or
+The isolated IsaacLabMULEEnv implements this class, not BR's sliding box or
 scripted payload wrenches. observe() is read-only (no RNG/history/physics).
 Histories advance once per action and clear per reset on the learning side.
 Physical stage and optimization phase are independent; no scheduler here.
@@ -49,7 +49,7 @@ class MULEStep:
 
 
 class Go2MULE(ABC):
-    """Abstract until physical integration, deliberately not registered.
+    """Abstract boundary; concrete rolling adapter deliberately not registered.
 
     Adapter owns the action-delay queue and reports applied source identity.
     Failures take precedence over timeouts. Bootstrap uses terminal snapshots,
