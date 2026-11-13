@@ -49,7 +49,7 @@ class MULEStep:
 
 
 class Go2MULE(ABC):
-    """Abstract boundary; concrete rolling adapter deliberately not registered.
+    """Abstract boundary; IsaacLabMULEEnv is the registered production adapter.
 
     Adapter owns the action-delay queue and reports applied source identity.
     Failures take precedence over timeouts. Bootstrap uses terminal snapshots,

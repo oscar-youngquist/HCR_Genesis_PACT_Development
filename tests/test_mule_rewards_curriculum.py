@@ -32,8 +32,8 @@ def test_native_coefficients_zeros_dt_and_no_phase_dependence():
     assert list(NATIVE.values())==[(1.,0.),(.5,0.),(-2.,-2.),(-.05,-.05),(-.2,-.2),
         (-2.5e-7,-2.5e-7),(-2e-5,0.),(-2.,-2.),(-.01,-.01),(-.001,-.01),(-.01,-.01),(0.,2.)]
     e,s=fixture(); n,a=evaluate(e,s)
-    torch.testing.assert_close(n,torch.full((3,),.02*1.49))
-    torch.testing.assert_close(a,torch.full((3,),-.02*.01))
+    torch.testing.assert_close(n,torch.full((3,),.02*1.5))
+    torch.testing.assert_close(a,torch.zeros(3))
     e2,s2=fixture(dt=.04); n2,a2=evaluate(e2,s2)
     torch.testing.assert_close(n2,2*n); torch.testing.assert_close(a2,2*a)
     e.begin_iteration(4000); n3,_=evaluate(e,s,adaptive=torch.ones(3,12)*20)
@@ -49,7 +49,7 @@ def test_shared_formulas_and_explicit_addition_contract():
     s.projected_gravity[:,0]=.2
     previous=e.velocity.clone(); evaluate(e,s)
     context=NS(simulator=s,cfg=e.cfg,commands=torch.zeros(3,4),dt=e.dt); s.last_dof_vel=previous
-    for k in NATIVE.keys()-{'grf_tracking','action_rate','action_smoothness'}:
+    for k in NATIVE.keys()-{'grf_tracking','action_rate','action_smoothness','foot_clearance'}:
         torch.testing.assert_close(e.last_raw['nominal'][k],getattr(Go2PACT,'_reward_'+k)(context))
     for k in ADDITIONS:
         assert e.spec['terms'][k]['coefficients']['adaptive']==0

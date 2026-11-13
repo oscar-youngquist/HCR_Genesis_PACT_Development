@@ -109,7 +109,7 @@ def main():
             assert runner.alg.model.phase=='nominal_only' # no mid-update switch
             env.episode_steps[0]=env.max_episode_length-1 # reset boundary within next rollout
         else: runner.transition_to_joint_adaptation()
-        logs+=runner.learn(1); runner.save(out/'joint.pt')
+        logs+=runner.learn(1); runner.save(out/'continuation'/'joint.pt')
         if args.curriculum_checks:
             assert s.payload_active[0] and (s.realized_severity[0]==.25)
             assert runner.alg.model.phase=='joint_adaptation'
@@ -120,7 +120,7 @@ def main():
             assert 'grf_tracking' not in env.rewards.last_weighted['nominal']
             checks['production_streams_and_zeros']=True
         sampling=s.sampling_state_dict(); progress=env.curriculum_state_dict()
-        runner.load(out/'joint.pt',resume_mode='fresh')
+        runner.load(out/'continuation'/'joint.pt',resume_mode='fresh')
         assert runner.alg.model.phase=='joint_adaptation' and runner.alg.iteration==len(logs)
         torch.testing.assert_close(s.ball_mass,sampling['tensors']['ball_mass'])
         torch.testing.assert_close(s.mass_elapsed,sampling['tensors']['mass_elapsed'])

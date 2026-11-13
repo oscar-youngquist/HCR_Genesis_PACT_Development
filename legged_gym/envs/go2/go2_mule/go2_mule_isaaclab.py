@@ -36,7 +36,8 @@ class IsaacLabMULEEnv(Go2MULE):
             raise ValueError('Explicit test MULE reward requires callable and versioned reward_contract')
         if reward_fn is None and reward_contract is not None: raise ValueError('Reward contract without callback')
         super().__init__(resolved.environment)
-        self.resolved=deepcopy(resolved); self.shared=deepcopy(resolved.shared)
+        self.resolved=deepcopy(resolved); self.resolved_config=self.resolved
+        self.shared=deepcopy(resolved.shared)
         self.device=str(torch.device(device)); self.num_actions=12; self.dt=self.cfg.control_dt
         self.reward_fn=reward_fn; self.reward_contract=reward_contract or deepcopy(self.shared.mule_reward)
         self.rewards=None if reward_fn is not None else MULERewards(self.shared.mule_reward,self.shared,self.num_envs,device)
@@ -302,6 +303,26 @@ class IsaacLabMULEEnv(Go2MULE):
             command_rng=self.command_rng.get_state(),noise=self.actor_observation_cache.state_dict(),
             action_delay=self.action_delay.clone(),iteration=self.iteration,
             terrain_levels=s.terrain_levels.clone(),terrain_types=s.terrain_types.clone()))
+
+    def export_training_progress(self):
+        """Portable difficulty, not sphere geometry, sampling RNG/timers or contacts.
+
+        A future target must validate its labels/physics contract and implement
+        import_training_progress + initialize_transferred_payload. This rolling
+        adapter deliberately does not claim it can create liquid physics.
+        """
+        s=self.simulator
+        return deepcopy(dict(version=1,domain=self.domain_rand_curriculum.state_dict(),
+            rewards=None if self.rewards is None else self.rewards.state_dict(),
+            command_ranges=self.command_ranges,command_streak=self.command_streak,
+            iteration=self.iteration,last_completed_iteration=self.last_completed_iteration,
+            terrain_levels=s.terrain_levels.clone(),terrain_types=s.terrain_types.clone()))
+
+    def training_stage_state(self):
+        s=self.simulator
+        return dict(name='rolling' if s.balls and s.payload_progress>0 else 'nominal',
+            origin_iteration=0,requested_severity=s.payload_progress,
+            realization='per-environment activation/severity in curriculum sampling state; reset-boundary application')
 
     def validate_curriculum_state_dict(self,state):
         if state['version']!=2 or state['contract']!=self.physical_contract(): raise ValueError('Incompatible MULE physical/reward contract; Stage 3 requires explicit migration')

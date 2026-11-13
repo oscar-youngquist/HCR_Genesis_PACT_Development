@@ -32,6 +32,10 @@ def canonical_leg_jacobians(jacobian, body_indices, joint_indices, quat, *, fixe
 
 
 class IsaacLabSimulatorMULE(IsaacLabSimulatorBR):
+    def _scene_physx_options(self):
+        return {**super()._scene_physx_options(),
+            'gpu_found_lost_pairs_capacity':getattr(self._cfg.sim.physx,'gpu_found_lost_pairs_capacity',2**21)}
+
     def __init__(self,cfg,sim_params,device,headless,payload_cfg):
         self.payload_cfg=payload_cfg
         self.payload_rng=torch.Generator(device=device).manual_seed(payload_cfg.seed)

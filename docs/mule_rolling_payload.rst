@@ -2,11 +2,12 @@ MULE rolling-payload integration
 ===============================
 
 This stage supplies ``IsaacLabMULEEnv(Go2MULE)`` and
-``IsaacLabSimulatorMULE``. It is not a registered production task. Models,
+``IsaacLabSimulatorMULE``. Production registration and commands now live in
+``mule_production.rst``. Models,
 native context losses, dual-PPO ownership, rollout likelihoods and phase
 transitions retain their ownership. Stage 4 adds production rewards and shared
 curriculum orchestration (see ``mule_rewards_curriculum.rst``). Production
-launchers, registration and liquid fine-tuning remain deferred.
+integration is now available; liquid fine-tuning remains deferred.
 
 Evidence and choices
 --------------------

@@ -208,3 +208,7 @@ if SIMULATOR == 'isaaclab':
     from legged_gym.envs.go2.go2_beyond_robustness import IsaacLabBeyondRobustnessEnv
     task_registry.register_resolved('go2_beyond_robustness_isaaclab',resolve_beyond_robustness,
         IsaacLabBeyondRobustnessEnv,BeyondRobustnessRunner)
+    from legged_gym.envs.go2.go2_mule.go2_mule_config import resolve_go2_mule
+    from legged_gym.envs.go2.go2_mule.go2_mule_isaaclab import IsaacLabMULEEnv
+    from rsl_rl.runners.mule_runner import MULERunner
+    task_registry.register_resolved('go2_mule_isaaclab',resolve_go2_mule,IsaacLabMULEEnv,MULERunner)

@@ -65,7 +65,7 @@ class TaskRegistry():
                 raise ValueError('Selected task has no validated cross-payload stage-transfer adapter; liquid integration is not implemented')
         if name in self.resolved_factories:
             if args is None or not hasattr(args,'device'):
-                raise ValueError('Resolved BR tasks require train_beyond_robustness.py arguments')
+                raise ValueError('Resolved tasks require explicit device/headless entrypoint arguments')
             resolved=env_cfg if env_cfg is not None else self.resolved_factories[name][0]()
             env=self.task_classes[name](resolved,device=args.device,headless=args.headless)
             return env,resolved

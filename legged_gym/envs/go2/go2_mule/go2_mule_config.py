@@ -208,7 +208,7 @@ class ResolvedGo2MULE:
 def resolve_go2_mule(env_cfg=None, train_cfg=None, *, environment_overrides=None,
                      training_overrides=None, payload_overrides=None, reward_overrides=None,
                      curriculum_overrides=None):
-    """Owned physical/reward/curriculum factory; no production task/launcher.
+    """Owned physical/reward/curriculum factory for the resolved MULE task.
 
     Only generic owned-settings conversion is reused from BR, not its factory,
     observation schema, payload ranges or learning/reward configuration.
@@ -224,6 +224,9 @@ def resolve_go2_mule(env_cfg=None, train_cfg=None, *, environment_overrides=None
     sections=('terrain','commands','init_state','normalization','noise','domain_rand',
               'termination','asset','sim','viewer','sensor')
     cfg=SimpleNamespace(**{k:_owned_settings(get(env_cfg,k)) for k in sections})
+    # Four moving bodies per robot require more broadphase bookkeeping. This
+    # is allocator capacity only, not a change to contact/solver tolerances.
+    cfg.sim.physx.gpu_found_lost_pairs_capacity=getattr(cfg.sim.physx,'gpu_found_lost_pairs_capacity',2**21)
     allow=dict(env=('num_envs','num_obs_hist','episode_length_s','env_spacing','fail_to_terminal_time_s',
                    'send_timeouts','lateral_push_only','debug','debug_viz'),
         control=('stiffness','damping','action_scale','dt','decimation'),
@@ -253,6 +256,11 @@ def resolve_go2_mule(env_cfg=None, train_cfg=None, *, environment_overrides=None
     if overrides.get('domain_rand.persistent_disturbance',False):
         raise ValueError('MULE rolling stage uses real payloads, not persistent torso wrenches')
     cfg.domain_rand.persistent_disturbance=False
+    if 'sim.physx.gpu_found_lost_pairs_capacity' not in overrides:
+        cfg.sim.physx.gpu_found_lost_pairs_capacity=max(cfg.sim.physx.gpu_found_lost_pairs_capacity,
+            1 << max(0,(1024*cfg.env.num_envs-1).bit_length()))
+    if not isinstance(cfg.sim.physx.gpu_found_lost_pairs_capacity,int) or cfg.sim.physx.gpu_found_lost_pairs_capacity<1:
+        raise ValueError('Positive integer broadphase capacity required')
     cfg.sim.physx.gpu_total_aggregate_pairs_capacity=getattr(cfg.sim.physx,'gpu_total_aggregate_pairs_capacity',2**22)
     if cfg.control.control_type!='P' or cfg.env.num_actions!=12 or cfg.env.num_observations!=45 or cfg.sensor.add_depth:
         raise ValueError('MULE requires native 45-D proprioception and 12-D position PD')

@@ -29,6 +29,7 @@ if [[ "$mode" == script ]]; then
     entry="$task"
     case "$entry" in
         go2_beyond_robustness_unity.sh) ;;
+        go2_mule_unity.sh) ;;
         go2_hard_pact_rss_pos_ppo_unity.sh) ;;
         go2_hard_pact_rss_coupled_ppo_unity.sh) ;;
         go2_hard_pact_rss_guided_no_qp_unity.sh) ;;
@@ -44,6 +45,7 @@ if [[ "$mode" == script ]]; then
     simulator=isaaclab
 else
     case "$task" in go2_beyond_robustness_isaaclab) simulator=isaaclab; entry=train_beyond_robustness.py ;;
+        go2_mule_isaaclab) simulator=isaaclab; entry=train_mule.py ;;
         go2_hard_pact*_isaaclab) simulator=isaaclab; entry=train_hard_pact.py ;;
         *) echo "Unsupported task: $task" >&2; exit 2;; esac
 fi
@@ -82,6 +84,10 @@ done
 export APPTAINERENV_CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES"
 export APPTAINERENV_OMNI_KIT_ACCEPT_EULA=YES
 export APPTAINERENV_SIMULATOR="$simulator"
+# Linked worktrees point outside the repo bind. Archive authoritative host Git
+# identity without binding an unrelated checkout or requiring writable .git.
+export APPTAINERENV_TRAINING_GIT_SHA=$(git -C "$REPO" rev-parse HEAD)
+export APPTAINERENV_TRAINING_GIT_STATUS=$(git -C "$REPO" status --short)
 export APPTAINERENV_OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
 export APPTAINERENV_WANDB_MODE="${WANDB_MODE:-offline}"
 export APPTAINERENV_TMPDIR=/tmp
@@ -109,6 +115,6 @@ if [[ "$mode" == script ]]; then
 fi
 limits=()
 [[ "$mode" != smoke ]] || limits=(--num_envs=2 --max_iterations=1)
-if [[ "$mode" == smoke && "$task" == go2_beyond_robustness_isaaclab ]]; then limits=(--smoke --num-envs=2 --max-iterations=1); fi
+if [[ "$mode" == smoke && ( "$task" == go2_beyond_robustness_isaaclab || "$task" == go2_mule_isaaclab ) ]]; then limits=(--smoke --num-envs=2 --max-iterations=1); fi
 exec apptainer "${options[@]}" "$IMAGE" /opt/env/bin/python -u "$entry" \
     --task="$task" --gpu=cuda:0 --headless "${limits[@]}" "$@"

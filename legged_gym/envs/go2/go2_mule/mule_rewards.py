@@ -2,8 +2,9 @@
 
 No author training code is available. Table I specifies coefficients, not the
 non-GRF formulas: those use the existing HardPACT/Go2PACT helpers at the user's
-request. In particular its clearance helper is a positive exponential despite
-MULE's negative coefficient; this is intentional and NOT exact reproduction.
+request, except clearance: its negative coefficient requires a positive cost.
+Terrain-relative speed-weighted squared clearance error is an explicit
+reproduction assumption, not a verified author-code formula.
 """
 from copy import deepcopy
 from types import SimpleNamespace as NS
@@ -11,7 +12,7 @@ import math
 import torch
 from rsl_rl.beyond_robustness_rewards import ADDITIONS as SHARED_ADDITIONS, PARAMETERS
 
-VERSION = 1
+VERSION = 2
 PAPER = 'https://arxiv.org/html/2505.00488v1#S2.T1'
 # Explicit zeros are part of the contract, not absent/default inherited terms.
 NATIVE = {
@@ -30,7 +31,7 @@ FORMULAS = {
     'dof_acc': ('sum(((dq-dq_previous)/control_dt)^2)','rad^2/s^4'),
     'joint_power': ('sum(abs(tau_executed*dq))','W'),
     'base_height': ('(mean(base_z-terrain_samples)-height_target)^2','m^2'),
-    'foot_clearance': ('exp(-sum(norm(foot_v_world_xy)*(foot_z_world-clearance_target-height_offset)^2)/clearance_sigma)','1'),
+    'foot_clearance': ('sum(norm(foot_v_world_xy)*(foot_z-mean(local_terrain_z)-height_offset-clearance_target)^2)','m^3/s'),
     'action_rate': ('sum((a_stream-a_previous_stream)^2)','normalized action^2'),
     'action_smoothness': ('sum((a_stream-2*a_previous_stream+a_previous2_stream)^2)','normalized action^2'),
     'grf_tracking': ('.75*I(h>h_target)+.5*I(h<h_target)*I(sum(norm(force_proxy_i))>total_realized_mass*9.81)','1'),
@@ -62,7 +63,7 @@ def resolve_reward_spec(shared, dt, overrides=None):
     for k,weights in NATIVE.items():
         formula,units=FORMULAS[k]
         terms[k]=dict(coefficients=dict(zip(('nominal','adaptive'),weights)),formula=formula,units=units,
-            source=PAPER if k=='grf_tracking' else 'Go2PACT helper used by HardPACT; MULE Table I coefficient',
+            source=PAPER if k=='grf_tracking' else ('terrain-relative squared-error reproduction assumption' if k=='foot_clearance' else 'Go2PACT helper used by HardPACT; MULE Table I coefficient'),
             coefficient_source=PAPER,curriculum_eligible=False,reason='native MULE; explicit zeros protected')
     for k,(formula,state,units) in ADDITIONS.items():
         terms[k]=dict(coefficients=dict(nominal=coefficients[k],adaptive=0.),formula=formula,state=state,units=units,
@@ -72,12 +73,18 @@ def resolve_reward_spec(shared, dt, overrides=None):
         excluded_shared={k:('native overlap' if k in NATIVE or k in EXCLUDED_OVERLAPS else
             'channel-specific, duplicate or not allowlisted') for k in dir(shared.scales)
             if not k.startswith('_') and k not in ADDITIONS},
-        assumptions=dict(formulas='Unspecified native formulas use HardPACT, including its exponential/world-z clearance. Not verified author code.',
+        assumptions=dict(formulas='Unspecified native formulas use HardPACT except clearance: positive speed-weighted squared error relative to the mean of nine local terrain samples, with shared foot offset/target. No exponential or sigma. Not verified author code.',
             actions='Separate raw normalized samples before combined clipping/delay/scaling. HardPACT difference formulas; no action-scale factor. First one/two unavailable differences masked.',
             timing='Clean endpoint after pushes, before reset. Last executed substep torque; dq derivative uses control_dt. Multiply each coefficient by control_dt exactly once; no total clipping.',
             grf='Each |f_i| is L2 norm of existing torque/Jacobian proxy (body axes), not simulator GRF. All four estimates must be valid for the low-height force test; invalid estimate does not earn that branch. Strict inequalities; equality gives zero.',
             mass='Realized articulation mass already includes tray and robot randomization; add only active sphere masses once. Parked spheres contribute zero.',
             additions='Nominal-only compatibility merge, not original MULE. No adaptive tracking/power aliases or duplicate orientation/height/clearance shaping.'))
+
+
+def clearance_cost(foot_position, foot_velocity, terrain_height, target, offset):
+    """Positive cost; invariant to a common world-z translation of feet/terrain."""
+    error=foot_position[...,2]-terrain_height.mean(-1)-offset-target
+    return (foot_velocity[...,:2].norm(dim=-1)*error.square()).sum(-1)
 
 
 def grf_reward(height, target, force, force_valid, robot_with_tray_mass, active_ball_mass):
@@ -122,7 +129,9 @@ class MULERewards:
             grf_processor=NS(contacts=foot[:,:,2]>self.cfg.rewards.contact_force_threshold))
         s.last_dof_vel=self.velocity; s.penalized_contact_indices=s.penalised_contact_indices
         common={k:getattr(Go2PACT,'_reward_'+k)(context) for k in NATIVE
-            if k not in ('action_rate','action_smoothness','grf_tracking')}
+            if k not in ('action_rate','action_smoothness','grf_tracking','foot_clearance')}
+        common['foot_clearance']=clearance_cost(s.feet_pos,s.feet_vel,s._height_around_feet,
+            self.cfg.rewards.foot_clearance_target,self.cfg.rewards.foot_height_offset)
         height=(s.base_pos[:,2,None]-s.measured_heights).mean(-1)
         common['grf_tracking']=grf_reward(height,self.cfg.rewards.base_height_target,
             force.force_b,force.valid,robot_mass,ball_mass)

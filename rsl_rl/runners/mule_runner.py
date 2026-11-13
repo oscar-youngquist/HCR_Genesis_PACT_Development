@@ -14,6 +14,8 @@ from rsl_rl.algorithms.ppo_mule import PPOMULE
 from rsl_rl.utils.learning_diagnostics import (LearningEpisodeDiagnostics, policy_diagnostics,
     compatible_training_metrics, format_training_summary)
 from rsl_rl.utils.training_checkpoint import atomic_save
+from rsl_rl.utils import training_checkpoint as checkpoint
+from copy import deepcopy
 
 
 def training_cuda_rng(data, target_device, *, exact=False, device_count=None):
@@ -43,6 +45,7 @@ class MULERunner:
         for key in ('control_dt', 'action_scale', 'clip_actions'):
             if getattr(env.cfg, key) != getattr(config, key): raise ValueError(f'Environment {key} differs')
         self.env, self.config, self.device = env, config, torch.device(device)
+        self.cfg=self.train_cfg=config
         random.seed(config.seed); np.random.seed(config.seed); torch.manual_seed(config.seed)
         self.alg = PPOMULE(ActorCriticMULE(config), config, self.device)
         self.history = MULEHistory(config.schema, config.num_envs, self.device)
@@ -206,11 +209,15 @@ class MULERunner:
                     if count>0 else None)
         return metrics, evidence
 
-    def learn(self, iterations=None):
+    @property
+    def current_learning_iteration(self): return self.alg.iteration
+
+    def learn(self, iterations=None, *, save_interval=None, final_checkpoint=True):
         """iterations is ADDITIONAL; None runs to the configured absolute budget."""
         if iterations is None: iterations = max(0, self.config.max_iterations-self.alg.iteration)
         if not isinstance(iterations, int) or iterations < 0: raise ValueError('Expected nonnegative iteration count')
         logs = []
+        save_interval=self.config.save_interval if save_interval is None else save_interval
         for _ in range(iterations):
             started = time.perf_counter()
             collection, performance = self.collect_rollout()
@@ -246,10 +253,10 @@ class MULERunner:
             if self.console:
                 print(format_training_summary('MULE',self.alg.iteration,self.alg.model.phase,published,self.config.max_iterations),flush=True)
             logs.append(metrics)
-            if self.log_dir is not None and self.alg.iteration % self.config.save_interval == 0:
+            if self.log_dir is not None and save_interval and self.alg.iteration % save_interval == 0:
                 self.save(self.log_dir/f'model_{self.alg.iteration}.pt')
-        if iterations and self.log_dir is not None:
-            self.save(self.log_dir/f'model_{self.alg.iteration}.pt')
+        if final_checkpoint and self.log_dir is not None:
+            self.save(self.log_dir/f'model_{self.alg.iteration}.pt',stage_end=True)
         return logs
 
     def get_inference_policy(self): return self.alg.model.inference
@@ -257,13 +264,17 @@ class MULERunner:
     def close(self):
         if self._owns_writer: self.writer.close()
 
-    def save(self, path):
+    def save(self, path, *, stage_end=False):
         algorithm = self.alg.state_dict()
         exact = bool(getattr(self.env, 'supports_exact_resume', False) and self.current is not None)
         if exact and not all(hasattr(self.env, name) for name in ('state_dict', 'validate_state_dict', 'load_state_dict')):
             raise ValueError('Exact environments must implement state validation/restoration')
         curriculum = self.env.curriculum_state_dict() if hasattr(self.env, 'curriculum_state_dict') else None
-        atomic_save(dict(version=1, device=str(self.device), algorithm=algorithm, environment_contract=asdict(self.env.cfg),
+        state=checkpoint.envelope(self,stage_end=stage_end)
+        # One tensor payload, two public views for legacy algorithm tooling.
+        state['models']['model']=algorithm['model']; state['optimizers']=algorithm['optimizers']
+        state['extra']['schedulers']=algorithm['schedulers']
+        data=dict(version=2, device=str(self.device), algorithm=algorithm, environment_contract=asdict(self.env.cfg),
             physical_contract=self.env.physical_contract() if hasattr(self.env,'physical_contract') else None,
             training_cuda_index=(self.device.index if self.device.index is not None else torch.cuda.current_device()) if self.device.type=='cuda' else None,
             environment_state=self.env.state_dict() if exact else None, exact_environment=exact,
@@ -273,15 +284,62 @@ class MULERunner:
             current=None if self.current is None else self.current.snapshot(),
             history=dict(observations=self.history.observations, adaptive=self.history.adaptive,
                          episode_ids=self.history.episode_ids, timestamp=self.history.timestamp),
-            python_rng=random.getstate(), numpy_rng=np.random.get_state(), torch_rng=torch.get_rng_state(),
-            cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None), path)
+            python_rng=random.getstate(), numpy_rng=checkpoint.portable_numpy_rng(), torch_rng=torch.get_rng_state(),
+            cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None,
+            resolved_configuration=deepcopy(getattr(self.env,'resolved_config',None)),training_state=state)
+        if not exact:
+            for key in ('history','current','episode_returns','episode_lengths','episode_diagnostics'):
+                data.pop(key) # Fresh PhysX never consumes episode-local learning buffers.
+            if data['curriculum'] is not None:
+                noise=data['curriculum'].get('noise')
+                if noise is not None: data['curriculum']['noise']={'rng':noise['rng']}
+        atomic_save(data,path,source=getattr(self,'_checkpoint_source',None))
 
-    def load(self, path, *, resume_mode='fresh'):
+    def load(self, path, *, resume_mode='fresh', operation='resume', learning_rate=None,
+             allow_legacy=False, transition_phase=None, target_stage=None, stage_local_initial=0.):
         """Trusted local checkpoints only. Fresh physics resets history, not learning progress."""
         self.alg.require_boundary()
         if resume_mode not in ('fresh', 'exact'): raise ValueError('Expected fresh or exact resume')
         data = torch.load(path, map_location=self.device, weights_only=False)
-        if data.get('version') != 1 or data.get('environment_contract') != asdict(self.env.cfg):
+        if self.log_dir is not None and self.log_dir.resolve()==Path(path).resolve().parent:
+            raise ValueError('Source run directory is protected')
+        if transition_phase not in (None,'joint_adaptation'): raise ValueError('Only explicit forward phase transitions are supported')
+        if target_stage is not None and operation!='stage_transfer': raise ValueError('Target stage requires stage_transfer')
+        if not math.isfinite(stage_local_initial) or not 0<=stage_local_initial<=1: raise ValueError('Invalid stage-local severity')
+        state=None; unavailable=[]
+        # Preserve the method-specific preflight/error contract before the shared envelope.
+        if operation=='resume':
+            self.alg.validate_state_dict(data['algorithm'])
+            physical=self.env.physical_contract() if hasattr(self.env,'physical_contract') else None
+            if data.get('physical_contract')!=physical: raise ValueError('Incompatible MULE physical contract')
+        if checkpoint.KEY in data:
+            saved=data[checkpoint.KEY]
+            if saved['next_iteration']!=data['algorithm']['iteration'] or saved['phase']!=data['algorithm']['phase']:
+                raise ValueError('Inconsistent checkpoint iteration/phase')
+            state=checkpoint.validate(self,data,operation,learning_rate=learning_rate)
+        elif not allow_legacy:
+            raise ValueError('Legacy MULE checkpoint: explicit allow_legacy required; reward contracts must still match')
+        else:
+            if operation!='resume' or learning_rate is not None: raise ValueError('Legacy checkpoints support explicit same-contract resume only')
+            unavailable=checkpoint.warn_legacy()
+        if operation in ('weights_only','stage_transfer'):
+            if resume_mode!='fresh': raise ValueError('Transfer/weights-only require fresh physics')
+            if operation=='weights_only':
+                phase=self.alg.model.phase
+                self.alg.model.load_state_dict(state['models']['model'],strict=True)
+                self.alg.model.set_phase(phase)
+            else:
+                if not target_stage: raise ValueError('Stage transfer requires explicit target_stage')
+                checkpoint.restore_learning(self,state,learning_rate=learning_rate)
+                self.env.import_training_progress(checkpoint.clear_gate_evidence(state['transferable_progress']),transfer=True)
+                self.training_stage=dict(name=target_stage,origin_iteration=self.alg.iteration,local_progress=stage_local_initial)
+                self.env.initialize_transferred_payload(deepcopy(self.training_stage))
+                checkpoint.restore_rng(self,state['rng'],transfer=True)
+            self._fresh_environment()
+            if transition_phase: self.transition_to_joint_adaptation()
+            self._checkpoint_source=str(Path(path).resolve())
+            return checkpoint.archive_report(self,path,state,operation,learning_rate)
+        if data.get('version') not in (1,2) or data.get('environment_contract') != asdict(self.env.cfg):
             raise ValueError('Incompatible MULE runner/environment contract')
         physical=self.env.physical_contract() if hasattr(self.env,'physical_contract') else None
         if data.get('physical_contract')!=physical: raise ValueError('Incompatible MULE physical contract')
@@ -294,14 +352,15 @@ class MULERunner:
                 raise ValueError('Exact continuation requires a fully restorable environment')
             self.env.validate_state_dict(data['environment_state'])
             self._validate_observation(data['current'])
-        for key in ('observations', 'adaptive', 'episode_ids'):
-            x, expected = data['history'][key], getattr(self.history, key)
-            if x.shape != expected.shape or x.dtype != expected.dtype: raise ValueError('Incompatible saved history')
-        if not isinstance(data['history']['timestamp'], int): raise ValueError('Invalid history timestamp')
-        if exact and data['history']['timestamp'] >= data['current'].timestamp:
-            raise ValueError('Saved current observation was already consumed into history')
-        for key in ('episode_returns', 'episode_lengths'):
-            if data[key].shape != getattr(self, key).shape: raise ValueError('Invalid saved episode state')
+        if exact:
+            for key in ('observations', 'adaptive', 'episode_ids'):
+                x, expected = data['history'][key], getattr(self.history, key)
+                if x.shape != expected.shape or x.dtype != expected.dtype: raise ValueError('Incompatible saved history')
+            if not isinstance(data['history']['timestamp'], int): raise ValueError('Invalid history timestamp')
+            if data['history']['timestamp'] >= data['current'].timestamp:
+                raise ValueError('Saved current observation was already consumed into history')
+            for key in ('episode_returns', 'episode_lengths'):
+                if data[key].shape != getattr(self, key).shape: raise ValueError('Invalid saved episode state')
         if any(not isinstance(data[k], int) or data[k] < 0 for k in ('interactions', 'control_steps')):
             raise ValueError('Invalid interaction counters')
         if data['curriculum'] is not None:
@@ -313,8 +372,9 @@ class MULERunner:
         np.random.RandomState().set_state(data['numpy_rng'])
         torch.Generator().set_state(data['torch_rng'].cpu())
         cuda_restore=training_cuda_rng(data,self.device,exact=exact)
-        for i,state in cuda_restore: torch.Generator(device=f'cuda:{i}').set_state(state.cpu())
-        self.alg.load_state_dict(data['algorithm'])
+        for i,cuda_state in cuda_restore: torch.Generator(device=f'cuda:{i}').set_state(cuda_state.cpu())
+        if state is not None: checkpoint.restore_learning(self,state,learning_rate=learning_rate)
+        else: self.alg.load_state_dict(data['algorithm'])
         if data['curriculum'] is not None: self.env.load_curriculum_state_dict(data['curriculum'])
         self.interactions, self.control_steps = data['interactions'], data['control_steps']
         self.total_time=float(data.get('total_time',0.))
@@ -327,8 +387,12 @@ class MULERunner:
             self.episode_diagnostics.load_state_dict(data.get('episode_diagnostics'))
         random.setstate(data['python_rng']); np.random.set_state(data['numpy_rng'])
         torch.set_rng_state(data['torch_rng'].cpu())
-        for i,state in cuda_restore: torch.cuda.set_rng_state(state.cpu(),i)
+        for i,cuda_state in cuda_restore: torch.cuda.set_rng_state(cuda_state.cpu(),i)
         self.resume_report=dict(mode=resume_mode,source_device=data['device'],target_device=str(self.device),
             cuda_rng_restored_indices=[i for i,_ in cuda_restore],
             portability='Fresh physics; training-GPU RNG mapped only. Different device types/architectures are not bitwise equivalent.' if not exact else 'Exact validated environment/device restoration')
         if not exact: self._fresh_environment()
+        if transition_phase: self.transition_to_joint_adaptation()
+        self._checkpoint_source=str(Path(path).resolve())
+        checkpoint.archive_report(self,path,state,operation,learning_rate,unavailable=unavailable,exact=exact)
+        return self.resume_report

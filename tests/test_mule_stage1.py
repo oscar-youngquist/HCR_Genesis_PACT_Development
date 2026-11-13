@@ -239,12 +239,12 @@ def test_serialization_and_contract_rejection_before_mutation(phase):
         if isinstance(v,torch.Tensor): torch.testing.assert_close(v,restored.state_dict()[k],rtol=0,atol=0)
 
 
-def test_env_interface_location_snapshot_and_no_registration():
+def test_env_interface_location_snapshot_and_production_registration():
     from legged_gym.envs.go2.go2_mule.go2_mule import Go2MULE, MULEObservation
     from legged_gym.envs import task_registry
     ec,c=resolve_go2_mule_configs()
     with pytest.raises(TypeError): Go2MULE(ec)  # abstract until physical integration
-    assert not any('mule' in name for name in task_registry.task_classes)
+    assert task_registry.task_classes['go2_mule_isaaclab'].__name__=='IsaacLabMULEEnv'
     forces=estimate_foot_forces(torch.zeros(2,12),torch.eye(3).expand(2,4,3,3))
     obs=MULEObservation(torch.ones(2,45),torch.ones(2,c.schema.critic_dim),torch.ones(2,3),forces,
         torch.zeros(2,dtype=torch.long),torch.ones(2,dtype=torch.bool),7)

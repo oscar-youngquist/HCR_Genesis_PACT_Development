@@ -2,7 +2,7 @@
 
 Adapters retain their legacy weight keys. Transfer is opt-in at the target
 environment, with a pure validation hook followed by explicit progress import
-and fresh payload initialization. MULE deliberately has no adapter yet.
+and fresh payload initialization. Physical state remains method-owned.
 """
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
@@ -54,13 +54,15 @@ def _kind(obj):
 
 
 def adapter(runner):
+    if _kind(runner.alg).endswith('PPOMULE'): return 'mule'
     if _kind(runner.alg).endswith('PPOBeyondRobustness'): return 'beyond_robustness'
     if getattr(runner, 'is_hard_pact', False): return 'hard_pact'
     if getattr(runner, 'is_hard_pact_pos', False): return 'hard_pact_pos'
-    raise ValueError('No complete-training-state adapter for this method (MULE deferred)')
+    raise ValueError('No complete-training-state adapter for this method')
 
 
 def modules(runner):
+    if adapter(runner) == 'mule': return {'model': runner.alg.model}
     result = {'actor_critic': runner.alg.actor_critic}
     if hasattr(runner.alg, 'decoder'): result['decoder'] = runner.alg.decoder
     # Includes future explicitly attached target/EMA/normalization modules.
@@ -71,6 +73,7 @@ def modules(runner):
 
 
 def optimizers(runner):
+    if adapter(runner) == 'mule': return runner.alg.optimizers
     names = (('optimizer', 'history_optimizer', 'load_optimizer')
              if adapter(runner) == 'beyond_robustness' else
              ('act_optimizer', 'enc_optimizer', 'decoder_optimizer'))
@@ -108,8 +111,11 @@ def boundary(runner):
 
 def contract(runner):
     method = adapter(runner)
-    cfg = plain(runner.cfg if method == 'beyond_robustness' else runner.train_cfg)
-    if method == 'beyond_robustness':
+    cfg = plain(runner.cfg if method in ('beyond_robustness','mule') else runner.train_cfg)
+    if method == 'mule':
+        cfg.pop('optimization_phase', None)
+        semantic = runner.config.contract()
+    elif method == 'beyond_robustness':
         # The SAVED active phase is restored; it is not inferred from constructor defaults.
         cfg.pop('training_phase', None)
         semantic = runner.alg.actor_critic.input_contract()
@@ -120,7 +126,7 @@ def contract(runner):
     environment = (env.training_environment_contract() if hasattr(env, 'training_environment_contract')
                    else env.physical_contract() if hasattr(env, 'physical_contract')
                    else {'adapter': _kind(env), 'input_schema': plain(getattr(env, 'input_schema', None))})
-    env_cfg = plain(getattr(env, 'cfg', {}))
+    env_cfg = plain(getattr(env, 'shared', env.cfg) if method == 'mule' else getattr(env, 'cfg', {}))
     shared = {name: env_cfg[name] for name in ('control','normalization','noise','init_state',
               'commands','terrain','rewards','termination','asset') if name in env_cfg}
     shared['observation_dimensions'] = {name:value for name,value in env_cfg.get('env',{}).items()
@@ -138,17 +144,36 @@ def rng_state(runner):
                           ('domain', getattr(runner.env, 'domain_rand_curriculum', None))):
         for name, value in vars(owner).items() if owner is not None else ():
             if isinstance(value, torch.Generator): local[prefix+'.'+name] = value.get_state()
-    return dict(python=random.getstate(), numpy=np.random.get_state(), torch=torch.get_rng_state(),
+    state=dict(python=random.getstate(), numpy=np.random.get_state(), torch=torch.get_rng_state(),
         cuda=torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None, local=local)
+    if adapter(runner)=='mule':
+        state['numpy']=portable_numpy_rng(state['numpy'])
+        state.update(device=str(runner.device),training_cuda_index=(runner.device.index or 0))
+    return state
+
+
+def portable_numpy_rng(state=None):
+    """MT19937 accepts a uint32 list on restore, avoiding NumPy 2-only pickle paths.
+
+    Values/position/Gaussian cache are unchanged; no RNG is consumed.
+    """
+    state=np.random.get_state() if state is None else state
+    return (state[0],list(map(int,state[1])),int(state[2]),int(state[3]),float(state[4]))
+
+
+def cuda_rng_targets(runner, state):
+    if adapter(runner)=='mule':
+        from rsl_rl.runners.mule_runner import training_cuda_rng
+        return training_cuda_rng(dict(state,cuda_rng=state['cuda']),runner.device)
+    if state['cuda'] is None or not torch.cuda.is_available(): return []
+    if len(state['cuda'])!=torch.cuda.device_count(): raise ValueError('CUDA RNG topology mismatch')
+    return list(enumerate(state['cuda']))
 
 
 def restore_rng(runner, state, transfer=False):
     random.setstate(state['python']); np.random.set_state(state['numpy'])
     torch.set_rng_state(state['torch'].cpu())
-    if state['cuda'] is not None and torch.cuda.is_available():
-        if len(state['cuda']) != torch.cuda.device_count():
-            raise ValueError('CUDA RNG device topology differs; explicit migration required')
-        torch.cuda.set_rng_state_all([v.cpu() for v in state['cuda']])
+    for index,value in cuda_rng_targets(runner,state): torch.cuda.set_rng_state(value.cpu(),index)
     owners = dict(runner=runner, algorithm=runner.alg, environment=runner.env,
                   domain=getattr(runner.env, 'domain_rand_curriculum', None))
     for path, value in state['local'].items():
@@ -158,6 +183,7 @@ def restore_rng(runner, state, transfer=False):
 
 
 def _extra_state(runner):
+    if adapter(runner)=='mule': return {'schedulers':deepcopy(runner.alg.schedulers)}
     # Schedulers/scalers, if present, have their own state, not guessed scalar fields.
     return {n: deepcopy(v.state_dict()) for n, v in vars(runner.alg).items()
             if ('scheduler' in n or 'scaler' in n) and hasattr(v, 'state_dict')}
@@ -168,8 +194,8 @@ def envelope(runner, *, stage_end=False):
     env = runner.env
     method = adapter(runner)
     try: sha = subprocess.check_output(['git', '-C', str(Path(__file__).resolve().parents[2]),
-                                       'rev-parse', 'HEAD'], text=True).strip()
-    except (OSError, subprocess.CalledProcessError): sha = 'unavailable'
+                                       'rev-parse', 'HEAD'], text=True,stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.CalledProcessError): sha = os.environ.get('TRAINING_GIT_SHA','unavailable')
     progress = (env.export_training_progress() if hasattr(env, 'export_training_progress') else None)
     return dict(version=VERSION, contract=contract(runner),
         models={n: m.state_dict() for n, m in modules(runner).items()},
@@ -179,12 +205,12 @@ def envelope(runner, *, stage_end=False):
         next_iteration=runner.current_learning_iteration,
         interactions=getattr(runner, 'interactions', getattr(runner, 'tot_timesteps', 0)),
         total_time=getattr(runner, 'total_time', getattr(runner, 'tot_time', 0.)),
-        phase=getattr(runner.alg, 'training_phase', 'ppo'),
-        stage=deepcopy(getattr(runner, 'training_stage', {
+        phase=runner.alg.model.phase if method=='mule' else getattr(runner.alg, 'training_phase', 'ppo'),
+        stage=deepcopy(env.training_stage_state() if hasattr(env,'training_stage_state') else getattr(runner, 'training_stage', {
             'name': 'stage'+str(getattr(getattr(env,'stage_state',None),'stage',2)), 'origin_iteration': 0})),
         qp_curriculum=(runner.qp_curriculum.state_dict() if hasattr(runner, 'qp_curriculum') else None),
         resolved_config=plain(getattr(env, 'resolved_config', getattr(env, 'cfg', None))),
-        resolved_training=plain(runner.cfg if method == 'beyond_robustness' else runner.train_cfg),
+        resolved_training=plain(runner.cfg if method in ('beyond_robustness','mule') else runner.train_cfg),
         source_commit=sha, parent=deepcopy(getattr(runner, '_checkpoint_parent', None)),
         stage_end=bool(stage_end), exact_physics_supported=bool(getattr(env, 'supports_exact_resume', False)),
         unavailable=[] if progress is not None else ['portable environment curriculum adapter'])
@@ -236,6 +262,9 @@ def validate(runner, data, operation='resume', *, learning_rate=None):
         if current[key] != saved[key]: raise ValueError('Incompatible training contract: '+key)
     for owner, model in modules(runner).items():
         own = model.state_dict(); old = state['models'][owner]
+        if adapter(runner)=='mule':
+            model.validate_state_dict(old)
+            continue
         if own.keys() != old.keys() or any(own[k].shape != old[k].shape or own[k].dtype != old[k].dtype for k in own):
             raise ValueError('Incompatible named model state: '+owner)
     if operation == 'weights_only': return state
@@ -249,8 +278,12 @@ def validate(runner, data, operation='resume', *, learning_rate=None):
                     if torch.is_tensor(v) and k != 'step' and v.shape != p.shape:
                         raise ValueError('Optimizer moment shape mismatch: '+name+'/'+k)
     if set(state['extra']) != set(_extra_state(runner)): raise ValueError('Scheduler/scaler inventory differs')
-    if state['rng']['cuda'] is not None and torch.cuda.is_available() and len(state['rng']['cuda']) != torch.cuda.device_count():
-        raise ValueError('CUDA RNG topology mismatch')
+    cuda_targets=cuda_rng_targets(runner,state['rng'])
+    if adapter(runner)=='mule':
+        # Reuse the algorithm's stricter disposable-optimizer and schedule preflight.
+        runner.alg.validate_state_dict(dict(version=1,model=state['models']['model'],
+            learning_contract=runner.config.learning_contract(),optimizers=state['optimizers'],
+            schedulers=state['extra']['schedulers'],phase=state['phase'],iteration=state['next_iteration']))
     owners = dict(runner=runner, algorithm=runner.alg, environment=runner.env,
                   domain=getattr(runner.env, 'domain_rand_curriculum', None))
     # Validate RNG payloads on independent generators, without consuming or
@@ -259,9 +292,8 @@ def validate(runner, data, operation='resume', *, learning_rate=None):
         random.Random().setstate(state['rng']['python'])
         np.random.RandomState().set_state(state['rng']['numpy'])
         torch.Generator().set_state(state['rng']['torch'].cpu())
-        if state['rng']['cuda'] is not None and torch.cuda.is_available():
-            for index, value in enumerate(state['rng']['cuda']):
-                torch.Generator(device=f'cuda:{index}').set_state(value.cpu())
+        for index, value in cuda_targets:
+            torch.Generator(device=f'cuda:{index}').set_state(value.cpu())
     except (TypeError, ValueError, RuntimeError) as error:
         raise ValueError('Invalid checkpoint RNG state') from error
     for path in state['rng']['local']:
@@ -303,7 +335,20 @@ def restore_learning(runner, state, *, learning_rate=None):
     for name, model in modules(runner).items(): model.load_state_dict(state['models'][name], strict=True)
     for name, opt in optimizers(runner).items(): opt.load_state_dict(state['optimizers'][name])
     for name, value in state['adaptive'].items(): setattr(runner.alg, name, deepcopy(value))
-    for name, value in state['extra'].items(): getattr(runner.alg, name).load_state_dict(value)
+    for name, value in state['extra'].items():
+        if adapter(runner)=='mule': setattr(runner.alg,name,deepcopy(value))
+        else: getattr(runner.alg, name).load_state_dict(value)
+    if adapter(runner)=='mule':
+        if learning_rate is not None:
+            factor=learning_rate/runner.alg.schedulers['nominal']['learning_rate']
+            for opt in optimizers(runner).values():
+                for group in opt.param_groups: group['lr']*=factor
+            for schedule in runner.alg.schedulers.values(): schedule['learning_rate']*=factor
+        runner.training_stage=deepcopy(state['stage'])
+        runner.alg.iteration=state['next_iteration']
+        runner.interactions=state['interactions']; runner.total_time=state['total_time']
+        runner.control_steps=runner.interactions//runner.env.num_envs
+        return
     if learning_rate is not None:
         # Apply a uniform factor, retaining per-owner/per-group LR ratios and moments.
         factor = learning_rate / runner.alg.learning_rate

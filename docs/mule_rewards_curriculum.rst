@@ -34,10 +34,13 @@ Where the paper does not define mathematics, the existing HardPACT/Go2PACT
 formulation is used, per the user's instruction, not a guessed author formula.
 Tracking is fixed ``exp(-4*error_squared)``: no dynamic sigma. Height is mean
 torso-z minus terrain heights. Power uses actual last-substep executed torque.
-Acceleration differences use the actual control dt. Clearance literally uses
-HardPACT's exponential of world-z clearance error weighted by foot speed;
-its combination with the negative native coefficient is unusual but retained,
-not silently inverted. Slip also retains the shared square-of-summed-xy-speed
+Acceleration differences use the actual control dt. Reward contract v2 fixes
+clearance to a positive, speed-weighted squared error relative to mean local
+terrain height (nine samples per foot), retaining the shared target/foot offset
+and the native -0.01 coefficient. Better clearance therefore improves reward;
+translating feet and terrain together leaves it unchanged. This is an explicit
+reproduction assumption: Table I supplies no clearance formula. Version-1 reward
+checkpoints are incompatible; there is no silent migration. Slip retains the shared square-of-summed-xy-speed
 definition. These choices are not a claim of exact author-code reproduction.
 
 GRF is ``.75*I(h>target) + .5*I(h<target)*I(sum_i ||f_i||_2 > m_total*9.81)``.

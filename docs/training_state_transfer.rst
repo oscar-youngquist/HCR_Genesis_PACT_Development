@@ -20,7 +20,7 @@ go2_hard_pact + backend names PACTRunner             PPO_HardPACT           hard
 10 RSS ablations (Isaac Lab)   PACTRunner             PPO_HardPACT           hard_pact
 go2_hard_pact_pos + aliases   PACTPosRunner          PPO_PACT_Pos           hard_pact_pos
 go2_beyond_robustness_isaaclab BeyondRobustnessRunner PPOBeyondRobustness    beyond_robustness
-MULE (no production task)      MULERunner             PPOMULE                deferred; contract below
+go2_mule_isaaclab              MULERunner             PPOMULE                mule
 ============================= ====================== ====================== ========================
 
 ``PACTRunner`` resolves to ``OnPolicyRunnerPACT``; ``PACTPosRunner`` resolves
@@ -33,7 +33,7 @@ HardPACT aliases cover Genesis/Isaac Gym/Isaac Lab; Pos aliases cover
 Genesis/Isaac Lab. This is code-path coverage, not GPU/backend certification.
 Unrelated legacy PACT/Go1 tasks retain their existing checkpoint behavior.
 The inspected registry contains 38 PACTRunner HardPACT tasks, three
-PACTPosRunner HardPACTPos tasks and one resolved BR task.
+PACTPosRunner HardPACTPos tasks and resolved BR and MULE tasks.
 
 Three operations
 ----------------
@@ -55,7 +55,7 @@ Three operations
   validated. Full training checkpoints are trusted pickle files, not untrusted
   model downloads; bootstrap readers explicitly support their RNG metadata.
 
-The configured training budget is TOTAL for HardPACT and BR entrypoints.
+The configured training budget is TOTAL for HardPACT, BR and MULE entrypoints.
 ``--additional-iterations`` explicitly adds updates to the loaded next-index;
 it is mutually exclusive with an explicit total budget. Runner ``learn(n)``
 continues to mean n additional updates. Periodic files retain existing names;
@@ -270,14 +270,28 @@ GPU execution of all ablations was performed. Cross-payload transfer remains a
 synthetic adapter check; exact continuation is only a deterministic test-env
 claim, never a PhysX claim.
 
-Deferred MULE checklist
+MULE production adapter
 -----------------------
 
-No MULE code or contracts are changed here. Its future adapter must enumerate
-nominal/adaptive actors and critics, context estimator/decoder, both exploration
-parameters and normalization; three disjoint optimizers with named ownership;
-independent nominal/adaptive LR/entropy state (inactive adaptive schedule must
-not advance); exact saved optimization phase; synchronized rollout/context and
-two history streams reset on fresh physics; portable robot curricula separate
-from rolling-ball/liquid sampling; and deterministic continuation tests in both
-phases. No actor copying/reinitialization or summed-action likelihood migration.
+MULE runner checkpoint v2 embeds the common version-1 envelope with both
+actors/critics, CENet/decoder, exploration, named nominal/adaptive/auxiliary
+optimizers, independent LR/entropy schedules and exact optimization phase.
+Inactive adaptive schedule counters do not advance. Compact fresh-physics saves
+omit rollout data, histories and episode rewards; fully restorable synthetic
+fixtures separately retain their exact-continuation state.
+
+Ordinary resume retains requested versus realized ball severity/activation,
+pending reset generations, actual properties, timers, sampling RNG and curriculum
+gates. Portable progress excludes all ball-specific state. Synthetic transfer
+tests preserve learned state/difficulty, clear source-domain promotion evidence,
+and invoke target ``initialize_transferred_payload(stage_dict)``. The rolling
+adapter cannot initialize a liquid target and rejects such requests explicitly.
+There is no actor reinitialization or combined-action likelihood migration.
+
+Fresh MULE resume maps the saved training-device CUDA RNG to the new training
+device; unrelated visible GPUs need not match. Device/architecture changes do
+not promise bitwise continuation. Exact fixtures retain strict device/topology
+checks. Legacy same-contract checkpoints require explicit opt-in and report
+missing named-envelope/provenance evidence, never claim full continuation.
+Incompatible clearance/reward v1 checkpoints are rejected even with that flag.
+See ``mule_production.rst`` for commands and observed validation results.
