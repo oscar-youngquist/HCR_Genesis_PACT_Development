@@ -6,8 +6,8 @@ class B1Z1UniFPCfg:
     seed = 1
 
     class env:
-        # num_envs = 10240
-        num_envs = 4096
+        num_envs = 10240
+        # num_envs = 4096
         # Actor frame excludes gait sin/cos; phase remains internal to gait
         # reference, contact scheduling, and guidance rewards.
         num_observations = 71 + 2
@@ -759,8 +759,8 @@ class B1Z1UniFPCfg:
                 # "torso_force_wrench_ellipsoid":[0.2, 0.5],
             }
             warmup_steps = 0
-            curr_steps = 60000
-            # curr_steps = 24000
+            # curr_steps = 60000
+            curr_steps = 24000
 
     class viewer:
         ref_env = 0
@@ -856,10 +856,10 @@ class B1Z1UniFPCfgPPO:
         algorithm_class_name = "PPO_UniFP"
         num_steps_per_env = 24
         
-        max_iterations = 70000
-        # max_iterations = 28000
+        # max_iterations = 70000
+        max_iterations = 27500
         
-        save_interval = 1000
+        save_interval = 100
         
         # Disable non-training rollout, PPO-consistency, and detailed episode diagnostics.
         enable_additional_diagnostics = False

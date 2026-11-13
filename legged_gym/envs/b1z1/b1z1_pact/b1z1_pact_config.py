@@ -12,8 +12,8 @@ class B1Z1PACTCfg(LeggedRobotCfg):
     seed = 1                                                                            # Random seed for reproducible initialization.
 
     class env:
-        num_envs = 4096                                                                # Parallel simulation instances.
-        # num_envs = 10240                                                                  # Parallel simulation instances.
+        # num_envs = 4096                                                                # Parallel simulation instances.
+        num_envs = 10240                                                                  # Parallel simulation instances.
         # 2 body-orientation + 3 angular velocity + 17 joint positions +
         # 17 joint velocities + 34 coupled PACT actions + 6 commands. EE pose
         # is estimated from history instead of exposed through an FK error.
@@ -837,9 +837,9 @@ class B1Z1PACTCfg(LeggedRobotCfg):
                 # "arm_feedforward_action_smoothness":[-0.002, -0.02],
             }
             # warmup_steps = 30000                                                        # Reward-curriculum warmup.
-            curr_steps = 60000                                                           # Reward-curriculum ramp duration.
+            # curr_steps = 60000                                                           # Reward-curriculum ramp duration.
             warmup_steps = 0                                                        # Reward-curriculum warmup.
-            # curr_steps = 24000                                                      # Reward-curriculum ramp duration.
+            curr_steps = 24000                                                      # Reward-curriculum ramp duration.
 
 
     class viewer:
@@ -963,7 +963,8 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
 
 
         pinn_loss_weight = -1.0                                                         # Magnitude scales PINNs; sign selects projection only in legacy mode.
-        pinn_warmup = 5000                                                               # Ramp duration after PINN activation [PPO updates].
+        # pinn_warmup = 5000                                                               # Ramp duration after PINN activation [PPO updates].
+        pinn_warmup = 2000                                                               # Ramp duration after PINN activation [PPO updates].
         pinn_init_steps = 000                                                          # First PPO iteration eligible for the PINN ramp.
         use_pinn_rollout_loss = True                                                    # Enable the rollout term in addition to inverse dynamics.
         pinn_inverse_weight = 0.2                                                       # Inverse-dynamics coefficient inside the combined physics objective.
@@ -1139,10 +1140,10 @@ class B1Z1PACTCfgPPO(LeggedRobotCfgPPO):
         num_steps_per_env = 24                                                          # Control transitions collected per environment per update.
         grf_dim = 12                                                                    # Flattened four-foot XYZ force width.
 
-        max_iterations = 70000                                                          # Total PPO learning iterations.
-        # max_iterations = 28000                                                          # Total PPO learning iterations.
+        # max_iterations = 70000                                                          # Total PPO learning iterations.
+        max_iterations = 27500                                                          # Total PPO learning iterations.
 
-        save_interval = 1000                                                            # Checkpoint interval [PPO iterations].
+        save_interval = 100                                                            # Checkpoint interval [PPO iterations].
         run_name = "b1z1_pact_improved"                                                  # Run label used in output directories.
         experiment_name = "b1z1_pact_lab"                                               # Experiment/log directory group.
         sync_wandb = False                                                              # Synchronize supported logs to Weights & Biases.

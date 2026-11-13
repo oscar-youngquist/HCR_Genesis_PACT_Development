@@ -54,7 +54,7 @@ class B1Z1FACETCfgPPO:
         self.algorithm.estimator_epochs = 2
         self.algorithm.estimator_teacher_interval = 2
         self.algorithm.estimator_ema_tau = .04
-        self.algorithm.student_start_iteration = 60000  # Completed PPO updates, never simulator steps.
+        self.algorithm.student_start_iteration = 24000  # Completed PPO updates, never simulator steps.
         self.algorithm.adaptation_iterations = 0  # Consumes part of the remaining 10k; no free interactions.
         self.policy = SimpleNamespace(action_mode='position')
         self.runner.policy_class_name = 'FACETModel'
