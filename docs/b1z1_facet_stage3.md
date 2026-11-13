@@ -112,19 +112,18 @@ The inherited nominal scales stay in `cfg.rewards.scales` intentionally: they
 define the old diagnostic units and allow the disabled switch to restore Stage 2.
 Runtime `reward_names`/`reward_functions` are the authoritative objective list.
 Three legacy tracking scales are retained in runtime `reward_scales` solely for
-existing threshold consumers. They are **absent from the optimized function list**.
+nominal diagnostics. They are **absent from the optimized function list**.
 
 FACET calls the unchanged parent nominal tracking formulas in the original
 post-callback timing, accumulating `raw_nominal_reward * legacy_weight * dt` in
 the original `episode_sums` keys. Parent reset logging still divides by
-`max_episode_length_s`; command/tradeoff thresholds still divide by maximum
-episode steps and use the old dt-scaled coefficient. Domain-randomization and
-adaptive-entropy readers therefore receive the original `rew_tracking_*` keys,
-units, and aggregation, never FACET rewards. These diagnostic sums do not enter
-`rew_buf`, positive-reward clipping, or PPO returns.
+`max_episode_length_s`. These diagnostic sums do not enter `rew_buf`,
+positive-reward clipping, or PPO returns. FACET command, domain-randomization,
+entropy, and force gates now use temporal FACET rewards; see Stage 5's schedule
+mapping. The inherited torque tradeoff curriculum remains disabled.
 
 The parent's independent `EE/tracking_l1_mean` and per-axis physical error
-diagnostics remain unchanged for the external-force curriculum. They still use
+diagnostics remain unchanged, but no longer gate FACET's force curriculum. They use
 the nominal EE target; FACET never overwrites that target or the target helper.
 
 ## Reading and Logging

@@ -13,8 +13,7 @@ from rsl_rl.facet_contract import contract_from_env, checkpoint_contract, valida
 from rsl_rl.utils.adaptive_entropy import terrain_entropy_progress
 from rsl_rl.utils.simulator_diagnostics import domain_rand_state, load_domain_rand_state, log_tradeoff_curriculum
 from legged_gym.envs.b1z1.force_task_utils import (
-    staged_force_curriculum_state_dict, load_staged_force_curriculum_state_dict,
-    update_force_curriculum_from_rollout)
+    staged_force_curriculum_state_dict, load_staged_force_curriculum_state_dict)
 
 
 class B1Z1FACETRunner:
@@ -33,6 +32,8 @@ class B1Z1FACETRunner:
         self.ema_hidden = torch.zeros_like(self.hidden)
         self.lengths = deque(maxlen=100)
         self.running_lengths = torch.zeros(env.num_envs, device=device)
+        self.rewards = deque(maxlen=100)
+        self.running_rewards = torch.zeros(env.num_envs, device=device)
         self.writer = None
         self.last_metrics = {}
         self.phase_updates = dict(teacher=0, adaptation=0, student=0)
@@ -113,6 +114,9 @@ class B1Z1FACETRunner:
                 successor_values=successor_value, done=done, is_init=init,
                 valid=torch.ones_like(done))
             self.running_lengths += 1
+            self.running_rewards += reward.reshape(-1)
+            self.rewards.extend(self.running_rewards[done].cpu().tolist())
+            self.running_rewards[done] = 0
             self.lengths.extend(self.running_lengths[done].cpu().tolist())
             self.running_lengths[done] = 0
             # Reset recurrent state on both sides of collection, never carry a
@@ -147,17 +151,22 @@ class B1Z1FACETRunner:
         return max(values, default=0.)
 
     def _schedules(self, iteration, infos):
+        from legged_gym.envs.b1z1.b1z1_facet.schedules import update_force_schedule
         cfg = self.alg.cfg
         if infos:
-            self.alg.update_entropy(self._metric(infos, 'rew_tracking_lin_vel_force_world'),
-                self._metric(infos, 'rew_tracking_ang_vel'), terrain_entropy_progress(self.env.cfg.terrain,
+            self.alg.update_entropy(self._metric(infos, 'rew_facet_base_velocity'),
+                self._metric(infos, 'rew_facet_yaw_rate'), terrain_entropy_progress(self.env.cfg.terrain,
                     self._metric(infos, 'terrain_level', 'terrain_level_mean'), cfg['adaptive_ent_ter_threshold']))
         if getattr(self.env, 'use_reward_curriculum', False):
             self.env.step_reward_curriculum(iteration)
         sim = self.env.simulator
-        if getattr(sim, 'use_domainrand_curriculum', False) and any('rew_tracking_lin_vel_force_world' in x for x in infos):
-            sim._step_domian_rand(iteration, self._metric(infos, 'rew_tracking_lin_vel_force_world'))
-        return update_force_curriculum_from_rollout(self.env, iteration, infos,
+        weight = self.env.cfg.facet_tracking.weights['base_velocity']
+        if getattr(sim, 'use_domainrand_curriculum', False) and weight > 0 and any('rew_facet_base_velocity' in x for x in infos):
+            # Shared simulator thresholds remain in PILOT reward units; convert
+            # the FACET success fraction, not the nominal tracking diagnostic.
+            scale = self.env.cfg.rewards.scales.tracking_lin_vel_force_world / weight
+            sim._step_domian_rand(iteration, self._metric(infos, 'rew_facet_base_velocity') * scale)
+        return update_force_schedule(self.env, iteration, infos,
             sum(self.lengths)/len(self.lengths) if self.lengths else None)
 
     @torch.no_grad()
@@ -237,11 +246,13 @@ class B1Z1FACETRunner:
             metrics.update({'FACET/phase_student': float(self.alg.phase == 'student'),
                 'FACET/phase_adaptation': float(self.alg.phase == 'adaptation'),
                 'Perf/collection_seconds': collected-start, 'Perf/update_seconds': updated-collected,
+                'Perf/total_fps': self.steps*self.env.num_envs/max(updated-start, 1e-6),
                 'Loss/learning_rate': self.alg.learning_rate, 'Values/entropy': self.alg.current_entropy_coef})
             self.current_learning_iteration += 1
             self.training_wall_seconds += time.perf_counter()-start
             metrics.update({'Budget/'+phase+'_interactions': count for phase, count in self.phase_interactions.items()})
             metrics['Budget/total_interactions'] = sum(self.phase_interactions.values())
+            metrics.update(self._policy_log_metrics(storage.phase))
             self.env.set_training_iteration(self.current_learning_iteration)
             self.last_metrics = metrics
             self.maybe_transition()  # Completed teacher update first; next rollout is wholly student.
@@ -249,14 +260,68 @@ class B1Z1FACETRunner:
                 for key, value in self.last_metrics.items():
                     self.writer.add_scalar(key, value, self.current_learning_iteration)
                 log_tradeoff_curriculum(self.writer, self.env, self.current_learning_iteration)
-            print(f"FACET {self.current_learning_iteration}/{num_learning_iterations} {self.alg.phase}: "
-                  f"rollout {collected-start:.3f}s, update {updated-collected:.3f}s", flush=True)
+            self._print_iteration(self.last_metrics, storage.phase, num_learning_iterations)
             if self.log_dir and self.current_learning_iteration % self.save_interval == 0:
                 self.save(str(Path(self.log_dir, f'model_{self.current_learning_iteration}.pt')))
         if self.log_dir:
             self.save(str(Path(self.log_dir, f'model_{self.current_learning_iteration}.pt')))
         if self.writer:
             self.writer.flush()
+
+    def _policy_log_metrics(self, collected_phase):
+        # Log the updated policy for THIS rollout, even at a teacher/student
+        # boundary. Match the distribution's clamp, without changing parameters.
+        actor = self.model.teacher if collected_phase == 'teacher' else self.model.student
+        std = actor.std.detach().clamp_min(1e-6)
+        metrics = {'Policy/mean_noise_std': std.mean().item(),
+                   'Policy/position_noise_std': std.mean().item(),
+                   'Policy/min_noise_std': std.min().item(),
+                   'Policy/max_noise_std': std.max().item()}
+        if self.rewards:
+            metrics['Train/mean_reward'] = sum(self.rewards)/len(self.rewards)
+        if self.lengths:
+            metrics['Train/mean_episode_length'] = sum(self.lengths)/len(self.lengths)
+        return metrics
+
+    def _print_iteration(self, metrics, collected_phase, total_iterations):
+        """PACT-style panel with FACET losses; all times are elapsed seconds."""
+        collection = metrics['Perf/collection_seconds']
+        update = metrics['Perf/update_seconds']
+        duration = collection + update
+        fps = self.steps*self.env.num_envs/max(duration, 1e-6)
+        width, pad = 80, 35
+        lines = ['#'*width,
+                 f' Learning iteration {self.current_learning_iteration}/{total_iterations} '.center(width), '']
+        def line(label, value):
+            lines.append(f'{label + ":":>{pad}} {value}')
+        line('FACET rollout phase', collected_phase)
+        if self.alg.phase != collected_phase:
+            line('Next rollout phase', self.alg.phase)
+        line('Computation', f'{fps:.0f} steps/s (collection: {collection:.3f}s, learning {update:.3f}s)')
+        labels = {'surrogate': 'Surrogate loss', 'value': 'Value function loss',
+                  'kl': 'KL divergence', 'estimator_priv': 'Estimator privileged loss',
+                  'estimator_force': 'Estimator force-feature loss'}
+        # Estimator updates are intermittent; absent losses are omitted, not zero.
+        for key, label in labels.items():
+            if 'Loss/'+key in metrics:
+                line(label, f'{metrics["Loss/"+key]:.6f}')
+        line('Position action noise std', f'{metrics["Policy/position_noise_std"]:.4f}')
+        line('Learning rate', f'{metrics["Loss/learning_rate"]:.6f}')
+        line('Entropy coefficient', f'{metrics["Values/entropy"]:.6f}')
+        for key, label in (('Train/mean_reward', 'Mean reward'),
+                           ('Train/mean_episode_length', 'Mean episode length')):
+            if key in metrics:
+                line(label, f'{metrics[key]:.2f}')
+        for key in sorted(k for k in metrics if k.startswith('Episode/')):
+            line('Mean episode '+key.removeprefix('Episode/'), f'{metrics[key]:.4f}')
+        lines.append('-'*width)
+        line('Total timesteps', int(metrics['Budget/total_interactions']))
+        line('Iteration time', f'{duration:.2f}s')
+        line('Total time', f'{self.training_wall_seconds:.2f}s')
+        # Use accounted updates, including resumed phases, not an epoch timestamp.
+        eta = self.training_wall_seconds/max(sum(self.phase_updates.values()), 1)*max(total_iterations-self.current_learning_iteration, 0)
+        line('ETA', f'{eta:.1f}s')
+        print('\n'.join(lines), flush=True)
 
     def save(self, path):
         env = self.env
@@ -295,6 +360,16 @@ class B1Z1FACETRunner:
         self.env.cfg.facet_reference = FACETReferenceCfg(**saved_contract['reference'])
         from legged_gym.envs.b1z1.b1z1_facet.tracking import FACETTrackingCfg, COMPONENTS
         self.env.cfg.facet_tracking = FACETTrackingCfg(**saved_contract['tracking'])
+        from legged_gym.envs.b1z1.b1z1_facet.schedules import FACETForceCurriculum
+        self.env._staged_force_curriculum = FACETForceCurriculum(self.env.cfg, self.env.device)
+        if self.alg.cfg.get('facet_reward_schedule_version', 0) < 1:
+            # Migrate old thresholds once; subsequent checkpoints already use
+            # FACET units. Preserve the saved relative success requirements.
+            for threshold, component, legacy in (
+                ('adaptive_ent_lin_threshold', 'base_velocity', 'tracking_lin_vel_force_world'),
+                ('adaptive_ent_ang_threshold', 'yaw_rate', 'tracking_ang_vel')):
+                self.alg.cfg[threshold] *= self.env.cfg.facet_tracking.weights[component] / getattr(self.env.cfg.rewards.scales, legacy)
+            self.alg.cfg['facet_reward_schedule_version'] = 1
         self.env._facet_bandwidths = torch.tensor([self.env.cfg.facet_tracking.bandwidths[k] for k in COMPONENTS], device=self.device)
         self.env.facet_reference = FACETReference(self.env.num_envs, self.env.device, self.env.cfg.facet_reference)
         self.env.facet_history = FACETReferenceBank(self.env.facet_reference, self.env.cfg.facet_tracking.horizons)
@@ -328,6 +403,7 @@ class B1Z1FACETRunner:
                 raise ValueError('Changing env count on resume cannot preserve per-env tradeoff curriculum')
             self.env.tradeoff_step_ctr.copy_(state['tradeoff_step_ctr'])
         self.hidden.zero_(); self.ema_hidden.zero_(); self.running_lengths.zero_()
+        self.running_rewards.zero_(); self.rewards.clear()
         self.lengths = deque(state['lengths'], maxlen=100)
         return self.current_learning_iteration
 

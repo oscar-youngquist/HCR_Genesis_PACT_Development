@@ -22,11 +22,15 @@ class FACETTrackingCfg:
     horizons: tuple = (8, 16, 32)  # Ages in control intervals, NOT future prediction offsets.
     weights: dict = field(default_factory=lambda: dict(zip(COMPONENTS, (.75, 1.5, .75, 1., 1., 1.))))
     bandwidths: dict = field(default_factory=lambda: dict(zip(COMPONENTS, (.25, .25, .25, .25, .10, .25))))
+    # Fraction of the maximum EE-position reward, not a distance threshold.
+    force_curriculum_reward_fraction: float = .75
     # Legacy scales remain intact in rewards.scales for diagnostic units and the
     # disabled switch. These terms are excluded when registering the objective.
     excluded_rewards: tuple = LEGACY_TRACKING + CONFLICTING_SHAPING + FF_ONLY
 
     def validate(self):
+        if not 0 < self.force_curriculum_reward_fraction < 1:
+            raise ValueError("FACET force curriculum reward fraction must lie in (0, 1)")
         if not set(LEGACY_TRACKING + CONFLICTING_SHAPING).issubset(self.excluded_rewards):
             raise ValueError("FACET tracking must exclude legacy tracking and competing nominal shaping")
         for name, values in (("weights", self.weights), ("bandwidths", self.bandwidths)):

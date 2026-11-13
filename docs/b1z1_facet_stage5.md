@@ -20,7 +20,7 @@ PILOT and reject differences outside an explicit allowlist.
 | Rollout / epochs / minibatches | 24 / 5 / 4 |
 | PPO | lr 3e-4, adaptive KL .012, gamma .99, lambda .95, clip .2, clipped value loss, value coefficient 1, gradient cap 1 |
 | Optimizer / advantages | PILOT AdamW: 1e-6 decay on weights and biases, zero on std; full-rollout sample-SD advantage normalization |
-| Adaptive entropy | Inherited PILOT `use_adaptive_entropy` and all `adaptive_ent_*` settings; no terrain curriculum means terrain threshold completed |
+| Adaptive entropy | FACET base-velocity/yaw-rate rewards; thresholds 1.125/0.70 preserve PILOT success fractions; remaining entropy settings inherited; terrain threshold completed |
 | Estimator | Separate Adam, lr 5e-4; 2 epochs; every other zero-indexed teacher update (0,2,...), every student update; same minibatch count |
 | EMA estimator | Tau .04, initialized from online estimator; updated once after estimator epochs |
 | Budget / saves / student start | 70,000 total completed updates / every 1,000 / after 60,000 |
@@ -41,7 +41,7 @@ curriculum bounds and cosine schedule, with dt applied exactly once.
 
 | Treatment | Reward names |
 |---|---|
-| Replace with six Stage 3 temporal objectives | `tracking_lin_vel_force_world`, `tracking_ang_vel`, `tracking_ee_force_world`; keep original weighted episode sums solely for existing curriculum/entropy diagnostics |
+| Replace with six Stage 3 temporal objectives | `tracking_lin_vel_force_world`, `tracking_ang_vel`, `tracking_ee_force_world`; keep original weighted episode sums solely for nominal diagnostics, not schedule inputs |
 | Exclude conflicting nominal/stillness/recruitment shaping | `no_physical_progress`, `stand_still`, `stand_still_contact`, `ref_dof_leg`, `feet_contact_number`, `walking_ref_dof`, `walking_ref_swing_dof`, `arm_progress_before_torso`, `early_torso_tilt` |
 | Exclude nonexistent learned-FF channels | `tracking_arm_feedforward`, `torque_cancellation`, `{leg,arm}_feedforward_{action_rate,action_smoothness,torques}`; Pos compatibility torque slots are NOT FF actions |
 | Replace PILOT-only compliance velocity reward | `compliance_ee_velocity_weight` is not registered; FACET EE velocity temporal reward remains active |
@@ -54,6 +54,36 @@ curriculum bounds and cosine schedule, with dt applied exactly once.
 The six FACET weights/bandwidths/horizons are unchanged. Nominal diagnostic
 formulas/units are unchanged, even when virtual references move under loading.
 No untrained 9-D wrench reconstruction is used for force-curriculum decisions.
+
+### FACET Reward-Based Schedules
+
+Entropy uses `rew_facet_base_velocity` and `rew_facet_yaw_rate`. Episode sums
+already include control dt and are divided by prescribed episode seconds;
+their maxima are the reward weights, 1.5 and 1.0. Default entropy thresholds
+are therefore 1.125 (75%) and 0.70 (70%), without another dt multiplier.
+These preserve relative thresholds, not identical success probabilities under
+the different FACET objectives. Explicit algorithm threshold overrides still apply.
+
+Command-range advancement uses `facet_base_velocity` episode sums against its
+own dt-scaled weight. Domain-randomization advancement uses the same reward,
+converted to the inherited simulator's reward units (multiply by 2/1.5 with
+default weights), preserving its relative minimum/recovery thresholds. Neither
+uses nominal tracking diagnostics. Time-based reward curricula are unchanged.
+
+Force advancement uses `rew_facet_ee_position / weights['ee_position']` with
+`facet_tracking.force_curriculum_reward_fraction = 0.75`. This is an explicit
+reward-fraction criterion, not a conversion of nominal L1 error into meters.
+The shared gate internally smooths its complementary dimensionless deficit;
+logs expose `ForceCurriculum/facet_ee_reward_fraction_ema` and its threshold.
+Missing/zero-weight rewards cannot satisfy the performance gate. Existing
+survival/roll checks, patience, latest-start fallback, and ramp timing remain.
+Short/failed episodes retain the prescribed-horizon denominator.
+
+Checkpoints tag the new gate semantics. Loading an older checkpoint clears the
+incompatible nominal-error EMA/patience with a warning, preserving already
+latched force exposure and ramp progress. Legacy entropy thresholds are rescaled
+once; subsequent saves retain their FACET units. Running Python processes do
+not pick up this change until restarted/resumed. Other methods are unchanged.
 
 ## Collection, Optimization and Handoff
 
@@ -157,3 +187,20 @@ references/rewards/observation switches, including physical failures.
   logging and file I/O; it is not full-training iteration time.
 
 No full training run or trained-task-performance evaluation was performed.
+
+## Training Logging
+
+FACET writes `Policy/mean_noise_std` and `Policy/position_noise_std` (identical
+for its position-only actions), plus `Policy/min_noise_std` and
+`Policy/max_noise_std`. These are effective Gaussian standard deviations in
+policy-action units, including the distribution's 1e-6 floor, for the updated
+actor that collected the rollout. They are not joint-position errors or torques.
+`Train/mean_reward` and `Train/mean_episode_length` average the last 100 completed
+episodes; partial episodes are not counted as completed returns.
+
+The terminal uses a PACT-style iteration panel with FACET PPO/estimator losses,
+policy std, episode metrics, phase, throughput, elapsed time and ETA. Intermittent
+estimator losses are omitted when not computed; no fictitious PINN losses are
+printed. At handoff it labels both the completed rollout phase and next phase.
+Reporting changes take effect on the next process launch, not in an already
+running Python process.

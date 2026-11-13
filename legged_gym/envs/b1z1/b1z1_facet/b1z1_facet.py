@@ -1,11 +1,13 @@
 """FACET references, temporal rewards and packets; shared Pos execution stays intact."""
 import torch
+import numpy as np
 
 from legged_gym.envs.b1z1.b1z1_ppo_pos.b1z1_ppo_pos import B1Z1PPOPos
 from legged_gym.envs.b1z1.directional_compliance import heading, rotate_yaw, sphere_basis
 from .reference import FACETReference, FACETReferenceBank, applied_loads, measured_reference_state
 from .tracking import COMPONENTS, LEGACY_TRACKING, tracking_values
 from .observations import FACETObservations
+from .schedules import FACETForceCurriculum
 
 
 class B1Z1FACET(B1Z1PPOPos):
@@ -13,6 +15,8 @@ class B1Z1FACET(B1Z1PPOPos):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if self.cfg.facet_tracking.enabled:
+            self._staged_force_curriculum = FACETForceCurriculum(self.cfg, self.device)
         self.facet_reference = None
         self.facet_history = None
         self._facet_interval = None
@@ -149,6 +153,17 @@ class B1Z1FACET(B1Z1PPOPos):
         """Original Stage 2 single-start diagnostic API; no actor input changes."""
         return {} if self.facet_reference is None else self.facet_reference.read()
 
+    def _update_command_curriculum(self, env_ids):
+        if not self.cfg.facet_tracking.enabled:
+            return super()._update_command_curriculum(env_ids)
+        key = 'facet_base_velocity'
+        # Episode sums include dt; compare against the same dt-scaled maximum.
+        score = self.episode_sums[key][env_ids].mean() / self.max_episode_length
+        if score > self.cfg.commands.curriculum_threshold * self.reward_scales[key]:
+            for axis in ('lin_vel_x', 'lin_vel_y', 'ang_vel_yaw'):
+                self.command_ranges[axis][0] = np.clip(self.command_ranges[axis][0]-.2, -self.cfg.commands.max_curriculum, 0.)
+                self.command_ranges[axis][1] = np.clip(self.command_ranges[axis][1]+.2, 0., self.cfg.commands.max_curriculum)
+
     def _prepare_reward_function(self):
         settings = self.cfg.facet_tracking
         if not settings.enabled:
@@ -185,8 +200,8 @@ class B1Z1FACET(B1Z1PPOPos):
                 self._facet_valid_steps += snapshot["valid"]
             self._facet_episode_steps += 1
             # Preserve EXACT parent nominal formulas and post-callback timing.
-            # These sums feed command/tradeoff/domain/entropy consumers and logs,
-            # but the keys are absent from reward_names/reward_functions.
+            # Nominal diagnostics only; FACET schedules use temporal rewards.
+            # These keys are absent from reward_names/reward_functions.
             for key in LEGACY_TRACKING:
                 self.episode_sums[key] += getattr(super(), "_reward_"+key)()*self.reward_scales[key]
         super().compute_reward()

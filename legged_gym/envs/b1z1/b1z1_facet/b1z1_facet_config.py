@@ -42,6 +42,11 @@ class B1Z1FACETCfgPPO:
         self.runner = pilot.runner
         self.algorithm = SimpleNamespace(**{key: value for key, value in vars(pilot.algorithm).items()
             if key in COMMON_PPO or key.startswith('adaptive_ent_')})
+        # Preserve PILOT's success fractions, in FACET weighted reward/second units.
+        tracking = FACETTrackingCfg()
+        self.algorithm.facet_reward_schedule_version = 1
+        self.algorithm.adaptive_ent_lin_threshold *= tracking.weights['base_velocity'] / B1Z1PPOPosCfg.rewards.scales.tracking_lin_vel_force_world
+        self.algorithm.adaptive_ent_ang_threshold *= tracking.weights['yaw_rate'] / B1Z1PPOPosCfg.rewards.scales.tracking_ang_vel
         # AdamW matches PILOT ownership groups: all weights/biases decay 1e-6,
         # Gaussian std has no decay. Estimator uses upstream's separate Adam.
         self.algorithm.weight_decay = 1e-6
