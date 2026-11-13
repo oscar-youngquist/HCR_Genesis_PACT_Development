@@ -1,11 +1,12 @@
-"""MULE rolling-payload adapter. Production rewards and stage orchestration deferred.
+"""MULE rolling-payload adapter with independent reward streams and shared curricula.
 
-An explicit reward callable returns two already weighted/dt-scaled streams.
-The only BR reuse is physical infrastructure and the generic 45-channel noise
-cache, NOT its observations, reward, model or optimization phase machinery.
+Production rewards are default; explicit test callbacks return already
+weighted/dt-scaled streams. BR reuse is physical infrastructure and generic
+noise/shared-reward metadata, NOT BR native rewards, observations or learning.
 """
 from copy import deepcopy
 from dataclasses import asdict
+from types import SimpleNamespace as NS
 import math
 import random
 import numpy as np
@@ -14,6 +15,7 @@ from .go2_mule import Go2MULE, MULEObservation, MULEStep
 from .mule_schema import MULEExecution, estimate_foot_forces
 from .go2_mule_config import ResolvedGo2MULE
 from .rolling_payload import lost_balls
+from .mule_rewards import MULERewards
 from rsl_rl.beyond_robustness_sensors import BRActorObservationCache
 from rsl_rl.beyond_robustness_payload import inverse_rotate_wxyz
 from legged_gym.simulator.isaaclab_simulator_mule import IsaacLabSimulatorMULE
@@ -30,22 +32,21 @@ class IsaacLabMULEEnv(Go2MULE):
 
     def __init__(self,resolved,device='cuda:0',headless=True,*,reward_fn=None,reward_contract=None):
         if not isinstance(resolved,ResolvedGo2MULE): raise TypeError('Use resolve_go2_mule()')
-        if not callable(reward_fn) or not isinstance(reward_contract,str) or not reward_contract:
-            raise ValueError('Explicit MULE reward callable and versioned reward_contract required; production rewards deferred')
+        if reward_fn is not None and (not callable(reward_fn) or not isinstance(reward_contract,str) or not reward_contract):
+            raise ValueError('Explicit test MULE reward requires callable and versioned reward_contract')
+        if reward_fn is None and reward_contract is not None: raise ValueError('Reward contract without callback')
         super().__init__(resolved.environment)
         self.resolved=deepcopy(resolved); self.shared=deepcopy(resolved.shared)
         self.device=str(torch.device(device)); self.num_actions=12; self.dt=self.cfg.control_dt
-        self.reward_fn=reward_fn; self.reward_contract=reward_contract
+        self.reward_fn=reward_fn; self.reward_contract=reward_contract or deepcopy(self.shared.mule_reward)
+        self.rewards=None if reward_fn is not None else MULERewards(self.shared.mule_reward,self.shared,self.num_envs,device)
         random.seed(resolved.training.seed); np.random.seed(resolved.training.seed); torch.manual_seed(resolved.training.seed)
         self.command_rng=torch.Generator(device=device).manual_seed(resolved.training.seed+739)
         self.simulator=IsaacLabSimulatorMULE(self.shared,resolved.sim_params,self.device,headless,resolved.payload)
         s=self.simulator; n=self.num_envs
         self.domain_rand_curriculum=HardPACTDomainRandCurriculum(self.shared,resolved.training.seed)
         self._apply_domain_rand_curriculum_state()
-        # Nominal training has no movable payload and very small pushes. This
-        # is an explicit physical-mode setting, never an optimization-phase switch.
-        if resolved.payload.mode=='nominal':
-            s.push_value*=.01; s.vert_value*=.01; s.angular_push_value*=.01
+        self._publish_payload_progress()
         self.command_ranges={k:list(getattr(self.shared.commands.ranges,k)) for k in ('lin_vel_x','lin_vel_y','ang_vel_yaw','heading')}
         self.commands=torch.zeros(n,4,device=device)
         self.previous_action=torch.zeros(n,12,device=device)
@@ -66,6 +67,9 @@ class IsaacLabMULEEnv(Go2MULE):
         names=list(s._contact_sensors.body_names)
         self.collision_ids=sorted(set(s._termination_contact_indices+[names.index('br_tray')]))
         self.clock=0; self.iteration=0; self._packet=None; self._robot_parameters=None
+        self.last_completed_iteration=-1; self.command_streak=0; self.curriculum_metrics={}
+        self.episode_tracking=torch.zeros(n,device=device)
+        self.reward_collision_ids=sorted(set(s._penalized_contact_indices+[names.index('br_tray')]))
 
     def _sample_commands(self,ids):
         keys=('lin_vel_x','lin_vel_y','heading' if self.shared.commands.heading_command else 'ang_vel_yaw')
@@ -112,10 +116,19 @@ class IsaacLabMULEEnv(Go2MULE):
         return self._packet.snapshot()  # No sensors, history, physics, RNG, or curricula.
 
     @torch.no_grad()
-    def reset(self,env_ids=None):
+    def reset(self,env_ids=None,*,completed=False):
         ids=torch.arange(self.num_envs,device=self.device) if env_ids is None else env_ids.to(self.device)
         if not len(ids): return self.observe()
         s=self.simulator; resumed=getattr(s,'_resume_samples',False)
+        if completed and not resumed:
+            context=NS(cfg=self.shared,simulator=s,commands=self.commands,init_done=True,
+                max_episode_length_s=self.max_episode_length_s,
+                _filter_terrain_move_up=lambda mask:mask & (self.iteration>=self.shared.terrain.curriculum_upward_delay_iterations))
+            if self.shared.terrain.curriculum and hasattr(s,'_terrain'): Go2PACT._update_terrain_curriculum(context,ids)
+            c=self.shared.commands
+            if (c.curriculum and c.curriculum_patience_iterations==0 and self.clock%self.max_episode_length==0
+                    and self.episode_tracking[ids].mean()/self.max_episode_length>c.curriculum_threshold):
+                self._expand_commands()
         self._reset_dofs(ids); self._reset_root_states(ids)
         s.reset_idx(ids); s.reset_payload(ids)
         realized={k:v.detach().clone() for k,v in s.realized_parameters().items()}
@@ -124,6 +137,7 @@ class IsaacLabMULEEnv(Go2MULE):
         else:
             for key,value in realized.items(): self._robot_parameters[key][ids]=value[ids]
         self.episode_id[ids]+=1; self.episode_steps[ids]=0; self.failure_steps[ids]=0
+        self.episode_tracking[ids]=0
         self.previous_action[ids]=0; self.target_queue[ids]=self.target_queue.new_tensor(self.cfg.standing_position)
         self.source_queue[ids]=-1; s._torques[ids]=0
         if hasattr(s,'_hard_pact_executed_torque'): s._hard_pact_executed_torque[ids]=0
@@ -132,6 +146,7 @@ class IsaacLabMULEEnv(Go2MULE):
             lo,hi=self.shared.domain_rand.ctrl_delay_step_range
             self.action_delay[due]=torch.randint(lo,hi+1,(len(due),),device=self.device,generator=self.command_rng)
         self._sample_commands(ids); self._heading(ids); self._refresh(ids)
+        if self.rewards is not None: self.rewards.reset(ids,self._reward_snapshot())
         s._resume_samples=False
         return self.observe()
 
@@ -151,9 +166,10 @@ class IsaacLabMULEEnv(Go2MULE):
         self.previous_action.copy_(command.combined_clipped); self.episode_steps+=1; self.clock+=1
         self._sample_commands((self.episode_steps%max(1,int(self.shared.commands.resampling_time/self.dt))==0).nonzero().flatten())
         if self.shared.domain_rand.push_robots: s.push_robots()
+        refresh_after_push(s)
         self._heading(); self._refresh()
         packet=self.observe(); relative,_=s.payload_motion()
-        lost=lost_balls(relative,s.ball_radius,s.payload_cfg) if s.balls else torch.zeros_like(self.episode_steps,dtype=torch.bool)
+        lost=(lost_balls(relative,s.ball_radius,s.payload_cfg)&s.payload_active) if s.balls else torch.zeros_like(self.episode_steps,dtype=torch.bool)
         collision=(s.ground_total_forces_world[:,self.collision_ids].norm(dim=-1)>10).any(-1)
         from legged_gym.utils.math_utils import wrap_to_pi
         term=self.shared.termination
@@ -171,18 +187,88 @@ class IsaacLabMULEEnv(Go2MULE):
         timeout=(self.episode_steps>=self.max_episode_length)&~failure
         done=failure|timeout
         # Callable sees the same pre-reset endpoint as labels and termination.
-        nominal,adaptive=self.reward_fn(self,packet,failure,timeout)
+        reward_terms=None
+        if self.rewards is None:
+            nominal,adaptive=self.reward_fn(self,packet,failure,timeout)
+        else:
+            nominal,adaptive=self.rewards.evaluate(self._reward_snapshot(),command,selected,self.commands,
+                packet.foot_force_estimate,self._robot_parameters['robot_including_tray_mass'],
+                s.ball_mass*s.payload_active[:,None],done,timeout,packet.supervision_valid)
+            reward_terms=self.rewards.last_weighted
+        # Same unscaled fixed-kernel locomotion evidence as HardPACT's gate;
+        # all valid env/control samples, never episode totals or adaptive reward.
+        linear=torch.exp(-4*(self.commands[:,:2]-s.base_lin_vel[:,:2]).square().sum(-1))
+        angular=torch.exp(-4*(self.commands[:,2]-s.base_ang_vel[:,2]).square())
+        valid=packet.supervision_valid&torch.isfinite(linear)&torch.isfinite(angular)
+        self.episode_tracking+=torch.where(valid,linear,0.)
+        count=int(valid.sum())
+        performance=None if count==0 else dict(lin_vel_tracking=float(linear[valid].mean()),
+            ang_vel_tracking=float(angular[valid].mean()),terrain_level=float(s.terrain_levels[valid].float().mean()),valid_count=count)
         for r in (nominal,adaptive):
             if r.shape!=(self.num_envs,) or not torch.isfinite(r).all(): raise ValueError('Invalid explicit reward stream')
         result=MULEStep(packet,execution,nominal.clone(),adaptive.clone(),failure.clone(),timeout.clone(),
-            packet.snapshot(),done&packet.supervision_valid,failure_reasons={k:v.clone() for k,v in reasons.items()})
-        self.reset(done.nonzero().flatten())
+            packet.snapshot(),done&packet.supervision_valid,failure_reasons={k:v.clone() for k,v in reasons.items()},
+            performance_metrics=performance,reward_terms=reward_terms)
+        self.reset(done.nonzero().flatten(),completed=True)
         return MULEStep(self.observe(),result.execution,result.nominal_reward,result.adaptive_reward,
-            result.terminated,result.timed_out,result.terminal,result.terminal_valid,failure_reasons=result.failure_reasons)
+            result.terminated,result.timed_out,result.terminal,result.terminal_valid,failure_reasons=result.failure_reasons,
+            performance_metrics=result.performance_metrics,reward_terms=result.reward_terms)
 
     def set_payload_severity(self,value): self.simulator.set_payload_severity(value)
-    def begin_iteration(self,iteration): self.iteration=int(iteration)
-    # No automatic phase/curriculum progression in this implementation stage.
+    def _publish_payload_progress(self):
+        s=self.simulator
+        if self.shared.mule.follow_disturbance_curriculum:
+            s.set_payload_severity(self.domain_rand_curriculum.progress['disturbance'])
+        if s.payload_cfg.mode=='nominal' or s.payload_progress==0:
+            s.push_value*=self.shared.mule.nominal_push_scale
+            s.vert_value*=self.shared.mule.nominal_push_scale
+            s.angular_push_value*=self.shared.mule.nominal_push_scale
+
+    def requested_optimization_phase(self):
+        if self.shared.mule.auto_joint_adaptation and self.simulator.balls and self.simulator.payload_progress>0:
+            return 'joint_adaptation'
+        return None # Never reverse a trained phase; explicit user phase remains independent.
+
+    def begin_iteration(self,iteration):
+        self.iteration=int(iteration)
+        if self.rewards is not None: self.rewards.begin_iteration(iteration)
+
+    def _expand_commands(self):
+        context=NS(cfg=self.shared,command_ranges=self.command_ranges)
+        Go2HardPACT._expand_command_curriculum_ranges(context)
+
+    def end_iteration(self,iteration,performance):
+        if iteration<=self.last_completed_iteration: return
+        consecutive=iteration==self.last_completed_iteration+1
+        self.last_completed_iteration=int(iteration)
+        count=0 if performance is None else performance.get('valid_count',0)
+        tracking=None if performance is None else performance.get('lin_vel_tracking')
+        valid=count>0 and tracking is not None and math.isfinite(tracking)
+        c=self.shared.commands
+        if c.curriculum and c.curriculum_patience_iterations>0:
+            self.command_streak=(self.command_streak if consecutive else 0)+1 if valid and tracking>c.curriculum_threshold else 0
+            if self.command_streak>=c.curriculum_patience_iterations:
+                self._expand_commands(); self.command_streak=0
+        if valid and self.simulator.use_domainrand_curriculum:
+            self.domain_rand_curriculum.advance(iteration,tracking)
+            self._apply_domain_rand_curriculum_state(); self._publish_payload_progress()
+        self.curriculum_metrics={'curriculum/commands/valid_count':count,
+            'curriculum/commands/patience_count':self.command_streak}
+        if valid: self.curriculum_metrics['curriculum/commands/tracking_mean']=tracking
+
+    def _reward_snapshot(self):
+        s=self.simulator
+        fields=('base_pos','base_quat','projected_gravity','dof_pos','dof_vel','default_dof_pos',
+            'dof_pos_limits','dof_pos_limits_hard','torque_limits','feet_pos','feet_vel','measured_heights',
+            '_height_around_feet','_max_height_ahead_feet','_normal_vector_around_feet','base_lin_vel','base_ang_vel')
+        values={k:getattr(s,k).detach().clone() for k in fields}
+        values.update(torques=s.hard_pact_executed_torque().clone(),requested_torque=s.last_requested_torque.clone(),
+            link_contact_forces=s.ground_total_forces_world.clone(),feet_contact_indices=s.feet_contact_indices,
+            feet_indices=s.feet_indices,penalised_contact_indices=self.reward_collision_ids)
+        if self.rewards is not None and any(self.rewards.coefficients()[k]['nominal']!=0 for k in
+                ('feet_near_edge','edge_swing_clearance','swing_foot_collision_edge')):
+            values['near_edge']=s.calc_feet_near_edge().clone()
+        return NS(**values)
 
     def physical_labels(self):
         """Owned privileged physical evidence for future rewards, NEVER actor inputs.
@@ -193,7 +279,8 @@ class IsaacLabMULEEnv(Go2MULE):
         """
         s=self.simulator; relative,velocity=s.payload_motion()
         return dict(realized_robot={k:v.clone() for k,v in self._robot_parameters.items()},ball_mass_kg=s.ball_mass.clone(),
-            total_ball_mass_kg=s.ball_mass.sum(-1),ball_radius_m=s.ball_radius.clone(),
+            total_ball_mass_kg=(s.ball_mass*s.payload_active[:,None]).sum(-1),ball_radius_m=s.ball_radius.clone(),
+            payload_active=s.payload_active.clone(),realized_severity=s.realized_severity.clone(),
             ball_relative_position_b=relative.clone(),ball_relative_velocity_b=velocity.clone(),
             payload_reaction_world_n=s.payload_reaction_world.clone(),
             ground_contact_force_world_n=s.ground_total_forces_world.clone(),
@@ -201,23 +288,30 @@ class IsaacLabMULEEnv(Go2MULE):
 
     def physical_contract(self):
         from rsl_rl.beyond_robustness_config import settings_dict
-        return dict(version=1,shared=settings_dict(self.resolved.shared),payload=asdict(self.resolved.payload),
+        return dict(version=2,shared=settings_dict(self.resolved.shared),payload=asdict(self.resolved.payload),
             schema=self.input_schema.contract(),reward=self.reward_contract,
             critic_disturbance='measured ball-on-robot contact force, normal+tangent, body axes',
             force_proxy='last applied joint torque and endpoint named foot COM Jacobian, body axes')
 
     def curriculum_state_dict(self):
         s=self.simulator
-        return deepcopy(dict(version=1,contract=self.physical_contract(),sampling=s.sampling_state_dict(),
+        return deepcopy(dict(version=2,contract=self.physical_contract(),sampling=s.sampling_state_dict(),
             domain=self.domain_rand_curriculum.state_dict(),command_ranges=self.command_ranges,
+            last_completed_iteration=self.last_completed_iteration,command_streak=self.command_streak,
+            rewards=None if self.rewards is None else self.rewards.state_dict(),
             command_rng=self.command_rng.get_state(),noise=self.actor_observation_cache.state_dict(),
             action_delay=self.action_delay.clone(),iteration=self.iteration,
             terrain_levels=s.terrain_levels.clone(),terrain_types=s.terrain_types.clone()))
 
     def validate_curriculum_state_dict(self,state):
-        if state['version']!=1 or state['contract']!=self.physical_contract(): raise ValueError('Incompatible MULE physical contract')
+        if state['version']!=2 or state['contract']!=self.physical_contract(): raise ValueError('Incompatible MULE physical/reward contract; Stage 3 requires explicit migration')
         self.simulator.validate_sampling_state_dict(state['sampling'])
         candidate=deepcopy(self.domain_rand_curriculum); candidate.load_state_dict(state['domain'])
+        if self.rewards is not None: deepcopy(self.rewards).load_state_dict(state['rewards'])
+        if state['last_completed_iteration']< -1 or state['command_streak']<0: raise ValueError('Invalid curriculum counters')
+        if state['command_ranges'].keys()!=self.command_ranges.keys() or any(
+                len(v)!=2 or not all(math.isfinite(x) for x in v) or v[0]>v[1] for v in state['command_ranges'].values()):
+            raise ValueError('Invalid restored command ranges')
         for key,generator in (('command_rng',self.command_rng),):
             torch.Generator(device=generator.device).set_state(state[key].cpu())
         torch.Generator(device=self.device).set_state(state['noise']['rng'].cpu())
@@ -233,8 +327,10 @@ class IsaacLabMULEEnv(Go2MULE):
         self.validate_curriculum_state_dict(state)
         s=self.simulator
         self.domain_rand_curriculum.load_state_dict(state['domain']); self._apply_domain_rand_curriculum_state()
-        if s.payload_cfg.mode=='nominal': s.push_value*=.01; s.vert_value*=.01; s.angular_push_value*=.01
         s.load_sampling_state_dict(state['sampling'])
+        self._publish_payload_progress()
+        self.last_completed_iteration=state['last_completed_iteration']; self.command_streak=state['command_streak']
+        if self.rewards is not None: self.rewards.load_state_dict(state['rewards'])
         self.command_ranges=deepcopy(state['command_ranges']); self.command_rng.set_state(state['command_rng'].cpu())
         self.actor_observation_cache.load_state_dict(state['noise']); self.action_delay.copy_(state['action_delay'])
         self.iteration=state['iteration']; self.commands.zero_(); self._packet=None; self.clock=0
@@ -245,7 +341,28 @@ class IsaacLabMULEEnv(Go2MULE):
 
     def iteration_metrics(self):
         s=self.simulator
-        return {'Payload/severity':s.payload_progress,'Payload/total_mass_mean_kg':float(s.ball_mass.sum(-1).mean()),
+        ranges={}
+        for name,values in (('reset_mass_kg',s.payload_cfg.mass_range(s.payload_progress)),
+                            ('periodic_mass_kg',s.payload_cfg.mass_range(s.payload_progress,periodic=True)),
+                            ('friction',s.payload_cfg.friction_at(s.payload_progress))):
+            ranges.update({f'Payload/{name}_{side}':value for side,value in zip(('low','high'),values)})
+        if self.rewards is not None:
+            rows,valid,force_valid,nonfinite=self.rewards.counts.tolist()
+            ranges.update({'Train/reward_sample_count':rows,'Train/reward_valid_count':valid,
+                'Train/reward_nonfinite_count':nonfinite,'Payload/grf_proxy_valid_count':force_valid})
+        if self.domain_rand_curriculum.reward_ema is not None:
+            ranges['Values/domain_rand_reward_ema']=self.domain_rand_curriculum.reward_ema
+        ranges['Values/required_reward']=self.domain_rand_curriculum.required_reward
+        return {**self.curriculum_metrics,**ranges,
+            **{f'Values/domain_rand_{k}_progress':v for k,v in self.domain_rand_curriculum.progress.items()},
+            'Payload/requested_severity':s.payload_progress,
+            'Train/environment_stage_requested':1+int(bool(s.balls) and s.payload_progress>0),
+            'Payload/spawn_jitter_bound_m':s.payload_cfg.spawn_jitter_m*s.payload_progress,
+            'Payload/relative_linear_velocity_bound_m_s':s.payload_cfg.relative_linear_velocity_max*s.payload_progress,
+            'Payload/relative_angular_velocity_bound_rad_s':s.payload_cfg.relative_angular_velocity_max*s.payload_progress,
+            'Payload/active_fraction':float(s.payload_active.float().mean()),
+            'Payload/realized_severity':float(s.realized_severity.mean()),
+            'Payload/total_mass_mean_kg':float((s.ball_mass*s.payload_active[:,None]).sum(-1).mean()),
             'Payload/ball_mass_max_kg':float(s.ball_mass.max()),'Train/environment_rolling':int(bool(s.balls)),
             'Episode/terrain_level':float(s.terrain_levels.float().mean())}
 
@@ -253,3 +370,15 @@ class IsaacLabMULEEnv(Go2MULE):
         raise ValueError('MULE liquid/stage transfer adapter not implemented; fresh same-contract resume only')
 
     def close(self): self.simulator._app_launcher.app.close()
+
+
+def refresh_after_push(s):
+    """Refresh root and foot twists after a velocity write, without another step."""
+    d=s._robot.data
+    delta_v=d.root_link_lin_vel_w-s._base_world_lin_vel
+    delta_w=d.root_link_ang_vel_w-s._base_world_ang_vel
+    s._feet_vel.add_(delta_v[:,None]+torch.cross(delta_w[:,None].expand(-1,4,-1),
+        s.feet_pos-d.root_link_pos_w[:,None],dim=-1))
+    s._base_lin_vel.copy_(inverse_rotate_wxyz(d.root_link_quat_w,d.root_link_lin_vel_w))
+    s._base_ang_vel.copy_(inverse_rotate_wxyz(d.root_link_quat_w,d.root_link_ang_vel_w))
+    s._base_world_lin_vel.copy_(d.root_link_lin_vel_w); s._base_world_ang_vel.copy_(d.root_link_ang_vel_w)

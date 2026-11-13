@@ -206,8 +206,9 @@ class ResolvedGo2MULE:
 
 
 def resolve_go2_mule(env_cfg=None, train_cfg=None, *, environment_overrides=None,
-                     training_overrides=None, payload_overrides=None):
-    """Physical factory; no task registration, reward import or automatic stages.
+                     training_overrides=None, payload_overrides=None, reward_overrides=None,
+                     curriculum_overrides=None):
+    """Owned physical/reward/curriculum factory; no production task/launcher.
 
     Only generic owned-settings conversion is reused from BR, not its factory,
     observation schema, payload ranges or learning/reward configuration.
@@ -215,6 +216,7 @@ def resolve_go2_mule(env_cfg=None, train_cfg=None, *, environment_overrides=None
     from types import SimpleNamespace
     from rsl_rl.beyond_robustness_config import _owned_settings, settings_dict
     from .rolling_payload import RollingPayloadConfig
+    from .mule_rewards import PARAMETERS, resolve_reward_spec
     if (env_cfg is None)!=(train_cfg is None): raise ValueError('Supply both shared configs or neither')
     if env_cfg is None:
         from legged_gym.envs.go2.go2_hard_pact.ablation_configs import make_hard_pact_backend_configs
@@ -229,6 +231,15 @@ def resolve_go2_mule(env_cfg=None, train_cfg=None, *, environment_overrides=None
                  'edge_clearance_forward_cells','edge_clearance_lateral_cells','feet_edge_threshold'))
     for group,names in allow.items():
         setattr(cfg,group,SimpleNamespace(**{k:deepcopy(get(get(env_cfg,group),k)) for k in names}))
+    for key in PARAMETERS:
+        setattr(cfg.rewards,key,deepcopy(get(get(env_cfg,'rewards'),key)))
+    cfg.mule=SimpleNamespace(follow_disturbance_curriculum=True,auto_joint_adaptation=True,nominal_push_scale=.01)
+    for key,value in (curriculum_overrides or {}).items():
+        if not hasattr(cfg.mule,key): raise ValueError('Unknown MULE curriculum setting: '+key)
+        setattr(cfg.mule,key,value)
+    if (not isinstance(cfg.mule.follow_disturbance_curriculum,bool) or not isinstance(cfg.mule.auto_joint_adaptation,bool)
+            or not math.isfinite(cfg.mule.nominal_push_scale) or not 0<=cfg.mule.nominal_push_scale<=1):
+        raise ValueError('Invalid MULE curriculum settings')
     cfg.seed=int((training_overrides or {}).get('seed',get(train_cfg,'seed')))
     cfg.env.num_actions=12; cfg.env.num_observations=45
     cfg.control.control_type='P'; cfg.control.use_tradeoff_curriculum=False; cfg.control.randomize_pact_weights=False
@@ -264,8 +275,11 @@ def resolve_go2_mule(env_cfg=None, train_cfg=None, *, environment_overrides=None
         raise ValueError('Canonical named feet required')
     payload=RollingPayloadConfig(**{'seed':cfg.seed,**(payload_overrides or {})})
     if payload.seed!=cfg.seed: raise ValueError('Payload seed must match run seed')
-    return ResolvedGo2MULE(environment,training,cfg,payload,dict(version=1,
+    cfg.mule_reward=resolve_reward_spec(get(env_cfg,'rewards'),cfg.control.dt,reward_overrides)
+    return ResolvedGo2MULE(environment,training,cfg,payload,dict(version=2,
         inherited_sections=sections,inherited_fields=allow,shared=settings_dict(cfg),
         source='live Go2 HardPACT Isaac Lab physical/optimization settings only',
-        overrides=dict(environment=overrides,training=training_overrides or {},payload=payload_overrides or {}),
-        method='MULE native context/dual PPO; no production reward, automatic stage clock or phase transition'))
+        overrides=dict(environment=overrides,training=training_overrides or {},payload=payload_overrides or {},
+            rewards=reward_overrides or {},curriculum=curriculum_overrides or {}),
+        reward=deepcopy(cfg.mule_reward),
+        method='MULE native context/dual PPO; shared disturbance clock drives reset-boundary rolling payloads'))

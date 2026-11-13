@@ -174,6 +174,8 @@ class MULERunner:
             phase = self.phase_transition_hook(self.alg.iteration, self.env)
             if phase == 'joint_adaptation': self.transition_to_joint_adaptation()
             elif phase not in (None, self.alg.model.phase): raise ValueError('Phase hook cannot reverse optimization')
+        elif hasattr(self.env,'requested_optimization_phase'):
+            if self.env.requested_optimization_phase()=='joint_adaptation': self.transition_to_joint_adaptation()
         if hasattr(self.env, 'begin_iteration'): self.env.begin_iteration(self.alg.iteration)
         if self.current is not None:
             refreshed = self.env.observe().snapshot()
@@ -187,7 +189,9 @@ class MULERunner:
             rewards.append(r); returns.append(er); lengths.append(el)
             keys = ('lin_vel_tracking', 'ang_vel_tracking', 'terrain_level')
             if evidence is not None and all(k in evidence and math.isfinite(float(evidence[k])) for k in keys):
-                performance.append({k: float(evidence[k]) for k in keys})
+                count=float(evidence.get('valid_count',self.config.num_envs))
+                if math.isfinite(count) and count>0:
+                    performance.append({**{k: float(evidence[k]) for k in keys},'valid_count':count})
         self.alg.compute_returns(self.current.critic)  # Critic only: no history append or action/context sampling.
         reward = torch.stack(rewards).mean((0, 1))
         completed = torch.cat(lengths)
@@ -196,9 +200,10 @@ class MULERunner:
         if len(completed):
             metrics.update(episode_length_steps=float(completed.float().mean()),
                 nominal_episode_return=float(episode[:, 0].mean()), adaptive_episode_return=float(episode[:, 1].mean()))
-        # Shared method-neutral performance-gap entropy; full-rollout finite evidence only.
-        evidence = ({k: sum(p[k] for p in performance)/len(performance) for k in keys}
-                    if len(performance) == self.config.num_steps_per_env else None)
+        # Count-weighted finite rollout evidence; no completed-episode bias.
+        count=sum(p['valid_count'] for p in performance)
+        evidence = ({**{k:sum(p[k]*p['valid_count'] for p in performance)/count for k in keys},'valid_count':count}
+                    if count>0 else None)
         return metrics, evidence
 
     def learn(self, iterations=None):

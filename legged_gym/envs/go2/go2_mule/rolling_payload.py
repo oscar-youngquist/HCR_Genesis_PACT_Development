@@ -29,6 +29,7 @@ class RollingPayloadConfig:
     light_mass_range: tuple = (.01, .05)
     mass_change_interval_s: float = 4.  # zero disables periodic changes
     friction_range: tuple = (.15, .6)
+    light_friction_range: tuple = (.6, .6) # endpoint choice, not a monotonic difficulty claim
     restitution_range: tuple = (0., .1)
     spawn_clearance: float = .003
     spawn_jitter_m: float = .025
@@ -41,7 +42,7 @@ class RollingPayloadConfig:
     def __post_init__(self):
         if self.mode not in ('nominal','rolling'): raise ValueError('Payload mode must be nominal or rolling')
         for key in ('tray_size','radius_range','reset_mass_range','periodic_mass_range',
-                    'light_mass_range','friction_range','restitution_range'):
+                    'light_mass_range','friction_range','light_friction_range','restitution_range'):
             v=tuple(getattr(self,key)); object.__setattr__(self,key,v)
             if not all(math.isfinite(x) and x>=0 for x in v): raise ValueError('Invalid '+key)
             if len(v)!=(3 if key=='tray_size' else 2) or (key!='tray_size' and v[0]>v[1]): raise ValueError('Invalid '+key)
@@ -66,6 +67,10 @@ class RollingPayloadConfig:
         if not math.isfinite(severity) or not 0<=severity<=1: raise ValueError('Severity must lie in [0,1]')
         target=self.periodic_mass_range if periodic else self.reset_mass_range
         return tuple(max(self.mass_floor_kg,a+severity*(b-a)) for a,b in zip(self.light_mass_range,target))
+
+    def friction_at(self,severity):
+        self.mass_range(severity) # validate progress
+        return tuple(a+severity*(b-a) for a,b in zip(self.light_friction_range,self.friction_range))
 
 
 def sphere_inertia(mass, radius):

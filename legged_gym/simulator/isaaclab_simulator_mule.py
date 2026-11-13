@@ -49,6 +49,8 @@ class IsaacLabSimulatorMULE(IsaacLabSimulatorBR):
         self.mass_elapsed=torch.zeros(n,device=device)
         self.mass_change_count=torch.zeros(n,dtype=torch.long,device=device)
         self.payload_reaction_world=torch.zeros(n,3,device=device)
+        self.payload_active=torch.zeros(n,dtype=torch.bool,device=device)
+        self.realized_severity=torch.zeros(n,device=device)
         self._ball_contacts=[GroundContactForces(sensor.contact_physx_view,sim_params['dt'],device)
                              for sensor in self.ball_sensors]
         self._p_gains=self._p_gains[self._dof_indices]; self._d_gains=self._d_gains[self._dof_indices]
@@ -101,6 +103,8 @@ class IsaacLabSimulatorMULE(IsaacLabSimulatorBR):
     def set_payload_severity(self,value):
         self.payload_cfg.mass_range(value)  # validation; no current property mutation
         self.payload_progress=float(value)
+        cadence=self._reset_sampling_cadence()
+        if cadence is not None: cadence.update_ranges({'mule_payload':(value,)})
 
     def _uniform(self,shape,lo,hi):
         return lo+(hi-lo)*torch.rand(shape,device=self._device,generator=self.payload_rng)
@@ -129,27 +133,43 @@ class IsaacLabSimulatorMULE(IsaacLabSimulatorBR):
         if not self.balls: return
         c=self.payload_cfg; p=self.payload_progress
         if not getattr(self,'_resume_samples',False):
-            self.ball_mass[ids]=self._uniform((len(ids),4),*c.mass_range(p))
-            self.ball_friction[ids]=self._uniform((len(ids),4),*c.friction_range)
-            self.ball_restitution[ids]=self._uniform((len(ids),4),*c.restitution_range)
-            self.ball_offsets[ids]=sample_offsets(c,self.ball_radius[ids],self.payload_rng,p)
-            self.ball_relative_velocity[ids]=self._uniform((len(ids),4,3),-1.,1.)*c.relative_linear_velocity_max*p
-            self.ball_relative_omega[ids]=self._uniform((len(ids),4,3),-1.,1.)*c.relative_angular_velocity_max*p
+            due=self._reset_sample_ids('mule_payload',ids)
+            self.payload_active[due]=p>0
+            self.realized_severity[due]=p
+            self.ball_mass[due]=self._uniform((len(due),4),*c.mass_range(p))
+            self.ball_friction[due]=self._uniform((len(due),4),*c.friction_at(p))
+            self.ball_restitution[due]=self._uniform((len(due),4),*c.restitution_range)
+            self.ball_offsets[due]=sample_offsets(c,self.ball_radius[due],self.payload_rng,p)
+            self.ball_relative_velocity[due]=self._uniform((len(due),4,3),-1.,1.)*c.relative_linear_velocity_max*p
+            self.ball_relative_omega[due]=self._uniform((len(due),4,3),-1.,1.)*c.relative_angular_velocity_max*p
             self.mass_elapsed[ids]=0; self.mass_change_count[ids]=0
         self._write_ball_properties(ids,material=True)
         d=self._robot.data
         states=ball_spawn_state(d.root_link_quat_w[ids],d.root_link_pos_w[ids],d.root_link_lin_vel_w[ids],
             d.root_link_ang_vel_w[ids],self.ball_offsets[ids],self.ball_relative_velocity[ids],self.ball_relative_omega[ids])
         for k,(ball,sensor,contact) in enumerate(zip(self.balls,self.ball_sensors,self._ball_contacts)):
+            # Supported PhysX gravity flags + nonoverlapping parking well below
+            # terrain: positive-mass bodies, no robot/terrain/ball interaction.
+            # Activation changes only on reset, never during an active episode.
+            view=ball.root_physx_view; cpu=ids.cpu()
+            disabled=view.get_disable_gravities().clone()
+            disabled[cpu,0]=(~self.payload_active[ids]).to(device='cpu',dtype=disabled.dtype)
+            view.set_disable_gravities(disabled,cpu)
+            parked=~self.payload_active[ids]
+            parking=states[:,k].clone(); parking[:,2]=-100.-k; parking[:,7:]=0
+            states[:,k]=torch.where(parked[:,None],parking,states[:,k])
             ball.write_root_state_to_sim(states[:,k],ids); ball.reset(ids); sensor.reset(ids); contact.reset(ids)
 
     def periodic_mass_update(self,dt):
         if not self.balls: return
         due,elapsed=due_mass_changes(self.mass_elapsed,dt,self.payload_cfg.mass_change_interval_s)
-        self.mass_elapsed.copy_(elapsed)
-        ids=due.nonzero().flatten()
+        self.mass_elapsed.copy_(torch.where(self.payload_active,elapsed,0.))
+        ids=(due&self.payload_active).nonzero().flatten()
         if len(ids):
-            self.ball_mass[ids]=self._uniform((len(ids),4),*self.payload_cfg.mass_range(self.payload_progress,periodic=True))
+            c=self.payload_cfg; p=self.realized_severity[ids,None]
+            lo=(c.light_mass_range[0]+p*(c.periodic_mass_range[0]-c.light_mass_range[0])).clamp_min(c.mass_floor_kg)
+            hi=(c.light_mass_range[1]+p*(c.periodic_mass_range[1]-c.light_mass_range[1])).clamp_min(c.mass_floor_kg)
+            self.ball_mass[ids]=lo+(hi-lo)*self._uniform((len(ids),4),0.,1.)
             self._write_ball_properties(ids)
             self.mass_change_count[ids]+=1
         # Discontinuous parameter change, NOT momentum conserving: pose and
@@ -204,9 +224,9 @@ class IsaacLabSimulatorMULE(IsaacLabSimulatorBR):
     def sampling_state_dict(self):
         view=self._robot.root_physx_view
         keys=('ball_mass','ball_friction','ball_restitution','ball_offsets','ball_relative_velocity','ball_relative_omega',
-              'mass_elapsed','mass_change_count','_kp_scale','_kd_scale','_motor_strength','_added_base_mass',
+              'mass_elapsed','mass_change_count','payload_active','realized_severity','_kp_scale','_kd_scale','_motor_strength','_added_base_mass',
               '_base_com_bias','_joint_armature','_joint_friction','_joint_stiffness','_joint_damping','_friction_values')
-        return deepcopy(dict(version=1,radius_bank=self.radius_bank,radius_ids=self.radius_ids,
+        return deepcopy(dict(version=2,radius_bank=self.radius_bank,radius_ids=self.radius_ids,
             severity=self.payload_progress,rng=self.payload_rng.get_state(),
             tensors={k:getattr(self,k).clone() for k in keys},
             robot_cadence=self._reset_cadence.__dict__ if hasattr(self,'_reset_cadence') else None,
@@ -214,7 +234,7 @@ class IsaacLabSimulatorMULE(IsaacLabSimulatorBR):
             robot_properties={k:getattr(view,'get_'+k)().clone() for k in ('masses','coms','inertias','material_properties')}))
 
     def validate_sampling_state_dict(self,state):
-        if state['version']!=1 or state['radius_bank']!=self.radius_bank or state['radius_ids']!=self.radius_ids:
+        if state['version']!=2 or state['radius_bank']!=self.radius_bank or state['radius_ids']!=self.radius_ids:
             raise ValueError('Incompatible creation-time sphere geometry')
         self.payload_cfg.mass_range(state['severity'])
         torch.Generator(device=self._device).set_state(state['rng'].cpu())
@@ -225,6 +245,8 @@ class IsaacLabSimulatorMULE(IsaacLabSimulatorBR):
                 if v.shape!=current[group][k].shape or v.dtype!=current[group][k].dtype or not torch.isfinite(v).all():
                     raise ValueError('Invalid sampled property: '+k)
         if self.balls and (state['tensors']['ball_mass']<self.payload_cfg.mass_floor_kg).any(): raise ValueError('Nonpositive sampled mass')
+        if ((state['tensors']['realized_severity']<0)|(state['tensors']['realized_severity']>1)).any():
+            raise ValueError('Invalid realized payload severity')
 
     def load_sampling_state_dict(self,state):
         self.validate_sampling_state_dict(state)

@@ -72,7 +72,7 @@ def test_named_jacobian_columns_force_sign_and_frame(fixed):
     torch.testing.assert_close(estimate.force_b,force,atol=1e-6,rtol=1e-5)
 
 
-def test_physical_factory_isolated_and_requires_explicit_reward():
+def test_physical_factory_isolated_and_production_reward_default():
     a=resolve_go2_mule(environment_overrides={'env.num_envs':3,'control.dt':.04,'noise.noise_level':.23},
                        training_overrides={'seed':19},payload_overrides={'mode':'nominal'})
     b=resolve_go2_mule()
@@ -80,7 +80,8 @@ def test_physical_factory_isolated_and_requires_explicit_reward():
     assert a.training.seed==a.payload.seed==19 and a.training.num_envs==3
     assert a.shared.noise.noise_level==.23 and b.shared.noise.noise_level!=.23
     assert a.environment.schema.critic_dim==51+143
-    with pytest.raises(ValueError,match='Explicit MULE reward'): IsaacLabMULEEnv(a,'cpu')
+    assert a.shared.mule_reward['terms']['tracking_lin_vel']['coefficients']==dict(nominal=1.,adaptive=0.)
+    with pytest.raises(ValueError,match='Explicit test MULE reward'): IsaacLabMULEEnv(a,'cpu',reward_fn=lambda:0)
     with pytest.raises(ValueError,match='persistent'): resolve_go2_mule(environment_overrides={'domain_rand.persistent_disturbance':True})
 
 

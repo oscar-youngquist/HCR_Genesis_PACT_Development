@@ -4,8 +4,9 @@ MULE rolling-payload integration
 This stage supplies ``IsaacLabMULEEnv(Go2MULE)`` and
 ``IsaacLabSimulatorMULE``. It is not a registered production task. Models,
 native context losses, dual-PPO ownership, rollout likelihoods and phase
-transitions are unchanged. Production rewards, launchers, automatic physical
-stage/optimization-phase orchestration and liquid fine-tuning remain deferred.
+transitions retain their ownership. Stage 4 adds production rewards and shared
+curriculum orchestration (see ``mule_rewards_curriculum.rst``). Production
+launchers, registration and liquid fine-tuning remain deferred.
 
 Evidence and choices
 --------------------
@@ -34,8 +35,8 @@ existing selective optimization factory/schema. Robot reset distributions are
 the shared +/-0.3 rad joint offsets, origin/terrain placement and +/-0.5 root
 twists. Persistent torso wrench injection is disabled, not replaced by payload
 truth in actors. Shared pushes remain; nominal-mode push magnitudes are 1% of
-their effective shared bounds. Shared curriculum state is retained, but no new
-automatic progression/phase clock is introduced in this stage.
+their effective shared bounds. The existing shared disturbance clock now drives
+rolling-load severity; there is no second progression clock.
 
 Lifetimes and timestamps
 ------------------------
@@ -43,12 +44,15 @@ Lifetimes and timestamps
 * Geometry: seeded size bank (eight four-ball combinations), env-id modulo
   bank size, before physics initialization; never runtime USD scaling. Clones
   are separated before PhysX initialization to avoid coincident broadphase.
-* Mass: episode reset sampling and separately timed four-second resampling;
+* Mass: eligible reset sampling and separately timed four-second resampling;
   ``set_payload_severity(p)`` interpolates light [0.01,0.05] kg to the configured
-  reset/periodic ranges. Changed severity affects the next sampling boundary,
-  never immediately changes active bodies. Timers are per environment and
+  reset/periodic ranges. Changed severity takes effect on the next reset;
+  periodic samples use each environment's realized severity. Timers are per environment and
   quantized to control intervals. Interval zero disables periodic changes.
-* Friction/restitution and initial placement/twist: episode-reset samples.
+* Friction/restitution and initial placement/twist: shared eligible-reset samples.
+  Changed severity forces eligibility at the next reset; otherwise the configured
+  per-environment reset cadence retains samples. Periodic mass changes remain
+  independent of that cadence. Friction interpolates explicit light/full endpoints.
   Four disjoint spawn cells guarantee non-overlap and floor/wall clearance.
 * Mass changes preserve pose and linear/angular velocity, not momentum; this is
   a discontinuous simulator-property experiment. Inertia and mass labels are
@@ -105,12 +109,11 @@ are not restored. Exact test-environment resume keeps strict device/topology
 checks. CPU/CUDA or GPU-architecture changes are not bitwise portable. Liquid
 transfer is explicitly rejected until a compatible adapter exists.
 
-Construct with a versioned ``reward_contract`` and explicit callable returning
-two finite [N] rewards, already weighted/dt-scaled. The callable receives the
-pre-reset env/observation/failure/timeout. No implicit production or BR reward
-exists. Tests use ``test_only_mule_tracking_reward`` deliberately, not MULE's
-future production objective. Physical mode and optimization phase remain
-independent; automatic orchestration is still deferred.
+The default is now the resolved MULE production reward merge. Explicit test
+callbacks still require a versioned ``reward_contract`` and return two finite
+[N] rewards, already weighted/dt-scaled. The callback receives the pre-reset
+env/observation/failure/timeout. Smoke scripts use production rewards unless
+``--test-reward`` is explicitly selected. No BR native rewards are inherited.
 
 Bounded validation commands
 ---------------------------
