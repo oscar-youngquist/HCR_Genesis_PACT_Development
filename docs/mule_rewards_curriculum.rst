@@ -125,7 +125,7 @@ remain disabled; shared pushes remain, scaled down in the nominal physical stage
 Resume
 ------
 
-The version-2 physical/sampling contract and version-1 reward contract are saved
+The version-2 physical/sampling contract and version-3 reward contract are saved
 with the existing model/three-optimizer/phase checkpoint. They include reward
 iteration, domain EMA/history/gates, command ranges/streak, terrain levels,
 requested and realized severity/activation, geometry, sampler RNG and timers.

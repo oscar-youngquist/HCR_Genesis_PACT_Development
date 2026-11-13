@@ -140,12 +140,17 @@ class IsaacLabSimulatorMULE(IsaacLabSimulatorBR):
             due=self._reset_sample_ids('mule_payload',ids)
             self.payload_active[due]=p>0
             self.realized_severity[due]=p
-            self.ball_mass[due]=self._uniform((len(due),4),*c.mass_range(p))
             self.ball_friction[due]=self._uniform((len(due),4),*c.friction_at(p))
             self.ball_restitution[due]=self._uniform((len(due),4),*c.restitution_range)
             self.ball_offsets[due]=sample_offsets(c,self.ball_radius[due],self.payload_rng,p)
             self.ball_relative_velocity[due]=self._uniform((len(due),4,3),-1.,1.)*c.relative_linear_velocity_max*p
             self.ball_relative_omega[due]=self._uniform((len(due),4,3),-1.,1.)*c.relative_angular_velocity_max*p
+            # Episode-initial masses are not persistent material properties.
+            # A periodic (larger-range) draw must never leak into a new episode.
+            severity=self.realized_severity[ids,None]
+            lo=(c.light_mass_range[0]+severity*(c.reset_mass_range[0]-c.light_mass_range[0])).clamp_min(c.mass_floor_kg)
+            hi=(c.light_mass_range[1]+severity*(c.reset_mass_range[1]-c.light_mass_range[1])).clamp_min(c.mass_floor_kg)
+            self.ball_mass[ids]=lo+(hi-lo)*self._uniform((len(ids),4),0.,1.)
             self.mass_elapsed[ids]=0; self.mass_change_count[ids]=0
         self._write_ball_properties(ids,material=True)
         d=self._robot.data

@@ -77,6 +77,10 @@ def resolve_run(args):
         c=deepcopy(data.get('resolved_configuration'))
         if not isinstance(c,ResolvedGo2MULE): raise ValueError('Missing saved resolved configuration; explicit legacy migration required')
         if c.shared.mule_reward['version']!=VERSION: raise ValueError('Incompatible MULE clearance/reward contract; explicit migration required')
+        c.training.schema.contract()
+        if (c.environment.schema!=c.training.schema or
+                c.training.schema.clip_observations!=c.shared.normalization.clip_observations):
+            raise ValueError('Incompatible MULE observation clipping/schema')
         if 'training_state' not in data and not args.allow_legacy_checkpoint: raise ValueError('Legacy checkpoint requires explicit permission')
         for k in ('seed','num_envs'):
             if getattr(args,k) is not None and getattr(args,k)!=getattr(c.training,k): raise ValueError('Incompatible resume '+k)

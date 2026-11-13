@@ -95,7 +95,9 @@ Checkpoint contract
 
 Model contract v2 separates structural schema/history/normalization/action/
 architecture compatibility from learning/runtime configuration. Known Stage-1
-v1 model metadata is normalized explicitly; unknown versions are rejected.
+v1 model metadata normalization does not migrate observation semantics: schema
+v2 now requires a finite shared clipping bound, and old unclipped schemas are
+rejected. Unknown versions are rejected.
 Full saves include all three optimizers, schedules, phase, iteration and
 interaction counts, resolved configs, Python/NumPy/Torch RNG, history/current
 observation, episode buffers and available adapter curriculum state.

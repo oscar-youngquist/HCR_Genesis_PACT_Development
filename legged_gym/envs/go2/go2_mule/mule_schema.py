@@ -1,4 +1,4 @@
-"""Go2 MULE v1 tensor contracts. No simulator/HardPACT observation packing.
+"""Go2 MULE v2 tensor contracts. No simulator/HardPACT observation packing.
 
 Body axes: x forward, y left, z up. FR/FL/RR/RL, hip/thigh/calf.
 Physical inputs are scaled only by pack(); stored actor/history tensors are
@@ -16,7 +16,7 @@ JOINTS = tuple(f'{leg}_{joint}_joint' for leg in FEET for joint in ('hip', 'thig
 
 @dataclass(frozen=True)
 class MULESchema:
-    version: int = 1
+    version: int = 2
     history_length: int = 20
     terrain_points_x: tuple = ()
     terrain_points_y: tuple = ()
@@ -28,16 +28,17 @@ class MULESchema:
     terrain_height_scale: float = 1.
     # Independent proxy/critic force normalization, not a HardPACT GRF head.
     force_scale: float = .01
+    clip_observations: float = 100.
 
     def __post_init__(self):
         for key in ('terrain_points_x', 'terrain_points_y', 'joint_order'):
             object.__setattr__(self, key, tuple(getattr(self, key)))
-        if self.version != 1 or self.joint_order != JOINTS:
+        if self.version != 2 or self.joint_order != JOINTS:
             raise ValueError('Incompatible MULE schema/joint order')
         if not isinstance(self.history_length, int) or self.history_length < 1:
             raise ValueError('history_length must be positive')
         for key in ('angular_velocity_scale', 'linear_velocity_scale', 'joint_position_scale',
-                    'joint_velocity_scale', 'terrain_height_scale', 'force_scale'):
+                    'joint_velocity_scale', 'terrain_height_scale', 'force_scale', 'clip_observations'):
             if not math.isfinite(getattr(self, key)) or getattr(self, key) <= 0:
                 raise ValueError(f'{key} must be finite and positive')
         if not all(math.isfinite(x) for x in self.terrain_points_x + self.terrain_points_y):
@@ -85,11 +86,12 @@ class MULESchema:
         return torch.cat(result, -1)
 
     def contract(self):
+        self.__post_init__()  # Also reject old unpickled objects before use.
         return dict(**asdict(self), actor_fields=self.fields('actor'), critic_fields=self.fields('critic'),
                     history='H frames oldest first including current; zero preceding frames on reset; append once per action',
                     auxiliary='velocity_B(t) physical m/s; packed next observation(t+1); same episode only',
                     previous_action='clipped combined issued command before action scale/delay; reset zero',
-                    normalization='fixed multiplicative scales, no running statistics or extra observation clipping',
+                    normalization='actor: fixed scales then cached noise then +/-clip_observations before history and next-observation targets; critic and physical labels remain clean/unclipped; no running statistics',
                     force='pinv(J_leg_B.T) @ applied_tau; signed endpoint-force proxy, not simulator GRF')
 
 

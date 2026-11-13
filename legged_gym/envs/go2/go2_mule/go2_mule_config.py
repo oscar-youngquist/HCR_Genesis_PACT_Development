@@ -105,6 +105,7 @@ class Go2MULECfgPPO:
         normal = get(env_cfg, 'normalization'); scales = get(normal, 'obs_scales')
         heights = get(terrain, 'measure_heights')
         schema = MULESchema(history_length=get(env, 'num_obs_hist'),
+            clip_observations=get(normal, 'clip_observations'),
             terrain_points_x=get(terrain, 'measured_points_x') if heights else (),
             terrain_points_y=get(terrain, 'measured_points_y') if heights else (),
             joint_order=get(get(env_cfg, 'asset'), 'dof_names'),
@@ -279,6 +280,8 @@ def resolve_go2_mule(env_cfg=None, train_cfg=None, *, environment_overrides=None
     environment,training=resolve_go2_mule_configs(cfg,train_cfg,**(training_overrides or {}))
     if training.num_envs!=cfg.env.num_envs or training.schema.history_length!=cfg.env.num_obs_hist:
         raise ValueError('Set environment sizing/history through environment_overrides')
+    if training.schema.clip_observations!=cfg.normalization.clip_observations:
+        raise ValueError('Observation clipping must match shared normalization.clip_observations')
     if tuple(cfg.asset.foot_name)!=tuple(f'{f}_foot' for f in ('FR','FL','RR','RL')):
         raise ValueError('Canonical named feet required')
     payload=RollingPayloadConfig(**{'seed':cfg.seed,**(payload_overrides or {})})

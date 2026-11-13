@@ -7,7 +7,7 @@ shared curriculum are defaults. The model, native CENet loss/routing
 conventions, separate nominal/adaptive PPO streams and optimizer ownership are
 unchanged. No HardPACT learning components or liquid physics are enabled.
 
-Reward contract v2
+Reward contract v3
 ------------------
 
 Table I of https://arxiv.org/html/2505.00488v1 specifies clearance weight -0.01
@@ -22,8 +22,22 @@ are m^3/s; the native coefficient and control-dt scaling apply once. Better
 clearance at the same foot speed improves reward, and a common vertical
 translation of feet/terrain leaves it invariant. Stationary feet have zero
 speed-weighted cost. This is a documented reproduction assumption, not verified
-author code. Shared HardPACT/BR helpers are unchanged. Version-1 MULE reward
+author code. Shared HardPACT/BR helpers are unchanged. Version-1/2 MULE reward
 checkpoints are rejected; no reward migration is supplied.
+
+The nominal stream also includes ``collision``, ``dof_pos_limits``,
+``feet_air_time`` and ``feet_contact_forces``, using live HardPACT coefficients
+and the shared helpers (joint-limit *excess*, not BR's count). Collision and
+foot rewards use ground-filtered contacts, never ordinary tray/payload support.
+Air time uses Fz > 1 N, current OR previous contact, a 0.5 s landing reference,
+and planar command norm > 0.1 m/s. Histories clear on selected resets and fresh
+resume. These additions have zero adaptive weight; dt applies exactly once.
+
+Observation schema v2 inherits ``normalization.clip_observations``. Scaling
+and cached noise precede symmetric clipping; policy histories and reconstruction
+targets share that clipped observation. Critic inputs and physical velocity
+labels remain clean/unclipped. Old unclipped contracts and changed clipping
+bounds are rejected, including weights-only loading; no migration is supplied.
 
 Configuration and stage semantics
 --------------------------------
@@ -35,6 +49,11 @@ only eligible resets realize the changes. Mass remains capped at 2 kg per ball
 for periodic resampling, whose production cadence is four seconds. Geometry is
 creation-time only. Requested versus realized severity, pending generations,
 sampling properties/RNG/timers and curriculum gates survive ordinary resume.
+Every ordinary episode reset draws fresh masses from the reset distribution
+at its realized severity (default full-severity maximum 1 kg per ball), writes
+matching sphere inertia, and restarts the periodic timer. This is independent
+of persistent material/robot-property cadence. The initial fresh-resume reset
+alone retains explicitly saved masses/timers; the next episode resamples.
 
 Optimization defaults to ``nominal_only``. The existing
 ``auto_joint_adaptation`` hook requests the forward phase transition at a
@@ -259,3 +278,53 @@ Changed-file map
   ``test_mule_stage1.py``, ``smoke_mule_payload.py``.
 * Docs: this file, ``mule_rewards_curriculum.rst``, ``mule_rolling_payload.rst``,
   ``training_state_transfer.rst``.
+
+Validation of the three post-3846798 fixes
+----------------------------------------
+
+The MULE/BR/checkpoint CPU regression set passed 190 tests (two existing
+dependency/legacy warnings). Seven focused cases are in
+``tests/test_mule_remaining_fixes.py``. From the repository root::
+
+    export SIMULATOR=isaaclab PYTHONPATH=.:tests OMP_NUM_THREADS=1
+    PY=/home/oyoungquist/.conda/envs/lr_lab_cupiqp/bin/python
+    "$PY" -m pytest -q -p no:cacheprovider \
+      tests/test_mule_remaining_fixes.py tests/test_mule_production.py \
+      tests/test_mule_rewards_curriculum.py tests/test_mule_payload.py \
+      tests/test_mule_stage1.py tests/test_mule_learning.py tests/test_br_mule_logging.py \
+      tests/test_beyond_robustness.py tests/test_beyond_robustness_runner.py \
+      tests/test_beyond_robustness_payload.py tests/test_beyond_robustness_inheritance.py \
+      tests/test_beyond_robustness_rewards.py tests/test_beyond_robustness_stage8.py \
+      tests/test_training_state_transfer.py
+
+Executed on physical GPU 1 (RTX 4090), mapped to logical cuda:0, using production
+rewards and the production entrypoint::
+
+    export CUDA_VISIBLE_DEVICES=1 PYTHONUNBUFFERED=1
+    export LD_PRELOAD=/home/oyoungquist/.conda/envs/lr_lab_cupiqp/lib/libstdc++.so.6
+    "$PY" legged_gym/scripts/train_mule.py --smoke --headless --device cuda:0 \
+      --optimization-phase nominal_only --no-auto-joint-adaptation \
+      --log-dir /tmp/mule_fixes_nominal_3846798
+    "$PY" legged_gym/scripts/train_mule.py --smoke --smoke-curriculum --headless \
+      --device cuda:0 --optimization-phase joint_adaptation \
+      --log-dir /tmp/mule_fixes_joint_3846798
+    "$PY" legged_gym/scripts/train_mule.py --headless --device cuda:0 \
+      --checkpoint /tmp/mule_fixes_joint_3846798/model_3.pt --additional-iterations 1 \
+      --log-dir /tmp/mule_fixes_resume_3846798
+
+Use new output directories when repeating these commands. All three returned
+``MULE_TRAIN_PASS`` with finite losses. Four-environment nominal training
+completed two updates/32 transitions in 1.381 s (23.17 transitions/s), joint
+adaptation three updates/48 transitions in 1.481 s (32.42 transitions/s), and
+fresh-physics joint resume iteration 3 to 4 in 0.451 s. The accelerated joint
+smoke recorded eight periodic mass changes; resumed training recorded 24.
+Peak PyTorch allocated bytes were respectively 42,028,544; 58,450,944; and
+59,083,776. These exclude PhysX/Kit memory and simulator startup time; tiny
+smoke timings are not production-throughput or speedup evidence.
+
+Artifacts, manifests, checkpoints and ``result.json`` are in the listed output
+directories, with terminal logs at the matching ``/tmp/*.log`` paths.
+Cadence-ineligible resets, support-versus-ground reward contacts, clipping
+limits and old-contract rejection additionally have explicit CPU fixtures.
+No new 4,096-environment run, Unity/container execution or long training was
+performed for this patch.

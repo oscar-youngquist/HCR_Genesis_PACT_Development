@@ -12,7 +12,7 @@ import math
 import torch
 from rsl_rl.beyond_robustness_rewards import ADDITIONS as SHARED_ADDITIONS, PARAMETERS
 
-VERSION = 2
+VERSION = 3
 PAPER = 'https://arxiv.org/html/2505.00488v1#S2.T1'
 # Explicit zeros are part of the contract, not absent/default inherited terms.
 NATIVE = {
@@ -40,6 +40,14 @@ FORMULAS = {
 EXCLUDED_OVERLAPS = {'orientation','joint_power_dist','foot_clearance_terrain_aware',
                     'feet_regulation','pbrs_orientation','pbrs_height'}
 ADDITIONS = {k:v for k,v in SHARED_ADDITIONS.items() if k not in EXCLUDED_OVERLAPS}
+# BR supplies these natively, so they are absent from its additions allowlist.
+# MULE instead inherits their live HardPACT coefficients and shared formulas.
+ADDITIONS.update({
+    'collision': ('sum(norm(ground_body_force)>0.1 N)', 'penalized robot/tray ground contacts', 'contact count'),
+    'dof_pos_limits': ('sum(relu(soft_lower-q)+relu(q-soft_upper))', 'simulator soft joint limits', 'rad'),
+    'feet_air_time': ('sum((air_time-0.5 s)*first_filtered_contact)*I(norm(command_xy)>0.1 m/s)', 'ground Fz>1 N; current OR previous contact', 's'),
+    'feet_contact_forces': ('sum(relu(norm(ground_foot_force)-max_contact_force))', 'ground-only foot forces', 'N'),
+})
 
 
 def resolve_reward_spec(shared, dt, overrides=None):
@@ -100,11 +108,15 @@ class MULERewards:
         self.actions=torch.zeros(n,2,2,12,device=device) # stream, previous/two-back
         self.age=torch.zeros(n,device=device,dtype=torch.long)
         self.velocity=torch.zeros(n,12,device=device)
+        self.air=torch.zeros(n,4,device=device)
+        self.contacts=torch.zeros(n,4,device=device,dtype=torch.bool)
         self.counts=torch.zeros(4,device=device) # rows, valid state, valid force proxy, nonfinite native rows
         self.last_raw={}; self.last_weighted={}
 
     def reset(self,ids,s):
         self.actions[ids]=0; self.age[ids]=0; self.velocity[ids]=s.dof_vel[ids]
+        self.air[ids]=0
+        self.contacts[ids]=s.link_contact_forces[ids][:,s.feet_contact_indices,2]>1.
 
     def begin_iteration(self,iteration):
         self.iteration=int(iteration); self.counts.zero_()
@@ -145,6 +157,8 @@ class MULERewards:
         context._compute_vhip_angle=lambda:Go2PACT._compute_vhip_angle(context)
         context._compute_vhip_acceleration=lambda:Go2PACT._compute_vhip_acceleration(context)
         coefficients=self.coefficients(); extra={}
+        context.feet_air_time=self.air
+        context.last_contacts=self.contacts
         for k in ADDITIONS:
             if not coefficients[k]['nominal']: continue
             if k=='torque_limits':
@@ -152,6 +166,7 @@ class MULERewards:
             else:
                 cls=Go2HardPACT if k in ('dof_vel_limits','front_foot_overreach','rear_foot_overreach') else Go2PACT
                 extra[k]=getattr(cls,'_reward_'+k)(context)
+        self.contacts.copy_(context.last_contacts)
         self.last_raw={}; self.last_weighted={}; totals=[]
         for i,(stream,action) in enumerate(zip(('nominal','adaptive'),(command.nominal_raw,command.adaptive_raw))):
             context.actions=action; context.last_actions=self.actions[:,i,0]; context.llast_actions=self.actions[:,i,1]

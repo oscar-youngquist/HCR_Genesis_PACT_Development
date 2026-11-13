@@ -35,6 +35,10 @@ class IsaacLabMULEEnv(Go2MULE):
         if reward_fn is not None and (not callable(reward_fn) or not isinstance(reward_contract,str) or not reward_contract):
             raise ValueError('Explicit test MULE reward requires callable and versioned reward_contract')
         if reward_fn is None and reward_contract is not None: raise ValueError('Reward contract without callback')
+        resolved.training.schema.contract()  # Validate before constructing physics.
+        if (resolved.environment.schema!=resolved.training.schema or
+                resolved.training.schema.clip_observations!=resolved.shared.normalization.clip_observations):
+            raise ValueError('Incompatible MULE observation clipping/schema')
         super().__init__(resolved.environment)
         self.resolved=deepcopy(resolved); self.resolved_config=self.resolved
         self.shared=deepcopy(resolved.shared)
@@ -60,7 +64,8 @@ class IsaacLabMULEEnv(Go2MULE):
         self.action_delay=torch.zeros_like(self.episode_id)
         self.target_queue=torch.tensor(self.cfg.standing_position,device=device).expand(n,delay+1,12).clone()
         self.source_queue=torch.full((n,delay+1),-1,dtype=torch.long,device=device)
-        self.actor_observation_cache=BRActorObservationCache(n,device,self.shared.noise,float('inf'),resolved.training.seed)
+        self.actor_observation_cache=BRActorObservationCache(n,device,self.shared.noise,
+            self.input_schema.clip_observations,resolved.training.seed)
         # Cache utility's physical noise is scaled exactly like MULE's pack().
         sc=self.input_schema
         for sl,scale in ((slice(0,3),sc.angular_velocity_scale),(slice(9,21),sc.joint_position_scale),(slice(21,33),sc.joint_velocity_scale)):

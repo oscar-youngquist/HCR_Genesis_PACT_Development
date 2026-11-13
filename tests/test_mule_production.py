@@ -28,7 +28,7 @@ def test_clearance_direction_translation_and_contract():
     assert reward[0]>reward[1] and reward[0]==pytest.approx(0,abs=1e-10)
     p[:,:,2]+=17.; ground+=17.
     torch.testing.assert_close(clearance_cost(p,v,ground,.10,.02),cost,atol=1e-6,rtol=1e-5)
-    assert VERSION==2
+    assert VERSION==3
 
 
 def test_mule_broadphase_capacity_is_resolved_and_overridable():
