@@ -81,6 +81,22 @@ class Go2MULECfgPPO:
             raise ValueError('Invalid logvar bounds')
         for key in ('num_learning_epochs', 'num_mini_batches', 'auxiliary_epochs', 'num_steps_per_env', 'num_envs'):
             if not isinstance(getattr(self, key), int) or getattr(self, key) < 1: raise ValueError(f'Invalid {key}')
+        for key in ('gamma', 'lam'):
+            if not math.isfinite(getattr(self, key)) or not 0 <= getattr(self, key) <= 1: raise ValueError(f'Invalid {key}')
+        for key in ('clip_param', 'max_grad_norm', 'desired_kl', 'adaptive_ent_softmax_temp'):
+            if not math.isfinite(getattr(self, key)) or getattr(self, key) <= 0: raise ValueError(f'Invalid {key}')
+        for key in ('value_loss_coef', 'entropy_coef', 'adaptive_ent_lin_threshold',
+                    'adaptive_ent_ang_threshold', 'adaptive_ent_ter_threshold'):
+            if not math.isfinite(getattr(self, key)) or getattr(self, key) < 0: raise ValueError(f'Invalid {key}')
+        if self.schedule not in ('fixed', 'adaptive'): raise ValueError('Unknown learning-rate schedule')
+        if (len(self.adaptive_ent_bounds) != 2 or not all(math.isfinite(x) for x in self.adaptive_ent_bounds)
+                or not 0 <= self.adaptive_ent_bounds[0] <= self.adaptive_ent_bounds[1]):
+            raise ValueError('Invalid entropy bounds')
+        for key in ('seed', 'max_iterations', 'save_interval'):
+            if not isinstance(getattr(self, key), int) or getattr(self, key) < (1 if key == 'save_interval' else 0):
+                raise ValueError(f'Invalid {key}')
+        if self.num_mini_batches > self.num_envs * self.num_steps_per_env:
+            raise ValueError('More minibatches than rollout rows')
 
     @classmethod
     def from_shared(cls, env_cfg, train_cfg, **overrides):
@@ -112,12 +128,30 @@ class Go2MULECfgPPO:
     def resolved(self): return asdict(self)
 
     def contract(self):
-        result = self.resolved()
-        result.pop('optimization_phase')  # Runtime phase restored independently of initial default.
-        return dict(version=1, config=result, schema=self.schema.contract(),
+        result = {k: self.resolved()[k] for k in ('schema', 'latent_dim', 'logvar_bounds',
+            'action_scale', 'clip_actions', 'min_noise_std', 'max_noise_std')}
+        return dict(version=2, config=result, schema=self.schema.contract(),
                     actor_critic_widths=(512,256,128), encoder_widths=(128,64), decoder_widths=(64,128),
                     activation='ELU', decoder_input='estimated velocity_B * linear_velocity_scale, sampled z',
                     routing='auxiliary-only context; detached shared rollout context for both actors')
+
+    def learning_contract(self):
+        """Only budget/save interval and runner log location may change on resume.
+
+        Initial phase is not a resume override: the saved phase wins. Changing
+        phase requires the runner's explicit clean-boundary transition API.
+        """
+        return {k: v for k, v in self.resolved().items()
+                if k not in ('optimization_phase', 'max_iterations', 'save_interval')}
+
+    def accepts_model_contract(self, contract):
+        # Stage-1 model-only checkpoints contained learning/runtime settings.
+        # Normalize that known format, never an unknown version or schema.
+        if isinstance(contract, dict) and contract.get('version') == 1:
+            contract = deepcopy(contract)
+            contract['version'] = 2
+            contract['config'] = {k: contract.get('config', {}).get(k) for k in self.contract()['config']}
+        return contract == self.contract()
 
 
 @dataclass(frozen=True)

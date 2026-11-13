@@ -99,8 +99,8 @@ try:
     torch.testing.assert_close(result.curriculum_tracking,expected)
     if env.rewards is not None:
         expected_reward=expected  # Fixed BR exp(-4*error_xy^2), not HardPACT dynamic sigma.
-        torch.testing.assert_close(env.rewards.sums['raw/tracking_lin_vel'],expected_reward.sum())
-        torch.testing.assert_close(env.rewards.sums['raw/foot_slip'],push_evidence['slip'])
+        torch.testing.assert_close(env.rewards.last_raw['tracking_lin_vel'],expected_reward)
+        torch.testing.assert_close(env.rewards.last_raw['foot_slip'].sum(),push_evidence['slip'])
         assert env.rewards.age.ge(0).all()
     sim.push_robots=original_push; env.cfg.domain_rand.push_robots=adapter_push_enabled
     checks['push_timestamp_reward_observation_tracking_parity']=True

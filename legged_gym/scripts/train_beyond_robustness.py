@@ -164,11 +164,9 @@ def main(argv=None):
             iteration=runner.current_learning_iteration
             if c.training.save_interval and iteration%c.training.save_interval==0:
                 runner.save(log_dir/f'model_{iteration}.pt')
-            print(f'BR iteration={iteration} stage={env.stage_state.stage} phase={runner.alg.training_phase} '
-                  f'collection={final_metrics["train/collection_wall_s"]:.3f}s update={final_metrics["train/update_wall_s"]:.3f}s',flush=True)
         torch.cuda.synchronize(args.device); elapsed=time.perf_counter()-begun
         final=log_dir/f'model_{runner.current_learning_iteration}.pt'; runner.save(final)
-        clean={k:float(v) if math.isfinite(float(v)) else None for k,v in final_metrics.items()}
+        clean={k:float(v) if math.isfinite(float(v)) else None for k,v in runner.last_logged_metrics.items()}
         summary=dict(start_iteration=start,end_iteration=runner.current_learning_iteration,updates=count,
             stage=env.stage_state.state_dict(),phase=runner.alg.training_phase,interactions=runner.interactions,
             training_wall_s=elapsed,transitions_per_s=count*c.training.num_envs*c.training.num_steps_per_env/max(elapsed,1e-9),

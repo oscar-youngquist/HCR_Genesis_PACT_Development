@@ -2,6 +2,7 @@
   "branch": "rescaled_qp_exps",
   "baseline": "f617154b7a69cb1994515621c6ff37c925916cde",
   "task": "go2_beyond_robustness_isaaclab",
+  "logging_contract": "docs/br_mule_logging.rst: HardPACT-style TensorBoard/terminal output; no reward coefficient/raw/weighted scalar series.",
   "contracts": {
     "reward_version": 3,
     "physical_checkpoint_version": 5,

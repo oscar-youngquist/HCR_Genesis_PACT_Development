@@ -67,6 +67,11 @@ class BRStep:
     # Separate from entropy/episode summaries: raw exp(-4*planar_error^2),
     # equal weight per environment/control step. Missing evidence pauses DR.
     curriculum_tracking: torch.Tensor | None = None
+    # Logging-only, pre-reset condition masks and already-weighted per-step terms.
+    # They never alter termination, rewards, supervision or PPO storage.
+    failure_reasons: dict | None = None
+    reward_terms: dict | None = None
+    raw_timeouts: torch.Tensor | None = None
 
 
 class BeyondRobustnessEnv(Protocol):

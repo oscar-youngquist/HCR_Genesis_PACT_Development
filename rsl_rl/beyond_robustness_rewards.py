@@ -134,7 +134,7 @@ class BRRewards:
         self.air=torch.zeros(num_envs,4,device=device)
         self.contacts=torch.zeros(num_envs,4,dtype=torch.bool,device=device)
         self.potential=torch.zeros(num_envs,2,device=device)
-        self.sums={}; self.count=0
+        self.last_raw={}; self.last_weighted={}
 
     def potentials(self,s):
         height=(s.base_pos[:,2,None]-s.measured_heights).mean(-1)
@@ -148,7 +148,7 @@ class BRRewards:
         self.potential[ids]=self.potentials(s)[ids]
 
     def begin_iteration(self,iteration):
-        self.iteration=int(iteration); self.sums={}; self.count=0
+        self.iteration=int(iteration)
 
     def coefficients(self):
         values={k:v['coefficient'] for k,v in self.spec['terms'].items()}
@@ -207,25 +207,17 @@ class BRRewards:
         if coefficients['torque_limits']!=0:
             raw['torque_limits']=(s.requested_torque.abs()-s.torque_limits*r.soft_torque_limit).clamp_min(0).sum(-1)
         weighted={k:v*coefficients[k]*self.dt for k,v in raw.items()}
+        # Keep current-step views for focused formula tests and episode logging.
+        # No raw/weighted/coefficient TensorBoard series or old per-step reductions.
+        self.last_raw={k:v.detach() for k,v in raw.items()}
+        self.last_weighted={k:v.detach() for k,v in weighted.items() if coefficients[k]!=0}
         original=sum(weighted[k] for k in ORIGINAL)
         additional=sum((v for k,v in weighted.items() if k in ADDITIONS),torch.zeros_like(original))
         total=original+additional
-        metrics={**{'raw/'+k:v for k,v in raw.items()},**{'weighted/'+k:v for k,v in weighted.items()},
-            'original_br':original,'shared_additions':additional,'total':total}
-        for key,value in metrics.items(): self.sums[key]=self.sums.get(key,0)+value.sum()
-        self.count+=len(action)
         self.actions[:,1].copy_(self.actions[:,0]); self.actions[:,0].copy_(action); self.age+=1
         self.velocity.copy_(s.dof_vel); self.air.copy_(context.feet_air_time); self.contacts.copy_(context.last_contacts)
         self.potential.copy_(potential)
         return total
-
-    def metrics(self):
-        if not self.count: return {}
-        # One bounded transfer per completed iteration, never per environment.
-        means=(torch.stack(list(self.sums.values()))/self.count).cpu().tolist()
-        result={'reward/'+k:v for k,v in zip(self.sums,means)}
-        result.update({'reward/coefficient/'+k:v for k,v in self.coefficients().items()})
-        return result
 
     def state_dict(self):
         return dict(version=VERSION,spec=deepcopy(self.spec),iteration=self.iteration)

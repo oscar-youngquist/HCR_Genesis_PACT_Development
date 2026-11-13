@@ -11,12 +11,14 @@ from rsl_rl.beyond_robustness_config import BeyondRobustnessConfig
 from rsl_rl.beyond_robustness_env import BeyondRobustnessEnv, BRObservation
 from rsl_rl.modules.actor_critic_beyond_robustness import ActorCriticBeyondRobustness
 from rsl_rl.algorithms.ppo_beyond_robustness import PPOBeyondRobustness
+from rsl_rl.utils.learning_diagnostics import (LearningEpisodeDiagnostics, policy_diagnostics,
+    compatible_training_metrics, format_training_summary)
 
 
 class BeyondRobustnessRunner:
     checkpoint_version = 1
 
-    def __init__(self, env: BeyondRobustnessEnv, train_cfg, log_dir=None, device="cpu", *, writer=None):
+    def __init__(self, env: BeyondRobustnessEnv, train_cfg, log_dir=None, device="cpu", *, writer=None, console=True):
         self.env = env
         self.cfg = train_cfg if isinstance(train_cfg, BeyondRobustnessConfig) else BeyondRobustnessConfig(**train_cfg)
         self.device = torch.device(device)
@@ -31,6 +33,9 @@ class BeyondRobustnessRunner:
         self.control_steps = 0
         self.episode_returns = torch.zeros(env.num_envs, device=self.device)
         self.episode_lengths = torch.zeros_like(self.episode_returns)
+        self.episode_diagnostics = LearningEpisodeDiagnostics(env.num_envs, self.device,
+            getattr(env,'dt',None), getattr(env,'max_episode_length_s',None))
+        self.console, self.total_time, self.last_logged_metrics = console, 0., {}
         self.log_dir = Path(log_dir) if log_dir is not None else None
         self.writer = writer
         self._owns_writer = False
@@ -67,12 +72,14 @@ class BeyondRobustnessRunner:
         self.alg.clear_history()
         self.episode_returns.zero_()
         self.episode_lengths.zero_()
+        self.episode_diagnostics.clear_episodes()
 
     @torch.no_grad()
     def collect_rollout(self):
         if self.alg.storage.step or self.alg.pending is not None:
             raise RuntimeError("Complete update before collecting another rollout")
         self.alg.apply_phase_schedule()
+        self.episode_diagnostics.begin_iteration()
         if hasattr(self.env, 'begin_iteration'):
             self.env.begin_iteration(self.alg.iteration)
         if self.current is None:
@@ -124,6 +131,9 @@ class BeyondRobustnessRunner:
             self.current = step.observation
             self.episode_returns += step.rewards
             self.episode_lengths += 1
+            self.episode_diagnostics.record(step.dones,step.timeouts,self.episode_lengths,
+                reasons=step.failure_reasons,reward_terms=step.reward_terms,raw_timeout=step.raw_timeouts,
+                returns=self.episode_returns)
             completed_returns += self.episode_returns[step.dones].sum()
             completed_lengths += self.episode_lengths[step.dones].sum()
             completed_count += step.dones.sum()
@@ -176,10 +186,9 @@ class BeyondRobustnessRunner:
             entropy_updated = self.alg.update_adaptive_entropy_coef(performance)
             error_keys = ("load_mae/", "load_rmse/")
             metrics = {f"loss/{key}": value for key, value in losses.items() if not key.startswith(error_keys)}
+            if phase != 'teacher_student': metrics.pop('loss/latent_matching',None)
             metrics.update({f"load/{key}": value for key, value in losses.items() if key.startswith(error_keys)})
             metrics.update({f"train/{key}": value for key, value in collection.items()})
-            if hasattr(self.env,'iteration_metrics'):
-                metrics.update(self.env.iteration_metrics())
             metrics.update({"train/learning_rate": self.alg.learning_rate,
                             "train/collection_wall_s":collected-started,"train/update_wall_s":updated-collected,
                             "train/iteration_wall_s":updated-started,
@@ -188,10 +197,21 @@ class BeyondRobustnessRunner:
                             "train/entropy_schedule_updated": float(entropy_updated),
                             "train/phase_student_reinforcement": float(phase == "student_reinforcement"),
                             "train/interactions": self.interactions, "train/control_steps": self.control_steps})
+            self.total_time += updated-started
+            published=compatible_training_metrics(metrics,collected-started,updated-collected,
+                self.env.num_envs*self.cfg.num_steps_per_env)
+            published.update(self.episode_diagnostics.metrics())
+            published.update(policy_diagnostics(self.alg.actor_critic.std,self.cfg.input_schema.joint_order))
+            published.update({'Perf/total_time':self.total_time,'Perf/total_timesteps':self.interactions,
+                'Train/phase_student_reinforcement':float(phase=='student_reinforcement')})
+            if hasattr(self.env,'iteration_metrics'): published.update(self.env.iteration_metrics())
+            self.last_logged_metrics=published
             if self.writer is not None:
-                for name, value in metrics.items(): self.writer.add_scalar(name, value, iteration)
-                self.writer.add_text("train/training_phase", phase, iteration)
+                for name, value in published.items(): self.writer.add_scalar(name, value, iteration)
+                self.writer.add_text("Train/training_phase", phase, iteration)
                 self.writer.flush()
+            if self.console:
+                print(format_training_summary('BR',self.alg.iteration,phase,published,self.cfg.max_iterations),flush=True)
             logs.append(metrics)
             if save_interval and self.alg.iteration % save_interval == 0:
                 if self.log_dir is None:
@@ -213,6 +233,7 @@ class BeyondRobustnessRunner:
                         exact_environment=bool(getattr(self.env, "supports_exact_resume", False) and env_state is not None),
                         interactions=self.interactions, control_steps=self.control_steps,
                         episode_returns=self.episode_returns, episode_lengths=self.episode_lengths,
+                        episode_diagnostics=self.episode_diagnostics.state_dict(),total_time=self.total_time,
                         python_rng=random.getstate(), numpy_rng=np.random.get_state()), path)
 
     def load(self, path, *, resume_mode="fresh", transition_phase=None):
@@ -234,6 +255,7 @@ class BeyondRobustnessRunner:
             raise ValueError("Checkpoint curriculum state cannot be restored by this environment")
         # Contract validation precedes every live model/optimizer/environment mutation.
         self.alg.validate_checkpoint_state(data['algorithm'])
+        self.episode_diagnostics.validate_state_dict(data.get('episode_diagnostics'))
         if hasattr(self.env,'validate_curriculum_state_dict'):
             self.env.validate_curriculum_state_dict(data['curriculum_state'])
         if transition_phase is not None and transition_phase not in ('teacher_student','student_reinforcement'):
@@ -248,6 +270,7 @@ class BeyondRobustnessRunner:
             self._validate(self.current)
             self.episode_returns.copy_(data["episode_returns"])
             self.episode_lengths.copy_(data["episode_lengths"])
+            self.episode_diagnostics.load_state_dict(data.get('episode_diagnostics'))
         # Restore global RNG AFTER environment restore; fresh reset then consumes it normally.
         random.setstate(data["python_rng"])
         np.random.set_state(data["numpy_rng"])
@@ -256,6 +279,7 @@ class BeyondRobustnessRunner:
             torch.cuda.set_rng_state(data["algorithm"]["cuda_rng"].cpu(), self.device)
         if not exact: self._fresh_environment()
         self.interactions, self.control_steps = data["interactions"], data["control_steps"]
+        self.total_time=float(data.get('total_time',0.))
         return self.alg.iteration
 
     def close(self):

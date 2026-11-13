@@ -33,7 +33,7 @@ def evaluate(e,s,action=None,delayed=None,load=None,done=None,timeout=None,comma
         torch.zeros(n,dtype=torch.bool) if timeout is None else timeout)
 
 
-def raw(e,k): return e.sums['raw/'+k]/len(e.age)
+def raw(e,k): return e.last_raw[k].mean()
 
 
 def test_published_coefficients_exclusions_and_single_dt():
@@ -160,7 +160,7 @@ def test_shaping_terminal_timeout_and_reset_potentials():
     done=torch.tensor([True,True,False]); timeout=torch.tensor([False,True,False])
     old=e.potential.clone(); evaluate(e,s,done=done,timeout=timeout)
     p=e.potentials(s); expected=p[:,1]-old[:,1]; expected[0]=-old[0,1]
-    torch.testing.assert_close(e.sums['raw/pbrs_height'],expected.sum())
+    torch.testing.assert_close(e.last_raw['pbrs_height'],expected)
     e.reset(torch.tensor([0]),s); torch.testing.assert_close(e.potential[0],p[0])
 
 

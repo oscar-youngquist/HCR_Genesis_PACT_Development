@@ -273,6 +273,13 @@ class IsaacLabBeyondRobustnessEnv:
         failure=lost|~packet.supervision_valid|(self.failure_steps>self.cfg.env.fail_to_terminal_time_s/self.dt)
         done,timeout=termination_masks(failure,self.episode_steps,self.max_episode_length)
         self.last_failure_reasons=dict(payload_lost=lost.clone(),ground_collision=collision.clone(),tilt=tilt.clone())
+        # Conditions on the terminating step, not inferred causes of earlier falls.
+        reasons=dict(payload_lost=lost,contact=collision,nonfinite=~packet.supervision_valid,
+            roll=(r.abs()>term.roll_threshold) if 'roll' in term.termination_terms else torch.zeros_like(lost),
+            pitch=(p.abs()>term.pitch_threshold) if 'pitch' in term.termination_terms else torch.zeros_like(lost),
+            height_min=(height<term.height_min) if 'height_min' in term.termination_terms else torch.zeros_like(lost),
+            height_max=(height>term.height_max) if 'height_max' in term.termination_terms else torch.zeros_like(lost))
+        raw_timeouts=self.episode_steps>=self.max_episode_length
         if self.rewards is not None:
             reward=self.rewards.evaluate(self._reward_snapshot(),clipped,delayed,self.commands,
                 packet.load_labels[:,3:6],done,timeout,tracking_context=self)
@@ -287,7 +294,9 @@ class IsaacLabBeyondRobustnessEnv:
                 terrain_level=float(s.terrain_levels[ids].float().mean()))
         self._reset(ids)
         return BRStep(self.observe(),reward,done,timeout,terminal,done.clone(),
-            performance_metrics=performance,curriculum_tracking=linear)
+            performance_metrics=performance,curriculum_tracking=linear,
+            failure_reasons=reasons,raw_timeouts=raw_timeouts,
+            reward_terms=self.rewards.last_weighted if self.rewards is not None else None)
 
     def begin_iteration(self, iteration):
         self.iteration=int(iteration)
@@ -314,20 +323,26 @@ class IsaacLabBeyondRobustnessEnv:
 
     def iteration_metrics(self):
         s=self.simulator
-        ranges=s.payload_cfg.ranges(s.payload_progress)
         labels=s.payload_labels()
         stats=torch.stack((s.payload_mass.mean(),s.payload_mass.min(),s.payload_mass.max(),
             s.payload_friction.mean(),(self.realized_stage==2).float().mean(),
             labels[:,:3].norm(dim=-1).mean(),labels[:,3:6].norm(dim=-1).mean(),
-            s._br_disturbance_scale.mean())).detach().cpu().tolist()
-        return {**{'curriculum/'+key:value for key,value in self.curriculum_metrics.items()},
-                'environment/stage':self.stage_state.stage,'payload/progress':s.payload_progress,
-                **dict(zip(('payload/mass_mean_kg','payload/mass_min_kg','payload/mass_max_kg',
-                            'payload/friction_mean','environment/realized_stage2_fraction',
-                            'payload/relative_com_distance_mean_m','payload/relative_speed_mean_m_s',
-                            'environment/realized_disturbance_scale'),stats)),
-                **{f'payload/range/{key}_{end}':value[i] for key,value in ranges.items() for i,end in enumerate(('min','max'))},
-                **(self.rewards.metrics() if self.rewards is not None else {})}
+            s._br_disturbance_scale.mean(),s.terrain_levels.float().mean(),s.terrain_levels.float().max())).detach().cpu().tolist()
+        result={**{'Values/domain_rand_'+key+'_progress':value for key,value in self.domain_rand_curriculum.progress.items()},
+                'Train/environment_stage':self.stage_state.stage,
+                'Values/required_reward':self.domain_rand_curriculum.required_reward,
+                **dict(zip(('Payload/mass_mean_kg','Payload/mass_min_kg','Payload/mass_max_kg',
+                            'Payload/friction_mean','Payload/realized_stage2_fraction',
+                            'Payload/relative_com_distance_mean_m','Payload/relative_speed_mean_m_s',
+                            'Payload/realized_disturbance_scale','Episode/terrain_level',
+                            'Episode/max_terrain_level'),stats))}
+        if self.domain_rand_curriculum.reward_ema is not None:
+            result['Values/domain_rand_reward_ema']=self.domain_rand_curriculum.reward_ema
+        for src,dst in (('tracking','tracking_mean'),('valid_count','valid_count'),('command_streak','patience_count')):
+            if src in self.curriculum_metrics: result['curriculum/commands/'+dst]=self.curriculum_metrics[src]
+        for key in ('lin_vel_x','lin_vel_y','ang_vel_yaw'):
+            result['curriculum/commands/'+key+'_max']=self.command_ranges[key][1]
+        return result
 
     def _publish_payload_stage(self):
         progress=self.domain_rand_curriculum.progress['disturbance']

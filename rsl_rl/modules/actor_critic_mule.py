@@ -179,7 +179,7 @@ class ActorCriticMULE(nn.Module):
         self.set_phase(config.optimization_phase)
 
     def parameter_groups(self):
-        """Disjoint owners for future dual PPO and auxiliary optimizers.
+        """Disjoint owners for dual PPO and auxiliary optimizers.
 
         Keep adaptive parameters in its optimizer across phase changes; do not
         rebuild optimizers or lose moments. Do not step inactive owner.
@@ -244,11 +244,22 @@ class ActorCriticMULE(nn.Module):
     def compose_actions(self, nominal_raw, adaptive_raw, standing_position):
         shape(nominal_raw, nominal_raw.shape[0], 12, 'raw nominal action')
         shape(adaptive_raw, nominal_raw.shape[0], 12, 'raw adaptive action')
+        if self.phase == 'nominal_only' and torch.any(adaptive_raw != 0):
+            raise ValueError('nominal_only requires exactly zero adaptive correction')
         if standing_position.shape not in ((12,), nominal_raw.shape): raise ValueError('Expected canonical standing pose')
         combined = nominal_raw + adaptive_raw
         clipped = combined.clamp(-self.config.clip_actions, self.config.clip_actions)
         target = standing_position.detach() + self.config.action_scale*clipped
         return MULECommand(nominal_raw, adaptive_raw, combined, clipped, target)
+
+    @torch.no_grad()
+    def project_action_std(self, owner):
+        """Project the stored parameter after each active optimizer step."""
+        if owner not in ('nominal', 'adaptive'): raise ValueError('Unknown actor owner')
+        if owner == 'adaptive' and self.phase == 'nominal_only':
+            raise ValueError('Inactive actor must not be updated')
+        actor = getattr(self, owner + '_actor')
+        actor.std.copy_(actor.std.clamp(actor.std_lower, actor.std_upper))
 
     @torch.no_grad()
     def inference(self, observations, history, adaptive_history=None):
@@ -263,10 +274,10 @@ class ActorCriticMULE(nn.Module):
         self.set_phase(state['phase'])
 
     def _validate_extra(self, state):
-        if not isinstance(state, dict) or state.get('contract') != self.config.contract() or state.get('phase') not in PHASES:
+        if not isinstance(state, dict) or not self.config.accepts_model_contract(state.get('contract')) or state.get('phase') not in PHASES:
             raise ValueError('Incompatible MULE checkpoint contract/phase; explicit conversion required')
 
-    def load_state_dict(self, state_dict, strict=True, assign=False):
+    def validate_state_dict(self, state_dict):
         # Validate before mutating weights or phase; missing metadata never silently loads.
         self._validate_extra(state_dict.get('_extra_state'))
         expected = self.state_dict()
@@ -274,4 +285,12 @@ class ActorCriticMULE(nn.Module):
         for key, value in expected.items():
             if isinstance(value, torch.Tensor) and (not isinstance(state_dict[key], torch.Tensor) or value.shape != state_dict[key].shape):
                 raise ValueError(f'MULE checkpoint shape mismatch: {key}')
+            if isinstance(value, torch.Tensor):
+                if value.dtype != state_dict[key].dtype or not torch.isfinite(state_dict[key]).all():
+                    raise ValueError(f'MULE checkpoint dtype/nonfinite mismatch: {key}')
+                if key.endswith(('.std_lower', '.std_upper')) and not torch.equal(value, state_dict[key].to(value.device)):
+                    raise ValueError(f'MULE checkpoint exploration contract mismatch: {key}')
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        self.validate_state_dict(state_dict)
         return super().load_state_dict(state_dict, strict=strict, assign=assign)

@@ -4,6 +4,10 @@ MULE implementation Stage 1
 Baseline: ``rescaled_qp_exps`` at ``37bc639447b86f0de658e94fa00d8fd47d64b984``.
 This is a standalone neural/contract implementation, not a trainable task yet.
 
+The subsequent dual-policy learning implementation and updated checkpoint
+contract are documented in ``mule_learning.rst``; source assumptions below
+remain unchanged.
+
 Locations and use
 -----------------
 
