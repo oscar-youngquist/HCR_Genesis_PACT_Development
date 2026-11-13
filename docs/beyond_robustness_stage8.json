@@ -1,0 +1,81 @@
+{
+  "branch": "rescaled_qp_exps",
+  "baseline": "f617154b7a69cb1994515621c6ff37c925916cde",
+  "task": "go2_beyond_robustness_isaaclab",
+  "contracts": {
+    "reward_version": 3,
+    "physical_checkpoint_version": 5,
+    "stage_state_version": 2,
+    "input_schema_version": 3,
+    "tracking": "Fixed exp(-4*planar_error_squared), exp(-4*yaw_error_squared); coefficients 2.0 and 0.5; no dynamic sigma.",
+    "joint_limit": "Count joints strictly outside Isaac Lab soft limits (URDF midpoint +/- soft_dof_pos_limit * half-range), coefficient -2.0; equality is allowed.",
+    "smoothness": "UNCHANGED: sum((a_t - 2*a_previous + a_previous2)^2), coefficient -0.001.",
+    "time_scaling": "Reward coefficients multiplied by control dt exactly once.",
+    "reproduction_assumptions": "Load motion uses 1/(1+L2 norm of physical body-relative load velocity). Shared air-time/contact-force and compatible addition conventions retained; not exact author-code reproduction.",
+    "resume": "Fresh physical reset with restored learning/RNG/curricula. No exact PhysX continuation. Incompatible reward/input/physical contracts are rejected, not silently migrated.",
+    "runtime_overrides": ["log directory", "save interval", "total/additional iteration budget"],
+    "explicit_transitions": ["--transition-phase teacher_student|student_reinforcement"],
+    "budget": "--max-iterations is TOTAL absolute updates; --additional-iterations is explicitly additional and resume-only. Final checkpoint is always written.",
+    "geometry": "Seeded per-environment size bank, creation-time only. No runtime geometry scaling. Mass/inertia/friction/spawn changes occur only on eligible resets.",
+    "stage1": "Disturbance progress zero: physically simulated 0.2-0.4 kg box; displacement <=0.01 m per axis, relative velocity 0, friction 0.8-1.0; inherited velocity pushes scaled by 0.01, latched per environment on reset. Persistent external wrenches are disabled in all BR stages.",
+    "stage2": "Existing disturbance progress interpolates toward mass 1-3 kg, displacement <=0.10 m per axis, relative velocity <=0.40 m/s per horizontal axis, friction 0.10-0.60. Usable tray footprint further limits displacement. Shared warmup/performance gates/cadence are retained, not reset.",
+    "stage_transition": "Stage 2 starts automatically when the shared disturbance progress becomes positive. No separate start iteration or manual stage selection. Live HardPACT warmup, earlier curriculum phases, performance gates, increments and reset-resampling conventions govern the ramp. Current push_warmup=10000; this is not a guaranteed Stage 2 start iteration.",
+    "phase": "Both physical stages default to teacher_student. Only --student-start-iteration optionally schedules an independent optimization-phase change.",
+    "migration": "Version-4/manual-stage physical checkpoints are rejected explicitly; no automatic migration. New checkpoints restore the shared disturbance progress and gates before a fresh physical reset.",
+    "archives": "run_manifest.json, resolved/inheritance/reward JSON, sources.tar.gz (BR plus shared Python/shell dependencies), result.json and model_N.pt. Original resume directory cannot be reused. Active stage/phase and approved overrides are recorded separately."
+  },
+  "validation": {
+    "focused_command": "SIMULATOR=isaaclab PYTHONPATH=.:tests OMP_NUM_THREADS=1 /home/oyoungquist/.conda/envs/lr_lab_cupiqp/bin/python -m pytest -q -p no:cacheprovider tests/test_beyond_robustness*.py",
+    "focused_result": "77 passed (10.01 s) after automatic disturbance-ramp changes; one external hppfcl deprecation warning",
+    "historical_gpu_note": "The physical and production GPU checks below preceded the automatic disturbance-ramp follow-up and used physical contract v4. Their artifacts/old manual-stage arguments are historical, not current launch commands. GPU training was not rerun for the follow-up; current commands are below.",
+    "legacy_command": "SIMULATOR=isaaclab PYTHONPATH=.:tests OMP_NUM_THREADS=1 /home/oyoungquist/.conda/envs/lr_lab_cupiqp/bin/python -m pytest -q -rs -p no:cacheprovider tests/test_hard_pact_rss.py tests/test_hard_pact_reset_randomization_cadence.py -k 'not test_defaults_empty_reset_rng_and_invalid_settings'",
+    "legacy_result": "36 passed, 1 skipped (cuPIQP/CUDA unavailable in sandbox), 1 deselected",
+    "preexisting_failure": "The unfiltered legacy run had 1 failure: test_defaults_empty_reset_rng_and_invalid_settings assumes reset_resample_episodes=100; baseline HEAD already configures 25. Neither production setting nor unrelated test was changed.",
+    "shell": "bash -n and local/Unity/container exact-allowlist dry runs passed; direct Python execution from scripts/ without PYTHONPATH passed and selects this worktree.",
+    "physical_command": "SIMULATOR=isaaclab PYTHONPATH=.:tests OMP_NUM_THREADS=1 /home/oyoungquist/.conda/envs/lr_lab_cupiqp/bin/python tests/smoke_beyond_robustness_payload.py --gpu cuda:0 --num-envs 4 --steps 4 --physical-checks --output-dir /tmp/br_stage8_physical",
+    "physical_result": "BR_PHYSICS_CHECKS_PASS and BR_PAYLOAD_SMOKE_PASS: rotating labels, property readbacks, partial reset/noise isolation, tray-ground filtering, support reaction, friction-dependent sliding, push consistency, load loss, failure-before-timeout, terminal ownership, cross-environment isolation, paired boundary relocation; merged-reward updates and resume in both optimization phases.",
+    "physical_measurements": {
+      "support_reaction_z_n": -2.949272394180298,
+      "filtered_tray_ground_n": 0.0,
+      "low_high_friction_slide_x_m": [0.024722503498196602, 0.01797056756913662],
+      "genuine_ground_collision_peak_n": 186.50143432617188
+    },
+    "gpu": "NVIDIA RTX 4090 GPU 0; Isaac Lab 0.54.2; Isaac Sim 5.1.0.0; PyTorch 2.7.0+cu128",
+    "production_prefix": "BR_SKIP_CONDA_ACTIVATE=1 BR_PYTHON=/home/oyoungquist/.conda/envs/lr_lab_cupiqp/bin/python OMP_NUM_THREADS=1 bash legged_gym/scripts/go2_beyond_robustness_lab.sh",
+    "production_checks": [
+      {"arguments": "--smoke --headless --device cuda:0 --seed 17 --log-dir /tmp/br_stage8_teacher", "result": "PASS: iterations 0->2, Stage 1, teacher_student", "training_s": 0.8252842170186341, "peak_torch_allocated_bytes": 51614720},
+      {"arguments": "--headless --device cuda:0 --checkpoint /tmp/br_stage8_teacher/model_2.pt --transition-stage 2 --additional-iterations 1 --log-dir /tmp/br_stage8_stage2", "result": "PASS: 2->3, Stage 2, teacher_student retained", "training_s": 0.313208837993443, "peak_torch_allocated_bytes": 51389952},
+      {"arguments": "--headless --device cuda:0 --checkpoint /tmp/br_stage8_stage2/model_3.pt --transition-phase student_reinforcement --additional-iterations 1 --log-dir /tmp/br_stage8_student", "result": "PASS: 3->4, Stage 2 retained, student_reinforcement", "training_s": 0.3376095970161259, "peak_torch_allocated_bytes": 58759168},
+      {"arguments": "--headless --device cuda:0 --checkpoint /tmp/br_stage8_student/model_4.pt --max-iterations 5 --save-interval 10 --log-dir /tmp/br_stage8_resume", "result": "PASS: 4->5, saved phase/stage retained; final model_5.pt despite save interval 10", "training_s": 0.3134547050576657, "peak_torch_allocated_bytes": 59213824},
+      {"arguments": "--smoke --headless --device cuda:0 --seed 17 --num-envs 64 --log-dir /tmp/br_stage8_64", "result": "PASS: 2 updates, finite losses, 512 transitions", "training_s": 0.8274858719669282, "transitions_per_s": 618.741681695398, "peak_torch_allocated_bytes": 56235008, "peak_torch_reserved_bytes": 73400320}
+    ],
+    "timing_scope": "Four rollout steps, one PPO/auxiliary epoch and minibatch per smoke update. Training wall time includes first-update overhead, excludes simulator initialization. Peak memory measures PyTorch allocator only, not PhysX/Kit. No speedup or task-performance claim."
+  },
+  "commands_from_repo_root": {
+    "local_setup": "export BR_CONDA_ENV=lr_lab_cupiqp",
+    "automatic_stages": "bash legged_gym/scripts/go2_beyond_robustness_lab.sh --headless --device cuda:0 --seed 1 --log-dir /tmp/br_training",
+    "ordinary_resume": "bash legged_gym/scripts/go2_beyond_robustness_lab.sh --headless --device cuda:0 --checkpoint /tmp/br_training/model_10000.pt --max-iterations 20000 --log-dir /tmp/br_resume",
+    "bounded": "bash legged_gym/scripts/go2_beyond_robustness_lab.sh --smoke --headless --device cuda:0 --log-dir /tmp/br_smoke_new",
+    "unity_setup": "Set IMAGE=/path/isaaclab.sif, REPO=/path/rescaled_qp_exps, RUN_DIR=/persistent/br_workflow; retain scheduler CUDA_VISIBLE_DEVICES. Set OMNI_KIT_ACCEPT_EULA=YES only after reviewing/accepting NVIDIA's terms. Each stage below has its own /output subdirectory in this same workflow root.",
+    "unity_automatic_stages": "bash containers/isaaclab/run.sh script go2_beyond_robustness_unity.sh --log-dir /output/training",
+    "unity_resume": "bash containers/isaaclab/run.sh script go2_beyond_robustness_unity.sh --checkpoint /output/training/model_10000.pt --max-iterations 20000 --log-dir /output/resume",
+    "unity_bounded_dry_run": "bash containers/isaaclab/run.sh script go2_beyond_robustness_unity.sh --smoke --log-dir /output/smoke --dry-run",
+    "job_composer": "TRAIN_SCRIPT=go2_beyond_robustness_unity.sh sbatch containers/isaaclab/job_composer.sbatch --log-dir /output/training; set REPO, IMAGE, RUN_ROOT and workflow RUN_DIR in submission environment and choose site partition/account/GPU via sbatch. No job was submitted during validation."
+  },
+  "changed_files": [
+    ".gitignore",
+    "rsl_rl/beyond_robustness_rewards.py", "rsl_rl/beyond_robustness_stages.py", "rsl_rl/beyond_robustness_payload.py", "rsl_rl/beyond_robustness_config.py",
+    "rsl_rl/algorithms/ppo_beyond_robustness.py", "rsl_rl/runners/beyond_robustness_runner.py",
+    "legged_gym/envs/go2/go2_beyond_robustness.py", "legged_gym/simulator/isaaclab_simulator_pact.py", "legged_gym/envs/__init__.py", "legged_gym/utils/task_registry.py",
+    "legged_gym/scripts/train_beyond_robustness.py", "legged_gym/scripts/go2_beyond_robustness.sh", "legged_gym/scripts/go2_beyond_robustness_lab.sh", "legged_gym/scripts/go2_beyond_robustness_unity.sh", "containers/isaaclab/run.sh",
+    "tests/test_beyond_robustness_stage8.py", "tests/test_beyond_robustness_rewards.py", "tests/test_beyond_robustness_runner.py", "tests/test_beyond_robustness_payload.py", "tests/test_beyond_robustness_inheritance.py", "tests/smoke_beyond_robustness_payload.py",
+    "docs/beyond_robustness_stage8.json"
+  ],
+  "limitations": [
+    "Unity/container command construction was dry-run checked, not executed on Unity; no jobs or full training sweeps submitted.",
+    "No 4096-environment performance run in this stage; measured checks used 4 and 64 environments with explicitly reduced smoke rollout/update settings.",
+    "Stage-2 live smoke retained early shared disturbance progress; stronger mass/friction envelopes were separately exercised by the physical checks, not by long trained-policy evaluation.",
+    "No automatic migration of pre-Stage-8 reward/physical checkpoints. Fresh PhysX reset is required on resume.",
+    "Liquid payloads and TCN remain out of scope. BR architecture, seven-value load target and auxiliary objectives are unchanged."
+  ]
+}

@@ -37,6 +37,7 @@ dist/
 *.csv
 *.pt
 *.json
+!docs/beyond_robustness_stage8.json
 **eval/*
 # JetBrains IDE
 .idea/

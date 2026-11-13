@@ -28,6 +28,7 @@ case "$mode" in smoke|train|script) ;; *) usage; exit 2 ;; esac
 if [[ "$mode" == script ]]; then
     entry="$task"
     case "$entry" in
+        go2_beyond_robustness_unity.sh) ;;
         go2_hard_pact_rss_pos_ppo_unity.sh) ;;
         go2_hard_pact_rss_coupled_ppo_unity.sh) ;;
         go2_hard_pact_rss_guided_no_qp_unity.sh) ;;
@@ -42,16 +43,17 @@ if [[ "$mode" == script ]]; then
     esac
     simulator=isaaclab
 else
-    case "$task" in go2_hard_pact*_isaaclab) simulator=isaaclab; entry=train_hard_pact.py ;;
+    case "$task" in go2_beyond_robustness_isaaclab) simulator=isaaclab; entry=train_beyond_robustness.py ;;
+        go2_hard_pact*_isaaclab) simulator=isaaclab; entry=train_hard_pact.py ;;
         *) echo "Unsupported task: $task" >&2; exit 2;; esac
 fi
 for argument in "$@"; do
     case "$argument" in
         --task|--task=*)
             echo "Task is managed by this launcher." >&2; exit 2 ;;
-        --gpu|--gpu=*|--cpu)
+        --gpu|--gpu=*|--device|--device=*|--cpu)
             echo "Task/device are managed by this launcher, not extra arguments." >&2; exit 2 ;;
-        --num_envs|--num_envs=*|--max_iterations|--max_iterations=*)
+        --num_envs|--num_envs=*|--num-envs|--num-envs=*|--max_iterations|--max_iterations=*|--max-iterations|--max-iterations=*|--additional-iterations|--additional-iterations=*)
             [[ "$mode" != smoke ]] || { echo "Smoke size cannot be overridden." >&2; exit 2; } ;;
     esac
 done
@@ -107,5 +109,6 @@ if [[ "$mode" == script ]]; then
 fi
 limits=()
 [[ "$mode" != smoke ]] || limits=(--num_envs=2 --max_iterations=1)
+if [[ "$mode" == smoke && "$task" == go2_beyond_robustness_isaaclab ]]; then limits=(--smoke --num-envs=2 --max-iterations=1); fi
 exec apptainer "${options[@]}" "$IMAGE" /opt/env/bin/python -u "$entry" \
     --task="$task" --gpu=cuda:0 --headless "${limits[@]}" "$@"

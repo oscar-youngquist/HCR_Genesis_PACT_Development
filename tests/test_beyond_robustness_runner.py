@@ -228,7 +228,9 @@ def test_exact_resume_restores_environment_and_next_update(tmp_path):
     restored.load(tmp_path / "exact.pt", resume_mode="exact")
     assert restored.env.curriculum_stage == 2 and restored.env.progress == .7
     actual = restored.learn(1)
-    assert actual == expected
+    # Wall timings are observations, not part of deterministic continuation.
+    strip=lambda logs:[{k:v for k,v in log.items() if not k.endswith('_wall_s')} for log in logs]
+    assert strip(actual) == strip(expected)
     for key, value in r.alg.actor_critic.state_dict().items():
         torch.testing.assert_close(value, restored.alg.actor_critic.state_dict()[key], rtol=0, atol=0)
     torch.testing.assert_close(r.env.q, restored.env.q, rtol=0, atol=0)

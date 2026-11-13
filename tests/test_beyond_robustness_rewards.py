@@ -43,17 +43,17 @@ def test_published_coefficients_exclusions_and_single_dt():
     torch.testing.assert_close(a,torch.full((3,),4.5*.02))
     e2,s2=fixture(dt=.04); torch.testing.assert_close(evaluate(e2,s2),a*2)
     assert not any(k in ADDITIONS for k in ('pos_action_rate','tau_action_smoothness','torque_cancellation','feedback_torques'))
-    assert e.spec['terms']['dof_pos_limits']['units']=='rad'
+    assert e.spec['terms']['dof_pos_limits']['units']=='joint count'
     assert e.spec['assumptions']['load_motion']
 
 
-def test_shared_formulas_limit_excess_and_endpoint_torque():
+def test_original_formulas_limit_count_and_endpoint_torque():
     e,s=fixture(); s.base_lin_vel[:]=torch.tensor([1.,2.,3.]); s.base_ang_vel[:]=torch.tensor([2.,3.,4.])
     s.dof_pos[:,0]=2.5; s.dof_vel[:]=2; s.torques[:]=3; s.requested_torque[:]=1e4
     s.base_pos[:,2]+=.2; s.link_contact_forces[:,2,0]=1
     evaluate(e,s)
     expected=dict(tracking_lin_vel=torch.exp(torch.tensor(-20.)),tracking_ang_vel=torch.exp(torch.tensor(-64.)),
-        lin_vel_z=9.,ang_vel_xy=13.,dof_acc=120000.,joint_power=72.,torques=108.,base_height=.04,collision=1.,dof_pos_limits=1.5)
+        lin_vel_z=9.,ang_vel_xy=13.,dof_acc=120000.,joint_power=72.,torques=108.,base_height=.04,collision=1.,dof_pos_limits=1.)
     for k,v in expected.items(): torch.testing.assert_close(raw(e,k),torch.as_tensor(v),rtol=1e-5,atol=1e-6)
 
 
@@ -99,6 +99,14 @@ def test_shared_smoothness_is_zero_for_constant_actions():
     assert raw(e,'action_smoothness')==0  # (1-2*1+1)^2 * 12
 
 
+def test_joint_limit_count_uses_strict_threshold_not_excess():
+    e,s=fixture()
+    s.dof_pos[:,0]=s.dof_pos_limits[0,0]; s.dof_pos[:,1]=s.dof_pos_limits[1,1]
+    evaluate(e,s); assert raw(e,'dof_pos_limits')==0
+    e.begin_iteration(1); s.dof_pos[:,0]-=1e-4; s.dof_pos[:,1]+=100
+    evaluate(e,s); assert raw(e,'dof_pos_limits')==2
+
+
 def test_overlapping_definitions_match_hardpact_helpers():
     from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
     e,s=fixture(); gen=torch.Generator().manual_seed(7)
@@ -115,14 +123,14 @@ def test_overlapping_definitions_match_hardpact_helpers():
     ctx=NS(simulator=reference,cfg=e.cfg,commands=commands,actions=action,dt=e.dt,
         last_actions=e.actions[:,0].clone(),llast_actions=e.actions[:,1].clone(),
         feet_air_time=e.air.clone(),last_contacts=e.contacts.clone())
-    expected={key:getattr(Go2PACT,'_reward_'+key)(ctx).mean() for key in ORIGINAL if key!='load_motion'}
+    excluded={'load_motion','tracking_lin_vel','tracking_ang_vel','dof_pos_limits'}
+    expected={key:getattr(Go2PACT,'_reward_'+key)(ctx).mean() for key in ORIGINAL if key not in excluded}
     evaluate(e,s,action=action,command=commands)
     for key,value in expected.items(): torch.testing.assert_close(raw(e,key),value)
 
 
-def test_tracking_inherits_terrain_wrench_settings_but_curriculum_stays_raw():
+def test_tracking_ignores_terrain_wrench_sigma_and_matches_fixed_formula():
     from legged_gym.envs.go2.go2_hard_pact.domain_rand_curriculum import HardPACTDomainRandCurriculum
-    from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
     e,s=fixture(); s.terrain_levels=torch.full((3,),9); s.terrain_kind_ids=torch.full((3,),4)
     commands=torch.tensor([[1.,1.,2.,0.]]*3)
     tc=NS(domain_rand_curriculum=HardPACTDomainRandCurriculum(e.cfg),
@@ -131,15 +139,12 @@ def test_tracking_inherits_terrain_wrench_settings_but_curriculum_stays_raw():
         e.evaluate(s,torch.zeros(3,12),torch.zeros(3,12),commands,torch.zeros(3,3),
             torch.zeros(3,dtype=torch.bool),torch.zeros(3,dtype=torch.bool),tracking_context=tc)
     run()
-    ctx=e._shared_context
-    torch.testing.assert_close(raw(e,'tracking_lin_vel'),Go2HardPACT._reward_tracking_lin_vel(ctx).mean())
-    torch.testing.assert_close(raw(e,'tracking_ang_vel'),Go2HardPACT._reward_tracking_ang_vel(ctx).mean())
     raw_linear,raw_yaw=tracking(s.base_lin_vel,s.base_ang_vel,commands)
-    assert raw(e,'tracking_lin_vel')>raw_linear.mean()
-    assert raw(e,'tracking_ang_vel')>raw_yaw.mean()
+    torch.testing.assert_close(raw(e,'tracking_lin_vel'),raw_linear.mean())
+    torch.testing.assert_close(raw(e,'tracking_ang_vel'),raw_yaw.mean())
     relaxed=raw(e,'tracking_lin_vel').clone()
     e.begin_iteration(1); tc._current_sustained_wrench_world.zero_(); run()
-    assert raw(e,'tracking_lin_vel')<relaxed
+    torch.testing.assert_close(raw(e,'tracking_lin_vel'),relaxed)
     e.begin_iteration(2); e.cfg.rewards.dynamic_tracking_sigma_enabled=False; run()
     torch.testing.assert_close(raw(e,'tracking_lin_vel'),raw_linear.mean())
     torch.testing.assert_close(raw(e,'tracking_ang_vel'),raw_yaw.mean())

@@ -98,8 +98,7 @@ try:
     expected=torch.exp(-4*(terminal.state[:,6:8]-terminal.state[:,45:47]).square().sum(-1))
     torch.testing.assert_close(result.curriculum_tracking,expected)
     if env.rewards is not None:
-        from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
-        expected_reward=Go2HardPACT._reward_tracking_lin_vel(env.rewards._shared_context)
+        expected_reward=expected  # Fixed BR exp(-4*error_xy^2), not HardPACT dynamic sigma.
         torch.testing.assert_close(env.rewards.sums['raw/tracking_lin_vel'],expected_reward.sum())
         torch.testing.assert_close(env.rewards.sums['raw/foot_slip'],push_evidence['slip'])
         assert env.rewards.age.ge(0).all()

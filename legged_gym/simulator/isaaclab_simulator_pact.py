@@ -239,6 +239,11 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         angular = torch.empty(
             self._num_envs, 3, device=self._device
         ).uniform_(-angular_maximum, angular_maximum)
+        # Optional BR reset-latched stage scale. Legacy tasks take the exact old path.
+        if hasattr(self, '_br_disturbance_scale'):
+            planar *= self._br_disturbance_scale
+            vertical *= self._br_disturbance_scale
+            angular *= self._br_disturbance_scale
 
         # These buffers describe the impulse applied on *this* transition.
         # Inactive values are zero rather than retaining the previous event.

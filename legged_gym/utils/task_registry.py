@@ -16,6 +16,12 @@ class TaskRegistry():
         self.task_classes = {}
         self.env_cfgs = {}
         self.train_cfgs = {}
+        self.resolved_factories = {}
+
+    def register_resolved(self, name, factory, task_class, runner_class):
+        """Opt-in flat-config adapters; legacy task construction remains unchanged."""
+        self.resolved_factories[name]=(factory,runner_class)
+        self.task_classes[name]=task_class
     
     def register(self, name: str, task_class: VecEnv, env_cfg, train_cfg):
         self.task_classes[name] = task_class
@@ -26,6 +32,9 @@ class TaskRegistry():
         return self.task_classes[name]
     
     def get_cfgs(self, name, args):
+        if name in self.resolved_factories:
+            resolved=self.resolved_factories[name][0]()
+            return resolved,resolved.training
         train_cfg = self.train_cfgs[name]
         env_cfg = self.env_cfgs[name]
         
@@ -50,6 +59,12 @@ class TaskRegistry():
             isaacgym.VecTaskPython: The created environment
             Dict: the corresponding config file
         """
+        if name in self.resolved_factories:
+            if args is None or not hasattr(args,'device'):
+                raise ValueError('Resolved BR tasks require train_beyond_robustness.py arguments')
+            resolved=env_cfg if env_cfg is not None else self.resolved_factories[name][0]()
+            env=self.task_classes[name](resolved,device=args.device,headless=args.headless)
+            return env,resolved
         # if no args passed get command line arguments
         if args is None:
             args = get_args()
@@ -95,6 +110,11 @@ class TaskRegistry():
             PPO: The created algorithm
             Dict: the corresponding config file
         """
+        if name in self.resolved_factories:
+            cfg=train_cfg if train_cfg is not None else env.resolved_config.training
+            if log_root=='default': raise ValueError('Resolved tasks require an explicit log directory')
+            runner=self.resolved_factories[name][1](env,cfg,log_dir=log_root,device=env.device)
+            return runner,cfg
         # if no args passed get command line arguments
         if args is None:
             args = get_args()

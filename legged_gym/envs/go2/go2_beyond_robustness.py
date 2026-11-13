@@ -1,4 +1,4 @@
-"""Isaac Lab BR adapter; merged rewards, no production task registration.
+"""Isaac Lab BR adapter; fixed BR rewards plus compatible shared additions.
 
 Pass resolve_beyond_robustness() output and explicitly select
 ``reward_mode='smoke_tracking'`` only for diagnostic tracking-only checks.
@@ -18,6 +18,7 @@ from rsl_rl.beyond_robustness_env import BRObservation, BRStep
 from rsl_rl.beyond_robustness_config import BeyondRobustnessResolvedConfig
 from rsl_rl.beyond_robustness_sensors import BRActorObservationCache
 from rsl_rl.beyond_robustness_rewards import BRRewards, tracking
+from rsl_rl.beyond_robustness_stages import BRStageState
 from rsl_rl.beyond_robustness_payload import inverse_rotate_wxyz, lost_payload, termination_masks, named_indices
 from legged_gym.simulator.isaaclab_simulator_br import IsaacLabSimulatorBR
 from legged_gym.envs.go2.go2_hard_pact.domain_rand_curriculum import HardPACTDomainRandCurriculum
@@ -48,6 +49,8 @@ class IsaacLabBeyondRobustnessEnv:
         self.reward_mode=reward_mode or resolved.environment.br_reward['mode']
         if self.reward_mode not in ('merged','smoke_tracking'): raise ValueError('Unknown BR reward mode')
         cfg=resolved.environment; sim_params=resolved.sim_params
+        self.resolved_config=deepcopy(resolved)  # Immutable construction contract, not live curriculum ranges.
+        self.stage_state=BRStageState(resolved.stages)
         self.configuration_manifest=deepcopy(resolved.manifest)
         # Shared scripted reset/command samplers require a device string.
         self.cfg=deepcopy(cfg); self.device=str(torch.device(device)); self.num_envs=cfg.env.num_envs
@@ -69,7 +72,9 @@ class IsaacLabBeyondRobustnessEnv:
         s._p_gains=s._p_gains[s._dof_indices]; s._d_gains=s._d_gains[s._dof_indices]
         self.domain_rand_curriculum=HardPACTDomainRandCurriculum(self.cfg,s.payload_cfg.seed)
         self._apply_domain_rand_curriculum_state()
-        s.set_payload_progress(self.domain_rand_curriculum.progress['disturbance'])
+        self._publish_payload_stage()
+        s._br_disturbance_scale=torch.full((self.num_envs,1),self.stage_state.disturbance_scale,device=device)
+        self.realized_stage=torch.full((self.num_envs,),self.stage_state.stage,device=device,dtype=torch.long)
         self.command_ranges={key:list(getattr(cfg.commands.ranges,key)) for key in ('lin_vel_x','lin_vel_y','ang_vel_yaw','heading')}
         self.commands=torch.zeros(self.num_envs,4,device=device)
         self.forward_vec=torch.tensor([1.,0.,0.],device=device).repeat(self.num_envs,1)
@@ -118,6 +123,8 @@ class IsaacLabBeyondRobustnessEnv:
     def _reset(self, ids):
         if not len(ids): return
         s=self.simulator
+        self.realized_stage[ids]=self.stage_state.stage
+        s._br_disturbance_scale[ids]=self.stage_state.disturbance_scale
         if self.init_done and self.cfg.terrain.curriculum and hasattr(s,'_terrain'):
             self._update_terrain_curriculum(ids)
         self._reset_command_curriculum(ids)
@@ -222,6 +229,7 @@ class IsaacLabBeyondRobustnessEnv:
         delayed=self.action_history[torch.arange(self.num_envs,device=self.device),self.action_delay]
         s._br_raw_actions=self.raw_action_history[torch.arange(self.num_envs,device=self.device),self.action_delay]
         self._update_persistent_wrench(self.clock)
+        self._current_sustained_wrench_world *= s._br_disturbance_scale
         s.hard_pact_apply_base_wrench_world(self._current_sustained_wrench_world)
         s.step(delayed); s.post_physics_step()
         self.previous_action.copy_(clipped); self.episode_steps+=1; self.clock+=1
@@ -283,6 +291,7 @@ class IsaacLabBeyondRobustnessEnv:
 
     def begin_iteration(self, iteration):
         self.iteration=int(iteration)
+        self._publish_payload_stage()
         self._terrain_curriculum_iteration=self.iteration
         if self.rewards is not None: self.rewards.begin_iteration(iteration)
 
@@ -299,36 +308,74 @@ class IsaacLabBeyondRobustnessEnv:
         if valid and self.simulator.use_domainrand_curriculum:
             self.domain_rand_curriculum.advance(iteration,tracking)
             self._apply_domain_rand_curriculum_state()
-            self.simulator.set_payload_progress(self.domain_rand_curriculum.progress['disturbance'])
+            self._publish_payload_stage()
         self.curriculum_metrics=dict(tracking=tracking if valid else float('nan'),valid_count=count,
             command_streak=self.command_streak,**self.domain_rand_curriculum.progress)
 
     def iteration_metrics(self):
+        s=self.simulator
+        ranges=s.payload_cfg.ranges(s.payload_progress)
+        labels=s.payload_labels()
+        stats=torch.stack((s.payload_mass.mean(),s.payload_mass.min(),s.payload_mass.max(),
+            s.payload_friction.mean(),(self.realized_stage==2).float().mean(),
+            labels[:,:3].norm(dim=-1).mean(),labels[:,3:6].norm(dim=-1).mean(),
+            s._br_disturbance_scale.mean())).detach().cpu().tolist()
         return {**{'curriculum/'+key:value for key,value in self.curriculum_metrics.items()},
+                'environment/stage':self.stage_state.stage,'payload/progress':s.payload_progress,
+                **dict(zip(('payload/mass_mean_kg','payload/mass_min_kg','payload/mass_max_kg',
+                            'payload/friction_mean','environment/realized_stage2_fraction',
+                            'payload/relative_com_distance_mean_m','payload/relative_speed_mean_m_s',
+                            'environment/realized_disturbance_scale'),stats)),
+                **{f'payload/range/{key}_{end}':value[i] for key,value in ranges.items() for i,end in enumerate(('min','max'))},
                 **(self.rewards.metrics() if self.rewards is not None else {})}
+
+    def _publish_payload_stage(self):
+        progress=self.domain_rand_curriculum.progress['disturbance']
+        self.stage_state.update(getattr(self,'iteration',0),progress)
+        # Changed ranges become due on eligible resets, never mutate active bodies.
+        self.simulator.set_payload_progress(self.stage_state.payload_progress(progress))
+
+    def physical_contract(self):
+        from dataclasses import asdict
+        from rsl_rl.beyond_robustness_config import settings_dict
+        c=self.resolved_config
+        return dict(environment=settings_dict(c.environment),payload=asdict(c.payload),
+                    stages=asdict(c.stages),schema=c.training.input_schema.contract(),reward_mode=self.reward_mode)
 
     def curriculum_state_dict(self):
         s=self.simulator
-        return deepcopy(dict(version=3,reward=self.rewards.state_dict() if self.rewards else None,domain=self.domain_rand_curriculum.state_dict(),
+        return deepcopy(dict(version=5,stage=self.stage_state.state_dict(),reward=self.rewards.state_dict() if self.rewards else None,domain=self.domain_rand_curriculum.state_dict(),
             command_ranges=self.command_ranges,command_streak=self.command_streak,
             iteration=self.iteration,last_completed_iteration=self.last_completed_iteration,
             sampling=s.sampling_state_dict(),action_delay=self.action_delay.clone(),
             noise=self.actor_observation_cache.state_dict(),
-            physical_config=self.resolved_configuration(),
+            physical_config=self.physical_contract(),
             terrain_levels=s.terrain_levels.clone(),terrain_types=s.terrain_types.clone()))
 
+    def validate_curriculum_state_dict(self, state):
+        if state['version']!=5: raise ValueError('Incompatible BR physical/reward contract; explicit migration required')
+        if state['physical_config']!=self.physical_contract():
+            raise ValueError('BR physical configuration differs from checkpoint')
+        self.stage_state.validate(state['stage'])
+        if state['stage']['stage']!=(2 if state['domain']['progress']['disturbance']>0 else 1):
+            raise ValueError('BR stage disagrees with saved disturbance progress')
+        if self.rewards is not None and (state['reward'] is None or state['reward']['spec']!=self.rewards.spec):
+            raise ValueError('Incompatible BR reward contract')
+        sampling=state['sampling']; s=self.simulator
+        if sampling['box_size_bank']!=s.box_size_bank or sampling['box_size_ids']!=s.box_size_ids:
+            raise ValueError('Incompatible creation-time payload geometry')
+
     def load_curriculum_state_dict(self, state):
-        if state['version']!=3: raise ValueError('Incompatible BR physical/reward contract; older tracking-only checkpoints require explicit migration')
+        self.validate_curriculum_state_dict(state)
         if self.rewards is not None: self.rewards.load_state_dict(state['reward'])
         s=self.simulator
+        self.stage_state.load_state_dict(state['stage'])
         self.domain_rand_curriculum.load_state_dict(state['domain'])
         self.command_ranges=deepcopy(state['command_ranges']); self.command_streak=state['command_streak']
         self.iteration=state['iteration']; self.last_completed_iteration=state['last_completed_iteration']
         self._apply_domain_rand_curriculum_state()
-        s.set_payload_progress(self.domain_rand_curriculum.progress['disturbance'])
-        if state['physical_config']!=self.resolved_configuration():
-            raise ValueError('BR physical configuration differs from checkpoint')
         s.load_sampling_state_dict(state['sampling'])
+        self._publish_payload_stage()
         self.action_delay.copy_(state['action_delay'])
         self.actor_observation_cache.load_state_dict(state['noise'])
         self._terrain_curriculum_iteration=self.iteration

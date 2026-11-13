@@ -200,3 +200,11 @@ for _hard_backend in HARD_PACT_BACKENDS:
 
 task_registry.register("go2_kite", Go2KITE, GO2KITECfg(), GO2KITECfgPPO())
 task_registry.register("go2_kite_baseline", Go2KITEBaseline, GO2KITEBaselineCfg(), GO2KITEBaselineCfgPPO())
+
+# Factory-owned configs, not mutable shared classes or a nested HardPACT runner.
+if SIMULATOR == 'isaaclab':
+    from rsl_rl.beyond_robustness_config import resolve_beyond_robustness
+    from rsl_rl.runners.beyond_robustness_runner import BeyondRobustnessRunner
+    from legged_gym.envs.go2.go2_beyond_robustness import IsaacLabBeyondRobustnessEnv
+    task_registry.register_resolved('go2_beyond_robustness_isaaclab',resolve_beyond_robustness,
+        IsaacLabBeyondRobustnessEnv,BeyondRobustnessRunner)

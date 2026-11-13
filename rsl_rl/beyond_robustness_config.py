@@ -11,14 +11,16 @@ The Stage-1 algorithm API remains usable directly. The runner adds collection,
 phase scheduling and environment-aware resume. Switch phase explicitly at an
 update boundary or set student_reinforcement_start_iteration; neither controls a
 simulator curriculum stage. The factory inherits live optimization/terrain settings.
-Stage-3 physics is opt-in via IsaacLabBeyondRobustnessEnv; this learning
-configuration remains simulator-neutral. Production launchers remain separate.
+Physical Stage 1 (light box) and Stage 2 (sliding load) are independent of this
+learning phase. Production dispatch: train_beyond_robustness.py, registered task
+go2_beyond_robustness_isaaclab; this learning configuration stays simulator-neutral.
 """
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 import math
 from rsl_rl.beyond_robustness_schema import BeyondRobustnessInputSchema
 from types import SimpleNamespace
+from rsl_rl.beyond_robustness_stages import BREnvironmentStages
 
 
 PHASES = ("teacher_student", "student_reinforcement")
@@ -154,13 +156,15 @@ class BeyondRobustnessResolvedConfig:
     training: BeyondRobustnessConfig
     payload: object
     manifest: dict
+    stages: BREnvironmentStages = field(default_factory=BREnvironmentStages)
 
     @property
     def sim_params(self): return settings_dict(self.environment.sim)
 
 
 def resolve_beyond_robustness(env_cfg=None, train_cfg=None, *, environment_overrides=None,
-                             training_overrides=None, payload_overrides=None, reward_overrides=None):
+                             training_overrides=None, payload_overrides=None, reward_overrides=None,
+                             stage_overrides=None):
     """Authoritative physical BR factory. Overrides use explicit dotted field paths.
 
     Whole physical sections below are shared; rewards are NOT inherited. No
@@ -202,6 +206,9 @@ def resolve_beyond_robustness(env_cfg=None, train_cfg=None, *, environment_overr
         for name in parts[:-1]: target=getattr(target,name)
         if not hasattr(target,parts[-1]): raise ValueError(f'Unknown BR environment override: {path}')
         setattr(target,parts[-1],_owned_settings(value))
+    if overrides.get('domain_rand.persistent_disturbance',False):
+        raise ValueError('BR uses physical payloads instead of persistent external wrenches')
+    cfg.domain_rand.persistent_disturbance=False
     dt=cfg.control.dt; decimation=cfg.control.decimation
     if not math.isfinite(dt) or dt<=0 or not isinstance(decimation,int) or decimation<1:
         raise ValueError('Invalid control dt/decimation')
@@ -249,15 +256,17 @@ def resolve_beyond_robustness(env_cfg=None, train_cfg=None, *, environment_overr
     if training.num_envs!=cfg.env.num_envs or training.history_length!=cfg.env.num_obs_hist:
         raise ValueError('Override environment sizing/history, not the derived training values')
     payload=SlidingPayloadConfig(**dict({'seed':cfg.seed},**(payload_overrides or {})))
+    stages=BREnvironmentStages(**(stage_overrides or {}))
     if payload.seed!=cfg.seed: raise ValueError('Payload seed must match resolved run seed')
-    manifest=dict(version=2,source='live Go2 HardPACT Isaac Lab',inherited_sections=sections,
+    manifest=dict(version=3,source='live Go2 HardPACT Isaac Lab',inherited_sections=sections,
         inherited_fields=dict(env=env_fields,control=control_fields,physical_limits=reward_fields),
         br_specific=dict(actor='45 SI channels; absolute joint angles; cached sensor noise',
             privileged='clean unclipped simulator truth',actions='12 position offsets, clipped before delay',
             depth=False,controller='position PD, no branch weighting or QP',
+            persistent_external_wrenches=False,payload_schedule='shared disturbance progress; no separate stage clock',
             latent=32,load_labels='7 physical values; supervised-only estimator',reward=deepcopy(cfg.br_reward),
             resets='shared Go2PACT joint/root reset methods',geometry='seeded size bank; creation-time only',
             gpu_total_aggregate_pairs_capacity=capacity),
-        explicit_overrides=dict(environment=overrides,training=deepcopy(training_overrides or {}),payload=deepcopy(payload_overrides or {}),reward=deepcopy(reward_overrides or {})),
-        effective_environment=settings_dict(cfg),effective_training=training.resolved(),payload=asdict(payload))
-    return BeyondRobustnessResolvedConfig(cfg,training,payload,manifest)
+        explicit_overrides=dict(environment=overrides,training=deepcopy(training_overrides or {}),payload=deepcopy(payload_overrides or {}),reward=deepcopy(reward_overrides or {}),stages=deepcopy(stage_overrides or {})),
+        effective_environment=settings_dict(cfg),effective_training=training.resolved(),payload=asdict(payload),stages=asdict(stages))
+    return BeyondRobustnessResolvedConfig(cfg,training,payload,manifest,stages)

@@ -266,7 +266,7 @@ class PPOBeyondRobustness(PPO):
         data = torch.load(path, map_location=self.device, weights_only=False)
         return self.load_checkpoint_state(data, restore_rng=restore_rng, restore_history=restore_history)
 
-    def load_checkpoint_state(self, data, *, restore_rng=True, restore_history=True):
+    def validate_checkpoint_state(self, data):
         if self.pending is not None or self.storage.step:
             raise RuntimeError("Load only at update boundaries")
         if data.get("schema_version") != self.checkpoint_version:
@@ -274,8 +274,17 @@ class PPOBeyondRobustness(PPO):
         if data.get("input_contract") != self.actor_critic.input_contract():
             raise ValueError("Incompatible BR input/history/latent/action contract")
         config = type(self.config)(**data["config"])
-        if replace(config, training_phase=self.config.training_phase) != self.config:
+        if replace(config, training_phase=self.config.training_phase,
+                   max_iterations=self.config.max_iterations,save_interval=self.config.save_interval) != self.config:
             raise ValueError("BR resolved config mismatch; reconstruct model/algorithm with checkpoint config")
+        if data['training_phase'] not in ('teacher_student','student_reinforcement'):
+            raise ValueError('Invalid saved BR phase')
+        own=self.actor_critic.state_dict(); saved=data['model_state_dict']
+        if own.keys()!=saved.keys() or any(own[k].shape!=saved[k].shape for k in own):
+            raise ValueError('Incompatible BR model weights')
+
+    def load_checkpoint_state(self, data, *, restore_rng=True, restore_history=True):
+        self.validate_checkpoint_state(data)
         self.set_training_phase(data["training_phase"])
         self.actor_critic.load_state_dict(data["model_state_dict"], strict=True)
         for name in ("optimizer", "history_optimizer", "load_optimizer"):

@@ -83,6 +83,8 @@ def test_physical_curriculum_missing_evidence_resume_and_reset_cadence():
     cfg.domain_rand.use_disturbance_curriculum=True; cfg.domain_rand.push_warmup=0; cfg.domain_rand.step_interval=1
     cfg.domain_rand.min_reward_to_step=0.; cfg.commands.curriculum=False
     env=Env.__new__(Env); env.cfg=cfg; env.last_completed_iteration=-1; env.command_streak=0
+    from rsl_rl.beyond_robustness_stages import BRStageState,BREnvironmentStages
+    env.stage_state=BRStageState(BREnvironmentStages())
     env.domain_rand_curriculum=HardPACTDomainRandCurriculum(cfg)
     updates=[]
     env.simulator=SimpleNamespace(use_domainrand_curriculum=True,set_payload_progress=updates.append)

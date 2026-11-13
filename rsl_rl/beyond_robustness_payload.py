@@ -23,6 +23,7 @@ class SlidingPayloadConfig:
     mass_initial: tuple = (.20, .40)
     mass_final: tuple = (1., 3.)
     friction_range: tuple = (.10, .60)
+    friction_initial: tuple = (.8, 1.)  # Stage 1; Stage 2 interpolates to friction_range
     displacement_initial: float = .01
     displacement_final: float = .10  # per-axis, limited by usable footprint
     velocity_initial: float = .0
@@ -33,7 +34,7 @@ class SlidingPayloadConfig:
     seed: int = 0
 
     def __post_init__(self):
-        for name in ('tray_size','box_size_min','box_size_max','mass_initial','mass_final','friction_range'):
+        for name in ('tray_size','box_size_min','box_size_max','mass_initial','mass_final','friction_range','friction_initial'):
             object.__setattr__(self,name,tuple(getattr(self,name)))
         if not isinstance(self.size_bank_count,int) or self.size_bank_count<1:
             raise ValueError('size_bank_count must be positive')
@@ -43,7 +44,7 @@ class SlidingPayloadConfig:
                 raise ValueError(f'{name} must contain three positive finite lengths')
         for lo, hi in zip(self.box_size_min, self.box_size_max):
             if not 0 < lo <= hi: raise ValueError('Positive ordered box sizes required')
-        for name in ('mass_initial', 'mass_final', 'friction_range'):
+        for name in ('mass_initial', 'mass_final', 'friction_range','friction_initial'):
             lo, hi = getattr(self, name)
             if not (math.isfinite(lo) and math.isfinite(hi) and 0 < lo <= hi):
                 raise ValueError(f'Invalid {name}')
@@ -64,7 +65,7 @@ class SlidingPayloadConfig:
         return dict(mass=tuple(a+p*(b-a) for a,b in zip(self.mass_initial,self.mass_final)),
                     displacement=(0., self.displacement_initial+p*(self.displacement_final-self.displacement_initial)),
                     velocity=(0., self.velocity_initial+p*(self.velocity_final-self.velocity_initial)),
-                    friction=self.friction_range)
+                    friction=tuple(a+p*(b-a) for a,b in zip(self.friction_initial,self.friction_range)))
 
 
 def rotate_wxyz(q, v):

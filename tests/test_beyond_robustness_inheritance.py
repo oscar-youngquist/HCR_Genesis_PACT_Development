@@ -109,6 +109,9 @@ def test_terrain_delay_absolute_iteration_and_per_reset_not_per_iteration():
     env.cfg.terrain.curriculum_upward_delay_iterations=12
     mask=torch.tensor([True,False])
     env.rewards=None
+    from rsl_rl.beyond_robustness_stages import BRStageState,BREnvironmentStages
+    env.stage_state=BRStageState(BREnvironmentStages())
+    env._publish_payload_stage=lambda:None
     env.begin_iteration(11); assert not env._filter_terrain_move_up(mask).any()
     env.begin_iteration(12); assert torch.equal(env._filter_terrain_move_up(mask),mask)
     env.begin_iteration(100); assert torch.equal(env._filter_terrain_move_up(mask),mask)

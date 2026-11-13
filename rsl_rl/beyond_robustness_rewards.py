@@ -10,13 +10,13 @@ from types import SimpleNamespace
 import math
 import torch
 
-VERSION = 2
+VERSION = 3  # Fixed BR tracking and joint-limit counts; incompatible with v2.
 PAPER = 'https://arxiv.org/html/2507.07825v1#S3.T1'
-# BR coefficients with HardPACT definitions for overlapping terms.
+# BR fixed tracking/count formulas; audited shared conventions for other overlaps.
 # coefficient, formula, required state, units (before coefficient/dt)
 ORIGINAL = {
-    'tracking_lin_vel': (2., 'HardPACT exp(-sum(error_xy^2/sigma_xy)); fixed exp(-4*sum(error_xy^2)) when dynamic sigma disabled', 'command, body velocity, configured terrain/wrench sigma', '1'),
-    'tracking_ang_vel': (.5, 'HardPACT exp(-error_yaw^2/sigma_yaw); fixed exp(-4*error_yaw^2) when dynamic sigma disabled', 'command, body angular velocity, configured terrain/wrench sigma', '1'),
+    'tracking_lin_vel': (2., 'exp(-4*sum((command_xy-body_velocity_xy)^2))', 'command, body velocity', '1'),
+    'tracking_ang_vel': (.5, 'exp(-4*(command_yaw-body_yaw_rate)^2)', 'command, body angular velocity', '1'),
     'lin_vel_z': (-2., 'v_B_z^2', 'body velocity', 'm^2/s^2'),
     'ang_vel_xy': (-.05, 'sum(omega_B_xy^2)', 'body angular velocity', 'rad^2/s^2'),
     'dof_acc': (-2.5e-7, 'sum(((dq-dq_previous)/control_dt)^2)', 'current/previous joint velocity', 'rad^2/s^4'),
@@ -26,7 +26,7 @@ ORIGINAL = {
     'action_rate': (-.02, 'sum((a-a_previous)^2)', 'clipped issued position actions before delay', 'normalized action^2'),
     'action_smoothness': (-.001, 'sum((a-2*a_previous+a_previous2)^2)', 'two issued action histories', 'normalized action^2'),
     'collision': (-1., 'count(norm(ground_force)>0.1 N)', 'penalized non-foot links including tray', 'count'),
-    'dof_pos_limits': (-2., 'sum(relu(soft_lower-q)+relu(q-soft_upper))', 'canonical joint positions and soft limits', 'rad'),
+    'dof_pos_limits': (-2., 'sum((q<soft_lower) OR (q>soft_upper))', 'canonical joint positions and simulator soft limits', 'joint count'),
     'feet_air_time': (1., 'sum((air_time-0.5)*first_filtered_contact)*I(norm(command_xy)>0.1)', 'ground contacts and air-time history', 's'),
     'feet_contact_forces': (-2., 'sum(relu(norm(ground_foot_force)-max_contact_force))', 'ground-only foot forces', 'N'),
     'load_motion': (2., '1/(1+norm(load_relative_velocity_B))', 'ground-truth derivative of body-relative load CoM', '1'),
@@ -66,8 +66,7 @@ PARAMETERS = ('base_height_target','max_contact_force','contact_force_threshold'
     'foot_clearance_excess_weight','foot_clearance_tracking_sigma','front_foot_x_nominal',
     'foot_x_margin','rear_foot_x_nominal','rear_foot_x_margin','support_polygon_sigma',
     'edge_swing_clearance_margin','swing_collision_max_normal_z','swing_collision_min_speed',
-    'tracking_sigma','dynamic_tracking_sigma_enabled','dynamic_sigma',
-    'wrench_tracking_sigma_enabled','wrench_tracking_sigma_gain')
+    )
 
 
 def resolve_reward_spec(shared, dt, overrides=None):
@@ -97,7 +96,7 @@ def resolve_reward_spec(shared, dt, overrides=None):
     for name,(weight,formula,state,units) in ORIGINAL.items():
         terms[name]=dict(group='original_br',coefficient=weight,formula=formula,state=state,units=units,
             curriculum_eligible=False,coefficient_source=PAPER,
-            source=PAPER if name=='load_motion' else 'Go2HardPACT/Go2PACT shared reward helper; BR coefficient',
+            source=PAPER if name in ('load_motion','tracking_lin_vel','tracking_ang_vel','dof_pos_limits') else 'Go2HardPACT/Go2PACT shared reward helper; BR coefficient',
             time_scaling='coefficient * control_dt once')
     for name,(formula,state,units) in ADDITIONS.items():
         terms[name]=dict(group='shared_addition',coefficient=coefficients[name],formula=formula,state=state,units=units,
@@ -111,15 +110,15 @@ def resolve_reward_spec(shared, dt, overrides=None):
             'load_motion':'Author paper/project page do not specify scalar reduction. Use 1/(1+L2 norm(dr_B/dt)) in m/s; not verified author implementation.',
             'air_time':'Calls HardPACT inherited feet_air_time helper: Fz>1 N, current OR previous contact; landing event sum(air_time-0.5 s), planar command norm>0.1 m/s. Reset contacts initialize filter.',
             'contact_force':'Calls HardPACT inherited feet_contact_forces helper: sum force-norm excess above inherited max_contact_force (N), not squared.',
-            'joint_limit':'Uses HardPACT summed soft-limit excess (rad), intentionally replacing the paper count.',
-            'tracking':'Uses HardPACT tracking helpers and inherited terrain/command/wrench sigma settings. Raw curriculum evidence remains fixed exp(-4*error^2). Payload relative-motion reward remains separate.',
+            'joint_limit':'Count joints strictly outside simulator dof_pos_limits: URDF midpoint +/- half-range * inherited soft_dof_pos_limit; equality is not a violation. Threshold choice is an implementation assumption.',
+            'tracking':'Fixed exp(-4*error^2), independent of terrain, commands and wrench sigma. Raw curriculum evidence uses the same unweighted formula.',
             'timing':'Endpoint after push, before reset; executed last-substep torque and endpoint dq for physical power. Joint acceleration is control-dt finite difference. Root impulse also propagates to cached foot velocities at fixed q/dq. Contacts remain the last completed physics measurement. No additional physics.',
             'action_history':'Clipped issued normalized position actions before delay. First rate and first two smoothness differences omitted after reset; dq history initialized from reset state.',
             'smoothness_sign':'Uses HardPACT a_t-2*a_(t-1)+a_(t-2), intentionally replacing the printed Table-I minus. Constant actions have zero steady-state smoothness penalty.',
             'shaping':'Shared undiscounted potential difference; absorbing potential zero on physical terminal, actual terminal potential on timeout. All terms dt-scaled, no total clamp.',
             'slip':'Uses existing HardPACT square(sum(vxy)) literally; opposite x/y components can cancel. No BR-only formula correction.',
             'vhip':'Uses existing HardPACT world-z numerator and CoP formula literally, with ground-filtered contact tensors and correct sensor indices. No BR-only height/support formula correction.',
-            'method':'BR coefficients with HardPACT definitions for overlapping terms, plus shared auxiliary rewards. Not a literal Table-I reward reproduction.'})
+            'method':'BR fixed tracking/count terms and coefficients with audited shared conventions elsewhere, plus shared auxiliary rewards. Not exact author-code reproduction.'})
 
 
 def tracking(velocity, omega, commands):
@@ -171,8 +170,7 @@ class BRRewards:
         # never point contact access at aggregate tray/payload support forces.
         from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
         from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact import Go2HardPACT
-        # Retain only immutable sigma tables/envelopes across calls. All state
-        # and histories are replaced with the current owned snapshot below.
+        # All state and histories refer to the current owned snapshot.
         if not hasattr(self,'_shared_context'): self._shared_context=SimpleNamespace()
         context=self._shared_context
         context.__dict__.update(simulator=s,cfg=self.cfg,commands=commands.detach().clone(),actions=action,
@@ -183,17 +181,12 @@ class BRRewards:
         context.feet_air_time=self.air.clone(); context.last_contacts=self.contacts.clone()
         s.last_dof_vel=self.velocity; s.penalized_contact_indices=s.penalised_contact_indices
         context._legacy_task_class=Go2PACT
-        context._dynamic_tracking_sigma=lambda command,angular=False: Go2HardPACT._dynamic_tracking_sigma(context,command,angular)
-        context._relax_tracking_sigma_for_wrench=lambda sigma: Go2HardPACT._relax_tracking_sigma_for_wrench(context,sigma)
-        context._pending_disturbance_transition=None
-        if tracking_context is not None:
-            context.domain_rand_curriculum=tracking_context.domain_rand_curriculum
-            context._pending_disturbance_transition={'applied_sustained_wrench_world':
-                tracking_context._current_sustained_wrench_world.detach()}
+        raw['tracking_lin_vel'],raw['tracking_ang_vel']=tracking(s.base_lin_vel,s.base_ang_vel,commands)
+        raw['dof_pos_limits']=((s.dof_pos<s.dof_pos_limits[:,0]) |
+                               (s.dof_pos>s.dof_pos_limits[:,1])).float().sum(-1)
         for key in ORIGINAL:
-            if key=='load_motion': continue
-            cls=Go2HardPACT if key in ('tracking_lin_vel','tracking_ang_vel') else Go2PACT
-            raw[key]=getattr(cls,'_reward_'+key)(context).float()
+            if key in raw: continue
+            raw[key]=getattr(Go2PACT,'_reward_'+key)(context).float()
         # Keep BR's reset-safe history availability masks; no cross-episode terms.
         raw['action_rate']*=self.age>0
         raw['action_smoothness']*=self.age>1

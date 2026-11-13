@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import math
 import random
+import time
 import numpy as np
 import torch
 
@@ -162,10 +163,13 @@ class BeyondRobustnessRunner:
         logs = []
         for _ in range(num_learning_iterations):
             iteration = self.alg.iteration
+            started=time.perf_counter()
             collection, performance = self.collect_rollout()
+            collected=time.perf_counter()
             phase = self.alg.training_phase
             entropy_used = self.alg.entropy_coef
             losses = self.alg.update()
+            updated=time.perf_counter()
             if hasattr(self.env, 'end_iteration'):
                 total, count = self._curriculum_evidence
                 self.env.end_iteration(iteration, total/count if count else None, count)
@@ -177,6 +181,8 @@ class BeyondRobustnessRunner:
             if hasattr(self.env,'iteration_metrics'):
                 metrics.update(self.env.iteration_metrics())
             metrics.update({"train/learning_rate": self.alg.learning_rate,
+                            "train/collection_wall_s":collected-started,"train/update_wall_s":updated-collected,
+                            "train/iteration_wall_s":updated-started,
                             "train/entropy_coefficient": entropy_used,
                             "train/entropy_coefficient_next": self.alg.entropy_coef,
                             "train/entropy_schedule_updated": float(entropy_updated),
@@ -202,13 +208,14 @@ class BeyondRobustnessRunner:
         env_state = self.env.state_dict() if hasattr(self.env, "state_dict") and self.current is not None else None
         curriculum = self.env.curriculum_state_dict() if hasattr(self.env, "curriculum_state_dict") else None
         torch.save(dict(runner_schema_version=self.checkpoint_version, algorithm=algorithm,
+                        resolved_configuration=getattr(self.env,'resolved_config',None),
                         environment_state=env_state, curriculum_state=curriculum,
                         exact_environment=bool(getattr(self.env, "supports_exact_resume", False) and env_state is not None),
                         interactions=self.interactions, control_steps=self.control_steps,
                         episode_returns=self.episode_returns, episode_lengths=self.episode_lengths,
                         python_rng=random.getstate(), numpy_rng=np.random.get_state()), path)
 
-    def load(self, path, *, resume_mode="fresh"):
+    def load(self, path, *, resume_mode="fresh", transition_phase=None):
         """fresh keeps learned/optimizer/curriculum progress, but resets physical state/history.
 
         exact fails explicitly without a complete environment-state implementation.
@@ -225,9 +232,16 @@ class BeyondRobustnessRunner:
             raise ValueError("Exact continuation requires a complete saved/restorable environment state")
         if data["curriculum_state"] is not None and not hasattr(self.env, "load_curriculum_state_dict"):
             raise ValueError("Checkpoint curriculum state cannot be restored by this environment")
+        # Contract validation precedes every live model/optimizer/environment mutation.
+        self.alg.validate_checkpoint_state(data['algorithm'])
+        if hasattr(self.env,'validate_curriculum_state_dict'):
+            self.env.validate_curriculum_state_dict(data['curriculum_state'])
+        if transition_phase is not None and transition_phase not in ('teacher_student','student_reinforcement'):
+            raise ValueError('Invalid requested BR phase transition')
         self.alg.load_checkpoint_state(data["algorithm"], restore_rng=False, restore_history=exact)
         if data["curriculum_state"] is not None:
             self.env.load_curriculum_state_dict(data["curriculum_state"])
+        if transition_phase is not None: self.alg.set_training_phase(transition_phase)
         if exact:
             self.env.load_state_dict(data["environment_state"])
             self.current = self.env.observe()
