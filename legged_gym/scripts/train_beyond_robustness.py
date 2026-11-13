@@ -35,6 +35,11 @@ def parser():
     p.add_argument('--save-interval',type=int)
     p.add_argument('--log-dir',type=Path)
     p.add_argument('--checkpoint',type=Path,help='Restore model, all optimizers, RNG and curricula')
+    p.add_argument('--load-operation',choices=('resume','stage_transfer','weights_only'),default='resume')
+    p.add_argument('--target-stage')
+    p.add_argument('--stage-local-initial',type=float,default=0.)
+    p.add_argument('--finetune-learning-rate',type=float)
+    p.add_argument('--allow-legacy-checkpoint',action='store_true')
     p.add_argument('--training-phase',choices=('teacher_student','student_reinforcement'),help='Fresh runs only')
     p.add_argument('--student-start-iteration',type=int,help='Absolute optimization-phase switch; fresh runs only')
     p.add_argument('--transition-phase',choices=('teacher_student','student_reinforcement'),help='Explicit phase change on resume')
@@ -51,6 +56,13 @@ def resolve_run(args):
     for key in ('seed','max_iterations','additional_iterations','save_interval','student_start_iteration'):
         if getattr(args,key) is not None and getattr(args,key)<0: raise ValueError(f'{key} must be nonnegative')
     if args.num_envs is not None and args.num_envs<1: raise ValueError('num_envs must be positive')
+    if not args.checkpoint and (args.load_operation!='resume' or args.target_stage or args.finetune_learning_rate is not None):
+        raise ValueError('Load operations/overrides require --checkpoint')
+    if args.finetune_learning_rate is not None and (not math.isfinite(args.finetune_learning_rate) or args.finetune_learning_rate<=0):
+        raise ValueError('Fine-tuning LR must be positive and finite')
+    if args.load_operation=='stage_transfer':
+        raise ValueError('No production liquid target adapter is registered yet. Use the validated runner transfer API with a supported target.')
+    if args.target_stage: raise ValueError('Stage changes require stage_transfer')
     data=None; changes={}
     if args.checkpoint:
         if any(getattr(args,k) is not None for k in ('training_phase','student_start_iteration')):
@@ -64,7 +76,7 @@ def resolve_run(args):
             raise ValueError('Incompatible BR physical curriculum contract; explicit migration required')
         for key,want in (('seed',args.seed),('num_envs',args.num_envs)):
             if want is not None and want!=getattr(c.training,key): raise ValueError(f'Resume {key} differs from checkpoint')
-        start=int(data['algorithm']['iteration'])
+        start=0 if args.load_operation=='weights_only' else int(data['algorithm']['iteration'])
         if data['algorithm']['config']!=c.training.resolved(): raise ValueError('Inconsistent resolved checkpoint training metadata')
         if args.transition_phase is not None: changes['training_phase']=[data['algorithm']['training_phase'],args.transition_phase]
     else:
@@ -154,18 +166,21 @@ def main(argv=None):
         env,_=task_registry.make_env(args.task,args=args,env_cfg=c)
         runner,_=task_registry.make_alg_runner(env,name=args.task,train_cfg=c.training,log_root=log_dir)
         if args.checkpoint:
-            runner.load(args.checkpoint,transition_phase=args.transition_phase)
+            runner.load(args.checkpoint,transition_phase=args.transition_phase,
+                operation=args.load_operation,learning_rate=args.finetune_learning_rate,
+                allow_legacy=args.allow_legacy_checkpoint,target_stage=args.target_stage,
+                stage_local_initial=args.stage_local_initial)
         torch.cuda.synchronize(args.device); torch.cuda.reset_peak_memory_stats(args.device)
         begun=time.perf_counter(); count=0; final_metrics={}
         while runner.current_learning_iteration<c.training.max_iterations:
-            final_metrics=runner.learn(1,save_interval=0)[0]; count+=1
+            final_metrics=runner.learn(1,save_interval=0,final_checkpoint=False)[0]; count+=1
             if any(not math.isfinite(float(v)) for k,v in final_metrics.items() if k.startswith('loss/')):
                 raise FloatingPointError('Nonfinite BR training loss')
             iteration=runner.current_learning_iteration
             if c.training.save_interval and iteration%c.training.save_interval==0:
                 runner.save(log_dir/f'model_{iteration}.pt')
         torch.cuda.synchronize(args.device); elapsed=time.perf_counter()-begun
-        final=log_dir/f'model_{runner.current_learning_iteration}.pt'; runner.save(final)
+        final=log_dir/f'model_{runner.current_learning_iteration}.pt'; runner.save(final,stage_end=True)
         clean={k:float(v) if math.isfinite(float(v)) else None for k,v in runner.last_logged_metrics.items()}
         summary=dict(start_iteration=start,end_iteration=runner.current_learning_iteration,updates=count,
             stage=env.stage_state.state_dict(),phase=runner.alg.training_phase,interactions=runner.interactions,

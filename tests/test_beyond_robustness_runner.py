@@ -199,9 +199,9 @@ def test_schedule_switch_resume_and_no_optimizer_reset(tmp_path):
     for key, value in model.items(): torch.testing.assert_close(value, restored.alg.actor_critic.state_dict()[key], rtol=0, atol=0)
     for key, values in state["state"].items():
         for name, value in values.items(): torch.testing.assert_close(value, opt.state_dict()["state"][key][name], rtol=0, atol=0)
-    restored.save(tmp_path / "student.pt")
+    restored.save(tmp_path / "continued" / "student.pt")
     next_runner = make(student_reinforcement_start_iteration=2)
-    next_runner.load(tmp_path / "student.pt", resume_mode="exact")
+    next_runner.load(tmp_path / "continued" / "student.pt", resume_mode="exact")
     assert next_runner.alg.training_phase == "student_reinforcement"
     assert next_runner.alg.entropy_coef == restored.alg.entropy_coef
 

@@ -117,6 +117,7 @@ class OnPolicyRunnerPACTPos:
                  log_dir=None,
                  device='cpu'):
         self.cfg=train_cfg["runner"]
+        self.train_cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
         # Keep legacy PACTPos diagnostics intact, but give HardPACTPos the
@@ -251,7 +252,8 @@ class OnPolicyRunnerPACTPos:
         pretrained_std = self.policy_cfg["pretrained_std"]
         if self.console_model_summary:
             print(pretrained_path)
-        loaded_dict = torch.load(pretrained_path)
+        loaded_dict = (torch.load(pretrained_path, weights_only=False) if self.is_hard_pact_pos
+                       else torch.load(pretrained_path))
         # Load the pretrained action-network and encoder
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         # Reset the 
@@ -265,15 +267,15 @@ class OnPolicyRunnerPACTPos:
         if self.log_dir is not None and self.writer is None:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
 
-        if init_at_random_ep_len:
+        if init_at_random_ep_len and not (self.is_hard_pact_pos and getattr(self, '_training_progress_restored', False)):
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
             
         # self.alg.actor_critic.std.data.fill_(self.policy_cfg["init_noise_std"]*0.45)
         
         obs,obs_hist,privileged_obs,exp_labels = self.env.get_observations()
 
-        if self.env.use_reward_curriculum:
-            self.env.step_reward_curriculum(0)
+        if self.env.use_reward_curriculum and not (self.is_hard_pact_pos and getattr(self,'_training_progress_restored',False)):
+            self.env.step_reward_curriculum(self.current_learning_iteration if self.is_hard_pact_pos else 0)
         
         critic_obs = privileged_obs if privileged_obs is not None else obs
         
@@ -288,6 +290,7 @@ class OnPolicyRunnerPACTPos:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
+            if self.is_hard_pact_pos: self._checkpoint_update_in_progress = True
             if self.is_hard_pact_pos:
                 self.env._terrain_curriculum_iteration = it
                 self.env.begin_command_curriculum_iteration()
@@ -431,15 +434,21 @@ class OnPolicyRunnerPACTPos:
             learn_time = stop - start
             if self.log_dir is not None:
                 self.log(locals())
+            if self.is_hard_pact_pos:
+                self.current_learning_iteration = it + 1
+                self._checkpoint_update_in_progress = False
+                if self.log_dir is None:
+                    self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
+                    self.tot_time += collection_time + learn_time
             if it % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             ep_infos.clear()
         
-        self.current_learning_iteration += num_learning_iterations
+        self.current_learning_iteration = tot_iter
         final_checkpoint = os.path.join(
             self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)
         )
-        self.save(final_checkpoint)
+        self.save(final_checkpoint, stage_end=self.is_hard_pact_pos)
         if self.is_hard_pact_pos and self.cfg.get(
             "export_hard_pact_start", True
         ):
@@ -551,7 +560,7 @@ class OnPolicyRunnerPACTPos:
             self.writer.add_scalar('Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
             self.writer.add_scalar('Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
 
-        str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
+        str = f" \033[1m Learning iteration {locs['it']}/{locs.get('tot_iter', self.current_learning_iteration + locs['num_learning_iterations'])} \033[0m "
 
         if len(locs['rewbuffer']) > 0:
             log_string = (f"""{'#' * width}\n"""
@@ -588,7 +597,7 @@ class OnPolicyRunnerPACTPos:
         if self.console_iteration:
             print(log_string)
 
-    def save(self, path, infos=None):
+    def save(self, path, infos=None, *, stage_end=False):
         checkpoint = {
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'act_optimizer_state_dict': self.alg.act_optimizer.optimizer.state_dict(),
@@ -607,7 +616,11 @@ class OnPolicyRunnerPACTPos:
         if self.is_hard_pact_pos:
             checkpoint['hard_pact_command_curriculum'] = self.env.command_curriculum_state_dict()
             checkpoint['iter'] = max(checkpoint['iter'],getattr(self.env,'_command_curriculum_last_iteration',-1)+1)
-        torch.save(checkpoint, path)
+        if self.is_hard_pact_pos:
+            from rsl_rl.utils.hard_pact_checkpoint import save
+            save(self, checkpoint, path, stage_end=stage_end)
+        else:
+            torch.save(checkpoint, path)
 
     def save_hard_pact_start(self, path, infos=None):
         """Write a strict-loadable HardPACT weight initialization checkpoint."""
@@ -620,7 +633,13 @@ class OnPolicyRunnerPACTPos:
         torch.save(checkpoint, path)
         return path
 
-    def load(self, path, load_optimizer=True):
+    def load(self, path, load_optimizer=True, *, operation=None, learning_rate=None,
+             allow_legacy=False, target_stage=None, stage_local_initial=0.):
+        if self.is_hard_pact_pos:
+            from rsl_rl.utils.hard_pact_checkpoint import load
+            return load(self, path, operation=operation or ('resume' if load_optimizer else 'weights_only'),
+                learning_rate=learning_rate, allow_legacy=allow_legacy,
+                target_stage=target_stage, stage_local_initial=stage_local_initial)
         loaded_dict = torch.load(path)
         # Load actor/critic model(s)
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])

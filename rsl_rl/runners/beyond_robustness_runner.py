@@ -13,6 +13,7 @@ from rsl_rl.modules.actor_critic_beyond_robustness import ActorCriticBeyondRobus
 from rsl_rl.algorithms.ppo_beyond_robustness import PPOBeyondRobustness
 from rsl_rl.utils.learning_diagnostics import (LearningEpisodeDiagnostics, policy_diagnostics,
     compatible_training_metrics, format_training_summary)
+from rsl_rl.utils import training_checkpoint as tc
 
 
 class BeyondRobustnessRunner:
@@ -163,7 +164,7 @@ class BeyondRobustnessRunner:
                     episodes=count, episode_return=completed_returns.item() / count if count else float("nan"),
                     episode_length_steps=completed_lengths.item() / count if count else float("nan")), performance
 
-    def learn(self, num_learning_iterations=None, *, save_interval=None):
+    def learn(self, num_learning_iterations=None, *, save_interval=None, final_checkpoint=True):
         """Run a bounded number of additional iterations; no implicit curriculum steps."""
         if num_learning_iterations is None: num_learning_iterations=max(0,self.cfg.max_iterations-self.alg.iteration)
         if save_interval is None: save_interval=self.cfg.save_interval if self.log_dir is not None else 0
@@ -172,6 +173,7 @@ class BeyondRobustnessRunner:
         self.alg.train_mode()
         logs = []
         for _ in range(num_learning_iterations):
+            self._checkpoint_update_in_progress = True
             iteration = self.alg.iteration
             started=time.perf_counter()
             collection, performance = self.collect_rollout()
@@ -213,30 +215,37 @@ class BeyondRobustnessRunner:
             if self.console:
                 print(format_training_summary('BR',self.alg.iteration,phase,published,self.cfg.max_iterations),flush=True)
             logs.append(metrics)
+            self._checkpoint_update_in_progress = False
             if save_interval and self.alg.iteration % save_interval == 0:
                 if self.log_dir is None:
                     raise ValueError("Automatic checkpointing requires log_dir")
                 self.save(self.log_dir / f"model_{self.alg.iteration}.pt")
+        if self.log_dir is not None and final_checkpoint:
+            self.save(self.log_dir / f"model_{self.alg.iteration}.pt", stage_end=True)
         return logs
 
     def get_inference_policy(self):
         """Stateless student callable (observations, explicit history); no teacher inputs."""
         return self.alg.actor_critic.act_inference
 
-    def save(self, path):
+    def save(self, path, *, stage_end=False):
+        tc.boundary(self)
         algorithm = self.alg.checkpoint_state()  # also rejects partial iterations
         env_state = self.env.state_dict() if hasattr(self.env, "state_dict") and self.current is not None else None
         curriculum = self.env.curriculum_state_dict() if hasattr(self.env, "curriculum_state_dict") else None
-        torch.save(dict(runner_schema_version=self.checkpoint_version, algorithm=algorithm,
+        checkpoint = dict(runner_schema_version=self.checkpoint_version, algorithm=algorithm,
                         resolved_configuration=getattr(self.env,'resolved_config',None),
                         environment_state=env_state, curriculum_state=curriculum,
                         exact_environment=bool(getattr(self.env, "supports_exact_resume", False) and env_state is not None),
                         interactions=self.interactions, control_steps=self.control_steps,
                         episode_returns=self.episode_returns, episode_lengths=self.episode_lengths,
                         episode_diagnostics=self.episode_diagnostics.state_dict(),total_time=self.total_time,
-                        python_rng=random.getstate(), numpy_rng=np.random.get_state()), path)
+                        python_rng=random.getstate(), numpy_rng=np.random.get_state())
+        checkpoint[tc.KEY] = tc.envelope(self, stage_end=stage_end)
+        tc.atomic_save(checkpoint, path, getattr(self, '_checkpoint_provenance', None))
 
-    def load(self, path, *, resume_mode="fresh", transition_phase=None):
+    def load(self, path, *, resume_mode="fresh", transition_phase=None, operation='resume',
+             learning_rate=None, allow_legacy=False, target_stage=None, stage_local_initial=0.):
         """fresh keeps learned/optimizer/curriculum progress, but resets physical state/history.
 
         exact fails explicitly without a complete environment-state implementation.
@@ -244,7 +253,25 @@ class BeyondRobustnessRunner:
         """
         if resume_mode not in ("fresh", "exact"):
             raise ValueError("resume_mode must be 'fresh' or 'exact'")
+        if operation not in tc.OPERATIONS: raise ValueError('Unknown checkpoint operation')
+        if operation == 'weights_only' and (learning_rate is not None or transition_phase is not None):
+            raise ValueError('weights_only retains fresh optimizer/phase settings; no continuation overrides')
+        if operation != 'resume' and resume_mode == 'exact': raise ValueError('Transfer/weights initialization requires fresh physics')
+        if operation == 'stage_transfer' and (not target_stage or transition_phase is not None):
+            raise ValueError('Stage transfer requires target_stage and preserves the optimization phase')
+        if target_stage is not None and operation != 'stage_transfer': raise ValueError('Stage changes require stage_transfer')
+        if not 0 <= stage_local_initial <= 1: raise ValueError('Invalid stage-local initial severity')
+        if self.log_dir and self.log_dir.resolve() == Path(path).resolve().parent:
+            raise ValueError('Use a new destination log directory')
         data = torch.load(path, map_location=self.device, weights_only=False)
+        state = data.get(tc.KEY)
+        if state is not None:
+            tc.validate(self, data, operation, learning_rate=learning_rate)
+            missing = state['unavailable']
+        else:
+            if operation == 'stage_transfer' or (not allow_legacy and operation != 'weights_only'):
+                raise ValueError('Legacy BR checkpoint: explicit allow_legacy or weights_only required')
+            missing = tc.warn_legacy()
         if data.get("runner_schema_version") != self.checkpoint_version:
             raise ValueError("Incompatible BR runner checkpoint; core-only checkpoints lack environment state")
         exact = resume_mode == "exact"
@@ -254,14 +281,33 @@ class BeyondRobustnessRunner:
         if data["curriculum_state"] is not None and not hasattr(self.env, "load_curriculum_state_dict"):
             raise ValueError("Checkpoint curriculum state cannot be restored by this environment")
         # Contract validation precedes every live model/optimizer/environment mutation.
-        self.alg.validate_checkpoint_state(data['algorithm'])
-        self.episode_diagnostics.validate_state_dict(data.get('episode_diagnostics'))
-        if hasattr(self.env,'validate_curriculum_state_dict'):
+        if operation != 'weights_only':
+            self.alg.validate_checkpoint_state(data['algorithm'])
+            self.episode_diagnostics.validate_state_dict(data.get('episode_diagnostics'))
+        else:
+            if data['algorithm']['input_contract'] != self.alg.actor_critic.input_contract():
+                raise ValueError('Incompatible BR weights/input semantics')
+            own = self.alg.actor_critic.state_dict(); old = data['algorithm']['model_state_dict']
+            if own.keys()!=old.keys() or any(own[k].shape!=old[k].shape for k in own):
+                raise ValueError('Incompatible BR model weights')
+        if hasattr(self.env,'validate_curriculum_state_dict') and operation == 'resume':
             self.env.validate_curriculum_state_dict(data['curriculum_state'])
         if transition_phase is not None and transition_phase not in ('teacher_student','student_reinforcement'):
             raise ValueError('Invalid requested BR phase transition')
+        if operation == 'weights_only':
+            self.alg.actor_critic.load_state_dict(data['algorithm']['model_state_dict'], strict=True)
+            self._fresh_environment()
+            self._checkpoint_provenance = str(Path(path).resolve())
+            tc.archive_report(self, path, state, operation, unavailable=missing)
+            return self.alg.iteration
         self.alg.load_checkpoint_state(data["algorithm"], restore_rng=False, restore_history=exact)
-        if data["curriculum_state"] is not None:
+        if state is not None: tc.restore_learning(self, state, learning_rate=learning_rate)
+        if operation == 'stage_transfer':
+            self.env.import_training_progress(tc.clear_gate_evidence(state['transferable_progress']), transfer=True)
+            self.training_stage = dict(name=target_stage, origin_iteration=state['next_iteration'],
+                                       local_progress=stage_local_initial)
+            self.env.initialize_transferred_payload(dict(self.training_stage))
+        elif data["curriculum_state"] is not None:
             self.env.load_curriculum_state_dict(data["curriculum_state"])
         if transition_phase is not None: self.alg.set_training_phase(transition_phase)
         if exact:
@@ -277,9 +323,12 @@ class BeyondRobustnessRunner:
         torch.set_rng_state(data["algorithm"]["torch_rng"].cpu())
         if data["algorithm"]["cuda_rng"] is not None and self.device.type == "cuda":
             torch.cuda.set_rng_state(data["algorithm"]["cuda_rng"].cpu(), self.device)
+        if state is not None: tc.restore_rng(self, state['rng'], transfer=operation == 'stage_transfer')
         if not exact: self._fresh_environment()
         self.interactions, self.control_steps = data["interactions"], data["control_steps"]
         self.total_time=float(data.get('total_time',0.))
+        self._checkpoint_provenance = str(Path(path).resolve())
+        tc.archive_report(self, path, state, operation, learning_rate, unavailable=missing, exact=exact)
         return self.alg.iteration
 
     def close(self):

@@ -43,6 +43,11 @@ from .transition import (
 
 class Go2HardPACT(Go2PACT):
     """Legacy Go2 PACT with GRF and persistent external-wrench targets."""
+    # Installed on HardPACTPos by the existing shared-method installer too.
+    from .training_state import (environment_contract as training_environment_contract,
+        export_progress as export_training_progress, validate_progress as validate_training_progress,
+        import_progress as import_training_progress, fresh_episodes as reset_training_episodes,
+        reject_unimplemented_transfer as validate_stage_transfer)
 
     _legacy_task_class = Go2PACT
 

@@ -59,6 +59,10 @@ class TaskRegistry():
             isaacgym.VecTaskPython: The created environment
             Dict: the corresponding config file
         """
+        if getattr(args, 'load_operation', None) == 'stage_transfer':
+            hooks = ('validate_stage_transfer','import_training_progress','initialize_transferred_payload')
+            if any(not hasattr(self.task_classes[name], h) for h in hooks):
+                raise ValueError('Selected task has no validated cross-payload stage-transfer adapter; liquid integration is not implemented')
         if name in self.resolved_factories:
             if args is None or not hasattr(args,'device'):
                 raise ValueError('Resolved BR tasks require train_beyond_robustness.py arguments')
@@ -132,6 +136,20 @@ class TaskRegistry():
         # override cfg from args (if specified)
         _, train_cfg = update_cfg_from_args(None, train_cfg, args)
 
+        state_path = getattr(args, 'state_checkpoint', None)
+        if not state_path and (getattr(args,'load_operation','resume')!='resume'
+                or getattr(args,'target_stage',None) or getattr(args,'finetune_learning_rate',None) is not None):
+            raise ValueError('Explicit load operations and overrides require --state-checkpoint')
+        state_options = state_path or getattr(args, 'additional_iterations', None) is not None
+        if state_options and not (name or '').startswith('go2_hard_pact'):
+            raise ValueError('Complete-state arguments require a HardPACT task (BR uses its dedicated entrypoint)')
+        if state_path:
+            if args.resume: raise ValueError('Choose --state-checkpoint or legacy --resume, not both')
+            train_cfg.runner.resume = False
+            # Explicit checkpoint selection takes precedence over bootstrap paths.
+            train_cfg.policy.pretrained_path = None
+        if getattr(args, 'checkpoint_log_root', None): log_root = args.checkpoint_log_root
+
         if log_root=="default":
             log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', 'hardpact_iclr', train_cfg.runner.experiment_name)
             # log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
@@ -140,6 +158,8 @@ class TaskRegistry():
             log_dir = None
         else:
             log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
+        if state_path and log_dir is not None and os.path.realpath(log_dir)==os.path.dirname(os.path.realpath(state_path)):
+            raise ValueError('Destination log directory must differ from source run')
         
         train_cfg_dict = class_to_dict(train_cfg)
         sim_device = "cpu" if args.cpu else args.gpu
@@ -153,6 +173,10 @@ class TaskRegistry():
         # select runner according to runner_class_name
         runner_class = runner_registry.get_runner_class(train_cfg.runner_class_name)
         runner = runner_class(env, train_cfg_dict, log_dir, device=sim_device)
+        if state_path:
+            runner.load(state_path, operation=args.load_operation,
+                learning_rate=args.finetune_learning_rate, allow_legacy=args.allow_legacy_checkpoint,
+                target_stage=args.target_stage, stage_local_initial=args.stage_local_initial)
         #save resume path before creating a new log_dir
         resume = train_cfg.runner.resume
         if resume:
@@ -165,7 +189,10 @@ class TaskRegistry():
                 # load previously trained model
                 resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
                 print(f"Loading model from: {resume_path}")
-                runner.load(resume_path)
+                if (name or '').startswith('go2_hard_pact'):
+                    runner.load(resume_path, allow_legacy=getattr(args,'allow_legacy_checkpoint',False))
+                else:
+                    runner.load(resume_path)
         return runner, train_cfg
 
 # make global task registry

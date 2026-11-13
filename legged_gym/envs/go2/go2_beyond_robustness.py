@@ -350,6 +350,19 @@ class IsaacLabBeyondRobustnessEnv:
         # Changed ranges become due on eligible resets, never mutate active bodies.
         self.simulator.set_payload_progress(self.stage_state.payload_progress(progress))
 
+    def export_training_progress(self):
+        """Portable difficulty only: never export box/noise/delay sampling as payload state."""
+        s = self.simulator
+        return deepcopy(dict(version=1, domain=self.domain_rand_curriculum.state_dict(),
+            reward=self.rewards.state_dict() if self.rewards else None,
+            command_ranges=self.command_ranges, command_streak=self.command_streak,
+            iteration=self.iteration, last_completed_iteration=self.last_completed_iteration,
+            terrain_levels=s.terrain_levels.clone(), terrain_types=s.terrain_types.clone()))
+
+    def validate_stage_transfer(self, state):
+        raise ValueError('BR sliding-box adapter cannot initialize a liquid payload. '
+                         'A target adapter must validate semantic labels and import portable difficulty explicitly.')
+
     def physical_contract(self):
         from dataclasses import asdict
         from rsl_rl.beyond_robustness_config import settings_dict

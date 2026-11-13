@@ -46,7 +46,17 @@ def train(args):
             json.dump(env.simulator.grf_semantics, stream, indent=2)
     
     # Start training session
-    ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
+    iterations = train_cfg.runner.max_iterations
+    if args.task.startswith('go2_hard_pact'):
+        additional = getattr(args, 'additional_iterations', None)
+        if additional is not None:
+            if additional < 0 or not (getattr(args,'state_checkpoint',None) or args.resume):
+                raise ValueError('--additional-iterations must be nonnegative and requires a checkpoint')
+            if args.max_iterations is not None: raise ValueError('Choose total --max_iterations OR --additional-iterations')
+            iterations = additional
+        else:
+            iterations = max(0, iterations - ppo_runner.current_learning_iteration)
+    ppo_runner.learn(num_learning_iterations=iterations, init_at_random_ep_len=True)
 
 if __name__ == '__main__':
     args = get_args()

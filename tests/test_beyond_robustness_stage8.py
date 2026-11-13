@@ -90,8 +90,8 @@ def test_stage_transition_resume_preserves_learning_and_all_optimizers(tmp_path,
     assert new.alg.history.frames.eq(0).all() and new.alg.reset_pending.all()
     for key in ('model_state_dict','optimizer','history_optimizer','load_optimizer','learning_rate','entropy_coef','iteration'):
         assert_equal(old[key],new.alg.checkpoint_state()[key])
-    new.learn(1); new.save(tmp_path/'two.pt')
-    again=runner(c); again.load(tmp_path/'two.pt')
+    new.learn(1); new.save(tmp_path/'continued'/'two.pt')
+    again=runner(c); again.load(tmp_path/'continued'/'two.pt')
     assert again.env.stage_state.stage==2 and again.alg.training_phase==phase
     assert len(again.env.stage_state.transitions)==1
     again.learn(1)
