@@ -1,4 +1,17 @@
-# First Plus Random Substep QP
+# Mixed and First Plus Random Substep QP
+
+The Go2 experiment now selects `qp_update_mode='mixed_substeps'`:
+each interval randomly assigns `floor(0.5*N)` environments to first + one
+random later solve, `floor(0.3*N)` to first + two distinct random later solves,
+and the remainder to all four. Groups and later substeps are redrawn every
+interval using the existing Torch RNG. This averages approximately 2.7 solves
+per environment (exactly 2.7 for batch sizes divisible by ten).
+PPO uniformly preselects one executed solve per environment, independent of
+solver success; its row/epoch budget is unchanged. No held corrections or
+additional neural forwards are introduced. `qp_shared_later_substep` applies
+only to `first_plus_random_substep`, not the new mixed mode.
+
+For the unchanged first-plus-random mode:
 
 Set the existing `algorithm.hard_pact_qp` dictionary entry:
 
@@ -7,7 +20,7 @@ Set the existing `algorithm.hard_pact_qp` dictionary entry:
 ```
 
 The compatibility dataclass default remains `random_one_substep`; the current
-HardPACT experiment config selects `first_plus_random_substep`. With four physics substeps per
+HardPACT experiment config selects `mixed_substeps`. With four physics substeps per
 policy interval, the new mode solves every environment at k=0 and again at
 K sampled from {1,2,3}. Later-index counts differ by at most one across
 environments; random offsets/permutations refresh every policy interval.

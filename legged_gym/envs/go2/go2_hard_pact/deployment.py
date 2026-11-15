@@ -61,8 +61,10 @@ def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None,
         "joint_position_beta": settings.position_integration_coefficient,
         "training_warmup_iterations": warmup_iterations,
         "physics_substep_anchors": [0,1,2,3],
-        "problems_per_environment_interval": {"every_substep":4, "random_one_substep":1, "first_plus_random_substep":2}[mode],
-        "execution_selection": ("all rows at k=0 plus balanced uniform K in {1,2,3}; compact K=k later"
+        "problems_per_environment_interval": {"every_substep":4, "random_one_substep":1, "first_plus_random_substep":2, "mixed_substeps":2.7}[mode],
+        "execution_selection": ("randomly reassigned floor(.5*N)/floor(.3*N)/remaining groups: k=0 plus 1/2/3 distinct uniform later substeps; mean approximately 2.7 solves; shared_later ignored"
+                                if mode=="mixed_substeps" else
+                                "all rows at k=0 plus balanced uniform K in {1,2,3}; compact K=k later"
                                 if mode=="first_plus_random_substep" else
                                 "all rows" if mode=="every_substep" else "preselected balanced uniform K per environment; compact K=k at each substep"),
         "prediction_horizon": "one physics/PD timestep",
@@ -88,7 +90,9 @@ def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None,
             "certification": "hard in primary/recovery candidates; not guaranteed for partial blends or fallback"},
         "execution_feedforward": "selected total torque minus current physical PD; divide by motor*feedforward gain once; zero gain uses explicit direct-torque fallback; replace every substep",
         "soft_joint_recovery": "[tau12, masked-force12, nonnegative joint-slack12(rad/s²), optional rate-slack12(Nm)]; rate slack/rows/costs exist only when QP rate enabled; absolute torque/friction/swing-zero stay hard; accepted commands bypass deterministic rate clipping; failed rows excluded from VJP",
-        "ppo_anchor_selection": ("independent fair coin: k=0 or selected later K; one record regardless of solver success"
+        "ppo_anchor_selection": ("one uniform executed solve per row, independent of acceptance; rollout selection is a four-bit mask"
+                                 if mode=="mixed_substeps" else
+                                 "independent fair coin: k=0 or selected later K; one record regardless of solver success"
                                  if mode=="first_plus_random_substep" else
                                  "one balanced uniform executed QP substep per environment in both modes"),
         "ppo_projection_loss_multiplier": 1,
@@ -386,6 +390,6 @@ def validate_qp_deployment_contract(contract):
         raise ValueError("Incompatible HardPACT deployment schema; re-export using the current controller")
     update = contract.get("qp_update")
     if update is not None:
-        if update.get("mode") not in ("every_substep", "random_one_substep", "first_plus_random_substep") or update.get("formulation") != "masked_torque_force_24":
+        if update.get("mode") not in ("every_substep", "random_one_substep", "first_plus_random_substep", "mixed_substeps") or update.get("formulation") != "masked_torque_force_24":
             raise ValueError("Incompatible HardPACT QP execution contract")
     return contract

@@ -411,7 +411,7 @@ def get_args():
     )
     parser.add_argument(
         '--qp_update_mode',
-        choices=('every_substep', 'random_one_substep'),
+        choices=('every_substep', 'random_one_substep', 'first_plus_random_substep', 'mixed_substeps'),
         default=None,
         help='HardPACT-only QP update mode override',
     )

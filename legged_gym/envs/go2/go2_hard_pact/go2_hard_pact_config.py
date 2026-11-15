@@ -633,7 +633,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             # Activation and rollout execution
             'enabled': True,                                 # Master QP switch; ablation gates still apply.
             'warmup_iterations': 0,                        # Absolute PPO iteration at which rollout/replay QPs become eligible.
-            'qp_update_mode': 'first_plus_random_substep',   # first_plus_random_substep - First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
+            # first_plus_random_substep - First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
+            'qp_update_mode': 'mixed_substeps',              # Random 50/30/20% groups: first+1 / first+2 / all four; one uniform executed PPO anchor.
             'correction_ramp_enabled': True,                 # Blend accepted QP corrections into execution; full QP losses remain unchanged.
             'correction_ramp_start_offset': 0,             # Iterations after QP activation before the execution ramp starts.
             'correction_ramp_duration': 500,                # Iterations to reach full correction; 0 applies full correction immediately.

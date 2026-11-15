@@ -27,7 +27,7 @@ NUM_VARIABLES = 24
 
 def qp_substep_anchors(mode, decimation):
     """Possible dispatch times, not per-environment solve counts."""
-    if mode not in ("every_substep", "random_one_substep", "first_plus_random_substep"):
+    if mode not in ("every_substep", "random_one_substep", "first_plus_random_substep", "mixed_substeps"):
         raise ValueError(f"Unsupported qp_update_mode: {mode}")
     if decimation != 4:
         raise ValueError("HardPACT QP execution requires exactly four physics substeps")
@@ -36,6 +36,8 @@ def qp_substep_anchors(mode, decimation):
 
 def qp_substep_mask(mode, substep, selected):
     qp_substep_anchors(mode,4)
+    if mode == "mixed_substeps":
+        return (selected & (1 << substep)) != 0
     if mode == "first_plus_random_substep":
         return (selected == substep) | (substep == 0)
     return torch.ones_like(selected,dtype=torch.bool) if mode=="every_substep" else selected==substep
@@ -49,6 +51,23 @@ def qp_interval_selection(mode, num_envs, decimation, device, *, generator=None,
     only this anchor preserves the existing differentiated-row/epoch budget.
     """
     qp_substep_anchors(mode, decimation)
+    if mode == "mixed_substeps":
+        # Exactly floor(.5*N)/floor(.3*N)/remainder rows, randomly reassigned
+        # each interval. Bitmasks keep the existing one-scalar rollout storage.
+        order = torch.randperm(num_envs, device=device, generator=generator)
+        count = torch.full((num_envs,), 4, device=device, dtype=torch.long)
+        first = num_envs // 2
+        second = 3 * num_envs // 10
+        count[order[:first]] = 2
+        count[order[first:first+second]] = 3
+        later = 1 + torch.rand(num_envs, 3, device=device, generator=generator).argsort(dim=1)
+        chosen = torch.arange(3, device=device)[None] < (count-1)[:, None]
+        selected = 1 + ((1 << later) * chosen).sum(dim=1)
+        masks = (selected[:, None] & (1 << torch.arange(4, device=device))) != 0
+        # Uniform among this row's executed solves, independent of acceptance.
+        scores = torch.rand(num_envs, 4, device=device, generator=generator)
+        replay = scores.masked_fill(~masks, float('inf')).argmin(dim=1)
+        return selected, replay
     if mode == "first_plus_random_substep":
         later = (torch.randint(1,decimation,(1,),device=device,generator=generator).expand(num_envs)
                  if shared_later else

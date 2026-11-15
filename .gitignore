@@ -76,3 +76,28 @@ wandb
 build
 *debug*
 resources/terrains/*.stl
+
+# Deployment sources are versioned; generated models, manifests, golden
+# vectors, historical-source snapshots and packaged bundles stay local.
+/deployments/**
+!/deployments/**/
+!/deployments/**/*.py
+!/deployments/**/*.sh
+!/deployments/**/*.cpp
+!/deployments/**/*.h
+!/deployments/**/*.hpp
+!/deployments/**/CMakeLists.txt
+!/deployments/**/*.rst
+!/deployments/**/*.md
+/deployments/**/archive/
+/deployments/**/__pycache__/
+
+# Keep evaluation code/documentation, never collected trials or reports.
+!/diagnostics/matched5500/
+/diagnostics/matched5500/*
+!/diagnostics/matched5500/evaluate.py
+!/diagnostics/matched5500/report.py
+!/diagnostics/matched5500/README.txt
+!/diagnostics/oct07_qp_comparison/
+/diagnostics/oct07_qp_comparison/*
+!/diagnostics/oct07_qp_comparison/README.txt

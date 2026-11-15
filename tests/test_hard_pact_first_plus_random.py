@@ -9,6 +9,52 @@ from rsl_rl.algorithms.ppo_hard_pact import disjoint_qp_epoch_mask
 from test_hard_pact_qp_modes import fixture
 
 
+@pytest.mark.parametrize('n', [0, 1, 7, 10, 4096])
+def test_mixed_groups_replay_and_reproducibility(n):
+    def sample(seed):
+        return qp_interval_selection('mixed_substeps', n, 4, 'cpu',
+            generator=torch.Generator().manual_seed(seed))
+    selected, replay = sample(41)
+    masks = torch.stack([qp_substep_mask('mixed_substeps', k, selected) for k in range(4)])
+    count = masks.sum(0)
+    assert masks[0].all()
+    assert (count == 2).sum() == n//2
+    assert (count == 3).sum() == 3*n//10
+    assert (count == 4).sum() == n-n//2-3*n//10
+    assert masks.gather(0, replay[None]).all()
+    assert all(torch.equal(a,b) for a,b in zip((selected,replay),sample(41)))
+    if n > 10:
+        other, _ = sample(42)
+        assert not torch.equal(selected,other)
+    epochs = [disjoint_qp_epoch_mask(torch.arange(n), replay, epoch=e, num_epochs=5) for e in range(5)]
+    assert torch.stack(epochs).sum(0).eq(1).all()
+
+
+def test_mixed_uniform_replay_and_actual_control_capture():
+    selected, replay = qp_interval_selection('mixed_substeps', 30000, 4, 'cpu',
+        generator=torch.Generator().manual_seed(17))
+    counts = torch.stack([qp_substep_mask('mixed_substeps',k,selected) for k in range(4)]).sum(0)
+    for count in (2,3,4):
+        assert abs((replay[counts==count]==0).float().mean().item()-1/count) < .02
+    task, heads, qp, _, solves, q, v, quat, _ = fixture('mixed_substeps', n=10)
+    for _ in range(3):
+        task._begin_qp_interval()
+        plan = task._qp_rollout_substep_index.clone()
+        anchor = task._qp_sampled_substep_index.clone()
+        before = solves.clone(); calls = heads.calls
+        for k in range(4):
+            q.fill_(.001*k); v.fill_(.0001*k)
+            task._solve_hard_pact_rollout_qp_substep(quat,torch.zeros(10,6))
+        expected = torch.stack([qp_substep_mask('mixed_substeps',k,plan) for k in range(4)]).sum(0)
+        torch.testing.assert_close(solves-before,expected)
+        assert expected.sum() == 27 and heads.calls == calls
+        packet = task._qp_sampled_transition
+        assert packet['sampled_qp_valid'].all()
+        torch.testing.assert_close(packet['sampled_qp_substep_index'].flatten(),anchor)
+        torch.testing.assert_close(packet['sampled_qp_q'][:,7:],(.001*anchor.float())[:,None].expand(-1,12))
+        assert torch.isfinite(task.simulator._torques).all()
+
+
 def test_balanced_later_solve_and_independent_fair_replay_coin():
     generator = torch.Generator().manual_seed(41)
     later, replay = qp_interval_selection("first_plus_random_substep", 30000, 4, "cpu", generator=generator)
