@@ -1,6 +1,20 @@
-"""Visually inspect a Go2 HardPACTPos checkpoint with random commands."""
+"""Play Go2 HardPACT/Pos, with opt-in every-substep Isaac Lab deployment QP."""
 
 import os
+import sys
+
+# Match training's cuPIQP/Warp import order BEFORE importing task registration
+# or launching Isaac Sim. Use the full solver config even for a no-QP ablation
+# that may explicitly opt into deployment-time QP execution.
+if __name__ == '__main__':
+    from legged_gym.scripts.train_hard_pact import prepare_solver_runtime
+    arguments = sys.argv[1:]
+    task = ''
+    for index, argument in enumerate(arguments):
+        if argument.startswith('--task='): task = argument.split('=', 1)[1]
+        elif argument == '--task' and index + 1 < len(arguments): task = arguments[index + 1]
+    if not task.startswith('go2_hard_pact_pos_'):
+        prepare_solver_runtime(arguments + ['--task', 'go2_hard_pact_isaaclab'])
 
 import torch
 
@@ -8,6 +22,7 @@ from legged_gym import LEGGED_GYM_ROOT_DIR, SIMULATOR
 from legged_gym.envs import *  # noqa: F403 - imports task registrations
 from legged_gym.utils import get_args, init_genesis, task_registry
 from legged_gym.utils.helpers import get_load_path
+from legged_gym.scripts.hard_pact_play_qp import configure_play_qp
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +155,7 @@ def play(args):
     )
     runner.load(checkpoint, load_optimizer=False)
     policy = runner.get_inference_policy(device=env.device)
+    play_qp = configure_play_qp(env, runner, train_cfg, getattr(args, 'play_qp', None))
     obs, obs_history, _, _ = env.get_observations()
     print(f"Playing {checkpoint} with {env.num_envs} robots.")
 
@@ -149,18 +165,33 @@ def play(args):
         "HARD_PACT_PLAY_STEPS", 10 * env.max_episode_length
     ))
     check_finite = os.getenv("HARD_PACT_PLAY_CHECK_FINITE", "0") == "1"
-    with torch.inference_mode():
+    with torch.inference_mode():  # Resume/reset creates inference-owned environment buffers.
         for _ in range(play_steps):
             actions = policy(obs, obs_history)
-            obs, _, obs_history, _, rewards, _, _, _ = env.step(actions)
+            obs, _, obs_history, _, rewards, dones, infos, _ = env.step(actions)
             if check_finite:
                 for name, value in (("actions", actions), ("observations", obs),
                                     ("history", obs_history), ("rewards", rewards)):
                     if not torch.isfinite(value).all():
                         raise RuntimeError(f"Nonfinite play {name}")
+                if play_qp is not None:
+                    torque = env.simulator.hard_pact_executed_torque()
+                    if not torch.isfinite(torque).all():
+                        raise RuntimeError('Nonfinite play executed torque')
+                    counts = infos.get('hard_pact_qp_interval', {}).get('interval_qp_solve_count')
+                    if counts is None or not (counts.flatten()[~dones.bool().flatten()] == env.cfg.control.decimation).all():
+                        raise RuntimeError('Play QP did not solve every physics substep')
     print(f"Completed {play_steps} control steps on {env.device}; "
           f"finite checks={'enabled' if check_finite else 'disabled'}.")
 
 
 if __name__ == "__main__":
-    play(get_args())
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--play-qp', action=argparse.BooleanOptionalAction, default=None,
+        help='Override cfg.play.qp_enabled; full deployment QP every physics substep')
+    options, remaining = parser.parse_known_args()
+    sys.argv[1:] = remaining
+    args = get_args()
+    args.play_qp = options.play_qp
+    play(args)

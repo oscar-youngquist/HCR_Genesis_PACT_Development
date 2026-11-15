@@ -288,6 +288,9 @@ def test_isaaclab_persistent_wrench_uses_composer_api():
         def __init__(self):
             self.calls = []
 
+        def reset(self):
+            pass
+
         def set_forces_and_torques(self, **kwargs):
             self.calls.append(kwargs)
 

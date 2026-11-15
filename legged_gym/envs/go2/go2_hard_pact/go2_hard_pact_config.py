@@ -5,6 +5,9 @@ from .transition import DISTURBANCE_CRITIC_DIM
 
 class GO2HardPACTCfg(LeggedRobotCfg):
 
+    class play:
+        qp_enabled = False  # Opt-in deployment: full corrections every physics substep; no training ramp.
+
     class env(LeggedRobotCfg.env):
         num_envs = 4096
         num_observations = 57
@@ -195,13 +198,14 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         disabled_curriculum_use_final_bounds = True
 
         persistent_disturbance = True
-        persistent_force_probability = 0.4
-        persistent_torque_probability = 0.4
+        persistent_wrench_at_com = True  # Isaac Lab: force at randomized torso CoM; torque about that point.
+        persistent_force_probability = 0.8
+        persistent_torque_probability = 0.6
         persistent_force_interval_range_s = [5.0, 15.0]
         persistent_torque_interval_range_s = [5.0, 15.0]
         persistent_force_duration_range_s = [1.0, 5.0]
         persistent_torque_duration_range_s = [1.0, 5.0]
-        persistent_ramp_fraction = 0.30
+        persistent_ramp_fraction = 0.20
         # Initial -> final planar FORCE NORM cap (sqrt(Fx²+Fy²)), in N.
         # The disturbance curriculum expands the planar disk and downward Fz
         # after push_warmup and the joint-dynamics/mass-CoM phases. Existing
@@ -210,9 +214,9 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         persistent_force_max_n = 10.0
         # Positive magnitudes; actual world Fz is sampled in [-limit, 0].
         persistent_vertical_force_min_n = 15.0
-        persistent_vertical_force_max_n = 70.0
+        persistent_vertical_force_max_n = 80.0
         persistent_torque_min_nm = 2.0
-        persistent_torque_max_nm = 15.0
+        persistent_torque_max_nm = 10.0
         persistent_yaw_torque_min_nm = 1.0  # Initial world-Z torque cap (+/- N*m).
         persistent_yaw_torque_max_nm = 4.0  # Final cap at full disturbance curriculum.
 
@@ -460,7 +464,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         max_curriculum = 1.2
         max_curriculum_lin_vel_x = 1.00    # Symmetric curriculum cap [m/s]; None uses max_curriculum.
         max_curriculum_lin_vel_y = 1.00    # Symmetric curriculum cap [m/s].
-        max_curriculum_ang_vel_yaw = 1.50  # Symmetric curriculum cap [rad/s].
+        max_curriculum_ang_vel_yaw = 1.00  # Symmetric curriculum cap [rad/s].
         num_commands = 4
         resampling_time = 10.0
         heading_command = True
@@ -836,3 +840,6 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 #   --ckpt 20000 \
 #   --gpu cuda:0 \
 #   --num_envs 10
+
+# ~/Research/Genesis_Development/HCR_HardPact/logs/hardpact_iclr/go2_hard_pact_rss_full/Nov13_17-56-38_hard_pact_rss_full_isaaclab
+# ~/Research/Genesis_Development/HCR_HardPact/logs/hardpact_iclr/go2_pact_rough/Nov11_16-19-05_hard_pact_isaaclab

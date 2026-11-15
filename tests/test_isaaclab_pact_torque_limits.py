@@ -48,6 +48,22 @@ def test_motor_limits_canonical_order_cached_and_base_adapter_unchanged():
     )
 
 
+def test_hard_pact_orientation_tracks_substeps_without_mutating_observation_cache():
+    sim = simulator()
+    sim._base_quat = torch.tensor([[0., 0., 0., 1.]]).repeat(2, 1)
+    cached = sim._base_quat.clone()
+    data = sim._robot.data
+    data.root_link_pos_w = torch.zeros(2, 3)
+    data.joint_pos = torch.zeros(2, 12)
+    for angle in (0., .1, .2, .3):
+        half = torch.tensor(angle / 2)
+        data.root_link_quat_w = torch.stack((half.cos(), half*0, half*0, half.sin())).repeat(2, 1)
+        expected = data.root_link_quat_w[:, [1, 2, 3, 0]]
+        torch.testing.assert_close(sim.hard_pact_base_quat_xyzw(), expected)
+        torch.testing.assert_close(sim.hard_pact_configuration()[:, 3:7], expected)
+        torch.testing.assert_close(sim.base_quat, cached)
+
+
 def test_all_joint_slice_and_tighter_physx_limit():
     sim = simulator()
     sim._robot.actuators = {"all": SimpleNamespace(

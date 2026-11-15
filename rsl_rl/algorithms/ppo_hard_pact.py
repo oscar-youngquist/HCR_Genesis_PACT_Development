@@ -2658,7 +2658,10 @@ class PPO_HardPACT:
                 )
                 applied_at_base = world_wrench(
                     batch["pre_q"], wrench_yaw,
-                    batch["realized_com_shift_body"],
+                    # New Isaac Lab CoM application includes the nominal offset,
+                    # not just its randomized displacement. Old replay retains
+                    # its existing convention when this optional field is absent.
+                    batch.get("wrench_application_offset_body", batch["realized_com_shift_body"]),
                 )
 
         # BARD uses logged interval-average executed torque as a constant;

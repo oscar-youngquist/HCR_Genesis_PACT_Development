@@ -39,6 +39,28 @@ resume them as applied-only estimators without accounting for retraining.
 
 ## Focused Validation
 
+### Isaac Lab randomized-CoM application
+
+New HardPACT/HardPACTPos configs enable
+`domain_rand.persistent_wrench_at_com = True`. Persistent forces are applied at
+the torso's nominal CoM plus its current randomized displacement, rotated into
+world space each physics substep. Supplied torques are free moments about that
+point. Isaac Lab's composer handles the equivalent link-origin moment; no
+second lever-arm correction is added during application. Setting the flag to
+`False` restores the previous Isaac Lab link-origin application. Missing flags
+in legacy configurations also retain that behavior. Genesis already uses
+`link_com` and is unchanged. This does not enable persistent wrenches in BR/MULE
+or change instantaneous velocity pushes.
+
+Decoder labels remain applied force/moment at the application point. New
+Isaac Lab transitions carry the complete body-frame application offset for
+the existing PINN application-point-to-base conversion (including nominal CoM,
+not just random displacement). Old transitions retain their existing fallback.
+QP prediction/solver settings and deployment behavior are not changed here.
+This changes the training disturbance's moment arm; continuing an old run with
+the new flag is a deliberate physical-setting change, not identical replay.
+Fresh configs enable it; a resumed run may retain its saved configuration.
+
 ```bash
 SIMULATOR=isaaclab python -m pytest -q -p no:cacheprovider \
   tests/test_hard_pact_applied_wrench.py tests/test_go2_hard_pact_disturbances.py \

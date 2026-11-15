@@ -53,3 +53,60 @@ def test_pinn_wiring_does_not_consume_mass_wrench_diagnostic():
     # Actual randomized inertia is still supplied to BARD; the QP stays separate.
     assert '"added_base_mass": batch["realized_added_mass"].detach()' in source
     assert '"base_com_shift": batch["realized_com_shift_body"].detach()' in source
+
+
+@pytest.mark.parametrize('composer_api',[True,False])
+@pytest.mark.parametrize('enabled',[True,False])
+def test_isaaclab_wrench_application_point_tracks_full_rotated_com(composer_api,enabled):
+    from legged_gym.simulator.isaaclab_simulator_pact import IsaacLabSimulator_PACT
+    sim=object.__new__(IsaacLabSimulator_PACT)
+    sim._cfg=SimpleNamespace(domain_rand=SimpleNamespace(persistent_wrench_at_com=enabled))
+    sim._base_link_index=1
+    sim._default_com_pos=torch.tensor([[.02,.03,.04]])
+    sim._base_com_bias=torch.tensor([[.10,-.02,.01]])
+    # Torso rotated 90 degrees around world z; nonzero world translation.
+    data=SimpleNamespace(body_link_pos_w=torch.tensor([[[0.,0.,0.],[1.,2.,3.]]]),
+        body_link_quat_w=torch.tensor([[[1.,0.,0.,0.],[2**-.5,0.,0.,2**-.5]]]))
+    calls=[]; resets=[]
+    composer=SimpleNamespace(reset=lambda:resets.append(True),set_forces_and_torques=lambda **kw:calls.append(kw))
+    sim._robot=SimpleNamespace(data=data)
+    if composer_api: sim._robot.permanent_wrench_composer=composer
+    else:
+        sim._robot.set_external_force_and_torque=lambda force,torque,**kw:calls.append(dict(forces=force,torques=torque,**kw))
+    wrench=torch.tensor([[3.,4.,-20.,1.,2.,3.]])
+    original=wrench.clone()
+    for change in (0.,.03):
+        sim._base_com_bias[:,0]+=change
+        sim.hard_pact_apply_base_wrench_world(wrench)
+        call=calls[-1]
+        assert call['is_global'] and call['body_ids']==[1]
+        torch.testing.assert_close(call['forces'],wrench[:,:3,None].transpose(1,2))
+        torch.testing.assert_close(call['torques'],wrench[:,3:,None].transpose(1,2))
+        if enabled:
+            offset=sim._default_com_pos+sim._base_com_bias
+            world_offset=torch.stack((-offset[:,1],offset[:,0],offset[:,2]),-1)
+            torch.testing.assert_close(call['positions'][:,0],data.body_link_pos_w[:,1]+world_offset)
+            # Link-origin equivalent moment yields exactly the specified free
+            # torque at CoM; don't pre-add another lever-arm moment in adapter.
+            link_moment=wrench[:,3:]+torch.cross(world_offset,wrench[:,:3],dim=-1)
+            torch.testing.assert_close(link_moment-torch.cross(world_offset,wrench[:,:3],dim=-1),wrench[:,3:])
+        else: assert 'positions' not in call
+    assert len(resets)==(2 if composer_api else 0)
+    torch.testing.assert_close(wrench,original)
+
+
+@pytest.mark.parametrize('task_class',[Go2HardPACT,Go2HardPACTPos])
+def test_com_application_offset_is_owned_interval_metadata(task_class):
+    task=_persistent_task(task_class=task_class)
+    task.cfg.domain_rand.persistent_wrench_at_com=True
+    task._realized_added_mass=torch.zeros(1,1)
+    task._realized_com_shift_body=torch.zeros(1,3)
+    offset=torch.tensor([[.12,.01,.05]])
+    task.simulator.hard_pact_wrench_application_offset_body=lambda:offset
+    for suffix in ('sustained','mass_com','total','sustained_yaw_scaled',
+                   'mass_com_yaw_scaled','yaw_scaled','yaw_physical'):
+        setattr(task,'_disturbance_interval_sum_'+suffix,torch.zeros(1,6))
+    task._disturbance_interval_count=torch.ones(1,1)
+    packet=task._end_disturbance_interval()
+    offset.zero_()
+    torch.testing.assert_close(packet['wrench_application_offset_body'],torch.tensor([[.12,.01,.05]]))

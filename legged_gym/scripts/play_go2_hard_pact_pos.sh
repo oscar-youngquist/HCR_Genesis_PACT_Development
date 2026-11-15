@@ -3,7 +3,7 @@
 set -eu
 
 usage() {
-    echo "Usage: $0 --task go2_hard_pact_pos_<genesis|isaaclab> --load_run RUN [--ckpt N] [other play arguments]" >&2
+    echo "Usage: $0 --task go2_hard_pact[_pos]_isaaclab --load_run RUN [--ckpt N] [--play-qp|--no-play-qp] [other play arguments]" >&2
 }
 
 task=""
@@ -26,6 +26,10 @@ case "$task" in
         export SIMULATOR=isaaclab
         target_env="${HARD_PACT_ISAACLAB_ENV:-lr_lab}"
         ;;
+    go2_hard_pact*_isaaclab)
+        export SIMULATOR=isaaclab
+        target_env="${HARD_PACT_ISAACLAB_CUPIQP_ENV:-lr_lab_cupiqp}"
+        ;;
     *) usage; exit 2 ;;
 esac
 
@@ -43,4 +47,4 @@ if [ "${HARD_PACT_SKIP_CONDA_ACTIVATE:-0}" != 1 ]; then
     conda activate "$target_env"
 fi
 echo "HardPACTPos play environment: ${CONDA_DEFAULT_ENV:-$target_env}; simulator: $SIMULATOR" >&2
-exec python -u "$script_dir/play_go2_hard_pact_pos.py" "$@"
+exec "${HARD_PACT_PYTHON:-python}" -u "$script_dir/play_go2_hard_pact_pos.py" "$@"

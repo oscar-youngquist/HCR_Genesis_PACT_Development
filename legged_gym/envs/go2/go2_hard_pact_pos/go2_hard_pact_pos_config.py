@@ -184,6 +184,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         disabled_curriculum_use_final_bounds = False
 
         persistent_disturbance = True
+        persistent_wrench_at_com = True  # Isaac Lab: force at randomized torso CoM; torque about that point.
         persistent_force_probability = 0.1
         persistent_torque_probability = 0.1
         persistent_force_interval_range_s = [5.0, 15.0]

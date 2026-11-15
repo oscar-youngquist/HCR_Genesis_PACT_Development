@@ -1456,7 +1456,11 @@ class Go2HardPACT(Go2PACT):
 
     def _end_disturbance_interval(self):
         divisor = self._disturbance_interval_count.clamp_min(1.0)
+        point = getattr(self.simulator, "hard_pact_wrench_application_offset_body", None)
+        application = ({"wrench_application_offset_body": point().detach().clone()}
+            if point is not None and getattr(self.cfg.domain_rand, "persistent_wrench_at_com", False) else {})
         return {
+            **application,
             "applied_sustained_wrench_world": (
                 self._disturbance_interval_sum_sustained / divisor
             ).clone(),
@@ -1508,6 +1512,8 @@ class Go2HardPACT(Go2PACT):
         push_event = self._hard_pact_push_event_mask.clone()
         torque_divisor = self._interval_executed_torque_count.clamp_min(1.0)
         fields = {
+            **({"wrench_application_offset_body": pending["wrench_application_offset_body"]}
+               if "wrench_application_offset_body" in pending else {}),
             "applied_sustained_wrench_world": pending["applied_sustained_wrench_world"],
             "sustained_wrench_active_mask": pending["sustained_wrench_active_mask"],
             "equivalent_mass_com_wrench_world": pending["equivalent_mass_com_wrench_world"],

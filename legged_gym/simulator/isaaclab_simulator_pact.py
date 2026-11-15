@@ -8,7 +8,7 @@ randomization compatibility required by HardPACT and HardPACTPos.
 
 import torch
 
-from legged_gym.utils.math_utils import quat_apply_yaw
+from legged_gym.utils.math_utils import quat_apply, quat_apply_yaw
 from legged_gym.simulator.isaaclab_simulator import IsaacLabSimulator
 
 
@@ -69,6 +69,15 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
                 )
             self._pact_torque_limits = limits.detach().clone()
         return self._pact_torque_limits
+
+    def hard_pact_base_quat_xyzw(self):
+        """Live physics-substep orientation; observation caches are policy-rate.
+
+        Shared by training QP/replay capture and deployment. Isaac Lab uses
+        WXYZ; the HardPACT/BARD boundary uses XYZW. Do not refresh or mutate
+        the policy observation cache here.
+        """
+        return self._robot.data.root_link_quat_w[:, (1, 2, 3, 0)]
 
     def hard_pact_configuration(self):
         return torch.cat((
@@ -161,10 +170,28 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         """
         return torch.clip(self._torques, -self.torque_limits, self.torque_limits)
 
+    def hard_pact_wrench_application_offset_body(self):
+        """Actual torso CoM relative to its link origin, including nominal CoM.
+
+        These GPU buffers are the values written by CoM randomization; avoid
+        a CPU PhysX property readback at every physics substep.
+        """
+        return self._default_com_pos + self._base_com_bias
+
     def hard_pact_apply_base_wrench_world(self, wrench):
-        """Set the current persistent world-frame wrench without warnings."""
+        """Set a world wrench, optionally at the current randomized torso CoM."""
         force = wrench[:, :3].unsqueeze(1)
         torque = wrench[:, 3:].unsqueeze(1)
+        options = {}
+        domain_rand = getattr(getattr(self, "_cfg", None), "domain_rand", None)
+        if getattr(domain_rand, "persistent_wrench_at_com", False):
+            data = self._robot.data
+            rotation = data.body_link_quat_w[:, self._base_link_index][:, (1, 2, 3, 0)]
+            position = data.body_link_pos_w[:, self._base_link_index] + quat_apply(
+                rotation, self.hard_pact_wrench_application_offset_body())
+            # Composer converts this point's wrench to an equivalent link-origin
+            # wrench. Do not also add r x F here (that would count it twice).
+            options["positions"] = position[:, None, :]
         composer = getattr(self._robot, "permanent_wrench_composer", None)
         if composer is not None:
             # Isaac Lab 5.1's composer is the replacement for the deprecated
@@ -175,6 +202,7 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
             composer.set_forces_and_torques(
                 forces=force, torques=torque,
                 body_ids=[self._base_link_index], is_global=True,
+                **options,
             )
         else:
             # Compatibility for older Isaac Lab releases; the explicit frame
@@ -182,6 +210,7 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
             self._robot.set_external_force_and_torque(
                 force, torque, body_ids=[self._base_link_index],
                 is_global=True,
+                **options,
             )
 
     def push_robots(self):
