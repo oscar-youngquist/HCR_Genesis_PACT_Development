@@ -46,12 +46,44 @@ class FACETReferenceCfg:
     boundary_damping: float = 30.
     base_speed_limit: float = 2.
     yaw_rate_limit: float = 2.
-    ee_relative_speed_limit: float = 1.
+    # Additional motion relative to the moving nominal, NOT nominal arm motion.
+    compliant_offset_speed_limit: float = 1.
+    compile_constraints: bool = True
 
 
 PARAMETERS = ("base_mass", "ee_mass", "yaw_inertia", "base_stiffness",
               "base_damping", "ee_stiffness", "ee_damping", "yaw_stiffness",
               "yaw_damping", "alpha")
+
+
+def coupled_impulse(relative_change_world, lever, parameters, yaw_reaction, normal_only=False):
+    """Solve J M^-1 J^T impulse = relative velocity change (SI, world axes).
+
+    J=[I,-I_xy,-z_cross_r]. Alpha scales the base reaction only. The diagonal
+    plus rank-one inverse below is Sherman-Morrison, not an iterative solve.
+    At alpha=1 equal/opposite planar impulses conserve virtual momentum.
+    """
+    p = parameters
+    inverse_ee = torch.ones_like(relative_change_world)/p['ee_mass']
+    diagonal = inverse_ee.clone()
+    diagonal[..., :2] += p['alpha']/p['base_mass']
+    c = torch.stack((-lever[..., 1], lever[..., 0], torch.zeros_like(lever[..., 0])), -1)
+    if normal_only:
+        # A frictionless scalar constraint uses n.T W n, not a three-axis
+        # velocity servo. This avoids injecting tangential kinetic energy when
+        # yaw makes W non-diagonal. Zero correction gives exactly zero impulse.
+        length = relative_change_world.norm(dim=-1, keepdim=True)
+        n = relative_change_world/length.clamp_min(1e-12)
+        effective = (diagonal*n*n).sum(-1, keepdim=True)
+        if yaw_reaction:
+            effective += p['alpha']/p['yaw_inertia']*(c*n).sum(-1, keepdim=True).square()
+        return n*length/effective.clamp_min(1e-12)
+    solution = relative_change_world/diagonal
+    if yaw_reaction:
+        dc = c/diagonal
+        scale = p['alpha']/p['yaw_inertia']
+        solution = solution-dc*scale*(c*solution).sum(-1, keepdim=True)/(1+scale*(c*dc).sum(-1, keepdim=True))
+    return solution
 
 
 def ee_setpoint(base_xy, base_velocity_xy, yaw, yaw_rate, local, local_velocity, height):
@@ -135,7 +167,7 @@ class FACETReference:
         rate = 2 * (math.sqrt(stiffness / mass) + damping / mass)
         if cfg.bounded:
             if any(not math.isfinite(x) or x <= 0 for x in (cfg.max_offset, cfg.boundary_margin,
-                    cfg.base_speed_limit, cfg.yaw_rate_limit, cfg.ee_relative_speed_limit, cfg.damping_ratio)):
+                    cfg.base_speed_limit, cfg.yaw_rate_limit, cfg.compliant_offset_speed_limit, cfg.damping_ratio)):
                 raise ValueError('FACET bounds/speeds/damping must be positive')
             if any(len(b) != 2 or b[0] >= b[1] for b in (cfg.radius, cfg.pitch, cfg.azimuth)):
                 raise ValueError('Invalid FACET workspace bounds')
@@ -155,6 +187,14 @@ class FACETReference:
         self._offset = self._state.new_zeros(count, 3)
         self._relative_speed = self._state.new_zeros(count)
         self._boundary_active = torch.zeros(count, device=device, dtype=torch.bool)
+        self._last_constraints = {}
+        self._integration_times = {}
+        # Fixed-shape fusion avoids hundreds of small geometry kernels per bank.
+        self._constraint_step = self._constrain
+        self._dynamics_step = self._rhs
+        if cfg.bounded and cfg.compile_constraints and self._state.is_cuda:
+            self._constraint_step = torch.compile(self._constrain, fullgraph=True, dynamic=False)
+            self._dynamics_step = torch.compile(self._rhs, fullgraph=True, dynamic=False)
 
     @torch.no_grad()
     def reset(self, ids, base_position, base_velocity, yaw, yaw_rate, ee_position, ee_velocity):
@@ -207,9 +247,9 @@ class FACETReference:
         yaw_error = torch.atan2(torch.sin(measured_yaw-yaw), torch.cos(measured_yaw-yaw))
         spring_yaw = p["yaw_stiffness"][..., 0]*yaw_error + p["yaw_damping"][..., 0]*(yaw_command-rate)
         if self.cfg.yaw_reaction:
-            # Jacobian-transpose of attached setpoint w.r.t. base yaw. Only
-            # internal reaction is transmitted; no duplicate applied EE force.
-            lever = target[..., :2]-xy
+            # Same reference-EE application point as the constraint Jacobian.
+            # Only internal reaction is transmitted, never the external EE force.
+            lever = state[..., 6:8]-xy
             spring_yaw = spring_yaw+lever[..., 0]*reaction[..., 1]-lever[..., 1]*reaction[..., 0]
         derivative = torch.cat((velocity, (spring_base+base_force[..., :2]+reaction)/p["base_mass"],
             rate[..., None], ((spring_yaw+yaw_moment)/p["yaw_inertia"][..., 0])[..., None],
@@ -244,16 +284,43 @@ class FACETReference:
         """Same RK4 for one start or a broadcast robot/start bank; no sampling."""
         steps = max(1, math.ceil(dt / self._max_dt))
         h = dt / steps
+        # Tensor times avoid one compiled specialization per RK stage. Cache
+        # device scalars once per control dt, not a CPU->GPU transfer per stage.
+        times = None
+        if self.cfg.bounded and self.cfg.compile_constraints and state.is_cuda:
+            key = (dt, steps)
+            if key not in self._integration_times:
+                self._integration_times[key] = tuple((torch.arange(2*steps+1, device=state.device, dtype=state.dtype)*(h/2)).unbind())
+            times = self._integration_times[key]
         forces = torch.zeros_like(self._diagnostics) if diagnostics else None
+        if self.cfg.bounded:
+            initial_q, initial_nominal, _ = self._relative(state, 0., inputs)
+            recovery = (geometry(initial_q, initial_nominal, self.cfg)[0] < -1e-4).any(-1)
+            total_impulse = torch.zeros_like(state[..., 9:12])
+            saturation_impulse = torch.zeros_like(total_impulse)
+            incompatible = torch.zeros_like(state[..., 4], dtype=torch.bool)
+            saturation = torch.zeros_like(incompatible)
         for i in range(steps):  # Fixed batch-wide numerical substeps, never per-robot loops.
-            s, t = state, i*h
-            k1, f1 = self._rhs(s, t, inputs, loads, parameters, diagnostics)
-            k2, f2 = self._rhs(s+h*k1/2, t+h/2, inputs, loads, parameters, diagnostics)
-            k3, f3 = self._rhs(s+h*k2/2, t+h/2, inputs, loads, parameters, diagnostics)
-            k4, f4 = self._rhs(s+h*k3, t+h, inputs, loads, parameters, diagnostics)
+            s = state
+            t, middle, end = (i*h, (i+.5)*h, (i+1)*h) if times is None else times[2*i:2*i+3]
+            k1, f1 = self._dynamics_step(s, t, inputs, loads, parameters, diagnostics)
+            k2, f2 = self._dynamics_step(s+h*k1/2, middle, inputs, loads, parameters, diagnostics)
+            k3, f3 = self._dynamics_step(s+h*k2/2, middle, inputs, loads, parameters, diagnostics)
+            k4, f4 = self._dynamics_step(s+h*k3, end, inputs, loads, parameters, diagnostics)
             state = s+h*(k1+2*k2+2*k3+k4)/6
             if self.cfg.bounded:
-                state, impulse, invalid = self._constrain(s, state, t+h, h, inputs, parameters)
+                # Speed saturation is dissipative, not an internal reaction.
+                saturation |= ((state[..., 2:4].norm(dim=-1) > self.cfg.base_speed_limit)
+                    | (state[..., 5].abs() > self.cfg.yaw_rate_limit))
+                incoming = state
+                state, impulse, invalid = self._constraint_step(s, state, end, h, inputs, parameters)
+                p = self._parameters if parameters is None else parameters
+                removed = p['ee_mass']*(state[..., 9:12]-incoming[..., 9:12])-impulse
+                removed[..., :2] += p['base_mass']*(state[..., 2:4]-incoming[..., 2:4])+p['alpha']*impulse[..., :2]
+                saturation_impulse += removed
+                saturation |= removed.norm(dim=-1) > 1e-4
+                total_impulse += impulse
+                incompatible |= invalid
                 if diagnostics:
                     if i == 0:
                         self._guard_impulse.zero_()
@@ -262,6 +329,19 @@ class FACETReference:
                     self._guard_invalid.logical_or_(invalid)
             if diagnostics:
                 forces.add_((f1+2*f2+2*f3+f4)/(6*steps))
+        if self.cfg.bounded:
+            q, nominal, velocity = self._relative(state, dt, inputs)
+            self._last_constraints = dict(
+                boundary_active=(geometry(q, nominal, self.cfg)[0] < self.cfg.boundary_margin).any(-1),
+                valid=~incompatible, incompatible=incompatible,
+                recovery=recovery, speed_saturation=saturation,
+                correction_impulse_Ns=total_impulse.norm(dim=-1),
+                saturation_impulse_Ns=saturation_impulse.norm(dim=-1),
+                accepted_offset_m=(q-nominal).norm(dim=-1),
+                compliant_offset_speed_mps=(velocity-inputs[5]).norm(dim=-1),
+                arm_relative_speed_mps=velocity.norm(dim=-1),
+                ee_world_speed_mps=state[..., 9:12].norm(dim=-1),
+                base_speed_mps=state[..., 2:4].norm(dim=-1), yaw_rate_rps=state[..., 5].abs())
         return state, forces
 
     def _relative(self, state, time, inputs):
@@ -279,50 +359,57 @@ class FACETReference:
         p = self._parameters if parameters is None else parameters
         cfg = self.cfg
         state = state.clone()
-        # Integrate capped velocities, not uncapped positional increments.
-        v = state[..., 2:4]
-        limited = v*(cfg.base_speed_limit/v.norm(dim=-1, keepdim=True).clamp_min(cfg.base_speed_limit))
-        clipped = v.norm(dim=-1) > cfg.base_speed_limit
-        previous_v = previous[..., 2:4]
-        previous_v = previous_v*(cfg.base_speed_limit/previous_v.norm(dim=-1, keepdim=True).clamp_min(cfg.base_speed_limit))
-        state[..., :2] = torch.where(clipped[..., None], previous[..., :2]+dt*(previous_v+limited)/2, state[..., :2])
-        state[..., 2:4] = limited
-        rate = state[..., 5].clamp(-cfg.yaw_rate_limit, cfg.yaw_rate_limit)
-        state[..., 4] = torch.where(state[..., 5].abs() > cfg.yaw_rate_limit,
-            previous[..., 4]+dt*(previous[..., 5].clamp(-cfg.yaw_rate_limit, cfg.yaw_rate_limit)+rate)/2, state[..., 4])
-        state[..., 5] = rate
-        q, nominal, velocity = self._relative(state, time, inputs)
         old_q, _, _ = self._relative(previous, time-dt, inputs)
-        velocity = velocity*(cfg.ee_relative_speed_limit/velocity.norm(dim=-1, keepdim=True).clamp_min(cfg.ee_relative_speed_limit))
-        displacement = q-old_q
-        q = old_q+displacement*(cfg.ee_relative_speed_limit*dt/displacement.norm(dim=-1, keepdim=True).clamp_min(cfg.ee_relative_speed_limit*dt))
-        q, velocity, invalid = guard(q, nominal, velocity, old_q, cfg, inputs[5])
-        # Nominal trajectory already passed task rejection. Incompatible guard
-        # intersections are visible in diagnostics, never accumulated as offsets.
-        q = torch.where(invalid[..., None], nominal, q)
-        velocity = torch.where(invalid[..., None], inputs[5], velocity)
-        origin = torch.cat((state[..., :2], inputs[6].expand_as(state[..., 4])[..., None]), -1)
-        offset = rotate_yaw(q+state.new_tensor((*cfg.center_xy, 0.)), state[..., 4])
-        transport = state[..., 5, None]*torch.stack((-offset[..., 1], offset[..., 0], torch.zeros_like(state[..., 4])), -1)
-        accepted_v = rotate_yaw(velocity, state[..., 4])+transport
-        accepted_v[..., :2] += state[..., 2:4]
-        impulse = p['ee_mass']*(accepted_v-state[..., 9:12])
-        state[..., 6:9] = origin+offset
-        state[..., 9:12] = accepted_v
-        # Guard impulse is an explicit virtual reaction, not a physical force.
-        # Its effect enters the next substep; reference position has already
-        # been integrated at the bounded velocity for this substep.
-        state[..., 2:4] -= p['alpha']*impulse[..., :2]/p['base_mass']
-        if cfg.yaw_reaction:
-            state[..., 5] -= p['alpha'][..., 0]*(offset[..., 0]*impulse[..., 1]-offset[..., 1]*impulse[..., 0])/p['yaw_inertia'][..., 0]
-        # Reaction impulses cannot bypass the virtual speed limits. Recompute
-        # transport using accepted base rates so relative velocity stays valid.
+        impulse = torch.zeros_like(state[..., 9:12])
+        # Semi-implicit accepted positions use the same corrected velocities.
+        # Fixed geometric sweeps handle curved/intersecting surfaces; they are
+        # not IK. No projection teleports an infeasible measured history seed.
+        for _ in range(4):
+            v = state[..., 2:4]
+            state[..., 2:4] = v*(cfg.base_speed_limit/v.norm(dim=-1, keepdim=True).clamp_min(cfg.base_speed_limit))
+            state[..., 5] = state[..., 5].clamp(-cfg.yaw_rate_limit, cfg.yaw_rate_limit)
+            state[..., :2] = previous[..., :2]+dt*state[..., 2:4]
+            state[..., 4] = previous[..., 4]+dt*state[..., 5]
+            state[..., 6:9] = previous[..., 6:9]+dt*state[..., 9:12]
+            q, nominal, velocity = self._relative(state, time, inputs)
+            limited_q, _, _ = guard(q, nominal, velocity, old_q, cfg, inputs[5], refinements=1, project_velocity=False)
+            desired = velocity+(limited_q-q)/dt
+            # The moving nominal is not slowed by this compliance-rate limit.
+            delta = desired-inputs[5]
+            desired = inputs[5]+delta*(cfg.compliant_offset_speed_limit/delta.norm(dim=-1, keepdim=True).clamp_min(cfg.compliant_offset_speed_limit))
+            change = rotate_yaw(desired-velocity, state[..., 4])
+            lever = state[..., 6:9]-torch.cat((state[..., :2], inputs[6].expand_as(state[..., 4])[..., None]), -1)
+            correction = coupled_impulse(change, lever, p, cfg.yaw_reaction, normal_only=True)
+            state[..., 9:12] += correction/p['ee_mass']
+            state[..., 2:4] -= p['alpha']*correction[..., :2]/p['base_mass']
+            if cfg.yaw_reaction:
+                state[..., 5] -= p['alpha'][..., 0]*torch.linalg.cross(lever, correction)[..., 2]/p['yaw_inertia'][..., 0]
+            impulse += correction
+        # Do not reconstruct EE velocity from the changed base velocity: that
+        # would apply the same internal momentum exchange a second time.
         v = state[..., 2:4]
         state[..., 2:4] = v*(cfg.base_speed_limit/v.norm(dim=-1, keepdim=True).clamp_min(cfg.base_speed_limit))
         state[..., 5] = state[..., 5].clamp(-cfg.yaw_rate_limit, cfg.yaw_rate_limit)
-        transport = state[..., 5, None]*torch.stack((-offset[..., 1], offset[..., 0], torch.zeros_like(state[..., 4])), -1)
-        state[..., 9:12] = rotate_yaw(velocity, state[..., 4])+transport
-        state[..., 9:11] += state[..., 2:4]
+        state[..., :2] = previous[..., :2]+dt*state[..., 2:4]
+        state[..., 4] = previous[..., 4]+dt*state[..., 5]
+        state[..., 6:9] = previous[..., 6:9]+dt*state[..., 9:12]
+        # Final rate saturation is explicitly non-internal. Account for its
+        # changed endpoint lever: d(relative v)=(I-dt*omega*Z)d(world v).
+        # This exact 2x2 inverse keeps both the speed bound and x+=dt*v true.
+        _, _, velocity = self._relative(state, time, inputs)
+        delta = velocity-inputs[5]
+        desired = inputs[5]+delta*(cfg.compliant_offset_speed_limit/delta.norm(dim=-1, keepdim=True).clamp_min(cfg.compliant_offset_speed_limit))
+        dv = rotate_yaw(desired-velocity, state[..., 4])
+        w = dt*state[..., 5]
+        correction = torch.stack(((dv[..., 0]-w*dv[..., 1])/(1+w*w),
+                                  (dv[..., 1]+w*dv[..., 0])/(1+w*w), dv[..., 2]), -1)
+        state[..., 9:12] += correction
+        state[..., 6:9] = previous[..., 6:9]+dt*state[..., 9:12]
+        q, nominal, velocity = self._relative(state, time, inputs)
+        invalid = ((geometry(q, nominal, cfg)[0] < -1e-4).any(-1)
+            | ((velocity-inputs[5]).norm(dim=-1) > cfg.compliant_offset_speed_limit+1e-4)
+            | (state[..., 2:4].norm(dim=-1) > cfg.base_speed_limit+1e-4)
+            | (state[..., 5].abs() > cfg.yaw_rate_limit+1e-4))
         return state, impulse, invalid
 
     def read(self):
@@ -367,20 +454,28 @@ class FACETReferenceBank:
         # Views share the robot's episode parameters, including partial resamples.
         self._parameters = {key: value[:, None] for key, value in reference._parameters.items()}
         self._cursor = 0
+        self._constraints = {}
         self._snapshot = self._select()
 
     @torch.no_grad()
     def clear(self, ids):
         self._state[ids] = 0
         self._ages[ids] = -1
+        for value in self._constraints.values():
+            value[ids] = 0
         # Do not clear the completed-transition snapshot: terminal diagnostics
         # can read it after the parent has initialized the next physical episode.
 
     def _select(self):
         columns = (self._cursor-self._horizons) % self.capacity
         ages = self._ages.index_select(1, columns)
-        return dict(targets=self._state.index_select(1, columns).detach(), ages=ages,
-                    valid=ages == self._horizons[None])
+        result = dict(targets=self._state.index_select(1, columns).detach(), ages=ages,
+                      valid=ages == self._horizons[None])
+        # Age eligibility stays independent of constraint validity: invalid
+        # targets remain counted in diagnostics and retain existing reward use.
+        result.update({'constraint_'+key: value.index_select(1, columns).detach()
+                       for key, value in self._constraints.items()})
+        return result
 
     @torch.no_grad()
     def advance(self, seed, dt, inputs, loads):
@@ -396,6 +491,8 @@ class FACETReferenceBank:
         # Fixed-shape batched arithmetic includes unused slots, but they never
         # advance or become valid. No full-bank roll/copy to insert a new seed.
         self._state = torch.where(active[..., None], state, 0.)
+        self._constraints = {key: torch.where(active, value, 0).detach()
+                             for key, value in self.reference._last_constraints.items()}
         self._ages.add_(active)
         self._cursor = (self._cursor+1) % self.capacity
         self._snapshot = self._select()  # Only requested ages are copied, once per interval.

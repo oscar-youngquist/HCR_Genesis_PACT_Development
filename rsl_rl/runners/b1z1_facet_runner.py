@@ -83,6 +83,9 @@ class B1Z1FACETRunner:
         self._norm_moments = {k: [torch.zeros_like(v[0], device=self.device), torch.zeros_like(v[0], device=self.device), 0]
                               for k, v in packet.items() if k != 'is_init'}
         ep_infos = []
+        self._history_totals = {}
+        self._history_maxima = {}
+        self._history_counts = None
         for t in range(self.steps):
             batch = self._normalize(packet)
             init = packet['is_init'].to(self.device)
@@ -100,6 +103,19 @@ class B1Z1FACETRunner:
                     total.add_(raw.sum(0)); squared.add_(raw.square().sum(0))
                     self._norm_moments[key][2] += len(raw)
             result = self.env.step(action.to(self.env.device))
+            if hasattr(self.env, 'facet_history'):
+                snapshot = self.env.facet_history.read()
+                eligible = snapshot['valid']
+                count = eligible.sum(0)
+                self._history_counts = count if self._history_counts is None else self._history_counts+count
+                for key, history_value in snapshot.items():
+                    if key.startswith('constraint_'):
+                        # Terminal snapshots are retained by the bank; reduce
+                        # once per collected interval, never during getter calls.
+                        total = torch.where(eligible, history_value, 0).float().sum(0)
+                        self._history_totals[key] = self._history_totals.get(key, 0)+total
+                        maximum = torch.where(eligible, history_value, 0).float().amax(0)
+                        self._history_maxima[key] = torch.maximum(self._history_maxima.get(key, maximum), maximum)
             self.phase_interactions[self.alg.phase] += self.env.num_envs
             self.simulated_seconds += self.env.num_envs*self.env.dt
             reward, done, info = result[4].to(self.device), result[5].to(self.device).bool(), result[6]
@@ -251,6 +267,14 @@ class B1Z1FACETRunner:
             updated = time.perf_counter()
             metrics = {'Loss/'+k: v for k, v in metrics.items()}
             metrics.update(self._schedules(iteration, infos))
+            if self._history_counts is not None:
+                for j, age in enumerate(self.env.facet_history.horizons):
+                    count = int(self._history_counts[j])
+                    metrics[f'FACETHistory/age_{age}/eligible_count'] = count
+                    if count:
+                        for key, value in self._history_totals.items():
+                            metrics[f'FACETHistory/age_{age}/{key}'] = float(value[j]/count)
+                            metrics[f'FACETHistory/age_{age}/{key}_max'] = float(self._history_maxima[key][j])
             reference = getattr(self.env, 'facet_reference', None)
             if reference is not None and reference.cfg.bounded:
                 values = reference.read()

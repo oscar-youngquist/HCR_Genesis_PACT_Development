@@ -9,7 +9,7 @@ from legged_gym.envs.b1z1.b1z1_facet.forces import FACETForceCfg, FACETForces
 
 
 def bounded(**kwargs):
-    ref, args = setup(bounded=True, formulation_version=2, ee_stiffness=90,
+    ref, args = setup(bounded=True, formulation_version=3, ee_stiffness=90,
         ee_damping=2*(180)**.5, **kwargs)
     args['ee_local'] = args['ee_local'].clone()+torch.tensor([.9, 0., 0.])
     ref._state[:, 6:9] = args['ee_local']
@@ -25,7 +25,7 @@ def test_bounds_velocity_and_release():
         'measured_xy', 'measured_yaw', 'command_world', 'yaw_command', 'ee_local', 'ee_local_velocity', 'height')))
     assert geometry(q, nominal, ref.cfg)[0].min() >= -1e-4
     assert (q-nominal).norm(dim=-1).max() <= ref.cfg.max_offset+1e-4
-    assert v.norm(dim=-1).max() <= ref.cfg.ee_relative_speed_limit+1e-4
+    assert v.norm(dim=-1).max() <= ref.cfg.compliant_offset_speed_limit+1e-4
     before = q[:, 1].abs().mean()
     args['ee_force'] = torch.zeros_like(args['ee_force'])
     for _ in range(80):
@@ -50,7 +50,7 @@ def test_yaw_reaction_uses_internal_force_only():
                                     'yaw_command', 'ee_local', 'ee_local_velocity', 'height'))
     loads = tuple(args[k] for k in ('ee_force', 'base_force', 'yaw_moment'))
     derivative, force = ref._rhs(ref._state, 0, inputs, loads)
-    torch.testing.assert_close(derivative[:, 5]*ref.cfg.yaw_inertia, .9*force[:, 6])
+    torch.testing.assert_close(derivative[:, 5]*ref.cfg.yaw_inertia, .9*force[:, 6]-.1*force[:, 5])
     # Changing physical EE loading does not directly add another base moment.
     derivative2, _ = ref._rhs(ref._state, 0, inputs, (loads[0]+20, *loads[1:]))
     torch.testing.assert_close(derivative[:, :6], derivative2[:, :6])

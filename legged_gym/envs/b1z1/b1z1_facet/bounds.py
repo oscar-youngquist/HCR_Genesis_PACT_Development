@@ -53,7 +53,7 @@ def restoring_force(q, nominal, velocity, cfg, nominal_velocity=None):
     return (normal*magnitude[..., None]).sum(-2)
 
 
-def guard(q, nominal, velocity, previous, cfg, nominal_velocity=None):
+def guard(q, nominal, velocity, previous, cfg, nominal_velocity=None, refinements=4, project_velocity=True):
     """Fixed geometric projections, then analytic segment/box interception.
 
     Velocity loses only components directed into an active boundary. This is
@@ -69,11 +69,13 @@ def guard(q, nominal, velocity, previous, cfg, nominal_velocity=None):
     outside_parallel = (parallel & ((previous < lo) | (previous > hi))).any(-1)
     hit = (~outside_parallel) & (near >= 0) & (near <= 1) & (far >= near)
     q = torch.where(hit[..., None], previous+(near-1e-5).clamp_min(0)[..., None]*travel, q)
-    for _ in range(4):  # Fixed-cost constraint projections, not iterative IK.
+    for _ in range(refinements):  # Fixed-cost constraint projections, not iterative IK.
         distance, normals = geometry(q, nominal, cfg)
         worst, index = distance.min(-1)
         n = normals.gather(-2, index[..., None, None].expand(*index.shape, 1, 3)).squeeze(-2)
         q = q + (-worst).clamp_min(0)[..., None]*n
+    if not project_velocity:
+        return q, velocity, None  # Caller validates the final coupled state once.
     distance, normals = geometry(q, nominal, cfg)
     for i in range(normals.shape[-2]):
         n = normals[..., i, :]

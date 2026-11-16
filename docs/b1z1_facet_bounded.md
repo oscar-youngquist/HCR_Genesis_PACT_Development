@@ -1,7 +1,7 @@
-# Bounded FACET formulation (version 2)
+# Bounded FACET formulation (version 3)
 
 This is a FACET-specific training change, based on repository HEAD
-`8525b6e88a95c7e428a872c30f2b5bf36aff34c1`. It requires fresh training.
+`bd0f71fe6a1f527935b0930a2a3faf7356b68e13`. It requires fresh training.
 The launcher rejects older formulation checkpoints before constructing Isaac
 Lab. Deployment of an existing checkpoint should use its original revision.
 PILOT, its ablations, UniFP, the shared simulator, and their defaults are unchanged.
@@ -34,7 +34,8 @@ and world vertical, with the existing mount/terrain height. Moving setpoint
 velocity includes translation, yaw transport and nominal trajectory derivative.
 Base/yaw commands remain velocities, not a fixed global heading target.
 Optional `yaw_reaction=True` maps the transmitted internal force through the
-attached setpoint yaw Jacobian: `(r_setpoint x -alpha*f_internal).z`.
+reference-EE yaw Jacobian: `(r_ee_ref x -alpha*f_internal).z`. The impulse
+guard uses the same reference-EE lever, rather than the moving nominal lever.
 Direct torso moments retain the verified actual application-point shift once.
 
 `FACETReferenceCfg` exposes original spherical bounds, the original exclusion
@@ -45,17 +46,33 @@ the moving displacement-cap boundary uses nominal-relative velocity.
 Guard impulses are separately reported and transmitted to the virtual base.
 Vertical ground reaction has no planar or yaw component.
 
-Base speed/yaw rate limits are 2 m/s and 2 rad/s; relative EE speed is 1 m/s.
-Capped base increments use bounded trapezoidal integration rather than
-subtracting an uncapped velocity increment (which can reverse motion).
+Base speed/yaw rate limits are 2 m/s and 2 rad/s.
+`compliant_offset_speed_limit=1` m/s limits **additional** heading-frame motion
+`arm_relative_velocity - nominal_relative_velocity`. It does not limit total
+arm-relative or world EE velocity: the unchanged nominal sampler can exceed
+2 m/s. Version 2's `ee_relative_speed_limit` is not a compatible resume setting.
+Bounded substeps use semi-implicit accepted positions (`x_next=x_previous+dt*v_next`),
+including base/yaw and EE motion, rather than a positional projection followed
+by an unrelated velocity. Smooth acceleration is still evaluated with RK4.
 All 8/16/32-step history trajectories use the same integrator/guards.
+
+The constraint effective inverse mass is
+`W=I/m_ee + alpha*diag(1,1,0)/m_base + alpha*c*c.T/I_yaw`, where
+`c=z_cross_r_ee` and the yaw term is optional. A diagonal-plus-rank-one solve
+uses `n.T W n` for each frictionless correction direction, producing
+equal/opposite velocity impulses; EE velocity is not reconstructed
+again from the changed base. For alpha=1, internal corrections conserve planar
+momentum. EE=2 kg/base=4 kg and an incoming 1 m/s EE velocity give 1/3 m/s
+for both bodies at a stationary outward-offset boundary. Speed saturation is
+explicitly dissipative and reported separately from this internal impulse.
 
 **Geometry limitations:** these are EE point/segment command-space checks
 against the task's exclusion box, ground and spherical workspace, not
 articulated arm/leg collision detection or an IK reachability certificate.
-Four fixed geometric projections handle intersecting constraints; incompatible
-intersections are explicitly flagged and fall back to the already-rejected
-nominal trajectory. Initialization/recovery projections may be discontinuous.
+Four fixed coupled geometric sweeps handle intersecting constraints. Incompatible
+intersections and initially infeasible measured starts are explicitly flagged;
+there is **no teleport to nominal**. Recovery obeys the speed limit and can remain
+outside the feasible region temporarily. Final geometry/rates are rechecked.
 The guard is a numerical correction, not an exact constrained mechanical solve;
 its impulse, saturation and incompatible fraction should be monitored.
 
@@ -112,7 +129,7 @@ reference speeds/offsets and per-episode time-averaged applied load norms.
 No full run is recommended until these diagnostics and geometry approximations
 are acceptable for the intended task.
 
-## Completed checks (2026-11-16)
+## Version 2 historical checks (2026-11-16)
 
 - FACET CPU suite: **146 passed, 2 skipped**. The CUDA export test was rerun
   unsandboxed and passed; the isolated upstream-module parity test was skipped
@@ -124,13 +141,13 @@ are acceptable for the intended task.
 - GPU0 Isaac Lab: eight environments, three teacher plus three student updates,
   checkpoint reload, then deterministic/stochastic standing/walking under
   test-local combined loading with 1.2-second EE plateaus and release.
-  [Machine-readable results](b1z1_facet_bounded_smoke.json) retain failures:
+  Historical local report `b1z1_facet_bounded_smoke.json` retained failures:
   3 deterministic and 4 stochastic during 1,024 transitions per evaluation.
   Peak EE/base loads were approximately4.8/56.5 N. The last training rollout
   took2.515 s, its update0.094 s; LR remained5e-4, entropy .002, std .999.
   Last KL was .100 and estimator privileged/force MSE .01265/.00186.
   This is not a converged or deployment-ready policy.
-- [4096-environment reference-only benchmark](b1z1_facet_bounded_benchmark.json):
+- Historical local `b1z1_facet_bounded_benchmark.json` (4096 environments):
   legacy8.39 ms versus bounded53.90 ms per control interval, including all32
   history starts; peak allocated memory65.5 versus152.9 MB. Additional reference
   cost is approximately1.46 s per32-step rollout. Five measured intervals after
@@ -141,6 +158,86 @@ are acceptable for the intended task.
 - Python syntax and `git diff --check` passed. No full training was launched.
 
 Resolved smoke configuration/checkpoints remain in `/tmp/facet-bounded-delivery`.
-The checked-in JSON files are compact reports, not model artifacts or raw data.
+The historical JSON names above refer to local reports that were ignored by git;
+use the version 3 report below for portable validation evidence.
 Full-range long-episode robustness, full-size training throughput and exhaustive
 articulated collision safety remain unverified.
+
+## Version 3 diagnostics and evaluation
+
+`FACETHistory/age_{8,16,32}` reports reductions over **every collected control
+interval**, including terminal snapshots. `eligible_count` counts age-valid
+robot/interval targets, not unused ring slots. Constraint-valid/incompatible,
+recovery, speed saturation, impulse magnitudes, offset and speeds use that same
+denominator; incompatible targets are not silently removed from rewards or
+statistics. `recovery` means the subtrajectory started the interval infeasible,
+not a positional teleport. `constraint_correction_impulse_Ns` and
+`constraint_saturation_impulse_Ns` distinguish internal and dissipative changes.
+Boundary activity and speeds describe interval-end accepted targets; impulse
+norms describe the sum over numerical substeps of that interval. Existing
+`FACET/*` persistent-reference logs remain last-step diagnostics, not these
+reward-history statistics. Getter calls never accumulate counters.
+
+Scripted evaluation uses saved fixed parameters or separate represented
+low/middle/high EE and base stiffnesses. Bounded sampling gives EE 60/90/120
+and base/yaw 2/16/30, with saved zeta and correlated mass-aware damping.
+The training force sampler is disabled for evaluation. Defaults include standing
+and walking with none/EE/base/both loads, sustained K*offset EE forces and
+represented triangular base pulses; 48 trials cover all levels/directions.
+`--extrapolation` explicitly selects legacy sustained 20/35 N and yaw loads.
+Finite actual loads are checked against scenario and reference inputs. Older
+bounded artifacts must be evaluated with their original source revision.
+
+`compile_constraints=True` fuses FACET-only fixed-shape reference kernels on
+CUDA; CPU uses the same eager expressions. RK times are cached device scalars
+to avoid a new compiled specialization per numerical stage. Compilation is a
+warmup cost, not part of the reported steady-state timing. Use `--eager` in
+the reference benchmark for comparison. These timings exclude simulation/PPO.
+
+## Version 3 checks (2026-11-16)
+
+- CPU FACET suite: **156 passed, 3 skipped**. The two CUDA-dependent tests were
+  rerun unsandboxed: compiled/eager reference parity and CPU/GPU portable student
+  parity **3 passed**. Isolated upstream module parity still needs its external
+  checkout fixture. No protected task source/configuration was changed.
+- [Warmed benchmark report](b1z1_facet_v3_benchmark.json), RTX 4090 / Torch 2.7:
+  production yaw coupling, reference plus all 32 history starts:
+
+  | Environments | Compiled ms/interval | Peak allocated MB |
+  | --- | ---: | ---: |
+  | 4,096 | 14.56 | 130.59 |
+  | 10,240 | 24.33 | 323.94 |
+
+  The same corrected 4,096-environment eager calculation took 74.82 ms:
+  compilation gives a 5.14x warmed speedup without changing the expressions.
+  The historical 53.90 ms report omitted yaw coupling and is not a freshly
+  rerun baseline. New timings include diagnostics; warmup/compilation and source
+  hashes are saved separately. These are not end-to-end training timings.
+
+Reproduce the integration pipeline (six PPO/adaptation updates only):
+
+```bash
+PYTHONPATH=.:tests OMP_NUM_THREADS=1 python tests/smoke_b1z1_facet_pipeline.py \
+  --gpu cuda:0 --output-dir /tmp/facet-v3-pipeline
+```
+
+This covers teacher/adaptation/student, resume at update 4, fresh-process
+portable export, and 48 short standing/walking trials across no-force, EE-only,
+base-only and combined conditions with release and represented impedance levels.
+Production schedules and interaction budgets are not changed by this test.
+
+The [version 3 smoke report](b1z1_facet_v3_smoke.json) records the successful
+pipeline, exact source hashes, configuration and failures. Training interactions
+were 384 per phase (1,152 total); evaluation simulated 7,200 transitions, including
+inactive/padded rows. Six-environment final rollout/update took 1.319/0.099 s.
+The 48 nearly untrained student trials had **16 physical failures**. Recovery
+windows were incomplete, so recovery statistics are unavailable, not zero.
+The final training rollout had incompatible fractions of approximately 39%/53%
+at ages 8/16, associated with initially infeasible/recovering reference starts.
+Those targets remain counted, and no performance benefit is claimed.
+
+**Another full training run is not yet justified.** Inspect these history
+diagnostics on a longer but bounded pilot run before spending the full budget.
+The new tests establish the impulse, speed, timing and integration contracts;
+they do not establish learned-policy quality or eliminate all incompatible
+measured starts. No full training run was launched for this change.

@@ -1,6 +1,7 @@
 """Fresh-process training -> adaptation -> fine-tuning -> portable export -> evaluation."""
 import argparse
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -19,6 +20,7 @@ def train(args):
     cli = get_args()
     cfg, training = B1Z1FACETCfg(), B1Z1FACETCfgPPO()
     cfg.env.num_envs, cfg.env.episode_length_s = 6, .9
+    cfg.facet_forces.enabled = False  # Test callbacks below are the sole physical source.
     for key in ('push_gripper_stators', 'push_robot_base', 'apply_ee_external_forces', 'apply_base_external_forces', 'apply_base_external_torques'):
         setattr(cfg.commands, key, True)
     training.algorithm.student_start_iteration = 2
@@ -46,13 +48,21 @@ def train(args):
         runner.learn(4)
         assert runner.alg.phase == 'student'
         assert all(torch.equal(v, actor[k]) for k, v in runner.model.student.state_dict().items())
+        runner.load(args.output_dir/'training/model_4.pt')
+        assert runner.current_learning_iteration == 4 and runner.alg.phase == 'student'
         runner.learn(6)
         assert any(not torch.equal(v, actor[k]) for k, v in runner.model.student.state_dict().items())
-        assert runner.phase_interactions == dict(teacher=288, adaptation=288, student=288)
+        expected = 2*training.runner.num_steps_per_env*cfg.env.num_envs
+        assert runner.phase_interactions == dict(teacher=expected, adaptation=expected, student=expected)
         assert torch.isfinite(torch.tensor(list(runner.last_metrics.values()))).all()
         result = dict(phase_updates=runner.phase_updates, phase_interactions=runner.phase_interactions,
             total_interactions=sum(runner.phase_interactions.values()), simulated_seconds=runner.simulated_seconds,
-            wall_seconds=runner.training_wall_seconds, metrics=runner.last_metrics)
+            wall_seconds=runner.training_wall_seconds, metrics=runner.last_metrics,
+            resumed_at_update=4, formulation_version=cfg.facet_reference.formulation_version,
+            source_revision=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+            source_files_sha256={str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in (
+                Path('legged_gym/envs/b1z1/b1z1_facet/reference.py'),
+                Path('rsl_rl/runners/b1z1_facet_runner.py'), Path('legged_gym/scripts/eval_b1z1_facet.py'))})
         (args.output_dir/'training.json').write_text(json.dumps(result, indent=2))
     finally:
         env.simulator._app_launcher.app.close()
@@ -72,16 +82,16 @@ def main():
         [sys.executable, str(Path(__file__).resolve()), '--train', '--gpu', args.gpu, '--output-dir', str(args.output_dir)],
         [sys.executable, '-m', 'rsl_rl.facet_deployment', '--checkpoint', str(args.output_dir/'training/model_6.pt'), '--output', str(args.output_dir/'student.pt')],
         [sys.executable, 'legged_gym/scripts/eval_b1z1_facet.py', '--artifact', str(args.output_dir/'student.pt'),
-            '--gpu', args.gpu, '--headless', '--num-envs', '6', '--episodes', '36', '--horizon-seconds', '3',
+            '--gpu', args.gpu, '--headless', '--num-envs', '6', '--episodes', '48', '--horizon-seconds', '3',
             '--event-times', '.5', '1', '1.5', '--output-dir', str(args.output_dir/'evaluation')]]
     for index, command in enumerate(commands):
         with (args.output_dir/f'process_{index}.log').open('w') as stream:
             subprocess.run(command, cwd=root, stdout=stream, stderr=subprocess.STDOUT, check=True, timeout=360)
     assert (args.output_dir/'evaluation/COMPLETE').exists(), 'Isaac shutdown is not proof of successful evaluation'
     summary = json.loads((args.output_dir/'evaluation/summary.json').read_text())
-    assert summary['trials'] == 36 and summary['evaluation_interactions'] > 0
+    assert summary['trials'] == 48 and summary['evaluation_interactions'] > 0
     trials = json.loads((args.output_dir/'evaluation/trials.json').read_text())
-    assert len(trials) == 36
+    assert len(trials) == 48
     reached = [r for r in trials if r['survival_seconds'] > .6]
     assert reached and any(r['force_peak_N'] > 0 for r in reached)
     assert any(r['base_force_peak_N'] > 0 for r in reached)
@@ -94,7 +104,7 @@ def main():
         pipeline_passed=True, teacher_adaptation_student_updates=[2, 2, 2],
         training_interactions=summary['training_interactions'], evaluated_trials=len(trials),
         physical_failures=summary['failed_trials'], evaluation_interactions=summary['evaluation_interactions'],
-        end_to_end_wall_seconds=summary['wall_seconds'], inference_seconds=summary['inference_seconds'],
+        evaluation_wall_seconds=summary['wall_seconds'], inference_seconds=summary['inference_seconds'],
         rollout_seconds=summary['rollout_seconds'],
         interpretation='Integration only; trained task performance and full-budget baseline comparisons pending'), indent=2))
     print('FACET67_PIPELINE_OK', args.output_dir, flush=True)

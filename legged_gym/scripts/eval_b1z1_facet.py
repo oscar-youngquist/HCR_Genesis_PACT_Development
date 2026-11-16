@@ -20,18 +20,51 @@ from eval_b1z1_exp1 import (EVAL_CONFIG, EvaluationAdapter, configure, build_act
 from rsl_rl.facet_contract import apply_config_snapshot
 
 
+def represented_profiles(reference):
+    """Separate EE/base low, middle, high settings in the SAVED training range.
+
+    The bounded sampler's base mass support is {2,4,8}; use its represented
+    middle mass, not an invented continuous value. Fixed profiles stay fixed.
+    """
+    from legged_gym.envs.b1z1.b1z1_facet.reference import PARAMETERS
+    mode = reference.get('sampling_mode', 'fixed')
+    if mode == 'fixed':
+        if reference.get('sample_ranges'):
+            raise ValueError('Custom ranges require an explicit represented evaluation profile')
+        return [dict(level='fixed', **{k: reference[k] for k in PARAMETERS})]
+    if mode not in ('bounded_b1z1', 'upstream_b1z1'):
+        raise ValueError(f'Unknown saved FACET sampling mode: {mode}')
+    result = []
+    for label, fraction in (('low', 0.), ('middle', .5), ('high', 1.)):
+        p = {k: reference[k] for k in PARAMETERS}
+        p.update(base_mass=4., ee_mass=2., yaw_inertia=1.5,
+                 base_stiffness=2.+28.*fraction, yaw_stiffness=2.+28.*fraction,
+                 ee_stiffness=(60.+60.*fraction if mode == 'bounded_b1z1' else 4.+26.*fraction))
+        for body, mass in (('base', 'base_mass'), ('ee', 'ee_mass'), ('yaw', 'yaw_inertia')):
+            p[body+'_damping'] = (2*reference.get('damping_ratio', 1.)*math.sqrt(p[mass]*p[body+'_stiffness'])
+                if mode == 'bounded_b1z1' else 1.8*math.sqrt(p[body+'_stiffness']))
+        result.append(dict(level=label, **p))
+    return result
+
+
 def scenarios(seed, trial_ids, config):
     result = []
     for trial in trial_ids:
-        condition = ('ee-only', 'base-only', 'combined')[trial % 3]
-        motion = ('standing', 'walking')[(trial//3) % 2]
-        direction = ('lateral', 'opposing')[(trial//6) % 2]
-        stiffness = (4., 16., 28.)[(trial//12) % 3]
+        condition = ('none', 'ee-only', 'base-only', 'combined')[trial % 4]
+        motion = ('standing', 'walking')[(trial//4) % 2]
+        direction = ('lateral', 'opposing')[(trial//8) % 2]
+        profiles = config.get('impedance_profiles')
+        profile = profiles[(trial//16) % len(profiles)] if profiles else None
+        stiffness = profile['ee_stiffness'] if profile else (4., 16., 28.)[(trial//16) % 3]
         if config.get('impedance_fixed'):
             stiffness = config['impedance_fixed']['ee_stiffness']
         result.append(Scenario(dict(trial_id=trial, evaluation_seed=seed, condition=condition,
             motion=motion, direction=direction, stiffness=stiffness, initial_heading=0.,
-            events=config['event_times'], horizon=config['horizon_seconds'], impedance_fixed=config.get('impedance_fixed'))))
+            events=config['event_times'], horizon=config['horizon_seconds'],
+            impedance_fixed=({k: v for k, v in profile.items() if k != 'level'} if profile else config.get('impedance_fixed')),
+            impedance_level=profile['level'] if profile else 'legacy',
+            force_protocol=config.get('force_protocol'),
+            extrapolation=config.get('extrapolation', False))))
     return result
 
 
@@ -48,11 +81,25 @@ class Scenario:
         yaw = m['initial_heading']
         force[:2] = [[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]] @ force[:2]
         load = np.zeros(9)
-        if m['condition'] != 'base-only':
+        if m['condition'] in ('ee-only', 'combined'):
             load[:3] = force
-        if m['condition'] != 'ee-only':
+        if m['condition'] in ('base-only', 'combined'):
             load[3:6] = force*.7
             load[8] = magnitude*.1  # Independent physical yaw couple, Nm.
+        protocol = m.get('force_protocol')
+        if protocol and not m.get('extrapolation'):
+            # Training EE loads are sustained K*offset; base loads are short
+            # triangular pulses, never the legacy sustained force/yaw couple.
+            sign = np.array([0., 1., 0.]) if m['direction'] == 'lateral' else np.array([-1., 0., 0.])
+            sign[:2] = [[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]] @ sign[:2]
+            offset = protocol['interior_offset'] if t < b else protocol['boundary_offset']
+            load[:] = 0.
+            if m['condition'] in ('ee-only', 'combined') and a <= t < c:
+                load[:3] = sign*m['stiffness']*offset
+            if m['condition'] in ('base-only', 'combined'):
+                duration = sum(protocol['pulse_duration'])/2
+                pulse = max(0., 1-abs(2*(t-(a if t < b else b))/duration-1))
+                load[3:6] = sign*sum(protocol['horizontal_peak'])/2*pulse
         return command, np.array([.5, .1, 0.]), load, int(a <= t)+int(b <= t)+int(c <= t)
 
 
@@ -131,12 +178,13 @@ def main():
     parser.add_argument('--checkpoint', help='Existing baseline checkpoint, not a FACET artifact')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--num-envs', type=int, default=6)
-    parser.add_argument('--episodes', type=int, default=36)
+    parser.add_argument('--episodes', type=int, default=48)
     parser.add_argument('--horizon-seconds', type=float, default=14.)
     parser.add_argument('--event-times', nargs=3, type=float, default=[3., 7., 11.])
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--gpu', default='cuda:0')
     parser.add_argument('--headless', action='store_true')
+    parser.add_argument('--extrapolation', action='store_true', help='Explicit legacy sustained 20/35 N + yaw-load protocol')
     args = parser.parse_args()
     if args.task == 'b1z1_facet' and not args.artifact:
         parser.error('FACET requires --artifact; explicitly export the initialized student or a copied teacher first')
@@ -158,12 +206,17 @@ def main():
     cfg = util.materialize(task_registry.env_cfgs[args.task])
     if facet:
         saved = metadata['contract']
+        if saved['reference'].get('bounded') and saved['reference'].get('formulation_version', 1) != 3:
+            raise ValueError('Bounded FACET artifact uses an older reference formulation; evaluate with its saved source revision, not version 3 dynamics')
         if 'environment' not in saved:
             raise ValueError('Simulator evaluation requires saved environment configuration')
         apply_config_snapshot(cfg, saved['environment'])
         cfg.facet_observations.enabled = False  # No privileged packet constructed for policy use.
     config = deepcopy(EVAL_CONFIG)
-    config.update(event_times=args.event_times, horizon_seconds=args.horizon_seconds)
+    config.update(event_times=args.event_times, horizon_seconds=args.horizon_seconds, extrapolation=args.extrapolation)
+    if facet:
+        config['impedance_profiles'] = represented_profiles(saved['reference'])
+        config['force_protocol'] = saved['environment'].get('facet_forces')
     if facet and saved['reference'].get('sampling_mode', 'fixed') == 'fixed':
         from legged_gym.envs.b1z1.b1z1_facet.reference import PARAMETERS
         config['impedance_fixed'] = {key: saved['reference'][key] for key in PARAMETERS}
@@ -176,6 +229,8 @@ def main():
         from legged_gym.envs.b1z1.b1z1_facet.reference import FACETReferenceCfg
         cfg.facet_tracking = FACETTrackingCfg(**saved['tracking'])
         cfg.facet_reference = FACETReferenceCfg(**saved['reference'])
+        # Scripted loads must not be overwritten in FACET's pre-step sampler.
+        cfg.facet_forces.enabled = False
     env_class = task_registry.get_task_class(args.task)
     reject = args.task in ('b1z1_unifp_original', 'b1z1_unifp_reject')
     if reject:
@@ -257,6 +312,17 @@ def main():
                 force, couple, point = s.applied_torso_wrench_source()
                 moment = couple+torch.linalg.cross(point-s.base_pos, force)  # One shift to base-link origin, world axes.
                 applied = torch.cat((s._ee_force_world, force, moment), -1).detach().cpu().numpy()
+                if facet:
+                    expected_loads = np.stack([scenario.at(step*env.dt)[2] for scenario in padded])
+                    reference_loads = env.facet_reference.read()
+                    reference_forces = torch.cat((reference_loads['applied_ee_force_world'],
+                                                  reference_loads['applied_base_force_world']), -1).cpu().numpy()
+                    finite_loads = np.isfinite(applied[:, :6]).all(1) & np.isfinite(reference_forces).all(1)
+                    # Failure/nonfinite rows still reach strict-JSON reporting;
+                    # finite loads must match BOTH scenario and reference input.
+                    if not (np.allclose(applied[finite_loads, :6], expected_loads[finite_loads, :6], atol=1e-4)
+                            and np.allclose(reference_forces[finite_loads], applied[finite_loads, :6], atol=1e-4)):
+                        raise RuntimeError('Scripted FACET loads disagree with actual/reference forces')
                 positions = torch.cat((s.ee_pos, s.base_pos), -1).detach().cpu().numpy()
                 velocities = torch.cat((s.ee_vel, s._base_world_lin_vel), -1).detach().cpu().numpy()
                 bad_contacts = (s.link_contact_forces[:, s.penalized_contact_indices].norm(dim=-1) > .1).sum(-1).cpu().numpy()

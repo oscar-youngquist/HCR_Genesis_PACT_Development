@@ -24,7 +24,7 @@ class B1Z1FACETCfg:
         self.action_mode = "position"  # 17 learned positions, no learned FF head.
         self.facet_reference = FACETReferenceCfg()
         self.facet_reference.sampling_mode = 'bounded_b1z1'
-        self.facet_reference.formulation_version = 2
+        self.facet_reference.formulation_version = 3
         self.facet_reference.bounded = True
         self.facet_reference.yaw_reaction = True
         self.facet_reference.ee_stiffness = 90.  # Paper calibration when sampling_mode='fixed'.
@@ -80,7 +80,7 @@ class B1Z1FACETCfgPPO:
         self.algorithm.num_learning_epochs = 4
         self.algorithm.num_mini_batches = 4
         self.algorithm.use_clipped_value_loss = False
-        self.algorithm.formulation_version = 2
+        self.algorithm.formulation_version = 3
         self.algorithm.curriculum_steps_per_iteration = 24
         self.algorithm.estimator_learning_rate = 5e-4
         self.algorithm.estimator_epochs = 2
