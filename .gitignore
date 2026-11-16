@@ -57,7 +57,30 @@ Thumbs.db
 *.exe
 *.war
 
-**/deployments/*
+# Deployment sources are versioned; exports, golden vectors, manifests,
+# generated historical-source snapshots, and packaged bundles stay local.
+/deployments/**
+!/deployments/**/
+!/deployments/**/*.py
+!/deployments/**/*.sh
+!/deployments/**/*.cpp
+!/deployments/**/*.h
+!/deployments/**/*.hpp
+!/deployments/**/CMakeLists.txt
+!/deployments/**/*.rst
+!/deployments/**/*.md
+/deployments/**/archive/
+/deployments/**/__pycache__/
+
+# Reproducible evaluation tooling only, not collected trials/reports/plots.
+!/diagnostics/matched5500/
+/diagnostics/matched5500/*
+!/diagnostics/matched5500/evaluate.py
+!/diagnostics/matched5500/report.py
+!/diagnostics/matched5500/README.txt
+!/diagnostics/oct07_qp_comparison/
+/diagnostics/oct07_qp_comparison/*
+!/diagnostics/oct07_qp_comparison/README.txt
 
 # Large media files
 *.tiff
