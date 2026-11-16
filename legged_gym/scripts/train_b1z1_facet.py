@@ -36,6 +36,8 @@ def main():
     contract = None
     if a.resume:
         state = torch.load(a.resume, map_location='cpu', weights_only=False)
+        if state.get('config', {}).get('algorithm', {}).get('formulation_version', 1) != training.algorithm.formulation_version:
+            raise ValueError('This bounded FACET formulation requires fresh training; use the original revision for older checkpoints')
         contract = checkpoint_contract(state, a.resume, json.loads(a.legacy_contract.read_text()) if a.legacy_contract else None)
         if 'environment' not in contract:
             raise ValueError('Resume CLI requires the original resolved environment settings')

@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import time
+import subprocess
 import torch
 
 from rsl_rl.facet_model import FACETModel
@@ -42,12 +43,15 @@ class B1Z1FACETRunner:
         self.simulated_seconds = 0.
         self.accounting_exact = True
         self.contract = contract_from_env(env)
+        self.git_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[2], text=True).strip()
         self._validate_schedule()
         if log_dir is not None:
             from legged_gym.utils.helpers import class_to_dict, _json_config_value
             Path(log_dir).mkdir(parents=True, exist_ok=True)
             Path(log_dir, 'facet_resolved_config.json').write_text(json.dumps(_json_config_value(dict(
                 training=self.cfg, environment=class_to_dict(env.cfg), observations=env.get_facet_observation_schema(),
+                git_sha=self.git_sha, formulation_version=self.alg.cfg.get('formulation_version', 1),
+                interaction_budget=self.cfg['runner']['max_iterations']*self.steps*env.num_envs,
                 optimized_reward_scales={key: env.reward_scales[key] for key in env.reward_names},
                 excluded_rewards=env.cfg.facet_tracking.excluded_rewards)), indent=2))
 
@@ -153,6 +157,7 @@ class B1Z1FACETRunner:
     def _schedules(self, iteration, infos):
         from legged_gym.envs.b1z1.b1z1_facet.schedules import update_force_schedule
         cfg = self.alg.cfg
+        iteration = self._curriculum_iteration(iteration)
         if infos:
             self.alg.update_entropy(self._metric(infos, 'rew_facet_base_velocity'),
                 self._metric(infos, 'rew_facet_yaw_rate'), terrain_entropy_progress(self.env.cfg.terrain,
@@ -166,8 +171,14 @@ class B1Z1FACETRunner:
             # the FACET success fraction, not the nominal tracking diagnostic.
             scale = self.env.cfg.rewards.scales.tracking_lin_vel_force_world / weight
             sim._step_domian_rand(iteration, self._metric(infos, 'rew_facet_base_velocity') * scale)
+        if getattr(self.env, '_facet_forces', None) is not None:
+            self.env._staged_force_curriculum.update(iteration)
+            return self.env._staged_force_curriculum.metrics(iteration)
         return update_force_schedule(self.env, iteration, infos,
             sum(self.lengths)/len(self.lengths) if self.lengths else None)
+
+    def _curriculum_iteration(self, iteration):
+        return int(iteration*self.steps/self.alg.cfg.get('curriculum_steps_per_iteration', self.steps))
 
     @torch.no_grad()
     def maybe_transition(self):
@@ -230,7 +241,7 @@ class B1Z1FACETRunner:
         self.maybe_transition()
         while self.current_learning_iteration < num_learning_iterations:
             iteration = self.current_learning_iteration
-            self.env.set_training_iteration(iteration)
+            self.env.set_training_iteration(self._curriculum_iteration(iteration))
             start = time.perf_counter()
             storage, infos = self.collect()
             collected = time.perf_counter()
@@ -240,6 +251,17 @@ class B1Z1FACETRunner:
             updated = time.perf_counter()
             metrics = {'Loss/'+k: v for k, v in metrics.items()}
             metrics.update(self._schedules(iteration, infos))
+            reference = getattr(self.env, 'facet_reference', None)
+            if reference is not None and reference.cfg.bounded:
+                values = reference.read()
+                metrics['FACET/guard_impulse_mean_Ns'] = float(values['guard_impulse_world'].norm(dim=-1).mean())
+                metrics['FACET/guard_incompatible_fraction'] = float(values['guard_incompatible'].float().mean())
+                metrics['FACET/base_reference_speed_max'] = float(values['base_velocity_xy'].norm(dim=-1).max())
+                metrics['FACET/yaw_reference_rate_max'] = float(values['yaw_rate'].abs().max())
+                metrics['FACET/ee_offset_mean_m'] = float(values['ee_offset_task'].norm(dim=-1).mean())
+                metrics['FACET/ee_offset_max_m'] = float(values['ee_offset_task'].norm(dim=-1).max())
+                metrics['FACET/ee_relative_speed_max'] = float(values['ee_relative_speed'].max())
+                metrics['FACET/boundary_active_fraction'] = float(values['boundary_active'].float().mean())
             for key in {k for info in infos for k in info}:
                 values = [torch.as_tensor(info[key], device=self.device).float().mean() for info in infos if key in info]
                 metrics['Episode/'+key] = float(torch.stack(values).mean())
@@ -253,7 +275,7 @@ class B1Z1FACETRunner:
             metrics.update({'Budget/'+phase+'_interactions': count for phase, count in self.phase_interactions.items()})
             metrics['Budget/total_interactions'] = sum(self.phase_interactions.values())
             metrics.update(self._policy_log_metrics(storage.phase))
-            self.env.set_training_iteration(self.current_learning_iteration)
+            self.env.set_training_iteration(self._curriculum_iteration(self.current_learning_iteration))
             self.last_metrics = metrics
             self.maybe_transition()  # Completed teacher update first; next rollout is wholly student.
             if self.writer:
@@ -326,6 +348,7 @@ class B1Z1FACETRunner:
     def save(self, path):
         env = self.env
         state = dict(version=2, algorithm=self.alg.state_dict(), iteration=self.current_learning_iteration,
+            git_sha=self.git_sha, formulation_version=self.alg.cfg.get('formulation_version', 1),
             contract=self.contract, phase_updates=self.phase_updates, phase_interactions=self.phase_interactions,
             simulated_seconds=self.simulated_seconds, training_wall_seconds=self.training_wall_seconds,
             accounting_exact=self.accounting_exact,
@@ -340,6 +363,8 @@ class B1Z1FACETRunner:
 
     def load(self, path, load_optimizer=True, schedule_overrides=None, legacy_contract=None):
         state = torch.load(path, map_location=self.device, weights_only=False)
+        if state.get('config', {}).get('algorithm', {}).get('formulation_version', 1) != self.alg.cfg.get('formulation_version', 1):
+            raise ValueError('Incompatible FACET formulation: bounded references/force sampling require a fresh run')
         if state.get('version') not in (1, 2):
             raise ValueError('Not a FACET checkpoint')
         saved_contract = checkpoint_contract(state, path, legacy_contract)
@@ -361,7 +386,11 @@ class B1Z1FACETRunner:
         from legged_gym.envs.b1z1.b1z1_facet.tracking import FACETTrackingCfg, COMPONENTS
         self.env.cfg.facet_tracking = FACETTrackingCfg(**saved_contract['tracking'])
         from legged_gym.envs.b1z1.b1z1_facet.schedules import FACETForceCurriculum
-        self.env._staged_force_curriculum = FACETForceCurriculum(self.env.cfg, self.env.device)
+        if getattr(self.env, '_facet_forces', None) is not None:
+            from legged_gym.envs.b1z1.b1z1_facet.forces import FACETExposure
+            self.env._staged_force_curriculum = FACETExposure()
+        else:
+            self.env._staged_force_curriculum = FACETForceCurriculum(self.env.cfg, self.env.device)
         if self.alg.cfg.get('facet_reward_schedule_version', 0) < 1:
             # Migrate old thresholds once; subsequent checkpoints already use
             # FACET units. Preserve the saved relative success requirements.
@@ -395,7 +424,7 @@ class B1Z1FACETRunner:
         load_staged_force_curriculum_state_dict(self.env, state['force_curriculum'])
         self.env.reward_scales.update(state['reward_scales'])
         self.env.command_ranges.update(state['command_ranges'])
-        self.env.set_training_iteration(self.current_learning_iteration)
+        self.env.set_training_iteration(self._curriculum_iteration(self.current_learning_iteration))
         self.env.reset_idx(self.env.all_env_ids)
         self.env.common_step_counter = state['common_step_counter']
         if state['tradeoff_step_ctr'] is not None:

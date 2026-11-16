@@ -55,6 +55,8 @@ def checkpoint_contract(state, path=None, legacy_contract=None):
 
 
 def validate_contract(saved, current):
+    if saved.get('reference', {}).get('formulation_version', 1) != current.get('reference', {}).get('formulation_version', 1):
+        raise ValueError('Incompatible FACET reference formulation version')
     # JSON normalizes tuple/list differences, not semantic differences.
     for key in ('schema', 'control', 'clip_actions', 'joints', 'default_joint_angles', 'delay', 'control_dt'):
         if json.dumps(saved[key], sort_keys=True) != json.dumps(current[key], sort_keys=True):
@@ -63,7 +65,7 @@ def validate_contract(saved, current):
         raise ValueError('Incompatible FACET FK geometry')
     # These settings determine physical/task semantics and cannot safely be
     # restored after simulator construction. The FACET launcher restores them first.
-    for key in ('commands', 'terrain', 'domain_rand', 'rewards', 'asset', 'noise', 'termination', 'init_state'):
+    for key in ('commands', 'terrain', 'domain_rand', 'rewards', 'asset', 'noise', 'termination', 'init_state', 'facet_forces'):
         old, new = saved.get('environment', {}), current.get('environment', {})
         if key in old and json.dumps(old[key], sort_keys=True) != json.dumps(new.get(key), sort_keys=True):
             raise ValueError('Incompatible FACET environment section: '+key+'; restore saved configuration before construction')

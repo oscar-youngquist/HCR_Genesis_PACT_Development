@@ -224,7 +224,10 @@ def test_transition_once_resume_and_frozen_latents(tmp_path):
     resumed.learn(4)
     assert resumed.current_learning_iteration == 4
     assert unchanged(resumed.model.teacher, teacher)
-    assert 3 in resumed.env.iterations and 4 in resumed.env.iterations
+    # Environment schedules use the equivalent legacy control-transition clock,
+    # while checkpoints/PPO phase counters remain completed 32-step updates.
+    assert resumed._curriculum_iteration(3) in resumed.env.iterations
+    assert resumed.env.iterations[-1] == resumed._curriculum_iteration(4)
 
 
 def test_student_inference_does_not_use_privilege_or_wrench():
@@ -251,7 +254,9 @@ def test_pilot_protocol_and_effective_reward_audit():
     a, b = class_to_dict(pilot), class_to_dict(facet)
     changes = differences(a, b)
     allowed = {'action_mode', 'ablation_variant', 'env.num_policy_actions', 'compliance.enabled',
-               'facet_reference', 'facet_tracking', 'facet_observations'}
+               'facet_reference', 'facet_tracking', 'facet_observations', 'facet_forces',
+               'env.num_steps_per_env', 'commands.zero_vel_cmd_prob_after_force',
+               'commands.apply_base_external_torques', 'domain_rand.push_robots'}
     allowed |= {f'control.{kind}.{name}' for kind in ('stiffness', 'damping')
                 for name in set(a['control'][kind]) | set(b['control'][kind])}
     assert changes <= allowed  # Some arm gains already coincide with FACET.

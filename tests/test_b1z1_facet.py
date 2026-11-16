@@ -31,15 +31,22 @@ def test_config_allowlist_and_resolved_layout():
     facet = B1Z1FACETCfg()
     gain_paths = {f'control.{kind}.{name}' for kind in ('stiffness', 'damping')
                   for name in set(getattr(facet.control, kind)) | set(getattr(baseline.control, kind))}
-    assert differences(class_to_dict(facet), class_to_dict(baseline)) == {"compliance.enabled", "facet_reference", "facet_tracking", "facet_observations"} | gain_paths
+    bounded_changes = {'facet_forces', 'env.num_steps_per_env', 'commands.zero_vel_cmd_prob_after_force',
+                       'commands.apply_base_external_torques', 'domain_rand.push_robots'}
+    assert differences(class_to_dict(facet), class_to_dict(baseline)) == {"compliance.enabled", "facet_reference", "facet_tracking", "facet_observations"} | gain_paths | bounded_changes
     train, base_train = B1Z1FACETCfgPPO(), copy_sections(B1Z1PPOPosCfgPPO)
     from legged_gym.envs.b1z1.b1z1_pact.b1z1_pact_config import B1Z1PACTCfgPPO
     from legged_gym.envs.b1z1.b1z1_facet.b1z1_facet_config import COMMON_PPO
     pilot = copy_sections(B1Z1PACTCfgPPO)
-    for key in COMMON_PPO:
+    upstream_overrides = {'learning_rate': 5e-4, 'schedule': 'fixed', 'entropy_coef': .002,
+        'num_learning_epochs': 4, 'use_clipped_value_loss': False, 'use_adaptive_entropy': False}
+    for key in set(COMMON_PPO)-set(upstream_overrides):
         assert getattr(train.algorithm, key) == getattr(pilot.algorithm, key)
-    assert train.runner.max_iterations == 70000 and train.runner.save_interval == 1000
-    assert train.runner.num_steps_per_env == 24
+    for key, value in upstream_overrides.items():
+        assert getattr(train.algorithm, key) == value
+    assert train.runner.max_iterations*32 == pilot.runner.max_iterations*24
+    assert train.runner.save_interval*32 == pilot.runner.save_interval*24
+    assert train.runner.num_steps_per_env == 32
     for name in facet.asset.dof_names:
         assert facet.control.stiffness[name] == (40 if name.startswith('z1_') else 100)
         assert facet.control.damping[name] == (1 if name.startswith('z1_') else 2)
@@ -55,7 +62,7 @@ def test_config_allowlist_and_resolved_layout():
         "rewards.scales.early_torso_tilt", "rewards.scales.feet_contact_number",
         "rewards.scales.stand_still", "rewards.scales.stand_still_contact",
         "rewards.scales.tracking_arm_feedforward",
-    } | gain_paths
+    } | gain_paths | bounded_changes
     for name in ("num_observations", "num_critic_state_obs", "num_privileged_obs", "num_privileged_recon_obs"):
         assert getattr(baseline.env, name) - getattr(facet.env, name) == 12
     assert facet.env.num_observations == 81
@@ -100,7 +107,7 @@ def test_cli_registration(monkeypatch):
     assert isinstance(task_registry.env_cfgs[args.task], B1Z1FACETCfg)
     assert issubclass(B1Z1FACET, B1Z1PPOPos)
     for method in ("step", "_init_buffers",
-                   "check_termination", "_resample_ee_goal", "_push_gripper", "_push_robot_base"):
+                   "check_termination", "_resample_ee_goal"):
         assert getattr(B1Z1FACET, method) is getattr(B1Z1PPOPos, method)
 
 

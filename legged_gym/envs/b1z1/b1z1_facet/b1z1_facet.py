@@ -8,6 +8,7 @@ from .reference import FACETReference, FACETReferenceBank, applied_loads, measur
 from .tracking import COMPONENTS, LEGACY_TRACKING, tracking_values
 from .observations import FACETObservations
 from .schedules import FACETForceCurriculum
+from .forces import FACETForces, FACETExposure
 
 
 class B1Z1FACET(B1Z1PPOPos):
@@ -17,6 +18,11 @@ class B1Z1FACET(B1Z1PPOPos):
         super().__init__(*args, **kwargs)
         if self.cfg.facet_tracking.enabled:
             self._staged_force_curriculum = FACETForceCurriculum(self.cfg, self.device)
+        self._facet_forces = None
+        if getattr(self.cfg, 'facet_forces', None) is not None and self.cfg.facet_forces.enabled:
+            self._staged_force_curriculum = FACETExposure()
+            self._facet_forces = FACETForces(self.num_envs, self.device, self.cfg.facet_forces)
+        self._facet_exposure = torch.zeros(self.num_envs, 3, device=self.device)
         self.facet_reference = None
         self.facet_history = None
         self._facet_interval = None
@@ -57,6 +63,12 @@ class B1Z1FACET(B1Z1PPOPos):
 
     def reset_idx(self, env_ids):
         diagnostics = {}
+        exposure = getattr(self, '_facet_exposure', None)
+        if exposure is not None and len(env_ids):
+            values = exposure[env_ids]
+            diagnostics['facet/ee_load_time_mean_N'] = (values[:, 0]/values[:, 2].clamp_min(self.dt)).mean()
+            diagnostics['facet/base_load_time_mean_N'] = (values[:, 1]/values[:, 2].clamp_min(self.dt)).mean()
+            exposure[env_ids] = 0
         if self.cfg.facet_tracking.enabled and len(env_ids):
             counts = self._facet_valid_steps[env_ids].sum(0)
             errors = self._facet_error_sums[env_ids].sum(0)/counts[:, None].clamp_min(1)
@@ -69,6 +81,8 @@ class B1Z1FACET(B1Z1PPOPos):
         super().reset_idx(env_ids)
         if getattr(self, "facet_reference", None) is not None and len(env_ids):
             self._reset_facet_reference(env_ids)
+        if getattr(self, '_facet_forces', None) is not None:
+            self._facet_forces.reset(env_ids)
         collector = getattr(self, '_facet_observations', None)
         if collector is not None and len(env_ids):
             collector.collect(self, env_ids, reset=True)
@@ -76,9 +90,10 @@ class B1Z1FACET(B1Z1PPOPos):
                 collector.skip[env_ids] = True  # Already collected at this boundary.
         if diagnostics:
             self.extras["episode"].update(diagnostics)
-            self._facet_error_sums[env_ids] = 0
-            self._facet_valid_steps[env_ids] = 0
-            self._facet_episode_steps[env_ids] = 0
+            if self.cfg.facet_tracking.enabled:
+                self._facet_error_sums[env_ids] = 0
+                self._facet_valid_steps[env_ids] = 0
+                self._facet_episode_steps[env_ids] = 0
 
     @torch.no_grad()
     def _pre_sim_step(self, actions):
@@ -88,6 +103,8 @@ class B1Z1FACET(B1Z1PPOPos):
             limit = self.cfg.normalization.clip_actions
             self._facet_issued_action = actions.detach().to(self.device).clamp(-limit, limit).clone()
         executed = super()._pre_sim_step(actions)
+        if getattr(self, '_facet_forces', None) is not None:
+            self._sample_facet_forces()
         if getattr(self, "facet_reference", None) is None:
             return executed
         measured = self._facet_measured_state()
@@ -120,6 +137,8 @@ class B1Z1FACET(B1Z1PPOPos):
             # or resample; use the captured start lever, never successor geometry.
             ee, base, moment = applied_loads(self.cfg.commands, self.simulator._ee_force_world,
                 self.simulator.applied_torso_wrench_source(), position, point)
+            if hasattr(self, '_facet_exposure'):
+                self._facet_exposure += torch.stack((ee.norm(dim=-1), base.norm(dim=-1), torch.ones_like(moment)), -1)*self.dt
             self.facet_reference.advance(self.dt, position[:, :2], yaw, command, yaw_command,
                                          local, local_rate, height, ee, base, moment)
             if getattr(self, "facet_history", None) is not None:
@@ -138,6 +157,28 @@ class B1Z1FACET(B1Z1PPOPos):
     def get_facet_observations(self):
         """Cached current-episode packet; no sampling, history advance or normalization."""
         return {} if self._facet_observations is None else self._facet_observations.read()
+
+    def _push_gripper(self, ids):
+        source = getattr(self, '_facet_forces', None)
+        if source is None:
+            return super()._push_gripper(ids)
+        self.simulator.apply_ee_force(self.ee_force_ext_world)
+
+    def _sample_facet_forces(self):
+        # Sample independently of which physical publisher is enabled. This
+        # keeps torso-only operation valid when the EE publisher is disabled.
+        ee, base = self._facet_forces.sample(self.episode_length_buf*self.dt,
+            self.facet_reference._parameters['ee_stiffness'], self.training_iteration*24)
+        c = self.cfg.commands
+        self.ee_force_ext_world.copy_(ee if c.push_gripper_stators and c.apply_ee_external_forces else torch.zeros_like(ee))
+        self.base_force_ext_world.copy_(base if c.push_robot_base and c.apply_base_external_forces else torch.zeros_like(base))
+        self.base_torque_ext_world.zero_()
+
+    def _push_robot_base(self, ids):
+        if getattr(self, '_facet_forces', None) is None:
+            return super()._push_robot_base(ids)
+        self.simulator.apply_base_force(self.base_force_ext_world)
+        self.simulator.apply_base_torque(self.base_torque_ext_world)
 
     def get_facet_observation_schema(self):
         """Named block and joint ordering for the separate Stage 4 API."""

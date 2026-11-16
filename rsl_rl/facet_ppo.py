@@ -1,7 +1,7 @@
 """FACET-only PPO and estimator ownership; no PACT auxiliary machinery.
 
 Estimator residual/targets/cadence/EMA follow active-adaptation c0d6f5a,
-ppo_facet.py (MIT; FACET_LICENSE.txt). PPO protocol follows local PILOT.
+ppo_facet.py (MIT; FACET_LICENSE.txt). Formulation 2 uses upstream PPO defaults.
 """
 from copy import deepcopy
 import torch
@@ -16,7 +16,8 @@ class FACETPPO:
         self.learning_rate = cfg['learning_rate']
         self.current_entropy_coef = cfg['entropy_coef']
         self.ema = deepcopy(model.estimator).requires_grad_(False).eval()
-        self.optimizer = torch.optim.AdamW([
+        optimizer = torch.optim.Adam if cfg.get('optimizer') == 'Adam' else torch.optim.AdamW
+        self.optimizer = optimizer([
             dict(params=[p for n, p in model.teacher.named_parameters() if n != 'std'], weight_decay=cfg['weight_decay']),
             dict(params=[model.teacher.std], weight_decay=0.),
             dict(params=list(model.critic.parameters()), weight_decay=cfg['weight_decay']),

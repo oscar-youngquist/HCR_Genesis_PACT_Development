@@ -70,6 +70,7 @@ def test_runner_entropy_and_domain_inputs():
         _step_domian_rand=lambda *args: calls.append(args))
     runner = object.__new__(B1Z1FACETRunner)
     runner.env, runner.lengths = env, deque([100000.])
+    runner.steps = 32
     runner.alg = SimpleNamespace(cfg=vars(B1Z1FACETCfgPPO().algorithm),
         update_entropy=lambda *args: entropy.append(args))
     info = dict(rew_facet_base_velocity=1.2, rew_facet_yaw_rate=.8,

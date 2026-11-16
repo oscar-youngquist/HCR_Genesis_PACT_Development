@@ -25,6 +25,13 @@ def main():
     cfg, training = B1Z1FACETCfg(), B1Z1FACETCfgPPO()
     cfg.env.num_envs = args.num_envs
     cfg.env.episode_length_s = .8  # Exercise timeout/reset packets in a short run.
+    # Test-local sustained load/release and base pulses; production sampler unchanged.
+    cfg.facet_forces.start_seconds = .1
+    cfg.facet_forces.cycle_seconds = .8
+    cfg.facet_forces.ee_duration = .4
+    cfg.facet_forces.mixture = (0., 0., 0., 1.)
+    cfg.facet_forces.horizontal_peak = (40., 40.)
+    cfg.facet_forces.vertical_peak = (0., 0.)
     training.algorithm.student_start_iteration = 3
     training.runner.max_iterations = 6
     training.runner.save_interval = 3
@@ -61,9 +68,12 @@ def main():
         runner.load(args.output_dir/'model_6.pt')
         assert not changed(runner.model, saved) and runner.current_learning_iteration == 6
         assert runner.hidden.count_nonzero() == runner.ema_hidden.count_nonzero() == 0
+        from facet_bounded_diagnostics import evaluate
+        evaluation = evaluate(runner)
+        assert all(evaluation[k]['ee_peak_N'] > 0 and evaluation[k]['base_peak_N'] > 0 for k in ('deterministic', 'stochastic'))
         result = dict(elapsed_seconds=time.perf_counter()-start, num_envs=args.num_envs,
             updates=6, switch_after=3, last_metrics=runner.last_metrics,
-            observations=env.get_facet_observation_schema(), device=args.gpu)
+            observations=env.get_facet_observation_schema(), device=args.gpu, evaluation=evaluation)
         (args.output_dir/'smoke.json').write_text(json.dumps(result, indent=2))
         print('FACET_STAGE5_SMOKE_OK', json.dumps(result), flush=True)
     finally:
