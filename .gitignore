@@ -92,6 +92,9 @@ resources/terrains/*.stl
 /deployments/**/archive/
 /deployments/**/__pycache__/
 
+# Portable runtime/source archives are generated artifacts, not source code.
+/container_exports/
+
 # Keep evaluation code/documentation, never collected trials or reports.
 !/diagnostics/matched5500/
 /diagnostics/matched5500/*

@@ -242,6 +242,15 @@ def validate(runner, data, operation='resume', *, learning_rate=None):
     if state is None: raise ValueError('Legacy partial checkpoint: use explicit allow_legacy or weights_only')
     if state['version'] != VERSION: raise ValueError('Unsupported training checkpoint version')
     current = contract(runner); saved = state['contract']
+    if (adapter(runner) == 'hard_pact'
+            and not (state.get('qp_curriculum') or {}).get('intervention')):
+        from rsl_rl.algorithms.hard_pact_intervention_curriculum import legacy_intervention_contract
+        migrated = legacy_intervention_contract(saved, current)
+        if migrated != saved:
+            warnings.warn('Checkpoint predates intervention curriculum: adopting only the explicitly '
+                          'configured sampler/settings; collecting fresh evidence at two solves '
+                          'if curriculum_substeps is selected.', RuntimeWarning)
+        saved = migrated
     for key in current:
         if operation == 'weights_only':
             # Playback/bootstrap may change terrain, command ranges, batch size,
@@ -325,7 +334,10 @@ def clear_gate_evidence(state):
     defaults = dict(reward_ema=None, best_reward_ema=-float('inf'), required_reward=0.,
         reward_history=[], ema=None, history=[], pre_qp_reference=None, reference_frozen=False,
         recovery_counter=0, streak=0, command_streak=0, threshold=None, advanced=False,
-        baseline_frozen=False)
+        baseline_frozen=False, tracking_reference=None, failure_reference=None,
+        tracking_mean=None, failure_rate=None, gate=False, window_start=None,
+        window_iterations=0, tracking_sum=0., tracking_count=0., failures=0., exposure=0.,
+        window_valid=True)
     if isinstance(state, dict):
         return {k: deepcopy(defaults[k]) if k in defaults else clear_gate_evidence(v) for k, v in state.items()}
     return state

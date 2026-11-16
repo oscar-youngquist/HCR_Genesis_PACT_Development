@@ -19,8 +19,11 @@ def execution_torque(base, candidate, accepted, alpha):
 
 
 class QPCurriculum:
-    def __init__(self, cfg):
+    def __init__(self, cfg, actor_ramp_iterations=0):
         self.cfg = cfg
+        from .hard_pact_intervention_curriculum import InterventionCurriculum
+        self.intervention = (InterventionCurriculum(cfg, actor_ramp_iterations)
+                             if cfg.qp_update_mode == 'curriculum_substeps' else None)
         self.origin = int(cfg.warmup_iterations) + int(cfg.correction_ramp_start_offset)
         self.start = (max(cfg.warmup_iterations, self.origin + cfg.correction_ramp_duration)
                       if cfg.objective_curriculum_start is None and cfg.correction_ramp_enabled
@@ -88,6 +91,8 @@ class QPCurriculum:
             scheduled=c.objective_curriculum_enabled and (name=='contact_acceleration_weight' or c.torso_stability_curriculum_enabled)
             weights[name] = (initial + self.progress*(final-initial) if scheduled else final)
         self.snapshot_iteration = int(iteration)
+        if self.intervention is not None:
+            self.intervention.begin(iteration)
         self.snapshot_progress = self.progress
         self.snapshot = (replace(c, **weights), alpha)
         return self.snapshot
@@ -161,7 +166,8 @@ class QPCurriculum:
                     advanced=int(self.advanced))
 
     def state_dict(self):
-        return {"version": 3, **{k: getattr(self, k) for k in
+        return {"version": 3, "intervention": (self.intervention.state_dict() if self.intervention else None),
+                **{k: getattr(self, k) for k in
                 ("origin", "start", "progress", "ema", "threshold", "last_iteration", "last_step",
                  "activation_iteration", "pre_qp_reference", "baseline_frozen", "recovery_counter", "block_reason")},
                 "history": list(self.history)}
@@ -169,6 +175,8 @@ class QPCurriculum:
     def load_state_dict(self, state):
         if state["version"] not in (1,2,3):
             raise ValueError("Unsupported QP curriculum checkpoint version")
+        if self.intervention is not None and state.get('intervention') is not None:
+            self.intervention.load_state_dict(state['intervention'])
         for key in ("origin", "start", "progress", "ema", "threshold", "last_iteration", "last_step"):
             setattr(self, key, state[key])
         self.history.clear()

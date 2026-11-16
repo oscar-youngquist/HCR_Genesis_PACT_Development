@@ -27,7 +27,7 @@ NUM_VARIABLES = 24
 
 def qp_substep_anchors(mode, decimation):
     """Possible dispatch times, not per-environment solve counts."""
-    if mode not in ("every_substep", "random_one_substep", "first_plus_random_substep", "mixed_substeps"):
+    if mode not in ("every_substep", "random_one_substep", "first_plus_random_substep", "mixed_substeps", "curriculum_substeps"):
         raise ValueError(f"Unsupported qp_update_mode: {mode}")
     if decimation != 4:
         raise ValueError("HardPACT QP execution requires exactly four physics substeps")
@@ -36,14 +36,15 @@ def qp_substep_anchors(mode, decimation):
 
 def qp_substep_mask(mode, substep, selected):
     qp_substep_anchors(mode,4)
-    if mode == "mixed_substeps":
+    if mode in ("mixed_substeps", "curriculum_substeps"):
         return (selected & (1 << substep)) != 0
     if mode == "first_plus_random_substep":
         return (selected == substep) | (substep == 0)
     return torch.ones_like(selected,dtype=torch.bool) if mode=="every_substep" else selected==substep
 
 
-def qp_interval_selection(mode, num_envs, decimation, device, *, generator=None, shared_later=False):
+def qp_interval_selection(mode, num_envs, decimation, device, *, generator=None, shared_later=False,
+                          intervention_probabilities=(1., 0., 0.)):
     """Return rollout selection and one replay anchor, before any solver result.
 
     In first-plus-random mode the rollout index is the later solve (k>0).
@@ -51,13 +52,27 @@ def qp_interval_selection(mode, num_envs, decimation, device, *, generator=None,
     only this anchor preserves the existing differentiated-row/epoch budget.
     """
     qp_substep_anchors(mode, decimation)
-    if mode == "mixed_substeps":
+    if mode in ("mixed_substeps", "curriculum_substeps"):
         # Exactly floor(.5*N)/floor(.3*N)/remainder rows, randomly reassigned
         # each interval. Bitmasks keep the existing one-scalar rollout storage.
         order = torch.randperm(num_envs, device=device, generator=generator)
         count = torch.full((num_envs,), 4, device=device, dtype=torch.long)
         first = num_envs // 2
         second = 3 * num_envs // 10
+        if mode == "curriculum_substeps":
+            import math
+            probabilities = intervention_probabilities
+            if (len(probabilities) != 3 or any(not math.isfinite(p) or p < 0 for p in probabilities)
+                    or not math.isclose(sum(probabilities), 1., abs_tol=1e-9)):
+                raise ValueError('Expected three intervention probabilities summing to one')
+            # Largest-remainder apportionment: exact N, errors < 1 row,
+            # deterministic ties (2,3,4). Group identities remain random.
+            quotas = [num_envs*p for p in probabilities]
+            groups = [math.floor(q) for q in quotas]
+            priority = sorted(range(3), key=lambda i: (-(quotas[i]-groups[i]), i))
+            for i in priority[:num_envs-sum(groups)]:
+                groups[i] += 1
+            first, second = groups[:2]
         count[order[:first]] = 2
         count[order[first:first+second]] = 3
         later = 1 + torch.rand(num_envs, 3, device=device, generator=generator).argsort(dim=1)
@@ -139,6 +154,12 @@ class HardPACTQPConfig:
     recovery_projection_slack_weight: float = 1.0
     recovery_projection_rate_slack_weight: float = 1.0
     qp_update_mode: str = "random_one_substep"
+    intervention_settling_iterations: int = 200
+    intervention_ramp_iterations: int = 4000
+    intervention_window_iterations: int = 200
+    intervention_tracking_ratio: float = .90
+    intervention_failure_ratio: float = 1.20
+    intervention_failure_allowance: float = 0.0  # failures / simulated env-second
     # One canonical QP and fallback cascade can be solved by any registered
     # numerical backend. Overrides are diagnostics-only and require an
     # explicit mismatch opt-in so rollout/training cannot diverge silently.
@@ -292,6 +313,9 @@ class HardPACTQPConfig:
         if self.constraint_schema_version != 2:
             raise ValueError("Unsupported HardPACT constraint schema; expected version 2")
         qp_substep_anchors(self.qp_update_mode,4)
+        if self.qp_update_mode == 'curriculum_substeps':
+            from .hard_pact_intervention_curriculum import InterventionCurriculum
+            InterventionCurriculum(self)  # validate before constructing simulation/solvers
         if self.cupiqp_rollout_cache_size < 1 or self.cupiqp_ppo_pool_size < 0:
             raise ValueError("cuPIQP cache size must be positive and pool size nonnegative")
         if (self.warmup_iterations < 0

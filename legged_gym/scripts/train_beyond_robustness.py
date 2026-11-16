@@ -119,7 +119,12 @@ def resolve_run(args):
 def archive(log_dir,resolved,args,changes):
     """Archive BR and shared code, without task-directory assumptions."""
     from rsl_rl.beyond_robustness_config import settings_dict
-    def git(*cmd): return subprocess.check_output(['git','-C',str(ROOT),*cmd],text=True).strip()
+    def git(*cmd):
+        try: return subprocess.check_output(['git','-C',str(ROOT),*cmd],text=True,stderr=subprocess.DEVNULL).strip()
+        except (OSError,subprocess.CalledProcessError):
+            # Linked worktrees/source bundles need host-provided provenance,
+            # not a bind mount exposing the parent repository's .git directory.
+            return os.environ.get('TRAINING_GIT_SHA' if cmd[0]=='rev-parse' else 'TRAINING_GIT_STATUS','unavailable')
     with tarfile.open(log_dir/'sources.tar.gz','w:gz') as tar:
         for folder in ('rsl_rl','legged_gym','containers/isaaclab'):
             for path in sorted((ROOT/folder).rglob('*')):

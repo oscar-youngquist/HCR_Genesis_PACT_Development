@@ -54,7 +54,8 @@ def load(runner, path, *, operation='resume', learning_rate=None, allow_legacy=F
             qp_state = state['qp_curriculum']
             if qp_state is not None:
                 from rsl_rl.algorithms.hard_pact_qp_curriculum import QPCurriculum
-                runner.qp_curriculum = QPCurriculum(runner.alg.qp_config)
+                runner.qp_curriculum = QPCurriculum(runner.alg.qp_config,
+                    getattr(runner.alg, 'actor_physics_warmup_iterations', 0))
                 runner.qp_curriculum.load_state_dict(tc.clear_gate_evidence(qp_state)
                     if operation == 'stage_transfer' else qp_state)
             if operation == 'stage_transfer':

@@ -368,7 +368,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             torque_rate_limits = 0.0  # Substep-mean squared excess / (rate*physics_dt)^2; 0 disables.
             pd_target_torque_limit = 0.0
 
-            alive_bonus = 0.1
+            alive_bonus = 0.5
 
             dof_vel_stand_still = 0.0
             stand_still_contact = 0.5
@@ -551,7 +551,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         vae_kl_warmup_iterations = 0  # 0 disables the curriculum
 
         # Multiplies contact BCE inside the collective explicit-estimator loss.
-        contact_probability_loss_weight = 0.1
+        contact_probability_loss_weight = 0.2
         privileged_loss_weight = 1.0
         explicit_loss_weight = 1.0
         grf_loss_weight = 1.0
@@ -587,26 +587,26 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
         lambda_inverse = 0.2
         lambda_rollout = 0.8
-        lambda_projection = 0.25
+        lambda_projection = 0.1
         # Cosine 0->1 from QP activation, in absolute PPO iterations; 0 disables.
         # Scales actor projection/velocity/FK/load losses, not encoder/decoder PINNs.
         actor_physics_warmup_iterations = 1000
-        lambda_qp_velocity_xy = 1.0  # inherit lambda_projection; 0 disables
-        lambda_qp_velocity_yaw = 1.0  # independent nonnegative override
+        lambda_qp_velocity_xy = 0.1  # inherit lambda_projection; 0 disables
+        lambda_qp_velocity_yaw = 0.1  # independent nonnegative override
 
         profile_bard_timing = False
         # Optional actor-only losses; zero skips computation and FK storage.
         # Shared actor weights can affect both outputs. Load compensation does
         # not identify disturbance-specific incremental effort or a PD/FF ratio.
         actor_regularizers = {
-            'lambda_fk': 0.10,  # Foot-position consistency, position-command path only.
+            'lambda_fk': 0.05,  # Foot-position consistency, position-command path only.
             'fk_position_scale_m': 0.10,  # Body-relative XYZ normalization [m].
-            'fk_deadband_m': 0.02,  # Per-coordinate zero-error band [m].
+            'fk_deadband_m': 0.01,  # Per-coordinate zero-error band [m].
             
-            'lambda_load': 0.10,  # Direct nominal-FF Huber support supervision; existing actor warmup applies.
+            'lambda_load': 0.05,  # Direct nominal-FF Huber support supervision; existing actor warmup applies.
             'load_balance_relative_tolerance': 1e-5,  # Exact support balance relative numerical tolerance; no ridge.
             'load_balance_absolute_tolerance': 1e-6,  # Absolute tolerance after force/moment row normalization.
-            'load_force_scale_n': 100.0,  # Allocation force-row scale [N].
+            'load_force_scale_n': 50.0,  # Allocation force-row scale [N].
             'load_moment_scale_nm': 25.0,  # Allocation moment-row scale [Nm].
         }
         console_debug = False
@@ -634,7 +634,13 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'enabled': True,                                 # Master QP switch; ablation gates still apply.
             'warmup_iterations': 0,                        # Absolute PPO iteration at which rollout/replay QPs become eligible.
             # first_plus_random_substep - First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
-            'qp_update_mode': 'mixed_substeps',              # Random 50/30/20% groups: first+1 / first+2 / all four; one uniform executed PPO anchor.
+            'qp_update_mode': 'curriculum_substeps',         # Gated 2 -> 4 solves; random groups each interval, one uniform executed PPO anchor.
+            'intervention_settling_iterations': 500,         # After BOTH correction and actor-physics ramps finish.
+            'intervention_ramp_iterations': 4000,            # Gate-open PPO iterations from two solves to every substep.
+            'intervention_window_iterations': 200,          # Complete non-overlapping evidence windows; also required for baseline.
+            'intervention_tracking_ratio': 0.90,            # Minimum fraction of best raw linear-tracking window mean.
+            'intervention_failure_ratio': 1.10,              # Maximum multiple of best (lowest) window failure rate.
+            'intervention_failure_allowance': 0.0,           # Additive failures / simulated environment-second near zero.
             'correction_ramp_enabled': True,                 # Blend accepted QP corrections into execution; full QP losses remain unchanged.
             'correction_ramp_start_offset': 0,             # Iterations after QP activation before the execution ramp starts.
             'correction_ramp_duration': 500,                # Iterations to reach full correction; 0 applies full correction immediately.
@@ -647,19 +653,19 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'torque_rate_constraint_weight': 0.0,            # 0 removes QP rate constraints; any positive value enables the hard rate bound.
 
             # Inner objective: nominal torque / GRF tracking and stance acceleration
-            'torque_tracking_weight': 10.0,                  # Inner normalized total-torque tracking weight.
+            'torque_tracking_weight': 20.0,                  # Inner normalized total-torque tracking weight.
             'torque_scale_nm': 40.0,                         # Torque variable/reference normalization scale [Nm].
             'force_tracking_weight': 1.0,                    # Inner normalized predicted-GRF tracking weight.
             'force_scale_n': 250.0,                          # Force variable/reference normalization scale [N].
-            'contact_acceleration_weight': 1.00,             # Inner stance-acceleration weight; authoritative final curriculum target.
+            'contact_acceleration_weight': 0.25,             # Inner stance-acceleration weight; authoritative final curriculum target.
             'contact_acceleration_scale_m_s2': 50.0,         # Stance-acceleration residual normalization [m/s^2].
 
             # Inner objective: torso attitude and terrain-relative height
-            'attitude_weight': 5.0,                          # Inner roll/pitch stabilization weight; final curriculum target.
+            'attitude_weight': 0.5,                          # Inner roll/pitch stabilization weight; final curriculum target.
             'attitude_kp': 20.0,                             # Tilt-error gain in desired roll/pitch angular acceleration [1/s^2].
             'attitude_kd': 5.0,                              # Angular-rate damping gain [1/s].
             'attitude_acceleration_scale_rad_s2': 20.0,      # Roll/pitch acceleration residual normalization [rad/s^2].
-            'height_weight': 5.0,                            # Inner height-regulation weight; final curriculum target; 0 skips this objective.
+            'height_weight': 0.5,                            # Inner height-regulation weight; final curriculum target; 0 skips this objective.
             'height_kp': 20.0,                               # Terrain-relative height-error gain [1/s^2].
             'height_kd': 5.0,                                # Predicted world-vertical velocity damping gain [1/s].
             'height_target': None,                           # Target torso height [m]; None uses rewards.base_height_target.
@@ -667,7 +673,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
             # Velocity tracking: independent inner-QP and outer-loss horizons
             'planar_velocity_weight': 20.0,                  # Inner normalized body-frame planar-velocity tracking weight.
-            'yaw_rate_weight': 12.0,                         # Inner normalized body-frame yaw-rate tracking weight.
+            'yaw_rate_weight': 10.0,                         # Inner normalized body-frame yaw-rate tracking weight.
             'planar_velocity_scale_m_s': 1.0,                # Planar-velocity error normalization [m/s].
             'yaw_rate_scale_rad_s': 1.0,                     # Yaw-rate error normalization [rad/s].
             'qp_velocity_objective_horizon_s': 0.020,        # Inner xy/yaw constant-derivative horizon [s]; None uses physics dt.

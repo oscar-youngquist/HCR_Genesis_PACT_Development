@@ -1,6 +1,89 @@
 # Mixed and First Plus Random Substep QP
 
-The Go2 experiment now selects `qp_update_mode='mixed_substeps'`:
+## Performance-gated intervention curriculum (active Go2 configuration)
+
+Select `qp_update_mode='curriculum_substeps'` in `algorithm.hard_pact_qp`.
+No extra enable flag is needed. The default schedule is:
+
+```python
+'qp_update_mode': 'curriculum_substeps',
+'intervention_settling_iterations': 200,
+'intervention_ramp_iterations': 4000,
+'intervention_window_iterations': 200,
+'intervention_tracking_ratio': 0.90,
+'intervention_failure_ratio': 1.20,
+'intervention_failure_allowance': 0.0,  # events / simulated environment-second
+```
+
+Probabilities for 2/3/4 solves interpolate linearly between progress knots
+`0:(1,0,0)`, `.25:(.75,.20,.05)`, `.5:(.5,.3,.2)`,
+`.75:(.25,.25,.5)`, `1:(0,0,1)`. Each interval uses largest-remainder integer
+group sizes (ties prefer 2 then 3 then 4), randomly assigns environments, and
+draws distinct uniform later substeps, always including zero. Tiny batches
+therefore approximate the mixture to within one row per group. PPO uniformly
+preselects one scheduled solve before outcomes; its budget is unchanged.
+Unselected substeps use fresh nominal torque, never held corrections.
+
+Evidence collection starts after both existing ramps end. Correction ends at
+`warmup_iterations + correction_ramp_start_offset + correction_ramp_duration`
+when enabled with positive duration (otherwise at QP activation). Actor physics
+ends at `warmup_iterations + actor_physics_warmup_iterations`. The later end,
+not an independent ramp clock, starts settling. At least one complete evidence
+window is necessary even if settling is shorter. Progress increments by
+`1/intervention_ramp_iterations` after each valid, gate-open completed iteration
+past settling; the updated mixture applies to the next rollout/update only.
+
+Raw linear tracking uses existing all-environment/control-step scores before
+reward scaling. Each window computes a sample-weighted tracking mean and
+`sum(non-timeout, non-relocation resets) / sum(N * control_dt)`; repeated failures
+count as events, not unique environments. This is independent of TensorBoard
+reporting intervals and episode reward means. References only improve: maximum
+window tracking and minimum window failure rate. The gate requires tracking
+>= ratio * reference and failures <= ratio * reference + absolute allowance.
+No yaw or plateau requirement. With a zero failure reference and zero allowance,
+only a zero-failure window passes. Missing/nonfinite/insufficient evidence
+invalidates the window and pauses progress; the gate otherwise stays fixed
+between windows. Gate decisions apply only to subsequent iterations.
+
+Checkpoint state under `hard_pact_qp_curriculum.intervention` (also in the shared
+training envelope) includes progress, absolute timing, partial evidence, best
+references and the gate. Torch RNG restoration preserves subsequent group and
+anchor sampling. A checkpoint lacking this state starts at two solves and
+collects a fresh complete window; iteration count never implies intervention
+progress. Physical Isaac Lab resume still starts fresh episodes, not exact
+PhysX continuation. Objective-weight scheduling is independent.
+
+`curriculum/intervention/*` logs progress, probabilities, expected mean solves
+(before integer rounding), gate/reason and completed-window means/references.
+Unavailable evidence is NaN, not a successful zero. Reason codes: 0 existing
+ramps, 1 settling, 2 insufficient evidence, 3 tracking, 4 failures, 5 open,
+6 complete. Metrics describe the rollout mixture and the decision for the next
+iteration. Deployment may explicitly select `every_substep`; without a restored
+training schedule, curriculum mode defaults to two solves.
+
+Old complete checkpoint envelopes predating the new settings support a narrow
+sampler migration when the new mode is explicitly selected: only intervention
+settings and sampler metadata may differ. Numerical QP, optimizer, actor/loss,
+and input contracts still compare strictly; a warning identifies the fresh
+schedule. Legacy weight-only files still cannot restore unavailable optimizer
+or global training state.
+
+Focused CPU validation (2026-11-15, `lr_lab_cupiqp`): 116 passed. Covers the new
+schedule plus unchanged sampling/control, QP-objective curriculum and shared
+checkpoint regressions. No GPU simulator/training run for this change.
+
+```bash
+conda activate lr_lab_cupiqp
+SIMULATOR=isaaclab PYTHONPATH=. LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6" \
+python -m pytest -q -p no:cacheprovider \
+  tests/test_hard_pact_intervention_curriculum.py \
+  tests/test_hard_pact_first_plus_random.py tests/test_hard_pact_qp_curriculum.py \
+  tests/test_hard_pact_qp_modes.py tests/test_training_state_transfer.py
+```
+
+## Fixed mixed mode (unchanged)
+
+The existing `qp_update_mode='mixed_substeps'` remains available:
 each interval randomly assigns `floor(0.5*N)` environments to first + one
 random later solve, `floor(0.3*N)` to first + two distinct random later solves,
 and the remainder to all four. Groups and later substeps are redrawn every
@@ -20,7 +103,7 @@ Set the existing `algorithm.hard_pact_qp` dictionary entry:
 ```
 
 The compatibility dataclass default remains `random_one_substep`; the current
-HardPACT experiment config selects `mixed_substeps`. With four physics substeps per
+HardPACT experiment config selects `curriculum_substeps`. With four physics substeps per
 policy interval, the new mode solves every environment at k=0 and again at
 K sampled from {1,2,3}. Later-index counts differ by at most one across
 environments; random offsets/permutations refresh every policy interval.

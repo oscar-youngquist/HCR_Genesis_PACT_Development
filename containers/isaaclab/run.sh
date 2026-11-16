@@ -2,7 +2,7 @@
 # One assigned GPU, one checkout, one process. No conda activation on the cluster.
 set -euo pipefail
 usage() {
-    echo "Usage: bash run.sh {smoke|train} TASK [training arguments]" >&2
+    echo "Usage: bash run.sh {check|smoke|train} TASK [training arguments]" >&2
     echo "       bash run.sh script TRAINING_UNITY_SCRIPT [training arguments]" >&2
     echo "Required: IMAGE REPO RUN_DIR CUDA_VISIBLE_DEVICES OMNI_KIT_ACCEPT_EULA=YES" >&2
 }
@@ -14,7 +14,7 @@ for argument in "$@"; do
     else forward+=("$argument"); fi
 done
 set -- "${forward[@]}"
-case "$mode" in smoke|train|script) ;; *) usage; exit 2 ;; esac
+case "$mode" in check|smoke|train|script) ;; *) usage; exit 2 ;; esac
 : "${IMAGE:?Set IMAGE to the SIF path}"
 : "${REPO:?Set REPO to the desired branch checkout}"
 : "${RUN_DIR:?Set RUN_DIR to a unique persistent output directory}"
@@ -48,6 +48,9 @@ else
         go2_mule_isaaclab) simulator=isaaclab; entry=train_mule.py ;;
         go2_hard_pact*_isaaclab) simulator=isaaclab; entry=train_hard_pact.py ;;
         *) echo "Unsupported task: $task" >&2; exit 2;; esac
+fi
+if [[ "$mode" == check && "$task" != go2_beyond_robustness_isaaclab && "$task" != go2_mule_isaaclab ]]; then
+    echo 'check currently supports BR and MULE only.' >&2; exit 2
 fi
 for argument in "$@"; do
     case "$argument" in
@@ -86,8 +89,8 @@ export APPTAINERENV_OMNI_KIT_ACCEPT_EULA=YES
 export APPTAINERENV_SIMULATOR="$simulator"
 # Linked worktrees point outside the repo bind. Archive authoritative host Git
 # identity without binding an unrelated checkout or requiring writable .git.
-export APPTAINERENV_TRAINING_GIT_SHA=$(git -C "$REPO" rev-parse HEAD)
-export APPTAINERENV_TRAINING_GIT_STATUS=$(git -C "$REPO" status --short)
+export APPTAINERENV_TRAINING_GIT_SHA=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf '%s' "${TRAINING_GIT_SHA:-unavailable}")
+export APPTAINERENV_TRAINING_GIT_STATUS=$(git -C "$REPO" status --short 2>/dev/null || printf '%s' "${TRAINING_GIT_STATUS:-unavailable}")
 export APPTAINERENV_OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
 export APPTAINERENV_WANDB_MODE="${WANDB_MODE:-offline}"
 export APPTAINERENV_TMPDIR=/tmp
@@ -99,6 +102,13 @@ options=(exec --nv --cleanenv --containall
     --bind "$RUN_DIR:/output" --bind "$RUN_DIR/logs:/workspace/repo/logs"
     --bind "$runtime/kit-cache:$kit/cache" --bind "$runtime/kit-data:$kit/data"
     --bind "$runtime/kit-logs:$kit/logs" --pwd /workspace/repo/legged_gym/scripts)
+# Optional read-only checkpoint mount; pass /checkpoints/... to Python, not
+# the source host path. Each resume writes to the destination RUN_DIR.
+if [[ -n ${CHECKPOINT_DIR:-} ]]; then
+    CHECKPOINT_DIR=$(realpath "$CHECKPOINT_DIR")
+    [[ -d "$CHECKPOINT_DIR" && "$CHECKPOINT_DIR" != *:* && "$CHECKPOINT_DIR" != *,* ]] || exit 2
+    options+=(--bind "$CHECKPOINT_DIR:/checkpoints:ro")
+fi
 # --nv supplies driver libraries; some installations also need the host ICD JSON.
 if [[ -n ${NVIDIA_ICD_FILE:-} ]]; then
     [[ -f "$NVIDIA_ICD_FILE" ]] || { echo "Missing NVIDIA_ICD_FILE" >&2; exit 2; }
@@ -112,6 +122,10 @@ fi
 } > "$RUN_DIR/launch-${SLURM_JOB_ID:-local}-$$.txt"
 if [[ "$mode" == script ]]; then
     exec apptainer "${options[@]}" "$IMAGE" /bin/bash "$entry" "$@"
+fi
+if [[ "$mode" == check ]]; then
+    exec apptainer "${options[@]}" "$IMAGE" /opt/env/bin/python \
+        /workspace/repo/containers/isaaclab/check_comparisons.py "$task" "$@"
 fi
 limits=()
 [[ "$mode" != smoke ]] || limits=(--num_envs=2 --max_iterations=1)

@@ -336,6 +336,10 @@ class OnPolicyRunnerPACT:
                 (), device=self.device
             )
             self._rollout_disturbance_metric_count = 0
+            intervention = getattr(getattr(self, 'qp_curriculum', None), 'intervention', None)
+            if intervention is not None:
+                intervention_failures = torch.zeros((), device=self.device)
+                intervention_exposure = 0.
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
@@ -355,6 +359,14 @@ class OnPolicyRunnerPACT:
                     # Submit the predicted action and extract the resulting state... 
                     obs, privileged_obs, obs_hist, exp_labels, rewards, dones, infos, grfs = self.env.step(actions)  # obs_t+1  (obs_t)
                     self._accumulate_rollout_qp_metrics(infos)
+                    if intervention is not None:
+                        # Count each actual transition once, not reset summaries
+                        # accumulated over a different logging interval.
+                        timeouts = infos.get('time_outs', self.env.time_out_buf)
+                        relocations = infos.get('reset_outs', self.env.non_failure_reset_buf)
+                        intervention_failures.add_((dones.flatten().bool()
+                            & ~timeouts.flatten().bool() & ~relocations.flatten().bool()).sum())
+                        intervention_exposure += dones.numel() * self.env.dt
                     
                     # Create privileged obs
                     critic_obs = privileged_obs if privileged_obs is not None else obs
@@ -520,6 +532,12 @@ class OnPolicyRunnerPACT:
             learn_time = stop - start
             if self.is_hard_pact and hasattr(self, "qp_curriculum"):
                 self.qp_curriculum.finish(it, locomotion_score, locomotion_count)
+                if intervention is not None:
+                    intervention.finish(it, locomotion_score, locomotion_count,
+                                        intervention_failures.item(), intervention_exposure)
+                    if self.writer is not None:
+                        for key, value in intervention.metrics().items():
+                            self.writer.add_scalar('curriculum/intervention/'+key, value, it)
                 if self.writer is not None:
                     for key, value in self.qp_curriculum.metrics().items():
                         self.writer.add_scalar("curriculum/qp/"+key, value, it)
@@ -559,13 +577,17 @@ class OnPolicyRunnerPACT:
         if qp is not None:
             from rsl_rl.algorithms.hard_pact_qp_curriculum import QPCurriculum
             if not hasattr(self, "qp_curriculum"):
-                self.qp_curriculum = QPCurriculum(qp.cfg)
+                self.qp_curriculum = QPCurriculum(qp.cfg,
+                    getattr(self.alg, 'actor_physics_warmup_iterations', 0))
             effective, alpha = self.qp_curriculum.begin(iteration)
             # Same object serves rollout/replay. Settings, dimensions, and
             # backend leases stay intact; only state-dependent objectives vary.
             qp.cfg = effective
             self.env._qp_execution_alpha = alpha
-            self.env._qp_tracking_collect = effective.objective_curriculum_enabled
+            intervention = self.qp_curriculum.intervention
+            if intervention is not None:
+                self.env._qp_intervention_probabilities = intervention.begin(iteration)
+            self.env._qp_tracking_collect = effective.objective_curriculum_enabled or intervention is not None
             qp.diagnostics_scheduled = (qp.cfg.tensorboard_diagnostics_enabled
                 and qp.cfg.tensorboard_diagnostics_interval > 0
                 and iteration % qp.cfg.tensorboard_diagnostics_interval == 0)

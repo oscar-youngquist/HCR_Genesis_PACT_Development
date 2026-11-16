@@ -36,6 +36,18 @@ A [legged_gym](https://github.com/leggedrobotics/legged_gym) based framework for
 
 Please refer to the [doc of this repo](https://genesis-lr-doc.readthedocs.io/en/latest/).
 
+### BR and MULE training with Apptainer
+
+See the [Apptainer setup and training guide](containers/isaaclab/COMPARISONS.md)
+for running Beyond Robustness and MULE locally, on another machine, or on Unity.
+It covers obtaining/transferring the runtime and source bundle, GPU selection,
+preflight/smoke checks, full training, persistent host-side checkpoints and
+TensorBoard logs, and checkpoint resume. No host Conda environment is required.
+
+The guide reuses the private `isaaclab-hcr-v2.sif` runtime; it does not download
+or build the image automatically. See [executed validation and limitations](containers/isaaclab/COMPARISONS_VALIDATION.md)
+for the tested versions and bounded GPU smoke results.
+
 ## 🖼️ Gallery
 
 | Robot | Sim | Real |
