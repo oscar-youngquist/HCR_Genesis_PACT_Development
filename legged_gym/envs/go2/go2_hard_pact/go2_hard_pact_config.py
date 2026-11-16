@@ -792,7 +792,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'exception_capture_limit': 1,                    # Maximum captured exceptions per solver instance.
             'exception_capture_dir': '/tmp/hard_pact_qp_failures',  # Directory for saved solver-failure packets.
         }
-
+        # 8686, 8086, 8780
         action_clip = GO2HardPACTCfg.normalization.clip_actions
 
     class runner(LeggedRobotCfgPPO.runner):
@@ -848,5 +848,4 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 #   --gpu cuda:0 \
 #   --num_envs 10
 
-# ~/Research/Genesis_Development/HCR_HardPact/logs/hardpact_iclr/go2_hard_pact_rss_full/Nov13_17-56-38_hard_pact_rss_full_isaaclab
-# ~/Research/Genesis_Development/HCR_HardPact/logs/hardpact_iclr/go2_pact_rough/Nov11_16-19-05_hard_pact_isaaclab
+# ~/Research/Genesis_Development/HCR_Genesis_PACT_Development/logs/hardpact_iclr/go2_pact_rough/Oct07_10-22-08_hard_pact_full_isaaclab
