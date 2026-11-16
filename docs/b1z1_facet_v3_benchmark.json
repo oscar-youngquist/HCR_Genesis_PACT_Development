@@ -1,0 +1,438 @@
+{
+  "report_version": 1,
+  "date": "2026-11-16",
+  "formulation_version": 3,
+  "scope": "FACET reference plus all 32 history starts; not full training throughput",
+  "comparison": {
+    "historical_bounded_ms_4096": 53.90056,
+    "historical_yaw_reaction": false,
+    "note": "Historical timing is from the reviewed report, not a fresh same-session run. New timings use production yaw coupling."
+  },
+  "commands": [
+    "SIMULATOR=isaaclab PYTHONPATH=.:tests OMP_NUM_THREADS=1 python tests/benchmark_b1z1_facet_bounded.py --device cuda:0 --num-envs 4096 --yaw-reaction",
+    "SIMULATOR=isaaclab PYTHONPATH=.:tests OMP_NUM_THREADS=1 python tests/benchmark_b1z1_facet_bounded.py --device cuda:0 --num-envs 10240 --yaw-reaction",
+    "SIMULATOR=isaaclab PYTHONPATH=.:tests OMP_NUM_THREADS=1 python tests/benchmark_b1z1_facet_bounded.py --device cuda:0 --num-envs 4096 --yaw-reaction --eager"
+  ],
+  "runs": [
+    {
+      "envs": 4096,
+      "device": "cuda:0",
+      "measured_intervals": 20,
+      "results": {
+        "legacy": {
+          "ms_per_control_interval": 8.459942899935413,
+          "configuration": {
+            "enabled": true,
+            "base_mass": 4,
+            "ee_mass": 2,
+            "yaw_inertia": 1.5,
+            "base_stiffness": 16,
+            "base_damping": 7.2,
+            "ee_stiffness": 16,
+            "ee_damping": 7.2,
+            "yaw_stiffness": 16,
+            "yaw_damping": 7.2,
+            "alpha": 1,
+            "seed": 1701,
+            "sampling_mode": "upstream_b1z1",
+            "sample_ranges": {},
+            "max_substep_seconds": 0.005,
+            "formulation_version": 1,
+            "bounded": false,
+            "yaw_reaction": false,
+            "damping_ratio": 1,
+            "radius": [
+              0.4,
+              0.9
+            ],
+            "pitch": [
+              -1.2566370614359172,
+              1.0471975511965976
+            ],
+            "azimuth": [
+              -1.2,
+              1.2
+            ],
+            "center_xy": [
+              0.3,
+              0
+            ],
+            "box_low": [
+              -0.9,
+              -0.2,
+              -0.7
+            ],
+            "box_high": [
+              0.1,
+              0.2,
+              -0.05
+            ],
+            "ground": -0.7,
+            "max_offset": 0.2,
+            "boundary_margin": 0.04,
+            "boundary_stiffness": 300,
+            "boundary_damping": 30,
+            "base_speed_limit": 2,
+            "yaw_rate_limit": 2,
+            "compliant_offset_speed_limit": 1,
+            "compile_constraints": true
+          },
+          "warmup_seconds": 0.058372776984469965,
+          "numerical_substep_limit": 0.005,
+          "peak_allocated_MB": 65.462784
+        },
+        "bounded": {
+          "ms_per_control_interval": 14.556653049658053,
+          "configuration": {
+            "enabled": true,
+            "base_mass": 4,
+            "ee_mass": 2,
+            "yaw_inertia": 1.5,
+            "base_stiffness": 16,
+            "base_damping": 7.2,
+            "ee_stiffness": 16,
+            "ee_damping": 7.2,
+            "yaw_stiffness": 16,
+            "yaw_damping": 7.2,
+            "alpha": 1,
+            "seed": 1701,
+            "sampling_mode": "bounded_b1z1",
+            "sample_ranges": {},
+            "max_substep_seconds": 0.005,
+            "formulation_version": 3,
+            "bounded": true,
+            "yaw_reaction": true,
+            "damping_ratio": 1,
+            "radius": [
+              0.4,
+              0.9
+            ],
+            "pitch": [
+              -1.2566370614359172,
+              1.0471975511965976
+            ],
+            "azimuth": [
+              -1.2,
+              1.2
+            ],
+            "center_xy": [
+              0.3,
+              0
+            ],
+            "box_low": [
+              -0.9,
+              -0.2,
+              -0.7
+            ],
+            "box_high": [
+              0.1,
+              0.2,
+              -0.05
+            ],
+            "ground": -0.7,
+            "max_offset": 0.2,
+            "boundary_margin": 0.04,
+            "boundary_stiffness": 300,
+            "boundary_damping": 30,
+            "base_speed_limit": 2,
+            "yaw_rate_limit": 2,
+            "compliant_offset_speed_limit": 1,
+            "compile_constraints": true
+          },
+          "warmup_seconds": 23.861236263997853,
+          "numerical_substep_limit": 0.005,
+          "peak_allocated_MB": 130.59072
+        }
+      },
+      "source_revision": "bd0f71fe6a1f527935b0930a2a3faf7356b68e13",
+      "source_files_sha256": {
+        "legged_gym/envs/b1z1/b1z1_facet/reference.py": "4a811c237f8d8e1563de454d3f41314e07c14b6302227202c143bee2642cbff3",
+        "legged_gym/envs/b1z1/b1z1_facet/bounds.py": "90dd7e51eb296303ec8436b0e6d578ba63fd3319f4ebeef9115db62e61eeb974"
+      },
+      "working_diff_sha256": "5601f066792276ea921e127bf6a02eddbc2b37b505c66c4c25718087c6abe1a6",
+      "torch_version": "2.7.0+cu128",
+      "hardware": "NVIDIA GeForce RTX 4090",
+      "scope": "Reference plus 32-start history only; excludes simulator/PPO. Warmup includes compilation."
+    },
+    {
+      "envs": 10240,
+      "device": "cuda:0",
+      "measured_intervals": 20,
+      "results": {
+        "legacy": {
+          "ms_per_control_interval": 8.135341749584768,
+          "configuration": {
+            "enabled": true,
+            "base_mass": 4,
+            "ee_mass": 2,
+            "yaw_inertia": 1.5,
+            "base_stiffness": 16,
+            "base_damping": 7.2,
+            "ee_stiffness": 16,
+            "ee_damping": 7.2,
+            "yaw_stiffness": 16,
+            "yaw_damping": 7.2,
+            "alpha": 1,
+            "seed": 1701,
+            "sampling_mode": "upstream_b1z1",
+            "sample_ranges": {},
+            "max_substep_seconds": 0.005,
+            "formulation_version": 1,
+            "bounded": false,
+            "yaw_reaction": false,
+            "damping_ratio": 1,
+            "radius": [
+              0.4,
+              0.9
+            ],
+            "pitch": [
+              -1.2566370614359172,
+              1.0471975511965976
+            ],
+            "azimuth": [
+              -1.2,
+              1.2
+            ],
+            "center_xy": [
+              0.3,
+              0
+            ],
+            "box_low": [
+              -0.9,
+              -0.2,
+              -0.7
+            ],
+            "box_high": [
+              0.1,
+              0.2,
+              -0.05
+            ],
+            "ground": -0.7,
+            "max_offset": 0.2,
+            "boundary_margin": 0.04,
+            "boundary_stiffness": 300,
+            "boundary_damping": 30,
+            "base_speed_limit": 2,
+            "yaw_rate_limit": 2,
+            "compliant_offset_speed_limit": 1,
+            "compile_constraints": true
+          },
+          "warmup_seconds": 0.031014186999527737,
+          "numerical_substep_limit": 0.005,
+          "peak_allocated_MB": 167.448576
+        },
+        "bounded": {
+          "ms_per_control_interval": 24.325646899524145,
+          "configuration": {
+            "enabled": true,
+            "base_mass": 4,
+            "ee_mass": 2,
+            "yaw_inertia": 1.5,
+            "base_stiffness": 16,
+            "base_damping": 7.2,
+            "ee_stiffness": 16,
+            "ee_damping": 7.2,
+            "yaw_stiffness": 16,
+            "yaw_damping": 7.2,
+            "alpha": 1,
+            "seed": 1701,
+            "sampling_mode": "bounded_b1z1",
+            "sample_ranges": {},
+            "max_substep_seconds": 0.005,
+            "formulation_version": 3,
+            "bounded": true,
+            "yaw_reaction": true,
+            "damping_ratio": 1,
+            "radius": [
+              0.4,
+              0.9
+            ],
+            "pitch": [
+              -1.2566370614359172,
+              1.0471975511965976
+            ],
+            "azimuth": [
+              -1.2,
+              1.2
+            ],
+            "center_xy": [
+              0.3,
+              0
+            ],
+            "box_low": [
+              -0.9,
+              -0.2,
+              -0.7
+            ],
+            "box_high": [
+              0.1,
+              0.2,
+              -0.05
+            ],
+            "ground": -0.7,
+            "max_offset": 0.2,
+            "boundary_margin": 0.04,
+            "boundary_stiffness": 300,
+            "boundary_damping": 30,
+            "base_speed_limit": 2,
+            "yaw_rate_limit": 2,
+            "compliant_offset_speed_limit": 1,
+            "compile_constraints": true
+          },
+          "warmup_seconds": 23.355437839985825,
+          "numerical_substep_limit": 0.005,
+          "peak_allocated_MB": 323.935232
+        }
+      },
+      "source_revision": "bd0f71fe6a1f527935b0930a2a3faf7356b68e13",
+      "source_files_sha256": {
+        "legged_gym/envs/b1z1/b1z1_facet/reference.py": "4a811c237f8d8e1563de454d3f41314e07c14b6302227202c143bee2642cbff3",
+        "legged_gym/envs/b1z1/b1z1_facet/bounds.py": "90dd7e51eb296303ec8436b0e6d578ba63fd3319f4ebeef9115db62e61eeb974"
+      },
+      "working_diff_sha256": "5601f066792276ea921e127bf6a02eddbc2b37b505c66c4c25718087c6abe1a6",
+      "torch_version": "2.7.0+cu128",
+      "hardware": "NVIDIA GeForce RTX 4090",
+      "scope": "Reference plus 32-start history only; excludes simulator/PPO. Warmup includes compilation."
+    },
+    {
+      "envs": 4096,
+      "device": "cuda:0",
+      "measured_intervals": 20,
+      "results": {
+        "legacy": {
+          "ms_per_control_interval": 8.186511999520008,
+          "configuration": {
+            "enabled": true,
+            "base_mass": 4,
+            "ee_mass": 2,
+            "yaw_inertia": 1.5,
+            "base_stiffness": 16,
+            "base_damping": 7.2,
+            "ee_stiffness": 16,
+            "ee_damping": 7.2,
+            "yaw_stiffness": 16,
+            "yaw_damping": 7.2,
+            "alpha": 1,
+            "seed": 1701,
+            "sampling_mode": "upstream_b1z1",
+            "sample_ranges": {},
+            "max_substep_seconds": 0.005,
+            "formulation_version": 1,
+            "bounded": false,
+            "yaw_reaction": false,
+            "damping_ratio": 1,
+            "radius": [
+              0.4,
+              0.9
+            ],
+            "pitch": [
+              -1.2566370614359172,
+              1.0471975511965976
+            ],
+            "azimuth": [
+              -1.2,
+              1.2
+            ],
+            "center_xy": [
+              0.3,
+              0
+            ],
+            "box_low": [
+              -0.9,
+              -0.2,
+              -0.7
+            ],
+            "box_high": [
+              0.1,
+              0.2,
+              -0.05
+            ],
+            "ground": -0.7,
+            "max_offset": 0.2,
+            "boundary_margin": 0.04,
+            "boundary_stiffness": 300,
+            "boundary_damping": 30,
+            "base_speed_limit": 2,
+            "yaw_rate_limit": 2,
+            "compliant_offset_speed_limit": 1,
+            "compile_constraints": false
+          },
+          "warmup_seconds": 0.024654884007759392,
+          "numerical_substep_limit": 0.005,
+          "peak_allocated_MB": 79.778816
+        },
+        "bounded": {
+          "ms_per_control_interval": 74.81543040048564,
+          "configuration": {
+            "enabled": true,
+            "base_mass": 4,
+            "ee_mass": 2,
+            "yaw_inertia": 1.5,
+            "base_stiffness": 16,
+            "base_damping": 7.2,
+            "ee_stiffness": 16,
+            "ee_damping": 7.2,
+            "yaw_stiffness": 16,
+            "yaw_damping": 7.2,
+            "alpha": 1,
+            "seed": 1701,
+            "sampling_mode": "bounded_b1z1",
+            "sample_ranges": {},
+            "max_substep_seconds": 0.005,
+            "formulation_version": 3,
+            "bounded": true,
+            "yaw_reaction": true,
+            "damping_ratio": 1,
+            "radius": [
+              0.4,
+              0.9
+            ],
+            "pitch": [
+              -1.2566370614359172,
+              1.0471975511965976
+            ],
+            "azimuth": [
+              -1.2,
+              1.2
+            ],
+            "center_xy": [
+              0.3,
+              0
+            ],
+            "box_low": [
+              -0.9,
+              -0.2,
+              -0.7
+            ],
+            "box_high": [
+              0.1,
+              0.2,
+              -0.05
+            ],
+            "ground": -0.7,
+            "max_offset": 0.2,
+            "boundary_margin": 0.04,
+            "boundary_stiffness": 300,
+            "boundary_damping": 30,
+            "base_speed_limit": 2,
+            "yaw_rate_limit": 2,
+            "compliant_offset_speed_limit": 1,
+            "compile_constraints": false
+          },
+          "warmup_seconds": 0.239486669015605,
+          "numerical_substep_limit": 0.005,
+          "peak_allocated_MB": 168.2432
+        }
+      },
+      "source_revision": "bd0f71fe6a1f527935b0930a2a3faf7356b68e13",
+      "source_files_sha256": {
+        "legged_gym/envs/b1z1/b1z1_facet/reference.py": "4a811c237f8d8e1563de454d3f41314e07c14b6302227202c143bee2642cbff3",
+        "legged_gym/envs/b1z1/b1z1_facet/bounds.py": "90dd7e51eb296303ec8436b0e6d578ba63fd3319f4ebeef9115db62e61eeb974"
+      },
+      "working_diff_sha256": "5601f066792276ea921e127bf6a02eddbc2b37b505c66c4c25718087c6abe1a6",
+      "torch_version": "2.7.0+cu128",
+      "hardware": "NVIDIA GeForce RTX 4090",
+      "scope": "Reference plus 32-start history only; excludes simulator/PPO. Warmup includes compilation."
+    }
+  ]
+}
