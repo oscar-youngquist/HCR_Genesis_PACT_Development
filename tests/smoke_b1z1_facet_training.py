@@ -11,6 +11,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--gpu', default='cuda:0')
     parser.add_argument('--num-envs', type=int, default=8)
+    parser.add_argument('--normal-episode-length', action='store_true')
+    parser.add_argument('--disable-recovery-diagnostics', action='store_true')
     parser.add_argument('--output-dir', type=Path, default=Path('/tmp/facet-stage5-smoke'))
     args = parser.parse_args()
     os.environ['SIMULATOR'] = 'isaaclab_b1z1_pact'
@@ -24,7 +26,9 @@ def main():
     cli = get_args()
     cfg, training = B1Z1FACETCfg(), B1Z1FACETCfgPPO()
     cfg.env.num_envs = args.num_envs
-    cfg.env.episode_length_s = .8  # Exercise timeout/reset packets in a short run.
+    if not args.normal_episode_length:
+        cfg.env.episode_length_s = .8  # Exercise timeout/reset packets in a short run.
+    cfg.facet_reference.recovery_diagnostics = not args.disable_recovery_diagnostics
     # Test-local sustained load/release and base pulses; production sampler unchanged.
     cfg.facet_forces.start_seconds = .1
     cfg.facet_forces.cycle_seconds = .8
@@ -54,6 +58,7 @@ def main():
             torch.testing.assert_close(value, runner.model.student.state_dict()[key], rtol=0, atol=0)
         student, estimator, critic = (snapshot(getattr(runner.model, key)) for key in ('student', 'estimator', 'critic'))
         runner.learn(6)
+        reference_diagnostics = runner.last_reference_diagnostics
         assert changed(runner.model.student, student) and changed(runner.model.estimator, estimator) and changed(runner.model.critic, critic)
         assert all(not changed(getattr(runner.model, key), state) for key, state in frozen.items())
         assert all(torch.isfinite(p).all() for p in runner.model.parameters())
@@ -73,8 +78,9 @@ def main():
         assert all(evaluation[k]['ee_peak_N'] > 0 and evaluation[k]['base_peak_N'] > 0 for k in ('deterministic', 'stochastic'))
         result = dict(elapsed_seconds=time.perf_counter()-start, num_envs=args.num_envs,
             updates=6, switch_after=3, last_metrics=runner.last_metrics,
-            observations=env.get_facet_observation_schema(), device=args.gpu, evaluation=evaluation)
-        (args.output_dir/'smoke.json').write_text(json.dumps(result, indent=2))
+            observations=env.get_facet_observation_schema(), device=args.gpu, evaluation=evaluation,
+            reference_diagnostics=reference_diagnostics)
+        (args.output_dir/'smoke.json').write_text(json.dumps(result, indent=2, allow_nan=False))
         print('FACET_STAGE5_SMOKE_OK', json.dumps(result), flush=True)
     finally:
         env.simulator._app_launcher.app.close()

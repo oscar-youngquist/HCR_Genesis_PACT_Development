@@ -86,6 +86,13 @@ class B1Z1FACETRunner:
         self._history_totals = {}
         self._history_maxima = {}
         self._history_counts = None
+        # Import after registry initialization, avoiding an env/runner import cycle.
+        from legged_gym.envs.b1z1.b1z1_facet.recovery_diagnostics import RecoveryRollout
+        self._recovery_rollout = RecoveryRollout()
+        bank = getattr(self.env, 'facet_history', None)
+        seed_diagnostics = getattr(bank, '_seed_diagnostics', None)
+        censored_start = seed_diagnostics.censored.clone() if seed_diagnostics is not None else None
+        exposure_start = seed_diagnostics.exposure.clone() if seed_diagnostics is not None else None
         for t in range(self.steps):
             batch = self._normalize(packet)
             init = packet['is_init'].to(self.device)
@@ -105,6 +112,7 @@ class B1Z1FACETRunner:
             result = self.env.step(action.to(self.env.device))
             if hasattr(self.env, 'facet_history'):
                 snapshot = self.env.facet_history.read()
+                self._recovery_rollout.add(snapshot)
                 eligible = snapshot['valid']
                 count = eligible.sum(0)
                 self._history_counts = count if self._history_counts is None else self._history_counts+count
@@ -147,6 +155,18 @@ class B1Z1FACETRunner:
                 ep_infos.append(deepcopy(info['episode']))
             packet = next_packet
         storage.finish(self.alg.cfg['gamma'], self.alg.cfg['lam'])
+        self.last_reference_diagnostics = {}
+        if seed_diagnostics is not None:
+            cfg = bank.reference.cfg
+            self.last_reference_diagnostics = dict(
+                horizons=self._recovery_rollout.report(bank.horizons), phase=storage.phase,
+                control_dt_s=self.env.dt, episode_duration_s=self.env.cfg.env.episode_length_s,
+                limits={name: getattr(cfg, name) for name in ('max_offset', 'radius', 'pitch', 'azimuth',
+                    'box_low', 'box_high', 'ground', 'compliant_offset_speed_limit', 'base_speed_limit', 'yaw_rate_limit')},
+                censored=dict(zip(('expired_unrecovered', 'reset_unrecovered'),
+                    (seed_diagnostics.censored-censored_start).tolist())),
+                exposure=dict(zip(('environment_seconds', 'loaded_environment_seconds', 'ee_force_Ns',
+                    'base_force_Ns', 'base_moment_Nms'), (seed_diagnostics.exposure-exposure_start).tolist())))
         return storage, ep_infos
 
     @torch.no_grad()
@@ -267,6 +287,14 @@ class B1Z1FACETRunner:
             updated = time.perf_counter()
             metrics = {'Loss/'+k: v for k, v in metrics.items()}
             metrics.update(self._schedules(iteration, infos))
+            for age, groups in self.last_reference_diagnostics.get('horizons', {}).items():
+                for group, fields in groups.items():
+                    for name, number in fields.items():
+                        if number is not None:
+                            metrics[f'FACETRecovery/age_{age}/{group}/{name}'] = number
+            for group in ('censored', 'exposure'):
+                for name, number in self.last_reference_diagnostics.get(group, {}).items():
+                    metrics[f'FACETRecovery/{group}/{name}'] = number
             if self._history_counts is not None:
                 for j, age in enumerate(self.env.facet_history.horizons):
                     count = int(self._history_counts[j])

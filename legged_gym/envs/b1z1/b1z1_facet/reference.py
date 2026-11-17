@@ -6,6 +6,7 @@ import torch
 
 from legged_gym.envs.b1z1.directional_compliance import rotate_yaw
 from .bounds import restoring_force, guard, geometry
+from .recovery_diagnostics import checked, SeedDiagnostics
 
 
 @dataclass
@@ -49,6 +50,7 @@ class FACETReferenceCfg:
     # Additional motion relative to the moving nominal, NOT nominal arm motion.
     compliant_offset_speed_limit: float = 1.
     compile_constraints: bool = True
+    recovery_diagnostics: bool = True  # Reporting only; never a dynamics/eligibility switch.
 
 
 PARAMETERS = ("base_mass", "ee_mass", "yaw_inertia", "base_stiffness",
@@ -192,9 +194,12 @@ class FACETReference:
         # Fixed-shape fusion avoids hundreds of small geometry kernels per bank.
         self._constraint_step = self._constrain
         self._dynamics_step = self._rhs
+        self._checked_step = self._checked
         if cfg.bounded and cfg.compile_constraints and self._state.is_cuda:
             self._constraint_step = torch.compile(self._constrain, fullgraph=True, dynamic=False)
             self._dynamics_step = torch.compile(self._rhs, fullgraph=True, dynamic=False)
+            if cfg.recovery_diagnostics:
+                self._checked_step = torch.compile(self._checked, fullgraph=True, dynamic=False)
 
     @torch.no_grad()
     def reset(self, ids, base_position, base_velocity, yaw, yaw_rate, ee_position, ee_velocity):
@@ -293,6 +298,9 @@ class FACETReference:
                 self._integration_times[key] = tuple((torch.arange(2*steps+1, device=state.device, dtype=state.dtype)*(h/2)).unbind())
             times = self._integration_times[key]
         forces = torch.zeros_like(self._diagnostics) if diagnostics else None
+        detailed = self.cfg.bounded and self.cfg.recovery_diagnostics and not diagnostics
+        if detailed:
+            any_flags = torch.zeros((*state.shape[:-1], 6), device=state.device, dtype=torch.bool)
         if self.cfg.bounded:
             initial_q, initial_nominal, _ = self._relative(state, 0., inputs)
             recovery = (geometry(initial_q, initial_nominal, self.cfg)[0] < -1e-4).any(-1)
@@ -321,6 +329,9 @@ class FACETReference:
                 saturation |= removed.norm(dim=-1) > 1e-4
                 total_impulse += impulse
                 incompatible |= invalid
+                if detailed:
+                    checked_end = self._checked_step(state, end, inputs)
+                    any_flags |= checked_end[0]
                 if diagnostics:
                     if i == 0:
                         self._guard_impulse.zero_()
@@ -342,7 +353,12 @@ class FACETReference:
                 arm_relative_speed_mps=velocity.norm(dim=-1),
                 ee_world_speed_mps=state[..., 9:12].norm(dim=-1),
                 base_speed_mps=state[..., 2:4].norm(dim=-1), yaw_rate_rps=state[..., 5].abs())
+        if detailed:
+            self._last_checked = checked_end, any_flags
         return state, forces
+
+    def _checked(self, state, time, inputs):
+        return checked(self, state, time, inputs)
 
     def _relative(self, state, time, inputs):
         yaw = state[..., 4]
@@ -455,10 +471,16 @@ class FACETReferenceBank:
         self._parameters = {key: value[:, None] for key, value in reference._parameters.items()}
         self._cursor = 0
         self._constraints = {}
+        self._seed_diagnostics = (SeedDiagnostics(self._state)
+            if reference.cfg.bounded and reference.cfg.recovery_diagnostics else None)
         self._snapshot = self._select()
 
     @torch.no_grad()
     def clear(self, ids):
+        if self._seed_diagnostics is not None:
+            self._seed_diagnostics.retire(ids, self._ages[ids] >= 0, 1)
+            for value in self._seed_diagnostics.data.values():
+                value[ids] = 0
         self._state[ids] = 0
         self._ages[ids] = -1
         for value in self._constraints.values():
@@ -475,14 +497,20 @@ class FACETReferenceBank:
         # targets remain counted in diagnostics and retain existing reward use.
         result.update({'constraint_'+key: value.index_select(1, columns).detach()
                        for key, value in self._constraints.items()})
+        if self._seed_diagnostics is not None:
+            result.update({'diagnostic_'+key: value.index_select(1, columns).detach()
+                           for key, value in self._seed_diagnostics.data.items()})
         return result
 
     @torch.no_grad()
-    def advance(self, seed, dt, inputs, loads):
+    def advance(self, seed, dt, inputs, loads, applied_torque_world=None):
         if not math.isfinite(dt) or dt <= 0:
             raise ValueError("FACET control dt must be positive")
         if not self.reference._ready:
             raise RuntimeError("Initialize episode impedance before advancing histories")
+        if self._seed_diagnostics is not None:
+            self._seed_diagnostics.retire((slice(None), self._cursor), self._ages[:, self._cursor] >= 0, 0)
+            self._seed_diagnostics.seed(self._cursor, self.reference._checked_step(seed, 0., inputs))
         self._state[:, self._cursor] = seed
         self._ages[:, self._cursor] = 0
         active = self._ages >= 0
@@ -493,6 +521,16 @@ class FACETReferenceBank:
         self._state = torch.where(active[..., None], state, 0.)
         self._constraints = {key: torch.where(active, value, 0).detach()
                              for key, value in self.reference._last_constraints.items()}
+        if self._seed_diagnostics is not None:
+            # Actual held forces/couples, including injected loads. Once loaded,
+            # a trajectory remains in the loaded group through force removal.
+            loaded = (loads[0].norm(dim=-1) > 1e-6) | (loads[1].norm(dim=-1) > 1e-6) | (loads[2].abs() > 1e-6)
+            if applied_torque_world is not None:
+                loaded |= applied_torque_world.norm(dim=-1) > 1e-6
+            torque_norm = loads[2].abs() if applied_torque_world is None else applied_torque_world.norm(dim=-1)
+            self._seed_diagnostics.exposure += torch.stack((torch.ones_like(torque_norm), loaded,
+                loads[0].norm(dim=-1), loads[1].norm(dim=-1), torque_norm), -1).sum(0)*dt
+            self._seed_diagnostics.update(active, dt, *self.reference._last_checked, loaded)
         self._ages.add_(active)
         self._cursor = (self._cursor+1) % self.capacity
         self._snapshot = self._select()  # Only requested ages are copied, once per interval.

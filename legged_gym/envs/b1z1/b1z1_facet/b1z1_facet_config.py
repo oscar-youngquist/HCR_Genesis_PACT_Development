@@ -86,8 +86,8 @@ class B1Z1FACETCfgPPO:
         self.algorithm.estimator_epochs = 2
         self.algorithm.estimator_teacher_interval = 2
         self.algorithm.estimator_ema_tau = .04
-        self.algorithm.student_start_iteration = 18000  # 24000*24/32: identical teacher interactions.
-        self.algorithm.adaptation_iterations = 0  # Consumes part of the remaining 10k; no free interactions.
+        self.algorithm.student_start_iteration = 16500  # 80% of the current 20,625-update budget; 4,125 student updates.
+        self.algorithm.adaptation_iterations = 0  # Optional adaptation consumes the remaining budget, never adds interactions.
         self.policy = SimpleNamespace(action_mode='position')
         self.runner.policy_class_name = 'FACETModel'
         self.runner.algorithm_class_name = 'FACETPPO'

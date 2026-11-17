@@ -31,8 +31,13 @@ def record(args):
     cfg.control.damping = {name: 1. if name.startswith('z1_') else 2. for name in cfg.asset.dof_names}
     if args.record_task == "b1z1_facet":
         cfg.facet_reference.enabled = not args.references_disabled
+        cfg.facet_reference.recovery_diagnostics = not args.recovery_diagnostics_disabled
         cfg.facet_tracking.enabled = args.tracking_enabled
         cfg.facet_observations.enabled = not args.observations_disabled
+        cfg.facet_forces.enabled = False  # Injected callbacks below are the sole test force source.
+        for key in ('push_gripper_stators', 'push_robot_base', 'apply_ee_external_forces',
+                    'apply_base_external_forces', 'apply_base_external_torques'):
+            setattr(cfg.commands, key, True)
     train = copy_sections(task_registry.train_cfgs[args.record_task])
     cfg.terrain.mesh_type = "plane"
     cfg.terrain.curriculum = False
@@ -257,12 +262,35 @@ def main():
     parser.add_argument("--references-disabled", action="store_true")
     parser.add_argument("--tracking-enabled", action="store_true")
     parser.add_argument("--observations-disabled", action="store_true")
+    parser.add_argument("--recovery-diagnostics-disabled", action="store_true")
+    parser.add_argument("--recovery-parity", action="store_true", help="Only compare FACET diagnostics on/off")
     args = parser.parse_args()
     if (args.tracking_enabled or args.record_task is None) and args.steps < 33:
         parser.error("Stage 3 smoke requires at least 33 uninterrupted intervals")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.record_task:
         record(args)
+        return
+    if args.recovery_parity:
+        for enabled in (True, False):
+            directory = args.output_dir/('on' if enabled else 'off')
+            command = [sys.executable, str(Path(__file__).resolve()), '--record-task', 'b1z1_facet',
+                '--tracking-enabled', '--gpu', args.gpu, '--steps', str(args.steps), '--output-dir', str(directory)]
+            if not enabled:
+                command.append('--recovery-diagnostics-disabled')
+            with (args.output_dir/('on.log' if enabled else 'off.log')).open('w') as log:
+                subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=300)
+        counts = {}
+        for name in ('b1z1_facet_tracking.npz', 'b1z1_facet_tracking_nominal.npz',
+                     'facet_references.npz', 'facet_tracking.npz'):
+            with np.load(args.output_dir/'on'/name) as on, np.load(args.output_dir/'off'/name) as off:
+                assert set(off.files).issubset(on.files)
+                assert all(k.startswith('diagnostic_') for k in set(on.files)-set(off.files))
+                for key in off.files:
+                    np.testing.assert_array_equal(on[key], off[key], err_msg=name+':'+key)
+                counts[name] = len(off.files)
+        (args.output_dir/'recovery_parity.json').write_text(json.dumps(dict(bitwise_parity=True, arrays=counts), indent=2))
+        print('FACET_RECOVERY_PARITY_OK', counts)
         return
     root = Path(__file__).resolve().parents[1]
     environment = dict(os.environ, SIMULATOR="isaaclab_b1z1_pact", PYTHONPATH=str(root))

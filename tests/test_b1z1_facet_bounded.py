@@ -97,7 +97,11 @@ def test_fixed_ppo_and_preserved_interaction_budget():
     assert not a.use_adaptive_entropy and not a.use_clipped_value_loss
     assert cfg.runner.num_steps_per_env == 32
     assert cfg.runner.max_iterations*32 == B1Z1PACTCfgPPO.runner.max_iterations*24
-    assert a.student_start_iteration*32 == 24000*24
+    assert a.student_start_iteration == 16500
+    assert cfg.runner.max_iterations == 20625
+    assert a.student_start_iteration*5 == cfg.runner.max_iterations*4
+    assert cfg.runner.max_iterations-a.student_start_iteration == 4125
+    assert a.adaptation_iterations == 0
     assert not env.domain_rand.push_robots
 
 

@@ -135,15 +135,24 @@ class B1Z1FACET(B1Z1PPOPos):
             # These buffers are the actual sampled/gated loads held throughout
             # the just-completed interval. Read before parent callbacks can reset
             # or resample; use the captured start lever, never successor geometry.
+            torso_source = self.simulator.applied_torso_wrench_source()
             ee, base, moment = applied_loads(self.cfg.commands, self.simulator._ee_force_world,
-                self.simulator.applied_torso_wrench_source(), position, point)
+                torso_source, position, point)
             if hasattr(self, '_facet_exposure'):
                 self._facet_exposure += torch.stack((ee.norm(dim=-1), base.norm(dim=-1), torch.ones_like(moment)), -1)*self.dt
             self.facet_reference.advance(self.dt, position[:, :2], yaw, command, yaw_command,
                                          local, local_rate, height, ee, base, moment)
             if getattr(self, "facet_history", None) is not None:
+                # Roll/pitch couples do not enter planar dynamics, but still
+                # count as actual load exposure. Shift the gated free couple once.
+                applied_moment = None
+                if self.facet_reference.cfg.recovery_diagnostics:
+                    couple = torso_source[1] if (self.cfg.commands.push_robot_base and
+                        getattr(self.cfg.commands, 'apply_base_external_torques', False)) else torch.zeros_like(base)
+                    applied_moment = couple + torch.linalg.cross(point-position, base)
                 self.facet_history.advance(self._facet_seed, self.dt,
-                    (position[:, :2], yaw, command, yaw_command, local, local_rate, height), (ee, base, moment))
+                    (position[:, :2], yaw, command, yaw_command, local, local_rate, height), (ee, base, moment),
+                    applied_torque_world=applied_moment)
                 self._facet_snapshot = self.facet_history.read()
                 self._facet_seed = None
             self._facet_interval = None  # Reads/post-step calls cannot advance twice.

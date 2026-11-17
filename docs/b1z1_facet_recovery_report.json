@@ -1,0 +1,994 @@
+{
+  "schema": "facet_recovery_validation_v1",
+  "source_revision": "4b0f59c7f5a4c85b1f382bb96558d1003e2f95c2",
+  "branch": "legged_manip_diff_comp",
+  "source_sha256": {
+    "legged_gym/envs/b1z1/b1z1_facet/reference.py": "483ff50ba131c1b1d4f93fdba0b357170490fa0cc3f80328703029a3df6b5ae5",
+    "legged_gym/envs/b1z1/b1z1_facet/recovery_diagnostics.py": "72518f776cd3ae9e8a8a9a285c367163179c1423ddf8ca285361d8f6209329ce",
+    "legged_gym/envs/b1z1/b1z1_facet/b1z1_facet.py": "227eac53e1870870cb3f39f9cd8da4a33b50bd9aac18fbdd8c786078493488ad",
+    "rsl_rl/runners/b1z1_facet_runner.py": "0447d267fc296c6c37024400caf34b885af1dd2266fb90802ca8ac52b4a736df"
+  },
+  "cpu_suite": {
+    "passed": 162,
+    "skipped": 3,
+    "command": "SIMULATOR=isaaclab PYTHONPATH=.:tests OMP_NUM_THREADS=1 python -m pytest tests/test_b1z1_facet*.py -q -p no:cacheprovider"
+  },
+  "gpu_regressions": {
+    "passed": 3,
+    "device": "cuda:0",
+    "checks": [
+      "compiled/eager constraint and dynamics",
+      "portable student action/hidden parity CPU and CUDA"
+    ]
+  },
+  "remaining_skip": "Pinned upstream module checkout unavailable; two CUDA skips rerun unsandboxed.",
+  "zero_load_example": {
+    "initial_offset_m": 0.77,
+    "max_offset_m": 0.2,
+    "offset_speed_limit_mps": 1,
+    "control_dt_s": 0.02,
+    "offset_m_by_age": {
+      "8": 0.6100000000000099,
+      "16": 0.45000000000002977,
+      "32": 0.1375449838600009
+    },
+    "first_recovery_age": 29,
+    "first_recovery_time_s": 0.58,
+    "workspace_or_box_ground_violations": false
+  },
+  "benchmark": {
+    "envs": 4096,
+    "device": "cuda:0",
+    "measured_intervals": 40,
+    "warmup_intervals": 35,
+    "results": [
+      {
+        "enabled": false,
+        "ms_per_control_interval": 13.85365614987677,
+        "peak_allocated_MB": 130.563072,
+        "configuration": {
+          "enabled": true,
+          "base_mass": 4.0,
+          "ee_mass": 2.0,
+          "yaw_inertia": 1.5,
+          "base_stiffness": 16.0,
+          "base_damping": 7.2,
+          "ee_stiffness": 16.0,
+          "ee_damping": 7.2,
+          "yaw_stiffness": 16.0,
+          "yaw_damping": 7.2,
+          "alpha": 1.0,
+          "seed": 1701,
+          "sampling_mode": "bounded_b1z1",
+          "sample_ranges": {},
+          "max_substep_seconds": 0.005,
+          "formulation_version": 3,
+          "bounded": true,
+          "yaw_reaction": true,
+          "damping_ratio": 1.0,
+          "radius": [
+            0.4,
+            0.9
+          ],
+          "pitch": [
+            -1.2566370614359172,
+            1.0471975511965976
+          ],
+          "azimuth": [
+            -1.2,
+            1.2
+          ],
+          "center_xy": [
+            0.3,
+            0.0
+          ],
+          "box_low": [
+            -0.9,
+            -0.2,
+            -0.7
+          ],
+          "box_high": [
+            0.1,
+            0.2,
+            -0.05
+          ],
+          "ground": -0.7,
+          "max_offset": 0.2,
+          "boundary_margin": 0.04,
+          "boundary_stiffness": 300.0,
+          "boundary_damping": 30.0,
+          "base_speed_limit": 2.0,
+          "yaw_rate_limit": 2.0,
+          "compliant_offset_speed_limit": 1.0,
+          "compile_constraints": true,
+          "recovery_diagnostics": false
+        }
+      },
+      {
+        "enabled": true,
+        "ms_per_control_interval": 15.045236449805088,
+        "peak_allocated_MB": 167.695872,
+        "configuration": {
+          "enabled": true,
+          "base_mass": 4.0,
+          "ee_mass": 2.0,
+          "yaw_inertia": 1.5,
+          "base_stiffness": 16.0,
+          "base_damping": 7.2,
+          "ee_stiffness": 16.0,
+          "ee_damping": 7.2,
+          "yaw_stiffness": 16.0,
+          "yaw_damping": 7.2,
+          "alpha": 1.0,
+          "seed": 1701,
+          "sampling_mode": "bounded_b1z1",
+          "sample_ranges": {},
+          "max_substep_seconds": 0.005,
+          "formulation_version": 3,
+          "bounded": true,
+          "yaw_reaction": true,
+          "damping_ratio": 1.0,
+          "radius": [
+            0.4,
+            0.9
+          ],
+          "pitch": [
+            -1.2566370614359172,
+            1.0471975511965976
+          ],
+          "azimuth": [
+            -1.2,
+            1.2
+          ],
+          "center_xy": [
+            0.3,
+            0.0
+          ],
+          "box_low": [
+            -0.9,
+            -0.2,
+            -0.7
+          ],
+          "box_high": [
+            0.1,
+            0.2,
+            -0.05
+          ],
+          "ground": -0.7,
+          "max_offset": 0.2,
+          "boundary_margin": 0.04,
+          "boundary_stiffness": 300.0,
+          "boundary_damping": 30.0,
+          "base_speed_limit": 2.0,
+          "yaw_rate_limit": 2.0,
+          "compliant_offset_speed_limit": 1.0,
+          "compile_constraints": true,
+          "recovery_diagnostics": true
+        }
+      }
+    ],
+    "bitwise_reference_parity": true,
+    "overhead_ms": 1.1915802999283187,
+    "hardware": "NVIDIA GeForce RTX 4090",
+    "torch_version": "2.7.0+cu128",
+    "source_revision": "4b0f59c7f5a4c85b1f382bb96558d1003e2f95c2",
+    "source_sha256": {
+      "legged_gym/envs/b1z1/b1z1_facet/reference.py": "483ff50ba131c1b1d4f93fdba0b357170490fa0cc3f80328703029a3df6b5ae5",
+      "legged_gym/envs/b1z1/b1z1_facet/recovery_diagnostics.py": "72518f776cd3ae9e8a8a9a285c367163179c1423ddf8ca285361d8f6209329ce"
+    },
+    "scope": "Reference + history + new rollout reductions, not simulator/PPO; shared GPU timing may vary."
+  },
+  "isaac_training_smoke": {
+    "updates": 6,
+    "num_envs": 8,
+    "teacher_updates": 3,
+    "student_updates": 3,
+    "training_interactions": 1536,
+    "elapsed_training_and_evaluation_seconds": 27.016510337998625,
+    "reference_diagnostics": {
+      "horizons": {
+        "8": {
+          "all": {
+            "count": 255.0,
+            "initially_feasible_count": 15.0,
+            "initially_infeasible_count": 240.0,
+            "end_incompatible_fraction": 0.4470588235294118,
+            "any_incompatible_fraction": 0.5019607843137255,
+            "recovered_count": 126.0,
+            "unrecovered_count": 114.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": 0.08333332623754229,
+            "recovery_age_mean": 4.166666666666667,
+            "initial_offset_m_mean": 0.37800602725907867,
+            "offset_m_mean": 0.2436570822023878,
+            "offset_m_max": 0.5878726840019226,
+            "excess_m_mean": 0.07581666392438552,
+            "excess_m_max": 0.38787269592285156,
+            "excess_reduction_m_mean": 0.10653871484831268,
+            "nominal_motion_m_mean": 0.02413014822146472,
+            "end_offset_fraction": 0.4470588235294118,
+            "end_workspace_fraction": 0.08235294117647059,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          },
+          "initially_feasible": {
+            "count": 15.0,
+            "initially_feasible_count": 15.0,
+            "initially_infeasible_count": 0.0,
+            "end_incompatible_fraction": 0.0,
+            "any_incompatible_fraction": 0.0,
+            "recovered_count": 0.0,
+            "unrecovered_count": 0.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": null,
+            "recovery_age_mean": null,
+            "initial_offset_m_mean": 0.1701478878657023,
+            "offset_m_mean": 0.12185586492220561,
+            "offset_m_max": 0.13958750665187836,
+            "excess_m_mean": 0.0,
+            "excess_m_max": 0.0,
+            "excess_reduction_m_mean": 0.0,
+            "nominal_motion_m_mean": 0.02381387948989868,
+            "end_offset_fraction": 0.0,
+            "end_workspace_fraction": 0.0,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          },
+          "initially_infeasible": {
+            "count": 240.0,
+            "initially_feasible_count": 0.0,
+            "initially_infeasible_count": 240.0,
+            "end_incompatible_fraction": 0.475,
+            "any_incompatible_fraction": 0.5333333333333333,
+            "recovered_count": 126.0,
+            "unrecovered_count": 114.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": 0.08333332623754229,
+            "recovery_age_mean": 4.166666666666667,
+            "initial_offset_m_mean": 0.39099716146787006,
+            "offset_m_mean": 0.25126965741316476,
+            "offset_m_max": 0.5878726840019226,
+            "excess_m_mean": 0.08055520541965962,
+            "excess_m_max": 0.38787269592285156,
+            "excess_reduction_m_mean": 0.11319738452633223,
+            "nominal_motion_m_mean": 0.024149914955099425,
+            "end_offset_fraction": 0.475,
+            "end_workspace_fraction": 0.0875,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          },
+          "zero_load": {
+            "count": 48.0,
+            "initially_feasible_count": 4.0,
+            "initially_infeasible_count": 44.0,
+            "end_incompatible_fraction": 0.3125,
+            "any_incompatible_fraction": 0.4166666666666667,
+            "recovered_count": 29.0,
+            "unrecovered_count": 15.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": 0.08620689000035155,
+            "recovery_age_mean": 4.310344827586207,
+            "initial_offset_m_mean": 0.3125724693139394,
+            "offset_m_mean": 0.18322476589431366,
+            "offset_m_max": 0.4127340614795685,
+            "excess_m_mean": 0.02522254455834627,
+            "excess_m_max": 0.21273405849933624,
+            "excess_reduction_m_mean": 0.0947880285481612,
+            "nominal_motion_m_mean": 0.025085164366413615,
+            "end_offset_fraction": 0.3125,
+            "end_workspace_fraction": 0.020833333333333332,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          },
+          "loaded": {
+            "count": 207.0,
+            "initially_feasible_count": 11.0,
+            "initially_infeasible_count": 196.0,
+            "end_incompatible_fraction": 0.4782608695652174,
+            "any_incompatible_fraction": 0.5217391304347826,
+            "recovered_count": 97.0,
+            "unrecovered_count": 99.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": 0.082474219276733,
+            "recovery_age_mean": 4.123711340206185,
+            "initial_offset_m_mean": 0.39317902908233054,
+            "offset_m_mean": 0.2576703737323411,
+            "offset_m_max": 0.5878726840019226,
+            "excess_m_mean": 0.08754863363245259,
+            "excess_m_max": 0.38787269592285156,
+            "excess_reduction_m_mean": 0.10926351080770078,
+            "nominal_motion_m_mean": 0.023908695484992963,
+            "end_offset_fraction": 0.4782608695652174,
+            "end_workspace_fraction": 0.0966183574879227,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          }
+        },
+        "16": {
+          "all": {
+            "count": 255.0,
+            "initially_feasible_count": 17.0,
+            "initially_infeasible_count": 238.0,
+            "end_incompatible_fraction": 0.16862745098039217,
+            "any_incompatible_fraction": 0.17647058823529413,
+            "recovered_count": 195.0,
+            "unrecovered_count": 43.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": 0.11415383571233505,
+            "recovery_age_mean": 5.707692307692308,
+            "initial_offset_m_mean": 0.3446911437838685,
+            "offset_m_mean": 0.12542831804238114,
+            "offset_m_max": 0.4275157153606415,
+            "excess_m_mean": 0.018098111421454188,
+            "excess_m_max": 0.22751571238040924,
+            "excess_reduction_m_mean": 0.13218752730126473,
+            "nominal_motion_m_mean": 0.04974250220784954,
+            "end_offset_fraction": 0.16862745098039217,
+            "end_workspace_fraction": 0.0,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          },
+          "initially_feasible": {
+            "count": 17.0,
+            "initially_feasible_count": 17.0,
+            "initially_infeasible_count": 0.0,
+            "end_incompatible_fraction": 0.0,
+            "any_incompatible_fraction": 0.0,
+            "recovered_count": 0.0,
+            "unrecovered_count": 0.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": null,
+            "recovery_age_mean": null,
+            "initial_offset_m_mean": 0.1754569271031548,
+            "offset_m_mean": 0.06793353903819532,
+            "offset_m_max": 0.08556213974952698,
+            "excess_m_mean": 0.0,
+            "excess_m_max": 0.0,
+            "excess_reduction_m_mean": 0.0,
+            "nominal_motion_m_mean": 0.050004943109610504,
+            "end_offset_fraction": 0.0,
+            "end_workspace_fraction": 0.0,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          },
+          "initially_infeasible": {
+            "count": 238.0,
+            "initially_feasible_count": 0.0,
+            "initially_infeasible_count": 238.0,
+            "end_incompatible_fraction": 0.18067226890756302,
+            "any_incompatible_fraction": 0.18907563025210083,
+            "recovered_count": 195.0,
+            "unrecovered_count": 43.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": 0.11415383571233505,
+            "recovery_age_mean": 5.707692307692308,
+            "initial_offset_m_mean": 0.3567793018677655,
+            "offset_m_mean": 0.12953508701645025,
+            "offset_m_max": 0.4275157153606415,
+            "excess_m_mean": 0.019390833665843772,
+            "excess_m_max": 0.22751571238040924,
+            "excess_reduction_m_mean": 0.14162949353706936,
+            "nominal_motion_m_mean": 0.04972375691437922,
+            "end_offset_fraction": 0.18067226890756302,
+            "end_workspace_fraction": 0.0,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          },
+          "zero_load": {
+            "count": 10.0,
+            "initially_feasible_count": 2.0,
+            "initially_infeasible_count": 8.0,
+            "end_incompatible_fraction": 0.0,
+            "any_incompatible_fraction": 0.0,
+            "recovered_count": 8.0,
+            "unrecovered_count": 0.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": 0.20749997720122337,
+            "recovery_age_mean": 10.375,
+            "initial_offset_m_mean": 0.35528944730758666,
+            "offset_m_mean": 0.10292446911334992,
+            "offset_m_max": 0.15392161905765533,
+            "excess_m_mean": 0.0,
+            "excess_m_max": 0.0,
+            "excess_reduction_m_mean": 0.1583835393190384,
+            "nominal_motion_m_mean": 0.08976870886981488,
+            "end_offset_fraction": 0.0,
+            "end_workspace_fraction": 0.0,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          },
+          "loaded": {
+            "count": 245.0,
+            "initially_feasible_count": 15.0,
+            "initially_infeasible_count": 230.0,
+            "end_incompatible_fraction": 0.17551020408163265,
+            "any_incompatible_fraction": 0.1836734693877551,
+            "recovered_count": 187.0,
+            "unrecovered_count": 43.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": 0.11016041821337001,
+            "recovery_age_mean": 5.508021390374331,
+            "initial_offset_m_mean": 0.3442585599665739,
+            "offset_m_mean": 0.12634684212353764,
+            "offset_m_max": 0.4275157153606415,
+            "excess_m_mean": 0.018836809846819663,
+            "excess_m_max": 0.22751571238040924,
+            "excess_reduction_m_mean": 0.13111830232094746,
+            "nominal_motion_m_mean": 0.04810877953256879,
+            "end_offset_fraction": 0.17551020408163265,
+            "end_workspace_fraction": 0.0,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          }
+        },
+        "32": {
+          "all": {
+            "count": 255.0,
+            "initially_feasible_count": 17.0,
+            "initially_infeasible_count": 238.0,
+            "end_incompatible_fraction": 0.0,
+            "any_incompatible_fraction": 0.0,
+            "recovered_count": 238.0,
+            "unrecovered_count": 0.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": 0.14638654449406793,
+            "recovery_age_mean": 7.319327731092437,
+            "initial_offset_m_mean": 0.31691717727511537,
+            "offset_m_mean": 0.04395706571784674,
+            "offset_m_max": 0.10754041373729706,
+            "excess_m_mean": 0.0,
+            "excess_m_max": 0.0,
+            "excess_reduction_m_mean": 0.12605326666551478,
+            "nominal_motion_m_mean": 0.10373610982707902,
+            "end_offset_fraction": 0.0,
+            "end_workspace_fraction": 0.0,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          },
+          "initially_feasible": {
+            "count": 17.0,
+            "initially_feasible_count": 17.0,
+            "initially_infeasible_count": 0.0,
+            "end_incompatible_fraction": 0.0,
+            "any_incompatible_fraction": 0.0,
+            "recovered_count": 0.0,
+            "unrecovered_count": 0.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": null,
+            "recovery_age_mean": null,
+            "initial_offset_m_mean": 0.1780592720298206,
+            "offset_m_mean": 0.04157403648337897,
+            "offset_m_max": 0.06587136536836624,
+            "excess_m_mean": 0.0,
+            "excess_m_max": 0.0,
+            "excess_reduction_m_mean": 0.0,
+            "nominal_motion_m_mean": 0.08691905986736803,
+            "end_offset_fraction": 0.0,
+            "end_workspace_fraction": 0.0,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          },
+          "initially_infeasible": {
+            "count": 238.0,
+            "initially_feasible_count": 0.0,
+            "initially_infeasible_count": 238.0,
+            "end_incompatible_fraction": 0.0,
+            "any_incompatible_fraction": 0.0,
+            "recovered_count": 238.0,
+            "unrecovered_count": 0.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": 0.14638654449406793,
+            "recovery_age_mean": 7.319327731092437,
+            "initial_offset_m_mean": 0.3268355982644217,
+            "offset_m_mean": 0.04412728197434369,
+            "offset_m_max": 0.10754041373729706,
+            "excess_m_mean": 0.0,
+            "excess_m_max": 0.0,
+            "excess_reduction_m_mean": 0.13505707142733725,
+            "nominal_motion_m_mean": 0.10493732725872713,
+            "end_offset_fraction": 0.0,
+            "end_workspace_fraction": 0.0,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          },
+          "zero_load": {
+            "count": 0.0,
+            "initially_feasible_count": 0.0,
+            "initially_infeasible_count": 0.0,
+            "end_incompatible_fraction": null,
+            "any_incompatible_fraction": null,
+            "recovered_count": 0.0,
+            "unrecovered_count": 0.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": null,
+            "recovery_age_mean": null,
+            "initial_offset_m_mean": null,
+            "offset_m_mean": null,
+            "offset_m_max": null,
+            "excess_m_mean": null,
+            "excess_m_max": null,
+            "excess_reduction_m_mean": null,
+            "nominal_motion_m_mean": null,
+            "end_offset_fraction": null,
+            "end_workspace_fraction": null,
+            "end_box_ground_fraction": null,
+            "end_offset_speed_fraction": null,
+            "end_base_speed_fraction": null,
+            "end_yaw_rate_fraction": null
+          },
+          "loaded": {
+            "count": 255.0,
+            "initially_feasible_count": 17.0,
+            "initially_infeasible_count": 238.0,
+            "end_incompatible_fraction": 0.0,
+            "any_incompatible_fraction": 0.0,
+            "recovered_count": 238.0,
+            "unrecovered_count": 0.0,
+            "reentry_count": 0.0,
+            "new_violation_count": 0.0,
+            "recovery_time_s_mean": 0.14638654449406793,
+            "recovery_age_mean": 7.319327731092437,
+            "initial_offset_m_mean": 0.31691717727511537,
+            "offset_m_mean": 0.04395706571784674,
+            "offset_m_max": 0.10754041373729706,
+            "excess_m_mean": 0.0,
+            "excess_m_max": 0.0,
+            "excess_reduction_m_mean": 0.12605326666551478,
+            "nominal_motion_m_mean": 0.10373610982707902,
+            "end_offset_fraction": 0.0,
+            "end_workspace_fraction": 0.0,
+            "end_box_ground_fraction": 0.0,
+            "end_offset_speed_fraction": 0.0,
+            "end_base_speed_fraction": 0.0,
+            "end_yaw_rate_fraction": 0.0
+          }
+        }
+      },
+      "phase": "student",
+      "control_dt_s": 0.02,
+      "episode_duration_s": 20,
+      "limits": {
+        "max_offset": 0.2,
+        "radius": [
+          0.4,
+          0.9
+        ],
+        "pitch": [
+          -1.2566370614359172,
+          1.0471975511965976
+        ],
+        "azimuth": [
+          -1.2,
+          1.2
+        ],
+        "box_low": [
+          -0.9,
+          -0.2,
+          -0.7
+        ],
+        "box_high": [
+          0.1,
+          0.2,
+          -0.05
+        ],
+        "ground": -0.7,
+        "compliant_offset_speed_limit": 1.0,
+        "base_speed_limit": 2.0,
+        "yaw_rate_limit": 2.0
+      },
+      "censored": {
+        "expired_unrecovered": 0.0,
+        "reset_unrecovered": 18.0
+      },
+      "exposure": {
+        "environment_seconds": 5.119999885559082,
+        "loaded_environment_seconds": 3.5599999241530895,
+        "ee_force_Ns": 10.59397205710411,
+        "base_force_Ns": 99.96864569187164,
+        "base_moment_Nms": 0.0001144342031409451
+      }
+    },
+    "resume_passed": true,
+    "strict_json_passed": true,
+    "post_training_evaluation": {
+      "deterministic": {
+        "modes": {
+          "standing": {
+            "nominal_ee_error_m": {
+              "mean": 0.28551873564720154,
+              "valid_count": 508,
+              "median": 0.25448107719421387,
+              "p95": 0.5721826553344727,
+              "maximum": 0.7847413420677185
+            },
+            "nominal_planar_error_mps": {
+              "mean": 0.26579785346984863,
+              "valid_count": 508,
+              "median": 0.24534235894680023,
+              "p95": 0.5745652914047241,
+              "maximum": 1.1387875080108643
+            },
+            "episode_end": {
+              "mean": 0.0078125,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 1.0
+            },
+            "failure": {
+              "mean": 0.0,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 0.0
+            },
+            "ee_load_N": {
+              "mean": 2.045793056488037,
+              "valid_count": 512,
+              "median": 2.689119815826416,
+              "p95": 3.8841214179992676,
+              "maximum": 4.433061122894287
+            },
+            "base_load_N": {
+              "mean": 10.665227890014648,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 49.23000717163086,
+              "maximum": 55.837432861328125
+            },
+            "offset_m": {
+              "mean": 0.07064634561538696,
+              "valid_count": 512,
+              "median": 0.05757783353328705,
+              "p95": 0.1802690327167511,
+              "maximum": 0.2809777855873108
+            },
+            "relative_speed_mps": {
+              "mean": 0.313484787940979,
+              "valid_count": 512,
+              "median": 0.22792549431324005,
+              "p95": 0.9170311689376831,
+              "maximum": 1.001229166984558
+            },
+            "boundary_fraction": {
+              "mean": 0.076171875,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 1.0,
+              "maximum": 1.0
+            },
+            "torque_saturation_fraction": {
+              "mean": 0.0,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 0.0
+            },
+            "reference_ee_mse": {
+              "mean": 0.14845643937587738,
+              "valid_count": 456,
+              "median": 0.08533650636672974,
+              "p95": 0.43464893102645874,
+              "maximum": 0.6273090839385986
+            },
+            "failures": 0
+          },
+          "walking": {
+            "nominal_ee_error_m": {
+              "mean": 0.27814653515815735,
+              "valid_count": 508,
+              "median": 0.2704751193523407,
+              "p95": 0.534866452217102,
+              "maximum": 0.6341981887817383
+            },
+            "nominal_planar_error_mps": {
+              "mean": 0.48640012741088867,
+              "valid_count": 508,
+              "median": 0.41309332847595215,
+              "p95": 0.8862476348876953,
+              "maximum": 1.1432857513427734
+            },
+            "episode_end": {
+              "mean": 0.0078125,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 1.0
+            },
+            "failure": {
+              "mean": 0.001953125,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 1.0
+            },
+            "ee_load_N": {
+              "mean": 2.5008342266082764,
+              "valid_count": 512,
+              "median": 3.153795003890991,
+              "p95": 4.480502605438232,
+              "maximum": 4.480502605438232
+            },
+            "base_load_N": {
+              "mean": 10.561233520507812,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 49.722877502441406,
+              "maximum": 56.2084846496582
+            },
+            "offset_m": {
+              "mean": 0.06008705124258995,
+              "valid_count": 512,
+              "median": 0.04795599356293678,
+              "p95": 0.1522473394870758,
+              "maximum": 0.22805292904376984
+            },
+            "relative_speed_mps": {
+              "mean": 0.26348036527633667,
+              "valid_count": 512,
+              "median": 0.21279889345169067,
+              "p95": 0.5448470115661621,
+              "maximum": 1.0000396966934204
+            },
+            "boundary_fraction": {
+              "mean": 0.0390625,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 1.0
+            },
+            "torque_saturation_fraction": {
+              "mean": 0.0,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 0.0
+            },
+            "reference_ee_mse": {
+              "mean": 0.10366952419281006,
+              "valid_count": 456,
+              "median": 0.0819641575217247,
+              "p95": 0.26565682888031006,
+              "maximum": 0.34679022431373596
+            },
+            "failures": 1
+          }
+        },
+        "ee_peak_N": 4.480502605438232,
+        "base_peak_N": 56.2084846496582,
+        "wall_seconds": 7.972715546027757,
+        "environment_transitions": 1024
+      },
+      "stochastic": {
+        "modes": {
+          "standing": {
+            "nominal_ee_error_m": {
+              "mean": 0.33798232674598694,
+              "valid_count": 508,
+              "median": 0.3182275891304016,
+              "p95": 0.6304571628570557,
+              "maximum": 0.7430660724639893
+            },
+            "nominal_planar_error_mps": {
+              "mean": 0.3037002980709076,
+              "valid_count": 508,
+              "median": 0.28236064314842224,
+              "p95": 0.6319850087165833,
+              "maximum": 0.8568890690803528
+            },
+            "episode_end": {
+              "mean": 0.0078125,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 1.0
+            },
+            "failure": {
+              "mean": 0.0,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 0.0
+            },
+            "ee_load_N": {
+              "mean": 2.4747934341430664,
+              "valid_count": 512,
+              "median": 3.3938093185424805,
+              "p95": 4.686821460723877,
+              "maximum": 4.699604034423828
+            },
+            "base_load_N": {
+              "mean": 10.421640396118164,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 49.16118240356445,
+              "maximum": 56.42287826538086
+            },
+            "offset_m": {
+              "mean": 0.05919234827160835,
+              "valid_count": 512,
+              "median": 0.04662558063864708,
+              "p95": 0.15974853932857513,
+              "maximum": 0.2530937194824219
+            },
+            "relative_speed_mps": {
+              "mean": 0.2853091061115265,
+              "valid_count": 512,
+              "median": 0.20643913745880127,
+              "p95": 0.8015899658203125,
+              "maximum": 1.0002880096435547
+            },
+            "boundary_fraction": {
+              "mean": 0.05078125,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.449981689453125,
+              "maximum": 1.0
+            },
+            "torque_saturation_fraction": {
+              "mean": 0.0020559208933264017,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 0.05263157933950424
+            },
+            "reference_ee_mse": {
+              "mean": 0.1579696089029312,
+              "valid_count": 456,
+              "median": 0.1481446921825409,
+              "p95": 0.3133561313152313,
+              "maximum": 0.5232073068618774
+            },
+            "failures": 0
+          },
+          "walking": {
+            "nominal_ee_error_m": {
+              "mean": 0.31511539220809937,
+              "valid_count": 508,
+              "median": 0.29498928785324097,
+              "p95": 0.5993285775184631,
+              "maximum": 0.6826751232147217
+            },
+            "nominal_planar_error_mps": {
+              "mean": 0.6205774545669556,
+              "valid_count": 508,
+              "median": 0.5771323442459106,
+              "p95": 1.107653260231018,
+              "maximum": 1.38467276096344
+            },
+            "episode_end": {
+              "mean": 0.0078125,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 1.0
+            },
+            "failure": {
+              "mean": 0.001953125,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 1.0
+            },
+            "ee_load_N": {
+              "mean": 2.297102689743042,
+              "valid_count": 512,
+              "median": 2.639620065689087,
+              "p95": 4.12630558013916,
+              "maximum": 4.12630558013916
+            },
+            "base_load_N": {
+              "mean": 10.49686050415039,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 49.11970901489258,
+              "maximum": 56.42173767089844
+            },
+            "offset_m": {
+              "mean": 0.05764273926615715,
+              "valid_count": 512,
+              "median": 0.04460734874010086,
+              "p95": 0.14924892783164978,
+              "maximum": 0.21970029175281525
+            },
+            "relative_speed_mps": {
+              "mean": 0.2768513560295105,
+              "valid_count": 512,
+              "median": 0.24188323318958282,
+              "p95": 0.605764627456665,
+              "maximum": 1.0000998973846436
+            },
+            "boundary_fraction": {
+              "mean": 0.033203125,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 1.0
+            },
+            "torque_saturation_fraction": {
+              "mean": 0.0015419406117871404,
+              "valid_count": 512,
+              "median": 0.0,
+              "p95": 0.0,
+              "maximum": 0.10526315867900848
+            },
+            "reference_ee_mse": {
+              "mean": 0.1668916791677475,
+              "valid_count": 456,
+              "median": 0.14030615985393524,
+              "p95": 0.38513582944869995,
+              "maximum": 0.7560129165649414
+            },
+            "failures": 1
+          }
+        },
+        "ee_peak_N": 4.699604034423828,
+        "base_peak_N": 56.42287826538086,
+        "wall_seconds": 5.711247609986458,
+        "environment_transitions": 1024
+      },
+      "protocol": {
+        "control_dt": 0.02,
+        "episode_seconds": 2.0,
+        "ee_duration_seconds": 1.2,
+        "load_onset_seconds": 0.1,
+        "interpretation": "Short integration smoke, not trained-policy performance; modes use separate reset samples."
+      }
+    }
+  },
+  "physical_replay": {
+    "steps": 40,
+    "num_envs": 2,
+    "bitwise_shared_arrays": 85,
+    "passed": true,
+    "diagnostics_on": "/tmp/facet-recovery-parity-on",
+    "diagnostics_off": "/tmp/facet-recovery-parity-off",
+    "scope": "Matched issued actions, effective mechanics, injected forces/couples; physical states, torques, observations, rewards and references identical."
+  },
+  "limitations": [
+    "Integration checks only; no learned performance claim or full training.",
+    "GPU timing is on a shared RTX 4090, warm kernels; not end-to-end PPO overhead.",
+    "Recovery detected at control endpoints; geometry is not articulated collision/IK certification.",
+    "Configured training episode duration is 20 s; six updates do not imply 20 s survival."
+  ]
+}

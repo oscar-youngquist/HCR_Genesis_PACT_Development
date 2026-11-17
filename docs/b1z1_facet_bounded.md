@@ -97,7 +97,11 @@ The inherited force samplers, velocity kicks and force-dependent standing
 probability changes are bypassed/disabled for this configuration only.
 
 The current branch's 27,500*24-step per-environment budget becomes20,625*32.
-Teacher handoff is18,000*32 =24,000*24 steps. Save cadence scales by24/32.
+Teacher handoff is 16,500 completed updates, followed by 4,125 student updates
+within the current 20,625-update total (80/20 interaction split). Adaptation is
+disabled. Save cadence scales by 24/32. Explicit total-budget overrides require
+an accompanying handoff override to retain this ratio; resumes retain saved
+schedules unless explicitly overridden.
 Existing reward/domain schedule readers receive the equivalent old24-step
 iteration clock. Explicit CLI iteration overrides are **new32-step updates**;
 passing an old70,000 update limit intentionally changes the budget.
