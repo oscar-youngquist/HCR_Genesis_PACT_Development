@@ -427,11 +427,12 @@ class B1Z1PACT(LeggedRobot):
         # HCR curricula run from reset-time episode statistics. The original
         # UniFP command curriculum is usually disabled for B1Z1, but the hook is
         # kept so this port can run the same machinery when enabled.
-        if self.cfg.terrain.curriculum:
+        restoring = getattr(self, "_restoring_training_episodes", False)
+        if self.cfg.terrain.curriculum and not restoring:
             self._update_terrain_curriculum(env_ids)
-        if self.cfg.commands.curriculum and self.common_step_counter % self.max_episode_length == 0:
+        if not restoring and self.cfg.commands.curriculum and self.common_step_counter % self.max_episode_length == 0:
             self._update_command_curriculum(env_ids)
-        if self.use_tradeoff:
+        if self.use_tradeoff and not restoring:
             self.step_tradeoff_curriculum(env_ids)
 
         episode_ee_goal_sphere = self.curr_ee_goal_sphere[env_ids].clone()

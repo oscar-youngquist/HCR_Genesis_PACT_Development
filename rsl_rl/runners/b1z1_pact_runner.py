@@ -218,6 +218,10 @@ class B1Z1PACTRunner:
 
         self.writer = None
         _, _ = self.env.reset()
+        from rsl_rl.utils.b1z1_training_checkpoint import contract
+        self._training_contract = contract(self)
+        self._resume_state = None
+        self._update_in_progress = False
 
     def _load_pretrained_model(self, pretrained_path):
         """Load a weights-only PACT hot start produced by the conversion notebook."""
@@ -237,7 +241,29 @@ class B1Z1PACTRunner:
             checkpoint["privileged_decoder_state_dict"], strict=True
         )
 
+    def _resume_fresh_episodes(self):
+        if self._resume_state is not None:
+            # Learning progress continues, but physics/history cannot be replayed
+            # exactly. Reset before reading the first observation of the new run.
+            from rsl_rl.utils.b1z1_training_checkpoint import restore_rng, restore_progress
+            state = self._resume_state
+            restore_rng(self, state['rng'])
+            restore_progress(self, state['progress'])
+            self.env._restoring_training_episodes = True
+            try:
+                self.env.reset()
+            finally:
+                self.env._restoring_training_episodes = False
+            # Reset callbacks must not count as successful curriculum evidence.
+            restore_progress(self, state['progress'])
+            load_staged_force_curriculum_state_dict(self.env, self._resume_force_state)
+            load_domain_rand_state(self.env.simulator, self._resume_domain_state)
+            self.actor_critic.reset()
+            self.action_replay.queue = None
+            self._resume_state = None
+
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
+        self._resume_fresh_episodes()
         if self.log_dir is not None and self.writer is None:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
         if init_at_random_ep_len:
@@ -252,12 +278,16 @@ class B1Z1PACTRunner:
                 self.writer,
             )
             self._startup_metadata_logged = True
-        rewards, lengths, ep_infos = deque(maxlen=100), deque(maxlen=100), []
+        rewards = deque(getattr(self, '_completed_rewards', ()), maxlen=100)
+        lengths = deque(getattr(self, '_completed_lengths', ()), maxlen=100)
+        self._completed_rewards, self._completed_lengths = rewards, lengths
+        ep_infos = []
         running_reward = torch.zeros(self.env.num_envs, 1, device=self.device)
         running_length = torch.zeros_like(running_reward)
         self.actor_critic.train()
         final_iteration = self.current_learning_iteration + num_learning_iterations
         for iteration in range(self.current_learning_iteration, final_iteration):
+            self._update_in_progress = True
             # Reward schedules use the true checkpoint-aware PPO iteration,
             # never an approximation based on environment transitions.
             if hasattr(self.env, "set_training_iteration"):
@@ -411,9 +441,11 @@ class B1Z1PACTRunner:
             if self.enable_additional_diagnostics:
                 self._validate_diagnostics(metrics)
             self._log(
-                iteration, self.current_learning_iteration + num_learning_iterations,
+                iteration, final_iteration,
                 metrics, collection_time, learning_time, rewards, lengths, ep_infos,
             )
+            self._update_in_progress = False
+            self.current_learning_iteration = iteration + 1
             if self.log_dir and iteration % self.save_interval == 0:
                 # Store the next PPO iteration so resumed schedules continue
                 # from the first iteration that has not yet been completed.
@@ -551,8 +583,10 @@ class B1Z1PACTRunner:
         print("\n".join(lines))
 
     def save(self, path, iteration=None):
+        from rsl_rl.utils.b1z1_training_checkpoint import capture, atomic_save
         saved_iteration = self.current_learning_iteration if iteration is None else int(iteration)
-        torch.save({
+        atomic_save({
+            "training_state": capture(self, saved_iteration),
             "model_state_dict": self.actor_critic.state_dict(),
             "privileged_decoder_state_dict": self.privileged_decoder.state_dict(),
             "actor_optimizer": self.alg.actor_optimizer.optimizer.state_dict(),
@@ -571,7 +605,20 @@ class B1Z1PACTRunner:
 
     def load(self, path, load_optimizer=True):
         """Restore learned heads and the privileged-force reliability gate."""
-        checkpoint = torch.load(path, map_location=self.device)
+        from copy import deepcopy
+        from rsl_rl.utils.b1z1_training_checkpoint import validate, restore_progress
+        # Full training files include Python/NumPy RNG state: trusted files only.
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        state = checkpoint.get('training_state')
+        if load_optimizer and state is not None:
+            validate(self, checkpoint)
+        elif load_optimizer:
+            warnings.warn('Legacy partial checkpoint: RNG, learning-rate/PINN state and complete '
+                          'curriculum/progress counters are unavailable; this is not full continuation.', RuntimeWarning)
+        if not load_optimizer:
+            self.actor_critic.load_state_dict(checkpoint['model_state_dict'])
+            self.privileged_decoder.load_state_dict(checkpoint['privileged_decoder_state_dict'])
+            return 0  # Explicit weights-only initialization leaves all learning progress fresh.
         load_domain_rand_state(self.env.simulator, checkpoint.get("domain_rand_curriculum_state"))
         self.actor_critic.load_state_dict(checkpoint["model_state_dict"])
         self.privileged_decoder.load_state_dict(checkpoint["privileged_decoder_state_dict"])
@@ -593,6 +640,15 @@ class B1Z1PACTRunner:
         )
         self.alg.current_entropy_coef = checkpoint.get("entropy_coef", self.alg.current_entropy_coef)
         self.alg.kl_controller.load_state_dict(checkpoint.get("kl_controller_state"))
+        if state is not None:
+            for name, value in state['adaptive'].items(): setattr(self.alg, name, deepcopy(value))
+            self.total_timesteps, self.total_time = state['total_timesteps'], state['total_time']
+            self._completed_rewards = state['completed_rewards']
+            self._completed_lengths = state['completed_lengths']
+            restore_progress(self, state['progress'])
+            self._resume_state = state
+            self._resume_force_state = deepcopy(checkpoint.get('force_curriculum_state'))
+            self._resume_domain_state = deepcopy(checkpoint.get('domain_rand_curriculum_state'))
         return checkpoint.get("iteration", 0)
 
     def get_inference_policy(self, device=None):

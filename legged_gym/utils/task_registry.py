@@ -146,6 +146,11 @@ class TaskRegistry():
                 runner.load(model_resume_path, estimator_resume_path)
             else:
                 # load previously trained model
+                if (train_cfg.runner_class_name == "B1Z1PACTRunner"
+                        and getattr(args, "ckpt", -1) >= 0):
+                    # The shared argument updater historically ignores --ckpt.
+                    # Apply it only for this runner's training continuation.
+                    train_cfg.runner.checkpoint = args.ckpt
                 resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
                 print(f"Loading model from: {resume_path}")
                 runner.load(resume_path)
